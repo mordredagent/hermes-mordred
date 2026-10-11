@@ -48,21 +48,143 @@ const MESSAGES = {
   sync_in_progress: 'An import is already running.',
   telegram_not_configured: 'Set the question model first (step 3).',
   hermes_model_not_private: 'Hermes itself must use a Venice private model or a local model first (step 0).',
+  // Windows (machine-bound CNG custody, no per-use presence).
+  telegram_not_enrolled: 'Telegram custody is not enrolled on this Windows profile. Follow the custody step or recovery remedy below.',
+  telegram_custody_unavailable: 'Telegram custody could not be checked on this Windows profile.',
+  presence_acknowledgement_required: 'First confirm that Windows asks for no per-use approval (Telegram custody step).',
+  presence_unsupported: 'Windows has no per-use presence prompt. Confirm the machine-bound key first.',
+  custody_unsafe: 'A Mordred custody file or folder is not private to this Windows account. Mordred never repairs it: fix its ownership or ACL by hand.',
+  custody_uncertain: 'Custody is busy or has an unresolved journal. Let other Hermes/Mordred processes finish, then retry.',
+  custody_broken: 'Custody evidence does not match this profile and Windows account (a copied or restored profile). It is preserved, never adopted.',
+  memory_encryption_refused: 'Memory encryption was not turned on. Nothing was sealed.',
+  memory_disable_refused: 'Memory encryption was not turned off.',
+  memory_operation_in_progress: 'Another memory encryption change is running. Try again when it finishes.',
+  custody_busy: 'Memory custody is busy (another Hermes or Mordred process is using it). Try again in a moment.',
+  forget_confirm_mismatch: 'Type delete my data exactly to delete the Telegram data.',
+  secrets_corrupt: 'The sealed Telegram credentials cannot be opened with this profile’s key.',
+  store_path_unsafe: 'A Telegram archive file or folder is not private to this account. Nothing was changed.',
+  store_unavailable: 'The Telegram archive is unavailable right now.',
+  store_write_uncertain: 'A Telegram archive write may not have completed. Check the archive before retrying.',
+  store_missing: 'A Telegram archive file is missing.',
+  store_io: 'The Telegram archive could not be read or written.',
+  store_busy: 'The Telegram archive is busy. Try again shortly.',
+  store_undecryptable: 'The Telegram archive cannot be decrypted with the current credentials.',
+  forget_unsupported: 'Deleting Telegram data this way is not supported on this platform.',
+  // Extension pairing and local storage (shared wire codes).
+  storage_unavailable: 'Mordred’s local storage is unsafe or locked; nothing was changed.',
+  storage_uncertain: 'A Mordred storage write may not have completed; check the pairing before retrying.',
+  storage_error: 'Mordred’s local storage refused the operation.',
+  attestation_key_missing: 'The pairing identity key is missing; remove the pairing, then pair again.',
+}
+
+// Windows labels, selected from explicit metadata (codes and names), never by matching text.
+const CAPABILITY_LABELS = {
+  memory_custody: 'Memory custody',
+  native_audit: 'Audit custody',
+  telegram_hardware: 'Telegram custody',
+  file_vault: 'File vault',
+  env_config_workspace_seals: '.env / config / workspace seals',
+  recovery: 'Key recovery',
+  presence: 'Per-use presence',
+  secret_store: 'Secret store',
+}
+const REASONS = {
+  enrolled: 'enrolled',
+  'not-enrolled': 'not enrolled yet',
+  'custody-unsafe': 'not private to this Windows account (never repaired)',
+  'custody-uncertain': 'busy or an unresolved journal',
+  'custody-broken': 'does not match this profile and account (preserved, never adopted)',
+  'helper-missing': 'CNG helper not installed',
+  'helper-uncertain': 'CNG helper location could not be checked',
+  'runtime-not-admitted': 'this interpreter is not an installed Hermes environment (the installed runtime is proven when memory encryption is turned on)',
+  'runtime-uncertain': 'this interpreter could not be checked (the installed runtime is proven when memory encryption is turned on)',
+  'excluded-on-windows': 'not available on Windows',
+  'not-ported-on-windows': 'not yet available on Windows',
+  unsupported: 'only on native Windows',
+  'gateways-unknown': 'the Hermes gateway inventory is unknown (never treated as empty)',
+  'gateways-running': 'a Hermes gateway is running',
+  gateways: 'a Hermes gateway started or could not be checked',
+  'ceremony-refused': 'the custody ceremony refused',
+  'lifecycle-partial': 'stopped part-way; every memory file is plaintext or an authenticated seal',
+  'interpreter-invalid': 'no validated installed Hermes interpreter',
+  'module-outside-environment': 'Hermes imports Mordred from outside its environment',
+  'helper-mismatch': 'Hermes used a different CNG helper',
+  'proof-stale': 'custody changed while proving the runtime',
+  'proof-expired': 'the runtime proof expired',
+  'proof-not-issued': 'the runtime proof was not issued',
+  'locks-held': 'another Mordred operation holds a lock',
+  'custody-not-enrolled': 'memory custody is not enrolled',
+  'custody-pending': 'an unresolved custody journal',
+  'memory-write-approval-plaintext': 'memory.write_approval is on: writes awaiting approval stay plaintext until applied',
+}
+const STEP_LABELS = {
+  capabilities: 'capabilities',
+  gate: 'gateway check',
+  ceremony: 'custody ceremony',
+  proof: 'installed-runtime proof',
+  lifecycle: 'encryption',
+}
+const HELPER_STATES = {
+  present: 'installed',
+  unchecked: 'not checked while custody is unavailable',
+  validated: 'installed (installer-owned)',
+  installed: 'installed (not installer-owned)',
+  missing: 'not installed',
+  uncertain: 'could not be checked',
+}
+const MEMORY_STATES = {
+  off: 'off',
+  enrolled: 'custody key enrolled, memory not encrypted yet',
+  on: 'on',
+  exposed: 'on, but a plaintext memory file is on disk',
+  degraded: 'on, with a problem',
+  paused: 'turned off (custody key kept)',
+  'disabled-incomplete': 'turned off, but seals or interrupted staging remain (turn it off again to finish)',
+  unavailable: 'unavailable',
 }
 
 function explain(code) {
   return MESSAGES[code] || `Failed (${code || 'unknown'})`
 }
 
+function reason(code) {
+  return REASONS[code] || code || 'unknown'
+}
+
+class MordredError extends Error {
+  constructor(code, info) {
+    super(explain(code))
+    this.code = code
+    this.info = info || {}
+  }
+}
+
 async function call(path, body) {
+  let res
   try {
-    const res = await rest(path, body === undefined ? {} : { method: 'POST', body })
-    if (res && res.ok === false) throw new Error(res.error)
-    return res
+    res = await rest(path, body === undefined ? {} : { method: 'POST', body })
   } catch (err) {
     const code = (err && (err.body && err.body.error)) || (err && err.message) || 'unknown'
-    throw new Error(explain(String(code).replace(/^.*"error":"([^"]+)".*$/, '$1')))
+    throw new MordredError(String(code).replace(/^.*"error":"([^"]+)".*$/, '$1'), (err && err.body) || {})
   }
+  if (res && res.ok === false) throw new MordredError(res.error, res)
+  return res
+}
+
+function FailureNote({ error }) {
+  const info = (error && error.info) || {}
+  return jsxs('div', {
+    role: 'alert',
+    style: { border: '1px solid #b91c1c', borderRadius: 8, padding: 10, marginTop: 10 },
+    children: [
+      jsx('p', { style: { margin: 0 }, children: error && error.message }),
+      info.storage_error ? jsx('p', { children: explain(info.storage_error) }) : null,
+      info.step ? jsx('p', { children: `Stopped at the ${STEP_LABELS[info.step] || info.step} step: ${reason(info.reason)}.` }) : null,
+      info.remedy ? jsx('p', { children: info.remedy }) : null,
+      info.custody_notice ? jsx('p', { children: `A memory custody key was created and is kept for a retry. ${info.custody_notice}` }) : null,
+      info.detail ? jsx('pre', { style: { whiteSpace: 'pre-wrap', fontSize: 12 }, children: info.detail }) : null,
+    ],
+  })
 }
 
 function Step({ n, title, done, children }) {
@@ -206,7 +328,7 @@ function MemoryStep({ done, refresh, hardwareKind }) {
   })
 }
 
-function TelegramStep({ done, needsApi, refresh }) {
+function TelegramStep({ done, needsApi, refresh, n = 4, extra = null }) {
   const [apiId, setApiId] = useState('')
   const [apiHash, setApiHash] = useState('')
   const [phone, setPhone] = useState('')
@@ -223,7 +345,7 @@ function TelegramStep({ done, needsApi, refresh }) {
     setBusy(true)
     try {
       if (step === 'phone') {
-        const body = { phone }
+        const body = { phone, ...(extra || {}) }
         if (needsApi) Object.assign(body, { api_id: apiId, api_hash: apiHash })
         const r = await call('/telegram/login/start', body)
         setApiHash('')
@@ -242,14 +364,14 @@ function TelegramStep({ done, needsApi, refresh }) {
     } catch (e) {
       setSecret('')
       host.notifyError(e, 'Telegram login failed')
-      if (/expired/.test(String(e && e.message))) reset()
+      if (e && (e.code === 'login_flow_expired' || e.code === 'login_code_expired')) reset()
     } finally {
       setBusy(false)
     }
   }
   const field = (props) => jsx(Input, { autoComplete: 'off', ...props })
   return jsx(Step, {
-    n: 4,
+    n,
     title: 'Connect Telegram (read-only)',
     done,
     children: jsxs(Fragment, {
@@ -293,7 +415,7 @@ function TelegramStep({ done, needsApi, refresh }) {
   })
 }
 
-function LlmStep({ done, hermesKey, refresh }) {
+function LlmStep({ done, hermesKey, refresh, n = 3, extra = null }) {
   const [key, setKey] = useState('')
   const [endpoint, setEndpoint] = useState('http://127.0.0.1:11434/v1')
   const [model, setModel] = useState('')
@@ -301,7 +423,7 @@ function LlmStep({ done, hermesKey, refresh }) {
   const run = async (path, body) => {
     setBusy(true)
     try {
-      await call(path, body)
+      await call(path, { ...body, ...(extra || {}) })
       setKey('')
       host.notify({ kind: 'success', message: 'Question model set.' })
       refresh()
@@ -312,7 +434,7 @@ function LlmStep({ done, hermesKey, refresh }) {
     }
   }
   return jsx(Step, {
-    n: 3,
+    n,
     title: 'Question model (Venice private or local)',
     done,
     children: jsxs(Fragment, {
@@ -338,7 +460,7 @@ function LlmStep({ done, hermesKey, refresh }) {
   })
 }
 
-function ImportStep({ ready, refresh }) {
+function ImportStep({ ready, refresh, n = 5 }) {
   const [days, setDays] = useState(3)
   const [sync, setSync] = useState(null)
   const poll = useCallback(async () => {
@@ -370,7 +492,7 @@ function ImportStep({ ready, refresh }) {
   }
   const progress = sync && sync.progress
   return jsx(Step, {
-    n: 5,
+    n,
     title: 'Import messages',
     done: false,
     children: ready
@@ -400,9 +522,248 @@ function ImportStep({ ready, refresh }) {
   })
 }
 
+function Checked({ checked, onChange, children }) {
+  return jsxs('label', {
+    style: { display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 8 },
+    children: [jsx(Checkbox, { checked, onCheckedChange: (v) => onChange(v === true), style: CHECKBOX_STYLE }), jsx('span', { children })],
+  })
+}
+
+function CapabilityList({ rows, error }) {
+  if (error) return jsx('p', { role: 'status', children: `Windows capabilities could not be read (${reason(error)}).` })
+  return jsx('ul', {
+    style: { margin: '4px 0 12px', paddingLeft: 20 },
+    children: (rows || []).map((row) =>
+      jsx('li', {
+        key: row.name,
+        children: `${CAPABILITY_LABELS[row.name] || row.name}: ${
+          row.supported ? (row.available ? 'available' : 'not available yet') : 'not supported on Windows'
+        } (${reason(row.reason)})`,
+      }),
+    ),
+  })
+}
+
+function HelperStep({ helper, done, refresh }) {
+  const [busy, setBusy] = useState(false)
+  const [checked, setChecked] = useState(null)
+  const shown = checked || helper || {}
+  const check = async () => {
+    setBusy(true)
+    try {
+      const r = await call('/hardware/build', {})
+      setChecked(r.helper)
+      refresh()
+    } catch (e) {
+      host.notifyError(e, 'Could not check the helper')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return jsx(Step, {
+    n: 1,
+    title: 'Windows TPM helper (CNG)',
+    done,
+    children: jsxs(Fragment, {
+      children: [
+        jsx('p', { children: `Helper: ${HELPER_STATES[shown.state] || shown.state || 'unknown'}.` }),
+        jsxs('p', {
+          children: [
+            'Install it with the Mordred Windows installer, or run ',
+            jsx('code', { style: { userSelect: 'all' }, children: shown.install_command || 'hermes-mordred keyvault enable-winkey' }),
+            ' in a terminal, then check again. This page never builds or installs it.',
+          ],
+        }),
+        jsx(Button, { disabled: busy, onClick: check, children: busy ? 'Checking…' : 'Check again' }),
+      ],
+    }),
+  })
+}
+
+function WindowsMemoryStep({ status, refresh }) {
+  const memory = status.memory || {}
+  const [noRecovery, setNoRecovery] = useState(false)
+  const [noPresence, setNoPresence] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [failure, setFailure] = useState(null)
+  const enable = async () => {
+    setBusy(true)
+    setFailure(null)
+    try {
+      const r = await call('/memory/enable', { acknowledge_cng_no_recovery: noRecovery, acknowledge_no_presence: noPresence })
+      host.notify({ kind: 'success', message: 'Memory encryption is on. Restart Hermes and its gateways to finish.' })
+      ;(r.warnings || []).forEach((code) =>
+        host.notify({ kind: 'info', message: `${reason(code)}${code === 'memory-write-approval-plaintext' && r.pending_approvals ? ` (${r.pending_approvals})` : ''}.` }),
+      )
+      refresh()
+    } catch (e) {
+      setFailure(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+  const state = `${MEMORY_STATES[memory.state] || memory.state || 'unknown'}${memory.reason ? ` (${reason(memory.reason)})` : ''}`
+  return jsx(Step, {
+    n: 2,
+    title: 'Encrypt Hermes memory',
+    done: memory.active === true,
+    children: jsxs(Fragment, {
+      children: [
+        jsx('p', { children: `Memory encryption: ${state}.` }),
+        memory.detail ? jsx('p', { style: { fontSize: 12, opacity: 0.8 }, children: memory.detail }) : null,
+        jsx('p', { children: status.custody_notice }),
+        jsx('p', {
+          children: `Per-use presence is not supported on Windows (${reason(status.presence_reason)}). Stop every Hermes gateway before turning this on, and restart Hermes afterwards.`,
+        }),
+        jsx(Checked, {
+          checked: noRecovery,
+          onChange: setNoRecovery,
+          children: 'I understand there is no portable recovery: losing the TPM, this Windows account or this profile folder loses the encrypted memory.',
+        }),
+        jsx(Checked, {
+          checked: noPresence,
+          onChange: setNoPresence,
+          children: 'I understand Windows asks for no per-use approval: programs running as this account can use the key.',
+        }),
+        jsx(Row, {
+          children: jsx(Button, {
+            disabled: busy || !noRecovery || !noPresence,
+            onClick: enable,
+            children: busy ? 'Encrypting…' : 'Turn on memory encryption',
+          }),
+        }),
+        failure ? jsx(FailureNote, { error: failure }) : null,
+      ],
+    }),
+  })
+}
+
+function TelegramCustodyStep({ custody, ack, setAck }) {
+  if (!custody.enrolled) {
+    return jsx(Step, {
+      n: 3,
+      title: 'Telegram custody',
+      done: false,
+      children: jsx('p', {
+        children: custody.ceremony_command
+          ? `Telegram custody is not enrolled (${reason(custody.reason)}). Run ${custody.ceremony_command} in a terminal, then reload.`
+          : `Telegram custody is not enrolled (${reason(custody.reason)}). Its Windows enrollment ceremony is not available in this Mordred build yet, so Telegram setup stops here. Nothing was created.`,
+      }),
+    })
+  }
+  return jsx(Step, {
+    n: 3,
+    title: 'Telegram custody',
+    done: false,
+    children: jsx(Checked, {
+      checked: ack,
+      onChange: setAck,
+      children: 'Telegram credentials are sealed by this PC’s TPM. I understand Windows asks for no per-use approval and there is no portable recovery.',
+    }),
+  })
+}
+
+function WindowsLogout({ refresh, loggedIn }) {
+  const [forget, setForget] = useState(false)
+  const [phrase, setPhrase] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState(null)
+  const [failure, setFailure] = useState(null)
+  const run = async () => {
+    setBusy(true)
+    setResult(null)
+    setFailure(null)
+    try {
+      const r = await call('/telegram/logout', forget ? { forget, confirm: phrase } : { forget })
+      setResult(r)
+      host.notify({
+        kind: 'success',
+        message: forget ? 'Telegram deletion finished. See the checked outcome below.' : 'Logged out of Telegram; the encrypted archive is kept.',
+      })
+      if (r.manual_revoke) host.notify({ kind: 'info', message: r.remedy })
+      refresh()
+    } catch (e) {
+      setFailure(e)
+      host.notifyError(e, 'Logout failed')
+      refresh()
+    } finally {
+      setBusy(false)
+      setPhrase('')
+    }
+  }
+  if (!loggedIn && !result && !failure) return null
+  return jsxs('section', {
+    style: { border: '1px solid var(--border, #333)', borderRadius: 10, padding: 16, marginBottom: 12 },
+    children: [
+      jsx('h3', { style: { margin: '0 0 8px' }, children: 'Disconnect Telegram' }),
+      jsx(Checked, {
+        checked: forget,
+        onChange: setForget,
+        children: 'Also delete the archive, the sealed credentials and the Telegram custody key (memory and audit keys stay).',
+      }),
+      forget
+        ? jsx(Row, { children: jsx(Input, { value: phrase, autoComplete: 'off', placeholder: PURGE_PHRASE, onChange: (e) => setPhrase(e.target.value) }) })
+        : null,
+      jsx(Row, {
+        children: jsx(Button, {
+          variant: 'outline',
+          disabled: busy || !loggedIn || (forget && phrase.trim() !== PURGE_PHRASE),
+          onClick: run,
+          children: busy ? 'Working…' : forget ? 'Log out and delete Telegram data' : 'Log out',
+        }),
+      }),
+      result && result.outcome ? jsx('pre', { style: { whiteSpace: 'pre-wrap' }, children: result.outcome.join('\n') }) : null,
+      result && result.remedy ? jsx('p', { children: result.remedy }) : null,
+      failure && failure.info.outcome ? jsx('pre', { style: { whiteSpace: 'pre-wrap' }, children: failure.info.outcome.join('\n') }) : null,
+      failure ? jsx(FailureNote, { error: failure }) : null,
+    ],
+  })
+}
+
+function WindowsSetup({ status, refresh }) {
+  const [presenceAck, setPresenceAck] = useState(false)
+  const c = status.checks || {}
+  const ok = (name) => Boolean(c[name] && c[name].ok)
+  const custody = status.telegram_custody || {}
+  const modelOk = Boolean(status.hermes_model && status.hermes_model.ok)
+  const extra = presenceAck ? { acknowledge_no_presence: true } : null
+  const telegramOpen = Boolean(status.telegram_supported && custody.enrolled && presenceAck)
+  const loggedIn = ok('login')
+  return jsxs(Fragment, {
+    children: [
+      jsx('p', { children: 'Windows: keys are machine-bound CNG keys in this PC’s TPM, without per-use presence or portable recovery.' }),
+      jsx('h3', { children: 'Windows capabilities' }),
+      jsx(CapabilityList, { rows: status.capabilities, error: status.capabilities_error }),
+      jsx(HermesModelStep, { check: status.hermes_model, refresh }),
+      jsx(HelperStep, { helper: status.helper, done: ok('hardware'), refresh }),
+      jsx(WindowsMemoryStep, { status, refresh }),
+      status.telegram_supported
+        ? jsxs(Fragment, {
+            children: [
+              jsx(TelegramCustodyStep, { custody, ack: presenceAck, setAck: setPresenceAck }),
+              telegramOpen && modelOk && ok('memory_encryption')
+                ? jsxs(Fragment, {
+                    children: [
+                      jsx(LlmStep, { n: 4, done: ok('privacy_llm'), hermesKey: status.hermes_venice_key, refresh, extra }),
+                      ok('privacy_llm')
+                        ? jsx(TelegramStep, { n: 5, done: loggedIn, needsApi: !status.telegram_api, refresh, extra })
+                        : jsx(Step, { n: 5, title: 'Connect Telegram (read-only)', done: false, children: jsx('p', { children: 'Set the question model first (step 4).' }) }),
+                      jsx(ImportStep, { n: 6, ready: loggedIn && ok('privacy_llm') && ok('memory_encryption'), refresh }),
+                    ],
+                  })
+                : jsx('p', { children: 'The Telegram steps unlock once Hermes uses a private or local model, memory encryption is on and Telegram custody is confirmed.' }),
+              // Keep results mounted after logout changes the login status; controls then disable.
+              jsx(WindowsLogout, { refresh, loggedIn }),
+            ],
+          })
+        : jsx('p', { role: 'status', children: 'Private Telegram is not available on this Windows profile.' }),
+    ],
+  })
+}
+
 const PURGE_PHRASE = 'delete my data'
 
-function UninstallSection() {
+function UninstallSection({ platform = null }) {
   const [open, setOpen] = useState(false)
   const [plan, setPlan] = useState(null)
   // decrypt: back to normal files (data kept unless `purge`); erase: delete encrypted data without decrypting.
@@ -411,6 +772,9 @@ function UninstallSection() {
   const [phrase, setPhrase] = useState('')
   const [busy, setBusy] = useState(false)
   const [report, setReport] = useState(null)
+  // Explicit server metadata (Windows: no erase-without-decrypting; purge deletes only the memory key).
+  const eraseSupported = !(platform && platform.erase_supported === false)
+  const windowsUninstall = Boolean(platform && platform.purge_scope === 'memory_custody_key')
   const deleting = mode === 'erase' || purge
   const show = async () => {
     setOpen(true)
@@ -465,7 +829,13 @@ function UninstallSection() {
       style: box,
       children: [
         jsx('h3', { style: { margin: '0 0 8px' }, children: report.ok ? 'Mordred was uninstalled' : 'Uninstall stopped' }),
-        jsx('p', { children: report.ok ? 'Quit Hermes Desktop (⌘Q) and open it again to finish.' : 'Nothing that could not be restored was removed.' }),
+        jsx('p', {
+          children: report.ok
+            ? windowsUninstall
+              ? 'Quit Hermes Desktop and open it again to finish.'
+              : 'Quit Hermes Desktop (⌘Q) and open it again to finish.'
+            : 'Nothing that could not be restored was removed.',
+        }),
         jsx('pre', { style: pre, children: report.text }),
       ],
     })
@@ -479,17 +849,27 @@ function UninstallSection() {
       open
         ? jsxs(Fragment, {
             children: [
-              choice('decrypt', 'Decrypt, then uninstall', 'Encrypted files (Hermes memory, .env, config) become normal files again, so Hermes keeps everything. Hardware approval may be requested.'),
+              choice(
+                'decrypt',
+                'Decrypt, then uninstall',
+                windowsUninstall
+                  ? 'Encrypted Hermes memory becomes normal files again, so Hermes keeps everything. Every Hermes gateway must be stopped.'
+                  : 'Encrypted files (Hermes memory, .env, config) become normal files again, so Hermes keeps everything. Hardware approval may be requested.',
+              ),
               mode === 'decrypt'
                 ? jsxs('label', {
                     style: { display: 'flex', gap: 8, alignItems: 'center', margin: '8px 0 0 24px' },
                     children: [
                       jsx(Checkbox, { checked: purge, onCheckedChange: (v) => setPurge(v === true), style: CHECKBOX_STYLE }),
-                      'Also delete Mordred’s own data and keys (Telegram archive and login, vault, keyvault).',
+                      windowsUninstall
+                        ? 'Also delete the Windows memory custody key. Telegram and audit custody, their history and the Mordred folders are kept and listed in the plan.'
+                        : 'Also delete Mordred’s own data and keys (Telegram archive and login, vault, keyvault).',
                     ],
                   })
                 : null,
-              choice('erase', 'Erase encrypted data without decrypting, then uninstall', 'Nothing is decrypted. Encrypted Hermes memory, the vault copies of .env / config and all Mordred data and keys are deleted. Anything that exists only in encrypted form is lost for good.'),
+              eraseSupported
+                ? choice('erase', 'Erase encrypted data without decrypting, then uninstall', 'Nothing is decrypted. Encrypted Hermes memory, the vault copies of .env / config and all Mordred data and keys are deleted. Anything that exists only in encrypted form is lost for good.')
+                : null,
               shownPlan ? jsx('pre', { style: { ...pre, marginTop: 12 }, children: shownPlan }) : jsx('p', { children: 'Loading…' }),
               deleting
                 ? jsxs(Fragment, {
@@ -525,6 +905,7 @@ function UninstallSection() {
 }
 
 const INSTALL_COMMAND = 'curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash'
+const WINDOWS_REINSTALL = 'Automatic repair after Hermes updates is not supported on Windows. Rerun the original Windows installer, keeping the existing Hermes home and custody keys, then restart Hermes and check again.'
 
 // Ask Mordred's local API whether the Python side is present. Three answers:
 // installed (the real API), missing (the shim in plugins/mordred/dashboard
@@ -534,7 +915,7 @@ const INSTALL_COMMAND = 'curl -fsSL https://raw.githubusercontent.com/mordredage
 async function probe() {
   let res
   try {
-    res = await rest('/status?client_version=2')
+    res = await rest('/status?client_version=3')
   } catch (err) {
     return { kind: 'unreachable', detail: String((err && err.message) || err || '') }
   }
@@ -552,11 +933,21 @@ async function probe() {
 }
 
 function describeMember(member) {
+  if (member && member.supported === false) return 'not supported on this platform'
   if (!member || !member.present) return 'not registered'
   if (!member.valid) return 'registration damaged'
   const extras = (member.extras || []).join(', ') || 'none'
   const from = member.source === 'path' ? `local source ${member.path}` : 'PyPI'
   return `hermes-mordred ${member.version} from ${from} (extras: ${extras})`
+}
+
+function windowsEnvironment(env) {
+  if (env && env.platform) return env.platform === 'win32'
+  // An unreachable API has no server metadata. Hermes Desktop's local client
+  // can still refuse the POSIX repair workflow on Windows.
+  return typeof navigator !== 'undefined' && (
+    navigator.userAgentData?.platform === 'Windows' || String(navigator.platform || '').startsWith('Win')
+  )
 }
 
 async function cliExec(argv) {
@@ -570,10 +961,11 @@ function RepairPanel({ probeResult, recheck }) {
   const [log, setLog] = useState('')
   const [repaired, setRepaired] = useState(false)
   const missing = probeResult.kind === 'missing'
-  const info = (missing && probeResult.info) || {}
+  const info = probeResult.info || {}
   const member = info.member || null
   const memberOk = Boolean(member && member.valid)
   const env = info.environment || null
+  const windows = windowsEnvironment(env)
   const pre = { whiteSpace: 'pre-wrap', fontSize: 12, maxHeight: 240, overflow: 'auto', background: 'var(--muted, rgba(127,127,127,.12))', padding: 8, borderRadius: 6 }
 
   const repairViaShim = async () => {
@@ -639,13 +1031,14 @@ function RepairPanel({ probeResult, recheck }) {
           : 'Mordred’s local API is not loaded. Either Hermes was updated into an environment without Mordred, or Mordred was turned off in plugins.enabled. Mordred’s protections are not active.',
       }),
       env ? jsx('p', { style: { fontSize: 12, opacity: 0.8 }, children: `Environment: ${env.environment} (Python ${env.python})` }) : null,
-      missing ? jsx('p', { style: { fontSize: 12, opacity: 0.8 }, children: `Package-manager registration: ${describeMember(member)}` }) : null,
-      missing && !memberOk
+      missing ? jsx('p', { style: { fontSize: 12, opacity: 0.8 }, children: `Package-manager registration: ${windows ? 'not supported on Windows' : describeMember(member)}` }) : null,
+      windows ? jsx('p', { children: WINDOWS_REINSTALL }) : null,
+      missing && !memberOk && !windows
         ? jsx('p', { children: 'Mordred never registered itself with Hermes’s package manager (installed by an older version), so the one-click repair cannot rebuild it. Reinstall once from a terminal; later updates keep it automatically.' })
         : null,
       jsx(Row, {
         children: [
-          missing && !memberOk
+          windows ? null : missing && !memberOk
             ? jsx(Button, { key: 'copy', onClick: () => navigator.clipboard && navigator.clipboard.writeText(INSTALL_COMMAND), children: 'Copy reinstall command' })
             : jsx(Button, { key: 'repair', disabled: busy || repaired, onClick: repair, children: busy ? 'Repairing… (a few minutes)' : 'Repair / reinstall Mordred' }),
           repaired ? jsx(Button, { key: 'restart', onClick: restart, children: 'Restart Hermes backend' }) : null,
@@ -661,6 +1054,10 @@ function RepairPanel({ probeResult, recheck }) {
 function HealthLine({ health }) {
   if (!health || !health.ok) return null
   const env = health.environment || {}
+  if (windowsEnvironment(env)) return jsx('p', {
+    style: { fontSize: 12, opacity: 0.8 },
+    children: `Mordred ${health.version} in Hermes environment ${env.environment} (Python ${env.python}). ${WINDOWS_REINSTALL}`,
+  })
   const memberText = health.pm_managed === false ? 'not needed (Hermes is not pm-managed)' : describeMember(health.member)
   return jsx('p', {
     style: { fontSize: 12, opacity: 0.8 },
@@ -709,7 +1106,9 @@ function SetupPage() {
       jsx('p', { children: 'Private, read-only Telegram for Hermes.' }),
       broken ? jsx(RepairPanel, { probeResult: broken, recheck: refresh }) : null,
       status ? jsx(HealthLine, { health }) : null,
-      status
+      status && status.hardware_kind === 'cng'
+        ? jsx(WindowsSetup, { status, refresh })
+        : status
         ? status.telegram_supported && ["secure_enclave", "tpm"].includes(status.hardware_kind)
           ? jsxs(Fragment, {
               children: [
@@ -738,7 +1137,7 @@ function SetupPage() {
               ],
             })
         : broken ? null : jsx('p', { children: 'Loading…' }),
-      status ? jsx(UninstallSection, {}) : null,
+      status ? jsx(UninstallSection, { platform: status.uninstall || null }) : null,
     ],
   })
 }

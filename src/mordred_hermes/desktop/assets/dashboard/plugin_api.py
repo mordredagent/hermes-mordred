@@ -26,11 +26,24 @@ except ImportError as _missing:  # Mordred is not in this environment
 
     router = APIRouter()
     _REASON = f"{type(_missing).__name__}: {_missing}"
-    _MEMBER = Path(__file__).resolve().parent.parent
+    _MEMBER = Path(__file__).parent.parent if sys.platform == "win32" else Path(__file__).resolve().parent.parent
     _REPAIR: dict[str, Any] = {"state": "idle", "code": None, "output": ""}
     _LOCK = threading.Lock()
+    _WINDOWS_REMEDY = (
+        "Automatic package-manager registration and repair are not supported on Windows. "
+        "After a Hermes update, rerun the original Windows installer, keeping the existing Hermes home "
+        "and custody keys, then restart Hermes."
+    )
 
     def _member() -> dict[str, Any]:
+        if sys.platform == "win32":
+            return {
+                "supported": False,
+                "present": None,
+                "valid": False,
+                "reason": "not-ported-on-windows",
+                "remedy": _WINDOWS_REMEDY,
+            }
         target = _MEMBER / "pyproject.toml"
         if not target.is_file():
             return {"present": False}
@@ -69,7 +82,12 @@ except ImportError as _missing:  # Mordred is not in this environment
     def _environment() -> dict[str, Any]:
         prefix = Path(sys.prefix)
         env_id = prefix.parent.name if prefix.name == "venv" else prefix.name
-        return {"prefix": str(prefix), "environment": env_id, "python": sys.version.split()[0]}
+        return {
+            "prefix": str(prefix),
+            "environment": env_id,
+            "python": sys.version.split()[0],
+            "platform": sys.platform,
+        }
 
     def _repair_view() -> dict[str, Any]:
         with _LOCK:
@@ -114,6 +132,8 @@ except ImportError as _missing:  # Mordred is not in this environment
 
     @router.post("/repair")
     async def repair() -> dict[str, Any]:
+        if sys.platform == "win32":
+            return {"ok": False, "error": "pm_repair_unsupported", "remedy": _WINDOWS_REMEDY}
         member = _member()
         if not member.get("valid"):
             return {"ok": False, "error": "member_missing", "member": member}
@@ -127,4 +147,11 @@ except ImportError as _missing:  # Mordred is not in this environment
 
     @router.get("/repair")
     async def repair_status() -> dict[str, Any]:
+        if sys.platform == "win32":
+            return {
+                "ok": False,
+                "error": "pm_repair_unsupported",
+                "remedy": _WINDOWS_REMEDY,
+                "repair": _repair_view(),
+            }
         return {"ok": True, "repair": _repair_view()}

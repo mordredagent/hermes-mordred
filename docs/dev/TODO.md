@@ -258,3 +258,352 @@ the source remains usable, and failure paths leave no partial destination.
   record the result in [`CI.md`](./CI.md).
 - Keep each implementation PR scoped to one plugin; land cross-plugin contract
   documentation first.
+## Windows keyvault wallet storage
+
+- [ ] Land the wallet storage contract before its dependent keyvault PR.
+- [x] Complete WW1–WW2 in [PLAN.md](PLAN.md#windows-wallet-storage-implementation-plan).
+- [ ] Design shared safe deletion/lifecycle contracts before remaining keyvault
+  storage, memory provision/reset/purge and plaintext capture migration.
+- [ ] Finish wizard/install, network, policy/LLM guard, privacy/audit and
+  extension/Desktop migration, Windows 11 and full installation-to-use acceptance.
+  Passing wallet storage tests does not establish these capabilities.
+
+
+
+## Windows native support
+
+- [x] Investigate native Windows feasibility and identify actual AWS NitroTPM
+  image candidates; preserve the existing Linux validation environment.
+- [x] Prove CNG P-256 ECDH and unchanged MRKW interoperability on actual AWS
+  Windows under a credentialed non-administrator user.
+- [x] Record Phase 0 host/persistence/device-binding outcomes and unmet scope.
+- [x] Review the Windows SPEC and helper implementation plan before production
+  implementation; in-session execution approved.
+- [ ] Submit the cross-component contract docs before the implementation PR.
+- [x] Implement and live-validate the standalone Windows CNG helper (PLAN W1–W4).
+- [ ] Implement secure Windows filesystem primitives and migrate callers in
+  separate component PRs without weakening POSIX behavior.
+- [ ] Extend keyvault memory custody, wizard, network, policy/privacy and
+  Desktop/extension through their respective plans and Windows acceptance gates.
+- [ ] Add the Windows CI/packaging matrix and a separate Windows 11 Desktop
+  acceptance run before advertising general native Windows product support.
+
+## Windows shared private filesystem
+
+Historical foundation checklist restored from PR #191 at `5b848ca3b`.
+Completed WF tasks and the then-open PR review/merge and caller-migration
+items retain their original status; the Windows product completion backlog
+below tracks subsequent work. This checklist does not reopen completed
+component slices or close Windows 11, live or Desktop acceptance.
+
+- [x] Draft the shared filesystem contract and executable WF0–WF5 plan in SPEC/PLAN.
+- [x] Prove native filesystem assumptions on the retained AWS host (WF0).
+- [ ] Review and land the shared filesystem contract before merging the foundation PR.
+- [x] Implement and actual-host validate independent primitives (WF1–WF4).
+- [x] Finish the scoped hosted CI matrix and foundation PR #192 acceptance (WF5).
+- [ ] Review and merge the separate foundation PR #192 after the contract PR.
+- [ ] Migrate callers in separate component PRs; preserve transaction domains and
+  design append/delete/rotation before adoption.
+- [ ] Complete later Windows component and Windows 11 Desktop acceptance before
+  advertising general native Windows product support. Helper PR #190 is separate.
+
+# Windows product completion backlog
+
+The full Windows port is **incomplete**. The helper (#190), private filesystem
+(#192) and wallet caller (#194) have bounded evidence; they do not complete the
+tasks below. Follow PLAN.md §Windows product completion execution and keep
+component PRs separate. Virtual Windows 11 is acceptable; a physical PC is not
+required.
+
+- [ ] C1: checked file lifecycle and audit primitives, with native failure tests.
+- [ ] C2: shared canonical policy/config read and transaction coordination.
+- [ ] C3: wizard policy/config/dotenv/credentials and safe cleanup backups.
+- [ ] C4: native Windows installer, interpreter/launcher resolution and CNG
+  helper CLI/setup/status integration.
+- [ ] C5: keyvault memory/custody, runtime hooks/discovery, capture/export,
+  generation/reset, encrypted audit and excluded file-vault recovery gates.
+- [ ] C6: wizard encryption/Telegram/vault lifecycle, upgrade and uninstall.
+- [ ] C7a: shared audit append/rotation/compression/retention prerequisites.
+- [ ] C7b: audit privacy and CLI migration after keyvault integration.
+  Part 1 (privacy_check factory, probe, hooks and install wrapper) routes
+  Windows writers through native audit custody with checked plaintext only for
+  clean absence and fail-closed refusals otherwise. Independent review, native
+  Windows CI, live CNG, C5e predicate adoption and the separate part 2 wizard
+  audit CLI remain.
+  Part 2 (wizard audit CLI) routes Windows `tail`/`grep` through one bounded
+  C7a snapshot, `decrypt` through the `native_audit` capability and C5d
+  `decrypt_windows_log_file`, and `purge` through checked identity-bound
+  deletes, without enrollment or key deletion. Independent review, native
+  Windows CI, live CNG and Windows 11 acceptance remain.
+  Follow-ups: POSIX `audit decrypt` still orders rotated files alphabetically
+  (`.10` before `.2`) where Windows uses C7a numeric order, which needs a POSIX
+  audit-CLI slice; only Windows `audit decrypt` writes UTF-8, so other wizard
+  commands (including `audit tail`/`grep`) can still fail on a stdout
+  redirected under a legacy Windows code page.
+- [ ] C8: network/LLM/privacy checked readers and fail-closed cache decisions.
+  The network slice routes every Windows network decision through one checked
+  canonical generation (host-tested; native Windows source/wheel validation of
+  `tests/test_network_windows_policy_native.py` is still required).
+- [ ] C9: native Tor/VPN route behavior and process cleanup.
+  The network route slice adds the native Windows Tor lifecycle (checked
+  `.exe` discovery, private `tor-data` state, startup cleanup, kill-on-close
+  job, exact teardown) and explicit VPN capabilities: Mullvad and WireGuard
+  are `not-ported-on-windows` (product limitation), custom needs validated
+  executables, strict never falls back to clearnet (host-tested; native
+  source/wheel runs of `tests/test_network_windows_routes_native.py`, real
+  route evidence, wizard presentation (C6) and Windows 11 remain required).
+  C9 review residuals (documented gaps; only the inventory refusal wording changed):
+  - A Tor that exits immediately is reported only as exited or with "stdout
+    closed before bootstrap". This applies before its identity is recorded
+    or before bootstrap. Tor's own first output lines, which carry its
+    reason (for example a rejected torrc or DataDirectory), are discarded.
+    Surfacing a bounded, sanitized tail of that output is still open.
+  - The startup inventory refuses any current-user process whose command
+    line names this profile's torrc, not only Tor images (for example an
+    editor opened on the torrc). The refusal now says "an unrecorded
+    process". Narrowing the match to Tor images (image identity) is still
+    open; the refusal stays conservative and never stops the process.
+- [ ] C10: extension pairing/history/Telegram storage and lifecycle.
+  C10a routes Windows pairing, attestation, WebAuthn, history and the wallet
+  snapshot fingerprint through checked private storage (host-tested; native
+  Windows source/wheel validation of
+  `tests/extension/test_extension_windows_storage_native.py` is still required).
+  C10b Telegram custody/archive remains open. Follow-ups:
+  - [ ] Wizard `extension pair`: report a checked-storage refusal from
+    `generate_code` (`storage_unavailable` / `storage_uncertain`) instead of a
+    raw traceback.
+  - [ ] Browser extension client: handle `storage_unavailable` /
+    `storage_uncertain` in `pair_fail`, `auth_fail` and `error` frames, the
+    additive `auth_challenge.storage_error`, and `attestation_key_missing`.
+  - [ ] C11: move the synchronous checked extension-storage lock off the
+    gateway event loop (challenge, auth currency check, history clear).
+  - [ ] History: explain or relieve the 64 MiB `history.enc` bound; an
+    oversized blob blocks saves until `history_clear`.
+  - [ ] Operator unpair command for the documented `attestation_key_missing`
+    recovery (today `clear_pairing()` from the Hermes Python).
+- [ ] C11: Windows Desktop installation/capabilities and gateway lifecycle.
+- [ ] C12: integrated source/wheel CI, ordinary-user Server tests, virtual
+  Windows 11 installation-to-use acceptance, and required live service gates.
+
+### Windows C5 custody execution order
+
+The approved contract is in [SPEC.md](SPEC.md#windows-dedicated-custody-and-memory-lifecycle)
+and the scoped sequence is in [PLAN.md](PLAN.md#windows-c5-dedicated-custody-implementation).
+Implementation and acceptance remain open:
+
+- [ ] Shared prerequisite: confidential memory enumeration and binary-SID
+  principal API; protected C2 transaction proxy and publication receipts.
+- [ ] C5a: freeze exact flat current/retained ownership and pending-journal
+  schemas; implement identity-bound create-only custody and load-only providers.
+  C5a now supplies the exact v1 schema, inert enrollment/load, retained role
+  leases, read-only memory inventory and positive-deletion cleanup. Local tests
+  and the explicit native fixture are implemented; independent review and
+  ordinary-user Server/Windows 11 acceptance remain required before completion.
+- [ ] C5b: checked memory storage/hooks, markers, adoption and flat lifecycle.
+- [ ] C5c: reuse C4 runtime selection, implement known/unknown process inventory,
+  and require actual installed-runtime memory proof without a force override.
+- [ ] C5d: independent audit role leases and C7a encrypted writer integration.
+  The opt-in provider/writer/reader, exact retained-selector lookup and checked
+  publication receipts are implemented. Independent review, native source/wheel
+  CNG and Windows 11 acceptance remain; C7b factory/CLI adoption is separate.
+- [ ] C5e: excluded file-vault refusal and flat role reset/deletion journals.
+  C5e now supplies pure capability predicates (no aggregate readiness flag),
+  pre-mutation `KeyvaultUnsupportedOnWindows` guards, retained excluded-artifact
+  reports and journaled role-specific `reset_role`. Independent review, native
+  Windows CI, real CNG/Windows 11 acceptance and C6 routing remain open.
+  Fix round 1: predicates are non-blocking; the unported `_storage` secret
+  store reports `secret_store` / `not-ported-on-windows` and refuses before
+  any mkdir. Remaining: design a checked Windows secret-store port; C6/C7b
+  must gate audit/Telegram role reset on their consumers because reset does
+  not consult the gateway inventory; C6 status/doctor must route retained
+  secret-store refusals (now raised by the Windows lifecycle-lock guard).
+- [ ] C6: explicit native-custody/audit initialization and wizard memory flows;
+  preserve separate C7b privacy/CLI and C10 Telegram migrations.
+  C6 now supplies `keyvault native init`, proof-bound `encryption
+  enable/disable/purge memory`, capability-routed `status`/`encryption
+  status`/`setup`, excluded vault/seal refusals before key generation and the
+  Windows uninstall (memory restore, memory-only `--purge-data`, no recursive
+  removal, `--erase-encrypted` refused). Remaining: independent review, scoped
+  Windows CI, the gated `test_wizard_windows_memory_live.py` source and
+  sdist-wheel runs, Windows 11 acceptance, wizard journal reconciliation,
+  Telegram (C10b), audit CLI (C7b part 2) and Desktop (C11) routing.
+  Review fix round 1: uninstall `--purge-data` plans the disable for inert
+  custody and purges memory custody inside step a (every refusal precedes
+  step b); enable/setup print the no-presence/no-portable-recovery notice when
+  they create the key; `keyvault reset` refuses first on Windows. Still open:
+  armed-with-problems memory renders `paused` instead of `on`, and
+  `--purge-data` removes the CNG helper while audit/Telegram custody is kept.
+- [ ] Design and implement checked tree lifecycle before recursive cleanup;
+  do not make it an implicit requirement for flat memory enrollment/purge.
+- [ ] Verify ordinary-user Server and Windows 11 installed flows, preserving
+  ciphertext after missing hardware, token denial and uncertain operations.
+
+- [ ] Managed image admission fix round: role-based ancestor policy (upper
+  ancestors admit entry-creation rights, parent and image stay strict),
+  storage-admission lock test, native fixture/probe evidence.
+- [ ] C5c R2: managed-image classification of denied non-plausible images,
+  removal of the fixed OS list, ordinary-user source/wheel known-empty proof.
+- [ ] Enforce the same supported C4 interpreter boundary in Windows managed
+  memory hooks and installed-runtime proof; document opaque-runtime limits.
+- [ ] C5c phase 2: `prove_windows_memory_runtime` and
+  `validate_windows_runtime_proof` are implemented with portable real-child
+  tests. Independent review, scoped Windows CI, explicit real-CNG source and
+  sdist-wheel runs and Windows 11 acceptance remain; C6 must route Desktop
+  launchers by passing the authoritative interpreter.
+
+### Windows memory storage follow-up (C5b)
+
+- [ ] Review and accept checked Windows storage/hooks independently; native
+  source/sdist-wheel inherited-ACL and real CNG installed-Hermes validation
+  remain controller-owned until recorded.
+- [ ] After C5c installed proof is frozen, implement reusable enable/seal,
+  disable/decrypt, marker transitions and purge verification with exact
+  physical-home/SID/generation/epoch/wrapped-digest proof preconditions.
+  Expose no bool/callback proof bypass; C5a continues to own deletion journals.
+- [ ] C5b-2 lifecycle: `enable_memory_encryption`,
+  `disable_memory_encryption`, marker transitions and
+  `verify_memory_purge_candidates` are implemented with portable real-proof
+  tests. Independent review, scoped Windows CI, the explicit real-CNG
+  `test_windows_memory_proof_live.py` source and sdist-wheel runs, C6 routing
+  of the ceremonies and Windows 11 acceptance remain.
+- [ ] Implement checked atomic Windows plaintext Journey memory mutations;
+  first-slice refusal is a preserved functional gap, not complete integration.
+- [ ] Complete separate C6 ceremony consumers and ordinary-user Windows 11
+  installed product acceptance.
+- [ ] C5b review follow-ups deferred from fix round 1: replace scattered
+  `sys.platform == "win32"` hook branches with install-time dispatch and split
+  `_memory_hook.py`; return `{"ok": False}` instead of raising for unmappable
+  Windows journey sources; cut per-call inventory/stat/unwrap cost (shape B
+  reads three times per mutation); strengthen the native process-lock test
+  beyond `poll() is None`.
+
+### Windows Telegram custody follow-up (C10b)
+
+- [ ] Review the custody-role credential store, checked archive and
+  forget ceremony independently; native source/sdist-wheel runs of
+  `tests/test_windows_telegram_native.py` and the gated real-CNG
+  `tests/test_windows_telegram_live.py` remain controller-owned.
+- [ ] C6-telegram: route wizard telegram setup/login/logout on Windows through
+  `default_secret_store()`, the explicit `enroll_role("telegram")` ceremony
+  (mapping `telegram_not_enrolled`), `require_presence=False` after the
+  machine-bound disclosure, and `wipe_archive(forget=True)` for `--forget`;
+  replace the raw `_orphaned_archive_present` scan.
+- [ ] C11: Desktop/login adoption of the seam and of the presence opt-out
+  (`login_flow` keeps calling `ensure_key()`, which refuses on Windows).
+- [ ] Live Telegram account gate and Windows 11 installation-to-use acceptance.
+- [ ] C6: never rotate the telegram role (`retain_current=True`) without
+  re-sealing `credentials.sealed` under the new generation first; otherwise
+  credentials and archive become `secrets_corrupt`. Not offering rotation is
+  acceptable.
+- [ ] C6-telegram progress: `keyvault native init --role telegram`, the
+  Windows `telegram setup` (capabilities, offered ceremony, C6 memory enable,
+  acknowledged login), login with `require_presence=False` only after the
+  machine-bound acknowledgement, classified Windows messages, logout (archive,
+  credentials and role kept), `logout --forget` (typed confirmation,
+  `wipe_archive(forget=True)`), a load-only doctor with per-capability rows
+  and the migrate-tee refusal are implemented with portable tests.
+  Remaining: independent review, scoped Windows CI and native runs of
+  `tests/test_wizard_windows_telegram_native.py`, the gated
+  `tests/test_wizard_windows_telegram_live.py` real-CNG run, a wizard
+  reconciliation verb for an ambiguous telegram deletion journal, Windows
+  routing of `extension.telegram.memory_guard` (never active on `win32`, so
+  the Hermes Telegram tools, Desktop and the extension server refuse
+  `memory_encryption_required`), Desktop login (C11), the live account gate
+  and Windows 11 acceptance.
+  Review fix round 1: plain logout keeps the archive (R-C6T-1); forget
+  deletes before revoking and reports partial outcomes (R-C6T-2); role-less
+  credentials point to `logout --forget` (R-C6T-3). Still open from the
+  review: the `_windows_gates` not-enrolled wording for `telegram_hardware`
+  (C6 vocabulary) and helper-missing blocking a role-less forget (fail
+  closed).
+  Review fix round 2: forget revokes whenever loaded credentials are re-checked
+  as gone (also when the metadata read fails); orphan detection follows the
+  C10b segment leaf rule. Open: a public store-error mapper in a later
+  extension slice would replace the pinned wizard copy.
+
+### Windows Desktop and gateway follow-up (C11)
+
+C11 routes the Desktop status, helper state, CNG memory enable/disable,
+Telegram custody gating, logout/forget, checked page placement/removal and the
+extension server's Windows shutdown (host-tested; native and live gates below).
+
+- [ ] Native Windows CI run of `tests/test_desktop_windows_api.py`,
+  `tests/test_desktop_windows_native.py`, `tests/test_desktop_windows_page.py`
+  and `tests/extension/test_extension_serve_shutdown.py` (CTRL_BREAK on 7799).
+- [ ] Gated real-CNG `tests/test_desktop_windows_live.py` from the Desktop
+  runtime and from an sdist-built wheel venv; real packaged Hermes Desktop
+  launch, page render, memory enable and restart; Windows 11.
+- [ ] C6-telegram: a wizard ceremony that enrolls the `telegram` role
+  (`keyvault native init` offers memory/audit only); the Desktop then sets
+  `TELEGRAM_CEREMONY_COMMAND` and stops refusing `telegram_not_enrolled`.
+- [ ] C6-telegram: a structured (step, reason) result from the wizard's
+  Windows memory verbs so the Desktop stops composing the same order itself.
+- [ ] C6-telegram: `memory_guard.memory_encryption_active` (and the wizard
+  `telegram` CLI) still report Windows memory as inactive; only the Desktop
+  and its import service use the load-only Windows state today.
+- [ ] Desktop `_hermes_venice_key` still reads `<home>/.env` with python-dotenv
+  (C3 dotenv scope).
+- [ ] Windows `extension serve` binds without `SO_EXCLUSIVEADDRUSE`; decide
+  whether loopback port hijacking by another same-user process needs it.
+- [ ] Checked recursive removal for the kept Desktop folders and locks.
+
+C11 review round 1 additions:
+
+- [ ] C6 (wizard): on Windows `uninstall_cli._clean_hermes_files` still prints
+  "Removed the Hermes Desktop page <folder>" after `remove_page()`, although
+  the Windows removal keeps the folders and prints each kept path.
+- [ ] C6 (wizard): the uninstall plan's gateway diagnostic uses the advisory
+  discovery, so on Windows an unknown inventory reads as "no gateway"; route
+  it through the typed inventory (`unknown` stays unknown).
+- [ ] C6 note: a broken memory seal met at the lifecycle step classifies as
+  `custody-uncertain` (with the "busy, retry" remedy) through
+  `classify_exception`; the Desktop inherits it. A dedicated `seal-broken`
+  reason belongs to the wizard/keyvault classification.
+- [ ] C6-telegram: the structured wizard result should also carry the wizard's
+  messages (or take an explicit output stream) so the Desktop no longer
+  captures process-wide stdout/stderr; until then every Desktop capture is
+  serialized and keeps only the capturing thread's text (`desktop/_capture.py`).
+- [ ] Pre-C11 Windows Desktop placements: earlier builds created
+  `<home>\desktop-plugins\mordred` and `<home>\plugins\mordred` with inherited
+  ACLs, which the checked placement refuses (never repairs) and logs with the
+  exact path. Remedy: delete those two folders by hand, then run
+  `hermes-mordred desktop install`.
+
+C11 integration follow-up (R-C11-5/R-C11-6):
+
+- [x] Close the missing-command follow-up using C6 ceremony PR #222:
+  Desktop exposes `hermes-mordred keyvault native init --role telegram` in
+  status, enrollment refusals and the page's existing command rendering.
+  This supersedes the earlier pending ceremony/command item above.
+- [x] Ordinary logout reuses the full Windows credential snapshot with one
+  unwrap; real-store regressions preserve credentials, archive and roles.
+- [x] Forget follows R-C6T-2 checked wipe -> checked observation -> revoke,
+  preserving definite refusals and original partial failures; unknown state
+  and failed revoke show manual Devices advice with outcomes across refresh.
+  Cost (R-C11-6): local deletion can precede a failed remote revocation.
+- [ ] Desktop still refuses unreadable/corrupt or role-less credentials
+  before forget; use the displayed `hermes-mordred telegram logout --forget`
+  recovery remedy. Native Desktop destructive recovery parity is separate.
+- [ ] Bound the pre-existing chat executor worker lifecycle separately.
+  R-C11-5 accepts listener stop, 3-second connection-handler grace and
+  remaining task cancellation after an open WebSocket delayed SIGTERM about
+  46 seconds. Cost: POSIX in-flight connections may be cancelled and callers
+  may reconnect/retry. It is not a process-exit deadline: the isolated
+  12-second worker probe returned from `_run_forever` around 3.21 seconds
+  but Python awaited the worker during interpreter exit.
+- [ ] Shared Windows credential `flags()` currently returns `None` for
+  non-object JSON metadata even when `credentials.sealed` remains. Desktop
+  now corroborates observed absence with checked seal presence (and refuses
+  remote revoke on retained/unknown state); fix shared flags semantics in a
+  separate extension/C6 follow-up.
+### Windows shared Telegram memory guard follow-up (C10c)
+
+- [x] Route the shared extension/Hermes Telegram service guard through C6's
+  load-only Windows memory target and retain `custody_busy` on canonical
+  contention. This supersedes the C6-telegram shared-guard routing gap above.
+- [x] Add checked-memory success/drift/status, unreadable/cleanup and real
+  cross-process refusal tests; include the portable module in Windows CI.
+- [ ] Repeat the selected guard and shared-service tests in native Windows
+  source and sdist-derived wheel environments; retain the real Telegram
+  account and Windows 11 acceptance gates. Wizard setup completion wording
+  remains a separate wizard slice; C10c changes no wizard user flow.

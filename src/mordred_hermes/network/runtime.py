@@ -33,12 +33,15 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import sys
 import threading
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass, field, fields
 from enum import Enum
 from pathlib import Path
 from typing import Any, Final, cast
+
+import psutil
 
 from .._audit_support import AuditWriter as _AuditWriter
 from .._audit_support import safe_audit_append
@@ -52,12 +55,13 @@ from ._exceptions import (
     MordredNetworkError,
     PathSwitchRequiresRestart,
     UnknownPath,
+    UnknownVpnProvider,
 )
 from .api import NetworkStatus
 from .guidance import tor_install_guidance
 from .paths import clearnet as clearnet_mod
 from .paths import tor as tor_mod
-from .vpn_providers import VpnProvider, build_provider
+from .vpn_providers import VpnProvider, build_provider, provider_capability
 
 _LOG = logging.getLogger("mordred.network.runtime")
 
@@ -135,11 +139,16 @@ def _default_subprocess_counter() -> int:
     an in-flight subprocess might be running with the pre-switch proxy
     env. We never block path switches on it.
 
-    Implementation: ``pgrep -P <pid>``. Works on Linux + macOS; on
-    Windows ``pgrep`` is absent and we return ``0`` (with the same
-    documented caveat). Failures are coerced to ``0`` so a noisy probe
-    can never break the actual ``use(path)`` call site.
+    Implementation: ``pgrep -P <pid>`` on Linux + macOS. Native Windows has
+    no ``pgrep``; it counts direct children through psutil instead (no
+    subprocess). Failures are coerced to ``0`` so a noisy probe can never
+    break the actual ``use(path)`` call site.
     """
+    if sys.platform == "win32":
+        try:
+            return len(psutil.Process(os.getpid()).children())
+        except (psutil.Error, OSError):
+            return 0
     try:
         result = subprocess.run(
             ["pgrep", "-P", str(os.getpid())],
@@ -672,14 +681,23 @@ class Runtime:
         port = self._config.tor_socks_port or self._tor_pick_port()
         tor_mod.validate_port_pair(port)
         control_port = port + 1
+        # Native Windows: quoted DataDirectory, Tor-side owner monitoring, and
+        # a launch that needs the private state directory and policy mode
+        # (strict refuses an untrusted image). POSIX arguments are unchanged.
+        windows = sys.platform == "win32"
         torrc = tor_mod.render_torrc(
             socks_port=port,
             control_port=control_port,
             data_dir=self._config.tor_data_dir,
             disable_ipv6=self._config.disable_ipv6,
+            quote_paths=windows,
+            owning_controller_pid=os.getpid() if windows else None,
         )
+        start_kwargs: dict[str, Any] = {"binary": self._config.tor_binary, "torrc": torrc}
+        if windows:
+            start_kwargs.update(data_dir=self._config.tor_data_dir, policy_mode=self._config.policy_mode)
         try:
-            proc = self._tor_start(binary=self._config.tor_binary, torrc=torrc)
+            proc = self._tor_start(**start_kwargs)
         except OSError as spawn_err:
             # Codex round 3 P1 (2026-05-14): ``subprocess.Popen`` raises
             # :class:`FileNotFoundError` / :class:`PermissionError`
@@ -737,6 +755,8 @@ class Runtime:
         # reserved for Mullvad-grade providers. Raising BringupFailed lets
         # the _switch strict path escalate to MordredPathBringupFailed.
         provider = self._vpn_provider
+        if sys.platform == "win32":
+            self._require_windows_vpn_capability(provider)
         if self._config.policy_mode == "strict" and not provider.capabilities.killswitch:
             raise BringupFailed(
                 f"vpn provider {provider.name!r} cannot guarantee a kill-switch, "
@@ -792,6 +812,38 @@ class Runtime:
                 raise
             raise BringupFailed(f"vpn provider wait failed: {wait_err}") from wait_err
         return _ActiveHandle("vpn", vpn_handle)
+
+    def _require_windows_vpn_capability(self, provider: VpnProvider) -> None:
+        """Refuse an unsupported or unusable Windows VPN before any provider call.
+
+        Native Windows ruling for this release: Tor is the supported private
+        route; Mullvad and WireGuard are ``not-ported-on-windows``; the custom
+        provider needs validated ``.exe`` images. Raising ``BringupFailed``
+        keeps the existing contract: strict refuses without a clearnet route,
+        lenient/off record the audited clearnet fallback.
+        """
+        try:
+            capability = provider_capability(
+                provider.name,
+                policy_mode=self._config.policy_mode,
+                wireguard_config_path=self._config.wireguard_config_path,
+                custom_up_cmd=self._config.custom_up_cmd,
+                custom_down_cmd=self._config.custom_down_cmd,
+                custom_health_cmd=self._config.custom_health_cmd,
+            )
+        except UnknownVpnProvider:
+            raise BringupFailed(
+                f"vpn provider {provider.name!r} is not a registered provider; refusing on native Windows"
+            ) from None
+        if not capability.supported or not capability.available:
+            refusal = BringupFailed(
+                f"vpn provider {provider.name!r} cannot be used on native Windows ({capability.reason}). "
+                "Mullvad and WireGuard routes are not supported on native Windows in this release; use the "
+                "Tor route, or a custom VPN command with a validated .exe under lenient/off policy."
+            )
+            if self._config.policy_mode != "strict":
+                _LOG.warning("%s %s policy degrades to clearnet.", refusal, self._config.policy_mode)
+            raise refusal
 
     def _teardown_current(self) -> None:
         assert self._handle is not None

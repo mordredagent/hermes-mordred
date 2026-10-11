@@ -892,7 +892,7 @@ class TestDatabaseUninstall:
             connection.commit()
         monkeypatch.setattr(_migrate, "holders", lambda _paths: [])
 
-        def confirm(_ctx: UninstallContext, _opts: UninstallOptions) -> bool:
+        def confirm(_ctx: UninstallContext, _opts: UninstallOptions, _plan: uninstall_cli.UninstallPlan) -> bool:
             assert not dbcrypt.marker_path(installed.home).exists()
             _migrate.migrate(installed.home, _key.derive(key), arm=dbcrypt.arm)
             return True

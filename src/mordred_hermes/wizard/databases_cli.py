@@ -38,6 +38,17 @@ def _key_from_environment() -> object | None:
 
 
 def databases_status(home: Path | None = None) -> int:
+    if sys.platform == "win32":
+        from .._home import hermes_home
+        from ._windows_databases import refusal
+
+        print("Database encryption: unsupported on Windows (macOS only).")
+        detail = refusal(home or hermes_home())
+        if detail is not None:
+            _term.emit_error(detail)
+            return 1
+        print("  Hermes databases are not protected by Mordred database encryption on Windows.")
+        return 0
     from ..dbcrypt import _migrate, armed, protected_state_present
 
     base = home or _home()

@@ -23,6 +23,8 @@ import importlib
 import logging
 import signal
 import sys
+from collections.abc import Callable
+from types import FrameType
 from typing import TYPE_CHECKING, Any
 
 from .. import _term
@@ -35,6 +37,13 @@ if TYPE_CHECKING:
 # importing *this* module never pulls in aiohttp — see the module docstring.
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 7788
+# Winsock codes (errno on Windows): WSAEADDRINUSE, WSAEACCES.
+_WSAEADDRINUSE = 10048
+_WSAEACCES = 10013
+# How long a stop waits for in-flight connections (an open extension
+# WebSocket never finishes on its own) before they are cancelled. The
+# listener is closed first, so the port is released at the start of the stop.
+_STOP_GRACE_SECONDS = 3.0
 
 
 def _load_vault_managed_environment() -> int:
@@ -90,7 +99,9 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
     already bound (either a stale ``extension serve`` from an earlier
     session or a running Hermes gateway already hosting the extension API),
     unresolvable host, or insufficient privileges — else ``0`` after a clean
-    shutdown on Ctrl+C or SIGTERM.
+    shutdown on Ctrl+C, SIGTERM or (Windows) Ctrl+Break. Shutdown closes the
+    listener first and gives open connections a short grace period, so a
+    connected extension cannot hold the process (or the port) open.
     """
     try:
         importlib.import_module("aiohttp")
@@ -154,13 +165,125 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
     return _run_forever(server, host, port, color)
 
 
+def _bind_failure(exc: OSError, host: str, port: int, *, platform: str = sys.platform) -> str:
+    """One classified line (plus hints) for a refused bind; another port is never tried silently.
+
+    ``port-in-use``: something already listens there. ``port-forbidden``: the
+    port is reserved (a Windows excluded port range) or exclusively held, or
+    privileged. ``bind-failed``: anything else (bad host, unavailable address).
+    """
+    windows = platform == "win32"
+    if exc.errno in (errno.EADDRINUSE, _WSAEADDRINUSE):
+        holder = (
+            f"Run `Get-NetTCPConnection -LocalPort {port} -State Listen` (PowerShell) to see what's listening"
+            if windows
+            else f"Run `lsof -i :{port}` to see what's listening"
+        )
+        return (
+            f"error: port {port} is already in use (port-in-use) — something is already "
+            "listening there. Common causes: an `extension serve` process "
+            "already running from an earlier session, or a full Hermes "
+            "gateway already hosting the extension API (nothing to start "
+            "in that case).\n"
+            f"  {holder}, or pass --port to use a different one. No other port is tried."
+        )
+    if exc.errno in (errno.EACCES, _WSAEACCES):
+        reserved = (
+            " Windows may reserve it in an excluded port range "
+            "(`netsh interface ipv4 show excludedportrange protocol=tcp`) or another process may hold it exclusively."
+            if windows
+            else ""
+        )
+        return (
+            f"error: port {port} cannot be bound on {host} (port-forbidden).{reserved}\n"
+            "  Pass --port to choose another port. No other port is tried."
+        )
+    return (
+        f"error: could not bind {host}:{port} (bind-failed) — {exc}. Pass --port to change it; no other port is tried."
+    )
+
+
+def _threadsafe_stop(loop: asyncio.AbstractEventLoop, stop: asyncio.Event) -> Callable[[int, FrameType | None], None]:
+    """A ``signal.signal`` handler that asks the loop to stop from whatever thread/frame it runs in.
+
+    A late console event after the loop closed is ignored rather than raised.
+    """
+
+    def handler(signum: int, frame: FrameType | None) -> None:
+        del signum, frame
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(stop.set)
+
+    return handler
+
+
+def _stop_signals() -> tuple[int, ...]:
+    """Console signals routed through ``signal.signal`` when the loop has no ``add_signal_handler``.
+
+    Windows' proactor loop raises ``NotImplementedError`` there. ``CTRL_BREAK_EVENT``
+    arrives as ``SIGBREAK``, whose default action ends the process without
+    ``server.stop()``. Ctrl-C keeps the ``KeyboardInterrupt`` path.
+    """
+    sigbreak = getattr(signal, "SIGBREAK", None)
+    return (int(sigbreak),) if sigbreak is not None else ()
+
+
+def _install_stop_handlers(loop: asyncio.AbstractEventLoop, stop: asyncio.Event) -> Callable[[], None]:
+    """Route SIGTERM (POSIX) or SIGBREAK (Windows) to ``stop``; return the undo callable."""
+    try:
+        loop.add_signal_handler(signal.SIGTERM, stop.set)
+    except (NotImplementedError, RuntimeError, ValueError):
+        pass
+    else:
+
+        def remove() -> None:
+            with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
+                loop.remove_signal_handler(signal.SIGTERM)
+
+        return remove
+    handler = _threadsafe_stop(loop, stop)
+    previous: dict[int, Any] = {}
+    for signum in _stop_signals():
+        with contextlib.suppress(ValueError, OSError):  # e.g. not the main thread
+            previous[signum] = signal.signal(signum, handler)
+
+    def restore() -> None:
+        for signum, old in previous.items():
+            with contextlib.suppress(ValueError, OSError, TypeError):
+                signal.signal(signum, old)
+
+    return restore
+
+
+async def _bounded_stop(server: ExtensionAPIServer, grace: float) -> None:
+    """``server.stop()`` (listener first, then connections), cut off after ``grace`` seconds.
+
+    aiohttp waits up to 60 s for every open handler; a connected extension's
+    WebSocket handler only ends when the client leaves, so an unbounded stop
+    could hang a Ctrl-C/Ctrl-Break/SIGTERM for most of a minute.
+    """
+    try:
+        await asyncio.wait_for(server.stop(), timeout=grace)
+    except TimeoutError:
+        logging.getLogger(__name__).info("closing connections still open after %.0f s", grace)
+
+
+def _cancel_remaining(loop: asyncio.AbstractEventLoop) -> None:
+    """Cancel the connection handlers a bounded stop left behind, as ``asyncio.run`` would."""
+    pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+    for task in pending:
+        task.cancel()
+    if pending:
+        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+
+
 def _run_forever(server: ExtensionAPIServer, host: str, port: int, color: bool) -> int:
     """Own the event loop for the life of the server: bind, print the startup
     banner, block until interrupted, then shut down cleanly.
 
     Returns ``1`` if binding failed (EADDRINUSE or another OSError), else
-    ``0`` after a clean shutdown on Ctrl+C or SIGTERM — the exit code
-    :func:`serve` passes straight through to its caller."""
+    ``0`` after a clean shutdown on Ctrl+C, SIGTERM or (Windows) Ctrl+Break —
+    the exit code :func:`serve` passes straight through to its caller."""
     # A manually managed loop (vs. asyncio.run) so the EADDRINUSE / Ctrl+C
     # paths below can each call `server.stop()` deterministically on the same
     # loop before it closes, instead of relying on asyncio.run()'s implicit
@@ -170,12 +293,13 @@ def _run_forever(server: ExtensionAPIServer, host: str, port: int, color: bool) 
     try:
         # systemd / `docker stop` / plain `kill` send SIGTERM; route it through
         # the same clean shutdown as Ctrl+C so supervisors see exit 0 rather
-        # than an abrupt signal death. Installed BEFORE binding: a supervisor
-        # (or the SIGTERM test) may signal as soon as the port accepts, which
-        # happens inside server.start() — the handler must already exist then.
+        # than an abrupt signal death. Windows has no add_signal_handler on the
+        # proactor loop: Ctrl+Break (SIGBREAK) goes through signal.signal and
+        # loop.call_soon_threadsafe instead. Installed BEFORE binding: a
+        # supervisor (or the shutdown test) may signal as soon as the port
+        # accepts, which happens inside server.start().
         stop = asyncio.Event()
-        with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
-            loop.add_signal_handler(signal.SIGTERM, stop.set)
+        restore_signals = _install_stop_handlers(loop, stop)
         try:
             loop.run_until_complete(server.start())
         except OSError as exc:
@@ -183,19 +307,8 @@ def _run_forever(server: ExtensionAPIServer, host: str, port: int, color: bool) 
             # OSError subclasses — every bind failure gets the same one-line
             # error UX instead of a traceback.
             loop.run_until_complete(server.stop())
-            if exc.errno == errno.EADDRINUSE:
-                print(
-                    f"error: port {port} is already in use — something is already "
-                    "listening there. Common causes: an `extension serve` process "
-                    "already running from an earlier session, or a full Hermes "
-                    "gateway already hosting the extension API (nothing to start "
-                    "in that case).\n"
-                    f"  Run `lsof -i :{port}` to see what's listening, or pass "
-                    "--port to use a different one.",
-                    file=sys.stderr,
-                )
-            else:
-                print(f"error: could not bind {host}:{port} — {exc}", file=sys.stderr)
+            restore_signals()
+            print(_bind_failure(exc, host, port), file=sys.stderr)
             return 1
 
         # Additive user-facing signal that the server is up. The INFO log
@@ -211,16 +324,16 @@ def _run_forever(server: ExtensionAPIServer, host: str, port: int, color: bool) 
         print(f"Web page:   {server.page_url}")
         print("            (private launch URL; do not share)")
         print()
-        print("Press Ctrl+C to stop.")
+        print("Press Ctrl+C to stop." if sys.platform != "win32" else "Press Ctrl+C (or Ctrl+Break) to stop.")
 
         try:
             loop.run_until_complete(stop.wait())
         except KeyboardInterrupt:
             pass
         finally:
-            with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
-                loop.remove_signal_handler(signal.SIGTERM)
-            loop.run_until_complete(server.stop())
+            restore_signals()
+            loop.run_until_complete(_bounded_stop(server, _STOP_GRACE_SECONDS))
+            _cancel_remaining(loop)
             print("Stopped.")
         return 0
     finally:

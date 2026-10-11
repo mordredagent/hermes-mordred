@@ -8,7 +8,7 @@ and honors `HERMES_HOME` when set before plugin discovery.
 Most private Mordred state is under `<home>/mordred/`, but that is not an
 absolute containment rule. The extension uses Hermes's established
 `<home>/extension/` directory, the encryption facade manages selected
-Hermes-owned files, native helper executables live outside the profile, and
+Hermes-owned files, macOS/Linux native helper executables live outside the profile, and
 the optional workspace target has user-home paths of its own.
 
 ## Overview
@@ -23,6 +23,7 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/credentials/network.json` | wizard/network setup | non-secret network references |
 | `<home>/mordred/tor-data/` | Mordred-launched Tor | Tor runtime state |
 | `<home>/mordred/keyvault/` | keyvault | hardware-wrapped key records and envelopes |
+| `<home>/bin/mordred-hermes-winkey.exe` | Windows helper build script | native CNG keyvault bridge |
 | `<home>/mordred/.keyvault.*` | keyvault | lifecycle lock, reset journal, generation epoch |
 | `<home>/mordred/vault/` | vault/encryption CLI | at-rest file vault |
 | `<home>/mordred/env-vault.optout` | encryption CLI | disables runtime `.env` injection |
@@ -224,9 +225,46 @@ owns the location but does not interpret those files.
 it to the Tor runtime. Do not copy it between profiles as configuration or
 treat it as a backup.
 
+### Native Windows contract (C9)
+
+On native Windows the directory is a checked private directory: Mordred
+creates it with the exact private ACL before any content, takes its exclusive
+transaction without waiting, and refuses (never repairs) an existing unsafe
+directory, reparse point or unsafe member. Mordred owns these members:
+
+| Member | Writer | Contract |
+|---|---|---|
+| `torrc` | network runtime | rendered configuration; checked no-replace staging, then rename |
+| `torrc-defaults` | network runtime | empty file pinned with `--defaults-torrc` |
+| `daemon.json` | network runtime | at most 4 KiB; Tor PID, creation time, image and user, launching process PID and creation time, torrc path |
+| `.mordred-fs.lock` | private filesystem | transaction lock; never deleted to make a busy operation succeed |
+
+Tor owns everything else, including `control_auth_cookie` (created with the Tor
+token's default DACL and read only through the checked bounded reader, at
+most 32 bytes) and its `lock`. `daemon.json` is removed only by its own Tor's
+teardown or by startup cleanup after identity revalidation; malformed or
+uncertain state refuses bring-up and stays for inspection. POSIX keeps the
+existing behavior (Tor configured through stdin; no Mordred members here).
+
+The checked cookie read proves the cookie's integrity, not its
+confidentiality (controller ruling R-C9-3). Confidentiality rests on this
+directory's private ACL: its entries are not inheritable, so the cookie Tor
+creates here receives the Tor token's default DACL, which grants no other
+user. Mordred does not check the cookie's read grants. stem's
+`authenticate()` re-reads the cookie with a raw `open()` at the `COOKIEFILE`
+path Tor reports. On native Windows that path must equal this directory's
+`control_auth_cookie`, or the liveness probe refuses with
+`control-cookie-path-unreported` or `control-cookie-path-outside-tor-data`.
+stem's raw read still follows reparse points, so a member swapped between
+Mordred's precheck and authentication would be read; only principals that can
+change this directory can swap it. A malformed or oversized `daemon.json` refusal names
+`daemon.json` in this directory. Remove it only after confirming that no Tor
+from the profile is running.
+
 ### Cross-references
 
 - [`SPEC.md`](./SPEC.md) §Plugin: `mordred_network`
+- [`SPEC.md`](./SPEC.md) §Windows network routes and VPN capability (C9)
 - [`PLAN.md`](./PLAN.md) §3.1 Plugin: `mordred_network`
 
 ## `~/.hermes/mordred/keyvault/`
@@ -422,6 +460,28 @@ environment, the `dashboard/plugin_api.py` shim serves a fallback API
   `~/.claude-private-mnt`. `CLAUDE_PRIVATE_*` overrides can relocate them.
   External `claude-private` tooling owns the volume format and mount lifecycle.
 
+## Windows helper paths
+
+`native/winkey-helper/build.ps1` installs `mordred-hermes-winkey.exe` into
+`<home>/bin` by default, using the selected Python's shared Hermes home resolver.
+`-InstallDir` selects another absolute directory. A verified temporary
+`.winkey-<uuid>.tmp` in that directory is atomically published; failed builds and
+in-use destinations preserve the previous executable. Build artifacts remain
+under the helper source directory's `target/` and are excluded from distributions.
+
+`MORDRED_WINKEY_HELPER` is an authoritative executable override. Otherwise the
+bridge searches the selected home's `bin`, then absolute PATH directories,
+without implicit current-directory or script lookup. Operators must trust those
+installation directories; this is not executable signature verification.
+
+Private keys belong to the user's Microsoft Platform Crypto Provider under
+`mordred-hermes:<sha256(decoded_tag)>`, not to a Hermes-home blob directory.
+Windows manages the underlying PCPKSP files (observed under
+`%LOCALAPPDATA%\Microsoft\Crypto\PCPKSP`). Mordred accesses and deletes keys
+through CNG, never by editing those opaque files. Copying them is not TPM-key
+recovery. The native helper does not establish Windows support for the other
+private-file paths or POSIX permissions described in this document.
+
 ## Migration from legacy OpenClaw paths
 
 `hermes-mordred upgrade` can detect `~/.openclaw/mordred/` and migrate the
@@ -452,3 +512,167 @@ legacy audit log, policy snapshot/config, keyvault tree, and credentials tree.
 - Hermes core contains no Mordred path knowledge. Optional future vendored
   enforcement remains separately specified under [`UPSTREAM.md`](./UPSTREAM.md).
 - This document, not package-local READMEs, is the path ownership authority.
+
+
+## Shared private filesystem staging and lock paths
+
+The opt-in `_private_fs` foundation reserves `.mordred-fs.lock` and
+`.mordred-fs-tmp-<128-bit random hex>` inside caller-selected private directories.
+The lock file is permanent and is never rotated/replaced/deleted by transactions.
+Unpublished staging files may remain after a process crash; opening a directory
+never glob-deletes them. No default component root or Hermes home changes in this
+foundation slice. Existing component lock names remain authoritative until their
+separate migration PRs define mixed-version behavior.
+
+`inspect_managed_installation_image(path)` is a read-only Windows observation
+of a caller-selected local NTFS image. It creates no lock, staging file or
+directory alongside OS or vendor executables, reads no executable contents,
+changes no ACL and grants no mutation capability. No environment variable,
+known folder or vendor basename establishes a trusted installation root.
+Checked descriptors and pinned file/ancestor identities establish admission;
+source-only hardlinks are permitted. The existing stored private/confidential
+single-link requirements are unchanged. Process ownership and supported-runtime
+classification belong to their consumers, never this metadata operation.
+
+## Windows wallet storage boundary
+
+The keyvault caller migration uses `<home>/extension/wallet.json` and a permanent
+`<home>/extension/.mordred-fs.lock` on Windows. Foundation-owned staging names
+begin `.mordred-fs-tmp-`; consumers must never remove them by glob. The POSIX
+wallet still uses `.wallet.lock`. Stop older Windows writers before adoption;
+there is no automatic ACL repair or mixed-version lock compatibility.
+See [the component contract](SPEC.md#windows-keyvault-wallet-configuration-2026-10-08).
+
+# Windows completion path contract
+
+The Windows completion work in PLAN.md uses native absolute local NTFS paths.
+Keep the existing Hermes-home resolution and explicit `HERMES_HOME` override;
+do not add a second hidden Windows state root. Tests always set a disposable
+home. Drive-relative, UNC/device paths, reparse ancestors and untrusted mutation
+rights remain refused at sensitive storage boundaries.
+
+The Hermes venv uses `Scripts/python.exe` and native console entry points;
+do not infer the selected runtime from a Unix `bin/python` path or a package
+version string. Check actual module locations in a subprocess. The CNG helper
+default remains `<HERMES_HOME>/bin/mordred-hermes-winkey.exe`, with the explicit
+`MORDRED_WINKEY_HELPER` override provided by the helper slice. Installer-owned
+launchers must carry verifiable ownership before upgrade or removal.
+
+Mordred-private directories retain the private DACL contract. Shared Hermes
+home is a distinct trusted-parent boundary for `config.yaml` and `.env`; it is
+not automatically adopted or repaired. Policy snapshots and pending markers
+remain under `<HERMES_HOME>/mordred`. Document and test the canonical lock order
+before combining transactions across these directories.
+
+Private directory `.mordred-fs.lock` files remain permanent while their
+namespace is live. Archive reset/purge cannot remove an active lock and then
+recreate a competing lock namespace. Rotated audit targets and backup exports
+publish without overwriting an existing path. Every recursive lifecycle action
+must check each traversed entry and stay inside its declared root.
+
+C1a lifecycle methods operate only on validated sibling names in the caller's
+checked directory. Enumeration hides the reserved lock/staging names but counts
+staging entries toward its scan budget. Delete/rename never accept those names;
+there is no implicit stale-staging cleanup or recursive directory removal.
+
+
+### Windows dedicated custody paths
+
+These paths belong to the approved C5 contract; C5a implements flat ownership
+and inert custody while hooks and user ceremonies remain separate. All resolve beneath the selected `HERMES_HOME`.
+
+| Path | Owner and contract |
+| --- | --- |
+| `mordred/windows-custody.json` | Keyvault; exact-private flat versioned ownership manifest, at most 64 KiB and 64 retained role generations; exact current/retained field schema frozen by C5a |
+| `mordred/windows-{memory,audit,telegram}.pending.json` | Keyvault; record enrollment/deletion intent before native action; exact v1 role schemas frozen by C5a, never inferred from a native missing result |
+| `mordred/memory-key.wrapped` | Keyvault; existing 127-byte MRKW container, create-no-replace enrollment and checked role binding |
+| `mordred/memory-vault.marker` and `mordred/memory-vault.optout` | Memory lifecycle; checked markers, no raw writes/unlinks or uncertainty-to-absence conversion |
+| `memories/*.md` and `memories/*.md.bak.*` | Upstream memory names through Mordred's checked Windows adapter; trusted/confidential existing parent/files, private new ciphertext/restored plaintext/backups, bounded flat inventory |
+| `mordred/audit.log` and dated siblings, or the explicitly configured audit path | Audit consumer through C7a; exact-private storage and an independent retained audit-key role |
+
+The home remains a shared trusted parent. Lock order is home, mordred, memories;
+custom audit storage follows custody locks, using a nonblocking directory lock.
+The C5d adapter reuses the permanent `.mordred-fs.lock`, never the POSIX
+`.audit.log.lock`; custom exact-private audit directories must already exist. The protected C2 loan excludes policy,
+pending-marker and coordinator-lock names. Independent memory and C5d audit publications report
+through the owning coordinator's monotonic publication receipt. Permanent locks
+remain after flat purge while their namespaces are live.
+
+Windows CNG keys live in the user-scoped Platform Crypto Provider, not in a new
+file-vault blob tree. Native role IDs bind checked home FileIdentity, current
+binary SID and persisted profile/role nonces. A safe same-identity rename is
+allowed; a copy/restore/recreation into another physical directory is refused
+without automatic adoption. Decrypt before such a move or await explicit future
+migration. The legacy migration/export guidance above does not authorize Windows
+TPM recovery or the excluded Windows file vault.
+
+No recursive removal is implied by these flat paths. Unknown legacy vault trees
+and retained ciphertext stay intact until a separately checked lifecycle supports
+that operation; never remove live directory locks to force cleanup.
+
+On Windows, `mordred/vault`, `mordred/env-vault.optout` and
+`mordred/config-vault.marker` belong to excluded capabilities (file vault and
+env/config seals). C5e reports them read-only through
+`excluded_artifacts(home)` as preserved and unsupported; public entry points
+refuse before reading, locking, adopting, erasing or reinitializing them. Flat
+role reset (`reset_role`) changes only `mordred/windows-custody.json`, the
+role's `mordred/windows-{role}.pending.json` journal and, for memory, the
+existing wrapper/opt-out cleanup of `delete_role`; it never touches
+`memories/` files, other roles or the permanent `.mordred-fs.lock`.
+The generic secret store `mordred/keyvault/` (meta, ciphertexts, digests,
+`.lock`) and its parent `mordred/.keyvault.lifecycle.lock` are not ported to
+Windows: `_storage.ensure_layout` and the lifecycle lock refuse there before
+creating directories or lock files, and retained store files are preserved.
+### Windows extension state paths (C10a)
+
+On Windows the files listed in the `<home>/extension/` section above live in an
+exact-private directory checked by `_private_fs`. The permanent
+`<home>/extension/.mordred-fs.lock`, shared with the wallet selection,
+serializes pairing, attestation, WebAuthn, history and wallet access; `.lock`
+is not created. Reads never create the directory or state files; an admitted
+directory without `.mordred-fs.lock` receives the private lock file. Pairing
+mutations may create only the final `extension` directory beneath an existing
+trusted home. A missing `attest_key.pem` while `state.json` holds a pairing is
+refused (`attestation_key_missing`), never regenerated; recover by removing the
+pairing (`clear_pairing()`) and pairing again. Foundation
+staging names (`.mordred-fs-tmp-*`) may remain after a crash and are never
+glob-deleted. Existing directories or files with broader ACLs, extra links or
+reparse points are refused without repair, adoption or migration; earlier
+Windows builds could not pass the POSIX mode checks, so no mixed-version lock
+compatibility is claimed. See
+[the component contract](SPEC.md#windows-extension-checked-state-c10a).
+
+### Windows Telegram paths (C10b)
+
+On Windows the files in `<home>/mordred/telegram/` keep their names, formats
+and roles; only their custody and storage change. `credentials.sealed` wraps
+its data key to the C5a custody `telegram` role (logical id
+`mordred-hermes.telegram.credentials.v1`, profile-scoped CNG selector) instead
+of a Secure Enclave key, so there is no `<home>/mordred/keyvault/sekey/` blob.
+`telegram/` and `telegram/dialogs/` are exact-private checked directories with
+the permanent `.mordred-fs.lock` and `.gitignore`. The POSIX `.lock` file is
+not used: the sync lock is the permanent `.mordred-fs.lock` of the private
+directory `telegram/sync-lock/`, always taken non-blocking. Foundation staging
+names may appear and are never removed by glob.
+
+`logout --forget` (`store.wipe_archive(forget=True)`) deletes only the
+enumerated, validated `dialogs/<hmac>.enc`, `index.enc`, `credentials.sealed`
+and `credentials.meta.json`, then resets only the custody `telegram` role
+(`mordred/windows-custody.json` and `mordred/windows-telegram.pending.json`).
+Directories, `.gitignore`, locks, unknown files and the memory/audit roles
+stay. See [the component contract](SPEC.md#windows-telegram-credential-custody-and-checked-archive-c10b).
+
+### Windows Desktop page paths (C11)
+
+On Windows the files in the `<home>/desktop-plugins/mordred/` and
+`<home>/plugins/mordred/` section above keep their names and roles. The
+Hermes-owned `desktop-plugins` and `plugins` folders are admitted as trusted
+parents and created only when missing; `desktop-plugins\mordred`,
+`plugins\mordred` and `plugins\mordred\dashboard` are exact-private checked
+directories with the permanent `.mordred-fs.lock`. Existing folders with an
+inherited or broadened DACL, a foreign owner, links or reparse points are
+refused and never repaired. Removal deletes only `plugin.js`, `manifest.json`,
+`plugin_api.py` and the legacy `plugins\mordred\desktop\plugin.js`; the
+folders, their locks and unknown files stay and are listed, because Windows has
+no checked recursive removal yet. See
+[the component contract](SPEC.md#windows-desktop-integration-and-extension-server-shutdown-c11).

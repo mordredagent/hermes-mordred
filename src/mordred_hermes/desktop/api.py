@@ -13,6 +13,15 @@ through the agent, the model, or the chat. This module:
 - runs long work (building the Enclave helper, importing messages) as jobs
   and reports progress with plugin events plus a poll endpoint.
 
+On Windows the Windows-specific decisions live in :mod:`._windows`: status for
+``client_version >= 3`` (older clients keep the unsupported shape) with one row
+per capability and no aggregate readiness answer, the helper state, the CNG
+memory flow behind explicit acknowledgements, Telegram custody and
+acknowledgement gating, logout/forget and the import service's memory guard.
+Routes such as ``/sync`` and ``/jobs`` are shared. macOS and Linux never reach
+that module. Every captured wizard output goes through :mod:`._capture` (one
+capture per process at a time, only the capturing thread's text).
+
 Served by Hermes' dashboard server, which requires the per-process session
 token on every ``/api`` request and binds to loopback only.
 """
@@ -21,7 +30,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import io
 import logging
 import secrets
 import sys
@@ -32,6 +40,8 @@ from typing import Any
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
+
+from ._capture import captured_output
 
 _log = logging.getLogger(__name__)
 router = APIRouter()
@@ -48,6 +58,12 @@ def _error(code: str, status: int = 200) -> JSONResponse:
     """
     del status
     return JSONResponse({"ok": False, "error": code}, status_code=200)
+
+
+def _quiet(work: Any, *args: Any, **kwargs: Any) -> Any:
+    """Run ``work`` with this thread's printed output captured and discarded (serialized, see ``_capture``)."""
+    with captured_output():
+        return work(*args, **kwargs)
 
 
 def _code(exc: BaseException, fallback: str) -> str:
@@ -69,9 +85,20 @@ def _home() -> Path:
 
 
 def _store() -> Any:
-    from ..extension.telegram.tee import TeeSecretStore
+    """The platform's Telegram credential store (``TeeSecretStore`` on macOS/Linux, C10b custody on Windows)."""
+    from ..extension.telegram.tee import default_secret_store
 
-    return TeeSecretStore()
+    return default_secret_store()
+
+
+def _writable_store() -> Any:
+    """The store for writes after the route's checks; Windows verifies its role without per-use presence."""
+    store = _store()
+    if sys.platform == "win32":
+        from ._windows import NoPresenceStore
+
+        return NoPresenceStore(store)
+    return store
 
 
 @dataclass
@@ -171,6 +198,8 @@ async def _require_hermes_model() -> JSONResponse | None:
 @router.get("/status")
 async def status(client_version: int = 1) -> dict[str, Any]:
     """Setup progress from metadata only (no Touch ID, no secrets, no content)."""
+    if sys.platform == "win32" and client_version >= 3:
+        return await _windows_status()
     platform_status = {
         "platform": sys.platform,
         "telegram_supported": sys.platform == "darwin" or (sys.platform == "linux" and client_version >= 2),
@@ -194,6 +223,18 @@ async def status(client_version: int = 1) -> dict[str, Any]:
         "telegram_api": bool((await asyncio.to_thread(_store().flags) or {}).get("api_configured")),
         "jobs": jobs,
     }
+
+
+async def _windows_status() -> dict[str, Any]:
+    """Windows status for a compatible client: capabilities, helper, memory, Telegram; no unwrap or launch."""
+    from . import _windows
+
+    jobs = [_job_view(j) for j in _JOBS.values() if j.state == "running"]
+    payload = await asyncio.to_thread(_windows.status_payload, _home(), _store())
+    result: dict[str, Any] = {"ok": True, **payload, "hermes_model": await hermes_model_check(), "jobs": jobs}
+    if payload["telegram_supported"]:
+        result["hermes_venice_key"] = await asyncio.to_thread(_hermes_venice_key) is not None
+    return result
 
 
 @router.get("/health")
@@ -226,6 +267,13 @@ async def job_status(job_id: str) -> Any:
 async def hardware_build() -> Any:
     if sys.platform == "darwin":
         return await enclave_build()
+    if sys.platform == "win32":
+        # The helper is installed by the native installer or the wizard
+        # (`hermes-mordred keyvault enable-winkey`); the API only reports it.
+        from . import _windows
+
+        helper = await asyncio.to_thread(_windows.helper_report, _home())
+        return {"ok": True, "built": False, "hardware_kind": _windows.HARDWARE_KIND, "helper": helper}
     if sys.platform != "linux":
         return _error("telegram_platform_unsupported")
 
@@ -234,8 +282,7 @@ async def hardware_build() -> Any:
 
         job.progress = {"message": "Building and probing the TPM 2.0 helper…"}
         _emit("progress", {"job_id": job.job_id, **job.progress})
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            rc = await asyncio.to_thread(enable_tpm)
+        rc = await asyncio.to_thread(_quiet, enable_tpm)
         if rc != 0:
             raise _Fail("tpm_build_failed")
 
@@ -252,8 +299,7 @@ async def enclave_build() -> Any:
 
         job.progress = {"message": "Building the Secure Enclave helper (a few minutes)…"}
         _emit("progress", {"job_id": job.job_id, **job.progress})
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            rc = await asyncio.to_thread(enable_se)
+        rc = await asyncio.to_thread(_quiet, enable_se)
         if rc != 0:
             raise _Fail("enclave_build_failed")
 
@@ -315,6 +361,8 @@ async def memory_enable(body: dict[str, Any] | None = None) -> Any:
     in one flow, so the vault is unlocked at most once (not at all when it is
     created here).
     """
+    if sys.platform == "win32":
+        return await _windows_memory_enable(body)
     if sys.platform not in ("darwin", "linux"):
         return _error("telegram_platform_unsupported")
 
@@ -336,11 +384,7 @@ async def memory_enable(body: dict[str, Any] | None = None) -> Any:
     home, root, platform = _home(), _resolve_root(None), sys.platform
 
     def enable() -> int:
-        with (
-            FlowSession(unattended=unattended) as flow,
-            contextlib.redirect_stdout(io.StringIO()),
-            contextlib.redirect_stderr(io.StringIO()),
-        ):
+        with FlowSession(unattended=unattended) as flow, captured_output():
             rc = env_decrypt_cli.enable(home=home, root=root, platform=platform, prompt_io=prompt, flow_session=flow)
             if rc == 0:
                 rc = memory_cli.enable(home=home, root=root, platform=platform, prompt_io=prompt, flow_session=flow)
@@ -361,13 +405,49 @@ async def _linux_memory_enable() -> Any:
     from ..wizard.vault_cli import _resolve_root
 
     def enable_linux() -> int:
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        with captured_output():
             return memory_cli.enable(home=_home(), root=_resolve_root(None), platform="linux")
 
     rc = await asyncio.to_thread(enable_linux)
     if rc != 0 or not await asyncio.to_thread(memory_encryption_active):
         return _error("memory_encryption_failed", 500)
     return {"ok": True, "restart_required": True}
+
+
+async def _windows_memory_enable(body: dict[str, Any] | None) -> Any:
+    """CNG memory enable; both acknowledgements are sent only from below the displayed limitations."""
+    from . import _windows
+
+    if not _windows.acknowledged(body, _windows.MEMORY_ACKNOWLEDGEMENTS):
+        return _error("telegram_platform_unsupported")
+    executable = sys.executable
+    return await asyncio.to_thread(lambda: _windows.enable_memory(_home(), executable=executable))
+
+
+@router.post("/memory/disable")
+async def memory_disable(body: dict[str, Any] | None = None) -> Any:
+    """Windows only: decrypt memory back to plaintext and keep the CNG key (purge stays a CLI ceremony)."""
+    del body
+    if sys.platform != "win32":
+        return _error("telegram_platform_unsupported")
+    from . import _windows
+
+    executable = sys.executable
+    return await asyncio.to_thread(lambda: _windows.disable_memory(_home(), executable=executable))
+
+
+@router.get("/memory/status")
+async def memory_status() -> Any:
+    """Windows only: the load-only memory state and the typed gateway inventory (unknown stays unknown)."""
+    if sys.platform != "win32":
+        return _error("telegram_platform_unsupported")
+    from . import _windows
+
+    home = _home()
+    memory, gateways = await asyncio.gather(
+        asyncio.to_thread(_windows.memory_summary, home), asyncio.to_thread(_windows.gateway_inventory, home)
+    )
+    return {"ok": True, "memory": memory, "gateways": gateways}
 
 
 # -- step 3/4: Telegram API credentials and login -----------------------------------------------
@@ -380,21 +460,36 @@ def _flows() -> Any:
     if _FLOWS is None:
         from ..extension.telegram.login_flow import LoginFlows
 
-        _FLOWS = LoginFlows(_store())
+        _FLOWS = LoginFlows(_writable_store())
     return _FLOWS
 
 
 async def _require_memory() -> JSONResponse | None:
+    if sys.platform == "win32":
+        from ._windows import memory_refusal
+
+        refusal = await asyncio.to_thread(memory_refusal, _home())
+        return None if refusal is None else JSONResponse(refusal)
     from ..extension.telegram.memory_guard import memory_encryption_active
 
     ok = await asyncio.to_thread(memory_encryption_active)
     return None if ok else _error("memory_encryption_required", 409)
 
 
+async def _windows_telegram_refusal(body: Any) -> JSONResponse | None:
+    """On Windows: an enrolled ``telegram`` role and the no-presence acknowledgement; ``None`` elsewhere."""
+    if sys.platform != "win32":
+        return None
+    from ._windows import telegram_refusal
+
+    refusal = await asyncio.to_thread(telegram_refusal, _home(), body)
+    return None if refusal is None else JSONResponse(refusal)
+
+
 @router.post("/telegram/login/start")
 async def telegram_login_start(body: dict[str, Any]) -> Any:
-    """Body: {"phone", and on first setup "api_id", "api_hash"}."""
-    blocked = await _require_memory() or await _require_hermes_model()
+    """Body: {"phone", and on first setup "api_id", "api_hash"}; on Windows also "acknowledge_no_presence"."""
+    blocked = await _require_memory() or await _require_hermes_model() or await _windows_telegram_refusal(body)
     if blocked is not None:
         return blocked
     from ..extension.telegram.login_flow import LoginError
@@ -476,7 +571,7 @@ def _set_venice(api_key: str, model: str | None) -> None:
 
     from ..extension.telegram.secrets import empty_secrets
 
-    store = _store()
+    store = _writable_store()
     store.ensure_key()
 
     def mutate(old: Any) -> Any:
@@ -488,7 +583,10 @@ def _set_venice(api_key: str, model: str | None) -> None:
 
 @router.post("/llm/venice")
 async def llm_venice(body: dict[str, Any]) -> Any:
-    """Body: {"use_hermes_key": true} or {"api_key": "..."}; optional "model"."""
+    """Body: {"use_hermes_key": true} or {"api_key": "..."}; optional "model"; Windows: "acknowledge_no_presence"."""
+    blocked = await _windows_telegram_refusal(body)
+    if blocked is not None:
+        return blocked
     model = body.get("model")
     if model is not None and (not isinstance(model, str) or not model.strip() or len(model) > 128):
         return _error("invalid_request")
@@ -512,6 +610,9 @@ async def llm_venice(body: dict[str, Any]) -> Any:
 async def llm_local(body: dict[str, Any]) -> Any:
     from ..extension.telegram.llm import LlmConfigError, normalize_local_endpoint
 
+    blocked = await _windows_telegram_refusal(body)
+    if blocked is not None:
+        return blocked
     endpoint, model = body.get("endpoint"), body.get("model")
     if not isinstance(endpoint, str) or not isinstance(model, str) or not model.strip():
         return _error("invalid_request")
@@ -528,7 +629,7 @@ async def llm_local(body: dict[str, Any]) -> Any:
         return replace(base, backend="local", local_endpoint=canonical, local_model=model.strip())
 
     def save() -> None:
-        store = _store()
+        store = _writable_store()
         store.ensure_key()
         store.update(mutate)
 
@@ -549,7 +650,13 @@ def _service() -> Any:
     if _SERVICE is None:
         from ..extension.telegram.service import TelegramService
 
-        _SERVICE = TelegramService()
+        if sys.platform == "win32":
+            from ._windows import memory_guard
+
+            # The C10b store comes from default_secret_store(); memory is checked load-only.
+            _SERVICE = TelegramService(memory_guard=memory_guard(_home))
+        else:
+            _SERVICE = TelegramService()
     return _SERVICE
 
 
@@ -587,6 +694,27 @@ async def sync_status() -> Any:
         "dialog_count": status["dialog_count"],
         "message_count": status["message_count"],
     }
+
+
+@router.post("/telegram/logout")
+async def telegram_logout(body: dict[str, Any] | None = None) -> Any:
+    """Windows only. Body ``{"forget": bool, "confirm"?: str}``.
+
+    Logout drops the session and keeps the archive. ``forget`` runs the custody
+    wipe (archive, sealed credentials, then the ``telegram`` role; never
+    ``delete_key``) and, like ``/uninstall``, needs ``confirm`` = ``delete my
+    data`` checked here, before anything is read, revoked or deleted.
+    """
+    if sys.platform != "win32":
+        return _error("telegram_platform_unsupported")
+    from ..wizard.uninstall_cli import PURGE_PHRASE
+    from ._windows import telegram_logout as windows_logout
+
+    body = body or {}
+    forget = body.get("forget") is True
+    if forget and str(body.get("confirm") or "").strip() != PURGE_PHRASE:
+        return _error("forget_confirm_mismatch")
+    return await windows_logout(_store(), forget=forget)
 
 
 # -- uninstall ----------------------------------------------------------------------------
@@ -627,8 +755,8 @@ async def uninstall_plan() -> Any:
     from ..wizard.uninstall_cli import UninstallOptions, run_uninstall
 
     def plan(purge: bool, erase: bool = False) -> str:
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+        # The three dry runs share one process-wide capture lock, so they run one after another.
+        with captured_output() as out:
             run_uninstall(_uninstall_context(), UninstallOptions(dry_run=True, purge_data=purge, erase_encrypted=erase))
         return out.getvalue()
 
@@ -660,16 +788,15 @@ async def uninstall(body: dict[str, Any] | None = None) -> Any:
     prompt = _UninstallAnswers(str(body.get("recovery_passphrase") or ""), phrase)
 
     async def work(job: _Job) -> None:
-        out = io.StringIO()
-
-        def run() -> int:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-                return run_uninstall(
+        def run() -> tuple[int, str]:
+            with captured_output() as out:
+                rc = run_uninstall(
                     _uninstall_context(prompt), UninstallOptions(yes=True, purge_data=purge, erase_encrypted=erase)
                 )
+            return rc, out.getvalue()
 
-        rc = await asyncio.to_thread(run)
-        job.progress = {"summary": out.getvalue()}
+        rc, summary = await asyncio.to_thread(run)
+        job.progress = {"summary": summary}
         if rc != 0:
             raise _Fail("uninstall_failed")
 

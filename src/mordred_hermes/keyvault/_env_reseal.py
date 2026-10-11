@@ -272,6 +272,9 @@ def reseal_env(
     it returns 0 — in every non-clean case the plaintext is kept so no secret is
     stranded.
     """
+    from ._windows_capability import refuse_excluded_on_windows
+
+    refuse_excluded_on_windows("env_config_workspace_seals", "reseal_env")  # before any I/O (C5e)
     env_path = home / _ENV_NAME
     if (
         not (env_path.exists() or env_path.is_symlink())  # no stray plaintext

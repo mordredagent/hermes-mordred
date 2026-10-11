@@ -651,3 +651,1585 @@ across component boundaries. One independent whole-branch review found four
 security/compatibility issues; regression tests reproduced each before the
 fixes. The final validation log distinguishes actual NitroTPM, swtpm, synthetic
 Telegram, and the pending operator-assisted live-account gate.
+## Windows Wallet Storage Implementation Plan
+
+> **For agentic workers:** Use `superpowers:executing-plans` for inline execution
+> and a fresh whole-branch review after validation.
+
+**Goal:** Migrate the keyvault-owned wallet selection document to checked native
+Windows storage without changing POSIX behavior or enabling other Windows flows.
+
+**Architecture:** A small keyvault adapter owns checked directory/transaction
+lifetimes and filesystem error translation. The existing signer facade dispatches
+Windows I/O to that adapter and retains document validation and its thread lock.
+
+**Tech Stack:** Python 3.11–3.13, existing `_private_fs`, pytest, scoped Windows CI.
+
+**Spec:** [Windows keyvault wallet configuration](SPEC.md#windows-keyvault-wallet-configuration-2026-10-08).
+
+### Wallet storage constraints and review focus
+
+- One keyvault component PR, after this contract and PR #192; target `dev`.
+- Preserve POSIX writers/locks; Windows uses `.mordred-fs.lock` only.
+- Only checked missing directory/file errors permit absence; missing lock or
+  cleanup errors refuse, including uncertain errors with a `missing` reason.
+- Unsafe existing ACLs must remain unchanged, including failed writes.
+- Uncertain publication must preserve the complete file and reach the caller.
+- A fresh process must use the same lock; invalid JSON must not discover a key.
+- Ordinary-user source/wheel execution is distinct from hosted admin CI.
+
+### Task WW1: Implement the bounded keyvault adapter
+
+**Files:** Create `keyvault/_wallet_storage.py` under `src/mordred_hermes`;
+modify `keyvault/extension_sign.py`; create `tests/test_keyvault_wallet_storage.py`.
+
+**Interfaces:** `read_wallet_bytes(directory: Path) -> bytes | None` and
+`write_wallet_bytes(directory: Path, payload: bytes) -> None`; a
+`WalletStorageError(WalletConfigError)` preserves filesystem classification.
+The adapter consumes `open_private_directory`, `read_bytes(max_bytes=1048576)`
+and `transaction().create_bytes/replace_bytes`; the facade keeps schema checks.
+
+- [x] Write regressions exercising the facade's Windows dispatch against real
+  checked storage: absent read creates nothing; create/replace round trips;
+  malformed/duplicate/oversized input refuses without fallback or mutation;
+  unsafe file/lock refuses without repair. Run and record the expected RED.
+- [x] Implement the adapter, narrow missing handlers and Windows dispatch;
+  inject pre/post-publication and context-exit errors to prove error state and
+  preserved bytes. Run focused tests and existing POSIX wallet tests to GREEN.
+- [x] Commit the implementation and regressions.
+
+### Task WW2: Validate native Windows and delivery
+
+**Files:** Extend `tests/test_keyvault_wallet_storage.py` and `.github/workflows/ci.yml`;
+record evidence in `docs/dev/CI.md`, `PLAN.md`, `TODO.md` and `PATHS.md`.
+
+**Interfaces:** Exercise `extension_sign.set_wallet`, `_load_wallet_cfg` and
+`_resolve_account` with synthetic configuration and isolated profile paths.
+
+- [x] Add native Windows ACL/junction/hard-link refusal, actual process
+  serialization and post-publication failure coverage. Add the suite to the
+  scoped Windows matrix and an out-of-checkout sdist-derived wheel smoke.
+- [x] Run full local pytest/coverage, Ruff/format, reduced-extras strict mypy,
+  shellcheck and documentation-link checks; inspect all results.
+- [x] Reuse only the retained Windows host after checking state and setting an
+  automatic stop deadline. Run source and wheel suites as the ordinary user,
+  verify fresh-process retention and second-user denial using new synthetic
+  fixtures, then stop and verify the host. Leave TPM/Linux fixtures unchanged.
+- [x] Obtain an independent whole-branch review, reproduce/fix findings, create
+  the dependent `dev` PR and record final CI results and remaining Windows work.
+
+### Remaining Windows caller sequence
+
+The wallet adapter is a leaf of the planned keyvault runtime migration. Before
+moving `_storage.py` and memory custody, specify lifecycle locks outside removable
+roots, safe deletion, reset journals, generation leases and plaintext capture.
+Then complete keyvault runtime/memory, wizard/install, network, policy/LLM guard,
+privacy/audit and extension/Desktop in separate component PRs. Existing shared
+append/rotation/delete gaps must be designed before their consumers migrate.
+
+
+
+## Windows CNG Helper Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use
+> superpowers:executing-plans for inline execution, or
+> superpowers:subagent-driven-development if the operator selects delegated
+> execution. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Deliver the independently testable Windows TPM helper and Python
+keyvault bridge without prematurely enabling the Windows product UI.
+
+**Architecture:** A separate Rust executable implements the existing helper JSON
+protocol using the Windows Platform Crypto Provider. Python keeps the existing
+MRKW wire format and shared backend adapter; the new executable owns native
+handles, key persistence and CNG error translation. Windows filesystem and
+feature integration remain dependent follow-on slices, not hidden additions to
+this keyvault PR.
+
+**Tech Stack:** Rust 2021/MSRV 1.85, serde/serde_json/hex/zeroize, `sha2 = "0.10"`, Windows-targeted
+`windows-sys = "=0.61.2"` bindings, PowerShell, Python 3.11–3.13 and pytest.
+Commit Cargo.lock and use `--locked`. The selected bindings' registry metadata
+reports MSRV 1.71 and not yanked as of 2026-10-07.
+
+**Spec:** [SPEC.md — Windows native support proposal
+(2026-10-07)](SPEC.md#windows-native-support-proposal-2026-10-07).
+Read [WINDOWS_FEASIBILITY.md](WINDOWS_FEASIBILITY.md) and the Windows evidence
+entry in CI.md before executing this plan.
+
+### Windows Global Constraints
+
+- Preserve the single `mordred` entry point and zero-upstream-PR commitment.
+- Preserve P-256 ECDH, HKDF-SHA256, AES-256-KW and 127-byte MRKW version 1.
+- Use only `Microsoft Platform Crypto Provider`; no software fallback.
+- User-scoped persistent keys; no product password capture or impersonation.
+- Machine-bound tier, no per-use presence or automatic recovery promise.
+- Actual AWS NitroTPM acceptance is separate from injected-backend CI tests.
+- Keep macOS/Linux behavior and helper namespaces unchanged.
+- Submit contract documentation first; this implementation PR owns keyvault only.
+- Do not enable Windows Private Telegram before storage/runtime/UI gates pass.
+
+### Windows Review Focus
+
+- Public-key SSH/S4U tokens may differ from password/interactive tokens: verify
+  actual key operations and refuse unavailable custody without replacing keys.
+- Little-endian raw CNG secrets with a leading zero must preserve all 32 bytes.
+- An inherited executable handle or interrupted install must retain the previous
+  helper rather than leave an absent or truncated executable.
+- Concurrent generate/delete/probe must not overwrite a committed key or delete
+  a different operation's key.
+- Malformed native responses and hardware errors must remain classified refusals,
+  never software fallback or plaintext success.
+
+### Task W0: Preserve and finish the Windows baseline evidence
+
+**Files:** Modify `docs/dev/CI.md`, `docs/dev/WINDOWS_FEASIBILITY.md`.
+Disposable probes remain under
+`~/.codex/artifacts/mordred-windows-validation-20261007/`.
+
+**Interfaces:** Consumes the approved Phase 0 probe and unmodified Mordred
+`f14c1edce`; produces an evidence-backed go/replan decision and a list of
+remaining acceptance gates. Probe scripts are not production implementation.
+
+- [x] Confirm AWS Windows 2025 recognizes actual AMZN NitroTPM.
+- [x] Verify native CNG operations and raw-secret parity using independent
+  Python/OpenSSL, including a leading-zero test vector.
+- [x] Exercise unchanged `wrap_dek`/`unwrap_dek` with the actual native key:
+  valid wrap, corrupt ciphertext, wrong profile, malformed point and retention.
+- [x] Repeat under a real non-administrator password-authenticated SSH process;
+  record public-key SSH refusal separately from successful credentialed access.
+- [x] Record pinned Hermes CLI, gateway and Desktop baseline attempts, source
+  installer workarounds and exact installed interpreter/version. CLI and host-only
+  Desktop start; Mordred-enabled Desktop and clean gateway lifecycle remain
+  implementation acceptance gates, with failures preserved in CI.md.
+- [x] Repeat retained-key/ciphertext checks after reboot and stop/start.
+- [x] Test a cloned synthetic disk on a second TPM, controlling for SID/DPAPI
+  differences, then remove disposable clone resources.
+- [x] Record Phase 0 resource states, costs/retention and explicit limitations.
+  The retained primary host is resumed separately for the approved implementation.
+
+### Task W1: Define bounded protocol and conversion tests
+
+**Files:** Create `native/winkey-helper/Cargo.toml`, `Cargo.lock`, `.gitignore`,
+`src/lib.rs`, `src/main.rs`, `src/wire.rs`, `src/codec.rs`, `src/error.rs`,
+`src/ops.rs`, `tests/protocol.rs`.
+
+**Interfaces:** `KeyOps` exposes `generate(tag_hex: &str) -> Result<Vec<u8>,
+OpError>`, `public_key(tag_hex: &str) -> Result<Vec<u8>, OpError>`,
+`ecdh(tag_hex: &str, peer_sec1: &[u8]) -> Result<[u8; 32], OpError>`,
+`delete(tag_hex: &str) -> Result<(), OpError>`, and `probe() -> Result<(),
+OpError>`. The dispatcher accepts the existing `cmd`, `tag_hex`, `label`,
+`peer_pub_hex`, `unattended` fields and emits existing response shapes. Define
+`dispatch(request: Request, ops: &mut dyn KeyOps) -> Response` in `wire.rs`,
+`decode_tag(tag_hex: &str) -> Result<Vec<u8>, OpError>` and
+`raw_to_be32(raw: &[u8]) -> Result<[u8; 32], OpError>`,
+`cng_public_to_sec1(blob: &[u8]) -> Result<Vec<u8>, OpError>` and
+`sec1_to_cng_public(peer: &[u8]) -> Result<Vec<u8>, OpError>` in `codec.rs`.
+Pure conversion checks blob magic, P-256 coordinate size and exact lengths;
+on-curve peer validation is proved through CNG import in W2.
+Success fields are `public_key_hex`, `shared_hex` or `ok`; native errors retain
+`domain: "cng"`, the numeric CNG `status`, a non-secret message, and one of
+`NOT_FOUND`, `EXISTS`, `UNAVAILABLE`, `AUTH_DENIED`. Request errors use domain
+`helper` and status `-1`, without a native reason. Refer to the existing
+`native/tpmkey-helper/src/wire.rs` shapes without copying its TPM implementation.
+
+- [x] Prepare the Windows build host with the MSVC C++ build tools and Windows
+  SDK, then install Rust 1.85 and the current stable toolchain for
+  `x86_64-pc-windows-msvc`. Record `rustc -Vv`, `cargo -V`, SDK/toolset versions
+  and available disk space; use a new bounded auto-stop deadline for the run.
+  These Rust prerequisites were not installed by the CNG feasibility probe.
+- [x] Write failing tests `request_size_is_bounded` (4,096 bytes maximum),
+  `tag_requires_even_hex` (1–256 decoded bytes), `unknown_command_is_refused`,
+  `sec1_rejects_bad_magic_length_curve`, `raw_secret_is_reversed_not_trimmed`,
+  and `failure_json_uses_neutral_reason`. Assert one JSON response and nonzero
+  status for malformed input, without echoing secret/request material.
+  The conversion assertion must retain a leading zero:
+
+  ```rust
+  let mut little = [0u8; 32];
+  little[0] = 1;
+  let big = raw_to_be32(&little).unwrap();
+  assert_eq!(big[0], 0);
+  assert_eq!(big[31], 1);
+  assert!(raw_to_be32(&little[..31]).is_err());
+  assert!(decode_tag("0").is_err());
+  assert!(decode_tag(&"00".repeat(257)).is_err());
+  ```
+
+- [x] Run `cargo test --manifest-path native/winkey-helper/Cargo.toml --locked`;
+  record the intended failures before implementing the dispatch/conversion code.
+- [x] Implement pure validation and conversion separately from native handles.
+  Use a test `KeyOps` for protocol checks; unsupported host builds return the
+  existing `UNAVAILABLE` reason, never a software key.
+- [x] Re-run the tests and commit the protocol slice.
+
+### Task W2: Implement actual CNG custody
+
+**Files:** Create `native/winkey-helper/src/cng.rs`, `src/handles.rs`,
+`tests/live_cng.rs`; modify `src/ops.rs`, `src/main.rs` and Cargo manifests.
+
+**Interfaces:** `CngOps` implements W1's `KeyOps`. It uses user-scoped names
+`mordred-hermes:<sha256(decoded_tag)>` and returns SEC1 public keys and big-endian 32-byte
+secrets. RAII wrappers own provider/key/secret handles; successful deletion
+consumes the handle to avoid freeing it twice.
+
+- [x] Add explicitly gated `MORDRED_WINKEY_TEST=1` live tests for creation,
+  duplicate refusal, fresh-process reopen, ECDH parity, leading zeroes, invalid
+  peer refusal, private-export rejection, deletion and missing-key refusal.
+  Test both an interactive/credentialed ordinary token and the expected refusal
+  under an incapable token. CI without hardware must report these as skipped.
+- [x] Run the live test names on AWS and capture failures against the missing
+  backend. These tests must fail until real CNG calls are implemented.
+- [x] Open and verify the hardware provider. Generate/finalize `ECDH_P256`
+  without setting the unsupported KeyAgreement usage property. Use provider-
+  scoped peer import and `TRUNCATE`, checking every return code and byte count.
+  Never request private export in production; assert its refusal in live tests.
+- [x] Map duplicate/missing/permission/device/unsupported errors into the existing
+  closed neutral taxonomy. Preserve the cause when a keyset cannot be opened
+  under the current token; do not treat every access failure as a missing key.
+  Actual clone testing revised deletion: a successful new-key probe and an empty
+  CNG enumeration do not establish absence of the requested key. Refuse an
+  unopenable delete with its original status and `UNAVAILABLE`, including a
+  repeated delete after confirmed removal; document the Windows exception to
+  success-on-missing behavior.
+- [x] Make `probe()` use a unique temporary name, prove a real ECDH operation,
+  and delete only its own successfully created key in all exit paths. Test
+  concurrent probes/generation and failure cleanup with scoped synthetic tags.
+- [x] Run native unit and actual-device suites, plus MSRV/build checks, then
+  commit. No new runtime capability is advertised from mocked results alone.
+
+### Task W3: Integrate the keyvault helper boundary
+
+**Files:** Modify `src/mordred_hermes/keyvault/_seckey_helper.py` and, only if
+needed for accurate error/capability mapping, `_seckey_backend.py` and
+`_seckey_errors.py`. Extend `tests/test_keyvault_seckey_helper.py`; create
+`tests/integration/test_keyvault_windows.py`.
+
+**Interfaces:** Preserve `find_winkey_helper() -> str | None` and the existing
+`_HelperOps` interface. On Windows resolve the explicit
+`MORDRED_WINKEY_HELPER`, the current Hermes home's
+`bin/mordred-hermes-winkey.exe`, then the established executable search policy.
+Validate the resolved executable; do not execute a source/build script found
+only by its filename in an unrelated ancestor.
+
+- [x] Add failing discovery/response tests for `.exe`, spaces/non-ASCII paths,
+  explicit missing override, absent helper, timeout, malformed JSON, nonzero
+  failure, neutral native errors and successful public-key/ECDH conversion.
+- [x] Implement the Windows locator without changing the existing macOS/Linux
+  locator behavior or creating an import-time Windows API dependency.
+- [x] Add gated production Python `wrap_dek`/`unwrap_dek` integration through
+  the compiled helper, not the disposable ctypes adapter. Exercise wrong
+  profile, ciphertext corruption, unavailable helper and valid-data retention.
+- [x] Run focused pytest on Windows and macOS, strict mypy with the reduced
+  extras, Ruff and the helper tests. Commit only this keyvault bridge slice.
+
+### Task W4: Ship a reproducible helper build and prove persistence
+
+**Files:** Create `native/winkey-helper/build.ps1`, `README.md`; modify
+`pyproject.toml` source inclusion and existing packaging tests. Add a scoped
+helper build job to `.github/workflows/ci.yml`.
+
+**Interfaces:** `build.ps1 -InstallDir <directory>` builds the locked release
+binary and installs `mordred-hermes-winkey.exe`. Default destination is the
+resolved Hermes home's `bin`; installation must not mutate arbitrary homes
+while running tests. Wizard command/UI work belongs to the later wizard PR.
+
+- [x] Add packaging assertions for manifest/lock/source/build-script inclusion
+  and target-artifact exclusion. Add Windows build/install tests covering an
+  in-use destination, failed build, spaces/non-ASCII and retained old binary.
+- [x] Implement the PowerShell build with explicit native exit-code checks,
+  temporary output verification and checked replacement. Keep all failure paths
+  from claiming that a helper is installed/ready.
+- [x] Build a wheel from the sdist, install outside the checkout and build the
+  helper from packaged sources. Validate the actual executable and interpreter
+  paths and file hashes on the AWS host.
+- [x] Exercise process restart, Windows reboot and actual EC2 stop/start with
+  retained ciphertext, then a second-instance cloned-disk binding test. Include
+  key deletion and subsequent refusal with disposable data.
+- [x] Run required checks and actual-device tests, update the manual validation
+  log, review the branch, and prepare a keyvault-only PR targeting `dev`.
+
+### Windows dependent plans
+
+After the helper slice, create separate executable plans for shared Windows
+private-filesystem primitives, keyvault memory custody, wizard installation,
+network routes, each policy/privacy caller migration, Desktop/extension and the
+full Windows CI/release matrix. Their contracts are already bounded in SPEC;
+none may skip its actual-device acceptance because the helper works.
+
+The immediate implementation review is for W1–W4, not approval to combine all
+components into one PR. No native production code was changed in the planning
+and baseline-validation branch.
+
+## Windows Private Filesystem Implementation Plan
+
+Historical WF0–WF5 foundation plan restored from PR #191 at `5b848ca3b`,
+including its completed foundation checkboxes. Caller-migration and delivery
+instructions describe that snapshot; the Windows product completion execution
+plan below governs subsequent C1–C12 work. These historical steps do not
+authorize new compute or establish completion of the later acceptance gates.
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use
+> superpowers:executing-plans for inline execution. Use
+> superpowers:subagent-driven-development only if the operator selects delegated
+> execution. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Deliver independently tested private filesystem primitives before
+component-by-component Windows adoption.
+
+**Architecture:** An internal, stdlib-only Python package dispatches to POSIX
+descriptor operations or a narrowly wrapped Windows API backend. A checked
+directory context owns pinned handles; a transaction owns its stable sidecar
+lock and is required for publication. Existing component implementations remain
+unchanged until separate migration PRs.
+
+**Tech Stack:** Python 3.11–3.13, ctypes, pytest, Win32 security/file APIs, local
+NTFS, Windows Server 2022 hosted CI and Server 2025 AWS acceptance.
+
+**Spec:** [Windows private filesystem contract
+(2026-10-08)](SPEC.md#windows-private-filesystem-contract-2026-10-08).
+
+### Filesystem Global Constraints
+
+- Initial Windows target: x86_64, fixed local NTFS, Python 3.11–3.13.
+- Exact private ACL trustees: current user, SYSTEM, Administrators; protected,
+  explicit full-control grants; current-user ownership; one hard link per file.
+- No API skipping, chmod-based Windows security, shell-based product I/O,
+  automatic ACL repair, software custody fallback or new product support claim.
+- Shared contract first, standalone foundation next, component migrations later.
+  Do not modify the keyvault helper, its crypto/protocol or its pending PR.
+- All writes/CLI tests use synthetic data and isolated `HERMES_HOME`; leave the
+  original dirty checkout and existing Linux validation resources untouched.
+- Preserve existing POSIX callers and required macOS/Linux CI checks.
+- Read [CI filesystem gates](CI.md#windows-private-filesystem-validation-gates)
+  before executing WF0 or starting task-owned compute.
+
+### Filesystem Review Focus
+
+- Default `C:\Users`/profile ACLs must pass without weakening the private-object
+  policy or rewriting system directories (WF0/WF2).
+- A handle intentionally held by a reader/antivirus must not make failed
+  publication remove the prior target (WF0/WF4).
+- A validation or flush failure after rename must not look retry-safe (WF4).
+- A case alias or second directory context must not bypass transaction locking;
+  recursive same-thread use must refuse promptly (WF3).
+- Privileged test runners cannot prove second-user exclusion or ordinary-user
+  access. Record token/elevation and separate fixture setup from assertions (WF5).
+
+### Filesystem interfaces and file ownership
+
+Create `src/mordred_hermes/_private_fs/` with the following files:
+
+| File | Responsibility |
+|---|---|
+| `__init__.py` | Public internal API, lazy OS dispatch; no component imports |
+| `_types.py` | Protocols, identity and error/commit-state types |
+| `_posix.py` | New API implemented with private modes, dir-fds, flock and fsync |
+| `_windows_api.py` | ctypes signatures/structures, owned HANDLE and LocalFree buffers |
+| `_windows_security.py` | Token SID, exact private ACL and ancestor-policy checks |
+| `_windows_paths.py` | Raw path validation, ancestor pinning, volume/file identity |
+| `_windows_lock.py` | Stable sidecar acquisition/release and same-thread recursion guard |
+| `_windows_io.py` | Directory/transaction objects, bounded reads and staged publication |
+
+The common API is:
+
+```python
+def open_private_directory(
+    path: str | Path, *, create: bool = False,
+) -> AbstractContextManager[PrivateDirectory]: ...
+
+class PrivateDirectory(Protocol):
+    def read_bytes(self, name: str, *, max_bytes: int) -> bytes: ...
+    def transaction(
+        self, *, blocking: bool = True,
+    ) -> AbstractContextManager[PrivateTransaction]: ...
+
+class PrivateTransaction(Protocol):
+    def read_bytes(self, name: str, *, max_bytes: int) -> bytes: ...
+    def create_bytes(self, name: str, data: bytes) -> None: ...
+    def replace_bytes(self, name: str, data: bytes) -> None: ...
+```
+
+`FileIdentity` contains `volume: int` and `file_id: bytes` (Windows 128-bit file
+ID; POSIX inode encoded as unsigned bytes). `PrivateFSError(OSError)` exposes
+`reason: Literal["unsafe", "unsupported", "missing", "exists", "busy",
+"access_denied", "io"]`, `operation: str`, `native_code: int | None`, and
+`commit_state: Literal["not_committed", "uncertain"]`. Paths may be included in
+errors; bytes, credentials and key material may not. For reads, lock/open errors
+and prepublication failures the commit state is `not_committed`.
+When postpublication reconciliation promotes the state to `uncertain`, the
+exception's rendered message and `args` must agree with its `commit_state`.
+
+Context/transaction use after exit raises `RuntimeError`; mutations cannot be
+called on `PrivateDirectory`. Reject nonpositive `max_bytes` with `ValueError`.
+Reserve `.mordred-fs.lock` and `.mordred-fs-tmp-` prefixed names from caller use.
+The foundation does not expose raw handles, generic open flags, append, unlink,
+recursive mkdir or permission-repair APIs. POSIX modes are 0700/0600, current
+euid ownership, no symlinks and one link per regular file; ancestor checks allow
+root-owned normal system directories but reject writable untrusted ancestors.
+On macOS, validate extended ACLs through those same descriptors and reject
+allow/unknown entries or query failures; absent, empty and deny-only ACLs are
+accepted. Test inherited grants, private-directory/file/lock grants, mutation
+during an open transaction, normal deny-delete ancestors and native-query
+failure cleanup without changing existing descriptors.
+
+### Task WF0: Prove the native filesystem assumptions
+
+**Files:** Modify `docs/dev/CI.md` with results only after execution. Disposable
+probe/evidence files go under
+`~/.codex/artifacts/mordred-windows-filesystem-20261008/`, outside the repository.
+
+**Interfaces:** Consumes the SPEC algorithms; produces pass/fail evidence for
+ordinary-user private creation, ancestor trust, byte locking and handle rename.
+This is a prerequisite to production implementation, not product code.
+
+- [x] Resume only retained instance `i-00f4db5c3a204906b` in `ap-southeast-1`;
+  set a fresh bounded shutdown deadline before running probes. Use existing SSM
+  access and the ordinary-user harness without logging credentials.
+- [x] Record actual OS, Python, token/elevation, NTFS volume and ordinary profile
+  ancestor descriptors. Prove private descriptor creation on a new directory and
+  file, no inherited ACEs, and rejection from a second ordinary user.
+- [x] SDK-check x64 structure sizes/offsets, especially variable-length
+  `FILE_RENAME_INFO`, `OVERLAPPED` and file-ID information. Demonstrate rename
+  using a pinned parent and still-open source handle; check post-rename identity,
+  DACL and flush under the standard user. Record the observed relative-name
+  refusal and use the checked handle-derived volume-GUID destination with NULL
+  RootDirectory, a byte-counted UTF-16 name and an explicit NUL terminator.
+  Preserve old bytes when a second
+  process opens the target without delete sharing.
+- [x] Demonstrate parent-junction refusal and the absence of a delete/rename
+  window with pinned ancestors. Test two-process byte locks and crash release.
+- [x] Record go/replan for each assumption. Any unsupported sharing/ABI/trust
+  behavior blocks implementation of the dependent operation; no permissive
+  fallback. Stop compute after the session unless continuing WF1–WF5 within the
+  same bounded deadline; record residual resources and commit sanitized evidence.
+
+### Task WF1: Pin the API, OS dispatch and POSIX compatibility
+
+**Files:** Create `__init__.py`, `_types.py`, `_posix.py` from the ownership map;
+create `tests/test_private_fs.py` and `tests/test_private_fs_posix.py`; update
+`docs/dev/PATHS.md` with the reserved sidecar/staging names within caller-owned
+private directories (no new default Hermes home or component root).
+
+**Interfaces:** Produces the complete common API above. Windows dispatch loads
+`_windows_io.open_private_directory` only on `os.name == "nt"`; unknown platforms
+raise `PrivateFSError(reason="unsupported", ...)`.
+
+- [x] Write tests `test_private_create_read_replace` (exact payloads and 0700/0600),
+  `test_create_preserves_existing`, `test_replace_requires_existing`,
+  `test_read_limit_refuses_oversize`, `test_context_use_after_close`,
+  `test_reserved_leaf_refused`, `test_symlink_and_hardlink_refused`,
+  `test_posix_import_does_not_load_windows` and
+  `test_unsupported_os_never_falls_back`. Errors must match reason/commit state.
+- [x] Run `uv run pytest -q tests/test_private_fs.py tests/test_private_fs_posix.py`;
+  confirm failures exercise absent API/contracts, then implement minimal types,
+  dispatch and POSIX backend. Use dir-relative exclusive staging, complete writes,
+  durable file flush and parent fsync. Publish creation using no-clobber
+  `os.link` with source/destination dir-fds, then unlink only the staging name;
+  publish replacement with dir-relative `os.replace`. A failed staging unlink
+  after a successful link is uncertain, never a reason to remove the target;
+  readers refuse the temporary two-link state. Classify all post-publication
+  errors uncertain, including a failed parent fsync.
+- [x] Run those tests plus `tests/test_file_lock.py`,
+  `tests/test_keyvault_api_storage.py`, `tests/test_keyvault_storage_lock_retry.py`
+  and `tests/test_audit.py`; require no regressions. Commit the isolated API slice.
+
+### Task WF2: Implement Windows handles, security and checked paths
+
+**Files:** Create `_windows_api.py`, `_windows_security.py`, `_windows_paths.py`,
+the directory/read portion of `_windows_io.py`, and
+`tests/test_private_fs_windows.py`, `tests/test_private_fs_windows_faults.py`.
+
+**Interfaces:** `_windows_api.OwnedHandle` owns one non-inheritable native handle;
+`close() -> None` is idempotent. `_windows_security.current_user_sid() -> bytes`,
+`validate_private(handle: OwnedHandle, *, directory: bool) -> None`, and
+`validate_ancestor(handle: OwnedHandle, *, creating_child: bool) -> None` enforce
+the two distinct ACL policies. `_windows_paths.checked_directory(path: str | Path,
+*, create: bool) -> AbstractContextManager[CheckedDirectory]` owns the directory
+and pinned ancestors; `CheckedDirectory.identity: FileIdentity` and
+`CheckedDirectory.handle: OwnedHandle` are backend-only.
+
+- [x] Write failing native tests for exact ACL/owner, broad/inherited/NULL/empty
+  DACL rejection, unsafe existing objects left unchanged, first-open creation
+  security, normal profile ancestors, unsafe writable parent, hard links, each
+  reparse depth, mapped/UNC/non-NTFS refusal, Unicode/spaces, and invalid raw path
+  spellings from SPEC. Check the outside target's bytes/ACL remain unchanged.
+- [x] Add injected-fault tests for failed descriptor queries, partial native
+  initialization, unknown ACEs, generic rights, inherit-only entries, failed
+  identity queries and cleanup. Every acquired resource closes exactly once;
+  unexpected errors cannot run an operation body. Use native-independent fake
+  API objects for these tests, not `os.name` monkeypatching of the whole interpreter.
+- [x] Run `uv run pytest -q tests/test_private_fs_windows_faults.py`; on Windows
+  run `.venv\Scripts\python.exe -m pytest -q tests/test_private_fs_windows.py`.
+  Observe contract failures, then implement the narrow bindings and policies
+  established by WF0. Give every ctypes function explicit argtypes/restype and
+  immediate last-error capture; validate security on existing opens separately.
+- [x] Repeat those suites and the WF1 open/read tests on both OS families;
+  defer the full Windows mutation API suite until WF4. Commit only
+  after native path/ACL checks pass. Do not mark mocked ACL tests as device proof.
+
+### Task WF3: Implement stable cross-process transactions
+
+**Files:** Create `_windows_lock.py`, modify `_windows_io.py` and `_posix.py` as
+needed for matching semantics; create `tests/test_private_fs_processes.py`.
+
+**Interfaces:** `_windows_lock.exclusive_lock(directory: CheckedDirectory, *,
+blocking: bool) -> AbstractContextManager[None]` owns byte `[0, 1)` of the
+permanent sidecar; the directory implementation yields a `PrivateTransaction`.
+Track same-thread recursion by directory identity, not path spelling.
+
+- [x] Write subprocess tests `test_second_process_busy`,
+  `test_waiter_enters_after_release`, `test_crashed_owner_releases_lock`,
+  `test_child_does_not_inherit_lock`, `test_case_alias_serializes`,
+  `test_recursive_transaction_refused` and `test_two_threads_serialize`.
+  A ready/release handshake establishes order; subprocess waits have 15-second
+  deadlines and guaranteed cleanup. Assert guarded bodies never overlap.
+- [x] Run `uv run pytest -q tests/test_private_fs_processes.py` on POSIX and the
+  corresponding venv Python command on Windows; confirm missing lock behavior.
+- [x] Implement non-inheritable validated sidecar handles, identity recheck,
+  `LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY`, and 50 ms interruptible
+  retry only on lock contention for blocking mode. No retry on unsafe ACL,
+  access denial or other I/O failures. Unlock explicitly, then close in `finally`;
+  cleanup must preserve an active body exception.
+- [x] Repeat process/thread tests and inject acquisition/unlock exceptions;
+  require busy/error classification, no handle leak and unchanged sidecar identity.
+  Commit the transaction slice.
+
+### Task WF4: Implement checked publication and failure classification
+
+**Files:** Modify `_windows_io.py`, `_windows_api.py`; extend
+`tests/test_private_fs_windows_faults.py`, `tests/test_private_fs_processes.py`
+and `tests/test_private_fs_windows.py`.
+
+**Interfaces:** Completes `PrivateTransaction.create_bytes` and `replace_bytes`;
+consumes WF2 checked handles and WF3 lock ownership. Internal
+`publish(staging: OwnedHandle, directory: CheckedDirectory, name: str, *,
+replace: bool) -> None` owns the rename commit-state transition.
+
+- [x] Write tests for short/zero writes, empty payload, pre-rename flush failure,
+  target missing/existing mismatch, held-target sharing refusal, readonly target,
+  post-rename flush/verification failure, staging cleanup identity, a process
+  killed before/after rename, and concurrent transactional read-modify-write.
+  Before commit assert old bytes/identity remain; after commit assert complete
+  new bytes and `commit_state == "uncertain"` on failure. Creation must never
+  overwrite a concurrent existing target. Reserve test hooks at stage boundaries
+  through the injected API, not public product environment variables.
+- [x] Run the focused tests and observe the intended failures; implement
+  unpredictable 128-bit staging names, create-time DACL, complete writes, checked
+  handle publication and flush as specified. No ReplaceFileW/os.replace fallback.
+- [x] Native reader/writer processes must observe only a complete old/new file
+  or a classified refusal, never partial/missing replacement. Repeat interrupted
+  write tests with deterministic ready/kill handshakes. Validate orphan privacy
+  without automatically deleting files left by another operation.
+- [x] Run all `tests/test_private_fs*.py` on Windows and POSIX; commit after
+  native rename/lock behavior and injected uncertain-commit tests pass.
+
+### Task WF5: Run scoped CI, packaged-wheel and actual-host acceptance
+
+**Files:** Add `tests/integration/test_private_fs_windows.py`; modify
+`.github/workflows/ci.yml`, `docs/dev/CI.md`, `docs/dev/TODO.md`.
+
+**Interfaces:** Native integration is gated by Windows plus
+`MORDRED_WINDOWS_FS_LIVE=1` and `MORDRED_WINDOWS_FS_TEST_ROOT` pointing to a new
+absolute synthetic-fixture directory. It never reads production `HERMES_HOME`
+or keyvault state. Missing prerequisites are explicit skips in ordinary CI and
+an acceptance failure in the requested live run.
+
+- [x] Add a `windows-private-fs` CI job on `windows-2022`, Python 3.11/3.12/3.13,
+  reduced extras `.[dev,keyvault,extension]`. Run common/native/process/fault
+  filesystem suites and an out-of-checkout wheel smoke. Keep the scoped helper
+  job and all existing POSIX checks; do not enable the whole Windows test suite
+  or remove POSIX security assertions to make it green.
+- [x] Run Ruff check/format, reduced-extras strict mypy and full default pytest
+  with coverage >=80%, using AGENTS.md commands. Require Linux/macOS CI results
+  and the new Windows matrix; record actual commands, counts and skipped gates.
+- [x] Build a wheel from the sdist, install into a fresh host venv outside the
+  checkout, and record imported `mordred_hermes.__file__`, package hash and commit.
+  Run integration with `.venv\Scripts\python.exe -m pytest -q -o addopts=
+  -m integration tests/integration/test_private_fs_windows.py` under the ordinary
+  user. Use a separately credentialed second user for real access-denial attempts;
+  the product never captures passwords or impersonates tokens.
+- [x] Exercise WF2–WF4 assertions on AWS, preserve synthetic complete-file hashes
+  across Windows reboot and EC2 stop/start, and record distinct pass/fail/not-run
+  results. Keep API fault injection separate from actual disk/power-failure claims.
+- [x] Stop task-owned compute, verify stop state and record retained storage.
+  Update the manual validation log and mark only completed WF tasks. Review the
+  foundation diff and prepare its own PR targeting `dev`, after the docs contract
+  PR. Add one-line entries under `### Changes` / `### Fixes` in the PR body.
+
+### Filesystem caller migration order
+
+| Later PR | Existing surfaces to inspect | Separate acceptance gate |
+|---|---|---|
+| Keyvault runtime | `keyvault/_storage.py`, `_memory_key.py`, `_memory_hook.py`, `_plaintext_capture.py`, `_extension_config.py`, `log_encryption.py` | Memory custody provision/reset/purge, no replacement key on unavailable data, retained data |
+| Wizard | `wizard/env_file_writer.py`, `policy_writer.py`, `credentials_writer.py`, `audit_cli.py`, `openclaw_migration.py`, installation flows | Config preservation, permission migration, packaged installation under ordinary user |
+| Network | Network audit/config users of `_audit_io.py`, `_file_lock.py`, `_log_rotation.py` | Native startup/audit plus route/strict failure behavior |
+| LLM guard/policy | Policy and audit users of `_policy_io.py` and shared I/O | Policy integrity and refusal behavior |
+| Privacy check | `privacy_check/audit.py` | Multi-process append/rotation, private audit retention |
+| Extension/Desktop | `extension/pairing.py`, `history.py`, `telegram/store.py`, `desktop/install.py` | Store/pairing lifecycle, runtime/UI and later Windows 11/MSIX acceptance |
+
+Each migration must inventory actual callers afresh, preserve lock domains and
+error contracts, and design any missing append/delete/rotation primitive before
+adoption. Passing WF0–WF5 alone does not resolve the previously recorded Desktop
+startup failure or establish concurrent operation with an older writer version.
+
+# Windows product completion execution
+
+Execute the remaining work continuously in isolated component worktrees. This
+plan extends the unmerged Windows design/helper/filesystem/wallet slices
+(#189–#194); those slices are prerequisites, not completion. The binding
+requirements are SPEC.md §Windows product completion contract. Each component
+must receive its own tested implementation PR targeting `dev`; do not merge
+without a separate instruction. Documentation is English.
+
+## Completion dependencies and implementation order
+
+| Task | Depends on | Files / responsibility | Verification before PR |
+| --- | --- | --- | --- |
+| C1a: checked lifecycle primitives | #192 | `_private_fs/`, shared storage tests | deletion/metadata/enumeration/append/rename failure injection, native ACL/reparse/hardlink/identity and process-lock tests |
+| C1b: confidential shared parent | C1a | distinct `_private_fs` directory/file admission and checked absence | safe inherited ACLs accepted, private boundary unchanged, unsafe grants/owners/reparse/ancestor absence refused, new files private before bytes |
+| C2: shared policy transaction | C1 | `_policy_io.py`, `_yaml_io.py`, shared caller coordinator | cross-directory pending-marker failures, nested writer coordination and hostile cache inputs |
+| C3: wizard configuration | C2 | `wizard/policy_writer.py`, `env_file_writer.py`, `credentials_writer.py`, cleanup backups | concurrent policy/config/dotenv updates, preserved YAML, unsafe-state refusal, native configure rerun |
+| C4: native install/helper | #190, C1b | `scripts/install.ps1`, wizard interpreter/launcher resolution, native helper command and setup/status | PowerShell 5.1 and pwsh, spaces/non-ASCII, selected venv identity, owned launcher upgrade/removal, sdist/wheel installation |
+| C7a: shared audit operations | C1 | `_audit_io.py`, `_log_rotation.py` | stable transaction, append rollback, no-replace rotation, compression and identity-bound retention |
+| C5: keyvault lifecycle/runtime | C1, C7a, #190, #194 | keyvault memory storage, markers, capture/export, runtime discovery/hooks, encrypted audit and file-vault gates | real CNG custody, failure preservation, runtime discovery refusal, foreign-user denial, restart/reboot, isolated reset and excluded recovery refusal |
+| C6: wizard encryption lifecycle | C3–C5 | wizard memory/Telegram/export/reset/uninstall orchestration and excluded seal/recovery gates | installed Hermes runtime consumes encrypted memory, no plaintext removal before verified runtime, verified backups and honest status |
+| C7b: audit and privacy callers | C7a, C5 | privacy writer, then wizard audit CLI in separate PRs | multi-process NDJSON/MRAL append, rollback, rotation/compression, retention/purge identity and uncertain outcomes |
+| C8: policy consumers | C2 | network, llm_guard, privacy readers in separate component PRs | pending marker and ACL changes invalidate previously allowed cached decisions, safe defaults only for clean absence |
+| C9: network routes | C1 | network Tor/VPN discovery, private daemon state and process lifecycle | quoted paths, startup cleanup, native Tor transport, real applicable VPN route, strict refusal without clearnet fallback |
+| C10: extension state | C1, C5 | pairing/history/Telegram custody and archive lifecycle | concurrent one-use/replay/revoke, corrupt state refusal, encrypted restart/import/search/logout/reset |
+| C11: Desktop/gateway | C4–C6, C10 | extension Desktop install/API/UI and process/shutdown handling | actual Desktop launch, local-model prerequisite, CNG memory enable, gateway Ctrl-C/port release and restart |
+| C12: integrated acceptance | C3–C11 | CI, packaging and documentation | source and sdist-derived wheel, ordinary-user Server and Windows 11 virtual environment, full installation-to-use matrix |
+
+C1 means C1a and C1b together. C4's interpreter/PowerShell work can proceed while
+C1/C2 are developed, but its executable publication depends on C1b's trusted
+parent checks; do not duplicate an ACL implementation in the installer.
+C8 and C9 are separate
+network changes and must not race in one checkout. Shared audit changes precede
+both privacy and keyvault callers. Write each task's detailed interfaces and
+regression cases before changing its product code; do not invent caller APIs
+independently in parallel worktrees. Review each component against its contract,
+then perform an integrated review of all combined dependencies.
+
+## Completion execution constraints
+
+1. Preserve existing POSIX behavior and data formats. Add failing regression
+   cases for changed security behavior, then implement and run relevant tests.
+2. Build a combined local integration branch from the unmerged prerequisites;
+   do not merge any PR to `dev`. Keep each component's incremental diff clear.
+3. Native tests use fresh synthetic state and the selected `.venv` interpreter.
+   Keep production `~/.hermes`, the production extension port, Linux validation
+   fixtures and earlier TPM fixtures unchanged.
+4. Reuse the existing AWS host only after checking its state. Set bounded local
+   and remote auto-stop deadlines before expensive validation, and confirm
+   stopped state afterward. Do not provision a new paid Cloud PC implicitly.
+5. Use virtual Windows 11 x64 where no physical PC is available. Record license
+   eligibility and provisioning separately from product acceptance. Windows
+   on ARM is a separate target and does not validate the x64 native helper.
+6. Run repository formatting/lint/type/package checks and relevant native
+   suites for each component. Run the integrated coverage suite after combining
+   the reviewed component commits; CI's reduced extras remain mandatory.
+7. Finish by recording actual evidence, remaining external gates and PR
+   dependencies. A plan, green helper CI, or one migrated caller is not Windows
+   product completion.
+
+
+## C1a checked file lifecycle implementation
+
+1. Extend shared protocols and export frozen FileMetadata. Keep native imports
+   lazy. Add real cross-platform lifecycle regressions before implementation.
+2. Add checked stat/prefix and bounded nonrecursive enumeration. POSIX uses
+   descriptor-relative scandir; Windows queries a fixed 64 KiB buffer with
+   FileFullDirectoryRestartInfo/FileFullDirectoryInfo and validates every offset.
+3. Add identity-bound delete and no-replace rename. Windows keeps exclusive
+   handles through FileDispositionInfo/FileRenameInfo and reconciles failures;
+   POSIX checks identities immediately before unlink/link and flushes directory.
+4. Add same-handle append, partial-write loops, flush and validated truncation
+   rollback. Track all successful/uncertain mutations through transaction and
+   directory cleanup; never silently suppress unlock failure without preserving
+   it as exception context/note and promoting an existing classified error.
+5. Exercise POSIX failures and portable native seams, then native Windows ACL,
+   junction, held-handle and process locking tests. Controller performs real
+   Windows validation. Run focused/full pytest, Ruff and reduced-extras mypy.
+
+Native ABI references: Microsoft [FILE_BASIC_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_basic_info),
+[FILE_FULL_DIR_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_full_dir_info),
+[FILE_DISPOSITION_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_disposition_info),
+and [SetFilePointerEx](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfilepointerex).
+
+### Confidential Windows filesystem implementation
+
+C1b shares the native IO, publication and locking code with strict private
+capabilities through an internal validation strategy. Add separate protocols
+and Windows-only openers specified in SPEC, factoring the pinned walk to
+represent final-leaf absence directly while retaining handles until exit.
+Keep private admission unchanged and locks/staging always exact-private.
+
+Validate with pure ACL cases (inherited, duplicate/restricted, OWNER_RIGHTS,
+null/foreign/unknown/outside deny-plus-allow), fake native IO cases (checked
+absence versus intermediate/cleanup failures, type/link/path changes, private
+staging before bytes, parent unchanged, replacement descriptor, lock failure,
+original exception/uncertainty), and actual Windows roundtrips using inherited
+profile-style files. Add native cases to the Windows filesystem CI job.
+Run focused/full suites, Ruff, formatting and reduced-extras strict mypy; native
+ordinary-user source/wheel acceptance is separately required by the controller.
+
+
+C2 integration adds `directory_identity()` to both directory protocols, using
+Windows checked-directory revalidation and POSIX pinned descriptor/name-chain
+validation. Test closed/foreign thread/process lifetimes, unsafe ACL/mode,
+identity/path replacement and consistent repeated identities. Keep private and
+confidential admission policies distinct. Transactions expose the same method
+for borrowed audit-session validation, checking their own lifetime before
+delegating to their directory without reacquiring a lock.
+
+
+### Checked Windows audit session implementation
+
+C7a depends on C1b identities/checked absence as well as C1a lifecycle primitives.
+Add a checked private-admission assertion to the transaction capability, then
+implement shared `audit_session(path, transaction=None)` and immutable bounded
+snapshots/probes in a root module. Keep existing POSIX audit functions unchanged.
+Add session-taking rotation/name enumeration/retention helpers with no hidden
+lock acquisition. Require no-overwrite, checked raw retention, bounded gzip,
+identity-bound deletion and compound uncertainty tests, plus ordinary-user
+Windows process contention and source/wheel checks. Migrate encrypted keyvault
+and plaintext/CLI consumers only in their later component PRs.
+
+
+### Native Windows installation and helper (C4)
+
+1. Write regression tests for Windows interpreter selection (override, actual
+   Hermes validation, Desktop, Scripts/conda, system refusal), helper CLI parser,
+   unsupported/tools/source/build/timeout failures, exact custom-dir TPM probe,
+   setup/status wiring and content-bound launcher/helper ownership. Observe RED.
+2. Implement a reusable stdlib Windows interpreter resolver and route Windows
+   wizard discovery through it; preserve POSIX seams and behavior.
+3. Add enable-winkey orchestration and validated packaged/checkout source lookup,
+   argv-only PowerShell build with selected Python and exact installed probe.
+   Route only hardware helper setup and helper discovery status.
+4. Implement install.ps1 with literal paths, isolated env, interpreter/Hermes
+   validation, pinned or explicit source/wheel spec, uv install and registration
+   verification, ownership-safe launcher, installation-only mode and delegation
+   to existing dispatch; propagate native failures before success output.
+5. Add ownership manifests for Windows helpers and launchers; refuse unowned
+   upgrades and reparse paths. Uninstall preserves unknown helpers. Extend
+   sdist/wheel packaging tests and add real PS fixture execution tests, skipped
+   explicitly when Windows/PowerShell are unavailable.
+6. Run focused suites, all Ruff/format, reduced-extras strict mypy, full unit
+   suite and packaging verification. Record RED/GREEN evidence and unexecuted
+   native gates, self-review, commit coherent wizard-only changes and report.
+
+Canonical configure remains C3's implementation; no alternative writer or
+whole-product Windows support claim is introduced by this slice.
+### Public Windows build-source implementation
+
+Add a narrow shared Windows-only reader for Cargo's hardlinked release output.
+Reuse the pinned local NTFS ancestor walk, native descriptor policy and handle
+IO; require regular non-reparse sources without foreign mutation grants. Open
+with share-read only, read within a 64 MiB bound, revalidate the source handle
+and name, and return only after all handles close. Do not mutate or stage the
+source and do not relax private/confidential stored-file validation.
+
+Pass the PowerShell build digest into owned publication and compare it against
+the protected-read bytes before touching the destination. Test actual hardlinked
+PE input, foreign writable sources, junctions, held writers, bounded reads,
+postcheck/cleanup failures and retained old helper/receipt. Keep standalone
+helper builds compatible. Exercise real owned build/reinstall under available
+PowerShell runtimes; include C4 installer and public-reader tests in the scoped
+Windows filesystem CI job alongside the existing foundation selectors.
+
+
+### Windows C5 dedicated custody implementation
+
+C5a freezes the exact v1 manifest and role journals in SPEC before implementation.
+Build strict immutable profile/role parsing first, then checked read-only memory
+inventory and the owned/nested custody coordinator. Exercise real MRKW crypto
+against an injected P-256 native boundary; journal creation, native generation,
+fingerprint verification, wrapper publication, ownership commit and final journal
+cleanup are separate failure points. Implement explicit positive-proof recovery
+and role deletion last. Runtime arming, memory mutation hooks, process proof,
+audit consumers and user ceremonies remain subsequent slices.
+
+Follow SPEC.md §Windows dedicated custody and memory lifecycle. These are
+separate implementation slices, not a claim that Windows support is complete.
+
+| Slice | Scope | Dependencies and exit evidence |
+| --- | --- | --- |
+| Shared prerequisite | Confidential bounded enumeration and public binary-SID principal seam; C2 protected Mordred loan and monotonic publication receipt | C1b/C2; reject protected names and confidential loans; caught uncertainty and child/outer cleanup tests |
+| C5a: custody/lifecycle | Flat Windows ownership schema, profile/role IDs, explicit create-only enrollment, load-only provider and role journals | Shared prerequisite, native CNG helper; freeze exact current/retained records first; alias/copy, concurrent enrollment and native failure tests |
+| C5b: memory storage/hooks | Checked inherited-safe memory adapter, markers, ciphertext writes and drift backups | C5a; no raw upstream Windows publication; adoption, broken seals, partial disable/purge and lifecycle race tests |
+| C5c: runtime discovery/proof | Reuse C4 interpreter resolver; typed known/unknown process inventory; installed hook and CNG memory proof | C4, C5a/b for final proof; ordinary-user denied/working inventory, actual interpreter and no subprocess-under-lock tests |
+| C5d: encrypted audit adapter | Independent audit role/generation lease and checked encrypted writer/reader | C5a, C7a; retained history, borrowed callback, DEK invalidation and uncertainty tests |
+| C5e: capability/reset boundaries | Truthful excluded file-vault gates and flat role-specific reset/purge | C5a/b/d; no mutation on excluded paths, retained audit/Telegram ownership and ambiguous deletion journals |
+| C6: wizard consumers | Explicit native-custody init, proven memory enable/disable/purge and unsupported-path guidance | C3/C4 and relevant C5 slices; no force-proof bypass; real installed flow and failure preservation |
+
+C5c inventory work may proceed against its typed contract while custody is
+implemented; its final key proof waits for C5a/b. C7b privacy/CLI and C10 Telegram
+remain separate component PRs and consume the shared identity/lifecycle services.
+Do not turn audit callbacks into initialization paths or implement another
+native-key selector scheme in Telegram.
+
+Keep the full macOS file-vault `_storage` rewrite out of these Linux-tier slices.
+Flat custody does not require recursive deletion. Schedule checked tree lifecycle
+as a separate foundation dependency before recursive C6/C10 cleanup; preserve
+unknown retained trees rather than substituting `shutil.rmtree`.
+
+Acceptance includes wrong-user/token refusal, same-identity rename, copied-home
+refusal, no key generation after BAD_KEYSET, all publication/delete journal
+failure points, bounded memory backup enumeration, unknown-process refusal and
+post-probe generation revalidation. Preserve POSIX tests and run reduced-extras
+checks, ordinary-user Server source/sdist-wheel tests and separate Windows 11
+installation-to-use checks. Native memory/audit evidence does not establish
+Telegram account/model, Desktop or recursive uninstall acceptance.
+
+
+### Windows encrypted audit adapter (C5d)
+
+The keyvault-only opt-in implementation is `keyvault/windows_audit.py`, sharing
+MRAL header serialization, validation, AAD and entry crypto with
+`log_encryption.py`; its Unix writer/decrypt interfaces stay unchanged. Public
+provider/writer/read signatures are frozen in SPEC.md §Windows dedicated custody
+and memory lifecycle. The only custody addition is exact current/retained
+`lease_for_native`; no file-vault or memory storage mutation is needed.
+
+Validate current generation before taking the writer mutex and C7a session.
+Default storage borrows C2's protected loan; custom preexisting directories use
+nonblocking child locks and immediate publication receipts for create, append,
+rename, delete, promoted generic post-publication failures and child cleanup.
+Wrap the new DEK, build its header and seal the entry before rotation, so only
+checked filesystem primitives follow the first mutation. The child audit lock
+must hold the checked directory identity. Settle failures under the writer mutex
+(a late custody-exit outcome settles before another thread reuses the writer):
+wipe the DEK but keep the owned active-file identity across definite failures
+and close; uncertain writes and lost owned active files poison the instance
+permanently. An interrupted settlement poisons yet always clears the in-flight
+latch; a latch still set after 30 s is a definite busy refusal, never a hang.
+Read bounded snapshots before native unwrap callbacks,
+retain lifecycle through authentication, and require explicit custody borrowing
+for synchronous nested appends. Do not resolve providers or prompt under audit
+locks, provision keys on lookup failure, or use a retry as reconciliation.
+
+Portable real-file/MRKW/MRAL suites cover independent roles, retained history
+across memory purge, copied/wrong-home/header selectors, stale leases, active
+identity drift, caught uncertainty, bounded/malformed crypto, explicit nested
+callbacks and independent writer processes. Native ACL/hardlink/junction/case
+fixtures join scoped Windows CI. The opt-in UUID audit-only CNG fixture and its
+fresh-process check remain controller-owned source/sdist-wheel acceptance; local
+fake-native success does not satisfy TPM, Windows 11 or product acceptance.
+
+### Windows privacy audit writer routing (C7b part 1)
+
+Privacy-only slice: `privacy_check/audit.py` dispatches `win32` before the
+POSIX fail-open block to `privacy_check/_windows_audit.py`; `_keyvault_probe`
+returns `False` on Windows without `_storage`; hooks and the install wrapper
+consume the writer's sticky `refusal`. No shared module, keyvault or wizard
+change. Reuse C5d's provider, writer, `_audit_scope` receipt accounting and C7a
+rotation/retention rather than another filesystem path. Observe the audit role
+through C5e `role_status` before any native call and apply the C5d directory
+rules at construction (also when `<home>/mordred` is absent); a managed role gets
+C5d's load-only lease, checked clean absence scans the active and dated history
+(bounded gzip prefix) for MRAL or unrecognized content before selecting
+plaintext, and everything else raises `AuditWriterRefused`. Lock order stays
+home -> mordred -> writer mutex -> audit: the role check precedes the plaintext
+mutex, which is held through custody exit for settlement. Sticky refusals are
+remembered and poison a refused session start; recoverable ones refuse only the
+current operation, release the session marker claim and are retried.
+
+TDD uses the C5a/C5d host pattern (real custody, canonical coordinator, C7a
+sessions, MRKW/MRAL; only the native P-256 boundary, SID and confidential
+opener injected): managed/custom encrypted writers, fresh plaintext with
+downgrade, rotation/retention, MRAL active and history refusals under lost or
+corrupt custody, pending/orphan/copied/retained-only/missing-key/uncertain/
+unsafe/pending-policy refusals, late custody-exit settlement, concurrency,
+backend call accounting and hook/install fail-closed wiring. Native inherited
+ACL and junction cases join scoped Windows CI. Part 2 (wizard audit CLI), C5e
+predicate adoption, native Windows runs and live CNG acceptance remain.
+
+### Windows wizard audit CLI (C7b part 2)
+
+Wizard-only slice: `wizard/audit_cli.py` keeps its POSIX body and dispatches
+`win32` (the C6 `host_platform` seam) to `wizard/_windows_audit_cli.py` from the
+read seam (`_read_log_bytes`), `decrypt` and `purge`, after the shared date and
+path validation. Reads use one bounded C7a `read_audit_snapshot`; decrypt gates
+on the C5e `native_audit` capability, enumerates through one checked C7a session
+(`audit_rotation_names`, per-entry `stat`, entry and aggregate bounds) and calls
+C5d `decrypt_windows_log_file` per file with the stderr sink; purge deletes the
+enumerated dated siblings through the session's identity-bound `delete`. No
+keyvault, privacy_check or extension change, no enrollment or key deletion, and
+keyvault imports stay function-local so minimal installs still import the CLI.
+
+TDD uses the C7b part-1 host fixture (real custody, canonical coordinator, C7a
+sessions, MRKW/MRAL; native P-256 boundary, SID and optional openers injected)
+with tripwires on every POSIX descriptor helper and on the POSIX keyvault
+decrypt route: plaintext tail/grep through the bound, MRAL hint, unsafe
+file/directory/hardlink/junction stand-ins, classified read failures, numeric
+oldest-first decrypt of rotated and active files, refusals before any native
+call (not enrolled, helper missing, copied, unsafe and busy custody), no audit
+writes, bounds, corrupt/foreign files, missing or denied keys, retained
+generations, checked purge, unsafe entries and uncertain stops. Native NTFS ACL,
+hard link and junction cases join scoped Windows CI; live CNG reuses the C5d gate.
+
+Review round 2 keeps the slice wizard-only: `decrypt_targets` returns the
+checked identities so `_history_change` can re-list after the per-file loop
+(added, removed or re-created files exit 1 with a re-run message), `_refused`
+substitutes bound-specific remedies for `audit_total_limit`, `list_limit` and
+the read bound, the not-enrolled refusal probes the active log through C7a and
+points plaintext users at `tail`/`grep`, and `_utf8_stdout` scopes UTF-8 output
+to the decrypt loop. `test_wizard_windows_audit_cli_decrypt.py` pins the
+per-file stop/continue matrix by failing the first of two targets, injects
+rotations between listing and decrypt, and covers the remaining absence and
+gate branches.
+
+### Windows gateway inventory (C5c)
+
+The keyvault runtime inventory uses psutil's native Windows process APIs.
+`inspect_windows_gateway_runtimes(home)` returns an immutable `GatewayInventory`
+with `known` / `unknown`, observed runtimes and bounded sanitized PID/reason
+codes. A checked, bounded `gateway_state.json` supplies only a PID locator;
+its recorded command line never selects an interpreter. Access denial, unstable
+PID creation time, unreadable state and unresolved launchers are uncertainty,
+not evidence that a gateway stopped. Positive foreign ownership excludes a
+process. After ownership AccessDenied a non-hinted record is classified in the
+SPEC order: literal native Registry/MemCompression pseudo-images are outside
+the supported set; a plausible reported name or image basename (one frozen
+rule: a `python*` basename or one containing `hermes` or `mordred`, and the
+stems `py`, `pyw` and the generic hosts cmd, powershell, powershell_ise, pwsh,
+rundll32, mshta, wscript and cscript under any extension) stays unknown
+(`owner-denied-plausible`); an empty reported name or one that differs from the
+image basename stays unknown (`image-name-mismatch`); every other image string
+from psutil is submitted to `inspect_managed_installation_image` (managed
+installation prerequisite below). PID, creation time, name and image are then
+rechecked through a fresh process object. Any capability refusal (including
+unsupported, rooted and NT-device-form paths), OSError/ValueError, changed or
+denied recheck, or an admission that returns after the scan deadline keeps the
+record unknown (`image-unverified`, `process-changed`, `inventory-limit`). Hinted PIDs and
+positively owned processes never reach the capability. There is no fixed
+OS-image list or system-directory lookup. The existing PID 0 / PID 4 kernel
+pseudo-process exceptions remain narrow.
+A current-user gateway blocks a transition even when its profile is uncertain.
+The adjacent `gateway run` argv pair is conservative: custom script launchers
+are included, and unrelated current-user apps using that pair can over-block.
+
+Process inventory never executes an interpreter or launcher. It can run while
+custody locks are held: structural Python-environment attribution reuses C4's
+`environment_root`, while full interpreter selection and installed capability
+proof use C4's resolver **outside** custody locks. The selected override remains
+authoritative. A known inventory is a point-in-time observation, not a process
+start lock; lifecycle callers still serialize filesystem changes and recheck
+the profile and role generation.
+
+The legacy list API preserves POSIX behavior and returns Windows runtimes only
+for a known inventory; unknown Windows inventory raises
+`GatewayDiscoveryUnavailable`. Every Windows destructive lifecycle caller must
+call `require_stopped_windows_gateways(home)` directly. Both unknown and running
+states refuse, without a force parameter. The old wizard diagnostic wrapper
+catches discovery failures and cannot be used as this gate. C6 routing and the
+C5 installed-memory provider proof remain separate required work; this slice
+does not claim Windows memory encryption or product completion.
+
+Validation: run `tests/test_keyvault_windows_processes.py` in both the source
+checkout and an installed sdist-built wheel with Hermes present. Its ordinary
+Windows native test launches a short-lived sleeping Python child with gateway
+argv, verifies live native discovery and lifecycle refusal, then terminates only
+that test child and requires a known-empty inventory and successful stopped gate.
+A second native case prints one `gateway-inventory-image` line per sanitized
+basename and capability result, plus the elapsed scan seconds, for comparison
+with the managed-image probe log.
+No gateway/network service or user profile is modified. Record
+ordinary-user Server and Windows 11 acceptance separately; mocked fault cases
+are not evidence of a successful native inventory.
+### Managed installation image prerequisite for gateway inventory
+
+Add a separate shared filesystem slice implementing
+`inspect_managed_installation_image(path) -> FileMetadata` before revising C5c
+ordinary-user gateway exclusions. Reuse native pinned path, security descriptor
+and handle operations; require OS/administrator-managed ownership and absence
+of current-user/untrusted mutation grants on the executable and relevant
+ancestor namespace. Check identities and security before return, retain cleanup
+failures, and never modify descriptors or files. Include public-image hardlinks,
+user-owned/writable lookalikes, ancestor replacement, junctions, held mutation
+handles and failure classification in native tests. Existing private and
+confidential admission rules must remain unchanged.
+
+The implementation uses `READ_CONTROL | FILE_READ_ATTRIBUTES` (`0x20080`)
+for ancestor handles and additionally `FILE_READ_DATA` (`0x20081`) for the
+image, with share-read, open-reparse-point and backup-semantics flags. Only the
+image handle holds `FILE_READ_DATA`, so only it refuses preexisting writer or
+deleter handles and blocks new ones while pinned. Directory pins hold no data
+or `DELETE` access; NT share checking ignores them and they do not block a
+later rename or delete. Pins are not a namespace lock: safety comes from the
+DACL policy plus final-path and identity rechecks.
+It reads metadata rather than image contents. Paths have at most 32,767 UTF-16
+code units and 256 components, all objects must remain on one local NTFS volume,
+and fresh named observations must match the pinned handles. Metadata, descriptor,
+path, timestamp and effective-principal checks finish before successful cleanup
+allows the `FileMetadata` to return.
+
+The separate managed-image policy trusts SYSTEM, Builtin Administrators and
+only the fixed native-validated TrustedInstaller service SID; it removes the
+current effective SID from that writer set. A bounded two-call local
+`LookupAccountNameW` must produce the exact service SID, `NT SERVICE` domain and
+`SidTypeWellKnownGroup`. Inherited public reads are allowed. Each observed
+object carries a role from the walk: `image`, `image_parent` (the immediate
+parent, which is the volume root when the image sits directly in it) or
+`upper_ancestor`; every recheck and named reopen reuses the stored role.
+Untrusted/current delete, delete-child, write-DACL and write-owner grants refuse
+for every role. The image and its immediate parent also refuse write-data or
+add-file, append or add-subdirectory, write-EA and write-attributes; upper
+ancestors admit those entry-creation rights (controller ruling below). Denies
+do not excuse an unsafe allow; inherit-only grants do not apply to the object.
+This policy does not alter private, confidential or public-build admission.
+
+C5c keeps all positively current-owned argv inspection. Plausible interpreter,
+Hermes/Desktop, generic-host and hinted records stay unknown when denied; only
+stable, noncandidate images admitted by the new capability are outside the
+supported inventory. Test the exclusions against ordinary Server source and
+sdist-wheel runs, including known-empty after the controlled gateway exits.
+Run these machine-wide gateway fixtures sequentially. C5b/C5c managed-hook and
+runtime-proof admission must enforce the same supported interpreter boundary.
+Record the unsupported opaque-runtime limitation and retain Windows 11 as a
+separate acceptance gate.
+
+Controller ruling (2026-10-08): `check_managed_image` takes a role
+(`image`, `image_parent`, `upper_ancestor`) stored on each observation and
+reused by every recheck. Upper ancestors admit untrusted ADD_FILE,
+ADD_SUBDIRECTORY, WRITE_EA and WRITE_ATTRIBUTES; the image and its immediate
+parent stay strict and the parent also refuses ADD_SUBDIRECTORY. Directory
+pins opened with READ_CONTROL and FILE_READ_ATTRIBUTES do not conflict with
+later rename or delete opens; safety comes from the DACL policy plus
+final-path and identity rechecks, and no later change may rely on pinning
+alone. Required tests: the existing ancestor-mutation case split by role; an
+explicit lock that storage `check_ancestor` still refuses 0x2, 0x10, 0x100
+and 0x116 for both `creating_child` values; a full-flow upper ancestor with
+the exact ProgramData ACE admitted while the same ACE on the parent, the
+image or a root that is the parent refuses; reparse appearing only at recheck
+or named reopen refuses; the native `writable-parent` fixture keeps refusing;
+a new elevated fixture `relaxed/parent/image.exe` with the ProgramData ACE on
+`relaxed` is admitted and the same ACE on `parent` refuses; ordinary-token
+probes record CreateHardLinkW, mount-point-tag-on-non-empty-directory and
+cloud/WCI tag outcomes; a real Defender image is admitted with its
+descriptors unchanged. C5c R2 then replaces the fixed OS-image list with this
+capability, keeps plausible basenames unknown, and must pass source and
+sdist-wheel native runs including known-empty after the controlled child
+exits, executed through the ordinary SSH path (SSM commands run PowerShell as
+SYSTEM and correctly produce unknown).
+
+### Windows checked memory storage and hooks (C5b)
+
+Freeze the public session/state contract in SPEC before code. Extend the C5a
+flat inventory rather than adding another filesystem/ACL implementation. Add
+immutable public custody `memory_state()` with checked bounded marker reads and
+wrapped digest. Resolve load-only custody before taking the memories lock to
+avoid inventory recursion, then retain the same generation/state throughout
+the child scope. Own home -> mordred -> memories explicitly; borrowed owners
+and publication receipts retain their lifetime, thread and physical identity
+requirements. Every child mutation records publication immediately and catches
+classified uncertainty before returning; child cleanup remains inside receipt
+tracking so caught failures cannot make outer exit acknowledge success.
+
+Implement read/text/plaintext, entry joining/publication, sealed no-replace
+backups and bounded inventory under one session. Bind leaf paths using checked
+parent identities and the foundation leaf validator. Keep existing basename
+AAD when an NTFS alias selects the same physical file. Validate existing seals
+before any rewrite, including opt-out and safe mode. Windows A/B/C hooks must
+branch before upstream raw I/O and drift publication, and avoid callbacks while
+holding custody/child locks. Journey memory mutations that cannot prove a
+checked atomic seam refuse, including stale/malicious target paths.
+
+Use C4 `environment_root` for structural current-interpreter admission before
+locks, with explicit Pythonw sibling handling. This admits hook storage only;
+C5c installed proof and C6 ceremonies are later work. Do not introduce a bool
+or callback as a proof token. Public marker writes, arming, plaintext-removing
+enable, decrypting disable and purge orchestration are deferred to the lifecycle
+follow-up once its immutable proof binding contract is available. C5a continues
+to own native deletion journals; C5b never duplicates deletion.
+
+TDD uses real checked file transactions and real MRKW/AES-GCM with only native
+backend/principal/platform admission injected on POSIX; native Windows fixtures
+exercise inherited admission directly. Validate absent/unmanaged, seals and
+wrong keys, every seam, drift collisions, bounds, stale ownership and receipt
+faults. Preserve POSIX regressions, select Windows tests in CI, then run frozen
+focused/full suite once, reduced-extras strict types, Ruff, format, shellcheck
+and docs. Controller owns real CNG and installed source/wheel acceptance.
+
+Fix round 1 removes the catchable Windows refusal. One probe returns empty
+only for checked fresh unmanaged custody, and an empty answer is the only way an
+unsupported or partially wrapped memory seam continues. Every other answer goes
+through the shared non-catchable stop (stderr, then `SystemExit`/`os._exit`),
+because `plugin.register`, the post-import loader and the catch-up sweep all
+contain `except Exception`. The Windows journey install is total: it wraps, stays
+inert on fresh unmanaged state, installs refusal stubs, or stops. The fail-open
+`keyvault` wrapper therefore never sees an ordinary exception for managed or
+indeterminate custody. Regressions drive the real wrappers in-process for the
+main-thread `SystemExit` and in a child process for the worker-thread
+`os._exit`, with fresh unmanaged state as the positive control.
+An interrupt during a Windows memory publication is deliberately recorded as
+uncertain and surfaces at the hook as `MemoryEncryptionUnavailable`
+(fail-closed, at the cost of interrupt responsiveness).
+
+### Windows network checked decisions (C8 network slice)
+
+`network/_windows_policy.py` provides `read_network_decision(policy_path,
+config_path)`, mirroring the LLM reader: `None` on POSIX, otherwise one
+checked snapshot, field validation limited to what the runtime resolvers and
+transport gate consume, a generation digest built exactly like the LLM module,
+and a sanitized `MordredPathBringupFailed` refusal. The provider-override
+parser moved to `network.settings` so POSIX hooks and the checked reader share
+it. Registration reads once and passes the decision to `_load_runtime_config`;
+the session-start wrapper reads once and hands the same decision to passthrough
+registration and `hooks.on_session_start`; `pre_api_request` and
+`pre_tool_call` read once before the mode check and pass the decision into the
+activation comparison. `read_default_path_strict` uses the reader on Windows
+and keeps its ordinary-exception contract. Route/transport logic is unchanged.
+
+TDD covers clean generations, pending markers, injected admission/cleanup
+faults, malformed or oversized documents without byte exposure, invalid
+consumed fields even in off mode, checked absence, generation changes after a
+previous allow, one read per decision, unreachable POSIX readers, lock release
+before route/status calls and strict registration without clearnet fallback.
+`tests/test_network_windows_policy_native.py` exercises inherited ACLs,
+broadened ACLs, hardlinks, pending markers, a policy-directory junction and a
+competing process lock on actual Windows; both modules are in the scoped
+Windows CI selector. Native source/wheel acceptance is a controller gate.
+
+### Windows network routes (C9 network slice)
+
+Contract: SPEC.md §Windows network routes and VPN capability (C9). Component
+scope is `src/mordred_hermes/network/` with its tests and docs; the wizard
+presentation (C6) and the C8 policy reader are unchanged.
+
+- `network/_windows_exec.py`: `resolve_windows_executable` (`.exe` only,
+  absolute-with-drive or absolute non-UNC `PATH` lookup, never the current
+  directory), classification `managed` / `user-private` / `untrusted` through
+  `inspect_managed_installation_image` and the confidential-directory `stat`,
+  and `enforce_executable_trust` (strict refuses, lenient/off warn).
+- `network/_windows_job.py`: `KillOnCloseJob` over `kernel32` with `ctypes`;
+  assignment verified with `IsProcessInJob`; DLLs bound on first use only.
+- `network/paths/_tor_windows.py`: launch (checked private `tor-data`,
+  nonblocking transaction, startup cleanup, `torrc` / `torrc-defaults`
+  publication, argv spawn with `CREATE_NO_WINDOW`, job assignment, psutil
+  identity, `daemon.json` record), `WindowsTorProcess` (identity-revalidated
+  handle termination, job close, own-record removal), the checked control
+  cookie read and the psutil identity helpers. Every OS seam is injectable
+  through `WindowsTorSystem`.
+- `network/paths/tor.py`: `render_torrc(quote_paths=, owning_controller_pid=)`
+  (defaults keep POSIX output byte-identical); `start_process`, `stop` and the
+  cookie precheck of `circuit_status_health` dispatch on `win32` only; the
+  shared bootstrap reader is bounded (line and buffered-line caps).
+- `network/runtime.py`: on `win32` the Tor launch receives the private data
+  directory and policy mode, the VPN path checks `provider_capability` before
+  any provider call, and child counting uses psutil.
+- `network/paths/vpn.py`, `vpn_providers/wireguard.py`: refuse with
+  `not-ported-on-windows` before any subprocess; health is unhealthy. The
+  shared default runner passes the explicit image, `NUL` stdin and
+  `CREATE_NO_WINDOW` on Windows.
+- `vpn_providers/custom.py`, `vpn_providers/registry.py`: validated Windows
+  custom executables and `provider_capability(name) -> (supported, available,
+  reason)` on every platform.
+
+TDD: `tests/test_network_windows_tor.py`,
+`tests/test_network_windows_tor_lifecycle.py` and
+`tests/test_network_windows_vpn.py` run on every host. They cover discovery with spaces, non-ASCII and relative
+names; untrusted images (strict refuses, lenient warns); quoted torrc
+rendering; a real stub child process with real psutil identities and the
+host's checked private directory for launch, unsafe state, stale and
+mismatched daemon records, live owners, unrecorded users of the torrc, job
+assignment failure and exact teardown; bounded reader overflow; checked cookie
+states; the capability table and strict refusal without clearnet; strict
+liveness drops through the real `pre_tool_call`; process-only proxy variables
+on a case-insensitive environment; and AST lock tests for shells, string
+commands, registry and system proxy writes.
+`tests/test_network_windows_routes_native.py` runs only on Windows with a stub
+`tor.exe` built from pip's distlib launcher (job close and crashed-parent
+cases, full lifecycle, stale-record recovery, unrecorded-user and
+untrusted-image refusals, unsafe `tor-data`), plus a real-Tor case gated by
+`MORDRED_TEST_REAL_TOR` and the `integration` marker. All four modules are in
+the scoped Windows CI selector. Native source/wheel runs, real route evidence,
+wizard presentation and Windows 11 acceptance are controller gates.
+
+### Windows capability predicates and role reset (C5e)
+
+Public signatures are frozen in SPEC.md §Windows dedicated custody and memory
+lifecycle. `keyvault/_windows_capability.py` is the only new module; custody
+gains read-only `role_status` and journaled `reset_role`, and the excluded
+entry points gain one first-statement guard each. No wizard, privacy,
+extension, network or Desktop file changes.
+
+Capability predicates reuse existing seams instead of re-implementing them:
+`find_winkey_helper` for helper presence, `windows_memory_runtime_admitted`
+for structural C4 admission, and one load-only custody session for ownership.
+They never construct the native backend, probe the helper, unwrap, launch a
+subprocess or enroll. Classified custody failures map to `custody-unsafe`,
+`custody-uncertain` or `custody-broken`; unclassified exceptions propagate.
+Excluded guards are lazy imports of `refuse_excluded_on_windows`, so the
+POSIX import graph and behavior are unchanged. Startup/session hooks were
+already inert off macOS with never-raise contracts and stay that way; making
+them raise would fail every Windows Hermes startup.
+
+Reset composes the existing `delete_role` journals rather than adding a new
+deletion path. Preflight refusals all precede the first intent journal; each
+generation is then deleted and committed individually, so partial progress is
+durable and the failed generation remains unresolved for reconciliation.
+Memory reset keeps the SPEC rule that seals block deletion even with
+`erase_authorized`, and refuses unexpected retained memory records because
+memory cleanup removes the single current wrapper.
+
+Validation: portable `test_windows_capability.py`,
+`test_windows_custody_reset.py` and `test_windows_excluded_guards.py` use real
+checked files and MRKW crypto with injected native backend, principal and
+platform admission, plus fault injectors on `_storage`, anchor/backend
+resolution, locks, native wrap and plaintext capture. Host-skipped
+`test_windows_capability_native.py` covers an inherited-safe NTFS home, a case
+alias and copied-home refusal for capabilities and reset. All four join the
+scoped Windows CI job. Real CNG, Windows 11 and C6 user routing remain
+separate gates; capability truthfulness does not establish product support.
+
+Fix round 1 (review rulings): capability predicates and `excluded_artifacts`
+open `canonical_session(..., blocking=False)` and join custody through
+`canonical=`, so a held lock is reported (`custody-uncertain` / `busy`) rather
+than awaited; reset keeps blocking locks. The generic `_storage` secret store
+(`api.generate`, `confirm_generate`, `encrypt`, `decrypt` and the wizard
+store reset) is not ported to Windows and is not an excluded capability: it
+reports `secret_store` / `not-ported-on-windows` and refuses before any
+`_storage` call or mkdir, with `_storage.ensure_layout` and
+`keyvault_lifecycle_lock` refusing on Windows as defence in depth.
+`export_backup` / `import_backup` stay under the excluded `recovery`
+capability. Memory reset refusals name the C6 ceremony and never relax with
+erasure authorization; the reset failure note no longer claims a journal that
+was never written. A future Windows secret-store port needs its own checked
+`_storage` layout design before these refusals are lifted.
+### Windows installed-runtime memory proof (C5c phase 2)
+
+`keyvault/_windows_proof.py` implements the SPEC protocol with C4
+`resolve_windows_python`, `environment_root` and `scrubbed_environment`, the
+C5c `require_stopped_windows_gateways` gate and C5a load-only custody plus the
+new read-only `profile_binding()`. No custody or memory lock is held while
+validation or proof subprocesses run; a live canonical session refuses first.
+The probe source travels with the parent so its protocol cannot drift, while
+every import, hook and custody call exercises the installed runtime's own
+package. Proofs are minted by a module-private factory and tracked by identity.
+
+Portable tests use a real non-editable environment created from the test
+venv's interpreter: a fresh venv whose site-packages holds a copy of the
+package and the packaged `.pth` bootstrap lines, with the test venv's
+site-packages as a path line for dependencies. The native boundary is the
+file-backed P-256 module `tests/_windows_proof_runtime.py`, selected through
+the guarded test variable. Cases cover the bound happy path, constructor and
+copy refusal, unenrolled and pending custody before launch, override failure
+without fallback, running/unknown inventory before the child, every malformed,
+oversized, extra-output, wrong-digest, wrong-custody, outside-root,
+helper and non-zero report, timeout, custody change during the child,
+missing bootstrap, locks held, and the injection scrub.
+
+### Windows proof-bound memory lifecycle (C5b-2)
+
+The lifecycle lives beside the checked storage in `keyvault/_memory_storage.py`
+and shares one receipt-reporting helper with ordinary memory publication. Plan
+first, mutate second: classify and authenticate the complete bounded inventory,
+validate staging leftovers and build every replacement in RAM before the first
+write, so refusals leave files and markers untouched. Convert through the C1
+create-no-replace sibling and atomic checked replacement, because confidential
+transactions expose no rename and a no-replace rename cannot replace a file.
+Markers transition last under the still-held custody locks after the proof and
+gateway gate are checked again. No installed-runtime or Python subprocess runs
+under lifecycle locks; native CNG helper operations remain under lifecycle
+locks as c5-design allows. `pending_lifecycle_siblings` lets C6 status report
+interrupted staging without mutating it. Purge verification is a load-only report; the
+native purge remains C5e/C5a work driven by C6.
+
+Tests use real proofs from the installed-runtime child and fault injection at
+the checked primitives: sibling create, publish, read-back verify, sibling
+cleanup, opt-out or marker removal and marker or opt-out creation, each followed
+by a coherence check (original plaintext or authenticated seal, markers never
+both) and a successful rerun. Stale epoch, wrapper and generation, another
+profile, copied or expired proofs, running or unknown gateways, forged seals,
+broken seals, impersonating plaintext, orphan siblings, marker exclusivity,
+purge reports and a fresh-process read through `windows_memory_session` are
+covered; `test_windows_memory_proof_live.py` is the gated real-CNG recipe.
+
+### Windows extension checked state (C10a)
+
+`extension/_windows_storage.py` owns the Windows branch: a per-thread reusable
+session holding one `_private_fs` transaction on `<home>/extension`
+(`open_private_directory(create=True)` for mutations,
+`open_optional_private_directory` for reads), identity-bound `read`/`write`/
+`delete` with per-file bounds, and content-free `ExtensionStorageError` /
+`ExtensionStorageUncertain` classification (session publication promotes later
+refusals). `pairing._ext_dir`, `_write_private`, `_read_json`,
+`_read_json_strict`, `_state_lock`, the attestation loader, the `state.json`
+cache, `clear_pairing` and the pair-result bookkeeping branch on
+`_windows_storage.enabled()`; `webauthn` re-raises storage refusals from its
+fingerprint and legacy-binding paths and uses checked removal; `history`
+persists the unchanged envelope through the session; the wallet snapshot
+fingerprint uses a checked stat. `api` surfaces the classified code
+(`pair_fail`, `auth_fail`, `error`, fail-closed `auth_challenge`) and `errors`
+maps both classes for chat/wallet contexts. POSIX code paths are untouched.
+
+TDD covers checked round trips, checked absence without creation, unreachable
+POSIX helpers and raw path APIs, unsafe directories and files (broadened,
+hard-linked, oversized) refusing every operation without repair, corrupt and
+truncated state, lost/unsafe attestation keys, identity-keyed cache
+revalidation, uncertain publication and cleanup, missing-lock and cleanup
+errors that are not absence, API surfacing, the wallet fingerprint, and
+cross-process races (two consumers of one code, revoke versus consume, replay
+claims, commit versus reader). `tests/extension/test_extension_windows_storage.py`
+runs on every host (POSIX descriptor-relative backend beneath the same calls)
+and in the scoped Windows CI job with the native backend;
+`tests/extension/test_extension_windows_storage_native.py` adds inherited and
+broadened ACLs, hardlinks, a junction and a lock held by another process.
+Native source/wheel acceptance is a controller gate.
+### Windows Telegram custody and archive (C10b)
+
+Contract: SPEC.md §Windows Telegram credential custody and checked archive
+(C10b). Scope is `extension/telegram/` only: new `windows_secrets.py`
+(`WindowsCustodySecretStore`, `forget_telegram`) and `_windows_archive.py`
+(checked directory admission, bounded reads, staged publication, sync lock,
+validated wipe plan), plus win32 dispatch in `store.py`, the
+`tee.default_secret_store()` seam used by `service.py` and `hermes_tools.py`,
+and fail-closed guards for the raw POSIX directory helper and the file-vault
+store. `tee.py` shares its MTC1 pack/unpack and metadata builders with the
+Windows store (byte-identical macOS/Linux behavior). No keyvault, wizard,
+Desktop, pairing or history change; the C5a/C5e role API sufficed.
+
+The sync lock lives in a dedicated `telegram/sync-lock` directory because
+private transactions are thread-bound and the sync spans asyncio worker
+threads: holding the data directory's own lock for a whole sync would block
+every status read and archive write. Wipe nests telegram then dialogs (the
+global order; no writer takes them in reverse) so the whole plan is validated
+before the first deletion. Archive I/O never takes the canonical home/mordred
+locks; credential I/O always does, which serializes read-modify-write.
+
+Validation: portable `test_windows_telegram_custody.py` and
+`test_windows_telegram_archive.py` use real checked transactions, MRKW and
+MTC1/MTG1 crypto with an injected native backend, SID and platform admission;
+POSIX mode/symlink/copied-tree stand-ins skip on Windows. Host-skipped
+`test_windows_telegram_native.py` covers an inherited-safe home and its case
+alias, an inherited (non-private) telegram directory, a broadened sealed-file
+ACL, a hardlinked archive file, a dialogs junction and a sync lock held by
+another process. `test_windows_telegram_live.py` is the gated real-CNG recipe
+on a fresh UUID profile with synthetic credentials and archive. All but the
+live module join the scoped Windows CI job. Remaining gates: the wizard
+telegram enrollment/login/logout routing (C6-telegram), Desktop adoption of
+the seam and presence opt-out (C11), the live account gate and Windows 11.
+### Windows wizard routing and ceremonies (C6)
+
+The wizard-only slice consuming C5; SPEC.md §Windows dedicated custody and
+memory lifecycle (subsection "Windows wizard routing, ceremonies and uninstall
+(C6)") freezes the command name, ordering and remedies. New modules keep the
+existing files near their size: `wizard/_windows_gates.py` (reason/remedy
+vocabulary, the `host_platform()` seam and the excluded/unported refusals that
+call C5e's guards), `wizard/keyvault_windows_cli.py` (`keyvault native init`
+and the reusable `enroll_roles`), `wizard/_windows_memory.py` (enable/disable/
+purge orchestration, load-only `observe`, proof interpreter routing),
+`wizard/_windows_status.py` (status, encryption-status and setup lines) and
+`wizard/_uninstall_windows.py` (uninstall plan/restore/purge/kept report).
+Existing entry points only route: `memory_cli.enable/disable/purge` on `win32`,
+`runtime_gate`'s `win32` branch (memory caller only, no bypass),
+`encryption_cli` status/dispatch/`all`, `status_cli`, `setup_cli`,
+`uninstall_cli`, and first-statement guards in `_vault_lifecycle`,
+`_vault_open`, `env_decrypt_cli`, `config_decrypt_cli` and the keyvault-init
+preflight. The wizard never writes Windows memory files or markers.
+
+Tests are portable and reuse the proof slice's harness (real installed-runtime
+child, real checked files, MRKW and AES-GCM; injected CNG boundary, principal
+and platform admission): `test_wizard_windows_memory.py` (ceremony on fresh,
+managed, copied, retained-marker, helper-less and failing-native homes; enable
+end-to-end through the CLI with a fresh-process read; a refusal at each step —
+capabilities, force flag, gate, ceremony, proof, lifecycle before and during
+mutation — leaving state untouched or coherent; disable; purge refusals and
+success after disable; launcher routing), `test_wizard_windows_status.py`
+(every capability and memory state, retained secret store and excluded
+artifacts, copied profile, held lock, no native call, setup steps),
+`test_wizard_windows_excluded.py` (call accounting for vault/env/config/keyvault
+init refusals, runtime gate, `all`), `test_wizard_windows_uninstall.py` (plan,
+restore, purge-data, gate/proof refusals, erase refusal) and the host-skipped
+`test_wizard_windows_native.py`. `test_wizard_windows_memory_live.py` is the
+gated real-CNG recipe (ceremony -> enable -> fresh installed-runtime read ->
+status -> disable -> purge on a fresh UUID profile). Telegram setup/logout
+(C10b), the audit CLI (C7b part 2), Desktop launcher routing (C11), explicit
+journal reconciliation and checked recursive cleanup remain separate slices.
+
+Review fix round 1 keeps the module layout: `_uninstall_windows.restores`
+takes the `--purge-data` flag (inert custody gets the disable restore) and
+`restore_step` folds the memory purge into step a, so `uninstall_cli._execute`
+reaches step b only after the purge succeeded; `purge_warning` derives the
+confirmation text from the plan's step 5. `keyvault_windows_cli.CUSTODY_NOTICE`
+is the single notice text for the ceremony and the enable ceremony step.
+`keyvault_cli.reset_keyvault` starts with the unported secret-store refusal.
+Tests: inert-custody uninstall plan/dry-run, no-purge, end-to-end purge and
+refusals (proof child, broken seal, reset) leaving Hermes files, launchers and
+the package untouched; notice assertions for ceremony, enable and setup; the
+`keyvault reset` tripwire; `classify_exception` against C5e's classification;
+and a frame-filtered spy proving no wizard frame opens, writes, renames or
+unlinks anything under the home during enable/disable/purge.
+
+### Windows wizard Telegram ceremony (C6-telegram)
+
+Contract: SPEC.md §Windows wizard Telegram ceremony (C6-telegram). Scope is the
+wizard only: the `telegram` role row in `wizard/keyvault_windows_cli.py`
+(`NativeRole`, `NATIVE_ROLES`, `_CAPABILITY_FOR`), the `--role` choice and the
+`--acknowledge-machine-bound` flag of `telegram setup`/`login` in
+`wizard/_cli_parsers.py`, win32 routing in `wizard/telegram_cli.py` and
+`wizard/telegram_setup_cli.py`, and the new `wizard/_windows_telegram.py`
+(custody capability to C10b code mapping, the disclosure and acknowledgement,
+the C6 memory predicate and `TelegramService` guard, checked state observation
+for logout/forget/doctor, the forget plan, typed confirmation and outcome
+lines, and the Windows message table). No extension, keyvault or Desktop
+source changes; `wizard/_windows_gates.py` keeps its C6 wording.
+
+Tests: portable `test_wizard_windows_telegram.py` builds on the C10b fixture
+(real checked transactions, MRKW, MTC1/MTG1 and the real custody store and
+archive, with the native backend, SID, helper and platform decisions
+injected) and on the C6 proof harness for one real Windows memory enable. It
+covers the ceremony (`--role telegram` only, rerun, helper refusal), setup on
+fresh, enrolled, declined, copied, orphan-journal and helper-less homes, the
+acknowledgement order, login refusals without enrollment or acknowledgement
+with zero backend calls, `require_presence=False` only after the
+acknowledgement, the checked orphan-archive wipe under a raw-scan tripwire,
+a parametrized message per classified code, venice/local-llm without a
+presence request, the sync memory guard, logout (archive, credentials and
+role kept), forget (typed confirmation, corrupt credentials, busy refusal,
+missing helper, ambiguous deletion journal, unconfigured profile, memory and
+audit kept decryptable), the load-only doctor and the migrate-tee tripwire.
+`test_wizard_windows_telegram_native.py` (host-skipped) repeats the ceremony,
+login/logout/forget, doctor and copied-home refusal on NTFS with the real
+platform decision; `test_wizard_windows_telegram_live.py` is the gated
+real-CNG recipe. Both portable and native modules join the scoped Windows CI
+job. Remaining: a wizard reconciliation verb, Windows routing of the
+extension memory guard (Hermes tools, Desktop, extension server), Desktop
+login (C11), the live account gate and Windows 11.
+
+Review fix round 1 (rulings R-C6T-1..3): Windows plain logout keeps the
+archive exactly like macOS/Linux (only `--forget` wipes it, and
+`store_undecryptable` now points to `logout --forget` then setup). `--forget`
+loads the credentials before the typed confirmation, runs
+`wipe_archive(forget=True)` (with the C10b preflight inside) before revoking
+the in-memory session, revokes only once the credentials are re-checked as
+deleted, and prints the re-checked deleted/still-present lines also after a
+partial failure. Sealed credentials without a role are reported as
+`credentials_without_custody` (remedy `logout --forget`) by logout, login,
+venice/local-llm and setup, which then offers no ceremony. Orphan detection
+also lists `dialogs/*.enc` through the checked transaction; the disclosure
+drops the memory-only sentence; the Windows setup completion text lists only
+`sync`/`status`/`doctor`. New portable tests cover the kept archive, the
+preflight refusal leaving the session untouched, revocation after deletion
+with an unreachable Telegram, role-less credentials (logout, login, venice,
+setup and forget with the warning before the confirmation), broken and
+uncertain custody on logout/forget, and orphaned segments without an index.
+
+Review fix round 2: forget treats a load that read a sealed file as proof the
+credentials existed, so a failing `flags()` read (a transient `store_busy`, or
+metadata over the 16 KiB bound that the C10b wipe deletes unread) can no
+longer skip the revocation or drop the credentials from the deleted list;
+`archive_present` uses the C10b 40-hex segment leaf rule; a parametrized test
+pins the wizard's store-error mapping to `store._store_error`.
+### Windows Desktop and extension server (C11)
+
+The Desktop/extension slice consuming C4-C6 and C10; SPEC.md §Windows Desktop
+integration and extension server shutdown (C11) freezes the wire shapes. New
+modules keep `desktop/api.py` close to its size: `desktop/_windows.py`
+(status payload, C4 helper state, load-only memory summary, C5c typed gateway
+inventory, the composed C6 memory enable/disable steps with step/reason
+refusals, the Desktop proof routing, Telegram custody/acknowledgement gating,
+the `NoPresenceStore` wrapper and Windows logout/forget) and
+`desktop/_windows_assets.py` (checked placement, enumerated removal and
+status of the page and API shim). `api.py` only routes `win32` (status with
+`client_version >= 3`, `/hardware/build`, `/memory/enable`, the new
+`/memory/disable`, `/memory/status` and `/telegram/logout`, login and
+question-model gating, the import service's memory guard) and uses
+`default_secret_store()` on every platform. `install.py` routes placement,
+removal and status through `_platform()`. `extension/__main__.py` gains
+`_install_stop_handlers` (POSIX `add_signal_handler`, else `signal.signal`
+for `_stop_signals()` with `_threadsafe_stop`) and `_bind_failure`
+(port-in-use / port-forbidden / bind-failed). `plugin.js` adds the Windows
+page (capability list, helper, memory acknowledgements, Telegram custody,
+logout) and code-keyed labels.
+
+Tests are portable and reuse the proof slice's harness through the C6
+fixtures: `tests/test_desktop_windows_api.py` (old/new client status, no
+aggregate, no subprocess or native call, capability failure, helper states,
+acknowledgements, the enable sequence end-to-end, a refusal at every step,
+partial lifecycle failure and rerun, symmetric disable, typed inventory with
+unknown propagation, serialization, proof routing, Telegram role and
+acknowledgement gating, the store seam, the import memory guard,
+logout/forget, macOS/Linux never routed), `tests/test_desktop_windows_install.py`
+(checked placement with a frame-filtered raw-I/O spy, idempotence, enumerated
+removal, unsafe refusal without repair, legacy page, wizard step never raising),
+`tests/test_desktop_windows_page.py` (`node --check`, explicit label tables,
+no text-matched readiness) and `tests/extension/test_extension_serve_shutdown.py`
+(7799 start/stop/port release/restart with CTRL_BREAK or SIGTERM, Ctrl-C, the
+`signal.signal` fallback under a loop without `add_signal_handler`, classified
+bind failures, busy port without fallback). `tests/test_desktop_windows_native.py`
+is host-skipped NTFS placement and status; `tests/test_desktop_windows_live.py`
+is the gated real-CNG Desktop API recipe. Wizard Telegram ceremonies
+(C6-telegram), the real packaged Desktop launch and Windows 11 remain separate
+gates.
+
+C11 review round 1 keeps the layout and adds `desktop/_capture.py` (one
+re-entrant process-wide capture lock; a per-thread stream keeps only the
+capturing thread's text and passes other threads through). `_windows.py` gains
+`helper_from_predicates`, `memory_refusal` (busy-aware guard) and the
+write-approval warning; `api.py` checks the forget phrase and routes every
+capture through `_capture`; `extension/__main__.py` bounds the stop
+(`_bounded_stop`, `_cancel_remaining`). Tests: the shutdown module's `servers`
+fixture kills and reaps every child (and the redirected Windows interpreter),
+then requires 7799 free; a connected HTTP keep-alive client and an open
+WebSocket at shutdown; the forget phrase, predicate-only helper status with an
+`is_owned` tripwire, `custody_busy` with a real cross-process lock holder, the
+approval warning, `disabled-incomplete`, unknown `found`, an end-to-end enable
+proving `sys.executable`, `tests/test_desktop_capture.py`, the logged refused
+placement and a native absent-folder case through C11 code.
+
+C11 integration follow-up: expose the C6 ceremony from PR #222 as
+`TELEGRAM_CEREMONY_COMMAND` without importing or duplicating wizard ceremony
+code. Preserve the complete snapshot when ordinary logout calls the real
+Windows store's `update_from_snapshot`; the unchanged seal costs one unwrap.
+For forget, use the existing C6 load-only `observe`/`outcome_lines` APIs
+around the C10b checked wipe. A loaded snapshot proves credentials existed
+even when pre-wipe metadata cannot be read. Only checked absence after wipe
+permits remote revocation; retained credentials do not revoke, and unknown
+state returns manual Devices advice. Return the original failure code with
+checked partial outcomes, and retain those outcomes and remedies in the
+Desktop component across status refresh, disabling logged-out controls.
+Corrupt or role-less credential refusals point to the existing CLI forget
+recovery; Desktop destructive recovery parity remains a separate gap.
+
+R-C11-6 aligns Desktop forget with R-C6T-2 (checked wipe before remote
+revocation); the cost is manual Settings → Devices revocation if Telegram
+cannot be reached after local deletion. R-C11-5 accepts the existing
+all-platform listener stop, 3-second handler grace and remaining task
+cancellation after an open WebSocket delayed SIGTERM about 46 seconds.
+POSIX in-flight connections can now be cancelled after the grace and may
+need reconnect/retry. This does not bound interpreter exit: an existing chat
+executor thread can outlive its cancelled asyncio task (the isolated worker
+probe returned from `_run_forever` around 3.21 seconds and exited after its
+12-second worker finished). Bound worker lifecycle in a separate follow-up.
+
+Post-wipe `observe` credential absence is additionally corroborated through
+the shared checked archive transaction and `credentials.sealed` presence.
+Valid non-object metadata can make shared `flags()` report `None` while the
+seal remains; a failed presence read remains unknown, never permission to
+revoke. This is Desktop-only corroboration; the shared flags contract is a
+separate follow-up, without extension or C6 product edits in this slice.
+
+### Windows shared Telegram memory guard execution (C10c)
+
+Scope: the extension Telegram memory guard, its regression tests, the Windows
+CI selector and append-only contract/validation notes. Both public interfaces
+share one classified decision. Windows takes a nonblocking canonical policy
+session before C6's existing observer and status projection, preserving busy
+classification before the advisory projection can erase it; POSIX retains
+the marker-based status reader. No Desktop implementation is imported.
+
+Portable tests build real C6 proof-bound empty and populated memory with
+checked custody, MRKW and AES-GCM, then forbid native, unwrap, enrollment,
+proof and process operations during the guard. Unsafe-state tests cover
+unmanaged/inert custody, opt-out, broken seals, staging, plaintext drift,
+missing helper and unreadable scans. A separate interpreter holds the real
+canonical lock while the actual shared service and Hermes tools preserve
+`custody_busy` before secret, archive or network access. Cleanup failure and
+single-scan checks guard the decision boundary. Existing POSIX guard tests
+pin their platform seam explicitly, including when run on native Windows.
+
+Native Windows source/wheel reruns, a real Telegram account and Windows 11
+acceptance remain independent completion gates.

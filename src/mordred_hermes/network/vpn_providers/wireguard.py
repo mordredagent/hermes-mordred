@@ -14,7 +14,10 @@ under ``strict`` policy — it is meant for ``lenient`` / ``off`` use, where
 any VPN is fine. Mullvad remains the strict-capable default.
 
 Platform: macOS + Linux (wherever ``wg-quick`` runs). Subprocess I/O goes
-through the injectable runner so tests never touch a real interface.
+through the injectable runner so tests never touch a real interface. Native
+Windows is not ported (the tunnel service needs administrative installation
+and a separately validated route): every entry point refuses with
+``not-ported-on-windows`` before any subprocess and ``health`` is unhealthy.
 """
 
 from __future__ import annotations
@@ -23,13 +26,14 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 from .._exceptions import BringupFailed
-from ..paths.vpn import DEFAULT_MAX_HANDSHAKE_AGE_SECONDS, parse_handshake_age
+from ..paths.vpn import DEFAULT_MAX_HANDSHAKE_AGE_SECONDS, parse_handshake_age, refuse_on_windows
 from .base import DEFAULT_RUNNER, PolicyMode, SubprocessRunner, VpnCapabilities
 
 __all__ = ["WireGuardHandle", "WireGuardProvider", "wireguard_install_guidance"]
@@ -75,6 +79,7 @@ class WireGuardProvider:
         self._exists = exists
 
     def detect_cli(self, *, which: Callable[[str], str | None] = shutil.which) -> str:
+        refuse_on_windows("wireguard detection")
         path = which("wg-quick")
         if not path:
             raise BringupFailed(f"wg-quick not installed. {wireguard_install_guidance()}")
@@ -92,6 +97,7 @@ class WireGuardProvider:
         # is enforced upstream in the runtime. region / policy_mode do not
         # apply here.
         del region, policy_mode
+        refuse_on_windows("wireguard bring-up")
         if not self._config_path:
             raise BringupFailed(
                 f"wireguard provider selected but no config path is set. {wireguard_install_guidance()}"
@@ -115,6 +121,7 @@ class WireGuardProvider:
         # interface is configured. Handshake liveness is the health
         # probe's job, mirroring the Mullvad path.
         del cli_path, runner
+        refuse_on_windows("wireguard status wait")
 
     def disconnect(
         self,
@@ -125,6 +132,7 @@ class WireGuardProvider:
     ) -> None:
         # No kill-switch to preserve for generic WireGuard.
         del preserve_lockdown
+        refuse_on_windows("wireguard teardown")
         try:
             result = runner(
                 (handle.wg_quick_path, "down", handle.config_path),
@@ -145,6 +153,8 @@ class WireGuardProvider:
         # after the config basename (``/etc/wireguard/wg0.conf`` -> ``wg0``).
         # Any subprocess failure (incl. ``wg`` missing) is coerced to
         # unhealthy so the liveness worker records the path as down.
+        if sys.platform == "win32":
+            return False
         interface = Path(handle.config_path).stem
         try:
             result = runner(

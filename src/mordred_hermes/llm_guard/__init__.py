@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -46,6 +47,7 @@ from .._proxy_bypass import ensure_loopback_proxy_bypass
 from . import auxiliary_guard, enforce, harness_detect, local_adapter
 from ._exceptions import MordredLocalUnreachable, MordredSessionRefused
 from ._typing import PluginContext
+from ._windows_policy import guarded_audit_factory, read_decision
 
 if TYPE_CHECKING:
     # Type-only import — keeps :func:`register` cheap and side-effect-free by
@@ -108,12 +110,13 @@ def register(ctx: PluginContext) -> None:
 
 def _on_session_start_harness(**_kwargs: Any) -> None:
     """First callback — harness detection (PR1)."""
-    policy_mode = _read_policy_mode(DEFAULT_POLICY_JSON_PATH)
-    audit = _build_audit_writer(DEFAULT_AUDIT_PATH)
+    policy_mode = "lenient" if sys.platform == "win32" else _read_policy_mode(DEFAULT_POLICY_JSON_PATH)
+    audit = guarded_audit_factory(_build_audit_writer, DEFAULT_AUDIT_PATH)
     harness_detect.check_harness_primary(
         policy_mode=policy_mode,
         config_path=DEFAULT_CONFIG_PATH,
         audit=audit,
+        **({"policy_json_path": DEFAULT_POLICY_JSON_PATH} if sys.platform == "win32" else {}),
     )
 
 
@@ -148,19 +151,33 @@ def _on_session_start_enforce(**_kwargs: Any) -> None:
     Authoritative refusal happens at :func:`_on_pre_api_request_enforce`
     where the actually-resolved runtime provider is known.
     """
-    local_adapter.register_mordred_local(policy_json_path=DEFAULT_POLICY_JSON_PATH)
-    policy_mode = _read_policy_mode(DEFAULT_POLICY_JSON_PATH)
-    audit = _build_audit_writer(DEFAULT_AUDIT_PATH)
-    active_provider = _resolve_active_provider(
-        auth_json_path=DEFAULT_AUTH_JSON_PATH,
-        config_path=DEFAULT_CONFIG_PATH,
+    decision = read_decision(DEFAULT_POLICY_JSON_PATH, DEFAULT_CONFIG_PATH)
+    local_adapter.register_mordred_local(
+        policy_json_path=DEFAULT_POLICY_JSON_PATH,
+        **({"_decision": decision} if decision is not None else {}),
     )
+    policy_mode = decision.mode if decision is not None else _read_policy_mode(DEFAULT_POLICY_JSON_PATH)
+    audit = guarded_audit_factory(_build_audit_writer, DEFAULT_AUDIT_PATH)
+    if decision is not None:
+        model = decision.config.get("model")
+        raw_provider = model.get("provider") if isinstance(model, dict) else None
+        active_provider = (
+            canonicalize_provider(raw_provider)
+            if isinstance(raw_provider, str) and raw_provider.strip() and raw_provider.strip().casefold() != "auto"
+            else None
+        )
+    else:
+        active_provider = _resolve_active_provider(
+            auth_json_path=DEFAULT_AUTH_JSON_PATH,
+            config_path=DEFAULT_CONFIG_PATH,
+        )
     try:
         enforce.check_session_provider(
             policy_mode=policy_mode,
             policy_json_path=DEFAULT_POLICY_JSON_PATH,
             active_provider=active_provider,
             audit=audit,
+            _decision=decision,
         )
     except MordredSessionRefused as e:
         _LOG.info(
@@ -204,14 +221,15 @@ def _on_pre_api_request_enforce(**kwargs: Any) -> None:
     # *that* URL, not the disk mirror.
     base_url = kwargs.get("base_url")
     runtime_base_url = base_url if isinstance(base_url, str) and base_url.strip() else None
-    policy_mode = _read_policy_mode(DEFAULT_POLICY_JSON_PATH)
-    audit = _build_audit_writer(DEFAULT_AUDIT_PATH)
+    policy_mode = "lenient" if sys.platform == "win32" else _read_policy_mode(DEFAULT_POLICY_JSON_PATH)
+    audit = guarded_audit_factory(_build_audit_writer, DEFAULT_AUDIT_PATH)
     enforce.check_runtime_provider(
         policy_mode=policy_mode,
         policy_json_path=DEFAULT_POLICY_JSON_PATH,
         active_provider=active_provider,
         audit=audit,
         runtime_base_url=runtime_base_url,
+        config_path=DEFAULT_CONFIG_PATH if sys.platform == "win32" else None,
     )
 
 
@@ -267,6 +285,9 @@ def _read_policy_mode(policy_json_path: Path) -> str:
     enforcement point, the one gate this plugin documents as impossible to
     bypass.
     """
+    decision = read_decision(policy_json_path)
+    if decision is not None:
+        return decision.mode
     return read_policy_mode_fail_closed(policy_json_path, default=_DEFAULT_POLICY_MODE, log=_LOG)
 
 

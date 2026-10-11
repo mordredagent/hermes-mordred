@@ -12,8 +12,10 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from mordred_hermes._private_fs import open_private_directory  # noqa: E402
 from mordred_hermes.desktop import api, install  # noqa: E402
 from mordred_hermes.extension.telegram import secrets  # noqa: E402
+from tests._private_files import write_private  # noqa: E402
 
 SECRET_HASH = "cd" * 16
 SECRET_CODE = "54321"
@@ -75,11 +77,16 @@ def env(monkeypatch, tmp_path):
 
     store = _Store()
     client = _Client(needs_password=True)
+    home = tmp_path / "hermes-home"
+    with open_private_directory(home, create=True):
+        pass
+    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="darwin"))
     monkeypatch.setattr(api, "_store", lambda: store)
     monkeypatch.setattr(
         api, "_FLOWS", LoginFlows(store, client_factory=lambda *a, **k: client, save_session=lambda c: c.session)
     )
-    monkeypatch.setattr(api, "_home", lambda: tmp_path)
+    monkeypatch.setattr(api, "_home", lambda: home)
+    monkeypatch.setattr(api, "_JOBS", {})
     monkeypatch.setattr(
         "mordred_hermes.extension.telegram.memory_guard.memory_encryption_active", lambda home=None: True
     )
@@ -90,7 +97,19 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "hermes_model_check", model_ok)
     app = FastAPI()
     app.include_router(api.router, prefix="/api/plugins/mordred")
-    return SimpleNamespace(http=TestClient(app), store=store, client=client, tmp=tmp_path)
+    # Background jobs must share a persistent event loop across requests.
+    with TestClient(app) as http:
+        yield SimpleNamespace(http=http, store=store, client=client, tmp=home)
+
+
+@pytest.fixture
+def posix_install(monkeypatch, tmp_path):
+    """Legacy recursive-removal contract; real Windows placement has its own tests."""
+    home = tmp_path / "hermes-home"
+    with open_private_directory(home, create=True):
+        pass
+    monkeypatch.setattr(install, "_platform", lambda: "darwin")
+    return home
 
 
 def _post(env: Any, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -147,10 +166,11 @@ def _configured(env) -> None:
 
 def test_venice_uses_hermes_key_without_returning_it(env):
     _configured(env)
-    (env.tmp / "config.yaml").write_text(
-        "model:\n  base_url: https://api.venice.ai/api/v1\n  key_env: HERMES_CUSTOM_API_VENICE_AI_API_KEY\n"
+    write_private(
+        env.tmp / "config.yaml",
+        b"model:\n  base_url: https://api.venice.ai/api/v1\n  key_env: HERMES_CUSTOM_API_VENICE_AI_API_KEY\n",
     )
-    (env.tmp / ".env").write_text(f"HERMES_CUSTOM_API_VENICE_AI_API_KEY={SECRET_VENICE}\n")
+    write_private(env.tmp / ".env", f"HERMES_CUSTOM_API_VENICE_AI_API_KEY={SECRET_VENICE}\n".encode())
     result = _post(env, "/llm/venice", {"use_hermes_key": True})
     assert result == {"ok": True}
     assert env.store.value.venice_api_key == SECRET_VENICE and env.store.value.backend == "venice"
@@ -212,36 +232,41 @@ def test_sync_validates_days(env):
     assert _post(env, "/sync", {"days": True}) == {"ok": False, "error": "invalid_request"}
 
 
-def test_install_writes_folder_and_enables_the_single_mordred_plugin(tmp_path):
+def test_install_writes_folder_and_enables_the_single_mordred_plugin(posix_install):
+    tmp_path = posix_install
     config = tmp_path / "config.yaml"
-    config.write_text(
-        "# keep\nplugins:\n  enabled:\n    - other\n    - mordred_e2e\n  disabled:\n    - mordred_keyvault\n"
+    write_private(
+        config,
+        b"# keep\nplugins:\n  enabled:\n    - other\n    - mordred_e2e\n  disabled:\n    - mordred_keyvault\n",
     )
     assert install.install(tmp_path) == 0
     folder = tmp_path / "plugins" / "mordred"
     page = tmp_path / "desktop-plugins" / "mordred" / "plugin.js"
     # The page goes through Hermes Desktop's disk door, which loads it enabled.
-    assert page.read_text().startswith("// Mordred setup for Hermes Desktop.")
+    assert page.read_text(encoding="utf-8").startswith("// Mordred setup for Hermes Desktop.")
     assert not (folder / "desktop").exists()
-    assert json.loads((folder / "dashboard" / "manifest.json").read_text())["name"] == "mordred"
-    assert "from mordred_hermes.desktop.api import router" in (folder / "dashboard" / "plugin_api.py").read_text()
+    assert json.loads((folder / "dashboard" / "manifest.json").read_text(encoding="utf-8"))["name"] == "mordred"
+    assert "from mordred_hermes.desktop.api import router" in (folder / "dashboard" / "plugin_api.py").read_text(
+        encoding="utf-8"
+    )
     # No plugin.yaml: the folder must not become a directory plugin that
     # shadows the `mordred` entry point (Hermes prefers a directory plugin).
     assert not (folder / "plugin.yaml").exists()
-    text = config.read_text()
+    text = config.read_text(encoding="utf-8")
     # Legacy per-component names are migrated to the single plugin; other entries survive.
     assert "# keep" in text and "- other\n" in text and "- mordred\n" in text
     assert "mordred_e2e" not in text and "mordred_keyvault" not in text
     assert install.status(tmp_path) == 0
     assert install.uninstall(tmp_path) == 0
     # The page goes; the plugin (every Mordred protection) stays enabled.
-    assert not folder.exists() and not page.parent.exists() and "- mordred\n" in config.read_text()
+    assert not folder.exists() and not page.parent.exists() and "- mordred\n" in config.read_text(encoding="utf-8")
 
 
-def test_ensure_page_is_idempotent_and_drops_the_legacy_desktop_half(tmp_path):
+def test_ensure_page_is_idempotent_and_drops_the_legacy_desktop_half(posix_install):
+    tmp_path = posix_install
     legacy = tmp_path / "plugins" / "mordred" / "desktop"
     legacy.mkdir(parents=True)
-    (legacy / "plugin.js").write_text("old")
+    (legacy / "plugin.js").write_text("old", encoding="utf-8")
     assert install.ensure_page(tmp_path) is True
     assert not legacy.exists()
     assert (tmp_path / "desktop-plugins" / "mordred" / "plugin.js").is_file()
@@ -266,9 +291,10 @@ def test_plugin_register_places_the_page(tmp_path, monkeypatch):
     assert calls == [None]
 
 
-def test_install_creates_a_missing_config(tmp_path):
+def test_install_creates_a_missing_config(posix_install):
+    tmp_path = posix_install
     assert install.install(tmp_path) == 0
-    assert "- mordred\n" in (tmp_path / "config.yaml").read_text()
+    assert "- mordred\n" in (tmp_path / "config.yaml").read_text(encoding="utf-8")
 
 
 def test_login_refused_until_hermes_itself_uses_a_private_model(env, monkeypatch):

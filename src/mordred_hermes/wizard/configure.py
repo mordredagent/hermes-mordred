@@ -35,7 +35,7 @@ import argparse
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Final, Literal, Protocol
 
 from mordred_hermes.network.provider_transport_flagger import KNOWN_PROVIDERS
@@ -61,7 +61,7 @@ from ._prompt_io import (
 from ._prompt_io import (
     _RefusingPromptIO as _RefusingPromptIO,
 )
-from .policy_writer import PolicySnapshot, PolicyWriter, _preserve_provider_overrides
+from .policy_writer import PolicySnapshot, PolicyWriter, _preserve_provider_overrides, _windows
 
 #: Cloud providers offered as checkbox choices for the allowlist prompt.
 #: Sourced from the network flagger's canonical registry so the wizard and the
@@ -446,6 +446,13 @@ def run(
             _term.emit_warn(f"`hermes setup` exited with code {rc}; continuing with Mordred prompts anyway")
 
     result = collect_answers(prompt_io)
+    if _windows():
+        # Prompts never resolve this operator-owned field. Read it only inside
+        # the owning update so a concurrent committed override cannot be lost.
+        snapshot = policy_writer.resolve_and_write(
+            lambda existing: replace(result.snapshot, provider_overrides=existing.get("provider_overrides", {}))
+        )
+        return ConfigureResult(snapshot=snapshot)
     # ``provider_overrides`` is an operator-managed policy.json extension,
     # not a wizard prompt. Carry it into the resolved snapshot before writing
     # so interactive configure cannot erase it (or turn an invalid value into
@@ -499,6 +506,27 @@ def _read_existing_policy_inputs(policy_writer: PolicyWriter) -> dict[str, objec
     ``{}`` — the flags then fall back to the prompt defaults.
     """
     import json
+
+    if _windows():
+        from .._config_io import read_canonical_snapshot
+        from .._policy_io import policy_mapping_from_snapshot
+        from .._yaml_io import yaml_mapping_from_snapshot
+        from .policy_writer import _canonical_paths
+
+        pair = read_canonical_snapshot(
+            _canonical_paths(
+                policy_writer.config_path,
+                policy_writer.policy_json_path,
+                policy_writer.mordred_dir,
+            )
+        )
+        checked = policy_mapping_from_snapshot(pair)
+        root = yaml_mapping_from_snapshot(pair)
+        plugins = root.get("plugins")
+        guard = plugins.get("mordred_llm_guard") if isinstance(plugins, dict) else None
+        if isinstance(guard, dict) and isinstance(guard.get("harness_primary"), str):
+            checked["harness_primary"] = guard["harness_primary"]
+        return checked
 
     existing: dict[str, object] = {}
     try:
@@ -604,10 +632,16 @@ def cli_handler(args: argparse.Namespace) -> int:
             if setup_rc != 0:
                 _term.emit_warn(f"`hermes setup` exited with code {setup_rc}; continuing with Mordred flags anyway")
         writer = PolicyWriter()
-        result = snapshot_from_args(args, existing=_read_existing_policy_inputs(writer))
         try:
-            writer.write(result.snapshot)
-        except OSError as e:
+            if _windows():
+                snapshot = writer.resolve_and_write(
+                    lambda existing: snapshot_from_args(args, existing=existing).snapshot
+                )
+                result = ConfigureResult(snapshot=snapshot)
+            else:
+                result = snapshot_from_args(args, existing=_read_existing_policy_inputs(writer))
+                writer.write(result.snapshot)
+        except (OSError, ValueError) as e:
             _term.emit_error(f"hermes-mordred configure: failed to write policy: {e}")
             return 1
         print(_render_configure_summary(result.snapshot))

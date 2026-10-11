@@ -28,7 +28,8 @@ repair is complete; historical restoration details remain in Git.
 
 ## `ci.yml` details
 
-The workflow has eight jobs:
+The workflow has ten full-regression job definitions, plus event routing and
+draft critical feedback:
 
 1. **`test`** — Python/OS matrix; Ruff, shellcheck (one Linux cell), strict
    mypy, pytest, coverage, and the status-skill drift guard.
@@ -50,6 +51,14 @@ The workflow has eight jobs:
 7. **`tpmkey-helper`** — checks the Rust crate, locked dependencies, MSRV, and
    `tss-esapi` build.
 8. **`tpmkey-helper-tpm`** — runs the TPM backend against `swtpm` on Linux.
+9. **`windows-private-fs`** — scoped native ACL/path/publication/process tests on
+   Server 2022 with Python 3.11–3.13, plus an sdist-derived wheel smoke outside
+   the checkout. This is foundation coverage, not whole-Windows product support.
+10. **`winkey-helper`** — Windows native helper build and scoped helper tests.
+
+`ci-policy` routes known draft PR events to `critical-feedback`; all other
+events select the existing full regression jobs. Existing full job names and
+Python/OS matrices remain unchanged.
 
 Key policy:
 
@@ -65,6 +74,136 @@ Key policy:
 - Live LLM and Secure Enclave tests have no automated workflow. VPN is the only
   live-gated suite with a manual workflow.
 
+### Critical feedback and full regression
+
+For ordinary edits, run the critical preset plus the modules you changed:
+
+```sh
+uv run python tools/run_critical_tests.py
+uv run pytest -q tests/test_<affected>.py
+uv run python tools/run_critical_tests.py --list
+uv run python tools/run_critical_tests.py --dry-run
+```
+
+The preset uses exact existing node IDs, including individual parameter cases;
+missing nodes fail collection. It runs 19 cases on Linux and 20 on macOS or
+Windows, prints the slowest durations, and accepts `--junitxml <file>` for
+evidence. It excludes integration/live gates and selects real filesystem tests
+for the current platform, rather than counting skipped foreign-platform cases.
+No test assertions, security checks or test timeouts are changed.
+
+| Critical risk | Representative existing test coverage |
+|---|---|
+| Unsafe storage or stuck lock | Real checked roundtrip; permissions and symlink/junction/hardlink refusal; crashed lock-owner release; macOS ancestor ACL refusal |
+| Configuration uncertainty | Failed pair verification retains its marker; caught post-publication verification failure remains uncertain |
+| Custody loss or profile copy | Retained wrapper without manifest never regenerates; copied physical home refuses |
+| Memory transition/read failure | Real installed child and checked storage enable, fresh read, rerun, disable, retained key; existing test-only native backend |
+| Authentication or credential exposure | Unauthenticated commands refuse; page sessions cannot access credentials; sealed credentials without custody refuse |
+| Destructive logout ordering | Busy forget preserves local/remote state; successful forget wipes before remote revocation and preserves other roles |
+| Gateway availability | Connected clients stop within the existing bound; immediate restart on test port 7799 |
+| Plugin or policy admission | Installed entry point resolves; real component registration; refusal propagates; pending policy generation blocks cached allow |
+
+Passing this subset is feedback only. The full suite retains unselected
+parameter combinations, fault matrices, packaging builds, provider extras,
+compatibility floor, native helpers and platform gates. Security-sensitive
+changes still require the entire containing test modules and their relevant
+explicit live-device paths; a fast preset cannot establish hardware or product
+acceptance. After focused iterations, run one full regression at final
+integration/code freeze. Reports or documentation do not justify repeatedly
+rerunning unchanged broad suites.
+
+Draft PR CI runs critical feedback on Ubuntu, macOS and Windows with Python
+3.12. Repository-wide Ruff and strict typing run once on Ubuntu, alongside
+Linux shellcheck; the existing Unix status-skill drift guard is retained. This
+avoids duplicate static work and adds no Windows typing gate. A Linux step also
+tests CI routing and the runner itself. Failures remain red; distinct critical JUnit artifacts are
+uploaded even after failures. Draft green means critical feedback passed;
+full acceptance remains pending. This policy delays discovery of unselected
+regressions until the final review gate in exchange for faster iteration.
+
+Converting a PR to ready-for-review triggers the full regression. Open/reopen
+and subsequent commits to ready PRs run full CI; `dev`/`main` pushes and manual
+`workflow_dispatch` also run full CI, including coverage and all original
+Python/OS/native gates. A manual dispatch runs full CI even from a draft branch.
+Unexpected event data selects full regression conservatively. Do not mark a PR
+ready solely to claim that the critical subset was full validation.
+PR events have no path filter, so conversion to ready-for-review cannot miss
+the full gate because of the files changed. Branch pushes retain their existing
+source/documentation path filters, now also including `AGENTS.md`.
+
+Windows critical CI prepares a fresh checked home and `mordred` child under
+`USERPROFILE`, then exports `HERMES_HOME` before test collection. `RUNNER_TEMP`
+is broadly writable and is not admitted for this checked ambient profile.
+Unsafe existing namespaces refuse without ACL repair. Local callers supplying
+`HERMES_HOME` must likewise provide an admissible isolated home before imports;
+changing it inside a test cannot update paths already frozen at collection.
+
+Historical native JUnit estimates for this preset are roughly 56 seconds of
+recorded test time for Windows before setup and unmeasured auth/import cases;
+the comparable macOS testcase sum is roughly 10 seconds. These are planning
+estimates from selected existing cases, not promises about job wall time.
+Runner provisioning, dependency installation and static checks add overhead.
+
+### Focused batches and native test shards
+
+For an iteration, run the affected modules together first, for example:
+
+```sh
+uv run pytest -q tests/test_native_test_shards.py tests/test_hook_payload_drift.py --durations=10
+uv run ruff check tools tests
+uv run ruff format --check tools tests
+uv run mypy --strict tools
+```
+
+After the final implementation and focused checks, run one full default sweep
+when the change needs broader regression evidence (`uv run pytest -q`), then
+the required checks for the affected platform. Avoid repeating the full sweep
+between unchanged batches. Coverage floors, platform gates, live-device gates,
+hook-name membership, and every consumed-field assertion remain in force.
+
+`windows-private-fs` runs three separate GitHub runners for each Python version
+(3.11, 3.12, 3.13). `tools/run_native_test_shard.py` assigns whole modules using
+deterministic longest-processing-time balancing from
+`tools/native_test_durations.json`, preserving selector order within each shard.
+The complete 82-module selector stays in the named native test step so the
+external frozen-native harness can continue extracting it. No native modules,
+assertions, security locks, timeouts, or tests are removed. A module appears
+once per Python version, and wheel build/smoke runs on shard 1 of each version.
+`fail-fast: false` preserves the other shards' evidence after a failure; each
+pytest nonzero exit fails its runner. Per-version/per-shard JUnit artifacts are
+uploaded with `always()`, and pytest prints its slowest 20 durations.
+
+For local reproduction, invoke the runner with `--shard-index 1 --shard-count 3
+--junitxml native-1.xml` followed by the full selector from the workflow; repeat
+with indices 2 and 3 if testing the complete selector. Missing module weights
+use a visible nonzero one-second default, so new modules still run. Empty
+selectors, duplicates, invalid indices/counts, and malformed weights are errors.
+
+The initial measured weights sum native JUnit testcase seconds. They estimate
+930.156, 930.156, and 930.157 seconds per shard (about 15.5 minutes), excluding
+runner provisioning, installation, collection, fixture effects, and wheel smoke.
+These are scheduling estimates, not measured shard wall times or a measured
+speedup. Nine runners trade additional duplicated setup for lower latency; use
+future per-shard JUnit and job wall times to assess the actual result.
+
+The first full sharded run (`38014669836`, commit `5bf2b868d`) passed all nine
+Windows shards. Its slowest Windows job took 1112s (18m32s), compared with
+2826s (47m06s) for the earlier unsharded run: about 60.7% lower maximum job
+latency in this observed comparison. Summed Windows job wall times increased
+from 6952s to 8258s (about 18.8%), reflecting the runner/setup tradeoff; this
+is not a compute-saving claim or a controlled benchmark. Each Python version
+reported 2602 passed, 111 skipped, zero failures, with no duplicated node IDs.
+
+The installed-Hermes hook canary scans all Python sources owned by the
+`hermes-agent` distribution, including top-level modules outside `hermes_cli`,
+instead of recursively parsing unrelated site-packages. An incomplete wheel
+ownership manifest or unreadable owned source fails closed. Missing distribution
+metadata and source/editable installs emit a warning and use the original
+recursive source scan. The CLI's source-checkout scan is unchanged. Compare
+scanner outputs as well as elapsed time when assessing this optimization;
+one before/after run in the same environment is observational and may include
+cache effects.
+
 ## `integration-vpn.yml` details
 
 This workflow requires the `MORDRED_MULLVAD_ACCOUNT` repository secret and a
@@ -73,7 +212,692 @@ manual `mullvad_version` input. It installs the official daemon, runs
 disconnects and logs out in teardown. It never runs automatically because it
 uses a paid account and mutates runner network state.
 
+## Windows private filesystem validation gates
+
+Historical foundation gates restored from PR #191 at `5b848ca3b`. The
+approval, execution ownership and retained-host instructions describe the
+WF0–WF5 slice; its completed foundation evidence is retained in the dated
+manual log. Later validation sections and the Windows completion acceptance
+matrix govern subsequent slices. Restoration is documentation-only and
+records no new execution or current-candidate pass.
+
+The [WF0–WF5 plan](PLAN.md#windows-private-filesystem-implementation-plan) is
+approved as of 2026-10-08. WF0 assumption-probe evidence is recorded below;
+foundation execution and acceptance results are tracked in PR #192. Helper PR #190's 16 successful checks at `441083f61`
+are helper/regression evidence, not private-filesystem or whole-Windows acceptance.
+
+The scoped `windows-private-fs` job must use Server 2022 and Python
+3.11–3.13 with `.[dev,keyvault,extension]`. Its implementation and run evidence
+belong to the separate foundation PR. Native ACL/junction/lock/publication tests run there without a
+TPM. Separate faults injected into the binding layer from real native calls.
+The existing macOS/Linux suite, coverage floor and reduced-extras typing stay
+required. Do not turn the recorded Windows baseline failures into blanket skips.
+
+Actual-host acceptance uses the retained Server 2025 instance
+`i-00f4db5c3a204906b` in `ap-southeast-1`, a fresh synthetic test root and a
+credentialed ordinary-user process. Record token/elevation, Python/package
+location, commit/wheel hashes, NTFS volume, test commands/counts and fixture hashes.
+Provision adversarial ACL/junction/second-user fixtures separately from the
+ordinary-user assertions. Keep test credentials and existing private harness
+files out of repository changes and tool output. Leave TPM fixtures and Linux
+validation resources untouched; no additional instance/clone is required.
+
+Before starting compute, verify the retained host identity/state and install a
+bounded auto-stop deadline for this run. Use the existing SSM path without new
+inbound rules. After validation, stop compute and verify state; retain only the
+identified development host/storage and record residual resources. Reboot and
+stop/start persistence are not sudden power-loss proof. Do not modify production
+homes or request live Telegram/model credentials for this filesystem slice.
+
+Report independent outcomes for native ACLs and second-user exclusion, ancestor
+trust/reparse/hardlink refusal, process/thread locking and crash release,
+publication/held-target refusal, injected post-commit failure, out-of-checkout
+wheel use, and reboot/stop-start persistence. Any missing requested live gate
+stays not-run/failed; an elevated or mocked pass cannot replace it. Only record a
+new dated entry under the manual log after executing the corresponding checks.
+
+## Windows dedicated custody validation
+
+The scoped Windows job includes `test_windows_custody_profile.py` and
+`test_windows_custody.py`. These use real checked files and real MRKW crypto
+with an injected native P-256 boundary; they do not prove TPM availability.
+POSIX primitive fault-injection cases are skipped on Windows, where the
+foundation's native fault suite remains required.
+
+Real CNG validation is explicit: set `MORDRED_TEST_WINDOWS_CUSTODY_LIVE=1` and
+`MORDRED_WINDOWS_CUSTODY_TEST_ROOT` to an existing isolated retained task root,
+then run `uv run pytest -q -o addopts= -m integration
+ tests/test_windows_custody_live.py` (one command line). Use the installed
+wheel venv's Python for the corresponding out-of-checkout run. Each run creates
+a UUID profile, reports only its path, enrolls new independent memory/audit
+keys and deletes only those keys after checked verification. A failed run
+preserves its profile/journals for explicit reconciliation; never remove that
+fixture first or blindly regenerate after a native missing result. The real
+known-stopped gateway gate must pass before the live test creates keys.
+
+This slice does not arm memory, run an installed Hermes hook, exercise Telegram,
+provide excluded file-vault features, or establish Windows 11/product readiness.
+Record native results separately under the existing validation log.
+
+### Windows encrypted audit validation
+
+Scoped Windows CI also selects `test_windows_encrypted_audit.py`,
+`test_windows_encrypted_audit_processes.py` and
+`test_windows_encrypted_audit_windows.py`. These use real checked transactions
+and MRKW/MRAL crypto with an injected native P-256 boundary. Native hostile ACL,
+hardlink, junction and home-case-alias cases require actual Windows. This does
+not establish CNG or factory/CLI adoption.
+
+The controller runs `uv run pytest -q -o addopts= tests/test_windows_encrypted_audit.py
+ tests/test_windows_encrypted_audit_processes.py tests/test_windows_encrypted_audit_windows.py`
+(one command line), first against the source and then with the isolated
+sdist-derived installed wheel interpreter. Verify `mordred_hermes.__file__`
+selects that wheel before claiming wheel coverage; the tests/helper modules
+remain importable but source `src/` must not shadow the installed package.
+
+Optional actual-CNG acceptance requires BOTH `MORDRED_TEST_WINDOWS_AUDIT_LIVE=1`
+and `MORDRED_WINDOWS_AUDIT_TEST_ROOT` pointing to an already existing isolated
+retained task root. Run `uv run pytest -q -o addopts= -m integration
+ tests/test_windows_encrypted_audit_live.py` (one command line), then the
+corresponding installed-wheel interpreter. The real known-stopped inventory gate
+runs before enrollment. Each invocation creates its own UUID audit-only profile,
+checks parent/fresh-process writes and retained-generation decrypt, verifies the
+complete known fixture history, then deletes only those newly enrolled roles
+and checked logs. It logs only the fixture path and nonsensitive pass/fail output.
+Failure preserves the profile/journals for reconciliation; do not erase it or
+regenerate missing native keys. No existing fixture, production home, unknown
+custom history, memory role or recursive tree is deleted. This worker's local
+run leaves the gate skipped; native results must be recorded by the controller.
+
+### Windows privacy audit routing validation (C7b)
+
+Scoped Windows CI also selects `test_windows_privacy_audit.py` and
+`test_windows_privacy_audit_windows.py`. The first uses real custody, canonical
+coordination, C7a sessions and MRKW/MRAL with an injected native P-256 boundary
+and covers every factory decision, sticky refusal and hook/install wiring. The
+second needs actual Windows: inherited-safe home plaintext publication without
+ACL repair, broadened active ACL, inherited custom directory and junction
+refusals. Neither establishes CNG, wizard CLI or product acceptance.
+
+The controller runs `uv run pytest -q -o addopts= tests/test_windows_privacy_audit.py
+ tests/test_windows_privacy_audit_windows.py` (one command line) against the
+source, then with the isolated sdist-derived installed wheel interpreter after
+verifying `mordred_hermes.__file__` selects that wheel. Live CNG for a managed
+role reuses the C5d audit live gate above; this slice adds no new live test.
+Record native results in the validation log below.
+
+### Windows wizard audit CLI validation (C7b part 2)
+
+Scoped Windows CI also selects `test_wizard_windows_audit_cli.py` and
+`test_wizard_windows_audit_cli_native.py`. The first reuses the C7b part-1 host
+fixture (real custody, canonical coordination, C7a sessions and MRKW/MRAL with
+an injected native P-256 boundary) and covers every verb's routing, refusal and
+call accounting; its POSIX mode and symlink stand-ins skip on Windows. The
+second needs actual Windows: inherited-safe home reads without ACL repair,
+broadened ACL and hard-link refusals, junctioned custom-directory refusals for
+`tail` and `purge`, a decrypt and purge round trip, and a helper-missing
+refusal before native calls. Neither establishes CNG or product acceptance.
+
+The controller runs `uv run pytest -q -o addopts= tests/test_wizard_windows_audit_cli.py
+ tests/test_wizard_windows_audit_cli_native.py` (one command line) against the
+source, then with the isolated sdist-derived installed wheel interpreter after
+verifying `mordred_hermes.__file__` selects that wheel. Live CNG reuses the C5d
+audit live gate; this slice adds no new live test. Record native results in the
+validation log below.
+
+Review round 2 adds `test_wizard_windows_audit_cli_decrypt.py` to the same
+scoped job (portable; no POSIX-only stand-ins). Windows 11 acceptance for this
+slice also covers redirected output under a legacy code page: on a ja-JP
+(cp932) install, run `hermes-mordred audit decrypt --date <date> > out.txt`
+for a log holding characters outside cp932 and confirm `out.txt` is complete
+UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
+
 ## Manual live-device validation log
+
+The restored WF0, C5 shared, C3 and C5a entries below are dated historical
+results for their original source/wheel snapshots, not evidence for the
+consolidated candidate `bb75885ac`. Pending observations in those entries
+describe their original test time; subsequent contracts and the Windows
+completion acceptance matrix track later work and current open gates.
+
+- **2026-10-08 — Windows privacy canonical decisions (C8).**
+  Component revision `31845b8b4` follows the shared canonical coordinator.
+  Ordinary non-administrator Server 2025 / Python 3.11.17 runs passed all
+  **35 tests** in `tests/test_windows_privacy_policy.py` for both source and
+  a fresh sdist-derived wheel environment. Module origins were verified;
+  all profiles were task-owned. Native cases cover inherited ACL preservation,
+  broadened ACL/hardlink/junction refusal after a cached allow, and another
+  process holding the canonical locks. The session-start regression verifies
+  one checked generation and a later pending-state hard refusal.
+  Wheel SHA-256: `2c052e6e4f4922dac7977e944f06f81fdfb2ecceecce9293c9b1abd875808403`.
+
+  Independent review found an unguarded second session-start read; the final
+  revision reuses the integrity gate's checked state and passed scoped review.
+  Host full regression at the pre-fix revision: 6,039 passed, 130 skipped,
+  37 integration cases excluded, coverage 89.16%. Final focused regression:
+  174 passed, four native-only skips. Reduced-extras types, lint, formatting,
+  shellcheck and documentation checks passed; existing dependency/fork warnings
+  remain. Production audit storage, other components, Windows 11 and the full
+  installation-to-use flow remain separate acceptance gates.
+
+- **2026-10-08 — Windows LLM canonical decisions (C8).**
+  Final component revision `a3be33537` passed **70 tests** in both ordinary-user
+  Server 2025 / Python 3.11.17 source and fresh sdist-derived wheel environments:
+  `tests/test_llm_windows_policy.py` and
+  `tests/test_llm_windows_policy_native.py`. Verified module origins and
+  disposable profiles kept production state unchanged. Native cases exercise
+  inherited ACL preservation, permission broadening, hardlinks and pending
+  markers after prompt/auxiliary grants were cached. No live model was called.
+  Wheel SHA-256: `1000c52f982faa6cd37791c5700eb1648bc9f03e34bf093a81e679e8be67ce64`.
+
+  Independent review and scoped R1 review approved. The R1 fix validates main
+  model endpoint/default/alias types before off-mode exits. Final focused host
+  checks passed 303 tests with four native skips; reduced-extras strict typing,
+  Ruff, formatting, shellcheck and docs checks passed. A prior full suite exited
+  successfully before the final ownership/schema changes; it is not evidence
+  for the final full-suite snapshot. Production audit IO, live provider flow,
+  other components, Windows 11 and full-product acceptance remain unfinished.
+
+  2026-10-09 host-only follow-up: policy/config and audit-factory refusals are
+  raised after their handlers (no `__context__` retains parser/reader errors or
+  bytes); 8 new host cases, full suite 7,160 passed; native reruns not repeated.
+
+- **2026-10-08 — Windows dedicated custody checked-file candidate (C5a).**
+  Revision `b4793e7d3` passed **51 tests with 11 POSIX-only fault-injection
+  skips** in both ordinary-user Server 2025 / Python 3.11.17 source and fresh
+  sdist-derived wheel environments. Selectors:
+  `tests/test_windows_custody.py tests/test_windows_custody_profile.py`.
+  These runs use real Windows checked files and real MRKW cryptography with
+  an injected native-key backend; they do **not** establish actual CNG enrollment
+  or deletion. All profiles are disposable and imported origins were checked.
+  Wheel SHA-256: `32298344357c81e279a0d66668b4f392170f6e583613feb7379949fae98345be`.
+
+  Core and scoped R1 independent reviews approved. Host full regression before
+  the narrow R1 correction: 6,060 passed, 126 skipped, 38 excluded. Final focused
+  checks: 62 passed, one native-only skip; reduced-extras types, lint/format,
+  shellcheck and docs passed. R1 validates malformed journal field types and
+  prevents pytest from rendering native key operands in live-test failures.
+
+  Real CNG validation is pending the C5c ordinary-user process-inventory gate:
+  protected foreign process token access is denied on this machine. The gate
+  remains strict; no native-key live test or fixture was run as a workaround.
+  The managed installation image prerequisite and supported-runtime boundary
+  are tracked in shared contract PR #195. Memory hooks, installed-runtime proof,
+  encrypted audit/Telegram consumers, wizard flows and Windows 11 are separate
+  unfinished gates. The component PR remains a draft until native custody
+  acceptance is complete.
+
+- **2026-10-08 — Windows wizard canonical writers (C3).**
+  Final code/tests `d6cfc519223096680005684d253e2fc6fcd0a6ee` passed
+  ordinary-user Server 2025 source and fresh sdist-derived wheel suites:
+  **147 passed each**. Native cases include configure rerun, concurrent config
+  and dotenv edits, crash/recovery, checked private credentials/backups,
+  no-overwrite collisions, busy custom destinations and hostile ACL/hardlink
+  refusal. The wheel SHA-256 was
+  `930c4c81db439f274fb041bc4727d4fca378e3d74475515d6c82c8e5006bd26a`.
+  Both module origins were checked; wheel tests borrowed only test dependencies
+  from the unchanged earlier validation environment.
+  A separate full Hermes 0.19.0 environment installed the final candidate wheel,
+  created a fresh home through Hermes itself, and ran the actual console
+  `configure --non-interactive --policy strict` twice. The checked policy was
+  strict, config/policy contents remained unchanged on rerun and the parent's
+  ACL was preserved. No account/provider calls or production home were used.
+
+  Independent review found two Important defects: lost child publication
+  uncertainty during a second cleanup failure, and stale interactive provider
+  overrides. Both reproduced and were fixed at `08ec8a76b`; scoped review
+  approved the fixes. Final targeted regression: 346 passed, eight native skips;
+  strict reduced-extras mypy (209 files), Ruff/format, shellcheck and docs links
+  passed. The earlier full host suite was 5,757 passed, 105 skipped, 37 excluded;
+  final narrow fixes have the focused and native evidence above.
+  Initial native testing completed 139 checks with two setup/teardown errors
+  because an 8 MiB pytest parameter ID exceeded Windows' environment limit.
+  Short IDs fixed only the harness. The resulting 67 MiB diagnostic log also
+  made line-based PowerShell tailing expensive; bounded recovery confirmed the
+  test process had finished. Only those task-owned log readers were stopped.
+  Evidence: `~/.codex/artifacts/mordred-windows-completion-20261008/c3-*`.
+  Memory/OpenClaw lifecycle, enforcement callers, Windows 11 and full-product
+  acceptance remain separate; legacy generic Windows writers still refuse.
+
+- **2026-10-08 — Windows custody coordination prerequisites (C5 shared).**
+  Code `c6d2e8ab767d26df408aae3ca7091f55634fbcb0` passed ordinary-user
+  Server 2025 source and fresh sdist-derived wheel runs: **503 passed,
+  54 skipped each**. Native cases include inherited-safe confidential inventory,
+  canonical SID, bounded enumeration, protected transaction loans, child
+  publication receipts, process/lifetime refusal and borrowed C7a audit sessions.
+  The subsequent four-line checked-home identity accessor at `ff4edbbc2` passed
+  six focused cases in its fresh sdist-derived wheel, including native case-alias
+  identity (113 unrelated cases deselected). Both module origins were verified.
+  The final wheel SHA-256 was
+  `1ba8409d02a8550a866325e314814ce5bd9b6d99dda040e41a9fde0648f8e412`.
+  Independent original and accessor reviews found no actionable findings.
+  Host full regression before the accessor: 5,895 passed, 106 skipped,
+  37 integration deselected; final accessor focused host checks and strict
+  reduced-extras mypy (210 files), Ruff/format and shellcheck passed.
+  Evidence: `~/.codex/artifacts/mordred-windows-completion-20261008/c5-foundation-*`.
+  Custody providers, memory hooks, Windows 11 and full-product use are separate
+  gates. These tests do not provision or recover a TPM role key.
+
+- **2026-10-08 — First keyvault Windows caller: wallet selection storage.**
+  Component contract PR #193 follows the shared contract/foundation PRs
+  #191/#192. The implementation at `e05034f63` migrates only the keyvault-owned
+  wallet selection document; `be87acf06` fixes Windows pytest IDs and extends
+  cleanup-error coverage. Signing, key custody, memory/reset/purge, audit,
+  installer and Desktop support remain separate, incomplete gates.
+
+  Reused `i-00f4db5c3a204906b` in `ap-southeast-1`; verified it stopped before
+  startup and armed a two-hour controller stop deadline plus a Windows scheduled
+  shutdown. Tests ran as the credentialed, non-administrator `mordred` user on
+  Server 2025, Python 3.11.17, fixed local NTFS, using new synthetic paths.
+  Neither TPM fixtures nor Linux validation resources were changed.
+
+  Final source and out-of-checkout wheel suites each produced **121 passed,
+  2 POSIX-fork skips** across the wallet suite and four shared filesystem/process
+  test modules (the POSIX-only module was not selected). The wheel was built
+  from the sdist and installed without dependencies into a fresh venv, with
+  pytest installed separately. Its imported module was under
+  `C:\Users\mordred.000\wallet-wheel-20261008\venv\Lib\site-packages`;
+  SHA-256: `6871af48f413c7270962705b3127e5c0138d1bd90f2d63a166b5cae4f5ee5b3e`.
+  The source run used the separate `wallet-validation-20261008` tree.
+
+  Native cases prove ACL/junction/hard-link refusal without repair, read/write
+  process exclusion, bounded file reads, and pre/post-publication error handling.
+  Synthetic selection survived a fresh process and a Windows reboot with SHA-256
+  `34fee0fee72b07ef4640a7638737e5d20c72aa7bd74d6ee688aa23f9e6a8ea5f`.
+  A separate ordinary account was denied access; its temporary account, task and
+  logon rights were removed. This slice did not repeat EC2 stop/start persistence,
+  sudden power-loss testing, TPM operations, Windows 11 or whole-product flows.
+
+  The initial source/wheel runs each had **117 passed, 2 skips, 2 setup/teardown
+  errors**: pytest expanded a 1 MiB parameter into `PYTEST_CURRENT_TEST`, exceeding
+  Windows' 32767-character environment limit. Short explicit parameter IDs fixed
+  the harness; no product-code change was needed. Independent review found no
+  product defect, confirmed that harness issue and suggested the additional
+  absent-wallet transaction-cleanup regression, which now passes.
+  Final local Python 3.13 full regression: **5,362 passed, 45 skipped,
+  34 integration deselected; 88.48% coverage**. Five warnings came from the
+  existing FastAPI/Starlette, Hermes escape-sequence and POSIX fork checks.
+  Ruff/format, reduced-extras strict mypy (206 files), shellcheck and all
+  12 documentation-link tests passed. The final hosted CI results are tracked
+  on the component PR; local/native acceptance does not replace that matrix.
+  The host was verified stopped after acceptance; both task-specific automatic
+  stop mechanisms were disarmed. Its retained disk and synthetic wallet remain.
+  Evidence is retained under `~/.codex/artifacts/mordred-windows-wallet-20261008/`.
+- **2026-10-08 — Checked Windows audit sessions (C7a).**
+  Shared implementation `b39a064379038bcce99fb021fe7418f326c1d105`, with the
+  already-reviewed elevated-owner fixture correction at `b9332e64d`, passed
+  ordinary-user Server 2025 source and isolated sdist-derived wheel suites:
+  **356 passed, 54 skipped** each. Native checks include process serialization,
+  hostile ACL/hardlink/junction refusal and case aliases. Wheel origin was
+  verified inside a fresh test-only environment. Host all-extras regression:
+  5,603 passed, 63 skipped, 35 deselected; independent reviewer focused run:
+  165 passed, four native skips. Ruff/format, reduced-extras strict mypy and
+  shellcheck passed; independent review found no actionable issues.
+  An intentionally broader Windows diagnostic also selected legacy POSIX
+  `test_log_rotation.py`: 373 passed, 54 skipped, one existing fchmod-path
+  failure. Legacy audit APIs remain POSIX; C7a's new explicit session APIs do
+  not migrate production consumers. That diagnostic exclusion is not a waiver
+  for the later C5/C7b consumer and whole-product gates.
+  Evidence: `~/.codex/artifacts/mordred-windows-completion-20261008/c7a-*`.
+  Windows 11, encrypted-writer key leases, CLI and production caller adoption
+  remain separate gates.
+
+- **2026-10-08 — Windows confidential-file and coordinator identity capabilities.**
+  Code `fc5db88455592badb638ca400507866b53328450` passed ordinary-user
+  Windows Server 2025 source and isolated sdist-derived wheel runs: **279 passed,
+  53 POSIX-only skips** each, including the explicitly enabled inherited-ACL
+  live roundtrip. Wheel SHA-256: `d55a4ee4aba92a146387f5aedaf1b9fe0b227d0c59498db5d11e1e278eb5c648`. Module origin was checked inside the
+  fresh wheel environment. The preceding `4f3f4377e` implementation also passed
+  actual Hermes-created `config.yaml`/`.env` read and replacement with unchanged
+  parent ACLs; replacements became exact-private. Local Python 3.13 all-extras
+  regression at `4f3f4377e`: 5,493 passed, 59 skipped, 35 integration deselected;
+  final identity-seam focused suite: 277 passed, 54 skipped, one live deselected.
+  Strict reduced-extras mypy, Ruff and formatting passed. Independent original
+  and identity-seam reviews found no actionable issues. Evidence is retained
+  under `~/.codex/artifacts/mordred-windows-completion-20261008/` (C1b logs).
+  These are shared-boundary checks; production caller migration, full product,
+  Windows 11 and new reboot/TPM validation are not established by this entry.
+
+- **2026-10-08 — Canonical Windows configuration coordination (C2).**
+  Code `c5d4e871c9b9b1846c95b1c22a2876179fa7f47e` passed ordinary-user
+  Server 2025 source and fresh sdist-derived wheel suites: **357 passed,
+  54 skipped** each. Skips are POSIX-specific or require an elevated owner
+  fixture. The wheel environment installed only pytest and ruamel.yaml for
+  these shared-boundary tests; this is not a full product dependency smoke.
+  Native cases include inherited-descriptor no-op preservation, case aliases,
+  fresh-process busy refusal, and a killed writer between config/policy members
+  retaining a pending marker until explicit reconciliation. Wheel import origin
+  was verified inside its new virtual environment.
+  Independent review findings on caught uncertainty, nested nonblocking scope
+  extension and custom config-name bypass were fixed and scoped re-review passed.
+  Full host regression before the final narrow nested-cleanup guard: 5,603 passed,
+  63 skipped, 35 deselected; final complete focused suite: 111 passed, three
+  native skips. Ruff/format, reduced-extras strict mypy, shellcheck and docs checks
+  passed. Evidence: `~/.codex/artifacts/mordred-windows-completion-20261008/c2-*`.
+  Canonical wizard writer adoption, enforcement decisions/caches, Windows 11 and
+  installation-to-normal-use remain separate component gates.
+
+- **2026-10-08 — Private filesystem review fixes on macOS.**
+  Review reproduced inherited extended-ACL grants despite mode 0700/0600 and
+  stale exception text after promotion to an uncertain commit. Before the fix,
+  six native ACL regressions and one exception-message regression failed.
+  Product revision `e6efd9dfc` checks macOS ACLs through validated descriptors,
+  accepts only absent/empty/deny-only ACLs and refuses all allow/unknown entries
+  or query failures without repairing permissions. Even owner-only, read-only
+  and inherit-only allow entries are intentionally refused; the normal profile
+  deny-delete ACL remains accepted. Exception `args` and text now follow the
+  current `commit_state` while preserving the original exception.
+
+  Native macOS tests cover inherited grants, existing directory/file/lock ACLs,
+  ACL changes during a transaction and injected native-query/free failures with
+  resource cleanup. The five filesystem test files produced **85 passed,
+  34 platform skips**. The full default suite produced **5,250 passed, 49 skipped,
+  34 integration deselected; 87.42% coverage**. Ruff/format, strict mypy (205
+  files), shellcheck and an independent read-only review passed. Hosted Windows
+  cleanup tests also assert that rendered errors match uncertain commit state;
+  current-head CI results are tracked on PR #192. AWS was not started for these
+  fixes, and Linux validation resources were untouched. The actual Windows
+  wheel/restart evidence below predates these fixes and is not a fresh host run.
+  Local evidence is retained under
+  `~/.codex/artifacts/mordred-filesystem-review-fixes-20261008/`.
+
+- **2026-10-08 — Shared private filesystem foundation (WF1–WF5).**
+  Independent foundation PR #192 follows contract PR #191; neither includes the
+  pending CNG helper implementation or migrates component callers. The product
+  source at `cb266a5` was built as an sdist and then wheel, installed in a fresh
+  out-of-checkout `wf-wheel-final\venv` under the credentialed ordinary `mordred`
+  user on retained Server 2025 build 26100, fixed local NTFS. Python was 3.11.17
+  AMD64; the imported module was under that venv's
+  `Lib\site-packages\mordred_hermes`. Wheel SHA-256:
+  `BFBC6419B245DE7026F43699CD623F70269F37B74E16F130313DC8069C12FEB4`.
+
+  Running `python -m pytest -q` against the five `test_private_fs*.py` files
+  produced **91 passed, 13 POSIX-only skips** from both source and installed
+  wheel. Native checks cover create-time/existing ACLs, normal profile ancestors,
+  junctions/hard links, >260-character paths, an actual 8.3 sidecar alias,
+  concurrent process/thread transactions, crash release, interrupted writes and
+  held-target refusal. Fault-injection tests separately cover short/zero writes,
+  ambiguous publication, flush/close/unlock failures and uncertain commit state;
+  they are not physical disk-failure tests. Independent review found two issues:
+  case-sensitive POSIX reserved names and cleanup misclassifying completed
+  publication. Both reproduced before fixes and passed afterward, including
+  preservation of the original exception when cleanup also fails.
+
+  With `MORDRED_WINDOWS_FS_LIVE=1`, a synthetic
+  `MORDRED_WINDOWS_FS_TEST_ROOT` and provision/reopen phases,
+  `python -m pytest -q -s -m integration tests/integration/test_private_fs_windows.py`
+  passed under a non-administrator token. A separately credentialed disposable
+  ordinary user was denied access to the wheel-created file. Only its temporary
+  batch-logon right was granted; that right, account and scheduled task were
+  removed after the assertion. Existing accounts, TPM fixtures and Linux
+  validation resources were unchanged. No inbound network rules were added.
+
+  Fresh-process, final-wheel Windows reboot and EC2 stop/start reopen each passed. Synthetic
+  fixture SHA-256 remained
+  `5aa341081d33ad1cfdbb608258d9f0a4078e54f7458a6133011837e96eef33de`.
+  This is retention evidence, not sudden power-loss durability.
+
+  On the clean dev-based foundation branch, the full default suite with coverage
+  produced **5,235 passed, 49 skipped, 34 integration deselected; 87.38% coverage**.
+  The earlier branch including pending helper changes passed 5,269 tests; the
+  differing count reflects PR isolation, not removed foundation assertions.
+  Ruff/format, shellcheck and reduced-extras strict mypy (204 source files) passed.
+  Hosted CI gates are tracked on PR #192 (three Windows cells plus existing
+  Linux/macOS checks); early failures and their resolutions follow. Final host
+  state was independently verified **stopped** after acceptance. The retained
+  development instance has one encrypted 50 GiB gp3 volume
+  (`vol-08b0b74e57e899ad0`), existing TPM fixtures and synthetic filesystem evidence.
+  Storage remains billable; no new volume, snapshot or instance was created. The initial hosted native run passed 90 checks and failed
+  only the independent Get-Acl subprocess: inherited PowerShell 7 module paths
+  prevented Windows PowerShell from loading its security module. The test child
+  now reconstructs the default PSModulePath without weakening ACL assertions.
+  The next hosted run passed all native tests but correctly refused the broadly
+  writable ancestor on the RUNNER_TEMP data volume. The out-of-checkout wheel
+  smoke now uses the runner's ordinary profile; the product trust policy and
+  system ACLs are unchanged.
+  Sanitized run evidence is retained privately under
+  `~/.codex/artifacts/mordred-windows-filesystem-20261008/`.
+
+- **2026-10-08 — Windows private filesystem assumptions (WF0).**
+  Retained Server 2025 build 26100 on fixed local NTFS was resumed with a
+  four-hour shutdown deadline. Under the credentialed non-administrator
+  `mordred` token, create-time protected user/SYSTEM/Administrators DACLs were
+  observed independently through Get-Acl. A disposable second ordinary user
+  was denied access. Its first scheduled runs failed with logon error 1385;
+  granting only that disposable SID SeBatchLogonRight enabled the actual check.
+  The test account, task and granted right were removed afterward. No existing
+  user's password, TPM fixture or Linux validation resource was changed.
+
+  SDK 26100/MSVC confirmed x64 FILE_RENAME_INFO size 24/name offset 20,
+  OVERLAPPED size 32 and FILE_ID_INFO size 24. Relative-name publication with a
+  non-NULL RootDirectory failed with WinError 87. A NULL RootDirectory and
+  NUL-terminated absolute volume-GUID destination derived from the pinned
+  directory succeeded, including flush and complete payload reopen. A separate
+  unterminated disposable buffer produced a wrongly suffixed filename; production
+  tests must pin termination, byte length and non-ASCII names. Held-target
+  publication returned access denied without changing old bytes; renaming a
+  pinned parent returned sharing violation. Real subprocess byte locks excluded
+  a second process and released after owner termination. OPEN_REPARSE_POINT
+  inspection identified an actual junction tag without following it.
+
+  Default volume/profile ancestor descriptors were recorded without modifying
+  them. These are disposable native API probes, not a shipped-foundation pass;
+  production ACL parser, all-path refusal, failure injection, wheel, scoped CI
+  and restart persistence acceptance belong to WF2–WF5 in PR #192. Evidence is private under
+  `~/.codex/artifacts/mordred-windows-filesystem-20261008/`. Compute was retained
+  within the deadline while implementation continued; final stopped-host evidence
+  is recorded in foundation PR #192.
+
+- **2026-10-08 — Native Windows installer and owned TPM helper (C4).**
+  Code `f9c15a72ac060486e14f08f730e1021843a6a330` passed ordinary-user
+  Windows Server 2025 source-editable and isolated sdist-derived wheel tests:
+  **91 passed each**. Both module origins were verified. The source harness
+  initially ordered borrowed dependency paths ahead of the editable checkout;
+  fixing only that task-local `.pth` order restored the intended source import.
+  The exact wheel SHA-256 was
+  `d53a23698c0d6f5a20571d67015e7553254b434e1d6494f6acbe45707cf2d4e2`.
+  Tests include PowerShell 5.1/7.6.6 environment selection, Unicode owned
+  launchers, restricted-parent helper launch, retained unknown destinations,
+  and bounded public Cargo-source reads with hardlink/ACL/identity checks.
+  The controller SSH stream was interrupted after completion; the retained
+  native test log was independently recovered through SSM and showed 91 passed.
+
+  A separate fresh environment installed Hermes 0.19.0 and real uv 0.12.23.
+  Both PowerShell 5.1 installation and PowerShell 7.6.6 reinstall passed with
+  verified module origins, console entry point and unchanged Hermes version.
+  The installed wheel's packaged Rust sources built into a custom Unicode,
+  space and metacharacter destination; owned publication and the actual
+  current-user TPM hardware probe succeeded. Existing TPM fixtures and the
+  released Hermes environment were not modified. Profiles were task-isolated.
+
+  Native acceptance found and fixed UTF-8 child output, PowerShell 7.5+ empty
+  environment-variable deletion, and Cargo release-output hardlinks. The
+  public build-input capability permits checked read-only hardlinks without
+  weakening private destination/receipt checks. Independent scoped reviews
+  approved each fix. Configure/setup consumer migration, memory encryption,
+  full-product use and Windows 11 remain separate acceptance gates.
+  Final supported-host Python 3.13 all-extras unit suite passed (exit 0);
+  focused shared/installer coverage was 443 passed, 95 native skips. Ruff,
+  formatting, reduced-extras strict mypy (208 files), shellcheck and 12
+  documentation-link checks passed.
+  Evidence: `~/.codex/artifacts/mordred-windows-completion-20261008/c4-*`.
+
+- **2026-10-07 — Windows CNG helper implementation (W1–W4).**
+  The dedicated Phase 0 Windows Server 2025/NitroTPM host was reused under the
+  ordinary `mordred` account with password-authenticated SSH through SSM. MSVC
+  Build Tools `17.14.37710.0`, toolset `14.44.35207`, Windows SDK 26100, Rust
+  `1.99.0` and MSRV `1.85.0` built the actual executable. The Rust protocol/unit
+  suite passed **12 tests**; the separately gated real CNG suite passed **3 tests**.
+  It verified P-256 ECDH against an independent implementation, a leading-zero
+  secret, duplicate preservation, malformed-point refusal, private-export
+  rejection with export policy zero, deletion, and concurrent probe cleanup.
+
+  **Actual-device corrections:** the provider rejected the silent flag on
+  deletion (`0x80090009`), while zero flags succeeded. Two parallel native
+  create/finalize operations returned distinct successful keys for one name
+  despite no overwrite flag; a user-SID/key-scoped Global Windows mutex now
+  serializes helper operations across processes and sessions. The same live
+  concurrency regression then passed. Public-key-only SSH still correctly
+  refused the compiled helper's probe with `AUTH_DENIED` (`0x80090010`). No
+  password capture, impersonation or software provider exists in the product.
+
+  **Python/build boundary:** actual Windows production MRKW wrap/unwrap through
+  the compiled helper passed, including a Unicode/space-containing installation
+  path, duplicate refusal, wrong-profile/corrupt-ciphertext rejection, missing
+  helper, valid-data retention and refusal after deletion. The installer passed
+  **4 actual Windows tests** covering replacement, failed-build retention,
+  an in-use executable and a Japanese default home under a cp1252 Python pipe.
+  ASCII JSON transports the default path without code-page corruption.
+  The hosted Windows CI initially reproduced a PowerShell 7 -> Python -> 5.1
+  module-path inheritance failure (`Get-FileHash` unavailable). The installer
+  explicitly loads Utility/Management manifests from its own `$PSHOME`;
+  the existing build tests cover that actual runner invocation. Windows PowerShell 5.1 requires `[NullString]::Value`
+  for the nullable `File.Replace` backup argument. A real sdist-to-wheel build
+  passed **6 packaging checks**. The wheel installed outside the checkout;
+  `build.ps1` compiled bundled sources under `site-packages` and installed into
+  the selected Hermes home's `bin`. The resulting executable SHA256 was
+  `c3da84b5ab0a2e2171ce0f9663af2322fb811bc19b781418cb8c25a3f02e6255`
+  after the review corrections.
+
+  **Persistence:** a retained synthetic MRKW fixture (SHA256
+  `e80184560cc28a8342e745c34c43c90c8f673e072b8ff89eda9ee88f12404e81`) reopened
+  through the installed wheel/helper in a fresh process, after Windows reboot,
+  and after actual EC2 stop/start. Each check verified the same public key and
+  plaintext digest; SID, fixture, executable and PCP key-file hashes were
+  retained. The final helper also reopened this unchanged fixture after upgrade and a
+  second Windows reboot and EC2 stop/start.
+  The same final executable on a cloned disk refused the retained key on the
+  second TPM, while fresh production MRKW operations worked. Both clone
+  integration tests passed; SID, credential-file and retained PCP-file hashes
+  matched the source host.
+
+  **Review/regressions:** one independent whole-branch review identified
+  malformed helper acknowledgement/status handling and a possible false-success
+  deletion of a retained inaccessible key. The bridge regression failed in 18
+  cases before correction; the focused local suite then passed **218 tests**,
+  and Windows passed **101 tests** with one explicitly clone-gated skip. The
+  inaccessible-key deletion regression failed on the real clone before the fix,
+  then passed with the final executable. A new-key probe succeeded and CNG
+  enumeration omitted the inaccessible retained key, so neither proved absence.
+  Windows deletion now refuses an unopenable keyset with the original status
+  and `UNAVAILABLE`, including repeat deletion; exact-key deletion still passes.
+  After the review fixes, the full local suite passed **5,158 tests**, with
+  **88.62% coverage**. Reduced-extras strict mypy, Ruff and
+  ShellCheck passed. A scoped Windows helper CI job is added; hosted runners do
+  not substitute for hardware acceptance. Full Windows private filesystem,
+  runtime, wizard, network, Desktop and Windows 11 acceptance remain separate
+  dependent plans.
+
+  **Cleanup:** second instance `i-0d0f2c45787bedcee` terminated; AMI
+  `ami-0d58a6979d00b69ff` deregistered and snapshot `snap-0cff25fd395bda4c2`
+  deleted. Primary `i-00f4db5c3a204906b` is retained for subsequent porting,
+  with CPU credits restored to standard and compute stopped after validation.
+  Its encrypted 50 GiB gp3 volume remains (approximately USD 4.80/month at
+  the recorded regional storage rate); the task-only SSM role/security group
+  remain, with no inbound rules. Previous Linux validation resources were
+  untouched. No production profiles or live Telegram/LLM accounts were used.
+
+- **2026-10-07 — Windows native feasibility on actual EC2 NitroTPM (Phase 0).**
+  Unchanged Mordred `f14c1edce23f88c4a2cb6f8bfd3c1454ed0a59ce` / `0.2.0a1`,
+  installed as a locally built wheel with `keyvault,extension` extras, was tested
+  on Windows Server 2025 build 26100, x86_64, `t3.large` in `ap-southeast-1`.
+  The TPM-enabled image was `ami-05171b2d13ab22cba` (2026-09-17); primary
+  instance `i-00f4db5c3a204906b`, encrypted 50 GiB gp3, UEFI/NitroTPM 2.0.
+  The older Linux validation instance remained stopped and untouched.
+
+  **Host baseline:** pinned upstream Hermes `v2026.9.24`, commit
+  `f97608f178d1ffeca59860195ab7da295f7c8e5f`; Agent `0.21.5`, Desktop `0.17.6`,
+  Electron `40.10.2`, Python `3.11.17`, Node `22.23.3` / npm `10.9.9`.
+  The plugin loaded from the wheel in
+  `C:\Users\mordred.000\hermes-source\venv\Lib\site-packages`, not the checkout.
+  `hermes --help`, `hermes-mordred --help`, and isolated
+  `hermes-mordred status --json` exited zero. `hermes desktop --build-only`
+  produced the real `win-unpacked/Hermes.exe`. Playwright launched that binary
+  under the ordinary user and captured screenshots: with Mordred disabled in
+  a separate baseline home, Desktop reached provider onboarding; with Mordred
+  enabled, backend startup refused at `_audit_io.py`'s unavailable `os.fchmod`
+  during the network plugin's audit initialization. No security checks were
+  bypassed and no upstream application source was patched. No model provider
+  or messaging account was configured, so onboarding is not a chat/E2E pass.
+
+  The upstream installer needed a clean checkout of its exact release in the
+  disposable source directory (initial checkout refused generated/line-ending
+  changes), then its official individual dependency stages after an existing-
+  venv cleanup failed under the ordinary user. npm completed, though the wrapper
+  emitted empty-exit-code failures; Desktop used the official CLI build. These
+  workarounds do not establish one-command Windows installation support.
+  An initial gateway harness timed out while collecting inherited output pipes.
+  A repeat with file output reached the Gateway Starting banner and remained
+  alive at 20 seconds; ordinary-user `taskkill /T /F` returned Access denied,
+  and the harness also hit cp1252 output encoding. Thus clean shutdown, channel
+  readiness and scheduled gateway support are not established; the later SYSTEM
+  cleanup found that PID already gone.
+
+  **Unmodified test baseline:**
+  `python -m pytest -q -o addopts= --tb=short tests/test_keyvault_wrap.py tests/test_file_lock.py`
+  returned **71 passed, 6 skipped, 12 failed**. All failures were in the file-lock
+  suite: both POSIX-mode assumptions and Windows-path regex assumptions occur.
+  These are recorded failures, not a passing Windows suite. The independent
+  wire probe used Python `3.12.15` / cryptography `50.0.2` and the unchanged
+  production `wrap.py` (SHA-256
+  `a043eb7dbc1c04ad0d80f849a588748ca50fb1b7d3b536b7b4fb4c097c2dfe6c`).
+
+  **Hardware custody:** `Get-Tpm` reported present/ready, manufacturer `AMZN`.
+  The explicit Microsoft Platform Crypto Provider reported implementation flag
+  `1` (hardware). Direct CNG user-scoped persisted `ECDH_P256` worked without
+  setting KeyAgreement usage; explicitly setting that property returned
+  `0x80090029`. `NCryptSecretAgreement` and `NCryptDeriveKey(TRUNCATE)` yielded
+  32 little-endian bytes, reversed for Mordred. Nine comparisons with independent
+  Python/OpenSSL ECDH passed, including leading-zero scalar `189`. The unchanged
+  127-byte MRKW wrapper round-tripped. Corrupt ciphertext, wrong profile,
+  malformed points and an invalid native peer were refused; valid ciphertext
+  remained usable. Private export failed with `0x8009000A`.
+
+  The same proof passed in a separate password-authenticated non-administrator
+  SSH process, without impersonation. Public-key-only SSH could not access the
+  persisted key (`0x80090016`); this token distinction must be diagnosed by the
+  actual product process. SYSTEM-only or impersonated results are not presented
+  as desktop/service identity proof. No Windows password capture or impersonation
+  is proposed for the product helper. Fresh-process reopen, Windows reboot and EC2 stop/start
+  retained public-key fingerprint
+  `7a573e66759b1ae7a4fa2715985d2ffa4d597eeab63978581170b0fe9c7f8e27`
+  and the valid synthetic wrapped DEK. The reboot repeat used a credentialed
+  user token from the SSM harness. The stop/start repeat also passed under the
+  actual password-authenticated ordinary-user SSH process. A separate disposable
+  key was created/reopened/deleted, and its subsequent open returned
+  `0x80090016`; the retained original fixture still decrypted afterward.
+  Scheduled gateway acceptance remains open.
+
+  **Device binding:** a cleanly stopped disk was imaged and launched on
+  second NitroTPM instance `i-08c6ec3e52adac82a`. Local SID, encrypted DPAPI test
+  credential, PCP key metadata and wrapped-fixture hashes matched the source.
+  DPAPI unprotect and credentialed logon succeeded, but the copied persisted key
+  could not open (`0x80090016`). A new, uniquely named key under the same user on
+  the second TPM completed ECDH with independent software parity and refused
+  private export; it was deleted afterward. This controls for unavailable TPM,
+  wrong SID and inability to authenticate. The test used synthetic data only.
+
+  **Phase 0 resources:** primary Windows and prior Linux instances were verified
+  stopped at the investigation boundary. Clone `i-08c6ec3e52adac82a` was
+  terminated; AMI `ami-021065c89d82a9745` was deregistered and snapshot
+  `snap-0b8b5d7ed23d25d0d` deleted. The task's TCP/22 ingress was revoked; all
+  working access uses SSM. The dedicated SSM role/profile and primary encrypted
+  50 GiB gp3 volume remain for implementation ($4.80/month storage at the
+  queried regional rate). The primary was then resumed for the approved helper
+  implementation with a new bounded shutdown deadline. Windows instance rate
+  was $0.1332/hour, excluding IPv4, surplus CPU credits and other usage.
+
+  **Scope and evidence:** disposable scripts, JSON results, baseline failure
+  logs, build logs and actual application screenshots are retained privately at
+  `~/.codex/artifacts/mordred-windows-validation-20261007/`; do not publish its
+  test credentials or private SSH key. The checked-in change is documentation
+  only. It proves feasibility of this device's CNG/wire boundary, not a shipped
+  helper, secure Windows file storage, Windows 11/MSIX, consumer TPMs, scheduled
+  gateway custody, Private Telegram or full Windows support. See
+  [Windows feasibility](WINDOWS_FEASIBILITY.md) and the Windows sections of
+  [SPEC](SPEC.md#windows-native-support-proposal-2026-10-07) and
+  [PLAN](PLAN.md#windows-cng-helper-implementation-plan).
+
 
 - **2026-10-07 — Real Telegram login, sync, and questions on EC2 NitroTPM.**
   Installed the wheel built from `52e69d7fc` in the actual Hermes Desktop
@@ -444,3 +1268,853 @@ Add a documentation publishing workflow only when the project has a hosted docs
 site. Add broader E2E automation only when it can run without production
 credentials or state. Until then, keep the current workflows small and
 purpose-specific.
+# Windows completion acceptance matrix
+
+Windows completion is tracked by SPEC.md §Windows product completion contract
+and PLAN.md §Windows product completion execution. This matrix is a release
+gate, not a new claim that the existing platform jobs test the entire product.
+
+| Evidence layer | Environment | Required evidence |
+| --- | --- | --- |
+| Regression | supported local Python and existing POSIX CI | component tests, formatting, reduced-extras strict typing, packaging and integrated coverage |
+| Native portable behavior | Windows CI, supported Python matrix | real Win32 filesystem calls, PowerShell installer, process locks, unsafe object refusal and non-hardware flows |
+| TPM and persistence | ordinary-user Windows Server 2025 on existing AWS host | compiled production CNG helper, source and fresh wheel, separate-user denial, process restart/reboot/stop-start retention |
+| Client product workflow | Windows 11 x64 VM/Cloud PC or physical PC | native install through normal use, Desktop and gateway, lifecycle/backup/upgrade/uninstall, actual runtime paths and token/provider |
+| External integrations | explicitly available route/account/model services | real applicable VPN/Tor transport and authenticated flows; synthetic fixtures recorded separately |
+
+Physical Windows hardware is not required. Windows 365 provides a virtual TPM
+([Microsoft security documentation](https://learn.microsoft.com/windows-365/enterprise/security));
+Azure Windows 11 VM use requires eligible licenses
+([Microsoft deployment guidance](https://learn.microsoft.com/en-us/azure/virtual-machines/windows/windows-desktop-multitenant-hosting-deployment)).
+These are environment options, not evidence that Mordred's CNG provider or
+product flow has passed there. Test the actual provider/token and record any
+refusal. ARM virtualization does not replace x64 helper acceptance.
+
+For each component record commit, command, interpreter/module path, OS/CPU,
+ordinary/admin user status, result and exclusions. Report implementation,
+unit tests, native Server checks, Windows 11 checks and live-service checks
+separately. Keep unchecked gates visible; never count a skipped hardware or
+account-dependent test as a pass. No Windows-ready release claim follows from
+green foundation/helper/wallet jobs alone.
+
+
+### C1a lifecycle validation (2026-10-08)
+
+The checked lifecycle slice extends the scoped `windows-private-fs` invocation
+with `tests/test_private_fs_lifecycle.py` and
+`tests/test_private_fs_lifecycle_faults.py`. Existing native Windows tests now
+also cover lifecycle ACL/junction refusal and exclusive-handle sharing failures;
+process tests include concurrent checked append with every record retained.
+
+Local macOS Python 3.13.12 validation: the focused shared-filesystem suite has
+**184 passed, 47 platform-specific skips**. Ruff check/format passed. Strict mypy
+passed for 205 source files in a separate `.venv-ci` installed with only
+`dev,keyvault,extension,macos` extras. Native Windows execution belongs to the
+controller's final-commit acceptance run, not these local results.
+
+Regression development observed 43 lifecycle cases fail on missing APIs, then
+13 portable Windows cases fail on missing backend methods. Three native ABI
+cases failed before adding time/seek/truncation/enumeration bindings. Subsequent
+RED/GREEN cases caught prevalidation metadata access, unbounded reserved staging
+scans and replaced exceptions after Windows publication. Fault seams exercise
+partial append/rollback, partial POSIX rename, native deletion/rename ambiguity,
+close/unlock/directory cleanup and original-error preservation. These are
+injected failures, not physical disk-failure or power-loss durability evidence.
+
+The full default `uv run pytest -q` run exited 0: **5,425 passed, 52 skipped,
+34 integration deselected** (counts from progress output and collection).
+Twelve final cleanup regressions added while that run was active were verified
+by the subsequent focused run above; product code was unchanged. Warnings were
+upstream Starlette/httpx deprecation, an installed Hermes invalid-escape warning,
+and existing Python multi-threaded-fork deprecations. No test failed.
+
+C1a review follow-up: ordinary `OSError` bodies after successful deletion exposed
+uncertainty loss when POSIX unlock or lock-close also failed. Regression RED was
+**2 failed, 4 passed**; retaining the transaction mutation state during error
+classification gave **6 passed**. The analogous directory-close case already
+preserved uncertainty and remains covered. Final focused suite: **190 passed,
+47 skipped**; Ruff check/format and reduced-extras strict mypy (205 files) passed.
+The full suite was not repeated for this bounded review fix.
+
+Actual Windows Server 2025 ordinary-user validation on 2026-10-08 used Python
+3.11.17, a disposable home and separate source/wheel directories on the retained
+AWS host. Source commit `15ccec45b` passed **193 tests, 38 platform skips**.
+An sdist-derived wheel from reviewed commit `d2db7b5d3`, installed with no package
+dependencies in a fresh venv (plus pytest), passed **193 tests, 44 platform
+skips**. The six additional skips are the new POSIX-only raw-error regressions;
+the review fix did not change Windows product code. Module paths were verified
+inside the new wheel venv, with no source path injection. Wheel SHA-256:
+`02c57837fc35d6aa9476d4bcafc01d3defedef0453ace6b34ccde0696ae6245e`.
+
+The actual native cases cover metadata/prefix/enumeration, checked deletion,
+no-replace rename, append, hostile ACLs/junctions/hard links, held handles and
+cross-process append contention. Injected cleanup failures are separately
+identified in test names. Independent review found one POSIX classification
+defect, fixed and re-reviewed with no remaining important findings. Shellcheck
+also passed. This slice did not repeat reboot/stop-start or TPM custody tests;
+it adds no Windows 11 or whole-product acceptance claim. Host shutdown remains
+the responsibility of the ongoing completion task's bounded auto-stop controls.
+
+### C5 custody foundation validation (2026-10-08)
+
+The shared prerequisite exposes validated Windows principal identity,
+confidential bounded inventory, protected canonical transaction loans and
+monotonic child publication receipts. It does not enable production custody,
+memory or encrypted audit callers. Scoped Windows CI additionally selects
+`tests/test_private_fs_principal.py` and `tests/test_config_io_custody.py`;
+existing native confidential/coordinator suites now include inherited inventory,
+fresh-process SID comparison, borrowed audit and child receipt cases.
+
+Local macOS Python 3.13.12 all-extras verification at code `c6d2e8ab7`:
+**5,895 passed, 106 skipped, 37 integration cases deselected**. Five warnings are
+existing dependency/fork deprecations and an upstream-source escape warning. Focused shared capabilities/readers and
+docs: **281 passed, 16 skipped** with default marker filtering disabled; the
+native/integration skips are not Windows execution evidence. Ruff check/format,
+ShellCheck and strict mypy for 210 source files passed; mypy used an isolated
+reduced-extras environment (`dev,keyvault,extension,macos`).
+
+Regression development caught missing interfaces, nested nonblocking loan
+acquisition, caught uncertain admission failures and child outcome loss when
+parent security revalidation happened before receipt reporting. Native Server
+source/wheel validation, independent review, Windows 11 and production caller
+adoption remain separate gates controlled by the completion run.
+
+### Managed installation image foundation validation (2026-10-08)
+
+The read-only Windows prerequisite adds
+`inspect_managed_installation_image(path) -> FileMetadata`; it does not change
+keyvault process inventory. Scoped Windows CI selects
+`tests/test_private_fs_managed_images.py` and
+`tests/test_private_fs_managed_images_windows.py`. Native cases observe a real
+protected Windows binary unchanged, refuse current-user-owned read-only
+lookalikes, and exercise administrator-owned public hardlinks, file/ancestor
+writes, delete-child, junctions, held writers and descriptor changes. Elevated
+CI creates only a new nonce-named fixture at the local volume root. An ordinary
+token can use an explicitly newly provisioned fixture via
+`MORDRED_MANAGED_IMAGE_TEST_ROOT`; this test input establishes no product trust.
+The supplied fixture is only observed, and administrative held-writer and
+descriptor-change cases report explicit skips under that ordinary token.
+
+Local macOS Python 3.13.12 verification: the focused foundation/docs run passed
+**424 tests with 77 native/platform skips**; the full default suite passed
+**6,211 tests with 141 skips and 38 integration cases deselected**. Its five
+warnings are existing dependency, upstream-source and fork deprecations.
+Ruff check/format, ShellCheck and strict mypy for 217 source files passed; mypy
+used a separate `dev,keyvault,extension,macos` environment. Portable new policy
+and boundary faults account for 109 passed cases; all 11 new native cases skip
+on this macOS host. These skips are not Windows execution evidence.
+
+Controller-run precommit read-only ordinary-token Server diagnostics verified
+the proposed OS handle access and native TrustedInstaller SID resolution, and
+admitted the tested System32, OpenSSH, Edge Update and Amazon SSM images.
+Under that original uniform ancestor policy, Defender images under ProgramData
+were refused: that ancestor has effective Builtin Users file-creation,
+subdirectory-creation, write-EA and write-attributes grants (`0x116`).
+Controller ruling R-C5c-1 supersedes this limitation for read-only image
+inspection only (see the role-based fix round below): directories strictly
+above the image's immediate parent admit those entry-creation grants, while the
+image and its immediate parent stay strict and storage admission is unchanged.
+[Setting reparse data](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/4aeefef8-92c3-4abc-af7a-a610caf8a165)
+uses write-data or write-attributes access, and modern Windows documents
+[nonempty-directory reparse behavior](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_open_reparse_list_entry)
+for directory-bit tags; that residual is accepted in SPEC §"Windows supported
+gateway inventory boundary" and probed natively below. No existing OS
+permissions were changed. Final committed source/wheel native acceptance,
+independent review, the ordinary-user known-empty runtime gate and Windows 11
+remain separate.
+
+### Managed image role-based fix round validation (2026-10-08)
+
+This round implements controller ruling R-C5c-1 (SPEC §"Windows supported
+gateway inventory boundary"): `check_managed_image` takes a role (`image`,
+`image_parent`, `upper_ancestor`) stored on each observation and reused by
+every pinned recheck and named reopen. The scoped Windows CI selector is
+unchanged; the role cases live in the already selected
+`tests/test_private_fs_managed_images.py`,
+`tests/test_private_fs_managed_images_windows.py` and
+`tests/test_private_fs_windows_faults.py` (an explicit lock that storage
+`check_ancestor` still refuses `0x2`, `0x10`, `0x100` and `0x116` for both
+`creating_child` values).
+
+The native fixture root (elevated CI creates its own; an ordinary token uses
+an explicitly newly provisioned root via `MORDRED_MANAGED_IMAGE_TEST_ROOT`)
+now contains, besides `safe/`, `writable-file/`, `writable-parent/`,
+`delete-child/`, `current-owned/` and `junction`:
+
+- `relaxed/parent/image.exe`: administrator-owned protected objects plus
+  `BUILTIN\Users:(CI)(WD,AD,WEA,WA)` (the default ProgramData grant) on the
+  upper ancestor `relaxed`; must be admitted with descriptors and bytes
+  unchanged.
+- `relaxed-parent/parent/image.exe`: the same grant on the immediate parent
+  `parent`; must refuse with `managed_image_acl`. `writable-parent` (Everyone
+  `W` on the immediate parent) keeps refusing.
+
+Every child is protected, so the container-inherit grant stays on the named
+directory. Native cases also admit every real
+`ProgramData\Microsoft\Windows Defender\Platform\*\MsMpEng.exe` (skipped when
+absent) and compare the security descriptors of the image and each ancestor
+before and after; ProgramData is never modified. Probe cases attempt
+ordinary-token mutation of `relaxed` and print one
+`managed-image-probe {json}` line each: `CreateHardLinkW` of `safe/image.exe`
+into `relaxed` (if it succeeds, the link must refuse because `relaxed` is its
+immediate parent, and the link count of `safe/image.exe` also rises), a
+mount-point tag on the non-empty `relaxed` (the probe must open `relaxed` and
+reach `FSCTL_SET_REPARSE_POINT`, failing there with `ERROR_DIR_NOT_EMPTY` 145;
+`ERROR_ACCESS_DENIED` 5 at that stage is accepted and recorded, while a failed
+open means the probe did not run and fails the test) and the directory-bit
+cloud (`0x9000001A`) and WCI (`0x90001018`) tags (outcome recorded; if set,
+inspection must refuse with `managed_image_metadata` while present and the tag
+is removed in teardown). A hardlink an ordinary token cannot delete stays
+inside the fixture root until the elevated controller removes that nonce root.
+
+Ordinary-token selectors on the committed source (repeat on a wheel built from
+the committed sdist, invoked from outside the checkout):
+
+```powershell
+$env:MORDRED_MANAGED_IMAGE_TEST_ROOT = 'C:\mordred-managed-test-<nonce>'
+$env:HERMES_HOME = '<isolated-test-home>'
+& $Python -m pytest -q -o addopts='' tests/test_private_fs_managed_images.py tests/test_private_fs_managed_images_windows.py tests/test_private_fs_windows_faults.py
+& $Python -m pytest -q -o addopts='' tests/test_private_fs_managed_images_windows.py -k 'probe or programdata or defender or relaxed'
+```
+
+Under that ordinary token 16 of the 18 native cases run; the administrative
+held-writer and descriptor-change cases report explicit skips. Elevated CI runs
+all 18 (Defender skips only where absent).
+
+Local macOS Python 3.13.12 verification: the focused foundation/docs run passed
+**658 tests with 84 native/platform skips**; the full default suite passed
+**6,445 tests with 148 skips and 38 integration cases
+deselected**. Ruff check/format, ShellCheck and strict mypy for 217 source
+files (separate `dev,keyvault,extension,macos` environment) passed. All 18
+native cases skip on this macOS host; those skips are not Windows execution
+evidence, and native source/wheel acceptance remains a controller gate.
+
+### Windows checked memory adapter validation (C5b)
+
+The scoped Windows job includes `test_windows_memory_storage.py`,
+`test_windows_memory_hook.py` and `test_windows_memory_native.py`. Host tests
+use real checked transactions and MRKW/AES-GCM, injecting only native custody,
+principal and platform admission. Native cases use inherited-safe task-owned
+Windows directories, actual NTFS casing/ACL/hardlink/junction admission and an
+independent process competing for the canonical home lock. Their injected CNG
+backend does not establish actual TPM acceptance. Existing POSIX memory suites
+remain required.
+
+For explicit ordinary-user CNG and installed-Hermes acceptance, first verify
+`mordred_hermes.__file__` in the selected source environment and again in the
+sdist-built wheel environment. Supply `MORDRED_TEST_WINDOWS_MEMORY_LIVE=1` and
+`MORDRED_WINDOWS_CUSTODY_TEST_ROOT` pointing to an existing retained isolated
+root, then run that environment's Python with:
+
+```powershell
+python -m pytest -q -o addopts= -m integration tests/test_windows_memory_live.py
+```
+
+This test checks the real unchanged C5c stopped-gateway gate before native
+enrollment, uses a fresh UUID profile/key, releases custody before starting the
+installed Hermes subprocess, and exercises checked sticky seal load/write/drift
+backup through the actual supported seam. A new native owner authenticates all
+files/backups before checked fixture-only removal and journaled key deletion.
+Failure retains its profile/journals and reports only a nonsensitive profile
+path. No ambient key, software fallback, key argv/env, or process-global cache
+is used; native key operands never appear inside rewritten pytest assertions.
+The root/profile directory remains as validation evidence. Record source and
+wheel results separately in the Manual live-device validation log.
+
+This smoke is an inert-custody storage check, not the C5c installed proof API,
+C6 arming/disable/purge ceremony, Windows 11 product acceptance, or complete
+Journey integration. Marker writes and destructive migration helpers are
+unavailable in this first C5b slice. Windows Journey memory mutations safely
+refuse the unsupported atomic seam; checked plaintext Journey edits remain a
+required follow-up. Skill mutations retain their existing behavior unless the
+journey signature itself is unsupported on a managed or indeterminate profile,
+where both mutations are refusal stubs.
+
+`test_windows_memory_hook.py` also starts host child processes (scrubbed
+environment, task-owned `HERMES_HOME`) that call the real `plugin.register` on
+a worker thread. They prove that broken or unproven custody with an unsupported
+seam ends the process through `os._exit(1)`, and that a fresh unmanaged
+profile continues in plaintext. The native junction case asserts the
+foundation's classified `unsafe`/`ancestor_identity` refusal.
+
+### Windows network canonical decisions validation (C8)
+
+The scoped Windows job includes `test_network_windows_policy.py` and
+`test_network_windows_policy_native.py`. Host tests drive the real canonical
+coordinator, registration, session-start wrapper and request hooks with a fake
+route runtime; no Tor/VPN process or network route is started. Native cases
+use inherited-safe task-owned homes and prove that broadened ACLs, hardlinks,
+pending markers, a policy-directory junction and another process holding the
+canonical locks refuse a previously allowed decision without repairing ACLs or
+rewriting documents. Existing POSIX network suites remain required.
+
+For controller acceptance, use an ordinary non-administrator account and a
+disposable `HERMES_HOME`. Verify `mordred_hermes.__file__` in the source
+environment and again in a fresh sdist-built wheel environment, then run that
+environment's Python with:
+
+```powershell
+python -m pytest -q -o addopts= tests/test_network_windows_policy.py tests/test_network_windows_policy_native.py
+```
+
+Record source and wheel results separately in the Manual live-device
+validation log. This does not validate native Tor/VPN routes (C9), live
+provider traffic, wizard status presentation or Windows 11 product acceptance.
+
+### Windows network routes validation (C9)
+
+The scoped Windows job adds `test_network_windows_tor.py`,
+`test_network_windows_tor_lifecycle.py`, `test_network_windows_vpn.py` and
+`test_network_windows_routes_native.py`. The first three also run on every
+POSIX job: discovery uses Windows path strings
+with an injected filesystem and admission; the Tor lifecycle uses the host's
+checked private directory, a real stub child process (a Python script standing
+in for `tor.exe`), real psutil identities and a fake job; VPN runners and
+`subprocess.run` are injected. No Tor, VPN, registry or system proxy setting
+is touched. The native module builds a real stub `tor.exe` from pip's
+vendored distlib launcher (it skips when pip is absent from the environment)
+and exercises the real kill-on-close job, `CREATE_NO_WINDOW` launch, checked
+`tor-data`, startup cleanup and exact teardown. Existing POSIX network suites
+remain required.
+
+Explicit native rerun in the selected source or installed-wheel environment
+(after checking `mordred_hermes.__file__`, an ordinary non-administrator
+account and a disposable `HERMES_HOME`):
+
+```powershell
+python -m pytest -q -o addopts= tests/test_network_windows_tor.py tests/test_network_windows_tor_lifecycle.py tests/test_network_windows_vpn.py tests/test_network_windows_routes_native.py
+```
+
+Optional real-Tor recipe for a validation host with an installed Tor Expert
+Bundle and outbound network (it bootstraps a real Tor on loopback ports from
+19050, checks the control cookie and, when `stem` is installed, the circuit
+probe, then verifies exact teardown and record removal):
+
+```powershell
+$env:MORDRED_TEST_REAL_TOR = 'C:\Program Files\Tor\tor.exe'
+python -m pytest -q -s -o addopts= -m integration tests/test_network_windows_routes_native.py -k real_tor
+```
+
+Set `MORDRED_TEST_REAL_TOR_POLICY=lenient` only to exercise an image that is
+neither administrator-managed nor in a private per-user directory. Record
+source and wheel results separately in the Manual live-device validation log.
+None of these runs validates Mullvad/WireGuard (not ported on Windows in this
+release), live provider traffic through the route, wizard capability
+presentation (C6) or Windows 11 acceptance.
+
+The kill-on-close job relies on nested job objects (Windows 8 and Windows
+Server 2012 or later). GitHub-hosted Windows runners start each step inside a
+job, so the native job cases on `windows-2022` exercise the nested path. On a
+host without nested jobs, assignment fails and bring-up refuses with the
+classified job failure. When `stem` is installed, the real-Tor case also
+requires the PROTOCOLINFO-reported cookie path to be the private
+`tor-data\control_auth_cookie` (`pinned_protocolinfo`). Record that result
+separately for the ASCII profile path and for the non-ASCII/space/`#` profile
+path, because a mismatch refuses with `control-cookie-path-outside-tor-data`.
+
+### Windows capability and role reset validation (C5e)
+
+The scoped Windows job adds `test_windows_capability.py`,
+`test_windows_capability_native.py`, `test_windows_custody_reset.py` and
+`test_windows_excluded_guards.py`. Host tests use real checked transactions
+and MRKW crypto, injecting only the native backend, principal and platform
+admission. Fault injectors fail if an excluded entry point reaches `_storage`,
+anchor or backend resolution, a lock, native wrap/unwrap or plaintext capture.
+Native cases use an inherited-safe task-owned NTFS home, its case alias and a
+copied exact-private home. Their injected seams are the CNG backend, the
+gateway inventory gate, C4 helper presence and C4 structural runtime
+admission; filesystem admission, SID and physical identity are real. They
+prove checked admission and refusal, not TPM availability. Held-lock cases
+use a real lock holder in another thread or process and require predicates
+to return `custody-uncertain` promptly instead of waiting.
+
+Explicit native rerun in the selected source or installed-wheel environment
+(after checking `mordred_hermes.__file__`, with a task-local `HERMES_HOME`):
+
+```powershell
+python -m pytest -q -o addopts= tests/test_windows_capability.py tests/test_windows_capability_native.py tests/test_windows_custody_reset.py tests/test_windows_excluded_guards.py
+```
+
+Capability predicates are diagnostics, not product acceptance. Real CNG reset,
+Windows 11 and C6 wizard routing remain separate gates; record native results
+in the Manual live-device validation log.
+### Windows installed-runtime memory proof validation (C5c phase 2)
+
+The scoped Windows job runs `test_windows_memory_proof.py`. It builds a real
+non-editable venv from the job's interpreter and runs the actual probe child,
+C4 validation, C1 private probe directory and bounded protocol natively; only
+the CNG boundary, principal and checked-directory admission are injected
+through the test-only backend module. This is not TPM or installed-product
+evidence. The explicit real-CNG recipe is recorded with the lifecycle below.
+
+### Windows proof-bound memory lifecycle validation (C5b-2)
+
+The scoped Windows job also runs `test_windows_memory_lifecycle.py`, whose
+proofs come from the real probe child above and whose files use real checked
+transactions, MRKW and AES-GCM with the injected CNG boundary.
+
+Explicit ordinary-user acceptance uses `tests/test_windows_memory_proof_live.py`.
+Use the installed Hermes 0.19 venv from the controller artifact notes
+(`completion-c4-real-20261008`) after installing, with pytest, a wheel built
+from this branch's sdist; an editable install cannot prove. Verify
+`mordred_hermes.__file__` there first. Set `MORDRED_TEST_WINDOWS_PROOF_LIVE=1`,
+`MORDRED_WINDOWS_CUSTODY_TEST_ROOT` to an existing retained isolated root,
+`MORDRED_HERMES_PYTHON` to that venv's `Scripts\python.exe` and
+`MORDRED_WINKEY_HELPER` to the owned helper, stop every Hermes gateway, then run
+from the checkout with that same interpreter:
+
+```powershell
+& $env:MORDRED_HERMES_PYTHON -m pytest -q -s -o addopts= -m integration tests/test_windows_memory_proof_live.py
+```
+
+The run passes the real stopped-gateway gate, creates a new UUID profile and a
+fresh CNG key, then proves the installed runtime, enables, reads in a fresh
+installed-runtime process, disables, reads again, requires a purgeable report
+and deletes only its own key through the C5a journal. It prints only the
+interpreter, module and helper paths and the seam. A failure keeps the profile
+and journals and names the profile path; the root is never removed
+recursively. Record source and sdist-wheel results separately in the Manual
+live-device validation log. Neither run establishes Windows 11 or C6 product
+acceptance.
+
+### Windows extension checked state validation (C10a)
+
+The scoped Windows job includes `tests/extension/test_extension_windows_storage.py`
+and `tests/extension/test_extension_windows_storage_native.py`. The first runs
+the real pairing, attestation, WebAuthn, history, wallet-fingerprint and API
+paths against the native backend, including child processes that race one
+pairing code, revocation against consumption, replay claims and a commit
+against a reader. Native cases prove that an inherited extension directory,
+broadened directory/file/lock ACLs, a hard-linked `state.json`, an extension
+directory junction and another process holding the lock refuse or serialize
+without repairing ACLs or rewriting state. Existing POSIX extension suites
+remain required and are unchanged.
+
+For controller acceptance, use an ordinary non-administrator account and a
+disposable `HERMES_HOME`. Verify `mordred_hermes.__file__` in the source
+environment and again in a fresh sdist-built wheel environment, then run that
+environment's Python from the repository root with:
+
+```powershell
+python -m pytest -q -o addopts= tests/extension/test_extension_windows_storage.py tests/extension/test_extension_windows_storage_native.py
+```
+
+Record source and wheel results separately in the Manual live-device
+validation log. This does not validate Telegram custody/archive (C10b), the
+gateway/Desktop lifecycle (C11), a real browser extension pairing, or
+Windows 11 product acceptance.
+### Windows Telegram custody and archive validation (C10b)
+
+The scoped Windows job adds `test_windows_telegram_custody.py`,
+`test_windows_telegram_archive.py` and `test_windows_telegram_native.py`.
+Host tests use real checked transactions, MRKW and MTC1/MTG1 crypto, injecting
+only the native backend, token SID and platform admission; POSIX
+mode/symlink/copied-tree stand-ins skip on Windows. Native cases use an
+inherited-safe task-owned home, its case alias, an inherited non-private
+telegram directory, a broadened ACL, a hardlink, a dialogs junction and a sync
+lock held by another process, and require refusal without ACL repair or
+deletion. Their injected CNG backend does not establish TPM acceptance.
+
+2026-10-09 host-only flags follow-up: the new extension module
+`tests/extension/test_telegram_windows_flags.py` reproduced 12 failures for
+non-object metadata with retained sealed credentials, then passed all 21
+cases after the Windows default-flags correction. The targeted command
+`.venv/bin/python -m pytest -q tests/extension/test_telegram_windows_flags.py tests/test_windows_telegram_custody.py tests/test_wizard_windows_telegram.py`
+passed all 130 cases on macOS. Checked presence, fresh conservative defaults,
+unchanged files and C6 observation are covered without native unseal or
+enrollment. Scoped Ruff checks and strict mypy passed. Native Windows and the
+final combined full-suite run remain separate controller checks.
+
+Explicit native rerun in the selected source or installed-wheel environment
+(after checking `mordred_hermes.__file__`, with a task-local `HERMES_HOME`):
+
+```powershell
+python -m pytest -q -o addopts= tests/test_windows_telegram_custody.py tests/test_windows_telegram_archive.py tests/test_windows_telegram_native.py
+```
+
+Optional real-CNG acceptance requires BOTH `MORDRED_TEST_WINDOWS_TELEGRAM_LIVE=1`
+and `MORDRED_WINDOWS_CUSTODY_TEST_ROOT` pointing to an existing isolated
+retained root; run that environment's Python with
+`python -m pytest -q -o addopts= -m integration tests/test_windows_telegram_live.py`.
+Each run creates a UUID profile, enrolls a fresh CNG `telegram` role, checks
+the presence refusal, seals synthetic credentials, writes a synthetic archive,
+reloads both in a fresh process and runs the forget ceremony. No Telegram
+account, credential, phone number, network or model is used; failure preserves
+the profile/journals and reports only its path. Wizard ceremonies, the live
+account gate and Windows 11 remain separate; record results in the Manual
+live-device validation log.
+
+### Canonical in-process wait validation (C2b)
+
+`tests/test_config_io.py`, already in the scoped Windows job, adds
+host-portable thread cases for SPEC.md ruling R-C2b-1: two concurrent
+`blocking=False` readers in one process both succeed; a reader behind an
+in-process holder refuses `busy`/`canonical_lock` only after
+`IN_PROCESS_WAIT_SECONDS` (2.0 s, minus 50 ms timer-tick slack) and before the
+bound plus 1 s; a holder released within the bound admits the reader;
+`blocking=True` ignores the bound; and a real cross-process home or `mordred`
+lock holder (the `tests/test_private_fs_processes.py` child) still refuses
+immediately. Host result 2026-10-09 (macOS arm64, Python 3.14.7): all pass,
+and C5e held-thread predicates now return within the bound; no native Windows
+rerun is recorded yet.
+### Windows wizard routing validation (C6)
+
+The scoped Windows job adds `test_wizard_windows_memory.py`,
+`test_wizard_windows_status.py`, `test_wizard_windows_excluded.py`,
+`test_wizard_windows_uninstall.py` and `test_wizard_windows_native.py`. The
+portable modules reuse the installed-runtime proof harness (a real non-editable
+venv child, real checked files, MRKW and AES-GCM) with the CNG boundary,
+principal and platform admission injected; the native module uses an
+inherited-safe NTFS home, its case alias and a copied home with the real
+`win32` platform decision, injecting only the CNG backend, helper presence,
+structural runtime admission and the gateway inventory. Neither is TPM or
+product evidence.
+
+Explicit ordinary-user acceptance uses `tests/test_wizard_windows_memory_live.py`
+in the same environment as the C5b-2 recipe above: the installed Hermes venv
+with a wheel built from this branch's sdist (verify `mordred_hermes.__file__`),
+`MORDRED_TEST_WINDOWS_WIZARD_LIVE=1`, `MORDRED_WINDOWS_CUSTODY_TEST_ROOT` set
+to an existing retained isolated root, `MORDRED_HERMES_PYTHON` set to that
+venv's `Scripts\python.exe` and `MORDRED_WINKEY_HELPER` set to the owned
+helper, with every Hermes gateway stopped:
+
+```powershell
+& $env:MORDRED_HERMES_PYTHON -m pytest -q -s -o addopts= -m integration tests/test_wizard_windows_memory_live.py
+```
+
+Through the real CLI it runs `keyvault native init`, `encryption enable
+memory` (real gate, installed-runtime proof and lifecycle on a new UUID profile
+with a fresh CNG key), a fresh installed-runtime read, `encryption status
+--json`, `encryption disable memory` and `encryption purge memory --yes`, which
+deletes only that profile's key through the C5a journal. A failure keeps the
+profile and journals and names the path; the root is never removed
+recursively. Record source and sdist-wheel results separately in the Manual
+live-device validation log. A real `hermes gateway` start, Desktop, Telegram
+and Windows 11 installed-product acceptance remain separate gates.
+
+### Windows wizard Telegram validation (C6-telegram)
+
+The scoped Windows job adds `test_wizard_windows_telegram.py` and
+`test_wizard_windows_telegram_native.py`. The portable module reuses the C10b
+fixture (real checked transactions, MRKW, MTC1/MTG1 crypto, the real custody
+store and archive) with the native backend, token SID, helper presence and
+platform decisions injected, plus the C6 proof harness for one real Windows
+memory enable; a synthetic Telegram client replaces the network. The native
+module uses an inherited-safe NTFS home, its case alias and a copied home with
+the real `win32` decisions, injecting only the CNG backend, helper presence,
+structural runtime admission, the memory predicate and the synthetic client.
+Neither is TPM, account or product evidence.
+
+Explicit native rerun in the selected source or installed-wheel environment
+(after checking `mordred_hermes.__file__`, with a task-local `HERMES_HOME`):
+
+```powershell
+python -m pytest -q -o addopts= tests/test_wizard_windows_telegram.py tests/test_wizard_windows_telegram_native.py
+```
+
+Optional real-CNG acceptance requires
+`MORDRED_TEST_WINDOWS_TELEGRAM_WIZARD_LIVE=1`, `MORDRED_WINDOWS_CUSTODY_TEST_ROOT`
+pointing to an existing isolated retained root and `MORDRED_WINKEY_HELPER` set
+to the owned helper, run by an ordinary user:
+
+```powershell
+python -m pytest -q -s -o addopts= -m integration tests/test_wizard_windows_telegram_live.py
+```
+
+On a new UUID profile it runs `keyvault native init --role telegram` (a fresh
+CNG telegram key), the acknowledged login with synthetic credentials and a
+synthetic client, a fresh-process reload of the sealed credentials, `telegram
+doctor --json`, `telegram logout` (a synthetic archive, the credentials and
+the role are kept) and `telegram logout --forget` with the typed confirmation,
+which deletes the credentials, the archive and that profile's telegram
+generation only. No Telegram account,
+phone number, network or model is used; a failure keeps the profile and its
+journals and names the path. The live account gate, Desktop login (C11) and
+Windows 11 remain separate; record results in the Manual live-device
+validation log.
+### Windows Desktop and extension shutdown validation (C11)
+
+The scoped Windows job adds `tests/test_desktop_windows_api.py`,
+`tests/test_desktop_windows_native.py`, `tests/test_desktop_windows_page.py`
+and `tests/extension/test_extension_serve_shutdown.py`. The API module reuses
+the installed-runtime proof harness through the C6 fixtures, with the CNG
+boundary, principal and platform admission injected. The native module places
+the Desktop page in a profile-style shared home whose name has a space and
+non-ASCII characters, with the real `win32` decision, and checks refusals without ACL repair. The shutdown
+module starts `python -m mordred_hermes.extension --port 7799` in a new process
+group, sends `CTRL_BREAK_EVENT`, requires exit 0 within 10 s, no child process
+and a free port, then restarts on the same port. A Windows venv `python.exe`
+redirects to a base-interpreter child; the test inspects that interpreter.
+`tests/test_desktop_windows_install.py` is the POSIX stand-in and skips on
+NTFS. None of this is TPM, Desktop UI or product evidence.
+
+Explicit ordinary-user acceptance uses `tests/test_desktop_windows_live.py`
+with every Hermes gateway stopped, `MORDRED_TEST_WINDOWS_DESKTOP_LIVE=1`,
+`MORDRED_WINDOWS_CUSTODY_TEST_ROOT` set to an existing retained isolated root
+and `MORDRED_WINKEY_HELPER` set to the owned helper. Run it with the Python of
+the packaged Hermes Desktop runtime, and again with an sdist-built wheel venv
+(verify `mordred_hermes.__file__`), leaving `MORDRED_HERMES_PYTHON` unset so
+the Desktop routing proves the serving interpreter:
+
+```powershell
+& <desktop-or-venv>\python.exe -m pytest -q -s -o addopts= -m integration tests/test_desktop_windows_live.py
+```
+
+Through the real Desktop router it reads `/status?client_version=3` and
+`/hardware/build`, enables memory with both acknowledgements on a new UUID
+profile (fresh CNG key), reads `/memory/status` and disables memory again; the
+profile keeps its key until `encryption purge memory --yes`. The manual part,
+recorded separately in the Manual live-device validation log, is to:
+
+1. run `hermes-mordred desktop install` and launch the packaged Hermes Desktop;
+2. open the Mordred page and record a screenshot of the capability list and
+   helper state;
+3. enable memory with all gateways stopped, then restart Desktop and confirm
+   that the memory state reads `on`;
+4. stop `extension serve` with Ctrl-C and with Ctrl-Break, then restart it on
+   the same port.
+
+Telegram stays blocked at the custody step until the C6-telegram ceremony
+exists.
+
+C11 round 1: `tests/test_desktop_capture.py` joins the scoped Windows job. The
+shutdown module now reaps every child (and the redirected base interpreter)
+on every path and requires 7799 free afterwards, and also stops a server while
+an HTTP keep-alive client and an open WebSocket are connected, then restarts
+it on the same port (server-side TIME_WAIT on Windows without
+`SO_REUSEADDR`).
+
+C11 integration follow-up validation and the scoped Windows job add
+`tests/test_desktop_windows_logout.py`: real checked custody, MRKW/MTC1
+credentials and archive with the native/platform boundary and Telegram
+client injected. Regressions cover full snapshot reuse with one unwrap for
+logged-in and configured/session-less credentials, retained archive/roles,
+busy and custody preflight refusal without remote revoke, wipe-before-revoke,
+partial deletion with confirmed credential absence, unknown post-wipe state,
+failed revoke, pre-wipe metadata failure and the CLI recovery remedy.
+`tests/test_desktop_windows_page.py` executes page components and handlers
+through a synthetic SDK/React boundary to check ceremony command rendering,
+success/error outcomes and Devices advice, persistent results after refresh
+and disabled controls after logout. These are host regressions, not native
+Desktop or real-CNG acceptance evidence. Ceremony availability depends on
+C6 PR #222; the earlier blocked-at-custody note is superseded.
+
+R-C11-5 records the shutdown evidence and limit: an open WebSocket delayed
+SIGTERM about 46 seconds, so the all-platform listener stop and 3-second
+connection-handler grace followed by task cancellation are accepted. POSIX
+connections, including in-flight work, can be cancelled and need reconnect
+or retry. This is not a universal process-exit deadline: a separate isolated
+12-second default-executor worker probe returned from `_run_forever` around
+3.21 seconds, then waited until the worker finished at interpreter exit.
+This pre-existing bounded-worker lifecycle gap remains outside this slice.
+R-C11-6 aligns Desktop with the C6 checked-wipe-before-revoke contract;
+manual Telegram Settings → Devices revocation is required if remote revoke
+fails after local deletion or if credential deletion cannot be confirmed.
+
+The Desktop real-store suite also regresses metadata `[]` with an archive
+lock held: advisory flags say absent, but the seal remains and a busy
+forget must not revoke. It injects a failed checked seal-presence read after
+an observed absence to verify unknown state, no revoke and Devices advice.
+Shared `flags()` semantics remain a separate fix; Desktop corroborates
+observed absence through the existing checked transaction/presence API.
+
+2026-10-11 Astra review follow-up: production candidate `c1b5e48db`
+integrates `dev` at `ec198d0f`. Telegram flags now refuse a held data lock
+without waiting, preserving `store_busy`; mutation/sync locks remain blocking.
+Failed Windows enrollment reports that a key may have been created and that
+retained journals require explicit reconciliation, without echoing exception
+content. Windows package-manager registration/repair remains unported and
+refuses before profile I/O; the page directs users to their original Windows
+installer. Windows database status and uninstall use checked, bounded,
+nonblocking observation of known protection-state names, including a profile
+owner, and refuse unsupported or uncertain state before teardown.
+
+macOS arm64 / Python 3.14.7 / Hermes 0.19.0 verification: **8,015 passed,
+221 skipped**, zero errors/failures, **90.22%** coverage (434.048 seconds).
+Reduced-extras Python 3.12 strict mypy passed all 257 files; Ruff check/format
+(586 files), shellcheck and Desktop JavaScript syntax passed. The sdist-built
+wheel was installed in a fresh Python 3.12 environment outside the checkout;
+its verified `site-packages` import passed 42 compatibility/page regressions.
+Astra's final repair/Desktop review passed 214 tests with one existing
+Hermes-checkout-dependent skip and found no remaining supported P1/P2 in its
+assigned scope. The independent database review confirmed both additional
+P2 fixes. Draft CI at native-test candidate `07b7993f6` passed all 59 critical
+cases across the three OSes with zero skips. Product source is unchanged since
+`c1b5e48db`. Full CI is tracked by
+[run 38106401094](https://github.com/mordredagent/hermes-mordred/actions/runs/38106401094).
+The run passed all 25 active jobs; draft-only feedback was intentionally skipped.
+Retrieved native JUnit confirms **2,638 passed, 111 skipped**, zero failures/errors,
+for each of Python 3.11, 3.12 and 3.13 across all nine Windows shards. Every
+version collected all 84 selected modules without duplicate case identities.
+The six Linux/macOS coverage cells passed the 80% floor (87.66% / 89.61%).
+The native selector retains all 82 original modules plus two new compatibility
+modules; new duration weights remain explicitly unmeasured.
+
+Native fixture follow-up: failed full runs
+[38104459639](https://github.com/mordredagent/hermes-mordred/actions/runs/38104459639)
+and [38105162352](https://github.com/mordredagent/hermes-mordred/actions/runs/38105162352)
+are retained. Teardown assertions now allow the read-only interpreter metadata
+probe while still refusing package/data removal. The Telegram contention test
+times the real Desktop flags adapter, excluding unrelated custody/memory scans;
+real thread/process locks, completion before release, unchanged ciphertext and
+native-call assertions remain. The Desktop API fixture uses a persistent
+TestClient event loop and fresh job state, preventing cancelled jobs from
+remaining falsely running between tests. Existing time bounds and confirmation,
+options and summary checks remain. Focused host verification passed **122 tests
+with zero skips**; Astra approved the precise test-only diff and both deliberately
+blocking negative controls. These repairs do not change product source.
+
+These host/wheel checks are portable regressions, not native CNG or Windows 11
+acceptance. The existing AWS session expired before any new Server execution;
+fresh ordinary-user Server source/wheel/CNG and installed-product gates remain
+open. SPEC permits a qualified Windows 11 x64 VM or Cloud PC; physical hardware
+is not required, and virtual-TPM evidence must name its provider and limits.
+Azure client-image eligibility has not been established; no Azure resources
+were created. A Windows Server environment can provide TPM/provider evidence
+but does not replace the separate Windows 11 client-product gate.
+
+### Windows shared Telegram memory guard validation (C10c)
+
+The scoped Windows job adds
+`tests/extension/test_telegram_memory_guard_windows.py`. It uses real C6
+checked custody and proof-bound memory with the existing injected CNG
+boundary. Native operations and subprocesses are forbidden during each guard
+check. A real second interpreter holds the canonical lock while service and
+Hermes-tool refusal retains `custody_busy` before secrets, archive or network
+access. The established POSIX guard module pins its platform seam so native
+Windows runners do not select production Windows state.
+
+Explicit rerun in the selected source or installed-wheel environment:
+
+```powershell
+python -m pytest -q -o addopts= tests/extension/test_telegram_memory_guard.py tests/extension/test_telegram_memory_guard_windows.py tests/extension/test_telegram_api.py tests/extension/test_telegram_hermes_tools.py
+```
+
+Local portable logs and the implementation report are retained under
+`~/.codex/artifacts/mordred-windows-completion-20261008/c10c-*`. These are
+regression evidence, not native Windows source/wheel or Windows 11 acceptance.
+The real-account gate and wizard completion wording remain separate work.
+
+### Windows native selector green-up validation (2026-10-09)
+
+The scoped Windows job and the Windows Server 2025 validation host (ordinary
+non-elevated SSH user, Medium integrity) failed on the integration head
+`412f920de` for harness and fixture reasons, not product admission. The fixes
+are test-only; no product module changed:
+
+- Child interpreters now import the package under test: `tests/_child_env.py`
+  prepends the directory the parent imported `mordred_hermes` from (the `src`
+  checkout or the wheel's site-packages) to a child `PYTHONPATH` or fixture
+  `.pth`. Source-tree runs against the Hermes venv otherwise imported the older
+  hermes-mordred installed there (extension storage race, memory process
+  lock, PowerShell installer fixtures). The Tor stub launcher also comes from
+  standalone distlib or ensurepip's bundled pip wheel when pip is absent.
+- The installed-runtime proof fixture appends `hermes_cli`'s source root when
+  Hermes is an editable install, whose import hook the path-only `.pth` lines
+  never run; `resolve_windows_python` refused the fixture venv
+  (`interpreter-invalid`) for every proof, lifecycle and wizard memory test.
+- Private fixtures with arbitrary content (malformed audit headers, history,
+  copied manifests, the hooked privacy config) are written through
+  `open_private_directory` (`tests/_private_files.py`). A raw write in a
+  protected private directory gets the creator token's default DACL, which on
+  an SSH logon carries the logon-session SID, so admission refused with
+  `private_acl` before the classification under test.
+- The unmanaged memory seam test reads UTF-8 explicitly; the synthetic process
+  tables exclude the real PID; the native crash test retries only `busy`
+  (bounded) after killing the lock holder, because Windows releases a killed
+  process's byte-range lock asynchronously; the native unrecorded-Tor test
+  matches the current refusal text.
+- Managed-image fixtures: the elevated fixture creates its junction after the
+  root is protected (created earlier it keeps an empty DACL, so the elevated
+  open failed at `open` and `rmtree` could not delete it — reproduced on the
+  host with an ordinary-user equivalent); the current-user-owned image test
+  grants the owner explicitly, because a pytest base temp created with mode
+  `0o700` by Python >= 3.13 grants an ordinary user access only through
+  `OWNER RIGHTS`, which the owner change leaves inherit-only.
+
+Host results, source environment (`PYTHONPATH=<root>\src`, Hermes venv
+`C:\Users\mordred.000\hermes-source\venv`, Python 3.11.17; Hermes 0.21.5 is an
+editable install there), per module, failed/errors before (full selector,
+97 failed, 2082 passed, 99 skipped, 45 errors) and after (focused run of the
+15 affected modules at `a18295d6b`):
+
+| Module | Before F/E | After (passed/failed/skipped) |
+|---|---|---|
+| `extension/test_extension_windows_storage.py` | 4/0 | 48/0/0 |
+| `test_config_io_windows.py` | 1/0 | 6/0/0 |
+| `test_keyvault_windows_processes.py` | 1/0 | 132/0/0 |
+| `test_network_windows_routes_native.py` | 1/4 | 6/1/2 |
+| `test_private_fs_managed_images_windows.py` | 1/0 | 4/0/14 |
+| `test_windows_encrypted_audit.py` | 11/0 | 57/0/0 |
+| `test_windows_install_powershell.py` | 10/0 | 18/0/0 |
+| `test_windows_memory_hook.py` | 3/0 | 45/0/0 |
+| `test_windows_memory_lifecycle.py` | 2/34 | 39/0/0 |
+| `test_windows_memory_native.py` | 1/0 | 5/0/0 |
+| `test_windows_memory_proof.py` | 27/0 | 43/0/0 |
+| `test_windows_privacy_audit.py` | 16/0 | 45/9/1 |
+| `test_wizard_windows_memory.py` | 9/0 | 27/0/1 |
+| `test_wizard_windows_status.py` | 8/0 | 13/0/0 |
+| `test_wizard_windows_uninstall.py` | 2/7 | 15/0/0 |
+
+The focused run totalled 10 failed, 503 passed, 18 skipped (27 min 45 s). The
+remaining failures are fixed by two follow-up commits. The old
+`unrecorded Tor` text (one) also fails on every windows-2022 job since
+`3d9c4d090`, so CI verifies that fix. The hooked privacy fixture's raw
+`config.yaml` (nine) fails only under the SSH-logon default DACL and already
+passes on windows-2022, so it still needs a native rerun; the host stopped
+before one could run. The 14 managed-image skips are the elevated or
+controller-root cases (an ordinary token without
+`MORDRED_MANAGED_IMAGE_TEST_ROOT`); the junction and teardown fix for the
+elevated runner is reasoned from the windows-2022 log and the host
+reproduction above, and windows-2022 verifies it. The wheel environment run of
+`412f920de` (82 failed, 2101 passed, 99 skipped, 41 errors) shows the same
+categories and was not rerun. `test_windows_encrypted_audit_processes.py`
+timed out in 5 of the last 15 windows-2022 jobs (passed on the host): its
+three contending children now share one 120 s deadline instead of 30 s each,
+and print faulthandler stacks after 60 s so a real stall stays diagnosable.
+
+### Hosted CI fixture follow-up (2026-10-09)
+
+PR #221 run `37909321803` at `e13e79671` supersedes the earlier assumption
+that raw `config.yaml` republishing passed on windows-2022. All three native
+cells had 2,230 passed, 84 skipped and nine setup errors: checked replacement
+correctly refused the raw creator-default file before the hook cases ran.
+The fixture now creates both config/policy files directly through checked IO
+and uses checked replacement for later updates; product admission is unchanged.
+
+The six Unix cells and the Hermes-floor job also exposed a portable proof
+fixture assumption: their pytest parent is a global setup-python interpreter,
+whereas local `uv run` uses a venv. The shared fixture now explicitly emulates
+parent storage admission only on non-Windows. Its installed proof child keeps
+structural validation and the real probe; native Windows admission and the
+independent unsupported-runtime tests remain intact. A global-parent regression
+exercises real proof-bound enable/disable without changing `sys.executable`.
+
+macOS framework Python can reexec with the same PID but a different executable
+path. Test-owned Tor sleepers now wait for final-child readiness before their
+identity is recorded. A full framework-child reproduction also exposed this
+in `StubPopen`, so the same bounded readiness gate covers that companion stub,
+retaining its bootstrap output. Early-exit/timeout/malformed-line regressions
+verify that both paths reap their child and close the ready pipe. The fixed
+readiness token accepts LF or CRLF, with a real binary-pipe CRLF regression;
+arbitrary whitespace is refused. No product identity comparison was relaxed.
+
+Host checks on macOS arm64: four initial regressions passed after RED/GREEN;
+the companion stub's two cleanup regressions also failed before its fix. The
+final Tor module passed all 67 tests with framework Python 3.13 children, and
+the Tor module plus private-pair/global-parent regressions passed 69 tests.
+The broader nine-module focused run passed 306 tests before the companion
+readiness extension; a real Python 3.11 base-parent proof/lifecycle run passed
+three tests. Reduced-extras Python 3.11 strict mypy passed all 235 source files;
+Ruff check/format and shellcheck passed.
+The final frozen full host suite exited successfully with 7,431 passed and
+204 skipped (integration tests excluded by default), at 90.08% coverage.
+Its five existing warnings concern FastAPI/Starlette, a Hermes escape sequence
+and POSIX fork use; no test failure was reported.
+
+These are host fixture checks, not new native Windows acceptance. The next
+Unix/floor and three-version Windows CI runs, the previously skipped Windows
+wheel smoke, the ordinary
+native source/wheel reruns, controller-root managed images and Windows 11 remain
+pending. The three audit writers did not time out in the inspected PR #221
+run; one successful run does not close that intermittent observation.

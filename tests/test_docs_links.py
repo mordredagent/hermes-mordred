@@ -43,6 +43,9 @@ _MAINTAINED_DEV_DOCS = {
     "STATE_DB_ENCRYPTION.md",
     "TODO.md",
     "UPSTREAM.md",
+    "WINDOWS_FEASIBILITY.md",
+    "WINDOWS_CONFIG_IO.md",
+    "WINDOWS_AUDIT_IO.md",
     "setup.md",
 }
 

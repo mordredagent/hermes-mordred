@@ -31,9 +31,14 @@ from __future__ import annotations
 
 import argparse
 import ast
+import csv
+import io
 import json
 import sys
+import warnings
+from collections.abc import Iterable
 from dataclasses import dataclass
+from importlib import metadata
 from pathlib import Path
 
 #: Directory names never scanned (relative to ``--hermes-root``). ``tests``
@@ -100,23 +105,30 @@ def _hook_name(node: ast.Call, dispatch_names: frozenset[str]) -> str | None:
 
 
 def extract_hook_payload_fields(
-    root: Path, excludes: frozenset[str] = DEFAULT_EXCLUDES
+    root: Path, excludes: frozenset[str] = DEFAULT_EXCLUDES, *, files: Iterable[Path] | None = None
 ) -> dict[str, list[DispatchSite]]:
     """Map hook name → dispatch sites found under ``root``.
 
     Unparseable / undecodable files are skipped: the scan must keep working
     against whatever an upstream checkout contains (templates, py2 relics).
-    Hidden directories (``.git``, ``.venv``) are always skipped.
+    Hidden directories (``.git``, ``.venv``) are always skipped. An explicit
+    installed-wheel file selection must be nonempty and readable/parseable;
+    malformed ownership inputs fail closed rather than reducing the scan.
     """
     sites: dict[str, list[DispatchSite]] = {}
-    for path in sorted(root.rglob("*.py")):
+    paths = sorted(root.rglob("*.py") if files is None else files)
+    if files is not None and not paths:
+        raise ValueError("empty Hermes ownership source selection")
+    for path in paths:
         rel = path.relative_to(root)
         parents = rel.parts[:-1]
         if any(part in excludes or part.startswith(".") for part in parents):
             continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
-        except (SyntaxError, ValueError, UnicodeDecodeError, OSError):
+        except (SyntaxError, ValueError, UnicodeDecodeError, OSError) as exc:
+            if files is not None:
+                raise ValueError(f"cannot scan owned Hermes source: {path}") from exc
             continue
         dispatch_names = _dispatch_names(tree)
         for node in ast.walk(tree):
@@ -134,6 +146,50 @@ def extract_hook_payload_fields(
                 )
             )
     return sites
+
+
+def installed_hermes_sources(root: Path) -> list[Path] | None:
+    """Select all hermes-agent owned Python files, including top-level modules.
+
+    Source checkouts/editable installs keep the recursive source-tree behavior.
+    Missing distribution metadata falls back with a warning; incomplete wheel
+    ownership fails closed. No Hermes module is imported or executed here.
+    """
+    try:
+        distribution = metadata.distribution("hermes-agent")
+    except metadata.PackageNotFoundError:
+        warnings.warn(
+            "Hermes distribution metadata unavailable; using recursive source scan", RuntimeWarning, stacklevel=2
+        )
+        return None
+    direct_url = distribution.read_text("direct_url.json")
+    if direct_url is not None and json.loads(direct_url).get("dir_info", {}).get("editable", False):
+        warnings.warn("Editable Hermes install; using recursive source scan", RuntimeWarning, stacklevel=2)
+        return None
+    installed_root = Path(str(distribution.locate_file("hermes_cli/__init__.py"))).resolve().parent.parent
+    if installed_root != root.resolve():
+        warnings.warn("Hermes source checkout; using recursive source scan", RuntimeWarning, stacklevel=2)
+        return None
+    # Python 3.13's Distribution.files silently filters missing files. Read the
+    # wheel's RECORD directly so an incomplete install cannot reduce the scan.
+    record = distribution.read_text("RECORD")
+    if not record:
+        raise ValueError("Hermes wheel ownership metadata is unavailable or empty")
+    try:
+        rows = list(csv.reader(io.StringIO(record), strict=True))
+    except csv.Error as exc:
+        raise ValueError("Hermes wheel ownership metadata is malformed") from exc
+    if not rows or any(len(row) != 3 or not row[0] for row in rows):
+        raise ValueError("Hermes wheel ownership metadata is malformed")
+    paths = sorted(
+        {Path(str(distribution.locate_file(row[0]))).resolve() for row in rows if Path(row[0]).suffix == ".py"}
+    )
+    required = {root.resolve() / "hermes_cli" / name for name in ("__init__.py", "plugins.py")}
+    if not required.issubset(paths) or any(
+        not path.is_relative_to(root.resolve()) or not path.is_file() for path in paths
+    ):
+        raise ValueError("Hermes wheel ownership metadata is incomplete or contains invalid sources")
+    return paths
 
 
 def _literal_string_collection(node: ast.expr) -> set[str] | None:
