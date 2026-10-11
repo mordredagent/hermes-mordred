@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import pytest
@@ -30,7 +31,8 @@ class TestMigrate:
             == 0
         )
 
-    def test_enrolls_each_source_under_basename(self, tmp_path: Path) -> None:
+    def test_enrolls_each_source_under_basename(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "platform", "linux")
         root = tmp_path / "v"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
@@ -87,11 +89,12 @@ class TestMigrate:
         finally:
             opened.close()
 
-    def test_empty_sources_is_noop(self, tmp_path: Path) -> None:
+    def test_empty_sources_is_noop(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "platform", "linux")
         root = tmp_path / "v"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
-        rc = vault_cli.migrate(root=root, sources=[], backend=backend, store=store)
+        rc = vault_cli.migrate(root=root, sources=[])
         assert rc == 0
         opened = vault.recover_vault(root, _PASSPHRASE)
         try:

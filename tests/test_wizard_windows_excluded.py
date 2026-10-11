@@ -78,7 +78,12 @@ def tree(home: Path) -> dict[str, bytes | None]:
     ("call", "capability"),
     [
         (lambda root, t: _vault_lifecycle.init(root=root, backend=t, store=t, prompt_io=t), "file_vault"),
-        (lambda root, t: _vault_lifecycle.ensure_initialised(root=root, backend=t, store=t, prompt_io=t), "file_vault"),
+        (
+            lambda root, t: _vault_lifecycle.ensure_initialised(
+                root=root, backend=t, store=t, prompt_io=t, flow_session=t
+            ),
+            "file_vault",
+        ),
         (lambda root, t: _vault_lifecycle.change_passphrase(root=root, backend=t, store=t, prompt_io=t), "recovery"),
         (lambda root, t: _vault_lifecycle.recover(root=root, backend=t, store=t, prompt_io=t), "recovery"),
     ],
@@ -105,7 +110,7 @@ def test_vault_init_cli_refuses_before_generation(windows, capsys):
 def test_vault_opens_refuse_before_backend_resolution(windows, capsys):
     home, trip = windows
     root = home / "mordred" / "vault"
-    assert _vault_open._open_hot_path_or_report(root, backend=trip, store=trip) is None
+    assert _vault_open._open_hot_path_or_report(root, backend=trip, store=trip, flow_session=trip) is None
     assert _vault_open._open_cold_path(root, prompt_io=trip) is None
     err = capsys.readouterr().err
     assert "vault open: file_vault is excluded" in err and "recovery is excluded" in err
@@ -294,10 +299,10 @@ def test_disable_and_purge_memory_dispatch_with_the_windows_platform(windows, mo
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the host is Windows")
-def test_posix_hosts_keep_the_vault_path(monkeypatch, tmp_path):
-    """Off Windows the guard is a no-op: init proceeds to its backend as before."""
+def test_non_windows_hosts_keep_the_injected_store_vault_path(monkeypatch, tmp_path):
+    """Off Windows an injected store bypasses production Keychain eligibility."""
     trip = Tripwire()
     monkeypatch.setattr(_vault_lifecycle, "resolve_backend", trip)
     with pytest.raises(AssertionError, match="resolver was reached"):
-        _vault_lifecycle.init(root=tmp_path / "v")
+        _vault_lifecycle.init(root=tmp_path / "v", store=trip)
     assert trip.calls == ["__call__"]

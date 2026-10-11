@@ -794,15 +794,17 @@ lines. Existing canary tests exercise the installed supported upstream memory
 tool. The weekly workflow currently scans hook contracts statically; an
 executable latest-main memory canary is planned below.
 
+The wizard refuses unsupported production file-vault initialization and
+hot/device-auth paths before resolving a backend/store, prompting or writing.
+The production device anchor requires macOS Keychain; injected portable stores
+and cached FlowSession vaults remain usable, after the first Windows exclusion
+check. Anchor `WrapError` returns a state-determination refusal before prompts
+or writes. Recovery requires a usable device/anchor pair before prompting;
+portable cold reads and passphrase rotation remain available outside Windows.
+This gate does not apply to dedicated Linux/Windows memory custody.
+
 Approved follow-up contracts (planned; not active runtime behavior):
 
-- The wizard must refuse production file-vault initialization and device-auth/
-  recovery paths off macOS before
-  resolving a backend/store, prompting or writing. This gate concerns the
-  Keychain device anchor, preserves injected portable stores and cached
-  FlowSession vaults, and does not gate dedicated Linux/Windows memory custody.
-  Anchor `WrapError` must produce a state-determination refusal before prompts
-  or writes. Portable cold reads/passphrase rotation remain available.
 - Weekly compatibility monitoring must execute memory read/write/mutation,
   drift-backup and journey guards against explicitly selected latest-main
   source in an isolated home, verify parent/child provenance, and retain the

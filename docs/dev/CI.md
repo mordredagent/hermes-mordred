@@ -361,6 +361,23 @@ consolidated candidate `bb75885ac`. Pending observations in those entries
 describe their original test time; subsequent contracts and the Windows
 completion acceptance matrix track later work and current open gates.
 
+- **2026-10-11 — Wizard file-vault eligibility; portable validation only.**
+  The candidate based on `eebf31fc9` used an isolated `HERMES_HOME` on macOS
+  with Python 3.12.13. Focused RED/GREEN covered anchor `WrapError`, unsupported
+  production Keychain defaults, cached/injected stores and portable rotation;
+  107 focused cases passed. Additional add/migrate preservation and Windows
+  exclusion-before-flow checks passed their 66-case containing modules.
+  The full frozen-production regression passed **7,621 tests**, with 220
+  skipped, 47 deselected and 90.29% coverage. Source and isolated installed-wheel
+  CLI probes verified Linux init/recovery refusal and passphrase rotation
+  without native resolver calls, preserving all non-sidecar vault bytes.
+  Lint, formatting, shellcheck, strict typing with all and CI-only extras,
+  package build, macOS Swift helper build and 55 portable TPM-helper Rust
+  tests passed. The explicit Secure Enclave integration command ran with
+  `MORDRED_KEYVAULT_LIVE=0`: **8 skipped**, so no live hardware validation is
+  claimed. Native Linux/Windows and live-device gates remain separate; no real
+  custody or production profile was opened or modified.
+
 - **2026-10-11 — Consolidated candidate ordinary-user AWS CNG validation.**
   Candidate `c055169639af5e82706e73e5316278a48f8b9a56` ran on the retained
   Windows Server 2025 Datacenter 10.0.26100 x64 / fixed NTFS host with
