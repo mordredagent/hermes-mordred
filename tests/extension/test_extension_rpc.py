@@ -273,40 +273,16 @@ def test_proxies_resolves_for_explicit_rpc_host(monkeypatch):
     assert seen == ["rpc.example.com"]
 
 
-def test_proxy_resolver_failure_does_not_fallback_to_env(monkeypatch):
-    """An env fallback may differ from the gateway/Tor route, so refuse it."""
-
-    def fail(*, target_hosts=None):
-        raise RuntimeError(f"resolver unavailable for {target_hosts}")
-
-    _install_gateway_resolver(monkeypatch, fail)
-    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8118")
-
-    with pytest.raises(extension_rpc.JsonRpcError, match="rpc_routing_unavailable"):
-        extension_rpc._proxies("https://rpc.example.com")
-
-
-def test_tor_route_without_proxy_fails_closed(monkeypatch):
-    _install_gateway_resolver(monkeypatch, lambda *, target_hosts=None: None)
-    monkeypatch.setattr(extension_rpc, "_tor_route_active", lambda: True)
-
-    with pytest.raises(extension_rpc.JsonRpcError, match="Tor is active"):
-        extension_rpc._proxies("https://rpc.example.com")
-
-
-def test_successful_direct_resolution_remains_valid_for_clearnet_or_vpn(monkeypatch):
-    _install_gateway_resolver(monkeypatch, lambda *, target_hosts=None: None)
-    monkeypatch.setattr(extension_rpc, "_tor_route_active", lambda: False)
-    monkeypatch.setattr(extension_rpc, "_validate_direct_dns", lambda host, port=443: ("93.184.216.34",))
-
-    assert extension_rpc._proxies("https://rpc.example.com") is None
-
-
 def test_call_never_posts_when_route_resolution_fails(monkeypatch):
     def fail(*, target_hosts=None):
         raise RuntimeError(f"resolver unavailable for {target_hosts}")
 
     _install_gateway_resolver(monkeypatch, fail)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8118")
+    monkeypatch.setattr(extension_rpc, "_direct_https_post", lambda *a, **k: pytest.fail("route failure must not post"))
+    monkeypatch.setattr(
+        extension_rpc, "_proxied_https_post", lambda *a, **k: pytest.fail("route failure must not post")
+    )
     posted = []
     monkeypatch.setattr("requests.post", lambda *args, **kwargs: posted.append((args, kwargs)))
 
@@ -318,6 +294,12 @@ def test_call_never_posts_when_route_resolution_fails(monkeypatch):
 def test_call_never_posts_when_tor_proxy_is_missing(monkeypatch):
     _install_gateway_resolver(monkeypatch, lambda *, target_hosts=None: None)
     monkeypatch.setattr(extension_rpc, "_tor_route_active", lambda: True)
+    monkeypatch.setattr(
+        extension_rpc, "_direct_https_post", lambda *a, **k: pytest.fail("missing Tor proxy must not post")
+    )
+    monkeypatch.setattr(
+        extension_rpc, "_proxied_https_post", lambda *a, **k: pytest.fail("missing Tor proxy must not post")
+    )
     posted = []
     monkeypatch.setattr("requests.post", lambda *args, **kwargs: posted.append((args, kwargs)))
 
@@ -803,47 +785,6 @@ def test_direct_route_rejects_multicast_dns_answers(monkeypatch, answer):
 
     with pytest.raises(extension_rpc.JsonRpcError, match="resolved to a non-public address"):
         extension_rpc._validate_direct_dns("rpc.example.com")
-
-
-def test_prepare_sign_freezes_chain_rpc_and_filled_transaction(monkeypatch):
-    from mordred_hermes.keyvault import extension_sign
-
-    monkeypatch.setattr(extension_sign, "get_address", lambda: "0x" + "aa" * 20)
-    monkeypatch.setattr(extension_sign, "rpc_url_for", lambda chain_id: "https://rpc.example.com/private-key")
-    monkeypatch.setattr(
-        extension_rpc,
-        "fill_transaction",
-        lambda rpc_url, tx, from_address, chain_id: {
-            **tx,
-            "nonce": "0x1",
-            "gas": "0x5208",
-            "gasPrice": "0x3b9aca00",
-        },
-    )
-
-    prepared = extension_wallet._prepare_sign(
-        "eth_sendTransaction",
-        [{"from": ("0x" + "aa" * 20).upper(), "to": "0x" + "11" * 20, "value": "0x1"}],
-        "0x1",
-    )
-
-    assert prepared.params == [
-        {
-            "type": "0x0",
-            "chainId": "0x1",
-            "nonce": "0x1",
-            "gasPrice": "0x3b9aca00",
-            "gas": "0x5208",
-            "to": "0x" + "11" * 20,
-            "value": "0x1",
-            "data": "0x",
-            "from": "0x" + "aa" * 20,
-        }
-    ]
-    assert prepared.chain_id == "0x1"
-    assert prepared.rpc_url == "https://rpc.example.com/private-key"
-    assert prepared.rpc_endpoint == "https://rpc.example.com"
-    assert prepared.expected_signer == "0x" + "aa" * 20
 
 
 def test_prepare_sign_rejects_transaction_from_other_wallet(monkeypatch):

@@ -21,17 +21,6 @@ def _paired_home(tmp_path, monkeypatch):
     extension_pairing.handle_pair_init(code, ext_pub, xc.b64u_encode(b"\x00" * 32))
 
 
-def test_history_roundtrip_and_persistence():
-    msgs = [
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "hi there"},
-    ]
-    extension_history.save_messages(msgs)
-    assert extension_history.load_messages() == msgs
-    # Reload (simulating a restart) — still there, not wiped.
-    assert extension_history.load_messages() == msgs
-
-
 def test_projection_extracts_text():
     extension_history.save_messages(
         [
@@ -87,13 +76,19 @@ def test_no_history_is_reported_as_empty_not_undecryptable(monkeypatch):
 
 def test_readable_history_is_reported_as_ok(monkeypatch):
     monkeypatch.setattr(extension_history, "_undecryptable_warned", False)
-    extension_history.save_messages([{"role": "user", "content": "hello"}])
+    messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi there"},
+    ]
+    extension_history.save_messages(messages)
 
     loaded = extension_history.load_history()
 
-    assert loaded.messages == [{"role": "user", "content": "hello"}]
+    assert loaded.messages == messages
     assert loaded.status == "ok"
     assert loaded.undecryptable is False
+    assert extension_history.load_messages() == messages
+    assert extension_history.load_messages() == messages
 
 
 def test_undecryptable_history_is_distinguishable_and_warned_once(tmp_path, monkeypatch, caplog):

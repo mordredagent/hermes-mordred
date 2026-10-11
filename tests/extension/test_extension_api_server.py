@@ -1332,7 +1332,7 @@ def test_transaction_sign_prompt_freezes_rpc_fields_and_signs_exact_snapshot(mon
                     "type": "sign_request",
                     "request_id": "tx1",
                     "method": "eth_sendTransaction",
-                    "params": [{"to": "0x" + "11" * 20}],
+                    "params": [{"from": ("0x" + "aa" * 20).upper(), "to": "0x" + "11" * 20}],
                     "rpc_url": rpc_url,
                 }
             )
@@ -1343,6 +1343,19 @@ def test_transaction_sign_prompt_freezes_rpc_fields_and_signs_exact_snapshot(mon
     assert prompt["type"] == "sign_prompt"
     assert prompt["decoded"]["rpc_endpoint"] == "https://rpc.example.com:8443"
     assert prompt["decoded"]["chain_id"] == "0x1"
+    assert prompt["decoded"]["transaction"] == {
+        "type": "0x2",
+        "chainId": "0x1",
+        "nonce": "0x7",
+        "gas": "0x5208",
+        "maxPriorityFeePerGas": "0x3b9aca00",
+        "maxFeePerGas": "0x77359400",
+        "to": "0x" + "11" * 20,
+        "value": "0x0",
+        "data": "0x",
+        "from": "0x" + "aa" * 20,
+        "accessList": [],
+    }
     assert prompt["decoded"]["transaction"]["nonce"] == "0x7"
     assert prompt["decoded"]["transaction"]["gas"] == "0x5208"
     assert prompt["decoded"]["transaction"]["maxFeePerGas"] == "0x77359400"
