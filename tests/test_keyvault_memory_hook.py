@@ -805,7 +805,7 @@ def test_shape_b_drift_delegates_for_a_plaintext_file(mem_dir: Path, tmp_path: P
         return original(self, target)
 
     module.MemoryStore._detect_external_drift = _spy
-    _install(module, tmp_path)
+    _install(module, tmp_path, armed=False)
     store = module.MemoryStore(memory_char_limit=40)
     path = _memory_path(module)
     path.write_text("x" * 100, encoding="utf-8")
@@ -817,11 +817,317 @@ def test_shape_b_drift_delegates_for_a_plaintext_file(mem_dir: Path, tmp_path: P
     assert not is_sealed(Path(str(result)).read_bytes())
 
 
-def test_shape_b_drift_delegates_for_an_absent_file(mem_dir: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize("plaintext", ["x" * 100, "first\n§\n\n§\nsecond", "x" * 30 + "\r\n§\r\nsecond"])
+def test_shape_b_armed_plaintext_backup_is_sealed_before_publication(
+    mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plaintext: str
+) -> None:
     module = _fake_module("B", mem_dir)
     _install(module, tmp_path)
+    path = _memory_path(module)
+    before = plaintext.encode()
+    path.write_bytes(before)
+    writes: list[bytes] = []
+    publications: list[bytes] = []
+    writer = _memory_hook._write_private
+    replace = os.replace
+
+    def record(target: Path, data: bytes) -> None:
+        writes.append(data)
+        assert is_sealed(data)
+        writer(target, data)
+
+    def forbid_raw_backup(selected: Path, *args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("drift backup must never use the plaintext writer")
+
+    def observe_publication(source: Any, target: Any) -> None:
+        temporary = Path(source)
+        data = temporary.read_bytes()
+        assert is_sealed(data)
+        if os.name == "posix":
+            assert temporary.stat().st_mode & 0o777 == 0o600
+        publications.append(data)
+        replace(source, target)
+
+    monkeypatch.setattr(_memory_hook, "_write_private", record)
+    monkeypatch.setattr(Path, "write_text", forbid_raw_backup)
+    monkeypatch.setattr(os, "replace", observe_publication)
+    result = module.MemoryStore(memory_char_limit=10)._detect_external_drift("memory")
+    backup = Path(result)
+    assert writes == [backup.read_bytes()]
+    assert publications == writes
+    assert unseal(backup.read_bytes(), key=KEY, name=backup.name) == before.replace(b"\r\n", b"\n")
+    if os.name == "posix":
+        assert backup.stat().st_mode & 0o777 == 0o600
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("key", [None, "invalid"])
+def test_shape_b_armed_plaintext_key_refusal_preserves_all_artifacts(
+    mem_dir: Path, tmp_path: Path, key: str | None
+) -> None:
+    module = _fake_module("B", mem_dir)
+    _install(module, tmp_path, key=key)
+    path = _memory_path(module)
+    path.write_bytes(b"x" * 100)
+    prior = mem_dir / "MEMORY.md.bak.prior"
+    prior.write_bytes(b"prior backup")
+    before = {p.name: p.read_bytes() for p in mem_dir.iterdir()}
+    with pytest.raises(MemoryEncryptionUnavailable):
+        module.MemoryStore(memory_char_limit=40)._detect_external_drift("memory")
+    assert {p.name: p.read_bytes() for p in mem_dir.iterdir()} == before
+
+
+@pytest.mark.parametrize("error", [OSError("unreadable"), UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")])
+def test_shape_b_armed_read_uncertainty_refuses_without_publication(
+    mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    module = _fake_module("B", mem_dir)
+    _install(module, tmp_path)
+    path = _memory_path(module)
+    path.write_bytes(b"original")
+    reader = Path.read_text
+
+    def fail(selected: Path, *args: Any, **kwargs: Any) -> str:
+        if selected == path:
+            raise error
+        return reader(selected, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail)
+    with pytest.raises(MemoryEncryptionUnavailable):
+        module.MemoryStore()._detect_external_drift("memory")
+    assert {p.name: p.read_bytes() for p in mem_dir.iterdir()} == {"MEMORY.md": b"original"}
+
+
+def test_shape_b_plaintext_backup_uses_one_snapshot(
+    mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _fake_module("B", mem_dir)
+    _install(module, tmp_path)
+    path = _memory_path(module)
+    observed = "x" * 100
+    replacement = seal(b"different snapshot", key=KEY, name=path.name)
+    path.write_text(observed)
+    reader = Path.read_text
+    reads: list[Path] = []
+
+    def replace_after_read(selected: Path, *args: Any, **kwargs: Any) -> str:
+        text = reader(selected, *args, **kwargs)
+        if selected == path:
+            reads.append(selected)
+            path.write_bytes(replacement)
+        return text
+
+    monkeypatch.setattr(Path, "read_text", replace_after_read)
+    backup = Path(module.MemoryStore(memory_char_limit=40)._detect_external_drift("memory"))
+    assert unseal(backup.read_bytes(), key=KEY, name=backup.name) == observed.encode()
+    assert reads == [path]
+    assert path.read_bytes() == replacement
+
+
+@pytest.mark.parametrize("armed", [True, False])
+@pytest.mark.parametrize("damage", ["broken", "wrong-key", "keyless"])
+def test_shape_b_drift_never_backs_up_an_unauthenticated_seal(
+    mem_dir: Path, tmp_path: Path, armed: bool, damage: str
+) -> None:
+    module = _fake_module("B", mem_dir)
+    key = None if damage == "keyless" else OTHER_KEY_ENV if damage == "wrong-key" else KEY_ENV
+    _install(module, tmp_path, armed=armed, key=key)
+    path = _memory_path(module)
+    before = seal(b"x" * 100, key=KEY, name=path.name)
+    if damage == "broken":
+        before += b"appended tampering"
+    path.write_bytes(before)
+    with pytest.raises(MemoryEncryptionUnavailable):
+        module.MemoryStore(memory_char_limit=40)._detect_external_drift("memory")
+    assert {p.name: p.read_bytes() for p in mem_dir.iterdir()} == {"MEMORY.md": before}
+
+
+def test_shape_b_disarmed_sealed_drift_remains_sealed(mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_module("B", mem_dir)
+    _install(module, tmp_path, armed=False)
+    path = _memory_path(module)
+    before = seal(b"x" * 100, key=KEY, name=path.name)
+    path.write_bytes(before)
+    backup = Path(module.MemoryStore(memory_char_limit=40)._detect_external_drift("memory"))
+    assert unseal(backup.read_bytes(), key=KEY, name=backup.name) == b"x" * 100
+    assert path.read_bytes() == before
+
+
+def test_shape_b_armed_clean_plaintext_creates_no_backup(mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_module("B", mem_dir)
+    _install(module, tmp_path)
+    path = _memory_path(module)
+    before = "first\n§\nsecond".encode()
+    path.write_bytes(before)
+    assert module.MemoryStore(memory_char_limit=40)._detect_external_drift("memory") is None
+    assert {p.name: p.read_bytes() for p in mem_dir.iterdir()} == {"MEMORY.md": before}
+
+
+def test_shape_b_sealed_backup_replace_failure_preserves_source_and_prior_backup(
+    mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _fake_module("B", mem_dir)
+    _install(module, tmp_path)
+    path = _memory_path(module)
+    path.write_bytes(b"x" * 100)
+    monkeypatch.setattr(_memory_hook.time, "time", lambda: 12345)
+    prior = mem_dir / "MEMORY.md.bak.12345"
+    prior.write_bytes(b"prior backup")
+
+    def fail(*args: Any) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(_memory_hook.os, "replace", fail)
+    result = module.MemoryStore(memory_char_limit=40)._detect_external_drift("memory")
+    assert "BACKUP FAILED" in result
+    assert {p.name: p.read_bytes() for p in mem_dir.iterdir()} == {
+        "MEMORY.md": b"x" * 100,
+        "MEMORY.md.bak.12345": b"prior backup",
+    }
+
+
+def test_shape_b_sealed_backup_replaces_symlink_without_touching_target(
+    mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _fake_module("B", mem_dir)
+    _install(module, tmp_path)
+    path = _memory_path(module)
+    path.write_bytes(b"x" * 100)
+    monkeypatch.setattr(_memory_hook.time, "time", lambda: 12345)
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"untouched")
+    backup = mem_dir / "MEMORY.md.bak.12345"
+    backup.symlink_to(outside)
+    assert module.MemoryStore(memory_char_limit=40)._detect_external_drift("memory") == str(backup)
+    assert not backup.is_symlink()
+    assert unseal(backup.read_bytes(), key=KEY, name=backup.name) == b"x" * 100
+    assert outside.read_bytes() == b"untouched"
+
+
+@pytest.mark.parametrize("key_error", [False, True])
+def test_shape_b_linux_plaintext_backup_holds_lifecycle_lock_and_never_provisions(
+    mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key_error: bool
+) -> None:
+    from mordred_hermes.keyvault import _memory_key
+    from tests._helpers import PlatformSys
+
+    module = _fake_module("B", mem_dir)
+    _install(module, tmp_path, key=None)
+    monkeypatch.setattr(_memory_hook, "sys", PlatformSys("linux"))
+    path = _memory_path(module)
+    path.write_bytes(b"x" * 100)
+    held = False
+    lock = _memory_key.memory_key_lock
+    writer = _memory_hook._write_private
+
+    @contextlib.contextmanager
+    def checked_lock(home: Path) -> Iterator[None]:
+        nonlocal held
+        with lock(home):
+            held = True
+            try:
+                yield
+            finally:
+                held = False
+
+    def resolve(*, home: Path, platform: str, environ: Any) -> bytes:
+        assert held and home == tmp_path and platform == "linux"
+        if key_error:
+            raise _memory_key.MemoryKeyError("TPM unwrap refused")
+        return KEY
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("backup must not provision or adopt custody")
+
+    def checked_writer(backup: Path, data: bytes) -> None:
+        assert held
+        writer(backup, data)
+
+    monkeypatch.setattr(_memory_key, "memory_key_lock", checked_lock)
+    monkeypatch.setattr(_memory_key, "resolve_memory_key", resolve)
+    monkeypatch.setattr(_memory_key, "ensure_linux_memory_key", forbidden)
+    monkeypatch.setattr(_memory_hook, "_write_private", checked_writer)
+    store = module.MemoryStore(memory_char_limit=40)
+    if key_error:
+        with pytest.raises(MemoryEncryptionUnavailable):
+            store._detect_external_drift("memory")
+        assert {p.name: p.read_bytes() for p in mem_dir.iterdir()} == {"MEMORY.md": b"x" * 100}
+    else:
+        backup = Path(store._detect_external_drift("memory"))
+        assert unseal(backup.read_bytes(), key=KEY, name=backup.name) == b"x" * 100
+        assert path.read_bytes() == b"x" * 100
+    assert not held
+
+
+@pytest.mark.parametrize("invalid_path", ["symlink", "other-profile"])
+def test_shape_b_linux_refuses_source_path_before_key_resolution(
+    mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_path: str
+) -> None:
+    from mordred_hermes.keyvault import _memory_key
+    from tests._helpers import PlatformSys
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    selected = mem_dir if invalid_path == "symlink" else outside
+    module = _fake_module("B", selected)
+    _install(module, tmp_path)
+    path = _memory_path(module)
+    if invalid_path == "symlink":
+        target = outside / "MEMORY.md"
+        target.write_bytes(b"x" * 100)
+        path.symlink_to(target)
+    else:
+        path.write_bytes(b"x" * 100)
+    monkeypatch.setattr(_memory_hook, "sys", PlatformSys("linux"))
+
+    def forbidden(**kwargs: Any) -> Any:
+        raise AssertionError("invalid path must refuse before key resolution")
+
+    monkeypatch.setattr(_memory_key, "resolve_memory_key", forbidden)
+    with pytest.raises(MemoryEncryptionUnavailable):
+        module.MemoryStore(memory_char_limit=40)._detect_external_drift("memory")
+    assert path.read_bytes() == b"x" * 100
+    assert len(list(outside.iterdir())) == 1
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt", "hardware"])
+def test_shape_b_linux_custody_failure_preserves_memory_and_does_not_regenerate(
+    mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    from mordred_hermes.keyvault import _memory_key
+    from tests._helpers import PlatformSys
+    from tests._keyvault_fakes import FakeBackend
+
+    backend = FakeBackend()
+    _memory_key.ensure_linux_memory_key(home=tmp_path, backend=backend)
+    module = _fake_module("B", mem_dir)
+    _install(module, tmp_path, key=KEY_ENV)  # ambient key must not bypass managed TPM failure
+    path = _memory_path(module)
+    path.write_bytes(b"x" * 100)
+    key_path = _memory_key.memory_key_path(tmp_path)
+    if damage == "missing":
+        key_path.unlink()
+    elif damage == "corrupt":
+        key_path.write_bytes(b"corrupt wrapped custody")
+    else:
+        backend._keys.clear()
+    before = {p.name: p.read_bytes() for p in key_path.parent.iterdir()}
+    calls_before = list(backend.calls)
+    monkeypatch.setattr(_memory_hook, "sys", PlatformSys("linux"))
+    monkeypatch.setattr(_memory_key, "linux_memory_backend", lambda home: backend)
+    with pytest.raises(MemoryEncryptionUnavailable):
+        module.MemoryStore(memory_char_limit=40)._detect_external_drift("memory")
+    assert {p.name: p.read_bytes() for p in mem_dir.iterdir()} == {"MEMORY.md": b"x" * 100}
+    assert {p.name: p.read_bytes() for p in key_path.parent.iterdir()} == before
+    assert not any(op == "generate" for op, _ in backend.calls[len(calls_before) :])
+
+
+def test_shape_b_drift_delegates_for_an_absent_file(mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_module("B", mem_dir)
+    _install(module, tmp_path, key=None)
     store = module.MemoryStore()
     assert store._detect_external_drift("memory") is None
+    assert list(mem_dir.iterdir()) == []
 
 
 def test_shape_b_drift_raises_for_an_undecryptable_file(mem_dir: Path, tmp_path: Path) -> None:
