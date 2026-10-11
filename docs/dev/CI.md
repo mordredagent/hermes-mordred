@@ -205,6 +205,40 @@ scanner outputs as well as elapsed time when assessing this optimization;
 one before/after run in the same environment is observational and may include
 cache effects.
 
+## `upstream-check.yml` details
+
+Monday 03:00 UTC and manual dispatch retain independent PyPI/main AST hook
+contract scans under Python 3.12. The workflow also runs the actual memory
+hook and Journey mutation guard against a shallow latest-main checkout in a
+disposable venv using released Hermes dependencies. A CI-only startup `.pth`
+selects the absolute checkout ahead of the installed release; PyPI scans run
+before that overlay in a separate interpreter. Logs record the selected SHA
+and module/class/shared-import paths in both parent and sanitized child.
+The expected root and strict mode are mandatory: required missing seams and
+behavior/assertion failures report `drift`; preparation, import/dependency,
+provenance, unexpected exceptions and incomplete/skipped execution report
+`unavailable`. Neither outcome claims compatibility. This is selected-source
+seam compatibility under Python 3.12, not full latest-main packaging or native
+runtime acceptance. Normal CI still executes memory on the declared 0.13.0
+floor; only a truly absent later Journey module may skip there.
+
+The workflow defaults to `permissions: {}`. Upstream source executes only in
+`drift-check`, with `contents: read`, checkout credential persistence disabled,
+no supplied secrets, and an isolated home established before interpreter
+startup. A separate fresh `report` runner has only `issues: write`; it performs
+no checkout, upstream execution, cache restore or artifact download. Exact
+`ok`/`drift` candidates cross only as environment data and are normalized by
+case-sensitive JavaScript before Issue API inputs. The report uses `if: always()`;
+unknown, uppercase or missing statuses and an unsuccessful job become
+`unavailable`. GitHub expression comparisons must not filter or normalize
+candidates because they ignore case. Only fixed text, normalized tokens and
+the context-derived run URL reach local issues; detailed upstream diagnostics
+remain in unprivileged logs. Successful all-ok runs make no Issue API calls. Whenever GitHub can run the reporter, failed
+preparation and missing outputs produce a local informational report. Production
+probes continue stripping
+`PYTHONPATH`, `PYTHONHOME` and `HERMES_MEMORY_KEY`; no runtime selection change
+ships with the CI overlay.
+
 ## `integration-vpn.yml` details
 
 This workflow requires the `MORDRED_MULLVAD_ACCOUNT` repository secret and a

@@ -250,11 +250,14 @@ Run everything via `uv run` (= uses the repo `.venv`). Invoking `.venv/bin/…` 
 | Check overall status | `.venv/bin/hermes-mordred status` | Shows policy / network / keyvault / encryption on one screen (`--json` available). Read-only, no prompts or Secure Enclave access |
 | Start extension gateway | `.venv/bin/hermes-mordred extension serve --port 7799` | Use 7799 for the localhost page/API tests; the published Chromium bundle permits only 7788 |
 
-See `CI.md` for workflow details. The scheduled upstream check currently runs
-AST hook-contract scans of PyPI and main and files an informational issue;
-the installed-Hermes contract tests run in normal CI. A source-selected
-executable weekly memory/journey canary and separated issue-report permissions
-are approved follow-ups in SPEC/PLAN, not yet workflow behavior.
+See `CI.md` §`upstream-check.yml` details for workflow behavior. The scheduled
+check retains PyPI/main AST scans and executes source-selected latest-main
+memory/Journey seams in an isolated Python 3.12 environment. The separate
+issue-writing runner receives candidate status strings as environment data;
+fixed JavaScript normalizes them before Issue API inputs and publishes only
+normalized status and trusted run context. Preparation, dependency and
+provenance failures report unavailable, never success. Normal CI retains the
+declared Hermes floor and installed-release contracts.
 
 ## Mordred-owned filesystem paths
 
