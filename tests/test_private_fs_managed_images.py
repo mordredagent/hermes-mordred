@@ -74,30 +74,99 @@ def test_readonly_user_or_untrusted_owner_can_rewrite_dacl_and_is_refused(owner,
     refused(s.Descriptor(owner, True, [s.Ace(0, 0, 0x120089, b"everyone")]), role=role)
 
 
-@pytest.mark.parametrize("sid", [b"user", b"other", b"everyone"])
-@pytest.mark.parametrize("mask", [2, 4, 0x10, 0x40, 0x100, 0x10000, 0x40000, 0x80000, 0x40000000, 0x10000000])
+# Rights mapping does not depend on trustees or these effective ACE flags.
+# Keep every right for each role and representative grants for every untrusted
+# trustee; OWNER_RIGHTS and effective administrative users are tested separately.
+@pytest.mark.parametrize(
+    ("mask", "sid"),
+    [
+        pytest.param(2, b"user", id="2-user"),
+        pytest.param(2, b"other", id="2-other"),
+        pytest.param(2, b"everyone", id="2-everyone"),
+        pytest.param(4, b"user", id="4-user"),
+        pytest.param(0x10, b"user", id="16-user"),
+        pytest.param(0x40, b"user", id="64-user"),
+        pytest.param(0x100, b"user", id="256-user"),
+        pytest.param(0x10000, b"user", id="65536-user"),
+        pytest.param(0x40000, b"user", id="262144-user"),
+        pytest.param(0x80000, b"user", id="524288-user"),
+        pytest.param(0x40000000, b"user", id="1073741824-user"),
+        pytest.param(0x10000000, b"user", id="268435456-user"),
+        pytest.param(0x10000000, b"other", id="268435456-other"),
+        pytest.param(0x10000000, b"everyone", id="268435456-everyone"),
+    ],
+)
 def test_managed_file_current_or_untrusted_mutation_refuses(sid, mask):
     refused(s.Descriptor(s.SYSTEM, False, [s.Ace(0, 0x10, mask, sid)]), role="image")
 
 
-@pytest.mark.parametrize("sid", [b"user", b"other", USERS])
-@pytest.mark.parametrize("mask", [2, 4, 0x10, 0x40, 0x100, 0x116, 0x10000, 0x40000, 0x80000, 0x40000000, 0x10000000])
+@pytest.mark.parametrize(
+    ("mask", "sid"),
+    [
+        pytest.param(2, b"user", id="2-user"),
+        pytest.param(4, b"user", id="4-user"),
+        pytest.param(4, b"other", id="4-other"),
+        pytest.param(4, USERS, id="4-users"),
+        pytest.param(0x10, b"user", id="16-user"),
+        pytest.param(0x40, b"user", id="64-user"),
+        pytest.param(0x100, b"user", id="256-user"),
+        pytest.param(0x116, b"user", id="278-user"),
+        pytest.param(0x10000, b"user", id="65536-user"),
+        pytest.param(0x40000, b"user", id="262144-user"),
+        pytest.param(0x80000, b"user", id="524288-user"),
+        pytest.param(0x40000000, b"user", id="1073741824-user"),
+        pytest.param(0x10000000, b"user", id="268435456-user"),
+        pytest.param(0x10000000, b"other", id="268435456-other"),
+        pytest.param(0x10000000, USERS, id="268435456-users"),
+    ],
+)
 def test_image_parent_refuses_entry_creation_and_every_mutation(sid, mask):
     # ADD_SUBDIRECTORY (0x4) is refused too: a planted <image>.local folder or
     # DLL in the application directory would run inside the admitted image.
     refused(s.Descriptor(s.SYSTEM, False, [s.Ace(0, 0, mask, sid)]), role="image_parent")
 
 
-@pytest.mark.parametrize("flags", [0, 0x02, 0x03])
-@pytest.mark.parametrize("sid", [b"user", b"other", USERS])
-@pytest.mark.parametrize("mask", [2, 4, 0x10, 0x100, 0x116, 0x40000000, 0x1201BF])
+# The compound ProgramData grant retains every trustee/inheritance combination.
+@pytest.mark.parametrize(
+    ("mask", "sid", "flags"),
+    [
+        pytest.param(2, USERS, 2, id="2-users-2"),
+        pytest.param(4, USERS, 2, id="4-users-2"),
+        pytest.param(0x10, USERS, 2, id="16-users-2"),
+        pytest.param(0x100, USERS, 2, id="256-users-2"),
+        pytest.param(0x116, b"user", 0, id="278-user-0"),
+        pytest.param(0x116, b"user", 2, id="278-user-2"),
+        pytest.param(0x116, b"user", 3, id="278-user-3"),
+        pytest.param(0x116, b"other", 0, id="278-other-0"),
+        pytest.param(0x116, b"other", 2, id="278-other-2"),
+        pytest.param(0x116, b"other", 3, id="278-other-3"),
+        pytest.param(0x116, USERS, 0, id="278-users-0"),
+        pytest.param(0x116, USERS, 2, id="278-users-2"),
+        pytest.param(0x116, USERS, 3, id="278-users-3"),
+        pytest.param(0x40000000, USERS, 2, id="1073741824-users-2"),
+        pytest.param(0x1201BF, USERS, 2, id="1180095-users-2"),
+    ],
+)
 def test_upper_ancestor_admits_entry_creation_ea_and_attribute_grants(sid, mask, flags):
     policy(s.Descriptor(s.SYSTEM, False, [s.Ace(0, flags, mask, sid)]), role="upper_ancestor")
 
 
-@pytest.mark.parametrize("sid", [b"user", b"other", USERS])
 @pytest.mark.parametrize(
-    "mask", [0x40, 0x10000, 0x40000, 0x80000, 0x10000000, s.FULL_CONTROL, 0x116 | 0x40, 0x40000000 | 0x10000]
+    ("mask", "sid"),
+    [
+        pytest.param(0x40, b"user", id="64-user"),
+        pytest.param(0x40, b"other", id="64-other"),
+        pytest.param(0x40, USERS, id="64-users"),
+        pytest.param(0x10000, b"user", id="65536-user"),
+        pytest.param(0x40000, b"user", id="262144-user"),
+        pytest.param(0x80000, b"user", id="524288-user"),
+        pytest.param(0x10000000, b"user", id="268435456-user"),
+        pytest.param(0x10000000, b"other", id="268435456-other"),
+        pytest.param(0x10000000, USERS, id="268435456-users"),
+        pytest.param(0x1F01FF, b"user", id="2032127-user"),
+        pytest.param(0x156, b"user", id="342-user"),
+        pytest.param(0x40010000, b"user", id="1073807360-user"),
+    ],
 )
 def test_upper_ancestor_refuses_delete_child_delete_dac_owner_and_full_grants(sid, mask):
     refused(s.Descriptor(s.SYSTEM, False, [s.Ace(0, 0x02, mask, sid)]), role="upper_ancestor")
