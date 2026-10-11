@@ -51,17 +51,6 @@ def _init_meta(home: Path) -> None:
 
 
 class TestMakeAuditWriter:
-    def test_uninitialized_keyvault_returns_ndjson(self, tmp_path: Path) -> None:
-        writer = make_audit_writer(tmp_path / "audit.log", keyvault_home=tmp_path)
-        assert isinstance(writer, NDJSONWriter)
-
-    def test_initialized_with_audit_key_returns_encrypted(self, tmp_path: Path) -> None:
-        _init_meta(tmp_path)
-        backend = FakeBackend()
-        backend.generate_enclave_key(AUDIT_LOG_KEY_ID)
-        writer = make_audit_writer(tmp_path / "audit.log", keyvault_home=tmp_path, backend=backend)
-        assert isinstance(writer, EncryptedWriter)
-
     @pytest.mark.parametrize(
         "field",
         [
@@ -87,19 +76,6 @@ class TestMakeAuditWriter:
 
         assert isinstance(writer, NDJSONWriter)
         assert backend.calls == []
-
-    def test_initialized_without_audit_key_falls_back_to_ndjson(self, tmp_path: Path) -> None:
-        _init_meta(tmp_path)
-        backend = FakeBackend()  # AUDIT_LOG_KEY_ID intentionally not generated
-        writer = make_audit_writer(tmp_path / "audit.log", keyvault_home=tmp_path, backend=backend)
-        assert isinstance(writer, NDJSONWriter)
-
-    def test_corrupt_keyvault_falls_back_to_ndjson(self, tmp_path: Path) -> None:
-        root = _storage.resolve_keyvault_dir(tmp_path)
-        _storage.ensure_layout(root)
-        (root / "meta.json").write_text("{ this is not valid json", encoding="utf-8")
-        writer = make_audit_writer(tmp_path / "audit.log", keyvault_home=tmp_path, backend=FakeBackend())
-        assert isinstance(writer, NDJSONWriter)
 
     def test_initialized_without_audit_key_emits_downgrade_marker(self, tmp_path: Path) -> None:
         """An encrypted→plaintext downgrade must leave a trace in the audit log.
@@ -230,6 +206,7 @@ class TestMakeAuditWriter:
         backend.generate_enclave_key(AUDIT_LOG_KEY_ID)
         log_path = tmp_path / "audit.log"
         writer = make_audit_writer(log_path, keyvault_home=tmp_path, backend=backend)
+        assert isinstance(writer, EncryptedWriter)
         writer.append({"event": "policy.strict.clearnet"})
         writer.close()
         entries = decrypt_log_file(
