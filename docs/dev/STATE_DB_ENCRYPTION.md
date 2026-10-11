@@ -62,7 +62,9 @@ plugin's later injection is skipped (one vault unlock per process).
   Conversion and protected-home uninstall take exclusive custody. Starting
   runtimes wait for conversions, then read the marker under their shared lease.
   A startup that observes another runtime finish journal recovery can join its
-  shared lease without waiting for that runtime to exit.
+  shared lease without waiting for that runtime to exit. Uninstall retains
+  the empty lock file after data purge so its inode remains stable through
+  package removal and for processes already waiting on it.
 - Database maintenance and uninstall CLI commands skip automatic startup
   conversion and the runtime lease, so `status` and `--dry-run` leave pending
   work untouched and explicit maintenance can obtain exclusive custody.

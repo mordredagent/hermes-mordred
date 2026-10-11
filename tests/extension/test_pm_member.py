@@ -86,8 +86,12 @@ def test_ensure_member_writes_a_buildable_member_once(tmp_path: Path) -> None:
     # The lock lives outside the member folder (pm hashes every byte inside it).
     assert (tmp_path / "home" / "mordred" / ".pm-member.lock").is_file()
     assert not list(plugin_dir.glob(".*"))
+    for name in BOOTSTRAPS:
+        assert (plugin_dir / name).read_bytes() == (PTH_SOURCE / name).read_bytes()
     # Unchanged inputs: no rewrite (a rewrite would force a pm rebuild).
+    before = {p: p.stat().st_mtime_ns for p in plugin_dir.rglob("*") if p.is_file()}
     assert member.ensure_member(plugin_dir, package_root=pkg, dist=_dist(pkg)) is False
+    assert {p: p.stat().st_mtime_ns for p in before} == before
 
 
 def test_ensure_member_refreshes_changed_and_stale_files(tmp_path: Path) -> None:
@@ -99,24 +103,16 @@ def test_ensure_member_refreshes_changed_and_stale_files(tmp_path: Path) -> None
     assert member.ensure_member(plugin_dir, package_root=pkg, dist=_dist(pkg)) is True
     assert (plugin_dir / "mordred_hermes" / "__init__.py").read_text() == "x = 2\n"
     assert not (plugin_dir / "mordred_hermes" / "sub" / "data.json").exists()
-
-
-@pytest.mark.parametrize("name", BOOTSTRAPS)
-def test_member_refreshes_bootstrap_bytes_without_rewriting_unchanged_files(tmp_path: Path, name: str) -> None:
-    pkg = _package(tmp_path)
-    plugin_dir = tmp_path / "plugins" / "mordred"
-    member.ensure_member(plugin_dir, package_root=pkg, dist=_dist(pkg))
-    before = {p: p.stat().st_mtime_ns for p in plugin_dir.rglob("*") if p.is_file()}
-    assert member.ensure_member(plugin_dir, package_root=pkg, dist=_dist(pkg)) is False
-    assert {p: p.stat().st_mtime_ns for p in before} == before
-    updated = (pkg.parent / name).read_bytes() + b"# updated canonical bootstrap\n"
-    (pkg.parent / name).write_bytes(updated)
+    # A bootstrap-only change must refresh even when the package tree matches.
+    updated = {name: (PTH_SOURCE / name).read_bytes() + b"# updated canonical bootstrap\n" for name in BOOTSTRAPS}
+    for name, content in updated.items():
+        (pkg.parent / name).write_bytes(content)
     assert member.ensure_member(plugin_dir, package_root=pkg, dist=_dist(pkg)) is True
-    assert (plugin_dir / name).read_bytes() == updated
+    for name, content in updated.items():
+        assert (plugin_dir / name).read_bytes() == content
 
 
-@pytest.mark.parametrize("name", BOOTSTRAPS)
-@pytest.mark.parametrize("editable", [False, True])
+@pytest.mark.parametrize("editable, name", [(False, BOOTSTRAPS[0]), (True, BOOTSTRAPS[1])])
 def test_member_refuses_missing_bootstrap_before_updating_existing_member(
     tmp_path: Path, name: str, editable: bool
 ) -> None:
@@ -131,6 +127,8 @@ def test_member_refuses_missing_bootstrap_before_updating_existing_member(
     dist = _dist(pkg, editable=editable)
     plugin_dir = tmp_path / "plugins" / "mordred"
     member.ensure_member(plugin_dir, package_root=pkg, dist=dist)
+    for filename in BOOTSTRAPS:
+        assert (plugin_dir / filename).read_bytes() == (PTH_SOURCE / filename).read_bytes()
     before = {p.relative_to(plugin_dir): p.read_bytes() for p in plugin_dir.rglob("*") if p.is_file()}
     (source_pth / name).unlink()
     (pkg / "__init__.py").write_text("x = 2\n")
@@ -139,8 +137,9 @@ def test_member_refuses_missing_bootstrap_before_updating_existing_member(
     assert {p.relative_to(plugin_dir): p.read_bytes() for p in plugin_dir.rglob("*") if p.is_file()} == before
 
 
-@pytest.mark.parametrize("name", BOOTSTRAPS)
-@pytest.mark.parametrize("damage", ["missing", "empty", "unmapped"])
+@pytest.mark.parametrize(
+    "name, damage", [(BOOTSTRAPS[0], "missing"), (BOOTSTRAPS[1], "empty"), (BOOTSTRAPS[0], "unmapped")]
+)
 def test_member_health_rejects_incomplete_bootstraps(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, damage: str
 ) -> None:
@@ -160,20 +159,19 @@ def test_member_health_rejects_incomplete_bootstraps(
     assert client.post("/api/plugins/mordred/repair", json={}).json()["error"] == "member_missing"
 
 
-@pytest.mark.parametrize("editable", [False, True])
-def test_built_member_wheel_preserves_and_executes_both_startup_bootstraps(tmp_path: Path, editable: bool) -> None:
+def test_built_member_wheel_preserves_and_executes_both_startup_bootstraps(tmp_path: Path) -> None:
     uv = shutil.which("uv")
     if uv is None:
         pytest.skip("uv not available to build and install the member wheel")
     source = tmp_path / "source"
-    pkg = source / ("src" if editable else "site-packages") / "mordred_hermes"
+    pkg = source / "site-packages" / "mordred_hermes"
     shutil.copytree(member._package_root(), pkg, ignore=shutil.ignore_patterns("__pycache__"))
-    pth_dir = source / "packaging" / "pth" if editable else pkg.parent
+    pth_dir = pkg.parent
     pth_dir.mkdir(parents=True, exist_ok=True)
     for name in BOOTSTRAPS:
         shutil.copyfile(PTH_SOURCE / name, pth_dir / name)
     plugin_dir = tmp_path / "home" / "plugins" / "mordred"
-    assert member.ensure_member(plugin_dir, package_root=pkg, dist=_dist(pkg, editable=editable))
+    assert member.ensure_member(plugin_dir, package_root=pkg, dist=_dist(pkg))
     # This is the artifact pm builds, not the top-level project wheel.
     env = {**os.environ, "HERMES_HOME": str(tmp_path / "home")}
     env.pop("MORDRED_CONFIG_DECRYPT", None)

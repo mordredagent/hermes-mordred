@@ -1301,10 +1301,12 @@ these steps in order; each is safe to repeat, and a second run changes nothing:
 
 `--purge-data` also deletes that data: it logs Telegram out (revoking the
 session), deletes the vault's device key and Keychain anchor, resets the
-keyvault (`keyvault reset`), and removes `<home>/mordred/` and
-`<home>/extension/`. A keychain item that only its creator may delete (for
-example a software key another Python created) is reported with the steps to
-remove it in Keychain Access. It asks you to type `delete my data`; `--yes` does not
+keyvault (`keyvault reset`), and removes the data under `<home>/mordred/` and
+`<home>/extension/`. On macOS, the empty `mordred/db-encryption.lock` file and
+its directory remain so concurrent processes keep coordinating on the same
+lock through package removal and afterward. A keychain item that only its
+creator may delete (for example a software key another Python created) is
+reported with the steps to remove it in Keychain Access. It asks you to type `delete my data`; `--yes` does not
 skip that. Afterwards anything encrypted with those keys can be recovered only
 with the keyvault Seed Phrase, Passphrase and backup blob or the vault recovery
 passphrase — and only from a copy of the data kept elsewhere.
