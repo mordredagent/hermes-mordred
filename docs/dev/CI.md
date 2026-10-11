@@ -1918,7 +1918,7 @@ an observed absence to verify unknown state, no revoke and Devices advice.
 Shared `flags()` semantics remain a separate fix; Desktop corroborates
 observed absence through the existing checked transaction/presence API.
 
-2026-10-11 Astra review follow-up: production/test candidate `c1b5e48db`
+2026-10-11 Astra review follow-up: production candidate `c1b5e48db`
 integrates `dev` at `ec198d0f`. Telegram flags now refuse a held data lock
 without waiting, preserving `store_busy`; mutation/sync locks remain blocking.
 Failed Windows enrollment reports that a key may have been created and that
@@ -1938,17 +1938,40 @@ its verified `site-packages` import passed 42 compatibility/page regressions.
 Astra's final repair/Desktop review passed 214 tests with one existing
 Hermes-checkout-dependent skip and found no remaining supported P1/P2 in its
 assigned scope. The independent database review confirmed both additional
-P2 fixes. Draft CI at the candidate passed all 59 critical cases across the
-three OSes with zero skips. Full CI is tracked by
-[run 38104459639](https://github.com/mordredagent/hermes-mordred/actions/runs/38104459639).
+P2 fixes. Draft CI at native-test candidate `07b7993f6` passed all 59 critical
+cases across the three OSes with zero skips. Product source is unchanged since
+`c1b5e48db`. Full CI is tracked by
+[run 38106401094](https://github.com/mordredagent/hermes-mordred/actions/runs/38106401094).
+The run passed all 25 active jobs; draft-only feedback was intentionally skipped.
+Retrieved native JUnit confirms **2,638 passed, 111 skipped**, zero failures/errors,
+for each of Python 3.11, 3.12 and 3.13 across all nine Windows shards. Every
+version collected all 84 selected modules without duplicate case identities.
+The six Linux/macOS coverage cells passed the 80% floor (87.66% / 89.61%).
 The native selector retains all 82 original modules plus two new compatibility
 modules; new duration weights remain explicitly unmeasured.
+
+Native fixture follow-up: failed full runs
+[38104459639](https://github.com/mordredagent/hermes-mordred/actions/runs/38104459639)
+and [38105162352](https://github.com/mordredagent/hermes-mordred/actions/runs/38105162352)
+are retained. Teardown assertions now allow the read-only interpreter metadata
+probe while still refusing package/data removal. The Telegram contention test
+times the real Desktop flags adapter, excluding unrelated custody/memory scans;
+real thread/process locks, completion before release, unchanged ciphertext and
+native-call assertions remain. The Desktop API fixture uses a persistent
+TestClient event loop and fresh job state, preventing cancelled jobs from
+remaining falsely running between tests. Existing time bounds and confirmation,
+options and summary checks remain. Focused host verification passed **122 tests
+with zero skips**; Astra approved the precise test-only diff and both deliberately
+blocking negative controls. These repairs do not change product source.
 
 These host/wheel checks are portable regressions, not native CNG or Windows 11
 acceptance. The existing AWS session expired before any new Server execution;
 fresh ordinary-user Server source/wheel/CNG and installed-product gates remain
 open. SPEC permits a qualified Windows 11 x64 VM or Cloud PC; physical hardware
 is not required, and virtual-TPM evidence must name its provider and limits.
+Azure client-image eligibility has not been established; no Azure resources
+were created. A Windows Server environment can provide TPM/provider evidence
+but does not replace the separate Windows 11 client-product gate.
 
 ### Windows shared Telegram memory guard validation (C10c)
 
