@@ -25,8 +25,9 @@ Linux supports the hardware-backed keyvault, but the transparent env/config
 startup lifecycle is not active there yet. On Linux those encryption targets
 report inactive and plaintext remains the runtime source. Dedicated TPM memory
 and Private Telegram do work: see [`TELEGRAM.md`](./TELEGRAM.md). General
-`setup` and `encryption enable all` currently skip Linux memory; enable it with
-`hermes-mordred encryption enable memory`.
+`setup` and `encryption enable all` enable Linux memory through the dedicated
+TPM engine and skip env/config file-vault enrollment. The standalone
+`hermes-mordred encryption enable memory` command remains available.
 
 Native Windows has scoped installer, CNG memory, Telegram and Desktop code;
 it is not general product or Windows 11 acceptance. Use the native PowerShell
@@ -230,10 +231,11 @@ The stores and recovery mechanisms remain separate despite reusing that input.
 | 4 | `hermes-mordred keyvault enable-se` or `enable-tpm` | Builds and installs the platform key helper. |
 | 5 | `hermes-mordred keyvault init` | Creates the main keyvault key and its seed/digest commitment. |
 | 6 | `hermes-mordred encryption enable env` (macOS runtime) | Enrolls `.env` and activates transparent injection on macOS. |
-| 7 | `hermes-mordred encryption enable memory` | Arms and seals memory on macOS; general setup currently skips Linux memory. |
+| 7 | `hermes-mordred encryption enable memory` | Arms and seals memory through macOS file-vault or Linux TPM custody. |
 
-Final `hermes-mordred status` is outside the numbered steps. Linux memory uses
-the standalone command above. Windows setup uses `enable-winkey`, skips the
+Final `hermes-mordred status` is outside the numbered steps. Linux skips
+step 6 and enables memory without a file vault or recovery-passphrase prompt.
+Windows setup uses `enable-winkey`, skips the
 unported secret-store keyvault ceremony and excluded env target, and uses its
 proof-bound CNG memory flow; the Windows gates remain separate.
 

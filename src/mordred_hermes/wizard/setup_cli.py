@@ -33,9 +33,8 @@ A step's ``action`` is one of:
   it now.
 - ``"skipped"``      -- nothing to do here, by the operator's choice or by
   platform: the ``hermes`` step's ``--skip-hermes-setup`` / a declined prompt,
-  and the ``memory-encryption`` step off macOS (its sealing shims are
-  macOS-only, and unlike the hardware helper that is no reason to stop a
-  perfectly good Linux run).
+  and file-vault encryption off macOS or memory encryption on unsupported
+  platforms. Linux memory uses dedicated TPM custody.
 - ``"manual"``       -- it needs interaction that ``--non-interactive`` cannot
   supply, the operator was told to run a specific command themselves, or a
   build/prerequisite step failed in a way that still leaves the rest of the
@@ -1020,6 +1019,11 @@ def _resolve_step_env_encryption(
             "excluded on Windows (excluded-on-windows); .env stays plaintext and any retained seal state is "
             "preserved unchanged",
         )
+    from ._file_vault_support import production_file_vault_eligibility
+
+    eligible, reason = production_file_vault_eligibility(platform)
+    if not eligible:
+        return StepResult(_STEP_ENV_ENCRYPTION, "skipped", f"{reason} Retained state is preserved unchanged.")
     complete, detail = _probe_env_encryption(home=home, root=root, platform=platform)
     if complete:
         return StepResult(_STEP_ENV_ENCRYPTION, "done", detail)
@@ -1094,14 +1098,19 @@ def _probe_memory_encryption(*, home: Path, platform: str) -> tuple[bool, str]:
       ``enable()`` re-runs its migration, not as "already done" while a memory
       sits readable at rest.
 
-    Platform is not part of completeness: an armed marker stays armed across a
-    reboot into another OS. :func:`_resolve_step_memory_encryption` is where the
-    macOS-only runtime is accounted for.
+    Linux reuses the load-only status checks for private wrapped-key metadata,
+    the local seam and every memory file. Completion does not prove live TPM
+    access; the engine owns installed-runtime and native-key proof.
     """
     if memory_optout_marker_path(home).exists():
         return True, (
             "paused by operator (`encryption disable memory`); re-enable with `hermes-mordred encryption enable memory`"
         )
+    if platform == "linux":
+        from .encryption_cli import memory_status
+
+        status = memory_status(home=home, platform=platform)
+        return status.active and not status.drift, status.detail
     if not memory_marker_path(home).exists():
         return False, "not enabled"
     if _unsealed_memory_files(home):
@@ -1145,15 +1154,11 @@ def _resolve_step_memory_encryption(
     if complete:
         return StepResult(_STEP_MEMORY_ENCRYPTION, "done", detail)
 
-    if platform != "darwin":
-        # `enable memory` refuses off macOS (the hook's shims are macOS-only), so
-        # attempting it would report a "failure" that is really just the OS. A
-        # skip keeps a Linux run clean instead of stopping it, which
-        # "unsupported" would do -- this is the last step, not a prerequisite.
+    if platform not in ("darwin", "linux"):
         return StepResult(
             _STEP_MEMORY_ENCRYPTION,
             "skipped",
-            f"macOS only — the memory sealing runtime is not available on {platform}",
+            f"memory encryption is unsupported on {platform}",
         )
 
     # Checked on the *state* (env enrolled and not opted out; see
@@ -1161,7 +1166,7 @@ def _resolve_step_memory_encryption(
     # gate) rather than on the env step's own result: that step reports
     # "ran" for a fresh system with no `.env` to protect at all, which is a
     # success for env and still not a usable carrier for memory.
-    if not _env_target_ready(home=home, root=root):
+    if platform == "darwin" and not _env_target_ready(home=home, root=root):
         return StepResult(
             _STEP_MEMORY_ENCRYPTION,
             "manual",
@@ -1181,15 +1186,24 @@ def _resolve_step_memory_encryption(
         ),
         non_interactive=options.non_interactive,
         non_interactive_detail=(
-            "agent-memory encryption may need interactive confirmation (a vault recovery passphrase and/or an "
+            "Linux TPM memory requires native custody and installed-runtime verification; "
+            "run `hermes-mordred encryption enable memory` without --non-interactive"
+            if platform == "linux"
+            else "agent-memory encryption may need interactive confirmation (a vault recovery passphrase and/or an "
             "OS device-key unlock) that --non-interactive cannot supply; run "
             "`hermes-mordred encryption enable memory`"
         ),
         abort_detail=(
-            "creating the at-rest vault needs a one-time recovery-passphrase prompt, and stdin is not a TTY; "
+            "Linux TPM memory setup could not complete; run `hermes-mordred encryption enable memory`"
+            if platform == "linux"
+            else "creating the at-rest vault needs a one-time recovery-passphrase prompt, and stdin is not a TTY; "
             "run `hermes-mordred encryption enable memory` interactively"
         ),
-        ran_detail="agent memories are now sealed at rest",
+        ran_detail=(
+            "agent memories are now sealed at rest with TPM custody"
+            if platform == "linux"
+            else "agent memories are now sealed at rest"
+        ),
     )
 
 
