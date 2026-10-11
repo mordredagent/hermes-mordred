@@ -47,9 +47,10 @@ settings sections in `config.yaml` keep their names.
   [Platform Support](docs/dev/SPEC.md#platform-support-v1).
 - Transparent `.env`, configuration, and workspace encryption use macOS
   integrations. Memory uses the macOS file vault, a dedicated Linux TPM-wrapped
-  key, or dedicated Windows CNG custody. Linux memory and Private Telegram work
-  through their standalone commands; general `setup` and `encryption enable all`
-  currently skip Linux memory. Windows support is reported per capability.
+  key, or dedicated Windows CNG custody. Linux memory works through `setup`,
+  `encryption enable all`, and standalone commands; Private Telegram has its
+  dedicated flow. Linux setup/all skip env/config file-vault enrollment. Windows
+  support is reported per capability.
 
 ## Install (users, from PyPI)
 

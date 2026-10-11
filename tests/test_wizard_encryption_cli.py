@@ -772,6 +772,7 @@ class TestCliDispatch:
 class TestCliDispatchAll:
     def _patch_home(self, monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
         monkeypatch.setattr(encryption_cli, "_hermes_home", lambda: home)
+        monkeypatch.setattr(encryption_cli._windows_gates, "host_platform", lambda: "darwin")
 
     def _spy_engines(
         self,
@@ -816,13 +817,12 @@ class TestCliDispatchAll:
 
     def test_enable_all_skips_workspace_off_macos(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self._patch_home(monkeypatch, tmp_path / "home")
-        # A wrappable seam does not matter here -- off macOS `memory` is skipped
-        # on the platform check alone, before the seam is ever consulted (W1).
+        # Linux memory is independent of the macOS file vault.
         monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (True, ""))
         calls = self._spy_engines(monkeypatch, "enable")
         rc = encryption_cli._dispatch_all("enable", platform="linux", on_path=lambda _n: True)
         assert rc == 0
-        assert calls == {"env": 1, "config": 1}  # workspace AND memory skipped, not failed
+        assert calls == {"memory": 1}  # env/config/workspace are ineligible
 
     def test_enable_all_skips_memory_without_runtime(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -842,13 +842,10 @@ class TestCliDispatchAll:
         assert any("memory" in ln and "skipped" in ln and "no wrappable seam" in ln for ln in lines)
         assert "  2 ok, 0 failed, 2 skipped" in lines  # env+config ok; memory+workspace skipped
 
-    def test_enable_all_skips_memory_off_macos_before_the_seam_check(
+    def test_enable_all_skips_memory_unsupported_platform_before_the_seam_check(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """W1: off macOS `memory` is skipped on the platform alone -- the fan-out
-        used to resolve platform independently inside the per-target dispatch
-        (always `sys.platform`), so a Linux `enable all` reported `memory FAILED`
-        instead of a skip even though `setup`'s own step skips it cleanly."""
+        """Unsupported platforms cannot reach the seam check or memory engine."""
 
         def _never(*_a: object, **_k: object) -> tuple[bool, str]:
             raise AssertionError("the platform gate must short-circuit before the seam check")
@@ -857,12 +854,12 @@ class TestCliDispatchAll:
         self._patch_home(monkeypatch, tmp_path / "home")
         calls = self._spy_engines(monkeypatch, "enable")
 
-        rc = encryption_cli._dispatch_all("enable", platform="linux", on_path=lambda _n: True)
+        rc = encryption_cli._dispatch_all("enable", platform="freebsd", on_path=lambda _n: True)
 
         assert rc == 0
         assert "memory" not in calls  # _dispatch (and therefore memory_cli.enable) is never reached
         lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
-        assert any("memory" in ln and "skipped" in ln and "macOS only" in ln and "linux" in ln for ln in lines)
+        assert any("memory" in ln and "skipped" in ln and "unsupported" in ln and "freebsd" in ln for ln in lines)
 
     def test_enable_all_attempts_memory_on_darwin(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """The darwin half of the W1 fix: the platform gate must not skip memory
@@ -909,17 +906,14 @@ class TestCliDispatchAll:
         # Header + one line per target + a trailing, indented totals line — together.
         assert "encryption enable all:" in lines
         assert any("workspace" in ln and "skipped" in ln for ln in lines)
-        assert any("memory" in ln and "skipped" in ln and "macOS only" in ln for ln in lines)
-        assert "  2 ok, 0 failed, 2 skipped" in lines  # env+config ok; memory+workspace skipped off macOS
+        assert any("memory" in ln and "ok" in ln for ln in lines)
+        assert "  1 ok, 0 failed, 3 skipped" in lines  # Linux memory only
 
     def test_enable_all_via_cli_accepts_all_choice(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from mordred_hermes.wizard import cli
 
         self._patch_home(monkeypatch, tmp_path / "home")
-        # `_dispatch_all` defaults `platform` from `sys.platform` when `cli_enable`
-        # does not pass one -- pin it so `memory`'s platform gate (W1) does not
-        # depend on the real OS running the test suite.
-        monkeypatch.setattr(encryption_cli.sys, "platform", "darwin")
+        # The host seam is pinned by _patch_home; the public adapter takes its default.
         monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (True, ""))
         calls = self._spy_engines(monkeypatch, "enable")
         monkeypatch.setattr(encryption_cli, "_workspace_eligible", lambda *_a, **_k: (False, "test"))

@@ -1287,12 +1287,13 @@ class TestMemoryEncryptionStep:
         assert "paused" in result.detail.lower()
         assert memory_optout_marker_path(tmp_path).exists()
 
-    def test_off_macos_is_skipped_and_never_runs(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """The sealing shims are macOS-only; skipping keeps a Linux run clean."""
-        monkeypatch.setattr(setup_cli, "_run_memory_encryption", _raiser("enable() is macOS-only"))
-        result = self._resolve(tmp_path, platform="linux")
+    def test_unsupported_platform_is_skipped_and_never_runs(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(setup_cli, "_run_memory_encryption", _raiser("unsupported engine reached"))
+        result = self._resolve(tmp_path, platform="freebsd")
         assert result.action == "skipped"
-        assert "macos" in result.detail.lower()
+        assert "unsupported" in result.detail.lower()
 
     def test_manual_when_the_env_target_is_not_ready(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """The key rides on the .env shim, so env must be sealed first."""

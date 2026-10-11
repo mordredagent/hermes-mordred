@@ -546,3 +546,34 @@ def test_unknown_inventory_error_is_classified_not_raised(seeded, monkeypatch, c
     monkeypatch.setattr(_windows_processes, "inspect_windows_gateway_runtimes", broken)
     assert memory_cli.enable(home=env.home, root=env.home / "vault", platform="win32") == 1
     assert generated(env) == 0 and files(env.home) == ORIGINALS
+
+
+@pytest.mark.parametrize("selected", ["linux", "darwin"])
+@pytest.mark.parametrize("entrance", ["all", "direct"])
+def test_windows_host_override_cannot_escape_force_refusal(seeded, monkeypatch, selected, entrance, capsys):
+    from mordred_hermes.wizard import encryption_cli
+
+    before = snapshot(seeded)
+    monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: pytest.fail("Windows consulted Unix seam"))
+    if entrance == "all":
+        rc = encryption_cli._dispatch_all("enable", platform=selected, force_runtime_unverified=True)
+    else:
+        rc = encryption_cli._dispatch("enable", "memory", platform=selected, force_runtime_unverified=True)
+    output = capsys.readouterr()
+    assert rc == 1
+    assert "refusing --force-runtime-unverified for agent memory on Windows" in output.err
+    if entrance == "all":
+        assert output.out.count("skipped (excluded on Windows") == 2
+    assert snapshot(seeded) == before
+    assert generated(seeded) == 0
+
+
+@pytest.mark.parametrize("selected", ["linux", "darwin"])
+def test_windows_enable_all_override_keeps_installed_runtime_proof(seeded, monkeypatch, selected):
+    from mordred_hermes.wizard import encryption_cli
+
+    monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: pytest.fail("Windows consulted Unix seam"))
+    assert encryption_cli._dispatch_all("enable", platform=selected) == 0
+    assert_all_sealed(seeded)
+    assert generated(seeded) == 1
+    fresh_process_read(seeded)

@@ -88,7 +88,7 @@ hermes-mordred network init           # OPTIONAL — Tor / VPN / clearnet privac
 hermes-mordred keyvault enable-se     # build the platform key helper (Linux: enable-tpm)
 hermes-mordred keyvault init          # create the hardware-backed keyvault
 hermes-mordred encryption enable env  # macOS only: turn on transparent at-rest encryption
-hermes-mordred encryption enable memory  # general setup: macOS or scoped Windows flow
+hermes-mordred encryption enable memory  # macOS file vault, Linux TPM, or scoped Windows CNG flow
 ```
 
 Final status is outside the seven steps:
@@ -98,8 +98,9 @@ hermes-mordred status                 # verify the result at a glance
 ```
 
 Linux supports the TPM-backed keyvault, dedicated memory encryption and Private
-Telegram. General `setup` and `encryption enable all` currently skip Linux
-memory; use `hermes-mordred encryption enable memory` explicitly. Transparent
+Telegram. General `setup` and `encryption enable all` enable Linux
+memory through the dedicated TPM engine, skipping env/config file-vault
+enrollment; the standalone memory command remains available. Transparent
 env/config runtime loading is inactive, and `vault recover` lacks a Linux
 device-anchor store. The dedicated memory key has no portable recovery.
 
@@ -210,12 +211,13 @@ hermes-mordred audit purge --before YYYY-MM-DD --yes  # delete dated rotated log
 ### `encryption` — the recommended on/off switch
 At-rest encryption per target: `env`, `config`, `memory`, `workspace` — or `all`
 to apply the verb to every target at once. Env/config and workspace runtime
-lifecycles are macOS-only; Linux env/config enrollment stays inactive. Memory
-uses platform-specific custody. General enable-all currently skips Linux
-memory; Windows skips excluded env/config targets and uses CNG memory.
+lifecycles are macOS-only. Linux enable-all skips env/config enrollment and
+enables memory when the local Hermes seam is supported; unavailable seams
+are explicit skips, while TPM or installed-runtime failures make the batch
+nonzero. Windows skips excluded env/config targets and uses CNG memory.
 `workspace` is skipped when its macOS tooling is unavailable and never fails
-an `all` batch. Generic early production file-vault refusal and Linux general
-orchestration are planned in SPEC/PLAN, not current behavior.
+an `all` batch. Production file-vault operations refuse unsupported default
+stores before enrollment. Linux memory does not use that store.
 ```sh
 hermes-mordred encryption status                        # all targets (non-prompting)
 hermes-mordred encryption enable  TARGET                # TARGET: env, config, memory, workspace, or all
@@ -1203,7 +1205,8 @@ including under strict mode).
   machine-only (Tier 2 — no per-use PIN/PCR prompt). Transparent `.env` and
   `config.yaml` loading/resealing and workspace encryption are inactive.
   Dedicated TPM memory sealing and Private Telegram flows are implemented;
-  enable memory explicitly because general setup/enable-all currently skip it.
+  general setup/enable-all use the dedicated TPM memory engine and skip
+  env/config file-vault enrollment.
   Memory is machine-bound without portable recovery.
 - **Windows**: scoped native installer, CNG custody, memory/Telegram and Desktop
   consumers exist. Env/config file-vault seals and APFS workspace integration

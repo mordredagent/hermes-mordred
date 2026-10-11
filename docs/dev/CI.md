@@ -205,6 +205,50 @@ scanner outputs as well as elapsed time when assessing this optimization;
 one before/after run in the same environment is observational and may include
 cache effects.
 
+### Linux memory orchestration device acceptance
+
+Portable wizard tests exercise the actual Linux memory engine with injected
+TPM and runtime boundaries. They do not establish native TPM access. The
+explicit device harness covers both the new setup-memory resolver and the
+installed public `encryption enable all` command, without running full setup,
+configure, network, a gateway, or a Telegram account flow:
+
+```sh
+env HERMES_HOME=/tmp/owned-mordred-acceptance \
+  MORDRED_LINUX_ORCHESTRATION_TEST=1 \
+  MORDRED_ACCEPTANCE_COMMIT=<installed-candidate-commit> \
+  MORDRED_LINUX_TPM_PROVIDER='EC2 NitroTPM' \
+  <installed-hermes-runtime>/bin/python -m pytest -m integration -s \
+  tests/integration/test_linux_memory_orchestration_tpm.py
+```
+
+Use only an authorized existing Linux test device, with the candidate wheel
+installed in that Hermes runtime and a test-owned parent exported before
+startup. The harness requires a real TPM device and refuses the emulator gate.
+It records interpreter/package/module/class provenance, helper hash and supplied
+provider identity; verify the actual provider separately before claiming NitroTPM
+acceptance. Each entrance owns a fresh private synthetic home, clears ambient
+key/store and source-path overrides in children, and requires an automatically
+installed shape-B memory hook in a fresh script named `hermes`.
+
+Acceptance checks synthetic read/write/reuse, paused setup versus explicit
+re-enable, and armed external-plaintext backup protection through the real
+Hermes drift method. The actual returned backup filename is its AEAD identity.
+Corrupt and missing wrappers must refuse without backup publication, source,
+marker, wrapper replacement or persistent native-store inventory changes;
+wrapper bytes/mode are restored in `finally`. Successful restoration and
+plaintext recovery precede profile-local purge. A failure retains the synthetic
+home for inspection. Inventory comparison does not trace every TPM operation;
+final sealed files do not prove every intermediate write was sealed. Missing or
+corrupt wrappers test custody refusal, not physical TPM outage.
+
+Also explicitly select the existing memory lifecycle test in
+`tests/integration/test_linux_telegram_tpm.py` with `-m integration` and
+`MORDRED_LINUX_TELEGRAM_TEST=1`. Record only actually executed device results
+in the manual log below; until then native acceptance remains not run. Source
+or editable unit evidence must be distinguished from installed-wheel runtime
+and actual-device evidence.
+
 ## `upstream-check.yml` details
 
 Monday 03:00 UTC and manual dispatch retain independent PyPI/main AST hook

@@ -274,7 +274,8 @@ historical context, not the source of truth.
   key rather than the macOS file vault; see the
   [design](SPEC.md#linux-private-telegram-design) and
   [implementation plan](#linux-private-telegram-implementation-plan).
-  Live-account acceptance and general setup/enable-all routing remain open.
+  Live-account acceptance remains open; general setup/enable-all memory
+  routing is implemented with native orchestration acceptance tracked separately.
 
 - Automatic lifecycle integration for `extension serve` is undecided.
 - Hermes still provides no `origin_skill` for per-skill runtime enforcement.
@@ -322,7 +323,7 @@ Agent-memory follow-up implementation status (separate PRs):
    normalizes them in fixed JavaScript before Issue API inputs. Only normalized
    status and fixed context are published. The declared Hermes floor and
    production probe cleanup remain.
-2. Planned Linux orchestration: `setup` skips env enrollment; enable-all skips
+2. Implemented Linux orchestration: `setup` skips env enrollment; enable-all skips
    env/config enable and delegates memory to the existing engine after seam checks.
    Setup honors opt-out before readiness, requires active/non-drift load-only
    status (live TPM access is not checked), and returns manual for unfinished

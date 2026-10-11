@@ -48,16 +48,16 @@ compatibility policy.
 - On Linux, the keyvault requires the installed TPM 2.0 helper and fails
   closed if it is absent or unusable. There is no Linux software-key fallback.
 - Transparent `.env` injection, `config.yaml` materialize/reseal, and the
-  encrypted workspace integration are active only on macOS. Linux env/config
-  enrollment does not activate those startup shims; plaintext remains their
-  runtime source. Windows file-vault and env/config seals are explicitly
-  excluded and refuse before mutation.
+  encrypted workspace integration are active only on macOS. Linux general setup
+  skips env enrollment and enable-all skips env/config enrollment; plaintext
+  remains their runtime source. Windows file-vault and env/config seals are
+  explicitly excluded and refuse before mutation.
 - Agent-memory encryption uses the macOS file-vault env key, dedicated Linux
-  TPM custody, or dedicated Windows CNG custody. Linux standalone memory and
-  Private Telegram flows are implemented; general `setup` and `encryption
-  enable all` currently skip Linux memory. See [Linux Private Telegram
-  Design](#linux-private-telegram-design) and [Windows dedicated custody and
-  memory lifecycle](#windows-dedicated-custody-and-memory-lifecycle).
+  TPM custody, or dedicated Windows CNG custody. Linux memory is available
+  through general `setup`, `encryption enable all`, and standalone commands; Private
+  Telegram has its dedicated flow. Setup/all skip Linux file-vault enrollment.
+  See [Linux Private Telegram Design](#linux-private-telegram-design) and
+  [Windows dedicated custody and memory lifecycle](#windows-dedicated-custody-and-memory-lifecycle).
 - Arming those macOS seals is fail-closed on the runtime: before removing a
   plaintext, the CLI probes the interpreter that should run `hermes` and also
   the interpreter of each `hermes gateway run` process it can identify in the
@@ -814,12 +814,13 @@ Agent-memory follow-up contracts:
   Hermes floor. Missing dependencies/provenance are unavailable, not success.
   Untrusted upstream execution must have no issue-write token; a separate
   report job may publish only normalized status and fixed diagnostic context.
-- Planned Linux general `setup` and enable-all must skip macOS env/config enrollment
+- Linux general `setup` and enable-all skip macOS env/config enrollment
   and use the existing dedicated memory engine. Setup respects opt-out,
-  checks readiness without unwrap, reports unfinished noninteractive work as
-  manual, and never forces runtime proof. Enable-all skips an unsupported
-  seam, propagates real engine failure, and retains disable/purge behavior.
-  Preserve macOS FlowSession and Windows proof/custody routes.
+  requires active, non-drift status without unwrap (live TPM access is not
+  checked), reports unfinished noninteractive work as manual, and never forces
+  runtime proof. Enable-all skips an unsupported seam, propagates real engine failure, and retains disable/purge behavior.
+  Actual Windows host precedence holds even with an internal Linux/Darwin
+  override. macOS FlowSession and Windows proof/custody routes remain intact.
 
 #### Explicitly out of v1
 

@@ -221,6 +221,12 @@ operator surface.
   early macOS Keychain eligibility, first Windows exclusions, cached/injected
   portable stores, recovery refusal before prompts, and cold-path rotation.
   Dedicated Linux/Windows memory engines remain independent.
+- [x] Linux general setup and enable-all memory routing through the existing TPM
+  engine; file-vault enable eligibility, load-only readiness, pause semantics and
+  actual Windows host precedence remain intact.
+- [ ] Real-device acceptance of the new Linux setup/enable-all entrances and
+  fresh installed shape-B memory drift backup/refusal, using the bounded test
+  in `tests/integration/test_linux_memory_orchestration_tpm.py` (not portable evidence).
 - [x] Live verification on Apple Silicon with a running gateway (2026-08-20).
 - [x] Record the live-verification result in [`CI.md`](./CI.md) §Manual
   live-device validation log (2026-08-20).
