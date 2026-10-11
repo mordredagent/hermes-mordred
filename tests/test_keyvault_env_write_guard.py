@@ -36,27 +36,26 @@ class TestInstall:
         cfg = SimpleNamespace()  # no save_env_value attribute at all
         assert _env_write_guard.install_env_write_guard(config_module=cfg, platform="darwin") is False
 
-    def test_wraps_and_reseals_after_write(self) -> None:
+    def test_wraps_and_reseals_after_write(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[str] = []
-        reseals: list[bool] = []
         cfg = _fake_config(calls)
+        original = cfg.save_env_value
+        early = SimpleNamespace(save_env_value=original)
+        monkeypatch.setitem(sys.modules, "hermes_cli._fake_early_binder", early)
 
         installed = _env_write_guard.install_env_write_guard(
-            config_module=cfg, platform="darwin", reconcile=lambda: reseals.append(True)
+            config_module=cfg, platform="darwin", reconcile=lambda: calls.append("reseal")
         )
         assert installed is True
 
-        result = cfg.save_env_value("ANTHROPIC_API_KEY", "sk-x")
-        assert result == "host-result"  # the host return value is preserved
-        assert calls == ["ANTHROPIC_API_KEY=sk-x"]  # the original write ran
-        assert reseals == [True]  # reconcile ran *after* the write
+        wrapped = cfg.save_env_value
+        assert _env_write_guard.install_env_write_guard(config_module=cfg, platform="darwin")
+        assert cfg.save_env_value is wrapped
+        assert early.save_env_value is wrapped and wrapped is not original
 
-    def test_idempotent(self) -> None:
-        cfg = _fake_config([])
-        assert _env_write_guard.install_env_write_guard(config_module=cfg, platform="darwin", reconcile=lambda: None)
-        wrapped_once = cfg.save_env_value
-        assert _env_write_guard.install_env_write_guard(config_module=cfg, platform="darwin", reconcile=lambda: None)
-        assert cfg.save_env_value is wrapped_once  # second install does not re-wrap
+        result = early.save_env_value("ANTHROPIC_API_KEY", "sk-x")
+        assert result == "host-result"  # the host return value is preserved
+        assert calls == ["ANTHROPIC_API_KEY=sk-x", "reseal"]  # exactly once, after the write
 
     def test_never_raises_into_host(self) -> None:
         calls: list[str] = []
@@ -69,16 +68,3 @@ class TestInstall:
         # A failing reconcile must NOT turn a successful config write into an error.
         assert cfg.save_env_value("K", "v") == "host-result"
         assert calls == ["K=v"]
-
-    def test_rebinds_early_bound_reference(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A host module that did ``from hermes_cli.config import save_env_value``
-        before us holds the *original* — the guard must rebind it to the wrapper."""
-        calls: list[str] = []
-        cfg = _fake_config(calls)
-        original = cfg.save_env_value
-        early = SimpleNamespace(save_env_value=original)
-        monkeypatch.setitem(sys.modules, "hermes_cli._fake_early_binder", early)
-
-        _env_write_guard.install_env_write_guard(config_module=cfg, platform="darwin", reconcile=lambda: None)
-        assert early.save_env_value is cfg.save_env_value  # rebound to the wrapper
-        assert early.save_env_value is not original

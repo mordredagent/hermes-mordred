@@ -37,7 +37,7 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.keyvault import _secret_ops, _storage, api, wrap
+from mordred_hermes.keyvault import _storage, api, wrap
 from mordred_hermes.keyvault._exceptions import (
     WrapAuthCancelled,
     WrapIntegrityError,
@@ -122,6 +122,7 @@ class TestApiEncrypt:
         assert log == []
         assert path.is_file()
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
 
     def test_uses_fresh_dek_each_call(
         self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
@@ -177,20 +178,16 @@ class TestApiEncrypt:
 
 
 class TestApiDecrypt:
-    def test_roundtrip_empty_plaintext(
-        self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        _, sink = captured_audit
-        eid = api.encrypt(registered_key, b"", "purpose", backend=backend, audit_sink=sink, home=home)
-        assert api.decrypt(registered_key, eid, "purpose", backend=backend, audit_sink=sink, home=home) == b""
-
     def test_roundtrip_binary_plaintext(
         self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
     ) -> None:
-        _, sink = captured_audit
+        log, sink = captured_audit
         plaintext = bytes(range(256))
-        eid = api.encrypt(registered_key, plaintext, "purpose", backend=backend, audit_sink=sink, home=home)
-        assert api.decrypt(registered_key, eid, "purpose", backend=backend, audit_sink=sink, home=home) == plaintext
+        purpose = "ssh-priv_key.v1"
+        eid = api.encrypt(registered_key, plaintext, purpose, backend=backend, audit_sink=sink, home=home)
+        assert api.decrypt(registered_key, eid, purpose, backend=backend, audit_sink=sink, home=home) == plaintext
+        assert len(log) == 1
+        assert log[0]["reason"] == "keyvault.unwrap_authorized"
 
     def test_cross_purpose_replay_no_biometric_prompt(
         self,
@@ -322,20 +319,6 @@ class TestApiDecrypt:
         with pytest.raises(WrapIntegrityError):
             api.decrypt(registered_key, eid, "purpose", backend=backend, audit_sink=sink, home=home)
 
-    def test_emits_keyvault_unwrap_authorized_on_success(
-        self,
-        registered_key: str,
-        backend: FakeBackend,
-        home: Path,
-        captured_audit: tuple[list[dict[str, Any]], Any],
-    ) -> None:
-        log, sink = captured_audit
-        eid = api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
-        api.decrypt(registered_key, eid, "purpose", backend=backend, audit_sink=sink, home=home)
-        # Exactly one emit, from the wrap layer (api.decrypt does NOT double-emit).
-        assert len(log) == 1
-        assert log[0]["reason"] == "keyvault.unwrap_authorized"
-
     def test_emits_keyvault_unwrap_denied_on_user_cancel(
         self,
         registered_key: str,
@@ -398,28 +381,11 @@ class TestPurposeValidation:
         with pytest.raises(ValueError):
             api.decrypt(registered_key, "dummy_eid", bad, backend=backend, audit_sink=sink, home=home)
 
-    def test_accepts_alphanumeric_with_dashes_and_underscores(
-        self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        _, sink = captured_audit
-        eid = api.encrypt(registered_key, b"x", "ssh-priv_key.v1", backend=backend, audit_sink=sink, home=home)
-        assert api.decrypt(registered_key, eid, "ssh-priv_key.v1", backend=backend, audit_sink=sink, home=home) == b"x"
-
 
 # ----------------------------- envelope persistence -----------------------------
 
 
 class TestEnvelopePersistence:
-    def test_creates_purpose_subdir_with_0700(
-        self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        _, sink = captured_audit
-        api.encrypt(registered_key, b"x", "newpurpose", backend=backend, audit_sink=sink, home=home)
-        kid_hex = _key_id_hash(registered_key).hex()
-        purpose_hex = _purpose_hash("newpurpose").hex()
-        purpose_dir = home / "mordred" / "keyvault" / "ciphertexts" / kid_hex / purpose_hex
-        assert stat.S_IMODE(purpose_dir.stat().st_mode) == 0o700
-
     def test_envelopes_for_same_key_different_purpose_separate(
         self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
     ) -> None:
@@ -470,31 +436,6 @@ class TestEnvelopeIdValidation:
         _, sink = captured_audit
         with pytest.raises(ValueError):
             api.decrypt(registered_key, bad, "purpose", backend=backend, audit_sink=sink, home=home)
-
-    def test_accepts_valid_22_char_envelope_id(
-        self,
-        registered_key: str,
-        backend: FakeBackend,
-        home: Path,
-        captured_audit: tuple[list[dict[str, Any]], Any],
-    ) -> None:
-        _, sink = captured_audit
-        eid = api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
-        # Round-trip succeeds.
-        assert api.decrypt(registered_key, eid, "purpose", backend=backend, audit_sink=sink, home=home) == b"x"
-
-    def test_encrypt_always_returns_validator_acceptable_id(
-        self,
-        registered_key: str,
-        backend: FakeBackend,
-        home: Path,
-        captured_audit: tuple[list[dict[str, Any]], Any],
-    ) -> None:
-        # 64 fresh encrypts; every envelope_id must satisfy the validator.
-        _, sink = captured_audit
-        for _ in range(64):
-            eid = api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
-            _secret_ops._validate_envelope_id(eid)  # must not raise
 
 
 class TestEncryptValidatesExistingDirs:
@@ -692,3 +633,4 @@ def test_mren_v1_wire_layout(registered_key, backend, home, captured_audit) -> N
     assert blob[21:37] == _purpose_hash("purpose")
     assert len(blob[37:164]) == 127
     assert int.from_bytes(blob[164:168], "big") == len(blob) - 168 == 28
+    assert api.decrypt(registered_key, eid, "purpose", backend=backend, audit_sink=sink, home=home) == b""

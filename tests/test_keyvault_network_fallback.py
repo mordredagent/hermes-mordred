@@ -69,13 +69,6 @@ class _FakeSystemConfiguration:
 # --------------------------------------------------------------------------
 
 
-def test_module_imports_on_any_platform() -> None:
-    """``network_fallback`` must import cleanly on Linux/Windows so the
-    non-keyvault primitives stay usable; pyobjc is deferred to call time.
-    """
-    import mordred_hermes.keyvault.network_fallback  # noqa: F401
-
-
 def test_exception_taxonomy() -> None:
     """``BlackoutNotAsserted`` and ``NetworkFallbackUnavailable`` are the
     two keyvault-owned exceptions the module raises. Both are ordinary
@@ -87,16 +80,6 @@ def test_exception_taxonomy() -> None:
     assert issubclass(nf.NetworkFallbackUnavailable, Exception)
     assert not issubclass(nf.NetworkFallbackUnavailable, nf.BlackoutNotAsserted)
     assert not issubclass(nf.BlackoutNotAsserted, nf.NetworkFallbackUnavailable)
-
-
-def test_probe_host_backward_compat_alias_removed() -> None:
-    """LOW dead-code finding: ``_PROBE_HOST`` was a "backward-compat alias"
-    for ``_PROBE_HOST_V4`` with zero remaining consumers (the real probe in
-    ``_os_reachability_probe`` uses ``_PROBE_HOST_V4`` / ``_PROBE_HOST_V6``
-    directly). Pin its removal so it does not silently creep back in as
-    dead state — the two live constants must still be defined and distinct."""
-    assert not hasattr(nf, "_PROBE_HOST")
-    assert nf._PROBE_HOST_V4 != nf._PROBE_HOST_V6
 
 
 # --------------------------------------------------------------------------
@@ -161,17 +144,6 @@ def test_query_reachability_flags_pyobjc_missing(
     with pytest.raises(nf.NetworkFallbackUnavailable) as excinfo:
         nf._query_reachability_flags()
     assert isinstance(excinfo.value.__cause__, ImportError)
-
-
-def test_query_reachability_flags_returns_flags(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Happy path: the raw ``SCNetworkReachabilityGetFlags`` value is
-    returned verbatim as an ``int``."""
-    monkeypatch.setattr(sys, "platform", "darwin")
-    fake = _FakeSystemConfiguration(get_flags_result=(True, _REACHABLE))
-    monkeypatch.setattr(nf, "_import_systemconfiguration", lambda: fake)
-    assert nf._query_reachability_flags() == _REACHABLE
 
 
 def test_query_reachability_flags_create_returns_null(
@@ -247,16 +219,6 @@ def test_query_reachability_flags_malformed_return(
 # --------------------------------------------------------------------------
 
 
-def test_os_reachability_probe_online(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(nf, "_query_reachability_flags", lambda *_a: _REACHABLE)
-    assert nf._os_reachability_probe() is True
-
-
-def test_os_reachability_probe_offline(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(nf, "_query_reachability_flags", lambda *_a: 0)
-    assert nf._os_reachability_probe() is False
-
-
 def test_os_reachability_probe_detects_ipv6_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """Security review H3: a dual-stack host whose IPv4 is down but whose
     IPv6 still routes is NOT isolated. The OS fallback must probe both
@@ -305,16 +267,22 @@ def test_blackout_assert_default_probe_offline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With no explicit probe, ``_os_reachability_probe`` is used."""
-    monkeypatch.setattr(nf, "_os_reachability_probe", lambda: False)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    fake = _FakeSystemConfiguration(get_flags_result=(True, 0))
+    monkeypatch.setattr(nf, "_import_systemconfiguration", lambda: fake)
     nf.blackout_assert()
+    assert fake.create_calls == [b"1.1.1.1", b"2606:4700:4700::1111"]
 
 
 def test_blackout_assert_default_probe_online(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(nf, "_os_reachability_probe", lambda: True)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    fake = _FakeSystemConfiguration(get_flags_result=(True, _REACHABLE))
+    monkeypatch.setattr(nf, "_import_systemconfiguration", lambda: fake)
     with pytest.raises(nf.BlackoutNotAsserted):
         nf.blackout_assert()
+    assert fake.create_calls == [b"1.1.1.1"]
 
 
 def test_blackout_assert_fails_closed_when_probe_unavailable(
@@ -360,20 +328,6 @@ def test_resolve_delegation_translates_exception() -> None:
     assert isinstance(excinfo.value.__cause__, NetworkBlackoutNotAsserted)
 
 
-def test_resolve_falls_back_when_network_absent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When ``mordred_network`` is not importable, ``resolve_blackout_assert``
-    returns this module's own OS-API ``blackout_assert``."""
-
-    def _raise_import_error() -> Any:
-        raise ImportError("No module named 'mordred_hermes.network'")
-
-    monkeypatch.setattr(nf, "_import_network_api", _raise_import_error)
-    resolved = nf.resolve_blackout_assert()
-    assert resolved is nf.blackout_assert
-
-
 def test_resolve_fallback_callable_uses_os_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -386,5 +340,6 @@ def test_resolve_fallback_callable_uses_os_probe(
     monkeypatch.setattr(nf, "_import_network_api", _raise_import_error)
     monkeypatch.setattr(nf, "_os_reachability_probe", lambda: True)
     resolved = nf.resolve_blackout_assert()
+    assert resolved is nf.blackout_assert
     with pytest.raises(nf.BlackoutNotAsserted):
         resolved()

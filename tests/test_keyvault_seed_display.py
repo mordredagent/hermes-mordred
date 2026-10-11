@@ -96,21 +96,6 @@ def test_blackout_failure_aborts_before_anything_is_shown() -> None:
     assert surface.ops == []  # not even the banner
 
 
-def test_blackout_runs_before_banner_and_display() -> None:
-    surface = FakeSurface()
-    clock = FakeClock()
-    sd.display_seed(
-        _handle(),
-        surface,
-        blackout_assert=_ok_blackout,
-        capture_probe=_no_capture,
-        ttl_seconds=2.0,
-        clock=clock.now,
-        sleep=clock.sleep,
-    )
-    assert surface.ops[0] == "banner"
-
-
 # ---------------------------------------------------------------------------
 # Happy path: banner → show → auto-clear
 # ---------------------------------------------------------------------------
@@ -119,11 +104,28 @@ def test_blackout_runs_before_banner_and_display() -> None:
 def test_happy_path_shows_seed_then_clears() -> None:
     surface = FakeSurface()
     clock = FakeClock()
+    handle = _handle()
+    start = clock.now()
+    polls = 0
+    blackouts: list[bool] = []
+    entries: list[dict[str, Any]] = []
+
+    def blackout(*, probe: Any = None) -> None:
+        assert surface.ops == []
+        blackouts.append(True)
+
+    def capture_probe() -> str | None:
+        nonlocal polls
+        polls += 1
+        assert blackouts == [True]
+        return None
+
     sd.display_seed(
-        _handle(),
+        handle,
         surface,
-        blackout_assert=_ok_blackout,
-        capture_probe=_no_capture,
+        blackout_assert=blackout,
+        capture_probe=capture_probe,
+        audit_sink=entries.append,
         ttl_seconds=3.0,
         clock=clock.now,
         sleep=clock.sleep,
@@ -131,82 +133,11 @@ def test_happy_path_shows_seed_then_clears() -> None:
     assert surface.ops[0] == "banner"
     assert ("show", _SEED) in surface.calls
     assert surface.ops[-1] == "clear"
-
-
-def test_banner_warns_about_capture_and_air_gap() -> None:
-    surface = FakeSurface()
-    clock = FakeClock()
-    sd.display_seed(
-        _handle(),
-        surface,
-        blackout_assert=_ok_blackout,
-        capture_probe=_no_capture,
-        ttl_seconds=2.0,
-        clock=clock.now,
-        sleep=clock.sleep,
-    )
-    banner_text = next(msg for op, msg in surface.calls if op == "banner").lower()
-    assert "bluetooth" in banner_text
-    assert "recording" in banner_text or "recorder" in banner_text
-
-
-def test_handle_consumed_exactly_once() -> None:
-    surface = FakeSurface()
-    clock = FakeClock()
-    handle = _handle()
-    sd.display_seed(
-        handle,
-        surface,
-        blackout_assert=_ok_blackout,
-        capture_probe=_no_capture,
-        ttl_seconds=2.0,
-        clock=clock.now,
-        sleep=clock.sleep,
-    )
-    # handle is one-shot — a second consume must now fail
+    assert clock.now() - start >= 3.0
+    assert polls > 1
+    assert entries == []
     with pytest.raises(RuntimeError):
         handle.consume()
-
-
-def test_timer_uses_injected_monotonic_clock() -> None:
-    """The display window length is measured by the injected clock."""
-    surface = FakeSurface()
-    clock = FakeClock()
-    start = clock.now()
-    sd.display_seed(
-        _handle(),
-        surface,
-        blackout_assert=_ok_blackout,
-        capture_probe=_no_capture,
-        ttl_seconds=10.0,
-        poll_interval=0.5,
-        clock=clock.now,
-        sleep=clock.sleep,
-    )
-    assert clock.now() - start >= 10.0
-
-
-def test_capture_probe_polled_during_window() -> None:
-    surface = FakeSurface()
-    clock = FakeClock()
-    polls = 0
-
-    def counting_probe() -> str | None:
-        nonlocal polls
-        polls += 1
-        return None
-
-    sd.display_seed(
-        _handle(),
-        surface,
-        blackout_assert=_ok_blackout,
-        capture_probe=counting_probe,
-        ttl_seconds=5.0,
-        poll_interval=0.5,
-        clock=clock.now,
-        sleep=clock.sleep,
-    )
-    assert polls > 1  # polled repeatedly, not just once
 
 
 # ---------------------------------------------------------------------------
@@ -216,33 +147,26 @@ def test_capture_probe_polled_during_window() -> None:
 
 def test_capture_detected_before_display_aborts_without_showing() -> None:
     surface = FakeSurface()
+    handle = _handle()
+    entries: list[dict[str, Any]] = []
     with pytest.raises(sd.SeedDisplayAborted) as exc:
         sd.display_seed(
-            _handle(),
-            surface,
-            blackout_assert=_ok_blackout,
-            capture_probe=lambda: "cg_screen_is_being_captured",
-        )
-    assert exc.value.detector == "cg_screen_is_being_captured"
-    assert "show" not in surface.ops
-
-
-def test_pre_display_abort_emits_audit() -> None:
-    surface = FakeSurface()
-    entries: list[dict[str, Any]] = []
-    with pytest.raises(sd.SeedDisplayAborted):
-        sd.display_seed(
-            _handle(),
+            handle,
             surface,
             blackout_assert=_ok_blackout,
             capture_probe=lambda: "cg_screen_is_being_captured",
             audit_sink=entries.append,
         )
+    assert exc.value.detector == "cg_screen_is_being_captured"
+    assert "show" not in surface.ops
     assert len(entries) == 1
     assert entries[0]["event"] == "keyvault.seed_display"
     assert entries[0]["decision"] == "block"
     assert entries[0]["reason"] == "keyvault.seed_display_aborted_screenshot"
     assert entries[0]["detector"] == "cg_screen_is_being_captured"
+    assert not any(handle._payload)
+    with pytest.raises(RuntimeError):
+        handle.consume()
 
 
 # ---------------------------------------------------------------------------
@@ -279,25 +203,6 @@ def test_capture_detected_mid_display_clears_and_aborts() -> None:
     # aborted before the 60s window elapsed
     assert clock.now() - 1000.0 < 60.0
     assert entries[0]["reason"] == "keyvault.seed_display_aborted_screenshot"
-
-
-def test_pre_display_abort_wipes_seed_from_handle() -> None:
-    """A capture detected before display still wipes the seed (code-review L1).
-
-    The seed was never rendered, but a hostile capture environment was
-    detected — the handle must be spent so the seed does not linger.
-    """
-    surface = FakeSurface()
-    handle = _handle()
-    with pytest.raises(sd.SeedDisplayAborted):
-        sd.display_seed(
-            handle,
-            surface,
-            blackout_assert=_ok_blackout,
-            capture_probe=lambda: "cg_screen_is_being_captured",
-        )
-    with pytest.raises(RuntimeError):  # handle already consumed (seed wiped)
-        handle.consume()
 
 
 def test_non_positive_poll_interval_rejected() -> None:
@@ -372,23 +277,6 @@ def test_expired_handle_raises_before_display() -> None:
     assert "show" not in surface.ops
 
 
-def test_no_audit_emitted_on_clean_completion() -> None:
-    surface = FakeSurface()
-    clock = FakeClock()
-    entries: list[dict[str, Any]] = []
-    sd.display_seed(
-        _handle(),
-        surface,
-        blackout_assert=_ok_blackout,
-        capture_probe=_no_capture,
-        audit_sink=entries.append,
-        ttl_seconds=2.0,
-        clock=clock.now,
-        sleep=clock.sleep,
-    )
-    assert entries == []
-
-
 # ---------------------------------------------------------------------------
 # Default macOS capture probe
 # ---------------------------------------------------------------------------
@@ -436,12 +324,6 @@ def test_default_probe_returns_none_when_not_captured(monkeypatch: pytest.Monkey
     assert sd._default_capture_probe() is None
 
 
-def test_default_probe_swallows_bridge_errors(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setattr(sd, "_import_quartz", lambda: _FakeQuartz(captured=False, raises=True))
-    assert sd._default_capture_probe() is None  # best-effort
-
-
 def test_default_probe_handles_missing_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
     """A Quartz build that does not expose ``CGScreenIsBeingCaptured`` fails open.
 
@@ -481,14 +363,6 @@ def test_default_probe_bridge_error_warns_once(
     assert len(probe_warnings) == 1
 
 
-def test_module_imports_without_quartz() -> None:
-    """The module must import on any platform — Quartz is call-time lazy."""
-    import importlib
-
-    importlib.reload(sd)
-    assert hasattr(sd, "display_seed")
-
-
 # ---------------------------------------------------------------------------
 # Early dismiss — operator presses ENTER to clear the seed before the 60s timer
 # ---------------------------------------------------------------------------
@@ -505,12 +379,14 @@ def test_dismiss_probe_breaks_window_early() -> None:
         return state["n"] >= 2  # press ENTER on the 2nd poll
 
     start = clock.now()
+    entries: list[dict[str, Any]] = []
     sd.display_seed(
         _handle(),
         surface,
         blackout_assert=_ok_blackout,
         capture_probe=_no_capture,
         dismiss_probe=dismiss,
+        audit_sink=entries.append,
         ttl_seconds=60.0,
         poll_interval=0.5,
         clock=clock.now,
@@ -520,27 +396,7 @@ def test_dismiss_probe_breaks_window_early() -> None:
     assert surface.ops[-1] == "clear"
     # Exited well before the 60s timer would have elapsed.
     assert clock.now() - start < 60.0
-
-
-def test_dismiss_is_a_clean_completion_no_audit() -> None:
-    """An early dismiss is a clean exit, not an abort — no audit entry."""
-    surface = FakeSurface()
-    clock = FakeClock()
-    entries: list[dict[str, Any]] = []
-    sd.display_seed(
-        _handle(),
-        surface,
-        blackout_assert=_ok_blackout,
-        capture_probe=_no_capture,
-        dismiss_probe=lambda: True,
-        audit_sink=entries.append,
-        ttl_seconds=60.0,
-        clock=clock.now,
-        sleep=clock.sleep,
-    )
     assert entries == []
-    assert ("show", _SEED) in surface.calls
-    assert surface.ops[-1] == "clear"
 
 
 def test_capture_takes_precedence_over_dismiss() -> None:

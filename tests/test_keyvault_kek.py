@@ -37,14 +37,6 @@ def backend() -> FakeBackend:
 # ---------------------------------------------------------------------------
 
 
-def test_seal_produces_distinct_blobs_each_call(backend: FakeBackend) -> None:
-    # Each seal generates a fresh random master key AND a fresh ephemeral
-    # keypair, so two blobs must differ.
-    a = kek.seal_master_key(_KEY_ID, backend=backend)
-    b = kek.seal_master_key(_KEY_ID, backend=backend)
-    assert a != b
-
-
 def test_seal_unknown_key_raises(backend: FakeBackend) -> None:
     with pytest.raises(WrapKeyNotFound):
         kek.seal_master_key("no-such-key", backend=backend)
@@ -58,10 +50,14 @@ def test_seal_unknown_key_raises(backend: FakeBackend) -> None:
 def test_same_wrapped_blob_opens_to_same_master_key(backend: FakeBackend) -> None:
     # Journey: data encrypted in one session must decrypt in a later one,
     # because the same wrapped blob always unwraps to the same master key.
+    backend.calls.clear()
     wrapped = kek.seal_master_key(_KEY_ID, backend=backend)
+    assert not any(call[0] == "ecdh" for call in backend.calls)
     assert isinstance(wrapped, bytes)
     assert len(wrapped) == 127  # MRKW wrapping envelope
-    mk1 = kek.open_master_key(wrapped, _KEY_ID, backend=backend)
+    audit: list[dict[str, object]] = []
+    mk1 = kek.open_master_key(wrapped, _KEY_ID, backend=backend, audit_sink=audit.append)
+    assert audit and audit[-1]["reason"] == "keyvault.unwrap_authorized"
     mk2 = kek.open_master_key(wrapped, _KEY_ID, backend=backend)
     blob = mk1.encrypt(b"cross-session payload")
     assert b"cross-session payload" not in blob
@@ -72,6 +68,7 @@ def test_distinct_seals_yield_independent_keys(backend: FakeBackend) -> None:
     # Two separately sealed master keys must NOT decrypt each other's data.
     w1 = kek.seal_master_key(_KEY_ID, backend=backend)
     w2 = kek.seal_master_key(_KEY_ID, backend=backend)
+    assert w1 != w2
     mk1 = kek.open_master_key(w1, _KEY_ID, backend=backend)
     mk2 = kek.open_master_key(w2, _KEY_ID, backend=backend)
     blob = mk1.encrypt(b"x")
@@ -104,17 +101,11 @@ def test_open_unknown_key_raises(backend: FakeBackend) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_aad_roundtrip(backend: FakeBackend) -> None:
-    wrapped = kek.seal_master_key(_KEY_ID, backend=backend)
-    mk = kek.open_master_key(wrapped, _KEY_ID, backend=backend)
-    blob = mk.encrypt(b"payload", aad=b"context-v1")
-    assert mk.decrypt(blob, aad=b"context-v1") == b"payload"
-
-
 def test_aad_mismatch_fails(backend: FakeBackend) -> None:
     wrapped = kek.seal_master_key(_KEY_ID, backend=backend)
     mk = kek.open_master_key(wrapped, _KEY_ID, backend=backend)
     blob = mk.encrypt(b"payload", aad=b"context-v1")
+    assert mk.decrypt(blob, aad=b"context-v1") == b"payload"
     with pytest.raises(InvalidTag):
         mk.decrypt(blob, aad=b"context-v2")
 
@@ -142,6 +133,8 @@ def test_close_blocks_further_use(backend: FakeBackend) -> None:
         mk.encrypt(b"x")
     with pytest.raises(ValueError):
         mk.decrypt(b"x")
+    with pytest.raises(ValueError):
+        mk.mac(b"body", info=b"i")
 
 
 def test_context_manager_closes_on_exit(backend: FakeBackend) -> None:
@@ -158,41 +151,19 @@ def test_context_manager_closes_on_exit(backend: FakeBackend) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_open_emits_authorization_audit(backend: FakeBackend) -> None:
-    wrapped = kek.seal_master_key(_KEY_ID, backend=backend)
-    audit: list[dict[str, object]] = []
-    kek.open_master_key(wrapped, _KEY_ID, backend=backend, audit_sink=audit.append)
-    assert audit and audit[-1]["reason"] == "keyvault.unwrap_authorized"
-
-
-def test_seal_does_not_emit_audit(backend: FakeBackend) -> None:
-    # Sealing uses only the public key (wrap_dek) — no authorization, no audit.
-    audit: list[dict[str, object]] = []
-    backend.calls.clear()
-    kek.seal_master_key(_KEY_ID, backend=backend)
-    assert audit == []
-    # And it must not have triggered an ECDH (the authorization op).
-    assert not any(call[0] == "ecdh" for call in backend.calls)
-
-
 # ---------------------------------------------------------------------------
 # MAC — domain-separated authentication keyed by the master (manifest use)
 # ---------------------------------------------------------------------------
-
-
-def test_mac_is_deterministic_and_32_bytes(backend: FakeBackend) -> None:
-    wrapped = kek.seal_master_key(_KEY_ID, backend=backend)
-    mk = kek.open_master_key(wrapped, _KEY_ID, backend=backend)
-    tag = mk.mac(b"manifest-body", info=b"mordred-manifest-v1")
-    assert isinstance(tag, bytes) and len(tag) == 32
-    assert mk.mac(b"manifest-body", info=b"mordred-manifest-v1") == tag
 
 
 def test_mac_differs_by_data(backend: FakeBackend) -> None:
     wrapped = kek.seal_master_key(_KEY_ID, backend=backend)
     mk = kek.open_master_key(wrapped, _KEY_ID, backend=backend)
     info = b"mordred-manifest-v1"
-    assert mk.mac(b"body-a", info=info) != mk.mac(b"body-b", info=info)
+    tag = mk.mac(b"body-a", info=info)
+    assert isinstance(tag, bytes) and len(tag) == 32
+    assert mk.mac(b"body-a", info=info) == tag
+    assert tag != mk.mac(b"body-b", info=info)
 
 
 def test_mac_differs_by_info(backend: FakeBackend) -> None:
@@ -208,11 +179,3 @@ def test_mac_differs_by_master(backend: FakeBackend) -> None:
     mk1 = kek.open_master_key(w1, _KEY_ID, backend=backend)
     mk2 = kek.open_master_key(w2, _KEY_ID, backend=backend)
     assert mk1.mac(b"body", info=b"i") != mk2.mac(b"body", info=b"i")
-
-
-def test_mac_after_close_raises(backend: FakeBackend) -> None:
-    wrapped = kek.seal_master_key(_KEY_ID, backend=backend)
-    mk = kek.open_master_key(wrapped, _KEY_ID, backend=backend)
-    mk.close()
-    with pytest.raises(ValueError):
-        mk.mac(b"body", info=b"i")

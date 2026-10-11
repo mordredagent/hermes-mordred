@@ -36,6 +36,7 @@ def test_round_trip() -> None:
     assert blob.endswith(b"\n")
     blob.decode("ascii")  # survives the upstream UTF-8 reader unchanged
     assert _PLAINTEXT not in blob
+    assert seal(_PLAINTEXT, key=_KEY, name="MEMORY.md") != blob  # fresh nonce
 
 
 def test_round_trip_empty_plaintext() -> None:
@@ -43,12 +44,6 @@ def test_round_trip_empty_plaintext() -> None:
     blob = seal(b"", key=_KEY, name="MEMORY.md")
     assert is_sealed(blob)
     assert unseal(blob, key=_KEY, name="MEMORY.md") == b""
-
-
-def test_two_seals_of_the_same_plaintext_differ() -> None:
-    first = seal(_PLAINTEXT, key=_KEY, name="MEMORY.md")
-    second = seal(_PLAINTEXT, key=_KEY, name="MEMORY.md")
-    assert first != second  # fresh nonce per seal
 
 
 def test_wrong_key_fails() -> None:
@@ -150,12 +145,9 @@ def test_decode_key_accepts(value: str) -> None:
     ],
 )
 def test_decode_key_rejects(value: str) -> None:
-    with pytest.raises(MemoryKeyError):
+    with pytest.raises(MemoryKeyError) as refusal:
         decode_key(value)
-
-
-def test_decode_key_error_is_a_memory_crypto_error() -> None:
-    assert issubclass(MemoryKeyError, MemoryCryptoError)
+    assert isinstance(refusal.value, MemoryCryptoError)
 
 
 def test_is_sealed_requires_the_whole_structure() -> None:

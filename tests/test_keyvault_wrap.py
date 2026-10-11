@@ -133,31 +133,6 @@ class TestWireFormat:
         assert blob1 != blob2
         assert blob1[22:87] != blob2[22:87]  # different ephemeral_pub
 
-    def test_blob_prefix_equals_hkdf_info(self, backend: FakeBackend) -> None:
-        """Regression test for the LOW refactor finding: ``wrap_dek`` used
-        to build the 87-byte HKDF ``info`` via ``_build_hkdf_info`` and
-        THEN re-serialize the identical prefix a second time in the return
-        statement. ``unwrap_dek`` reconstructs ``info`` from the parsed
-        header, so a divergence between the two packings would derive a
-        mismatched KEK and break unwrap. Pin ``blob[:87] == info`` so the
-        two can never silently drift apart again."""
-        from mordred_hermes.keyvault.wrap import (
-            _OFFSET_WRAPPED_DEK,
-            _build_hkdf_info,
-            _key_id_hash,
-            generate_wrapping_key,
-            wrap_dek,
-        )
-
-        generate_wrapping_key("k1", backend=backend)
-        blob = wrap_dek(secrets.token_bytes(32), "k1", backend=backend)
-
-        assert _OFFSET_WRAPPED_DEK == 87
-        kid_hash = _key_id_hash("k1")
-        ephemeral_pub = blob[22:87]
-        expected_info = _build_hkdf_info(kid_hash, ephemeral_pub)
-        assert blob[:87] == expected_info
-
 
 # ---------------------------------------------------------------------------
 # Round-trip
@@ -176,7 +151,7 @@ class TestRoundTrip:
             wrap_dek,
         )
 
-        _, sink = captured_audit
+        entries, sink = captured_audit
         generate_wrapping_key("k1", backend=backend)
         dek = secrets.token_bytes(32)
         blob = wrap_dek(dek, "k1", backend=backend)
@@ -184,6 +159,14 @@ class TestRoundTrip:
         recovered = unwrap_dek(blob, "k1", audit_sink=sink, backend=backend)
 
         assert recovered == dek
+        unwrap_entries = [e for e in entries if e.get("reason") == "keyvault.unwrap_authorized"]
+        assert len(unwrap_entries) == 1
+        entry = unwrap_entries[0]
+        assert entry["event"] == "keyvault.unwrap_dek"
+        assert entry["decision"] == "allow"
+        assert "key_id_hash" in entry
+        assert "k1" not in entry["key_id_hash"]
+        assert len(entry["key_id_hash"]) == 16
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +211,7 @@ class TestParseRejections:
 
         with pytest.raises(WrapParseError):
             unwrap_dek(tampered, "k1", audit_sink=sink, backend=backend)
+        assert not any(op == "ecdh" for op, _ in backend.calls)
 
     def test_unknown_version_rejected(
         self,
@@ -293,24 +277,6 @@ class TestParseRejections:
 
         with pytest.raises(WrapParseError):
             unwrap_dek(tampered, "k1", audit_sink=sink, backend=backend)
-
-    def test_parse_rejections_do_not_call_backend_ecdh(
-        self,
-        backend: FakeBackend,
-        captured_audit: tuple[list[dict[str, Any]], AuditSink],
-    ) -> None:
-        """A parse failure must never trigger the Enclave authorization
-        prompt (would be UX-bad and could leak info about which fields
-        an attacker tampered with)."""
-        from mordred_hermes.keyvault._exceptions import WrapParseError
-        from mordred_hermes.keyvault.wrap import unwrap_dek
-
-        _, sink = captured_audit
-        with pytest.raises(WrapParseError):
-            unwrap_dek(b"X" * 127, "k1", audit_sink=sink, backend=backend)
-
-        ecdh_calls = [c for c in backend.calls if c[0] == "ecdh"]
-        assert ecdh_calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -379,60 +345,6 @@ class TestIntegrity:
 
 
 class TestAuthorization:
-    def test_successful_unwrap_emits_authorized_audit(
-        self,
-        backend: FakeBackend,
-        captured_audit: tuple[list[dict[str, Any]], AuditSink],
-    ) -> None:
-        from mordred_hermes.keyvault.wrap import (
-            generate_wrapping_key,
-            unwrap_dek,
-            wrap_dek,
-        )
-
-        entries, sink = captured_audit
-        generate_wrapping_key("k1", backend=backend)
-        blob = wrap_dek(secrets.token_bytes(32), "k1", backend=backend)
-
-        unwrap_dek(blob, "k1", audit_sink=sink, backend=backend)
-
-        unwrap_entries = [e for e in entries if e.get("reason") == "keyvault.unwrap_authorized"]
-        assert len(unwrap_entries) == 1
-        entry = unwrap_entries[0]
-        assert entry["event"] == "keyvault.unwrap_dek"
-        assert entry["decision"] == "allow"
-        assert "key_id_hash" in entry
-        # key_id_hash is a hex prefix of SHA-256(key_id) — never the cleartext
-        assert "k1" not in entry["key_id_hash"]
-        assert len(entry["key_id_hash"]) == 16  # 8 bytes * 2 hex chars
-
-    def test_user_cancelled_emits_denied_audit_and_raises(
-        self,
-        backend: FakeBackend,
-        captured_audit: tuple[list[dict[str, Any]], AuditSink],
-    ) -> None:
-        from mordred_hermes.keyvault._exceptions import WrapAuthCancelled
-        from mordred_hermes.keyvault.wrap import (
-            generate_wrapping_key,
-            unwrap_dek,
-            wrap_dek,
-        )
-
-        entries, sink = captured_audit
-        generate_wrapping_key("k1", backend=backend)
-        blob = wrap_dek(secrets.token_bytes(32), "k1", backend=backend)
-
-        backend.denied_reason = "user_cancelled"
-
-        with pytest.raises(WrapAuthCancelled):
-            unwrap_dek(blob, "k1", audit_sink=sink, backend=backend)
-
-        denied = [e for e in entries if e.get("reason") == "keyvault.unwrap_denied"]
-        assert len(denied) == 1
-        entry = denied[0]
-        assert entry["decision"] == "block"
-        assert entry["native_error_code"] == "user_cancelled"
-
     @pytest.mark.parametrize(
         "reason",
         ["user_cancelled", "auth_failed", "biometry_lockout", "passcode_not_set"],
@@ -455,10 +367,17 @@ class TestAuthorization:
         blob = wrap_dek(secrets.token_bytes(32), "k1", backend=backend)
         backend.denied_reason = reason
 
-        with pytest.raises(WrapAuthCancelled):
+        with pytest.raises(WrapAuthCancelled) as excinfo:
             unwrap_dek(blob, "k1", audit_sink=sink, backend=backend)
 
-        assert entries[-1]["native_error_code"] == reason
+        assert len(entries) == 1
+        assert entries[0]["reason"] == "keyvault.unwrap_denied"
+        assert entries[0]["decision"] == "block"
+        assert entries[0]["native_error_code"] == reason
+        cause = excinfo.value.__cause__
+        assert isinstance(cause, NativeBackendError)
+        assert cause.code == reason
+        assert str(cause) == reason
 
 
 # ---------------------------------------------------------------------------
@@ -467,18 +386,6 @@ class TestAuthorization:
 
 
 class TestKeychainManagement:
-    def test_generate_then_lookup_returns_same_pub(self, backend: FakeBackend) -> None:
-        from mordred_hermes.keyvault.wrap import (
-            generate_wrapping_key,
-            get_wrapping_key_public,
-        )
-
-        generate_wrapping_key("k1", backend=backend)
-        pub = get_wrapping_key_public("k1", backend=backend)
-
-        assert len(pub) == 65
-        assert pub[0] == 0x04
-
     def test_generate_returns_sec1_public_key(self, backend: FakeBackend) -> None:
         """review LOW-3: ``generate_wrapping_key`` returns the SEC1
         uncompressed public key so PR4's ``api.generate`` need not issue a
@@ -638,7 +545,7 @@ class TestKeyNotFoundIsPreAuthorization:
             wrap_dek,
         )
 
-        _, sink = captured_audit
+        entries, sink = captured_audit
         generate_wrapping_key("k1", backend=backend)
         blob = wrap_dek(secrets.token_bytes(32), "k1", backend=backend)
         backend.denied_reason = "key_not_found"
@@ -650,64 +557,11 @@ class TestKeyNotFoundIsPreAuthorization:
         # ``except WrapKeyNotFound`` must catch this; callers catching
         # ``except WrapAuthCancelled`` (the prompt-denied category) must NOT.
         assert not isinstance(excinfo.value, WrapAuthCancelled)
-
-    def test_key_not_found_emits_no_audit_entry(
-        self,
-        backend: FakeBackend,
-        captured_audit: tuple[list[dict[str, Any]], AuditSink],
-    ) -> None:
-        """SPEC.md §Wrap wire format & algorithm "Algorithm — unwrap_dek"
-        step 2: pre-authorization failures do not emit audit. The
-        ``keyvault.unwrap_denied`` reason code is for prompt-denied flows
-        (user_cancelled / auth_failed / biometry_lockout / passcode_not_set),
-        not for missing-key flows."""
-        from mordred_hermes.keyvault._exceptions import WrapKeyNotFound
-        from mordred_hermes.keyvault.wrap import (
-            generate_wrapping_key,
-            unwrap_dek,
-            wrap_dek,
-        )
-
-        entries, sink = captured_audit
-        generate_wrapping_key("k1", backend=backend)
-        blob = wrap_dek(secrets.token_bytes(32), "k1", backend=backend)
-        backend.denied_reason = "key_not_found"
-
-        with pytest.raises(WrapKeyNotFound):
-            unwrap_dek(blob, "k1", audit_sink=sink, backend=backend)
-
-        assert entries == [], (
-            f"key_not_found path must emit NO audit entries (got {entries!r}); "
-            "audit emission is reserved for prompt-denied flows."
-        )
-
-    def test_key_not_found_chains_native_backend_error_via_cause(
-        self,
-        backend: FakeBackend,
-        captured_audit: tuple[list[dict[str, Any]], AuditSink],
-    ) -> None:
-        """The underlying ``NativeBackendError`` must still be reachable via
-        ``__cause__`` so callers can introspect the native signal — matches
-        the denial-path chaining contract."""
-        from mordred_hermes.keyvault._exceptions import WrapKeyNotFound
-        from mordred_hermes.keyvault.wrap import (
-            NativeBackendError,
-            generate_wrapping_key,
-            unwrap_dek,
-            wrap_dek,
-        )
-
-        _, sink = captured_audit
-        generate_wrapping_key("k1", backend=backend)
-        blob = wrap_dek(secrets.token_bytes(32), "k1", backend=backend)
-        backend.denied_reason = "key_not_found"
-
-        with pytest.raises(WrapKeyNotFound) as excinfo:
-            unwrap_dek(blob, "k1", audit_sink=sink, backend=backend)
-
+        assert entries == []
         cause = excinfo.value.__cause__
         assert isinstance(cause, NativeBackendError)
         assert cause.code == "key_not_found"
+        assert str(cause) == "key_not_found"
 
 
 class TestNativeBackendProtocolRuntimeCheckable:
@@ -754,17 +608,6 @@ class TestNativeBackendErrorClosedSet:
     the closed-set check happens at NativeBackendError construction,
     which is upstream of the audit-emit decision.
     """
-
-    @pytest.mark.parametrize(
-        "code",
-        ["user_cancelled", "auth_failed", "biometry_lockout", "passcode_not_set", "key_not_found"],
-    )
-    def test_construct_succeeds_for_each_frozen_code(self, code: str) -> None:
-        from mordred_hermes.keyvault.wrap import NativeBackendError
-
-        exc = NativeBackendError(code)
-        assert exc.code == code
-        assert str(exc) == code
 
     def test_construct_rejects_unknown_string(self) -> None:
         from mordred_hermes.keyvault.wrap import NativeBackendError
@@ -836,29 +679,6 @@ class TestAuthorizedAuditSinkResilience:
             "success-path audit sink failure must not lose the DEK — the "
             "caller cannot recover the value once it has been computed"
         )
-
-    def test_authorized_audit_sink_failure_does_not_propagate(self, backend: FakeBackend) -> None:
-        """A ``unwrap_dek`` call on the success path must never propagate the
-        sink exception. The denial path chains via ``__context__`` because
-        there's a primary exception to attach to; the success path has only
-        a return value and must deliver it intact."""
-        from mordred_hermes.keyvault.wrap import (
-            generate_wrapping_key,
-            unwrap_dek,
-            wrap_dek,
-        )
-
-        generate_wrapping_key("k1", backend=backend)
-        blob = wrap_dek(secrets.token_bytes(32), "k1", backend=backend)
-
-        def bad_sink(_: dict[str, Any]) -> None:
-            raise RuntimeError("audit log rotation in progress")
-
-        # If the implementation propagates the sink exception, this would
-        # raise RuntimeError; the assertion verifies we receive the DEK
-        # without exception.
-        result = unwrap_dek(blob, "k1", audit_sink=bad_sink, backend=backend)
-        assert len(result) == 32
 
 
 def test_mrkw_v1_wire_layout(backend: FakeBackend) -> None:

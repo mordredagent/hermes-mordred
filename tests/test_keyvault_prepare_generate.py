@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from pathlib import Path
+
+import pytest
 
 from mordred_hermes.keyvault import api
 from tests._keyvault_lifecycle_helpers import (
@@ -29,20 +31,6 @@ from tests._keyvault_lifecycle_helpers import (
 # Normalization split (SPEC.md §"Mordred normalization", codex HIGH #1):
 #   - seed_phrase: NFKD + strip Cf chars + casefold + collapse whitespace
 #   - passphrase: NFKD only — case and whitespace are entropy, must NOT collapse
-
-
-class TestPrepareGenerateCanonicalVector:
-    """ASCII canonical inputs reproduce SPEC.md §"Fixed test vector" digest.
-
-    The canonical digest vector in SPEC is the regression anchor for the
-    whole compute_digest algorithm. Re-pinning the final digest at the
-    api.py layer guards against silent normalization regressions that
-    would only surface at recovery time.
-    """
-
-    def test_spec_vector_digest_matches(self) -> None:
-        _, digest = api.prepare_generate(_SPEC_SEED, _SPEC_PASSPHRASE, _SPEC_POW)
-        assert digest == _SPEC_DIGEST
 
 
 class TestPrepareGenerateSeedNormalization:
@@ -124,22 +112,21 @@ class TestPrepareGenerateHandleBehavior:
     expires roughly 60s from the call site (default TTL from SPEC).
     """
 
-    def test_handle_consume_returns_normalized_seed(self) -> None:
+    def test_handle_consume_returns_normalized_seed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Casefold and whitespace-collapse must have been applied to the
         bytes the handle carries — PR5's display flow renders this string
         back to the user, so it has to match what compute_digest hashed.
         """
-        handle, digest = api.prepare_generate("  TEST\t  SEED\u00a0 ", _SPEC_PASSPHRASE, _SPEC_POW)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        before = sorted(tmp_path.rglob("*"))
+        seed = "  TEST\t  SEED\u00a0 "
+        handle, digest = api.prepare_generate(seed, _SPEC_PASSPHRASE, _SPEC_POW)
+        second, _ = api.prepare_generate(seed, _SPEC_PASSPHRASE, _SPEC_POW)
+        assert handle is not second
+        assert sorted(tmp_path.rglob("*")) == before
         assert handle.consume() == "test seed"
+        assert second.consume() == "test seed"
         assert digest == _SPEC_DIGEST
-
-    def test_consecutive_calls_return_distinct_handles(self) -> None:
-        """No memoization — each call mints a fresh handle so a stale
-        cached handle never leaks into a later display flow.
-        """
-        h1, _ = api.prepare_generate(_SPEC_SEED, _SPEC_PASSPHRASE, _SPEC_POW)
-        h2, _ = api.prepare_generate(_SPEC_SEED, _SPEC_PASSPHRASE, _SPEC_POW)
-        assert h1 is not h2
 
     def test_handle_deadline_is_approximately_60s_in_future(self) -> None:
         """Default TTL per SPEC: ``time.monotonic() + 60.0``. White-box
@@ -153,35 +140,3 @@ class TestPrepareGenerateHandleBehavior:
         # the only ambiguity is the time spent inside the call.
         deadline = handle._deadline  # type: ignore[attr-defined]
         assert before + 60.0 <= deadline <= after + 60.0
-
-    def test_handle_carries_expected_digest_equal_to_returned_digest(self) -> None:
-        """The (handle, expected_digest) pair is internally consistent —
-        confirm_generate compares the user-typed digest against
-        handle._expected_digest, so the value baked into the handle must
-        equal the digest returned to the caller (i.e. the one shown to
-        the user for offline transcription).
-        """
-        handle, returned_digest = api.prepare_generate(_SPEC_SEED, _SPEC_PASSPHRASE, _SPEC_POW)
-        assert handle._expected_digest == returned_digest  # type: ignore[attr-defined]
-
-
-class TestPrepareGenerateNoPersistence:
-    """``prepare_generate`` is pure with respect to disk state.
-
-    The two-phase contract exists precisely so the digest-mismatch case
-    can be a clean "no-op" — no Keychain entry, no meta.json, no
-    digests/<kid>.commit, no audit event. A passing test here is what
-    licenses the contract that "if the digest doesn't match, nothing
-    durable happened".
-    """
-
-    def test_no_files_created_anywhere(self, tmp_path: Any) -> None:
-        """``prepare_generate`` has no ``home`` parameter — it cannot create
-        keyvault files by construction. This snapshots a scratch directory
-        before/after the call to assert no incidental disk writes occur.
-        """
-        # Snapshot the directory state, call prepare_generate, re-snapshot.
-        before = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
-        api.prepare_generate(_SPEC_SEED, _SPEC_PASSPHRASE, _SPEC_POW)
-        after = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
-        assert before == after

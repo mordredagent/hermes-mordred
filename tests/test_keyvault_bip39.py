@@ -28,16 +28,10 @@ ALL_FF_MNEMONIC = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo z
 
 
 class TestWordlist:
-    def test_wordlist_has_2048_words(self) -> None:
-        assert len(_bip39.WORDLIST) == 2048
-
     def test_wordlist_is_sorted_and_unique(self) -> None:
+        assert len(_bip39.WORDLIST) == 2048
         assert list(_bip39.WORDLIST) == sorted(_bip39.WORDLIST)
         assert len(set(_bip39.WORDLIST)) == 2048
-
-    def test_wordlist_bounds(self) -> None:
-        assert _bip39.WORDLIST[0] == "abandon"
-        assert _bip39.WORDLIST[-1] == "zoo"
 
 
 class TestEntropyToMnemonic:
@@ -46,10 +40,6 @@ class TestEntropyToMnemonic:
 
     def test_all_ff_vector(self) -> None:
         assert _bip39.entropy_to_mnemonic(ALL_FF_ENTROPY) == ALL_FF_MNEMONIC
-
-    def test_produces_24_words(self) -> None:
-        words = _bip39.entropy_to_mnemonic(ALL_ZERO_ENTROPY).split(" ")
-        assert len(words) == 24
 
     def test_rejects_non_256_bit_entropy(self) -> None:
         with pytest.raises(ValueError):
@@ -80,16 +70,11 @@ class TestMnemonicToEntropy:
 
 
 class TestGenerateMnemonic:
-    def test_generates_24_words_in_wordlist(self) -> None:
-        mnemonic = _bip39.generate_mnemonic()
-        words = mnemonic.split(" ")
-        assert len(words) == 24
-        assert all(w in _bip39.WORDLIST for w in words)
-
     def test_generated_mnemonic_has_valid_checksum(self) -> None:
         # mnemonic_to_entropy raises on a bad checksum; a clean round-trip
         # back through entropy_to_mnemonic proves the generated phrase is valid.
         mnemonic = _bip39.generate_mnemonic()
+        assert len(mnemonic.split()) == 24
         entropy = _bip39.mnemonic_to_entropy(mnemonic)
         assert len(entropy) == 32
         assert _bip39.entropy_to_mnemonic(entropy) == mnemonic

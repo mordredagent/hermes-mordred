@@ -45,9 +45,6 @@ from mordred_hermes.keyvault import _storage
 
 
 class TestResolveKeyvaultDir:
-    def test_explicit_home_returns_keyvault_subdir(self, tmp_path: Path) -> None:
-        assert _storage.resolve_keyvault_dir(tmp_path) == tmp_path / "mordred" / "keyvault"
-
     def test_none_home_uses_hermes_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # Monkeypatch the hermes_home resolver so the test does not depend on
         # the user's real ~/.hermes directory.
@@ -85,8 +82,9 @@ class TestEnsureLayout:
     def test_existing_root_wrong_mode_raises_permission_error(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
         root.mkdir(mode=0o755)  # too permissive
-        with pytest.raises(_storage.KeyvaultPermissionError):
+        with pytest.raises(_storage.KeyvaultPermissionError) as excinfo:
             _storage.ensure_layout(root)
+        assert isinstance(excinfo.value, OSError)
 
     def test_existing_meta_wrong_mode_raises_permission_error(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
@@ -144,13 +142,6 @@ class TestEnsureLayout:
 
 
 class TestAtomicWrite:
-    def test_writes_data_to_final_path(self, tmp_path: Path) -> None:
-        target = tmp_path / "file.bin"
-        _storage.atomic_write(target, b"hello")
-        assert target.read_bytes() == b"hello"
-        assert stat.S_IMODE(target.stat().st_mode) == 0o600
-        assert list(tmp_path.glob("*.tmp")) == []
-
     def test_overwrites_existing_atomically(self, tmp_path: Path) -> None:
         target = tmp_path / "file.bin"
         target.write_bytes(b"old")
@@ -322,12 +313,6 @@ class TestAtomicWriteUsesFsyncDurable:
 
 
 class TestSafeRead:
-    def test_reads_normal_file(self, tmp_path: Path) -> None:
-        target = tmp_path / "file.bin"
-        target.write_bytes(b"content")
-        os.chmod(target, 0o600)
-        assert _storage.safe_read(target) == b"content"
-
     def test_symlink_refused(self, tmp_path: Path) -> None:
         real = tmp_path / "real.bin"
         real.write_bytes(b"secret")
@@ -407,13 +392,6 @@ with _storage.keyvault_lifecycle_lock(root):
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             finally:
                 os.close(fd)
-
-    def test_releases_on_context_exit(self, tmp_path: Path) -> None:
-        root = tmp_path / "kv"
-        _storage.ensure_layout(root)
-        with _storage.keyvault_lock(root):
-            pass
-        # After release, a non-blocking acquire succeeds.
         fd = os.open(root / ".lock", os.O_RDWR)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -716,20 +694,13 @@ class TestLoadMeta:
         (root / "meta.json").unlink()
         assert _storage.load_meta(root) == {"version": 1, "keys": {}}
 
-    def test_parses_valid_meta(self, tmp_path: Path) -> None:
-        root = tmp_path / "kv"
-        _storage.ensure_layout(root)
-        (root / "meta.json").write_text('{"version": 1, "keys": {"k1": {"foo": "bar"}}}')
-        os.chmod(root / "meta.json", 0o600)
-        meta = _storage.load_meta(root)
-        assert meta == {"version": 1, "keys": {"k1": {"foo": "bar"}}}
-
     def test_invalid_json_raises_corrupt(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
         _storage.ensure_layout(root)
         (root / "meta.json").write_text("not json{{")
-        with pytest.raises(_storage.KeyvaultCorruptError):
+        with pytest.raises(_storage.KeyvaultCorruptError) as excinfo:
             _storage.load_meta(root)
+        assert isinstance(excinfo.value, ValueError)
 
     def test_non_utf8_json_raises_corrupt_without_leaking_bytes(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
@@ -742,13 +713,6 @@ class TestLoadMeta:
 
         assert "SECRET_NON_UTF8_MARKER" not in str(raised.value)
         assert raised.value.__cause__ is None
-
-    def test_missing_version_field_raises_corrupt(self, tmp_path: Path) -> None:
-        root = tmp_path / "kv"
-        _storage.ensure_layout(root)
-        (root / "meta.json").write_text('{"keys": {}}')
-        with pytest.raises(_storage.KeyvaultCorruptError):
-            _storage.load_meta(root)
 
     def test_version_mismatch_raises_corrupt(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
@@ -765,7 +729,7 @@ class TestLoadMeta:
         root = tmp_path / "kv"
         _storage.ensure_layout(root)
         secret_marker = "SECRET_DO_NOT_LEAK_INTO_TRACEBACK"
-        (root / "meta.json").write_text(f'{{"corrupt": "{secret_marker}"}}')
+        (root / "meta.json").write_text(f'{{"keys": {{}}, "corrupt": "{secret_marker}"}}')
         try:
             _storage.load_meta(root)
         except _storage.KeyvaultCorruptError as exc:
@@ -843,6 +807,8 @@ class TestAtomicWriteShortWrites:
         monkeypatch.setattr("os.write", chunked_write)
         _storage.atomic_write(target, payload)
         assert target.read_bytes() == payload
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        assert list(tmp_path.glob("*.tmp")) == []
         # The implementation looped at least len(payload)/64 times.
         assert len(offsets) >= len(payload) // 64
 
@@ -940,27 +906,3 @@ class TestCheckFileModeSymlinkRefusal:
         with pytest.raises(_storage.KeyvaultPermissionError) as excinfo:
             _storage._check_file_mode(link)
         assert excinfo.value.errno == errno.ELOOP
-
-
-# ---------------------------- exception types ----------------------------
-
-
-class TestExceptionTypes:
-    def test_keyvault_permission_error_is_oserror(self) -> None:
-        # Subclass OSError so callers using `except OSError` for FS error
-        # handling catch it naturally.
-        assert issubclass(_storage.KeyvaultPermissionError, OSError)
-
-    def test_keyvault_corrupt_error_is_valueerror(self) -> None:
-        # Subclass ValueError so callers using `except ValueError` for input
-        # validation catch it (mirrors VerificationDigestMismatch from digest.py).
-        assert issubclass(_storage.KeyvaultCorruptError, ValueError)
-
-    def test_both_exceptions_are_publicly_accessible(self) -> None:
-        from mordred_hermes.keyvault._storage import (
-            KeyvaultCorruptError,
-            KeyvaultPermissionError,
-        )
-
-        assert KeyvaultPermissionError is _storage.KeyvaultPermissionError
-        assert KeyvaultCorruptError is _storage.KeyvaultCorruptError

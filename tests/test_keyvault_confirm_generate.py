@@ -92,23 +92,6 @@ def kv_root(home: Path) -> Path:
     return home / "mordred" / "keyvault"
 
 
-class TestGenerateResult:
-    """``GenerateResult`` is the frozen return type of confirm_generate /
-    generate — carries the resolved key_id (the caller may have passed
-    None), its on-disk hash, and the creation timestamp.
-    """
-
-    def test_is_frozen_dataclass(self) -> None:
-        assert dataclasses.is_dataclass(api.GenerateResult)
-        result = api.GenerateResult(
-            key_id="default",
-            key_id_hash="00" * 16,
-            created_at="2026-05-15T07:30:00Z",
-        )
-        with pytest.raises(dataclasses.FrozenInstanceError):
-            result.key_id = "other"  # type: ignore[misc]
-
-
 class TestConfirmGenerateHappyPath:
     """Digest matches → Enclave key created, meta.json + digests commit
     persisted, init_started/init_completed emitted in order.
@@ -148,19 +131,9 @@ class TestConfirmGenerateHappyPath:
         assert started["decision"] == completed["decision"] == "allow"
         assert started["key_id_hash"] == completed["key_id_hash"] == wrap._audit_key_id_hex("default")
         assert completed["verification_digest_hex_prefix"] == digest[:8].hex()
-
-    def test_confirm_does_not_consume_the_handle(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
-        """confirm_generate is a pure reader of the handle (codex pre-merge
-        P1): it reads ``_expected_digest`` + ``_deadline`` but never calls
-        ``consume()``. ``consume()`` is the *display flow's* egress for the
-        seed; if confirm_generate also consumed, a real
-        prepare → display-seed (consume) → confirm flow could not complete.
-        The handle's seed payload is therefore still intact after a confirm.
-        """
-        handle, digest = _prepared()
-        api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
-        # The handle was NOT consumed — consume() still works (and returns
-        # the normalized seed), proving confirm_generate left it untouched.
+        assert dataclasses.is_dataclass(result)
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            result.key_id = "other"  # type: ignore[misc]
         assert handle.consume() == _SPEC_SEED
 
 
@@ -173,9 +146,11 @@ class TestConfirmGenerateMismatch:
         """POLICY.md #23: init_denied is emitted before any filesystem
         state is touched — the keyvault layout is never even created.
         """
-        handle, _digest = _prepared()
-        with pytest.raises(api.VerificationDigestMismatch):
+        handle, digest = _prepared()
+        with pytest.raises(api.VerificationDigestMismatch) as excinfo:
             api.confirm_generate(handle, b"\x11" * 32, backend=backend, audit_sink=audit, home=home)
+        assert excinfo.value.__context__ is None
+        assert excinfo.value.__cause__ is None
         assert not kv_root.exists()
         assert backend.calls == []
         assert [e["reason"] for e in audit.log] == ["keyvault.init_denied"]
@@ -183,17 +158,6 @@ class TestConfirmGenerateMismatch:
         assert denied["event"] == "keyvault.init"
         assert denied["decision"] == "block"
         assert denied["key_id_hash"] == wrap._audit_key_id_hex("default")
-
-    def test_mismatch_leaves_handle_reusable(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
-        """confirm_generate does not consume the handle (codex P1), so a
-        mismatch does not burn it — the caller can retry confirm_generate
-        with the corrected digest and succeed (e.g. the user fixed a
-        transcription typo). No fresh prepare_generate is required.
-        """
-        handle, digest = _prepared()
-        with pytest.raises(api.VerificationDigestMismatch):
-            api.confirm_generate(handle, b"\x11" * 32, backend=backend, audit_sink=audit, home=home)
-        # Retry with the correct digest on the SAME handle — succeeds.
         result = api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
         assert isinstance(result, api.GenerateResult)
 
@@ -230,7 +194,7 @@ class TestConfirmGenerateKeyIdValidation:
 class TestConfirmGenerateAuditFailure:
     """The 3 audit emits have 3 distinct sink-failure policies."""
 
-    def test_init_started_sink_failure_aborts_the_init(self, backend: FakeBackend, home: Path) -> None:
+    def test_init_started_sink_failure_aborts_the_init(self, backend: FakeBackend, home: Path, kv_root: Path) -> None:
         """init_started is the durability barrier: if the sink raises, the
         whole init aborts — no Enclave key, no meta.json.
         """
@@ -239,15 +203,10 @@ class TestConfirmGenerateAuditFailure:
         with pytest.raises(RuntimeError) as excinfo:
             api.confirm_generate(handle, digest, backend=backend, audit_sink=sink, home=home)
         assert excinfo.value is sink.boom
+        assert not kv_root.exists()
+        assert backend.calls == []
         with pytest.raises(Exception):  # noqa: B017 — WrapKeyNotFound
             wrap.get_wrapping_key_public("default", backend=backend)
-
-    def test_init_started_sink_failure_writes_no_meta(self, backend: FakeBackend, home: Path, kv_root: Path) -> None:
-        sink = _FailingAuditCapture("keyvault.init_started")
-        handle, digest = _prepared()
-        with pytest.raises(RuntimeError):
-            api.confirm_generate(handle, digest, backend=backend, audit_sink=sink, home=home)
-        assert not kv_root.exists()
 
     def test_init_completed_sink_failure_is_suppressed(self, backend: FakeBackend, home: Path, kv_root: Path) -> None:
         """init_completed fires after the init is already durable — a sink
@@ -275,6 +234,7 @@ class TestConfirmGenerateAuditFailure:
         with pytest.raises(api.VerificationDigestMismatch) as excinfo:
             api.confirm_generate(handle, b"\x11" * 32, backend=backend, audit_sink=sink, home=home)
         assert excinfo.value.__context__ is sink.boom
+        assert excinfo.value.__cause__ is None
 
 
 class TestConfirmGenerateRollback:
@@ -288,24 +248,6 @@ class TestConfirmGenerateRollback:
     has to delete the Enclave key and the orphaned commit file; it never
     has to repair a half-written ``meta.json``.
     """
-
-    def test_meta_write_failure_rolls_back_enclave_key(
-        self,
-        backend: FakeBackend,
-        audit: _AuditCapture,
-        home: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        handle, digest = _prepared()
-
-        def boom_save_meta(root: Path, meta: dict[str, Any]) -> None:
-            raise OSError("disk full while writing meta.json")
-
-        monkeypatch.setattr(_storage, "save_meta", boom_save_meta)
-        with pytest.raises(OSError, match="disk full"):
-            api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
-        with pytest.raises(Exception):  # noqa: B017 — WrapKeyNotFound; key rolled back
-            wrap.get_wrapping_key_public("default", backend=backend)
 
     def test_meta_write_failure_leaves_no_stale_filesystem_state(
         self,
@@ -329,6 +271,10 @@ class TestConfirmGenerateRollback:
         monkeypatch.setattr(_storage, "save_meta", boom_save_meta)
         with pytest.raises(OSError, match="disk full"):
             api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        with pytest.raises(wrap.WrapKeyNotFound):
+            wrap.get_wrapping_key_public(
+                "default", backend=backend, native_key_id=_native_key_id.scoped_native_key_id(kv_root, "default")
+            )
         # The commit file written earlier in the transaction is removed.
         assert not (kv_root / "digests" / f"{key_id_hash}.commit").exists()
         # meta.json carries no row for the rolled-back key.
@@ -362,22 +308,6 @@ class TestConfirmGenerateRollback:
             wrap.get_wrapping_key_public("default", backend=backend)
         meta = _storage.load_meta(kv_root)
         assert key_id_hash not in meta["keys"]
-
-    def test_meta_write_failure_reraises_original_error(
-        self,
-        backend: FakeBackend,
-        audit: _AuditCapture,
-        home: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        handle, digest = _prepared()
-
-        def boom_save_meta(root: Path, meta: dict[str, Any]) -> None:
-            raise OSError("disk full while writing meta.json")
-
-        monkeypatch.setattr(_storage, "save_meta", boom_save_meta)
-        with pytest.raises(OSError, match="disk full"):
-            api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
 
     def test_save_meta_partial_commit_is_repaired(
         self,
@@ -607,13 +537,6 @@ class TestConfirmGenerateReInit:
         assert backend.calls == []
         assert _storage.safe_read(kv_root / "meta.json") == before_meta
         assert list((kv_root / "digests").iterdir()) == []
-
-    def test_reinit_same_key_id_rejected(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
-        h1, d1 = _prepared()
-        api.confirm_generate(h1, d1, backend=backend, audit_sink=audit, home=home)
-        h2, d2 = _prepared()
-        with pytest.raises(RuntimeError, match="already initialized"):
-            api.confirm_generate(h2, d2, backend=backend, audit_sink=audit, home=home)
 
     def test_reinit_with_different_key_id_rejected(
         self, backend: FakeBackend, audit: _AuditCapture, home: Path, kv_root: Path

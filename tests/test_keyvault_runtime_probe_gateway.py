@@ -253,8 +253,10 @@ class TestPsUnavailable:
     def test_windows_known_empty_inventory_without_running_ps(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(sys, "platform", "win32")
         from mordred_hermes.keyvault import _windows_processes
+        from tests._helpers import PlatformSys
+
+        monkeypatch.setattr(_runtime_probe, "sys", PlatformSys("win32"))
 
         monkeypatch.setattr(
             _windows_processes,

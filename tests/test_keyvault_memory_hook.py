@@ -279,10 +279,6 @@ def _memory_path(module: ModuleType) -> Path:
 # --------------------------------------------------------------------------
 
 
-def test_classify_seam_recognises_each_shape(shape: str, mem_dir: Path) -> None:
-    assert classify_seam(_fake_module(shape, mem_dir)) == (shape, "")
-
-
 def test_classify_seam_rejects_missing_write_file(mem_dir: Path) -> None:
     module = _fake_module("B", mem_dir)
     module.MemoryStore._write_file = None  # present but not callable
@@ -321,10 +317,6 @@ def test_classify_seam_rejects_missing_memory_store() -> None:
     shape, reason = classify_seam(module)
     assert shape == ""
     assert "MemoryStore" in reason
-
-
-def test_memory_seam_shape_reports_the_shape(shape: str, mem_dir: Path) -> None:
-    assert memory_seam_shape(_fake_module(shape, mem_dir)) == shape
 
 
 @pytest.mark.parametrize("drift_shape", ["A", "B"])
@@ -366,23 +358,6 @@ def test_shape_c_classifies_without_the_drift_dependencies(mem_dir: Path) -> Non
 # --------------------------------------------------------------------------
 # Installation
 # --------------------------------------------------------------------------
-
-
-def test_install_is_idempotent(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    assert _install(module, tmp_path)[0] is True
-    first_write = module.MemoryStore._write_file
-    assert install_memory_hook(home=tmp_path, memory_tool_module=module, environ={}) is True
-    assert module.MemoryStore._write_file is first_write
-    assert memory_hook_installed(module) is True
-
-
-def test_install_stamps_static_seams_as_staticmethods(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path)
-    # Reassigned as a plain function, `self._write_file(path, entries)` would bind
-    # `self` to `path` — the whole seam would silently take the wrong arguments.
-    assert isinstance(module.MemoryStore.__dict__["_write_file"], staticmethod)
 
 
 def test_install_fails_open_on_unsupported_seam_when_not_armed(mem_dir: Path, tmp_path: Path) -> None:
@@ -440,27 +415,19 @@ def test_not_armed_write_and_read_are_byte_identical(shape: str, mem_dir: Path, 
 
 def test_armed_write_seals_the_file(shape: str, mem_dir: Path, tmp_path: Path) -> None:
     module = _fake_module(shape, mem_dir)
+    assert classify_seam(module) == (shape, "")
+    assert memory_seam_shape(module) == shape
     _install(module, tmp_path)
     path = _memory_path(module)
 
-    module.MemoryStore._write_file(path, ["the cat is on the mat", "second entry"])
+    # Calling through an instance catches accidental binding of the static seam.
+    module.MemoryStore()._write_file(path, ["the cat is on the mat", "second entry"])
 
     data = path.read_bytes()
     assert data.startswith(MAGIC + b"\n")
     assert b"cat is on the mat" not in data
+    assert ENTRY_DELIMITER.encode() not in data
     assert unseal(data, key=KEY, name="MEMORY.md").decode("utf-8") == "the cat is on the mat\n§\nsecond entry"
-
-
-def test_sealed_blob_survives_the_single_entry_join(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    # The wrapper hands the sealed text back to upstream as a ONE-entry list, so
-    # upstream's `delimiter.join(entries)` must be the identity for it.
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path)
-    path = _memory_path(module)
-    module.MemoryStore._write_file(path, ["only entry"])
-    sealed = path.read_text(encoding="utf-8")
-    assert ENTRY_DELIMITER.join([sealed]) == sealed
-    assert ENTRY_DELIMITER not in sealed
 
 
 def test_armed_write_without_a_key_raises_and_leaves_the_file(shape: str, mem_dir: Path, tmp_path: Path) -> None:
@@ -470,9 +437,10 @@ def test_armed_write_without_a_key_raises_and_leaves_the_file(shape: str, mem_di
     path.write_bytes(seal(b"prior entry", key=KEY, name="MEMORY.md"))
     before = path.read_bytes()
 
-    with pytest.raises(MemoryEncryptionUnavailable):
+    with pytest.raises(MemoryEncryptionUnavailable) as refusal:
         module.MemoryStore._write_file(path, ["new entry"])
 
+    assert isinstance(refusal.value, RuntimeError)  # upstream catches write failures
     assert path.read_bytes() == before
 
 
@@ -482,12 +450,6 @@ def test_armed_write_with_an_unusable_key_raises(shape: str, mem_dir: Path, tmp_
     _install(module, tmp_path, key="base64:not-a-32-byte-key")
     with pytest.raises(MemoryEncryptionUnavailable):
         module.MemoryStore._write_file(_memory_path(module), ["new entry"])
-
-
-def test_memory_encryption_unavailable_is_a_runtime_error() -> None:
-    # Upstream catches RuntimeError around memory writes, so the refusal is
-    # reported to the model instead of crashing the process.
-    assert issubclass(MemoryEncryptionUnavailable, RuntimeError)
 
 
 # --------------------------------------------------------------------------
@@ -1494,6 +1456,8 @@ def _uninstall_import_hook() -> None:
 
 def test_import_hook_wraps_the_seam_on_import(import_hook: Path) -> None:
     assert install_memory_import_hook() is True
+    assert install_memory_import_hook() is True
+    assert sum(isinstance(f, _memory_hook._PostImportFinder) for f in sys.meta_path) == 1
 
     module = importlib.import_module("tools.memory_tool")
 
@@ -1518,13 +1482,6 @@ def test_import_hook_ignores_every_other_module(import_hook: Path) -> None:
     assert finder.find_spec("tools", None, None) is None
     # ...and an unrelated import still works through the untouched machinery.
     assert importlib.import_module("json") is sys.modules["json"]
-
-
-def test_import_hook_is_idempotent(import_hook: Path) -> None:
-    install_memory_import_hook()
-    install_memory_import_hook()
-
-    assert sum(isinstance(f, _memory_hook._PostImportFinder) for f in sys.meta_path) == 1
 
 
 def test_import_hook_installs_the_journey_guard(import_hook: Path) -> None:
@@ -1669,6 +1626,9 @@ def test_journey_guard_refuses_to_delete_from_a_sealed_file(mem_dir: Path, tmp_p
     module = _fake_mutations_module(mem_dir)
     (mem_dir / "MEMORY.md").write_bytes(seal(b"first entry", key=KEY, name="MEMORY.md"))
     assert install_journey_guard(module, home=tmp_path) is True
+    wrapped = module.delete_node
+    assert install_journey_guard(module, home=tmp_path) is True
+    assert module.delete_node is wrapped
 
     result = module.delete_node("memory:memory:0")
 
@@ -1714,15 +1674,6 @@ def test_journey_guard_skips_a_mismatched_signature(mem_dir: Path, tmp_path: Pat
     assert install_journey_guard(module, home=tmp_path) is False
     assert module.delete_node is not original
     assert getattr(module.edit_node, _memory_hook._WRAPPED_FLAG, False) is False
-
-
-def test_journey_guard_is_idempotent(mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_mutations_module(mem_dir)
-    install_journey_guard(module, home=tmp_path)
-    wrapped = module.delete_node
-    install_journey_guard(module, home=tmp_path)
-
-    assert module.delete_node is wrapped
 
 
 # --------------------------------------------------------------------------
@@ -1826,6 +1777,8 @@ def test_locked_memory_warning_fires_without_a_key(tmp_path: Path, capsys: pytes
     err = capsys.readouterr().err
     assert "agent memory is sealed" in err
     assert "HERMES_MEMORY_KEY" in err
+    assert warn_when_memory_is_locked(home=home, environ={}) is False
+    assert capsys.readouterr().err == ""
 
 
 def test_locked_memory_warning_fires_for_a_wrong_key(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1856,16 +1809,6 @@ def test_locked_memory_warning_is_quiet_for_plaintext_memory(
     assert capsys.readouterr().err == ""
 
 
-def test_locked_memory_warning_fires_once_per_process(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    home = _memories_home(tmp_path)
-    (home / "memories" / "MEMORY.md").write_bytes(seal(b"entry", key=KEY, name="MEMORY.md"))
-
-    assert warn_when_memory_is_locked(home=home, environ={}) is True
-    capsys.readouterr()
-    assert warn_when_memory_is_locked(home=home, environ={}) is False
-    assert capsys.readouterr().err == ""
-
-
 # --------------------------------------------------------------------------
 # Delimiter safety
 # --------------------------------------------------------------------------
@@ -1878,10 +1821,6 @@ def test_classify_seam_rejects_a_delimiter_that_could_occur_in_a_sealed_blob(mem
     shape, reason = classify_seam(module)
     assert shape == ""
     assert reason == "ENTRY_DELIMITER could occur inside a sealed blob"
-
-
-def test_classify_seam_accepts_the_upstream_delimiter(mem_dir: Path) -> None:
-    assert classify_seam(_fake_module("B", mem_dir)) == ("B", "")
 
 
 # --------------------------------------------------------------------------
@@ -1929,8 +1868,11 @@ def test_seams_are_never_wrapped_twice(shape: str, mem_dir: Path, tmp_path: Path
     installers racing (discovery on a worker vs. the import hook on main) cannot
     both read "not wrapped"."""
     module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path)
-    _install(module, tmp_path)
+    assert _install(module, tmp_path)[0] is True
+    first_write = module.MemoryStore._write_file
+    assert install_memory_hook(home=tmp_path, memory_tool_module=module, environ={}) is True
+    assert module.MemoryStore._write_file is first_write
+    assert memory_hook_installed(module) is True
 
     inner = module.MemoryStore.__dict__["_write_file"].__func__.__wrapped__
     assert not getattr(inner, _memory_hook._WRAPPED_FLAG, False)

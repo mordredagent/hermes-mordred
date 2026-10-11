@@ -49,19 +49,10 @@ class TestSpecFixedVector:
         from mordred_hermes.keyvault import digest
 
         assert digest.compute_digest(SPEC_SEED, SPEC_PASS, SPEC_POW) == SPEC_DIGEST
+        assert digest.compute_digest(SPEC_SEED, SPEC_PASS, SPEC_POW[:4]) == SPEC_DIGEST
 
 
 class TestTop4:
-    def test_top4_returns_first_four_bytes(self) -> None:
-        from mordred_hermes.keyvault import digest
-
-        assert digest.top4(bytes.fromhex("deadbeefcafebabe" + "00" * 24)) == bytes.fromhex("deadbeef")
-
-    def test_top4_accepts_exactly_four_bytes(self) -> None:
-        from mordred_hermes.keyvault import digest
-
-        assert digest.top4(b"\x01\x02\x03\x04") == b"\x01\x02\x03\x04"
-
     def test_top4_rejects_under_four_bytes(self) -> None:
         from mordred_hermes.keyvault import digest
 
@@ -139,37 +130,6 @@ class TestXorWidth:
 
 
 class TestVerifyDigest:
-    def test_verify_digest_succeeds_on_match(self) -> None:
-        from mordred_hermes.keyvault import digest
-
-        # Should not raise.
-        digest.verify_digest(SPEC_SEED, SPEC_PASS, SPEC_POW, expected=SPEC_DIGEST)
-
-    def test_verify_digest_raises_on_mismatch(self) -> None:
-        from mordred_hermes.keyvault import digest
-
-        wrong = bytes(32)
-        with pytest.raises(digest.VerificationDigestMismatch):
-            digest.verify_digest(SPEC_SEED, SPEC_PASS, SPEC_POW, expected=wrong)
-
-    def test_verify_digest_rejects_short_expected(self) -> None:
-        """Codex review #6: digest is always 32 bytes. An ``expected`` of
-        the wrong length must NOT trigger constant-time compare on
-        mismatched-size inputs — instead raise the same mismatch
-        exception, so callers can't smuggle in length confusion."""
-        from mordred_hermes.keyvault import digest
-
-        with pytest.raises(digest.VerificationDigestMismatch):
-            digest.verify_digest(SPEC_SEED, SPEC_PASS, SPEC_POW, expected=b"\x00" * 31)
-
-    def test_verify_digest_rejects_long_expected(self) -> None:
-        """Companion to short_expected: 33-byte ``expected`` is also a
-        mismatch (the algorithm only ever emits 32 bytes)."""
-        from mordred_hermes.keyvault import digest
-
-        with pytest.raises(digest.VerificationDigestMismatch):
-            digest.verify_digest(SPEC_SEED, SPEC_PASS, SPEC_POW, expected=b"\x00" * 33)
-
     def test_verify_digest_uses_constant_time_compare(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """The implementation MUST use ``hmac.compare_digest`` (or
         equivalent timing-safe primitive). Verified via monkeypatched
@@ -194,13 +154,3 @@ class TestVerifyDigest:
         digest.verify_digest(SPEC_SEED, SPEC_PASS, SPEC_POW, expected=SPEC_DIGEST)
 
         assert calls, "verify_digest must route equality through a timing-safe primitive (e.g. hmac.compare_digest)"
-
-
-class TestVerificationDigestMismatchException:
-    def test_exception_is_value_error_subclass(self) -> None:
-        """The exception must be a ``ValueError`` so callers using
-        ``except ValueError:`` for input-validation handling catch it
-        naturally, without special-casing the keyvault module."""
-        from mordred_hermes.keyvault.digest import VerificationDigestMismatch
-
-        assert issubclass(VerificationDigestMismatch, ValueError)

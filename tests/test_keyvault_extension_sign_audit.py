@@ -61,54 +61,7 @@ def _clear_audit_writer_cache() -> None:
     extension_sign._audit_writer.cache_clear()
 
 
-class TestAuditLogPath:
-    def test_resolves_under_hermes_home_mordred_audit_log(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        import hermes_constants
-
-        monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: tmp_path)
-        assert extension_sign._audit_log_path() == tmp_path / "mordred" / "audit.log"
-        # keyvault_home = path.parent.parent contract build_audit_writer relies on:
-        assert extension_sign._audit_log_path().parent.parent == tmp_path
-
-
-class TestAuditWriterMemoization:
-    def test_same_instance_across_calls(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        built: list[object] = []
-
-        def _fake_build_audit_writer(path: Path) -> _FakeWriter:
-            writer = _FakeWriter()
-            built.append(writer)
-            return writer
-
-        monkeypatch.setattr("mordred_hermes._audit_support.build_audit_writer", _fake_build_audit_writer)
-
-        first = extension_sign._audit_writer()
-        second = extension_sign._audit_writer()
-
-        assert first is second
-        assert len(built) == 1  # constructed exactly once (per-process memoization)
-
-
 class TestAuditSinkAppendsEntry:
-    def test_entry_lands_on_the_writer_with_event_intact(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        fake_writer = _FakeWriter()
-        monkeypatch.setattr(extension_sign, "_audit_writer", lambda: fake_writer)
-
-        entry = {
-            "event": "keyvault.unwrap_dek",
-            "decision": "allow",
-            "reason": "keyvault.unwrap_authorized",
-            "key_id_hash": "deadbeef",
-        }
-        extension_sign._audit_sink(entry)
-
-        assert len(fake_writer.entries) == 1
-        assert fake_writer.entries[0]["event"] == "keyvault.unwrap_dek"
-        assert fake_writer.entries[0]["reason"] == "keyvault.unwrap_authorized"
-        assert fake_writer.entries[0]["key_id_hash"] == "deadbeef"
-
     def test_denied_event_also_lands(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake_writer = _FakeWriter()
         monkeypatch.setattr(extension_sign, "_audit_writer", lambda: fake_writer)
@@ -141,9 +94,18 @@ class TestSignHashWiresAuditSink:
     ``ethereum.sign_hash_hd`` as ``audit_sink=``, and an ``unwrap_authorized``
     event emitted from there reaches the memoized audit writer."""
 
-    def test_unwrap_authorized_reaches_the_audit_writer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_unwrap_authorized_reaches_the_audit_writer(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        import hermes_constants
+
         fake_writer = _FakeWriter()
-        monkeypatch.setattr(extension_sign, "_audit_writer", lambda: fake_writer)
+        built_paths: list[Path] = []
+
+        def build_writer(path: Path) -> _FakeWriter:
+            built_paths.append(path)
+            return fake_writer
+
+        monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr("mordred_hermes._audit_support.build_audit_writer", build_writer)
         monkeypatch.setattr(
             extension_sign,
             "_resolve_account",
@@ -183,5 +145,19 @@ class TestSignHashWiresAuditSink:
 
         extension_sign._sign_hash(b"\x00" * 32)
 
-        assert len(fake_writer.entries) == 1
-        assert fake_writer.entries[0]["reason"] == "keyvault.unwrap_authorized"
+        extension_sign._sign_hash(b"\x01" * 32)
+
+        assert built_paths == [tmp_path / "mordred" / "audit.log"]
+        assert built_paths[0].parent.parent == tmp_path
+        assert (
+            fake_writer.entries
+            == [
+                {
+                    "event": "keyvault.unwrap_dek",
+                    "decision": "allow",
+                    "reason": "keyvault.unwrap_authorized",
+                    "key_id_hash": "abc123",
+                }
+            ]
+            * 2
+        )

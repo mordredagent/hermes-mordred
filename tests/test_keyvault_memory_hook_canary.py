@@ -87,16 +87,13 @@ def _arm(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HERMES_MEMORY_KEY", base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii"))
 
 
-def test_installed_seam_is_one_we_recognise(upstream: Any, tmp_path: Path) -> None:
+def test_memory_round_trips_through_upstream_code(
+    upstream: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     assert upstream.get_memory_dir() == tmp_path / "memories"
     ok, reason = seam_check()
     assert ok, reason
     assert memory_seam_shape() in {"A", "B", "C"}
-
-
-def test_memory_round_trips_through_upstream_code(
-    upstream: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
     _arm(tmp_path, monkeypatch)
     assert install_memory_hook(home=tmp_path) is True
 

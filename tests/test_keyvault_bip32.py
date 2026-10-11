@@ -45,6 +45,7 @@ def test_master_key_from_seed_returns_32_byte_key_and_chaincode() -> None:
 def test_bip44_derives_known_account0_private_key() -> None:
     priv = _bip32.derive_path(_seed(), "m/44'/60'/0'/0/0")
     assert priv.hex() == _HARDHAT_ACCOUNT0_PRIVKEY_HEX
+    assert _bip32.derive_path(_seed(), "m/44'/60'/0'/0/0") == priv
 
 
 @pytest.mark.parametrize("index,expected_address", list(_HARDHAT_ADDRESSES.items()))
@@ -52,11 +53,6 @@ def test_bip44_derives_known_ethereum_addresses(index: int, expected_address: st
     keys = pytest.importorskip("eth_keys").keys
     priv = _bip32.derive_path(_seed(), f"m/44'/60'/0'/0/{index}")
     assert keys.PrivateKey(priv).public_key.to_checksum_address() == expected_address
-
-
-def test_derive_path_is_deterministic() -> None:
-    p = "m/44'/60'/0'/0/5"
-    assert _bip32.derive_path(_seed(), p) == _bip32.derive_path(_seed(), p)
 
 
 def test_derive_path_rejects_non_master_prefix() -> None:

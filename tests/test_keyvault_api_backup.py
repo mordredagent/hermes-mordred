@@ -78,64 +78,6 @@ def _key_id_hash_hex(key_id: str) -> str:
 
 
 class TestExportBlob:
-    def test_export_audit_fields_match_policy(self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]) -> None:
-        """POLICY.md #24: event=keyvault.backup_export, decision=allow,
-        key_id_hash, blob_version=1, kdf_id=1, envelope_count."""
-        log, sink = audit
-        backend = FakeBackend()
-        home = tmp_path / "deviceA"
-        key_id = _init_device(home, backend, sink)
-        api.encrypt(key_id, b"one", "alpha", backend=backend, audit_sink=sink, home=home)
-        api.encrypt(key_id, b"two", "beta", backend=backend, audit_sink=sink, home=home)
-        log.clear()
-
-        api.export_backup(
-            key_id,
-            PASSPHRASE,
-            backend=backend,
-            audit_sink=sink,
-            home=home,
-            seed_phrase=SEED,
-            pow_bytes=POW,
-        )
-
-        entry = next(e for e in log if e.get("reason") == "keyvault.backup_exported")
-        assert entry["event"] == "keyvault.backup_export"
-        assert entry["decision"] == "allow"
-        assert entry["blob_version"] == 1
-        assert entry["kdf_id"] == 1
-        assert entry["envelope_count"] == 2
-        # key_id_hash is the 16-char audit hex prefix, never the cleartext id.
-        assert entry["key_id_hash"] and key_id not in str(entry["key_id_hash"])
-
-    def test_export_empty_keyvault_envelope_count_zero(
-        self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        log, sink = audit
-        backend = FakeBackend()
-        home = tmp_path / "deviceA"
-        key_id = _init_device(home, backend, sink)
-        log.clear()
-
-        blob = api.export_backup(
-            key_id,
-            PASSPHRASE,
-            backend=backend,
-            audit_sink=sink,
-            home=home,
-            seed_phrase=SEED,
-            pow_bytes=POW,
-        )
-
-        assert blob[:4] == b"MRKV"
-        parsed = backup.parse_header(blob)
-        assert parsed.version == backup.VERSION
-        commit_path = home / "mordred" / "keyvault" / "digests" / f"{_key_id_hash_hex(key_id)}.commit"
-        assert parsed.verification_digest == _storage.safe_read(commit_path)
-        assert len([e for e in log if e.get("reason") == "keyvault.backup_exported"]) == 1
-        entry = next(e for e in log if e.get("reason") == "keyvault.backup_exported")
-        assert entry["envelope_count"] == 0
-
     def test_export_sink_failure_on_backup_exported_is_suppressed(self, tmp_path: Path) -> None:
         """POLICY.md #24: success-path emit suppressed via
         contextlib.suppress — the blob is already in hand."""
@@ -259,36 +201,8 @@ class TestExportBlob:
 
 
 class TestCrossMachineRoundtrip:
-    def test_single_envelope_roundtrip(self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]) -> None:
-        _log, sink = audit
-        # Device A: generate, encrypt, export.
-        backend_a = FakeBackend()
-        home_a = tmp_path / "deviceA"
-        key_id = _init_device(home_a, backend_a, sink)
-        eid = api.encrypt(key_id, b"the-secret-payload", "vault", backend=backend_a, audit_sink=sink, home=home_a)
-        blob = api.export_backup(
-            key_id,
-            PASSPHRASE,
-            backend=backend_a,
-            audit_sink=sink,
-            home=home_a,
-            seed_phrase=SEED,
-            pow_bytes=POW,
-        )
-
-        # Device B: a fresh Enclave + a fresh home — the source key is gone.
-        backend_b = FakeBackend()
-        home_b = tmp_path / "deviceB"
-        imported = api.import_backup(
-            blob, PASSPHRASE, seed_phrase=SEED, pow_bytes=POW, backend=backend_b, audit_sink=sink, home=home_b
-        )
-        assert imported == key_id
-
-        recovered = api.decrypt(imported, eid, "vault", backend=backend_b, audit_sink=sink, home=home_b)
-        assert recovered == b"the-secret-payload"
-
     def test_multiple_purposes_roundtrip(self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]) -> None:
-        _log, sink = audit
+        log, sink = audit
         backend_a = FakeBackend()
         home_a = tmp_path / "deviceA"
         key_id = _init_device(home_a, backend_a, sink)
@@ -317,6 +231,19 @@ class TestCrossMachineRoundtrip:
             blob, PASSPHRASE, seed_phrase=SEED, pow_bytes=POW, backend=backend_b, audit_sink=sink, home=home_b
         )
 
+        assert imported == key_id
+        root_b = home_b / "mordred" / "keyvault"
+        assert _key_id_hash_hex(imported) in _storage.load_meta(root_b)["keys"]
+        commit = root_b / "digests" / f"{_key_id_hash_hex(imported)}.commit"
+        assert _storage.safe_read(commit) == backup.parse_header(blob).verification_digest
+        entry = next(e for e in log if e.get("reason") == "keyvault.backup_exported")
+        assert entry["event"] == "keyvault.backup_export"
+        assert entry["decision"] == "allow"
+        assert entry["blob_version"] == 1
+        assert entry["kdf_id"] == 1
+        assert entry["envelope_count"] == len(items)
+        assert entry["key_id_hash"] and key_id not in str(entry["key_id_hash"])
+
         for purpose, expected in items.items():
             got = api.decrypt(imported, eids[purpose], purpose, backend=backend_b, audit_sink=sink, home=home_b)
             assert got == expected
@@ -326,7 +253,7 @@ class TestCrossMachineRoundtrip:
     ) -> None:
         """Exporting a keyvault with zero envelopes still transports the
         key; the destination can encrypt + decrypt afterwards."""
-        _log, sink = audit
+        log, sink = audit
         backend_a = FakeBackend()
         home_a = tmp_path / "deviceA"
         key_id = _init_device(home_a, backend_a, sink)
@@ -346,6 +273,14 @@ class TestCrossMachineRoundtrip:
             blob, PASSPHRASE, seed_phrase=SEED, pow_bytes=POW, backend=backend_b, audit_sink=sink, home=home_b
         )
 
+        assert blob[:4] == b"MRKV"
+        parsed = backup.parse_header(blob)
+        assert parsed.version == backup.VERSION
+        commit_path = home_a / "mordred" / "keyvault" / "digests" / f"{_key_id_hash_hex(key_id)}.commit"
+        assert parsed.verification_digest == _storage.safe_read(commit_path)
+        exported = [e for e in log if e.get("reason") == "keyvault.backup_exported"]
+        assert len(exported) == 1
+        assert exported[0]["envelope_count"] == 0
         eid = api.encrypt(imported, b"post-import", "fresh", backend=backend_b, audit_sink=sink, home=home_b)
         assert api.decrypt(imported, eid, "fresh", backend=backend_b, audit_sink=sink, home=home_b) == b"post-import"
 
@@ -882,36 +817,6 @@ class TestCrossMachineRoundtrip:
             )
         assert destination_backend.calls == []
 
-    def test_import_creates_meta_row_and_commit_digest(
-        self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        _log, sink = audit
-        backend_a = FakeBackend()
-        home_a = tmp_path / "deviceA"
-        key_id = _init_device(home_a, backend_a, sink)
-        api.encrypt(key_id, b"x", "p", backend=backend_a, audit_sink=sink, home=home_a)
-        blob = api.export_backup(
-            key_id,
-            PASSPHRASE,
-            backend=backend_a,
-            audit_sink=sink,
-            home=home_a,
-            seed_phrase=SEED,
-            pow_bytes=POW,
-        )
-
-        backend_b = FakeBackend()
-        home_b = tmp_path / "deviceB"
-        imported = api.import_backup(
-            blob, PASSPHRASE, seed_phrase=SEED, pow_bytes=POW, backend=backend_b, audit_sink=sink, home=home_b
-        )
-
-        root_b = home_b / "mordred" / "keyvault"
-        meta = _storage.load_meta(root_b)
-        assert _key_id_hash_hex(imported) in meta["keys"]
-        commit = root_b / "digests" / f"{_key_id_hash_hex(imported)}.commit"
-        assert _storage.safe_read(commit) == backup.parse_header(blob).verification_digest
-
     def test_nfkd_equivalent_passphrases_use_the_same_backup_kdf(
         self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]
     ) -> None:
@@ -1106,6 +1011,8 @@ class TestImportRejection:
                 audit_sink=sink,
                 home=home_b,
             )
+        assert backend_b.calls == [], "no Enclave operation may run on a rejected import"
+        assert not home_b.exists()
 
     def test_wrong_seed_phrase_raises_recovery_mismatch(
         self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]
@@ -1141,50 +1048,6 @@ class TestImportRejection:
                 audit_sink=sink,
                 home=home_b,
             )
-
-    def test_digest_mismatch_creates_no_enclave_key(
-        self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        """Verify-before-decrypt: a mismatch must reject BEFORE the
-        destination Enclave key is generated (SPEC import step 2 — steps
-        1-5 are pre-mutation)."""
-        _log, sink = audit
-        blob = self._exported_blob(tmp_path, sink)
-        backend_b = FakeBackend()
-        home_b = tmp_path / "deviceB"
-
-        with pytest.raises(RecoveryDigestMismatch):
-            api.import_backup(
-                blob,
-                "wrong-passphrase",
-                seed_phrase=SEED,
-                pow_bytes=POW,
-                backend=backend_b,
-                audit_sink=sink,
-                home=home_b,
-            )
-        assert backend_b.calls == [], "no Enclave operation may run on a rejected import"
-
-    def test_digest_mismatch_writes_no_ciphertexts(
-        self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        _log, sink = audit
-        blob = self._exported_blob(tmp_path, sink)
-        backend_b = FakeBackend()
-        home_b = tmp_path / "deviceB"
-
-        with pytest.raises(RecoveryDigestMismatch):
-            api.import_backup(
-                blob,
-                "wrong-passphrase",
-                seed_phrase=SEED,
-                pow_bytes=POW,
-                backend=backend_b,
-                audit_sink=sink,
-                home=home_b,
-            )
-        cipher_dir = home_b / "mordred" / "keyvault" / "ciphertexts" / _key_id_hash_hex("default")
-        assert not cipher_dir.exists()
 
 
 # ----------------------------- audit reason freeze -----------------------------

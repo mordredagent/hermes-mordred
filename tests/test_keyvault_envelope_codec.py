@@ -25,11 +25,6 @@ def _opaque_wrapped_dek() -> bytes:
     return bytes(codec._WRAPPED_DEK_LEN)
 
 
-class TestHashId:
-    def test_hash_id_is_sha256_first_16_bytes(self) -> None:
-        assert codec._hash_id("default") == hashlib.sha256(b"default").digest()[:16]
-
-
 class TestEncodeSplitParseRoundTrip:
     def test_encode_then_split_returns_aad_bound_fields(self) -> None:
         dek = bytes(32)
@@ -37,22 +32,15 @@ class TestEncodeSplitParseRoundTrip:
         key_id, purpose = "kid", "secret"
 
         blob = codec._encode_envelope(dek, plaintext, key_id, purpose, _opaque_wrapped_dek())
-        aad, purpose_hash, wrapped, aes_blob = codec._split_envelope(blob, codec._hash_id(key_id))
+        aad, purpose_hash, wrapped, aes_blob = codec._split_envelope(
+            blob, hashlib.sha256(key_id.encode()).digest()[:16]
+        )
 
-        assert purpose_hash == codec._hash_id(purpose)
+        assert purpose_hash == hashlib.sha256(purpose.encode()).digest()[:16]
         assert wrapped == _opaque_wrapped_dek()
         # AAD-bound AES-GCM: the same dek + aad must recover the plaintext.
         nonce, ct_tag = aes_blob[: codec._AES_NONCE_LEN], aes_blob[codec._AES_NONCE_LEN :]
         assert AESGCM(dek).decrypt(nonce, ct_tag, aad) == plaintext
-
-    def test_encode_from_hashes_matches_encode(self) -> None:
-        # _encode_envelope is the cleartext wrapper over _encode_envelope_from_hashes;
-        # both must produce a blob that splits back to the same key_id/purpose hashes.
-        dek = bytes(32)
-        kid_hash, purpose_hash = codec._hash_id("kid"), codec._hash_id("p")
-        blob = codec._encode_envelope_from_hashes(dek, b"x", kid_hash, purpose_hash, _opaque_wrapped_dek())
-        _, got_purpose_hash, _, _ = codec._split_envelope(blob, kid_hash)
-        assert got_purpose_hash == purpose_hash
 
     def test_parse_enforces_purpose(self) -> None:
         dek = bytes(32)

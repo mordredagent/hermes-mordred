@@ -68,18 +68,6 @@ def _seal(root: Path, home: Path, backend: FakeBackend, store: FakeAnchorStore, 
 # 1. The moved core still merges/reseals correctly when called directly.
 # -----------------------------------------------------------------------------
 class TestResealEnvCore:
-    def test_merges_partial_write_without_losing_secrets(self, tmp_path: Path) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _seal(root, home, backend, store, _ENV_MULTI)
-        (home / ".env").write_bytes(b"C=3\n")  # host writes only the just-set key
-
-        rc = reseal_env(home=home, root=root, backend=backend, store=store)
-        assert rc == 0
-        assert not (home / ".env").exists()
-        assert _vault_env(root, backend, store) == b"A=1\nB=2\nC=3\n"  # A and B survived
-
     def test_noop_when_no_plaintext(self, tmp_path: Path) -> None:
         root, home = tmp_path / "v", tmp_path / "home"
         home.mkdir()

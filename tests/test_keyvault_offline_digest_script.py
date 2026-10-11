@@ -26,8 +26,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 # Locate the script via the repo root (this file is <repo>/tests/<this>.py).
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _REPO_ROOT / "scripts" / "keyvault_offline_digest.py"
@@ -153,28 +151,13 @@ class TestOfflinePortability:
                 out.append(node.module or "")
         return out
 
-    def test_script_imports_no_mordred_hermes_module(self) -> None:
-        """The script must be runnable on an air-gapped machine that
-        only has ``python3`` + ``blake3`` — it must not *import* any
-        ``mordred_hermes`` module. Docstring cross-references are fine
-        (and useful: drift warning), so this checks AST imports only.
-        """
-        imports = self._import_statements()
-        offenders = [m for m in imports if m.startswith("mordred_hermes")]
-        assert not offenders, (
-            f"scripts/keyvault_offline_digest.py imports {offenders!r} — "
-            "must not depend on the mordred_hermes package (offline portability)"
-        )
-
     def test_script_imports_no_other_third_party_beyond_blake3(self) -> None:
         """Allow-list: stdlib + ``blake3`` only. If a future change
         pulls in ``cryptography``, ``argon2``, …, the operator-prep
         instructions in setup.md break silently."""
         imports = self._import_statements()
-        # Forbidden third-party top-level packages that have appeared in
-        # adjacent keyvault modules. Match on the leading dotted segment.
-        forbidden = {"cryptography", "argon2", "pyobjc", "mordred_hermes"}
-        offenders = [m for m in imports if m.split(".", 1)[0] in forbidden]
+        allowed = {*sys.stdlib_module_names, "blake3"}
+        offenders = [m for m in imports if m.split(".", 1)[0] not in allowed]
         assert not offenders, (
             f"scripts/keyvault_offline_digest.py imports {offenders!r} — breaks the stdlib + blake3 invariant"
         )
@@ -208,27 +191,3 @@ class TestBlake3Bootstrap:
         src = self._source()
         assert "pip install blake3" in src  # bare offline device
         assert ".venv/bin/python" in src  # this dev checkout
-
-    def test_reexec_uses_only_stdlib(self) -> None:
-        """The bootstrap must not pull in a third-party package — the
-        offline-portability invariant (stdlib + blake3) still holds."""
-        import ast
-
-        tree = ast.parse(self._source())
-        modules: list[str] = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                modules.extend(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom):
-                modules.append(node.module or "")
-        third_party = [m for m in modules if m.split(".", 1)[0] not in {*sys.stdlib_module_names, "blake3"}]
-        assert not third_party, f"bootstrap introduced non-stdlib import(s): {third_party!r}"
-
-
-@pytest.mark.skipif(not _SCRIPT.exists(), reason="script not yet implemented (RED)")
-class TestScriptExists:
-    """Sanity guard so the absence of the script reports as one clean
-    skipped class rather than every test above erroring on FileNotFound."""
-
-    def test_script_file_present(self) -> None:
-        assert _SCRIPT.is_file()

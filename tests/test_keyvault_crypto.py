@@ -28,6 +28,7 @@ class TestAesGcmRoundtrip:
         blob = crypto.encrypt(key, plaintext, aad=b"v1")
 
         assert crypto.decrypt(key, blob, aad=b"v1") == plaintext
+        assert blob[:12] != crypto.encrypt(key, plaintext, aad=b"v1")[:12]
 
     def test_roundtrip_with_empty_aad_default(self) -> None:
         """``aad`` defaults to empty bytes — must roundtrip when omitted."""
@@ -61,19 +62,6 @@ class TestAesGcmRoundtrip:
         blob = crypto.encrypt(key, plaintext)
 
         assert crypto.decrypt(key, blob) == plaintext
-
-    def test_encrypted_blob_carries_nonce_prefix(self) -> None:
-        """Wire format is ``nonce(12) || ciphertext || tag(16)``. Two blobs
-        encrypting the same plaintext must share no nonce — the 12-byte
-        prefix is what differs (the ciphertext+tag after it will also
-        differ because the keystream depends on the nonce)."""
-        from mordred_hermes.keyvault import crypto
-
-        key = b"\x55" * 32
-        a = crypto.encrypt(key, b"abc")
-        b = crypto.encrypt(key, b"abc")
-
-        assert a[:12] != b[:12]
 
 
 class TestAesGcmAuthenticatedFailures:

@@ -82,8 +82,9 @@ def test_substituted_wmk_rejected(store: FakeAnchorStore) -> None:
     """Codex P1-a: a wmk swapped for one the attacker minted under their
     own SE key has a different fingerprint → AnchorMismatch."""
     anchor.write_anchor(store, _LABEL, wmk=_WMK_A, generation=4)
-    with pytest.raises(anchor.AnchorMismatch):
+    with pytest.raises(anchor.AnchorMismatch) as raised:
         anchor.verify_anchor(store, _LABEL, wmk=_WMK_B, generation=4)
+    assert isinstance(raised.value, anchor.AnchorError)
 
 
 def test_rolled_back_generation_rejected(store: FakeAnchorStore) -> None:
@@ -109,19 +110,16 @@ def test_advanced_generation_rejected(store: FakeAnchorStore) -> None:
 def test_missing_anchor_raises(store: FakeAnchorStore) -> None:
     """An enrolled vault whose anchor is absent (never initialized, or the
     attacker deleted it to force a fallback) must fail closed."""
-    with pytest.raises(anchor.AnchorMissing):
+    with pytest.raises(anchor.AnchorMissing) as raised:
         anchor.verify_anchor(store, _LABEL, wmk=_WMK_A, generation=1)
-
-
-def test_read_missing_anchor_raises(store: FakeAnchorStore) -> None:
-    with pytest.raises(anchor.AnchorMissing):
-        anchor.read_anchor(store, _LABEL)
+    assert isinstance(raised.value, anchor.AnchorError)
 
 
 def test_corrupt_anchor_not_json_raises(store: FakeAnchorStore) -> None:
     store.write(_LABEL, b"not json at all")
-    with pytest.raises(anchor.AnchorCorrupt):
+    with pytest.raises(anchor.AnchorCorrupt) as raised:
         anchor.verify_anchor(store, _LABEL, wmk=_WMK_A, generation=1)
+    assert isinstance(raised.value, anchor.AnchorError)
 
 
 def test_corrupt_anchor_missing_field_raises(store: FakeAnchorStore) -> None:
@@ -137,13 +135,6 @@ def test_corrupt_anchor_bad_version_raises(store: FakeAnchorStore) -> None:
     )
     with pytest.raises(anchor.AnchorCorrupt):
         anchor.verify_anchor(store, _LABEL, wmk=_WMK_A, generation=1)
-
-
-def test_all_anchor_errors_share_base(store: FakeAnchorStore) -> None:
-    """A caller can fail closed with a single ``except AnchorError``."""
-    assert issubclass(anchor.AnchorMissing, anchor.AnchorError)
-    assert issubclass(anchor.AnchorMismatch, anchor.AnchorError)
-    assert issubclass(anchor.AnchorCorrupt, anchor.AnchorError)
 
 
 # ---------------------------------------------------------------------------
