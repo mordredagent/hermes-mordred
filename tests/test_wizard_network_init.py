@@ -625,6 +625,8 @@ class TestInitSummary:
         # Mullvad-specific detail lines must not appear for a custom provider.
         assert "mullvad relay" not in out.lower()
         assert "mullvad account" not in out.lower()
+        assert "Mullvad" not in out
+        assert "[warning]" not in out
 
     def test_run_init_prints_resolved_settings(self, tmp_path: Path) -> None:
         """End-to-end: run_init's printed summary reflects the saved path."""
