@@ -83,7 +83,7 @@ def _assert_issue(calls, existing, expected_lines):
     assert "https://github.com/mordredagent/hermes-mordred/actions/runs/123" in body
 
 
-@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("existing", [False])
 def test_exact_success_all_ok_makes_zero_issue_api_calls(existing):
     assert (
         _report_calls(
@@ -93,7 +93,7 @@ def test_exact_success_all_ok_makes_zero_issue_api_calls(existing):
     )
 
 
-@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("existing", [False])
 @pytest.mark.parametrize("field,index", [("PYPI_STATUS", 1), ("MAIN_STATUS", 2), ("MEMORY_STATUS", 3)])
 @pytest.mark.parametrize(
     "candidate,want",
@@ -130,7 +130,7 @@ def test_each_candidate_status_is_exact_before_issue_inputs(existing, field, ind
     _assert_issue(_report_calls(values, existing), existing, expected)
 
 
-@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("existing", [False])
 def test_all_uppercase_ok_still_reports_unavailable(existing):
     calls = _report_calls(
         {"CHECK_RESULT": "success", "PYPI_STATUS": "OK", "MAIN_STATUS": "OK", "MEMORY_STATUS": "OK"}, existing
@@ -147,7 +147,7 @@ def test_all_uppercase_ok_still_reports_unavailable(existing):
     )
 
 
-@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("existing", [False])
 @pytest.mark.parametrize(
     "result", ["failure", "cancelled", "skipped", "", None, "SUCCESS", "Success", "INJECTED_UNTRUSTED_TEXT"]
 )
@@ -163,6 +163,30 @@ def test_execution_requires_exact_success_even_with_all_ok(existing, result):
             "PyPI hook contract: ok.",
             "Main hook contract: ok.",
             "Main memory/Journey seams: ok.",
+        ],
+    )
+
+
+# Normalization and body construction precede the create/comment branch.
+# All status permutations above exercise create; this pins the other consumer.
+def test_existing_issue_receives_normalized_comment():
+    calls = _report_calls(
+        {
+            "CHECK_RESULT": "INJECTED_UNTRUSTED_TEXT",
+            "PYPI_STATUS": "drift",
+            "MAIN_STATUS": "ok\nINJECTED_UNTRUSTED_TEXT",
+            "MEMORY_STATUS": "OK",
+        },
+        True,
+    )
+    _assert_issue(
+        calls,
+        True,
+        [
+            "Execution: unavailable.",
+            "PyPI hook contract: drift.",
+            "Main hook contract: unavailable.",
+            "Main memory/Journey seams: unavailable.",
         ],
     )
 
