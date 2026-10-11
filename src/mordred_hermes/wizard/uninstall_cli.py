@@ -743,9 +743,17 @@ def run_uninstall(ctx: UninstallContext, opts: UninstallOptions) -> int:
     if not _confirm(ctx, opts):
         print("Uninstall cancelled; nothing was changed.")
         return 1
-    if any(r.target == "databases" for r in plan.restores):
+    planned_databases = any(r.target == "databases" for r in plan.restores)
+    if ctx.platform == "darwin" or planned_databases:
         try:
+            # Confirmation happens without a lease. Always take custody now:
+            # another process may have enabled encryption after the plan.
             with _uninstall_databases.guard(ctx):
+                if _uninstall_databases.needed(ctx.home) != planned_databases:
+                    raise RuntimeError(
+                        "database protection changed after the plan was printed; nothing was removed. "
+                        "Re-run uninstall to review the updated plan"
+                    )
                 return _execute(ctx, plan, opts)
         except Exception as exc:
             _term.emit_error(f"uninstall stopped: {exc}. Resolve the failure before retrying.")

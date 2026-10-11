@@ -883,3 +883,52 @@ class TestDatabaseUninstall:
             assert not any(call[0] == "ecdh" for call in installed.backend.calls)
         finally:
             process.communicate(timeout=10)
+
+    def test_encryption_started_during_confirmation_blocks_stale_purge_plan(
+        self, installed: Installed, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import contextlib
+        import sqlite3
+
+        pytest.importorskip("sqlcipher3")
+        from mordred_hermes import dbcrypt
+        from mordred_hermes.dbcrypt import _key, _migrate
+
+        key = memory_cli._memory_key_from_vault(root=installed.root, backend=installed.backend, store=installed.store)
+        assert key is not None
+        path = installed.home / "state.db"
+        with contextlib.closing(sqlite3.connect(path)) as connection:
+            connection.execute("CREATE TABLE messages (text TEXT)")
+            connection.execute("INSERT INTO messages VALUES ('created while confirming')")
+            connection.commit()
+        monkeypatch.setattr(_migrate, "holders", lambda _paths: [])
+
+        def confirm(_ctx: UninstallContext, _opts: UninstallOptions) -> bool:
+            assert not dbcrypt.marker_path(installed.home).exists()
+            _migrate.migrate(installed.home, _key.derive(key), arm=dbcrypt.arm)
+            return True
+
+        monkeypatch.setattr(uninstall_cli, "_confirm", confirm)
+        installed.backend.calls.clear()
+        assert run_uninstall(installed.context(), UninstallOptions(yes=True, purge_data=True)) == 1
+        assert "changed" in capsys.readouterr().err
+        assert dbcrypt.marker_path(installed.home).exists()
+        assert installed.root.exists()
+        assert installed.runner.uninstalls == []
+        assert not (installed.home / "config.yaml").exists()
+        assert not (installed.home / ".env").exists()
+        assert not installed.backend.calls
+        assert all(is_sealed((installed.home / "memories" / name).read_bytes()) for name in _MEMORIES)
+
+    def test_plain_linux_uninstall_does_not_require_database_custody(
+        self, installed: Installed, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from mordred_hermes.dbcrypt import _migrate
+
+        def fail_lock(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("an unprotected Linux home must not acquire the macOS DB lock")
+
+        monkeypatch.setattr(_migrate, "migration_lock", fail_lock)
+        assert run_uninstall(installed.context(platform="linux"), UninstallOptions(yes=True)) == 0
+        assert (installed.home / ".env").read_bytes() == installed.before[".env"]
+        assert installed.runner.uninstalls

@@ -128,14 +128,14 @@ def guard(ctx: UninstallContext) -> Iterator[None]:
         raise RuntimeError(
             "database encryption can only be restored or erased on macOS; Mordred and its keys were kept"
         )
-    if base.resolve() != ctx.home.resolve():
-        raise RuntimeError(
-            f"database encryption is shared with the root home {base}; run uninstall with HERMES_HOME={base} "
-            "to restore or erase every profile before removing the shared key"
-        )
     from ..dbcrypt._migrate import migration_lock
 
     with migration_lock(base, timeout=0):
+        if base.resolve() != ctx.home.resolve() and needed(base):
+            raise RuntimeError(
+                f"database encryption is shared with the root home {base}; run uninstall with HERMES_HOME={base} "
+                "to restore or erase every profile before removing the shared key"
+            )
         yield
 
 
