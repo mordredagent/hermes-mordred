@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from types import SimpleNamespace
 
 import pytest
 
 from mordred_hermes import llm_guard
 from mordred_hermes._config_io import CanonicalPaths, canonical_session
-from mordred_hermes.llm_guard import auxiliary_guard, enforce, harness_detect, local_adapter
+from mordred_hermes.llm_guard import _windows_policy, auxiliary_guard, enforce, harness_detect, local_adapter
 from mordred_hermes.llm_guard._exceptions import MordredSessionRefused
+from tests._helpers import PlatformSys
 
 
 class Audit:
@@ -21,6 +21,11 @@ class Audit:
 
     def append(self, entry):
         self.entries.append(entry)
+
+
+def _set_platform(monkeypatch, platform):
+    monkeypatch.setattr(llm_guard, "sys", PlatformSys(platform))
+    monkeypatch.setattr(_windows_policy, "sys", PlatformSys(platform))
 
 
 @pytest.fixture
@@ -39,7 +44,7 @@ def profile(tmp_path, monkeypatch):
             json.dumps({"policy": "strict", "allow_cloud_llm": True, "cloud_provider_allowlist": ["openai"]}).encode()
         )
         update.commit()
-    monkeypatch.setattr(sys, "platform", "win32")
+    _set_platform(monkeypatch, "win32")
     enforce._reset_state()
     auxiliary_guard.reset_caches()
     return paths
@@ -201,7 +206,7 @@ def test_admission_and_cleanup_errors_never_authorize(monkeypatch, tmp_path, fau
     backend = Backend()
     monkeypatch.setattr(cio, "open_optional_confidential_directory", backend.open_home)
     monkeypatch.setattr(cio, "open_optional_private_directory", backend.open_policy)
-    monkeypatch.setattr(sys, "platform", "win32")
+    _set_platform(monkeypatch, "win32")
     backend.fault = fault
     with pytest.raises(MordredSessionRefused):
         run_provider(CanonicalPaths(tmp_path / "home"))
@@ -215,7 +220,7 @@ def test_only_checked_absence_keeps_fresh_install_default(monkeypatch, tmp_path)
     backend = Backend()
     backend.home_present = False
     monkeypatch.setattr(cio, "open_optional_confidential_directory", backend.open_home)
-    monkeypatch.setattr(sys, "platform", "win32")
+    _set_platform(monkeypatch, "win32")
     run_provider(CanonicalPaths(tmp_path / "home"))
 
 
@@ -597,7 +602,7 @@ def test_audit_refusal_retains_no_raw_exception_context(monkeypatch, tmp_path):
     def broken(path):
         raise OSError(SECRET)
 
-    monkeypatch.setattr(sys, "platform", "win32")
+    _set_platform(monkeypatch, "win32")
     with pytest.raises(MordredSessionRefused) as caught:
         _windows_policy.guarded_audit_factory(broken, tmp_path / "audit.log")
     refusal = caught.value
@@ -614,7 +619,7 @@ def test_audit_factory_failure_still_reraises_original_off_windows(monkeypatch, 
     def broken(path):
         raise original
 
-    monkeypatch.setattr(sys, "platform", "linux")
+    _set_platform(monkeypatch, "linux")
     with pytest.raises(OSError) as caught:
         _windows_policy.guarded_audit_factory(broken, tmp_path / "audit.log")
     assert caught.value is original
