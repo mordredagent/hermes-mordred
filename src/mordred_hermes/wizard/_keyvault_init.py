@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 from ..keyvault import _native_key_id, _storage
 from . import _term
 from ._defaults import resolve_backend, resolve_prompt_io
+from ._windows_gates import unported_refusal
 
 if TYPE_CHECKING:
     from ..keyvault.api import GenerateResult, SeedDisplayHandle
@@ -361,6 +362,9 @@ def _preflight_or_refuse(
     """Run the pre-ceremony guards, all before the passphrase prompt so a
     doomed run never asks the operator to type one:
 
+    0. Windows: the generic secret store is not ported, so refuse before any
+       ``_storage`` read, prompt or seed generation (native custody uses
+       ``keyvault native init``);
     1. re-init guard (v1 keyvault is single-key);
     2. air-gap pre-check — refuse fast while the host is online (UX review
        2026-06-15; ``display_seed`` re-asserts isolation as the real gate);
@@ -368,6 +372,9 @@ def _preflight_or_refuse(
 
     Returns the refusal exit code (after printing), or None to proceed.
     """
+    unported = unported_refusal("secret_store", "keyvault init")
+    if unported is not None:
+        return unported
     guard = _refuse_if_initialised(home)
     if guard is not None:
         return guard

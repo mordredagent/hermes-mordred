@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Final, Literal, TypeAlias
+from typing import Any, Final, Literal, TypeAlias
 
 from .._policy_io import load_policy_mapping
 from ._cloud_endpoint import policy_provider_id
@@ -66,6 +66,11 @@ def _read_policy_settings(policy_json_path: Path) -> _PolicySettings:
     below reproduces exactly those safe-by-default values.
     """
     data = load_policy_mapping(policy_json_path, log=_LOG)
+    return settings_from_mapping(data)
+
+
+def settings_from_mapping(data: dict[str, Any]) -> _PolicySettings:
+    """Extract settings from an already checked decision or a legacy mapping."""
 
     # Codex review P2: ``bool("false")`` is ``True`` in Python — using
     # ``bool(...)`` here would let a hand-edited or migrated

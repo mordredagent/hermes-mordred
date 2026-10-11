@@ -84,9 +84,9 @@ def _configured_model() -> tuple[str | None, str | None]:
 
 def _telegram_logged_in() -> bool:
     try:
-        from .tee import TeeSecretStore
+        from .tee import default_secret_store
 
-        flags = TeeSecretStore().flags()
+        flags = default_secret_store().flags()
     except Exception:
         return False
     return bool(flags and flags.get("logged_in") is True)
@@ -141,7 +141,7 @@ async def _require_reader_allowed(parent_agent: Any) -> None:
 
 def _coverage() -> dict[str, Any]:
     """Freshness facts for the agent, from metadata only."""
-    from .store import StoreError, archive_busy, telegram_dir
+    from .store import StoreError, archive_busy, archive_updated, telegram_dir
 
     try:
         busy = archive_busy(telegram_dir())
@@ -149,11 +149,12 @@ def _coverage() -> dict[str, Any]:
         busy = False
     import datetime as _dt
 
-    index = telegram_dir() / "index.enc"
+    try:
+        mtime = archive_updated(telegram_dir())
+    except StoreError:
+        mtime = None  # advisory only: the archive read itself refuses unsafe state
     updated = (
-        _dt.datetime.fromtimestamp(index.stat().st_mtime).astimezone().strftime("%Y-%m-%d %H:%M %z")
-        if index.exists()
-        else None
+        _dt.datetime.fromtimestamp(mtime).astimezone().strftime("%Y-%m-%d %H:%M %z") if mtime is not None else None
     )
     return {
         "archive_updated": updated,

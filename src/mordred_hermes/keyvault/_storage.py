@@ -267,6 +267,9 @@ def ensure_layout(root: Path) -> None:
     # only that stable parent first; reset never removes it, and an absent-root
     # reset may linearize before this initializer without racing any mutation
     # inside the keyvault tree.
+    from ._windows_capability import refuse_unported_on_windows
+
+    refuse_unported_on_windows("secret_store", "ensure_layout")  # before any I/O or mkdir (C5e)
     root.parent.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
     with keyvault_lifecycle_lock(root):
         _ensure_layout_locked(root)
@@ -830,6 +833,9 @@ def keyvault_lifecycle_lock(root: Path) -> Iterator[None]:
     be able to reject or remove a malformed root without trusting any inode
     inside that root.
     """
+    from ._windows_capability import refuse_unported_on_windows
+
+    refuse_unported_on_windows("secret_store", "keyvault_lifecycle_lock")  # before any I/O or mkdir (C5e)
     _refresh_process_lock_state()
     thread_lock = _LIFECYCLE_THREAD_LOCK
     with thread_lock:

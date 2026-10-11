@@ -1401,6 +1401,7 @@ name = "hermes-mordred"
 source = { editable = "." }
 dependencies = [
     { name = "hermes-agent" },
+    { name = "psutil" },
     { name = "ruamel-yaml" },
 ]
 
@@ -1494,6 +1495,7 @@ requires-dist = [
     { name = "httpx", extras = ["socks"], marker = "extra == 'integration'", specifier = ">=0.27" },
     { name = "mypy", marker = "extra == 'dev'", specifier = "==2.1.0" },
     { name = "openai", marker = "extra == 'integration'", specifier = ">=1.40" },
+    { name = "psutil", specifier = ">=7.2.2" },
     { name = "pyobjc-framework-quartz", marker = "extra == 'macos'", specifier = ">=10.0" },
     { name = "pyobjc-framework-security", marker = "extra == 'macos'", specifier = ">=10.0" },
     { name = "pyobjc-framework-systemconfiguration", marker = "extra == 'macos'", specifier = ">=10.0" },

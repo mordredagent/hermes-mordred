@@ -10,6 +10,7 @@ design diaries and upstream snapshots remain available through Git history.
 |---|---|
 | [`SPEC.md`](./SPEC.md) | Supported behavior, threat model, and product boundaries |
 | [`PLAN.md`](./PLAN.md) | Current implementation shape and maintenance approach |
+| [`WINDOWS_FEASIBILITY.md`](./WINDOWS_FEASIBILITY.md) | Windows feasibility, actual-device findings, and proposed delivery sequence |
 | [`TODO.md`](./TODO.md) | Actionable work for the current release |
 | [`ROADMAP.md`](./ROADMAP.md) | Deferred work and its prerequisites |
 | [`CI.md`](./CI.md) | CI, branching, release, and changelog policy |
@@ -25,6 +26,8 @@ design diaries and upstream snapshots remain available through Git history.
 | Document | Purpose |
 |---|---|
 | [`setup.md`](./setup.md) | Development setup, the two venvs, and isolated validation |
+| [`WINDOWS_CONFIG_IO.md`](./WINDOWS_CONFIG_IO.md) | Canonical Windows configuration API, ownership and verification |
+| [`WINDOWS_AUDIT_IO.md`](./WINDOWS_AUDIT_IO.md) | Opt-in checked audit sessions, bounded rotation, and validation |
 
 When prose and code disagree, the typed implementation, tests, CLI parser, and
 machine contracts named by the relevant document take precedence. Correct the

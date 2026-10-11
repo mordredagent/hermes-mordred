@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from ..keyvault import _identity
 from . import _term
 from ._defaults import resolve_backend, resolve_prompt_io, resolve_store
+from ._windows_gates import excluded_refusal
 
 if TYPE_CHECKING:
     from ..keyvault.anchor import AnchorStore
@@ -84,6 +85,8 @@ def _open_cold_path(root: Path, *, prompt_io: PromptIO | None) -> OpenVault | No
     and return ``None``. On success returns the opened (read-only) vault; the
     caller owns closing it.
     """
+    if excluded_refusal("recovery", "vault open with the recovery passphrase") is not None:
+        return None
     from cryptography.exceptions import InvalidTag
 
     from ..keyvault import backup, manifest, recovery, vault
@@ -153,6 +156,8 @@ def _open_hot_path_or_report(
     gets a view whose ``close`` / ``with`` exit leaves the handle open (the
     flow closes it when it ends). One unwrap -- one Touch ID -- per flow.
     """
+    if excluded_refusal("file_vault", "vault open") is not None:
+        return None
     from ..keyvault import vault
     from ..keyvault._vault_open_report import report_hot_open_failure
 

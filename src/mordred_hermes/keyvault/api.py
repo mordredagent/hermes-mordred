@@ -587,6 +587,9 @@ def confirm_generate(
     the hardware trust boundary explicit and lets callers choose the supported
     Secure-Enclave, TPM-helper, or test implementation deliberately.
     """
+    from ._windows_capability import refuse_unported_on_windows
+
+    refuse_unported_on_windows("secret_store", "confirm_generate")  # before any I/O or mkdir (C5e)
     resolved_key_id = key_id if key_id is not None else _DEFAULT_KEY_ID
 
     # 1. Read the prepared digest via the handle's confirm-side egress.
@@ -707,6 +710,9 @@ def generate(
     simpler and gives a non-interactive mismatch the same audit trail as
     the interactive path.)
     """
+    from ._windows_capability import refuse_unported_on_windows
+
+    refuse_unported_on_windows("secret_store", "generate")  # before any I/O or mkdir (C5e)
     handle, _expected = prepare_generate(seed_phrase, passphrase, pow_bytes)
     try:
         return confirm_generate(

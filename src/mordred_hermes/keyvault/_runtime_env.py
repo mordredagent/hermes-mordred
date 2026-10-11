@@ -67,6 +67,9 @@ def inject_vault_env(
     ``backend`` / ``store`` default to the production implementations; tests
     inject fakes. Returns the number of variables injected.
     """
+    from ._windows_capability import refuse_excluded_on_windows
+
+    refuse_excluded_on_windows("env_config_workspace_seals", "inject_vault_env")  # before any I/O (C5e)
     from dotenv import dotenv_values
 
     from . import anchor, vault

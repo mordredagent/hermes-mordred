@@ -17,7 +17,10 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+from . import _windows_storage
 
 # --------------------------------------------------------------------------- #
 # Sign helpers (run in executor — keyvault calls may block on Touch ID)
@@ -120,6 +123,11 @@ def _wallet_config_fingerprint() -> tuple[object, ...]:
     ``WalletNotConfigured`` into an address; 1→2 turns it into an explicit
     "pin one" error). Enumerating the seed directory here would reach into the
     keyvault's on-disk layout on every request to close a one-minute window.
+
+    On Windows the fingerprint is a checked stat under the extension
+    directory's ``.mordred-fs.lock`` (the lock the keyvault wallet uses), so
+    every cache hit revalidates the wallet's ACL, link count and identity;
+    unsafe storage raises instead of replaying a cached snapshot.
     """
     from mordred_hermes.keyvault import extension_sign
 
@@ -127,12 +135,23 @@ def _wallet_config_fingerprint() -> tuple[object, ...]:
         path = extension_sign._ext_dir() / extension_sign._WALLET_FILE
     except Exception:  # pragma: no cover - only if the home cannot be resolved
         return ("unresolved-wallet-path",)
+    if _windows_storage.enabled():
+        return _checked_wallet_fingerprint(path)
     try:
         stat_result = path.stat()
     except OSError:
         # No explicit config: the account is discovered from the stored seeds.
         return (str(path), None)
     return (str(path), stat_result.st_mtime_ns, stat_result.st_size, stat_result.st_ino)
+
+
+def _checked_wallet_fingerprint(path: Path) -> tuple[object, ...]:
+    with _windows_storage.session(path.parent, create=False) as active:
+        metadata = active.stat(path.name)
+        if metadata is None:
+            # Checked absence: the account is discovered from the stored seeds.
+            return (str(path), None)
+        return (str(path), active.directory_identity(), metadata.identity, metadata.size, metadata.mtime_ns)
 
 
 def reset_account_snapshot_cache() -> None:

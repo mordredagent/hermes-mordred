@@ -143,6 +143,9 @@ def materialize_config(
     on-disk working copy that differs from the vault is treated as authoritative
     (live edit / unclean prior exit) and re-synced into the vault.
     """
+    from ._windows_capability import refuse_excluded_on_windows
+
+    refuse_excluded_on_windows("env_config_workspace_seals", "materialize_config")  # before any I/O (C5e)
     if not _marker_path(home).exists():
         return 0  # not opted in
 
@@ -253,6 +256,9 @@ def reseal_config(
     vault cannot be opened to persist a changed copy, the error propagates and the
     plaintext is **left in place** (no data loss) for the next start to self-heal.
     """
+    from ._windows_capability import refuse_excluded_on_windows
+
+    refuse_excluded_on_windows("env_config_workspace_seals", "reseal_config")  # before any I/O (C5e)
     if not _marker_path(home).exists():
         return 0  # not opted in — never touch an unmanaged config
 

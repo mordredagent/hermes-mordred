@@ -47,6 +47,7 @@ from ._cloud_endpoint import policy_provider_id as policy_provider_id
 from ._cloud_endpoint import safe_endpoint_for_audit as safe_endpoint_for_audit
 from ._exceptions import MordredLocalUnreachable, MordredSessionRefused
 from ._policy_settings import CloudAttemptAction, _PolicySettings, _read_policy_settings
+from ._windows_policy import Decision, read_decision
 from .local_adapter import LOCAL_PROVIDER_NAME
 
 _LOG = logging.getLogger("mordred.llm_guard.enforce")
@@ -108,6 +109,8 @@ def check_session_provider(
     active_provider: str | None,
     audit: _AuditWriter,
     health_probe: Callable[[str], None] | None = None,
+    _decision: Decision | None = None,
+    config_path: Path | None = None,
 ) -> None:
     """Apply the refuse-only decision matrix at ``on_session_start``.
 
@@ -115,6 +118,9 @@ def check_session_provider(
     neither ``"strict"`` nor ``"off"`` are treated as lenient (defense in
     depth, mirroring :func:`harness_detect.check_harness_primary`).
     """
+    decision = _decision or read_decision(policy_json_path, config_path)
+    if decision is not None:
+        policy_mode = decision.mode
     if policy_mode == "off":
         return  # silent no-op
 
@@ -122,7 +128,7 @@ def check_session_provider(
         # lenient and any unknown mode — stay silent in v1.
         return
 
-    settings = _read_policy_settings(policy_json_path)
+    settings = decision.settings if decision is not None else _read_policy_settings(policy_json_path)
 
     if active_provider is None:
         _refuse_degraded(audit=audit, settings=settings)
@@ -608,6 +614,8 @@ def check_runtime_provider(
     health_probe: Callable[[str], None] | None = None,
     runtime_base_url: str | None = None,
     prompt_fn: PromptFn | None = None,
+    _decision: Decision | None = None,
+    config_path: Path | None = None,
 ) -> None:
     """Per-request runtime enforcement (Codex review P1 round 3 + P2 round 4).
 
@@ -639,11 +647,14 @@ def check_runtime_provider(
     ``hermes_cli/plugins.py:1112`` and ``run_agent.py:11337`` cannot
     mask the refusal.
     """
+    decision = _decision or read_decision(policy_json_path, config_path)
+    if decision is not None:
+        policy_mode = decision.mode
     if policy_mode == "off":
         return
     if policy_mode != "strict":
         return  # lenient + unknown modes stay silent (defense in depth)
-    settings = _read_policy_settings(policy_json_path)
+    settings = decision.settings if decision is not None else _read_policy_settings(policy_json_path)
     if active_provider is None:
         # Codex review P1 round 5: session_start enforce is now log-only,
         # so the degraded path MUST refuse here — otherwise strict mode
@@ -698,7 +709,8 @@ def check_runtime_provider(
         provider_id=active_provider,
         audit=audit,
         prompt_fn=prompt_fn or _default_prompt,
-        route_key=_cloud_route_key(active_provider, runtime_base_url),
+        route_key=(decision.generation + ":" if decision is not None else "")
+        + _cloud_route_key(active_provider, runtime_base_url),
         runtime_base_url=runtime_base_url,
     ):
         return

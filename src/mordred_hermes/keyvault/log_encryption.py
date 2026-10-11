@@ -192,6 +192,19 @@ def _read_log_snapshot(path: Path) -> bytes:
             os.close(fd)
 
 
+def _make_log_header(wrapped: bytes, key_id: str, native_key_id: str | None) -> bytes:
+    """Serialize the shared exact MRAL schema for Unix and Windows writers."""
+    header = {
+        "fmt": MAGIC.decode("ascii"),
+        "ver": FORMAT_VERSION,
+        "key_id": key_id,
+        "wdek": base64.b64encode(wrapped).decode("ascii"),
+    }
+    if native_key_id is not None:
+        header[_native_key_id.NATIVE_KEY_ID_FIELD] = native_key_id
+    return json.dumps(header, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
 def _entry_aad(header_bytes: bytes) -> bytes:
     """Derive the per-entry AES-GCM AAD that binds entries to *header_bytes*.
 
@@ -415,15 +428,7 @@ class EncryptedWriter:
             backend=self.backend,
             native_key_id=self.native_key_id,
         )
-        header = {
-            "fmt": MAGIC.decode("ascii"),
-            "ver": FORMAT_VERSION,
-            "key_id": self.key_id,
-            "wdek": base64.b64encode(wrapped).decode("ascii"),
-        }
-        if self.native_key_id is not None:
-            header[_native_key_id.NATIVE_KEY_ID_FIELD] = self.native_key_id
-        header_bytes = json.dumps(header, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        header_bytes = _make_log_header(wrapped, self.key_id, self.native_key_id)
         aad = _entry_aad(header_bytes)
 
         # O_EXCL: the file must not exist — _rotate above moved any prior

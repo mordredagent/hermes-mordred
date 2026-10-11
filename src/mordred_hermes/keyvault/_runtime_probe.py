@@ -51,11 +51,13 @@ from typing import Final, NamedTuple
 from .._home import hermes_home as _hermes_home
 
 __all__ = [
+    "GatewayDiscoveryUnavailable",
     "GatewayRuntime",
     "discover_running_gateway_pythons",
     "discover_running_gateway_runtimes",
     "discover_runtime_python",
     "environment_key",
+    "require_stopped_windows_gateways",
     "runtime_config_decrypt_available",
     "runtime_env_injection_available",
     "runtime_memory_encryption_available",
@@ -396,6 +398,18 @@ def discover_runtime_python(home: Path | None = None, explicit: str | Path | Non
     home = _hermes_home() if home is None else home
 
     override = explicit if explicit is not None else os.environ.get(RUNTIME_PYTHON_ENV)
+    if sys.platform == "win32":
+        from .._windows_runtime import resolve_windows_python
+
+        if override is not None:
+            return resolve_windows_python(home, override=str(override))
+        managed = resolve_windows_python(home)
+        if managed is not None:
+            return managed
+        import shutil
+
+        launcher = shutil.which("hermes")
+        return None if launcher is None else resolve_windows_python(home, launcher=Path(launcher))
     if override:
         candidate = Path(override)
         return candidate if candidate.exists() else None
@@ -720,7 +734,8 @@ def _collect_gateway_runtimes(home: Path) -> list[GatewayRuntime]:
 def discover_running_gateway_runtimes(home: Path | None = None) -> list[GatewayRuntime]:
     """Interpreters of the ``hermes … gateway run`` processes running *right now*.
 
-    POSIX only (``[]`` on Windows). Discovery is best-effort and **never raises**
+    On Windows, an unknown inventory raises GatewayDiscoveryUnavailable.
+    POSIX discovery retains its historical best-effort behavior and never raises
     into the CLI: a missing ``ps``, a denied ``/proc``, an unparseable state file
     or any other surprise degrades to an empty list. Callers must therefore treat
     "no gateway found" as "unknown", not as proof that nothing is running.
@@ -732,7 +747,14 @@ def discover_running_gateway_runtimes(home: Path | None = None) -> list[GatewayR
     this CLI can inspect or fix; see the module docstring for why the process
     table wins over the state file's recorded argv.
     """
-    if sys.platform.startswith("win") or os.name != "posix":
+    if sys.platform == "win32":
+        from ._windows_processes import inspect_windows_gateway_runtimes
+
+        inventory = inspect_windows_gateway_runtimes(_hermes_home() if home is None else home)
+        if inventory.state == "unknown":
+            raise GatewayDiscoveryUnavailable("Windows gateway inventory is unknown: " + "; ".join(inventory.reasons))
+        return list(inventory.runtimes)
+    if os.name != "posix":
         return []
     try:
         return _collect_gateway_runtimes(_hermes_home() if home is None else home)
@@ -740,6 +762,26 @@ def discover_running_gateway_runtimes(home: Path | None = None) -> list[GatewayR
         # Broad on purpose: discovery is advisory, and raising here would abort a
         # seal (or `status`) over an unreadable process table.
         return []
+
+
+class GatewayDiscoveryUnavailable(RuntimeError):
+    """A Windows lifecycle transition cannot prove relevant gateways stopped."""
+
+
+def require_stopped_windows_gateways(home: Path) -> None:
+    """Refuse unknown or running gateways, with no force bypass.
+
+    Windows lifecycle callers must call this directly: the legacy wizard's
+    diagnostic discovery wrapper intentionally catches errors and is not a gate.
+    Filesystem lifecycle locks and final generation checks remain required.
+    """
+    from ._windows_processes import inspect_windows_gateway_runtimes
+
+    inventory = inspect_windows_gateway_runtimes(home)
+    if inventory.state == "unknown":
+        raise GatewayDiscoveryUnavailable("Windows gateway inventory is unknown: " + "; ".join(inventory.reasons))
+    if inventory.runtimes:
+        raise GatewayDiscoveryUnavailable("Stop running Windows Hermes gateways before changing memory custody")
 
 
 def discover_running_gateway_pythons(home: Path | None = None) -> list[Path]:
@@ -754,7 +796,10 @@ def _resolve_runtime_python(home: Path | None, runtime_python: Path | None) -> t
     :func:`discover_runtime_python` resolves it from ``home``.
     """
     home = _hermes_home() if home is None else home
-    python = runtime_python if runtime_python is not None else discover_runtime_python(home=home)
+    if sys.platform == "win32":
+        python = discover_runtime_python(home=home, explicit=runtime_python)
+    else:
+        python = runtime_python if runtime_python is not None else discover_runtime_python(home=home)
     if python is None:
         return None, (
             "could not locate the interpreter that runs `hermes` "

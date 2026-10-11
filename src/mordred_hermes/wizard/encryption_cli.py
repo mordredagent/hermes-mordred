@@ -82,7 +82,7 @@ from .._home import hermes_home as _hermes_home
 from ..keyvault._identity import resolve_root
 from ..keyvault._memory_hook import memory_marker_path, memory_optout_marker_path
 from ..keyvault._runtime_env import _env_optout_marker_path
-from . import _term
+from . import _term, _windows_gates
 from ._defaults import is_missing_keyvault_stack
 from ._encryption_status import _DARWIN as _DARWIN
 from ._encryption_status import _SEAL_PROBE_BYTES as _SEAL_PROBE_BYTES
@@ -105,6 +105,7 @@ from ._encryption_status import status_mark as status_mark
 from ._encryption_status import style_mark as style_mark
 from ._encryption_status import workspace_status as workspace_status
 from ._flow_session import FlowSession
+from ._windows_gates import WINDOWS as _WINDOWS
 from ._workspace_paths import WorkspacePaths, resolve_workspace_env
 
 __all__ = [
@@ -313,6 +314,12 @@ def collect_status(
     workspace: WorkspacePaths,
     on_path: Callable[[str], bool] | None = None,
 ) -> list[TargetStatus]:
+    if platform == _WINDOWS:
+        # Windows: excluded seals plus the proof-bound memory target, all from
+        # the capability predicates and load-only custody reads.
+        from ._windows_status import collect_target_statuses
+
+        return collect_target_statuses(home)
     return [
         env_status(root=root, home=home, platform=platform),
         config_status(home=home, platform=platform),
@@ -362,7 +369,7 @@ def cli_status(args: argparse.Namespace) -> int:
     return status(
         home=home,
         root=resolve_root(None),
-        platform=sys.platform,
+        platform=_windows_gates.host_platform(),
         workspace=_default_workspace_paths(),
         as_json=bool(getattr(args, "json", False)),
     )
@@ -384,7 +391,7 @@ def _dispatch(
 
     home = _hermes_home()
     root = resolve_root(None)
-    platform = sys.platform
+    platform = _windows_gates.host_platform()
 
     # target -> {verb: action}. enable/disable are explicit; the CLI adapters
     # only ever pass enable/disable/purge, and any non-enable/disable verb
@@ -423,8 +430,8 @@ def _dispatch(
                 force_runtime_unverified=force_runtime_unverified,
                 flow_session=flow_session,
             ),
-            "disable": lambda: memory_cli.disable(home=home, root=root),
-            "purge": lambda: memory_cli.purge(home=home, root=root),
+            "disable": lambda: memory_cli.disable(home=home, root=root, platform=platform),
+            "purge": lambda: memory_cli.purge(home=home, root=root, platform=platform),
         },
     }
     if target in routes:
@@ -527,8 +534,14 @@ def _run_core_target(
     a skip instead of a failure. ``disable`` / ``purge`` still run regardless
     of platform or seam: they clear state and decrypt files back, which is
     exactly what a broken seam or the wrong OS needs.
+
+    On Windows the env/config seals are excluded and skipped for every verb,
+    while memory always runs: its proof-bound flow checks the installed
+    runtime itself, so this interpreter's seam is not consulted.
     """
-    if target == "memory" and verb == "enable":
+    if platform == _WINDOWS and target in ("env", "config"):
+        return "skipped (excluded on Windows; retained state is preserved unchanged)", 0, True
+    if target == "memory" and verb == "enable" and platform != _WINDOWS:
         if platform != _DARWIN:
             return (
                 f"skipped (macOS only — the memory sealing runtime is not available on {platform})",
@@ -577,7 +590,7 @@ def _dispatch_all(
     affects the env and config enables (the runtime-gated seals); see
     :func:`_dispatch`.
     """
-    platform = sys.platform if platform is None else platform
+    platform = _windows_gates.host_platform() if platform is None else platform
     on_path = _default_on_path() if on_path is None else on_path
 
     outcomes: list[tuple[str, str]] = []

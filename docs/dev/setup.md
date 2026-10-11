@@ -384,3 +384,56 @@ account: enter API credentials, OTP and 2FA directly in the login screen, then
 perform a small read-only sync, one query, cancellation and logout. Never put
 those credentials or real message content into logs or test fixtures. Report
 this gate as pending when it has not run.
+
+### Native Windows installer and helper validation (C4)
+
+This wizard slice provides installation and helper probes; full Windows product
+acceptance is still incomplete. Use a native PowerShell session and an isolated
+Hermes installation/profile. For unpublished code, build a wheel from the sdist
+and supply that exact wheel, rather than assuming a PyPI release contains it:
+
+```powershell
+$env:HERMES_HOME = Join-Path $env:TEMP ('mordred-test-' + [Guid]::NewGuid().ToString('N'))
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1 `
+  -Python 'C:\test Hermes\venv\Scripts\python.exe' `
+  -Source 'C:\builds\hermes_mordred-<version>-py3-none-any.whl' -InstallOnly
+```
+
+`-Version <exact-version>` selects a pinned release instead of `-Source`.
+`-Uv <path>` selects uv explicitly; otherwise PATH or Desktop's bundled uv is
+used. The installer validates the selected interpreter, Hermes's entry-point
+loader and Mordred's Windows wizard code, prints actual module/interpreter paths,
+and preserves Hermes dependency pins. Installation-only mode skips canonical
+configuration, legacy plugin identity migration and setup. Without that flag,
+legacy identity migration uses the existing writer; `-Action configure` or
+`-Action setup` delegates the canonical CLI and propagates its failure. These
+writers depend on C3. `-Action uninstall -CommandArgs --dry-run` delegates the
+installed uninstall command. No production profile should be used for tests.
+
+The exposed PowerShell launcher lives in `<HERMES_HOME>\bin`; add that directory
+to PATH if desired. It receives a hash-bound ownership receipt. An unknown
+launcher/executable is preserved, and unsafe reparse destinations are refused.
+Windows helper installation uses the same ownership rules:
+
+```powershell
+& 'C:\test Hermes\venv\Scripts\hermes-mordred.exe' keyvault enable-winkey
+# Optional destination must be fully qualified; verification uses this exact file.
+& 'C:\test Hermes\venv\Scripts\hermes-mordred.exe' keyvault enable-winkey `
+  --install-dir 'C:\private helper Unicode\bin'
+```
+
+Install Rust's native MSVC toolchain and Visual C++ Build Tools first. Helper
+installation probes TPM/CNG under the existing user token. It does not enable
+memory encryption or provide per-use presence. A failed probe remains a failure
+with its native reason. Standalone `native/winkey-helper/build.ps1` retains its
+helper-only build contract; the wizard passes optional `-OwnedInstall` to create
+ownership receipts. Existing helpers without receipts are retained by uninstall.
+Custom helpers remain at their selected location; set `MORDRED_WINKEY_HELPER` to
+that absolute executable when using them, and inspect/remove owned custom files
+explicitly if they are outside the profile's default bin directory.
+
+Run `tests/test_windows_install_powershell.py` natively to exercise PowerShell 5.1
+and pwsh argument passing and exit codes with compiled fixture executables and
+temporary profiles, without network package installation. Native wheel installs,
+TPM probes and ordinary-user Windows 11 acceptance remain separate controller-run
+gates; macOS/Linux unit evidence does not establish those results.

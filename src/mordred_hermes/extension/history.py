@@ -9,6 +9,12 @@ Storage: ``~/.hermes/extension/history.enc`` — a single `🔒ENC:v1:` blob who
 plaintext is the JSON agent-message list. We rewrite the whole blob per turn
 (chat-scale data); a paired client decrypts it (or Hermes decrypts server-side
 for the keyless localhost page).
+
+On Windows the blob is persisted through the checked private directory of
+:mod:`._windows_storage` (bounded, identity-bound reads; checked create or
+replace; identity-bound clear). The key source and envelope are unchanged.
+Storage refusals raise :class:`._windows_storage.ExtensionStorageError` and
+are never reported as an empty or undecryptable history.
 """
 
 from __future__ import annotations
@@ -16,11 +22,13 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..keyvault._storage import atomic_write
+from . import _windows_storage as _storage
 from .crypto import decrypt_message, encrypt_message
 from .pairing import load_pairing
 
@@ -64,6 +72,8 @@ def _history_path() -> Path:
     from .._home import hermes_home
 
     d = hermes_home() / "extension"
+    if _storage.enabled():
+        return d / "history.enc"  # the checked session admits/creates the directory
     d.mkdir(parents=True, exist_ok=True)
     return d / "history.enc"
 
@@ -78,6 +88,9 @@ def save_messages(messages: list[dict[str, Any]]) -> None:
     key = _key()
     if key is None:
         return
+    if _storage.enabled():
+        _save_checked(key, messages)
+        return
     try:
         blob = encrypt_message(key, json.dumps(messages, ensure_ascii=False))
         # Canonical 0600 atomic write (keyvault._storage): unpredictable tmp
@@ -88,6 +101,20 @@ def save_messages(messages: list[dict[str, Any]]) -> None:
         atomic_write(_history_path(), blob.encode("utf-8"))
     except Exception:
         logger.debug("extension history save failed", exc_info=True)
+
+
+def _save_checked(key: bytes, messages: list[dict[str, Any]]) -> None:
+    """Windows: serialization stays best-effort; storage refusals propagate.
+
+    A refused or uncertain save must reach the chat turn instead of letting the
+    next turn silently start from a different stored history.
+    """
+    try:
+        blob = encrypt_message(key, json.dumps(messages, ensure_ascii=False))
+    except Exception:
+        logger.debug("extension history save failed", exc_info=True)
+        return
+    _storage.write_file(_history_path(), blob.encode("utf-8"))
 
 
 def _warn_undecryptable_once() -> None:
@@ -104,15 +131,24 @@ def _warn_undecryptable_once() -> None:
 
 def load_history() -> HistoryLoad:
     """Decrypt the stored agent message list and report why it is what it is."""
-    global _undecryptable_warned
     key = _key()
     if key is None:
         return HistoryLoad([], STATUS_UNAVAILABLE)
     path = _history_path()
+    if _storage.enabled():
+        raw = _storage.read_file(path)
+        if raw is None:
+            return HistoryLoad([], STATUS_EMPTY)
+        return _decrypt_history(key, lambda: raw.decode("utf-8"))
     if not path.exists():
         return HistoryLoad([], STATUS_EMPTY)
+    return _decrypt_history(key, lambda: path.read_text("utf-8"))
+
+
+def _decrypt_history(key: bytes, text: Callable[[], str]) -> HistoryLoad:
+    global _undecryptable_warned
     try:
-        blob = path.read_text("utf-8").strip()
+        blob = text().strip()
         data = json.loads(decrypt_message(key, blob))
     except Exception:
         _warn_undecryptable_once()
@@ -136,6 +172,10 @@ def load_messages() -> list[dict[str, Any]]:
 
 def clear() -> None:
     global _undecryptable_warned
+    if _storage.enabled():
+        _storage.delete_file(_history_path())
+        _undecryptable_warned = False
+        return
     with contextlib.suppress(OSError):
         _history_path().unlink()
     _undecryptable_warned = False

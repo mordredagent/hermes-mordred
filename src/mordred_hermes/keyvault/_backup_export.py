@@ -254,6 +254,9 @@ def export_backup(
     #24); a sink failure on that emit is suppressed since the blob is
     already in hand.
     """
+    from ._windows_capability import refuse_excluded_on_windows
+
+    refuse_excluded_on_windows("recovery", "export_backup")  # before any I/O (C5e)
     # Function-local: avoids the _secret_ops -> _backup_export -> _secret_ops
     # load cycle (see this module's docstring).
     from ._secret_ops import _MANIFEST_VERSION, _assert_key_committed

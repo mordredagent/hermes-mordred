@@ -16,10 +16,12 @@ lock). Hermes picks the change up on the next tool call; no restart needed.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from . import _term
+from .policy_writer import PolicyWriter, _windows
 
 _DESCRIPTIONS = {
     "lockdown": "no internet from tools (local tools and Mordred's Telegram tools only)",
@@ -44,10 +46,37 @@ def _current_section(path: Path) -> dict[str, Any]:
     return dict(raw) if isinstance(raw, dict) else {}
 
 
+def _edit_section(path: Path, transform: Callable[[dict[str, Any]], None]) -> None:
+    if _windows():
+
+        def edit(root: Any) -> None:
+            plugins = root.setdefault("plugins", {})
+            section = plugins.setdefault("mordred_privacy_check", {})
+            raw = section.get("tool_egress")
+            egress = dict(raw) if isinstance(raw, dict) else {}
+            transform(egress)
+            section["tool_egress"] = egress
+
+        mordred = path.parent / "mordred"
+        PolicyWriter(path, mordred / "policy.json", mordred).transform_config(edit)
+    else:
+        section = _current_section(path)
+        transform(section)
+        _write_section(path, section)
+
+
 def _write_section(path: Path, tool_egress: dict[str, Any]) -> None:
     """Replace only ``plugins.mordred_privacy_check.tool_egress``."""
     from .policy_writer import _atomic_write_text, _policy_write_lock, _read_regular_text, _round_trip_yaml
 
+    if _windows():
+
+        def replace(section: dict[str, Any]) -> None:
+            section.clear()
+            section.update(tool_egress)
+
+        _edit_section(path, replace)
+        return
     with _policy_write_lock(path.parent):
         yaml = _round_trip_yaml()
         text = _read_regular_text(path)
@@ -85,36 +114,34 @@ def egress_set(level: str, *, config_path: Path | None = None) -> int:
         _term.emit_error(f"level must be one of: {', '.join(LEVELS)}")
         return 1
     path = config_path or _config_path()
-    section = _current_section(path)
-    section["level"] = level
-    _write_section(path, section)
+    _edit_section(path, lambda section: section.update(level=level))
     print(f"Tool egress level set to {level}: {_DESCRIPTIONS[level]}.")
     return 0
 
 
 def egress_list_edit(key: str, value: str, *, add: bool, config_path: Path | None = None) -> int:
     path = config_path or _config_path()
-    section = _current_section(path)
-    items = [str(v) for v in section.get(key, []) if isinstance(v, str | int)]
     value = value.strip().casefold() if key == "blocklist" else value.strip()
     if not value:
         _term.emit_error("a value is required.")
         return 1
-    if add and value not in items:
-        items.append(value)
-    if not add:
-        items = [v for v in items if v != value]
-    section[key] = items
-    _write_section(path, section)
+
+    def transform(section: dict[str, Any]) -> None:
+        items = [str(v) for v in section.get(key, []) if isinstance(v, str | int)]
+        if add and value not in items:
+            items.append(value)
+        if not add:
+            items = [v for v in items if v != value]
+        section[key] = items
+
+    _edit_section(path, transform)
     print(f"{'Added' if add else 'Removed'} {value} {'to' if add else 'from'} {key}.")
     return 0
 
 
 def egress_taint(enabled: bool, *, config_path: Path | None = None) -> int:
     path = config_path or _config_path()
-    section = _current_section(path)
-    section["taint"] = enabled
-    _write_section(path, section)
+    _edit_section(path, lambda section: section.update(taint=enabled))
     print(f"Taint {'enabled' if enabled else 'disabled'}.")
     return 0
 

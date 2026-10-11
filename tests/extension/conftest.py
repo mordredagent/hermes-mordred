@@ -32,3 +32,4 @@ def _memory_encryption_on(request, monkeypatch):
     except ImportError:
         return
     monkeypatch.setattr(memory_guard, "memory_encryption_active", lambda home=None: True)
+    monkeypatch.setattr(memory_guard, "require_memory_encryption", lambda home=None: None)

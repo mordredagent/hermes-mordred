@@ -250,8 +250,17 @@ class TestPsUnavailable:
         _install_ps(monkeypatch, _FakePs(scan=_scan_row(1, "/bin/python3 -m hermes_cli.main gateway run")))
         assert discover_running_gateway_pythons(home=tmp_path / "home") == []
 
-    def test_windows_returns_empty_without_running_ps(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_windows_known_empty_inventory_without_running_ps(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr(sys, "platform", "win32")
+        from mordred_hermes.keyvault import _windows_processes
+
+        monkeypatch.setattr(
+            _windows_processes,
+            "inspect_windows_gateway_runtimes",
+            lambda home: _windows_processes.GatewayInventory("known", (), ()),
+        )
 
         def _never(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
             raise AssertionError("ps must not run on Windows")

@@ -22,16 +22,83 @@ from __future__ import annotations
 import contextlib
 import logging
 import sys
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 from .._audit_support import safe_audit_append
 from .._plugin_identity import MIGRATE_COMMAND, PLUGIN_NAME
 from .._policy_types import VALID_ACTIVE_PATHS, ActivePath
 from . import _runtime
-from ._exceptions import MordredIntegrityRefused
+from ._exceptions import AuditWriterRefused, MordredIntegrityRefused
 from .policy import evaluate_pre_tool_call
 
 _LOG = logging.getLogger("mordred.privacy_check")
+
+_POLICY_UNREADABLE = "Mordred cannot safely read its canonical privacy policy"
+
+
+def _windows_unavailable_message(exc: BaseException) -> str:
+    """Name the Windows audit refusal instead of blaming the policy read."""
+    if isinstance(exc, AuditWriterRefused):
+        return f"Mordred cannot use its Windows audit log ({exc.reason})"
+    return _POLICY_UNREADABLE
+
+
+def _audit_refusal(state: Any) -> str | None:
+    """Sticky Windows audit-writer refusal (poison/uncertainty), else ``None``."""
+    if _runtime._platform != "nt":
+        return None
+    from ._windows_audit import audit_writer_refusal
+
+    return audit_writer_refusal(state.audit)
+
+
+def _record(state: Any, entry: dict[str, Any]) -> bool:
+    """Append one audit entry; ``False`` when Windows could not record it.
+
+    POSIX keeps :func:`safe_audit_append`'s log-and-continue behavior. On
+    Windows an unrecorded entry makes the hooked operation fail closed, so the
+    ordinary failure is logged and reported to the caller instead.
+    """
+    if _runtime._platform != "nt":
+        safe_audit_append(state.audit, entry, logger=_LOG)
+        return True
+    try:
+        state.audit.append(entry)
+    except Exception as e:
+        _LOG.error("audit append failed for entry %r: %s", entry, e)
+        return False
+    return True
+
+
+def _recoverable_refusal(exc: BaseException) -> bool:
+    """A construction refusal that refuses only this operation (retried next)."""
+    if not isinstance(exc, AuditWriterRefused):
+        return False
+    from ._windows_audit import refusal_is_recoverable
+
+    return refusal_is_recoverable(exc.reason)
+
+
+def _refuse_windows_session(message: str, *, sticky: bool) -> NoReturn:
+    """Refuse the session; poison the process only for a sticky refusal.
+
+    Sticky refusals (an unreadable policy as in C8, a poisoned/uncertain writer,
+    retained ciphertext, broken or unsafe custody) poison like the C8 gate.
+    Recoverable audit failures refuse only this session start, so the next one
+    retries once the cause clears.
+    """
+    if sticky:
+        _runtime.poison(message)
+    _LOG.error(message)
+    raise MordredIntegrityRefused(message) from None
+
+
+def _refuse_unrecorded(state: Any, message: str) -> NoReturn:
+    """Refuse a session whose Windows audit entry could not be recorded."""
+    refusal = _audit_refusal(state)
+    if refusal is None:
+        _refuse_windows_session(message, sticky=False)
+    _refuse_windows_session(f"{message} ({refusal})", sticky=True)
 
 
 def _resolve_active_network_path() -> ActivePath | None:
@@ -67,8 +134,28 @@ def check_plugin_integrity(**kwargs: Any) -> None:
     manager in hand it also reports each failed component as
     ``mordred/<component>``.
     """
-    state = _runtime.ensure_state()
-    disabled = _runtime.find_disabled_siblings(config_path=state.config_path)
+    _check_plugin_integrity_state(**kwargs)
+
+
+def _check_plugin_integrity_state(**kwargs: Any) -> _runtime.PluginState:
+    """Return the state that passed the gate without another canonical read."""
+    try:
+        state = _runtime.ensure_state()
+    except Exception as exc:
+        if _runtime._platform != "nt":
+            raise
+        message = f"{_windows_unavailable_message(exc)}; session refused."
+        _refuse_windows_session(message, sticky=not _recoverable_refusal(exc))
+    refusal = _audit_refusal(state)
+    if refusal is not None:
+        _refuse_windows_session(
+            f"Mordred cannot write its Windows audit log ({refusal}); session refused.", sticky=True
+        )
+    disabled = (
+        _runtime.disabled_from_checked(state.checked)
+        if state.checked is not None
+        else _runtime.find_disabled_siblings(config_path=state.config_path)
+    )
     plugin_manager = kwargs.get("plugin_manager")
     if plugin_manager is not None:
         disabled.update(_runtime.find_unloaded_siblings(plugin_manager))
@@ -76,22 +163,22 @@ def check_plugin_integrity(**kwargs: Any) -> None:
     if disabled:
         hint = _legacy_names_hint(state.config_path) if PLUGIN_NAME in disabled else ""
         decision = "block" if state.policy_mode == "strict" else "warn"
-        # safe_audit_append, not a bare append: Hermes wraps every hook callback
+        # Never a bare append: Hermes wraps every hook callback
         # in ``except Exception`` and logs-and-continues. A plain Exception from
         # the audit write (disk full, permission flip, an over-long entry) would
         # therefore be swallowed BEFORE the refusal below ever fires, and the
         # session would proceed unprotected — a fail-open bypass of the very
         # gate this hook exists to enforce. The refusal must outrank the audit
-        # write, so audit-side errors are logged and swallowed here instead.
-        safe_audit_append(
-            state.audit,
+        # write, so audit-side errors are logged and swallowed by ``_record``;
+        # on Windows an unrecorded entry then refuses the session below.
+        recorded = _record(
+            state,
             {
                 "event": "on_session_start",
                 "decision": decision,
                 "reason": "mordred.degraded.disable_unprotected",
                 "disabled_siblings": sorted(disabled),
             },
-            logger=_LOG,
         )
         if state.policy_mode == "strict":
             msg = (
@@ -113,9 +200,12 @@ def check_plugin_integrity(**kwargs: Any) -> None:
             with contextlib.suppress(Exception):
                 print(f"mordred: {msg}", file=sys.stderr)
             raise MordredIntegrityRefused(msg)
+        if not recorded:
+            _refuse_unrecorded(state, "Mordred could not record its Windows integrity audit entry; session refused.")
         _LOG.warning(
             "Mordred plugin not loaded or incomplete in %s mode: %s.%s", state.policy_mode, sorted(disabled), hint
         )
+    return state
 
 
 def _legacy_names_hint(config_path: Any) -> str:
@@ -138,18 +228,28 @@ def on_session_start(**kwargs: Any) -> None:
     Always emits ``mordred.degraded.no_origin_skill`` once per process
     (HOOK_PAYLOADS §4: ``origin_skill`` absent from ``pre_tool_call`` payload).
     """
-    check_plugin_integrity(**kwargs)
-    state = _runtime.ensure_state()
+    if _runtime._platform == "nt":
+        # The marker belongs to the already checked startup decision. A second
+        # read here could fail outside the hard-refusal gate and be swallowed
+        # by Hermes's ordinary-exception hook wrapper.
+        state = _check_plugin_integrity_state(**kwargs)
+    else:
+        check_plugin_integrity(**kwargs)
+        state = _runtime.ensure_state()
     if _runtime.claim_no_origin_skill_emit():
-        safe_audit_append(
-            state.audit,
+        recorded = _record(
+            state,
             {
                 "event": "on_session_start",
                 "decision": "warn",
                 "reason": "mordred.degraded.no_origin_skill",
             },
-            logger=_LOG,
         )
+        if not recorded:
+            if _audit_refusal(state) is None:
+                # Recoverable: the next session start must retry the marker.
+                _runtime.release_no_origin_skill_emit()
+            _refuse_unrecorded(state, "Mordred could not record its Windows session audit entry; session refused.")
 
 
 def _check_tool_egress(state: Any, tool_name: str, kwargs: dict[str, Any]) -> dict[str, Any] | None:
@@ -158,7 +258,8 @@ def _check_tool_egress(state: Any, tool_name: str, kwargs: dict[str, Any]) -> di
 
     session_id = str(kwargs.get("session_id") or "") or None
     try:
-        policy = egress.load_policy()
+        checked = getattr(state, "checked", None)
+        policy = checked.egress if checked is not None else egress.load_policy()
         decision = egress.decide(tool_name, kwargs.get("args"), session_id, policy)
     except Exception:
         _LOG.exception("tool-egress evaluation failed; blocking %s", tool_name)
@@ -171,8 +272,8 @@ def _check_tool_egress(state: Any, tool_name: str, kwargs: dict[str, Any]) -> di
     if decision.approve:
         # Hermes shows its approval prompt (once / session / always / deny) and
         # blocks the call on deny or when no human is present.
-        safe_audit_append(
-            state.audit,
+        recorded = _record(
+            state,
             {
                 "event": "pre_tool_call",
                 "decision": "ask",
@@ -181,11 +282,13 @@ def _check_tool_egress(state: Any, tool_name: str, kwargs: dict[str, Any]) -> di
                 "level": policy.level,
                 "tool_name": tool_name,
             },
-            logger=_LOG,
         )
+        if not recorded:
+            # Windows: an approval that cannot be audited is refused outright.
+            return {"action": "block", "message": "Mordred could not record this approval in its audit log."}
         return {"action": "approve", "message": decision.message, "rule_key": decision.rule_key}
-    safe_audit_append(
-        state.audit,
+    _record(
+        state,
         {
             "event": "pre_tool_call",
             "decision": "block",
@@ -194,7 +297,6 @@ def _check_tool_egress(state: Any, tool_name: str, kwargs: dict[str, Any]) -> di
             "level": policy.level,
             "tool_name": tool_name,
         },
-        logger=_LOG,
     )
     return {"action": "block", "message": decision.message}
 
@@ -206,26 +308,36 @@ def pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     is absent from the payload (HOOK_PAYLOADS §4). Strict-mode
     per-skill checks live in :mod:`install_wrapper`.
     """
-    state = _runtime.ensure_state()
+    try:
+        state = _runtime.ensure_state()
+    except Exception as exc:
+        if _runtime._platform != "nt":
+            raise
+        return {"action": "block", "message": f"{_windows_unavailable_message(exc)}."}
     tool_name = str(kwargs.get("tool_name") or "")
 
     if _runtime.is_poisoned():
         # Same fail-open reasoning as on_session_start: the block decision must
         # survive an audit-write failure, so the append can never raise past us.
-        safe_audit_append(
-            state.audit,
+        _record(
+            state,
             {
                 "event": "pre_tool_call",
                 "decision": "block",
                 "reason": "mordred.degraded.disable_unprotected",
                 "tool_name": tool_name,
             },
-            logger=_LOG,
         )
         return {
             "action": "block",
             "message": _runtime.get_poison_reason() or "Mordred strict mode: process poisoned",
         }
+
+    refusal = _audit_refusal(state)
+    if refusal is not None:
+        # A poisoned/uncertain Windows audit writer refuses every tool until
+        # audit custody is reconciled and Hermes restarts.
+        return {"action": "block", "message": f"Mordred cannot write its Windows audit log ({refusal})."}
 
     egress_block = _check_tool_egress(state, tool_name, kwargs)
     if egress_block is not None:
@@ -237,15 +349,14 @@ def pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
         active_path=_resolve_active_network_path(),
     )
     if outcome.decision == "block":
-        safe_audit_append(
-            state.audit,
+        _record(
+            state,
             {
                 "event": "pre_tool_call",
                 "decision": "block",
                 "reason": outcome.reason,
                 "tool_name": tool_name,
             },
-            logger=_LOG,
         )
         return {
             "action": "block",

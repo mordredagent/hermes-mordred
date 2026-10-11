@@ -56,12 +56,15 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import os
 import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+
+_platform = os.name
 
 LEVELS = ("lockdown", "search", "ask", "blocklist", "off")
 DEFAULT_LEVEL = "ask"
@@ -231,11 +234,18 @@ _cache: dict[str, Any] = {}
 
 
 def load_policy(config_path: Path | None = None) -> EgressPolicy:
-    """Read ``tool_egress`` from config.yaml, re-reading when the file changes."""
+    """Read tool-egress settings; Windows refreshes the pair and propagates refusal.
+
+    POSIX retains the historical mtime cache and lockdown fallback.
+    """
     from .._home import hermes_home
     from .._yaml_io import load_plugin_section
 
     path = config_path or (hermes_home() / "config.yaml")
+    if _platform == "nt":
+        from ._checked_policy import read_checked_policy
+
+        return read_checked_policy(path).egress
     try:
         stat = path.stat()
         stamp = (str(path), stat.st_mtime_ns, stat.st_size)

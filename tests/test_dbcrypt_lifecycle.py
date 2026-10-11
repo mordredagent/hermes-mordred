@@ -298,7 +298,11 @@ if sys.argv[3] == 'True':
 else:
     assert dbcrypt.install(home=home) is False
     assert _monitor.check(home) == []
-    assert databases_cli.databases_status(home=home) == 0
+    # Simulated Windows has no checked Win32 storage backend on a POSIX host.
+    # A failed observation must refuse, rather than report an empty home.
+    import os
+    expected = 1 if sys.platform == 'win32' and os.name != 'nt' else 0
+    assert databases_cli.databases_status(home=home) == expected
 assert databases_cli.databases_encrypt(home=home) == 1
 assert databases_cli.databases_decrypt(home=home) == 1
 """

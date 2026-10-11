@@ -11,23 +11,31 @@ library defaults.
 
 Bridges / obfs4 / Snowflake are not supported. The
 caller is expected to surface a startup warning on censored networks.
+
+Native Windows launches, private ``tor-data`` state, startup cleanup and the
+exact child lifetime live in :mod:`._tor_windows`; :func:`start_process`,
+:func:`stop` and :func:`circuit_status_health` dispatch to it on ``win32``
+only, so POSIX behavior is unchanged.
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
-import queue
 import socket
 import subprocess
+import sys
 import threading
 import time
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Protocol, cast
 
+from ..._policy_types import PolicyMode
 from .._exceptions import BringupFailed
+from . import _tor_windows
 
 _LOG = logging.getLogger("mordred.network.paths.tor")
 
@@ -36,6 +44,11 @@ DEFAULT_PORT_CANDIDATES: Final[tuple[int, ...]] = (9050, 9150)
 DEFAULT_BOOTSTRAP_TIMEOUT: Final[float] = 30.0
 DEFAULT_GRACE_SECONDS: Final[float] = 5.0
 BOOTSTRAP_DONE_TOKEN: Final[str] = "Bootstrapped 100%"
+# Bootstrap output caps (all platforms): one line, and lines buffered for the
+# bootstrap reader. Exceeding either is a classified bring-up failure; the
+# pump keeps draining (and discarding) the pipe so Tor never blocks on it.
+MAX_BOOTSTRAP_LINE_CHARS: int = 8192
+MAX_BUFFERED_BOOTSTRAP_LINES: int = 1024
 
 # Module-level latch: emit the [tor-control]-missing WARNING exactly once
 # per process (the 30s liveness worker would spam logs every interval
@@ -68,7 +81,15 @@ class TorHandle:
     data_dir: Path
 
 
-def render_torrc(*, socks_port: int, control_port: int, data_dir: Path, disable_ipv6: bool = False) -> str:
+def render_torrc(
+    *,
+    socks_port: int,
+    control_port: int,
+    data_dir: Path,
+    disable_ipv6: bool = False,
+    quote_paths: bool = False,
+    owning_controller_pid: int | None = None,
+) -> str:
     """Render the torrc fragment we hand to ``tor -f -``.
 
     ``IsolateSOCKSAuth`` is set explicitly so an optional process-scoped
@@ -83,16 +104,36 @@ def render_torrc(*, socks_port: int, control_port: int, data_dir: Path, disable_
     IPv6 or constrain provider SDK sockets, so the transport flagger cannot
     treat it as leak prevention. It defaults to False here so the parameter is
     purely additive for callers that don't pass it.
+
+    Native Windows passes ``quote_paths=True``: the DataDirectory becomes a
+    torrc quoted string (backslashes and quotes escaped, control characters
+    refused) so spaces, ``#`` and non-ASCII profile paths survive Tor's
+    parser. ``owning_controller_pid`` adds ``__OwningControllerProcess`` so
+    Tor itself exits when the launching process disappears. Both default off,
+    leaving the POSIX rendering byte-identical.
     """
+    directory = _torrc_quoted(str(data_dir)) if quote_paths else f"{data_dir}"
     lines = [
         f"SOCKSPort 127.0.0.1:{socks_port} IsolateSOCKSAuth",
         f"ControlPort 127.0.0.1:{control_port}",
         "CookieAuthentication 1",
-        f"DataDirectory {data_dir}",
+        f"DataDirectory {directory}",
     ]
+    if owning_controller_pid is not None:
+        if type(owning_controller_pid) is not int or owning_controller_pid <= 0:
+            raise BringupFailed(f"invalid owning controller pid for Tor: {owning_controller_pid!r}")
+        lines.append(f"__OwningControllerProcess {owning_controller_pid}")
     if disable_ipv6:
         lines.append("ClientUseIPv6 0")
     return "".join(f"{line}\n" for line in lines)
+
+
+def _torrc_quoted(value: str) -> str:
+    """Tor C-string quoting; a control character could inject torrc lines."""
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        raise BringupFailed("tor data directory path contains control characters; refusing to render torrc")
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 def pick_free_port(
@@ -202,59 +243,108 @@ def _make_piped_read_line(stdout: Iterable[str]) -> tuple[ReadLine, Callable[[],
     the pre-thread behavior where a torn-down pipe raised on the caller's
     thread and surfaced as ``BringupFailed`` with a real ``__cause__``.
     ``cleanup()`` switches the thread to discard/drain mode.
+
+    Buffers are bounded: a line longer than :data:`MAX_BOOTSTRAP_LINE_CHARS`
+    or more than :data:`MAX_BUFFERED_BOOTSTRAP_LINES` unread lines raise a
+    classified :class:`BringupFailed` from ``read_line`` once the lines
+    already buffered have been delivered; the pump then only drains.
     """
-    lines: queue.SimpleQueue[str | BaseException | None] = queue.SimpleQueue()
-    draining = threading.Event()
+    pump = _LinePump()
     threading.Thread(
         target=_pump_stdout_lines,
-        args=(stdout, lines, draining),
+        args=(stdout, pump),
         name="mordred-tor-bootstrap-read",
         daemon=True,
     ).start()
-    eof_seen = False
+    terminal_delivered = False
 
     def read_line(deadline_seconds: float) -> str | None:
-        nonlocal eof_seen
-        if eof_seen:
-            return None
-        try:
-            item = lines.get(timeout=max(deadline_seconds, 0.0))
-        except queue.Empty:
+        nonlocal terminal_delivered
+        with pump.ready:
+            if terminal_delivered:
+                return None
+            pump.ready.wait_for(pump.has_item, timeout=max(deadline_seconds, 0.0))
+            if pump.lines:
+                return pump.lines.popleft()
+            if pump.error is not None:
+                terminal_delivered = True
+                error, pump.error = pump.error, None
+                raise error
+            if pump.overflow is not None:
+                terminal_delivered = True
+                raise BringupFailed(pump.overflow)
+            if pump.eof:
+                terminal_delivered = True
+                return None
             return ""
-        if isinstance(item, BaseException):
-            eof_seen = True
-            raise item
-        if item is None:
-            eof_seen = True
-        return item
 
     def cleanup() -> None:
-        draining.set()
+        with pump.ready:
+            pump.draining = True
+            pump.lines.clear()
 
     return read_line, cleanup
 
 
-def _pump_stdout_lines(
-    stdout: Iterable[str],
-    lines: queue.SimpleQueue[str | BaseException | None],
-    draining: threading.Event,
-) -> None:
+@dataclass
+class _LinePump:
+    """Bounded hand-off between the pump thread and ``read_line``."""
+
+    ready: threading.Condition = field(default_factory=threading.Condition)
+    lines: deque[str] = field(default_factory=deque)
+    error: BaseException | None = None
+    overflow: str | None = None
+    eof: bool = False
+    draining: bool = False
+
+    def has_item(self) -> bool:
+        return bool(self.lines) or self.error is not None or self.overflow is not None or self.eof
+
+
+def _bounded_chunks(stdout: Iterable[str]) -> Iterator[str]:
+    """``readline(limit)`` keeps one oversized line from accumulating in memory."""
+    readline = getattr(stdout, "readline", None)
+    if not callable(readline):
+        yield from stdout
+        return
+    while True:
+        chunk = readline(MAX_BOOTSTRAP_LINE_CHARS + 1)
+        if not chunk:
+            return
+        yield chunk
+
+
+def _pump_stdout_lines(stdout: Iterable[str], pump: _LinePump) -> None:
     """Pump thread body for :func:`_make_piped_read_line`.
 
-    Blocks in ``readline`` and forwards bootstrap lines into ``lines``.
-    Once ``draining`` is set, it consumes and discards all later output so the
-    child's pipe never applies backpressure. Errors are delivered only while a
-    caller is still reading; the trailing ``None`` sentinel signals EOF.
+    Blocks in ``readline`` and forwards bootstrap lines into ``pump``.
+    Once ``draining`` is set (cleanup or a classified overflow), it consumes
+    and discards all later output so the child's pipe never applies
+    backpressure. Errors are delivered only while a caller is still reading;
+    ``eof`` signals the end of the stream.
     """
     try:
-        for line in stdout:
-            if not draining.is_set():
-                lines.put(line)
+        for chunk in _bounded_chunks(stdout):
+            with pump.ready:
+                if pump.draining:
+                    continue
+                if len(chunk.removesuffix("\n")) > MAX_BOOTSTRAP_LINE_CHARS:
+                    pump.overflow = f"tor bootstrap output line exceeded {MAX_BOOTSTRAP_LINE_CHARS} characters"
+                    pump.draining = True
+                elif len(pump.lines) >= MAX_BUFFERED_BOOTSTRAP_LINES:
+                    pump.overflow = f"tor bootstrap output exceeded {MAX_BUFFERED_BOOTSTRAP_LINES} buffered lines"
+                    pump.draining = True
+                else:
+                    pump.lines.append(chunk)
+                pump.ready.notify_all()
     except Exception as exc:  # delivered, not swallowed: read_line re-raises
-        if not draining.is_set():
-            lines.put(exc)
+        with pump.ready:
+            if not pump.draining:
+                pump.error = exc
     finally:
-        lines.put(None)  # EOF/abandon sentinel
+        with pump.ready:
+            pump.eof = True
+            pump.ready.notify_all()
 
 
 def wait_for_bootstrap(
@@ -314,8 +404,15 @@ def stop(handle: TorHandle, *, grace_seconds: float = DEFAULT_GRACE_SECONDS) -> 
     Exception``), *not* the built-in :class:`TimeoutError` (which is an
     ``OSError`` subclass). We must catch the former so the kill
     escalation actually fires in production.
+
+    A native Windows child (:class:`._tor_windows.WindowsTorProcess`) uses its
+    exact teardown: identity-revalidated handle termination, then the
+    kill-on-close job and its private daemon record.
     """
     proc = handle.process
+    if isinstance(proc, _tor_windows.WindowsTorProcess):
+        proc.stop(grace_seconds=grace_seconds)
+        return
     if proc.poll() is not None:
         return
     proc.terminate()
@@ -359,9 +456,16 @@ class _ControllerLike(Protocol):
     Stem does PROTOCOLINFO discovery + cookie read internally, so we
     invoke it with no positional args. Fakes that previously accepted
     ``cookie=...`` would have masked the API mismatch.
+
+    Native Windows first calls ``get_protocolinfo()`` and passes the response
+    whose ``COOKIEFILE`` is pinned to the private ``tor-data`` cookie as
+    ``authenticate(protocolinfo_response=...)``; POSIX still calls
+    ``authenticate()`` with no arguments.
     """
 
-    def authenticate(self) -> None: ...
+    def authenticate(self, *, protocolinfo_response: Any = None) -> None: ...
+
+    def get_protocolinfo(self) -> Any: ...
 
     def get_info(self, key: str) -> str: ...
 
@@ -432,7 +536,12 @@ def circuit_status_health(
     Graceful degradation applies only when the deep probe is unavailable:
 
     - Missing ``control_auth_cookie`` (Tor still bootstrapping or data
-      dir wiped) → shallow fallback.
+      dir wiped) → shallow fallback. On native Windows the cookie is first
+      read through a checked bounded reader; an unsafe or wrongly sized
+      cookie → ``False``. stem then re-reads the cookie with a raw ``open()``
+      at the path Tor reports in PROTOCOLINFO, so on native Windows that
+      path is pinned to the private ``tor-data`` cookie first; a missing or
+      different reported path → ``False`` with a classified WARNING.
     - ImportError from the default factory (the user did not install
       ``hermes-mordred[tor-control]``) → shallow fallback.
     - Authentication failure (cookie mismatch, daemon rejected) →
@@ -447,14 +556,9 @@ def circuit_status_health(
     is closed on every call so the control-port socket pool doesn't
     grow.
     """
-    cookie_path = handle.data_dir / "control_auth_cookie"
-    if not cookie_path.exists():
-        # No cookie => Tor still bootstrapping or the data dir was wiped;
-        # the deep probe has nothing to authenticate with. Stem would
-        # auto-discover this path via PROTOCOLINFO and produce the same
-        # outcome, but we short-circuit here to keep the shallow fallback
-        # path fast (avoids opening a control-port socket just to fail).
-        return health(handle)
+    early = _cookie_precheck(handle)
+    if early is not None:
+        return early
 
     factory = controller_factory or _default_controller_factory
     try:
@@ -485,7 +589,12 @@ def circuit_status_health(
             # ``Controller.authenticate`` does PROTOCOLINFO discovery and
             # reads the cookie file itself. The previous ``cookie=`` kwarg
             # raised TypeError on every probe.
-            controller.authenticate()
+            _authenticate(controller, handle)
+        except _tor_windows.ControlCookiePathRefused as refusal:
+            _LOG.warning(
+                "tor control cookie path refused (%s); the deep liveness probe reports unhealthy", refusal.reason
+            )
+            return False
         except Exception:
             return False
         try:
@@ -507,6 +616,43 @@ def circuit_status_health(
     finally:
         with contextlib.suppress(Exception):
             controller.close()
+
+
+def _authenticate(controller: _ControllerLike, handle: TorHandle) -> None:
+    """POSIX: stem's own discovery. Native Windows: the cookie path is pinned.
+
+    stem opens the cookie at the PROTOCOLINFO-reported path with a raw
+    ``open()``; on Windows the response is accepted only when that path is the
+    private ``<tor_data_dir>\\control_auth_cookie`` that
+    :func:`_cookie_precheck` just checked, and the same response is handed to
+    stem so it sends no second PROTOCOLINFO.
+    """
+    if sys.platform == "win32":
+        protocolinfo = _tor_windows.pinned_protocolinfo(controller, handle.data_dir)
+        controller.authenticate(protocolinfo_response=protocolinfo)
+        return
+    controller.authenticate()
+
+
+def _cookie_precheck(handle: TorHandle) -> bool | None:
+    """Early verdict from the control cookie, or ``None`` to run the deep probe.
+
+    No cookie => Tor still bootstrapping or the data dir was wiped; the deep
+    probe has nothing to authenticate with. Stem would auto-discover this
+    path via PROTOCOLINFO and produce the same outcome, but we short-circuit
+    here to keep the shallow fallback path fast (avoids opening a
+    control-port socket just to fail). Native Windows replaces the
+    reparse-following ``exists()`` with a checked, bounded read; an unsafe
+    cookie is unhealthy rather than a shallow fallback.
+    """
+    if sys.platform == "win32":
+        cookie_state = _tor_windows.control_cookie_state(handle.data_dir)
+        if cookie_state == "unsafe":
+            return False
+        return health(handle) if cookie_state == "missing" else None
+    if not (handle.data_dir / "control_auth_cookie").exists():
+        return health(handle)
+    return None
 
 
 _TERMINAL_CIRCUIT_STATUSES: Final[frozenset[str]] = frozenset({"FAILED", "CLOSED"})
@@ -607,13 +753,23 @@ def start_process(
     binary: str,
     torrc: str,
     popen_factory: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
+    data_dir: Path | None = None,
+    policy_mode: PolicyMode | None = None,
 ) -> _ProcessLike:
     """Spawn ``tor -f -`` with the rendered torrc on stdin.
 
     Production wiring only; tests inject ``popen_factory`` to swap in
     a fake. Kept separate from the higher-level orchestration so the
     per-step behavior is independently testable.
+
+    On native Windows the launch is delegated to
+    :func:`._tor_windows.start_process`, which needs the private data
+    directory and the policy mode (strict refuses an untrusted image).
     """
+    if sys.platform == "win32":
+        if data_dir is None or policy_mode is None:
+            raise BringupFailed("native Windows Tor launch requires the private data directory and policy mode")
+        return _tor_windows.start_process(binary=binary, torrc=torrc, data_dir=data_dir, policy_mode=policy_mode)
     proc = popen_factory(
         [binary, "-f", "-"],
         stdin=subprocess.PIPE,
