@@ -7,8 +7,8 @@ open them. This command undoes the install in a safe order, printing the whole
 plan first and asking once (``--yes`` skips the question):
 
 a. **Restore plaintext.** Every encryption target that is on is turned off with
-   the existing reversible ``encryption disable`` engines (config, then memory,
-   then env), sharing one :class:`._flow_session.FlowSession` so the vault is
+   the synchronous database conversion and reversible ``encryption disable``
+   engines (databases, config, memory, then env), sharing one :class:`._flow_session.FlowSession` so the vault is
    unlocked at most once. If the device key cannot open the vault the recovery
    passphrase is offered instead. If any target cannot be restored the command
    stops *before removing anything* and says why.
@@ -44,7 +44,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import _term
+from . import _term, _uninstall_databases
 from ._uninstall_config import (
     ConfigCleanup,
     EnvCleanup,
@@ -130,8 +130,9 @@ class UninstallContext:
 class Restore:
     target: str
     detail: str
-    #: Whether the plaintext exists only in the vault (the vault must be opened).
+    #: Whether restoring the target requires plaintext or a key held in the vault.
     needs_vault: bool
+    erase_detail: str | None = None
 
 
 @dataclass
@@ -174,6 +175,15 @@ def _restores(ctx: UninstallContext) -> list[Restore]:
 
     home = ctx.home
     out: list[Restore] = []
+    if _uninstall_databases.needed(home):
+        out.append(
+            Restore(
+                "databases",
+                _uninstall_databases.detail(home),
+                _uninstall_databases.needs_vault(ctx),
+                _uninstall_databases.detail(home, erase=True),
+            )
+        )
     if _marker_path(home).exists():
         sealed_away = not (home / "config.yaml").exists()
         detail = "vault-managed" + ("; the plaintext is sealed away and will be decrypted back" if sealed_away else "")
@@ -397,6 +407,8 @@ def render_plan(plan: UninstallPlan, opts: UninstallOptions) -> str:
 
 def _erase_line(restore: Restore, plan: UninstallPlan) -> str:
     del plan
+    if restore.target == "databases":
+        return f"databases: {restore.erase_detail}"
     if restore.target == "memory":
         return "memory: the sealed memory files are deleted; Hermes starts with empty memory"
     if restore.target == "env":
@@ -411,14 +423,16 @@ def _erase_line(restore: Restore, plan: UninstallPlan) -> str:
 def _erase_encrypted(ctx: UninstallContext, restores: list[Restore]) -> int:
     """Step a in erase mode: remove sealed files without opening the vault.
 
-    Only the sealed memory files live outside Mordred's own directories; the
-    vault (sealed .env / config.yaml copies) and every marker are removed by
-    the purge that erase mode always runs.
+    Databases and sealed memory files live outside Mordred's directories and
+    must go before their keys. The vault (sealed .env / config.yaml copies)
+    and other markers are removed by the purge that erase mode always runs.
     """
     from . import memory_cli
 
     for restore in restores:
-        if restore.target == "memory":
+        if restore.target == "databases":
+            _uninstall_databases.erase(ctx)
+        elif restore.target == "memory":
             for path in memory_cli._sealed_memory_files(ctx.home):
                 path.unlink(missing_ok=True)
                 print(f"Erased sealed memory file {path}.")
@@ -489,15 +503,19 @@ def _restore_all(ctx: UninstallContext, restores: list[Restore]) -> int:
         if not vault_open and needed:
             targets = ", ".join(r.target for r in restores if r.needs_vault)
             _term.emit_error(
-                f"uninstall stopped: the vault could not be opened, and the plaintext of {targets} exists only "
-                "in the vault. Nothing was removed. Fix vault access (see the message above) and re-run."
+                f"uninstall stopped: the vault could not be opened, and restoring {targets} requires it. "
+                "Nothing was removed. Fix vault access (see the message above) and re-run."
             )
             return 1
         for restore in restores:
             print(f"Restoring {restore.target} ...")
-            rc = engines[restore.target](
-                home=ctx.home, root=ctx.vault_root, backend=ctx.backend, store=ctx.store, flow_session=flow
-            )
+            if restore.target == "databases":
+                _uninstall_databases.restore(ctx, flow)
+                rc = 0
+            else:
+                rc = engines[restore.target](
+                    home=ctx.home, root=ctx.vault_root, backend=ctx.backend, store=ctx.store, flow_session=flow
+                )
             if rc != 0:
                 _term.emit_error(
                     f"uninstall stopped: {restore.target} could not be restored to plaintext (see above). "
@@ -725,6 +743,13 @@ def run_uninstall(ctx: UninstallContext, opts: UninstallOptions) -> int:
     if not _confirm(ctx, opts):
         print("Uninstall cancelled; nothing was changed.")
         return 1
+    if any(r.target == "databases" for r in plan.restores):
+        try:
+            with _uninstall_databases.guard(ctx):
+                return _execute(ctx, plan, opts)
+        except Exception as exc:
+            _term.emit_error(f"uninstall stopped: {exc}. Resolve the failure before retrying.")
+            return 1
     return _execute(ctx, plan, opts)
 
 
