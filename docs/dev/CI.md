@@ -439,6 +439,65 @@ consolidated candidate `bb75885ac`. Pending observations in those entries
 describe their original test time; subsequent contracts and the Windows
 completion acceptance matrix track later work and current open gates.
 
+- **2026-10-11 — Linux setup/enable-all memory and armed shape-B backup on real NitroTPM.**
+  The immutable wizard candidate `dbd8acc8d8d23df88c4674e6585339758abdc831`
+  passed **3 gated tests in 16.47s** on the retained EC2 NitroTPM instance
+  `i-095cbe655c196c749`. Actual `/dev/tpmrm0` capability output identified
+  AMZN/NitroTPM 2.0; no emulator or device-selector override was used.
+  The host was Linux `7.0.0-1014-aws`, x86_64, glibc 2.39, Python 3.12.3,
+  with installed Hermes 0.19.0. The candidate wheel SHA256 was
+  `9c63bc28fe2e4a274e04f47aef156bc14d4e4e4aad43453bef7dfe8f6f39a92f`.
+  The existing helper `/home/ubuntu/.local/bin/mordred-hermes-tpmkey` had SHA256
+  `b870be37f051447c02f008111dd01bc55a1fe163e7a33af0c6e5eb2812701b19`.
+
+  Both the new setup-memory resolver and actual installed public
+  `hermes-mordred encryption enable all` enrolled fresh owned synthetic homes.
+  Fresh automatically hooked Hermes processes verified shape B, sealed
+  read/write, exact wrapped-key reuse, paused setup versus explicit re-enable,
+  and unchanged env/config sentinels with no file-vault enrollment. Real
+  `MemoryStore(memory_char_limit=40)._detect_external_drift("memory")` protected
+  armed external plaintext in a private `0600` sealed backup, authenticated
+  with the actual returned backup filename as AEAD identity. Corrupt and
+  missing wrappers refused both backup publication and the corresponding
+  entrance without source/backup/marker changes or persistent native-store
+  regeneration. Exact wrapper bytes/mode were restored in `finally`, followed
+  by successful readability and scoped disable/purge. The existing lifecycle
+  selection also exercised unreadable-tree refusal and a missing-device
+  selector with an ambient key, which could not bypass managed TPM custody.
+
+  The runtime prefix was `/tmp/mordred-pr155-dbd8acc-pORrMq/runtime`.
+  Recorded imports were its `lib/python3.12/site-packages/tools/memory_tool.py`
+  (both memory module and real MemoryStore class) and
+  `lib/python3.12/site-packages/mordred_hermes/__init__.py`; these were installed
+  wheel imports, not the source checkout. From the adjacent `repo` directory,
+  the actual sanitized outer launch was:
+
+  ```sh
+  native_root=/tmp/mordred-pr155-dbd8acc-pORrMq
+  env -i HOME=/home/ubuntu \
+    PATH="$native_root/runtime/bin:/usr/local/bin:/usr/bin:/bin" \
+    HERMES_HOME="$native_root/parent" MORDRED_CONFIG_DECRYPT=0 \
+    MORDRED_LINUX_ORCHESTRATION_TEST=1 MORDRED_LINUX_TELEGRAM_TEST=1 \
+    MORDRED_ACCEPTANCE_COMMIT=dbd8acc8d8d23df88c4674e6585339758abdc831 \
+    MORDRED_LINUX_TPM_PROVIDER=EC2-NitroTPM \
+    MORDRED_HERMES_RUNTIME_PYTHON="$native_root/runtime/bin/python" \
+    "$native_root/runtime/bin/python" -m pytest -p no:cacheprovider \
+    -o addopts= -m integration -s -q --basetemp="$native_root/acceptance-owned" \
+    tests/integration/test_linux_memory_orchestration_tpm.py \
+    tests/integration/test_linux_telegram_tpm.py::test_fresh_runtime_lifecycle_and_fail_closed
+  ```
+
+  All three test-owned native stores were independently confirmed empty after
+  purge. The instance was independently verified stopped; the original SSH
+  ingress rule remained unchanged, and the owned watchdog was terminated only
+  after cleanup checks. Host-key admission matched the prior console-verified
+  pin. No new resources or ingress changes were needed. No production home,
+  live credentials, full general setup, gateway or live Telegram account flow
+  was exercised. This establishes the bounded memory entrances, installed
+  shape-B runtime and backup/refusal paths on actual TPM hardware; final-state
+  inventory does not trace every TPM command or intermediate write, and the
+  missing-device selector is not a physical TPM outage test.
+
 - **2026-10-11 — Wizard file-vault eligibility; portable validation only.**
   The candidate based on `eebf31fc9` used an isolated `HERMES_HOME` on macOS
   with Python 3.12.13. Focused RED/GREEN covered anchor `WrapError`, unsupported
