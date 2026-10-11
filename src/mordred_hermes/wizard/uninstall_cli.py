@@ -81,6 +81,9 @@ PURGE_PHRASE = "delete my data"
 #: one and the legacy one. ``resolve_store(...).delete`` removes both.
 _ANCHOR_SERVICES = ("mordred-hermes.vault.anchor.sekey", "mordred-hermes.vault.anchor")
 
+# The lock pathname must keep its inode even after purge releases its lease.
+_DATABASE_LOCK_NAME = "db-encryption.lock"
+
 #: Human descriptions of what lives under ``<home>/mordred``.
 _DATA_DESCRIPTIONS: dict[str, str] = {
     "vault": "encrypted file vault (vault copies of .env / config.yaml)",
@@ -212,8 +215,8 @@ def _data_inventory(ctx: UninstallContext) -> list[tuple[Path, str]]:
     if mordred.is_dir():
         for child in sorted(mordred.iterdir()):
             name = child.name
-            if name.startswith("."):
-                continue  # lock files and journals; they go with the directory
+            if name.startswith(".") or name == _DATABASE_LOCK_NAME:
+                continue  # coordination files are not retained user data
             description = "audit log" if name.startswith("audit.log") else _DATA_DESCRIPTIONS.get(name, "Mordred state")
             data.append((child, description))
     extension = ctx.home / "extension"
@@ -636,6 +639,17 @@ def _forget_telegram_for_uninstall(ctx: UninstallContext) -> None:
         )
 
 
+def _purge_except_database_lock(path: Path) -> None:
+    """Remove data while preserving the inode that serializes database access."""
+    for child in path.iterdir():
+        if child.name == _DATABASE_LOCK_NAME:
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
 def _purge_data(ctx: UninstallContext, plan: UninstallPlan) -> int:
     """Step e with ``--purge-data``. Returns 1 when the keyvault could not be reset."""
     if plan.telegram_configured:
@@ -654,8 +668,16 @@ def _purge_data(ctx: UninstallContext, plan: UninstallPlan) -> int:
             return 1
     for path in (ctx.home / "mordred", ctx.home / "extension"):
         if path.is_dir() and not path.is_symlink():
-            shutil.rmtree(path)
-            print(f"Deleted {path}.")
+            lock = path / _DATABASE_LOCK_NAME
+            if ctx.platform == "darwin" and path.name == "mordred" and lock.is_file():
+                # Unlinking a held lock allows another process to acquire a
+                # different inode before this uninstall finishes. Keep the
+                # pathname permanently; only its neighboring data is purged.
+                _purge_except_database_lock(path)
+                print(f"Deleted Mordred data from {path}.")
+            else:
+                shutil.rmtree(path)
+                print(f"Deleted {path}.")
     for name in (".env.vault-purged", ".env.reseal.tmp"):
         (ctx.home / name).unlink(missing_ok=True)
     return 0

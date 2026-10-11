@@ -390,8 +390,9 @@ class TestEraseEncrypted:
         assert not [call for call in installed.backend.calls if call[0] == "ecdh"]
         assert not (home / ".env").exists() and not (home / "config.yaml").exists()
         assert not any((home / "memories" / name).exists() for name in _MEMORIES)
-        # Mordred and all its data are gone.
-        assert not (home / "mordred").exists()
+        # User data is gone; the database coordination inode stays available.
+        assert list((home / "mordred").iterdir()) == [home / "mordred" / "db-encryption.lock"]
+        assert not installed.root.exists()
         assert not (home / "plugins" / "mordred").exists()
         assert installed.runner.uninstalls
 
@@ -426,7 +427,8 @@ class TestPurge:
         assert rc == 0
         assert events == ["telegram", "keyvault"]
         assert len(prompt.asked) == 1  # --yes skips the plain question, never the typed one
-        assert not (installed.home / "mordred").exists()
+        assert list((installed.home / "mordred").iterdir()) == [installed.home / "mordred" / "db-encryption.lock"]
+        assert not installed.root.exists()
         label = _identity.vault_identity(installed.root)
         assert installed.store.read(label) is None
         assert ("delete", label) in installed.backend.calls
@@ -445,7 +447,8 @@ class TestPurge:
 
         err = capsys.readouterr().err
         assert "Keychain Access" in err and "mordred-hermes.wrsw." in err
-        assert not (installed.home / "mordred").exists()
+        assert list((installed.home / "mordred").iterdir()) == [installed.home / "mordred" / "db-encryption.lock"]
+        assert not installed.root.exists()
 
     def test_wrong_phrase_changes_nothing(self, installed: Installed) -> None:
         rc = run_uninstall(
@@ -1098,3 +1101,43 @@ def _encrypted_backup_archives(installed: Installed, databases: list[Path]) -> l
         with zipfile.ZipFile(archive_path, "w") as archive:
             archive.write(database, "state.db")
     return archives
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX database lease")
+def test_purge_preserves_database_lock_inode_through_package_teardown(installed: Installed) -> None:
+    lock = installed.home / "mordred" / "db-encryption.lock"
+    lock.touch(mode=0o600)
+    original_inode = lock.stat().st_ino
+    code = """\
+import fcntl, os, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(75)
+finally:
+    os.close(fd)
+"""
+
+    def probe() -> int:
+        return subprocess.run([sys.executable, "-S", "-c", code, str(lock)], check=False, timeout=10).returncode
+
+    during_uninstall: list[int] = []
+
+    def runner(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        if list(argv)[1:3] == ["pip", "uninstall"]:
+            during_uninstall.append(probe())
+        return installed.runner(argv)
+
+    ctx = installed.context(runner=runner, prompt_io=_TypedPrompt(uninstall_cli.PURGE_PHRASE))
+    assert run_uninstall(ctx, UninstallOptions(yes=True, purge_data=True)) == 0
+    assert during_uninstall == [75]
+    assert lock.stat().st_ino == original_inode
+    assert probe() == 0
+    assert lock.stat().st_ino == original_inode
+    assert list(lock.parent.iterdir()) == [lock]
+    plan = uninstall_cli.build_plan(ctx, UninstallOptions())
+    assert plan.nothing_to_do
+    assert lock not in [path for path, _description in plan.data]
