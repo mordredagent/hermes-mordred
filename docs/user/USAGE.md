@@ -1265,7 +1265,7 @@ Quit Hermes Desktop and stop any `hermes gateway` first. The command then runs
 these steps in order; each is safe to repeat, and a second run changes nothing:
 
 1. **Restore plaintext.** Protected databases in the root home and every profile
-   (including backups) are restored first on macOS, followed by config, memory
+   (including loose database backups) are restored first on macOS, followed by config, memory
    and env using the same reversible logic as `encryption disable`, unlocking
    the vault once for all of them. `.env`, `config.yaml` and
    `memories/*.md` are back on disk exactly as Hermes wrote them. If the device
@@ -1317,6 +1317,13 @@ typed deletion confirmation even with `--yes`. Both database modes require
 macOS and a stopped Hermes; a missing/wrong key, active process or incomplete
 restore stops normal uninstall before package or key removal. Run from the
 root `HERMES_HOME`, since database protection is shared by all profiles.
+
+Normal uninstall stops if a ZIP under the root or a profile's `backups/`
+contains a protected database or cannot be checked safely. Restore and decrypt
+that backup separately before uninstalling, or use `--erase-encrypted` to
+delete the listed archives along with the databases. Plaintext ZIPs are kept.
+Backups outside the Hermes home and other archive formats are outside this
+command's scope; retain their recovery material before purging keys.
 
 What `uninstall` cannot restore:
 

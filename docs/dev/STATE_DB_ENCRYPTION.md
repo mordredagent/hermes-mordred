@@ -191,10 +191,15 @@ Verified end-to-end on a throwaway home with Hermes's own code.
 ## Remaining phases
 
 6. Desktop page step. Both uninstall modes are implemented: normal uninstall
-   synchronously restores all root/profile databases and backups before config,
+   synchronously restores all root/profile databases and loose database backups before config,
    memory, environment, package or key cleanup; failure retains the installation
    and keys. `--erase-encrypted` explicitly deletes scoped databases, sidecars,
    prepared copies and conversion state before key cleanup, without needing the
-   database key. Both modes require macOS, an idle home and the root
+   database key. ZIP backups under root/profile `backups/` are checked for
+   protected or unreadable database entries, including after the live databases
+   have been decrypted. Normal uninstall refuses those archives for manual
+   recovery; explicit erase lists and deletes them before key cleanup. Archives
+   outside the home and custom archive formats are not managed by uninstall.
+   Both database modes require macOS, an idle home and the root
    `HERMES_HOME`; a profile-only uninstall cannot remove shared protection.
 7. Redact message previews (`msg=`) from `logs/agent.log`.
