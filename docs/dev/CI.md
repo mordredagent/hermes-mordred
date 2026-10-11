@@ -402,7 +402,9 @@ completion acceptance matrix track later work and current open gates.
   removed, and EC2 was independently verified **stopped** before disarming the
   local stop guard. No new VM or Azure resource was created. Windows 11,
   packaged GUI/page/restart, full installed lifecycle and actual external
-  account/model/route flows remain separate open gates; PR #226 stays draft.
+  account/model/route flows remain separate open gates. The user authorized
+  PR #226 integration into `dev` after ready-for-review full CI succeeds;
+  this does not close the Windows product release gates above.
 
 - **2026-10-08 — Windows privacy canonical decisions (C8).**
   Component revision `31845b8b4` follows the shared canonical coordinator.
