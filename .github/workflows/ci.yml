@@ -209,6 +209,7 @@ jobs:
           tests/test_wizard_windows_telegram.py tests/test_wizard_windows_telegram_native.py
           tests/test_desktop_windows_api.py tests/test_desktop_windows_native.py
           tests/test_desktop_windows_page.py tests/test_desktop_windows_logout.py
+          tests/test_desktop_windows_pm_compat.py
           tests/test_desktop_windows_install.py
           tests/extension/test_desktop_api.py tests/extension/test_desktop_platform.py
           tests/extension/test_extension_serve_shutdown.py

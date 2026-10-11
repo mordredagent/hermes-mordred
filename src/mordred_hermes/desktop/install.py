@@ -147,6 +147,10 @@ def ensure_member(home: Path | None = None, *, force: bool = False) -> bool:
     ``pip install hermes-agent`` never rebuilds and needs no member. ``force``
     skips that check (``hermes-mordred desktop install --pm-member``).
     """
+    if _windows():
+        # The POSIX member lock and recursive placement are not ported. Even
+        # forced registration must not discover or touch the Windows profile.
+        return False
     from . import member
 
     if not force and not member.pm_managed():

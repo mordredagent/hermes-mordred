@@ -905,6 +905,7 @@ function UninstallSection({ platform = null }) {
 }
 
 const INSTALL_COMMAND = 'curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash'
+const WINDOWS_REINSTALL = 'Automatic repair after Hermes updates is not supported on Windows. Rerun the original Windows installer, keeping the existing Hermes home and custody keys, then restart Hermes and check again.'
 
 // Ask Mordred's local API whether the Python side is present. Three answers:
 // installed (the real API), missing (the shim in plugins/mordred/dashboard
@@ -932,11 +933,21 @@ async function probe() {
 }
 
 function describeMember(member) {
+  if (member && member.supported === false) return 'not supported on this platform'
   if (!member || !member.present) return 'not registered'
   if (!member.valid) return 'registration damaged'
   const extras = (member.extras || []).join(', ') || 'none'
   const from = member.source === 'path' ? `local source ${member.path}` : 'PyPI'
   return `hermes-mordred ${member.version} from ${from} (extras: ${extras})`
+}
+
+function windowsEnvironment(env) {
+  if (env && env.platform) return env.platform === 'win32'
+  // An unreachable API has no server metadata. Hermes Desktop's local client
+  // can still refuse the POSIX repair workflow on Windows.
+  return typeof navigator !== 'undefined' && (
+    navigator.userAgentData?.platform === 'Windows' || String(navigator.platform || '').startsWith('Win')
+  )
 }
 
 async function cliExec(argv) {
@@ -950,10 +961,11 @@ function RepairPanel({ probeResult, recheck }) {
   const [log, setLog] = useState('')
   const [repaired, setRepaired] = useState(false)
   const missing = probeResult.kind === 'missing'
-  const info = (missing && probeResult.info) || {}
+  const info = probeResult.info || {}
   const member = info.member || null
   const memberOk = Boolean(member && member.valid)
   const env = info.environment || null
+  const windows = windowsEnvironment(env)
   const pre = { whiteSpace: 'pre-wrap', fontSize: 12, maxHeight: 240, overflow: 'auto', background: 'var(--muted, rgba(127,127,127,.12))', padding: 8, borderRadius: 6 }
 
   const repairViaShim = async () => {
@@ -1019,13 +1031,14 @@ function RepairPanel({ probeResult, recheck }) {
           : 'Mordred’s local API is not loaded. Either Hermes was updated into an environment without Mordred, or Mordred was turned off in plugins.enabled. Mordred’s protections are not active.',
       }),
       env ? jsx('p', { style: { fontSize: 12, opacity: 0.8 }, children: `Environment: ${env.environment} (Python ${env.python})` }) : null,
-      missing ? jsx('p', { style: { fontSize: 12, opacity: 0.8 }, children: `Package-manager registration: ${describeMember(member)}` }) : null,
-      missing && !memberOk
+      missing ? jsx('p', { style: { fontSize: 12, opacity: 0.8 }, children: `Package-manager registration: ${windows ? 'not supported on Windows' : describeMember(member)}` }) : null,
+      windows ? jsx('p', { children: WINDOWS_REINSTALL }) : null,
+      missing && !memberOk && !windows
         ? jsx('p', { children: 'Mordred never registered itself with Hermes’s package manager (installed by an older version), so the one-click repair cannot rebuild it. Reinstall once from a terminal; later updates keep it automatically.' })
         : null,
       jsx(Row, {
         children: [
-          missing && !memberOk
+          windows ? null : missing && !memberOk
             ? jsx(Button, { key: 'copy', onClick: () => navigator.clipboard && navigator.clipboard.writeText(INSTALL_COMMAND), children: 'Copy reinstall command' })
             : jsx(Button, { key: 'repair', disabled: busy || repaired, onClick: repair, children: busy ? 'Repairing… (a few minutes)' : 'Repair / reinstall Mordred' }),
           repaired ? jsx(Button, { key: 'restart', onClick: restart, children: 'Restart Hermes backend' }) : null,
@@ -1041,6 +1054,10 @@ function RepairPanel({ probeResult, recheck }) {
 function HealthLine({ health }) {
   if (!health || !health.ok) return null
   const env = health.environment || {}
+  if (windowsEnvironment(env)) return jsx('p', {
+    style: { fontSize: 12, opacity: 0.8 },
+    children: `Mordred ${health.version} in Hermes environment ${env.environment} (Python ${env.python}). ${WINDOWS_REINSTALL}`,
+  })
   const memberText = health.pm_managed === false ? 'not needed (Hermes is not pm-managed)' : describeMember(health.member)
   return jsx('p', {
     style: { fontSize: 12, opacity: 0.8 },

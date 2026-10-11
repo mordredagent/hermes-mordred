@@ -3434,6 +3434,19 @@ codes (`storage_unavailable`, `storage_uncertain`, `storage_error`,
 `attestation_key_missing`) and hides erase-without-decrypt on Windows. A login
 expiry resets by code, never by matching message text.
 
+Hermes package-manager update survival is not ported to Windows. Startup does
+not create a member there; direct member creation/removal refuses before
+profile I/O, and member status reports `supported: false`, `present: null`
+(not inspected), `valid: false` and `reason: "not-ported-on-windows"`. Both the
+installed `/health` API and the fallback shim include `environment.platform`.
+The fallback refuses `POST /repair` and `GET /repair` with
+`pm_repair_unsupported` before inspecting a member or launching a worker,
+including when a valid-looking member already exists. The Windows page
+provides no Bash reinstall command or automatic repair button and makes no
+update-survival claim. After a Hermes update drops Mordred, rerun the original
+Windows installer with the existing Hermes home and custody keys, then restart
+Hermes. macOS/Linux member registration and repair remain unchanged.
+
 Extension server. `extension serve` stops with exit 0 on Ctrl-C
 (`KeyboardInterrupt`), on SIGTERM (POSIX `add_signal_handler`) and, on
 Windows, on `CTRL_BREAK_EVENT`. The proactor loop has no

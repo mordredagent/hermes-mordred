@@ -229,3 +229,72 @@ console.log(JSON.stringify(FailureNote({error})))
     text = json.dumps(result)
     assert "hermes-mordred telegram logout --forget" in text
     assert "native init" not in text, "a new key cannot open the retained credentials"
+
+
+@pytest.mark.parametrize("valid_member", [False, True])
+def test_windows_missing_package_offers_manual_reinstall_without_pm_repair_or_bash(valid_member):
+    result = render_page(
+        """
+let calls = []
+rest = async (...args) => {calls.push(args); return {ok: true}}
+const tree = RepairPanel({probeResult: {kind: 'missing', info: {
+  environment: {platform: 'win32', environment: 'test', python: '3.12'},
+  member: {present: true, valid: VALID_MEMBER}}}, recheck: () => {}})
+const buttons = []
+const visit = node => {
+  if (!node || typeof node !== 'object') return
+  if (node.type === 'button') buttons.push(node.props.children)
+  const children = node.props && node.props.children
+  for (const child of Array.isArray(children) ? children : [children]) visit(child)
+}
+visit(tree)
+console.log(JSON.stringify({tree, buttons, calls}))
+""".replace("VALID_MEMBER", json.dumps(valid_member))
+    )
+    text = json.dumps(result["tree"])
+    assert "original Windows installer" in text and "existing Hermes home" in text
+    assert "later updates keep it automatically" not in text
+    assert "Copy reinstall command" not in result["buttons"]
+    assert "Repair / reinstall Mordred" not in result["buttons"]
+    assert result["calls"] == []
+
+
+def test_windows_health_does_not_claim_automatic_update_survival():
+    result = render_page("""
+console.log(JSON.stringify(HealthLine({health: {ok: true, version: '0.2.0a0', pm_managed: true,
+  environment: {platform: 'win32', environment: 'test', python: '3.12'},
+  member: {present: true, valid: true, version: '0.2.0a0'}}})))
+""")
+    text = json.dumps(result)
+    assert "original Windows installer" in text
+    assert "Survives Hermes updates:" not in text
+
+
+def test_posix_valid_member_keeps_automatic_repair():
+    result = render_page("""
+const tree = RepairPanel({probeResult: {kind: 'missing', info: {
+  environment: {platform: 'darwin'}, member: {present: true, valid: true}}}, recheck: () => {}})
+console.log(JSON.stringify(find(tree, n => n.type === 'button').props.children))
+""")
+    assert result == "Repair / reinstall Mordred"
+
+
+def test_unreachable_windows_backend_does_not_offer_generic_gateway_pm_repair():
+    result = render_page("""
+Object.defineProperty(globalThis, 'navigator', {value: {platform: 'Win32'}, configurable: true})
+const tree = RepairPanel({probeResult: {kind: 'unreachable'}, recheck: () => {}})
+console.log(JSON.stringify({tree, firstButton: find(tree, n => n.type === 'button').props.children}))
+""")
+    assert "original Windows installer" in json.dumps(result["tree"])
+    assert result["firstButton"] == "Check again"
+
+
+def test_windows_client_does_not_infer_survival_from_older_health_metadata():
+    result = render_page("""
+Object.defineProperty(globalThis, 'navigator', {value: {platform: 'Win32'}, configurable: true})
+console.log(JSON.stringify(HealthLine({health: {ok: true, version: '0.2.0a0', pm_managed: true,
+  environment: {environment: 'test', python: '3.12'}, member: {present: false}}})))
+""")
+    text = json.dumps(result)
+    assert "original Windows installer" in text
+    assert "Survives Hermes updates:" not in text
