@@ -69,6 +69,15 @@ def _maintenance_process() -> bool:
         while args and len(args[0]) > 2 and args[0].startswith("--") and "--no-color".startswith(args[0]):
             args = args[1:]
         return bool(args and args[0] in {"databases", "uninstall"})
+    # Hermes consumes profile selection before its command parser, but the
+    # flag is still present when this interpreter-startup hook runs.
+    while args:
+        if args[0] in {"--profile", "-p"}:
+            args = args[2:]
+        elif args[0].startswith("--profile="):
+            args = args[1:]
+        else:
+            break
     return len(args) >= 2 and args[0] in {"mordred", "mordred-wizard"} and args[1] in {"databases", "uninstall"}
 
 

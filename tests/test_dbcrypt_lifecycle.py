@@ -177,15 +177,26 @@ sys.stdin.readline()
 @pytest.mark.parametrize(
     "args", [["databases", "status"], ["databases", "encrypt", "--dry-run"], ["uninstall", "--dry-run"]]
 )
-@pytest.mark.parametrize("options", [[], ["--no-color"], ["--no-col"]])
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["hermes-mordred"],
+        ["hermes-mordred", "--no-color"],
+        ["hermes-mordred", "--no-col"],
+        ["hermes", "mordred"],
+        ["hermes", "--profile", "work", "mordred"],
+        ["hermes", "--profile=work", "mordred"],
+        ["hermes", "-p", "work", "mordred"],
+    ],
+)
 def test_maintenance_startup_does_not_execute_pending_conversions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args: list[str], options: list[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args: list[str], command: list[str]
 ) -> None:
     pytest.importorskip("sqlcipher3")
     path = _database(tmp_path)
     before = path.read_bytes()
     monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setattr(sys, "argv", ["hermes-mordred", *options, *args])
+    monkeypatch.setattr(sys, "argv", [*command, *args])
     monkeypatch.setitem(sys.modules, "sqlite3", sqlite3)
     monkeypatch.setitem(sys.modules, "sqlite3.dbapi2", sqlite3.dbapi2)
     _migrate.schedule(tmp_path)
