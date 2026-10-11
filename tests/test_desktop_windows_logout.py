@@ -170,10 +170,26 @@ def test_forget_custody_preflight_refusal_keeps_local_and_remote_state(logout):
     assert "Nothing was deleted." in result["outcome"]
 
 
-def test_successful_forget_wipes_before_remote_revoke_and_keeps_other_roles(logout):
+def test_successful_forget_wipes_before_remote_revoke_and_keeps_other_roles(logout, monkeypatch):
+    wipes = []
+    real_wipe = store.wipe_archive
+
+    def wipe(*args, **kwargs):
+        wipes.append(kwargs)
+        return real_wipe(*args, **kwargs)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("forget must use checked custody wipe, not secret-store deletion or rewriting")
+
+    monkeypatch.setattr(store, "wipe_archive", wipe)
+    monkeypatch.setattr(logout.store, "delete_key", forbidden, raising=False)
+    monkeypatch.setattr(logout.store, "update", forbidden)
+    monkeypatch.setattr(logout.store, "update_from_snapshot", forbidden)
     leases = {name: role(logout, name) for name in ("memory", "audit")}
     result = forget(logout)
     assert result["ok"] is True and result["forgot"] is True and result["revoked"] is True
+    assert "outcome" in result
+    assert wipes == [{"forget": True}]
     assert logout.client.credentials_at_connect == [False]
     assert logout.store.flags() is None and not (logout.root / "index.enc").exists()
     assert role(logout, "telegram").current is None

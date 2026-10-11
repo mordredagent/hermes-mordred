@@ -855,54 +855,6 @@ def test_windows_import_service_uses_the_load_only_memory_guard(telegram, monkey
     assert refused.value.code == "memory_encryption_required"
 
 
-def test_windows_logout_keeps_the_archive_and_drops_only_the_session(telegram, monkeypatch):
-    from mordred_hermes.extension.telegram import store as tg_store
-
-    wiped: list[dict[str, Any]] = []
-    monkeypatch.setattr(tg_store, "wipe_archive", lambda *a, **k: wiped.append(k))
-    telegram.store.value = tg_secrets.TelegramSecrets(
-        api_id=1, api_hash=SECRET_HASH, store_key=b"k" * 32, session="WINDOWS-SESSION"
-    )
-    result = post(telegram.http, "/telegram/logout", {})
-    assert result == {"ok": True, "forgot": False, "revoked": True}
-    assert telegram.client.logged_out and telegram.client.disconnected
-    assert telegram.store.value is not None and telegram.store.value.session is None
-    assert telegram.store.value.api_hash == SECRET_HASH, "logout keeps the API credentials"
-    assert wiped == []
-
-
-def test_windows_forget_runs_the_custody_wipe_and_no_delete_key(telegram, monkeypatch):
-    from mordred_hermes.extension.telegram import store as tg_store
-
-    wiped: list[dict[str, Any]] = []
-
-    def wipe(*args, **kwargs):
-        wiped.append(kwargs)
-        telegram.store.value = None
-
-    monkeypatch.setattr(tg_store, "wipe_archive", wipe)
-    telegram.store.value = tg_secrets.TelegramSecrets(
-        api_id=1, api_hash=SECRET_HASH, store_key=b"k" * 32, session="WINDOWS-SESSION"
-    )
-    assert not hasattr(telegram.store, "delete_key")
-    result = post(telegram.http, "/telegram/logout", {"forget": True, "confirm": PURGE_PHRASE})
-    assert result["ok"] is True and result["forgot"] is True and result["revoked"] is True
-    assert "outcome" in result
-    assert wiped == [{"forget": True}]
-    assert telegram.store.updates == 0, "forget deletes through the validated wipe plan, not a rewrite"
-
-
-def test_windows_forget_reports_a_classified_wipe_refusal(telegram, monkeypatch):
-    from mordred_hermes.extension.telegram import store as tg_store
-
-    def busy(*args, **kwargs):
-        raise tg_store.StoreError("sync_in_progress")
-
-    monkeypatch.setattr(tg_store, "wipe_archive", busy)
-    result = post(telegram.http, "/telegram/logout", {"forget": True, "confirm": PURGE_PHRASE})
-    assert result["ok"] is False and result["error"] == "sync_in_progress"
-
-
 def test_windows_logout_refuses_when_credentials_cannot_be_read(telegram, monkeypatch):
     from mordred_hermes.extension.telegram import store as tg_store
 

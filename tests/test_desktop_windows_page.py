@@ -46,6 +46,8 @@ CODES = (
     "memory_encryption_refused",
     "memory_disable_refused",
     "memory_operation_in_progress",
+    "forget_confirm_mismatch",
+    "custody_busy",
 )
 
 
@@ -106,14 +108,6 @@ def test_no_readiness_is_derived_from_english_text():
     assert "e.code === 'login_flow_expired'" in text
 
 
-def test_logout_stays_reachable_and_forget_sends_the_typed_phrase():
-    text = source()
-    assert "jsx(WindowsLogout, { refresh, loggedIn })" in text, "logout does not depend on the gate"
-    assert "confirm: phrase" in text
-    assert re.search(r"\bforget_confirm_mismatch:", block("MESSAGES"))
-    assert re.search(r"\bcustody_busy:", block("MESSAGES"))
-
-
 def render_page(script):
     """Run the page components and button handlers with a tiny SDK/React boundary."""
     if shutil.which("node") is None:
@@ -168,13 +162,12 @@ console.log(JSON.stringify(tree))
 
 
 @pytest.mark.parametrize("ok", [False, True])
-@pytest.mark.parametrize("revoked", [False, None])
-def test_logout_renders_outcome_and_manual_remedy_after_success_or_error(ok, revoked):
+def test_logout_renders_outcome_and_manual_remedy_after_success_or_error(ok):
     response = {
         "ok": ok,
         "forgot": True,
         "error": "custody_uncertain",
-        "revoked": revoked,
+        "revoked": False,
         "manual_revoke": True,
         "remedy": "End the session in Telegram → Settings → Devices.",
         "outcome": ["Deleted:", "the sealed credentials", "Still present:", "the custody deletion journal"],
@@ -182,20 +175,24 @@ def test_logout_renders_outcome_and_manual_remedy_after_success_or_error(ok, rev
     result = render_page(
         """
 states = [true, 'delete my data', false]
-rest = async () => (RESPONSE)
+const requests = []
+rest = async (...args) => {requests.push(args); return RESPONSE}
 let refreshes = 0
 const refresh = () => {refreshes++}
 const first = WindowsLogout({refresh, loggedIn: true})
 await find(first, n => n.type === 'button').props.onClick()
 cursor = 0
 const tree = WindowsLogout({refresh, loggedIn: false})
-console.log(JSON.stringify({tree, notifications, refreshes}))
+console.log(JSON.stringify({tree, notifications, refreshes, requests}))
 """.replace("RESPONSE", json.dumps(response))
     )
     text = json.dumps(result["tree"], ensure_ascii=False)
     assert "the sealed credentials" in text and "the custody deletion journal" in text
     assert "Settings" in text and "Devices" in text
     assert result["refreshes"] == 1, "refresh even after partial local deletion"
+    assert result["requests"] == [
+        ["/telegram/logout", {"method": "POST", "body": {"forget": True, "confirm": "delete my data"}}]
+    ]
 
 
 def test_setup_keeps_logout_component_mounted_after_status_refresh():
