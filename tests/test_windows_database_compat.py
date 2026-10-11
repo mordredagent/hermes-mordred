@@ -59,7 +59,10 @@ def test_uninstall_refuses_retained_database_state_before_any_cleanup(
     assert "database" in err and "macOS" in err
     assert database.read_bytes() == b"retained encrypted database content"
     assert (env.home / "mordred" / name).read_bytes() == b"retained state\n"
-    assert hermes_files == [] and env.runner.calls == [] and env.backend.calls == calls
+    # Native Windows planning may inspect the installed interpreter read-only.
+    # Teardown and custody mutation must still never run.
+    assert hermes_files == [] and env.backend.calls == calls
+    assert not any("uninstall" in argv for argv in env.runner.calls)
 
 
 def test_uninstall_rechecks_database_state_after_confirmation(win, monkeypatch, hermes_files, capsys):
@@ -82,7 +85,8 @@ def test_uninstall_rechecks_database_state_after_confirmation(win, monkeypatch, 
     calls = list(env.backend.calls)
     assert run_uninstall(context(env), UninstallOptions(yes=True, purge_data=True)) == 1
     assert "database" in capsys.readouterr().err
-    assert hermes_files == [] and env.runner.calls == [] and env.backend.calls == calls
+    assert hermes_files == [] and env.backend.calls == calls
+    assert not any("uninstall" in argv for argv in env.runner.calls)
 
 
 @pytest.mark.parametrize("name", [None, *STATES])
