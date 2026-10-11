@@ -90,6 +90,8 @@ def test_runner_distinguishes_behavior_drift_from_incomplete_execution(events, c
     [
         ("assert 1 == 1", "ok"),
         ("assert 1 == 2", "drift"),
+        ("with pytest.raises(ValueError):\n        pass", "drift"),
+        ("pytest.fail('required behavior failed')", "drift"),
         ("raise ImportError('dependency unavailable')", "unavailable"),
         ("pytest.skip('cannot execute')", "unavailable"),
     ],

@@ -78,11 +78,7 @@ jobs:
 
   report:
     needs: drift-check
-    if: >-
-      always() && (needs.drift-check.result != 'success' ||
-      needs.drift-check.outputs.pypi_status != 'ok' ||
-      needs.drift-check.outputs.main_status != 'ok' ||
-      needs.drift-check.outputs.memory_status != 'ok')
+    if: always()
     runs-on: ubuntu-24.04
     permissions:
       issues: write
@@ -91,10 +87,10 @@ jobs:
       - name: File or update local compatibility issue
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          CHECK_RESULT: ${{ needs.drift-check.result == 'success' && 'success' || 'unavailable' }}
-          PYPI_STATUS: ${{ needs.drift-check.outputs.pypi_status == 'ok' && 'ok' || needs.drift-check.outputs.pypi_status == 'drift' && 'drift' || 'unavailable' }}
-          MAIN_STATUS: ${{ needs.drift-check.outputs.main_status == 'ok' && 'ok' || needs.drift-check.outputs.main_status == 'drift' && 'drift' || 'unavailable' }}
-          MEMORY_STATUS: ${{ needs.drift-check.outputs.memory_status == 'ok' && 'ok' || needs.drift-check.outputs.memory_status == 'drift' && 'drift' || 'unavailable' }}
+          CHECK_RESULT: ${{ needs.drift-check.result }}
+          PYPI_STATUS: ${{ needs.drift-check.outputs.pypi_status }}
+          MAIN_STATUS: ${{ needs.drift-check.outputs.main_status }}
+          MEMORY_STATUS: ${{ needs.drift-check.outputs.memory_status }}
         with:
           script: |
             const normalize = value => value === "ok" || value === "drift" ? value : "unavailable";

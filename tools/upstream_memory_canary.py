@@ -20,7 +20,7 @@ class Outcomes:
     def record(self, outcome: str, error: BaseException | None) -> None:
         if outcome == "passed":
             self.passed += 1
-        elif outcome == "failed" and isinstance(error, AssertionError):
+        elif outcome == "failed" and isinstance(error, (AssertionError, pytest.fail.Exception)):
             self.drift = True
         elif outcome != "passed":
             self.unavailable = True

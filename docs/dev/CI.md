@@ -227,12 +227,15 @@ The workflow defaults to `permissions: {}`. Upstream source executes only in
 no supplied secrets, and an isolated home established before interpreter
 startup. A separate fresh `report` runner has only `issues: write`; it performs
 no checkout, upstream execution, cache restore or artifact download. Exact
-`ok`/`drift` statuses are normalized before crossing that boundary; unknown or
-missing statuses and an unsuccessful job become `unavailable`. Only fixed
-text, normalized tokens and the context-derived run URL reach local issues;
-detailed upstream diagnostics remain in unprivileged logs. Successful all-ok
-runs make no Issue API calls. Failed preparation and missing outputs always
-produce a local informational report. Production probes continue stripping
+`ok`/`drift` candidates cross only as environment data and are normalized by
+case-sensitive JavaScript before Issue API inputs. The report uses `if: always()`;
+unknown, uppercase or missing statuses and an unsuccessful job become
+`unavailable`. GitHub expression comparisons must not filter or normalize
+candidates because they ignore case. Only fixed text, normalized tokens and
+the context-derived run URL reach local issues; detailed upstream diagnostics
+remain in unprivileged logs. Successful all-ok runs make no Issue API calls. Whenever GitHub can run the reporter, failed
+preparation and missing outputs produce a local informational report. Production
+probes continue stripping
 `PYTHONPATH`, `PYTHONHOME` and `HERMES_MEMORY_KEY`; no runtime selection change
 ships with the CI overlay.
 

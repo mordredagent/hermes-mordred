@@ -1,8 +1,10 @@
-"""The issue-writing runner consumes only normalized tokens and trusted context."""
+"""The issue-writing runner normalizes candidate status data before API inputs."""
 
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -26,28 +28,24 @@ def test_upstream_execution_has_no_issue_write_authority():
     assert check["steps"][0]["with"]["persist-credentials"] is False
     report = config["jobs"]["report"]
     assert report["permissions"] == {"issues": "write"}
-    assert "always()" in report["if"]
+    assert report["if"] == "always()"
     assert len(report["steps"]) == 1
-    assert "github-script@" in report["steps"][0]["uses"]
+    assert re.fullmatch(r"actions/github-script@[0-9a-f]{40}", report["steps"][0]["uses"])
     assert not any("secrets" in str(step) for step in check["steps"])
     assert all(not ("run" in step or "checkout@" in step.get("uses", "")) for step in report["steps"])
 
 
-@pytest.mark.parametrize(
-    "result,pypi,main,memory,want_api,word",
-    [
-        ("success", "ok", "ok", "ok", False, ""),
-        ("success", "ok", "drift", "ok", True, "drift"),
-        ("failure", "ok", "ok", "ok", True, "unavailable"),
-        ("cancelled", "", "", "", True, "unavailable"),
-        ("success", "ok", "ok", "", True, "unavailable"),
-        ("success", "ok", "ok", "INJECTED_UNTRUSTED_TEXT", True, "unavailable"),
-        ("success", "ok", "ok", "ok\nINJECTED_UNTRUSTED_TEXT", True, "unavailable"),
-        ("INJECTED_UNTRUSTED_TEXT", "ok", "ok", "ok", True, "unavailable"),
-    ],
-)
-@pytest.mark.parametrize("existing", [False, True])
-def test_report_executes_only_allowlisted_statuses(result, pypi, main, memory, want_api, word, existing):
+def test_report_candidate_values_reach_exact_javascript_boundary_unchanged():
+    env = workflow()["jobs"]["report"]["steps"][0]["env"]
+    assert env == {
+        "CHECK_RESULT": "${{ needs.drift-check.result }}",
+        "PYPI_STATUS": "${{ needs.drift-check.outputs.pypi_status }}",
+        "MAIN_STATUS": "${{ needs.drift-check.outputs.main_status }}",
+        "MEMORY_STATUS": "${{ needs.drift-check.outputs.memory_status }}",
+    }
+
+
+def _report_calls(values, existing):
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node is required to execute the github-script boundary")
@@ -59,22 +57,114 @@ const github = {rest:{issues:{
 listForRepo: async arg => {calls.push(["list",arg]);return {data: EXISTING ? [{number:42}]:[]};},
 create: async arg => calls.push(["create",arg]),
 createComment: async arg => calls.push(["comment",arg])}}};
-const core = {info:()=>{}};
 (async () => { SCRIPT })().then(()=>process.stdout.write(JSON.stringify(calls)))
 .catch(e=>{console.error(e);process.exit(1)});
 """.replace("EXISTING", json.dumps(existing)).replace("SCRIPT", script)
-    import os
-
-    env = {**os.environ, "CHECK_RESULT": result, "PYPI_STATUS": pypi, "MAIN_STATUS": main, "MEMORY_STATUS": memory}
+    keys = ("CHECK_RESULT", "PYPI_STATUS", "MAIN_STATUS", "MEMORY_STATUS")
+    env = {k: v for k, v in os.environ.items() if k not in keys}
+    env.update({k: v for k, v in values.items() if v is not None})
     proc = subprocess.run([node, "-e", harness], env=env, capture_output=True, text=True, check=False)
     assert proc.returncode == 0, proc.stderr
-    calls = json.loads(proc.stdout)
-    assert bool(calls) is want_api
     assert "INJECTED_UNTRUSTED_TEXT" not in proc.stdout
-    if want_api:
-        assert calls[-1][0] == ("comment" if existing else "create")
-        assert word in calls[-1][1]["body"]
-        assert "https://github.com/mordredagent/hermes-mordred/actions/runs/123" in calls[-1][1]["body"]
+    return json.loads(proc.stdout)
+
+
+def _assert_issue(calls, existing, expected_lines):
+    assert [call[0] for call in calls] == ["list", "comment" if existing else "create"]
+    target = calls[-1][1]
+    assert target["owner"] == "mordredagent"
+    assert target["repo"] == "hermes-mordred"
+    if existing:
+        assert target["issue_number"] == 42
+    else:
+        assert target["labels"] == ["actionable", "upstream-drift"]
+    body = target["body"]
+    assert body.splitlines()[2:6] == expected_lines
+    assert "https://github.com/mordredagent/hermes-mordred/actions/runs/123" in body
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_exact_success_all_ok_makes_zero_issue_api_calls(existing):
+    assert (
+        _report_calls(
+            {"CHECK_RESULT": "success", "PYPI_STATUS": "ok", "MAIN_STATUS": "ok", "MEMORY_STATUS": "ok"}, existing
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("field,index", [("PYPI_STATUS", 1), ("MAIN_STATUS", 2), ("MEMORY_STATUS", 3)])
+@pytest.mark.parametrize(
+    "candidate,want",
+    [
+        ("drift", "drift"),
+        ("OK", "unavailable"),
+        ("Ok", "unavailable"),
+        ("DRIFT", "unavailable"),
+        ("Drift", "unavailable"),
+        ("", "unavailable"),
+        (None, "unavailable"),
+        (" ok", "unavailable"),
+        ("ok ", "unavailable"),
+        ("ok\nINJECTED_UNTRUSTED_TEXT", "unavailable"),
+        ("unknown", "unavailable"),
+        ("INJECTED_UNTRUSTED_TEXT", "unavailable"),
+    ],
+)
+def test_each_candidate_status_is_exact_before_issue_inputs(existing, field, index, candidate, want):
+    values = {"CHECK_RESULT": "success", "PYPI_STATUS": "ok", "MAIN_STATUS": "ok", "MEMORY_STATUS": "ok"}
+    values[field] = candidate
+    expected = [
+        "Execution: success.",
+        "PyPI hook contract: ok.",
+        "Main hook contract: ok.",
+        "Main memory/Journey seams: ok.",
+    ]
+    prefixes = {
+        "PYPI_STATUS": "PyPI hook contract",
+        "MAIN_STATUS": "Main hook contract",
+        "MEMORY_STATUS": "Main memory/Journey seams",
+    }
+    expected[index] = prefixes[field] + ": " + want + "."
+    _assert_issue(_report_calls(values, existing), existing, expected)
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_all_uppercase_ok_still_reports_unavailable(existing):
+    calls = _report_calls(
+        {"CHECK_RESULT": "success", "PYPI_STATUS": "OK", "MAIN_STATUS": "OK", "MEMORY_STATUS": "OK"}, existing
+    )
+    _assert_issue(
+        calls,
+        existing,
+        [
+            "Execution: success.",
+            "PyPI hook contract: unavailable.",
+            "Main hook contract: unavailable.",
+            "Main memory/Journey seams: unavailable.",
+        ],
+    )
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize(
+    "result", ["failure", "cancelled", "skipped", "", None, "SUCCESS", "Success", "INJECTED_UNTRUSTED_TEXT"]
+)
+def test_execution_requires_exact_success_even_with_all_ok(existing, result):
+    calls = _report_calls(
+        {"CHECK_RESULT": result, "PYPI_STATUS": "ok", "MAIN_STATUS": "ok", "MEMORY_STATUS": "ok"}, existing
+    )
+    _assert_issue(
+        calls,
+        existing,
+        [
+            "Execution: unavailable.",
+            "PyPI hook contract: ok.",
+            "Main hook contract: ok.",
+            "Main memory/Journey seams: ok.",
+        ],
+    )
 
 
 @pytest.mark.parametrize(

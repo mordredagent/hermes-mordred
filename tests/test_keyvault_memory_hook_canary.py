@@ -271,8 +271,9 @@ def test_sanitized_child_uses_selected_source(tmp_path: Path) -> None:
     assert "CANARY_SOURCE MemoryStore:" in proc.stdout
 
 
+@pytest.mark.parametrize("source_sealed", [True, False])
 def test_drift_backup_is_sealed_and_preserves_external_content(
-    upstream: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    upstream: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_sealed: bool
 ) -> None:
     _arm(tmp_path, monkeypatch)
     assert install_memory_hook(home=tmp_path)
@@ -281,7 +282,7 @@ def test_drift_backup_is_sealed_and_preserves_external_content(
     path = tmp_path / "memories" / "MEMORY.md"
     raw = "external writer " + "x" * (store.memory_char_limit + 100)
     key = base64.urlsafe_b64decode(os.environ["HERMES_MEMORY_KEY"])
-    before = seal(raw.encode(), key=key, name=path.name)
+    before = seal(raw.encode(), key=key, name=path.name) if source_sealed else raw.encode()
     path.write_bytes(before)
     result = store.remove("memory", "external writer")
     backups = list(path.parent.glob("MEMORY.md.bak.*"))
@@ -298,18 +299,28 @@ def test_drift_backup_is_sealed_and_preserves_external_content(
     path.write_text("repaired entry", encoding="utf-8")
     assert store.add("memory", "another fact")["success"]
     assert path.read_bytes().startswith(MAGIC)
-    if memory_seam_shape() == "A":
-        # Current main's snapshot seam also seals backups from an out-of-process
-        # plaintext writer. Shape B delegates that pre-existing exposure path.
-        monkeypatch.setattr(_memory_hook.time, "time", lambda: 1_700_000_000)
-        path.write_text(raw, encoding="utf-8")
-        result = store.remove("memory", "external writer")
-        assert result["success"] is False
-        assert path.read_text() == raw
-        plaintext_backup = path.with_suffix(path.suffix + ".bak.1700000000")
-        assert plaintext_backup.read_bytes().startswith(MAGIC)
-        assert unseal(plaintext_backup.read_bytes(), key=key, name=plaintext_backup.name).decode() == raw
-        assert backup.read_bytes().startswith(MAGIC)
+
+
+@pytest.mark.parametrize("missing_key", [None, "invalid-key"])
+def test_keyless_plaintext_drift_does_not_publish_backup(
+    upstream: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing_key: str | None
+) -> None:
+    _arm(tmp_path, monkeypatch)
+    assert install_memory_hook(home=tmp_path)
+    store = upstream.MemoryStore()
+    store.load_from_disk()
+    path = tmp_path / "memories" / "MEMORY.md"
+    raw = "external writer " + "x" * (store.memory_char_limit + 100)
+    path.write_text(raw, encoding="utf-8")
+    before = path.read_bytes()
+    if missing_key is None:
+        monkeypatch.delenv("HERMES_MEMORY_KEY")
+    else:
+        monkeypatch.setenv("HERMES_MEMORY_KEY", missing_key)
+    with pytest.raises(MemoryEncryptionUnavailable):
+        store.remove("memory", "external writer")
+    assert path.read_bytes() == before
+    assert list(path.parent.glob("MEMORY.md.bak.*")) == []
 
 
 @pytest.fixture(autouse=True)
