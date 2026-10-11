@@ -46,17 +46,18 @@ def store() -> FakeAnchorStore:
 # ---------------------------------------------------------------------------
 
 
-def test_write_then_verify_ok(store: FakeAnchorStore) -> None:
-    anchor.write_anchor(store, _LABEL, wmk=_WMK_A, generation=5)
-    # Matching wmk + generation → no exception.
-    anchor.verify_anchor(store, _LABEL, wmk=_WMK_A, generation=5)
-
-
 def test_read_anchor_round_trips(store: FakeAnchorStore) -> None:
     anchor.write_anchor(store, _LABEL, wmk=_WMK_A, generation=7)
     a = anchor.read_anchor(store, _LABEL)
     assert a.wmk_sha256 == hashlib.sha256(_WMK_A).digest()
     assert a.generation == 7
+    anchor.verify_anchor(store, _LABEL, wmk=_WMK_A, generation=7)
+    raw = store.read(_LABEL)
+    assert raw is not None
+    obj = json.loads(raw)
+    assert obj["v"] == 1
+    assert obj["wmk_sha256"] == hashlib.sha256(_WMK_A).hexdigest()
+    assert obj["generation"] == 7
 
 
 def test_write_overwrites_on_generation_bump(store: FakeAnchorStore) -> None:
@@ -70,16 +71,6 @@ def test_write_overwrites_on_generation_bump(store: FakeAnchorStore) -> None:
 # ---------------------------------------------------------------------------
 # wire format
 # ---------------------------------------------------------------------------
-
-
-def test_anchor_serialization_format(store: FakeAnchorStore) -> None:
-    anchor.write_anchor(store, _LABEL, wmk=_WMK_A, generation=3)
-    raw = store.read(_LABEL)
-    assert raw is not None
-    obj = json.loads(raw)
-    assert obj["v"] == 1
-    assert obj["wmk_sha256"] == hashlib.sha256(_WMK_A).hexdigest()
-    assert obj["generation"] == 3
 
 
 # ---------------------------------------------------------------------------

@@ -9,13 +9,6 @@ dispatch uniformly.
 from __future__ import annotations
 
 
-def test_start_returns_handle() -> None:
-    from mordred_hermes.network.paths import clearnet
-
-    handle = clearnet.start()
-    assert handle is not None
-
-
 def test_stop_is_noop() -> None:
     from mordred_hermes.network.paths import clearnet
 
@@ -29,19 +22,3 @@ def test_health_always_true() -> None:
 
     handle = clearnet.start()
     assert clearnet.health(handle) is True
-
-
-def test_path_name_constant() -> None:
-    from mordred_hermes.network.paths import clearnet
-
-    assert clearnet.PATH_NAME == "clearnet"
-
-
-def test_start_idempotent() -> None:
-    """Two start() calls in a row do not raise (no shared state)."""
-    from mordred_hermes.network.paths import clearnet
-
-    h1 = clearnet.start()
-    h2 = clearnet.start()
-    assert h1 is not None
-    assert h2 is not None

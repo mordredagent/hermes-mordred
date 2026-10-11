@@ -54,17 +54,6 @@ class TestResolveKeyvaultDir:
         monkeypatch.setattr("mordred_hermes.keyvault._storage._hermes_home", lambda: tmp_path)
         assert _storage.resolve_keyvault_dir(None) == tmp_path / "mordred" / "keyvault"
 
-    def test_signature_matches_spec(self) -> None:
-        import inspect
-        import typing
-
-        sig = inspect.signature(_storage.resolve_keyvault_dir)
-        hints = typing.get_type_hints(_storage.resolve_keyvault_dir)
-        assert list(sig.parameters) == ["home"]
-        assert hints["home"] == (Path | None)
-        assert hints["return"] is Path
-        assert sig.parameters["home"].default is None
-
 
 # ---------------------------- ensure_layout ----------------------------
 
@@ -75,31 +64,13 @@ class TestEnsureLayout:
         _storage.ensure_layout(root)
         assert root.is_dir()
         assert stat.S_IMODE(root.stat().st_mode) == 0o700
-
-    def test_creates_digests_subdir_with_0700(self, tmp_path: Path) -> None:
-        root = tmp_path / "kv"
-        _storage.ensure_layout(root)
         assert (root / "digests").is_dir()
         assert stat.S_IMODE((root / "digests").stat().st_mode) == 0o700
-
-    def test_creates_ciphertexts_subdir_with_0700(self, tmp_path: Path) -> None:
-        root = tmp_path / "kv"
-        _storage.ensure_layout(root)
         assert (root / "ciphertexts").is_dir()
         assert stat.S_IMODE((root / "ciphertexts").stat().st_mode) == 0o700
-
-    def test_creates_lock_file_with_0600(self, tmp_path: Path) -> None:
-        root = tmp_path / "kv"
-        _storage.ensure_layout(root)
-        lock = root / ".lock"
-        assert lock.is_file()
-        assert stat.S_IMODE(lock.stat().st_mode) == 0o600
-
-    def test_creates_initial_meta_json(self, tmp_path: Path) -> None:
-        root = tmp_path / "kv"
-        _storage.ensure_layout(root)
-        meta = json.loads((root / "meta.json").read_text())
-        assert meta == {"version": 1, "keys": {}}
+        assert (root / ".lock").is_file()
+        assert stat.S_IMODE((root / ".lock").stat().st_mode) == 0o600
+        assert json.loads((root / "meta.json").read_text()) == {"version": 1, "keys": {}}
         assert stat.S_IMODE((root / "meta.json").stat().st_mode) == 0o600
 
     def test_idempotent_on_existing_layout(self, tmp_path: Path) -> None:
@@ -177,11 +148,8 @@ class TestAtomicWrite:
         target = tmp_path / "file.bin"
         _storage.atomic_write(target, b"hello")
         assert target.read_bytes() == b"hello"
-
-    def test_file_mode_is_0600_after_write(self, tmp_path: Path) -> None:
-        target = tmp_path / "file.bin"
-        _storage.atomic_write(target, b"x")
         assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        assert list(tmp_path.glob("*.tmp")) == []
 
     def test_overwrites_existing_atomically(self, tmp_path: Path) -> None:
         target = tmp_path / "file.bin"
@@ -189,12 +157,6 @@ class TestAtomicWrite:
         os.chmod(target, 0o600)
         _storage.atomic_write(target, b"new")
         assert target.read_bytes() == b"new"
-
-    def test_tmp_file_removed_after_success(self, tmp_path: Path) -> None:
-        target = tmp_path / "file.bin"
-        _storage.atomic_write(target, b"data")
-        # No leftover *.tmp files in the directory.
-        assert list(tmp_path.glob("*.tmp")) == []
 
     def test_symlink_target_refused(self, tmp_path: Path) -> None:
         real = tmp_path / "real.bin"
@@ -814,32 +776,15 @@ class TestLoadMeta:
 
 
 class TestSaveMeta:
-    def test_writes_canonical_json(self, tmp_path: Path) -> None:
-        root = tmp_path / "kv"
-        _storage.ensure_layout(root)
-        _storage.save_meta(root, {"version": 1, "keys": {"k1": {"x": 1}}})
-        on_disk = json.loads((root / "meta.json").read_text())
-        assert on_disk == {"version": 1, "keys": {"k1": {"x": 1}}}
-
-    def test_atomic_via_tmp_rename(self, tmp_path: Path) -> None:
-        root = tmp_path / "kv"
-        _storage.ensure_layout(root)
-        _storage.save_meta(root, {"version": 1, "keys": {}})
-        # No leftover tmp files.
-        assert list(root.glob("*.tmp")) == []
-
     def test_round_trips_through_load(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
         _storage.ensure_layout(root)
         meta = {"version": 1, "keys": {"a": {"nested": [1, 2, 3]}, "b": {}}}
         _storage.save_meta(root, meta)
         assert _storage.load_meta(root) == meta
-
-    def test_preserves_0600_mode(self, tmp_path: Path) -> None:
-        root = tmp_path / "kv"
-        _storage.ensure_layout(root)
-        _storage.save_meta(root, {"version": 1, "keys": {"k": {}}})
+        assert json.loads((root / "meta.json").read_text()) == meta
         assert stat.S_IMODE((root / "meta.json").stat().st_mode) == 0o600
+        assert list(root.glob("*.tmp")) == []
 
 
 # ---------------------- codex pre-merge review-fix tests ----------------------

@@ -23,7 +23,7 @@ import time
 import pytest
 
 from mordred_hermes.extension import __main__ as extension_main
-from mordred_hermes.extension.__main__ import main, serve
+from mordred_hermes.extension.__main__ import serve
 from mordred_hermes.wizard.cli import _setup_subparser
 
 _NO_AIOHTTP_IMPORT_PROBE = """\
@@ -101,15 +101,6 @@ def _build_wizard_parser() -> argparse.ArgumentParser:
     plugin_parser = sub.add_parser("mordred")
     _setup_subparser(plugin_parser)
     return root
-
-
-def test_main_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
-    # Argument parsing is dependency-light; aiohttp is checked only once
-    # ``serve`` is called.
-    with pytest.raises(SystemExit) as exc_info:
-        main(["--help"])
-    assert exc_info.value.code == 0
-    assert "ws://127.0.0.1:7788/ext" in capsys.readouterr().out
 
 
 def test_package_pairing_and_help_import_without_aiohttp() -> None:

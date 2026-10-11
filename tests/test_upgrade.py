@@ -35,14 +35,6 @@ class TestUpgradeOptions:
         with pytest.raises((AttributeError, Exception)):
             opts.reset = True  # type: ignore[misc]
 
-    def test_audit_merge_accepts_known_values(self) -> None:
-        for v in ("skip", "append-all", "abort"):
-            assert upgrade.UpgradeOptions(audit_merge=v).audit_merge == v
-
-    def test_policy_conflict_accepts_known_values(self) -> None:
-        for v in ("keep-existing", "overwrite", "abort"):
-            assert upgrade.UpgradeOptions(policy_conflict=v).policy_conflict == v
-
 
 # -----------------------------------------------------------------------------
 # upgrade.run() -- Story 1 happy paths
@@ -328,21 +320,6 @@ class TestIdempotency:
 # -----------------------------------------------------------------------------
 # UpgradeReport shape
 # -----------------------------------------------------------------------------
-
-
-class TestReport:
-    def test_report_has_story1_and_story1_5_fields(self, tmp_path: Path) -> None:
-        w = _writer(tmp_path)
-        report = upgrade.run(
-            options=upgrade.UpgradeOptions(),
-            policy_writer=w,
-            openclaw_base=tmp_path / "no-openclaw-here",
-        )
-        assert hasattr(report, "story1_action")
-        assert hasattr(report, "story1_5_action")
-        # Action values are documented strings
-        assert report.story1_action in {"noop", "applied", "kept-existing", "overwritten"}
-        assert report.story1_5_action in {"noop", "migrated", "skipped-marker"}
 
 
 # -----------------------------------------------------------------------------

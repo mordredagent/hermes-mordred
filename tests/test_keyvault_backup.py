@@ -53,50 +53,15 @@ class TestRoundtrip:
         blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
         parsed = backup.parse_header(blob)
         assert backup.decrypt_body(parsed, PASSPHRASE) == SECRET
-
-    def test_roundtrip_preserves_verification_digest_in_header(self) -> None:
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        parsed = backup.parse_header(blob)
+        assert blob[:6] == b"MRKV\x01\x01"
+        assert backup.HEADER_LEN == 70
         assert parsed.verification_digest == DIGEST_FIXTURE
+        assert (parsed.m_cost, parsed.t_cost, parsed.p_cost) == (47104, 1, 1)
+        assert blob[70:] == parsed.aes_blob
+        assert blob[:70] == parsed.aad + len(parsed.aes_blob).to_bytes(4, "big")
 
 
 class TestWireFormat:
-    def test_blob_starts_with_mrkv_magic(self) -> None:
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        assert blob[:4] == b"MRKV"
-
-    def test_blob_version_byte_is_1(self) -> None:
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        assert blob[4] == 1
-
-    def test_blob_kdf_id_is_argon2id(self) -> None:
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        # kdf_id at offset 5
-        assert blob[5] == backup.KDF_ID_ARGON2ID
-        assert backup.KDF_ID_ARGON2ID == 1
-
-    def test_header_is_70_bytes_before_aes_blob(self) -> None:
-        """Wire format header (Codex #3): magic(4)+version(1)+kdf_id(1)+
-        m(4)+t(4)+p(4)+salt(16)+digest(32)+aes_blob_len(4) = 70 bytes."""
-        from mordred_hermes.keyvault import backup
-
-        assert backup.HEADER_LEN == 70
-
-    def test_aes_blob_starts_at_offset_70(self) -> None:
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        parsed = backup.parse_header(blob)
-        assert blob[70:] == parsed.aes_blob
-
     def test_aad_prefix_equals_header_bytes_0_to_66(self) -> None:
         """Regression test for the AAD/header double-packing refactor
         (LOW refactor finding): ``export()`` used to hand-serialize the
@@ -129,46 +94,6 @@ class TestWireFormat:
             + DIGEST_FIXTURE
         )
         assert parsed.aad == expected_aad
-
-    def test_header_equals_aad_plus_aes_blob_len(self) -> None:
-        """``header == aad + aes_blob_len(4 BE)`` is now structural:
-        ``export()`` derives the header from ``aad`` instead of
-        re-packing it via a second helper."""
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        parsed = backup.parse_header(blob)
-        header = blob[: backup.HEADER_LEN]
-        assert header == parsed.aad + len(parsed.aes_blob).to_bytes(4, "big")
-
-
-class TestKdfParams:
-    """Codex review (cryptographic soundness): the Argon2id cost params
-    are part of the threat model. Regression guard ensures a future PR
-    that accidentally drops the memory cost gets caught immediately."""
-
-    def test_argon2_memory_cost_is_46_mib(self) -> None:
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        parsed = backup.parse_header(blob)
-        # 46 MiB in KiB
-        assert parsed.m_cost == 46 * 1024
-        assert parsed.m_cost == 47104
-
-    def test_argon2_time_cost_is_1(self) -> None:
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        parsed = backup.parse_header(blob)
-        assert parsed.t_cost == 1
-
-    def test_argon2_parallelism_is_1(self) -> None:
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        parsed = backup.parse_header(blob)
-        assert parsed.p_cost == 1
 
 
 class TestSaltFreshness:

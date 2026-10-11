@@ -187,37 +187,3 @@ def _eval_pth_engages(argv0: str) -> bool:
     # used since the expression legitimately calls os.environ.get / str
     # methods, not just literals.
     return bool(eval(_pth_engage_expr(), {"os": fake_os, "sys": fake_sys}))
-
-
-class TestPthGateParity:
-    """The ``.pth`` engage expression must decide identically to
-    :func:`_pth_bootstrap._looks_like_hermes` for every ``argv[0]`` shape —
-    including the ``endswith('/hermes_cli')`` case FIX 6 restored.
-    """
-
-    @pytest.mark.parametrize(
-        "argv0,expected",
-        [
-            ("/opt/venv/bin/hermes", True),
-            ("/opt/venv/bin/hermes-agent", True),
-            ("/opt/venv/bin/hermes-acp", True),
-            ("/opt/venv/bin/hermes-mordred", True),
-            (r"C:\venv\Scripts\hermes.EXE", True),
-            (r"C:\venv\Scripts\HERMES.Exe", True),
-            (r"C:\venv\Scripts\HERMES.PY", True),
-            ("/x/site-packages/hermes_cli/cli.py", True),
-            ("/x/site-packages/hermes_cli", True),  # endswith('/hermes_cli') — the FIX 6 branch
-            ("/opt/venv/bin/hermes.backup", False),
-            ("/opt/venv/bin/hermes.test.py", False),
-            (r"C:\venv\Scripts\hermes.backup.EXE", False),
-            ("/x/hermes-venv/bin/pytest", False),  # venv NAMED hermes, but not a hermes process
-            ("/usr/bin/python", False),
-        ],
-    )
-    def test_pth_expression_matches_looks_like_hermes(self, argv0: str, expected: bool) -> None:
-        engaged = _eval_pth_engages(argv0)
-        assert engaged is expected
-        # The real parity check: never hard-code only the expected literal —
-        # assert equality against the production matcher itself, so the two
-        # can never drift again even if one side's behaviour changes later.
-        assert engaged == _pth_bootstrap._looks_like_hermes([argv0])

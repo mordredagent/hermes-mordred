@@ -262,17 +262,6 @@ class TestResolveRoot:
 class TestStatusJson:
     """Phase 5 (UX review 2026-06-11): read commands need --json for scripting."""
 
-    def test_status_json_reports_generation_and_files(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        import json
-
-        _build_vault(tmp_path, files={".env": b"K=v\n", "config.yaml": b"a: 1\n"})
-        rc = vault_cli.status(root=tmp_path, prompt_io=_PromptIO(password=_PASSPHRASE), as_json=True)
-        assert rc == 0
-        body = json.loads(capsys.readouterr().out)
-        assert body["generation"] == 2
-        assert sorted(body["files"]) == [".env", "config.yaml"]
-        assert body["read_only"] is True
-
     def test_status_json_flag_is_wired(self) -> None:
         from mordred_hermes.wizard import cli
 

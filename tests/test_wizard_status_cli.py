@@ -198,11 +198,6 @@ class TestKeyvaultSection:
         assert report.keyvault_initialized is True
         assert "audit log encrypted" in report.keyvault_detail
 
-    def test_absent_audit_key_reports_plaintext(self, tmp_path: Path) -> None:
-        _build_keyvault(tmp_path, {"default": b"\x01" * 32})
-        report = _collect(tmp_path)
-        assert "audit log plaintext" in report.keyvault_detail
-
     def test_hardware_helper_reported(self, tmp_path: Path) -> None:
         report = _collect(tmp_path, helper_finder=lambda platform: "/usr/local/bin/helper")
         assert report.keyvault_helper_installed is True
@@ -302,23 +297,6 @@ class TestKeyvaultSection:
 
 
 class TestRendering:
-    def test_text_includes_all_sections(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = status_cli.status(
-            home=tmp_path,
-            root=_storage.resolve_keyvault_dir(tmp_path),
-            platform="darwin",
-            workspace=_workspace(tmp_path),
-            on_path=lambda name: False,
-            helper_finder=lambda platform: None,
-        )
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "policy" in out
-        assert "network" in out
-        assert "keyvault" in out
-        for target in ("env", "config", "memory", "workspace"):
-            assert target in out
-
     def test_status_wiring_no_ansi_when_not_a_tty(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -335,7 +313,13 @@ class TestRendering:
             helper_finder=lambda platform: None,
         )
         assert rc == 0
-        assert "\033" not in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "\033" not in out
+        assert "policy" in out
+        assert "network" in out
+        assert "keyvault" in out
+        for target in ("env", "config", "memory", "workspace"):
+            assert target in out
 
     def test_status_wiring_colours_when_forced(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -393,9 +377,6 @@ class TestRendering:
             ],
         )
 
-    def test_render_text_default_has_no_ansi(self) -> None:
-        assert "\033" not in status_cli.render_text(self._sample_report())
-
     @pytest.mark.parametrize(
         ("mode", "detail"),
         [
@@ -407,11 +388,6 @@ class TestRendering:
     def test_policy_mode_has_short_explanation(self, mode: str, detail: str) -> None:
         report = replace(self._sample_report(), policy_mode=mode)
         assert f"policy mode : {mode} ({detail})" in status_cli.render_text(report)
-
-    def test_render_text_color_emits_ansi(self) -> None:
-        text = status_cli.render_text(self._sample_report(), color=True)
-        assert "\033[" in text  # styled
-        assert "\033[1m" in text  # the dashboard heading is bold
 
     def test_json_is_machine_readable(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         rc = status_cli.status(

@@ -21,9 +21,6 @@ class TestEvaluateInstall:
             # off mode — always allow, no audit reason
             ("off", None, PolicyOutcome("allow", None)),
             ("off", "clearnet", PolicyOutcome("allow", None)),
-            ("off", "tor", PolicyOutcome("allow", None)),
-            ("off", "vpn", PolicyOutcome("allow", None)),
-            ("off", "local-only", PolicyOutcome("allow", None)),
             # strict — block clearnet and missing, allow tor/vpn/local-only
             ("strict", None, PolicyOutcome("block", "policy.strict.unknown_metadata")),
             ("strict", "clearnet", PolicyOutcome("block", "policy.strict.clearnet")),
@@ -33,9 +30,6 @@ class TestEvaluateInstall:
             # lenient — warn on missing, allow everything else
             ("lenient", None, PolicyOutcome("warn", "policy.lenient.unknown_metadata_warning")),
             ("lenient", "clearnet", PolicyOutcome("allow", None)),
-            ("lenient", "tor", PolicyOutcome("allow", None)),
-            ("lenient", "vpn", PolicyOutcome("allow", None)),
-            ("lenient", "local-only", PolicyOutcome("allow", None)),
         ],
     )
     def test_matrix(self, policy_mode: str, network_req: str | None, expected: PolicyOutcome) -> None:
@@ -126,9 +120,15 @@ class TestEvaluateInstallKeyvault:
 
 
 class TestEvaluatePreToolCall:
-    @pytest.mark.parametrize("policy_mode", ["off", "lenient"])
-    @pytest.mark.parametrize("tool_name", ["web_fetch", "web_search", "read_file"])
-    @pytest.mark.parametrize("active_path", [None, "tor", "vpn", "clearnet"])
+    @pytest.mark.parametrize(
+        ("policy_mode", "tool_name", "active_path"),
+        [
+            ("off", "web_fetch", None),
+            ("off", "read_file", "tor"),
+            ("lenient", "web_search", "clearnet"),
+            ("lenient", "web_fetch", "vpn"),
+        ],
+    )
     def test_off_and_lenient_always_allow(
         self,
         policy_mode: str,

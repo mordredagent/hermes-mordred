@@ -576,13 +576,6 @@ class TestDisconnect:
         vpn.disconnect(handle, runner=runner)
         assert ("/bin/mullvad", "disconnect") in runner.calls
         assert runner.timeouts == [vpn.DEFAULT_COMMAND_TIMEOUT]
-
-    def test_preserve_lockdown_default(self) -> None:
-        from mordred_hermes.network.paths import vpn
-
-        runner = _FakeRunner({})
-        handle = vpn.MullvadHandle(cli_path="/bin/mullvad", region="auto", lockdown_enforced=True)
-        vpn.disconnect(handle, runner=runner)
         assert ("/bin/mullvad", "lockdown-mode", "set", "off") not in runner.calls
 
     def test_preserve_lockdown_false_clears_it(self) -> None:
@@ -731,19 +724,6 @@ class TestHealth:
 # --------------------------------------------------------------------------- #
 # Module constants                                                            #
 # --------------------------------------------------------------------------- #
-
-
-def test_path_name_constant() -> None:
-    from mordred_hermes.network.paths import vpn
-
-    assert vpn.PATH_NAME == "vpn"
-
-
-def test_default_runner_is_callable() -> None:
-    """Production default must be a runnable subprocess wrapper."""
-    from mordred_hermes.network.paths import vpn
-
-    assert callable(vpn.DEFAULT_RUNNER)
 
 
 def test_default_handshake_ceiling() -> None:

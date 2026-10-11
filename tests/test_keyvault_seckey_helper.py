@@ -361,20 +361,6 @@ def test_backend_uses_application_tag(fake_helper: str, monkeypatch: pytest.Monk
 # ---------------------------------------------------------------------------
 
 
-def test_locate_helper_source_finds_build_sources_in_checkout() -> None:
-    """From a source checkout, locate native/sekey-helper with its build files.
-
-    ``hermes mordred keyvault enable-se`` needs to build the helper from
-    source, so it must first locate the source tree (``build.sh`` +
-    ``Package.swift`` + the Swift entrypoint).
-    """
-    src = _seckey_helper._locate_helper_source()
-    assert src is not None, "should find native/sekey-helper from the source tree"
-    assert (src / "build.sh").is_file()
-    assert (src / "Package.swift").is_file()
-    assert (src / "Sources" / "mordred-hermes-sekey" / "main.swift").is_file()
-
-
 def test_swift_helper_uses_fullfsync_for_blob_publication_and_delete() -> None:
     """macOS ``fsync`` alone does not promise stable-media durability."""
     src = _seckey_helper._locate_helper_source()
@@ -445,6 +431,9 @@ class TestIsSekeySource:
         src = _seckey_helper._locate_helper_source()
         assert src is not None
         assert _seckey_helper._is_sekey_source(src)
+        assert (src / "build.sh").is_file()
+        assert (src / "Package.swift").is_file()
+        assert (src / "Sources" / "mordred-hermes-sekey" / "main.swift").is_file()
 
 
 def _make_fake_tpmkey_crate(

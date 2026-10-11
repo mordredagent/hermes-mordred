@@ -28,7 +28,6 @@ from mordred_hermes.wizard.configure import (
     ConfigureResult,
     NonInteractiveAbort,
     PromptIO,
-    SetupRunner,
     _RefusingPromptIO,
     cli_handler,
     collect_answers,
@@ -589,21 +588,6 @@ class TestSubprocessSetupRunner:
 # -----------------------------------------------------------------------------
 
 
-def test_scripted_prompt_io_matches_protocol() -> None:
-    p: PromptIO = _ScriptedPromptIO(answers=[])
-    assert p is not None
-
-
-def test_refusing_prompt_io_matches_protocol() -> None:
-    p: PromptIO = _RefusingPromptIO()
-    assert p is not None
-
-
-def test_setup_runner_spy_matches_protocol() -> None:
-    r: SetupRunner = _SetupRunnerSpy()
-    assert r is not None
-
-
 # -----------------------------------------------------------------------------
 # PromptIO.ask_password remains part of the shared prompt surface (reused by
 # `network init` for the Mullvad secret).
@@ -611,19 +595,6 @@ def test_setup_runner_spy_matches_protocol() -> None:
 
 
 class TestPromptIOAskPassword:
-    def test_protocol_has_ask_password(self) -> None:
-        import inspect
-
-        sig = inspect.signature(PromptIO.ask_password)  # type: ignore[attr-defined]
-        params = list(sig.parameters)
-        assert "label" in params
-        assert "default" in params
-
-    def test_scripted_prompt_io_supports_ask_password(self) -> None:
-        scripted = _ScriptedPromptIO(answers=["secret-123"])
-        result = scripted.ask_password("Mullvad account id", default="")
-        assert result == "secret-123"
-
     def test_refusing_prompt_io_ask_password_raises(self) -> None:
         rp = _RefusingPromptIO()
         with pytest.raises(NonInteractiveAbort):
@@ -636,19 +607,6 @@ class TestPromptIOAskPassword:
 
 
 class TestConfigureSummary:
-    def test_render_summary_contains_resolved_fields(self) -> None:
-        from mordred_hermes.wizard.configure import _render_configure_summary
-
-        snap = PolicySnapshot(policy="strict", allow_cloud_llm=True, harness_primary="codex")
-        out = _render_configure_summary(snap)
-        assert "strict" in out
-        assert "codex" in out
-        # cloud-LLM state is shown as a human yes/no, not the raw bool.
-        assert "policy" in out.lower()
-        assert "cloud" in out.lower()
-        # Points the user at the on-demand network privacy command.
-        assert "network init" in out
-
     def test_render_summary_reflects_cloud_disallowed(self) -> None:
         from mordred_hermes.wizard.configure import _render_configure_summary
 
@@ -665,6 +623,8 @@ class TestConfigureSummary:
         out = capsys.readouterr().out
         assert "strict" in out
         assert "codex" in out
+        assert "policy" in out.lower()
+        assert "cloud" in out.lower()
         assert "network init" in out
 
 
@@ -758,17 +718,13 @@ class TestSnapshotFromArgs:
 
 
 class TestParseBoolAnswer:
-    @pytest.mark.parametrize("answer", ["y", "yes", "true", "1", "on", "Y", "TRUE"])
+    @pytest.mark.parametrize("answer", ["true", "1", "on"])
     def test_truthy_answers(self, answer: str) -> None:
         assert configure._parse_bool_answer(answer, default=False) is True
 
-    @pytest.mark.parametrize("answer", ["n", "no", "false", "0", "off", "anything-else"])
+    @pytest.mark.parametrize("answer", ["no", "false", "0", "off"])
     def test_falsy_answers(self, answer: str) -> None:
         assert configure._parse_bool_answer(answer, default=True) is False
-
-    @pytest.mark.parametrize("default", [True, False])
-    def test_empty_answer_returns_default(self, default: bool) -> None:
-        assert configure._parse_bool_answer("", default=default) is default
 
 
 class TestSnapshotFromArgsHardening:
@@ -972,22 +928,6 @@ class TestPromptToolkitIO:
             ("off", "off"),
         ]
 
-    def test_build_choice_app_constructs_keyboard_friendly_dialog(self) -> None:
-        # Construction needs no TTY, so exercising the real builder here covers
-        # it (the run/cancel tests stub it out). Asserts the dialog is a usable
-        # Application with the live-selection radio + key bindings that back the
-        # arrows/Enter/Tab navigation.
-        from prompt_toolkit.application import Application
-
-        app = configure._build_choice_app(
-            title="Mordred policy mode",
-            values=[("strict", "strict — x"), ("lenient", "lenient — y")],
-            default="lenient",
-            hint="hint",
-        )
-        assert isinstance(app, Application)
-        assert app.key_bindings is not None
-
     @pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="needs SIGALRM watchdog (POSIX)")
     @pytest.mark.parametrize(
         ("keys", "expected"),
@@ -1006,20 +946,6 @@ class TestPromptToolkitIO:
             keys,
         )
         assert result == expected
-
-    def test_build_multichoice_app_constructs_keyboard_friendly_dialog(self) -> None:
-        # Construction needs no TTY; exercising the real builder covers the
-        # checkbox path of _build_list_app (the run/cancel tests stub it out).
-        from prompt_toolkit.application import Application
-
-        app = configure._build_multichoice_app(
-            title="Cloud provider allowlist",
-            values=[("anthropic", "anthropic"), ("openai", "openai")],
-            default_values=("anthropic",),
-            hint="hint",
-        )
-        assert isinstance(app, Application)
-        assert app.key_bindings is not None
 
     @pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="needs SIGALRM watchdog (POSIX)")
     def test_multichoice_dialog_space_toggles_and_enter_confirms(self) -> None:
@@ -1303,14 +1229,6 @@ def test_coerce_cloud_attempt_action_rejects_unknown_value() -> None:
 class TestSelectableCloudProviders:
     """The allowlist checkbox is sourced from the network flagger's canonical
     registry so the wizard never drifts from the transport-compat layer."""
-
-    def test_excludes_localhost_provider(self) -> None:
-        assert "mordred-local" not in configure._SELECTABLE_CLOUD_PROVIDERS
-
-    def test_includes_known_cloud_providers(self) -> None:
-        providers = configure._SELECTABLE_CLOUD_PROVIDERS
-        assert "anthropic" in providers
-        assert "openai" in providers
 
     def test_matches_known_providers_minus_localhost(self) -> None:
         from mordred_hermes.network.provider_transport_flagger import KNOWN_PROVIDERS

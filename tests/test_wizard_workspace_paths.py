@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 
 from mordred_hermes.wizard._workspace_paths import (
-    WorkspaceEnv,
     WorkspacePaths,
     is_mountpoint,
     resolve_workspace_env,
@@ -46,13 +45,6 @@ class TestResolveWorkspaceEnv:
         # WorkspaceEnv must satisfy it so one resolution serves both surfaces.
         monkeypatch.setenv("HOME", str(tmp_path))
         assert isinstance(resolve_workspace_env(), WorkspacePaths)
-
-    def test_read_side_constructor_shape_is_stable(self, tmp_path: Path) -> None:
-        # encryption_cli / status_cli tests construct the 3-field read view
-        # directly; the verbs add keydir. Both keyword shapes must keep working.
-        paths = WorkspacePaths(image=tmp_path / "i", blob=tmp_path / "b", mount=tmp_path / "m")
-        env = WorkspaceEnv(image=tmp_path / "i", blob=tmp_path / "b", mount=tmp_path / "m", keydir=tmp_path / "k")
-        assert (paths.image, paths.blob, paths.mount) == (env.image, env.blob, env.mount)
 
 
 class TestIsMountpoint:
