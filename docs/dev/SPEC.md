@@ -791,8 +791,11 @@ the operator opt-out.
 The capability probe `runtime_memory_encryption_available` joins the env and
 config probes in the same family and appears in `encryption status`'s gateway
 lines. Existing canary tests exercise the installed supported upstream memory
-tool. The weekly workflow currently scans hook contracts statically; an
-executable latest-main memory canary is planned below.
+tool, including the declared Hermes 0.13.0 floor. The weekly workflow retains
+static hook scans and executes memory/Journey seams against explicitly selected
+latest-main source under Python 3.12 with released Hermes dependencies. It
+verifies parent/child provenance and classifies incomplete execution as
+unavailable; see CI.md §`upstream-check.yml` details.
 
 The wizard refuses unsupported production file-vault initialization and
 hot/device-auth paths before resolving a backend/store, prompting or writing.
@@ -803,15 +806,15 @@ or writes. Recovery requires a usable device/anchor pair before prompting;
 portable cold reads and passphrase rotation remain available outside Windows.
 This gate does not apply to dedicated Linux/Windows memory custody.
 
-Approved follow-up contracts (planned; not active runtime behavior):
+Agent-memory follow-up contracts:
 
-- Weekly compatibility monitoring must execute memory read/write/mutation,
+- Implemented weekly compatibility monitoring executes memory read/write/mutation,
   drift-backup and journey guards against explicitly selected latest-main
-  source in an isolated home, verify parent/child provenance, and retain the
+  source in an isolated home, verifies parent/child provenance, and retains the
   Hermes floor. Missing dependencies/provenance are unavailable, not success.
   Untrusted upstream execution must have no issue-write token; a separate
   report job may publish only normalized status and fixed diagnostic context.
-- Linux general `setup` and enable-all must skip macOS env/config enrollment
+- Planned Linux general `setup` and enable-all must skip macOS env/config enrollment
   and use the existing dedicated memory engine. Setup respects opt-out,
   checks readiness without unwrap, reports unfinished noninteractive work as
   manual, and never forces runtime proof. Enable-all skips an unsupported

@@ -311,18 +311,17 @@ writes. Hot opens refuse unsupported production stores; device-auth construction
 returns no pair so cold-path rotation remains portable and recovery refuses
 before prompting. Dedicated Linux/Windows memory engines stay outside this gate.
 
-Approved follow-ups to the agent-memory contract (separate implementation PRs,
-not yet shipped):
+Agent-memory follow-up implementation status (separate PRs):
 
-1. Weekly upstream compatibility: retain PyPI/main AST scans, Python 3.12 and
-   Monday 03:00 UTC. Add a source-selected latest-main executable memory and
+1. Implemented weekly upstream compatibility: retain PyPI/main AST scans,
+   Python 3.12 and Monday 03:00 UTC. Run a source-selected latest-main executable memory and
    journey canary with isolated home and verified parent/sanitized-child
    provenance. Treat setup/import failures as unavailable; strict-main mode
    cannot skip missing seams. Separate unprivileged upstream execution from
    an issue-writing report job consuming only normalized statuses and fixed
-   context. Preserve the declared Hermes floor and production probe cleanup.
-2. Linux orchestration: `setup` skips env enrollment; enable-all skips env/config
-   enable and delegates memory to the existing engine after seam checks.
+   context. The declared Hermes floor and production probe cleanup remain.
+2. Planned Linux orchestration: `setup` skips env enrollment; enable-all skips
+   env/config enable and delegates memory to the existing engine after seam checks.
    Setup honors opt-out before readiness, requires active/non-drift load-only
    status (live TPM access is not checked), and returns manual for unfinished
    noninteractive work. Never recreate armed missing/corrupt custody or force

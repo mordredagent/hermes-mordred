@@ -213,6 +213,8 @@ operator surface.
   coverage, and lifecycle in SPEC/PLAN/PATHS/ROADMAP (this PR).
 - [x] Keyvault runtime: the memory-hook wrapper around the memory tool seam,
   the capability probe, and the CI canary against the installed upstream.
+- [x] Weekly selected-source main memory/Journey canary with parent/child
+  provenance, sealed-backup/refusal behavior and separate issue-report authority.
 - [x] Wizard lifecycle: `encryption enable/disable/purge memory`, `status`
   drift, and the `setup` `memory-encryption` step.
 - [x] Wizard production file-vault eligibility and anchor `WrapError` handling:

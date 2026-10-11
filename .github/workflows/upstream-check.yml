@@ -1,115 +1,122 @@
 name: Upstream drift check
 
-# Detects hook-name and payload drift in both the current hermes-agent PyPI
-# package and the latest upstream main checkout. The AST scanner imports
-# neither target, so main can be checked before it is packaged or installable.
-
+# Static release/main scans plus selected-source memory seams under Python 3.12.
+# Upstream code executes only in the read-only job; diagnostics stay in its logs.
 on:
   schedule:
     - cron: "0 3 * * 1" # Monday 03:00 UTC
   workflow_dispatch:
 
-permissions:
-  contents: read
-  issues: write
+permissions: {}
 
 jobs:
   drift-check:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      HERMES_HOME: ${{ github.workspace }}/.canary-home
+      PYTHONDONTWRITEBYTECODE: "1"
+    outputs:
+      pypi_status: ${{ steps.ast.outputs.pypi_status }}
+      main_status: ${{ steps.ast.outputs.main_status }}
+      memory_status: ${{ steps.memory.outputs.memory_status }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-
       - name: Install current hermes-agent from PyPI
         run: |
           python -m pip install --upgrade pip
-          pip install hermes-agent
-
+          python -m pip install hermes-agent
       - name: Clone latest Hermes main
-        run: git clone --depth 1 --branch main https://github.com/NousResearch/hermes-agent.git hermes-upstream
-
-      - name: Check hook contract against PyPI and main
-        id: drift
         run: |
-          SITE_PACKAGES="$(python -c 'import hermes_cli, os; print(os.path.dirname(os.path.dirname(hermes_cli.__file__)))')"
-          if python tools/check_hook_payload_drift.py --hermes-root "$SITE_PACKAGES" --contract tools/hook_payload_contract.json > pypi_drift.txt; then
-            echo "pypi_status=ok" >> "$GITHUB_OUTPUT"
-          else
-            echo "pypi_status=drift" >> "$GITHUB_OUTPUT"
-          fi
-          if python tools/check_hook_payload_drift.py --hermes-root hermes-upstream --contract tools/hook_payload_contract.json > main_drift.txt; then
-            echo "main_status=ok" >> "$GITHUB_OUTPUT"
-          else
-            echo "main_status=drift" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Find existing upstream-drift issue
-        if: steps.drift.outputs.pypi_status != 'ok' || steps.drift.outputs.main_status != 'ok'
-        id: existing
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          script: |
-            const { data } = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: "open",
-              labels: "upstream-drift",
-            });
-            core.setOutput("number", data.length > 0 ? data[0].number : "");
-
-      - name: Build drift report
-        if: steps.drift.outputs.pypi_status != 'ok' || steps.drift.outputs.main_status != 'ok'
-        id: report
+          git clone --depth 1 --branch main https://github.com/NousResearch/hermes-agent.git hermes-upstream
+          git -C hermes-upstream rev-parse HEAD
+      - name: Check hook contract against PyPI and main before source overlay
+        id: ast
+        shell: bash
+        run: |
+          SITE_PACKAGES="$(python -c 'import hermes_cli, pathlib; print(pathlib.Path(hermes_cli.__file__).resolve().parent.parent)')"
+          scan() {
+            local code=0 status
+            python tools/check_hook_payload_drift.py --hermes-root "$2" --contract tools/hook_payload_contract.json > "$1_drift.txt" 2>&1 || code=$?
+            case "$code" in 0) status=ok;; 1) status=drift;; *) status=unavailable;; esac
+            cat "$1_drift.txt"
+            echo "$1_status=$status" >> "$GITHUB_OUTPUT"
+          }
+          scan pypi "$SITE_PACKAGES"
+          scan main hermes-upstream
+      - name: Prepare disposable selected-source canary
+        run: |
+          python -m venv "$RUNNER_TEMP/memory-canary"
+          "$RUNNER_TEMP/memory-canary/bin/python" -m pip install -e '.[dev,keyvault]'
+          "$RUNNER_TEMP/memory-canary/bin/python" - <<'PY'
+          import pathlib, sysconfig
+          root = str(pathlib.Path('hermes-upstream').resolve())
+          overlay = pathlib.Path(sysconfig.get_paths()['purelib']) / '00_mordred_upstream_canary.pth'
+          overlay.write_text('import sys; sys.path.insert(0, ' + repr(root) + ')\n', encoding='utf-8')
+          PY
+      - name: Execute actual upstream memory and Journey guards
+        id: memory
         env:
-          PYPI_STATUS: ${{ steps.drift.outputs.pypi_status }}
-          MAIN_STATUS: ${{ steps.drift.outputs.main_status }}
+          MORDRED_REQUIRE_UPSTREAM_MEMORY_SEAMS: "1"
+          MORDRED_EXPECTED_UPSTREAM_ROOT: ${{ github.workspace }}/hermes-upstream
+        shell: bash
         run: |
-          {
-            echo "body<<REPORT_EOF"
-            echo "Weekly upstream drift check found a Hermes hook-contract mismatch. This report is informational; Mordred does not send upstream PRs."
-            echo
-            if [ "$PYPI_STATUS" = "drift" ]; then
-              echo "Current PyPI \`hermes-agent\`:"
-              echo '```'
-              cat pypi_drift.txt
-              echo '```'
-            fi
-            if [ "$MAIN_STATUS" = "drift" ]; then
-              echo
-              echo "Latest \`NousResearch/hermes-agent\` main:"
-              echo '```'
-              cat main_drift.txt
-              echo '```'
-            fi
-            echo "REPORT_EOF"
-          } >> "$GITHUB_OUTPUT"
+          code=0
+          "$RUNNER_TEMP/memory-canary/bin/python" tools/upstream_memory_canary.py --status-file "$RUNNER_TEMP/memory-status.txt" > memory_canary.txt 2>&1 || code=$?
+          cat memory_canary.txt
+          status=unavailable
+          recorded="$(cat "$RUNNER_TEMP/memory-status.txt" 2>/dev/null || true)"
+          if [ "$code" = 0 ] && [ "$recorded" = ok ]; then status=ok; fi
+          if [ "$code" = 1 ] && [ "$recorded" = drift ]; then status=drift; fi
+          echo "memory_status=$status" >> "$GITHUB_OUTPUT"
 
-      - name: File or update drift issue
-        if: steps.drift.outputs.pypi_status != 'ok' || steps.drift.outputs.main_status != 'ok'
+  report:
+    needs: drift-check
+    if: >-
+      always() && (needs.drift-check.result != 'success' ||
+      needs.drift-check.outputs.pypi_status != 'ok' ||
+      needs.drift-check.outputs.main_status != 'ok' ||
+      needs.drift-check.outputs.memory_status != 'ok')
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      # Fresh runner: no checkout, cache, artifacts or upstream execution.
+      - name: File or update local compatibility issue
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          DRIFT_BODY: ${{ steps.report.outputs.body }}
-          EXISTING_ISSUE: ${{ steps.existing.outputs.number }}
+          CHECK_RESULT: ${{ needs.drift-check.result == 'success' && 'success' || 'unavailable' }}
+          PYPI_STATUS: ${{ needs.drift-check.outputs.pypi_status == 'ok' && 'ok' || needs.drift-check.outputs.pypi_status == 'drift' && 'drift' || 'unavailable' }}
+          MAIN_STATUS: ${{ needs.drift-check.outputs.main_status == 'ok' && 'ok' || needs.drift-check.outputs.main_status == 'drift' && 'drift' || 'unavailable' }}
+          MEMORY_STATUS: ${{ needs.drift-check.outputs.memory_status == 'ok' && 'ok' || needs.drift-check.outputs.memory_status == 'drift' && 'drift' || 'unavailable' }}
         with:
           script: |
-            const body = process.env.DRIFT_BODY;
-            const existing = process.env.EXISTING_ISSUE;
-            if (existing) {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: Number(existing),
-                body,
-              });
+            const normalize = value => value === "ok" || value === "drift" ? value : "unavailable";
+            const result = process.env.CHECK_RESULT === "success" ? "success" : "unavailable";
+            const statuses = [process.env.PYPI_STATUS, process.env.MAIN_STATUS, process.env.MEMORY_STATUS].map(normalize);
+            if (result === "success" && statuses.every(value => value === "ok")) return;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              "Weekly Hermes compatibility check. Informational only; Mordred does not send upstream PRs.",
+              "",
+              `Execution: ${result}.`,
+              `PyPI hook contract: ${statuses[0]}.`,
+              `Main hook contract: ${statuses[1]}.`,
+              `Main memory/Journey seams: ${statuses[2]}.`,
+              "",
+              "Unavailable means preparation, dependencies or execution could not establish compatibility. Drift means a contract or behavior check failed.",
+              `Diagnostics and selected source provenance: ${runUrl}`,
+            ].join("\n");
+            const target = {owner: context.repo.owner, repo: context.repo.repo};
+            const {data} = await github.rest.issues.listForRepo({...target, state: "open", labels: "upstream-drift"});
+            if (data.length) {
+              await github.rest.issues.createComment({...target, issue_number: data[0].number, body});
             } else {
-              await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title: "Hermes upstream drift detected",
-                body,
-                labels: ["actionable", "upstream-drift"],
-              });
+              await github.rest.issues.create({...target, title: "Hermes upstream compatibility report", body, labels: ["actionable", "upstream-drift"]});
             }

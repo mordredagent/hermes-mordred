@@ -53,7 +53,16 @@ Use `git show hermes-upstream/main:<path>` or a separate temporary clone.
 `tools/hook_payload_contract.json` lists the hook names and payload fields
 Mordred actually consumes. The local test checks the installed supported
 Hermes release; `.github/workflows/upstream-check.yml` also compares current
-PyPI and upstream `main` weekly.
+PyPI and upstream `main` weekly. The same workflow executes a strictly
+source-selected memory/Journey seam canary under Python 3.12 with released
+Hermes dependencies. It verifies parent and sanitized-child source origins,
+read/write/mutation/refusal and sealed drift backups. This narrow source
+compatibility claim does not install or validate upstream main's full native
+package/runtime. Setup, dependency or provenance failures report unavailable;
+contract or behavioral failures report drift. Only normalized status and a
+trusted run link cross to the separate local issue-writing runner; upstream
+code never receives issue-write authority. See [`CI.md`](./CI.md)
+§`upstream-check.yml` details for the execution and permission boundary.
 
 - Released-Hermes incompatibility can fail normal CI.
 - Upstream-`main` drift opens or updates a local informational issue.
