@@ -69,16 +69,21 @@ def test_workflow_selector_preserves_frozen_native_harness_contract() -> None:
     # The external harness extracts filenames directly from this named run step.
     modules = re.findall(r"tests/[\w/]+\.py", step["run"])
     weights = _tool().load_weights(WEIGHTS)
-    assert len(modules) == len(set(modules)) == 82
+    additions = {"tests/test_windows_database_compat.py", "tests/test_desktop_windows_pm_compat.py"}
+    assert additions <= set(modules)
+    assert len(modules) == len(set(modules)) == 84
+    frozen = [module for module in modules if module not in additions]
     # SHA256 of newline-joined, sorted distinct modules at frozen BASE f3506b7dc.
     # Independent of the weights fixture, so replacing a module cannot hide loss.
-    assert hashlib.sha256("\n".join(sorted(modules)).encode()).hexdigest() == (
+    assert hashlib.sha256("\n".join(sorted(frozen)).encode()).hexdigest() == (
         "7d7b2b9da0549e631373054f3741a8c1e8cd8c96c51e3261538af783c6667b0d"
     )
-    assert set(modules) == set(weights)  # Frozen BASE selector, independently measured in native JUnit.
+    assert set(frozen) == set(weights)  # Original native JUnit measurements remain unchanged.
     shards = _tool().shard_modules(modules, weights, 3)
     assert sorted(m for shard in shards for m in shard) == sorted(modules)
-    totals = [sum(weights[m] for m in shard) for shard in shards]
+    # New modules use the runner's explicit unmeasured fallback, not invented
+    # native timing evidence. Both must run once alongside every frozen module.
+    totals = [sum(weights.get(m, _tool().DEFAULT_SECONDS) for m in shard) for shard in shards]
     assert max(totals) - min(totals) < 1
     assert max(totals) < 950
     assert job["strategy"]["matrix"] == {"python-version": ["3.11", "3.12", "3.13"], "shard": [1, 2, 3]}
