@@ -89,11 +89,6 @@ class TestReadPolicyModeFailClosed:
 
 
 class TestRegisterEntryPoint:
-    def test_register_is_callable(self) -> None:
-        from mordred_hermes.llm_guard import register
-
-        assert callable(register)
-
     def test_register_places_mordred_local_in_provider_registry(self) -> None:
         from mordred_hermes.llm_guard import register
 

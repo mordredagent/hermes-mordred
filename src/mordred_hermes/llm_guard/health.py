@@ -75,7 +75,7 @@ def probe(
         # ConnectError, ReadError, etc. — everything below the transport.
         raise MordredLocalUnreachable(f"local LLM probe failed ({type(e).__name__})") from e
 
-    if response.status_code >= 400:
+    if not response.is_success:
         raise MordredLocalUnreachable(f"local LLM probe returned HTTP {response.status_code}")
 
     _LOG.debug("local LLM probe ok: %s", url)

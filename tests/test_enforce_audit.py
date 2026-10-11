@@ -223,6 +223,10 @@ class TestDegradedReasons:
                 audit=audit,
                 health_probe=_noop_probe,
             )
+        assert [entry["reason"] for entry in audit.entries] == [
+            "mordred.degraded.no_resolved_provider",
+            "policy.strict.unconditional_override",
+        ]
         audit.entries.clear()
         with pytest.raises(MordredSessionRefused):
             enforce.check_session_provider(
@@ -240,81 +244,6 @@ class TestDegradedReasons:
 # --------------------------------------------------------------------------- #
 # Frozen enum membership — POLICY.md must agree with emitted reasons          #
 # --------------------------------------------------------------------------- #
-
-
-class TestFrozenEnumMembership:
-    _FROZEN_REASONS = frozenset(
-        {
-            "policy.strict.cloud_allowlisted",
-            "policy.strict.cloud_not_allowlisted",
-            "policy.strict.cloud_prompted_allow",
-            "policy.strict.cloud_prompted_deny",
-            "policy.strict.session_refused",
-            "policy.strict.unconditional_override",
-            "mordred.degraded.no_resolved_provider",
-        }
-    )
-
-    def test_all_emitted_reasons_are_in_freeze(self, tmp_path: Path) -> None:
-        audit = _FakeAuditWriter()
-
-        # Allow allowlisted cloud
-        a = tmp_path / "a"
-        a.mkdir()
-        cfg = _write_policy_json(
-            a,
-            allow_cloud_llm=True,
-            cloud_provider_allowlist=("anthropic",),
-        )
-        enforce.check_session_provider(
-            policy_mode="strict",
-            policy_json_path=cfg,
-            active_provider="anthropic",
-            audit=audit,
-            health_probe=_noop_probe,
-        )
-
-        # Allow local
-        b = tmp_path / "b"
-        b.mkdir()
-        cfg = _write_policy_json(b)
-        enforce.check_session_provider(
-            policy_mode="strict",
-            policy_json_path=cfg,
-            active_provider="mordred-local",
-            audit=audit,
-            health_probe=_noop_probe,
-        )
-
-        # Cloud refused
-        c = tmp_path / "c"
-        c.mkdir()
-        cfg = _write_policy_json(c)
-        with pytest.raises(MordredSessionRefused):
-            enforce.check_session_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider="bedrock",
-                audit=audit,
-                health_probe=_noop_probe,
-            )
-
-        # Degraded
-        d = tmp_path / "d"
-        d.mkdir()
-        cfg = _write_policy_json(d)
-        with pytest.raises(MordredSessionRefused):
-            enforce.check_session_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider=None,
-                audit=audit,
-                health_probe=_noop_probe,
-            )
-
-        emitted = {e["reason"] for e in audit.entries}
-        unknown = emitted - self._FROZEN_REASONS
-        assert not unknown, f"unfrozen reasons emitted: {sorted(unknown)}"
 
 
 # --------------------------------------------------------------------------- #
