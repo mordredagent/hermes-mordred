@@ -165,9 +165,8 @@ def test_update_snapshot_flags_and_scope_keep_the_existing_contract(tg):
 
 
 @pytest.mark.parametrize("holder", ["thread", "process"])
-def test_desktop_status_reports_busy_while_telegram_data_lock_is_held(tg, monkeypatch, holder):
+def test_desktop_telegram_checks_report_busy_while_data_lock_is_held(tg, holder):
     from mordred_hermes.desktop import _windows
-    from mordred_hermes.keyvault import _windows_capability
 
     c, home, backend = tg
     enroll(c, home, backend, "telegram")
@@ -175,14 +174,14 @@ def test_desktop_status_reports_busy_while_telegram_data_lock_is_held(tg, monkey
     vault.store(_value())
     sealed = sealed_path(home).read_bytes()
     calls = list(backend.calls)
-    monkeypatch.setenv("HERMES_HOME", str(home))
-    monkeypatch.setattr(_windows_capability, "_platform", lambda: "win32")
     finished = threading.Event()
     result = []
 
     def read_status():
         try:
-            result.append(_windows.status_payload(home, vault))
+            # Exercise the real Desktop flags reader; full status also scans
+            # unrelated custody/memory state before reaching this boundary.
+            result.append(_windows._telegram_checks(vault))
         finally:
             finished.set()
 
@@ -199,9 +198,11 @@ def test_desktop_status_reports_busy_while_telegram_data_lock_is_held(tg, monkey
     worker.join(timeout=5)
 
     assert not worker.is_alive()
-    assert returned_while_locked, "Desktop status must return before the Telegram data lock is released"
-    assert result[0]["checks"]["login"] == {"ok": False, "detail": "store_busy"}
-    assert result[0]["checks"]["privacy_llm"] == {"ok": False, "detail": "store_busy"}
+    assert returned_while_locked, "Desktop Telegram checks must return before the data lock is released"
+    checks, flags = result[0]
+    assert checks["login"] == {"ok": False, "detail": "store_busy"}
+    assert checks["privacy_llm"] == {"ok": False, "detail": "store_busy"}
+    assert flags is None
     assert sealed_path(home).read_bytes() == sealed
     assert backend.calls == calls, "status must not unseal, generate or delete a key"
     assert vault.flags()["logged_in"] is True

@@ -86,6 +86,7 @@ def env(monkeypatch, tmp_path):
         api, "_FLOWS", LoginFlows(store, client_factory=lambda *a, **k: client, save_session=lambda c: c.session)
     )
     monkeypatch.setattr(api, "_home", lambda: home)
+    monkeypatch.setattr(api, "_JOBS", {})
     monkeypatch.setattr(
         "mordred_hermes.extension.telegram.memory_guard.memory_encryption_active", lambda home=None: True
     )
@@ -96,7 +97,9 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "hermes_model_check", model_ok)
     app = FastAPI()
     app.include_router(api.router, prefix="/api/plugins/mordred")
-    return SimpleNamespace(http=TestClient(app), store=store, client=client, tmp=home)
+    # Background jobs must share a persistent event loop across requests.
+    with TestClient(app) as http:
+        yield SimpleNamespace(http=http, store=store, client=client, tmp=home)
 
 
 @pytest.fixture
