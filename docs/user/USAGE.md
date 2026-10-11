@@ -266,13 +266,14 @@ the hook reseals the current config and removes the plaintext. Do not re-run
 > plaintext memory file is on disk — re-run `encryption enable memory` to seal
 > it.
 >
-> **Restart a running gateway** after enabling or disabling. After `enable`,
+> **On macOS, restart a running gateway** after enabling or disabling. After `enable`,
 > the running process still lacks the freshly-minted key, so — fail-closed,
 > not plaintext — its memory reads/writes are refused until you restart it,
 > and a session may see an empty memory. After `disable`, it still has the
 > hook armed in-process; the marker being gone only stops it sealing new
 > writes starting at the next memory call. `enable` warns and names the pid
-> when it sees one.
+> when it sees one. Normal Linux memory enable requires identified gateways to
+> be stopped; Windows requires gateways to be known stopped before enabling.
 >
 > **Refusal and recovery.** A recognized seam raises when a sealed read lacks a
 > usable key or fails authentication. Mordred emits the remedy; Hermes may
