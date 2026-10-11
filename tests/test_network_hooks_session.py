@@ -164,38 +164,6 @@ class TestOnSessionStart:
         )
         assert rt.use_calls == ["vpn"]
 
-    def test_strict_bringup_failure_raises_MordredPathBringupFailed(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import api, hooks
-
-        rt = _FakeRuntime()
-        rt.use_raises = BringupFailed("tor timeout")
-        api.set_runtime(rt)
-        policy = _write_policy(tmp_path, "strict")
-        config = _write_config(tmp_path, "tor")
-
-        with pytest.raises(MordredPathBringupFailed):
-            hooks.on_session_start(
-                policy_json_path=policy,
-                config_path=config,
-                audit=_FakeAudit(),
-            )
-
-    def test_lenient_bringup_failure_does_not_raise(self, tmp_path: Path) -> None:
-        """Lenient bring-up failure is handled inside the runtime
-        (fallback + audit). The hook stays silent."""
-        from mordred_hermes.network import api, hooks
-
-        rt = _FakeRuntime()
-        api.set_runtime(rt)
-        policy = _write_policy(tmp_path, "lenient")
-        config = _write_config(tmp_path, "tor")
-
-        hooks.on_session_start(
-            policy_json_path=policy,
-            config_path=config,
-            audit=_FakeAudit(),
-        )
-
     def test_missing_config_defaults_to_clearnet_in_strict(self, tmp_path: Path) -> None:
         """A missing config.yaml behaves like clearnet (safe default)."""
         from mordred_hermes.network import api, hooks

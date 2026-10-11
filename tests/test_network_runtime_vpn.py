@@ -10,7 +10,7 @@ from tests._network_runtime_fakes import _make_runtime, _VpnFakes
 
 class TestVpnUse:
     def test_use_vpn_calls_bring_up_with_policy_mode(self) -> None:
-        vpn = _VpnFakes()
+        vpn = _VpnFakes(killswitch=True)
         rt = _make_runtime(vpn_fakes=vpn, policy_mode="strict", mullvad_region="jp")
         rt.use("vpn")
         assert len(vpn.bring_up_calls) == 1
@@ -65,13 +65,6 @@ class TestStrictKillswitchGate:
             rt.use("vpn")
         # The tunnel must never have been brought up — we refuse first.
         assert vpn.bring_up_calls == []
-        rt.stop()
-
-    def test_strict_allows_provider_with_killswitch(self) -> None:
-        vpn = _VpnFakes(killswitch=True)
-        rt = _make_runtime(vpn_fakes=vpn, policy_mode="strict")
-        rt.use("vpn")
-        assert len(vpn.bring_up_calls) == 1
         rt.stop()
 
     def test_lenient_allows_provider_without_killswitch(self) -> None:

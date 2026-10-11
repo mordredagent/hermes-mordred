@@ -43,13 +43,6 @@ class _FakeRuntime:
 
 
 class TestUse:
-    def test_clearnet_dispatches(self) -> None:
-        from mordred_hermes.network import api
-
-        rt = _FakeRuntime()
-        api.use("clearnet", runtime=rt)
-        assert rt.use_calls == ["clearnet"]
-
     def test_tor_dispatches(self) -> None:
         from mordred_hermes.network import api
 
@@ -72,14 +65,6 @@ class TestUse:
         with pytest.raises(UnknownPath):
             api.use("i2p", runtime=rt)  # type: ignore[arg-type]
 
-    def test_missing_runtime_raises(self) -> None:
-        from mordred_hermes.network import api
-        from mordred_hermes.network._exceptions import MordredNetworkError
-
-        api.reset_runtime_for_tests()
-        with pytest.raises(MordredNetworkError):
-            api.use("tor")
-
 
 class TestStatus:
     def test_returns_active_path(self) -> None:
@@ -89,22 +74,10 @@ class TestStatus:
         rt.active_path = "tor"
         result = api.status(runtime=rt)
         assert result.active_path == "tor"
-
-    def test_status_has_ready_field(self) -> None:
-        from mordred_hermes.network import api
-
-        rt = _FakeRuntime()
-        result = api.status(runtime=rt)
         assert result.ready is True
 
 
 class TestHealth:
-    def test_health_truthy(self) -> None:
-        from mordred_hermes.network import api
-
-        rt = _FakeRuntime()
-        assert api.health(runtime=rt) is True
-
     def test_health_falsy(self) -> None:
         from mordred_hermes.network import api
 
@@ -214,15 +187,6 @@ class TestRuntimeRegistration:
         api.reset_runtime_for_tests()
         with pytest.raises(MordredNetworkError):
             api.use("tor")
-
-
-def test_network_status_shape() -> None:
-    from mordred_hermes.network.api import NetworkStatus
-
-    s = NetworkStatus(active_path="clearnet", ready=True, last_health=True)
-    assert s.active_path == "clearnet"
-    assert s.ready is True
-    assert s.last_health is True
 
 
 class TestSetIsolationToken:

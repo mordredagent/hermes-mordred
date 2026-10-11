@@ -86,19 +86,6 @@ class TestVpnCapabilities:
 
 
 class TestRegistry:
-    def test_runtime_config_defaults_to_mullvad(self) -> None:
-        """Existing configs (no vpn_provider key) must keep using Mullvad."""
-        from mordred_hermes.network.runtime import RuntimeConfig
-
-        assert RuntimeConfig().vpn_provider == "mullvad"
-
-    def test_build_mullvad_explicit(self) -> None:
-        from mordred_hermes.network.vpn_providers import MullvadProvider, build_provider
-
-        provider = build_provider("mullvad")
-        assert isinstance(provider, MullvadProvider)
-        assert provider.name == "mullvad"
-
     def test_unknown_provider_raises(self) -> None:
         from mordred_hermes.network._exceptions import UnknownVpnProvider
         from mordred_hermes.network.vpn_providers import build_provider
@@ -133,19 +120,17 @@ class TestMullvadProviderDelegation:
     Mullvad behaviour.
     """
 
-    def test_detect_cli_resolves_from_which(self) -> None:
-        from mordred_hermes.network.vpn_providers import MullvadProvider
-
-        provider = MullvadProvider()
-        assert provider.detect_cli(which=lambda name: "/opt/homebrew/bin/mullvad") == "/opt/homebrew/bin/mullvad"
-
     def test_bring_up_issues_connect_in_order(self) -> None:
-        from mordred_hermes.network.vpn_providers import MullvadProvider
+        from mordred_hermes.network.vpn_providers import MullvadProvider, build_provider
 
-        runner = _FakeRunner({})
-        provider = MullvadProvider()
+        runner = _FakeRunner({("/bin/mullvad", "status"): _result(stdout="Connected to jp-tyo-wg-001\n")})
+        provider = build_provider("mullvad")
+        assert isinstance(provider, MullvadProvider)
+        assert provider.name == "mullvad"
+        cli = provider.detect_cli(which=lambda name: "/bin/mullvad")
+        assert cli == "/bin/mullvad"
         handle = provider.bring_up(
-            cli_path="/bin/mullvad",
+            cli_path=cli,
             region="jp",
             policy_mode="strict",
             runner=runner,
@@ -156,36 +141,19 @@ class TestMullvadProviderDelegation:
         # Handle carries Mullvad state the runtime teardown relies on.
         assert handle.cli_path == "/bin/mullvad"
         assert handle.lockdown_enforced is True
+        assert (
+            runner.calls.index((cli, "lockdown-mode", "set", "on"))
+            < runner.calls.index((cli, "relay", "set", "location", "jp"))
+            < runner.calls.index((cli, "connect"))
+        )
 
-    def test_wait_connected_polls_status(self) -> None:
-        from mordred_hermes.network.vpn_providers import MullvadProvider
+        provider.wait_connected(cli_path=cli, runner=runner)
+        assert provider.health(handle, runner=runner) is True
+        assert (cli, "status") in runner.calls
 
-        runner = _FakeRunner({("/bin/mullvad", "status"): _result(stdout="Tunnel status: Connected\n")})
-        provider = MullvadProvider()
-        provider.wait_connected(cli_path="/bin/mullvad", runner=runner)
-        assert ("/bin/mullvad", "status") in runner.calls
-
-    def test_disconnect_preserves_lockdown_by_default(self) -> None:
-        from mordred_hermes.network.paths import vpn as vpn_mod
-        from mordred_hermes.network.vpn_providers import MullvadProvider
-
-        runner = _FakeRunner({})
-        handle = vpn_mod.MullvadHandle(cli_path="/bin/mullvad", region="auto", lockdown_enforced=True)
-        MullvadProvider().disconnect(handle, runner=runner)
-        assert ("/bin/mullvad", "disconnect") in runner.calls
-        assert ("/bin/mullvad", "lockdown-mode", "set", "off") not in runner.calls
-
-    def test_health_reads_mullvad_status_connected(self) -> None:
-        # Since the fix 2026-07-13 the Mullvad health probe is scoped to the
-        # daemon's own Connected state (``mullvad status``), not an unscoped
-        # ``wg show`` that a sibling WireGuard interface could mask.
-        from mordred_hermes.network.paths import vpn as vpn_mod
-        from mordred_hermes.network.vpn_providers import MullvadProvider
-
-        runner = _FakeRunner({("/bin/mullvad", "status"): _result(stdout="Connected to jp-tyo-wg-001\n")})
-        handle = vpn_mod.MullvadHandle(cli_path="/bin/mullvad", region="auto", lockdown_enforced=True)
-        assert MullvadProvider().health(handle, runner=runner) is True
-        assert ("/bin/mullvad", "status") in runner.calls
+        provider.disconnect(handle, runner=runner)
+        assert (cli, "disconnect") in runner.calls
+        assert (cli, "lockdown-mode", "set", "off") not in runner.calls
 
     def test_health_disconnected_is_unhealthy(self) -> None:
         from mordred_hermes.network.paths import vpn as vpn_mod
