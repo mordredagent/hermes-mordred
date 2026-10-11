@@ -1918,6 +1918,38 @@ an observed absence to verify unknown state, no revoke and Devices advice.
 Shared `flags()` semantics remain a separate fix; Desktop corroborates
 observed absence through the existing checked transaction/presence API.
 
+2026-10-11 Astra review follow-up: production/test candidate `c1b5e48db`
+integrates `dev` at `ec198d0f`. Telegram flags now refuse a held data lock
+without waiting, preserving `store_busy`; mutation/sync locks remain blocking.
+Failed Windows enrollment reports that a key may have been created and that
+retained journals require explicit reconciliation, without echoing exception
+content. Windows package-manager registration/repair remains unported and
+refuses before profile I/O; the page directs users to their original Windows
+installer. Windows database status and uninstall use checked, bounded,
+nonblocking observation of known protection-state names, including a profile
+owner, and refuse unsupported or uncertain state before teardown.
+
+macOS arm64 / Python 3.14.7 / Hermes 0.19.0 verification: **8,015 passed,
+221 skipped**, zero errors/failures, **90.22%** coverage (434.048 seconds).
+Reduced-extras Python 3.12 strict mypy passed all 257 files; Ruff check/format
+(586 files), shellcheck and Desktop JavaScript syntax passed. The sdist-built
+wheel was installed in a fresh Python 3.12 environment outside the checkout;
+its verified `site-packages` import passed 42 compatibility/page regressions.
+Astra's final repair/Desktop review passed 214 tests with one existing
+Hermes-checkout-dependent skip and found no remaining supported P1/P2 in its
+assigned scope. The independent database review confirmed both additional
+P2 fixes. Draft CI at the candidate passed all 59 critical cases across the
+three OSes with zero skips. Full CI is tracked by
+[run 38104459639](https://github.com/mordredagent/hermes-mordred/actions/runs/38104459639).
+The native selector retains all 82 original modules plus two new compatibility
+modules; new duration weights remain explicitly unmeasured.
+
+These host/wheel checks are portable regressions, not native CNG or Windows 11
+acceptance. The existing AWS session expired before any new Server execution;
+fresh ordinary-user Server source/wheel/CNG and installed-product gates remain
+open. SPEC permits a qualified Windows 11 x64 VM or Cloud PC; physical hardware
+is not required, and virtual-TPM evidence must name its provider and limits.
+
 ### Windows shared Telegram memory guard validation (C10c)
 
 The scoped Windows job adds
