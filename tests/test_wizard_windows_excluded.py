@@ -78,7 +78,12 @@ def tree(home: Path) -> dict[str, bytes | None]:
     ("call", "capability"),
     [
         (lambda root, t: _vault_lifecycle.init(root=root, backend=t, store=t, prompt_io=t), "file_vault"),
-        (lambda root, t: _vault_lifecycle.ensure_initialised(root=root, backend=t, store=t, prompt_io=t), "file_vault"),
+        (
+            lambda root, t: _vault_lifecycle.ensure_initialised(
+                root=root, backend=t, store=t, prompt_io=t, flow_session=t
+            ),
+            "file_vault",
+        ),
         (lambda root, t: _vault_lifecycle.change_passphrase(root=root, backend=t, store=t, prompt_io=t), "recovery"),
         (lambda root, t: _vault_lifecycle.recover(root=root, backend=t, store=t, prompt_io=t), "recovery"),
     ],
@@ -105,7 +110,7 @@ def test_vault_init_cli_refuses_before_generation(windows, capsys):
 def test_vault_opens_refuse_before_backend_resolution(windows, capsys):
     home, trip = windows
     root = home / "mordred" / "vault"
-    assert _vault_open._open_hot_path_or_report(root, backend=trip, store=trip) is None
+    assert _vault_open._open_hot_path_or_report(root, backend=trip, store=trip, flow_session=trip) is None
     assert _vault_open._open_cold_path(root, prompt_io=trip) is None
     err = capsys.readouterr().err
     assert "vault open: file_vault is excluded" in err and "recovery is excluded" in err

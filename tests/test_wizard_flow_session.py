@@ -34,6 +34,8 @@ from mordred_hermes.keyvault import pow as kvpow
 from mordred_hermes.keyvault.memory_crypto import is_sealed
 from mordred_hermes.wizard import (
     _keyvault_init,
+    _vault_lifecycle,
+    _vault_open,
     config_decrypt_cli,
     configure,
     encryption_cli,
@@ -515,7 +517,9 @@ class TestVaultInitWithFlow:
         assert prompt_io.password_labels == []
         vault.recover_vault(tmp_path / "v", _PASSPHRASE).close()
 
-    def test_remembers_a_new_passphrase_and_keeps_the_vault_open(self, tmp_path: Path) -> None:
+    def test_remembers_a_new_passphrase_and_keeps_the_vault_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         with FlowSession() as flow:
             rc = vault_cli.init(
                 root=tmp_path / "v",
@@ -531,6 +535,18 @@ class TestVaultInitWithFlow:
             with lent:  # a lent handle survives the borrower's `with`
                 pass
             assert lent.list_files() == []
+            monkeypatch.setattr(sys, "platform", "linux")
+
+            def forbidden(*args, **kwargs):
+                pytest.fail("cached flow resolved a production default")
+
+            for module in (_vault_lifecycle, _vault_open):
+                for name in ("resolve_backend", "resolve_store", "resolve_prompt_io"):
+                    monkeypatch.setattr(module, name, forbidden)
+            assert vault_cli.ensure_initialised(root=tmp_path / "v", flow_session=flow) == 0
+            with _vault_open._open_hot_path_or_report(tmp_path / "v", flow_session=flow) as cached:
+                cached.enroll_file(".env", b"CACHED=1\n")
+            assert lent.read_file(".env") == b"CACHED=1\n"
 
     def test_mismatch_is_not_remembered(self, tmp_path: Path) -> None:
         class _Mismatch(_CountingPromptIO):

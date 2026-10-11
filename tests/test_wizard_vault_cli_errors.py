@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from mordred_hermes.keyvault import vault
+from mordred_hermes.keyvault._exceptions import WrapError
 from mordred_hermes.wizard import vault_cli
 from mordred_hermes.wizard._prompt_io import _RefusingPromptIO
 
@@ -22,15 +24,23 @@ from ._wizard_vault_cli_helpers import (
 class TestFailClosed:
     """Review H-1: every failure path returns rc 1, never an uncaught traceback."""
 
-    def test_init_keychain_error_in_reinit_guard(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = vault_cli.init(
-            root=tmp_path,
-            prompt_io=_PromptIO(passwords=[_PASSPHRASE, _PASSPHRASE]),
-            backend=FakeBackend(),
-            store=_ReadRaisesStore(),
-        )
+    @pytest.mark.parametrize("command", [vault_cli.init, vault_cli.ensure_initialised])
+    @pytest.mark.parametrize("error", [None, WrapError("anchor helper failed"), OSError("anchor I/O failed")])
+    def test_anchor_read_failure_preserves_vault_before_prompts_or_writes(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], command, error: Exception | None
+    ) -> None:
+        root = tmp_path / "vault"
+        _build_vault(root, files={".env": b"SECRET=retained\n"})
+        before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+        backend, store = FakeBackend(), _ReadRaisesStore(error)
+        rc = command(root=root, prompt_io=_RefusingPromptIO(), backend=backend, store=store)
         assert rc == 1
-        assert capsys.readouterr().err.strip() != ""
+        assert "Cannot determine vault state" in capsys.readouterr().err
+        assert backend.calls == []
+        assert [operation for operation, _ in store.calls] == ["read"]
+        assert {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
+        with vault.recover_vault(root, _PASSPHRASE) as opened:
+            assert opened.read_file(".env") == b"SECRET=retained\n"
 
     def test_init_wraperror_generating_key(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         rc = vault_cli.init(
