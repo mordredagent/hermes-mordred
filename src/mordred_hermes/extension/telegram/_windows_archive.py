@@ -112,12 +112,13 @@ def directory_present(path: Path) -> bool:
 
 @contextlib.contextmanager
 def transaction(
-    path: Path, *, create: bool = False, recorder: Recorder = UNRECORDED
+    path: Path, *, create: bool = False, recorder: Recorder = UNRECORDED, blocking: bool = True
 ) -> Iterator[PrivateTransaction | None]:
     """A checked exact-private directory transaction; ``None`` when absent.
 
     With ``create`` the final directory is created private before content and
     its ``.gitignore`` is ensured; its parent must already exist.
+    Status readers use ``blocking=False`` to refuse contention as ``busy``.
     """
     with ExitStack() as stack:
         try:
@@ -132,7 +133,7 @@ def transaction(
                 return
             recorder.published()  # creation (and its cleanup) is owned by this scope
             directory = stack.enter_context(open_private_directory(path, create=True))
-        tx = stack.enter_context(directory.transaction())
+        tx = stack.enter_context(directory.transaction(blocking=blocking))
         if create:
             _ensure_gitignore(tx, recorder)
         yield tx

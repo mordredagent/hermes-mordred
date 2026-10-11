@@ -299,7 +299,7 @@ def _check(ok: bool, detail: str) -> dict[str, Any]:
 
 
 def _telegram_checks(store: Any) -> tuple[dict[str, dict[str, Any]], dict[str, Any] | None]:
-    """Login/question-model checks from non-secret flags (no native call)."""
+    """Load-only flags without waiting; ``store_busy`` stays distinct from unconfigured state."""
     try:
         flags = store.flags()
     except Exception as exc:  # classified code only

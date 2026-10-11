@@ -354,8 +354,12 @@ class WindowsCustodySecretStore:
             self._publish(session, self._seal(encode(value), lease, backend), value, expected=_ANY)
 
     def flags(self) -> dict[str, Any] | None:
-        """Non-secret flags, or ``None`` for checked sealed-file absence. No native call."""
-        with _translated(), checked.transaction(self.root) as tx:
+        """Nonblocking non-secret flags; checked absence is ``None``, contention is ``store_busy``.
+
+        Status readers must never await an archive or credential mutation. No
+        native call is made, and mutation/sync reads keep their blocking locks.
+        """
+        with _translated(), checked.transaction(self.root, blocking=False) as tx:
             if tx is None or not checked.present(tx, _SEALED):
                 return None
             raw = checked.read_optional(tx, _META, META_LIMIT)

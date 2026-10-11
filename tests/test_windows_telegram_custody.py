@@ -13,6 +13,8 @@ import logging
 import os
 import shutil
 import struct
+import threading
+from contextlib import ExitStack
 
 import pytest
 
@@ -21,6 +23,7 @@ from mordred_hermes._private_fs import open_private_directory
 from mordred_hermes.extension.telegram import secrets, store, tee
 from mordred_hermes.keyvault import wrap
 from tests import test_windows_custody
+from tests.test_private_fs_processes import _child, _line
 from tests.test_windows_custody_profile import SID
 
 custody_fixture = test_windows_custody.fs
@@ -159,6 +162,80 @@ def test_update_snapshot_flags_and_scope_keep_the_existing_contract(tg):
     assert audit and all(entry["event"] == "keyvault.unwrap_dek" for entry in audit)
     assert all(SESSION not in json.dumps(entry) for entry in audit)
     assert ops(backend, "generate") == 1
+
+
+@pytest.mark.parametrize("holder", ["thread", "process"])
+def test_desktop_status_reports_busy_while_telegram_data_lock_is_held(tg, monkeypatch, holder):
+    from mordred_hermes.desktop import _windows
+    from mordred_hermes.keyvault import _windows_capability
+
+    c, home, backend = tg
+    enroll(c, home, backend, "telegram")
+    vault = windows_store(home, backend)
+    vault.store(_value())
+    sealed = sealed_path(home).read_bytes()
+    calls = list(backend.calls)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(_windows_capability, "_platform", lambda: "win32")
+    finished = threading.Event()
+    result = []
+
+    def read_status():
+        try:
+            result.append(_windows.status_payload(home, vault))
+        finally:
+            finished.set()
+
+    with ExitStack() as locks:
+        if holder == "thread":
+            directory = locks.enter_context(open_private_directory(vault.root))
+            locks.enter_context(directory.transaction())
+        else:
+            process = locks.enter_context(_child(vault.root, "hold"))
+            assert _line(process).startswith("locked ")
+        worker = threading.Thread(target=read_status, daemon=True)
+        worker.start()
+        returned_while_locked = finished.wait(1.0)
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert returned_while_locked, "Desktop status must return before the Telegram data lock is released"
+    assert result[0]["checks"]["login"] == {"ok": False, "detail": "store_busy"}
+    assert result[0]["checks"]["privacy_llm"] == {"ok": False, "detail": "store_busy"}
+    assert sealed_path(home).read_bytes() == sealed
+    assert backend.calls == calls, "status must not unseal, generate or delete a key"
+    assert vault.flags()["logged_in"] is True
+
+
+def test_sync_scope_write_still_waits_for_telegram_data_lock(tg):
+    c, home, backend = tg
+    enroll(c, home, backend, "telegram")
+    vault = windows_store(home, backend)
+    vault.store(_value())
+    started = threading.Event()
+    finished = threading.Event()
+    failures = []
+
+    def save_scope():
+        started.set()
+        try:
+            vault.save_sync_scope({"since_days": 7})
+        except Exception as exc:
+            failures.append(exc)
+        finally:
+            finished.set()
+
+    with open_private_directory(vault.root) as directory, directory.transaction():
+        worker = threading.Thread(target=save_scope, daemon=True)
+        worker.start()
+        assert started.wait(1.0)
+        returned_while_locked = finished.wait(0.1)
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert not returned_while_locked, "sync-scope mutation must stay serialized by the data lock"
+    assert failures == []
+    assert vault.sync_scope()["since_days"] == 7
 
 
 def test_audit_entries_are_emitted_after_the_custody_scope(tg):
