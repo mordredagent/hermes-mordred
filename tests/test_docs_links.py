@@ -40,6 +40,7 @@ _MAINTAINED_DEV_DOCS = {
     "ROADMAP.md",
     "SLACK_E2E.md",
     "SPEC.md",
+    "STATE_DB_ENCRYPTION.md",
     "TODO.md",
     "UPSTREAM.md",
     "setup.md",

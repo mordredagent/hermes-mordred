@@ -30,6 +30,12 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/memory-key.wrapped` | Linux memory provider | 127-byte TPM-wrapped memory key; private `0600`, no portable recovery |
 | `<home>/mordred/memory-key.lock` | Linux memory lifecycle | private interprocess provisioning/lifecycle lock |
 | `<home>/mordred/memory-vault.marker` | encryption CLI | arms the agent-memory at-rest encryption runtime |
+| `<home>/mordred/db-encryption.marker` | `databases encrypt` / startup conversion | arms SQLCipher for every Hermes database (`mordred_hermes.dbcrypt`) |
+| `<home>/mordred/db-encryption.pending` | `databases encrypt` while Hermes runs | converts the databases at the next Hermes start |
+| `<home>/mordred/db-decryption.pending` | `databases decrypt` while Hermes runs | turns the databases back into plain SQLite at the next Hermes start |
+| `<home>/mordred/db-encryption.journal.json` | database conversion | swaps still to do after an interrupted conversion |
+| `<home>/mordred/db-encryption.lock` | database runtime / maintenance | shared runtime leases until exit; exclusive conversion and protected-home uninstall; stable inode retained after purge |
+| `<db>.mordred-enc` | database conversion | the verified converted copy (encrypted, or plain when decrypting), renamed over `<db>` |
 | `<home>/mordred/memory-vault.optout` | encryption CLI | pauses the memory hook (paused by operator) |
 | `<home>/mordred/telegram/` | extension (Telegram importer) | encrypted read-only Telegram archive |
 | `<home>/mordred/uninstall/` | `uninstall` | `.env` lines (`HERMES_MEMORY_KEY`, `MORDRED_*`) moved out of `.env`, mode `0600` |
@@ -372,6 +378,22 @@ out as a second, switched-off row. No `plugin.yaml`, so Hermes'
 agent-plugin scanner finds no directory plugin there and the `mordred`
 entry-point plugin is not shadowed; Hermes Desktop pairs the page with that
 plugin by name. Holds no secrets.
+
+On pm-managed Hermes installs (Hermes Desktop and source installs, detected by
+an importable `pm.workspace`) the plugin also keeps
+`<home>/plugins/mordred/pyproject.toml` plus a vendored copy of the installed
+`mordred_hermes/` package there (`desktop.member.ensure_member`, rewritten only
+when the bytes differ, serialized by `<home>/mordred/.pm-member.lock`). Hermes's
+package manager makes every enabled plugin folder with a `pyproject.toml` a uv
+workspace member of each environment it builds, so a Hermes update rebuilds
+Mordred in instead of dropping it. The member is a buildable project named
+`hermes-mordred` with Mordred's requirements minus `hermes-agent` (the
+workspace root is the Hermes checkout, version 0.0.0, which cannot satisfy
+`hermes-agent>=0.13.0`). `[tool.hermes-mordred]` records the install source
+(PyPI or local path) and extras. When the package is missing from Hermes's
+environment, the `dashboard/plugin_api.py` shim serves a fallback API
+(`/status` answers `mordred_not_installed`, `POST /repair` runs
+`hermes pm install venv`).
 
 ## Hermes-owned and external targets
 

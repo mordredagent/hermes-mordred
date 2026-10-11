@@ -40,7 +40,7 @@ class TestLooksLikeHermes:
         ],
     )
     def test_hermes_invocations(self, argv: list[str]) -> None:
-        assert _pth_bootstrap._looks_like_hermes(argv) is True
+        assert _pth_bootstrap._looks_like_hermes(argv, {}, orig_argv=[]) is True
 
     @pytest.mark.parametrize(
         "argv",
@@ -55,21 +55,21 @@ class TestLooksLikeHermes:
         ],
     )
     def test_non_hermes_invocations(self, argv: list[str]) -> None:
-        assert _pth_bootstrap._looks_like_hermes(argv) is False
+        assert _pth_bootstrap._looks_like_hermes(argv, {}, orig_argv=[]) is False
 
 
 class TestShouldEngage:
     def test_force_env_engages_non_hermes(self) -> None:
-        assert _pth_bootstrap._should_engage(["/usr/bin/python"], {"MORDRED_CONFIG_DECRYPT": "1"}) is True
+        assert _pth_bootstrap._should_engage(["/usr/bin/python"], {"MORDRED_CONFIG_DECRYPT": "1"}, {}) is True
 
     def test_optout_env_skips_hermes(self) -> None:
-        assert _pth_bootstrap._should_engage(["/usr/local/bin/hermes"], {"MORDRED_CONFIG_DECRYPT": "0"}) is False
+        assert _pth_bootstrap._should_engage(["/usr/local/bin/hermes"], {"MORDRED_CONFIG_DECRYPT": "0"}, {}) is False
 
     def test_hermes_without_env_engages(self) -> None:
-        assert _pth_bootstrap._should_engage(["/usr/local/bin/hermes"], {}) is True
+        assert _pth_bootstrap._should_engage(["/usr/local/bin/hermes"], {}, {}) is True
 
     def test_non_hermes_without_env_skips(self) -> None:
-        assert _pth_bootstrap._should_engage(["/usr/bin/pytest"], {}) is False
+        assert _pth_bootstrap._should_engage(["/usr/bin/pytest"], {}, {}) is False
 
 
 class TestRun:
@@ -80,7 +80,7 @@ class TestRun:
             calls.append("ran")
             return 1
 
-        result = _pth_bootstrap.run(argv=["/usr/local/bin/hermes"], environ={}, installer=_installer)
+        result = _pth_bootstrap.run(argv=["/usr/local/bin/hermes"], environ={}, installer=_installer, modules={})
         assert result is True
         assert calls == ["ran"]
 
@@ -91,7 +91,7 @@ class TestRun:
             calls.append("ran")
             return 0
 
-        result = _pth_bootstrap.run(argv=["/usr/bin/pytest"], environ={}, installer=_installer)
+        result = _pth_bootstrap.run(argv=["/usr/bin/pytest"], environ={}, installer=_installer, modules={})
         assert result is False
         assert calls == []  # unrelated interpreters never touch the device key
 
@@ -102,7 +102,7 @@ class TestRun:
             raise RuntimeError("vault tampered")
 
         with pytest.raises(SystemExit):
-            _pth_bootstrap.run(argv=["/usr/local/bin/hermes"], environ={}, installer=_installer)
+            _pth_bootstrap.run(argv=["/usr/local/bin/hermes"], environ={}, installer=_installer, modules={})
 
     def test_systemexit_from_installer_propagates(self) -> None:
         """A deliberate SystemExit (already fail-closed) passes through unchanged."""
@@ -111,7 +111,7 @@ class TestRun:
             raise SystemExit(3)
 
         with pytest.raises(SystemExit) as exc_info:
-            _pth_bootstrap.run(argv=["/usr/local/bin/hermes"], environ={}, installer=_installer)
+            _pth_bootstrap.run(argv=["/usr/local/bin/hermes"], environ={}, installer=_installer, modules={})
         assert exc_info.value.code == 3
 
     def test_default_installer_is_install_config_decrypt(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -125,7 +125,7 @@ class TestRun:
             return 0
 
         monkeypatch.setattr(cb, "install_config_decrypt", _spy)
-        result = _pth_bootstrap.run(argv=["/usr/local/bin/hermes"], environ={})  # installer=None default
+        result = _pth_bootstrap.run(argv=["/usr/local/bin/hermes"], environ={}, modules={})  # installer=None default
         assert result is True
         assert calls == ["ran"]
 
@@ -177,7 +177,7 @@ def _eval_pth_engages(argv0: str) -> bool:
     the real builtins automatically when the globals dict omits the key,
     so the expression's bare ``len(...)`` call still resolves.
     """
-    fake_sys = SimpleNamespace(argv=[argv0])
+    fake_sys = SimpleNamespace(argv=[argv0], modules={})
     fake_os = SimpleNamespace(environ={}, path=_real_os.path)
     # eval() is safe here: the source is our own tracked packaging/pth/*.pth
     # file (not attacker- or user-controlled input), the prefix/suffix
@@ -220,4 +220,30 @@ class TestPthGateParity:
         # The real parity check: never hard-code only the expected literal —
         # assert equality against the production matcher itself, so the two
         # can never drift again even if one side's behaviour changes later.
-        assert engaged == _pth_bootstrap._looks_like_hermes([argv0])
+        assert engaged == _pth_bootstrap._looks_like_hermes([argv0], {})
+
+
+def test_config_decrypt_engages_under_the_managed_launcher() -> None:
+    managed = {_pth_bootstrap.MANAGED_LAUNCHER_MODULE: object()}
+    calls: list[str] = []
+    assert _pth_bootstrap.run(argv=["-c"], environ={}, installer=lambda: calls.append("x") or 0, modules=managed)
+    assert calls == ["x"]
+    # The recovery opt-out still wins.
+    assert not _pth_bootstrap.run(
+        argv=["-c"], environ={"MORDRED_CONFIG_DECRYPT": "0"}, installer=lambda: 0, modules=managed
+    )
+    assert not _pth_bootstrap.run(argv=["-c"], environ={}, installer=lambda: 0, modules={})
+
+
+@pytest.mark.parametrize(
+    ("orig_argv", "expected"),
+    [
+        (["/venv/bin/python", "-m", "hermes_cli.main", "-z", "hi"], True),
+        (["/venv/bin/python", "-m", "json.tool"], False),
+    ],
+)
+def test_config_pth_gate_engages_for_python_m_hermes_cli(orig_argv: list[str], expected: bool) -> None:
+    fake_sys = SimpleNamespace(argv=["-m", *orig_argv[3:]], modules={}, orig_argv=orig_argv)
+    fake_os = SimpleNamespace(environ={}, path=_real_os.path)
+    assert bool(eval(_pth_engage_expr(), {"os": fake_os, "sys": fake_sys})) is expected
+    assert _pth_bootstrap._looks_like_hermes(["-m", *orig_argv[3:]], {}, orig_argv=orig_argv) is expected

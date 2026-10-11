@@ -24,6 +24,8 @@ const CHECKBOX_STYLE = { borderColor: 'CanvasText', borderWidth: 1.5, borderStyl
 const jobListeners = new Set()
 
 const MESSAGES = {
+  telegram_session_revoked:
+    'Telegram ended this login (for example it was terminated in Telegram → Settings → Devices, or Telegram signed it out). Log in again in step 4 — your imported messages are kept.',
   telegram_platform_unsupported: 'Private Telegram requires macOS Secure Enclave or Linux TPM 2.0, with memory encryption enabled. Update both Mordred and its Desktop assets if platform metadata is missing.',
   memory_encryption_required: 'Turn on memory encryption first (step 2).',
   memory_encryption_failed: 'Memory encryption could not be turned on. Check hardware access and the Hermes runtime, then try again.',
@@ -346,6 +348,11 @@ function ImportStep({ ready, refresh }) {
       /* ignore */
     }
   }, [])
+  // A revoked login flips step 4 back to "log in": re-read the setup status.
+  const lastError = sync && sync.last_error
+  useEffect(() => {
+    if (lastError === 'telegram_session_revoked') refresh()
+  }, [lastError, refresh])
   useEffect(() => {
     if (!ready) return undefined
     poll()
@@ -517,13 +524,163 @@ function UninstallSection() {
   })
 }
 
+const INSTALL_COMMAND = 'curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash'
+
+// Ask Mordred's local API whether the Python side is present. Three answers:
+// installed (the real API), missing (the shim in plugins/mordred/dashboard
+// loaded but the package is not in Hermes's current environment) and
+// unreachable (no API mounted at all: Mordred is disabled, or an older shim
+// failed to import).
+async function probe() {
+  let res
+  try {
+    res = await rest('/status?client_version=2')
+  } catch (err) {
+    return { kind: 'unreachable', detail: String((err && err.message) || err || '') }
+  }
+  if (res && res.ok === false && res.error === 'mordred_not_installed') return { kind: 'missing', info: res }
+  if (res && res.ok) {
+    let health = null
+    try {
+      health = await rest('/health')
+    } catch (_) {
+      health = null
+    }
+    return { kind: 'installed', status: res, health }
+  }
+  return { kind: 'unreachable', detail: (res && res.error) || 'unknown' }
+}
+
+function describeMember(member) {
+  if (!member || !member.present) return 'not registered'
+  if (!member.valid) return 'registration damaged'
+  const extras = (member.extras || []).join(', ') || 'none'
+  const from = member.source === 'path' ? `local source ${member.path}` : 'PyPI'
+  return `hermes-mordred ${member.version} from ${from} (extras: ${extras})`
+}
+
+async function cliExec(argv) {
+  const res = await host.request('cli.exec', { argv, timeout: 600 }, 610_000)
+  if (res && res.blocked) throw new Error(res.hint || 'blocked')
+  return res || { code: -1, output: '' }
+}
+
+function RepairPanel({ probeResult, recheck }) {
+  const [busy, setBusy] = useState(false)
+  const [log, setLog] = useState('')
+  const [repaired, setRepaired] = useState(false)
+  const missing = probeResult.kind === 'missing'
+  const info = (missing && probeResult.info) || {}
+  const member = info.member || null
+  const memberOk = Boolean(member && member.valid)
+  const env = info.environment || null
+  const pre = { whiteSpace: 'pre-wrap', fontSize: 12, maxHeight: 240, overflow: 'auto', background: 'var(--muted, rgba(127,127,127,.12))', padding: 8, borderRadius: 6 }
+
+  const repairViaShim = async () => {
+    const started = await rest('/repair', { method: 'POST', body: {} })
+    if (started && started.ok === false) throw new Error(started.error === 'member_missing' ? 'member_missing' : started.error)
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 3000))
+      const res = await rest('/repair')
+      const r = (res && res.repair) || {}
+      setLog(r.output || 'Rebuilding Hermes’s Python environment with Mordred…')
+      if (r.state === 'done') return
+      if (r.state === 'failed') throw new Error(`hermes pm install venv failed (exit ${r.code})`)
+    }
+  }
+  const repairViaGateway = async () => {
+    // No Mordred API at all: go through Hermes's own CLI over the gateway.
+    // `plugins enable` puts mordred back into plugins.enabled if an update
+    // turned it off; `pm install venv` rebuilds the environment from its
+    // inputs, including Mordred's package-manager member.
+    setLog('hermes plugins enable mordred …')
+    const enabled = await cliExec(['plugins', 'enable', 'mordred'])
+    let out = `$ hermes plugins enable mordred\n${enabled.output || ''}\n`
+    setLog(out + '$ hermes pm install venv …')
+    const synced = await cliExec(['pm', 'install', 'venv'])
+    out += `$ hermes pm install venv\n${synced.output || ''}`
+    setLog(out)
+    if (synced.code !== 0) throw new Error(`hermes pm install venv failed (exit ${synced.code})`)
+  }
+  const repair = async () => {
+    setBusy(true)
+    setLog('')
+    try {
+      if (missing) await repairViaShim()
+      else await repairViaGateway()
+      setRepaired(true)
+      host.notify({ kind: 'success', message: 'Mordred was rebuilt into Hermes’s environment. Restart Hermes to load it.' })
+    } catch (e) {
+      if (String(e && e.message) === 'member_missing') {
+        setLog(`This Mordred install predates automatic repair. Reinstall it once from a terminal:\n\n${INSTALL_COMMAND}\n\n(or scripts/install.sh --from-source <checkout> for a local checkout), then restart Hermes.`)
+      } else {
+        host.notifyError(e, 'Repair failed')
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+  const restart = async () => {
+    try {
+      await host.restartGateway()
+      host.notify({ kind: 'info', message: 'Restarting the Hermes backend… If Mordred is still missing, quit and reopen Hermes.' })
+    } catch (e) {
+      host.notifyError(e, 'Quit and reopen Hermes to finish')
+    }
+    setTimeout(recheck, 8000)
+  }
+  return jsxs('section', {
+    style: { border: '1px solid var(--destructive, #c33)', borderRadius: 10, padding: 16, marginBottom: 12 },
+    children: [
+      jsx('h3', { style: { margin: '0 0 8px' }, children: missing ? 'Mordred is not installed in Hermes’s current environment' : 'Mordred is not running in Hermes' }),
+      jsx('p', {
+        children: missing
+          ? 'Hermes was probably updated: each update builds a new Python environment, and this one does not contain Mordred. Mordred’s protections are not active until it is repaired.'
+          : 'Mordred’s local API is not loaded. Either Hermes was updated into an environment without Mordred, or Mordred was turned off in plugins.enabled. Mordred’s protections are not active.',
+      }),
+      env ? jsx('p', { style: { fontSize: 12, opacity: 0.8 }, children: `Environment: ${env.environment} (Python ${env.python})` }) : null,
+      missing ? jsx('p', { style: { fontSize: 12, opacity: 0.8 }, children: `Package-manager registration: ${describeMember(member)}` }) : null,
+      missing && !memberOk
+        ? jsx('p', { children: 'Mordred never registered itself with Hermes’s package manager (installed by an older version), so the one-click repair cannot rebuild it. Reinstall once from a terminal; later updates keep it automatically.' })
+        : null,
+      jsx(Row, {
+        children: [
+          missing && !memberOk
+            ? jsx(Button, { key: 'copy', onClick: () => navigator.clipboard && navigator.clipboard.writeText(INSTALL_COMMAND), children: 'Copy reinstall command' })
+            : jsx(Button, { key: 'repair', disabled: busy || repaired, onClick: repair, children: busy ? 'Repairing… (a few minutes)' : 'Repair / reinstall Mordred' }),
+          repaired ? jsx(Button, { key: 'restart', onClick: restart, children: 'Restart Hermes backend' }) : null,
+          jsx(Button, { key: 'check', variant: 'outline', disabled: busy, onClick: recheck, children: 'Check again' }),
+        ],
+      }),
+      repaired ? jsx('p', { children: 'Done. Restart Hermes (button above, or quit and reopen the app) so it starts on the rebuilt environment, then press Check again.' }) : null,
+      log ? jsx('pre', { style: pre, children: log }) : null,
+    ],
+  })
+}
+
+function HealthLine({ health }) {
+  if (!health || !health.ok) return null
+  const env = health.environment || {}
+  const memberText = health.pm_managed === false ? 'not needed (Hermes is not pm-managed)' : describeMember(health.member)
+  return jsx('p', {
+    style: { fontSize: 12, opacity: 0.8 },
+    children: `Mordred ${health.version} in Hermes environment ${env.environment} (Python ${env.python}). Survives Hermes updates: ${memberText}.`,
+  })
+}
+
 function SetupPage() {
   const [status, setStatus] = useState(null)
+  const [health, setHealth] = useState(null)
+  const [broken, setBroken] = useState(null)
   const refresh = useCallback(async () => {
-    try {
-      setStatus(await call('/status?client_version=2'))
-    } catch (e) {
-      host.notifyError(e, 'Mordred is not reachable. Restart Hermes after installing Mordred.')
+    const result = await probe()
+    if (result.kind === 'installed') {
+      setBroken(null)
+      setStatus(result.status)
+      setHealth(result.health)
+    } else {
+      setStatus(null)
+      setBroken(result)
     }
   }, [])
   useEffect(() => {
@@ -550,6 +707,8 @@ function SetupPage() {
     children: [
       jsx('h2', { children: 'Mordred setup' }),
       jsx('p', { children: 'Private, read-only Telegram for Hermes.' }),
+      broken ? jsx(RepairPanel, { probeResult: broken, recheck: refresh }) : null,
+      status ? jsx(HealthLine, { health }) : null,
       status
         ? status.telegram_supported && ["secure_enclave", "tpm"].includes(status.hardware_kind)
           ? jsxs(Fragment, {
@@ -578,8 +737,8 @@ function SetupPage() {
                 jsx('p', { children: MESSAGES.telegram_platform_unsupported }),
               ],
             })
-        : jsx('p', { children: 'Loading…' }),
-      jsx(UninstallSection, {}),
+        : broken ? null : jsx('p', { children: 'Loading…' }),
+      status ? jsx(UninstallSection, {}) : null,
     ],
   })
 }
@@ -596,6 +755,18 @@ export default {
       area: PALETTE_AREA,
       data: { id: 'mordred.setup', label: 'Mordred: Set up private Telegram', keywords: ['telegram', 'privacy', 'mordred'], run: () => host.navigate('/mordred') },
     })
+    // Notice at Desktop start when a Hermes update left Mordred out of the
+    // environment (the Python side cannot report it: it is not there).
+    ctx.setTimeout(async () => {
+      const result = await probe()
+      if (result.kind === 'installed') return
+      host.notify({
+        kind: 'warning',
+        message: result.kind === 'missing'
+          ? 'Mordred is not installed in Hermes’s current environment (Hermes was probably updated). Open Mordred in the sidebar to repair it.'
+          : 'Mordred is not running in Hermes. Open Mordred in the sidebar to repair it.',
+      })
+    }, 5000)
     ctx.onEvent('plugin.mordred.job', (e) => {
       const p = e && e.payload
       if (!p) return

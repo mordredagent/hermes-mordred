@@ -71,6 +71,9 @@ macos = [
   # Phase 4 PR7: CGScreenIsBeingCaptured probe for keyvault.seed_display
   # (best-effort screenshot detection during the Seed display window, M5).
   "pyobjc-framework-Quartz>=10.0",
+  # SQLCipher build of the sqlite3 module (FTS5 + trigram) for at-rest
+  # encryption of Hermes's SQLite databases (mordred_hermes.dbcrypt).
+  "sqlcipher3-wheels>=0.5.4",
 ]
 # Phase 3 PR3a Task #5: Tor ControlPort cookie auth + `GETINFO circuit-status`
 # liveness probe. Optional because (a) stem's last release was 2021-12 so we
@@ -385,6 +388,10 @@ module = [
     # extension/telegram/client.py imports it lazily.
     "telethon",
     "telethon.*",
+    # SQLCipher is supplied only by the macos extra; Linux still checks the
+    # guarded imports, without installing this optional, untyped dependency.
+    "sqlcipher3",
+    "sqlcipher3.*",
 ]
 ignore_missing_imports = true
 
