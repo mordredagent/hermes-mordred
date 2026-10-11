@@ -7,8 +7,8 @@ open them. This command undoes the install in a safe order, printing the whole
 plan first and asking once (``--yes`` skips the question):
 
 a. **Restore plaintext.** Every encryption target that is on is turned off with
-   the existing reversible ``encryption disable`` engines (config, then memory,
-   then env), sharing one :class:`._flow_session.FlowSession` so the vault is
+   the synchronous database conversion and reversible ``encryption disable``
+   engines (databases, config, memory, then env), sharing one :class:`._flow_session.FlowSession` so the vault is
    unlocked at most once. If the device key cannot open the vault the recovery
    passphrase is offered instead. If any target cannot be restored the command
    stops *before removing anything* and says why.
@@ -44,7 +44,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import _term
+from . import _term, _uninstall_databases
 from ._uninstall_config import (
     ConfigCleanup,
     EnvCleanup,
@@ -80,6 +80,9 @@ PURGE_PHRASE = "delete my data"
 #: Keychain services that may hold the vault's anchor item: the helper-owned
 #: one and the legacy one. ``resolve_store(...).delete`` removes both.
 _ANCHOR_SERVICES = ("mordred-hermes.vault.anchor.sekey", "mordred-hermes.vault.anchor")
+
+# The lock pathname must keep its inode even after purge releases its lease.
+_DATABASE_LOCK_NAME = "db-encryption.lock"
 
 #: Human descriptions of what lives under ``<home>/mordred``.
 _DATA_DESCRIPTIONS: dict[str, str] = {
@@ -130,8 +133,9 @@ class UninstallContext:
 class Restore:
     target: str
     detail: str
-    #: Whether the plaintext exists only in the vault (the vault must be opened).
+    #: Whether restoring the target requires plaintext or a key held in the vault.
     needs_vault: bool
+    erase_detail: str | None = None
 
 
 @dataclass
@@ -174,6 +178,15 @@ def _restores(ctx: UninstallContext) -> list[Restore]:
 
     home = ctx.home
     out: list[Restore] = []
+    if _uninstall_databases.needed(home):
+        out.append(
+            Restore(
+                "databases",
+                _uninstall_databases.detail(home),
+                _uninstall_databases.needs_vault(ctx),
+                _uninstall_databases.detail(home, erase=True),
+            )
+        )
     if _marker_path(home).exists():
         sealed_away = not (home / "config.yaml").exists()
         detail = "vault-managed" + ("; the plaintext is sealed away and will be decrypted back" if sealed_away else "")
@@ -202,8 +215,8 @@ def _data_inventory(ctx: UninstallContext) -> list[tuple[Path, str]]:
     if mordred.is_dir():
         for child in sorted(mordred.iterdir()):
             name = child.name
-            if name.startswith("."):
-                continue  # lock files and journals; they go with the directory
+            if name.startswith(".") or name == _DATABASE_LOCK_NAME:
+                continue  # coordination files are not retained user data
             description = "audit log" if name.startswith("audit.log") else _DATA_DESCRIPTIONS.get(name, "Mordred state")
             data.append((child, description))
     extension = ctx.home / "extension"
@@ -397,6 +410,8 @@ def render_plan(plan: UninstallPlan, opts: UninstallOptions) -> str:
 
 def _erase_line(restore: Restore, plan: UninstallPlan) -> str:
     del plan
+    if restore.target == "databases":
+        return f"databases: {restore.erase_detail}"
     if restore.target == "memory":
         return "memory: the sealed memory files are deleted; Hermes starts with empty memory"
     if restore.target == "env":
@@ -411,14 +426,16 @@ def _erase_line(restore: Restore, plan: UninstallPlan) -> str:
 def _erase_encrypted(ctx: UninstallContext, restores: list[Restore]) -> int:
     """Step a in erase mode: remove sealed files without opening the vault.
 
-    Only the sealed memory files live outside Mordred's own directories; the
-    vault (sealed .env / config.yaml copies) and every marker are removed by
-    the purge that erase mode always runs.
+    Databases and sealed memory files live outside Mordred's directories and
+    must go before their keys. The vault (sealed .env / config.yaml copies)
+    and other markers are removed by the purge that erase mode always runs.
     """
     from . import memory_cli
 
     for restore in restores:
-        if restore.target == "memory":
+        if restore.target == "databases":
+            _uninstall_databases.erase(ctx)
+        elif restore.target == "memory":
             for path in memory_cli._sealed_memory_files(ctx.home):
                 path.unlink(missing_ok=True)
                 print(f"Erased sealed memory file {path}.")
@@ -489,15 +506,19 @@ def _restore_all(ctx: UninstallContext, restores: list[Restore]) -> int:
         if not vault_open and needed:
             targets = ", ".join(r.target for r in restores if r.needs_vault)
             _term.emit_error(
-                f"uninstall stopped: the vault could not be opened, and the plaintext of {targets} exists only "
-                "in the vault. Nothing was removed. Fix vault access (see the message above) and re-run."
+                f"uninstall stopped: the vault could not be opened, and restoring {targets} requires it. "
+                "Nothing was removed. Fix vault access (see the message above) and re-run."
             )
             return 1
         for restore in restores:
             print(f"Restoring {restore.target} ...")
-            rc = engines[restore.target](
-                home=ctx.home, root=ctx.vault_root, backend=ctx.backend, store=ctx.store, flow_session=flow
-            )
+            if restore.target == "databases":
+                _uninstall_databases.restore(ctx, flow)
+                rc = 0
+            else:
+                rc = engines[restore.target](
+                    home=ctx.home, root=ctx.vault_root, backend=ctx.backend, store=ctx.store, flow_session=flow
+                )
             if rc != 0:
                 _term.emit_error(
                     f"uninstall stopped: {restore.target} could not be restored to plaintext (see above). "
@@ -618,6 +639,17 @@ def _forget_telegram_for_uninstall(ctx: UninstallContext) -> None:
         )
 
 
+def _purge_except_database_lock(path: Path) -> None:
+    """Remove data while preserving the inode that serializes database access."""
+    for child in path.iterdir():
+        if child.name == _DATABASE_LOCK_NAME:
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
 def _purge_data(ctx: UninstallContext, plan: UninstallPlan) -> int:
     """Step e with ``--purge-data``. Returns 1 when the keyvault could not be reset."""
     if plan.telegram_configured:
@@ -636,8 +668,16 @@ def _purge_data(ctx: UninstallContext, plan: UninstallPlan) -> int:
             return 1
     for path in (ctx.home / "mordred", ctx.home / "extension"):
         if path.is_dir() and not path.is_symlink():
-            shutil.rmtree(path)
-            print(f"Deleted {path}.")
+            lock = path / _DATABASE_LOCK_NAME
+            if ctx.platform == "darwin" and path.name == "mordred" and lock.is_file():
+                # Unlinking a held lock allows another process to acquire a
+                # different inode before this uninstall finishes. Keep the
+                # pathname permanently; only its neighboring data is purged.
+                _purge_except_database_lock(path)
+                print(f"Deleted Mordred data from {path}.")
+            else:
+                shutil.rmtree(path)
+                print(f"Deleted {path}.")
     for name in (".env.vault-purged", ".env.reseal.tmp"):
         (ctx.home / name).unlink(missing_ok=True)
     return 0
@@ -725,6 +765,21 @@ def run_uninstall(ctx: UninstallContext, opts: UninstallOptions) -> int:
     if not _confirm(ctx, opts):
         print("Uninstall cancelled; nothing was changed.")
         return 1
+    planned_databases = any(r.target == "databases" for r in plan.restores)
+    if ctx.platform == "darwin" or planned_databases:
+        try:
+            # Confirmation happens without a lease. Always take custody now:
+            # another process may have enabled encryption after the plan.
+            with _uninstall_databases.guard(ctx, erase=opts.erase_encrypted):
+                if _uninstall_databases.needed(ctx.home) != planned_databases:
+                    raise RuntimeError(
+                        "database protection changed after the plan was printed; nothing was removed. "
+                        "Re-run uninstall to review the updated plan"
+                    )
+                return _execute(ctx, plan, opts)
+        except Exception as exc:
+            _term.emit_error(f"uninstall stopped: {exc}. Resolve the failure before retrying.")
+            return 1
     return _execute(ctx, plan, opts)
 
 

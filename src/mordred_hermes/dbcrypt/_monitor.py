@@ -20,17 +20,20 @@ the only finding is ``pending`` (a conversion is scheduled).
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from . import _migrate, _shim, armed
+from . import _migrate, _shim, armed, protected_state_present
 from ._policy import in_scope, looks_like_database_name
 
 #: Findings that mean the databases are not protected.
-VIOLATIONS: Final = frozenset({"unprotected_process", "no_key", "wrong_key", "interrupted", "plaintext"})
+VIOLATIONS: Final = frozenset(
+    {"unprotected_process", "no_key", "wrong_key", "interrupted", "plaintext", "unsupported_platform"}
+)
 _DEEP_SCAN_SECONDS: Final = 300.0
 _LOCK: Final = threading.Lock()
 _DEEP_CACHE: dict[str, Any] = {}
@@ -121,6 +124,12 @@ def key_opens(path: Path, key: Any) -> bool:
         conn.close()
 
 
+def _unsupported(home: Path) -> list[Finding]:
+    if protected_state_present(home):
+        return [Finding("unsupported_platform", "this encrypted Hermes home requires macOS; decrypt it there first")]
+    return []
+
+
 def check(home: Path, *, key_available: Any = None, key: Any = None) -> list[Finding]:
     """Everything wrong with the databases' protection right now (empty = fine).
 
@@ -128,6 +137,8 @@ def check(home: Path, *, key_available: Any = None, key: Any = None) -> list[Fin
     opens the top-level databases: with another key Hermes can read none of
     its history and saves no new turns.
     """
+    if sys.platform != "darwin":
+        return _unsupported(home)
     if not armed(home):
         if _migrate.pending_path(home).is_file():
             return [Finding("pending", "database encryption is scheduled for the next Hermes start")]

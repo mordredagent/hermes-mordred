@@ -34,7 +34,7 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/db-encryption.pending` | `databases encrypt` while Hermes runs | converts the databases at the next Hermes start |
 | `<home>/mordred/db-decryption.pending` | `databases decrypt` while Hermes runs | turns the databases back into plain SQLite at the next Hermes start |
 | `<home>/mordred/db-encryption.journal.json` | database conversion | swaps still to do after an interrupted conversion |
-| `<home>/mordred/db-encryption.lock` | database conversion | serializes conversions and the Hermes processes waiting on one |
+| `<home>/mordred/db-encryption.lock` | database runtime / maintenance | shared runtime leases until exit; exclusive conversion and protected-home uninstall; stable inode retained after purge |
 | `<db>.mordred-enc` | database conversion | the verified converted copy (encrypted, or plain when decrypting), renamed over `<db>` |
 | `<home>/mordred/memory-vault.optout` | encryption CLI | pauses the memory hook (paused by operator) |
 | `<home>/mordred/telegram/` | extension (Telegram importer) | encrypted read-only Telegram archive |

@@ -211,7 +211,12 @@ def test_uninstall_data_purge_removes_memory_custody_before_keyvault(linux):
     _storage.ensure_layout(_storage.resolve_keyvault_dir(home))
     assert memory_cli.disable(home=home, root=home / "vault") == 0
     ctx = SimpleNamespace(
-        home=home, vault_root=home / "vault", backend=backend, keyvault_reset=None, telegram_forget=None
+        home=home,
+        vault_root=home / "vault",
+        backend=backend,
+        platform="linux",
+        keyvault_reset=None,
+        telegram_forget=None,
     )
     assert uninstall_cli._purge_data(ctx, SimpleNamespace(telegram_configured=False)) == 0
     assert not mk.memory_key_path(home).exists()

@@ -388,6 +388,10 @@ module = [
     # extension/telegram/client.py imports it lazily.
     "telethon",
     "telethon.*",
+    # SQLCipher is supplied only by the macos extra; Linux still checks the
+    # guarded imports, without installing this optional, untyped dependency.
+    "sqlcipher3",
+    "sqlcipher3.*",
 ]
 ignore_missing_imports = true
 
