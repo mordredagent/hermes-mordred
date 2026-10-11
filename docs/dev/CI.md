@@ -360,6 +360,50 @@ consolidated candidate `bb75885ac`. Pending observations in those entries
 describe their original test time; subsequent contracts and the Windows
 completion acceptance matrix track later work and current open gates.
 
+- **2026-10-11 — Consolidated candidate ordinary-user AWS CNG validation.**
+  Candidate `c055169639af5e82706e73e5316278a48f8b9a56` ran on the retained
+  Windows Server 2025 Datacenter 10.0.26100 x64 / fixed NTFS host with
+  AMZN NitroTPM 2.0 ready. Python 3.11.17 used a credentialed, non-elevated
+  SSH user. Both owned venvs installed their dependencies directly; Hermes
+  0.21.5 retained its existing editable source installation. Mordred imported
+  from the candidate's `src` in the source venv and from the wheel venv's own
+  `site-packages` in the installed run. The sdist-derived wheel SHA-256 is
+  `10b8e50640d2266fe60f44b3affe63e0d32c940c6fec39b98b9b55cbd6dca289`.
+
+  Real CNG acceptance passed **4 source Python cases and 9 installed-wheel
+  Python cases**, each with fresh JUnit and zero failures, errors or skips.
+  The installed cases cover custody, encrypted audit, memory and Telegram
+  storage, installed-runtime proof/lifecycle, memory and synthetic Telegram
+  wizard flows, compiled-helper production MRKW and Desktop API enable/disable
+  through the serving interpreter. Rust regression passed 12 cases with the
+  three live cases intentionally ignored; the explicit real-CNG invocation
+  then passed **all 3 live cases with zero ignored**. Test profiles and keys
+  were newly scoped fixtures. The successful Desktop fixture's retained
+  memory key was purged through the actual installed CLI (exit 0).
+
+  The initial full Server source attempt failed (2,517 passed, 68 failures,
+  41 errors, 123 skips): child fixtures did not process the parent's borrowed
+  dependency `.pth`, so PyYAML was unavailable and the runtime guard refused.
+  Disabling that owned borrowing hook and installing complete dependencies
+  corrected the isolated proof reproduction: **1 passed in 8.20 seconds**.
+  The subsequent full 84-module source attempt reached approximately 89%
+  without observed failed markers, but timed out at 3,600.016 seconds (exit
+  124, no final JUnit). **Fresh complete Server regression remains open.**
+  Unchanged injected proof fixtures require a source-checkout parent; no
+  full 84-module installed-wheel pass is claimed.
+
+  Independent live execution used verified equivalent-input CI
+  [38106401094](https://github.com/mordredagent/hermes-mordred/actions/runs/38106401094)
+  as its prerequisite after the source processes ended. Production/native
+  inputs, all 84 selected modules and the three imported configure helpers
+  match that green candidate; this does not imply equivalent dependencies or
+  a new complete Server pass. The 23 collected evidence files matched their
+  SHA-256 manifest. Task-owned processes ended, the created shutdown task was
+  removed, and EC2 was independently verified **stopped** before disarming the
+  local stop guard. No new VM or Azure resource was created. Windows 11,
+  packaged GUI/page/restart, full installed lifecycle and actual external
+  account/model/route flows remain separate open gates; PR #226 stays draft.
+
 - **2026-10-08 — Windows privacy canonical decisions (C8).**
   Component revision `31845b8b4` follows the shared canonical coordinator.
   Ordinary non-administrator Server 2025 / Python 3.11.17 runs passed all
@@ -1965,9 +2009,11 @@ with zero skips**; Astra approved the precise test-only diff and both deliberate
 blocking negative controls. These repairs do not change product source.
 
 These host/wheel checks are portable regressions, not native CNG or Windows 11
-acceptance. The existing AWS session expired before any new Server execution;
-fresh ordinary-user Server source/wheel/CNG and installed-product gates remain
-open. SPEC permits a qualified Windows 11 x64 VM or Cloud PC; physical hardware
+acceptance. At this pre-reauthentication snapshot, the AWS session had expired
+before new Server execution. The dated ordinary-user AWS CNG entry in the
+Manual live-device validation log records the subsequent live results and
+the still-incomplete full Server regression. SPEC permits a qualified Windows
+11 x64 VM or Cloud PC; physical hardware
 is not required, and virtual-TPM evidence must name its provider and limits.
 Azure client-image eligibility has not been established; no Azure resources
 were created. A Windows Server environment can provide TPM/provider evidence
