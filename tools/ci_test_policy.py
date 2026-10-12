@@ -27,6 +27,7 @@ from ci_change_scope import (
     pull_request_changes,
     push_changes,
 )
+from native_test_plan import exclusions_digest
 
 DRAFT_ACTIONS = {"opened", "synchronize", "reopened", "converted_to_draft"}
 PR_ACTIONS = DRAFT_ACTIONS | {"ready_for_review"}
@@ -44,6 +45,9 @@ OUTPUT_KEYS = (
     "macos_packs",
     "windows_packs",
     "windows_modules",
+    "windows_shards",
+    "windows_test_tier",
+    "windows_exclusions_sha256",
 )
 
 
@@ -119,11 +123,11 @@ def _pr_mode(
     env: Mapping[str, str],
     get_json: Callable[[str], object],
     pr_context: Mapping[str, object] | None,
-) -> tuple[str, Scope]:
+) -> tuple[str, Scope, bool]:
     pr = event.get("pull_request")
     action = event.get("action")
     if not isinstance(pr, dict) or not isinstance(action, str) or action not in PR_ACTIONS:
-        return "final", final_scope("unknown PR metadata or event action")
+        return "final", final_scope("unknown PR metadata or event action"), False
     base = pr.get("base")
     labels = pr.get("labels")
     if (
@@ -133,9 +137,9 @@ def _pr_mode(
         or not isinstance(labels, list)
         or not all(isinstance(label, dict) and isinstance(label.get("name"), str) for label in labels)
     ):
-        return "final", final_scope("incomplete PR policy metadata")
+        return "final", final_scope("incomplete PR policy metadata"), False
     if base["ref"] == "main" or any(label["name"] == "ci:full" for label in labels):
-        return "final", final_scope("main-target PR or explicit ci:full override")
+        return "final", final_scope("main-target PR or explicit ci:full override"), False
     number = pr.get("number")
     if (
         type(number) is not int
@@ -145,21 +149,21 @@ def _pr_mode(
         or pr_context is None
         or pr_context.get("merge_sha") != env.get("GITHUB_SHA")
     ):
-        return "final", final_scope("PR tested merge context does not match the event")
+        return "final", final_scope("PR tested merge context does not match the event"), False
     if pr["draft"] and action not in DRAFT_ACTIONS:
-        return "final", final_scope("inconsistent draft event")
+        return "final", final_scope("inconsistent draft event"), False
     changes = pull_request_changes(env["GITHUB_REPOSITORY"], pr, get_json=get_json)
     scope = classify_changes(changes)
     if pr["draft"]:
-        return "critical", scope
-    return ("final" if scope.final else "docs" if scope.docs else "ordinary"), scope
+        return "critical", scope, False
+    return ("final" if scope.final else "docs" if scope.docs else "ordinary"), scope, True
 
 
 def _push_mode(
     event: Mapping[str, object], env: Mapping[str, str], baseline_check: Callable[..., bool], root: Path
-) -> tuple[str, Scope]:
+) -> tuple[str, Scope, bool]:
     if env.get("GITHUB_REF") != "refs/heads/dev" or event.get("ref") != "refs/heads/dev":
-        return "final", final_scope("non-dev branch push")
+        return "final", final_scope("non-dev branch push"), False
     before, after = event.get("before"), event.get("after")
     if (
         any(event.get(flag) is not False for flag in ("forced", "created", "deleted"))
@@ -169,14 +173,14 @@ def _push_mode(
         or not isinstance(after, str)
         or after != env.get("GITHUB_SHA")
     ):
-        return "final", final_scope("initial, forced or incomplete push context")
+        return "final", final_scope("initial, forced or incomplete push context"), False
     # Read the exact complete ancestry range before asking whether that exact
     # baseline was accepted. Nearby successful commits are never substituted.
     changes = push_changes(before, after, root=root)
     if not baseline_check(env["GITHUB_REPOSITORY"], before, "dev", minimum_mode="ordinary"):
-        return "final", final_scope("exact before SHA lacks trusted acceptance")
+        return "final", final_scope("exact before SHA lacks trusted acceptance"), False
     scope = classify_changes(changes)
-    return ("final" if scope.final else "ordinary"), scope
+    return ("final" if scope.final else "ordinary"), scope, True
 
 
 def build_policy(
@@ -192,6 +196,7 @@ def build_policy(
     context = os.environ if env is None else env
     pr_context = _pr_context(event, context.get("GITHUB_SHA", ""), root) if event_name == "pull_request" else None
     mode, scope = "final", final_scope("manual or unrecognized event requires final validation")
+    routine_eligible = False
     try:
         if (
             not REPOSITORY.fullmatch(context.get("GITHUB_REPOSITORY", ""))
@@ -200,9 +205,9 @@ def build_policy(
         ):
             scope = final_scope("invalid workflow provenance")
         elif event_name == "pull_request":
-            mode, scope = _pr_mode(event, context, get_json, pr_context)
+            mode, scope, routine_eligible = _pr_mode(event, context, get_json, pr_context)
         elif event_name == "push":
-            mode, scope = _push_mode(event, context, baseline_check, root)
+            mode, scope, routine_eligible = _push_mode(event, context, baseline_check, root)
     except (ValueError, OSError, TypeError, KeyError, ImportError, subprocess.SubprocessError):
         mode, scope = "final", final_scope("complete scope or trusted baseline unavailable")
     final = mode == "final"
@@ -218,8 +223,9 @@ def build_policy(
         if docs
         else ["main", "static", *(() if critical else scope.linux_packs)]
     )
+    tier = "none" if not windows else "routine" if final and routine_eligible else "full"
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "mode": mode,
         "repository": context.get("GITHUB_REPOSITORY", ""),
         "workflow_path": ".github/workflows/ci.yml",
@@ -241,6 +247,9 @@ def build_policy(
         else ["main", *(() if critical else scope.windows_packs)]
         if windows
         else [],
+        "windows_shards": [1, 2] if final else [1] if windows else [],
+        "windows_test_tier": tier,
+        "windows_exclusions_sha256": exclusions_digest("full" if tier == "none" else tier),
         "windows_modules": list(native_modules()) if final else [] if critical else list(scope.windows_modules),
         "reason": "draft feedback only; " + scope.reason if critical else scope.reason,
     }

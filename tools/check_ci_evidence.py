@@ -140,9 +140,13 @@ def _timestamp(value: Any) -> datetime:
 
 def _check_jobs(jobs: list[Json], policy: Json) -> Json:
     required = {"ci-policy", "CI acceptance"}
-    for os_name, version in expected_workers(policy):
+    for os_name, version, shard in expected_workers(policy):
         required.add(
-            f"linux ({version})" if os_name == "linux" else "windows-private-fs" if os_name == "windows" else os_name
+            f"linux ({version})"
+            if os_name == "linux"
+            else f"windows-private-fs ({shard})"
+            if os_name == "windows"
+            else os_name
         )
     by_name = {job.get("name"): job for job in jobs}
     require(len(by_name) == len(jobs), "duplicate job names")
@@ -196,6 +200,8 @@ def _verify_run(api: GitHub, listed: Json, repo: str, sha: str, branch: str, min
     policy = validate_acceptance(evidence)
     allowed = ("final",) if minimum_mode == "final" else ("ordinary", "final")
     if evidence["accepted"] is not True or policy["mode"] not in allowed:
+        return False
+    if minimum_mode == "final" and policy["windows_test_tier"] != "full":
         return False
     expected = {
         "repository": repo,

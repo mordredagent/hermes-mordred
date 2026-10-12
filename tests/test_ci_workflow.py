@@ -51,7 +51,12 @@ def scheduled_jobs(outputs: dict[str, str]) -> list[str]:
         ("ordinary", True, True, ["ci-policy", "linux", "macos", "windows-private-fs", "ci-acceptance"]),
         ("critical", False, False, ["ci-policy", "linux", "ci-acceptance"]),
         ("docs", False, False, ["ci-policy", "ci-acceptance"]),
-        ("final", True, True, ["ci-policy", "linux", "linux", "macos", "windows-private-fs", "ci-acceptance"]),
+        (
+            "final",
+            True,
+            True,
+            ["ci-policy", "linux", "linux", "macos", "windows-private-fs", "windows-private-fs", "ci-acceptance"],
+        ),
     ],
 )
 def test_only_requested_workers_are_scheduled(mode, macos, windows, want) -> None:
@@ -60,6 +65,7 @@ def test_only_requested_workers_are_scheduled(mode, macos, windows, want) -> Non
         "linux_versions": json.dumps([] if mode == "docs" else ["3.11", "3.13"] if mode == "final" else ["3.12"]),
         "macos": str(macos).lower(),
         "windows": str(windows).lower(),
+        "windows_shards": json.dumps([1, 2] if mode == "final" else [1] if windows else []),
         # Characterize the pre-change graph's real fan-out too.
         "full": str(mode != "critical").lower(),
         "critical": str(mode == "critical").lower(),
@@ -137,3 +143,25 @@ def test_auxiliary_environments_are_outside_repository_document_scans() -> None:
             assert target.startswith("$RUNNER_TEMP/"), f"{step['id']} dependencies would enter repository scans"
             checked.add(step["id"])
     assert checked == auxiliary
+
+
+def test_native_matrix_records_each_shard_and_runs_support_only_once() -> None:
+    job = workflow()["jobs"]["windows-private-fs"]
+    assert job["name"] == "windows-private-fs (${{ matrix.shard }})"
+    assert job["strategy"]["fail-fast"] is False
+    assert job["strategy"]["matrix"] == {"shard": "${{ fromJSON(needs.ci-policy.outputs.windows_shards) }}"}
+    native = next(step for step in job["steps"] if step.get("id") == "native")
+    assert native["env"]["CI_SHARD"] == "${{ matrix.shard }}"
+    assert native["env"]["CI_SHARD_COUNT"] == "${{ strategy.job-total }}"
+    assert native["env"]["CI_TIER"] == "${{ needs.ci-policy.outputs.windows_test_tier }}"
+    assert "--manifest native-selection.json" in native["run"]
+    for step in job["steps"]:
+        condition = step.get("if", "")
+        if "windows_packs" in condition:
+            assert "matrix.shard == 1" in condition
+        if step.get("uses", "").startswith("actions/upload-artifact@"):
+            assert "matrix.shard" in step["with"]["name"]
+    evidence = next(step for step in job["steps"] if step.get("id") == "evidence")
+    assert evidence["env"]["CI_SHARD"] == "${{ matrix.shard }}"
+    assert '--shard "$CI_SHARD"' in evidence["run"]
+    assert "--native-manifest native-selection.json" in evidence["run"]

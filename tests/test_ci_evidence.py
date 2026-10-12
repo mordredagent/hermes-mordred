@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -24,7 +25,7 @@ def evidence_tool():
 
 def policy(mode="ordinary"):
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "mode": mode,
         "repository": "owner/repo",
         "workflow_path": ".github/workflows/ci.yml",
@@ -43,6 +44,9 @@ def policy(mode="ordinary"):
         "macos_packs": [],
         "windows_packs": [],
         "windows_modules": [],
+        "windows_shards": [],
+        "windows_test_tier": "none",
+        "windows_exclusions_sha256": hashlib.sha256(b"[]").hexdigest(),
         "reason": "portable change",
     }
 
@@ -162,7 +166,7 @@ def test_docs_acceptance_requires_checks_executed_in_acceptance_job():
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("schema_version", 2),
+        ("schema_version", 1),
         ("run_attempt", True),
         ("workflow_path", ".github/workflows/other.yml"),
         ("linux_versions", ["3.11"]),
@@ -233,7 +237,7 @@ def checker_tool():
     return module
 
 
-def final_policy():
+def final_policy(tier="full"):
     p = policy("final")
     inventory = json.loads((ROOT / "tools/ci_scope_paths.json").read_text())
     p.update(
@@ -246,13 +250,16 @@ def final_policy():
         macos_packs=["main", "swift", "tpm"],
         windows_packs=["main", "winkey", "windows-wheel"],
         windows_modules=inventory["native_modules"],
+        windows_shards=[1, 2],
+        windows_test_tier=tier,
+        windows_exclusions_sha256=planner().exclusions_digest(tier),
     )
     return p
 
 
-def final_evidence():
+def final_evidence(tier="full"):
     tool = evidence_tool()
-    p = final_policy()
+    p = final_policy(tier)
     # Independent complete step lists catch missing pack mappings or omitted workers.
     manifests = [
         tool.build_worker(
@@ -326,6 +333,17 @@ def final_evidence():
                 "wheel",
             ),
             actual_python="3.11",
+            shard=1,
+            native_selection=native_selection(p, 1),
+        ),
+        tool.build_worker(
+            p,
+            "windows",
+            "3.11",
+            successful_steps("install", "private_home", "native"),
+            actual_python="3.11",
+            shard=2,
+            native_selection=native_selection(p, 2),
         ),
     ]
     jobs = needs()
@@ -337,13 +355,14 @@ def test_final_requires_both_linux_versions_and_every_support_pack():
     tool = evidence_tool()
     evidence = final_evidence()
     assert evidence["accepted"] is True
-    assert [(w["os"], w["python"]) for w in evidence["workers"]] == [
-        ("linux", "3.11"),
-        ("linux", "3.13"),
-        ("macos", "3.11"),
-        ("windows", "3.11"),
+    assert [(w["os"], w["python"], w["shard"]) for w in evidence["workers"]] == [
+        ("linux", "3.11", 1),
+        ("linux", "3.13", 1),
+        ("macos", "3.11", 1),
+        ("windows", "3.11", 1),
+        ("windows", "3.11", 2),
     ]
-    for index in range(4):
+    for index in range(5):
         damaged = copy.deepcopy(evidence)
         damaged["workers"].pop(index)
         with pytest.raises(ValueError):
@@ -401,7 +420,15 @@ def api_fixture(evidence):
             "created_at": "2026-10-12T00:10:00Z",
         }
     ]
-    names = ["ci-policy", "linux (3.11)", "linux (3.13)", "macos", "windows-private-fs", "CI acceptance"]
+    names = [
+        "ci-policy",
+        "linux (3.11)",
+        "linux (3.13)",
+        "macos",
+        "windows-private-fs (1)",
+        "windows-private-fs (2)",
+        "CI acceptance",
+    ]
     if p["mode"] != "final":
         names = ["ci-policy", "linux (3.12)", "CI acceptance"]
     jobs = [
@@ -803,8 +830,10 @@ def test_complete_ordinary_native_family_and_wheel_only_scope_are_valid():
     network = [name for name in native if name.startswith("tests/test_network_windows_")]
     assert len(network) > 1
     p = policy()
-    p.update(windows=True, windows_packs=["main"], windows_modules=network)
-    assert ("windows", "3.12") in tool.expected_workers(p)
+    p.update(
+        windows=True, windows_packs=["main"], windows_modules=network, windows_shards=[1], windows_test_tier="full"
+    )
+    assert ("windows", "3.12", 1) in tool.expected_workers(p)
     p.update(windows_packs=["main", "windows-wheel"], windows_modules=[])
     tool.validate_policy(p)
 
@@ -922,3 +951,202 @@ def test_malformed_nonnull_pr_merge_metadata_is_rejected(tmp_path, raw_merge):
     Path(environ["GITHUB_EVENT_PATH"]).write_text(json.dumps(event))
     with pytest.raises(ValueError):
         tool.validate_environment(p, environ)
+
+
+def planner():
+    spec = importlib.util.spec_from_file_location("native_test_plan", ROOT / "tools/native_test_plan.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def native_selection(p, shard):
+    plan = planner()
+    modules = plan.plan_native_modules(p["windows_modules"], tier=p["windows_test_tier"], shard=shard, count=2)
+    excluded = plan.exclusions_for(modules, p["windows_test_tier"])
+    tests = [{"nodeid": module + "::test_contract", "outcome": "passed"} for module in modules]
+    ids = sorted([test["nodeid"] for test in tests] + excluded)
+    return {
+        "schema_version": 1,
+        "tier": p["windows_test_tier"],
+        "shard": shard,
+        "shard_count": 2,
+        "modules": modules,
+        "excluded_nodeids": excluded,
+        "tests": tests,
+        "collected_count": len(ids),
+        "collection_sha256": hashlib.sha256("\n".join(ids).encode()).hexdigest(),
+        "exit_code": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing",
+        "duplicate",
+        "foreign",
+        "module_missing",
+        "exclusion_missing",
+        "failed",
+        "exit",
+        "hash",
+        "count",
+        "shard",
+        "overlap",
+    ],
+)
+def test_native_selection_tampering_cannot_authorize_acceptance(mutation):
+    tool = evidence_tool()
+    evidence = final_evidence("routine")
+    worker = next(w for w in evidence["workers"] if w["os"] == "windows" and w["shard"] == 1)
+    selection = worker["native_selection"]
+    if mutation == "missing":
+        worker["native_selection"] = None
+    elif mutation == "duplicate":
+        selection["tests"].append(selection["tests"][0])
+    elif mutation == "foreign":
+        selection["tests"][0]["nodeid"] = "tests/foreign.py::test_escape"
+    elif mutation == "module_missing":
+        selection["tests"].pop(0)
+    elif mutation == "exclusion_missing":
+        selection["excluded_nodeids"].pop()
+    elif mutation == "failed":
+        selection["tests"][0]["outcome"] = "failed"
+    elif mutation == "exit":
+        selection["exit_code"] = 1
+    elif mutation == "hash":
+        selection["collection_sha256"] = "0" * 64
+    elif mutation == "count":
+        selection["collected_count"] += 1
+    elif mutation == "shard":
+        worker["shard"] = 2
+    else:
+        other = next(w for w in evidence["workers"] if w["os"] == "windows" and w["shard"] == 2)
+        selection["tests"].append(other["native_selection"]["tests"][0])
+    with pytest.raises(ValueError):
+        tool.validate_acceptance(evidence)
+
+
+def test_final_windows_missing_manifest_records_unsuccessful_evidence():
+    tool = evidence_tool()
+    p = final_policy()
+    steps = successful_steps("install", "private_home", "native")
+    result = tool.build_worker(p, "windows", "3.11", steps, actual_python="3.11", shard=2)
+    assert result["success"] is False
+
+
+def test_routine_final_is_accepted_baseline_but_never_release(monkeypatch):
+    checker = checker_tool()
+    install_api(monkeypatch, checker, api_fixture(final_evidence("routine")))
+    assert checker.has_ci_evidence("owner/repo", SHA, "dev", "ordinary") is True
+    assert checker.has_ci_evidence("owner/repo", SHA, "dev", "final") is False
+
+
+@pytest.mark.parametrize(
+    "mutation", ["missing", "duplicate", "stale_run", "stale_attempt", "wrong_tier", "wrong_exclusion_digest"]
+)
+def test_windows_shards_are_bound_to_the_same_complete_execution(mutation):
+    tool = evidence_tool()
+    evidence = final_evidence("routine")
+    index = next(i for i, w in enumerate(evidence["workers"]) if w["os"] == "windows" and w["shard"] == 2)
+    manifest = evidence["workers"][index]
+    if mutation == "missing":
+        evidence["workers"].pop(index)
+    elif mutation == "duplicate":
+        evidence["workers"].append(copy.deepcopy(manifest))
+    elif mutation == "stale_run":
+        manifest["context"]["run_id"] -= 1
+    elif mutation == "stale_attempt":
+        manifest["context"]["run_attempt"] -= 1
+    elif mutation == "wrong_tier":
+        manifest["context"]["windows_test_tier"] = "full"
+    else:
+        manifest["context"]["windows_exclusions_sha256"] = "0" * 64
+    with pytest.raises(ValueError):
+        tool.validate_acceptance(evidence)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "failed", "old_name"])
+def test_remote_requires_each_named_windows_shard(monkeypatch, mutation):
+    checker = checker_tool()
+    responses = api_fixture(final_evidence())
+    page = responses["actions/runs/42/attempts/2/jobs?per_page=100&page=1"]
+    index = next(i for i, job in enumerate(page["jobs"]) if job["name"] == "windows-private-fs (2)")
+    if mutation == "missing":
+        page["jobs"].pop(index)
+    elif mutation == "duplicate":
+        page["jobs"].append(copy.deepcopy(page["jobs"][index]))
+    elif mutation == "failed":
+        page["jobs"][index]["conclusion"] = "failure"
+    else:
+        page["jobs"][index]["name"] = "windows-private-fs"
+    page["total_count"] = len(page["jobs"])
+    install_api(monkeypatch, checker, responses)
+    assert checker.has_ci_evidence("owner/repo", SHA, "dev") is False
+
+
+def test_new_collected_cases_are_retained_without_changing_reviewed_exclusions():
+    tool = evidence_tool()
+    evidence = final_evidence("routine")
+    worker = next(w for w in evidence["workers"] if w["os"] == "windows")
+    selection = worker["native_selection"]
+    selection["tests"].append({"nodeid": selection["modules"][0] + "::test_new[unreviewed]", "outcome": "passed"})
+    ids = [test["nodeid"] for test in selection["tests"]] + selection["excluded_nodeids"]
+    selection["collected_count"] = len(ids)
+    selection["collection_sha256"] = hashlib.sha256("\n".join(sorted(ids)).encode()).hexdigest()
+    assert tool.validate_acceptance(evidence)["windows_test_tier"] == "routine"
+
+
+@pytest.mark.parametrize("final", [False, True])
+@pytest.mark.parametrize("contents", [None, "invalid json"])
+def test_worker_cli_records_missing_native_proof_as_unsuccessful_only_when_required(
+    tmp_path, monkeypatch, final, contents
+):
+    import sys
+    from types import SimpleNamespace
+
+    tool = evidence_tool()
+    p = final_policy() if final else policy()
+    if not final:
+        p.update(windows=True, windows_packs=["main"], windows_shards=[1], windows_test_tier="full")
+    policy_path, output, native = tmp_path / "policy.json", tmp_path / "worker.json", tmp_path / "native.json"
+    policy_path.write_text(json.dumps(p))
+    if contents is not None:
+        native.write_text(contents)
+    for key, value in {
+        "GITHUB_REPOSITORY": p["repository"],
+        "GITHUB_SHA": p["tested_sha"],
+        "GITHUB_REF": p["ref"],
+        "GITHUB_EVENT_NAME": p["event_name"],
+        "GITHUB_RUN_ID": str(p["run_id"]),
+        "GITHUB_RUN_ATTEMPT": str(p["run_attempt"]),
+        "GITHUB_WORKFLOW_REF": "owner/repo/.github/workflows/ci.yml@refs/heads/dev",
+        "CI_STEPS_JSON": json.dumps(successful_steps("install", "private_home", "native")),
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "version_info", SimpleNamespace(major=3, minor=11 if final else 12))
+    assert (
+        tool.main(
+            [
+                "worker",
+                "--policy",
+                str(policy_path),
+                "--output",
+                str(output),
+                "--os",
+                "windows",
+                "--python",
+                p["platform_python"],
+                "--shard",
+                "2" if final else "1",
+                "--native-manifest",
+                str(native),
+            ]
+        )
+        == 0
+    )
+    document = json.loads(output.read_text())
+    assert document["success"] is (not final)
+    assert document["native_selection"] is None

@@ -28,8 +28,8 @@ repair is complete; historical restoration details remain in Git.
 
 ## `ci.yml` details
 
-The workflow has five job definitions, with Linux expanding to two workers
-only for final validation:
+The workflow has five job definitions. Final validation expands Linux and
+Windows to two workers each:
 
 | Scope | Scheduled jobs | Python and validation |
 |---|---:|---|
@@ -37,7 +37,7 @@ only for final validation:
 | Ordinary platform change | 4–5 | Adds one macOS and/or one Windows 3.12 worker |
 | Ready allowlisted user-documentation PR | 2 | Policy and complete documentation contract checks |
 | Draft feedback | 3–5 | Critical preset on Ubuntu 3.12 and mapped platforms |
-| Final validation | 6 | Policy, Linux 3.11/3.13, macOS 3.11, Windows 3.11, acceptance |
+| Final validation | 7 | Policy, Linux 3.11/3.13, macOS 3.11, two Windows 3.11 shards, acceptance |
 
 `ci-policy` discovers the complete cumulative PR diff through paginated GitHub
 API responses. It checks the reported file count and rechecks head/base metadata;
@@ -67,9 +67,12 @@ Key policy:
   >=80% and strict mypy. Drafts run critical feedback plus CI-tool tests.
 - The optional macOS worker runs the complete default suite, coverage, typing
   and status guard; drafts retain critical feedback and the status guard.
-- There is exactly one Windows worker when requested. Ordinary workers run
-  complete mapped modules plus remaining critical cases; final workers run all
-  84 frozen native modules, helper validation and the outside-checkout wheel.
+- Ordinary/draft Windows requests use one worker; final uses two isolated
+  Windows runners. Ordinary workers retain complete mapped modules and remaining
+  critical cases. Final workers cover all 84 frozen native modules once; routine
+  Windows validation excludes only 28 reviewed portable cases. Full Windows
+  validation retains them for `main`, manual dispatch and `ci:full`.
+  Helper validation and the outside-checkout wheel run once, on shard 1.
 - Static Ruff, formatting, shellcheck and status checks run once on Linux.
   Main typing uses `.[dev,keyvault,extension]`, plus `macos` on macOS. Feature,
   Hermes-floor, integration and swtpm packs have separate environments.
@@ -82,9 +85,10 @@ Key policy:
   retains the complete default suite and typing. macOS absorbs Swift and TPM
   Rust checks; Windows absorbs winkey stable/MSRV/build checks and wheel smoke.
 - `CI acceptance` always runs after all selected workers and fails if a worker,
-  pack or successful blocking step is missing. Unique OS/version/run/attempt
-  manifests avoid last-writer-wins matrix outputs. Feedback/documents cannot
-  qualify a production release. Rerun **all jobs** for accepted fresh evidence;
+  pack or successful blocking step is missing. Unique OS/version/shard/run/attempt
+  manifests avoid last-writer-wins matrix outputs. Feedback/documents and routine Windows evidence cannot
+  qualify a production release. Release admission requires final mode and the
+  full Windows tier for the exact branch SHA. Rerun **all jobs** for accepted fresh evidence;
   rerunning only failed jobs cannot reuse manifests from an older attempt.
 - Where branch protection is available, use the single stable `CI acceptance`
   check rather than retired matrix checks. Repository settings are configured
@@ -106,9 +110,11 @@ platform/version requires evidence that its additional coverage merits the cost.
 Baseline observations from 13 current 25-job successful runs: median elapsed
 18.80 minutes and raw summed job wall time 192.15 minutes. A portable ordinary
 route has a 7.25-minute historical proxy (budget 8–12 minutes); the consolidated
-final route has an 80.88-minute raw-time proxy (budget 75–95 minutes). Windows
-serialization can extend final latency to 40–50+ minutes. These are estimates
-from existing jobs, not measured new-workflow savings or billed minutes.
+final route has an 80.88-minute raw-time proxy (budget 75–95 minutes). The
+successful consolidated run `38204317824` measured 52m39s workflow elapsed and
+52m24s on Windows, including 49m27s of native pytest. The two-runner routine
+profile targets approximately 25 minutes; see the measured selection below.
+Queue time and runner speed vary. Raw summed job time is not billed minutes.
 
 ### Critical feedback and full regression
 
@@ -193,32 +199,63 @@ the required checks for the affected platform. Avoid repeating the full sweep
 between unchanged batches. Coverage floors, platform gates, live-device gates,
 hook-name membership, and every consumed-field assertion remain in force.
 
-`windows-private-fs` now uses one Server 2022 runner: Python 3.12 for mapped
-ordinary/draft feedback, or Python 3.11 for final validation. The named native
-step retains the entire 84-module selector, including the frozen 82-module hash,
-for the external harness. Final validation invokes `tools/run_native_test_shard.py`
-with `--shard-index 1 --shard-count 1`, so every module runs once on that worker.
-Ordinary validation uses `tools/run_ci_native_tests.py`: complete mapped modules
-replace their overlapping critical node IDs, and all other critical cases remain.
-No native tests, assertions, locks or timeouts are removed.
+`windows-private-fs` uses Server 2022: one Python 3.12 runner for mapped
+ordinary/draft feedback, or two isolated Python 3.11 runners for final mode.
+The named native step retains the entire 84-module selector, including the
+frozen 82-module hash, for the external harness. Whole modules are assigned
+once using deterministic measured-duration balancing. Shard 1's estimate
+includes the helper/wheel overhead, which avoids an unbalanced critical path.
+Both shards retain the existing native lock, process, ACL, crypto, publication,
+uncertainty, restore/purge and platform validation tests and their timeouts.
 
-Wheel smoke runs once when its pack is selected; final always selects it.
-PowerShell checks each native exit code immediately. JUnit and worker manifests
-are unique per run attempt and uploaded with `always()`. Failed/skipped required
-steps cannot become accepted evidence. Final Windows gets a 90-minute timeout
-to accommodate serialization plus helper/wheel checks.
+There are two explicit final Windows tiers:
 
-For local reproduction, use `--shard-index 1 --shard-count 1 --junitxml native.xml`
-with the complete selector from the workflow. The old sharding utility and
-measured duration inventory remain available for explicit local parallel runs;
-they no longer create hosted-CI fan-out. Missing weights use a visible nonzero
-default. Empty/duplicate selectors, bad indices/counts and malformed weights fail.
+- **Routine:** verified ready PRs targeting `dev` and verified `dev` pushes
+  omit exactly the 28 parameterized node IDs in `tools/native_test_profile.json`.
+  They exercise portable presentation/orchestration contracts and still run in
+  the complete Linux/macOS suites. The successful baseline recorded 306.555s
+  for these cases; the remaining native test weight is 2649.052s. Two shards
+  balance approximately 23 minutes including measured helper overhead, leaving
+  setup/acceptance room for the approximately 25-minute workflow target.
+- **Full:** `main`, manual dispatch and `ci:full` retain all Windows cases.
+  Uncertain provenance also selects full conservatively. Full validation can
+  take longer than the routine target. A routine green cannot authorize a
+  release, even when the global mode is `final`.
 
-Historical comparison: the first nine-shard run (`38014669836`, `5bf2b868d`)
-reduced maximum Windows job latency from 47m06s to 18m32s, but increased summed
-Windows wall time from 6952s to 8258s. That setup duplication is why the current
-policy accepts longer final latency for fewer workers. Historical results are
-not evidence for the newly consolidated workflow.
+The exclusion list uses exact parameterized node IDs. New tests and new
+parameters remain included; a removed/renamed reviewed exclusion fails
+collection until the profile is reviewed. The tradeoff is less frequent real
+Windows coverage for those 28 combinations, while all native security cases
+remain. Test files and assertions are retained. This is a bounded reduction,
+not an important-only security preset.
+
+`tools/run_native_pytest.py` records the actual pre-exclusion collection,
+exclusions, completed test outcomes and exit code. Schema-2 acceptance checks
+both shard identities, exact module assignment, exclusion digest, collection
+counts/hashes and every requested pack, in the same SHA/ref/run/attempt context.
+Missing/duplicate/overlapping shards, failed native tests and skipped required
+steps cannot become accepted evidence. Schema-1 manifests are conservatively
+refused; upgrading can therefore require one full baseline run.
+
+Ordinary validation still uses `tools/run_ci_native_tests.py`: complete mapped
+modules replace overlapping critical node IDs, and remaining critical cases
+stay included. Wheel/helper packs run once on shard 1 when selected. PowerShell
+checks native exit codes immediately. JUnit, selection and worker artifacts
+include shard and run attempt. Both final workers have a 60-minute timeout;
+this is a failure bound, not a way to manufacture the runtime target.
+
+For local reproduction, use the complete workflow selector with
+`--shard-index 1 --shard-count 2 --tier routine --manifest native-selection.json
+--junitxml native.xml`, then shard 2 on a separate host or isolated environment.
+Use `--tier full` for complete Windows validation; one-runner full execution
+remains available with `--shard-count 1`. Missing measured weights receive a
+nonzero default. Invalid selectors, indices/counts and malformed inputs fail.
+
+Historical comparison: the nine-shard run (`38014669836`, `5bf2b868d`) reduced
+maximum Windows latency from 47m06s to 18m32s but increased summed Windows
+wall time from 6952s to 8258s. The two-runner design adds only one setup and
+removes reviewed duplication to balance turnaround against runner consumption.
+Hosted elapsed time must be measured after changing this configuration.
 
 The installed-Hermes hook canary scans all Python sources owned by the
 `hermes-agent` distribution, including top-level modules outside `hermes_cli`,
