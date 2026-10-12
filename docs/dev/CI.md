@@ -433,6 +433,50 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 
 ## Manual live-device validation log
 
+- **2026-10-12 — Qwen3 14B on the installed Hermes runtime (macOS M5, 24 GiB).**
+  Candidate `6eb299682` was installed as a copied package, replacing an
+  existing editable install that pointed at a deleted checkout. Hermes's
+  package manager then rebuilt its environment with the vendored Mordred
+  member; all 252 installed Python source files matched the candidate.
+  The generated CLI launcher was refreshed to that active environment.
+  Hermes `0.21.5+4900.gbddd22b` loaded Mordred `0.2.0a1` on subsequent starts.
+
+  The official `Qwen/Qwen3-14B-GGUF` Q4_K_M weights (SHA256
+  `500a8806e85ee9c83f3ae08420295592451379b4f8cf2d0f41c15dffeb6b81f0`)
+  were served by llama.cpp `b11562` on `127.0.0.1:11435`, aliased as
+  `qwen3-14b-q4-hermes`. Hermes refused the initial 4096-token runtime because
+  it requires at least 64000 tokens. Ollama clamped a requested 65536-token
+  context to 40960 for these weights. The accepted llama.cpp configuration
+  used a 65536-token context, YaRN scaling factor 2 with original context
+  32768, q8_0 K/V cache, Flash Attention, one slot, and thinking disabled.
+  Both `/v1/models` and `/props` confirmed the runtime context. This checks
+  allocation and short interactions, not answer quality at 64K tokens.
+  The loopback LaunchAgent unloads the model after 300 idle seconds; logs
+  confirmed unloading and a successful wake on the next Hermes request.
+
+  In the existing Hermes profile, `hermes chat -m qwen14b --toolsets file`
+  called `read_file` on a synthetic fixture and correctly returned its
+  Monday meeting date and random verification code (exit 0, 33.3 seconds
+  including the cold model wake). A subsequent normal invocation without a
+  toolset override also returned the requested Japanese response (exit 0,
+  75.4 seconds, 12450 input tokens). This demonstrates a working default
+  tool configuration but also substantial initial prompt latency on this Mac.
+  The original default model/provider and
+  plugin configuration were unchanged. A named local provider, model alias,
+  and per-model reasoning override were added. The existing Telegram
+  privacy backend remains Venice; its real archive was not queried.
+
+  The explicit live gate
+  `uv run pytest -o addopts= -q -m integration tests/integration/test_telegram_local_llm.py`
+  passed **1 test in 3.14s** against this 14B endpoint. This exercised sealed
+  local configuration, `telegram doctor --probe-llm`, and `telegram_ask`
+  with a synthetic encrypted archive. The fixture uses test hardware
+  custody and injected policy/memory guards; it does not validate physical
+  Secure Enclave custody, a live Telegram import, Linux TPM, or the
+  reporter's original 27B setup. No application code changed in this
+  environment-validation step; the full regression result below remains
+  the code candidate's acceptance evidence.
+
 - **2026-10-12 — Telegram saved local LLM: real llama.cpp, with and without authentication.**
   Candidate `0617515df` was exercised on macOS arm64 / Python 3.14.7 against
   the official llama.cpp `b11562` binary and
