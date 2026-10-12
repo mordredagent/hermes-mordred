@@ -192,7 +192,9 @@ browser extension, using a Venice.ai private model.
   key, then sends a synthetic streaming completion through the same direct,
   redirect-disabled client as `telegram_ask`. It uses a 30-second total HTTP
   deadline and 64 output tokens, consumes the stream and requires visible
-  non-reasoning text. It never opens the archive or probes a cloud backend;
+  non-reasoning text and an explicit terminal event (`[DONE]` or a valid
+  `finish_reason`); clean HTTP EOF alone is insufficient. It never opens
+  the archive or probes a cloud backend;
   failure makes the privacy-LLM check unhealthy with a fix hint.
 - **Read-only.** Every request is checked against an allowlist of reads before
   Telethon resolves or queues it, both at `TelegramClient._call` and at the

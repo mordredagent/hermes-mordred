@@ -198,6 +198,7 @@ Under Mordred's `strict` LLM policy, allow Venice by adding `"venice"` to
 | `local_llm_unauthorized` | The local server returned HTTP 401. Set the correct key with `telegram local-llm --endpoint <base-url> --model <id> --api-key`, then run `telegram doctor --probe-llm`. |
 | `local_llm_unavailable` | Inspect the tool's `detail` or the `telegram.ask.failed` audit event. `connection_failed`: verify the saved port and server; `timeout`: check loading/generation speed; HTTP 404: verify the model and `/v1` base path; HTTP 5xx: check server health. Redirects are refused. |
 | `local_llm_bad_request` | Reduce the selected messages or check the server's context limit and request compatibility. |
+| `local_llm_bad_response` | The probe did not receive a complete OpenAI-compatible stream. Check the server and endpoint; partial text followed by a missing completion event is not healthy. |
 | `local_llm_busy` / `local_llm_rate_limited` | The local server is busy or rate-limiting; retry when it is ready. |
 | `llm_empty_answer` | No visible answer text was returned. Try fewer messages or a model that produces visible text within the output limit. |
 | Hermes tries to open Telegram.app | Restart Hermes Desktop so the Telegram tools and instructions load, and decline any screen-control request. |

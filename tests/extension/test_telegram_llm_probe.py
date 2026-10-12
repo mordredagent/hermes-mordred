@@ -83,24 +83,44 @@ def test_probe_failure_is_degraded_with_status_and_fix(doctor, status):
 
 
 @pytest.mark.parametrize(
-    "response",
+    ("response", "code"),
     [
-        b"data: [DONE]\n\n",
-        b'data: {"choices":[{"delta":{"content":"<think>private reasoning</think>"}}]}\n\ndata: [DONE]\n\n',
-        b'{"choices":[{"message":{"content":"non-streaming"}}]}',
+        (b"data: [DONE]\n\n", "llm_empty_answer"),
+        (
+            b'data: {"choices":[{"delta":{"content":"<think>private reasoning</think>"}}]}\n\ndata: [DONE]\n\n',
+            "llm_empty_answer",
+        ),
+        (b'{"choices":[{"message":{"content":"non-streaming"}}]}', "local_llm_bad_response"),
     ],
 )
-def test_probe_requires_visible_streamed_text(doctor, response):
+def test_probe_requires_visible_streamed_text(doctor, response, code):
     with LocalLlmServer(response=response) as peer:
         rc, check = doctor(MemorySecrets(peer.endpoint))
     assert rc == 1 and check["ok"] is False
-    assert "llm_empty_answer" in check["detail"]
+    assert code in check["detail"]
 
 
 def test_truncated_response_cannot_pass_probe(doctor):
     with LocalLlmServer(truncate=True) as peer:
         rc, check = doctor(MemorySecrets(peer.endpoint))
     assert rc == 1 and "transport_error" in check["detail"]
+
+
+@pytest.mark.parametrize("suffix", [b"", b"data: {broken"])
+def test_clean_http_eof_without_completed_sse_is_not_healthy(doctor, suffix):
+    response = b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n' + suffix
+    with LocalLlmServer(response=response) as peer:
+        rc, check = doctor(MemorySecrets(peer.endpoint))
+    assert rc == 1 and check["ok"] is False
+    assert "local_llm_bad_response" in check["detail"]
+    assert "invalid_response" in check["detail"]
+
+
+def test_explicit_finish_reason_completes_the_probe(doctor):
+    response = b'data: {"choices":[{"delta":{"content":"OK"},"finish_reason":"stop"}]}\n\n'
+    with LocalLlmServer(response=response) as peer:
+        rc, check = doctor(MemorySecrets(peer.endpoint))
+    assert rc == 0 and check["ok"] is True
 
 
 def test_probe_closed_port_and_timeout_are_distinguishable(doctor, monkeypatch):

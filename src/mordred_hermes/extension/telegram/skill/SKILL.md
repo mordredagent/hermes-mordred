@@ -105,6 +105,7 @@ terminal (`hermes-mordred` may need its full venv path):
 | `local_llm_unauthorized` | Local server returned HTTP 401 | Tell the user to set the server key using `hermes-mordred telegram local-llm --endpoint <base-url> --model <id> --api-key` (hidden prompt), then run `telegram doctor --probe-llm`. Never request or echo the key in chat. |
 | `local_llm_unavailable` | Local request could not complete | Read the returned `detail`: `connection_failed` means check the saved port/server; `timeout` means check loading or generation speed; HTTP 404 means verify model and base URL (usually `/v1`); HTTP 5xx means server failure. Suggest `hermes-mordred telegram doctor --probe-llm`. Do not infer that the model is stopped or that 401 occurred from this code alone. |
 | `local_llm_bad_request` | Local server rejected the request or context size | Narrow the date range or select fewer chats; verify the server's model/context configuration. |
+| `local_llm_bad_response` | The probe received an incomplete stream | Verify the OpenAI-compatible endpoint and server health; partial output without a terminal completion event is a failed probe. |
 | `local_llm_busy`, `local_llm_rate_limited` | Local server is temporarily busy | Retry when the server is ready. |
 | `tee_unavailable` | Hardware helper unavailable | macOS: `hermes-mordred keyvault enable-se`; Linux: `hermes-mordred keyvault enable-tpm` |
 | `tee_auth_cancelled` | Touch ID declined | Ask whether to try again |

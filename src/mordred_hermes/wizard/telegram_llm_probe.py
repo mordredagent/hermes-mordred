@@ -25,6 +25,7 @@ async def _probe(target: LlmTarget) -> None:
             [{"role": "user", "content": "Reply with just OK, without reasoning."}],
             max_tokens=64,
             backend="local",
+            require_complete=True,
         )
         produced = False
         async with contextlib.aclosing(chunks), contextlib.aclosing(service._without_thinking(chunks)) as answer:

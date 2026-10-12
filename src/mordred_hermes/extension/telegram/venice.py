@@ -247,6 +247,24 @@ def _delta_text(line: str) -> str | None:
     return content if isinstance(content, str) and content else None
 
 
+def _completion_finished(line: str) -> bool:
+    """Recognize a terminal SSE event, independently of HTTP connection closure."""
+    if not line.startswith("data:"):
+        return False
+    data = line[5:].strip()
+    if data == "[DONE]":
+        return True
+    try:
+        payload = json.loads(data)
+    except ValueError:
+        return False
+    choices = payload.get("choices") if isinstance(payload, dict) else None
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return False
+    reason = choices[0].get("finish_reason")
+    return isinstance(reason, str) and reason in {"stop", "length", "content_filter", "tool_calls", "function_call"}
+
+
 async def _sse_lines(content: Any) -> AsyncIterator[str]:
     # Incremental: a multi-byte character (CJK, emoji) split across two network
     # chunks must be decoded once both halves arrive, not replaced with U+FFFD.
@@ -271,6 +289,7 @@ async def stream_chat(
     *,
     max_tokens: int = 1500,
     backend: str = "venice",
+    require_complete: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Stream the answer's text deltas from an OpenAI-compatible ``/chat/completions``.
 
@@ -280,6 +299,7 @@ async def stream_chat(
     prefix = "venice" if backend == "venice" else "local_llm"
     body = build_request(cfg, messages, max_tokens=max_tokens, venice_parameters=backend == "venice")
     status = None
+    completed = False
     try:
         async with session.post(
             f"{cfg.base_url}/chat/completions", json=body, headers=_headers(cfg), allow_redirects=False
@@ -287,9 +307,12 @@ async def stream_chat(
             status = resp.status
             _raise_for_status(resp.status, prefix)
             async for line in _sse_lines(resp.content):
+                completed = completed or (require_complete and _completion_finished(line))
                 text = _delta_text(line)
                 if text is not None:
                     yield text
+            if require_complete and not completed:
+                raise VeniceError(f"{prefix}_bad_response")
     except VeniceError as exc:
         if backend == "local":
             failure = "http_error" if status is not None and status != 200 else "invalid_response"
