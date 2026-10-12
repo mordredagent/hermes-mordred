@@ -58,6 +58,12 @@ compatibility policy.
   Telegram has its dedicated flow. Setup/all skip Linux file-vault enrollment.
   See [Linux Private Telegram Design](#linux-private-telegram-design) and
   [Windows dedicated custody and memory lifecycle](#windows-dedicated-custody-and-memory-lifecycle).
+- SQLite database encryption (`state.db` and sibling/profile stores) is
+  macOS-only, enabled separately with `databases encrypt` after memory setup.
+  It derives its key from the memory key; `setup` and `encryption enable all`
+  do not enable it. JSONL/text logs and existing ZIP backups are not converted.
+  Protected homes must be decrypted on macOS before migration to Linux/Windows.
+  See [the database lifecycle contract](./STATE_DB_ENCRYPTION.md).
 - Arming those macOS seals is fail-closed on the runtime: before removing a
   plaintext, the CLI probes the interpreter that should run `hermes` and also
   the interpreter of each `hermes gateway run` process it can identify in the

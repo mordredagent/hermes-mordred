@@ -1,10 +1,11 @@
 # Windows support feasibility and proposed validation plan
 
-Date: 2026-10-07.
-Status: Phase 0 and the W1–W4 CNG helper slice are implemented and validated
-on actual AWS Windows/NitroTPM. Full Windows product support remains incomplete.
-This document proposes work, not an approved support contract. SPEC.md, PLAN.md,
-TODO.md, and CI.md remain the source of truth for implemented behavior.
+Date: 2026-10-07 (initial feasibility snapshot).
+The consolidated Windows implementation has since merged into `dev` (#226).
+See [CI.md](./CI.md#manual-live-device-validation-log) for 2026-10-11 ordinary-user
+Server/NitroTPM validation. The findings and proposed sequence below describe the
+initial investigation; SPEC.md, PLAN.md and TODO.md own current behavior and
+remaining work. Full Windows product support remains incomplete.
 
 ## Intended outcome
 

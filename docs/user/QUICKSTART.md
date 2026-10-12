@@ -32,7 +32,8 @@ TPM engine and skip env/config file-vault enrollment. The standalone
 Native Windows has scoped installer, CNG memory, Telegram and Desktop code;
 it is not general product or Windows 11 acceptance. Use the native PowerShell
 instructions in [`setup.md`](../dev/setup.md#native-windows-installer-and-helper-validation-c4)
-and the capability-specific contracts and remaining gates in
+and the [Windows TPM workflow](./USAGE.md#native-windows-tpm-workflow).
+Capability-specific contracts and remaining gates are in
 [`SPEC.md`](../dev/SPEC.md#platform-support-v1), [`TODO.md`](../dev/TODO.md), and
 [`CI.md`](../dev/CI.md). The shell installer below is for macOS/Linux.
 
@@ -288,6 +289,22 @@ the hook reseals the current config and removes the plaintext. Do not re-run
 requires `--yes`. The macOS-only `workspace` target reports `sealed` when it is
 encrypted and unmounted. See [`USAGE.md` §3](./USAGE.md#encryption--the-recommended-onoff-switch).
 
+### Encrypt conversation databases (macOS)
+
+After enabling memory, encrypt `state.db` and Hermes's other SQLite stores:
+
+```sh
+hermes-mordred databases encrypt --dry-run
+hermes-mordred databases encrypt
+hermes-mordred databases status
+```
+
+`setup` and `encryption enable all` do not enable this. If conversion is
+scheduled, quit all Hermes processes and restart, then check status again.
+Linux/Windows databases, session JSONL and text logs are outside this protection.
+See [database operations](./USAGE.md#databases--encrypt-hermess-sqlite-databases-macos)
+for decryption, backups and migration.
+
 ### What the protected states mean
 
 Protection is target-specific. An `on` mark means the target's lifecycle is
@@ -395,17 +412,21 @@ hermes-mordred uninstall --erase-encrypted   # delete encrypted data as it is (n
 
 Or through the installer: `curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash -s -- --uninstall`.
 
-Quit Hermes Desktop and stop any `hermes gateway` first. The command decrypts
-`.env`, `config.yaml` and your memories back to plaintext (it stops before
-removing anything if it cannot), removes Mordred's entries from `config.yaml`
+Quit Hermes Desktop and stop any `hermes gateway` first. On macOS, the command
+restores protected databases first, then `.env`, `config.yaml` and memories
+to plaintext (it stops before removing anything if it cannot), removes
+Mordred's entries from `config.yaml`
 (keeping a backup) and `.env`, the Hermes Desktop page and the installer's
 launcher, and finally uninstalls the package from Hermes's environment.
 
-Your Mordred data — vault, keyvault, Telegram archive, audit log, device keys —
-is **kept** and listed with its location. `--purge-data` deletes it too, after
+On macOS/Linux, your Mordred data — vault, keyvault, Telegram archive, audit log,
+device keys — is **kept** and listed with its location. `--purge-data` deletes it too, after
 you type `delete my data`; keep your keyvault Seed Phrase / Passphrase and the
 vault recovery passphrase if you may want any of it back. Details:
 [`USAGE.md` § Uninstall safely](./USAGE.md#uninstall-safely).
+
+Windows restores memory; `--purge-data` removes only its memory custody key
+and retains audit/Telegram data and keys. `--erase-encrypted` is unsupported.
 
 ## Common checks
 

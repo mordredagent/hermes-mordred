@@ -62,13 +62,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--shard-count", required=True, type=int)
     parser.add_argument("--weights", type=Path, default=Path(__file__).with_name("native_test_durations.json"))
     parser.add_argument("--junitxml", required=True, type=Path)
+    parser.add_argument("--tier", choices=("full", "routine"), default="full")
+    parser.add_argument("--manifest", type=Path, help="record actual collection and outcomes")
     parser.add_argument("modules", nargs="+")
     args = parser.parse_args(argv)
     try:
         if not 1 <= args.shard_index <= args.shard_count:
             raise ValueError("shard index must be between 1 and shard count")
+        if args.tier == "routine" and args.manifest is None:
+            raise ValueError("routine selection requires an actual native manifest")
         weights = load_weights(args.weights)
-        shards = shard_modules(args.modules, weights, args.shard_count)
+        if args.manifest is None:
+            shards = shard_modules(args.modules, weights, args.shard_count)
+        else:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from native_test_plan import plan_native_modules
+
+            shards = [
+                plan_native_modules(args.modules, tier=args.tier, shard=index, count=args.shard_count)
+                for index in range(1, args.shard_count + 1)
+            ]
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
     selected = shards[args.shard_index - 1]
@@ -80,6 +93,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     if unknown:
         print(f"Unmeasured modules use {DEFAULT_SECONDS}s each: {', '.join(unknown)}", flush=True)
+    if args.manifest is not None:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).with_name("run_native_pytest.py")),
+                "--tier",
+                args.tier,
+                "--shard",
+                str(args.shard_index),
+                "--shard-count",
+                str(args.shard_count),
+                "--manifest",
+                str(args.manifest),
+                "--junitxml",
+                str(args.junitxml),
+                *selected,
+            ],
+            check=False,
+        ).returncode
     return subprocess.run(
         [
             sys.executable,

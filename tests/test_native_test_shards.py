@@ -72,28 +72,31 @@ def test_workflow_selector_preserves_frozen_native_harness_contract() -> None:
     additions = {"tests/test_windows_database_compat.py", "tests/test_desktop_windows_pm_compat.py"}
     assert additions <= set(modules)
     assert len(modules) == len(set(modules)) == 84
+    assert modules == json.loads((ROOT / "tools/ci_scope_paths.json").read_text())["native_modules"]
     frozen = [module for module in modules if module not in additions]
     # SHA256 of newline-joined, sorted distinct modules at frozen BASE f3506b7dc.
     # Independent of the weights fixture, so replacing a module cannot hide loss.
     assert hashlib.sha256("\n".join(sorted(frozen)).encode()).hexdigest() == (
         "7d7b2b9da0549e631373054f3741a8c1e8cd8c96c51e3261538af783c6667b0d"
     )
-    assert set(frozen) == set(weights)  # Original native JUnit measurements remain unchanged.
+    assert set(modules) == set(weights)  # Latest measured native run includes both additions.
     shards = _tool().shard_modules(modules, weights, 3)
     assert sorted(m for shard in shards for m in shard) == sorted(modules)
     # New modules use the runner's explicit unmeasured fallback, not invented
     # native timing evidence. Both must run once alongside every frozen module.
     totals = [sum(weights.get(m, _tool().DEFAULT_SECONDS) for m in shard) for shard in shards]
     assert max(totals) - min(totals) < 1
-    assert max(totals) < 950
-    assert job["strategy"]["matrix"] == {"python-version": ["3.11", "3.12", "3.13"], "shard": [1, 2, 3]}
-    assert job["strategy"]["fail-fast"] is False
+    assert max(totals) < 1000
+    assert job["strategy"]["matrix"] == {"shard": "${{ fromJSON(needs.ci-policy.outputs.windows_shards) }}"}
+    assert "--shard-index $env:CI_SHARD --shard-count $env:CI_SHARD_COUNT" in step["run"]
+    assert '$env:CI_MODE -eq "final"' in step["run"]
+    assert "tools/run_ci_native_tests.py --policy ci-policy.json" in step["run"]
     smoke = next(s for s in job["steps"] if s.get("name", "").startswith("Build a wheel"))
-    assert smoke["if"] == "matrix.shard == 1"
+    assert "windows-wheel" in smoke["if"]
     upload = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/upload-artifact@"))
     assert upload["if"] == "always()"
-    assert "matrix.shard" in upload["with"]["name"]
-    assert "matrix.python-version" in upload["with"]["name"]
+    assert "platform_python" in upload["with"]["name"]
+    assert "github.run_attempt" in upload["with"]["name"]
 
 
 @pytest.mark.parametrize("index", ["0", "4", "", "garbage"])
@@ -137,3 +140,44 @@ def test_cli_runs_pytest_and_propagates_failure(tmp_path: Path, body: str, exit_
     assert result.returncode == exit_code, result.stdout + result.stderr
     assert junit.is_file()
     assert "slowest" in result.stdout
+
+
+def test_routine_cli_records_reviewed_exclusion_and_executes_new_case(tmp_path: Path) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    module = tests / "test_wizard_windows_audit_cli.py"
+    module.write_text(
+        "def test_decrypt_prints_rotated_then_active_entries_oldest_first(): assert False\n"
+        "def test_new_native_assertion(): pass\n"
+    )
+    output = tmp_path / "selection.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(TOOL),
+            "--shard-index",
+            "1",
+            "--shard-count",
+            "1",
+            "--tier",
+            "routine",
+            "--manifest",
+            str(output),
+            "--junitxml",
+            str(tmp_path / "j.xml"),
+            "tests/test_wizard_windows_audit_cli.py",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    selection = json.loads(output.read_text())
+    assert selection["tests"] == [
+        {"nodeid": "tests/test_wizard_windows_audit_cli.py::test_new_native_assertion", "outcome": "passed"}
+    ]
+    assert selection["excluded_nodeids"] == [
+        "tests/test_wizard_windows_audit_cli.py::test_decrypt_prints_rotated_then_active_entries_oldest_first"
+    ]
+    assert selection["exit_code"] == 0 and selection["collected_count"] == 2

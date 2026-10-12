@@ -59,7 +59,7 @@ on:
         default: "0.0.0.dev0"
       skip-ci-gate:
         description: >-
-          TestPyPI-only escape hatch: skip the "ci.yml passed on this SHA"
+          TestPyPI-only escape hatch: skip the final CI evidence check
           gate for an old commit whose retained check-runs have expired.
           Production PyPI rejects this input unconditionally.
         required: false
@@ -81,8 +81,8 @@ jobs:
   # (private repo; see docs/dev/CI.md §"Initial setup" deviation note), so
   # without this job a single workflow_dispatch could build and publish an
   # untested commit straight to production PyPI. This job blocks `build`
-  # (and transitively `publish`, via `needs`) unless a completed ci.yml run
-  # with conclusion == "success" exists for the exact SHA being released.
+  # (and transitively `publish`, via `needs`) unless the exact branch/SHA has
+  # accepted final CI evidence with every required worker and validation pack.
   ci-gate:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -92,7 +92,11 @@ jobs:
       # overrides (does not merge with) the workflow-level one, so `build`
       # and `publish` are unaffected and stay at their existing scopes.
       actions: read
+      contents: read
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Validate target, ref, and release inputs
         env:
           TARGET: ${{ inputs.target }}
@@ -137,7 +141,7 @@ jobs:
         run: |
           echo "::warning::skip-ci-gate=true — BYPASSING the ci.yml success gate for TestPyPI at $GITHUB_SHA. Production PyPI rejects this input."
 
-      - name: Require a green ci.yml run on this exact SHA
+      - name: Require final CI evidence on this exact branch and SHA
         if: ${{ !inputs.skip-ci-gate }}
         env:
           # gh CLI reads GH_TOKEN automatically; env indirection (not inline
@@ -147,16 +151,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
+          BRANCH: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          echo "Checking for a successful ci.yml run on $REPO @ $SHA ..."
-          success_count=$(gh api "/repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&status=completed" \
-            --paginate --jq '.workflow_runs[] | select(.conclusion == "success") | .id' | wc -l | tr -d ' ')
-          if [ "$success_count" -lt 1 ]; then
-            echo "::error::No completed ci.yml run with conclusion=success found for commit $SHA. Refusing to build/publish an unverified commit. Ensure ci.yml has passed on this exact SHA. The skip-ci-gate escape hatch is TestPyPI-only."
-            exit 1
-          fi
-          echo "Found $success_count successful ci.yml run(s) for $SHA — proceeding."
+          python3 tools/check_ci_evidence.py --repo "$REPO" --sha "$SHA" \
+            --branch "$BRANCH" --minimum-mode final
 
   build:
     needs: ci-gate

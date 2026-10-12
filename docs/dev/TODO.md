@@ -53,7 +53,9 @@ No open work. Release mechanics belong to [`CI.md`](./CI.md) §Normal release.
 
 ### 0.6 CI workflow
 
-No open work. Workflow YAML and [`CI.md`](./CI.md) own the current gates.
+No open implementation work. Scope-aware CI uses 3–5 ordinary jobs, two for
+ready allowlisted user-documentation PRs and six for final validation. Workflow YAML and
+[`CI.md`](./CI.md) own routing, evidence, matrix tradeoffs and hosted validation.
 
 ### 0.7 ~~HSeam-1 PR~~ → Zero-PR commitment (deferred to v2 vendored fork)
 
@@ -240,6 +242,14 @@ the source remains usable, and failure paths leave no partial destination.
 
 ## Cross-cutting (ongoing through the operational phase)
 
+### Hermes database encryption
+
+The macOS CLI, startup protection, monitor and uninstall lifecycle are implemented
+([design](./STATE_DB_ENCRYPTION.md)). Remaining work:
+
+- [ ] Desktop: add database enable/disable/status controls, including scheduled conversion.
+- [ ] Logging: redact message previews (`msg=`) from `logs/agent.log`.
+
 ### Linux private Telegram (proposed)
 
 - [x] Review the [design](SPEC.md#linux-private-telegram-design) and
@@ -324,10 +334,14 @@ component slices or close Windows 11, live or Desktop acceptance.
 # Windows product completion backlog
 
 The full Windows port is **incomplete**. The helper (#190), private filesystem
-(#192) and wallet caller (#194) have bounded evidence; they do not complete the
-tasks below. Follow PLAN.md §Windows product completion execution and keep
-component PRs separate. Virtual Windows 11 is acceptable; a physical PC is not
-required.
+(#192), wallet caller (#194) and consolidated implementation (#226) are merged.
+The 2026-10-11 [validation log](./CI.md#manual-live-device-validation-log)
+records ordinary-user Server/NitroTPM source and installed-wheel CNG acceptance.
+Unchecked items below include remaining acceptance and follow-ups; they do not
+mean the components are wholly unimplemented. Full Server regression, Windows 11,
+packaged Desktop and live external flows remain open. Follow PLAN.md §Windows
+product completion execution and keep component PRs separate. Virtual Windows 11
+is acceptable; a physical PC is not required.
 
 - [ ] C1: checked file lifecycle and audit primitives, with native failure tests.
 - [ ] C2: shared canonical policy/config read and transaction coordination.

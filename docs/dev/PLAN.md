@@ -221,6 +221,11 @@ regressing silently.
 
 ## Cross-cutting concerns
 
+Database encryption is implemented in `dbcrypt`: the startup shim selects
+SQLCipher, conversion uses journals and process-lifetime locks, and hooks check
+protection each turn. The CLI owns conversion and uninstall ordering; see
+[`STATE_DB_ENCRYPTION.md`](./STATE_DB_ENCRYPTION.md) for the macOS-only lifecycle.
+
 ### Documentation
 
 Use [`README.md`](./README.md) as the only developer index. Keep current contracts in
@@ -1254,6 +1259,11 @@ replace: bool) -> None` owns the rename commit-state transition.
 
 ### Task WF5: Run scoped CI, packaged-wheel and actual-host acceptance
 
+The completed matrix tasks below describe the original foundation rollout.
+Current hosted execution is consolidated by [`CI.md`](./CI.md): mapped ordinary
+Windows 3.12 or final Windows 3.11, one runner with the complete frozen selector.
+Historical actual-host evidence and live acceptance requirements still apply.
+
 **Files:** Add `tests/integration/test_private_fs_windows.py`; modify
 `.github/workflows/ci.yml`, `docs/dev/CI.md`, `docs/dev/TODO.md`.
 
@@ -1303,9 +1313,10 @@ startup failure or establish concurrent operation with an older writer version.
 
 # Windows product completion execution
 
-Execute the remaining work continuously in isolated component worktrees. This
-plan extends the unmerged Windows design/helper/filesystem/wallet slices
-(#189–#194); those slices are prerequisites, not completion. The binding
+Execute the remaining work continuously in isolated component worktrees. The
+Windows design/helper/filesystem/wallet slices (#189–#194) and consolidated
+implementation (#226) are merged into `dev`; product acceptance remains open
+(see TODO.md and CI.md). The binding
 requirements are SPEC.md §Windows product completion contract. Each component
 must receive its own tested implementation PR targeting `dev`; do not merge
 without a separate instruction. Documentation is English.

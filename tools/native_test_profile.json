@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "run_id": 38204317824,
+    "tested_sha": "f3cbba0b59f5b2ec1ecd3e98a346e42685e06f09",
+    "head_sha": "60def089d170e9066b1053558abff196a977f2f7",
+    "baseline_cases": 2655,
+    "baseline_skips": 111,
+    "excluded_cases": 28,
+    "excluded_seconds": 306.555
+  },
+  "routine_exclusions": [
+    {
+      "nodeid": "tests/test_desktop_windows_api.py::test_windows_memory_enable_has_no_approval_warning_by_default",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_desktop_windows_api.py::test_windows_memory_enable_surfaces_the_pending_approval_queue",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_audit_cli.py::test_decrypt_prints_rotated_then_active_entries_oldest_first",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_audit_cli_decrypt.py::test_bound_refusals_name_the_bound_and_the_workaround[DECRYPT_TOTAL_LIMIT-64-64-byte decrypt bound]",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_audit_cli_decrypt.py::test_bound_refusals_name_the_bound_and_the_workaround[MAX_ENTRIES-2-more than 2 entries]",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_audit_cli_decrypt.py::test_first_file_failure_stops_or_continues_as_documented[auth-denied]",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_audit_cli_decrypt.py::test_first_file_failure_stops_or_continues_as_documented[corrupt]",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_audit_cli_decrypt.py::test_first_file_failure_stops_or_continues_as_documented[custody-broken]",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_audit_cli_decrypt.py::test_first_file_failure_stops_or_continues_as_documented[invalid]",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_audit_cli_decrypt.py::test_first_file_failure_stops_or_continues_as_documented[key-missing]",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_audit_cli_decrypt.py::test_first_file_failure_stops_or_continues_as_documented[native-unavailable]",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_audit_cli_decrypt.py::test_first_file_failure_stops_or_continues_as_documented[policy-pending]",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_audit_cli_decrypt.py::test_first_file_failure_stops_or_continues_as_documented[storage-busy]",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_audit_cli_decrypt.py::test_first_file_failure_stops_or_continues_as_documented[storage-uncertain]",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_audit_cli_decrypt.py::test_first_file_failure_stops_or_continues_as_documented[storage-unsafe]",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_audit_cli_decrypt.py::test_first_file_failure_stops_or_continues_as_documented[vanished]",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_audit_cli_decrypt.py::test_unexpected_failure_propagates",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_memory.py::test_lifecycle_never_writes_memory_or_markers_itself",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_memory.py::test_windows_enable_all_override_keeps_installed_runtime_proof[darwin]",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_memory.py::test_windows_enable_all_override_keeps_installed_runtime_proof[linux]",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_telegram.py::test_setup_memory_step_runs_the_real_c6_windows_enable",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_telegram.py::test_setup_on_a_fresh_home_runs_the_ceremony_then_login_with_acknowledgement",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_telegram.py::test_setup_on_an_enrolled_home_skips_the_ceremony",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_uninstall.py::test_dry_run_plan_says_exactly_what_happens",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_uninstall.py::test_erase_encrypted_is_refused_on_windows[False]",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_uninstall.py::test_erase_encrypted_is_refused_on_windows[True]",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_uninstall.py::test_inert_custody_purge_plan_records_the_disable_first",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    },
+    {
+      "nodeid": "tests/test_wizard_windows_uninstall.py::test_purge_warning_names_no_key_without_memory_custody",
+      "reason": "Portable orchestration or display contract; retained by full Linux/macOS suites and full Windows validation."
+    }
+  ]
+}
