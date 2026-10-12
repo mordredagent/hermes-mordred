@@ -295,7 +295,8 @@ def test_nullable_merge_sha_uses_tested_commit_only_after_exact_parent_proof(
 
 
 @pytest.mark.parametrize(
-    "mutation", ["base", "head", "swapped_parents", "wrong_checkout", "single_parent", "unavailable", "stale", "empty"]
+    "mutation",
+    ["base", "head", "swapped_parents", "wrong_checkout", "single_parent", "unavailable", "stale_event_head", "empty"],
 )
 def test_nullable_context_cannot_invent_merge_provenance(pr_merge_checkout, mutation):
     root, payload, env = pr_merge_checkout
@@ -310,8 +311,11 @@ def test_nullable_context_cannot_invent_merge_provenance(pr_merge_checkout, muta
         env["GITHUB_SHA"] = pr["head"]["sha"]
     elif mutation == "unavailable":
         env["GITHUB_SHA"] = "d" * 40
+    elif mutation == "stale_event_head":
+        pr["merge_commit_sha"] = "d" * 40
+        pr["head"]["sha"] = "e" * 40
     else:
-        pr["merge_commit_sha"] = "d" * 40 if mutation == "stale" else ""
+        pr["merge_commit_sha"] = ""
     result = decide(payload, env=env, root=root)
     assert result["mode"] == "final"
     # It must also fail producer-side schema validation, rather than dispatching
@@ -357,25 +361,34 @@ def test_cli_resolves_real_nullable_merge_before_publishing_contract(pr_merge_ch
     assert "mode=final\n" in output.read_text()
 
 
-@pytest.mark.parametrize("raw_merge", ["matching", "null"])
-@pytest.mark.parametrize("mismatch", ["base", "head", "swapped_parents", "wrong_checkout", "stale"])
+@pytest.mark.parametrize("raw_merge", ["matching", "null", "stale"])
+@pytest.mark.parametrize(
+    "mismatch", ["base", "head", "swapped_parents", "wrong_checkout", "stale_tested_sha", "event_number", "ref"]
+)
 def test_cli_never_publishes_pr_policy_with_unproven_commit_binding(pr_merge_checkout, raw_merge, mismatch):
     root, payload, env = pr_merge_checkout
     pr = payload["pull_request"]
     pr["labels"] = [{"name": "ci:full"}]
     if raw_merge == "matching":
         pr["merge_commit_sha"] = env["GITHUB_SHA"]
+    elif raw_merge == "stale":
+        pr["merge_commit_sha"] = "d" * 40
     if mismatch in {"base", "head"}:
         pr[mismatch]["sha"] = "d" * 40
     elif mismatch == "swapped_parents":
         pr["base"]["sha"], pr["head"]["sha"] = pr["head"]["sha"], pr["base"]["sha"]
     elif mismatch == "wrong_checkout":
         subprocess.run(["git", "-C", str(root), "checkout", "-q", "feature"], check=True)
+    elif mismatch == "event_number":
+        payload["number"] = 8
+    elif mismatch == "ref":
+        env["GITHUB_REF"] = "refs/pull/8/merge"
     else:
-        pr["merge_commit_sha"] = "d" * 40
+        env["GITHUB_SHA"] = "e" * 40
     result, output, policy = run_policy_cli(root, payload, env)
     assert result.returncode == 2
     assert not policy.exists() and not output.exists()
+    assert f"tested_sha={env['GITHUB_SHA']}" in result.stderr
 
 
 def test_cli_rejects_invalid_policy_before_writing_any_artifact_or_outputs(tmp_path):
@@ -396,3 +409,59 @@ def test_cli_rejects_invalid_policy_before_writing_any_artifact_or_outputs(tmp_p
     )
     assert result.returncode == 2
     assert not policy.exists() and not output.exists()
+
+
+@pytest.mark.parametrize("draft,expected", [(False, "ordinary"), (True, "critical")])
+def test_proven_checkout_supersedes_previous_advisory_merge_for_routing(pr_merge_checkout, draft, expected):
+    root, payload, env = pr_merge_checkout
+    pr = payload["pull_request"]
+    tree = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD^{tree}"], text=True).strip()
+    previous_merge = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            str(root),
+            "commit-tree",
+            tree,
+            "-p",
+            pr["base"]["sha"],
+            "-p",
+            pr["head"]["sha"],
+            "-m",
+            "previous generated test merge",
+        ],
+        text=True,
+    ).strip()
+    assert previous_merge != env["GITHUB_SHA"]
+    pr["merge_commit_sha"] = previous_merge
+    pr["draft"] = draft
+    result = decide(payload, env=env, root=root)
+    assert result["mode"] == expected
+    assert result["pr"]["merge_sha"] == env["GITHUB_SHA"]
+
+
+def test_cli_accepts_previous_advisory_merge_only_with_current_commit_proof(pr_merge_checkout):
+    root, payload, env = pr_merge_checkout
+    pr = payload["pull_request"]
+    tree = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD^{tree}"], text=True).strip()
+    pr["merge_commit_sha"] = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            str(root),
+            "commit-tree",
+            tree,
+            "-p",
+            pr["base"]["sha"],
+            "-p",
+            pr["head"]["sha"],
+            "-m",
+            "previous generated test merge",
+        ],
+        text=True,
+    ).strip()
+    pr["labels"] = [{"name": "ci:full"}]
+    result, output, policy = run_policy_cli(root, payload, env)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(policy.read_text())["pr"]["merge_sha"] == env["GITHUB_SHA"]
+    assert "mode=final\n" in output.read_text()

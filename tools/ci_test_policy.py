@@ -63,7 +63,7 @@ def _positive_int(value: str) -> int:
 
 
 def _verified_merge_sha(tested_sha: str, base_sha: object, head_sha: object, root: Path) -> str | None:
-    """Prove nullable event context from the exact checked-out commit object."""
+    """Prove tested PR context from the exact checked-out commit object."""
     if not all(isinstance(sha, str) and SHA.fullmatch(sha) for sha in (tested_sha, base_sha, head_sha)):
         return None
     try:
@@ -101,7 +101,10 @@ def _pr_context(event: Mapping[str, object], tested_sha: str, root: Path) -> dic
     if not isinstance(head, dict) or not isinstance(base, dict):
         return None
     merge_sha = pr.get("merge_commit_sha")
-    if merge_sha is None:
+    # GitHub computes this advisory field asynchronously: both null and a
+    # previous test-merge SHA occur in genuine opened/synchronize events. Only
+    # immutable checkout/parent proof may supersede it; malformed values refuse.
+    if merge_sha is None or (isinstance(merge_sha, str) and SHA.fullmatch(merge_sha) and merge_sha != tested_sha):
         merge_sha = _verified_merge_sha(tested_sha, base.get("sha"), head.get("sha"), root)
     return {
         "number": pr.get("number"),
@@ -252,6 +255,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not args.event_name or not args.event_path:
         parser.error("event name and event path are required")
+    policy: dict[str, object] | None = None
     try:
         event: object = json.loads(args.event_path.read_text(encoding="utf-8"))
         if not isinstance(event, dict):
@@ -265,6 +269,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.event_name == "pull_request":
             pr = cast(dict[str, object], policy["pr"])
             tested_sha = cast(str, policy["tested_sha"])
+            if type(event.get("number")) is not int or event["number"] != pr["number"]:
+                raise ValueError("PR number differs between event and tested context")
             if _verified_merge_sha(tested_sha, pr["base_sha"], pr["head_sha"], ROOT) != tested_sha:
                 raise ValueError("checked-out PR merge does not bind the exact event base and head")
         args.policy_file.write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
@@ -275,6 +281,21 @@ def main(argv: list[str] | None = None) -> int:
                     rendered = value if isinstance(value, str) else json.dumps(value, separators=(",", ":"))
                     stream.write(f"{key}={rendered}\n")
     except (ValueError, OSError) as exc:
+        if policy is not None and isinstance(policy.get("pr"), dict):
+            pr = cast(dict[str, object], policy["pr"])
+            raw_pr = event.get("pull_request") if isinstance(event, dict) else None
+            hashes = {
+                "tested_sha": policy.get("tested_sha"),
+                "base_sha": pr.get("base_sha"),
+                "head_sha": pr.get("head_sha"),
+                "advisory_merge_sha": raw_pr.get("merge_commit_sha") if isinstance(raw_pr, dict) else None,
+            }
+            # Print only validated hashes, never arbitrary event text or tokens.
+            details = " ".join(
+                f"{key}={value if isinstance(value, str) and SHA.fullmatch(value) else '<invalid-or-missing>'}"
+                for key, value in hashes.items()
+            )
+            print(f"PR commit context: {details}", file=sys.stderr)
         parser.error(str(exc))
     print(f"{policy['mode']}: {policy['reason']}")
     return 0
