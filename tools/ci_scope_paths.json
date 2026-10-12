@@ -1,0 +1,614 @@
+{
+  "schema_version": 1,
+  "native_modules": [
+    "tests/test_private_fs.py",
+    "tests/test_private_fs_posix.py",
+    "tests/test_private_fs_windows.py",
+    "tests/test_private_fs_windows_faults.py",
+    "tests/test_private_fs_processes.py",
+    "tests/test_keyvault_wallet_storage.py",
+    "tests/test_private_fs_lifecycle.py",
+    "tests/test_private_fs_lifecycle_faults.py",
+    "tests/test_private_fs_confidential.py",
+    "tests/test_private_fs_confidential_windows.py",
+    "tests/test_private_fs_public_build.py",
+    "tests/test_private_fs_public_build_windows.py",
+    "tests/test_private_fs_managed_images.py",
+    "tests/test_private_fs_managed_images_windows.py",
+    "tests/test_windows_runtime.py",
+    "tests/test_windows_installer.py",
+    "tests/test_windows_install_ownership.py",
+    "tests/test_windows_install_powershell.py",
+    "tests/test_private_fs_principal.py",
+    "tests/test_config_io_custody.py",
+    "tests/test_config_io.py",
+    "tests/test_config_readers.py",
+    "tests/test_config_io_windows.py",
+    "tests/test_keyvault_windows_processes.py",
+    "tests/test_audit_session.py",
+    "tests/test_audit_session_faults.py",
+    "tests/test_audit_rotation.py",
+    "tests/test_audit_session_processes.py",
+    "tests/test_audit_session_windows.py",
+    "tests/test_wizard_config_windows.py",
+    "tests/test_wizard_config_native_windows.py",
+    "tests/test_windows_custody_profile.py",
+    "tests/test_windows_custody.py",
+    "tests/test_windows_encrypted_audit.py",
+    "tests/test_windows_encrypted_audit_processes.py",
+    "tests/test_windows_encrypted_audit_windows.py",
+    "tests/test_windows_privacy_policy.py",
+    "tests/test_windows_privacy_audit.py",
+    "tests/test_windows_privacy_audit_windows.py",
+    "tests/test_wizard_windows_audit_cli.py",
+    "tests/test_wizard_windows_audit_cli_native.py",
+    "tests/test_wizard_windows_audit_cli_decrypt.py",
+    "tests/test_llm_windows_policy.py",
+    "tests/test_llm_windows_policy_native.py",
+    "tests/test_network_windows_policy.py",
+    "tests/test_network_windows_policy_native.py",
+    "tests/test_network_windows_tor.py",
+    "tests/test_network_windows_tor_lifecycle.py",
+    "tests/test_network_windows_vpn.py",
+    "tests/test_network_windows_routes_native.py",
+    "tests/test_windows_memory_storage.py",
+    "tests/test_windows_memory_hook.py",
+    "tests/test_windows_memory_native.py",
+    "tests/test_windows_capability.py",
+    "tests/test_windows_capability_native.py",
+    "tests/test_windows_custody_reset.py",
+    "tests/test_windows_excluded_guards.py",
+    "tests/test_windows_memory_proof.py",
+    "tests/test_windows_memory_lifecycle.py",
+    "tests/extension/test_extension_windows_storage.py",
+    "tests/extension/test_extension_windows_storage_native.py",
+    "tests/test_windows_telegram_custody.py",
+    "tests/test_windows_telegram_archive.py",
+    "tests/test_windows_telegram_native.py",
+    "tests/extension/test_telegram_memory_guard_windows.py",
+    "tests/extension/test_telegram_windows_flags.py",
+    "tests/test_wizard_windows_memory.py",
+    "tests/test_wizard_windows_status.py",
+    "tests/test_wizard_windows_excluded.py",
+    "tests/test_wizard_windows_uninstall.py",
+    "tests/test_windows_database_compat.py",
+    "tests/test_wizard_windows_native.py",
+    "tests/test_wizard_windows_telegram.py",
+    "tests/test_wizard_windows_telegram_native.py",
+    "tests/test_desktop_windows_api.py",
+    "tests/test_desktop_windows_native.py",
+    "tests/test_desktop_windows_page.py",
+    "tests/test_desktop_windows_logout.py",
+    "tests/test_desktop_windows_pm_compat.py",
+    "tests/test_desktop_windows_install.py",
+    "tests/extension/test_desktop_api.py",
+    "tests/extension/test_desktop_platform.py",
+    "tests/extension/test_extension_serve_shutdown.py",
+    "tests/test_desktop_capture.py"
+  ],
+  "paths": {
+    "README.md": [
+      "package"
+    ],
+    "docs/dev/CI.md": [
+      "docs"
+    ],
+    "docs/dev/HOOK_PAYLOADS.md": [
+      "docs"
+    ],
+    "docs/dev/PATHS.md": [
+      "docs"
+    ],
+    "docs/dev/PLAN.md": [
+      "docs"
+    ],
+    "docs/dev/POLICY.md": [
+      "docs"
+    ],
+    "docs/dev/README.md": [
+      "docs"
+    ],
+    "docs/dev/ROADMAP.md": [
+      "docs"
+    ],
+    "docs/dev/SLACK_E2E.md": [
+      "docs"
+    ],
+    "docs/dev/SPEC.md": [
+      "docs"
+    ],
+    "docs/dev/STATE_DB_ENCRYPTION.md": [
+      "docs"
+    ],
+    "docs/dev/TODO.md": [
+      "docs"
+    ],
+    "docs/dev/UPSTREAM.md": [
+      "docs"
+    ],
+    "docs/dev/WINDOWS_AUDIT_IO.md": [
+      "docs"
+    ],
+    "docs/dev/WINDOWS_CONFIG_IO.md": [
+      "docs"
+    ],
+    "docs/dev/WINDOWS_FEASIBILITY.md": [
+      "docs"
+    ],
+    "docs/dev/setup.md": [
+      "docs"
+    ],
+    "docs/user/EXTENSION.md": [
+      "docs"
+    ],
+    "docs/user/QUICKSTART.md": [
+      "docs"
+    ],
+    "docs/user/TELEGRAM.md": [
+      "docs"
+    ],
+    "docs/user/USAGE.md": [
+      "docs"
+    ],
+    "src/mordred_hermes/desktop/__init__.py": [
+      "extension"
+    ],
+    "src/mordred_hermes/desktop/_capture.py": [
+      "extension",
+      "macos"
+    ],
+    "src/mordred_hermes/desktop/_windows.py": [
+      "extension"
+    ],
+    "src/mordred_hermes/desktop/api.py": [
+      "extension"
+    ],
+    "src/mordred_hermes/desktop/assets/dashboard/manifest.json": [
+      "extension",
+      "package",
+      "windows-wheel"
+    ],
+    "src/mordred_hermes/desktop/assets/dashboard/plugin_api.py": [
+      "extension",
+      "package",
+      "windows-wheel"
+    ],
+    "src/mordred_hermes/desktop/assets/desktop/plugin.js": [
+      "extension",
+      "package",
+      "windows-wheel"
+    ],
+    "src/mordred_hermes/desktop/member.py": [
+      "extension",
+      "macos"
+    ],
+    "src/mordred_hermes/extension/__init__.py": [],
+    "src/mordred_hermes/extension/__main__.py": [],
+    "src/mordred_hermes/extension/_windows_storage.py": [
+      "extension"
+    ],
+    "src/mordred_hermes/extension/chat.py": [],
+    "src/mordred_hermes/extension/discord_context.py": [],
+    "src/mordred_hermes/extension/egress.py": [],
+    "src/mordred_hermes/extension/errors.py": [],
+    "src/mordred_hermes/extension/gateway_plugin.py": [
+      "floor"
+    ],
+    "src/mordred_hermes/extension/history.py": [],
+    "src/mordred_hermes/extension/outbound.py": [],
+    "src/mordred_hermes/extension/page_headers.py": [],
+    "src/mordred_hermes/extension/telegram/__init__.py": [
+      "features"
+    ],
+    "src/mordred_hermes/extension/telegram/ask.py": [
+      "features"
+    ],
+    "src/mordred_hermes/extension/telegram/client.py": [
+      "features"
+    ],
+    "src/mordred_hermes/extension/telegram/hermes_tools.py": [
+      "features",
+      "floor"
+    ],
+    "src/mordred_hermes/extension/telegram/llm.py": [
+      "features"
+    ],
+    "src/mordred_hermes/extension/telegram/login_flow.py": [
+      "features"
+    ],
+    "src/mordred_hermes/extension/telegram/readonly.py": [
+      "features"
+    ],
+    "src/mordred_hermes/extension/telegram/service.py": [
+      "features"
+    ],
+    "src/mordred_hermes/extension/telegram/skill/SKILL.md": [
+      "features"
+    ],
+    "src/mordred_hermes/extension/telegram/tee.py": [
+      "features"
+    ],
+    "src/mordred_hermes/extension/telegram/venice.py": [
+      "features"
+    ],
+    "src/mordred_hermes/extension/wallet.py": [
+      "features"
+    ],
+    "src/mordred_hermes/extension/web/index.html": [
+      "package"
+    ],
+    "src/mordred_hermes/llm_guard/__init__.py": [],
+    "src/mordred_hermes/llm_guard/_cloud_endpoint.py": [],
+    "src/mordred_hermes/llm_guard/_exceptions.py": [],
+    "src/mordred_hermes/llm_guard/_policy_settings.py": [
+      "llm",
+      "privacy"
+    ],
+    "src/mordred_hermes/llm_guard/_typing.py": [],
+    "src/mordred_hermes/llm_guard/_windows_policy.py": [
+      "llm",
+      "privacy"
+    ],
+    "src/mordred_hermes/llm_guard/auxiliary_guard.py": [],
+    "src/mordred_hermes/llm_guard/enforce.py": [],
+    "src/mordred_hermes/llm_guard/harness_detect.py": [],
+    "src/mordred_hermes/llm_guard/health.py": [],
+    "src/mordred_hermes/llm_guard/local_adapter.py": [
+      "floor"
+    ],
+    "src/mordred_hermes/network/__init__.py": [
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/_exceptions.py": [],
+    "src/mordred_hermes/network/_windows_exec.py": [
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/_windows_job.py": [
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/_windows_policy.py": [
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/api.py": [
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/guidance.py": [],
+    "src/mordred_hermes/network/hooks.py": [
+      "floor",
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/paths/__init__.py": [
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/paths/_tor_windows.py": [
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/paths/clearnet.py": [
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/paths/tor.py": [
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/paths/vpn.py": [
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/provider_transport_flagger.py": [
+      "floor",
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/proxy_env.py": [
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/runtime.py": [
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/settings.py": [
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/vpn_providers/__init__.py": [
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/vpn_providers/base.py": [
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/vpn_providers/custom.py": [
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/vpn_providers/mullvad.py": [
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/vpn_providers/registry.py": [
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/network/vpn_providers/wireguard.py": [
+      "network",
+      "tor"
+    ],
+    "src/mordred_hermes/privacy_check/__init__.py": [],
+    "src/mordred_hermes/privacy_check/_audit_reasons.py": [],
+    "src/mordred_hermes/privacy_check/_checked_policy.py": [
+      "llm",
+      "privacy"
+    ],
+    "src/mordred_hermes/privacy_check/_exceptions.py": [],
+    "src/mordred_hermes/privacy_check/_keyvault_probe.py": [
+      "macos"
+    ],
+    "src/mordred_hermes/privacy_check/_runtime.py": [],
+    "src/mordred_hermes/privacy_check/_typing.py": [],
+    "src/mordred_hermes/privacy_check/_windows_audit.py": [
+      "llm",
+      "privacy"
+    ],
+    "src/mordred_hermes/privacy_check/audit.py": [],
+    "src/mordred_hermes/privacy_check/egress.py": [],
+    "src/mordred_hermes/privacy_check/hooks.py": [
+      "floor"
+    ],
+    "src/mordred_hermes/privacy_check/install_wrapper.py": [],
+    "src/mordred_hermes/privacy_check/policy.py": [
+      "llm",
+      "privacy"
+    ],
+    "src/mordred_hermes/privacy_check/skill_frontmatter.py": [],
+    "src/mordred_hermes/wizard/_defaults.py": [],
+    "src/mordred_hermes/wizard/_network_answers.py": [],
+    "src/mordred_hermes/wizard/_prompt_io.py": [],
+    "src/mordred_hermes/wizard/_term.py": [],
+    "src/mordred_hermes/wizard/_typing.py": [],
+    "src/mordred_hermes/wizard/extension_pair_cli.py": [
+      "features"
+    ],
+    "src/mordred_hermes/wizard/policy_explainer.py": [],
+    "tests/extension/test_desktop_api.py": [
+      "extension"
+    ],
+    "tests/extension/test_desktop_platform.py": [
+      "extension",
+      "macos"
+    ],
+    "tests/extension/test_discord_context.py": [],
+    "tests/extension/test_extension_chat.py": [],
+    "tests/extension/test_extension_history.py": [],
+    "tests/extension/test_extension_history_frames.py": [],
+    "tests/extension/test_extension_outbound.py": [],
+    "tests/extension/test_extension_page_headers.py": [],
+    "tests/extension/test_extension_serve.py": [],
+    "tests/extension/test_extension_serve_shutdown.py": [
+      "extension"
+    ],
+    "tests/extension/test_extension_server_frame_fixture.py": [],
+    "tests/extension/test_extension_sign_tx.py": [
+      "features"
+    ],
+    "tests/extension/test_extension_wallet.py": [
+      "features"
+    ],
+    "tests/extension/test_pm_member.py": [
+      "extension",
+      "macos"
+    ],
+    "tests/extension/test_telegram_dates.py": [
+      "features"
+    ],
+    "tests/extension/test_telegram_hermes_tools.py": [
+      "features",
+      "floor"
+    ],
+    "tests/extension/test_telegram_tee.py": [
+      "features"
+    ],
+    "tests/extension/test_telegram_windows_flags.py": [
+      "extension",
+      "features"
+    ],
+    "tests/test_audit.py": [],
+    "tests/test_audit_reasons_phase3.py": [],
+    "tests/test_audit_reasons_phase4.py": [],
+    "tests/test_desktop_capture.py": [
+      "extension",
+      "macos"
+    ],
+    "tests/test_desktop_windows_api.py": [
+      "extension"
+    ],
+    "tests/test_desktop_windows_live.py": [
+      "extension"
+    ],
+    "tests/test_desktop_windows_logout.py": [
+      "extension"
+    ],
+    "tests/test_desktop_windows_native.py": [
+      "extension"
+    ],
+    "tests/test_desktop_windows_page.py": [
+      "extension"
+    ],
+    "tests/test_desktop_windows_pm_compat.py": [
+      "extension"
+    ],
+    "tests/test_enforce.py": [],
+    "tests/test_enforce_audit.py": [],
+    "tests/test_enforce_prompt.py": [],
+    "tests/test_harness_detect.py": [],
+    "tests/test_health.py": [],
+    "tests/test_hooks.py": [
+      "floor"
+    ],
+    "tests/test_install_wrapper.py": [],
+    "tests/test_keyvault_probe.py": [
+      "macos"
+    ],
+    "tests/test_llm_auxiliary_guard.py": [],
+    "tests/test_llm_guard_register.py": [],
+    "tests/test_llm_windows_policy.py": [
+      "llm",
+      "privacy"
+    ],
+    "tests/test_llm_windows_policy_native.py": [
+      "llm",
+      "privacy"
+    ],
+    "tests/test_local_adapter.py": [
+      "floor"
+    ],
+    "tests/test_network_api.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_network_exceptions.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_network_hooks_config.py": [
+      "floor",
+      "network",
+      "tor"
+    ],
+    "tests/test_network_hooks_registration.py": [
+      "floor",
+      "network",
+      "tor"
+    ],
+    "tests/test_network_hooks_requests.py": [
+      "floor",
+      "network",
+      "tor"
+    ],
+    "tests/test_network_hooks_session.py": [
+      "floor",
+      "network",
+      "tor"
+    ],
+    "tests/test_network_runtime_api.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_network_runtime_basic.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_network_runtime_resilience.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_network_runtime_switching.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_network_runtime_synchronization.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_network_runtime_tor.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_network_runtime_vpn.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_network_runtime_vpn_recovery.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_network_windows_policy.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_network_windows_policy_native.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_network_windows_routes_native.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_network_windows_tor.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_network_windows_tor_lifecycle.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_network_windows_vpn.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_packaging_native.py": [
+      "package",
+      "windows-wheel"
+    ],
+    "tests/test_paths_clearnet.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_paths_tor.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_paths_vpn.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_policy.py": [
+      "llm",
+      "privacy"
+    ],
+    "tests/test_policy_explainer.py": [],
+    "tests/test_privacy_check_egress.py": [],
+    "tests/test_privacy_exceptions.py": [],
+    "tests/test_provider_transport_flagger.py": [
+      "floor",
+      "network",
+      "tor"
+    ],
+    "tests/test_proxy_env.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_skill_frontmatter.py": [],
+    "tests/test_vpn_providers.py": [
+      "network",
+      "tor"
+    ],
+    "tests/test_windows_privacy_audit.py": [
+      "llm",
+      "privacy"
+    ],
+    "tests/test_windows_privacy_audit_windows.py": [
+      "llm",
+      "privacy"
+    ],
+    "tests/test_windows_privacy_policy.py": [
+      "llm",
+      "privacy"
+    ],
+    "tests/test_wizard_defaults.py": [],
+    "tests/test_wizard_extension_pair_cli.py": [
+      "features"
+    ],
+    "tests/test_wizard_term.py": []
+  }
+}
