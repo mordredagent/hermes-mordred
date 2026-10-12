@@ -535,6 +535,10 @@ class TelegramService:
             if not produced:
                 # Never hand back a silent empty answer as if it were one.
                 raise AskError("llm_empty_answer")
+        except venice.VeniceError as exc:
+            if target.backend == "local":
+                _audit("telegram.ask.failed", "error", backend="local", error=exc.code, detail=exc.detail)
+            raise
         finally:
             with contextlib.suppress(Exception):
                 await raw_session.close()
