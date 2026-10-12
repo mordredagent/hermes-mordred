@@ -244,7 +244,7 @@ def test_standalone_bootstrap_cli_writes_exact_contract_without_site_packages(tm
     assert result.returncode == 0, result.stderr
     document = json.loads(policy.read_text())
     assert document["mode"] == "final"
-    assert document["schema_version"] == 1
+    assert document["schema_version"] == 2
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert values["mode"] == "final" and values["windows"] == "true"
     assert json.loads(values["linux_versions"]) == ["3.11", "3.13"]
@@ -330,7 +330,15 @@ def test_nullable_context_cannot_invent_merge_provenance(pr_merge_checkout, muta
 def run_policy_cli(root, payload, env):
     tools = root / "tools"
     tools.mkdir()
-    for name in ("ci_test_policy.py", "ci_change_scope.py", "ci_scope_paths.json", "ci_evidence.py"):
+    for name in (
+        "ci_test_policy.py",
+        "ci_change_scope.py",
+        "ci_scope_paths.json",
+        "ci_evidence.py",
+        "native_test_plan.py",
+        "native_test_profile.json",
+        "native_test_durations.json",
+    ):
         (tools / name).write_bytes((ROOT / "tools" / name).read_bytes())
     event_path, output, policy = root / "event.json", root / "output", root / "policy.json"
     event_path.write_text(json.dumps(payload))
@@ -465,3 +473,25 @@ def test_cli_accepts_previous_advisory_merge_only_with_current_commit_proof(pr_m
     assert result.returncode == 0, result.stderr
     assert json.loads(policy.read_text())["pr"]["merge_sha"] == env["GITHUB_SHA"]
     assert "mode=final\n" in output.read_text()
+
+
+def test_windows_final_ready_dev_is_routine_but_explicit_full_is_preserved():
+    result = decide(path="tools/new.py")
+    assert result["windows_shards"] == [1, 2]
+    assert result["windows_test_tier"] == "routine"
+    for payload in (event(target="main"), event(labels=["ci:full"]), event(action="unexpected")):
+        assert decide(payload, path="tools/new.py")["windows_test_tier"] == "full"
+    assert decide(path="src/mordred_hermes/network/hooks.py")["windows_shards"] == [1]
+    assert decide(path="src/mordred_hermes/network/hooks.py")["windows_test_tier"] == "full"
+    assert decide()["windows_shards"] == []
+    assert decide()["windows_test_tier"] == "none"
+
+
+def test_uncertain_discovery_retains_full_windows_tier():
+    payload = event()
+
+    def unavailable(endpoint):
+        raise OSError("offline")
+
+    result = tool().build_policy("pull_request", payload, env=environment(), get_json=unavailable)
+    assert result["windows_test_tier"] == "full"
