@@ -439,6 +439,17 @@ consolidated candidate `bb75885ac`. Pending observations in those entries
 describe their original test time; subsequent contracts and the Windows
 completion acceptance matrix track later work and current open gates.
 
+- **2026-10-12 — Local LLM probe refusal; live endpoint unavailable.**
+  The LLM candidate `4ecb4cf58` rejects HTTP 1xx and 3xx responses instead
+  of treating them as healthy. Deterministic HTTP 103 refusal and HTTP 302
+  strict-session refusal regressions failed before the fix and passed after
+  it. An explicit run of `tests/integration/test_llm_local.py` on macOS,
+  Python 3.14.7, passed the two connection/refusal tests and skipped the
+  three live-gated tests. `MORDRED_LIVE_LLM_TEST` and
+  `MORDRED_LIVE_LLM_ENDPOINT` were unset, and no service was listening on
+  the default local port 1234. Real LM Studio / Ollama / vLLM validation
+  remains pending; mock-transport results are not live-server evidence.
+
 - **2026-10-11 — Linux setup/enable-all memory and armed shape-B backup on real NitroTPM.**
   The immutable wizard candidate `dbd8acc8d8d23df88c4674e6585339758abdc831`
   passed **3 gated tests in 16.47s** on the retained EC2 NitroTPM instance
