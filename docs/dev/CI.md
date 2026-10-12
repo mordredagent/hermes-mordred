@@ -433,6 +433,25 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 
 ## Manual live-device validation log
 
+- **2026-10-12 — Follow-up: Telegram discovery in the actual Hermes session.**
+  The user's Qwen session could read Mordred's Telegram prompt section but
+  `tool_search` had only five deferred tools and returned no Telegram matches.
+  A fresh installed-runtime probe found both tools registered, their
+  availability check true, and no component registration errors. The precise
+  startup ordering that omitted them from the existing session was not
+  established. Earlier one-shot runs also logged plugin-load timeouts in
+  `agent.log` / `errors.log` that were absent from captured stderr; successful
+  generic chat and file calls alone did not establish Telegram discovery.
+
+  `hermes tools enable mordred_telegram --platform cli` explicitly persisted
+  the CLI selection. A fresh `hermes chat -m qwen14b` one-shot then had seven
+  deferred tools; Qwen called `tool_search` with both Telegram names and
+  received matches for both tools (exit 0, 88.0 seconds). This was a real
+  installed-Hermes/model/search-bridge check, without invoking Telegram
+  custody or reading an archive. The already-running user session still
+  needs its tool selection reloaded or a restart. No Telegram privacy
+  backend, keys, model default, or application source was changed.
+
 - **2026-10-12 — Qwen3 14B on the installed Hermes runtime (macOS M5, 24 GiB).**
   Candidate `6eb299682` was installed as a copied package, replacing an
   existing editable install that pointed at a deleted checkout. Hermes's
