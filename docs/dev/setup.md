@@ -14,8 +14,9 @@ shape, and [`TODO.md`](./TODO.md) lists only open work.
 
 ## Prerequisites
 
-- Python 3.11 or later. Full CI covers Python 3.11–3.13 on Ubuntu, macOS and
-  scoped native Windows lanes (see [`CI.md`](./CI.md) §`ci.yml` details)
+- Python 3.11 or later. Ordinary CI uses Python 3.12; final CI covers Linux
+  3.11/3.13 plus macOS and scoped Windows 3.11
+  (see [`CI.md`](./CI.md) §`ci.yml` details).
 - [uv](https://docs.astral.sh/uv/) — used to create the dev venv (`.venv/`) and reproduce `uv.lock`
 - git 2.30+
 - macOS / Linux for established workflows; native Windows for scoped component

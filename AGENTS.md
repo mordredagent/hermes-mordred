@@ -37,8 +37,11 @@ fast feedback, not full acceptance. Run one full regression at final
 integration/code freeze, rather than repeatedly for reports or documentation.
 Security-sensitive changes still require the complete containing test modules
 and the relevant explicit live-gated paths. Draft PR CI runs critical feedback
-on Ubuntu/macOS/Windows Python 3.12; ready-for-review PRs, ready PR updates,
-`dev`/`main` pushes and manual CI dispatch retain the full gates.
+on Ubuntu Python 3.12 and mapped macOS/Windows workers. Ready PRs and accepted-
+baseline `dev` pushes use conservative changed-scope CI (normally 3–5 jobs).
+Sensitive/unknown changes, `main`, manual dispatch and `ci:full` use final CI:
+Linux 3.11/3.13, macOS 3.11 and one Windows 3.11 worker, with all validation packs.
+See `docs/dev/CI.md` for exact evidence and rerun rules.
 
 ## Critical gotchas
 

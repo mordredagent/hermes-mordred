@@ -1,401 +1,134 @@
+# Scope-aware CI: routine 3–5, documentation 2, final 6 jobs.
+# Policy and positive acceptance are defined in docs/dev/CI.md.
+# Keep PR event types stable: label-only runs can cancel actual testing.
 name: CI
-
-# Restored after the Mordred-Hermes-monorepo -> standalone-repo split
-# (2026-06-30/07-01). See docs/dev/CI.md for the full policy this
-# implements, and the "Standalone-repo adaptations" note at the top of
-# that doc for what changed vs. the pre-split design (chiefly: hermes-agent
-# now ships on PyPI, so the old "install hermes-agent from the monorepo
-# root, then install hermes-mordred" step is gone).
-
-on:
+'on':
   pull_request:
-    # Ready-for-review must always reach the full gate, regardless of file paths.
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - converted_to_draft
   push:
-    branches: [main, dev]
-    paths:
-      - "src/**"
-      - "tests/**"
-      - "tools/**"
-      - "native/**"
-      - "packaging/**"
-      - "scripts/**"
-      - "skills/**"
-      - "docs/**"
-      - "README.md"
-      - "AGENTS.md"
-      - "LICENSE"
-      - "pyproject.toml"
-      - "uv.lock"
-      - ".github/workflows/**"
-      - ".github/labeler.yml"
-  workflow_dispatch:
-
+    branches:
+      - main
+      - dev
+  workflow_dispatch: null
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
-
-# Every job here only reads the checked-out source
-# (lint/type-check/test/build), so the default GITHUB_TOKEN is scoped down
-# to read-only least privilege.
 permissions:
   contents: read
-
 jobs:
   ci-policy:
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
     outputs:
-      full: ${{ steps.mode.outputs.full }}
-      critical: ${{ steps.mode.outputs.critical }}
+      mode: ${{ steps.mode.outputs.mode }}
+      linux_versions: ${{ steps.mode.outputs.linux_versions }}
+      platform_python: ${{ steps.mode.outputs.platform_python }}
+      support_python: ${{ steps.mode.outputs.support_python }}
+      macos: ${{ steps.mode.outputs.macos }}
+      windows: ${{ steps.mode.outputs.windows }}
+      linux_packs: ${{ steps.mode.outputs.linux_packs }}
+      macos_packs: ${{ steps.mode.outputs.macos_packs }}
+      windows_packs: ${{ steps.mode.outputs.windows_packs }}
+      windows_modules: ${{ steps.mode.outputs.windows_modules }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Select draft feedback or full regression
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Select cumulative change scope
         id: mode
-        run: python3 tools/ci_test_policy.py
-
-  # Draft green is quick feedback, never full acceptance. Ready PRs, dev/main
-  # pushes and manual dispatch retain every existing full regression gate.
-  critical-feedback:
-    needs: [ci-policy]
-    if: needs.ci-policy.outputs.critical == 'true'
-    runs-on: ${{ matrix.os }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 tools/ci_test_policy.py --policy-file ci-policy.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ci-policy-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-policy.json
+          if-no-files-found: error
+  linux:
+    name: linux (${{ matrix.python-version }})
+    needs:
+      - ci-policy
+    if: needs.ci-policy.outputs.mode != 'docs'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest, windows-2022]
+        python-version: ${{ fromJSON(needs.ci-policy.outputs.linux_versions) }}
+    env:
+      HERMES_HOME: /tmp/mordred-ci-linux-home
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: pip
-      - name: Install isolated feedback environment
-        env:
-          HERMES_HOME: ${{ runner.temp }}/mordred-critical-home
-        run: |
+      - name: Download immutable run policy
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ci-policy-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Install reduced-extras environment
+        id: install
+        run: |-
           python -m venv .venv
-          if [ "$RUNNER_OS" = Windows ]; then
-            critical_python=.venv/Scripts/python.exe
+          .venv/bin/python -m pip install -e ".[dev,keyvault,extension]"
+      - name: ruff check and format
+        id: ruff
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'static') && matrix.python-version == needs.ci-policy.outputs.support_python
+        run: |-
+          .venv/bin/python -m ruff check src tests scripts tools
+          .venv/bin/python -m ruff format --check src tests scripts tools
+      - name: shellcheck
+        id: shellcheck
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'static') && matrix.python-version == needs.ci-policy.outputs.support_python
+        run: shellcheck scripts/*.sh native/*/build.sh
+      - name: SKILL.md drift guard (mordred-status)
+        id: status
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'static') && matrix.python-version == needs.ci-policy.outputs.support_python
+        run: .venv/bin/hermes-mordred policy dry-run skills/mordred-status
+      - name: mypy --strict with reduced extras
+        id: mypy
+        run: .venv/bin/python -m mypy --strict src tools scripts/keyvault_offline_digest.py
+      - name: Default suite or draft critical feedback
+        id: pytest
+        env:
+          CI_MODE: ${{ needs.ci-policy.outputs.mode }}
+        run: |-
+          if [ "$CI_MODE" = critical ]; then
+            .venv/bin/python tools/run_critical_tests.py --junitxml critical-linux.xml
+            .venv/bin/python -m pytest -q tests/test_ci_*.py tests/test_critical_test_runner.py tests/test_critical_test_home.py tests/test_native_test_shards.py
           else
-            critical_python=.venv/bin/python
+            .venv/bin/python -m pytest -q --cov=mordred_hermes --cov-report=xml
           fi
-          "$critical_python" -m pip install -e ".[dev,keyvault,extension]"
-          if [ "$RUNNER_OS" = macOS ]; then
-            "$critical_python" -m pip install -e ".[macos]"
-          fi
-          echo "MORDRED_TEST_PYTHON=$critical_python" >> "$GITHUB_ENV"
-          echo "HERMES_HOME=$HERMES_HOME" >> "$GITHUB_ENV"
-      - name: Prepare checked Windows feedback home
-        if: runner.os == 'Windows'
-        # RUNNER_TEMP is broadly writable. Plugin paths freeze during collection,
-        # so admit an isolated profile namespace before pytest imports anything.
-        run: |
-          "$MORDRED_TEST_PYTHON" - <<'PY'
-          import os
-          import uuid
-          from pathlib import Path
-          from mordred_hermes._private_fs import open_private_directory
-
-          home = Path(os.environ["USERPROFILE"]) / ("mordred-critical-" + uuid.uuid4().hex)
-          with open_private_directory(home, create=True):
-              pass
-          with open_private_directory(home / "mordred", create=True):
-              pass
-          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as output:
-              output.write(f"HERMES_HOME={home}\n")
-          PY
-      - name: Static checks
-        if: runner.os == 'Linux'
-        run: |
-          "$MORDRED_TEST_PYTHON" -m ruff check src tests scripts tools
-          "$MORDRED_TEST_PYTHON" -m ruff format --check src tests scripts tools
-          "$MORDRED_TEST_PYTHON" -m mypy --strict src tools scripts/keyvault_offline_digest.py
-      - name: shellcheck
-        if: runner.os == 'Linux'
-        run: shellcheck scripts/*.sh native/*/build.sh
-      - name: SKILL.md drift guard (mordred-status)
-        if: runner.os != 'Windows'
-        run: >-
-          "$MORDRED_TEST_PYTHON" -c 'from mordred_hermes.wizard.cli import main; raise SystemExit(main())'
-          policy dry-run skills/mordred-status
-      - name: Critical regression feedback
-        run: >-
-          "$MORDRED_TEST_PYTHON" tools/run_critical_tests.py
-          --junitxml critical-${{ matrix.os }}.xml
-      - name: CI routing and runner checks
-        if: runner.os == 'Linux'
-        run: >-
-          "$MORDRED_TEST_PYTHON" -m pytest -q
-          tests/test_critical_test_runner.py tests/test_ci_test_policy.py tests/test_critical_test_home.py
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: critical-feedback-${{ matrix.os }}-py3.12
-          path: critical-${{ matrix.os }}.xml
-          if-no-files-found: warn
-
-  windows-private-fs:
-    needs: [ci-policy]
-    if: needs.ci-policy.outputs.full == 'true'
-    runs-on: windows-2022
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.12", "3.13"]
-        shard: [1, 2, 3]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install scoped dependencies in an isolated venv
-        run: |
-          python -m venv .venv
-          .\.venv\Scripts\python.exe -m pip install -e ".[dev,keyvault,extension]" uv
-      - name: Native ACL, path, publication and process tests
-        # Keep the full module selector here: the frozen native harness extracts it.
-        run: >-
-          .\.venv\Scripts\python.exe tools/run_native_test_shard.py
-          --shard-index ${{ matrix.shard }} --shard-count 3
-          --junitxml native-${{ matrix.python-version }}-${{ matrix.shard }}.xml
-          tests/test_private_fs.py tests/test_private_fs_posix.py
-          tests/test_private_fs_windows.py tests/test_private_fs_windows_faults.py
-          tests/test_private_fs_processes.py
-          tests/test_keyvault_wallet_storage.py
-          tests/test_private_fs_lifecycle.py tests/test_private_fs_lifecycle_faults.py
-          tests/test_private_fs_confidential.py tests/test_private_fs_confidential_windows.py
-          tests/test_private_fs_public_build.py tests/test_private_fs_public_build_windows.py
-          tests/test_private_fs_managed_images.py tests/test_private_fs_managed_images_windows.py
-          tests/test_windows_runtime.py tests/test_windows_installer.py
-          tests/test_windows_install_ownership.py tests/test_windows_install_powershell.py
-          tests/test_private_fs_principal.py tests/test_config_io_custody.py
-          tests/test_config_io.py tests/test_config_readers.py tests/test_config_io_windows.py
-          tests/test_keyvault_windows_processes.py
-          tests/test_audit_session.py tests/test_audit_session_faults.py
-          tests/test_audit_rotation.py tests/test_audit_session_processes.py
-          tests/test_audit_session_windows.py
-          tests/test_wizard_config_windows.py tests/test_wizard_config_native_windows.py
-          tests/test_windows_custody_profile.py tests/test_windows_custody.py
-          tests/test_windows_encrypted_audit.py tests/test_windows_encrypted_audit_processes.py
-          tests/test_windows_encrypted_audit_windows.py
-          tests/test_windows_privacy_policy.py
-          tests/test_windows_privacy_audit.py tests/test_windows_privacy_audit_windows.py
-          tests/test_wizard_windows_audit_cli.py tests/test_wizard_windows_audit_cli_native.py
-          tests/test_wizard_windows_audit_cli_decrypt.py
-          tests/test_llm_windows_policy.py tests/test_llm_windows_policy_native.py
-          tests/test_network_windows_policy.py tests/test_network_windows_policy_native.py
-          tests/test_network_windows_tor.py tests/test_network_windows_tor_lifecycle.py
-          tests/test_network_windows_vpn.py tests/test_network_windows_routes_native.py
-          tests/test_windows_memory_storage.py tests/test_windows_memory_hook.py
-          tests/test_windows_memory_native.py
-          tests/test_windows_capability.py tests/test_windows_capability_native.py
-          tests/test_windows_custody_reset.py tests/test_windows_excluded_guards.py
-          tests/test_windows_memory_proof.py
-          tests/test_windows_memory_lifecycle.py
-          tests/extension/test_extension_windows_storage.py
-          tests/extension/test_extension_windows_storage_native.py
-          tests/test_windows_telegram_custody.py tests/test_windows_telegram_archive.py
-          tests/test_windows_telegram_native.py
-          tests/extension/test_telegram_memory_guard_windows.py
-          tests/extension/test_telegram_windows_flags.py
-          tests/test_wizard_windows_memory.py tests/test_wizard_windows_status.py
-          tests/test_wizard_windows_excluded.py tests/test_wizard_windows_uninstall.py
-          tests/test_windows_database_compat.py
-          tests/test_wizard_windows_native.py
-          tests/test_wizard_windows_telegram.py tests/test_wizard_windows_telegram_native.py
-          tests/test_desktop_windows_api.py tests/test_desktop_windows_native.py
-          tests/test_desktop_windows_page.py tests/test_desktop_windows_logout.py
-          tests/test_desktop_windows_pm_compat.py
-          tests/test_desktop_windows_install.py
-          tests/extension/test_desktop_api.py tests/extension/test_desktop_platform.py
-          tests/extension/test_extension_serve_shutdown.py
-          tests/test_desktop_capture.py
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
-        with:
-          name: native-${{ matrix.python-version }}-${{ matrix.shard }}
-          path: native-${{ matrix.python-version }}-${{ matrix.shard }}.xml
-          if-no-files-found: warn
-      - name: Build a wheel from the sdist and smoke outside the checkout
-        if: matrix.shard == 1
-        run: |
-          .\.venv\Scripts\uv.exe build --sdist --out-dir dist-private-fs
-          if ($LASTEXITCODE -ne 0) { throw 'sdist build failed' }
-          $source = (Get-ChildItem dist-private-fs/*.tar.gz).FullName
-          .\.venv\Scripts\uv.exe build --wheel $source --out-dir dist-private-fs
-          if ($LASTEXITCODE -ne 0) { throw 'wheel build failed' }
-          $wheel = (Get-ChildItem dist-private-fs/*.whl).FullName
-          # RUNNER_TEMP is on a broadly writable data volume; use the checked profile.
-          $smoke = Join-Path $env:USERPROFILE 'mordred-private-fs-wheel'
-          python -m venv "$smoke/venv"
-          & "$smoke/venv/Scripts/python.exe" -m pip install --no-deps $wheel
-          if ($LASTEXITCODE -ne 0) { throw 'wheel install failed' }
-          $env:PYTHONPATH = ''
-          @'
-          from pathlib import Path
-          import mordred_hermes
-          from mordred_hermes._private_fs import open_private_directory
-          from mordred_hermes.keyvault import extension_sign
-          assert 'site-packages' in Path(mordred_hermes.__file__).parts
-          with open_private_directory(Path.cwd() / 'private', create=True) as d, d.transaction() as tx:
-              tx.create_bytes('secret', b'old')
-              tx.replace_bytes('secret', b'new')
-              assert d.read_bytes('secret', max_bytes=3) == b'new'
-          extension_sign._ext_dir = lambda: Path.cwd() / 'wallet'
-          selection = {'kind': 'raw', 'key_id': 'synthetic', 'envelope_id': 'test'}
-          extension_sign.set_wallet(selection)
-          assert extension_sign._load_wallet_cfg() == selection
-          extension_sign.set_wallet(selection | {'envelope_id': 'replacement'})
-          assert extension_sign._load_wallet_cfg()['envelope_id'] == 'replacement'
-          from mordred_hermes._audit_io import audit_session, decode_audit_bytes
-          from mordred_hermes._log_rotation import rotate_audit
-          with audit_session(Path.cwd() / 'audit' / 'custom.log', create=True) as session:
-              session.create('custom.log', b'{}\n')
-              result = rotate_audit(session, '2026-10-08')
-              snapshot = session.snapshot(result.gzip_name, max_bytes=1024)
-          assert decode_audit_bytes(snapshot.data, max_output_bytes=3) == b'{}\n'
-          print(mordred_hermes.__file__)
-          '@ | Set-Content -LiteralPath "$smoke/check.py" -Encoding utf8
-          Set-Location $smoke
-          & "$smoke/venv/Scripts/python.exe" check.py
-          if ($LASTEXITCODE -ne 0) { throw 'private filesystem wheel smoke failed' }
-
-  # Scoped helper validation. Hosted runners do not establish real TPM support;
-  # live_cng remains ignored unless explicitly run on an isolated hardware host.
-  winkey-helper:
-    needs: [ci-policy]
-    if: needs.ci-policy.outputs.full == 'true'
-    # VS 2022 keeps linker discovery compatible with the Rust 1.85 MSRV.
-    runs-on: windows-2022
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.11"
-      - name: Install scoped Python dependencies
-        run: python -m pip install -e ".[dev,keyvault,extension]"
-      - name: Native formatting
-        run: cargo fmt --manifest-path native/winkey-helper/Cargo.toml --check
-      - name: Native lint
-        run: cargo clippy --manifest-path native/winkey-helper/Cargo.toml --locked --all-targets -- -D warnings
-      - name: Native tests (hardware tests explicitly ignored)
-        run: cargo test --manifest-path native/winkey-helper/Cargo.toml --locked
-      - name: Install declared MSRV
-        run: rustup toolchain install 1.85.0 --profile minimal
-      - name: MSRV tests
-        run: cargo +1.85.0 test --manifest-path native/winkey-helper/Cargo.toml --locked
-      - name: Windows discovery and real build/install tests
-        env:
-          MORDRED_WINKEY_BUILD_TEST: "1"
-        run: python -m pytest tests/test_keyvault_winkey_helper.py tests/test_winkey_build.py tests/integration/test_keyvault_windows.py -o addopts='' -q
-
-  test:
-    needs: [ci-policy]
-    if: needs.ci-policy.outputs.full == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-latest]
-        # 3.13 added 2026-07-15 (newly added cell — watch for a cycle: wheels
-        # for pyobjc>=10 / blake3 are expected to exist already, but a fresh
-        # CPython release can still lag on some platform). fail-fast is
-        # already false, so a 3.13-only failure won't block 3.11/3.12.
-        python-version: ["3.11", "3.12", "3.13"]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-
-      # hermes-agent is a normal PyPI dependency (pyproject.toml pins
-      # `hermes-agent>=0.13.0`) so `pip install -e .` resolves it directly —
-      # no monorepo root install step needed.
-      - name: Install hermes-mordred (dev + keyvault + extension extras)
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev,keyvault,extension]"
-
-      # macos extra = keyvault extra + Phase 4 pyobjc Security/SystemConfiguration/Quartz
-      # bridges; only meaningful (and only installable) on macOS.
-      - name: Install macOS extra
-        if: runner.os == 'macOS'
-        run: pip install -e ".[macos]"
-
-      - name: SKILL.md drift guard (mordred-status)
-        # Nothing else validates skills/mordred-status/SKILL.md against the
-        # live CLI, so a wizard/_cli_parsers.py rename would regress
-        # silently; exit code 2 (policy would block it) also fails this step.
-        run: hermes-mordred policy dry-run skills/mordred-status
-
-      - name: ruff check
-        run: ruff check src tests scripts
-
-      - name: ruff format --check
-        run: ruff format --check src tests scripts
-
-      - name: shellcheck
-        # The user installer is fetched via `curl | bash`, and the native
-        # helper build.sh scripts ship inside the wheel; keep them clean.
-        # One Linux cell only: the input never varies across the matrix and
-        # the macOS runner image does not ship shellcheck.
-        if: runner.os == 'Linux' && matrix.python-version == '3.12'
-        run: shellcheck scripts/*.sh native/*/build.sh
-
-      - name: mypy --strict
-        # keyvault_offline_digest.py ships in the wheel and guards the
-        # keyvault init ceremony; the other scripts/*.py are dev-era PoCs
-        # that deliberately stay outside the strict gate.
-        run: mypy --strict src tools scripts/keyvault_offline_digest.py
-
-      - name: pytest
-        env:
-          # Pinned to a known path on purpose. The root tests/conftest.py
-          # would isolate a bare run anyway (it defaults HERMES_HOME to a
-          # temp dir before _home.py freezes HERMES_BASE), but an explicit
-          # value keeps CI's home deterministic and easy to inspect.
-          HERMES_HOME: /tmp/hermes-mordred-ci-home
-        run: pytest -q --cov=mordred_hermes --cov-report=xml
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: coverage-${{ matrix.os }}-py${{ matrix.python-version }}
-          path: coverage.xml
+          name: test-linux-${{ matrix.python-version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |-
+            coverage.xml
+            critical-linux.xml
           if-no-files-found: ignore
-
-  # Optional feature dependencies used to be absent from every ordinary CI
-  # environment, so pytest.importorskip could make the Ethereum suites vanish
-  # without a red check. Install the declared extras explicitly, prove their
-  # imports are present, exercise the QR implementation, then run the focused
-  # feature suites with skip reasons visible.
-  feature-extras:
-    needs: [ci-policy]
-    if: needs.ci-policy.outputs.full == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Install Ethereum, messaging, Tor-control, and Telegram extras
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev,keyvault,extension,ethereum,messaging,tor-control,telegram]"
-
+      - name: Install feature extras in a clean environment
+        id: feature_install
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'features') && matrix.python-version == needs.ci-policy.outputs.support_python
+        run: |-
+          python -m venv "$RUNNER_TEMP/mordred-ci-features"
+          "$RUNNER_TEMP/mordred-ci-features/bin/python" -m pip install -e ".[dev,keyvault,extension,ethereum,messaging,tor-control,telegram]"
       - name: Require and exercise every feature dependency
         run: |
-          python - <<'PY'
+          "$RUNNER_TEMP/mordred-ci-features/bin/python" - <<'PY'
           import contextlib
           import io
 
@@ -430,12 +163,13 @@ jobs:
               _print_qr("MORT-CI000000-CI000000")
           assert rendered.getvalue().strip(), "messaging extra did not render a QR"
           PY
-
+        id: feature_imports
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'features') && matrix.python-version == needs.ci-policy.outputs.support_python
       - name: Run feature-extra suites
         env:
           HERMES_HOME: /tmp/hermes-mordred-ci-home
         run: |
-          pytest -q -rs \
+          "$RUNNER_TEMP/mordred-ci-features/bin/python" -m pytest -q -rs \
             tests/test_keyvault_ethereum.py \
             tests/test_keyvault_bip32.py \
             tests/test_wizard_keyvault_eth_cli.py \
@@ -443,30 +177,40 @@ jobs:
             tests/test_paths_tor.py \
             tests/test_wizard_extension_pair_cli.py \
             tests/extension/test_telegram_import.py
-
-  # Build by the same sdist -> wheel path used by release.yml, install that
-  # wheel into a fresh venv outside the checkout, and smoke the public package
-  # contract. This catches files that editable installs accidentally mask.
-  package-smoke:
-    needs: [ci-policy]
-    if: needs.ci-policy.outputs.full == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Build canonical and compatibility artifacts
+        id: feature_tests
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'features') && matrix.python-version == needs.ci-policy.outputs.support_python
+      - name: Install declared Hermes floor in a clean environment
+        id: floor_install
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'floor') && matrix.python-version == needs.ci-policy.outputs.support_python
+        run: |-
+          python -m venv "$RUNNER_TEMP/mordred-ci-floor"
+          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pip install "hermes-agent==0.13.0"
+          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pip install -e ".[dev,keyvault,extension]"
+      - name: Guard — resolver must not have upgraded hermes-agent off the floor
         run: |
-          python -m pip install --upgrade pip build
-          python -m build --outdir dist
-          python -m build --outdir compat-dist packaging/mordred-hermes-compat
-
+          set -euo pipefail
+          INSTALLED_VERSION="$("$RUNNER_TEMP/mordred-ci-floor/bin/python" -c 'import importlib.metadata as m; print(m.version("hermes-agent"))')"
+          if [ "$INSTALLED_VERSION" != "0.13.0" ]; then
+            echo "::error::hermes-agent floor test is void: resolver left hermes-agent at $INSTALLED_VERSION instead of the pinned 0.13.0, so pyproject.toml's declared floor was not actually exercised."
+            exit 1
+          fi
+        id: floor_guard
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'floor') && matrix.python-version == needs.ci-policy.outputs.support_python
+      - name: pytest against the hermes-agent floor
+        env:
+          HERMES_HOME: /tmp/hermes-mordred-ci-home
+        run: >-
+          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pytest -q --deselect tests/test_provider_identity.py::test_replica_matches_hermes_source --deselect tests/test_provider_transport_flagger.py::TestRegistrySync::test_known_provider_slugs_are_real_hermes_ids
+        id: floor_tests
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'floor') && matrix.python-version == needs.ci-policy.outputs.support_python
+      - name: Build canonical and compatibility artifacts
+        id: package_build
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'package') && matrix.python-version == needs.ci-policy.outputs.support_python
+        run: |-
+          python -m venv "$RUNNER_TEMP/mordred-ci-package"
+          "$RUNNER_TEMP/mordred-ci-package/bin/python" -m pip install build
+          "$RUNNER_TEMP/mordred-ci-package/bin/python" -m build --outdir dist
+          "$RUNNER_TEMP/mordred-ci-package/bin/python" -m build --outdir compat-dist packaging/mordred-hermes-compat
       - name: Fresh-install and smoke entry points plus shipped assets
         env:
           SMOKE_VENV: ${{ runner.temp }}/mordred-wheel-smoke
@@ -573,174 +317,38 @@ jobs:
           assert importlib.metadata.version("hermes-mordred") == mordred_hermes.__version__
           PY
           HERMES_HOME="$SMOKE_HOME" "$SMOKE_VENV/bin/hermes-mordred" --version
-
-  # H1 floor guarantee: pyproject.toml declares `hermes-agent>=0.13.0`, but
-  # every other job in this workflow resolves the latest PyPI hermes-agent,
-  # so the declared floor itself is never actually exercised — a Mordred
-  # API usage that only works on a newer hermes-agent could silently
-  # violate the floor. Pin hermes-agent to exactly 0.13.0 first, install
-  # hermes-mordred on top of it, verify the resolver left the pin alone
-  # (pip could otherwise "helpfully" upgrade it while still satisfying the
-  # >=0.13.0 constraint), and run the unit suite against that exact
-  # combination. Standalone job (no `needs:`) so it runs in parallel with
-  # `test` for fast feedback; it is not a required branch-protection check.
-  #
-  # Why 0.13.0: this job's own first run (2026-07-15) proved the previous
-  # declared floor of 0.11.0 was uninstallable — hermes-agent's PyPI
-  # history starts at 0.13.0 (0.11.x/0.12.x were source-install-era
-  # versions, never published). 0.13.0 passes the full compat suite
-  # (verified locally before raising the floor in pyproject.toml).
-  hermes-floor:
-    needs: [ci-policy]
-    if: needs.ci-policy.outputs.full == 'true'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Pin hermes-agent to the declared floor (0.13.0)
-        run: |
-          python -m pip install --upgrade pip
-          pip install "hermes-agent==0.13.0"
-
-      - name: Install hermes-mordred (dev + keyvault + extension extras)
-        run: pip install -e ".[dev,keyvault,extension]"
-
-      - name: Guard — resolver must not have upgraded hermes-agent off the floor
-        run: |
-          set -euo pipefail
-          INSTALLED_VERSION="$(python -c 'import importlib.metadata as m; print(m.version("hermes-agent"))')"
-          if [ "$INSTALLED_VERSION" != "0.13.0" ]; then
-            echo "::error::hermes-agent floor test is void: resolver left hermes-agent at $INSTALLED_VERSION instead of the pinned 0.13.0, so pyproject.toml's declared floor was not actually exercised."
-            exit 1
-          fi
-
-      - name: pytest against the hermes-agent floor
-        env:
-          # Isolate _home.py's HERMES_BASE from the runner's real $HOME
-          # (same rationale as the test job above).
-          HERMES_HOME: /tmp/hermes-mordred-ci-home
-        # Two tests are deselected because they are latest-tracking drift
-        # detectors, not compatibility tests — including them would force
-        # floor == latest forever (a treadmill, defeating this job):
-        #   - test_replica_matches_hermes_source requires the vendored
-        #     provider replica to byte-match the INSTALLED hermes source;
-        #     the replica deliberately tracks PyPI-latest, so it can never
-        #     match a pinned old floor.
-        #   - test_known_provider_slugs_are_real_hermes_ids requires
-        #     provider ids (vertex/novita) that hermes-agent only
-        #     recognises from 0.18.0 (per its own docstring).
-        # Both still run at latest in the `test` job. If either is renamed,
-        # pytest silently re-includes it here and this job goes red —
-        # loud in the right direction.
-        run: >-
-          pytest -q
-          --deselect tests/test_provider_identity.py::test_replica_matches_hermes_source
-          --deselect tests/test_provider_transport_flagger.py::TestRegistrySync::test_known_provider_slugs_are_real_hermes_ids
-
-  # Hermetic Tor integration tests (Docker-backed; Linux only — macOS
-  # runners have no Docker). The socks5h / provider-transport suites are
-  # hermetic (no Docker) but consume the `integration` extra, so they
-  # ride this job.
-  integration-tor:
-    needs: [ci-policy, test]
-    if: needs.ci-policy.outputs.full == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      # `integration` extra carries the SOCKS client libraries and
-      # provider SDKs the §0.8 verification suites need. hermes-agent
-      # resolves from PyPI — no monorepo root install step.
-      - name: Install hermes-mordred (dev + integration extras)
-        run: |
-          pip install --upgrade pip
-          pip install -e ".[dev,integration]"
-
+        id: package_smoke
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'package') && matrix.python-version == needs.ci-policy.outputs.support_python
+      - name: Install integration extras in a clean environment
+        id: integration_install
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'tor') && matrix.python-version == needs.ci-policy.outputs.support_python
+        run: |-
+          python -m venv "$RUNNER_TEMP/mordred-ci-integration"
+          "$RUNNER_TEMP/mordred-ci-integration/bin/python" -m pip install -e ".[dev,integration]"
       - name: Verify docker compose is available
         run: |
           docker --version
           docker compose version
           docker info --format '{{.ServerVersion}}'
-
+        id: docker_verify
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'tor') && matrix.python-version == needs.ci-policy.outputs.support_python
       - name: Build Tor integration image
         working-directory: tests/integration/docker/tor
         run: docker compose build
-
+        id: tor_build
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'tor') && matrix.python-version == needs.ci-policy.outputs.support_python
       - name: Run Tor + SOCKS5h + provider transport integration tests
         env:
-          # Isolate _home.py's HERMES_BASE from the runner's real $HOME
-          # (same rationale as the test job above).
           HERMES_HOME: /tmp/hermes-mordred-ci-home
-        # `-m integration` overrides the default `-m "not integration"`
-        # from pyproject.toml so the suites actually run here.
         run: |
-          pytest -v -m integration \
+          "$RUNNER_TEMP/mordred-ci-integration/bin/python" -m pytest -v -m integration \
             tests/integration/test_tor.py \
             tests/integration/test_socks5h_libs.py \
             tests/integration/test_provider_transport.py
-
-  # The macOS Secure Enclave helper is shipped as Swift source in the wheel.
-  # Compile it on a real macOS runner so source/API drift cannot reach users
-  # unnoticed. Runtime Secure Enclave operations remain hardware-gated.
-  sekey-helper:
-    needs: [ci-policy]
-    if: needs.ci-policy.outputs.full == 'true'
-    runs-on: macos-latest
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: native/sekey-helper
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Swift toolchain info
-        run: swift --version
-
-      - name: Build Secure Enclave helper
-        run: swift build -c release
-
-  # v2-OS2 tpmkey-helper: the native/tpmkey-helper Rust crate (Linux TPM 2.0
-  # helper). Covers fmt + clippy + the pure, host-agnostic layer (wire protocol,
-  # SEC1 codec, 32-byte ECDH-Z left-pad, blob store, neutral error taxonomy) on
-  # BOTH Linux and macOS — proving the cross-platform build claim on real Linux,
-  # which the macOS dev host cannot. On Linux it additionally COMPILES the
-  # tss-esapi TPM backend (Phase 2b), so libtss2 + libclang are installed there;
-  # macOS excludes the backend via cfg. The backend's live tests are gated on
-  # MORDRED_TPM_TEST and run in the swtpm-backed tpmkey-helper-tpm job below.
-  # Runs independently of the Python matrix; runners ship a stable Rust toolchain.
-  tpmkey-helper:
-    needs: [ci-policy]
-    if: needs.ci-policy.outputs.full == 'true'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-latest]
-    defaults:
-      run:
-        working-directory: native/tpmkey-helper
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # GitHub-owned actions/cache@v4 only (this repo deliberately avoids
-      # third-party actions like Swatinem/rust-cache for supply-chain
-      # reasons — same stance as gating `stem` behind the `tor-control`
-      # extra). Without this, both legs of the matrix recompile the crate
-      # from scratch every run, including bindgen against libtss2 on Linux.
+        id: tor_tests
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'tor') && matrix.python-version == needs.ci-policy.outputs.support_python
       - name: Cache cargo registry + target (tpmkey-helper)
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry
@@ -749,72 +357,45 @@ jobs:
           key: ${{ runner.os }}-cargo-tpmkey-helper-${{ hashFiles('native/tpmkey-helper/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-tpmkey-helper-
-
-      # The tss-esapi TPM backend only compiles on Linux and needs the libtss2
-      # headers + libclang (bindgen). macOS excludes it via cfg, so skip there.
-      - name: Install libtss2 (Linux — tss-esapi backend)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libtss2-dev libclang-dev clang pkg-config
-
-      - name: Toolchain info + components
-        run: |
-          rustup component add rustfmt clippy
-          cargo --version
-          rustc --version
-
-      - name: cargo fmt --check
-        run: cargo fmt --check
-
-      - name: cargo clippy (deny warnings)
-        run: cargo clippy --locked --all-targets -- -D warnings
-
-      - name: cargo test
-        run: cargo test --locked
-
-      - name: Check declared Rust 1.85 MSRV
-        if: runner.os == 'Linux'
-        run: |
-          rustup toolchain install 1.85.0 --profile minimal
-          cargo +1.85.0 check --locked --all-targets
-
-  # v2-OS2 Phase 2b: exercise the Linux-only tss-esapi TPM backend end to end
-  # against a swtpm software TPM (generate / public_key / delete / ECDH parity).
-  # The pure layer + cross-platform build are covered by tpmkey-helper above;
-  # this job sets MORDRED_TPM_TEST=1 so the otherwise-skipped live tests run.
-  # Single-threaded because the tests share one swtpm command server.
-  tpmkey-helper-tpm:
-    needs: [ci-policy]
-    if: needs.ci-policy.outputs.full == 'true'
-    runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: native/tpmkey-helper
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # Same rationale + key scheme as the tpmkey-helper job above (a
-      # distinct key suffix so the two jobs don't race to save the same
-      # cache entry when they finish around the same time).
-      - name: Cache cargo registry + target (tpmkey-helper-tpm)
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            native/tpmkey-helper/target
-          key: ${{ runner.os }}-cargo-tpmkey-helper-tpm-${{ hashFiles('native/tpmkey-helper/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-tpmkey-helper-tpm-
-
+        if: (contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'tpm') && matrix.python-version == needs.ci-policy.outputs.support_python) || (contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'swtpm') && matrix.python-version == needs.ci-policy.outputs.support_python)
       - name: Install libtss2 + swtpm
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libtss2-dev libtss2-tcti-swtpm0 libclang-dev clang pkg-config \
             swtpm swtpm-tools tpm2-tools
-
+        id: tpm_system
+        if: (contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'tpm') && matrix.python-version == needs.ci-policy.outputs.support_python) || (contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'swtpm') && matrix.python-version == needs.ci-policy.outputs.support_python)
+      - name: Toolchain info + components
+        run: |
+          rustup component add rustfmt clippy
+          cargo --version
+          rustc --version
+        id: rust_tools
+        if: (contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'tpm') && matrix.python-version == needs.ci-policy.outputs.support_python) || (contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'swtpm') && matrix.python-version == needs.ci-policy.outputs.support_python)
+        working-directory: native/tpmkey-helper
+      - name: cargo fmt --check
+        run: cargo fmt --check
+        id: tpm_fmt
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'tpm') && matrix.python-version == needs.ci-policy.outputs.support_python
+        working-directory: native/tpmkey-helper
+      - name: cargo clippy (deny warnings)
+        run: cargo clippy --locked --all-targets -- -D warnings
+        id: tpm_clippy
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'tpm') && matrix.python-version == needs.ci-policy.outputs.support_python
+        working-directory: native/tpmkey-helper
+      - name: cargo test
+        run: cargo test --locked
+        id: tpm_test
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'tpm') && matrix.python-version == needs.ci-policy.outputs.support_python
+        working-directory: native/tpmkey-helper
+      - name: Check declared Rust 1.85 MSRV
+        run: |
+          rustup toolchain install 1.85.0 --profile minimal
+          cargo +1.85.0 check --locked --all-targets
+        id: tpm_msrv
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'tpm') && matrix.python-version == needs.ci-policy.outputs.support_python
+        working-directory: native/tpmkey-helper
       - name: Start swtpm software TPM
         run: |
           mkdir -p /tmp/swtpm-state
@@ -828,31 +409,454 @@ jobs:
             if (exec 3<>/dev/tcp/127.0.0.1/2321) 2>/dev/null; then exec 3>&- 3<&-; break; fi
             sleep 0.25
           done
-
-      - name: Toolchain info
-        run: cargo --version
-
+        id: swtpm_start
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'swtpm') && matrix.python-version == needs.ci-policy.outputs.support_python
+        working-directory: native/tpmkey-helper
       - name: cargo test (TPM backend vs swtpm)
         env:
           TCTI: swtpm:host=127.0.0.1,port=2321
-          MORDRED_TPM_TEST: "1"
+          MORDRED_TPM_TEST: '1'
         run: cargo test --locked -- --test-threads=1
-
-
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-
+        id: swtpm_rust
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'swtpm') && matrix.python-version == needs.ci-policy.outputs.support_python
+        working-directory: native/tpmkey-helper
       - name: Build helper and validate Linux memory/Telegram against swtpm
         working-directory: ${{ github.workspace }}
         env:
           TCTI: swtpm:host=127.0.0.1,port=2321
-          MORDRED_TPM_TEST: "1"
+          MORDRED_TPM_TEST: '1'
           HERMES_HOME: /tmp/mordred-ci-telegram-home
-          MORDRED_LINUX_TELEGRAM_TEST: "1"
+          MORDRED_LINUX_TELEGRAM_TEST: '1'
           MORDRED_TPMKEY_HELPER: ${{ github.workspace }}/native/tpmkey-helper/target/debug/mordred-hermes-tpmkey
         run: |
           cargo build --locked --manifest-path native/tpmkey-helper/Cargo.toml
+          python -m venv "$RUNNER_TEMP/mordred-ci-swtpm"
+          "$RUNNER_TEMP/mordred-ci-swtpm/bin/python" -m pip install -e ".[dev,keyvault,extension,telegram]"
+          "$RUNNER_TEMP/mordred-ci-swtpm/bin/python" -m pytest -v -o addopts="" tests/integration/test_linux_telegram_tpm.py
+        id: swtpm_python
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'swtpm') && matrix.python-version == needs.ci-policy.outputs.support_python
+      - name: Record worker checks
+        id: evidence
+        if: always()
+        shell: bash
+        env:
+          CI_STEPS_JSON: ${{ toJSON(steps) }}
+          CI_PYTHON: ${{ matrix.python-version }}
+        working-directory: ${{ github.workspace }}
+        run: .venv/bin/python tools/ci_evidence.py worker --policy ci-policy.json --os linux --python "$CI_PYTHON" --output worker.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: ci-worker-evidence-linux-${{ matrix.python-version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: worker.json
+          if-no-files-found: error
+  macos:
+    name: macos
+    needs:
+      - ci-policy
+    if: needs.ci-policy.outputs.macos == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      HERMES_HOME: /tmp/mordred-ci-macos-home
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ needs.ci-policy.outputs.platform_python }}
+          cache: pip
+      - name: Download immutable run policy
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ci-policy-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Install macOS reduced-extras environment
+        id: install
+        run: |-
           python -m venv .venv
-          .venv/bin/python -m pip install -e ".[dev,keyvault,extension,telegram]"
-          .venv/bin/python -m pytest -v -o addopts="" tests/integration/test_linux_telegram_tpm.py
+          .venv/bin/python -m pip install -e ".[dev,keyvault,extension,macos]"
+      - name: mypy --strict with reduced extras
+        id: mypy
+        if: needs.ci-policy.outputs.mode != 'critical'
+        run: .venv/bin/python -m mypy --strict src tools scripts/keyvault_offline_digest.py
+      - name: SKILL.md drift guard (mordred-status)
+        id: status
+        run: .venv/bin/hermes-mordred policy dry-run skills/mordred-status
+      - name: Default suite or draft critical feedback
+        id: pytest
+        env:
+          CI_MODE: ${{ needs.ci-policy.outputs.mode }}
+        run: |-
+          if [ "$CI_MODE" = critical ]; then
+            .venv/bin/python tools/run_critical_tests.py --junitxml critical-macos.xml
+          else
+            .venv/bin/python -m pytest -q --cov=mordred_hermes --cov-report=xml
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: test-macos-${{ needs.ci-policy.outputs.platform_python }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |-
+            coverage.xml
+            critical-macos.xml
+          if-no-files-found: ignore
+      - name: Swift toolchain info
+        run: swift --version
+        id: swift_info
+        if: contains(fromJSON(needs.ci-policy.outputs.macos_packs), 'swift')
+        working-directory: native/sekey-helper
+      - name: Build Secure Enclave helper
+        run: swift build -c release
+        id: swift_build
+        if: contains(fromJSON(needs.ci-policy.outputs.macos_packs), 'swift')
+        working-directory: native/sekey-helper
+      - name: Cache cargo registry + target (tpmkey-helper)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/tpmkey-helper/target
+          key: ${{ runner.os }}-cargo-tpmkey-helper-${{ hashFiles('native/tpmkey-helper/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-tpmkey-helper-
+        if: contains(fromJSON(needs.ci-policy.outputs.macos_packs), 'tpm')
+      - name: Toolchain info + components
+        run: |
+          rustup component add rustfmt clippy
+          cargo --version
+          rustc --version
+        id: rust_tools
+        if: contains(fromJSON(needs.ci-policy.outputs.macos_packs), 'tpm')
+        working-directory: native/tpmkey-helper
+      - name: cargo fmt --check
+        run: cargo fmt --check
+        id: tpm_fmt
+        if: contains(fromJSON(needs.ci-policy.outputs.macos_packs), 'tpm')
+        working-directory: native/tpmkey-helper
+      - name: cargo clippy (deny warnings)
+        run: cargo clippy --locked --all-targets -- -D warnings
+        id: tpm_clippy
+        if: contains(fromJSON(needs.ci-policy.outputs.macos_packs), 'tpm')
+        working-directory: native/tpmkey-helper
+      - name: cargo test
+        run: cargo test --locked
+        id: tpm_test
+        if: contains(fromJSON(needs.ci-policy.outputs.macos_packs), 'tpm')
+        working-directory: native/tpmkey-helper
+      - name: Record worker checks
+        id: evidence
+        if: always()
+        shell: bash
+        env:
+          CI_STEPS_JSON: ${{ toJSON(steps) }}
+          CI_PYTHON: ${{ needs.ci-policy.outputs.platform_python }}
+        working-directory: ${{ github.workspace }}
+        run: .venv/bin/python tools/ci_evidence.py worker --policy ci-policy.json --os macos --python "$CI_PYTHON" --output worker.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: ci-worker-evidence-macos-${{ needs.ci-policy.outputs.platform_python }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: worker.json
+          if-no-files-found: error
+  windows-private-fs:
+    name: windows-private-fs
+    needs:
+      - ci-policy
+    if: needs.ci-policy.outputs.windows == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ needs.ci-policy.outputs.platform_python }}
+          cache: pip
+      - name: Download immutable run policy
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ci-policy-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Install scoped dependencies in an isolated venv
+        id: install
+        run: |-
+          python -m venv .venv
+          if ($LASTEXITCODE -ne 0) { throw "venv creation failed" }
+          .\.venv\Scripts\python.exe -m pip install -e ".[dev,keyvault,extension]" uv
+          if ($LASTEXITCODE -ne 0) { throw "dependency install failed" }
+      - name: Prepare checked Windows feedback home
+        run: |
+          .venv/Scripts/python.exe - <<'PY'
+          import os
+          import uuid
+          from pathlib import Path
+          from mordred_hermes._private_fs import open_private_directory
+
+          home = Path(os.environ["USERPROFILE"]) / ("mordred-critical-" + uuid.uuid4().hex)
+          with open_private_directory(home, create=True):
+              pass
+          with open_private_directory(home / "mordred", create=True):
+              pass
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as output:
+              output.write(f"HERMES_HOME={home}\n")
+          PY
+        id: private_home
+        shell: bash
+      - name: Native ACL, path, publication and process tests
+        id: native
+        env:
+          CI_MODE: ${{ needs.ci-policy.outputs.mode }}
+        run: |-
+          if ($env:CI_MODE -eq "final") {
+            .\.venv\Scripts\python.exe tools/run_native_test_shard.py --shard-index 1 --shard-count 1 --junitxml native-windows.xml `
+              tests/test_private_fs.py `
+              tests/test_private_fs_posix.py `
+              tests/test_private_fs_windows.py `
+              tests/test_private_fs_windows_faults.py `
+              tests/test_private_fs_processes.py `
+              tests/test_keyvault_wallet_storage.py `
+              tests/test_private_fs_lifecycle.py `
+              tests/test_private_fs_lifecycle_faults.py `
+              tests/test_private_fs_confidential.py `
+              tests/test_private_fs_confidential_windows.py `
+              tests/test_private_fs_public_build.py `
+              tests/test_private_fs_public_build_windows.py `
+              tests/test_private_fs_managed_images.py `
+              tests/test_private_fs_managed_images_windows.py `
+              tests/test_windows_runtime.py `
+              tests/test_windows_installer.py `
+              tests/test_windows_install_ownership.py `
+              tests/test_windows_install_powershell.py `
+              tests/test_private_fs_principal.py `
+              tests/test_config_io_custody.py `
+              tests/test_config_io.py `
+              tests/test_config_readers.py `
+              tests/test_config_io_windows.py `
+              tests/test_keyvault_windows_processes.py `
+              tests/test_audit_session.py `
+              tests/test_audit_session_faults.py `
+              tests/test_audit_rotation.py `
+              tests/test_audit_session_processes.py `
+              tests/test_audit_session_windows.py `
+              tests/test_wizard_config_windows.py `
+              tests/test_wizard_config_native_windows.py `
+              tests/test_windows_custody_profile.py `
+              tests/test_windows_custody.py `
+              tests/test_windows_encrypted_audit.py `
+              tests/test_windows_encrypted_audit_processes.py `
+              tests/test_windows_encrypted_audit_windows.py `
+              tests/test_windows_privacy_policy.py `
+              tests/test_windows_privacy_audit.py `
+              tests/test_windows_privacy_audit_windows.py `
+              tests/test_wizard_windows_audit_cli.py `
+              tests/test_wizard_windows_audit_cli_native.py `
+              tests/test_wizard_windows_audit_cli_decrypt.py `
+              tests/test_llm_windows_policy.py `
+              tests/test_llm_windows_policy_native.py `
+              tests/test_network_windows_policy.py `
+              tests/test_network_windows_policy_native.py `
+              tests/test_network_windows_tor.py `
+              tests/test_network_windows_tor_lifecycle.py `
+              tests/test_network_windows_vpn.py `
+              tests/test_network_windows_routes_native.py `
+              tests/test_windows_memory_storage.py `
+              tests/test_windows_memory_hook.py `
+              tests/test_windows_memory_native.py `
+              tests/test_windows_capability.py `
+              tests/test_windows_capability_native.py `
+              tests/test_windows_custody_reset.py `
+              tests/test_windows_excluded_guards.py `
+              tests/test_windows_memory_proof.py `
+              tests/test_windows_memory_lifecycle.py `
+              tests/extension/test_extension_windows_storage.py `
+              tests/extension/test_extension_windows_storage_native.py `
+              tests/test_windows_telegram_custody.py `
+              tests/test_windows_telegram_archive.py `
+              tests/test_windows_telegram_native.py `
+              tests/extension/test_telegram_memory_guard_windows.py `
+              tests/extension/test_telegram_windows_flags.py `
+              tests/test_wizard_windows_memory.py `
+              tests/test_wizard_windows_status.py `
+              tests/test_wizard_windows_excluded.py `
+              tests/test_wizard_windows_uninstall.py `
+              tests/test_windows_database_compat.py `
+              tests/test_wizard_windows_native.py `
+              tests/test_wizard_windows_telegram.py `
+              tests/test_wizard_windows_telegram_native.py `
+              tests/test_desktop_windows_api.py `
+              tests/test_desktop_windows_native.py `
+              tests/test_desktop_windows_page.py `
+              tests/test_desktop_windows_logout.py `
+              tests/test_desktop_windows_pm_compat.py `
+              tests/test_desktop_windows_install.py `
+              tests/extension/test_desktop_api.py `
+              tests/extension/test_desktop_platform.py `
+              tests/extension/test_extension_serve_shutdown.py `
+              tests/test_desktop_capture.py
+          } else {
+            .\.venv\Scripts\python.exe tools/run_ci_native_tests.py --policy ci-policy.json --junitxml native-windows.xml
+          }
+          if ($LASTEXITCODE -ne 0) { throw "native tests failed" }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: native-windows-${{ needs.ci-policy.outputs.platform_python }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: native-windows.xml
+          if-no-files-found: warn
+      - name: Install Rust formatting and lint components
+        id: winkey_tools
+        if: contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
+        run: |-
+          rustup component add rustfmt clippy
+          if ($LASTEXITCODE -ne 0) { throw "Rust component install failed" }
+      - name: Native formatting
+        run: |-
+          cargo fmt --manifest-path native/winkey-helper/Cargo.toml --check
+          if ($LASTEXITCODE -ne 0) { throw "winkey_fmt failed" }
+        id: winkey_fmt
+        if: contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
+      - name: Native lint
+        run: |-
+          cargo clippy --manifest-path native/winkey-helper/Cargo.toml --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw "winkey_clippy failed" }
+        id: winkey_clippy
+        if: contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
+      - name: Native tests (hardware tests explicitly ignored)
+        run: |-
+          cargo test --manifest-path native/winkey-helper/Cargo.toml --locked
+          if ($LASTEXITCODE -ne 0) { throw "winkey_test failed" }
+        id: winkey_test
+        if: contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
+      - name: Install declared MSRV
+        run: |-
+          rustup toolchain install 1.85.0 --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw "winkey_msrv_install failed" }
+        id: winkey_msrv_install
+        if: contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
+      - name: MSRV tests
+        run: |-
+          cargo +1.85.0 test --manifest-path native/winkey-helper/Cargo.toml --locked
+          if ($LASTEXITCODE -ne 0) { throw "winkey_msrv_test failed" }
+        id: winkey_msrv_test
+        if: contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
+      - name: Windows discovery and real build/install tests
+        env:
+          MORDRED_WINKEY_BUILD_TEST: '1'
+        run: |-
+          .\.venv\Scripts\python.exe -m pytest tests/test_keyvault_winkey_helper.py tests/test_winkey_build.py tests/integration/test_keyvault_windows.py -o addopts='' -q
+          if ($LASTEXITCODE -ne 0) { throw "winkey_python failed" }
+        id: winkey_python
+        if: contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
+      - name: Build a wheel from the sdist and smoke outside the checkout
+        run: |
+          .\.venv\Scripts\uv.exe build --sdist --out-dir dist-private-fs
+          if ($LASTEXITCODE -ne 0) { throw 'sdist build failed' }
+          $source = (Get-ChildItem dist-private-fs/*.tar.gz).FullName
+          .\.venv\Scripts\uv.exe build --wheel $source --out-dir dist-private-fs
+          if ($LASTEXITCODE -ne 0) { throw 'wheel build failed' }
+          $wheel = (Get-ChildItem dist-private-fs/*.whl).FullName
+          # RUNNER_TEMP is on a broadly writable data volume; use the checked profile.
+          $smoke = Join-Path $env:USERPROFILE 'mordred-private-fs-wheel'
+          python -m venv "$smoke/venv"
+          if ($LASTEXITCODE -ne 0) { throw "wheel venv creation failed" }
+          & "$smoke/venv/Scripts/python.exe" -m pip install --no-deps $wheel
+          if ($LASTEXITCODE -ne 0) { throw 'wheel install failed' }
+          $env:PYTHONPATH = ''
+          @'
+          from pathlib import Path
+          import mordred_hermes
+          from mordred_hermes._private_fs import open_private_directory
+          from mordred_hermes.keyvault import extension_sign
+          assert 'site-packages' in Path(mordred_hermes.__file__).parts
+          with open_private_directory(Path.cwd() / 'private', create=True) as d, d.transaction() as tx:
+              tx.create_bytes('secret', b'old')
+              tx.replace_bytes('secret', b'new')
+              assert d.read_bytes('secret', max_bytes=3) == b'new'
+          extension_sign._ext_dir = lambda: Path.cwd() / 'wallet'
+          selection = {'kind': 'raw', 'key_id': 'synthetic', 'envelope_id': 'test'}
+          extension_sign.set_wallet(selection)
+          assert extension_sign._load_wallet_cfg() == selection
+          extension_sign.set_wallet(selection | {'envelope_id': 'replacement'})
+          assert extension_sign._load_wallet_cfg()['envelope_id'] == 'replacement'
+          from mordred_hermes._audit_io import audit_session, decode_audit_bytes
+          from mordred_hermes._log_rotation import rotate_audit
+          with audit_session(Path.cwd() / 'audit' / 'custom.log', create=True) as session:
+              session.create('custom.log', b'{}\n')
+              result = rotate_audit(session, '2026-10-08')
+              snapshot = session.snapshot(result.gzip_name, max_bytes=1024)
+          assert decode_audit_bytes(snapshot.data, max_output_bytes=3) == b'{}\n'
+          print(mordred_hermes.__file__)
+          '@ | Set-Content -LiteralPath "$smoke/check.py" -Encoding utf8
+          Set-Location $smoke
+          & "$smoke/venv/Scripts/python.exe" check.py
+          if ($LASTEXITCODE -ne 0) { throw 'private filesystem wheel smoke failed' }
+        id: wheel
+        if: contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'windows-wheel')
+      - name: Record worker checks
+        id: evidence
+        if: always()
+        shell: bash
+        env:
+          CI_STEPS_JSON: ${{ toJSON(steps) }}
+          CI_PYTHON: ${{ needs.ci-policy.outputs.platform_python }}
+        working-directory: ${{ github.workspace }}
+        run: .venv/Scripts/python.exe tools/ci_evidence.py worker --policy ci-policy.json --os windows --python "$CI_PYTHON" --output worker.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: ci-worker-evidence-windows-${{ needs.ci-policy.outputs.platform_python }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: worker.json
+          if-no-files-found: error
+  ci-acceptance:
+    name: CI acceptance
+    needs:
+      - ci-policy
+      - linux
+      - macos
+      - windows-private-fs
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      HERMES_HOME: /tmp/mordred-ci-docs-home
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Download immutable run policy
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ci-policy-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Download all worker manifests
+        if: needs.ci-policy.outputs.mode != 'docs'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: ci-worker-evidence-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: worker-evidence
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        if: needs.ci-policy.outputs.mode == 'docs'
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install documentation test environment
+        id: docs_install
+        if: needs.ci-policy.outputs.mode == 'docs'
+        run: |-
+          python -m venv "$RUNNER_TEMP/mordred-ci-docs"
+          "$RUNNER_TEMP/mordred-ci-docs/bin/python" -m pip install -e ".[dev,keyvault,extension]"
+      - name: Complete documentation contract checks
+        id: docs_tests
+        if: needs.ci-policy.outputs.mode == 'docs'
+        run: >-
+          "$RUNNER_TEMP/mordred-ci-docs/bin/python" -m pytest -q tests/test_docs_links.py
+          tests/test_ux_guidance_guard.py tests/test_packaging_versions.py tests/test_user_installer.py
+      - name: Require the complete selected scope
+        id: accept
+        env:
+          CI_NEEDS_JSON: ${{ toJSON(needs) }}
+          CI_STEPS_JSON: ${{ toJSON(steps) }}
+        run: python3 tools/ci_evidence.py accept --policy ci-policy.json --workers worker-evidence --output evidence.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ci-acceptance-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence.json
+          if-no-files-found: error

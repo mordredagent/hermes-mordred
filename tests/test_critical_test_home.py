@@ -16,11 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def home_script() -> str:
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
-    steps = workflow["jobs"]["critical-feedback"]["steps"]
+    steps = workflow["jobs"]["windows-private-fs"]["steps"]
     preparation = next((s for s in steps if s.get("name") == "Prepare checked Windows feedback home"), None)
     assert preparation is not None, "checked Windows ambient home preparation is missing"
-    assert preparation["if"] == "runner.os == 'Windows'"
-    collection = next(s for s in steps if s.get("name") == "Critical regression feedback")
+    assert "if" not in preparation  # All Windows modes must admit the home.
+    collection = next(s for s in steps if s.get("id") == "native")
     assert steps.index(preparation) < steps.index(collection)
     return preparation["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
 
