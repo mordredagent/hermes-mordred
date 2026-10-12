@@ -14,7 +14,7 @@ import contextlib
 import logging
 import os
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -159,7 +159,7 @@ def check_llm_policy(backend: str, base_url: str) -> None:
         raise TelegramServiceError("llm_policy_refused") from exc
 
 
-async def _without_thinking(chunks: AsyncIterator[str]) -> AsyncIterator[str]:
+async def _without_thinking(chunks: AsyncIterator[str]) -> AsyncGenerator[str, None]:
     """Stream text with any ``<think>…</think>`` block removed (local reasoning models)."""
     pending = ""
     async for chunk in chunks:

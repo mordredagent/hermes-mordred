@@ -115,8 +115,10 @@ def _report(code: str) -> int:
         "tee_auth_cancelled": "Touch ID / passcode was cancelled, so the credentials stayed sealed.",
         "local_endpoint_invalid": "the local model endpoint must be http(s)://127.0.0.1:<port>/... or "
         "http(s)://[::1]:<port>/... (loopback only, with an explicit port).",
-        "local_api_key_invalid": "the local API key must be a nonempty ASCII token without whitespace or control characters.",
-        "local_api_key_missing": "the selected API-key environment variable is not set. Set it or use --api-key for hidden input.",
+        "local_api_key_invalid": "the local API key must be a nonempty ASCII token "
+        "without whitespace or control characters.",
+        "local_api_key_missing": "the selected API-key environment variable is not set. "
+        "Set it or use --api-key for hidden input.",
         "local_api_key_options": "choose only one of --api-key, --api-key-env and --clear-api-key.",
         "memory_encryption_required": "Telegram needs agent-memory encryption on, so nothing Hermes remembers "
         f"about your chats is stored in plaintext. Run {memory_setup}, restart Hermes, then try again "
@@ -651,6 +653,32 @@ def telegram_venice(*, model: str | None, secret_fn: InputFn = getpass.getpass, 
     return 0
 
 
+def _read_local_key(api_key: bool, api_key_env: str | None, clear_api_key: bool, secret_fn: InputFn) -> str | None:
+    from ..extension.telegram.llm import LlmConfigError, validate_local_api_key
+
+    if sum((api_key, api_key_env is not None, clear_api_key)) > 1:
+        raise LlmConfigError("local_api_key_options")
+    if not api_key and api_key_env is None:
+        return None
+    raw_key = secret_fn("Local API key (hidden, stored sealed): ") if api_key else os.environ.get(api_key_env or "")
+    if raw_key is None:
+        raise LlmConfigError("local_api_key_missing")
+    return validate_local_api_key(raw_key)
+
+
+def _retained_local_key(old: Any, endpoint: str) -> str | None:
+    from ..extension.telegram.llm import LlmConfigError, normalize_local_endpoint
+
+    if old is not None:
+        try:
+            if normalize_local_endpoint(old.local_endpoint or "") == endpoint:
+                key: str | None = old.local_api_key
+                return key
+        except LlmConfigError:
+            pass
+    return None
+
+
 def telegram_local_llm(
     *,
     endpoint: str,
@@ -662,7 +690,7 @@ def telegram_local_llm(
     secret_fn: InputFn = getpass.getpass,
 ) -> int:
     """Send questions to a model on THIS machine instead of Venice."""
-    from ..extension.telegram.llm import LlmConfigError, normalize_local_endpoint, validate_local_api_key
+    from ..extension.telegram.llm import LlmConfigError, normalize_local_endpoint
     from ..extension.telegram.secrets import TelegramSecretsError
 
     try:
@@ -672,17 +700,10 @@ def telegram_local_llm(
     if not model.strip():
         _term.emit_error("a model name is required.")
         return 1
-    if sum((api_key, api_key_env is not None, clear_api_key)) > 1:
-        return _report("local_api_key_options")
-    key = None
-    if api_key or api_key_env is not None:
-        raw_key = secret_fn("Local API key (hidden, stored sealed): ") if api_key else os.environ.get(api_key_env or "")
-        if raw_key is None:
-            return _report("local_api_key_missing")
-        try:
-            key = validate_local_api_key(raw_key)
-        except LlmConfigError as exc:
-            return _report(exc.code)
+    try:
+        key = _read_local_key(api_key, api_key_env, clear_api_key, secret_fn)
+    except LlmConfigError as exc:
+        return _report(exc.code)
     from ..extension.telegram.secrets import empty_secrets
 
     secrets_store = store if store is not None else _secret_store()
@@ -699,13 +720,8 @@ def telegram_local_llm(
 
         def updated(old: Any) -> Any:
             saved_key = key
-            if not api_key and api_key_env is None and not clear_api_key and old is not None:
-                try:
-                    same_endpoint = normalize_local_endpoint(old.local_endpoint or "") == canonical
-                except LlmConfigError:
-                    same_endpoint = False
-                if same_endpoint:
-                    saved_key = old.local_api_key
+            if not api_key and api_key_env is None and not clear_api_key:
+                saved_key = _retained_local_key(old, canonical)
             return replace(
                 old if old is not None else empty_secrets(),
                 backend="local",

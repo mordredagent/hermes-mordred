@@ -5,9 +5,9 @@ hardware key helper, the Telegram login, the privacy LLM (Venice or a local
 model) and a first import with conservative defaults, then says how to use it
 from Hermes Desktop and the browser extension.
 
-``doctor`` reports health from metadata only. It never unseals the credentials
-(no Touch ID), never decrypts the archive, and never prints the account name
-or any chat title.
+``doctor`` normally reports metadata only. The explicit ``--probe-llm`` option
+unseals credentials and tests a saved local model with synthetic text. Neither
+mode decrypts the archive or prints the account name or any chat title.
 
 On Windows (C6-telegram) setup checks ``windows_capabilities`` instead of the
 Enclave/TPM helper, offers the explicit ``keyvault native init --role
@@ -99,8 +99,10 @@ def _check_credentials(flags: dict[str, Any] | None, *, sealed_by: str = "device
         Check(
             "privacy_llm",
             backend in ("venice", "local"),
-            f"{backend} ({model})" if backend else "not configured",
-            "" if backend else "hermes-mordred telegram venice   (or: telegram local-llm)",
+            f"{backend} ({model}); configured, connection not checked" if backend else "not configured",
+            "hermes-mordred telegram doctor --probe-llm"
+            if backend == "local"
+            else ("" if backend else "hermes-mordred telegram venice   (or: telegram local-llm)"),
         )
     )
     return checks
@@ -186,8 +188,13 @@ def run_checks() -> list[Check]:
     ]
 
 
-def telegram_doctor(*, as_json: bool = False) -> int:
+def telegram_doctor(*, as_json: bool = False, probe_llm: bool = False) -> int:
     checks = run_checks()
+    if probe_llm:
+        from .telegram_llm_probe import check_saved_local_llm
+
+        checks = [check for check in checks if check.name != "privacy_llm"]
+        checks.append(check_saved_local_llm())
     if as_json:
         print(json.dumps([asdict(c) for c in checks], indent=2))
     else:
@@ -423,7 +430,9 @@ def cli_setup(args: argparse.Namespace) -> int:
 
 
 def cli_doctor(args: argparse.Namespace) -> int:
-    return telegram_doctor(as_json=bool(getattr(args, "json", False)))
+    return telegram_doctor(
+        as_json=bool(getattr(args, "json", False)), probe_llm=bool(getattr(args, "probe_llm", False))
+    )
 
 
 def _hardware_fix() -> str:

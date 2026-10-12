@@ -1,6 +1,6 @@
 # Telegram Local LLM Diagnostics Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Make Telegram local-model failures actionable, support authenticated loopback servers, and explicitly verify the saved model configuration.
 
@@ -36,11 +36,11 @@
 
 **Interfaces:** `VeniceError(code: str, *, detail: dict[str, str | int] | None = None)`; local details contain `endpoint` (origin only), `failure` (http_error, timeout, connection_failed, transport_error, invalid_response), optional `http_status`, and a constant remediation `hint`. The tool adds `detail` only for this reviewed exception type. `TelegramService.ask` emits `telegram.ask.failed` with code and safe local details.
 
-- [ ] Add a real loopback HTTP fixture and synthetic encrypted archive. Through the real service and Hermes tool assert 401 retains its code, 404/500/307 retain unavailable, and closed-port/timeout failures have distinct details. Assert no redirect is followed and secrets in paths/bodies/exceptions are absent.
-- [ ] Run `uv run pytest -q tests/extension/test_telegram_local_llm.py` and observe missing diagnostic failures.
-- [ ] Implement the local error details and failure audit event. Leave Venice errors and successful response envelopes compatible. Do not record raw exception messages or response bodies.
-- [ ] Run the new module plus `test_telegram_tee.py`, `test_telegram_hermes_tools.py`, `test_telegram_api.py`, `test_telegram_dates.py`, and `test_telegram_import.py`; expect all passing.
-- [ ] Commit as `fix(telegram): retain safe local LLM failure diagnostics`.
+- [x] Add a real loopback HTTP fixture and synthetic encrypted archive. Through the real service and Hermes tool assert 401 retains its code, 404/500/307 retain unavailable, and closed-port/timeout failures have distinct details. Assert no redirect is followed and secrets in paths/bodies/exceptions are absent.
+- [x] Run `uv run pytest -q tests/extension/test_telegram_local_llm.py` and observe missing diagnostic failures.
+- [x] Implement the local error details and failure audit event. Leave Venice errors and successful response envelopes compatible. Do not record raw exception messages or response bodies.
+- [x] Run the new module plus `test_telegram_tee.py`, `test_telegram_hermes_tools.py`, `test_telegram_api.py`, `test_telegram_dates.py`, and `test_telegram_import.py`; expect all passing.
+- [x] Commit as `fix(telegram): retain safe local LLM failure diagnostics`.
 
 ## Task 2: Seal and use optional local authentication
 
@@ -48,11 +48,11 @@
 
 **Interfaces:** Add `TelegramSecrets.local_api_key: str | None = None` and optional `local_api_key` to `resolve_target`. Extend `telegram local-llm` with mutually exclusive `--api-key` (hidden prompt), `--api-key-env NAME` (one-time import), and `--clear-api-key`. With no key option, retain a key only when the normalized endpoint is unchanged; clear it on an endpoint change. `telegram_local_llm` receives those options plus the existing injectable secret input function.
 
-- [ ] Test sealed roundtrip and metadata/repr redaction, legacy decoding, missing/empty environment values refusing before writes, same-endpoint preservation, endpoint-change clearing, and explicit clearing. An authenticated HTTP fixture must reject before configuration and return an answer after the real CLI configuration is stored.
-- [ ] Run the relevant new tests and observe failure before implementation.
-- [ ] Implement optional sealed field, endpoint-bound key reuse and request Authorization. Hide keys in target/config repr as well as TelegramSecrets repr.
-- [ ] Run both complete affected test modules and Windows Telegram custody/CLI modules; expect all passing.
-- [ ] Commit as `feat(telegram): support sealed local LLM API keys`.
+- [x] Test sealed roundtrip and metadata/repr redaction, legacy decoding, missing/empty environment values refusing before writes, same-endpoint preservation, endpoint-change clearing, and explicit clearing. An authenticated HTTP fixture must reject before configuration and return an answer after the real CLI configuration is stored.
+- [x] Run the relevant new tests and observe failure before implementation.
+- [x] Implement optional sealed field, endpoint-bound key reuse and request Authorization. Hide keys in target/config repr as well as TelegramSecrets repr.
+- [x] Run both complete affected test modules and Windows Telegram custody/CLI modules; expect all passing.
+- [x] Commit as `feat(telegram): support sealed local LLM API keys`.
 
 ## Task 3: Explicit doctor probe of the saved local model
 
@@ -60,11 +60,11 @@
 
 **Interfaces:** Add `telegram doctor --probe-llm`; `telegram_doctor(*, as_json: bool = False, probe_llm: bool = False) -> int`. A dedicated helper returns the existing `Check` shape and replaces the privacy_llm row. It freshly loads credentials through the platform's default store, resolves the same target as ask, refuses non-local backends without network access, and consumes a fixed synthetic prompt through `venice.stream_chat` with a 30-second total deadline and 64 output tokens. It reports the origin and configured model, sanitized failure detail and a fix hint. Empty visible output is a failed probe.
 
-- [ ] Test ordinary doctor never loads credentials or contacts a server and says connection not checked. Test explicit probe CLI exit status/JSON against authenticated success, 401, wrong path, connection failure, empty/truncated stream and timeout. Test unknown/unconfigured/cloud backend and custody refusal without archive access.
-- [ ] Run `uv run pytest -q tests/extension/test_telegram_llm_probe.py` and observe the missing option/probe failures.
-- [ ] Implement the opt-in probe and ordinary status wording. Reuse the same URL normalization, sealed key, request builder, direct session and diagnostic classification as ask; close sessions on every outcome.
-- [ ] Run the new module and complete Telegram setup/Windows doctor modules; expect all passing.
-- [ ] Commit as `feat(telegram): probe saved local LLM configuration on request`.
+- [x] Test ordinary doctor never loads credentials or contacts a server and says connection not checked. Test explicit probe CLI exit status/JSON against authenticated success, 401, wrong path, connection failure, empty/truncated stream and timeout. Test unknown/unconfigured/cloud backend and custody refusal without archive access.
+- [x] Run `uv run pytest -q tests/extension/test_telegram_llm_probe.py` and observe the missing option/probe failures.
+- [x] Implement the opt-in probe and ordinary status wording. Reuse the same URL normalization, sealed key, request builder, direct session and diagnostic classification as ask; close sessions on every outcome.
+- [x] Run the new module and complete Telegram setup/Windows doctor modules; expect all passing.
+- [x] Commit as `feat(telegram): probe saved local LLM configuration on request`.
 
 ## Task 4: Document, validate and review
 

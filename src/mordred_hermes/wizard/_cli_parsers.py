@@ -170,6 +170,11 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     p_setup.set_defaults(func=_handle_telegram)
     p_doctor = tsub.add_parser("doctor", help="Health check from metadata only (no Touch ID, no content)")
     p_doctor.add_argument("--json", action="store_true", help="Machine-readable output")
+    p_doctor.add_argument(
+        "--probe-llm",
+        action="store_true",
+        help="Unseal the saved local LLM configuration and test a streamed completion (may prompt for unlock)",
+    )
     p_doctor.set_defaults(func=_handle_telegram)
     p_login = tsub.add_parser("login", help="Create a session, sealed by the Secure Enclave")
     p_login.add_argument(
