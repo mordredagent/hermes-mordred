@@ -7,8 +7,8 @@ messages ever reaching a model you did not choose.
 - **Read-only.** Mordred can list your chats and read history. It cannot send,
   edit, delete, react, mark chats as read, or show you as online.
 - **Hardware sealed.** Your Telegram session and keys use macOS Secure Enclave
-  or Linux TPM 2.0. They are opened only when needed and never cached. macOS
-  can require Touch ID; Linux TPM access has no per-use user-presence prompt.
+  or Linux/Windows TPM 2.0. They are opened only when needed and never cached. macOS
+  can require Touch ID; Linux/Windows have no per-use user-presence prompt.
 - **Encrypted at rest.** Imported messages are stored AES-256-GCM encrypted
   under hashed file names, and are never committed to git.
 - **Only Venice or this host reads them.** Questions are answered by a
@@ -26,6 +26,16 @@ messages ever reaching a model you did not choose.
   (Ollama, LM Studio, llama.cpp) on `127.0.0.1`.
 - Your own Telegram API application from <https://my.telegram.org> →
   *API development tools* (`api_id` and `api_hash`).
+
+**Native Windows preview:** follow the [Windows TPM workflow](./USAGE.md#native-windows-tpm-workflow)
+and install the `telegram` extra. Run `keyvault enable-winkey` before
+`telegram setup`; setup offers `keyvault native init --role telegram` and
+memory encryption. Login requires acknowledgement of machine-bound custody
+(interactive, or `--acknowledge-machine-bound`). There is no portable recovery
+or per-use prompt; losing the TPM, account or profile loses local credentials
+and archive access. Ordinary-user Server/NitroTPM synthetic flows are validated;
+live-account, packaged Desktop and Windows 11 acceptance remain open
+([evidence](../dev/CI.md#manual-live-device-validation-log)).
 
 On Linux, install Rust, `pkg-config`, `libtss2-dev`, and the `telegram` extra.
 The user running Hermes must be able to open `/dev/tpmrm0` (normally via the
@@ -59,7 +69,7 @@ automatically; restart Hermes Desktop and open
 page walks through the same steps with buttons and masked fields; what you
 type goes straight to Mordred on this host — never into the chat, the model,
 logs or plugin storage. On macOS it shows the vault recovery passphrase once: write it
-down. Linux displays the TPM recovery limitation instead.
+down. Linux/Windows display the TPM recovery limitation instead.
 
 **In a terminal.**
 
@@ -149,7 +159,7 @@ Under Mordred's `strict` LLM policy, allow Venice by adding `"venice"` to
 
 | Message | What to do |
 |---|---|
-| `tee_unavailable` | `hermes-mordred keyvault enable-se` on macOS; `hermes-mordred keyvault enable-tpm` on Linux |
+| `tee_unavailable` | `hermes-mordred keyvault enable-se` on macOS; `enable-tpm` on Linux; `enable-winkey` on Windows |
 | `tee_auth_cancelled` | Touch ID was declined; ask again when ready. |
 | `archive_empty` | `hermes-mordred telegram sync` |
 | `telegram_session_revoked` | The session was ended from another device: `telegram logout`, then `telegram setup`. |
@@ -169,6 +179,10 @@ You can also end the session from any Telegram app: Settings → Devices.
 
 Removing Mordred with `hermes-mordred uninstall` keeps the Telegram archive and
 sealed credentials (and the session stays logged in) unless you add
-`--purge-data`, which first revokes the session at Telegram and then deletes
-the archive, the credentials and the hardware key. See
+`--purge-data` on macOS/Linux, which revokes the session and deletes the archive,
+credentials and hardware key. See
 [`USAGE.md` § Uninstall safely](./USAGE.md#uninstall-safely).
+
+Windows uninstall retains Telegram data and custody even with `--purge-data`;
+use `telegram logout --forget` separately. If remote revocation fails after
+local deletion, end the session in Telegram Settings → Devices.
