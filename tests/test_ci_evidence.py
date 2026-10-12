@@ -848,3 +848,67 @@ def test_acceptance_cli_writes_complete_manifest_only_after_validation(tmp_path,
     evidence = json.loads(output.read_text())
     assert evidence["accepted"] is True
     assert tool.validate_acceptance(evidence)["tested_sha"] == SHA
+
+
+def nullable_pr_context(tmp_path):
+    p = policy()
+    p.update(
+        event_name="pull_request",
+        ref="refs/pull/7/merge",
+        pr={"number": 7, "head_sha": "b" * 40, "base_sha": "c" * 40, "merge_sha": SHA},
+    )
+    event = {
+        "number": 7,
+        "pull_request": {"head": {"sha": "b" * 40}, "base": {"sha": "c" * 40}, "merge_commit_sha": None},
+    }
+    environ = {
+        "GITHUB_REPOSITORY": "owner/repo",
+        "GITHUB_SHA": SHA,
+        "GITHUB_REF": "refs/pull/7/merge",
+        "GITHUB_EVENT_NAME": "pull_request",
+        "GITHUB_RUN_ID": "42",
+        "GITHUB_RUN_ATTEMPT": "2",
+        "GITHUB_WORKFLOW_REF": "owner/repo/.github/workflows/ci.yml@refs/pull/7/merge",
+        "GITHUB_EVENT_PATH": str(tmp_path / "event.json"),
+    }
+    return p, event, environ
+
+
+@pytest.mark.parametrize("raw_merge", [None, "missing", SHA])
+def test_pr_event_merge_field_can_be_unavailable_when_policy_matches_github_sha(tmp_path, raw_merge):
+    tool = evidence_tool()
+    p, event, environ = nullable_pr_context(tmp_path)
+    if raw_merge == "missing":
+        del event["pull_request"]["merge_commit_sha"]
+    else:
+        event["pull_request"]["merge_commit_sha"] = raw_merge
+    Path(environ["GITHUB_EVENT_PATH"]).write_text(json.dumps(event))
+    tool.validate_policy(p)
+    tool.validate_environment(p, environ)
+    assert p["pr"]["merge_sha"] == SHA
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["head", "base", "number", "nonnull_merge", "empty_merge", "policy_merge", "github_sha", "workflow", "ref"],
+)
+def test_nullable_pr_event_does_not_relax_other_provenance_checks(tmp_path, mutation):
+    tool = evidence_tool()
+    p, event, environ = nullable_pr_context(tmp_path)
+    if mutation in ("head", "base"):
+        event["pull_request"][mutation]["sha"] = "d" * 40
+    elif mutation == "number":
+        event["number"] = 8
+    elif mutation in ("nonnull_merge", "empty_merge"):
+        event["pull_request"]["merge_commit_sha"] = "d" * 40 if mutation == "nonnull_merge" else ""
+    elif mutation == "policy_merge":
+        p["pr"]["merge_sha"] = "d" * 40
+    elif mutation == "github_sha":
+        environ["GITHUB_SHA"] = "d" * 40
+    elif mutation == "workflow":
+        environ["GITHUB_WORKFLOW_REF"] = "owner/repo/.github/workflows/other.yml@refs/pull/7/merge"
+    else:
+        environ["GITHUB_REF"] = "refs/pull/8/merge"
+    Path(environ["GITHUB_EVENT_PATH"]).write_text(json.dumps(event))
+    with pytest.raises(ValueError):
+        tool.validate_environment(p, environ)
