@@ -496,6 +496,126 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 
 ## Manual live-device validation log
 
+- **2026-10-12 — Pre-merge Telegram review follow-up.**
+  After integration with `dev` at `d3ad9d795`, independent review reproduced
+  a diagnostic disclosure when malformed local HTTP coincided with audit
+  writer construction failure: DEBUG traceback logging included the active
+  transport exception's response bytes and URL path. A real malformed-chunked
+  loopback regression through `telegram_ask` failed before the fix. The audit
+  fallback now logs only the exception class, without traceback or exception
+  text. The complete affected modules passed **307 tests in 11.28s**; Ruff,
+  formatting, strict mypy (266 sources), and shellcheck passed. The 401/403
+  remediation also includes the required endpoint/model placeholders.
+  Final integrated regression and hosted acceptance are recorded in PR #238.
+  The user subsequently confirmed the installed Hermes/Telegram workflow
+  after the CLI toolset correction described below.
+
+- **2026-10-12 — Follow-up: Telegram discovery in the actual Hermes session.**
+  The user's Qwen session could read Mordred's Telegram prompt section but
+  `tool_search` had only five deferred tools and returned no Telegram matches.
+  A fresh installed-runtime probe found both tools registered, their
+  availability check true, and no component registration errors. The precise
+  startup ordering that omitted them from the existing session was not
+  established. Earlier one-shot runs also logged plugin-load timeouts in
+  `agent.log` / `errors.log` that were absent from captured stderr; successful
+  generic chat and file calls alone did not establish Telegram discovery.
+
+  `hermes tools enable mordred_telegram --platform cli` explicitly persisted
+  the CLI selection. A fresh `hermes chat -m qwen14b` one-shot then had seven
+  deferred tools; Qwen called `tool_search` with both Telegram names and
+  received matches for both tools (exit 0, 88.0 seconds). This was a real
+  installed-Hermes/model/search-bridge check, without invoking Telegram
+  custody or reading an archive. The already-running user session still
+  needs its tool selection reloaded or a restart. No Telegram privacy
+  backend, keys, model default, or application source was changed.
+
+- **2026-10-12 — Qwen3 14B on the installed Hermes runtime (macOS M5, 24 GiB).**
+  Candidate `6eb299682` was installed as a copied package, replacing an
+  existing editable install that pointed at a deleted checkout. Hermes's
+  package manager then rebuilt its environment with the vendored Mordred
+  member; all 252 installed Python source files matched the candidate.
+  The generated CLI launcher was refreshed to that active environment.
+  Hermes `0.21.5+4900.gbddd22b` loaded Mordred `0.2.0a1` on subsequent starts.
+
+  The official `Qwen/Qwen3-14B-GGUF` Q4_K_M weights (SHA256
+  `500a8806e85ee9c83f3ae08420295592451379b4f8cf2d0f41c15dffeb6b81f0`)
+  were served by llama.cpp `b11562` on `127.0.0.1:11435`, aliased as
+  `qwen3-14b-q4-hermes`. Hermes refused the initial 4096-token runtime because
+  it requires at least 64000 tokens. Ollama clamped a requested 65536-token
+  context to 40960 for these weights. The accepted llama.cpp configuration
+  used a 65536-token context, YaRN scaling factor 2 with original context
+  32768, q8_0 K/V cache, Flash Attention, one slot, and thinking disabled.
+  Both `/v1/models` and `/props` confirmed the runtime context. This checks
+  allocation and short interactions, not answer quality at 64K tokens.
+  The loopback LaunchAgent unloads the model after 300 idle seconds; logs
+  confirmed unloading and a successful wake on the next Hermes request.
+
+  In the existing Hermes profile, `hermes chat -m qwen14b --toolsets file`
+  called `read_file` on a synthetic fixture and correctly returned its
+  Monday meeting date and random verification code (exit 0, 33.3 seconds
+  including the cold model wake). A subsequent normal invocation without a
+  toolset override also returned the requested Japanese response (exit 0,
+  75.4 seconds, 12450 input tokens). This demonstrates a working default
+  tool configuration but also substantial initial prompt latency on this Mac.
+  The original default model/provider and
+  plugin configuration were unchanged. A named local provider, model alias,
+  and per-model reasoning override were added. The existing Telegram
+  privacy backend remains Venice; its real archive was not queried.
+
+  The explicit live gate
+  `uv run pytest -o addopts= -q -m integration tests/integration/test_telegram_local_llm.py`
+  passed **1 test in 3.14s** against this 14B endpoint. This exercised sealed
+  local configuration, `telegram doctor --probe-llm`, and `telegram_ask`
+  with a synthetic encrypted archive. The fixture uses test hardware
+  custody and injected policy/memory guards; it does not validate physical
+  Secure Enclave custody, a live Telegram import, Linux TPM, or the
+  reporter's original 27B setup. No application code changed in this
+  environment-validation step; the full regression result below remains
+  the code candidate's acceptance evidence.
+
+- **2026-10-12 — Telegram saved local LLM: real llama.cpp, with and without authentication.**
+  Candidate `0617515df` was exercised on macOS arm64 / Python 3.14.7 against
+  the official llama.cpp `b11562` binary and
+  `Qwen/Qwen2.5-0.5B-Instruct-GGUF` (`qwen2.5-0.5b-instruct-q4_k_m.gguf`,
+  SHA256 `74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db`).
+  Both servers were task-owned, bound only to dynamic loopback ports, and
+  stopped after validation. The model was served as `mordred-synthetic` with
+  a 4096-token context and one slot. No existing Ollama models/settings or
+  production Hermes state were changed.
+
+  Explicit runs of `tests/integration/test_telegram_local_llm.py` passed
+  **1 test in 1.51s without authentication** and **1 test in 1.52s with
+  authentication**, after the review fix requiring an explicit terminal
+  SSE event for a successful probe. The authenticated run first observed the real server's
+  HTTP 401 as `local_llm_unauthorized`, then imported a temporary key through
+  `telegram local-llm --api-key-env`. Both runs verified the saved target via
+  `telegram doctor --probe-llm --json` and obtained an answer through the
+  actual `telegram_ask` tool over a synthetic encrypted archive. Custody used
+  the existing test hardware backend with real credential sealing, not a
+  physical Secure Enclave or TPM. This is live model/HTTP evidence, not
+  Linux TPM or the reported 27B model's acceptance.
+
+  Reproduce with `MORDRED_TELEGRAM_LIVE_TEST=1`,
+  `MORDRED_TELEGRAM_LIVE_ENDPOINT=http://127.0.0.1:<port>/v1`,
+  `MORDRED_TELEGRAM_LIVE_MODEL=<served-model>` and, for an authenticated
+  server, `MORDRED_TELEGRAM_LIVE_API_KEY` set privately, then run
+  `uv run pytest -o addopts= -q -m integration tests/integration/test_telegram_local_llm.py`.
+  The gate-off run skipped that live test and both
+  `tests/integration/test_linux_telegram_tpm.py` tests. A real Linux TPM and
+  the reporter's sealed endpoint remain unavailable in this environment;
+  the original incident's exact cause is still unconfirmed.
+
+  Final regression: `uv run pytest --cov=src/mordred_hermes` passed
+  **7272 tests**, skipped **220**, deselected **50**, and reached **90.34%**
+  coverage (80% floor) in **1286.38s**. The run reported 28 warnings,
+  including SQLite resource warnings in existing lifecycle tests and
+  dependency/fork deprecations. Repository-wide Ruff checks and formatting,
+  strict mypy (260 source files), and the prescribed shellcheck command
+  passed. A fresh code review found one incomplete-SSE probe issue; two
+  regressions failed before its fix, then all 109 affected tests passed.
+  The final full regression includes the fix. No Critical or Minor review
+  findings remained.
+
 The restored WF0, C5 shared, C3 and C5a entries below are dated historical
 results for their original source/wheel snapshots, not evidence for the
 consolidated candidate `bb75885ac`. Pending observations in those entries

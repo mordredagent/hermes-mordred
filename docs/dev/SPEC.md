@@ -181,6 +181,27 @@ browser extension, using a Venice.ai private model.
   `https://api.venice.ai/api/v1`, `private` models) or to a loopback model
   (`telegram local-llm`, literal `127.0.0.1`/`::1`, no proxy). Redirects are
   never followed. No other endpoint is configurable.
+- **Local LLM authentication and diagnostics.** `telegram local-llm` accepts
+  `--api-key` (hidden prompt), `--api-key-env NAME` (one-time import), or
+  `--clear-api-key`. The optional `local_api_key` lives only in the existing
+  sealed credential record; legacy records remain readable. Omitted key
+  options retain a key only for the same normalized endpoint. Changing the
+  endpoint clears the old key unless the operator supplies it explicitly.
+  Local failures preserve stable error codes and expose reviewed details
+  through `telegram_ask` and `telegram.ask.failed`: failure category,
+  scheme/address/port, optional HTTP status and remediation. Never expose
+  response bodies, exception messages, arbitrary URL paths, keys or content.
+  HTTP 401 remains `local_llm_unauthorized`.
+- **Local LLM health.** Ordinary `telegram doctor` remains metadata-only and
+  labels saved models as configured with connection not checked.
+  `telegram doctor --probe-llm` explicitly unseals the saved local target and
+  key, then sends a synthetic streaming completion through the same direct,
+  redirect-disabled client as `telegram_ask`. It uses a 30-second total HTTP
+  deadline and 64 output tokens, consumes the stream and requires visible
+  non-reasoning text and an explicit terminal event (`[DONE]` or a valid
+  `finish_reason`); clean HTTP EOF alone is insufficient. It never opens
+  the archive or probes a cloud backend;
+  failure makes the privacy-LLM check unhealthy with a fix hint.
 - **Read-only.** Every request is checked against an allowlist of reads before
   Telethon resolves or queues it, both at `TelegramClient._call` and at the
   MTProto sender's `send`. Sending, editing, deleting, reacting,

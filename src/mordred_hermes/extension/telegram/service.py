@@ -14,7 +14,7 @@ import contextlib
 import logging
 import os
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -123,8 +123,10 @@ def _audit(event: str, decision: str, **fields: Any) -> None:
 
         writer = build_audit_writer(hermes_home() / "mordred" / "audit.log")
         safe_audit_append(writer, {"event": event, "decision": decision, "reason": None, **fields}, logger=_log)
-    except Exception:
-        _log.debug("telegram audit append failed", exc_info=True)
+    except Exception as exc:
+        # This can run inside a transport exception handler. Its traceback chain
+        # may contain response bytes or a credential-bearing endpoint path.
+        _log.debug("telegram audit append failed (%s)", type(exc).__name__)
 
 
 def check_llm_policy(backend: str, base_url: str) -> None:
@@ -159,7 +161,7 @@ def check_llm_policy(backend: str, base_url: str) -> None:
         raise TelegramServiceError("llm_policy_refused") from exc
 
 
-async def _without_thinking(chunks: AsyncIterator[str]) -> AsyncIterator[str]:
+async def _without_thinking(chunks: AsyncIterator[str]) -> AsyncGenerator[str, None]:
     """Stream text with any ``<think>…</think>`` block removed (local reasoning models)."""
     pending = ""
     async for chunk in chunks:
@@ -469,6 +471,7 @@ class TelegramService:
             venice_model=value.venice_model or os.environ.get(venice.MODEL_ENV) or venice.DEFAULT_MODEL,
             local_endpoint=value.local_endpoint,
             local_model=value.local_model,
+            local_api_key=value.local_api_key,
         )
 
     async def ask(self, request: AskRequest, on_meta: Callable[[AskResult], None]) -> AsyncIterator[str]:
@@ -535,6 +538,10 @@ class TelegramService:
             if not produced:
                 # Never hand back a silent empty answer as if it were one.
                 raise AskError("llm_empty_answer")
+        except venice.VeniceError as exc:
+            if target.backend == "local":
+                _audit("telegram.ask.failed", "error", backend="local", error=exc.code, detail=exc.detail)
+            raise
         finally:
             with contextlib.suppress(Exception):
                 await raw_session.close()

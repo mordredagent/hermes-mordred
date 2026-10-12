@@ -102,6 +102,11 @@ terminal (`hermes-mordred` may need its full venv path):
 | `invalid_date` | Bad `start_date` / `end_date` | Use `YYYY-MM-DD`; start must not be after end |
 | `no_matching_messages` | No hit | Rephrase, or pass `chat_ids` |
 | `llm_not_configured` | No privacy LLM | Run `hermes-mordred telegram venice` (or `telegram local-llm`) |
+| `local_llm_unauthorized` | Local server returned HTTP 401 | Tell the user to set the server key using `hermes-mordred telegram local-llm --endpoint <base-url> --model <id> --api-key` (hidden prompt), then run `telegram doctor --probe-llm`. Never request or echo the key in chat. |
+| `local_llm_unavailable` | Local request could not complete | Read the returned `detail`: `connection_failed` means check the saved port/server; `timeout` means check loading or generation speed; HTTP 404 means verify model and base URL (usually `/v1`); HTTP 5xx means server failure. Suggest `hermes-mordred telegram doctor --probe-llm`. Do not infer that the model is stopped or that 401 occurred from this code alone. |
+| `local_llm_bad_request` | Local server rejected the request or context size | Narrow the date range or select fewer chats; verify the server's model/context configuration. |
+| `local_llm_bad_response` | The probe received an incomplete stream | Verify the OpenAI-compatible endpoint and server health; partial output without a terminal completion event is a failed probe. |
+| `local_llm_busy`, `local_llm_rate_limited` | Local server is temporarily busy | Retry when the server is ready. |
 | `tee_unavailable` | Hardware helper unavailable | macOS: `hermes-mordred keyvault enable-se`; Linux: `hermes-mordred keyvault enable-tpm` |
 | `tee_auth_cancelled` | Touch ID declined | Ask whether to try again |
 | `hermes_model_not_allowed`, `hermes_model_not_private` | This chat's model may not read Telegram text | Switch this chat to a Venice `private` model or a local model |
@@ -112,6 +117,15 @@ terminal (`hermes-mordred` may need its full venv path):
 
 For a health check you MAY run `hermes-mordred telegram doctor` (metadata
 only: no content, no account name, no Touch ID).
+
+An ordinary doctor's configured privacy-LLM row is **not** a connection test.
+For a real local inference check, tell the user to run `hermes-mordred telegram
+doctor --probe-llm`: it explicitly unseals the saved configuration (macOS may
+prompt for Touch ID) and sends only a fixed synthetic prompt, never messages.
+The Telegram privacy-LLM endpoint is separate from the main Hermes model;
+a working server on a different port does not prove the saved endpoint works.
+Never inspect the sealed credentials to obtain a key or suggest another
+destination as an automatic fallback.
 
 ## Syncing
 

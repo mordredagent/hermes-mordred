@@ -170,6 +170,11 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     p_setup.set_defaults(func=_handle_telegram)
     p_doctor = tsub.add_parser("doctor", help="Health check from metadata only (no Touch ID, no content)")
     p_doctor.add_argument("--json", action="store_true", help="Machine-readable output")
+    p_doctor.add_argument(
+        "--probe-llm",
+        action="store_true",
+        help="Unseal the saved local LLM configuration and test a streamed completion (may prompt for unlock)",
+    )
     p_doctor.set_defaults(func=_handle_telegram)
     p_login = tsub.add_parser("login", help="Create a session, sealed by the Secure Enclave")
     p_login.add_argument(
@@ -232,6 +237,12 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     p_local = tsub.add_parser("local-llm", help="Send questions to a model on this machine (loopback only)")
     p_local.add_argument("--endpoint", required=True, help="e.g. http://127.0.0.1:11434/v1")
     p_local.add_argument("--model", required=True, help="Model name served by that endpoint")
+    local_auth = p_local.add_mutually_exclusive_group()
+    local_auth.add_argument("--api-key", action="store_true", help="Prompt for a local API key (hidden; stored sealed)")
+    local_auth.add_argument(
+        "--api-key-env", metavar="NAME", help="Import a local API key once from this environment variable"
+    )
+    local_auth.add_argument("--clear-api-key", action="store_true", help="Remove the stored local API key")
     p_local.set_defaults(func=_handle_telegram)
     p_migrate = tsub.add_parser("migrate-tee", help="Move vault-stored credentials into the Secure Enclave seal")
     p_migrate.add_argument(

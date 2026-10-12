@@ -178,10 +178,14 @@ def _service() -> Any:
 
 
 def _error(exc: BaseException) -> str:
+    from . import venice
     from .service import error_code
 
     code = getattr(exc, "code", None) or error_code(exc, "telegram_tool_failed")
-    return json.dumps({"error": code})
+    result = {"error": code}
+    if isinstance(exc, venice.VeniceError) and exc.detail is not None:
+        result["detail"] = exc.detail
+    return json.dumps(result)
 
 
 async def telegram_chats(args: dict[str, Any], parent_agent: Any = None, **_: Any) -> str:
