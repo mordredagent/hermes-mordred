@@ -1,4 +1,4 @@
-# Scope-aware CI: routine 3–5, documentation 2, final 6 jobs.
+# Scope-aware CI: routine 3–5, documentation 2, final 7 jobs.
 # Policy and positive acceptance are defined in docs/dev/CI.md.
 # Keep PR event types stable: label-only runs can cancel actual testing.
 name: CI
@@ -39,6 +39,9 @@ jobs:
       macos_packs: ${{ steps.mode.outputs.macos_packs }}
       windows_packs: ${{ steps.mode.outputs.windows_packs }}
       windows_modules: ${{ steps.mode.outputs.windows_modules }}
+      windows_shards: ${{ steps.mode.outputs.windows_shards }}
+      windows_test_tier: ${{ steps.mode.outputs.windows_test_tier }}
+      windows_exclusions_sha256: ${{ steps.mode.outputs.windows_exclusions_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -108,7 +111,7 @@ jobs:
         run: |-
           if [ "$CI_MODE" = critical ]; then
             .venv/bin/python tools/run_critical_tests.py --junitxml critical-linux.xml
-            .venv/bin/python -m pytest -q tests/test_ci_*.py tests/test_critical_test_runner.py tests/test_critical_test_home.py tests/test_native_test_shards.py
+            .venv/bin/python -m pytest -q tests/test_ci_*.py tests/test_critical_test_runner.py tests/test_critical_test_home.py tests/test_native_test_shards.py tests/test_native_test_plan.py tests/test_native_selection.py
           else
             .venv/bin/python -m pytest -q --cov=mordred_hermes --cov-report=xml
           fi
@@ -562,12 +565,16 @@ jobs:
           path: worker.json
           if-no-files-found: error
   windows-private-fs:
-    name: windows-private-fs
+    name: windows-private-fs (${{ matrix.shard }})
     needs:
       - ci-policy
     if: needs.ci-policy.outputs.windows == 'true'
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.ci-policy.outputs.windows_shards) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
@@ -607,9 +614,12 @@ jobs:
         id: native
         env:
           CI_MODE: ${{ needs.ci-policy.outputs.mode }}
+          CI_SHARD: ${{ matrix.shard }}
+          CI_SHARD_COUNT: ${{ strategy.job-total }}
+          CI_TIER: ${{ needs.ci-policy.outputs.windows_test_tier }}
         run: |-
           if ($env:CI_MODE -eq "final") {
-            .\.venv\Scripts\python.exe tools/run_native_test_shard.py --shard-index 1 --shard-count 1 --junitxml native-windows.xml `
+            .\.venv\Scripts\python.exe tools/run_native_test_shard.py --shard-index $env:CI_SHARD --shard-count $env:CI_SHARD_COUNT --tier $env:CI_TIER --manifest native-selection.json --junitxml native-windows.xml `
               tests/test_private_fs.py `
               tests/test_private_fs_posix.py `
               tests/test_private_fs_windows.py `
@@ -701,12 +711,14 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: native-windows-${{ needs.ci-policy.outputs.platform_python }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: native-windows.xml
+          name: native-windows-${{ needs.ci-policy.outputs.platform_python }}-shard-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            native-windows.xml
+            native-selection.json
           if-no-files-found: warn
       - name: Install Rust formatting and lint components
         id: winkey_tools
-        if: contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
+        if: matrix.shard == 1 && contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
         run: |-
           rustup component add rustfmt clippy
           if ($LASTEXITCODE -ne 0) { throw "Rust component install failed" }
@@ -715,31 +727,31 @@ jobs:
           cargo fmt --manifest-path native/winkey-helper/Cargo.toml --check
           if ($LASTEXITCODE -ne 0) { throw "winkey_fmt failed" }
         id: winkey_fmt
-        if: contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
+        if: matrix.shard == 1 && contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
       - name: Native lint
         run: |-
           cargo clippy --manifest-path native/winkey-helper/Cargo.toml --locked --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { throw "winkey_clippy failed" }
         id: winkey_clippy
-        if: contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
+        if: matrix.shard == 1 && contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
       - name: Native tests (hardware tests explicitly ignored)
         run: |-
           cargo test --manifest-path native/winkey-helper/Cargo.toml --locked
           if ($LASTEXITCODE -ne 0) { throw "winkey_test failed" }
         id: winkey_test
-        if: contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
+        if: matrix.shard == 1 && contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
       - name: Install declared MSRV
         run: |-
           rustup toolchain install 1.85.0 --profile minimal
           if ($LASTEXITCODE -ne 0) { throw "winkey_msrv_install failed" }
         id: winkey_msrv_install
-        if: contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
+        if: matrix.shard == 1 && contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
       - name: MSRV tests
         run: |-
           cargo +1.85.0 test --manifest-path native/winkey-helper/Cargo.toml --locked
           if ($LASTEXITCODE -ne 0) { throw "winkey_msrv_test failed" }
         id: winkey_msrv_test
-        if: contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
+        if: matrix.shard == 1 && contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
       - name: Windows discovery and real build/install tests
         env:
           MORDRED_WINKEY_BUILD_TEST: '1'
@@ -747,7 +759,7 @@ jobs:
           .\.venv\Scripts\python.exe -m pytest tests/test_keyvault_winkey_helper.py tests/test_winkey_build.py tests/integration/test_keyvault_windows.py -o addopts='' -q
           if ($LASTEXITCODE -ne 0) { throw "winkey_python failed" }
         id: winkey_python
-        if: contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
+        if: matrix.shard == 1 && contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'winkey')
       - name: Build a wheel from the sdist and smoke outside the checkout
         run: |
           .\.venv\Scripts\uv.exe build --sdist --out-dir dist-private-fs
@@ -792,7 +804,7 @@ jobs:
           & "$smoke/venv/Scripts/python.exe" check.py
           if ($LASTEXITCODE -ne 0) { throw 'private filesystem wheel smoke failed' }
         id: wheel
-        if: contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'windows-wheel')
+        if: matrix.shard == 1 && contains(fromJSON(needs.ci-policy.outputs.windows_packs), 'windows-wheel')
       - name: Record worker checks
         id: evidence
         if: always()
@@ -800,12 +812,13 @@ jobs:
         env:
           CI_STEPS_JSON: ${{ toJSON(steps) }}
           CI_PYTHON: ${{ needs.ci-policy.outputs.platform_python }}
+          CI_SHARD: ${{ matrix.shard }}
         working-directory: ${{ github.workspace }}
-        run: .venv/Scripts/python.exe tools/ci_evidence.py worker --policy ci-policy.json --os windows --python "$CI_PYTHON" --output worker.json
+        run: .venv/Scripts/python.exe tools/ci_evidence.py worker --policy ci-policy.json --os windows --python "$CI_PYTHON" --shard "$CI_SHARD" --native-manifest native-selection.json --output worker.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: ci-worker-evidence-windows-${{ needs.ci-policy.outputs.platform_python }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ci-worker-evidence-windows-${{ needs.ci-policy.outputs.platform_python }}-shard-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: worker.json
           if-no-files-found: error
   ci-acceptance:
