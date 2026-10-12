@@ -72,6 +72,7 @@ def test_workflow_selector_preserves_frozen_native_harness_contract() -> None:
     additions = {"tests/test_windows_database_compat.py", "tests/test_desktop_windows_pm_compat.py"}
     assert additions <= set(modules)
     assert len(modules) == len(set(modules)) == 84
+    assert modules == json.loads((ROOT / "tools/ci_scope_paths.json").read_text())["native_modules"]
     frozen = [module for module in modules if module not in additions]
     # SHA256 of newline-joined, sorted distinct modules at frozen BASE f3506b7dc.
     # Independent of the weights fixture, so replacing a module cannot hide loss.
@@ -86,14 +87,16 @@ def test_workflow_selector_preserves_frozen_native_harness_contract() -> None:
     totals = [sum(weights.get(m, _tool().DEFAULT_SECONDS) for m in shard) for shard in shards]
     assert max(totals) - min(totals) < 1
     assert max(totals) < 950
-    assert job["strategy"]["matrix"] == {"python-version": ["3.11", "3.12", "3.13"], "shard": [1, 2, 3]}
-    assert job["strategy"]["fail-fast"] is False
+    assert "strategy" not in job  # One Windows runner, with no Python/shard fan-out.
+    assert "--shard-index 1 --shard-count 1" in step["run"]
+    assert '$env:CI_MODE -eq "final"' in step["run"]
+    assert "tools/run_ci_native_tests.py --policy ci-policy.json" in step["run"]
     smoke = next(s for s in job["steps"] if s.get("name", "").startswith("Build a wheel"))
-    assert smoke["if"] == "matrix.shard == 1"
+    assert "windows-wheel" in smoke["if"]
     upload = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/upload-artifact@"))
     assert upload["if"] == "always()"
-    assert "matrix.shard" in upload["with"]["name"]
-    assert "matrix.python-version" in upload["with"]["name"]
+    assert "platform_python" in upload["with"]["name"]
+    assert "github.run_attempt" in upload["with"]["name"]
 
 
 @pytest.mark.parametrize("index", ["0", "4", "", "garbage"])
