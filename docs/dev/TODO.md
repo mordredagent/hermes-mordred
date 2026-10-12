@@ -53,7 +53,9 @@ No open work. Release mechanics belong to [`CI.md`](./CI.md) §Normal release.
 
 ### 0.6 CI workflow
 
-No open work. Workflow YAML and [`CI.md`](./CI.md) own the current gates.
+No open implementation work. Scope-aware CI uses 3–5 ordinary jobs, two for
+ready documentation-only PRs and six for final validation. Workflow YAML and
+[`CI.md`](./CI.md) own routing, evidence, matrix tradeoffs and hosted validation.
 
 ### 0.7 ~~HSeam-1 PR~~ → Zero-PR commitment (deferred to v2 vendored fork)
 

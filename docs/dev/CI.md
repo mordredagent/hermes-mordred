@@ -28,52 +28,82 @@ repair is complete; historical restoration details remain in Git.
 
 ## `ci.yml` details
 
-The workflow has ten full-regression job definitions, plus event routing and
-draft critical feedback:
+The workflow has five job definitions, with Linux expanding to two workers
+only for final validation:
 
-1. **`test`** — Python/OS matrix; Ruff, shellcheck (one Linux cell), strict
-   mypy, pytest, coverage, and the status-skill drift guard.
-2. **`feature-extras`** — installs `ethereum`, `messaging`, and `tor-control`
-   and runs their focused tests so optional coverage cannot disappear behind
-   import skips.
-3. **`package-smoke`** — builds sdist then wheel, installs outside the checkout,
-   loads the single `mordred` plugin entry point plus the console script, and
-   checks shipped
-   native/offline/web/bootstrap assets.
-4. **`hermes-floor`** — pins `hermes-agent==0.13.0`, verifies the resolver kept
-   the pin, and runs the compatible default suite.
-5. **`integration-tor`** — Docker-based Tor, SOCKS5h, and provider-transport
-   integration tests. Tor bootstrap runs against the live Tor network; the
-   harness waits up to 240s per attempt and recreates the container once
-   before failing (`tests/integration/_docker.py`). A `BootstrapTimeout`
-   that survives both attempts is a network flake — re-run the job rather
-   than bypassing the CI gate.
-6. **`sekey-helper`** — compiles the Secure Enclave Swift helper on macOS.
-7. **`tpmkey-helper`** — checks the Rust crate, locked dependencies, MSRV, and
-   `tss-esapi` build.
-8. **`tpmkey-helper-tpm`** — runs the TPM backend against `swtpm` on Linux.
-9. **`windows-private-fs`** — scoped native ACL/path/publication/process tests on
-   Server 2022 with Python 3.11–3.13, plus an sdist-derived wheel smoke outside
-   the checkout. This is foundation coverage, not whole-Windows product support.
-10. **`winkey-helper`** — Windows native helper build and scoped helper tests.
+| Scope | Scheduled jobs | Python and validation |
+|---|---:|---|
+| Ordinary portable change | 3 | Policy, Ubuntu 3.12 default suite, acceptance |
+| Ordinary platform change | 4–5 | Adds one macOS and/or one Windows 3.12 worker |
+| Ready documentation-only PR | 2 | Policy and complete documentation contract checks |
+| Draft feedback | 3–5 | Critical preset on Ubuntu 3.12 and mapped platforms |
+| Final validation | 6 | Policy, Linux 3.11/3.13, macOS 3.11, Windows 3.11, acceptance |
 
-`ci-policy` routes known draft PR events to `critical-feedback`; all other
-events select the existing full regression jobs. Existing full job names and
-Python/OS matrices remain unchanged.
+`ci-policy` discovers the complete cumulative PR diff through paginated GitHub
+API responses. It checks the reported file count and rechecks head/base metadata;
+renames inspect both paths. It never classifies only the latest PR commit.
+`tools/ci_scope_paths.json` is a finite inventory of reviewed existing paths.
+New, removed, unknown, shared storage/bootstrap/crypto/authentication, native,
+installer, dependency, CI and tools changes conservatively require final
+validation when ready. Mapped component changes retain complete affected
+Windows test families, rather than selecting isolated passing cases.
+
+A `dev` push can use its `before..after` diff only when `before` is an ancestor
+and has successful accepted ordinary-or-final CI evidence on exactly `dev`.
+Missing, pending, cancelled, failed or inaccessible evidence, initial pushes and
+force pushes select final validation. This prevents a small follow-up commit
+from cancelling an untested broad change and then hiding it behind a short CI.
+`main` pushes, PRs targeting `main`, manual dispatch and `ci:full` select final
+validation. The label is read on existing PR events: apply it before the next
+synchronize/reopen/ready event, or dispatch CI manually. A label-only change does
+not start CI. PR event types remain opened, synchronize, reopened,
+ready_for_review and converted_to_draft; no whole-PR path filter is used.
 
 Key policy:
 
-- The test matrix covers Ubuntu and macOS with Python 3.11–3.13.
-- CI installs `.[dev,keyvault,extension]`; macOS adds `macos`. Do not assume
-  `ethereum` or `tor-control` imports are available in the main typing job.
-- Run `mypy --strict src tools scripts/keyvault_offline_digest.py`; a narrower
-  CLI target silently stops checking `tools/` or the shipped digest script.
-- GitHub Actions use immutable commit SHAs. Cargo commands use `--locked`.
-- The default pytest configuration excludes `integration` tests.
-- Required branch checks are the Ubuntu and macOS Python 3.12 `test` cells;
-  helper and integration jobs remain additional signals.
-- Live LLM and Secure Enclave tests have no automated workflow. VPN is the only
-  live-gated suite with a manual workflow.
+- Ubuntu ordinary/final workers run the complete default suite with coverage
+  >=80% and strict mypy. Drafts run critical feedback plus CI-tool tests.
+- The optional macOS worker runs the complete default suite, coverage, typing
+  and status guard; drafts retain critical feedback and the status guard.
+- There is exactly one Windows worker when requested. Ordinary workers run
+  complete mapped modules plus remaining critical cases; final workers run all
+  84 frozen native modules, helper validation and the outside-checkout wheel.
+- Static Ruff, formatting, shellcheck and status checks run once on Linux.
+  Main typing uses `.[dev,keyvault,extension]`, plus `macos` on macOS. Feature,
+  Hermes-floor, integration and swtpm packs have separate environments.
+- Final Linux 3.11 also runs feature-import proofs and focused suites, Hermes
+  0.13 compatibility, canonical/compatibility package smoke, Docker Tor,
+  TPM Rust/MSRV and swtpm/Linux Telegram checks as blocking steps. Linux 3.13
+  retains the complete default suite and typing. macOS absorbs Swift and TPM
+  Rust checks; Windows absorbs winkey stable/MSRV/build checks and wheel smoke.
+- `CI acceptance` always runs after all selected workers and fails if a worker,
+  pack or successful blocking step is missing. Unique OS/version/run/attempt
+  manifests avoid last-writer-wins matrix outputs. Feedback/documents cannot
+  qualify a production release. Rerun **all jobs** for accepted fresh evidence;
+  rerunning only failed jobs cannot reuse manifests from an older attempt.
+- Where branch protection is available, use the single stable `CI acceptance`
+  check rather than retired matrix checks. Repository settings are configured
+  separately from this YAML; a critical green remains feedback only.
+- Merge a ready PR only after acceptance for its current tested merge context
+  succeeds with the selected scope. Sensitive/unknown changes require final;
+  ordinary acceptance covers mapped non-foundation changes. A head/base update
+  invalidates previous context. Protection is currently unavailable, so this
+  remains an operator rule until repository settings can enforce it.
+- GitHub Actions use immutable commit SHAs; Cargo uses `--locked`. Default
+  pytest excludes integration. Live LLM/Secure Enclave remain explicitly gated,
+  and VPN remains manual-only. No scheduled full CI is added.
+
+The reduced matrix deliberately gives up native macOS/Windows Python 3.13
+coverage and routine all-platform coverage. Python 3.13 remains covered on
+Linux; final Windows and macOS cover the declared 3.11 floor. Adding back a
+platform/version requires evidence that its additional coverage merits the cost.
+
+Baseline observations from 13 current 25-job successful runs: median elapsed
+18.80 minutes and raw summed job wall time 192.15 minutes. A portable ordinary
+route has a 7.25-minute historical proxy (budget 8–12 minutes); the consolidated
+final route has an 80.88-minute raw-time proxy (budget 75–95 minutes). Windows
+serialization can extend final latency to 40–50+ minutes. These are estimates
+from existing jobs, not measured new-workflow savings or billed minutes.
 
 ### Critical feedback and full regression
 
@@ -113,24 +143,20 @@ acceptance. After focused iterations, run one full regression at final
 integration/code freeze. Reports or documentation do not justify repeatedly
 rerunning unchanged broad suites.
 
-Draft PR CI runs critical feedback on Ubuntu, macOS and Windows with Python
-3.12. Repository-wide Ruff and strict typing run once on Ubuntu, alongside
-Linux shellcheck; the existing Unix status-skill drift guard is retained. This
-avoids duplicate static work and adds no Windows typing gate. A Linux step also
-tests CI routing and the runner itself. Failures remain red; distinct critical JUnit artifacts are
-uploaded even after failures. Draft green means critical feedback passed;
-full acceptance remains pending. This policy delays discovery of unselected
-regressions until the final review gate in exchange for faster iteration.
+Known draft PRs run critical feedback on Ubuntu 3.12, adding macOS or Windows
+only for mapped platform changes. Linux runs repository-wide static checks,
+strict typing, shellcheck, the status guard and CI routing/runner tests. Draft
+documentation changes remain feedback; ready documentation-only PRs use the
+two-job documentation route. Failures remain red and JUnit artifacts are
+uploaded after failures. A critical green cannot supply an accepted dev baseline
+or release evidence. Unselected regressions can be discovered later in exchange
+for cheaper iteration.
 
-Converting a PR to ready-for-review triggers the full regression. Open/reopen
-and subsequent commits to ready PRs run full CI; `dev`/`main` pushes and manual
-`workflow_dispatch` also run full CI, including coverage and all original
-Python/OS/native gates. A manual dispatch runs full CI even from a draft branch.
-Unexpected event data selects full regression conservatively. Do not mark a PR
-ready solely to claim that the critical subset was full validation.
-PR events have no path filter, so conversion to ready-for-review cannot miss
-the full gate because of the files changed. Branch pushes retain their existing
-source/documentation path filters, now also including `AGENTS.md`.
+Ready conversion, open/reopen and ready updates select the complete appropriate
+scope from the cumulative diff. Sensitive or unknown changes receive final
+validation. `main`, manual dispatch and `ci:full` always receive final validation,
+including from a draft branch. Unexpected/incomplete discovery selects final
+conservatively. All branch pushes are observed, including unknown paths.
 
 Windows critical CI prepares a fresh checked home and `mordred` child under
 `USERPROFILE`, then exports `HERMES_HOME` before test collection. `RUNNER_TEMP`
@@ -162,38 +188,32 @@ the required checks for the affected platform. Avoid repeating the full sweep
 between unchanged batches. Coverage floors, platform gates, live-device gates,
 hook-name membership, and every consumed-field assertion remain in force.
 
-`windows-private-fs` runs three separate GitHub runners for each Python version
-(3.11, 3.12, 3.13). `tools/run_native_test_shard.py` assigns whole modules using
-deterministic longest-processing-time balancing from
-`tools/native_test_durations.json`, preserving selector order within each shard.
-The complete 82-module selector stays in the named native test step so the
-external frozen-native harness can continue extracting it. No native modules,
-assertions, security locks, timeouts, or tests are removed. A module appears
-once per Python version, and wheel build/smoke runs on shard 1 of each version.
-`fail-fast: false` preserves the other shards' evidence after a failure; each
-pytest nonzero exit fails its runner. Per-version/per-shard JUnit artifacts are
-uploaded with `always()`, and pytest prints its slowest 20 durations.
+`windows-private-fs` now uses one Server 2022 runner: Python 3.12 for mapped
+ordinary/draft feedback, or Python 3.11 for final validation. The named native
+step retains the entire 84-module selector, including the frozen 82-module hash,
+for the external harness. Final validation invokes `tools/run_native_test_shard.py`
+with `--shard-index 1 --shard-count 1`, so every module runs once on that worker.
+Ordinary validation uses `tools/run_ci_native_tests.py`: complete mapped modules
+replace their overlapping critical node IDs, and all other critical cases remain.
+No native tests, assertions, locks or timeouts are removed.
 
-For local reproduction, invoke the runner with `--shard-index 1 --shard-count 3
---junitxml native-1.xml` followed by the full selector from the workflow; repeat
-with indices 2 and 3 if testing the complete selector. Missing module weights
-use a visible nonzero one-second default, so new modules still run. Empty
-selectors, duplicates, invalid indices/counts, and malformed weights are errors.
+Wheel smoke runs once when its pack is selected; final always selects it.
+PowerShell checks each native exit code immediately. JUnit and worker manifests
+are unique per run attempt and uploaded with `always()`. Failed/skipped required
+steps cannot become accepted evidence. Final Windows gets a 90-minute timeout
+to accommodate serialization plus helper/wheel checks.
 
-The initial measured weights sum native JUnit testcase seconds. They estimate
-930.156, 930.156, and 930.157 seconds per shard (about 15.5 minutes), excluding
-runner provisioning, installation, collection, fixture effects, and wheel smoke.
-These are scheduling estimates, not measured shard wall times or a measured
-speedup. Nine runners trade additional duplicated setup for lower latency; use
-future per-shard JUnit and job wall times to assess the actual result.
+For local reproduction, use `--shard-index 1 --shard-count 1 --junitxml native.xml`
+with the complete selector from the workflow. The old sharding utility and
+measured duration inventory remain available for explicit local parallel runs;
+they no longer create hosted-CI fan-out. Missing weights use a visible nonzero
+default. Empty/duplicate selectors, bad indices/counts and malformed weights fail.
 
-The first full sharded run (`38014669836`, commit `5bf2b868d`) passed all nine
-Windows shards. Its slowest Windows job took 1112s (18m32s), compared with
-2826s (47m06s) for the earlier unsharded run: about 60.7% lower maximum job
-latency in this observed comparison. Summed Windows job wall times increased
-from 6952s to 8258s (about 18.8%), reflecting the runner/setup tradeoff; this
-is not a compute-saving claim or a controlled benchmark. Each Python version
-reported 2602 passed, 111 skipped, zero failures, with no duplicated node IDs.
+Historical comparison: the first nine-shard run (`38014669836`, `5bf2b868d`)
+reduced maximum Windows job latency from 47m06s to 18m32s, but increased summed
+Windows wall time from 6952s to 8258s. That setup duplication is why the current
+policy accepts longer final latency for fewer workers. Historical results are
+not evidence for the newly consolidated workflow.
 
 The installed-Hermes hook canary scans all Python sources owned by the
 `hermes-agent` distribution, including top-level modules outside `hermes_cli`,
@@ -305,9 +325,10 @@ approved as of 2026-10-08. WF0 assumption-probe evidence is recorded below;
 foundation execution and acceptance results are tracked in PR #192. Helper PR #190's 16 successful checks at `441083f61`
 are helper/regression evidence, not private-filesystem or whole-Windows acceptance.
 
-The scoped `windows-private-fs` job must use Server 2022 and Python
-3.11–3.13 with `.[dev,keyvault,extension]`. Its implementation and run evidence
-belong to the separate foundation PR. Native ACL/junction/lock/publication tests run there without a
+The scoped `windows-private-fs` job uses Server 2022 with
+`.[dev,keyvault,extension]`: Python 3.12 for mapped ordinary changes and Python
+3.11 for the complete final native selector. Its original foundation matrix and
+actual-host evidence remain historical acceptance records. Native ACL/junction/lock/publication tests run there without a
 TPM. Separate faults injected into the binding layer from real native calls.
 The existing macOS/Linux suite, coverage floor and reduced-extras typing stay
 required. Do not turn the recorded Windows baseline failures into blanket skips.
@@ -1340,7 +1361,7 @@ Required labels:
 `.github/dependabot.yml` keeps the SHA-pinned GitHub Actions current: weekly,
 with all action bumps grouped into one `ci`-labelled PR against `dev`. Scope is
 deliberately actions-only — Python dependencies are governed by
-`pyproject.toml` floors plus `uv.lock` and the `hermes-floor` job, so pip/uv
+`pyproject.toml` floors plus `uv.lock` and the Hermes-floor validation pack, so pip/uv
 update PRs would add review noise without a matching safety gain. It is not a
 workflow, so the expected-path list in [Auditing](#auditing) is unchanged.
 
@@ -1362,6 +1383,11 @@ not stored API tokens.
 - `expected-version`: exact PEP 440 version required in source, wheel metadata,
   and sdist metadata.
 - Production publishing accepts only `main` and never permits a CI-gate bypass.
+- `tools/check_ci_evidence.py` requires exact branch/SHA final acceptance from
+  `ci.yml` push/manual execution: matching run attempt, successful actual jobs,
+  complete workers/packs and retained acceptance artifact. Ordinary, docs,
+  critical, stale or expired evidence is insufficient. TestPyPI may validate
+  the selected branch; its existing explicit bypass remains TestPyPI-only.
 - The build must produce exactly one wheel and one sdist with matching name and
   version.
 
@@ -1393,7 +1419,8 @@ add-first with the new repository claim while preserving `release.yml` and the
    version or edit version surfaces separately.
 2. Run the full local checks and merge the version bump to `dev` through a PR.
 3. Open the release PR from `dev` to `main`, aggregate the included PRs'
-   Changes/Fixes entries, confirm CI, and merge.
+   Changes/Fixes entries, confirm final CI, and merge. Wait for final accepted
+   evidence on the resulting exact `main` SHA before publishing.
 4. Dispatch TestPyPI from `main` with `mode=release` and the exact expected
    version.
 5. In a fresh venv, install `hermes-mordred` from TestPyPI (using PyPI as the

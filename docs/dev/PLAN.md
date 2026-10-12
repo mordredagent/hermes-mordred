@@ -1254,6 +1254,11 @@ replace: bool) -> None` owns the rename commit-state transition.
 
 ### Task WF5: Run scoped CI, packaged-wheel and actual-host acceptance
 
+The completed matrix tasks below describe the original foundation rollout.
+Current hosted execution is consolidated by [`CI.md`](./CI.md): mapped ordinary
+Windows 3.12 or final Windows 3.11, one runner with the complete frozen selector.
+Historical actual-host evidence and live acceptance requirements still apply.
+
 **Files:** Add `tests/integration/test_private_fs_windows.py`; modify
 `.github/workflows/ci.yml`, `docs/dev/CI.md`, `docs/dev/TODO.md`.
 
