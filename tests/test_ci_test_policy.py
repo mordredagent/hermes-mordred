@@ -120,11 +120,19 @@ def test_overrides_and_unknown_actions_never_reduce_work(payload):
 
 
 def test_docs_pr_has_no_execution_workers_but_readme_needs_package():
-    result = decide(path="docs/dev/CI.md")
+    result = decide(path="docs/user/USAGE.md")
     assert result["mode"] == "docs"
     assert result["linux_versions"] == result["linux_packs"] == []
     assert result["macos"] is result["windows"] is False
     assert decide(path="README.md")["linux_packs"] == ["main", "static", "package"]
+
+
+@pytest.mark.parametrize("path", ["docs/dev/CI.md", "docs/dev/SPEC.md", "docs/dev/PLAN.md", "docs/dev/setup.md"])
+def test_developer_contract_changes_require_final_validation(path):
+    result = decide(path=path)
+    assert result["mode"] == "final"
+    assert result["linux_versions"] == ["3.11", "3.13"]
+    assert result["macos"] is result["windows"] is True
 
 
 @pytest.mark.parametrize("failure", ["api_error", "missing_count", "missing_draft", "labels", "sha", "ref", "base_ref"])

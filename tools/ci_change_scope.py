@@ -95,7 +95,7 @@ def windows_family_modules(families: Sequence[str]) -> tuple[str, ...]:
 def _sensitive(path: str) -> bool:
     # Overrides stay ahead of the inventory: an accidental entry cannot grant a
     # portable route to a shared custody/bootstrap boundary.
-    if path.startswith(("native/", "packaging/", ".github/", "tools/")) or path in {
+    if path.startswith(("native/", "packaging/", ".github/", "tools/", "docs/dev/")) or path in {
         "AGENTS.md",
         "pyproject.toml",
         "uv.lock",
@@ -255,6 +255,8 @@ def classify_changes(changes: object, *, inventory_path: Path = INVENTORY) -> Sc
             entry = paths.get(path)
             if not isinstance(entry, list) or not all(isinstance(tag, str) and tag in TAGS for tag in entry):
                 return final_scope("path has no reviewed ownership")
+            if "docs" in entry and (not path.startswith("docs/user/") or not path.endswith(".md")):
+                return final_scope("documentation route is limited to reviewed user Markdown")
             tags.update(entry)
             all_docs = all_docs and entry == ["docs"]
         families = tuple(family for family in FAMILIES if family in tags)

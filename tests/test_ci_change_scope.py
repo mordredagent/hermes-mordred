@@ -87,6 +87,13 @@ def test_sensitive_overrides_win_even_if_inventory_accidentally_allowlists_them(
     assert scope_tool().classify_changes([change("src/mordred_hermes/keyvault/api.py")], inventory_path=path).final
 
 
+@pytest.mark.parametrize("path", ["docs/dev/CI.md", "src/mordred_hermes/llm_guard/health.py", "docs/user/example.py"])
+def test_docs_tag_cannot_bypass_user_markdown_boundary(tmp_path, path):
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(json.dumps({"schema_version": 1, "paths": {path: ["docs"]}}))
+    assert scope_tool().classify_changes([change(path)], inventory_path=inventory).final
+
+
 def test_whole_windows_family_preserves_native_selector_order():
     result = scope_tool().classify_changes([change("tests/test_network_windows_tor.py")])
     assert result.windows_modules == (

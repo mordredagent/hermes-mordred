@@ -35,7 +35,7 @@ only for final validation:
 |---|---:|---|
 | Ordinary portable change | 3 | Policy, Ubuntu 3.12 default suite, acceptance |
 | Ordinary platform change | 4–5 | Adds one macOS and/or one Windows 3.12 worker |
-| Ready documentation-only PR | 2 | Policy and complete documentation contract checks |
+| Ready allowlisted user-documentation PR | 2 | Policy and complete documentation contract checks |
 | Draft feedback | 3–5 | Critical preset on Ubuntu 3.12 and mapped platforms |
 | Final validation | 6 | Policy, Linux 3.11/3.13, macOS 3.11, Windows 3.11, acceptance |
 
@@ -43,6 +43,8 @@ only for final validation:
 API responses. It checks the reported file count and rechecks head/base metadata;
 renames inspect both paths. It never classifies only the latest PR commit.
 `tools/ci_scope_paths.json` is a finite inventory of reviewed existing paths.
+Only reviewed existing Markdown under `docs/user/` can take the documents route;
+developer policy/version/setup contracts require final validation.
 New, removed, unknown, shared storage/bootstrap/crypto/authentication, native,
 installer, dependency, CI and tools changes conservatively require final
 validation when ready. Mapped component changes retain complete affected
@@ -146,7 +148,7 @@ rerunning unchanged broad suites.
 Known draft PRs run critical feedback on Ubuntu 3.12, adding macOS or Windows
 only for mapped platform changes. Linux runs repository-wide static checks,
 strict typing, shellcheck, the status guard and CI routing/runner tests. Draft
-documentation changes remain feedback; ready documentation-only PRs use the
+user-documentation changes remain feedback; ready allowlisted user-doc PRs use the
 two-job documentation route. Failures remain red and JUnit artifacts are
 uploaded after failures. A critical green cannot supply an accepted dev baseline
 or release evidence. Unselected regressions can be discovered later in exchange

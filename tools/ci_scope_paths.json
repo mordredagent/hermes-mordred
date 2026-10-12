@@ -90,54 +90,6 @@
     "README.md": [
       "package"
     ],
-    "docs/dev/CI.md": [
-      "docs"
-    ],
-    "docs/dev/HOOK_PAYLOADS.md": [
-      "docs"
-    ],
-    "docs/dev/PATHS.md": [
-      "docs"
-    ],
-    "docs/dev/PLAN.md": [
-      "docs"
-    ],
-    "docs/dev/POLICY.md": [
-      "docs"
-    ],
-    "docs/dev/README.md": [
-      "docs"
-    ],
-    "docs/dev/ROADMAP.md": [
-      "docs"
-    ],
-    "docs/dev/SLACK_E2E.md": [
-      "docs"
-    ],
-    "docs/dev/SPEC.md": [
-      "docs"
-    ],
-    "docs/dev/STATE_DB_ENCRYPTION.md": [
-      "docs"
-    ],
-    "docs/dev/TODO.md": [
-      "docs"
-    ],
-    "docs/dev/UPSTREAM.md": [
-      "docs"
-    ],
-    "docs/dev/WINDOWS_AUDIT_IO.md": [
-      "docs"
-    ],
-    "docs/dev/WINDOWS_CONFIG_IO.md": [
-      "docs"
-    ],
-    "docs/dev/WINDOWS_FEASIBILITY.md": [
-      "docs"
-    ],
-    "docs/dev/setup.md": [
-      "docs"
-    ],
     "docs/user/EXTENSION.md": [
       "docs"
     ],
