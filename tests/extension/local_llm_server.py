@@ -17,6 +17,7 @@ class LocalLlmServer:
         delay: float = 0,
         response: bytes | None = None,
         truncate: bool = False,
+        chunked: bool = False,
     ) -> None:
         self.requests: list[dict[str, Any]] = []
         self.release = threading.Event()
@@ -45,7 +46,10 @@ class LocalLlmServer:
                     )
                 self.send_response(actual_status)
                 self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Content-Length", str(len(payload) + (100 if truncate else 0)))
+                if chunked:
+                    self.send_header("Transfer-Encoding", "chunked")
+                else:
+                    self.send_header("Content-Length", str(len(payload) + (100 if truncate else 0)))
                 if 300 <= actual_status < 400:
                     self.send_header("Location", "/redirect-target")
                 self.end_headers()

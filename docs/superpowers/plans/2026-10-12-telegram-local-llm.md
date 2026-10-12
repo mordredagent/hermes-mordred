@@ -84,6 +84,7 @@
 
 ## Review decisions
 
+- Pre-merge review additionally reproduced response-body/URL-path disclosure from the audit fallback's chained DEBUG traceback after a local transport failure. A real malformed-chunked HTTP regression failed before the fix; fallback diagnostics now include only the exception class. The required endpoint/model placeholders were also added to the authentication remedy.
 - A fresh review found that clean HTTP EOF could incorrectly pass the new probe after partial SSE text. Two failing regressions proved the issue; the probe now requires `[DONE]` or a valid finish reason. Existing ask/Venice stream behavior is retained for compatibility, so ordinary ask completion strictness is outside this change.
 - Existing CLI success output may include the configured base path, and ordinary doctor still inspects archive filesystem metadata. New failure diagnostics omit arbitrary paths, and the explicit inference probe never decrypts the archive.
 - Live model evidence is from macOS and a small Qwen model, using synthetic credentials/archive and test hardware sealing. Linux physical TPM and the reported 27B model remain unverified.

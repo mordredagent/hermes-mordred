@@ -175,7 +175,10 @@ def local_failure_detail(base_url: str, failure: str, status: int | None = None)
 
     hint = "Check the local server and run hermes-mordred telegram doctor --probe-llm."
     if status in (401, 403):
-        hint = "Configure the server's API key with hermes-mordred telegram local-llm --api-key."
+        hint = (
+            "Configure the server's API key with hermes-mordred telegram local-llm "
+            "--endpoint <base-url> --model <model-id> --api-key."
+        )
     elif status == 404:
         hint = "Check the saved model and endpoint base path (usually /v1, without /chat/completions)."
     elif status is not None and 300 <= status < 400:

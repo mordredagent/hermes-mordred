@@ -123,8 +123,10 @@ def _audit(event: str, decision: str, **fields: Any) -> None:
 
         writer = build_audit_writer(hermes_home() / "mordred" / "audit.log")
         safe_audit_append(writer, {"event": event, "decision": decision, "reason": None, **fields}, logger=_log)
-    except Exception:
-        _log.debug("telegram audit append failed", exc_info=True)
+    except Exception as exc:
+        # This can run inside a transport exception handler. Its traceback chain
+        # may contain response bytes or a credential-bearing endpoint path.
+        _log.debug("telegram audit append failed (%s)", type(exc).__name__)
 
 
 def check_llm_policy(backend: str, base_url: str) -> None:

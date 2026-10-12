@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -42,13 +44,16 @@ def ask_local(tmp_path, monkeypatch):
     )
     archive.save_index(store.ArchiveIndex(dialogs={-5: store.DialogInfo(-5, "group", "Finance", message_count=1)}))
     events = []
+    original_audit = service._audit
     monkeypatch.setattr(
         service,
         "_audit",
         lambda event, decision, **fields: events.append({"event": event, "decision": decision, **fields}),
     )
 
-    def run(endpoint, *, timeout=2, credentials=None):
+    def run(endpoint, *, timeout=2, credentials=None, real_audit=False):
+        if real_audit:
+            monkeypatch.setattr(service, "_audit", original_audit)
         vault = credentials or MemorySecrets(endpoint)
         svc = service.TelegramService(
             secret_store=vault,
@@ -66,6 +71,32 @@ def ask_local(tmp_path, monkeypatch):
         return json.loads(result), events
 
     return run
+
+
+def test_failed_audit_does_not_log_transport_exception_secrets(ask_local, monkeypatch, caplog):
+    from mordred_hermes import _audit_support
+
+    def broken_writer(_path):
+        raise OSError("AUDIT-SECRET")
+
+    monkeypatch.setattr(_audit_support, "build_audit_writer", broken_writer)
+    with (
+        caplog.at_level(logging.DEBUG, logger=service._log.name),
+        LocalLlmServer(chunked=True, response=b"BODY-SECRET\r\n") as peer,
+    ):
+        endpoint = peer.origin + "/PATH-SECRET/v1"
+        vault = MemorySecrets(endpoint)
+        vault.value = replace(vault.value, local_api_key="KEY-SECRET")
+        result, _ = ask_local(endpoint, credentials=vault, real_audit=True)
+        assert result["error"] == "local_llm_unavailable"
+        assert result["detail"]["endpoint"] == peer.origin
+        assert len(peer.requests) == 1
+    records = [record for record in caplog.records if record.name == service._log.name]
+    assert records  # A failed audit remains observable without exposing the active exception chain.
+    exposed = caplog.text + json.dumps(result)
+    for secret in ("BODY-SECRET", "PATH-SECRET", "KEY-SECRET", "AUDIT-SECRET", "PRIVATE-MESSAGE"):
+        assert secret not in exposed
+    assert all(record.exc_info is None for record in records)
 
 
 @pytest.mark.parametrize(

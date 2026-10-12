@@ -496,6 +496,20 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 
 ## Manual live-device validation log
 
+- **2026-10-12 — Pre-merge Telegram review follow-up.**
+  After integration with `dev` at `d3ad9d795`, independent review reproduced
+  a diagnostic disclosure when malformed local HTTP coincided with audit
+  writer construction failure: DEBUG traceback logging included the active
+  transport exception's response bytes and URL path. A real malformed-chunked
+  loopback regression through `telegram_ask` failed before the fix. The audit
+  fallback now logs only the exception class, without traceback or exception
+  text. The complete affected modules passed **307 tests in 11.28s**; Ruff,
+  formatting, strict mypy (266 sources), and shellcheck passed. The 401/403
+  remediation also includes the required endpoint/model placeholders.
+  Final integrated regression and hosted acceptance are recorded in PR #238.
+  The user subsequently confirmed the installed Hermes/Telegram workflow
+  after the CLI toolset correction described below.
+
 - **2026-10-12 — Follow-up: Telegram discovery in the actual Hermes session.**
   The user's Qwen session could read Mordred's Telegram prompt section but
   `tool_search` had only five deferred tools and returned no Telegram matches.
