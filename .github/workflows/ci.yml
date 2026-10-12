@@ -124,11 +124,11 @@ jobs:
         id: feature_install
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'features') && matrix.python-version == needs.ci-policy.outputs.support_python
         run: |-
-          python -m venv .venv-features
-          .venv-features/bin/python -m pip install -e ".[dev,keyvault,extension,ethereum,messaging,tor-control,telegram]"
+          python -m venv "$RUNNER_TEMP/mordred-ci-features"
+          "$RUNNER_TEMP/mordred-ci-features/bin/python" -m pip install -e ".[dev,keyvault,extension,ethereum,messaging,tor-control,telegram]"
       - name: Require and exercise every feature dependency
         run: |
-          .venv-features/bin/python - <<'PY'
+          "$RUNNER_TEMP/mordred-ci-features/bin/python" - <<'PY'
           import contextlib
           import io
 
@@ -169,7 +169,7 @@ jobs:
         env:
           HERMES_HOME: /tmp/hermes-mordred-ci-home
         run: |
-          .venv-features/bin/python -m pytest -q -rs \
+          "$RUNNER_TEMP/mordred-ci-features/bin/python" -m pytest -q -rs \
             tests/test_keyvault_ethereum.py \
             tests/test_keyvault_bip32.py \
             tests/test_wizard_keyvault_eth_cli.py \
@@ -183,13 +183,13 @@ jobs:
         id: floor_install
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'floor') && matrix.python-version == needs.ci-policy.outputs.support_python
         run: |-
-          python -m venv .venv-floor
-          .venv-floor/bin/python -m pip install "hermes-agent==0.13.0"
-          .venv-floor/bin/python -m pip install -e ".[dev,keyvault,extension]"
+          python -m venv "$RUNNER_TEMP/mordred-ci-floor"
+          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pip install "hermes-agent==0.13.0"
+          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pip install -e ".[dev,keyvault,extension]"
       - name: Guard — resolver must not have upgraded hermes-agent off the floor
         run: |
           set -euo pipefail
-          INSTALLED_VERSION="$(.venv-floor/bin/python -c 'import importlib.metadata as m; print(m.version("hermes-agent"))')"
+          INSTALLED_VERSION="$("$RUNNER_TEMP/mordred-ci-floor/bin/python" -c 'import importlib.metadata as m; print(m.version("hermes-agent"))')"
           if [ "$INSTALLED_VERSION" != "0.13.0" ]; then
             echo "::error::hermes-agent floor test is void: resolver left hermes-agent at $INSTALLED_VERSION instead of the pinned 0.13.0, so pyproject.toml's declared floor was not actually exercised."
             exit 1
@@ -199,17 +199,18 @@ jobs:
       - name: pytest against the hermes-agent floor
         env:
           HERMES_HOME: /tmp/hermes-mordred-ci-home
-        run: .venv-floor/bin/python -m pytest -q --deselect tests/test_provider_identity.py::test_replica_matches_hermes_source --deselect tests/test_provider_transport_flagger.py::TestRegistrySync::test_known_provider_slugs_are_real_hermes_ids
+        run: >-
+          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pytest -q --deselect tests/test_provider_identity.py::test_replica_matches_hermes_source --deselect tests/test_provider_transport_flagger.py::TestRegistrySync::test_known_provider_slugs_are_real_hermes_ids
         id: floor_tests
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'floor') && matrix.python-version == needs.ci-policy.outputs.support_python
       - name: Build canonical and compatibility artifacts
         id: package_build
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'package') && matrix.python-version == needs.ci-policy.outputs.support_python
         run: |-
-          python -m venv .venv-package
-          .venv-package/bin/python -m pip install build
-          .venv-package/bin/python -m build --outdir dist
-          .venv-package/bin/python -m build --outdir compat-dist packaging/mordred-hermes-compat
+          python -m venv "$RUNNER_TEMP/mordred-ci-package"
+          "$RUNNER_TEMP/mordred-ci-package/bin/python" -m pip install build
+          "$RUNNER_TEMP/mordred-ci-package/bin/python" -m build --outdir dist
+          "$RUNNER_TEMP/mordred-ci-package/bin/python" -m build --outdir compat-dist packaging/mordred-hermes-compat
       - name: Fresh-install and smoke entry points plus shipped assets
         env:
           SMOKE_VENV: ${{ runner.temp }}/mordred-wheel-smoke
@@ -322,8 +323,8 @@ jobs:
         id: integration_install
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'tor') && matrix.python-version == needs.ci-policy.outputs.support_python
         run: |-
-          python -m venv .venv-integration
-          .venv-integration/bin/python -m pip install -e ".[dev,integration]"
+          python -m venv "$RUNNER_TEMP/mordred-ci-integration"
+          "$RUNNER_TEMP/mordred-ci-integration/bin/python" -m pip install -e ".[dev,integration]"
       - name: Verify docker compose is available
         run: |
           docker --version
@@ -340,7 +341,7 @@ jobs:
         env:
           HERMES_HOME: /tmp/hermes-mordred-ci-home
         run: |
-          .venv-integration/bin/python -m pytest -v -m integration \
+          "$RUNNER_TEMP/mordred-ci-integration/bin/python" -m pytest -v -m integration \
             tests/integration/test_tor.py \
             tests/integration/test_socks5h_libs.py \
             tests/integration/test_provider_transport.py
@@ -429,9 +430,9 @@ jobs:
           MORDRED_TPMKEY_HELPER: ${{ github.workspace }}/native/tpmkey-helper/target/debug/mordred-hermes-tpmkey
         run: |
           cargo build --locked --manifest-path native/tpmkey-helper/Cargo.toml
-          python -m venv .venv-swtpm
-          .venv-swtpm/bin/python -m pip install -e ".[dev,keyvault,extension,telegram]"
-          .venv-swtpm/bin/python -m pytest -v -o addopts="" tests/integration/test_linux_telegram_tpm.py
+          python -m venv "$RUNNER_TEMP/mordred-ci-swtpm"
+          "$RUNNER_TEMP/mordred-ci-swtpm/bin/python" -m pip install -e ".[dev,keyvault,extension,telegram]"
+          "$RUNNER_TEMP/mordred-ci-swtpm/bin/python" -m pytest -v -o addopts="" tests/integration/test_linux_telegram_tpm.py
         id: swtpm_python
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'swtpm') && matrix.python-version == needs.ci-policy.outputs.support_python
       - name: Record worker checks
@@ -817,6 +818,8 @@ jobs:
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    env:
+      HERMES_HOME: /tmp/mordred-ci-docs-home
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Download immutable run policy
@@ -838,13 +841,13 @@ jobs:
         id: docs_install
         if: needs.ci-policy.outputs.mode == 'docs'
         run: |-
-          python -m venv .venv-docs
-          .venv-docs/bin/python -m pip install -e ".[dev,keyvault,extension]"
+          python -m venv "$RUNNER_TEMP/mordred-ci-docs"
+          "$RUNNER_TEMP/mordred-ci-docs/bin/python" -m pip install -e ".[dev,keyvault,extension]"
       - name: Complete documentation contract checks
         id: docs_tests
         if: needs.ci-policy.outputs.mode == 'docs'
         run: >-
-          .venv-docs/bin/python -m pytest -q tests/test_docs_links.py
+          "$RUNNER_TEMP/mordred-ci-docs/bin/python" -m pytest -q tests/test_docs_links.py
           tests/test_ux_guidance_guard.py tests/test_packaging_versions.py tests/test_user_installer.py
       - name: Require the complete selected scope
         id: accept

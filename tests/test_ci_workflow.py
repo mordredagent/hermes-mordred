@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import json
 import re
+import shlex
 from pathlib import Path
 
 import pytest
@@ -114,3 +115,25 @@ def test_documentation_route_runs_every_required_contract_module() -> None:
         "tests/test_packaging_versions.py",
         "tests/test_user_installer.py",
     }
+
+
+def test_auxiliary_environments_are_outside_repository_document_scans() -> None:
+    jobs = workflow()["jobs"]
+    auxiliary = {
+        "feature_install",
+        "floor_install",
+        "package_build",
+        "integration_install",
+        "swtpm_python",
+        "docs_install",
+    }
+    checked = set()
+    for job in jobs.values():
+        for step in job["steps"]:
+            if step.get("id") not in auxiliary:
+                continue
+            creation = next(line for line in step["run"].splitlines() if line.startswith("python -m venv "))
+            target = shlex.split(creation)[-1]
+            assert target.startswith("$RUNNER_TEMP/"), f"{step['id']} dependencies would enter repository scans"
+            checked.add(step["id"])
+    assert checked == auxiliary

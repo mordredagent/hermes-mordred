@@ -73,6 +73,9 @@ Key policy:
 - Static Ruff, formatting, shellcheck and status checks run once on Linux.
   Main typing uses `.[dev,keyvault,extension]`, plus `macos` on macOS. Feature,
   Hermes-floor, integration and swtpm packs have separate environments.
+  Auxiliary environments, including the documentation-test environment,
+  live under `RUNNER_TEMP` outside the checkout so dependency documentation
+  cannot enter repository Markdown or packaging scans.
 - Final Linux 3.11 also runs feature-import proofs and focused suites, Hermes
   0.13 compatibility, canonical/compatibility package smoke, Docker Tor,
   TPM Rust/MSRV and swtpm/Linux Telegram checks as blocking steps. Linux 3.13
