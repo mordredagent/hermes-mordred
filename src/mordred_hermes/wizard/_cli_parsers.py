@@ -232,6 +232,12 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     p_local = tsub.add_parser("local-llm", help="Send questions to a model on this machine (loopback only)")
     p_local.add_argument("--endpoint", required=True, help="e.g. http://127.0.0.1:11434/v1")
     p_local.add_argument("--model", required=True, help="Model name served by that endpoint")
+    local_auth = p_local.add_mutually_exclusive_group()
+    local_auth.add_argument("--api-key", action="store_true", help="Prompt for a local API key (hidden; stored sealed)")
+    local_auth.add_argument(
+        "--api-key-env", metavar="NAME", help="Import a local API key once from this environment variable"
+    )
+    local_auth.add_argument("--clear-api-key", action="store_true", help="Remove the stored local API key")
     p_local.set_defaults(func=_handle_telegram)
     p_migrate = tsub.add_parser("migrate-tee", help="Move vault-stored credentials into the Secure Enclave seal")
     p_migrate.add_argument(

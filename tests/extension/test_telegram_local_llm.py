@@ -121,3 +121,36 @@ def test_success_still_returns_the_local_answer(ask_local):
         assert "venice_parameters" not in peer.requests[0]["body"]
         assert peer.requests[0]["authorization"] is None
     assert not any(event["event"] == "telegram.ask.failed" for event in events)
+
+
+def test_authenticated_server_answers_after_cli_key_configuration(ask_local, monkeypatch, capsys):
+    import argparse
+
+    from mordred_hermes.wizard import _cli_parsers, telegram_cli
+
+    with LocalLlmServer(api_key="LOCAL-SECRET") as peer:
+        vault = MemorySecrets(peer.endpoint)
+        result, _ = ask_local(peer.endpoint, credentials=vault)
+        assert result["error"] == "local_llm_unauthorized"
+        monkeypatch.setenv("TEST_LOCAL_KEY", "LOCAL-SECRET")
+        monkeypatch.setattr(telegram_cli, "_secret_store", lambda: vault)
+        parser = argparse.ArgumentParser()
+        _cli_parsers._add_telegram(parser.add_subparsers())
+        args = parser.parse_args(
+            [
+                "telegram",
+                "local-llm",
+                "--endpoint",
+                peer.endpoint,
+                "--model",
+                "synthetic-model",
+                "--api-key-env",
+                "TEST_LOCAL_KEY",
+            ]
+        )
+        assert args.func(args) == 0
+        monkeypatch.delenv("TEST_LOCAL_KEY")  # runtime must use the saved key, never the environment
+        result, events = ask_local(peer.endpoint, credentials=vault)
+        assert result["answer"] == "The budget moved."
+        assert peer.requests[-1]["authorization"] == "Bearer LOCAL-SECRET"
+    assert "LOCAL-SECRET" not in json.dumps([result, events]) + capsys.readouterr().out

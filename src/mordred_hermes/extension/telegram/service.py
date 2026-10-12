@@ -469,6 +469,7 @@ class TelegramService:
             venice_model=value.venice_model or os.environ.get(venice.MODEL_ENV) or venice.DEFAULT_MODEL,
             local_endpoint=value.local_endpoint,
             local_model=value.local_model,
+            local_api_key=value.local_api_key,
         )
 
     async def ask(self, request: AskRequest, on_meta: Callable[[AskResult], None]) -> AsyncIterator[str]:

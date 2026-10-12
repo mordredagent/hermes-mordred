@@ -29,7 +29,7 @@ import codecs
 import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
@@ -56,7 +56,7 @@ class VeniceError(RuntimeError):
 
 @dataclass(frozen=True)
 class VeniceConfig:
-    api_key: str
+    api_key: str = field(repr=False)
     model: str = DEFAULT_MODEL
     base_url: str = DEFAULT_BASE_URL
 

@@ -115,6 +115,9 @@ def _report(code: str) -> int:
         "tee_auth_cancelled": "Touch ID / passcode was cancelled, so the credentials stayed sealed.",
         "local_endpoint_invalid": "the local model endpoint must be http(s)://127.0.0.1:<port>/... or "
         "http(s)://[::1]:<port>/... (loopback only, with an explicit port).",
+        "local_api_key_invalid": "the local API key must be a nonempty ASCII token without whitespace or control characters.",
+        "local_api_key_missing": "the selected API-key environment variable is not set. Set it or use --api-key for hidden input.",
+        "local_api_key_options": "choose only one of --api-key, --api-key-env and --clear-api-key.",
         "memory_encryption_required": "Telegram needs agent-memory encryption on, so nothing Hermes remembers "
         f"about your chats is stored in plaintext. Run {memory_setup}, restart Hermes, then try again "
         "(`hermes-mordred telegram setup` does this for you).",
@@ -648,9 +651,18 @@ def telegram_venice(*, model: str | None, secret_fn: InputFn = getpass.getpass, 
     return 0
 
 
-def telegram_local_llm(*, endpoint: str, model: str, store: Any = None) -> int:
+def telegram_local_llm(
+    *,
+    endpoint: str,
+    model: str,
+    store: Any = None,
+    api_key: bool = False,
+    api_key_env: str | None = None,
+    clear_api_key: bool = False,
+    secret_fn: InputFn = getpass.getpass,
+) -> int:
     """Send questions to a model on THIS machine instead of Venice."""
-    from ..extension.telegram.llm import LlmConfigError, normalize_local_endpoint
+    from ..extension.telegram.llm import LlmConfigError, normalize_local_endpoint, validate_local_api_key
     from ..extension.telegram.secrets import TelegramSecretsError
 
     try:
@@ -660,6 +672,17 @@ def telegram_local_llm(*, endpoint: str, model: str, store: Any = None) -> int:
     if not model.strip():
         _term.emit_error("a model name is required.")
         return 1
+    if sum((api_key, api_key_env is not None, clear_api_key)) > 1:
+        return _report("local_api_key_options")
+    key = None
+    if api_key or api_key_env is not None:
+        raw_key = secret_fn("Local API key (hidden, stored sealed): ") if api_key else os.environ.get(api_key_env or "")
+        if raw_key is None:
+            return _report("local_api_key_missing")
+        try:
+            key = validate_local_api_key(raw_key)
+        except LlmConfigError as exc:
+            return _report(exc.code)
     from ..extension.telegram.secrets import empty_secrets
 
     secrets_store = store if store is not None else _secret_store()
@@ -673,14 +696,25 @@ def telegram_local_llm(*, endpoint: str, model: str, store: Any = None) -> int:
         ensure = None if windows else getattr(secrets_store, "ensure_key", None)
         if ensure is not None:
             ensure()
-        secrets_store.update(
-            lambda old: replace(
+
+        def updated(old: Any) -> Any:
+            saved_key = key
+            if not api_key and api_key_env is None and not clear_api_key and old is not None:
+                try:
+                    same_endpoint = normalize_local_endpoint(old.local_endpoint or "") == canonical
+                except LlmConfigError:
+                    same_endpoint = False
+                if same_endpoint:
+                    saved_key = old.local_api_key
+            return replace(
                 old if old is not None else empty_secrets(),
                 backend="local",
                 local_endpoint=canonical,
                 local_model=model.strip(),
+                local_api_key=saved_key,
             )
-        )
+
+        secrets_store.update(updated)
     except TelegramSecretsError as exc:
         return _report(exc.code)
     print(f"Questions now go only to the local model at {canonical} (never through a proxy).")
@@ -751,7 +785,13 @@ def cli_telegram(args: argparse.Namespace) -> int:
     if command == "venice":
         return telegram_venice(model=args.model)
     if command == "local-llm":
-        return telegram_local_llm(endpoint=args.endpoint, model=args.model)
+        return telegram_local_llm(
+            endpoint=args.endpoint,
+            model=args.model,
+            api_key=bool(getattr(args, "api_key", False)),
+            api_key_env=getattr(args, "api_key_env", None),
+            clear_api_key=bool(getattr(args, "clear_api_key", False)),
+        )
     if command == "migrate-tee":
         return telegram_migrate_tee(require_presence=not getattr(args, "no_touch_id", False))
     print(
