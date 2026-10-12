@@ -850,7 +850,7 @@ def test_acceptance_cli_writes_complete_manifest_only_after_validation(tmp_path,
     assert tool.validate_acceptance(evidence)["tested_sha"] == SHA
 
 
-def nullable_pr_context(tmp_path):
+def pr_event_context(tmp_path):
     p = policy()
     p.update(
         event_name="pull_request",
@@ -874,10 +874,10 @@ def nullable_pr_context(tmp_path):
     return p, event, environ
 
 
-@pytest.mark.parametrize("raw_merge", [None, "missing", SHA])
-def test_pr_event_merge_field_can_be_unavailable_when_policy_matches_github_sha(tmp_path, raw_merge):
+@pytest.mark.parametrize("raw_merge", [None, "missing", SHA, "d" * 40])
+def test_pr_event_merge_field_is_advisory_when_policy_matches_github_sha(tmp_path, raw_merge):
     tool = evidence_tool()
-    p, event, environ = nullable_pr_context(tmp_path)
+    p, event, environ = pr_event_context(tmp_path)
     if raw_merge == "missing":
         del event["pull_request"]["merge_commit_sha"]
     else:
@@ -890,17 +890,17 @@ def test_pr_event_merge_field_can_be_unavailable_when_policy_matches_github_sha(
 
 @pytest.mark.parametrize(
     "mutation",
-    ["head", "base", "number", "nonnull_merge", "empty_merge", "policy_merge", "github_sha", "workflow", "ref"],
+    ["head", "base", "number", "policy_merge", "github_sha", "workflow", "ref"],
 )
-def test_nullable_pr_event_does_not_relax_other_provenance_checks(tmp_path, mutation):
+@pytest.mark.parametrize("raw_merge", [None, "d" * 40])
+def test_advisory_pr_merge_does_not_relax_other_provenance_checks(tmp_path, mutation, raw_merge):
     tool = evidence_tool()
-    p, event, environ = nullable_pr_context(tmp_path)
+    p, event, environ = pr_event_context(tmp_path)
+    event["pull_request"]["merge_commit_sha"] = raw_merge
     if mutation in ("head", "base"):
         event["pull_request"][mutation]["sha"] = "d" * 40
     elif mutation == "number":
         event["number"] = 8
-    elif mutation in ("nonnull_merge", "empty_merge"):
-        event["pull_request"]["merge_commit_sha"] = "d" * 40 if mutation == "nonnull_merge" else ""
     elif mutation == "policy_merge":
         p["pr"]["merge_sha"] = "d" * 40
     elif mutation == "github_sha":
@@ -909,6 +909,16 @@ def test_nullable_pr_event_does_not_relax_other_provenance_checks(tmp_path, muta
         environ["GITHUB_WORKFLOW_REF"] = "owner/repo/.github/workflows/other.yml@refs/pull/7/merge"
     else:
         environ["GITHUB_REF"] = "refs/pull/8/merge"
+    Path(environ["GITHUB_EVENT_PATH"]).write_text(json.dumps(event))
+    with pytest.raises(ValueError):
+        tool.validate_environment(p, environ)
+
+
+@pytest.mark.parametrize("raw_merge", ["", "not-a-sha", "g" * 40, [], {}, True])
+def test_malformed_nonnull_pr_merge_metadata_is_rejected(tmp_path, raw_merge):
+    tool = evidence_tool()
+    p, event, environ = pr_event_context(tmp_path)
+    event["pull_request"]["merge_commit_sha"] = raw_merge
     Path(environ["GITHUB_EVENT_PATH"]).write_text(json.dumps(event))
     with pytest.raises(ValueError):
         tool.validate_environment(p, environ)

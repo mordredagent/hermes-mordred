@@ -337,17 +337,16 @@ def validate_environment(policy: Json, environ: Mapping[str, str]) -> None:
         event = read_json(Path(environ.get("GITHUB_EVENT_PATH", "")))
         pr = event.get("pull_request", {})
         require(isinstance(pr, dict), "invalid PR event")
-        # GitHub may emit an opened event before its merge_commit_sha field is
-        # populated. The policy job verifies the tested commit's head/base
-        # parents; GITHUB_SHA above binds this worker to that same commit.
-        merge_sha = pr.get("merge_commit_sha")
-        if merge_sha is None:
-            merge_sha = policy["tested_sha"]
+        # This asynchronous field can be missing or name an earlier merge.
+        # The policy job instead proves checkout HEAD/GITHUB_SHA and the exact
+        # ordered base/head parents. The bindings above preserve that identity.
+        raw_merge_sha = pr.get("merge_commit_sha")
+        require(raw_merge_sha is None or _sha(raw_merge_sha), "invalid PR merge metadata")
         current = {
             "number": event.get("number"),
             "head_sha": pr.get("head", {}).get("sha"),
             "base_sha": pr.get("base", {}).get("sha"),
-            "merge_sha": merge_sha,
+            "merge_sha": policy["tested_sha"],
         }
         require(policy["pr"] == current, "stale PR context")
 
