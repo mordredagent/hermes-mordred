@@ -249,3 +249,150 @@ def test_standalone_bootstrap_cli_writes_exact_contract_without_site_packages(tm
     assert values["mode"] == "final" and values["windows"] == "true"
     assert json.loads(values["linux_versions"]) == ["3.11", "3.13"]
     assert len(json.loads(values["windows_modules"])) == 84
+
+
+@pytest.fixture
+def pr_merge_checkout(tmp_path):
+    """A real synthetic merge, with independently recorded base and PR heads."""
+    root = tmp_path / "checkout"
+    root.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
+
+    git("init", "-q", "-b", "base")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "CI test")
+    (root / "base.txt").write_text("base\n")
+    git("add", ".")
+    git("commit", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    git("checkout", "-qb", "feature")
+    (root / "head.txt").write_text("head\n")
+    git("add", ".")
+    git("commit", "-qm", "head")
+    head = git("rev-parse", "HEAD")
+    git("checkout", "-q", "base")
+    git("merge", "--no-ff", "-qm", "synthetic PR merge", "feature")
+    merge = git("rev-parse", "HEAD")
+    payload = event()
+    payload["pull_request"].update(head={"sha": head}, base={"sha": base, "ref": "dev"}, merge_commit_sha=None)
+    return root, payload, environment(sha=merge)
+
+
+@pytest.mark.parametrize("missing", [False, True])
+@pytest.mark.parametrize("draft,expected", [(False, "ordinary"), (True, "critical")])
+def test_nullable_merge_sha_uses_tested_commit_only_after_exact_parent_proof(
+    pr_merge_checkout, missing, draft, expected
+):
+    root, payload, env = pr_merge_checkout
+    payload["pull_request"]["draft"] = draft
+    if missing:
+        del payload["pull_request"]["merge_commit_sha"]
+    result = decide(payload, env=env, root=root)
+    assert result["mode"] == expected
+    assert result["pr"]["merge_sha"] == env["GITHUB_SHA"]
+
+
+@pytest.mark.parametrize(
+    "mutation", ["base", "head", "swapped_parents", "wrong_checkout", "single_parent", "unavailable", "stale", "empty"]
+)
+def test_nullable_context_cannot_invent_merge_provenance(pr_merge_checkout, mutation):
+    root, payload, env = pr_merge_checkout
+    pr = payload["pull_request"]
+    if mutation in {"base", "head"}:
+        pr[mutation]["sha"] = "d" * 40
+    elif mutation == "swapped_parents":
+        pr["base"]["sha"], pr["head"]["sha"] = pr["head"]["sha"], pr["base"]["sha"]
+    elif mutation == "wrong_checkout":
+        subprocess.run(["git", "-C", str(root), "checkout", "-q", "feature"], check=True)
+    elif mutation == "single_parent":
+        env["GITHUB_SHA"] = pr["head"]["sha"]
+    elif mutation == "unavailable":
+        env["GITHUB_SHA"] = "d" * 40
+    else:
+        pr["merge_commit_sha"] = "d" * 40 if mutation == "stale" else ""
+    result = decide(payload, env=env, root=root)
+    assert result["mode"] == "final"
+    # It must also fail producer-side schema validation, rather than dispatching
+    # expensive workers with a syntactically plausible invented merge context.
+    spec = importlib.util.spec_from_file_location("ci_evidence", ROOT / "tools/ci_evidence.py")
+    evidence = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(evidence)
+    with pytest.raises(ValueError):
+        evidence.validate_policy(result)
+
+
+def run_policy_cli(root, payload, env):
+    tools = root / "tools"
+    tools.mkdir()
+    for name in ("ci_test_policy.py", "ci_change_scope.py", "ci_scope_paths.json", "ci_evidence.py"):
+        (tools / name).write_bytes((ROOT / "tools" / name).read_bytes())
+    event_path, output, policy = root / "event.json", root / "output", root / "policy.json"
+    event_path.write_text(json.dumps(payload))
+    process_env = {**os.environ, **env, "GITHUB_EVENT_PATH": str(event_path), "GITHUB_OUTPUT": str(output)}
+    result = subprocess.run(
+        [sys.executable, "-S", str(tools / "ci_test_policy.py"), "--policy-file", str(policy)],
+        cwd=root,
+        env=process_env,
+        text=True,
+        capture_output=True,
+    )
+    return result, output, policy
+
+
+@pytest.mark.parametrize("nullable", ["null", "missing", "matching"])
+def test_cli_resolves_real_nullable_merge_before_publishing_contract(pr_merge_checkout, nullable):
+    root, payload, env = pr_merge_checkout
+    # A forced-final PR avoids external discovery; provenance must still be
+    # resolved and validated before any worker output is published.
+    payload["pull_request"]["labels"] = [{"name": "ci:full"}]
+    if nullable == "missing":
+        del payload["pull_request"]["merge_commit_sha"]
+    elif nullable == "matching":
+        payload["pull_request"]["merge_commit_sha"] = env["GITHUB_SHA"]
+    result, output, policy = run_policy_cli(root, payload, env)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(policy.read_text())["pr"]["merge_sha"] == env["GITHUB_SHA"]
+    assert "mode=final\n" in output.read_text()
+
+
+@pytest.mark.parametrize("raw_merge", ["matching", "null"])
+@pytest.mark.parametrize("mismatch", ["base", "head", "swapped_parents", "wrong_checkout", "stale"])
+def test_cli_never_publishes_pr_policy_with_unproven_commit_binding(pr_merge_checkout, raw_merge, mismatch):
+    root, payload, env = pr_merge_checkout
+    pr = payload["pull_request"]
+    pr["labels"] = [{"name": "ci:full"}]
+    if raw_merge == "matching":
+        pr["merge_commit_sha"] = env["GITHUB_SHA"]
+    if mismatch in {"base", "head"}:
+        pr[mismatch]["sha"] = "d" * 40
+    elif mismatch == "swapped_parents":
+        pr["base"]["sha"], pr["head"]["sha"] = pr["head"]["sha"], pr["base"]["sha"]
+    elif mismatch == "wrong_checkout":
+        subprocess.run(["git", "-C", str(root), "checkout", "-q", "feature"], check=True)
+    else:
+        pr["merge_commit_sha"] = "d" * 40
+    result, output, policy = run_policy_cli(root, payload, env)
+    assert result.returncode == 2
+    assert not policy.exists() and not output.exists()
+
+
+def test_cli_rejects_invalid_policy_before_writing_any_artifact_or_outputs(tmp_path):
+    payload, output, policy = tmp_path / "event.json", tmp_path / "output", tmp_path / "policy.json"
+    payload.write_text("{}")
+    env = {
+        **os.environ,
+        **environment("workflow_dispatch", "invalid-ref"),
+        "GITHUB_EVENT_PATH": str(payload),
+        "GITHUB_OUTPUT": str(output),
+    }
+    result = subprocess.run(
+        [sys.executable, "-S", str(TOOL), "--policy-file", str(policy)],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert not policy.exists() and not output.exists()
