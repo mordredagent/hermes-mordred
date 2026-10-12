@@ -5,6 +5,7 @@ Status: phases 0 (feasibility spike), 1 (startup hook under Hermes Desktop)
 an existing home, `hermes-mordred databases encrypt`), 4 (monitor), 5 (status
 line), reverse conversion (`databases decrypt`) and both uninstall modes
 done; the Desktop page step and log-preview redaction remain.
+Track those remaining tasks in [`TODO.md`](./TODO.md#hermes-database-encryption).
 
 ## Goal
 
@@ -17,6 +18,11 @@ siblings (`shared-state.db`, `projects.db`, `response_store.db`,
 Encrypt all of them with SQLCipher, keyed from the key Mordred already
 manages, without forking Hermes. Only Python opens them (no Node/Electron
 SQLite access in Hermes Desktop or the TUI).
+
+This is a separate macOS-only opt-in: `setup` and `encryption enable all` do
+not arm database encryption. Session JSONL, text logs and existing ZIP backups
+are not converted. Decrypt databases before removing their memory key or vault;
+retain recovery material for encrypted backups.
 
 ## Key
 

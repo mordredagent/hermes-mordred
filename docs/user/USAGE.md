@@ -219,6 +219,8 @@ nonzero. Windows skips excluded env/config targets and uses CNG memory.
 `workspace` is skipped when its macOS tooling is unavailable and never fails
 an `all` batch. Production file-vault operations refuse unsupported default
 stores before enrollment. Linux memory does not use that store.
+`all` does not include SQLite databases; use
+[`databases encrypt`](#databases--encrypt-hermess-sqlite-databases-macos) separately on macOS.
 ```sh
 hermes-mordred encryption status                        # all targets (non-prompting)
 hermes-mordred encryption enable  TARGET                # TARGET: env, config, memory, workspace, or all
@@ -341,8 +343,8 @@ the hook reseals the current config and removes the plaintext. Do not re-run
 > Nothing is migrated by any of this: transcripts already under
 > `~/.claude/projects/` stay plaintext where they are. The target covers only
 > the volume's contents, so it does not reach Hermes's own session storage
-> (`<home>/state.db`, `<home>/sessions/*.jsonl`), which no encryption target
-> covers.
+> (`<home>/state.db`, `<home>/sessions/*.jsonl`). On macOS, `databases encrypt`
+> separately protects `state.db`; session JSONL remains outside its scope.
 
 > **Runtime guard before a seal (macOS).** `enable env` and `enable config`
 > remove the plaintext, so both first prove the file can be unsealed again at
@@ -400,6 +402,8 @@ hermes-mordred keyvault reset               # DESTROY profile-owned key material
 hermes-mordred keyvault enable-se           # macOS: build+install Secure Enclave helper (ad-hoc signed, no Apple Developer account)
                                 # safe to refresh; key policy is selected only by fresh init/recovery — see §4.3
 hermes-mordred keyvault enable-tpm          # Linux: build+install TPM 2.0 helper (machine-bound, Tier 2)
+hermes-mordred keyvault enable-winkey       # Windows: build+install and probe the CNG TPM helper
+hermes-mordred keyvault native init --role memory  # Windows: enroll custody; does not enable memory encryption
 hermes-mordred keyvault eth <sub>           # Ethereum keys — see below
 ```
 
@@ -624,6 +628,13 @@ hermes-mordred databases decrypt           # back to plain SQLite; encryption of
 > journal to Linux/Windows, startup refuses to open it. Run `databases decrypt`
 > on macOS and let it finish before moving the home.
 
+`setup` and `encryption enable all` do not enable database encryption. Session
+JSONL, text logs (including `agent.log` message previews) and existing ZIP
+backups are not converted. Decrypt databases before purging the memory key or
+file vault, and retain recovery material for encrypted backups.
+On Windows, retained database-protection state also blocks uninstall; reconcile
+it on macOS first.
+
 ### `egress` — limit what the agent's tools may send out
 ```sh
 hermes-mordred egress status                 # level, taint setting, blocklists
@@ -663,10 +674,10 @@ Start with the [Telegram guide](./TELEGRAM.md); `telegram setup` does
 everything below in one guided command, and `telegram doctor` checks health.
 
 ```sh
-hermes-mordred telegram setup               # guided: Enclave helper, login, privacy LLM, first import
+hermes-mordred telegram setup               # guided: hardware custody, memory, login, privacy LLM, first import
 hermes-mordred telegram doctor              # health check from metadata only (no Touch ID, no content)
-hermes-mordred keyvault enable-se           # once: build the Secure Enclave helper (required)
-hermes-mordred telegram login               # API credentials + phone code (+ 2FA password); sealed by the Secure Enclave
+hermes-mordred keyvault enable-se           # macOS; Linux: enable-tpm; Windows: enable-winkey
+hermes-mordred telegram login               # API credentials + phone code (+ 2FA password); hardware sealed
 hermes-mordred telegram sync                # import new messages from every dialog into the encrypted archive
 hermes-mordred telegram sync --days 3 --skip-archived   # recent window, pinned chats first; options are remembered
 hermes-mordred telegram sync --skip-channels --limit-per-dialog 5000
@@ -677,19 +688,22 @@ hermes-mordred telegram migrate-tee         # move credentials stored by an olde
 hermes-mordred telegram logout              # revoke the session at Telegram; keep the archive
 hermes-mordred telegram logout --forget     # also delete the API credentials, archive key and archive
 ```
-> Requires the `telegram` extra and the Secure Enclave helper
-> (`hermes-mordred keyvault enable-se`). Create your own application at
+> Requires the `telegram` extra and the platform hardware helper; Windows also
+> requires dedicated Telegram custody (see the [Telegram guide](./TELEGRAM.md)).
+> Create your own application at
 > <https://my.telegram.org> → *API development tools* for `api_id` / `api_hash`
 > (or export them as `TELEGRAM_MORDRED_APP_ID` / `TELEGRAM_MORDRED_APP_HASH`).
 >
 > **What is stored where.** The session (a full account credential), the API
 > credentials, the archive key and the LLM key are sealed by a key inside the
-> Secure Enclave and opened by the Enclave on every connection — with Touch ID
-> unless you log in with `--no-touch-id`. There is no software-key fallback,
+> Secure Enclave, Linux TPM or Windows CNG provider and opened on every connection.
+> macOS requests Touch ID unless you log in with `--no-touch-id`; Linux/Windows
+> have no per-use presence prompt. There is no software-key fallback,
 > and nothing is injected into the Hermes environment. Messages are stored in
 > `<home>/mordred/telegram/`, AES-256-GCM encrypted per chat under hashed file
-> names; plaintext exists only in memory (core dumps and debugger attach are
-> disabled). The 2FA password is never stored.
+> names; plaintext is processed in memory. Dump/debugger restrictions are
+> best-effort on macOS/Linux and are not provided on Windows. The 2FA password
+> is never stored.
 >
 > **Read-only by construction.** Every MTProto request passes an allowlist
 > before it is sent: the importer can list chats and read history, but cannot
@@ -1211,11 +1225,25 @@ including under strict mode).
   Memory is machine-bound without portable recovery.
 - **Windows**: scoped native installer, CNG custody, memory/Telegram and Desktop
   consumers exist. Env/config file-vault seals and APFS workspace integration
-  are excluded. Capability status and remaining native/live/Windows 11 gates
-  govern readiness; see [`SPEC.md`](../dev/SPEC.md#platform-support-v1).
+  are excluded; database encryption is also unsupported. Capability status and
+  remaining native/live/Windows 11 gates govern readiness; see
+  [`SPEC.md`](../dev/SPEC.md#platform-support-v1).
 - **Fallback behavior**: macOS can use a software P-256 key in the login
-  Keychain when Secure Enclave access is unavailable. Linux deliberately has no
-  software fallback and fails closed without the TPM helper.
+  Keychain when Secure Enclave access is unavailable. Linux and Windows have no
+  software fallback and fail closed without their TPM helper.
+
+### Native Windows TPM workflow
+
+Use the [PowerShell installer](../dev/setup.md#native-windows-installer-and-helper-validation-c4)
+with a native Windows account and local NTFS profile. Install Rust MSVC and
+Visual C++ Build Tools, then run `hermes-mordred keyvault enable-winkey`.
+Stop Hermes gateways, run `hermes-mordred encryption enable memory`, and check
+`hermes-mordred status` before restarting. Enable enrolls custody and verifies
+the installed Hermes runtime. `keyvault init` is not ported to Windows.
+
+CNG keys are bound to the TPM, Windows account and profile; there is no per-use
+presence or portable recovery. `keyvault native init --role audit` separately
+enrolls encrypted audit custody; Telegram has its [own setup](./TELEGRAM.md).
 
 ---
 
@@ -1282,6 +1310,13 @@ The migration is safe to repeat. Fresh installations should use `configure`
 instead.
 
 ### Uninstall safely
+
+**Windows:** uninstall restores memory; `--purge-data` removes its custody key
+after restoration but retains audit/Telegram custody and data. Use
+`telegram logout --forget` separately to remove Telegram data.
+`--erase-encrypted` is unsupported. Retained macOS database-protection state
+blocks teardown. The shell installer and full cleanup sequence below describe
+macOS/Linux.
 
 One command removes Mordred and gives Hermes its files back:
 
