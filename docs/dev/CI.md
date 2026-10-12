@@ -433,6 +433,49 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 
 ## Manual live-device validation log
 
+- **2026-10-12 — Telegram saved local LLM: real llama.cpp, with and without authentication.**
+  Candidate `0617515df` was exercised on macOS arm64 / Python 3.14.7 against
+  the official llama.cpp `b11562` binary and
+  `Qwen/Qwen2.5-0.5B-Instruct-GGUF` (`qwen2.5-0.5b-instruct-q4_k_m.gguf`,
+  SHA256 `74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db`).
+  Both servers were task-owned, bound only to dynamic loopback ports, and
+  stopped after validation. The model was served as `mordred-synthetic` with
+  a 4096-token context and one slot. No existing Ollama models/settings or
+  production Hermes state were changed.
+
+  Explicit runs of `tests/integration/test_telegram_local_llm.py` passed
+  **1 test in 1.51s without authentication** and **1 test in 1.52s with
+  authentication**, after the review fix requiring an explicit terminal
+  SSE event for a successful probe. The authenticated run first observed the real server's
+  HTTP 401 as `local_llm_unauthorized`, then imported a temporary key through
+  `telegram local-llm --api-key-env`. Both runs verified the saved target via
+  `telegram doctor --probe-llm --json` and obtained an answer through the
+  actual `telegram_ask` tool over a synthetic encrypted archive. Custody used
+  the existing test hardware backend with real credential sealing, not a
+  physical Secure Enclave or TPM. This is live model/HTTP evidence, not
+  Linux TPM or the reported 27B model's acceptance.
+
+  Reproduce with `MORDRED_TELEGRAM_LIVE_TEST=1`,
+  `MORDRED_TELEGRAM_LIVE_ENDPOINT=http://127.0.0.1:<port>/v1`,
+  `MORDRED_TELEGRAM_LIVE_MODEL=<served-model>` and, for an authenticated
+  server, `MORDRED_TELEGRAM_LIVE_API_KEY` set privately, then run
+  `uv run pytest -o addopts= -q -m integration tests/integration/test_telegram_local_llm.py`.
+  The gate-off run skipped that live test and both
+  `tests/integration/test_linux_telegram_tpm.py` tests. A real Linux TPM and
+  the reporter's sealed endpoint remain unavailable in this environment;
+  the original incident's exact cause is still unconfirmed.
+
+  Final regression: `uv run pytest --cov=src/mordred_hermes` passed
+  **7272 tests**, skipped **220**, deselected **50**, and reached **90.34%**
+  coverage (80% floor) in **1286.38s**. The run reported 28 warnings,
+  including SQLite resource warnings in existing lifecycle tests and
+  dependency/fork deprecations. Repository-wide Ruff checks and formatting,
+  strict mypy (260 source files), and the prescribed shellcheck command
+  passed. A fresh code review found one incomplete-SSE probe issue; two
+  regressions failed before its fix, then all 109 affected tests passed.
+  The final full regression includes the fix. No Critical or Minor review
+  findings remained.
+
 The restored WF0, C5 shared, C3 and C5a entries below are dated historical
 results for their original source/wheel snapshots, not evidence for the
 consolidated candidate `bb75885ac`. Pending observations in those entries

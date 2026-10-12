@@ -70,14 +70,27 @@
 
 **Files:** `docs/user/TELEGRAM.md`, `docs/dev/SPEC.md`, `docs/dev/CI.md`, `src/mordred_hermes/extension/telegram/skill/SKILL.md`; explicit live-gated test in `tests/extension/test_telegram_local_llm.py` or a dedicated Telegram integration module.
 
-- [ ] Document /v1 base URL semantics, separate Telegram model settings, auth options and endpoint-change behavior, default doctor limitations, opt-in probe and errors. Keep existing headings.
-- [ ] Add/run an explicitly gated synthetic Telegram-to-real-model roundtrip. Inspect existing Ollama availability first; use a small model if available. For llama.cpp authentication/Linux-specific acceptance, record precisely what ran and any unavailable hardware/server gate; never present mock tests as live evidence.
-- [ ] Run `uv run ruff check src tests scripts`, `uv run ruff format --check src tests scripts`, `uv run mypy --strict src tools scripts/keyvault_offline_digest.py`, and `shellcheck scripts/*.sh native/*/build.sh`.
-- [ ] Run one full `uv run pytest --cov=src/mordred_hermes` at final integration, after targeted modules pass. Record all failures and skips.
-- [ ] Request a fresh whole-change review using the plan and diff, resolve important findings with failing-then-passing regressions, and commit verified changes. Leave the managed worktree for review; do not push or merge into the dirty source checkout.
+- [x] Document /v1 base URL semantics, separate Telegram model settings, auth options and endpoint-change behavior, default doctor limitations, opt-in probe and errors. Keep existing headings.
+- [x] Add/run an explicitly gated synthetic Telegram-to-real-model roundtrip. Inspect existing Ollama availability first; use a small model if available. For llama.cpp authentication/Linux-specific acceptance, record precisely what ran and any unavailable hardware/server gate; never present mock tests as live evidence.
+- [x] Run `uv run ruff check src tests scripts`, `uv run ruff format --check src tests scripts`, `uv run mypy --strict src tools scripts/keyvault_offline_digest.py`, and `shellcheck scripts/*.sh native/*/build.sh`.
+- [x] Run one full `uv run pytest --cov=src/mordred_hermes` at final integration, after targeted modules pass. Record all failures and skips.
+- [x] Request a fresh whole-change review using the plan and diff, resolve important findings with failing-then-passing regressions, and commit verified changes. Leave the managed worktree for review; do not push or merge into the dirty source checkout.
 
 ## Execution record
 
 - Original report's exact stored endpoint is unknown; do not claim its original cause is confirmed.
 - A managed worktree was created from dev at `77aa6cbcbf63b8357756b58b442153a22e1ceaee`; original uncommitted documentation changes stay in the source checkout.
 - User explicitly requested planning followed by fixes; proceed inline without another approval round.
+
+## Review decisions
+
+- A fresh review found that clean HTTP EOF could incorrectly pass the new probe after partial SSE text. Two failing regressions proved the issue; the probe now requires `[DONE]` or a valid finish reason. Existing ask/Venice stream behavior is retained for compatibility, so ordinary ask completion strictness is outside this change.
+- Existing CLI success output may include the configured base path, and ordinary doctor still inspects archive filesystem metadata. New failure diagnostics omit arbitrary paths, and the explicit inference probe never decrypts the archive.
+- Live model evidence is from macOS and a small Qwen model, using synthetic credentials/archive and test hardware sealing. Linux physical TPM and the reported 27B model remain unverified.
+
+## Final validation
+
+- `uv run pytest --cov=src/mordred_hermes`: 7272 passed, 220 skipped, 50 deselected, 28 warnings; 90.34% coverage; 1286.38 seconds.
+- Repository Ruff checks and formatting, strict mypy (260 sources), and shellcheck passed.
+- Live llama.cpp authenticated and unauthenticated checks both passed after the review fix. Evidence and repeatable gates are in `docs/dev/CI.md`, "Manual live-device validation log".
+- Managed worktree retained for review; no push or merge into the dirty source checkout. Temporary validation model/server assets removed after validation.
