@@ -62,6 +62,7 @@ COMPONENTS: Final[tuple[tuple[str, str], ...]] = (
     ("llm_guard", "mordred_hermes.llm_guard"),
     ("network", "mordred_hermes.network"),
     ("privacy_check", "mordred_hermes.privacy_check"),
+    ("dbcrypt", "mordred_hermes.dbcrypt"),
     ("e2e", "mordred_hermes.extension.gateway_plugin"),
     ("wizard", "mordred_hermes.wizard"),
 )
@@ -74,6 +75,7 @@ COMPONENT_REQUIRED_HOOKS: Final[dict[str, frozenset[str]]] = {
     "llm_guard": frozenset({"on_session_start", "pre_api_request"}),
     "network": frozenset({"on_session_start", "on_session_end", "pre_api_request", "pre_tool_call"}),
     "privacy_check": frozenset({"on_session_start", "pre_tool_call"}),
+    "dbcrypt": frozenset({"on_session_start", "pre_llm_call"}),
     "e2e": frozenset({"on_session_start", "pre_gateway_dispatch"}),
     "wizard": frozenset(),
 }
@@ -196,3 +198,11 @@ def register(ctx: Any) -> None:
         ensure_page()
     except Exception as exc:
         _LOG.warning("Mordred desktop page not placed: %s", type(exc).__name__)
+    # pm-managed Hermes rebuilds its Python environment on every update; keep
+    # Mordred one of that rebuild's inputs so it survives (desktop/member.py).
+    try:
+        from .desktop.install import ensure_member
+
+        ensure_member()
+    except Exception as exc:
+        _LOG.warning("Mordred not registered with Hermes's package manager: %s", type(exc).__name__)

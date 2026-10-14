@@ -1,10 +1,8 @@
 """Unit tests for ``wizard._defaults`` — the lazy production-default seams.
 
-Two contracts matter: an injected fake is returned unchanged (the test seam
-every keyvault-facing command relies on), and the production classes are
-imported only *inside* the resolvers, so importing the module never pulls the
-crypto / Keychain / prompt_toolkit stacks (the ``audit_cli``
-minimal-install guarantee — see ``test_audit_cli.TestMinimalInstallImport``).
+Production defaults are selected lazily, so importing this module never pulls
+crypto / Keychain / prompt_toolkit stacks. Injected defaults are exercised by
+the vault CLI tests that create and recover a vault using fake dependencies.
 """
 
 from __future__ import annotations
@@ -16,43 +14,6 @@ import textwrap
 import pytest
 
 from mordred_hermes.wizard import _defaults
-
-
-class TestIsMissingKeyvaultStack:
-    """The shared predicate that classifies a ``ModuleNotFoundError`` as a
-    missing ``[keyvault]`` crypto-stack dependency (used by ``cli.dispatch`` to
-    emit an install hint and by ``status`` to degrade gracefully)."""
-
-    @pytest.mark.parametrize("name", ["argon2", "cryptography", "blake3", "argon2.low_level"])
-    def test_matches_crypto_stack_and_submodules(self, name: str) -> None:
-        exc = ModuleNotFoundError(f"No module named {name!r}", name=name)
-        assert _defaults.is_missing_keyvault_stack(exc) is True
-
-    @pytest.mark.parametrize("name", ["numpy", "requests", "mordred_hermes.keyvault.vault"])
-    def test_rejects_unrelated_modules(self, name: str) -> None:
-        exc = ModuleNotFoundError(f"No module named {name!r}", name=name)
-        assert _defaults.is_missing_keyvault_stack(exc) is False
-
-    def test_rejects_nameless_error(self) -> None:
-        # A hand-raised ModuleNotFoundError with no ``name`` must not be
-        # misclassified as a missing crypto dependency.
-        assert _defaults.is_missing_keyvault_stack(ModuleNotFoundError("mystery")) is False
-
-
-class TestPassThrough:
-    """An injected (non-None) value is returned as-is, no import triggered."""
-
-    def test_backend_passthrough(self) -> None:
-        sentinel = object()
-        assert _defaults.resolve_backend(sentinel) is sentinel  # type: ignore[arg-type]
-
-    def test_store_passthrough(self) -> None:
-        sentinel = object()
-        assert _defaults.resolve_store(sentinel) is sentinel  # type: ignore[arg-type]
-
-    def test_prompt_io_passthrough(self) -> None:
-        sentinel = object()
-        assert _defaults.resolve_prompt_io(sentinel) is sentinel  # type: ignore[arg-type]
 
 
 class TestLazyProductionDefaults:

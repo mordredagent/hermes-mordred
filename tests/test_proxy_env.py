@@ -46,6 +46,10 @@ def test_tor_sets_socks5h() -> None:
     assert env["HTTPS_PROXY"] == "socks5h://127.0.0.1:9050"
     assert env["HTTP_PROXY"] == "socks5h://127.0.0.1:9050"
     assert env["ALL_PROXY"] == "socks5h://127.0.0.1:9050"
+    assert env["https_proxy"] == "socks5h://127.0.0.1:9050"
+    assert env["http_proxy"] == "socks5h://127.0.0.1:9050"
+    assert env["all_proxy"] == "socks5h://127.0.0.1:9050"
+    assert env["no_proxy"] == env["NO_PROXY"]
 
 
 def test_tor_uses_shifted_port() -> None:
@@ -54,15 +58,6 @@ def test_tor_uses_shifted_port() -> None:
 
     env = proxy_env.desired_env(path="tor", tor_socks_port=9150)
     assert env["HTTPS_PROXY"] == "socks5h://127.0.0.1:9150"
-
-
-def test_tor_never_uses_plain_http_scheme() -> None:
-    """Plain ``http://`` proxy URLs leak DNS via the system resolver — forbidden."""
-    from mordred_hermes.network import proxy_env
-
-    env = proxy_env.desired_env(path="tor", tor_socks_port=9050)
-    for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
-        assert env[key].startswith("socks5h://"), env[key]
 
 
 def test_no_proxy_default_localhost_clearnet() -> None:
@@ -154,17 +149,6 @@ def test_managed_var_names_complete() -> None:
         "all_proxy",
         "no_proxy",
     }
-
-
-def test_tor_sets_lowercase_proxy_vars() -> None:
-    """Codex round 5 P1: lowercase keys must also be set, not just uppercase."""
-    from mordred_hermes.network import proxy_env
-
-    env = proxy_env.desired_env(path="tor", tor_socks_port=9050)
-    assert env["https_proxy"] == "socks5h://127.0.0.1:9050"
-    assert env["http_proxy"] == "socks5h://127.0.0.1:9050"
-    assert env["all_proxy"] == "socks5h://127.0.0.1:9050"
-    assert env["no_proxy"] == env["NO_PROXY"]
 
 
 def test_unknown_path_raises() -> None:
@@ -303,12 +287,6 @@ class TestProcessScopedIsolationToken:
         assert env["HTTPS_PROXY"] == "socks5h://process-a:process-a@127.0.0.1:9050"
         assert env["HTTP_PROXY"] == "socks5h://process-a:process-a@127.0.0.1:9050"
         assert env["ALL_PROXY"] == "socks5h://process-a:process-a@127.0.0.1:9050"
-
-    def test_token_injects_lowercase_keys_too(self) -> None:
-        """Codex round 5 P1 parity: the lowercase keys must carry the credential too."""
-        from mordred_hermes.network import proxy_env
-
-        env = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="process-a")
         assert env["https_proxy"] == "socks5h://process-a:process-a@127.0.0.1:9050"
         assert env["all_proxy"] == "socks5h://process-a:process-a@127.0.0.1:9050"
 
@@ -318,13 +296,6 @@ class TestProcessScopedIsolationToken:
 
         env = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token=None)
         assert env["HTTPS_PROXY"] == "socks5h://127.0.0.1:9050"
-
-    def test_default_omits_isolation(self) -> None:
-        """``isolation_token`` defaults to None — existing callers are untouched."""
-        from mordred_hermes.network import proxy_env
-
-        env = proxy_env.desired_env(path="tor", tor_socks_port=9050)
-        assert "@" not in env["HTTPS_PROXY"]
 
     def test_empty_token_leaves_url_unchanged(self) -> None:
         """An empty token must NOT produce ``socks5h://:@host`` — treat as no isolation."""

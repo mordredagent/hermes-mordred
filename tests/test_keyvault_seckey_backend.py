@@ -207,11 +207,6 @@ def test_translate_error_only_returns_frozen_codes() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_generate_returns_sec1_uncompressed_public_key(backend: _SecKeyBackend) -> None:
-    pub = backend.generate_enclave_key("k1")
-    assert len(pub) == 65 and pub[0] == 0x04
-
-
 def test_generate_duplicate_tag_raises_wrap_key_not_found(backend: _SecKeyBackend) -> None:
     # Back-compat pin: WrapKeyAlreadyExists subclasses WrapKeyNotFound, so
     # pre-existing `except WrapKeyNotFound` callers keep catching duplicates.
@@ -261,6 +256,7 @@ def test_generate_other_native_error_raises_wrap_error(ops: _FakeOps, backend: _
 
 def test_get_public_key_round_trips_generate(backend: _SecKeyBackend) -> None:
     generated = backend.generate_enclave_key("k1")
+    assert len(generated) == 65 and generated[0] == 0x04
     assert backend.get_enclave_public_key("k1") == generated
 
 

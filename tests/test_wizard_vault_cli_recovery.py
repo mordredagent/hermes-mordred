@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import sys
 from pathlib import Path
 
 import pytest
 
 from mordred_hermes.keyvault import vault
-from mordred_hermes.wizard import vault_cli
+from mordred_hermes.wizard import _vault_open, vault_cli
+from mordred_hermes.wizard._prompt_io import _RefusingPromptIO
 
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend
 from ._wizard_vault_cli_helpers import _PASSPHRASE, _PromptIO, _ReadRaisesStore
@@ -39,6 +41,65 @@ def _build_at_cli_identity(
         opened.close()
 
 
+@pytest.mark.parametrize("injected_backend", [False, True])
+def test_linux_recovery_refuses_before_device_resolution_or_passphrase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], injected_backend: bool
+) -> None:
+    backend, store = FakeBackend(), FakeAnchorStore()
+    _build_at_cli_identity(tmp_path, backend, store, files={".env": b"SECRET=retained\n"})
+    before = {str(p.relative_to(tmp_path)): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("production device resolution on unsupported host")
+
+    monkeypatch.setattr(_vault_open, "resolve_backend", forbidden)
+    monkeypatch.setattr(_vault_open, "resolve_store", forbidden)
+    assert (
+        vault_cli.recover(root=tmp_path, backend=backend if injected_backend else None, prompt_io=_RefusingPromptIO())
+        == 1
+    )
+    assert "Cannot re-key" in capsys.readouterr().err
+    assert {str(p.relative_to(tmp_path)): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+    vault.recover_vault(tmp_path, _PASSPHRASE).close()
+
+
+def test_linux_rotation_uses_portable_cold_path_without_production_device_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cryptography.exceptions import InvalidTag
+
+    backend, store = FakeBackend(), FakeAnchorStore()
+    _build_at_cli_identity(tmp_path, backend, store, files={".env": b"Z=9\n"})
+    before = {
+        str(p.relative_to(tmp_path)): p.read_bytes()
+        for p in tmp_path.rglob("*")
+        if p.is_file() and p.name != "recovery.mrkv"
+    }
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("production device resolution instead of portable cold path")
+
+    monkeypatch.setattr(_vault_open, "resolve_backend", forbidden)
+    monkeypatch.setattr(_vault_open, "resolve_store", forbidden)
+    assert (
+        vault_cli.change_passphrase(
+            root=tmp_path, prompt_io=_PromptIO(passwords=[_NEW_PASSPHRASE, _NEW_PASSPHRASE, _PASSPHRASE])
+        )
+        == 0
+    )
+    with vault.recover_vault(tmp_path, _NEW_PASSPHRASE) as opened:
+        assert opened.read_file(".env") == b"Z=9\n"
+    with pytest.raises(InvalidTag):
+        vault.recover_vault(tmp_path, _PASSPHRASE)
+    assert {
+        str(p.relative_to(tmp_path)): p.read_bytes()
+        for p in tmp_path.rglob("*")
+        if p.is_file() and p.name != "recovery.mrkv"
+    } == before
+
+
 class TestChangePassphrase:
     """`vault change-passphrase` — rotate the recovery passphrase, master unchanged."""
 
@@ -50,6 +111,9 @@ class TestChangePassphrase:
         backend, store = FakeBackend(), FakeAnchorStore()
         root = tmp_path / "vault"
         _build_at_cli_identity(root, backend, store, files={".env": b"SECRET=1\n"})
+        ident = vault_cli._vault_identity(root)
+        with vault.open_vault(root, key_id=ident, backend=backend, store=store, anchor_label=ident) as before:
+            generation = before.generation
 
         rc = vault_cli.change_passphrase(
             root=root,
@@ -66,6 +130,11 @@ class TestChangePassphrase:
             assert opened.read_file(".env") == b"SECRET=1\n"
         finally:
             opened.close()
+
+        # Rotation also preserves the everyday device-key path and generation.
+        with vault.open_vault(root, key_id=ident, backend=backend, store=store, anchor_label=ident) as after:
+            assert after.generation == generation
+            assert after.read_file(".env") == b"SECRET=1\n"
 
         # The old passphrase no longer opens it.
         with pytest.raises(InvalidTag):
@@ -174,36 +243,6 @@ class TestChangePassphrase:
             ns = parser.parse_args(argv)
             assert ns.func.__name__ == "_handle_vault_change_passphrase"
 
-    def test_device_key_open_unaffected_and_generation_unchanged(self, tmp_path: Path) -> None:
-        """The headline claim: rotation re-wraps only the recovery sidecar, so the
-        everyday device-key (hot path) open still works, the file is intact, and no
-        new generation is written (nothing is re-encrypted)."""
-        backend, store = FakeBackend(), FakeAnchorStore()
-        root = tmp_path / "vault"
-        _build_at_cli_identity(root, backend, store, files={".env": b"K=v\n"})
-        ident = vault_cli._vault_identity(root)
-
-        before = vault.open_vault(root, key_id=ident, backend=backend, store=store, anchor_label=ident)
-        try:
-            gen_before = before.generation
-        finally:
-            before.close()
-
-        rc = vault_cli.change_passphrase(
-            root=root,
-            prompt_io=_PromptIO(passwords=[_NEW_PASSPHRASE, _NEW_PASSPHRASE]),
-            backend=backend,
-            store=store,
-        )
-        assert rc == 0
-
-        after = vault.open_vault(root, key_id=ident, backend=backend, store=store, anchor_label=ident)
-        try:
-            assert after.generation == gen_before  # no re-encrypt, no generation bump
-            assert after.read_file(".env") == b"K=v\n"
-        finally:
-            after.close()
-
     def test_rotation_survives_missing_lock_file(self, tmp_path: Path) -> None:
         """`keyvault_lock` opens .lock without O_CREAT; a vault whose dotfile was
         dropped (backup that skipped it, manual cleanup) must still rotate —
@@ -236,7 +275,10 @@ class TestRecover:
     A successful recover restores the writable device hot path on the new host.
     """
 
-    def test_happy_path_restores_hot_path(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_happy_path_restores_hot_path(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sys, "platform", "linux")
         old_backend, old_store = FakeBackend(), FakeAnchorStore()
         root = tmp_path / "vault"
         _build_at_cli_identity(root, old_backend, old_store, files={".env": b"SECRET=1\n"})

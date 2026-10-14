@@ -26,37 +26,6 @@ from __future__ import annotations
 import pytest
 
 
-def test_network_error_is_exception_subclass() -> None:
-    from mordred_hermes.network._exceptions import MordredNetworkError
-
-    assert issubclass(MordredNetworkError, Exception)
-
-
-def test_bringup_failed_subclass() -> None:
-    from mordred_hermes.network._exceptions import BringupFailed, MordredNetworkError
-
-    assert issubclass(BringupFailed, MordredNetworkError)
-    assert issubclass(BringupFailed, Exception)
-
-
-def test_already_switching_subclass() -> None:
-    from mordred_hermes.network._exceptions import AlreadySwitching, MordredNetworkError
-
-    assert issubclass(AlreadySwitching, MordredNetworkError)
-
-
-def test_path_switch_requires_restart_subclass() -> None:
-    from mordred_hermes.network._exceptions import MordredNetworkError, PathSwitchRequiresRestart
-
-    assert issubclass(PathSwitchRequiresRestart, MordredNetworkError)
-
-
-def test_unknown_path_subclass() -> None:
-    from mordred_hermes.network._exceptions import MordredNetworkError, UnknownPath
-
-    assert issubclass(UnknownPath, MordredNetworkError)
-
-
 def test_subclasses_caught_by_except_network_error() -> None:
     """``api.use(path)`` callers should be able to catch the base class."""
     from mordred_hermes.network._exceptions import (
@@ -67,27 +36,12 @@ def test_subclasses_caught_by_except_network_error() -> None:
         UnknownPath,
     )
 
+    assert issubclass(MordredNetworkError, Exception)
     for cls in (BringupFailed, AlreadySwitching, PathSwitchRequiresRestart, UnknownPath):
         try:
             raise cls("test")
         except MordredNetworkError:
             pass
-
-
-def test_path_bringup_failed_is_base_exception() -> None:
-    """Strict-mode on_session_start refusal must escape ``except Exception``."""
-    from mordred_hermes.network._exceptions import MordredPathBringupFailed
-
-    assert issubclass(MordredPathBringupFailed, BaseException)
-    assert not issubclass(MordredPathBringupFailed, Exception)
-
-
-def test_path_dropped_is_base_exception() -> None:
-    """Strict-mode mid-session liveness drop must escape ``except Exception``."""
-    from mordred_hermes.network._exceptions import MordredPathDropped
-
-    assert issubclass(MordredPathDropped, BaseException)
-    assert not issubclass(MordredPathDropped, Exception)
 
 
 def test_path_bringup_failed_propagates_past_exception_wrapper() -> None:

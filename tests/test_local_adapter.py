@@ -65,6 +65,7 @@ class TestProfileConstruction:
         assert profile.name == "mordred-local"
         assert profile.base_url == "http://localhost:1234/v1"
         assert profile.api_mode == "chat_completions"
+        assert profile.env_vars == ()
 
     def test_reads_endpoint_from_policy(self, tmp_path: Path) -> None:
         from mordred_hermes.llm_guard.local_adapter import build_mordred_local_profile
@@ -83,13 +84,6 @@ class TestProfileConstruction:
         path.write_text("{not json", encoding="utf-8")
         profile = build_mordred_local_profile(policy_json_path=path)
         assert profile.base_url == "http://localhost:1234/v1"
-
-    def test_no_env_vars(self) -> None:
-        """Local endpoint has no API key requirement — env_vars must be empty."""
-        from mordred_hermes.llm_guard.local_adapter import build_mordred_local_profile
-
-        profile = build_mordred_local_profile(policy_json_path=Path("/dev/null"))
-        assert profile.env_vars == ()
 
 
 class TestRegistration:

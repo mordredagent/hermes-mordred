@@ -68,6 +68,13 @@ def test_round_trip(sealed: tuple[bytes, kek.MasterKey]) -> None:
     wmk, master = sealed
     m = _manifest(wmk, generation=3)
     blob = manifest.encode(m, master)
+    body = json.loads(blob.partition(b"\n")[0])
+    assert body["fmt"] == "MVMF"
+    assert body["ver"] == 1
+    assert body["key_id"] == _KEY_ID
+    assert base64.b64decode(body["wmk"], validate=True) == wmk
+    assert body["generation"] == 3
+    assert body["files"] == {".env": "a" * 64, "config.yaml": "b" * 64}
     out = manifest.decode(blob, master)
     assert out.key_id == _KEY_ID
     assert out.wmk == wmk
@@ -84,29 +91,6 @@ def test_empty_vault_round_trips(sealed: tuple[bytes, kek.MasterKey]) -> None:
     assert out.generation == 0
 
 
-def test_generation_is_preserved(sealed: tuple[bytes, kek.MasterKey]) -> None:
-    wmk, master = sealed
-    out = manifest.decode(manifest.encode(_manifest(wmk, generation=42), master), master)
-    assert out.generation == 42
-
-
-# ---------------------------------------------------------------------------
-# wire format
-# ---------------------------------------------------------------------------
-
-
-def test_body_is_mvmf_v1(sealed: tuple[bytes, kek.MasterKey]) -> None:
-    wmk, master = sealed
-    blob = manifest.encode(_manifest(wmk), master)
-    body = json.loads(blob.partition(b"\n")[0])
-    assert body["fmt"] == "MVMF"
-    assert body["ver"] == 1
-    assert body["key_id"] == _KEY_ID
-    assert base64.b64decode(body["wmk"], validate=True) == wmk
-    assert body["generation"] == 1
-    assert body["files"] == {".env": "a" * 64, "config.yaml": "b" * 64}
-
-
 # ---------------------------------------------------------------------------
 # integrity / tamper
 # ---------------------------------------------------------------------------
@@ -120,17 +104,6 @@ def test_tampered_body_rejected(sealed: tuple[bytes, kek.MasterKey]) -> None:
     body = json.loads(body_b)
     body["files"][".env"] = "c" * 64  # swap in a different (older) digest
     tampered = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n" + b64tag
-    with pytest.raises(manifest.ManifestError):
-        manifest.decode(tampered, master)
-
-
-def test_tampered_tag_rejected(sealed: tuple[bytes, kek.MasterKey]) -> None:
-    wmk, master = sealed
-    blob = manifest.encode(_manifest(wmk), master)
-    body_b, _, b64tag = blob.partition(b"\n")
-    raw = bytearray(base64.b64decode(b64tag))
-    raw[-1] ^= 0x01
-    tampered = body_b + b"\n" + base64.b64encode(bytes(raw))
     with pytest.raises(manifest.ManifestError):
         manifest.decode(tampered, master)
 
@@ -252,28 +225,22 @@ def test_negative_generation_rejected(sealed: tuple[bytes, kek.MasterKey]) -> No
 # anchor (which an offline attacker cannot write) before trusting the wmk.
 
 
-def test_parse_unverified_extracts_wmk_and_generation(sealed: tuple[bytes, kek.MasterKey]) -> None:
-    wmk, master = sealed
-    blob = manifest.encode(_manifest(wmk, generation=8), master)
-    # No master argument — this is the pre-master bootstrap.
-    out = manifest.parse_unverified(blob)
-    assert out.wmk == wmk
-    assert out.generation == 8
-    assert out.key_id == _KEY_ID
-
-
 def test_parse_unverified_does_not_check_mac(sealed: tuple[bytes, kek.MasterKey]) -> None:
     """A tampered tag must NOT stop parse_unverified — authenticity is the
     job of decode() once the master is available. (The vault's anchor pin
     is what makes trusting the extracted wmk safe.)"""
     wmk, master = sealed
-    blob = manifest.encode(_manifest(wmk), master)
+    blob = manifest.encode(_manifest(wmk, generation=8), master)
     body_b, _, b64tag = blob.partition(b"\n")
     raw = bytearray(base64.b64decode(b64tag))
     raw[-1] ^= 0x01  # corrupt the tag
     tampered = body_b + b"\n" + base64.b64encode(bytes(raw))
     out = manifest.parse_unverified(tampered)  # must NOT raise
     assert out.wmk == wmk
+    assert out.generation == 8
+    assert out.key_id == _KEY_ID
+    with pytest.raises(manifest.ManifestError):
+        manifest.decode(tampered, master)
 
 
 def test_parse_unverified_still_rejects_structural_garbage(sealed: tuple[bytes, kek.MasterKey]) -> None:

@@ -82,7 +82,7 @@ from .._home import hermes_home as _hermes_home
 from ..keyvault._identity import resolve_root
 from ..keyvault._memory_hook import memory_marker_path, memory_optout_marker_path
 from ..keyvault._runtime_env import _env_optout_marker_path
-from . import _term
+from . import _term, _windows_gates
 from ._defaults import is_missing_keyvault_stack
 from ._encryption_status import _DARWIN as _DARWIN
 from ._encryption_status import _SEAL_PROBE_BYTES as _SEAL_PROBE_BYTES
@@ -105,6 +105,7 @@ from ._encryption_status import status_mark as status_mark
 from ._encryption_status import style_mark as style_mark
 from ._encryption_status import workspace_status as workspace_status
 from ._flow_session import FlowSession
+from ._windows_gates import WINDOWS as _WINDOWS
 from ._workspace_paths import WorkspacePaths, resolve_workspace_env
 
 __all__ = [
@@ -313,6 +314,12 @@ def collect_status(
     workspace: WorkspacePaths,
     on_path: Callable[[str], bool] | None = None,
 ) -> list[TargetStatus]:
+    if platform == _WINDOWS:
+        # Windows: excluded seals plus the proof-bound memory target, all from
+        # the capability predicates and load-only custody reads.
+        from ._windows_status import collect_target_statuses
+
+        return collect_target_statuses(home)
     return [
         env_status(root=root, home=home, platform=platform),
         config_status(home=home, platform=platform),
@@ -362,7 +369,7 @@ def cli_status(args: argparse.Namespace) -> int:
     return status(
         home=home,
         root=resolve_root(None),
-        platform=sys.platform,
+        platform=_windows_gates.host_platform(),
         workspace=_default_workspace_paths(),
         as_json=bool(getattr(args, "json", False)),
     )
@@ -373,8 +380,19 @@ def cli_status(args: argparse.Namespace) -> int:
 # The encryption surface always uses the default vault root (a custom --root would
 # not be seen by the macOS startup shims, which read default_vault_root()).
 # -----------------------------------------------------------------------------
+def _dispatch_platform(platform: str | None) -> str:
+    """Keep actual Windows custody authoritative; preserve Unix testing seams."""
+    host = _windows_gates.host_platform()
+    return host if host == _WINDOWS else (host if platform is None else platform)
+
+
 def _dispatch(
-    verb: str, target: str, *, force_runtime_unverified: bool = False, flow_session: FlowSession | None = None
+    verb: str,
+    target: str,
+    *,
+    force_runtime_unverified: bool = False,
+    flow_session: FlowSession | None = None,
+    platform: str | None = None,
 ) -> int:
     """Run ``verb`` on one target. ``flow_session`` (a guided multi-target flow)
     reaches the env / config / memory ``enable`` engines so they share one
@@ -384,7 +402,7 @@ def _dispatch(
 
     home = _hermes_home()
     root = resolve_root(None)
-    platform = sys.platform
+    platform = _dispatch_platform(platform)
 
     # target -> {verb: action}. enable/disable are explicit; the CLI adapters
     # only ever pass enable/disable/purge, and any non-enable/disable verb
@@ -423,8 +441,8 @@ def _dispatch(
                 force_runtime_unverified=force_runtime_unverified,
                 flow_session=flow_session,
             ),
-            "disable": lambda: memory_cli.disable(home=home, root=root),
-            "purge": lambda: memory_cli.purge(home=home, root=root),
+            "disable": lambda: memory_cli.disable(home=home, root=root, platform=platform),
+            "purge": lambda: memory_cli.purge(home=home, root=root, platform=platform),
         },
     }
     if target in routes:
@@ -493,14 +511,21 @@ def _workspace_eligible(
 
 
 def _run_target(
-    verb: str, target: str, *, force_runtime_unverified: bool = False, flow_session: FlowSession | None = None
+    verb: str,
+    target: str,
+    *,
+    force_runtime_unverified: bool = False,
+    flow_session: FlowSession | None = None,
+    platform: str | None = None,
 ) -> tuple[str, int]:
     """Dispatch one target for an ``all`` fan-out; return ``(status_label, exit_code)``.
 
     The engine streams its own detail to stdout here; the caller emits the
     one-line per-target status afterwards as a single contiguous summary block.
     """
-    rc = _dispatch(verb, target, force_runtime_unverified=force_runtime_unverified, flow_session=flow_session)
+    rc = _dispatch(
+        verb, target, force_runtime_unverified=force_runtime_unverified, flow_session=flow_session, platform=platform
+    )
     return ("ok" if rc == 0 else f"FAILED (exit {rc})"), rc
 
 
@@ -512,33 +537,34 @@ def _run_core_target(
     force_runtime_unverified: bool,
     flow_session: FlowSession | None = None,
 ) -> tuple[str, int, bool]:
-    """Run one core (env/config/memory) target; return ``(status_label, exit_code, skipped)``.
+    """Run eligible enables; preserve cleanup dispatch and Windows proof routing.
 
-    ``memory`` under ``enable`` is special-cased, platform first: off macOS the
-    memory-sealing runtime shims do not exist at all (mirrors
-    ``setup_cli._resolve_step_memory_encryption``'s ordering), so the engine
-    would just refuse — that refusal used to be counted a *failure* here
-    because ``_dispatch``/the engine resolve their own ``sys.platform``
-    independently of the ``platform`` an ``all`` fan-out was given, so a
-    Linux ``enable all`` reported ``memory FAILED`` instead of a clean skip.
-    Only once the platform passes is this Hermes' memory seam
-    (:func:`memory_runtime_available`) checked; when that is also missing the
-    engine would again just refuse, so it is never called — both cases record
-    a skip instead of a failure. ``disable`` / ``purge`` still run regardless
-    of platform or seam: they clear state and decrypt files back, which is
-    exactly what a broken seam or the wrong OS needs.
+    File-vault enables require the macOS production anchor. Memory enables on
+    macOS/Linux require a supported local seam; actual engine failures count
+    as failures. Windows memory owns its proof gate without this local check.
+    Disable/purge retain existing non-Windows dispatch regardless of eligibility.
     """
-    if target == "memory" and verb == "enable":
-        if platform != _DARWIN:
+    from ._file_vault_support import production_file_vault_eligibility
+
+    if platform == _WINDOWS and target in ("env", "config"):
+        return "skipped (excluded on Windows; retained state is preserved unchanged)", 0, True
+    if verb == "enable" and target in ("env", "config"):
+        eligible, reason = production_file_vault_eligibility(platform)
+        if not eligible:
+            return f"skipped ({reason}; retained state is preserved unchanged)", 0, True
+    if target == "memory" and verb == "enable" and platform != _WINDOWS:
+        if platform not in (_DARWIN, "linux"):
             return (
-                f"skipped (macOS only — the memory sealing runtime is not available on {platform})",
+                f"skipped (memory encryption is unsupported on {platform})",
                 0,
                 True,
             )
         available, reason = memory_runtime_available()
         if not available:
             return f"skipped ({reason})", 0, True
-    status, rc = _run_target(verb, target, force_runtime_unverified=force_runtime_unverified, flow_session=flow_session)
+    status, rc = _run_target(
+        verb, target, force_runtime_unverified=force_runtime_unverified, flow_session=flow_session, platform=platform
+    )
     return status, rc, False
 
 
@@ -560,24 +586,14 @@ def _dispatch_all(
 ) -> int:
     """Fan ``verb`` out over every target, best-effort. Returns an exit code.
 
-    Core vault targets (env / config / memory) are always attempted; workspace
-    is eligibility-gated (see :func:`_workspace_eligible`) and a skip never
-    counts as a failure. ``memory`` under ``enable`` is likewise skipped, not
-    attempted, off macOS or when this Hermes has no memory seam Mordred can
-    wrap (see :func:`_run_core_target`) — the ``platform`` given here (or
-    ``sys.platform`` by default) is what decides the former, so the skip is
-    accurate even though the per-target engine itself always resolves its own
-    ``sys.platform``. Every target runs even if an earlier one
-    failed; the exit code is non-zero iff at least one *attempted* target
-    failed. Per-target engine output streams inline; the ok/FAILED/skipped
-    roll-up prints once at the end as a single block (see
-    :func:`_print_all_summary`).
-
-    ``force_runtime_unverified`` is forwarded to every target's dispatch but only
-    affects the env and config enables (the runtime-gated seals); see
-    :func:`_dispatch`.
+    Enables skip ineligible production file-vault targets and unsupported memory
+    seams. Windows memory keeps its proof-bound engine. Cleanup retains existing
+    dispatch. Every eligible target runs even if an earlier one failed; only
+    attempted failures make the batch nonzero. One FlowSession shares macOS
+    enrollment and unlocks. Force reaches supported memory enables, but Windows
+    has no bypass.
     """
-    platform = sys.platform if platform is None else platform
+    platform = _dispatch_platform(platform)
     on_path = _default_on_path() if on_path is None else on_path
 
     outcomes: list[tuple[str, str]] = []
@@ -603,7 +619,9 @@ def _dispatch_all(
 
     eligible, reason = _workspace_eligible(verb, platform=platform, on_path=on_path)
     if eligible:
-        status, rc = _run_target(verb, "workspace", force_runtime_unverified=force_runtime_unverified)
+        status, rc = _run_target(
+            verb, "workspace", force_runtime_unverified=force_runtime_unverified, platform=platform
+        )
         outcomes.append(("workspace", status))
         failed += rc != 0
     else:

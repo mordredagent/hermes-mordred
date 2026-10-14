@@ -7,8 +7,8 @@ messages ever reaching a model you did not choose.
 - **Read-only.** Mordred can list your chats and read history. It cannot send,
   edit, delete, react, mark chats as read, or show you as online.
 - **Hardware sealed.** Your Telegram session and keys use macOS Secure Enclave
-  or Linux TPM 2.0. They are opened only when needed and never cached. macOS
-  can require Touch ID; Linux TPM access has no per-use user-presence prompt.
+  or Linux/Windows TPM 2.0. They are opened only when needed and never cached. macOS
+  can require Touch ID; Linux/Windows have no per-use user-presence prompt.
 - **Encrypted at rest.** Imported messages are stored AES-256-GCM encrypted
   under hashed file names, and are never committed to git.
 - **Only Venice or this host reads them.** Questions are answered by a
@@ -26,6 +26,16 @@ messages ever reaching a model you did not choose.
   (Ollama, LM Studio, llama.cpp) on `127.0.0.1`.
 - Your own Telegram API application from <https://my.telegram.org> →
   *API development tools* (`api_id` and `api_hash`).
+
+**Native Windows preview:** follow the [Windows TPM workflow](./USAGE.md#native-windows-tpm-workflow)
+and install the `telegram` extra. Run `keyvault enable-winkey` before
+`telegram setup`; setup offers `keyvault native init --role telegram` and
+memory encryption. Login requires acknowledgement of machine-bound custody
+(interactive, or `--acknowledge-machine-bound`). There is no portable recovery
+or per-use prompt; losing the TPM, account or profile loses local credentials
+and archive access. Ordinary-user Server/NitroTPM synthetic flows are validated;
+live-account, packaged Desktop and Windows 11 acceptance remain open
+([evidence](../dev/CI.md#manual-live-device-validation-log)).
 
 On Linux, install Rust, `pkg-config`, `libtss2-dev`, and the `telegram` extra.
 The user running Hermes must be able to open `/dev/tpmrm0` (normally via the
@@ -59,7 +69,7 @@ automatically; restart Hermes Desktop and open
 page walks through the same steps with buttons and masked fields; what you
 type goes straight to Mordred on this host — never into the chat, the model,
 logs or plugin storage. On macOS it shows the vault recovery passphrase once: write it
-down. Linux displays the TPM recovery limitation instead.
+down. Linux/Windows display the TPM recovery limitation instead.
 
 **In a terminal.**
 
@@ -117,8 +127,23 @@ more than 100 members are skipped unless you pass `--include-large-groups`
 hermes-mordred telegram doctor
 ```
 
-`doctor` reads metadata only — no Touch ID, no message content, no account
-name — and prints the fix for anything that is not ready.
+By default, `doctor` reads metadata only — no Touch ID, no message content,
+no account name. A configured privacy LLM is reported as **connection not
+checked**; this does not mean its server is reachable or accepts requests.
+
+To test the saved local endpoint, model and API key:
+
+```sh
+hermes-mordred telegram doctor --probe-llm --json
+```
+
+This explicitly unseals credentials (macOS may request Touch ID) and sends
+one fixed synthetic prompt to the saved local model. It never reads the
+message archive or sends a probe to Venice. The probe has a 30-second total
+HTTP deadline and a 64-token output limit; loading a slow model or spending
+the budget on reasoning can therefore fail this check. Success requires a
+completed stream with visible answer text. Failure reports the connection
+origin, error type, HTTP status when available, and a fix hint.
 
 ## Privacy details
 
@@ -141,6 +166,30 @@ hermes-mordred telegram venice --model qwen3-6-27b          # another Venice pri
 hermes-mordred telegram local-llm --endpoint http://127.0.0.1:11434/v1 --model qwen3
 ```
 
+These Telegram privacy-LLM settings are separate from the main Hermes model.
+Starting another server, changing its port, or switching the Hermes model
+does not update the saved Telegram endpoint. Use the exact model identifier
+served by that endpoint. The endpoint is the API **base URL**, usually ending
+in `/v1`; Mordred appends `/chat/completions` and does not add `/v1` for you.
+
+For a local server that requires a key, use hidden input:
+
+```sh
+hermes-mordred telegram local-llm --endpoint http://127.0.0.1:8080/v1 --model my-model --api-key
+```
+
+`--api-key` prompts; it does not take a plaintext command-line value.
+Alternatively, `--api-key-env LOCAL_MODEL_API_KEY` imports a key once from
+that environment variable. The key is sealed with the Telegram credentials;
+the runtime does not read it from the environment. Missing, empty or invalid
+key input leaves the existing settings unchanged.
+
+With no key option, an existing key is kept only if the normalized endpoint
+is unchanged. Changing the host, port, scheme or base path clears that key;
+provide it explicitly for the new endpoint if required. Use `--clear-api-key`
+with `--endpoint` and `--model` to remove a key explicitly. Only one of the
+three key options may be used at a time.
+
 Under Mordred's `strict` LLM policy, allow Venice by adding `"venice"` to
 `cloud_provider_allowlist` (with `allow_cloud_llm: true`) in
 `~/.hermes/mordred/policy.json`.
@@ -149,14 +198,26 @@ Under Mordred's `strict` LLM policy, allow Venice by adding `"venice"` to
 
 | Message | What to do |
 |---|---|
-| `tee_unavailable` | `hermes-mordred keyvault enable-se` on macOS; `hermes-mordred keyvault enable-tpm` on Linux |
+| `tee_unavailable` | `hermes-mordred keyvault enable-se` on macOS; `enable-tpm` on Linux; `enable-winkey` on Windows |
 | `tee_auth_cancelled` | Touch ID was declined; ask again when ready. |
 | `archive_empty` | `hermes-mordred telegram sync` |
 | `telegram_session_revoked` | The session was ended from another device: `telegram logout`, then `telegram setup`. |
 | `hermes_model_not_allowed` / `hermes_model_not_private` | Switch the Hermes chat to a Venice private model or a local model. |
 | `venice_model_not_private` | `hermes-mordred telegram venice --model <private model>` |
 | `routing_unavailable` | Your Tor/VPN route is down; nothing was sent. |
+| `local_llm_unauthorized` | The local server returned HTTP 401. Set the correct key with `telegram local-llm --endpoint <base-url> --model <id> --api-key`, then run `telegram doctor --probe-llm`. |
+| `local_llm_unavailable` | Inspect the tool's `detail` or the `telegram.ask.failed` audit event. `connection_failed`: verify the saved port and server; `timeout`: check loading/generation speed; HTTP 404: verify the model and `/v1` base path; HTTP 5xx: check server health. Redirects are refused. |
+| `local_llm_bad_request` | Reduce the selected messages or check the server's context limit and request compatibility. |
+| `local_llm_bad_response` | The probe did not receive a complete OpenAI-compatible stream. Check the server and endpoint; partial text followed by a missing completion event is not healthy. |
+| `local_llm_busy` / `local_llm_rate_limited` | The local server is busy or rate-limiting; retry when it is ready. |
+| `llm_empty_answer` | No visible answer text was returned. Try fewer messages or a model that produces visible text within the output limit. |
 | Hermes tries to open Telegram.app | Restart Hermes Desktop so the Telegram tools and instructions load, and decline any screen-control request. |
+
+Local failure diagnostics retain the existing top-level error code and add
+safe details. They include only the URL's scheme/address/port, never arbitrary
+URL paths, response bodies, message text or API keys. `telegram.ask` with
+`decision: allow` records permission before inference; it is not evidence of
+a completed answer. A local transport failure records `telegram.ask.failed`.
 
 ## Stop or remove
 
@@ -169,6 +230,10 @@ You can also end the session from any Telegram app: Settings → Devices.
 
 Removing Mordred with `hermes-mordred uninstall` keeps the Telegram archive and
 sealed credentials (and the session stays logged in) unless you add
-`--purge-data`, which first revokes the session at Telegram and then deletes
-the archive, the credentials and the hardware key. See
+`--purge-data` on macOS/Linux, which revokes the session and deletes the archive,
+credentials and hardware key. See
 [`USAGE.md` § Uninstall safely](./USAGE.md#uninstall-safely).
+
+Windows uninstall retains Telegram data and custody even with `--purge-data`;
+use `telegram logout --forget` separately. If remote revocation fails after
+local deletion, end the session in Telegram Settings → Devices.

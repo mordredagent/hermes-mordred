@@ -11,7 +11,6 @@ ported module.
 
 from __future__ import annotations
 
-import argparse
 import json
 import sys
 import threading
@@ -59,10 +58,6 @@ def _break_ported_pairing_import(monkeypatch: pytest.MonkeyPatch, error: Excepti
 # --------------------------------------------------------------------------- #
 # Backend selection
 # --------------------------------------------------------------------------- #
-
-
-def test_import_pairing_prefers_ported_module() -> None:
-    assert extension_pair_cli._import_pairing() is ported_pairing
 
 
 def test_import_pairing_falls_back_to_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -212,25 +207,6 @@ def test_extension_pair_sanitizes_forged_fail_reason(
     assert "\\x1b[31m" in err  # escaped form is shown instead
 
 
-def test_extension_pair_success_prints_next_step(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    fake_pairing = types.SimpleNamespace(
-        generate_code=lambda: ("MORT-TEST0000-TEST0000", time.time() + 60.0),
-        pair_outcome=lambda code: ("paired", None),
-    )
-    monkeypatch.setattr(extension_pair_cli, "_import_pairing", lambda: fake_pairing)
-    monkeypatch.setattr(extension_pair_cli, "_POLL_SECONDS", 0.01)
-
-    rc = extension_pair_cli.extension_pair(timeout=5.0)
-
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "Paired (" in out
-    assert "extension serve" in out  # next-step hint
-
-
 def test_extension_pair_expiry_warns_on_stderr(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -256,6 +232,8 @@ def test_extension_pair_timeout_revokes_pending_code(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    from mordred_hermes.wizard import cli
+
     revoked: list[str] = []
     code = "MORT-TEST0000-TEST0000"
     fake_pairing = types.SimpleNamespace(
@@ -266,7 +244,7 @@ def test_extension_pair_timeout_revokes_pending_code(
     monkeypatch.setattr(extension_pair_cli, "_import_pairing", lambda: fake_pairing)
     monkeypatch.setattr(extension_pair_cli, "_POLL_SECONDS", 0.001)
 
-    assert extension_pair_cli.extension_pair(timeout=0.0) == 1
+    assert cli.main(["extension", "pair", "--timeout", "0"]) == 1
     assert revoked == [code]
     assert "no pairing" in capsys.readouterr().err
 
@@ -314,21 +292,6 @@ def test_extension_pair_ctrl_c_reports_pairing_that_committed_before_revoke(
     assert "Paired (" in captured.out
 
 
-def test_cli_extension_pair_passes_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: dict[str, float] = {}
-
-    def _fake_extension_pair(*, timeout: float) -> int:
-        seen["timeout"] = timeout
-        return 0
-
-    monkeypatch.setattr(extension_pair_cli, "extension_pair", _fake_extension_pair)
-
-    rc = extension_pair_cli.cli_extension_pair(argparse.Namespace(timeout=42.0))
-
-    assert rc == 0
-    assert seen["timeout"] == 42.0
-
-
 # --------------------------------------------------------------------------- #
 # Real happy path against the ported backend
 # --------------------------------------------------------------------------- #
@@ -343,6 +306,14 @@ def test_extension_pair_completes_against_ported_backend(
     via the real server-side handler, pair reports success."""
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
+    from mordred_hermes.wizard import cli
+
+    def unexpected_legacy_backend():
+        pytest.fail("the installed ported backend must take precedence over the gateway fallback")
+
+    legacy = types.SimpleNamespace(generate_code=unexpected_legacy_backend)
+    monkeypatch.setitem(sys.modules, "gateway", types.SimpleNamespace(extension_pairing=legacy))
+    monkeypatch.setitem(sys.modules, "gateway.extension_pairing", legacy)
     monkeypatch.setattr(extension_pair_cli, "_POLL_SECONDS", 0.02)
     pending = tmp_path / "extension" / "pending.json"
     ext_pub_b64 = b64u_encode(X25519PrivateKey.generate().public_key().public_bytes_raw())
@@ -364,7 +335,7 @@ def test_extension_pair_completes_against_ported_backend(
 
     consumer = threading.Thread(target=_consume_when_visible, daemon=True)
     consumer.start()
-    rc = extension_pair_cli.extension_pair(timeout=10.0)
+    rc = cli.main(["extension", "pair", "--timeout", "10"])
     consumer.join(timeout=5)
 
     # A still-alive consumer would outlive this test's HERMES_HOME monkeypatch
@@ -373,4 +344,6 @@ def test_extension_pair_completes_against_ported_backend(
     assert not consumer.is_alive()
     assert not errors, errors
     assert rc == 0
-    assert "Paired" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Paired (" in out
+    assert "extension serve" in out

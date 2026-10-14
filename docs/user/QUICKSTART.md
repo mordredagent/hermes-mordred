@@ -9,8 +9,9 @@
 
 Mordred adds privacy controls to Hermes without modifying Hermes itself. It can
 keep keys behind Secure Enclave or TPM 2.0, route traffic through Tor or a VPN,
-enforce local-LLM policy, and on macOS transparently encrypt `.env`,
-configuration, and agent memories at rest.
+enforce local-LLM policy, and protect agent memories at rest using macOS
+file-vault, Linux TPM, or scoped Windows CNG custody. Transparent `.env` and
+configuration lifecycles use macOS integrations.
 
 ## Before you start
 
@@ -22,7 +23,19 @@ You need:
 
 Linux supports the hardware-backed keyvault, but the transparent env/config
 startup lifecycle is not active there yet. On Linux those encryption targets
-report inactive and plaintext remains the runtime source.
+report inactive and plaintext remains the runtime source. Dedicated TPM memory
+and Private Telegram do work: see [`TELEGRAM.md`](./TELEGRAM.md). General
+`setup` and `encryption enable all` enable Linux memory through the dedicated
+TPM engine and skip env/config file-vault enrollment. The standalone
+`hermes-mordred encryption enable memory` command remains available.
+
+Native Windows has scoped installer, CNG memory, Telegram and Desktop code;
+it is not general product or Windows 11 acceptance. Use the native PowerShell
+instructions in [`setup.md`](../dev/setup.md#native-windows-installer-and-helper-validation-c4)
+and the [Windows TPM workflow](./USAGE.md#native-windows-tpm-workflow).
+Capability-specific contracts and remaining gates are in
+[`SPEC.md`](../dev/SPEC.md#platform-support-v1), [`TODO.md`](../dev/TODO.md), and
+[`CI.md`](../dev/CI.md). The shell installer below is for macOS/Linux.
 
 If `hermes` is not installed yet, use its official installer, then reload your
 shell:
@@ -179,6 +192,7 @@ On macOS, finally encrypt `.env` and verify:
 
 ```sh
 MORDRED_SEKEY_UNATTENDED=1 hermes-mordred encryption enable env
+hermes-mordred encryption enable memory
 hermes-mordred status
 ```
 
@@ -186,8 +200,10 @@ hermes-mordred status
 variable applies to one process, so put it on both key-creation commands when
 both keys must work unattended.
 
-On Linux, finish by checking `hermes-mordred keyvault list` and
-`hermes-mordred status`; do not expect an `env [on]` row.
+On Linux, enable dedicated memory with `hermes-mordred encryption enable memory`,
+then check `hermes-mordred keyvault list` and `hermes-mordred status`.
+Stop gateways before enabling and restart afterward. TPM memory has no portable
+recovery and needs no env enrollment; do not expect an `env [on]` row.
 
 ## 1. Invoke it
 
@@ -198,27 +214,31 @@ shell.
 
 ## 2. First run, in order
 
-`hermes-mordred setup` first checks that upstream Hermes itself is set up
-(offering to run `hermes setup` if not), then runs the seven steps below in
-order, probing each one first and skipping whatever is already complete — so
-re-running it after an interruption picks up where it left off. Two moments
-still need you at the keyboard: the keyvault Passphrase and 24-word Seed
-Phrase backup at step 4 (have pen and paper ready), and any device-key unlock
-(Touch ID) while steps 5–6 enable encryption. A setup run asks you to choose a
-passphrase only once (plus one confirmation): when the same run also creates
-the at-rest vault at step 5, the keyvault Passphrase becomes that vault's
-recovery passphrase too. If the keyvault already existed, step 5 asks for the
-vault recovery passphrase instead — still once, plus one confirmation.
+`hermes-mordred setup` runs seven steps in order, probing each and skipping
+whatever is already complete. Re-running after an interruption picks up the
+unfinished work. On macOS, the keyvault Passphrase and 24-word Seed Phrase
+backup are at step 5 (have pen and paper ready), and device-key authorization
+may occur at steps 6–7. A setup run asks you to choose a passphrase only once
+(plus one confirmation): when that run creates the file vault at step 6, the
+keyvault Passphrase also becomes its recovery passphrase. If the keyvault
+already exists, step 6 asks for the file-vault recovery passphrase instead.
+The stores and recovery mechanisms remain separate despite reusing that input.
 
 | # | Command | Result |
 |---|---|---|
-| 1 | `hermes-mordred configure` | Writes Mordred policy and enables the `mordred` plugin. |
-| 2 | `hermes-mordred network init` | Optionally selects Tor, VPN, or clearnet. |
-| 3 | `hermes-mordred keyvault enable-se` or `enable-tpm` | Builds and installs the platform key helper. |
-| 4 | `hermes-mordred keyvault init` | Creates the main keyvault key and its seed/digest commitment. |
-| 5 | `hermes-mordred encryption enable env` (macOS only) | Enrolls `.env` and activates the transparent runtime lifecycle. |
-| 6 | `hermes-mordred encryption enable memory` (macOS only) | Arms the memory hook and seals `~/.hermes/memories/*.md`. |
-| 7 | `hermes-mordred status` | Shows policy, route, keyvault, and encryption state. |
+| 1 | Upstream Hermes check; offers `hermes setup` if needed | Establishes the Hermes configuration prerequisite. |
+| 2 | `hermes-mordred configure` | Writes Mordred policy and enables the `mordred` plugin. |
+| 3 | `hermes-mordred network init` | Optionally selects Tor, VPN, or clearnet. |
+| 4 | `hermes-mordred keyvault enable-se` or `enable-tpm` | Builds and installs the platform key helper. |
+| 5 | `hermes-mordred keyvault init` | Creates the main keyvault key and its seed/digest commitment. |
+| 6 | `hermes-mordred encryption enable env` (macOS runtime) | Enrolls `.env` and activates transparent injection on macOS. |
+| 7 | `hermes-mordred encryption enable memory` | Arms and seals memory through macOS file-vault or Linux TPM custody. |
+
+Final `hermes-mordred status` is outside the numbered steps. Linux skips
+step 6 and enables memory without a file vault or recovery-passphrase prompt.
+Windows setup uses `enable-winkey`, skips the
+unported secret-store keyvault ceremony and excluded env target, and uses its
+proof-bound CNG memory flow; the Windows gates remain separate.
 
 On macOS, a successful final status includes an `env [on] enrolled` row. On
 Linux the row is inactive even if enrolled; that is an explicit platform
@@ -269,6 +289,22 @@ the hook reseals the current config and removes the plaintext. Do not re-run
 requires `--yes`. The macOS-only `workspace` target reports `sealed` when it is
 encrypted and unmounted. See [`USAGE.md` §3](./USAGE.md#encryption--the-recommended-onoff-switch).
 
+### Encrypt conversation databases (macOS)
+
+After enabling memory, encrypt `state.db` and Hermes's other SQLite stores:
+
+```sh
+hermes-mordred databases encrypt --dry-run
+hermes-mordred databases encrypt
+hermes-mordred databases status
+```
+
+`setup` and `encryption enable all` do not enable this. If conversion is
+scheduled, quit all Hermes processes and restart, then check status again.
+Linux/Windows databases, session JSONL and text logs are outside this protection.
+See [database operations](./USAGE.md#databases--encrypt-hermess-sqlite-databases-macos)
+for decryption, backups and migration.
+
 ### What the protected states mean
 
 Protection is target-specific. An `on` mark means the target's lifecycle is
@@ -287,17 +323,19 @@ but protection is not active, `off` means the target is not configured, and
 `exposed` means plaintext drift was found on disk and must be resealed. The
 workspace uses `sealed` / `open` / `off` instead.
 
-The audit log is separate from these four targets. It starts as plaintext and
-becomes encrypted after a successful `keyvault init`; `hermes-mordred status`
-reports the actual audit-log state and calls out any encrypted-to-plaintext
+On macOS/Linux, the audit log is separate from these four targets. It starts
+as plaintext and becomes encrypted after a successful `keyvault init`;
+`hermes-mordred status` reports the actual audit-log state and calls out any encrypted-to-plaintext
 downgrade.
 
-`encryption enable memory` needs the `env` target first (it carries the memory
-key) and seals `~/.hermes/memories/*.md` as it goes. If a `hermes gateway` is
-running, restart it afterwards — until then its memory reads/writes fail
-closed (not plaintext), and a session may see an empty memory. Separately,
-the audit log itself is encrypted only after `keyvault init` — before that,
-entries are written in plaintext.
+On macOS, `encryption enable memory` needs the `env` target first (it carries
+the memory key) and seals `~/.hermes/memories/*.md` as it goes. Linux TPM and
+Windows CNG memory use dedicated custody; see the platform contracts in
+[`SPEC.md`](../dev/SPEC.md#platform-support-v1). Restart running gateways after
+changing memory protection. A macOS process that lacks the newly created key
+refuses sealed reads and writes; Hermes may catch its initial-load error and
+show an empty view, while hooked writes preserve the seals. Linux and Windows
+normal enable flows require stopped gateways before sealing.
 
 ## 5. Network settings 🌐
 
@@ -374,17 +412,21 @@ hermes-mordred uninstall --erase-encrypted   # delete encrypted data as it is (n
 
 Or through the installer: `curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash -s -- --uninstall`.
 
-Quit Hermes Desktop and stop any `hermes gateway` first. The command decrypts
-`.env`, `config.yaml` and your memories back to plaintext (it stops before
-removing anything if it cannot), removes Mordred's entries from `config.yaml`
+Quit Hermes Desktop and stop any `hermes gateway` first. On macOS, the command
+restores protected databases first, then `.env`, `config.yaml` and memories
+to plaintext (it stops before removing anything if it cannot), removes
+Mordred's entries from `config.yaml`
 (keeping a backup) and `.env`, the Hermes Desktop page and the installer's
 launcher, and finally uninstalls the package from Hermes's environment.
 
-Your Mordred data — vault, keyvault, Telegram archive, audit log, device keys —
-is **kept** and listed with its location. `--purge-data` deletes it too, after
+On macOS/Linux, your Mordred data — vault, keyvault, Telegram archive, audit log,
+device keys — is **kept** and listed with its location. `--purge-data` deletes it too, after
 you type `delete my data`; keep your keyvault Seed Phrase / Passphrase and the
 vault recovery passphrase if you may want any of it back. Details:
 [`USAGE.md` § Uninstall safely](./USAGE.md#uninstall-safely).
+
+Windows restores memory; `--purge-data` removes only its memory custody key
+and retains audit/Telegram data and keys. `--erase-encrypted` is unsupported.
 
 ## Common checks
 

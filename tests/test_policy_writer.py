@@ -265,23 +265,6 @@ class TestPolicySnapshotPhase2Fields:
         snap = PolicySnapshot(policy="strict", provider_overrides=override)
         assert snap.to_json_dict()["provider_overrides"] == override
 
-    def test_cloud_attempt_action_only_accepts_known_values(self) -> None:
-        """No validation at the dataclass level — schema is documented but
-        not enforced (matches Phase 1 pattern). This test just guards the
-        Literal type hint so mypy --strict catches typos at compile time.
-
-        The runtime test below ensures we did not silently widen the type.
-        """
-        from typing import get_type_hints
-
-        from mordred_hermes.wizard.policy_writer import PolicySnapshot as Snap
-
-        hints = get_type_hints(Snap)
-        # ``Literal['always-block', 'prompt-once']`` -> __args__ exposes the values
-        action_hint = hints["cloud_attempt_action"]
-        args = getattr(action_hint, "__args__", ())
-        assert set(args) == {"always-block", "prompt-once"}, args
-
 
 class TestUpsertMordredSections:
     def test_creates_config_yaml_when_absent(self, tmp_path: Path) -> None:

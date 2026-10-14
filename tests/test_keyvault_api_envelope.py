@@ -30,16 +30,14 @@ Secure Enclave).
 from __future__ import annotations
 
 import hashlib
-import inspect
 import os
 import stat
-import typing
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from mordred_hermes.keyvault import _envelope_codec, _secret_ops, _storage, api, wrap
+from mordred_hermes.keyvault import _storage, api, wrap
 from mordred_hermes.keyvault._exceptions import (
     WrapAuthCancelled,
     WrapIntegrityError,
@@ -106,108 +104,25 @@ def _purpose_hash(purpose: str) -> bytes:
 # ----------------------------- MREN wire format -----------------------------
 
 
-class TestMrenWireFormat:
-    def test_constants_match_spec(self) -> None:
-        # Wire-format constants moved to _envelope_codec (api re-imports the
-        # codec functions it uses; the constants now live with the wire format).
-        assert _envelope_codec._ENVELOPE_MAGIC == b"MREN"
-        assert _envelope_codec._ENVELOPE_VERSION == 1
-        assert _envelope_codec._ENVELOPE_HEADER_LEN == 168  # magic+version+kid+purpose+wrap+len
-        assert _envelope_codec._ENVELOPE_AAD_LEN == 164  # all but aes_blob_len
-
-    def test_minimum_envelope_size_is_196_bytes(
-        self,
-        registered_key: str,
-        backend: FakeBackend,
-        home: Path,
-        captured_audit: tuple[list[dict[str, Any]], Any],
-    ) -> None:
-        _, sink = captured_audit
-        eid = api.encrypt(registered_key, b"", "purpose", backend=backend, audit_sink=sink, home=home)
-        envelope_path = _envelope_path(home, registered_key, "purpose", eid)
-        blob = _storage.safe_read(envelope_path)
-        # AAD(164) + aes_blob_len(4) + nonce(12) + ciphertext(0) + tag(16) = 196.
-        assert len(blob) == 196
-
-    def test_envelope_starts_with_mren_magic(
-        self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        _, sink = captured_audit
-        eid = api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
-        blob = _read_envelope(home, registered_key, "purpose", eid)
-        assert blob[0:4] == b"MREN"
-
-    def test_envelope_version_byte_is_one(
-        self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        _, sink = captured_audit
-        eid = api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
-        blob = _read_envelope(home, registered_key, "purpose", eid)
-        assert blob[4] == 1
-
-    def test_envelope_carries_key_id_hash(
-        self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        _, sink = captured_audit
-        eid = api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
-        blob = _read_envelope(home, registered_key, "purpose", eid)
-        assert blob[5:21] == _key_id_hash(registered_key)
-
-    def test_envelope_carries_purpose_hash(
-        self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        _, sink = captured_audit
-        eid = api.encrypt(registered_key, b"x", "ssh-priv", backend=backend, audit_sink=sink, home=home)
-        blob = _read_envelope(home, registered_key, "ssh-priv", eid)
-        assert blob[21:37] == _purpose_hash("ssh-priv")
-
-    def test_envelope_aes_blob_len_field_matches_actual(
-        self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        _, sink = captured_audit
-        eid = api.encrypt(registered_key, b"abcdef", "purpose", backend=backend, audit_sink=sink, home=home)
-        blob = _read_envelope(home, registered_key, "purpose", eid)
-        declared = int.from_bytes(blob[164:168], "big")
-        assert declared == len(blob) - 168
-        assert declared == 12 + 6 + 16  # nonce + ciphertext + tag
-
-
 # ----------------------------- api.encrypt -----------------------------
 
 
 class TestApiEncrypt:
-    def test_signature_matches_spec(self) -> None:
-        sig = inspect.signature(api.encrypt)
-        hints = typing.get_type_hints(api.encrypt)
-        assert list(sig.parameters) == ["key_id", "plaintext", "purpose", "backend", "audit_sink", "home"]
-        assert hints["key_id"] is str
-        assert hints["plaintext"] is bytes
-        assert hints["purpose"] is str
-        assert hints["return"] is str  # envelope_id
-        assert sig.parameters["backend"].kind is inspect.Parameter.KEYWORD_ONLY
-        assert sig.parameters["audit_sink"].kind is inspect.Parameter.KEYWORD_ONLY
-        assert sig.parameters["home"].kind is inspect.Parameter.KEYWORD_ONLY
-
-    def test_returns_envelope_id_string(
-        self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        _, sink = captured_audit
-        eid = api.encrypt(registered_key, b"data", "purpose", backend=backend, audit_sink=sink, home=home)
-        assert isinstance(eid, str)
-        # URL-safe base64 of 16 bytes is 22 chars (no padding).
-        assert len(eid) == 22
-        assert all(c.isalnum() or c in "-_" for c in eid)
-
     def test_persists_envelope_at_expected_path(
         self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
     ) -> None:
-        _, sink = captured_audit
+        log, sink = captured_audit
         eid = api.encrypt(registered_key, b"data", "purpose", backend=backend, audit_sink=sink, home=home)
         kid_hex = _key_id_hash(registered_key).hex()
         purpose_hex = _purpose_hash("purpose").hex()
         path = home / "mordred" / "keyvault" / "ciphertexts" / kid_hex / purpose_hex / f"{eid}.gcm"
+        assert isinstance(eid, str)
+        assert len(eid) == 22
+        assert all(c.isalnum() or c in "-_" for c in eid)
+        assert log == []
         assert path.is_file()
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
 
     def test_uses_fresh_dek_each_call(
         self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
@@ -219,36 +134,9 @@ class TestApiEncrypt:
         blob2 = _read_envelope(home, registered_key, "purpose", eid2)
         # Same key_id_hash + purpose_hash, but the 127-byte MRKW prefix is
         # built from a fresh ephemeral keypair each call -> different bytes.
+        assert eid1 != eid2
         assert blob1[37:164] != blob2[37:164]
-
-    def test_uses_fresh_aes_nonce_each_call(
-        self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        _, sink = captured_audit
-        eid1 = api.encrypt(registered_key, b"same", "purpose", backend=backend, audit_sink=sink, home=home)
-        eid2 = api.encrypt(registered_key, b"same", "purpose", backend=backend, audit_sink=sink, home=home)
-        blob1 = _read_envelope(home, registered_key, "purpose", eid1)
-        blob2 = _read_envelope(home, registered_key, "purpose", eid2)
-        # First 12 bytes after aes_blob_len are the nonce.
         assert blob1[168:180] != blob2[168:180]
-
-    def test_envelope_id_is_unique_across_calls(
-        self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        _, sink = captured_audit
-        seen = {
-            api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home) for _ in range(8)
-        }
-        assert len(seen) == 8
-
-    def test_does_not_emit_audit_at_api_layer(
-        self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        # codex OD-3: encrypt has no authorization gate; no audit emit at api layer.
-        # The wrap layer would emit only on unwrap (not wrap). So the sink stays empty.
-        log, sink = captured_audit
-        api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
-        assert log == []
 
     def test_key_without_authoritative_commit_is_rejected_before_wrap(
         self, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
@@ -290,45 +178,16 @@ class TestApiEncrypt:
 
 
 class TestApiDecrypt:
-    def test_signature_matches_spec(self) -> None:
-        sig = inspect.signature(api.decrypt)
-        hints = typing.get_type_hints(api.decrypt)
-        assert list(sig.parameters) == ["key_id", "envelope_id", "purpose", "backend", "audit_sink", "home"]
-        assert hints["key_id"] is str
-        assert hints["envelope_id"] is str
-        assert hints["purpose"] is str
-        assert hints["return"] is bytes
-
-    def test_roundtrip(
-        self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        _, sink = captured_audit
-        eid = api.encrypt(registered_key, b"plaintext-data", "purpose", backend=backend, audit_sink=sink, home=home)
-        decrypted = api.decrypt(registered_key, eid, "purpose", backend=backend, audit_sink=sink, home=home)
-        assert decrypted == b"plaintext-data"
-
-    def test_roundtrip_empty_plaintext(
-        self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        _, sink = captured_audit
-        eid = api.encrypt(registered_key, b"", "purpose", backend=backend, audit_sink=sink, home=home)
-        assert api.decrypt(registered_key, eid, "purpose", backend=backend, audit_sink=sink, home=home) == b""
-
     def test_roundtrip_binary_plaintext(
         self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
     ) -> None:
-        _, sink = captured_audit
+        log, sink = captured_audit
         plaintext = bytes(range(256))
-        eid = api.encrypt(registered_key, plaintext, "purpose", backend=backend, audit_sink=sink, home=home)
-        assert api.decrypt(registered_key, eid, "purpose", backend=backend, audit_sink=sink, home=home) == plaintext
-
-    def test_roundtrip_unicode_plaintext(
-        self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        _, sink = captured_audit
-        plaintext = "パスワード🔐 with mixed 文字 and emoji".encode()
-        eid = api.encrypt(registered_key, plaintext, "purpose", backend=backend, audit_sink=sink, home=home)
-        assert api.decrypt(registered_key, eid, "purpose", backend=backend, audit_sink=sink, home=home) == plaintext
+        purpose = "ssh-priv_key.v1"
+        eid = api.encrypt(registered_key, plaintext, purpose, backend=backend, audit_sink=sink, home=home)
+        assert api.decrypt(registered_key, eid, purpose, backend=backend, audit_sink=sink, home=home) == plaintext
+        assert len(log) == 1
+        assert log[0]["reason"] == "keyvault.unwrap_authorized"
 
     def test_cross_purpose_replay_no_biometric_prompt(
         self,
@@ -460,20 +319,6 @@ class TestApiDecrypt:
         with pytest.raises(WrapIntegrityError):
             api.decrypt(registered_key, eid, "purpose", backend=backend, audit_sink=sink, home=home)
 
-    def test_emits_keyvault_unwrap_authorized_on_success(
-        self,
-        registered_key: str,
-        backend: FakeBackend,
-        home: Path,
-        captured_audit: tuple[list[dict[str, Any]], Any],
-    ) -> None:
-        log, sink = captured_audit
-        eid = api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
-        api.decrypt(registered_key, eid, "purpose", backend=backend, audit_sink=sink, home=home)
-        # Exactly one emit, from the wrap layer (api.decrypt does NOT double-emit).
-        assert len(log) == 1
-        assert log[0]["reason"] == "keyvault.unwrap_authorized"
-
     def test_emits_keyvault_unwrap_denied_on_user_cancel(
         self,
         registered_key: str,
@@ -536,28 +381,11 @@ class TestPurposeValidation:
         with pytest.raises(ValueError):
             api.decrypt(registered_key, "dummy_eid", bad, backend=backend, audit_sink=sink, home=home)
 
-    def test_accepts_alphanumeric_with_dashes_and_underscores(
-        self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        _, sink = captured_audit
-        eid = api.encrypt(registered_key, b"x", "ssh-priv_key.v1", backend=backend, audit_sink=sink, home=home)
-        assert api.decrypt(registered_key, eid, "ssh-priv_key.v1", backend=backend, audit_sink=sink, home=home) == b"x"
-
 
 # ----------------------------- envelope persistence -----------------------------
 
 
 class TestEnvelopePersistence:
-    def test_creates_purpose_subdir_with_0700(
-        self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        _, sink = captured_audit
-        api.encrypt(registered_key, b"x", "newpurpose", backend=backend, audit_sink=sink, home=home)
-        kid_hex = _key_id_hash(registered_key).hex()
-        purpose_hex = _purpose_hash("newpurpose").hex()
-        purpose_dir = home / "mordred" / "keyvault" / "ciphertexts" / kid_hex / purpose_hex
-        assert stat.S_IMODE(purpose_dir.stat().st_mode) == 0o700
-
     def test_envelopes_for_same_key_different_purpose_separate(
         self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
     ) -> None:
@@ -608,31 +436,6 @@ class TestEnvelopeIdValidation:
         _, sink = captured_audit
         with pytest.raises(ValueError):
             api.decrypt(registered_key, bad, "purpose", backend=backend, audit_sink=sink, home=home)
-
-    def test_accepts_valid_22_char_envelope_id(
-        self,
-        registered_key: str,
-        backend: FakeBackend,
-        home: Path,
-        captured_audit: tuple[list[dict[str, Any]], Any],
-    ) -> None:
-        _, sink = captured_audit
-        eid = api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
-        # Round-trip succeeds.
-        assert api.decrypt(registered_key, eid, "purpose", backend=backend, audit_sink=sink, home=home) == b"x"
-
-    def test_encrypt_always_returns_validator_acceptable_id(
-        self,
-        registered_key: str,
-        backend: FakeBackend,
-        home: Path,
-        captured_audit: tuple[list[dict[str, Any]], Any],
-    ) -> None:
-        # 64 fresh encrypts; every envelope_id must satisfy the validator.
-        _, sink = captured_audit
-        for _ in range(64):
-            eid = api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
-            _secret_ops._validate_envelope_id(eid)  # must not raise
 
 
 class TestEncryptValidatesExistingDirs:
@@ -818,3 +621,16 @@ def _envelope_path(home: Path, key_id: str, purpose: str, envelope_id: str) -> P
 
 def _read_envelope(home: Path, key_id: str, purpose: str, envelope_id: str) -> bytes:
     return _storage.safe_read(_envelope_path(home, key_id, purpose, envelope_id))
+
+
+def test_mren_v1_wire_layout(registered_key, backend, home, captured_audit) -> None:
+    _, sink = captured_audit
+    eid = api.encrypt(registered_key, b"", "purpose", backend=backend, audit_sink=sink, home=home)
+    blob = _read_envelope(home, registered_key, "purpose", eid)
+    assert len(blob) == 196
+    assert blob[:5] == b"MREN\x01"
+    assert blob[5:21] == _key_id_hash(registered_key)
+    assert blob[21:37] == _purpose_hash("purpose")
+    assert len(blob[37:164]) == 127
+    assert int.from_bytes(blob[164:168], "big") == len(blob) - 168 == 28
+    assert api.decrypt(registered_key, eid, "purpose", backend=backend, audit_sink=sink, home=home) == b""

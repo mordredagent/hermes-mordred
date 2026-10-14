@@ -65,20 +65,6 @@ def _patch_reseal(monkeypatch: pytest.MonkeyPatch, behavior: Any) -> list[Path]:
 
 
 class TestReseelStrayEnv:
-    def test_reseals_and_returns_true_on_darwin(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        home = _make_home(tmp_path, with_env=True, with_optout=False)
-
-        def _success(home: Path, _root: Path) -> int:
-            (home / ".env").unlink()  # a real reseal removes the plaintext
-            return 0
-
-        calls = _patch_reseal(monkeypatch, _success)
-        result = _env_write_guard.reseal_stray_env_if_present(home=home, platform="darwin")
-
-        assert result is True
-        assert calls == [home]
-        assert not (home / ".env").exists()
-
     def test_noop_off_darwin_keeps_plaintext(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # Off macOS the read shim is a no-op, so removing the plaintext would
         # strand the secrets. The sweep must do nothing and keep the file.
@@ -190,37 +176,17 @@ class TestRegisterWiring:
         from mordred_hermes import keyvault
 
         _isolate_register(monkeypatch)
+        installed: list[str] = []
+        monkeypatch.setattr(keyvault, "_install_journey_guard", lambda: installed.append("journey"))
         ctx = _FakeCtx()
         keyvault.register(ctx)
 
+        assert installed == ["journey"]
         assert ctx.hooks.count("on_session_start") == 3
         assert "on_session_end" in ctx.hooks
-
-    def test_register_wires_the_memory_check_itself(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A count only proves *three* callbacks arrived. The sealed-but-locked
-        diagnosis is the one the operator never sees fail, so pin its identity."""
-        from mordred_hermes import keyvault
-
-        _isolate_register(monkeypatch)
-        ctx = _FakeCtx()
-        keyvault.register(ctx)
-
         assert keyvault._on_session_memory_check in ctx.callbacks_for("on_session_start")
         assert keyvault._on_session_reseal in ctx.callbacks_for("on_session_start")
         assert keyvault._on_session_reseal in ctx.callbacks_for("on_session_end")
-
-    def test_register_installs_the_journey_guard(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The import hook covers a process it engaged in; ``register()`` covers the
-        one the ``.pth`` gate never matched."""
-        from mordred_hermes import keyvault
-
-        _isolate_register(monkeypatch)
-        installed: list[str] = []
-        monkeypatch.setattr(keyvault, "_install_journey_guard", lambda: installed.append("journey"))
-
-        keyvault.register(_FakeCtx())
-
-        assert installed == ["journey"]
 
     def test_journey_guard_installation_is_fail_open(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A host without ``agent.learning_mutations`` must be a silent no-op."""
@@ -291,14 +257,6 @@ class TestOnSessionMemoryCheck:
 class TestOnSessionResealCallback:
     """The hook callback itself: it must invoke the helper, ignore the host's hook
     payload kwargs, and never let a helper failure escape into the session boundary."""
-
-    def test_callback_invokes_helper(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from mordred_hermes import keyvault
-
-        seen: list[dict[str, Any]] = []
-        monkeypatch.setattr(_env_write_guard, "reseal_stray_env_if_present", lambda **kw: bool(seen.append(kw)))
-        keyvault._on_session_reseal()
-        assert seen == [{}]  # called once, with no args of its own
 
     def test_callback_ignores_hook_payload_kwargs(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from mordred_hermes import keyvault

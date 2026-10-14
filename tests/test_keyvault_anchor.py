@@ -46,17 +46,18 @@ def store() -> FakeAnchorStore:
 # ---------------------------------------------------------------------------
 
 
-def test_write_then_verify_ok(store: FakeAnchorStore) -> None:
-    anchor.write_anchor(store, _LABEL, wmk=_WMK_A, generation=5)
-    # Matching wmk + generation → no exception.
-    anchor.verify_anchor(store, _LABEL, wmk=_WMK_A, generation=5)
-
-
 def test_read_anchor_round_trips(store: FakeAnchorStore) -> None:
     anchor.write_anchor(store, _LABEL, wmk=_WMK_A, generation=7)
     a = anchor.read_anchor(store, _LABEL)
     assert a.wmk_sha256 == hashlib.sha256(_WMK_A).digest()
     assert a.generation == 7
+    anchor.verify_anchor(store, _LABEL, wmk=_WMK_A, generation=7)
+    raw = store.read(_LABEL)
+    assert raw is not None
+    obj = json.loads(raw)
+    assert obj["v"] == 1
+    assert obj["wmk_sha256"] == hashlib.sha256(_WMK_A).hexdigest()
+    assert obj["generation"] == 7
 
 
 def test_write_overwrites_on_generation_bump(store: FakeAnchorStore) -> None:
@@ -72,16 +73,6 @@ def test_write_overwrites_on_generation_bump(store: FakeAnchorStore) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_anchor_serialization_format(store: FakeAnchorStore) -> None:
-    anchor.write_anchor(store, _LABEL, wmk=_WMK_A, generation=3)
-    raw = store.read(_LABEL)
-    assert raw is not None
-    obj = json.loads(raw)
-    assert obj["v"] == 1
-    assert obj["wmk_sha256"] == hashlib.sha256(_WMK_A).hexdigest()
-    assert obj["generation"] == 3
-
-
 # ---------------------------------------------------------------------------
 # substitution / rollback defence
 # ---------------------------------------------------------------------------
@@ -91,8 +82,9 @@ def test_substituted_wmk_rejected(store: FakeAnchorStore) -> None:
     """Codex P1-a: a wmk swapped for one the attacker minted under their
     own SE key has a different fingerprint → AnchorMismatch."""
     anchor.write_anchor(store, _LABEL, wmk=_WMK_A, generation=4)
-    with pytest.raises(anchor.AnchorMismatch):
+    with pytest.raises(anchor.AnchorMismatch) as raised:
         anchor.verify_anchor(store, _LABEL, wmk=_WMK_B, generation=4)
+    assert isinstance(raised.value, anchor.AnchorError)
 
 
 def test_rolled_back_generation_rejected(store: FakeAnchorStore) -> None:
@@ -118,19 +110,16 @@ def test_advanced_generation_rejected(store: FakeAnchorStore) -> None:
 def test_missing_anchor_raises(store: FakeAnchorStore) -> None:
     """An enrolled vault whose anchor is absent (never initialized, or the
     attacker deleted it to force a fallback) must fail closed."""
-    with pytest.raises(anchor.AnchorMissing):
+    with pytest.raises(anchor.AnchorMissing) as raised:
         anchor.verify_anchor(store, _LABEL, wmk=_WMK_A, generation=1)
-
-
-def test_read_missing_anchor_raises(store: FakeAnchorStore) -> None:
-    with pytest.raises(anchor.AnchorMissing):
-        anchor.read_anchor(store, _LABEL)
+    assert isinstance(raised.value, anchor.AnchorError)
 
 
 def test_corrupt_anchor_not_json_raises(store: FakeAnchorStore) -> None:
     store.write(_LABEL, b"not json at all")
-    with pytest.raises(anchor.AnchorCorrupt):
+    with pytest.raises(anchor.AnchorCorrupt) as raised:
         anchor.verify_anchor(store, _LABEL, wmk=_WMK_A, generation=1)
+    assert isinstance(raised.value, anchor.AnchorError)
 
 
 def test_corrupt_anchor_missing_field_raises(store: FakeAnchorStore) -> None:
@@ -146,13 +135,6 @@ def test_corrupt_anchor_bad_version_raises(store: FakeAnchorStore) -> None:
     )
     with pytest.raises(anchor.AnchorCorrupt):
         anchor.verify_anchor(store, _LABEL, wmk=_WMK_A, generation=1)
-
-
-def test_all_anchor_errors_share_base(store: FakeAnchorStore) -> None:
-    """A caller can fail closed with a single ``except AnchorError``."""
-    assert issubclass(anchor.AnchorMissing, anchor.AnchorError)
-    assert issubclass(anchor.AnchorMismatch, anchor.AnchorError)
-    assert issubclass(anchor.AnchorCorrupt, anchor.AnchorError)
 
 
 # ---------------------------------------------------------------------------

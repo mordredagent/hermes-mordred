@@ -1,7 +1,7 @@
-"""Canary: the memory hook against the **real installed** ``tools/memory_tool.py``.
+"""Canary: the memory hook against the real release or selected upstream source.
 
 The unit tests run against faithful copies of the three upstream seam shapes;
-this file runs against whatever Hermes is actually installed. It is the tripwire
+this file runs against installed Hermes or a strictly selected main checkout. It is the tripwire
 for an upstream refactor — if ``MemoryStore`` grows a new read chokepoint or
 renames a parameter, ``seam_check`` stops recognising it and this fails in CI
 rather than in an operator's memory directory.
@@ -33,7 +33,8 @@ from mordred_hermes.keyvault._memory_hook import (
     seam_check,
 )
 from mordred_hermes.keyvault._runtime_probe import runtime_memory_encryption_available
-from mordred_hermes.keyvault.memory_crypto import MAGIC
+from mordred_hermes.keyvault.memory_crypto import MAGIC, seal, unseal
+from tests._upstream_canary import CanaryUnavailable, SeamDrift, import_target, verify_selected_source
 
 _SEAM_NAMES = ("_write_file", "_read_file", "_read_raw_checked", "_detect_external_drift")
 _ABSENT = object()
@@ -60,8 +61,9 @@ def _unwrap_seams(store_cls: Any) -> None:
 @pytest.fixture
 def upstream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     """The live ``tools.memory_tool``, rooted at ``tmp_path`` and restored afterwards."""
-    memory_tool = pytest.importorskip("tools.memory_tool")
+    memory_tool = import_target("tools.memory_tool")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    verify_selected_source()
     store_cls = memory_tool.MemoryStore
     saved = {name: store_cls.__dict__.get(name, _ABSENT) for name in _SEAM_NAMES}
     _unwrap_seams(store_cls)
@@ -85,16 +87,13 @@ def _arm(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HERMES_MEMORY_KEY", base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii"))
 
 
-def test_installed_seam_is_one_we_recognise(upstream: Any, tmp_path: Path) -> None:
+def test_memory_round_trips_through_upstream_code(
+    upstream: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     assert upstream.get_memory_dir() == tmp_path / "memories"
     ok, reason = seam_check()
     assert ok, reason
     assert memory_seam_shape() in {"A", "B", "C"}
-
-
-def test_memory_round_trips_through_upstream_code(
-    upstream: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
     _arm(tmp_path, monkeypatch)
     assert install_memory_hook(home=tmp_path) is True
 
@@ -174,35 +173,51 @@ def test_journey_guard_wraps_the_real_learning_mutations(tmp_path: Path, monkeyp
     """The journey-guard half of the canary: ``delete_node`` / ``edit_node`` still
     take the parameters we pin. A rename upstream silently turns the guard into a
     no-op, and ``learning_graph`` then deletes real entries by raw-file index."""
-    mutations = pytest.importorskip("agent.learning_mutations")
+    mutations = import_target("agent.learning_mutations", optional=True)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     saved = {name: getattr(mutations, name) for name in ("delete_node", "edit_node")}
     try:
         assert install_journey_guard(mutations, home=tmp_path) is True
         assert getattr(mutations.delete_node, _memory_hook._WRAPPED_FLAG, False) is True
         assert getattr(mutations.edit_node, _memory_hook._WRAPPED_FLAG, False) is True
+        path = tmp_path / "memories" / "MEMORY.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("first entry", encoding="utf-8")
+        assert mutations.edit_node("memory:memory:0", "edited entry")["ok"] is True
+        assert path.read_text().strip() == "edited entry"
+        assert mutations.delete_node("memory:memory:0")["ok"] is True
+        assert path.read_text().strip() == ""
+        _arm(tmp_path, monkeypatch)
+        key = base64.urlsafe_b64decode(os.environ["HERMES_MEMORY_KEY"])
+        sealed = seal(b"protected entry", key=key, name=path.name)
+        path.write_bytes(sealed)
+        for result in (mutations.edit_node("memory:memory:0", "lost entry"), mutations.delete_node("memory:memory:0")):
+            assert result["ok"] is False
+            assert "sealed" in result["message"]
+            assert path.read_bytes() == sealed
     finally:
         for name, value in saved.items():
             setattr(mutations, name, value)
 
 
 def test_runtime_probe_sees_this_interpreter_as_capable(tmp_path: Path) -> None:
-    pytest.importorskip("tools.memory_tool")
+    import_target("tools.memory_tool")
     ok, detail = runtime_memory_encryption_available(home=tmp_path, runtime_python=Path(sys.executable))
     assert ok is True, detail
     assert "seam" in detail
 
 
 def test_probe_entry_point_rejects_other_arguments(capsys: pytest.CaptureFixture[str]) -> None:
-    pytest.importorskip("tools.memory_tool")
+    import_target("tools.memory_tool")
+    capsys.readouterr()
     assert _memory_hook._main(["--probe"]) == 0
     assert capsys.readouterr().out.strip() in {"A", "B", "C"}
     assert _memory_hook._main([]) == 2
     assert "--probe" in capsys.readouterr().err
 
 
-def test_probe_entry_point_exits_zero() -> None:
-    pytest.importorskip("tools.memory_tool")
+def test_probe_entry_point_exits_zero(tmp_path: Path) -> None:
+    import_target("tools.memory_tool")
     import subprocess
 
     proc = subprocess.run(
@@ -210,7 +225,10 @@ def test_probe_entry_point_exits_zero() -> None:
         capture_output=True,
         text=True,
         check=False,
-        env={k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")},
+        env={
+            **{k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "HERMES_MEMORY_KEY")},
+            "HERMES_HOME": str(tmp_path),
+        },
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() in {"A", "B", "C"}
@@ -223,3 +241,87 @@ def _macos_key_custody_contract(monkeypatch):
     from tests._helpers import PlatformSys
 
     monkeypatch.setattr(module, "sys", PlatformSys("darwin"))
+
+
+def test_sanitized_child_uses_selected_source(tmp_path: Path) -> None:
+    import subprocess
+
+    from tests._upstream_canary import expected_root
+
+    if expected_root() is None:
+        return
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "HERMES_MEMORY_KEY")}
+    env["HERMES_HOME"] = str(tmp_path)
+    proc = subprocess.run(
+        [sys.executable, "-c", "from tests._upstream_canary import child_main; raise SystemExit(child_main())"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode == 11:
+        raise SeamDrift(proc.stdout + proc.stderr)
+    if proc.returncode != 0:
+        raise CanaryUnavailable(proc.stdout + proc.stderr)
+    print("CANARY_CHILD_PROVENANCE\n" + proc.stdout, end="")
+    assert "CANARY_SOURCE tools.memory_tool:" in proc.stdout
+    assert "CANARY_SOURCE MemoryStore:" in proc.stdout
+
+
+@pytest.mark.parametrize("source_sealed", [True, False])
+def test_drift_backup_is_sealed_and_preserves_external_content(
+    upstream: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_sealed: bool
+) -> None:
+    _arm(tmp_path, monkeypatch)
+    assert install_memory_hook(home=tmp_path)
+    store = upstream.MemoryStore()
+    store.load_from_disk()
+    path = tmp_path / "memories" / "MEMORY.md"
+    raw = "external writer " + "x" * (store.memory_char_limit + 100)
+    key = base64.urlsafe_b64decode(os.environ["HERMES_MEMORY_KEY"])
+    before = seal(raw.encode(), key=key, name=path.name) if source_sealed else raw.encode()
+    path.write_bytes(before)
+    result = store.remove("memory", "external writer")
+    backups = list(path.parent.glob("MEMORY.md.bak.*"))
+    if memory_seam_shape() == "C":
+        # The declared floor has no drift-backup seam; mutations still ran.
+        assert backups == []
+        return
+    assert result["success"] is False
+    assert path.read_bytes() == before
+    assert len(backups) == 1
+    backup = backups[0]
+    assert backup.read_bytes().startswith(MAGIC)
+    assert unseal(backup.read_bytes(), key=key, name=backup.name).decode() == raw
+    path.write_text("repaired entry", encoding="utf-8")
+    assert store.add("memory", "another fact")["success"]
+    assert path.read_bytes().startswith(MAGIC)
+
+
+@pytest.mark.parametrize("missing_key", [None, "invalid-key"])
+def test_keyless_plaintext_drift_does_not_publish_backup(
+    upstream: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing_key: str | None
+) -> None:
+    _arm(tmp_path, monkeypatch)
+    assert install_memory_hook(home=tmp_path)
+    store = upstream.MemoryStore()
+    store.load_from_disk()
+    path = tmp_path / "memories" / "MEMORY.md"
+    raw = "external writer " + "x" * (store.memory_char_limit + 100)
+    path.write_text(raw, encoding="utf-8")
+    before = path.read_bytes()
+    if missing_key is None:
+        monkeypatch.delenv("HERMES_MEMORY_KEY")
+    else:
+        monkeypatch.setenv("HERMES_MEMORY_KEY", missing_key)
+    with pytest.raises(MemoryEncryptionUnavailable):
+        store.remove("memory", "external writer")
+    assert path.read_bytes() == before
+    assert list(path.parent.glob("MEMORY.md.bak.*")) == []
+
+
+@pytest.fixture(autouse=True)
+def _selected_source_contract():
+    verify_selected_source()
+    yield
+    verify_selected_source()

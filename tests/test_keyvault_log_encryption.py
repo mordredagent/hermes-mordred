@@ -238,26 +238,43 @@ def _isolate_default_keyvault_home(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 # ---------------------------------------------------------------------------
 
 
-def test_encrypted_writer_satisfies_writer_surface(log_path: Path, backend: FakeBackend) -> None:
-    w = le.EncryptedWriter(log_path, backend=backend)
-    assert callable(w.append)
-    assert callable(w.close)
-
-
 def test_roundtrip_single_entry(
     log_path: Path,
     backend: FakeBackend,
     captured_audit: tuple[list[dict[str, Any]], AuditSink],
 ) -> None:
-    _, sink = captured_audit
+    audit_entries, sink = captured_audit
     w = le.EncryptedWriter(log_path, backend=backend)
-    w.append({"event": "keyvault.unwrap_authorized", "decision": "allow"})
+    w.append(
+        {
+            "event": "keyvault.unwrap_authorized",
+            "decision": "allow",
+            "note": "ネットワーク遮断",
+            "secret_marker": "TOPSECRET-XYZ",
+        }
+    )
     w.close()
+    assert not any(op == "ecdh" for op, _ in backend.calls)
+    assert log_path.stat().st_mode & 0o777 == 0o600
+    raw = log_path.read_bytes()
+    assert b"TOPSECRET-XYZ" not in raw
+    assert b"unwrap_authorized" not in raw
+    header = json.loads(raw.split(b"\n", 1)[0])
+    assert header["fmt"] == "MRAL"
+    assert header["ver"] == le.FORMAT_VERSION
+    assert header["key_id"] == le.AUDIT_LOG_KEY_ID
+    wrapped = base64.b64decode(header["wdek"])
+    assert wrapped[:4] == b"MRKW"
+    assert len(wrapped) == 127
 
     entries = le.decrypt_log_file(log_path, backend=backend, audit_sink=sink)
+    assert any(e.get("reason") == "keyvault.unwrap_authorized" for e in audit_entries)
     assert len(entries) == 1
     assert entries[0]["event"] == "keyvault.unwrap_authorized"
     assert entries[0]["decision"] == "allow"
+    assert entries[0]["note"] == "ネットワーク遮断"
+    assert entries[0]["secret_marker"] == "TOPSECRET-XYZ"
+    assert _TS_RE.match(entries[0]["ts"])
 
 
 def test_short_os_writes_complete_header_and_entry(
@@ -338,6 +355,11 @@ def test_roundtrip_multiple_entries_preserves_order(
 
     entries = le.decrypt_log_file(log_path, backend=backend, audit_sink=sink)
     assert [e["seq"] for e in entries] == [0, 1, 2, 3, 4]
+    lines = log_path.read_bytes().splitlines()
+    assert len(lines) == 6
+    assert json.loads(lines[0])["fmt"] == "MRAL"
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(lines[1])
 
 
 def test_process_handoffs_rotate_each_dek_owner_without_corrupting_files(
@@ -812,64 +834,9 @@ def test_encrypted_writer_refuses_symlinked_sidecar(
     assert stat.S_IMODE(victim.stat().st_mode) == 0o644
 
 
-def test_non_ascii_entry_roundtrips(
-    log_path: Path,
-    backend: FakeBackend,
-    captured_audit: tuple[list[dict[str, Any]], AuditSink],
-) -> None:
-    _, sink = captured_audit
-    w = le.EncryptedWriter(log_path, backend=backend)
-    w.append({"event": "policy.strict.clearnet", "note": "ネットワーク遮断"})
-    w.close()
-
-    entries = le.decrypt_log_file(log_path, backend=backend, audit_sink=sink)
-    assert entries[0]["note"] == "ネットワーク遮断"
-
-
 # ---------------------------------------------------------------------------
 # Encryption: plaintext never hits disk
 # ---------------------------------------------------------------------------
-
-
-def test_append_does_not_write_plaintext(log_path: Path, backend: FakeBackend) -> None:
-    w = le.EncryptedWriter(log_path, backend=backend)
-    w.append({"event": "keyvault.unwrap_authorized", "secret_marker": "TOPSECRET-XYZ"})
-    w.close()
-
-    raw = log_path.read_bytes()
-    assert b"TOPSECRET-XYZ" not in raw
-    assert b"unwrap_authorized" not in raw
-
-
-def test_dek_is_wrapped_not_plaintext_in_header(log_path: Path, backend: FakeBackend) -> None:
-    w = le.EncryptedWriter(log_path, backend=backend)
-    w.append({"event": "policy.strict.clearnet"})
-    w.close()
-
-    header_line = log_path.read_bytes().split(b"\n", 1)[0]
-    header = json.loads(header_line)
-    assert header["fmt"] == "MRAL"
-    assert header["ver"] == le.FORMAT_VERSION
-    assert header["key_id"] == le.AUDIT_LOG_KEY_ID
-
-    wrapped = base64.b64decode(header["wdek"])
-    # The header carries a wrap.py MRKW blob (127 bytes), not a raw DEK.
-    assert wrapped[:4] == b"MRKW"
-    assert len(wrapped) == 127
-
-
-def test_header_is_first_line_only(log_path: Path, backend: FakeBackend) -> None:
-    w = le.EncryptedWriter(log_path, backend=backend)
-    w.append({"event": "a"})
-    w.append({"event": "b"})
-    w.close()
-
-    lines = log_path.read_bytes().splitlines()
-    assert len(lines) == 3  # 1 header + 2 entries
-    assert json.loads(lines[0])["fmt"] == "MRAL"
-    # entry lines are opaque base64, not JSON
-    with pytest.raises(json.JSONDecodeError):
-        json.loads(lines[1])
 
 
 # ---------------------------------------------------------------------------
@@ -877,20 +844,6 @@ def test_header_is_first_line_only(log_path: Path, backend: FakeBackend) -> None
 # ---------------------------------------------------------------------------
 
 _TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
-
-
-def test_ts_injected_with_millisecond_precision(
-    log_path: Path,
-    backend: FakeBackend,
-    captured_audit: tuple[list[dict[str, Any]], AuditSink],
-) -> None:
-    _, sink = captured_audit
-    w = le.EncryptedWriter(log_path, backend=backend)
-    w.append({"event": "policy.strict.clearnet"})
-    w.close()
-
-    entries = le.decrypt_log_file(log_path, backend=backend, audit_sink=sink)
-    assert _TS_RE.match(entries[0]["ts"])
 
 
 def test_caller_supplied_ts_is_preserved(
@@ -910,13 +863,6 @@ def test_caller_supplied_ts_is_preserved(
 # ---------------------------------------------------------------------------
 # File mode (Writer Protocol invariant #3)
 # ---------------------------------------------------------------------------
-
-
-def test_active_file_is_mode_0600(log_path: Path, backend: FakeBackend) -> None:
-    w = le.EncryptedWriter(log_path, backend=backend)
-    w.append({"event": "policy.strict.clearnet"})
-    w.close()
-    assert (log_path.stat().st_mode & 0o777) == 0o600
 
 
 def test_parent_dir_created_mode_0700(tmp_path: Path, backend: FakeBackend) -> None:
@@ -1038,21 +984,6 @@ def test_entry_from_another_file_cannot_be_spliced_in(
 # ---------------------------------------------------------------------------
 
 
-def test_decrypt_emits_unwrap_authorized_audit(
-    log_path: Path,
-    backend: FakeBackend,
-    captured_audit: tuple[list[dict[str, Any]], AuditSink],
-) -> None:
-    entries, sink = captured_audit
-    w = le.EncryptedWriter(log_path, backend=backend)
-    w.append({"event": "policy.strict.clearnet"})
-    w.close()
-
-    le.decrypt_log_file(log_path, backend=backend, audit_sink=sink)
-    # wrap.unwrap_dek emits event=keyvault.unwrap_dek, reason=keyvault.unwrap_authorized
-    assert any(e.get("reason") == "keyvault.unwrap_authorized" for e in entries)
-
-
 def test_decrypt_denied_when_authorization_cancelled(
     log_path: Path,
     backend: FakeBackend,
@@ -1066,14 +997,6 @@ def test_decrypt_denied_when_authorization_cancelled(
     backend.denied_reason = "user_cancelled"
     with pytest.raises((le.AuditLogDecryptError, WrapError)):
         le.decrypt_log_file(log_path, backend=backend, audit_sink=sink)
-
-
-def test_writer_never_calls_authorization_boundary(log_path: Path, backend: FakeBackend) -> None:
-    """``wrap_dek`` is offline — writing never triggers ``enclave_ecdh``."""
-    w = le.EncryptedWriter(log_path, backend=backend)
-    w.append({"event": "policy.strict.clearnet"})
-    w.close()
-    assert not any(op == "ecdh" for op, _ in backend.calls)
 
 
 # ---------------------------------------------------------------------------
@@ -1106,27 +1029,6 @@ def test_size_cap_rotation_produces_decryptable_files(
     assert total == 8
 
 
-def test_date_change_triggers_rotation(
-    log_path: Path,
-    backend: FakeBackend,
-    captured_audit: tuple[list[dict[str, Any]], AuditSink],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _, sink = captured_audit
-    monkeypatch.setattr(le, "_today_utc_date", lambda: "2026-05-16")
-    w = le.EncryptedWriter(log_path, backend=backend)
-    w.append({"event": "policy.strict.clearnet", "day": 1})
-
-    monkeypatch.setattr(le, "_today_utc_date", lambda: "2026-05-17")
-    w.append({"event": "policy.strict.clearnet", "day": 2})
-    w.close()
-
-    rotated = [p for p in log_path.parent.iterdir() if p.name.startswith(f"{log_path.name}.")]
-    assert len(rotated) == 1
-    active = le.decrypt_log_file(log_path, backend=backend, audit_sink=sink)
-    assert [e["day"] for e in active] == [2]
-
-
 def test_rotated_gzip_file_decrypts(
     log_path: Path,
     backend: FakeBackend,
@@ -1142,6 +1044,9 @@ def test_rotated_gzip_file_decrypts(
     w.close()
 
     gz = log_path.with_name("audit.log.2026-05-16.gz")
+    assert [p for p in log_path.parent.iterdir() if p.name.startswith(f"{log_path.name}.")] == [gz]
+    active = le.decrypt_log_file(log_path, backend=backend, audit_sink=sink)
+    assert [e["day"] for e in active] == [2]
     assert gz.exists()
     assert gz.read_bytes()[:2] == b"\x1f\x8b"  # gzip magic
     rotated = le.decrypt_log_file(gz, backend=backend, audit_sink=sink)

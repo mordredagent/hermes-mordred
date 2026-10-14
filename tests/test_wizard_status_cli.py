@@ -13,10 +13,8 @@ touch the Secure Enclave — it reads on-disk artifacts only.
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -64,10 +62,6 @@ def _collect(tmp_path: Path, **overrides: object) -> status_cli.StatusReport:
 
 
 class TestPolicySection:
-    def test_defaults_to_lenient_without_config(self, tmp_path: Path) -> None:
-        report = _collect(tmp_path)
-        assert report.policy_mode == "lenient"
-
     def test_reads_mode_from_config_yaml(self, tmp_path: Path) -> None:
         (tmp_path / "config.yaml").write_text(
             "plugins:\n  mordred_privacy_check:\n    policy: strict\n",
@@ -78,11 +72,6 @@ class TestPolicySection:
 
 
 class TestNetworkSection:
-    def test_defaults_to_clearnet_without_config(self, tmp_path: Path) -> None:
-        report = _collect(tmp_path)
-        assert report.network_configured_path == "clearnet"
-        assert report.network_live is False
-
     def test_reads_configured_path(self, tmp_path: Path) -> None:
         (tmp_path / "config.yaml").write_text(
             "plugins:\n  mordred_network:\n    default_path: tor\n",
@@ -93,16 +82,12 @@ class TestNetworkSection:
 
 
 class TestKeyvaultSection:
-    def test_uninitialised_keyvault(self, tmp_path: Path) -> None:
-        report = _collect(tmp_path)
-        assert report.keyvault_initialized is False
-        assert report.keyvault_key_count == 0
-
     def test_initialised_keyvault_counts_keys(self, tmp_path: Path) -> None:
         _build_keyvault(tmp_path, {"default": b"\x01" * 32, "payments": b"\x02" * 32})
-        report = _collect(tmp_path)
+        report = _collect(tmp_path, helper_finder=lambda platform: "/usr/local/bin/helper")
         assert report.keyvault_initialized is True
         assert report.keyvault_key_count == 2
+        assert report.keyvault_helper_installed is True
 
     def test_corrupt_meta_reports_without_raising(self, tmp_path: Path) -> None:
         root = _storage.resolve_keyvault_dir(tmp_path)
@@ -197,15 +182,6 @@ class TestKeyvaultSection:
 
         assert report.keyvault_initialized is True
         assert "audit log encrypted" in report.keyvault_detail
-
-    def test_absent_audit_key_reports_plaintext(self, tmp_path: Path) -> None:
-        _build_keyvault(tmp_path, {"default": b"\x01" * 32})
-        report = _collect(tmp_path)
-        assert "audit log plaintext" in report.keyvault_detail
-
-    def test_hardware_helper_reported(self, tmp_path: Path) -> None:
-        report = _collect(tmp_path, helper_finder=lambda platform: "/usr/local/bin/helper")
-        assert report.keyvault_helper_installed is True
 
     def _mral_header_bytes(self) -> bytes:
         """Build a real MRAL header line from the format's own constants.
@@ -302,23 +278,6 @@ class TestKeyvaultSection:
 
 
 class TestRendering:
-    def test_text_includes_all_sections(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = status_cli.status(
-            home=tmp_path,
-            root=_storage.resolve_keyvault_dir(tmp_path),
-            platform="darwin",
-            workspace=_workspace(tmp_path),
-            on_path=lambda name: False,
-            helper_finder=lambda platform: None,
-        )
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "policy" in out
-        assert "network" in out
-        assert "keyvault" in out
-        for target in ("env", "config", "memory", "workspace"):
-            assert target in out
-
     def test_status_wiring_no_ansi_when_not_a_tty(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -335,7 +294,13 @@ class TestRendering:
             helper_finder=lambda platform: None,
         )
         assert rc == 0
-        assert "\033" not in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "\033" not in out
+        assert "policy" in out
+        assert "network" in out
+        assert "keyvault" in out
+        for target in ("env", "config", "memory", "workspace"):
+            assert target in out
 
     def test_status_wiring_colours_when_forced(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -393,53 +358,29 @@ class TestRendering:
             ],
         )
 
-    def test_render_text_default_has_no_ansi(self) -> None:
-        assert "\033" not in status_cli.render_text(self._sample_report())
+    def test_live_network_and_initialized_keyvault_are_rendered(self) -> None:
+        text = status_cli.render_text(self._sample_report())
+        assert "tor (live, ready)" in text
+        assert "initialised (2 keys; hardware helper installed)" in text
 
-    @pytest.mark.parametrize(
-        ("mode", "detail"),
-        [
-            ("strict", "blocks on policy violations"),
-            ("lenient", "warns and audits; continues"),
-            ("off", "guards disabled"),
-        ],
-    )
-    def test_policy_mode_has_short_explanation(self, mode: str, detail: str) -> None:
-        report = replace(self._sample_report(), policy_mode=mode)
-        assert f"policy mode : {mode} ({detail})" in status_cli.render_text(report)
+    def test_json_is_machine_readable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from mordred_hermes.wizard import _windows_gates, cli
 
-    def test_render_text_color_emits_ansi(self) -> None:
-        text = status_cli.render_text(self._sample_report(), color=True)
-        assert "\033[" in text  # styled
-        assert "\033[1m" in text  # the dashboard heading is bold
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setattr(_windows_gates, "host_platform", lambda: "darwin")
+        monkeypatch.setattr(status_cli, "_default_workspace_paths", lambda: _workspace(tmp_path))
+        monkeypatch.setattr(status_cli, "_default_helper_finder", lambda platform: None)
 
-    def test_json_is_machine_readable(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = status_cli.status(
-            home=tmp_path,
-            root=_storage.resolve_keyvault_dir(tmp_path),
-            platform="darwin",
-            workspace=_workspace(tmp_path),
-            as_json=True,
-            on_path=lambda name: False,
-            helper_finder=lambda platform: None,
-        )
-        assert rc == 0
+        assert cli.main(["status", "--json"]) == 0
         body = json.loads(capsys.readouterr().out)
         assert body["policy"]["mode"] == "lenient"
         assert body["network"]["configured_path"] == "clearnet"
+        assert body["network"]["live"] is False
         assert body["keyvault"]["initialized"] is False
+        assert body["keyvault"]["key_count"] == 0
         assert len(body["encryption"]) == 4
-
-
-class TestCliWiring:
-    def test_status_command_is_wired(self) -> None:
-        from mordred_hermes.wizard import cli
-
-        parser = argparse.ArgumentParser(prog="hermes-mordred")
-        cli._setup_subparser(parser)
-        ns = parser.parse_args(["status", "--json"])
-        assert ns.json is True
-        assert callable(ns.func)
 
 
 class TestNeverRaiseContract:

@@ -16,6 +16,11 @@ Side-effect-free by the same contract as ``encryption status``: never
 prompts, never opens the vault cold path, never touches the Secure
 Enclave or TPM — on-disk reads and PATH lookups only. Heavy imports stay
 function-local so the module imports on any platform.
+
+On Windows the keyvault line reports the unported secret store (a retained
+one is preserved, never read) and a **windows** block lists every
+``windows_capabilities`` entry with its own supported/available/reason; there
+is no aggregate readiness line (see :mod:`._windows_status`).
 """
 
 from __future__ import annotations
@@ -25,8 +30,9 @@ import json
 import logging
 import sys
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .._home import hermes_home as _hermes_home
 from .._policy_io import (
@@ -46,6 +52,9 @@ from .encryption_cli import (
     status_mark,
     style_mark,
 )
+
+if TYPE_CHECKING:
+    from ..keyvault._windows_capability import WindowsCapability
 
 __all__ = [
     "StatusReport",
@@ -82,8 +91,21 @@ class StatusReport:
     keyvault_helper_installed: bool
     keyvault_detail: str
     encryption: list[TargetStatus]
+    #: Windows only: every capability in fixed order, or the classified read failure.
+    windows_capabilities: tuple[WindowsCapability, ...] = ()
+    windows_error: str | None = None
 
     def to_dict(self) -> dict[str, object]:
+        out = self._base_dict()
+        if self.windows_capabilities or self.windows_error is not None:
+            out["windows_capabilities"] = (
+                {"error": self.windows_error}
+                if self.windows_error is not None
+                else [asdict(row) for row in self.windows_capabilities]
+            )
+        return out
+
+    def _base_dict(self) -> dict[str, object]:
         return {
             "policy": {"mode": self.policy_mode},
             "network": {
@@ -260,6 +282,8 @@ def _default_helper_finder(platform: str) -> str | None:
         return _seckey_helper._find_helper()
     if platform.startswith("linux"):
         return _seckey_helper.find_tpmkey_helper()
+    if platform == "win32":
+        return _seckey_helper.find_winkey_helper()
     return None
 
 
@@ -285,7 +309,15 @@ def collect(
     except Exception:
         helper_installed = False
     configured, live, active_path, ready = _network_state(home)
-    kv_initialized, kv_count, kv_detail = _keyvault_state(home)
+    windows_rows: tuple[WindowsCapability, ...] = ()
+    windows_error: str | None = None
+    if platform == "win32":
+        from . import _windows_status
+
+        kv_initialized, kv_count, kv_detail = _windows_status.keyvault_state(home)
+        windows_rows, windows_error = _windows_status.capability_rows(home)
+    else:
+        kv_initialized, kv_count, kv_detail = _keyvault_state(home)
     return StatusReport(
         policy_mode=_policy_mode(home),
         network_configured_path=configured,
@@ -297,6 +329,8 @@ def collect(
         keyvault_helper_installed=helper_installed,
         keyvault_detail=kv_detail,
         encryption=collect_status(home=home, root=root, platform=platform, workspace=workspace, on_path=on_path),
+        windows_capabilities=windows_rows,
+        windows_error=windows_error,
     )
 
 
@@ -318,8 +352,13 @@ def render_text(report: StatusReport, *, color: bool = False) -> str:
         f"  policy mode : {policy}",
         f"  network     : {network}",
         f"  keyvault    : {keyvault}",
-        "  encryption  :",
     ]
+    if report.windows_capabilities or report.windows_error is not None:
+        from ._windows_status import capability_lines
+
+        lines.append("  windows     : per capability (no aggregate readiness):")
+        lines += capability_lines(report.windows_capabilities, report.windows_error)
+    lines.append("  encryption  :")
     width = max((len(s.target) for s in report.encryption), default=0)
     marks = [status_mark(s) for s in report.encryption]
     mark_w = max((len(m) for m in marks), default=0)
@@ -379,10 +418,12 @@ def status(
 def cli_status(args: argparse.Namespace) -> int:
     """argparse handler for ``status [--json]`` — resolves production defaults."""
     home = _hermes_home()
+    from ._windows_gates import host_platform
+
     return status(
         home=home,
         root=resolve_root(None),
-        platform=sys.platform,
+        platform=host_platform(),
         workspace=_default_workspace_paths(),
         as_json=bool(getattr(args, "json", False)),
     )

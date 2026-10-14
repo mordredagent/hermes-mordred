@@ -44,18 +44,6 @@ def _read_vault_config(root: Path, backend: FakeBackend, store: FakeAnchorStore)
 
 
 class TestEnable:
-    def test_enrolls_config_and_writes_marker(self, tmp_path: Path) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / "config.yaml").write_bytes(_CONFIG)
-
-        rc = config_decrypt_cli.enable(home=home, root=root, platform="linux", backend=backend, store=store)
-        assert rc == 0
-        assert _marker_path(home).exists()
-        assert _read_vault_config(root, backend, store) == _CONFIG
-
     def test_enable_message_confirms_when_hook_installed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -70,6 +58,8 @@ class TestEnable:
 
         assert config_decrypt_cli.enable(home=home, root=root, platform="linux", backend=backend, store=store) == 0
         out = capsys.readouterr().out
+        assert _marker_path(home).exists()
+        assert _read_vault_config(root, backend, store) == _CONFIG
         assert "decrypt hook is installed" in out
         assert "Next: run `hermes-mordred encryption status` once." in out
         assert "plaintext config.yaml will be resealed and removed" in out

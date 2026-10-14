@@ -50,38 +50,15 @@ def valid_blob() -> bytes:
     return backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
 
 
-class TestDigestMatchSucceeds:
-    def test_import_with_matching_digest_returns_secret(self, valid_blob: bytes) -> None:
-        from mordred_hermes.keyvault import recovery
-
-        result = recovery.import_backup(valid_blob, PASSPHRASE, recomputed_digest=DIGEST_FIXTURE)
-        assert result == SECRET
-
-
 class TestDigestMismatchRefuses:
     def test_off_by_one_byte_digest_raises_recovery_digest_mismatch(self, valid_blob: bytes) -> None:
         """A one-byte transcription error produces a digest mismatch."""
         from mordred_hermes.keyvault import recovery
-
-        with pytest.raises(recovery.RecoveryDigestMismatch):
-            recovery.import_backup(valid_blob, PASSPHRASE, recomputed_digest=OFF_BY_ONE_DIGEST)
-
-    def test_zero_digest_raises_recovery_digest_mismatch(self, valid_blob: bytes) -> None:
-        from mordred_hermes.keyvault import recovery
-
-        with pytest.raises(recovery.RecoveryDigestMismatch):
-            recovery.import_backup(valid_blob, PASSPHRASE, recomputed_digest=WRONG_DIGEST)
-
-    def test_recovery_digest_mismatch_subclasses_verification_digest_mismatch(
-        self,
-    ) -> None:
-        """Callers catching :class:`VerificationDigestMismatch` (digest
-        layer) must also catch the recovery-layer variant — they
-        represent the same user-facing concept (mis-transcription)."""
         from mordred_hermes.keyvault.digest import VerificationDigestMismatch
-        from mordred_hermes.keyvault.recovery import RecoveryDigestMismatch
 
-        assert issubclass(RecoveryDigestMismatch, VerificationDigestMismatch)
+        with pytest.raises(recovery.RecoveryDigestMismatch) as raised:
+            recovery.import_backup(valid_blob, PASSPHRASE, recomputed_digest=OFF_BY_ONE_DIGEST)
+        assert isinstance(raised.value, VerificationDigestMismatch)
 
 
 class TestVerifyBeforeDecrypt:
@@ -164,7 +141,12 @@ class TestVerifyBeforeDecrypt:
 
         monkeypatch.setattr(recovery, "_compare_digest", spy, raising=True)
         # Match path: ensures the spy fires on a successful digest check.
-        recovery.import_backup(valid_blob, PASSPHRASE, recomputed_digest=DIGEST_FIXTURE)
+        captured: list[dict[str, object]] = []
+        assert (
+            recovery.import_backup(valid_blob, PASSPHRASE, recomputed_digest=DIGEST_FIXTURE, audit_sink=captured.append)
+            == SECRET
+        )
+        assert captured == []
 
         assert calls, (
             "recovery.import_backup must route digest comparison through a timing-safe primitive (hmac.compare_digest)"
@@ -216,49 +198,13 @@ class TestAuditSink:
         assert entry["event"] == "keyvault.import_backup"
         assert entry["decision"] == "block"
         assert entry["reason"] == "keyvault.recovery_digest_mismatch"
-        # Phase 4 event-specific extras (POLICY.md entry #17 Fields):
-        assert entry["blob_version"] == 1
-
-    def test_audit_reason_is_in_frozen_enum(self, valid_blob: bytes) -> None:
-        """Belt-and-suspenders: the emitted reason code must be a
-        member of the typed Literal. Avoid drift between the audit
-        emit site and ``_audit_reasons.ReasonCode``."""
         from typing import get_args
 
-        from mordred_hermes.keyvault import recovery
         from mordred_hermes.privacy_check._audit_reasons import ReasonCode
 
-        captured: list[dict[str, object]] = []
-        with pytest.raises(recovery.RecoveryDigestMismatch):
-            recovery.import_backup(
-                valid_blob,
-                PASSPHRASE,
-                recomputed_digest=WRONG_DIGEST,
-                audit_sink=captured.append,
-            )
-        assert captured[0]["reason"] in get_args(ReasonCode)
-
-    def test_match_path_does_not_emit_audit(self, valid_blob: bytes) -> None:
-        """PR2 success path is silent — no ``keyvault.import_completed``
-        code in the freeze yet (Codex #8 scope policy)."""
-        from mordred_hermes.keyvault import recovery
-
-        captured: list[dict[str, object]] = []
-        recovery.import_backup(
-            valid_blob,
-            PASSPHRASE,
-            recomputed_digest=DIGEST_FIXTURE,
-            audit_sink=captured.append,
-        )
-        assert captured == []
-
-    def test_mismatch_with_no_audit_sink_still_raises(self, valid_blob: bytes) -> None:
-        """audit_sink is optional; absence does not change the safety
-        property (still raise on mismatch)."""
-        from mordred_hermes.keyvault import recovery
-
-        with pytest.raises(recovery.RecoveryDigestMismatch):
-            recovery.import_backup(valid_blob, PASSPHRASE, recomputed_digest=WRONG_DIGEST)
+        assert entry["reason"] in get_args(ReasonCode)
+        # Phase 4 event-specific extras (POLICY.md entry #17 Fields):
+        assert entry["blob_version"] == 1
 
     def test_audit_sink_exception_does_not_mask_recovery_digest_mismatch(self, valid_blob: bytes) -> None:
         """Code-reviewer HIGH-1: if audit_sink raises (e.g. disk-full

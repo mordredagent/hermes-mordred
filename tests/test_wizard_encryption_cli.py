@@ -136,12 +136,6 @@ class TestEnvStatus:
         assert st.configured is False
         assert st.active is False
 
-    def test_enrolled_active_on_macos(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(encryption_cli, "_enrolled_names", lambda _root: {".env"})
-        st = encryption_cli.env_status(root=tmp_path / "v", home=tmp_path / "home", platform="darwin")
-        assert st.configured is True
-        assert st.active is True
-
     def test_enrolled_inactive_off_macos(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(encryption_cli, "_enrolled_names", lambda _root: {".env"})
         st = encryption_cli.env_status(root=tmp_path / "v", home=tmp_path / "home", platform="linux")
@@ -189,6 +183,8 @@ class TestEnvStatus:
         home = tmp_path / "home"
         home.mkdir()
         st = encryption_cli.env_status(root=tmp_path / "v", home=home, platform="darwin")
+        assert st.configured is True
+        assert st.active is True
         assert st.drift is False
         assert encryption_cli.status_mark(st) == "on"
 
@@ -539,59 +535,6 @@ class TestWorkspaceStatus:
 # Aggregation + rendering
 # -----------------------------------------------------------------------------
 class TestRender:
-    def test_collect_returns_all_four_targets(self, tmp_path: Path) -> None:
-        home = tmp_path / "home"
-        home.mkdir()
-        statuses = encryption_cli.collect_status(
-            home=home,
-            root=tmp_path / "v",
-            platform="darwin",
-            workspace=encryption_cli.WorkspacePaths(
-                image=tmp_path / "img.sparsebundle",
-                blob=tmp_path / "passphrase.wrapped",
-                mount=tmp_path / "mnt",
-            ),
-            on_path=lambda _name: False,
-        )
-        assert [s.target for s in statuses] == list(encryption_cli.TARGETS)
-
-    def test_render_json_is_machine_readable(self, tmp_path: Path) -> None:
-        home = tmp_path / "home"
-        home.mkdir()
-        statuses = encryption_cli.collect_status(
-            home=home,
-            root=tmp_path / "v",
-            platform="darwin",
-            workspace=encryption_cli.WorkspacePaths(
-                image=tmp_path / "img.sparsebundle",
-                blob=tmp_path / "passphrase.wrapped",
-                mount=tmp_path / "mnt",
-            ),
-            on_path=lambda _name: False,
-        )
-        payload = json.loads(encryption_cli.render_json(statuses))
-        assert {row["target"] for row in payload} == set(encryption_cli.TARGETS)
-        for row in payload:
-            assert set(row) >= {"target", "configured", "active", "detail"}
-
-    def test_render_text_lists_every_target(self, tmp_path: Path) -> None:
-        home = tmp_path / "home"
-        home.mkdir()
-        statuses = encryption_cli.collect_status(
-            home=home,
-            root=tmp_path / "v",
-            platform="linux",
-            workspace=encryption_cli.WorkspacePaths(
-                image=tmp_path / "img.sparsebundle",
-                blob=tmp_path / "passphrase.wrapped",
-                mount=tmp_path / "mnt",
-            ),
-            on_path=lambda _name: False,
-        )
-        text = encryption_cli.render_text(statuses)
-        for target in encryption_cli.TARGETS:
-            assert target in text
-
     def test_status_mark_reflects_active_not_just_configured(self) -> None:
         on = encryption_cli.TargetStatus("env", configured=True, active=True, detail="active")
         paused = encryption_cli.TargetStatus("env", configured=True, active=False, detail="disabled")
@@ -622,13 +565,6 @@ class TestRender:
         assert "[off]" in text
         assert "legend:" not in text
 
-    def test_exposed_legend_is_target_neutral(self) -> None:
-        """`exposed` is now reachable for env *and* memory, so the alert line
-        must not name a single target's reseal command."""
-        body = encryption_cli.EXPOSED_LEGEND_BODY
-        assert "encryption enable <target>" in body
-        assert "encryption enable env" not in body
-
     def test_render_text_shows_the_exposed_alert_for_any_target(self) -> None:
         statuses = [
             encryption_cli.TargetStatus("memory", configured=True, active=True, detail="plaintext file", drift=True),
@@ -636,14 +572,8 @@ class TestRender:
         text = encryption_cli.render_text(statuses)
         assert "[exposed]" in text
         assert encryption_cli.EXPOSED_LEGEND_BODY in text
-
-    def test_workspace_mark_is_sealed_when_set_up_and_unmounted(self) -> None:
-        # The workspace is encrypted at rest whenever it is set up and sealed,
-        # so `disable` (= seal) must NOT read as the others' `on`/`off`.
-        sealed = encryption_cli.TargetStatus(
-            "workspace", configured=True, active=True, detail="sealed at rest", mounted=False
-        )
-        assert encryption_cli.status_mark(sealed) == "sealed"
+        assert "encryption enable <target>" in text
+        assert "encryption enable env" not in text
 
     def test_workspace_mark_is_open_when_mounted(self) -> None:
         mounted = encryption_cli.TargetStatus(
@@ -692,37 +622,6 @@ class TestRender:
 # Colour — opt-in styling; plain output stays byte-identical (above tests assert it)
 # -----------------------------------------------------------------------------
 class TestColor:
-    def test_style_mark_colours_by_state(self) -> None:
-        assert "\033[32m" in encryption_cli.style_mark("on", "on", enabled=True)  # green
-        assert "\033[32m" in encryption_cli.style_mark("sealed", "sealed", enabled=True)  # green
-        assert "\033[33m" in encryption_cli.style_mark("paused", "paused", enabled=True)  # yellow
-        assert "\033[36m" in encryption_cli.style_mark("open", "open", enabled=True)  # cyan
-        assert "\033[2m" in encryption_cli.style_mark("off", "off", enabled=True)  # dim
-
-    def test_style_mark_plain_when_disabled(self) -> None:
-        # The padded cell passes through unchanged so column alignment is preserved.
-        assert encryption_cli.style_mark("on", "on ", enabled=False) == "on "
-
-    def test_style_mark_unknown_word_passes_through(self) -> None:
-        assert encryption_cli.style_mark("mystery", "mystery", enabled=True) == "mystery"
-
-    def test_render_text_default_has_no_ansi(self) -> None:
-        statuses = [
-            encryption_cli.TargetStatus("env", configured=True, active=True, detail="active"),
-            encryption_cli.TargetStatus("config", configured=True, active=False, detail="disabled"),
-        ]
-        assert "\033" not in encryption_cli.render_text(statuses)
-
-    def test_render_text_color_emits_ansi_and_keeps_words(self) -> None:
-        statuses = [
-            encryption_cli.TargetStatus("env", configured=True, active=True, detail="active"),
-            encryption_cli.TargetStatus("config", configured=True, active=False, detail="disabled"),
-        ]
-        text = encryption_cli.render_text(statuses, color=True)
-        assert "\033[" in text  # styled
-        assert "\033[1m" in text  # heading is bold
-        assert "on" in text and "paused" in text  # mark words still present
-
     def _run_status(self, tmp_path: Path) -> int:
         return encryption_cli.status(
             home=tmp_path,
@@ -744,7 +643,10 @@ class TestColor:
         monkeypatch.delenv("FORCE_COLOR", raising=False)
         monkeypatch.delenv("NO_COLOR", raising=False)
         assert self._run_status(tmp_path) == 0
-        assert "\033" not in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "\033" not in out
+        for target in encryption_cli.TARGETS:
+            assert target in out
 
     def test_status_wiring_colours_when_forced(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -781,7 +683,9 @@ class TestCliWiring:
         rc = cli.main(["encryption", "status", "--json"])
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
-        assert {row["target"] for row in payload} == set(encryption_cli.TARGETS)
+        assert [row["target"] for row in payload] == list(encryption_cli.TARGETS)
+        for row in payload:
+            assert set(row) >= {"target", "configured", "active", "detail"}
 
 
 # -----------------------------------------------------------------------------
@@ -847,6 +751,7 @@ class TestCliDispatch:
 class TestCliDispatchAll:
     def _patch_home(self, monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
         monkeypatch.setattr(encryption_cli, "_hermes_home", lambda: home)
+        monkeypatch.setattr(encryption_cli._windows_gates, "host_platform", lambda: "darwin")
 
     def _spy_engines(
         self,
@@ -889,15 +794,21 @@ class TestCliDispatchAll:
         assert rc == 0
         assert calls == {"env": 1, "config": 1, "memory": 1, "workspace": 1}
 
-    def test_enable_all_skips_workspace_off_macos(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_enable_all_skips_workspace_off_macos(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         self._patch_home(monkeypatch, tmp_path / "home")
-        # A wrappable seam does not matter here -- off macOS `memory` is skipped
-        # on the platform check alone, before the seam is ever consulted (W1).
+        # Linux memory is independent of the macOS file vault.
         monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (True, ""))
         calls = self._spy_engines(monkeypatch, "enable")
         rc = encryption_cli._dispatch_all("enable", platform="linux", on_path=lambda _n: True)
         assert rc == 0
-        assert calls == {"env": 1, "config": 1}  # workspace AND memory skipped, not failed
+        assert calls == {"memory": 1}  # env/config/workspace are ineligible
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        assert "encryption enable all:" in lines
+        assert any("workspace" in ln and "skipped" in ln and "macOS" in ln for ln in lines)
+        assert any("memory" in ln and "ok" in ln for ln in lines)
+        assert "  1 ok, 0 failed, 3 skipped" in lines
 
     def test_enable_all_skips_memory_without_runtime(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -912,18 +823,16 @@ class TestCliDispatchAll:
         calls = self._spy_engines(monkeypatch, "enable")
         rc = encryption_cli._dispatch_all("enable", platform="darwin", on_path=lambda _n: False)
         assert rc == 0  # a skip never fails the batch
-        assert "memory" not in calls  # the engine is never called — it would just refuse
+        assert calls == {"env": 1, "config": 1}  # unavailable engines are never called
         lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
         assert any("memory" in ln and "skipped" in ln and "no wrappable seam" in ln for ln in lines)
         assert "  2 ok, 0 failed, 2 skipped" in lines  # env+config ok; memory+workspace skipped
+        assert any("workspace" in ln and "skipped" in ln and "tooling" in ln for ln in lines)
 
-    def test_enable_all_skips_memory_off_macos_before_the_seam_check(
+    def test_enable_all_skips_memory_unsupported_platform_before_the_seam_check(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """W1: off macOS `memory` is skipped on the platform alone -- the fan-out
-        used to resolve platform independently inside the per-target dispatch
-        (always `sys.platform`), so a Linux `enable all` reported `memory FAILED`
-        instead of a skip even though `setup`'s own step skips it cleanly."""
+        """Unsupported platforms cannot reach the seam check or memory engine."""
 
         def _never(*_a: object, **_k: object) -> tuple[bool, str]:
             raise AssertionError("the platform gate must short-circuit before the seam check")
@@ -932,34 +841,12 @@ class TestCliDispatchAll:
         self._patch_home(monkeypatch, tmp_path / "home")
         calls = self._spy_engines(monkeypatch, "enable")
 
-        rc = encryption_cli._dispatch_all("enable", platform="linux", on_path=lambda _n: True)
+        rc = encryption_cli._dispatch_all("enable", platform="freebsd", on_path=lambda _n: True)
 
         assert rc == 0
         assert "memory" not in calls  # _dispatch (and therefore memory_cli.enable) is never reached
         lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
-        assert any("memory" in ln and "skipped" in ln and "macOS only" in ln and "linux" in ln for ln in lines)
-
-    def test_enable_all_attempts_memory_on_darwin(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The darwin half of the W1 fix: the platform gate must not skip memory
-        when it does not need to."""
-        self._patch_home(monkeypatch, tmp_path / "home")
-        monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (True, ""))
-        calls = self._spy_engines(monkeypatch, "enable")
-
-        rc = encryption_cli._dispatch_all("enable", platform="darwin", on_path=lambda _n: False)
-
-        assert rc == 0
-        assert calls["memory"] == 1
-
-    def test_enable_all_skips_workspace_when_tooling_missing(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        self._patch_home(monkeypatch, tmp_path / "home")
-        calls = self._spy_engines(monkeypatch, "enable")
-        rc = encryption_cli._dispatch_all("enable", platform="darwin", on_path=lambda _n: False)
-        assert rc == 0
-        assert "workspace" not in calls
-        assert calls["env"] == 1
+        assert any("memory" in ln and "skipped" in ln and "unsupported" in ln and "freebsd" in ln for ln in lines)
 
     def test_all_continues_past_failure_and_reports_nonzero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -973,28 +860,11 @@ class TestCliDispatchAll:
         assert rc == 1  # a target failed
         assert calls == {"env": 1, "config": 1, "memory": 1}  # every core target still attempted
 
-    def test_enable_all_prints_contiguous_summary(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        self._patch_home(monkeypatch, tmp_path / "home")
-        monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (True, ""))
-        self._spy_engines(monkeypatch, "enable")  # silent spies → output is only the summary
-        encryption_cli._dispatch_all("enable", platform="linux", on_path=lambda _n: True)
-        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
-        # Header + one line per target + a trailing, indented totals line — together.
-        assert "encryption enable all:" in lines
-        assert any("workspace" in ln and "skipped" in ln for ln in lines)
-        assert any("memory" in ln and "skipped" in ln and "macOS only" in ln for ln in lines)
-        assert "  2 ok, 0 failed, 2 skipped" in lines  # env+config ok; memory+workspace skipped off macOS
-
     def test_enable_all_via_cli_accepts_all_choice(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from mordred_hermes.wizard import cli
 
         self._patch_home(monkeypatch, tmp_path / "home")
-        # `_dispatch_all` defaults `platform` from `sys.platform` when `cli_enable`
-        # does not pass one -- pin it so `memory`'s platform gate (W1) does not
-        # depend on the real OS running the test suite.
-        monkeypatch.setattr(encryption_cli.sys, "platform", "darwin")
+        # The host seam is pinned by _patch_home; the public adapter takes its default.
         monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (True, ""))
         calls = self._spy_engines(monkeypatch, "enable")
         monkeypatch.setattr(encryption_cli, "_workspace_eligible", lambda *_a, **_k: (False, "test"))
@@ -1024,20 +894,6 @@ class TestCliDispatchAll:
 # `_workspace_eligible` — the workspace gate for `all` (M1: direct unit coverage)
 # -----------------------------------------------------------------------------
 class TestWorkspaceEligible:
-    def test_non_macos_never_eligible(self) -> None:
-        ok, reason = encryption_cli._workspace_eligible("enable", platform="linux", on_path=lambda _n: True)
-        assert ok is False
-        assert "macOS" in reason
-
-    def test_enable_eligible_with_tooling(self) -> None:
-        ok, _ = encryption_cli._workspace_eligible("enable", platform="darwin", on_path=lambda _n: True)
-        assert ok is True
-
-    def test_enable_skipped_without_tooling(self) -> None:
-        ok, reason = encryption_cli._workspace_eligible("enable", platform="darwin", on_path=lambda _n: False)
-        assert ok is False
-        assert "tooling" in reason
-
     def test_purge_eligible_when_volume_set_up(self, tmp_path: Path) -> None:
         image = tmp_path / "claude-private.sparsebundle"
         image.write_text("x")

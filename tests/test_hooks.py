@@ -618,3 +618,14 @@ plugins:
 """,
         )
         assert _runtime.get_active_policy_mode(config_path=config) == "strict"
+
+
+def test_network_prompt_section_accepts_hermes_session_info(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hermes calls a prompt-section callable with a read-only session-info mapping."""
+    from types import MappingProxyType
+
+    from mordred_hermes.privacy_check import egress
+
+    monkeypatch.setattr(egress, "load_policy", lambda *a, **k: egress.EgressPolicy(level="ask"))
+    assert hooks.network_prompt_section(MappingProxyType({"platform": "cli"})) == hooks.NETWORK_PROMPT
+    assert hooks.network_prompt_section() == hooks.NETWORK_PROMPT

@@ -14,7 +14,8 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 - ``network {use,status,init}``                  — network-privacy path control + on-demand setup
 - ``policy {show,explain,dry-run,reload}``       — inspect / explain the active policy
 - ``audit {tail,grep,decrypt,purge}``            — read / maintain the audit log
-- ``keyvault {init,list,verify-digest,export,recover,reset,enable-se,enable-tpm,eth}`` — keyvault management
+- ``keyvault {init,list,verify-digest,export,recover,reset,enable-se,enable-tpm,enable-winkey,native,eth}`` —
+  keyvault management (``keyvault native init`` is the Windows CNG custody ceremony)
 - ``vault {init,add,status,cat,migrate,...}``    — at-rest secrets/env vault
 - ``plugins list``                               — show the Mordred plugin and its components
 - ``plugins migrate``                            — switch config.yaml to the single ``mordred`` plugin
@@ -56,6 +57,7 @@ def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) 
     _add_extension(sub)
     _add_telegram(sub)
     _add_egress(sub)
+    _add_databases(sub)
     _add_desktop(sub)
     _add_uninstall(sub)
 
@@ -108,6 +110,26 @@ def _add_uninstall(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     p.set_defaults(func=_handle_uninstall)
 
 
+def _add_databases(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser("databases", help="Encrypt Hermes's SQLite databases (state.db and its siblings) with SQLCipher")
+    dsub = p.add_subparsers(dest="databases_command", required=True, metavar="COMMAND")
+    dsub.add_parser("status", help="Show whether each Hermes database is encrypted").set_defaults(
+        func=_handle_databases
+    )
+    p_encrypt = dsub.add_parser(
+        "encrypt",
+        help="Encrypt every Hermes database now (or at the next Hermes start if Hermes has them open)",
+    )
+    p_encrypt.add_argument("--dry-run", action="store_true", help="List what would be encrypted; change nothing")
+    p_encrypt.set_defaults(func=_handle_databases)
+    p_decrypt = dsub.add_parser(
+        "decrypt",
+        help="Turn every Hermes database back into plain SQLite and switch database encryption off",
+    )
+    p_decrypt.add_argument("--dry-run", action="store_true", help="List what would be decrypted; change nothing")
+    p_decrypt.set_defaults(func=_handle_databases)
+
+
 def _add_egress(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("egress", help="Tool-egress level: stop the agent's tools from sending data out")
     esub = p.add_subparsers(dest="egress_command", required=True, metavar="COMMAND")
@@ -129,6 +151,12 @@ def _add_egress(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     p_taint.set_defaults(func=_handle_egress)
 
 
+_MACHINE_BOUND_HELP = (
+    "Windows: acknowledge that the Telegram credentials are sealed by this profile's machine-bound CNG key, "
+    "without per-use presence or portable recovery (otherwise login asks)"
+)
+
+
 def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("telegram", help="Read-only import of your own Telegram account (optional extra)")
     tsub = p.add_subparsers(dest="telegram_command", required=True, metavar="COMMAND")
@@ -138,9 +166,15 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
         action="store_true",
         help="Create the Enclave key without a per-use Touch ID / passcode requirement",
     )
+    p_setup.add_argument("--acknowledge-machine-bound", action="store_true", help=_MACHINE_BOUND_HELP)
     p_setup.set_defaults(func=_handle_telegram)
     p_doctor = tsub.add_parser("doctor", help="Health check from metadata only (no Touch ID, no content)")
     p_doctor.add_argument("--json", action="store_true", help="Machine-readable output")
+    p_doctor.add_argument(
+        "--probe-llm",
+        action="store_true",
+        help="Unseal the saved local LLM configuration and test a streamed completion (may prompt for unlock)",
+    )
     p_doctor.set_defaults(func=_handle_telegram)
     p_login = tsub.add_parser("login", help="Create a session, sealed by the Secure Enclave")
     p_login.add_argument(
@@ -148,6 +182,7 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
         action="store_true",
         help="Create the Enclave key without a per-use Touch ID / passcode requirement",
     )
+    p_login.add_argument("--acknowledge-machine-bound", action="store_true", help=_MACHINE_BOUND_HELP)
     p_login.set_defaults(func=_handle_telegram)
     p_sync = tsub.add_parser("sync", help="Import new messages from every dialog into the encrypted archive")
     p_sync.add_argument(
@@ -202,6 +237,12 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     p_local = tsub.add_parser("local-llm", help="Send questions to a model on this machine (loopback only)")
     p_local.add_argument("--endpoint", required=True, help="e.g. http://127.0.0.1:11434/v1")
     p_local.add_argument("--model", required=True, help="Model name served by that endpoint")
+    local_auth = p_local.add_mutually_exclusive_group()
+    local_auth.add_argument("--api-key", action="store_true", help="Prompt for a local API key (hidden; stored sealed)")
+    local_auth.add_argument(
+        "--api-key-env", metavar="NAME", help="Import a local API key once from this environment variable"
+    )
+    local_auth.add_argument("--clear-api-key", action="store_true", help="Remove the stored local API key")
     p_local.set_defaults(func=_handle_telegram)
     p_migrate = tsub.add_parser("migrate-tee", help="Move vault-stored credentials into the Secure Enclave seal")
     p_migrate.add_argument(
@@ -521,6 +562,23 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     )
     p_enable_tpm.add_argument("--install-dir", help="Install directory for the helper (default: ~/.local/bin)")
     p_enable_tpm.set_defaults(func=_handle_keyvault_enable_tpm)
+    p_enable_win = ksub.add_parser("enable-winkey", help="Build and probe the Windows CNG TPM helper")
+    p_enable_win.add_argument("--install-dir", help="Helper directory (default: <HERMES_HOME>/bin)")
+    p_enable_win.set_defaults(func=_handle_keyvault_enable_winkey)
+    p_native = ksub.add_parser("native", help="Windows native CNG custody (explicit initialization ceremony)")
+    nsub = p_native.add_subparsers(dest="keyvault_native_command", required=True, metavar="COMMAND")
+    p_native_init = nsub.add_parser(
+        "init",
+        help="Explicitly enroll Windows CNG custody roles (inert: nothing is sealed or armed)",
+    )
+    p_native_init.add_argument(
+        "--role",
+        dest="roles",
+        action="append",
+        choices=["memory", "audit", "telegram"],
+        help="Role to enroll; repeatable (default: memory). `telegram setup` offers --role telegram.",
+    )
+    p_native_init.set_defaults(func=_handle_keyvault_native_init)
 
     from . import keyvault_eth_cli
 
@@ -672,9 +730,9 @@ def _add_encryption(sub: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     p_enable.add_argument(
         "--force-runtime-unverified",
         action="store_true",
-        help="(env/config, macOS) seal .env / config.yaml even when the `hermes` runtime "
+        help="(env/config on macOS; memory on macOS/Linux) seal even when the `hermes` runtime "
         "can't be verified to decrypt it — advanced; data stays unreadable until that "
-        "runtime has mordred",
+        "runtime has mordred; refused on Windows",
     )
     p_enable.set_defaults(func=_handle_encryption_enable)
 
@@ -997,6 +1055,12 @@ def _handle_uninstall(args: argparse.Namespace) -> int:
     return uninstall_cli.cli_uninstall(args)
 
 
+def _handle_databases(args: argparse.Namespace) -> int:
+    from . import databases_cli
+
+    return databases_cli.cli_databases(args)
+
+
 def _handle_egress(args: argparse.Namespace) -> int:
     from . import egress_cli
 
@@ -1016,3 +1080,15 @@ def _handle_extension_serve(args: argparse.Namespace) -> int:
     from mordred_hermes.extension.__main__ import serve
 
     return serve(host=args.host, port=args.port)
+
+
+def _handle_keyvault_enable_winkey(args: argparse.Namespace) -> int:
+    from . import keyvault_native_cli
+
+    return keyvault_native_cli.cli_enable_winkey(args)
+
+
+def _handle_keyvault_native_init(args: argparse.Namespace) -> int:
+    from . import keyvault_windows_cli
+
+    return keyvault_windows_cli.cli_native_init(args)

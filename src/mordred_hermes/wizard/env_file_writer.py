@@ -28,8 +28,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn, Protocol, runtime_checkable
 
+from .._config_io import DOTENV_LIMIT, CanonicalPaths, canonical_session
 from .._file_lock import private_flock
-from .policy_writer import _atomic_write_text, _ensure_real_directory, _read_regular_text
+from .policy_writer import _atomic_write_text, _bounded_utf8, _ensure_real_directory, _read_regular_text, _windows
 
 # POSIX env-var name: start with letter/underscore, followed by alnum/underscore.
 # We also require at least one uppercase letter -- Mordred owns the
@@ -70,6 +71,14 @@ def _dotenv_lock(path: Path) -> Iterator[None]:
 
 def update_dotenv_file(path: Path, transform: Callable[[str], str]) -> None:
     """Atomically transform a regular dotenv file under the shared RMW lock."""
+    if _windows():
+        if path.name != ".env":
+            raise ValueError("canonical dotenv filename must be .env")
+        with canonical_session(CanonicalPaths(path.parent), scope="home", create=True) as session:
+            source = session.read_home(".env", max_bytes=DOTENV_LIMIT)
+            updated = transform(source.data.decode("utf-8") if source is not None else "")
+            session.write_home(".env", _bounded_utf8(updated, DOTENV_LIMIT))
+        return
     with _dotenv_lock(path):
         existing = _read_regular_text(path)
         updated = transform(existing if existing is not None else "")
@@ -92,13 +101,16 @@ class DotEnvFileWriter:
     """
 
     def upsert(self, path: Path, *, key: str, value: str) -> None:
-        if not _VALID_ENV_KEY.match(key):
+        if not _VALID_ENV_KEY.fullmatch(key):
             raise ValueError(
                 f"refusing to write env var key {key!r}: must be uppercase, start with letter/underscore, "
                 "and contain only alnum/underscore"
             )
         if "\n" in value or "\r" in value:
             raise ValueError(f"refusing to write env var value with newline in key {key!r}")
+
+        if _windows():
+            _bounded_utf8(value, DOTENV_LIMIT)
 
         def transform(existing: str) -> str:
             new_lines, found = _replace_or_strip_key(existing.splitlines(), key, value)
@@ -127,9 +139,10 @@ def _replace_or_strip_key(lines: list[str], key: str, value: str) -> tuple[list[
     found = False
     prefix = f"{key}="
     for line in lines:
-        if line.startswith(prefix):
+        export = "export " if line.startswith("export " + prefix) else ""
+        if line.startswith(prefix) or export:
             if value and not found:
-                out.append(f"{key}={value}")
+                out.append(f"{export}{key}={value}")
             # subsequent matches dropped (or all matches dropped when value is empty)
             found = True
             continue

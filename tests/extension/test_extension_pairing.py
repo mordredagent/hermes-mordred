@@ -44,6 +44,7 @@ def _webauthn_public_key_b64() -> str:
 def test_full_pairing_handshake():
     code, _exp = pairing.generate_code()
     assert code.startswith("MORT-")
+    assert pairing.pair_outcome(code) == ("pending", None)
 
     # Extension side
     ext_priv = X25519PrivateKey.generate()
@@ -51,6 +52,7 @@ def test_full_pairing_handshake():
     challenge = b"\x11" * 32
 
     result = pairing.handle_pair_init(code, ext_pub_b64, xc.b64u_encode(challenge))
+    assert pairing.pair_outcome(code) == ("paired", None)
 
     # Attestation verifies against the returned SE pubkey
     att = result["attestation"]
@@ -61,6 +63,7 @@ def test_full_pairing_handshake():
     stored = pairing.load_pairing()
     assert stored is not None
     assert stored.aes_key == ext_key
+    assert len(ext_key) == 32
 
     # Token round-trips
     assert pairing.validate_token(result["ext_token"]) is True
@@ -321,17 +324,6 @@ def test_invalid_code():
     with pytest.raises(pairing.PairError) as ei:
         pairing.handle_pair_init("MORT-AAAAAAAA-BBBBBBBB", ext_pub, xc.b64u_encode(b"\x00" * 32))
     assert ei.value.reason == "invalid_code"
-
-
-def test_pair_outcome_lifecycle():
-    """pending → paired, recorded on the pending entry for the polling CLI."""
-    code, _ = pairing.generate_code()
-    assert pairing.pair_outcome(code) == ("pending", None)
-
-    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
-    pairing.handle_pair_init(code, ext_pub, xc.b64u_encode(b"\x00" * 32))
-
-    assert pairing.pair_outcome(code) == ("paired", None)
 
 
 def test_handshake_failure_after_consume_records_failed_outcome():

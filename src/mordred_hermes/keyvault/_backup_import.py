@@ -354,6 +354,9 @@ def import_backup(
     encrypted under a passphrase different from the one committed in the
     verification digest; new backups must leave it unset.
     """
+    from ._windows_capability import refuse_excluded_on_windows
+
+    refuse_excluded_on_windows("recovery", "import_backup")  # before any I/O (C5e)
     # Function-local to avoid a module-load cycle: ``api`` imports this module
     # (via ``_secret_ops``, to re-export the ops), so the few provisioning-side
     # helpers we still need are imported here at call time, when ``api`` is

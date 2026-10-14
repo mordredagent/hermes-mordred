@@ -18,7 +18,7 @@ Both are called with redirects disabled, so a server cannot bounce the request
 from __future__ import annotations
 
 import ipaddress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 
@@ -42,7 +42,7 @@ class LlmTarget:
     backend: Backend
     base_url: str
     model: str
-    api_key: str | None
+    api_key: str | None = field(repr=False)
 
     @property
     def config(self) -> venice.VeniceConfig:
@@ -78,6 +78,14 @@ def normalize_local_endpoint(url: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path.rstrip("/"), "", ""))
 
 
+def validate_local_api_key(key: str) -> str:
+    """A nonempty header-safe token; never echo rejected input."""
+    key = key.strip()
+    if not key or any(ord(char) < 33 or ord(char) > 126 for char in key):
+        raise LlmConfigError("local_api_key_invalid")
+    return key
+
+
 def resolve_target(
     backend: str | None,
     *,
@@ -85,6 +93,7 @@ def resolve_target(
     venice_model: str,
     local_endpoint: str | None,
     local_model: str | None,
+    local_api_key: str | None = None,
 ) -> LlmTarget:
     """Pick the configured destination; anything else is refused."""
     chosen = backend or ("venice" if venice_api_key else None)
@@ -95,5 +104,6 @@ def resolve_target(
     if chosen == "local":
         if not local_endpoint or not local_model:
             raise LlmConfigError("local_llm_not_configured")
-        return LlmTarget("local", normalize_local_endpoint(local_endpoint), local_model, None)
+        key = validate_local_api_key(local_api_key) if local_api_key is not None else None
+        return LlmTarget("local", normalize_local_endpoint(local_endpoint), local_model, key)
     raise LlmConfigError("llm_not_configured")

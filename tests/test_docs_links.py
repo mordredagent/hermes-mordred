@@ -40,8 +40,13 @@ _MAINTAINED_DEV_DOCS = {
     "ROADMAP.md",
     "SLACK_E2E.md",
     "SPEC.md",
+    "STATE_DB_ENCRYPTION.md",
     "TODO.md",
+    "UBUNTU_MANUAL_INSTALL_NOTES.md",
     "UPSTREAM.md",
+    "WINDOWS_FEASIBILITY.md",
+    "WINDOWS_CONFIG_IO.md",
+    "WINDOWS_AUDIT_IO.md",
     "setup.md",
 }
 

@@ -30,6 +30,19 @@ uv run pytest --cov=src/mordred_hermes    # coverage; CI floor is 80%
 Full guide: `docs/dev/setup.md`. Always go through `uv run` / `.venv/bin/…`;
 bare `pytest` or `hermes-mordred` may hit a different environment via PATH.
 
+For ordinary edits, start with `uv run python tools/run_critical_tests.py` and
+the changed modules (`uv run pytest -q tests/test_<affected>.py`). Use `--list`
+to inspect the critical preset or `--dry-run` to validate collection. This is
+fast feedback, not full acceptance. Run one full regression at final
+integration/code freeze, rather than repeatedly for reports or documentation.
+Security-sensitive changes still require the complete containing test modules
+and the relevant explicit live-gated paths. Draft PR CI runs critical feedback
+on Ubuntu Python 3.12 and mapped macOS/Windows workers. Ready PRs and accepted-
+baseline `dev` pushes use conservative changed-scope CI (normally 3–5 jobs).
+Sensitive/unknown changes, `main`, manual dispatch and `ci:full` use final CI:
+Linux 3.11/3.13, macOS 3.11 and one Windows 3.11 worker, with all validation packs.
+See `docs/dev/CI.md` for exact evidence and rerun rules.
+
 ## Critical gotchas
 
 - **Two venvs coexist.** The repo `.venv/` is an editable install (runs

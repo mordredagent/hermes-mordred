@@ -14,8 +14,8 @@ import contextlib
 import logging
 import os
 import time
-from collections.abc import AsyncIterator, Callable
-from dataclasses import asdict, dataclass
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +48,7 @@ from .memory_guard import MemoryEncryptionRequired
 from .readonly import ReadOnlyViolation, RequestPolicy
 from .secrets import TelegramSecrets, TelegramSecretsError
 from .store import ArchiveStore, StoreError
-from .tee import TeeSecretStore
+from .tee import default_secret_store
 
 _log = logging.getLogger(__name__)
 
@@ -123,8 +123,10 @@ def _audit(event: str, decision: str, **fields: Any) -> None:
 
         writer = build_audit_writer(hermes_home() / "mordred" / "audit.log")
         safe_audit_append(writer, {"event": event, "decision": decision, "reason": None, **fields}, logger=_log)
-    except Exception:
-        _log.debug("telegram audit append failed", exc_info=True)
+    except Exception as exc:
+        # This can run inside a transport exception handler. Its traceback chain
+        # may contain response bytes or a credential-bearing endpoint path.
+        _log.debug("telegram audit append failed (%s)", type(exc).__name__)
 
 
 def check_llm_policy(backend: str, base_url: str) -> None:
@@ -159,7 +161,7 @@ def check_llm_policy(backend: str, base_url: str) -> None:
         raise TelegramServiceError("llm_policy_refused") from exc
 
 
-async def _without_thinking(chunks: AsyncIterator[str]) -> AsyncIterator[str]:
+async def _without_thinking(chunks: AsyncIterator[str]) -> AsyncGenerator[str, None]:
     """Stream text with any ``<think>…</think>`` block removed (local reasoning models)."""
     pending = ""
     async for chunk in chunks:
@@ -228,8 +230,9 @@ class TelegramService:
         installed: Callable[[], bool] = telethon_available,
         memory_guard: Callable[[], None] | None = None,
     ) -> None:
-        # Enclave-sealed; every load() is a fresh Secure Enclave unwrap.
-        self._secrets = secret_store if secret_store is not None else TeeSecretStore()
+        # Hardware-sealed (Enclave/TPM, or the Windows custody telegram role);
+        # every load() is a fresh native unwrap.
+        self._secrets = secret_store if secret_store is not None else default_secret_store()
         if secret_store is None:
             from .hardening import harden_process
 
@@ -416,6 +419,8 @@ class TelegramService:
         except Exception as exc:
             code = error_code(exc, "telegram_sync_failed")
             self._last_error = code
+            if code == "telegram_session_revoked":
+                await self._forget_revoked_session()
             if code == "telegram_sync_failed":
                 # Type name only: an exception message or traceback locals
                 # could carry message text.
@@ -425,8 +430,28 @@ class TelegramService:
             if client is not None:
                 with contextlib.suppress(Exception):
                     await client.disconnect()
-            lock.__exit__(None, None, None)
-            self._progress.finished_at = int(time.time())
+            try:
+                lock.__exit__(None, None, None)
+            except StoreError as exc:
+                # A classified lock-release failure is reported, never lost.
+                self._last_error = self._last_error or exc.code
+            finally:
+                self._progress.finished_at = int(time.time())
+
+    async def _forget_revoked_session(self) -> None:
+        """Telegram ended this login: drop the dead session so setup asks to log in again.
+
+        Keeps everything else (API id/hash, the archive and its key, the
+        question model), so logging in again resumes where the archive left
+        off. Best effort: if sealing fails the next sync reports it again.
+        """
+        try:
+            await asyncio.to_thread(
+                self._secrets.update, lambda old: replace(old, session=None) if old is not None else None
+            )
+            _audit("telegram.session", "revoked")
+        except Exception as exc:
+            _log.warning("could not clear the revoked Telegram session (%s)", type(exc).__name__)
 
     async def cancel_sync(self) -> None:
         task = self._sync_task
@@ -446,6 +471,7 @@ class TelegramService:
             venice_model=value.venice_model or os.environ.get(venice.MODEL_ENV) or venice.DEFAULT_MODEL,
             local_endpoint=value.local_endpoint,
             local_model=value.local_model,
+            local_api_key=value.local_api_key,
         )
 
     async def ask(self, request: AskRequest, on_meta: Callable[[AskResult], None]) -> AsyncIterator[str]:
@@ -512,6 +538,10 @@ class TelegramService:
             if not produced:
                 # Never hand back a silent empty answer as if it were one.
                 raise AskError("llm_empty_answer")
+        except venice.VeniceError as exc:
+            if target.backend == "local":
+                _audit("telegram.ask.failed", "error", backend="local", error=exc.code, detail=exc.detail)
+            raise
         finally:
             with contextlib.suppress(Exception):
                 await raw_session.close()

@@ -24,12 +24,14 @@ and never contain prompt content, message text, or the API key.
 
 from __future__ import annotations
 
+import asyncio
 import codecs
 import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
+from urllib.parse import urlsplit, urlunsplit
 
 DEFAULT_BASE_URL = "https://api.venice.ai/api/v1"
 API_KEY_ENV = "VENICE_API_KEY"
@@ -46,14 +48,15 @@ _MAX_SSE_LINE_CHARS = 1 << 20
 class VeniceError(RuntimeError):
     """Stable, content-free failure code."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, detail: dict[str, str | int] | None = None) -> None:
         super().__init__(code)
         self.code = code
+        self.detail = detail
 
 
 @dataclass(frozen=True)
 class VeniceConfig:
-    api_key: str
+    api_key: str = field(repr=False)
     model: str = DEFAULT_MODEL
     base_url: str = DEFAULT_BASE_URL
 
@@ -166,6 +169,38 @@ def _raise_for_status(status: int, prefix: str = "venice") -> None:
         raise VeniceError(code.replace("venice_", f"{prefix}_", 1))
 
 
+def local_failure_detail(base_url: str, failure: str, status: int | None = None) -> dict[str, str | int]:
+    """Reviewed diagnostics only: never copy a response body, exception or URL path."""
+    from .llm import LlmConfigError, normalize_local_endpoint
+
+    hint = "Check the local server and run hermes-mordred telegram doctor --probe-llm."
+    if status in (401, 403):
+        hint = (
+            "Configure the server's API key with hermes-mordred telegram local-llm "
+            "--endpoint <base-url> --model <model-id> --api-key."
+        )
+    elif status == 404:
+        hint = "Check the saved model and endpoint base path (usually /v1, without /chat/completions)."
+    elif status is not None and 300 <= status < 400:
+        hint = "Configure the final loopback endpoint directly; redirects are refused."
+    elif failure == "timeout":
+        hint = "Check model loading and generation speed; try fewer messages or a smaller model."
+    elif failure == "connection_failed":
+        hint = "Start the local server and verify its port matches telegram local-llm --endpoint."
+    elif failure == "invalid_response":
+        hint = "Use an OpenAI-compatible /v1 endpoint that returns streamed chat completion text."
+    detail: dict[str, str | int] = {"failure": failure, "hint": hint}
+    try:
+        parts = urlsplit(normalize_local_endpoint(base_url))
+    except LlmConfigError:
+        pass
+    else:
+        detail["endpoint"] = urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+    if status is not None:
+        detail["http_status"] = status
+    return detail
+
+
 def build_request(
     cfg: VeniceConfig, messages: list[dict[str, str]], *, max_tokens: int, venice_parameters: bool = True
 ) -> dict[str, Any]:
@@ -215,6 +250,24 @@ def _delta_text(line: str) -> str | None:
     return content if isinstance(content, str) and content else None
 
 
+def _completion_finished(line: str) -> bool:
+    """Recognize a terminal SSE event, independently of HTTP connection closure."""
+    if not line.startswith("data:"):
+        return False
+    data = line[5:].strip()
+    if data == "[DONE]":
+        return True
+    try:
+        payload = json.loads(data)
+    except ValueError:
+        return False
+    choices = payload.get("choices") if isinstance(payload, dict) else None
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return False
+    reason = choices[0].get("finish_reason")
+    return isinstance(reason, str) and reason in {"stop", "length", "content_filter", "tool_calls", "function_call"}
+
+
 async def _sse_lines(content: Any) -> AsyncIterator[str]:
     # Incremental: a multi-byte character (CJK, emoji) split across two network
     # chunks must be decoded once both halves arrive, not replaced with U+FFFD.
@@ -239,6 +292,7 @@ async def stream_chat(
     *,
     max_tokens: int = 1500,
     backend: str = "venice",
+    require_complete: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Stream the answer's text deltas from an OpenAI-compatible ``/chat/completions``.
 
@@ -247,16 +301,35 @@ async def stream_chat(
     """
     prefix = "venice" if backend == "venice" else "local_llm"
     body = build_request(cfg, messages, max_tokens=max_tokens, venice_parameters=backend == "venice")
+    status = None
+    completed = False
     try:
         async with session.post(
             f"{cfg.base_url}/chat/completions", json=body, headers=_headers(cfg), allow_redirects=False
         ) as resp:
+            status = resp.status
             _raise_for_status(resp.status, prefix)
             async for line in _sse_lines(resp.content):
+                completed = completed or (require_complete and _completion_finished(line))
                 text = _delta_text(line)
                 if text is not None:
                     yield text
-    except VeniceError:
+            if require_complete and not completed:
+                raise VeniceError(f"{prefix}_bad_response")
+    except VeniceError as exc:
+        if backend == "local":
+            failure = "http_error" if status is not None and status != 200 else "invalid_response"
+            exc.detail = local_failure_detail(cfg.base_url, failure, status)
         raise
     except Exception as exc:
-        raise VeniceError(f"{prefix}_unavailable") from exc
+        detail = None
+        if backend == "local":
+            import aiohttp
+
+            failure = "transport_error"
+            if isinstance(exc, asyncio.TimeoutError):
+                failure = "timeout"
+            elif isinstance(exc, aiohttp.ClientConnectionError):
+                failure = "connection_failed"
+            detail = local_failure_detail(cfg.base_url, failure, status)
+        raise VeniceError(f"{prefix}_unavailable", detail=detail) from exc

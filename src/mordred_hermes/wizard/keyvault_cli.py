@@ -52,6 +52,7 @@ from ._keyvault_init import (
 from ._keyvault_init import (
     _blackout_guidance as _blackout_guidance,  # re-exported for tests
 )
+from ._windows_gates import unported_refusal
 
 if TYPE_CHECKING:
     from ..keyvault.wrap import AuditSink, NativeBackend
@@ -841,7 +842,14 @@ def reset_keyvault(
     prompt_io: PromptIO | None = None,
     assume_yes: bool = False,
 ) -> int:
-    """Reset keyvault only after independent TPM memory custody is removed."""
+    """Reset keyvault only after independent TPM memory custody is removed.
+
+    On Windows the secret store is not ported: refuse first, before the Linux
+    memory-key lock, the keyvault lifecycle lock or any ``_storage`` read.
+    """
+    unported = unported_refusal("secret_store", "keyvault reset")
+    if unported is not None:
+        return unported
     from ..keyvault._memory_key import MemoryKeyError, memory_key_lock, memory_key_path
 
     root = _resolve_root(home)

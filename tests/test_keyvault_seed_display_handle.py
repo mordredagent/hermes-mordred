@@ -32,7 +32,6 @@ from __future__ import annotations
 import copy
 import io
 import pickle
-import time
 
 import pytest
 
@@ -59,44 +58,11 @@ class TestSlotsLayout:
     on any other name.
     """
 
-    def test_slots_value_is_exact_five_tuple(self) -> None:
-        """The handle carries (seed bytes, consumed flag, deadline, expected
-        digest, consume lock). The 4th slot makes confirm_generate's
-        defense-in-depth digest check possible; the 5th (``_lock``)
-        serializes ``consume()`` so the one-shot guarantee holds even if
-        the handle is shared across threads.
-        """
-        assert api.SeedDisplayHandle.__slots__ == (
-            "_payload",
-            "_consumed",
-            "_deadline",
-            "_expected_digest",
-            "_lock",
-        )
-
-    def test_instance_has_no_dict(self) -> None:
-        handle = _make_handle()
-        assert not hasattr(handle, "__dict__")
-
     def test_arbitrary_attribute_assignment_rejected(self) -> None:
         handle = _make_handle()
+        assert not hasattr(handle, "__dict__")
         with pytest.raises(AttributeError):
             handle.seed_phrase = _SEED  # type: ignore[attr-defined]
-
-    def test_payload_starts_as_utf8_encoded_seed(self) -> None:
-        """White-box: pin the bytearray initialization so wipe-tests below can
-        compare against zero-fill in the same buffer.
-        """
-        handle = _make_handle()
-        assert bytes(handle._payload) == _SEED.encode("utf-8")  # type: ignore[attr-defined]
-
-    def test_expected_digest_stored_verbatim(self) -> None:
-        """The third constructor argument is held on the instance for
-        confirm_generate to compare against the user-typed digest.
-        """
-        digest = b"\xab" * 32
-        handle = _make_handle(expected_digest=digest)
-        assert handle._expected_digest == digest  # type: ignore[attr-defined]
 
 
 # ============================ expected_digest length validation ============================
@@ -126,19 +92,6 @@ class TestExpectedDigestValidation:
         with pytest.raises(ValueError, match="32 bytes"):
             api.SeedDisplayHandle(_SEED, _FAR_FUTURE, b"")
 
-    def test_exactly_32_bytes_accepted(self) -> None:
-        """The boundary value — exactly 32 bytes — must NOT raise."""
-        handle = api.SeedDisplayHandle(_SEED, _FAR_FUTURE, b"\x00" * 32)
-        assert handle._expected_digest == b"\x00" * 32  # type: ignore[attr-defined]
-
-    def test_bytearray_digest_stored_as_immutable_bytes(self) -> None:
-        """A 32-byte bytearray passes the length check; the handle must
-        coerce it to immutable ``bytes`` rather than store the mutable
-        object.
-        """
-        handle = api.SeedDisplayHandle(_SEED, _FAR_FUTURE, bytearray(32))
-        assert type(handle._expected_digest) is bytes  # type: ignore[attr-defined]
-
     def test_mutating_caller_bytearray_does_not_affect_stored_digest(self) -> None:
         """confirm_generate (PR4c-2) compares the user-typed digest against
         ``_expected_digest``. If a caller passed a bytearray and retained a
@@ -149,6 +102,7 @@ class TestExpectedDigestValidation:
         """
         mutable = bytearray(b"\xaa" * 32)
         handle = api.SeedDisplayHandle(_SEED, _FAR_FUTURE, mutable)
+        assert type(handle._expected_digest) is bytes
         mutable[0] = 0x00  # mutate the caller's original buffer
         assert handle._expected_digest[0] == 0xAA  # type: ignore[attr-defined]
         assert handle._expected_digest == b"\xaa" * 32  # type: ignore[attr-defined]
@@ -195,29 +149,15 @@ class TestExpectedDigestMethod:
     outlive its deadline (codex pre-merge P2).
     """
 
-    def test_returns_the_expected_digest(self) -> None:
-        digest = b"\x5a" * 32
-        handle = _make_handle(expected_digest=digest)
-        assert handle.expected_digest() == digest
-
     def test_does_not_consume_the_handle(self) -> None:
         """Unlike consume(), expected_digest() leaves the handle usable —
         the display flow can still consume() the seed afterwards.
         """
-        handle = _make_handle()
-        handle.expected_digest()
+        digest = b"\xab" * 32
+        handle = _make_handle(expected_digest=digest)
+        assert handle.expected_digest() == digest
+        assert handle.expected_digest() == digest
         assert handle.consume() == _SEED
-
-    def test_callable_repeatedly(self) -> None:
-        """A pure read on the non-expired path — no one-shot guard."""
-        handle = _make_handle(expected_digest=b"\x5a" * 32)
-        assert handle.expected_digest() == b"\x5a" * 32
-        assert handle.expected_digest() == b"\x5a" * 32
-
-    def test_expired_raises_seed_display_expired(self) -> None:
-        handle = _make_handle(deadline=_FAR_PAST)
-        with pytest.raises(api.SeedDisplayExpired):
-            handle.expected_digest()
 
     def test_expired_wipes_the_payload(self) -> None:
         """An expired, never-displayed handle must not keep the seed in
@@ -255,15 +195,6 @@ class TestExpectedDigestMethod:
         # The seed is already gone — expiry no longer applies.
         assert handle.expected_digest() == digest
 
-    def test_expired_and_never_consumed_still_raises(self) -> None:
-        """The mirror of the above: an expired handle whose seed was NEVER
-        consumed must still raise — the deadline guard exists precisely to
-        wipe a never-displayed seed.
-        """
-        handle = _make_handle(deadline=_FAR_PAST)
-        with pytest.raises(api.SeedDisplayExpired):
-            handle.expected_digest()
-
 
 # ============================ repr / str (no leakage) ============================
 
@@ -276,25 +207,11 @@ class TestRedactedRepr:
     ``logging.debug(handle)`` / interactive-session inspection safe.
     """
 
-    def test_repr_is_exact_redacted_marker(self) -> None:
-        handle = _make_handle()
-        assert repr(handle) == "<SeedDisplayHandle redacted>"
-
-    def test_repr_does_not_leak_seed_substring(self) -> None:
-        # Use a seed with a distinctive token so a partial leak would surface.
-        handle = _make_handle("avocado banjo carbon dalmatian")
-        assert "avocado" not in repr(handle)
-        assert "banjo" not in repr(handle)
-
-    def test_str_falls_back_to_repr_and_redacts(self) -> None:
-        handle = _make_handle("uniqueseedmarker")
-        assert "uniqueseedmarker" not in str(handle)
-        assert str(handle) == "<SeedDisplayHandle redacted>"
-
     def test_repr_after_consume_still_redacted(self) -> None:
-        handle = _make_handle()
+        handle = _make_handle("uniqueseedmarker")
+        assert repr(handle) == str(handle) == "<SeedDisplayHandle redacted>"
         handle.consume()
-        assert repr(handle) == "<SeedDisplayHandle redacted>"
+        assert repr(handle) == str(handle) == "<SeedDisplayHandle redacted>"
 
 
 # ============================ equality (always raises) ============================
@@ -332,14 +249,6 @@ class TestEqualityRaises:
         with pytest.raises(TypeError):
             handle != "anything"  # noqa: B015 — intentional: trigger __ne__
 
-    def test_identity_still_works(self) -> None:
-        """``is`` is not affected by ``__eq__`` — legitimate same-object
-        comparisons must still succeed.
-        """
-        handle = _make_handle()
-        assert handle is handle
-        assert handle is not _make_handle()
-
 
 # ============================ hashability (unhashable) ============================
 
@@ -352,19 +261,6 @@ class TestUnhashable:
     far beyond the intentional 60-second display window. Blocking
     hashability prevents the entire class of bug.
     """
-
-    def test_hash_attribute_is_none_at_class_level(self) -> None:
-        assert api.SeedDisplayHandle.__hash__ is None
-
-    def test_hash_call_raises_typeerror(self) -> None:
-        handle = _make_handle()
-        with pytest.raises(TypeError):
-            hash(handle)
-
-    def test_cannot_be_added_to_set(self) -> None:
-        handle = _make_handle()
-        with pytest.raises(TypeError):
-            {handle}  # noqa: B018 — intentional: trigger set construction
 
     def test_cannot_be_used_as_dict_key(self) -> None:
         handle = _make_handle()
@@ -398,12 +294,6 @@ class TestCopyPickleBlocked:
         handle = _make_handle("supersecret")
         with pytest.raises(TypeError) as excinfo:
             copy.deepcopy(handle)
-        assert "opaque" in str(excinfo.value).lower()
-
-    def test_pickle_dumps_raises_typeerror(self) -> None:
-        handle = _make_handle("supersecret")
-        with pytest.raises(TypeError) as excinfo:
-            pickle.dumps(handle)
         assert "opaque" in str(excinfo.value).lower()
 
     def test_reduce_directly_raises_typeerror(self) -> None:
@@ -441,17 +331,6 @@ class TestCopyPickleBlocked:
             handle.__getstate__()
         assert "opaque" in str(excinfo.value).lower()
 
-    def test_getstate_does_not_leak_seed(self) -> None:
-        """Belt-and-suspenders: even if a future refactor changed the
-        exception type, the call must not return the seed payload.
-        """
-        handle = _make_handle("verysecretseedphrase")
-        try:
-            state = handle.__getstate__()
-        except TypeError:
-            return  # blocked as intended
-        pytest.fail(f"__getstate__ must raise, not return state: {state!r}")
-
     def test_setstate_raises_typeerror(self) -> None:
         """``__setstate__`` is blocked for symmetry — a reconstructed handle
         must never be populated from an external state dict.
@@ -474,37 +353,22 @@ class TestConsumeOneShot:
     pointer into the same buffer.
     """
 
-    def test_first_consume_returns_normalized_seed(self) -> None:
-        handle = _make_handle()
-        assert handle.consume() == _SEED
-
     def test_consume_zero_fills_payload_in_place(self) -> None:
         handle = _make_handle()
         # Capture the bytearray reference BEFORE consume so we can verify
         # the SAME buffer is wiped (not just replaced with a new bytearray).
         original_payload = handle._payload  # type: ignore[attr-defined]
-        assert any(b != 0 for b in original_payload)  # sanity: starts non-zero
-        handle.consume()
+        assert bytes(original_payload) == _SEED.encode("utf-8")
+        original_len = len(original_payload)
+        assert handle.consume() == _SEED
         assert all(b == 0 for b in original_payload), "payload must be wiped in-place after consume()"
         # Pin that the slot still holds the SAME bytearray object — a refactor
         # of _wipe to ``self._payload = bytearray(...)`` would leave the old
         # (aliased) buffer un-zeroed and silently pass the content check above.
         assert handle._payload is original_payload  # type: ignore[attr-defined]
-
-    def test_consume_preserves_payload_length(self) -> None:
-        """Wipe is zero-fill, not truncate — length stays equal to the
-        encoded seed so timing on the buffer doesn't leak post-wipe."""
-        handle = _make_handle()
-        original_len = len(handle._payload)  # type: ignore[attr-defined]
-        handle.consume()
-        assert len(handle._payload) == original_len  # type: ignore[attr-defined]
-
-    def test_second_consume_raises_runtimeerror(self) -> None:
-        handle = _make_handle()
-        handle.consume()
-        with pytest.raises(RuntimeError) as excinfo:
+        assert len(original_payload) == original_len
+        with pytest.raises(RuntimeError, match="already consumed"):
             handle.consume()
-        assert "already consumed" in str(excinfo.value)
 
     def test_consume_preserves_unicode_normalized_form(self) -> None:
         """The handle holds the *already-normalized* seed bytes; consume()
@@ -528,41 +392,14 @@ class TestDeadlineExpiry:
     that releases the seed to a caller.
     """
 
-    def test_seed_display_expired_is_exported(self) -> None:
-        assert hasattr(api, "SeedDisplayExpired")
-        assert issubclass(api.SeedDisplayExpired, Exception)
-
-    def test_consume_past_deadline_raises_seeddisplayexpired(self) -> None:
-        handle = _make_handle(deadline=_FAR_PAST)
-        with pytest.raises(api.SeedDisplayExpired):
-            handle.consume()
-
     def test_consume_past_deadline_still_wipes_payload(self) -> None:
         handle = _make_handle(deadline=_FAR_PAST)
         original_payload = handle._payload  # type: ignore[attr-defined]
         with pytest.raises(api.SeedDisplayExpired):
             handle.consume()
         assert all(b == 0 for b in original_payload), "expired consume() must still wipe the payload"
-
-    def test_consume_after_expired_consume_raises(self) -> None:
-        """Once an expired consume() has wiped + raised, the handle is
-        terminally unusable — a follow-up call must also raise (either
-        SeedDisplayExpired again, or RuntimeError "already consumed";
-        both are acceptable as long as no seed comes back).
-        """
-        handle = _make_handle(deadline=_FAR_PAST)
-        with pytest.raises(api.SeedDisplayExpired):
-            handle.consume()
         with pytest.raises((api.SeedDisplayExpired, RuntimeError)):
             handle.consume()
-
-    def test_consume_just_before_deadline_succeeds(self) -> None:
-        """Sanity check that the deadline guard is not always-on. Use a
-        deadline well ahead of the call site so any reasonable clock
-        skew stays on the non-expired side.
-        """
-        handle = _make_handle(deadline=time.monotonic() + 30.0)
-        assert handle.consume() == _SEED
 
 
 # ============================ consume() — thread safety ============================

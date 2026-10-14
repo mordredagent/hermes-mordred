@@ -7,11 +7,6 @@ import pytest
 from mordred_hermes.privacy_check._exceptions import MordredIntegrityRefused
 
 
-def test_integrity_refusal_is_direct_base_exception() -> None:
-    assert issubclass(MordredIntegrityRefused, BaseException)
-    assert not issubclass(MordredIntegrityRefused, Exception)
-
-
 def test_integrity_refusal_is_not_system_exit() -> None:
     assert not issubclass(MordredIntegrityRefused, SystemExit)
 

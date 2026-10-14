@@ -53,122 +53,22 @@ class TestRoundtrip:
         blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
         parsed = backup.parse_header(blob)
         assert backup.decrypt_body(parsed, PASSPHRASE) == SECRET
-
-    def test_roundtrip_preserves_verification_digest_in_header(self) -> None:
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        parsed = backup.parse_header(blob)
-        assert parsed.verification_digest == DIGEST_FIXTURE
-
-
-class TestWireFormat:
-    def test_blob_starts_with_mrkv_magic(self) -> None:
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        assert blob[:4] == b"MRKV"
-
-    def test_blob_version_byte_is_1(self) -> None:
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        assert blob[4] == 1
-
-    def test_blob_kdf_id_is_argon2id(self) -> None:
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        # kdf_id at offset 5
-        assert blob[5] == backup.KDF_ID_ARGON2ID
-        assert backup.KDF_ID_ARGON2ID == 1
-
-    def test_header_is_70_bytes_before_aes_blob(self) -> None:
-        """Wire format header (Codex #3): magic(4)+version(1)+kdf_id(1)+
-        m(4)+t(4)+p(4)+salt(16)+digest(32)+aes_blob_len(4) = 70 bytes."""
-        from mordred_hermes.keyvault import backup
-
+        assert blob[:6] == b"MRKV\x01\x01"
         assert backup.HEADER_LEN == 70
-
-    def test_aes_blob_starts_at_offset_70(self) -> None:
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        parsed = backup.parse_header(blob)
+        assert parsed.verification_digest == DIGEST_FIXTURE
+        assert (parsed.m_cost, parsed.t_cost, parsed.p_cost) == (47104, 1, 1)
         assert blob[70:] == parsed.aes_blob
-
-    def test_aad_prefix_equals_header_bytes_0_to_66(self) -> None:
-        """Regression test for the AAD/header double-packing refactor
-        (LOW refactor finding): ``export()`` used to hand-serialize the
-        66-byte AAD prefix TWICE — once for ``aad`` and again inside
-        ``_build_header_bytes`` — which had to stay byte-identical by
-        convention only. A future edit to one packing but not the other
-        would make every NEWLY-written backup fail ``decrypt_body`` with
-        ``InvalidTag`` while old blobs kept verifying (split-brain). This
-        pins ``parsed.aad == blob[:66]`` and independently rebuilds the
-        expected AAD to prove the two are provably byte-identical, not
-        just coincidentally so."""
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        parsed = backup.parse_header(blob)
-
+        assert blob[:70] == parsed.aad + len(parsed.aes_blob).to_bytes(4, "big")
         assert parsed.aad == blob[:66]
         assert len(parsed.aad) == backup._AAD_LEN
-
-        # Independently rebuild the AAD (mirrors export()'s own construction
-        # formula) and confirm it matches what parse_header recovered.
-        expected_aad = (
-            backup.MAGIC
-            + bytes([backup.VERSION])
-            + bytes([backup.KDF_ID_ARGON2ID])
-            + backup._ARGON2_M_COST_KIB.to_bytes(4, "big")
-            + backup._ARGON2_T_COST.to_bytes(4, "big")
-            + backup._ARGON2_P_COST.to_bytes(4, "big")
-            + blob[18:34]  # salt
+        assert parsed.aad == (
+            b"MRKV\x01\x01"
+            + (47104).to_bytes(4, "big")
+            + (1).to_bytes(4, "big")
+            + (1).to_bytes(4, "big")
+            + blob[18:34]
             + DIGEST_FIXTURE
         )
-        assert parsed.aad == expected_aad
-
-    def test_header_equals_aad_plus_aes_blob_len(self) -> None:
-        """``header == aad + aes_blob_len(4 BE)`` is now structural:
-        ``export()`` derives the header from ``aad`` instead of
-        re-packing it via a second helper."""
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        parsed = backup.parse_header(blob)
-        header = blob[: backup.HEADER_LEN]
-        assert header == parsed.aad + len(parsed.aes_blob).to_bytes(4, "big")
-
-
-class TestKdfParams:
-    """Codex review (cryptographic soundness): the Argon2id cost params
-    are part of the threat model. Regression guard ensures a future PR
-    that accidentally drops the memory cost gets caught immediately."""
-
-    def test_argon2_memory_cost_is_46_mib(self) -> None:
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        parsed = backup.parse_header(blob)
-        # 46 MiB in KiB
-        assert parsed.m_cost == 46 * 1024
-        assert parsed.m_cost == 47104
-
-    def test_argon2_time_cost_is_1(self) -> None:
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        parsed = backup.parse_header(blob)
-        assert parsed.t_cost == 1
-
-    def test_argon2_parallelism_is_1(self) -> None:
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        parsed = backup.parse_header(blob)
-        assert parsed.p_cost == 1
 
 
 class TestSaltFreshness:
@@ -295,8 +195,9 @@ class TestStructuralValidation:
 
         blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
         blob[:4] = b"XXXX"
-        with pytest.raises(backup.BackupCorrupt, match="magic"):
+        with pytest.raises(backup.BackupCorrupt, match="magic") as raised:
             backup.parse_header(bytes(blob))
+        assert isinstance(raised.value, ValueError)
 
     def test_unknown_version_raises_backup_corrupt(self) -> None:
         from mordred_hermes.keyvault import backup
@@ -402,20 +303,6 @@ class TestCanonicalKdfProfileV1:
         blob[14:18] = (2).to_bytes(4, "big")
         with pytest.raises(backup.BackupCorrupt, match=r"canonical|p_cost"):
             backup.parse_header(bytes(blob))
-
-    def test_canonical_profile_roundtrips_unchanged(self) -> None:
-        """Sanity: the canonical profile (m=46*1024, t=1, p=1) is what
-        export produces by default and must parse cleanly. Regression
-        guard for the canonical-check itself."""
-        from mordred_hermes.keyvault import backup
-
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
-        parsed = backup.parse_header(blob)
-        assert parsed.m_cost == 46 * 1024
-        assert parsed.t_cost == 1
-        assert parsed.p_cost == 1
-        # And the full roundtrip still works.
-        assert backup.decrypt_body(parsed, PASSPHRASE) == SECRET
 
     def test_decrypt_body_rejects_hand_crafted_non_canonical_parsed_header(
         self,
@@ -555,12 +442,3 @@ class TestParseHeaderDoesNotDecrypt:
 
         monkeypatch.setattr(crypto, "decrypt", boom)
         backup.parse_header(blob)  # must not raise
-
-
-class TestBackupCorruptException:
-    def test_exception_is_value_error_subclass(self) -> None:
-        """Same convention as :class:`VerificationDigestMismatch` — a
-        ``ValueError`` so generic input-validation handlers catch it."""
-        from mordred_hermes.keyvault.backup import BackupCorrupt
-
-        assert issubclass(BackupCorrupt, ValueError)

@@ -27,6 +27,8 @@ from typing import TYPE_CHECKING
 from ..keyvault import _identity
 from . import _term
 from ._defaults import resolve_backend, resolve_prompt_io, resolve_store
+from ._file_vault_support import production_file_vault_eligibility
+from ._windows_gates import excluded_refusal
 
 if TYPE_CHECKING:
     from ..keyvault.anchor import AnchorStore
@@ -84,6 +86,8 @@ def _open_cold_path(root: Path, *, prompt_io: PromptIO | None) -> OpenVault | No
     and return ``None``. On success returns the opened (read-only) vault; the
     caller owns closing it.
     """
+    if excluded_refusal("recovery", "vault open with the recovery passphrase") is not None:
+        return None
     from cryptography.exceptions import InvalidTag
 
     from ..keyvault import backup, manifest, recovery, vault
@@ -153,6 +157,8 @@ def _open_hot_path_or_report(
     gets a view whose ``close`` / ``with`` exit leaves the handle open (the
     flow closes it when it ends). One unwrap -- one Touch ID -- per flow.
     """
+    if excluded_refusal("file_vault", "vault open") is not None:
+        return None
     from ..keyvault import vault
     from ..keyvault._vault_open_report import report_hot_open_failure
 
@@ -160,6 +166,12 @@ def _open_hot_path_or_report(
         lent = flow_session.lend_vault(root)
         if lent is not None:
             return lent
+
+    if store is None:
+        eligible, reason = production_file_vault_eligibility()
+        if not eligible:
+            _term.emit_error(f"Cannot open the vault at {root}: {reason}")
+            return None
 
     key_id = anchor_label = _vault_identity(root)
     backend = resolve_backend(backend)
@@ -176,11 +188,13 @@ def _build_device_auth(
 ) -> tuple[NativeBackend | None, AnchorStore | None]:
     """Construct the SE backend + keychain store for the device rotation path.
 
-    Tolerant by design: off-macOS the SE backend / keychain modules don't import,
-    so a failure returns ``(None, None)`` and the caller falls through to the
-    passphrase (cold) path instead of crashing before it. Injected values
-    (tests / callers that already have them) are returned unchanged.
+    Unsupported production Keychain anchors return ``(None, None)`` before
+    resolving native defaults, so rotation can use its portable passphrase
+    path and recovery can refuse before prompting. Import failures also return
+    ``(None, None)``. Injected stores continue through the existing resolvers.
     """
+    if store is None and not production_file_vault_eligibility()[0]:
+        return None, None
     try:
         backend = resolve_backend(backend)
         store = resolve_store(store)

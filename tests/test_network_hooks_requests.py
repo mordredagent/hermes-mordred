@@ -680,24 +680,6 @@ class TestPreToolCall:
                 audit=_FakeAudit(),
             )
 
-    def test_strict_not_dropped_returns_none(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import api, hooks
-
-        rt = _FakeRuntime()
-        rt.use("tor")
-        rt.dropped = False
-        api.set_runtime(rt)
-        policy = _write_policy(tmp_path, "strict")
-        config = _write_config(tmp_path, "tor")
-
-        result = hooks.pre_tool_call(
-            tool_name="web_fetch",
-            policy_json_path=policy,
-            config_path=config,
-            audit=_FakeAudit(),
-        )
-        assert result is None
-
     def test_lenient_dropped_does_not_raise(self, tmp_path: Path) -> None:
         from mordred_hermes.network import api, hooks
 

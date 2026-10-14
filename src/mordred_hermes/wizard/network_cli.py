@@ -35,6 +35,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from ruamel.yaml.error import YAMLError
+
 from .._home import HERMES_BASE
 from .._yaml_io import load_plugin_section
 from ..network import api
@@ -86,6 +88,9 @@ def handle_use(args: argparse.Namespace) -> int:
 
     try:
         _write_default_path_to_config(config_path, target)
+    except (YAMLError, ValueError):
+        _term.emit_error("invalid network configuration; repair config.yaml before retrying")
+        return 1
     except OSError as e:
         _term.emit_error(f"failed to write {config_path}: {e}")
         return 1
@@ -290,7 +295,13 @@ def _persist_network(
     secret_written = False
     secret_cleared = False
     try:
-        policy_writer.merge_mordred_sections({"mordred_network": na.to_config_yaml_section()})
+        try:
+            policy_writer.merge_mordred_sections({"mordred_network": na.to_config_yaml_section()})
+        except (YAMLError, ValueError):
+            # Parser/validation errors can include secret config values. Keep
+            # this guard on the config write, not unrelated writer failures.
+            _term.emit_error("invalid network configuration; repair config.yaml before retrying")
+            return 1
 
         if clear_mullvad:
             env_writer.upsert(resolved_env_path, key=na.mullvad_account_id_env, value="")
@@ -360,7 +371,13 @@ def _read_existing_network_section(config_path: Path) -> dict[str, Any]:
     existing values. Any read/parse error collapses to ``{}`` (the prompts
     then fall back to their safe static defaults).
     """
-    return load_plugin_section(config_path, "mordred_network", log=_LOG) or {}
+    try:
+        return load_plugin_section(config_path, "mordred_network", catch=()) or {}
+    except (OSError, YAMLError, ValueError):
+        # The shared loader's default warning includes the exception text,
+        # which can expose YAML source snippets before the write refuses.
+        _LOG.warning("could not read network configuration from %s", config_path)
+        return {}
 
 
 def _join_cmd_or(cmd: tuple[str, ...], empty: str) -> str:

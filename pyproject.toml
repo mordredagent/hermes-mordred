@@ -26,6 +26,7 @@ dependencies = [
   # suite minus the two latest-tracking drift detectors (see ci.yml).
   "hermes-agent>=0.13.0",
   "ruamel.yaml>=0.18",
+  "psutil>=7.2.2",
 ]
 
 [project.optional-dependencies]
@@ -71,6 +72,9 @@ macos = [
   # Phase 4 PR7: CGScreenIsBeingCaptured probe for keyvault.seed_display
   # (best-effort screenshot detection during the Seed display window, M5).
   "pyobjc-framework-Quartz>=10.0",
+  # SQLCipher build of the sqlite3 module (FTS5 + trigram) for at-rest
+  # encryption of Hermes's SQLite databases (mordred_hermes.dbcrypt).
+  "sqlcipher3-wheels>=0.5.4",
 ]
 # Phase 3 PR3a Task #5: Tor ControlPort cookie auth + `GETINFO circuit-status`
 # liveness probe. Optional because (a) stem's last release was 2021-12 so we
@@ -213,6 +217,12 @@ packages = ["src/mordred_hermes"]
 "native/tpmkey-helper/Cargo.lock" = "mordred_hermes/_native/tpmkey-helper/Cargo.lock"
 "native/tpmkey-helper/src" = "mordred_hermes/_native/tpmkey-helper/src"
 "native/tpmkey-helper/README.md" = "mordred_hermes/_native/tpmkey-helper/README.md"
+"native/winkey-helper/build.ps1" = "mordred_hermes/_native/winkey-helper/build.ps1"
+"native/winkey-helper/Cargo.toml" = "mordred_hermes/_native/winkey-helper/Cargo.toml"
+"native/winkey-helper/Cargo.lock" = "mordred_hermes/_native/winkey-helper/Cargo.lock"
+"native/winkey-helper/src" = "mordred_hermes/_native/winkey-helper/src"
+"native/winkey-helper/tests" = "mordred_hermes/_native/winkey-helper/tests"
+"native/winkey-helper/README.md" = "mordred_hermes/_native/winkey-helper/README.md"
 # config.yaml at-rest transparent decrypt (ROADMAP v2-F8). The .pth lands at the
 # site-packages root and runs a cheap inline guard at every interpreter start;
 # only a Hermes invocation (or MORDRED_CONFIG_DECRYPT=1) imports _pth_bootstrap.
@@ -246,6 +256,7 @@ include = ["/src", "/tests", "/README.md", "/LICENSE", "/pyproject.toml", "/nati
 # hit this, but exclude them explicitly so local and CI sdists are identical.
 exclude = [
   "native/tpmkey-helper/target",
+  "native/winkey-helper/target",
   "native/sekey-helper/.build",
   # Dev-era PoC harnesses for the extension plugin; their behavior is
   # mirrored by tests/extension/, so downstream builds don't need them.
@@ -351,6 +362,8 @@ follow_imports = "skip"
 # Treat all as untyped so `mypy --strict src` resolves cross-platform.
 [[tool.mypy.overrides]]
 module = [
+    "psutil",
+    "psutil.*",
     "eth_keys",
     "eth_keys.*",
     "eth_account",
@@ -385,6 +398,10 @@ module = [
     # extension/telegram/client.py imports it lazily.
     "telethon",
     "telethon.*",
+    # SQLCipher is supplied only by the macos extra; Linux still checks the
+    # guarded imports, without installing this optional, untyped dependency.
+    "sqlcipher3",
+    "sqlcipher3.*",
 ]
 ignore_missing_imports = true
 

@@ -41,10 +41,19 @@ settings sections in `config.yaml` keep their names.
 ## Requirements
 
 - Python 3.11 or newer and `hermes-agent>=0.13.0`.
-- macOS or Linux. Windows and mobile support are deferred.
-- Transparent at-rest encryption of `.env`, configuration, memory, and the
-  workspace is macOS-only. On Linux the TPM-backed keyvault works, but those
-  encryption targets stay inactive.
+- macOS or Linux for the established operator workflows. Scoped native Windows
+  implementations exist; general Windows product, Windows 11, and live-device
+  acceptance remain incomplete. Mobile support is deferred. See
+  [Platform Support](docs/dev/SPEC.md#platform-support-v1).
+- Transparent `.env`, configuration, and workspace encryption use macOS
+  integrations. Memory uses the macOS file vault, a dedicated Linux TPM-wrapped
+  key, or dedicated Windows CNG custody. Linux memory works through `setup`,
+  `encryption enable all`, and standalone commands; Private Telegram has its
+  dedicated flow. Linux setup/all skip env/config file-vault enrollment. Windows
+  support is reported per capability.
+- Hermes database encryption (`state.db` and the other SQLite stores) is
+  macOS-only and requires the separate `databases encrypt` command after memory
+  setup. Linux TPM and Windows CNG memory encryption do not encrypt databases.
 
 ## Install (users, from PyPI)
 
@@ -68,6 +77,10 @@ commands, and expected output are documented in the
 
 Use `hermes-mordred status` for the overall state. On macOS, guided setup also
 offers agent-memory protection through `hermes-mordred encryption enable memory`.
+To protect conversation databases too, follow the
+[database encryption steps](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md#encrypt-conversation-databases-macos).
+For native Windows, follow the
+[TPM workflow and capability limits](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/USAGE.md#native-windows-tpm-workflow).
 The complete command reference and security ceremonies live in the
 [usage guide](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/USAGE.md).
 
@@ -94,7 +107,7 @@ guides:
 | Users | [Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md) | Install and first protected setup |
 | Users | [Usage guide](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/USAGE.md) | Commands, ceremonies, troubleshooting, upgrades, removal |
 | Users | [Extension guide (preview)](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/EXTENSION.md) | Optional browser extension, E2E messaging, wallet bridge |
-| Users | [Telegram guide (preview)](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/TELEGRAM.md) | Ask Hermes about your own Telegram messages: read-only, Secure Enclave sealed, Venice/local only |
+| Users | [Telegram guide (preview)](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/TELEGRAM.md) | Read-only private questions, hardware-sealed credentials, platform limits, Venice/local only |
 | Developers | [Development setup](https://github.com/mordredagent/hermes-mordred/blob/main/docs/dev/setup.md) | Editable `.venv`, `HERMES_HOME` isolation, validation |
 | Developers | [Development index](https://github.com/mordredagent/hermes-mordred/blob/main/docs/dev/README.md) | Maintained sources of truth |
 

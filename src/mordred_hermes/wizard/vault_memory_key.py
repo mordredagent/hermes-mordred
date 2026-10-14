@@ -81,7 +81,7 @@ def _effective_memory_key(text: str) -> str | None:
 
     Parsed with ``dotenv_values`` (last-wins, no interpolation, quotes stripped) —
     exactly the value :func:`...keyvault._runtime_env.inject_vault_env` injects at
-    startup, matching what a future memory-encryption runtime would key on.
+    startup, matching the key Mordred's memory-encryption runtime reads.
     """
     import io
 

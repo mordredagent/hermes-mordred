@@ -3,19 +3,79 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import pytest
 
 from mordred_hermes.keyvault import vault
-from mordred_hermes.wizard import vault_cli
+from mordred_hermes.wizard import _vault_lifecycle, _vault_open, vault_cli
 
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend, FixedPassphrasePromptIO
-from ._wizard_vault_cli_helpers import _PASSPHRASE, _PromptIO, _ReadRaisesStore
+from ._wizard_vault_cli_helpers import _PASSPHRASE, _build_vault, _PromptIO
+
+
+@pytest.mark.parametrize("command", [vault_cli.init, vault_cli.ensure_initialised])
+@pytest.mark.parametrize("injected_backend", [False, True])
+def test_linux_production_store_refuses_before_resolution_or_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], command, injected_backend: bool
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("production resolution or prompting before unsupported-store refusal")
+
+    for name in ("resolve_backend", "resolve_store", "resolve_prompt_io"):
+        monkeypatch.setattr(_vault_lifecycle, name, forbidden)
+    root = tmp_path / "vault"
+    assert command(root=root, backend=FakeBackend() if injected_backend else None) == 1
+    assert "Keychain" in capsys.readouterr().err
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("command", ["add", "migrate"])
+def test_linux_file_enrollment_refuses_before_production_resolution_and_preserves_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], command: str
+) -> None:
+    root = tmp_path / "vault"
+    _build_vault(root, files={".env": b"RETAINED=1\n"})
+    source = tmp_path / "config.yaml"
+    source.write_bytes(b"SECRET=2\n")
+    before = {str(p.relative_to(tmp_path)): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("production resolution/open before unsupported-store refusal")
+
+    monkeypatch.setattr(_vault_open, "resolve_backend", forbidden)
+    monkeypatch.setattr(_vault_open, "resolve_store", forbidden)
+    monkeypatch.setattr(vault, "open_vault", forbidden)
+    if command == "add":
+        rc = vault_cli.add(root=root, name="config.yaml", source=source)
+    else:
+        rc = vault_cli.migrate(root=root, sources=[source])
+    assert rc == 1
+    assert "Keychain" in capsys.readouterr().err
+    assert {str(p.relative_to(tmp_path)): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+    with vault.recover_vault(root, _PASSPHRASE) as opened:
+        assert opened.read_file(".env") == b"RETAINED=1\n"
+        assert opened.list_files() == [".env"]
+
+
+def test_macos_production_defaults_create_recoverable_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    backend, store = FakeBackend(), FakeAnchorStore()
+    monkeypatch.setattr(_vault_lifecycle, "resolve_backend", lambda value: backend)
+    monkeypatch.setattr(_vault_lifecycle, "resolve_store", lambda value: store)
+    assert vault_cli.init(root=tmp_path, prompt_io=_PromptIO(passwords=[_PASSPHRASE, _PASSPHRASE])) == 0
+    vault.recover_vault(tmp_path, _PASSPHRASE).close()
 
 
 class TestInit:
-    def test_creates_a_recoverable_vault(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_creates_a_recoverable_vault(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sys, "platform", "linux")
         backend = FakeBackend()
         store = FakeAnchorStore()
         rc = vault_cli.init(
@@ -25,6 +85,13 @@ class TestInit:
             store=store,
         )
         assert rc == 0
+        out = capsys.readouterr().out.lower()
+        assert "vault" in out
+        assert "passphrase" in out or "recovery" in out
+        assert "two ways" in out
+        assert "this device" in out
+        assert "day to day" in out
+        assert "lost" in out
         # A real, cold-path-recoverable vault now exists at the root.
         opened = vault.recover_vault(tmp_path, _PASSPHRASE)
         try:
@@ -69,37 +136,6 @@ class TestInit:
         assert rc == 1
         assert "already" in capsys.readouterr().err.lower()
 
-    def test_success_message_points_at_recovery_passphrase(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        vault_cli.init(
-            root=tmp_path,
-            prompt_io=_PromptIO(passwords=[_PASSPHRASE, _PASSPHRASE]),
-            backend=FakeBackend(),
-            store=FakeAnchorStore(),
-        )
-        out = capsys.readouterr().out.lower()
-        assert "vault" in out
-        assert "passphrase" in out or "recovery" in out
-
-    def test_output_teaches_the_two_key_model(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """Newcomers conflate the device key with the recovery passphrase. The
-        creation output must state the two-key model so the mental model lands at
-        the moment of creation, not buried in docs."""
-        vault_cli.init(
-            root=tmp_path,
-            prompt_io=_PromptIO(passwords=[_PASSPHRASE, _PASSPHRASE]),
-            backend=FakeBackend(),
-            store=FakeAnchorStore(),
-        )
-        out = capsys.readouterr().out.lower()
-        # both opening paths are named
-        assert "two ways" in out
-        assert "this device" in out
-        # the passphrase is framed as the backup, not the everyday key
-        assert "day to day" in out
-        assert "lost" in out
-
     def test_cli_init_adapter_delegates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         seen: dict[str, object] = {}
 
@@ -116,29 +152,6 @@ class TestInit:
 class TestEnsureInitialised:
     """`ensure_initialised` — the create-the-vault-on-first-`encryption enable` path."""
 
-    def test_noop_when_vault_already_exists(self, tmp_path: Path) -> None:
-        root = tmp_path / "v"
-        backend, store = FakeBackend(), FakeAnchorStore()
-        assert (
-            vault_cli.init(
-                root=root, prompt_io=_PromptIO(passwords=[_PASSPHRASE, _PASSPHRASE]), backend=backend, store=store
-            )
-            == 0
-        )
-        # An existing vault is left untouched and never re-prompts: an empty
-        # password queue would IndexError if `init` were (wrongly) re-entered.
-        rc = vault_cli.ensure_initialised(root=root, prompt_io=_PromptIO(passwords=[]), backend=backend, store=store)
-        assert rc == 0
-
-    def test_creates_vault_when_missing(self, tmp_path: Path) -> None:
-        root = tmp_path / "v"
-        backend, store = FakeBackend(), FakeAnchorStore()
-        rc = vault_cli.ensure_initialised(
-            root=root, prompt_io=_PromptIO(passwords=[_PASSPHRASE, _PASSPHRASE]), backend=backend, store=store
-        )
-        assert rc == 0
-        vault.recover_vault(root, _PASSPHRASE).close()  # a real cold-path-recoverable vault now exists
-
     def test_prompts_only_once_across_repeated_calls(self, tmp_path: Path) -> None:
         """`encryption enable all` fans out over targets — the vault must be created
         (and the passphrase asked) on the first call only; a second call with the
@@ -147,7 +160,12 @@ class TestEnsureInitialised:
         backend, store = FakeBackend(), FakeAnchorStore()
         prompt = FixedPassphrasePromptIO(_PASSPHRASE)
         assert vault_cli.ensure_initialised(root=root, prompt_io=prompt, backend=backend, store=store) == 0
+        with vault.recover_vault(root, _PASSPHRASE) as opened:
+            assert opened.generation == 0
+            assert opened.list_files() == []
+        before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
         assert vault_cli.ensure_initialised(root=root, prompt_io=prompt, backend=backend, store=store) == 0
+        assert {p: p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
         # 2 = the first call's confirm-twice; the second call must not prompt again.
         assert prompt.password_calls == 2
 
@@ -160,18 +178,6 @@ class TestEnsureInitialised:
         with pytest.raises(vault.VaultError):  # nothing was written
             vault.recover_vault(root, "")
 
-    def test_fail_closed_when_anchor_read_errors(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """A transient Keychain read failure must not be read as 'no vault' and
-        clobber a possibly-existing one — ensure returns 1 and creates nothing."""
-        rc = vault_cli.ensure_initialised(
-            root=tmp_path / "v",
-            prompt_io=_PromptIO(passwords=[_PASSPHRASE, _PASSPHRASE]),
-            backend=FakeBackend(),
-            store=_ReadRaisesStore(),
-        )
-        assert rc == 1
-        assert "determine vault state" in capsys.readouterr().err.lower()
-
 
 class TestAdd:
     def _init(self, root: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
@@ -182,7 +188,10 @@ class TestAdd:
             == 0
         )
 
-    def test_enrolls_file_readable_via_cold_path(self, tmp_path: Path) -> None:
+    def test_enrolls_file_readable_via_cold_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsysbinary: pytest.CaptureFixture[bytes]
+    ) -> None:
+        monkeypatch.setattr(sys, "platform", "linux")
         root = tmp_path / "v"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
@@ -191,6 +200,10 @@ class TestAdd:
 
         rc = vault_cli.add(root=root, name=".env", source=src, backend=backend, store=store)
         assert rc == 0
+        assert src.read_bytes() == b"ANTHROPIC_API_KEY=sk-secret\n"
+        capsysbinary.readouterr()  # Drop init/add output before checking cat's exact bytes.
+        assert vault_cli.cat(root=root, name=".env", prompt_io=_PromptIO(password=_PASSPHRASE)) == 0
+        assert capsysbinary.readouterr().out == b"ANTHROPIC_API_KEY=sk-secret\n"
         # Readable back through the independent cold path.
         opened = vault.recover_vault(root, _PASSPHRASE)
         try:
@@ -198,25 +211,12 @@ class TestAdd:
         finally:
             opened.close()
 
-    def test_round_trips_through_cat(self, tmp_path: Path, capsysbinary: pytest.CaptureFixture[bytes]) -> None:
-        root = tmp_path / "v"
-        backend, store = FakeBackend(), FakeAnchorStore()
-        self._init(root, backend, store)
-        src = tmp_path / "c.yaml"
-        src.write_bytes(b"a: 1\n")
-        assert vault_cli.add(root=root, name="config.yaml", source=src, backend=backend, store=store) == 0
-        capsysbinary.readouterr()  # drop add's stdout
-
-        rc = vault_cli.cat(root=root, name="config.yaml", prompt_io=_PromptIO(password=_PASSPHRASE))
-        assert rc == 0
-        assert capsysbinary.readouterr().out == b"a: 1\n"
-
     def test_add_to_uninitialised_vault_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         src = tmp_path / "x"
         src.write_bytes(b"v")
         rc = vault_cli.add(root=tmp_path / "v", name=".env", source=src, backend=FakeBackend(), store=FakeAnchorStore())
         assert rc == 1
-        assert capsys.readouterr().err.strip() != ""
+        assert "init" in capsys.readouterr().err.lower()
 
     def test_missing_source_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         root = tmp_path / "v"

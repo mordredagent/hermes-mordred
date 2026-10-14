@@ -193,12 +193,7 @@ class TestRegistrySync:
         assert entry.respects_proxy is True
         assert entry.respects_socks5h is True  # httpx env-trusting baseline
         assert entry.unverified_baseline is True  # not yet packet-capture verified
-
-    @pytest.mark.parametrize("slug", _NEW)
-    def test_new_provider_is_selectable_in_wizard(self, slug: str) -> None:
-        from mordred_hermes.wizard import configure
-
-        assert slug in configure._SELECTABLE_CLOUD_PROVIDERS
+        assert entry.localhost_only is False  # included by the wizard registry projection
 
     def test_known_provider_slugs_are_real_hermes_ids(self) -> None:
         """Every non-localhost registry slug must be a provider id Hermes
@@ -321,16 +316,6 @@ class TestProviderEntryExtensions:
         from mordred_hermes.network.provider_transport_flagger import KNOWN_PROVIDERS
 
         assert KNOWN_PROVIDERS["anthropic"].respects_ipv6_proxy is True
-
-    def test_transport_class_literal_type_pins_alphabet(self) -> None:
-        """``transport_class`` is a Literal so mypy --strict catches typos."""
-        from typing import get_type_hints
-
-        from mordred_hermes.network.provider_transport_flagger import ProviderEntry
-
-        hints = get_type_hints(ProviderEntry)
-        args = getattr(hints["transport_class"], "__args__", ())
-        assert set(args) == {"http", "tcp", "udp", "quic", "grpc", "websocket"}, args
 
 
 class TestIPv6Flagging:

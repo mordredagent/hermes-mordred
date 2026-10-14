@@ -28,6 +28,10 @@ Rules enforced here:
 
 Non-secret flags for the status screen (logged in? which LLM?) live in
 ``credentials.meta.json`` so polling never touches the Enclave.
+
+Windows has no Enclave/TPM helper here: :func:`default_secret_store` selects
+:class:`.windows_secrets.WindowsCustodySecretStore`, which keeps this exact
+file layout but wraps to the independent C5a custody ``telegram`` role.
 """
 
 from __future__ import annotations
@@ -53,6 +57,64 @@ _META_NAME = "credentials.meta.json"
 
 #: ``(value, token)`` from :meth:`TeeSecretStore.load_snapshot`.
 Snapshot = tuple[TelegramSecrets | None, bytes | None]
+_DEFAULT_FLAGS: dict[str, Any] = {"version": 1, "logged_in": False, "llm_backend": None, "llm_model": None}
+
+
+def _pack(blob: bytes, dek: bytes, plaintext: bytes) -> bytes:
+    """``MTC1 || u16 len || wrap_blob || nonce || AES-256-GCM(plaintext)`` under *dek*."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    nonce = _secrets.token_bytes(_NONCE_LEN)
+    body = AESGCM(dek).encrypt(nonce, plaintext, _AAD)
+    return _MAGIC + struct.pack(">H", len(blob)) + blob + nonce + body
+
+
+def _unpack(sealed: bytes) -> tuple[bytes, bytes, bytes]:
+    """Split a sealed file into ``(wrap_blob, nonce, body)``; ``secrets_corrupt`` if malformed."""
+    header = len(_MAGIC) + 2
+    if len(sealed) < header or not sealed.startswith(_MAGIC):
+        raise TelegramSecretsError("secrets_corrupt")
+    (blob_len,) = struct.unpack(">H", sealed[len(_MAGIC) : header])
+    blob = sealed[header : header + blob_len]
+    nonce = sealed[header + blob_len : header + blob_len + _NONCE_LEN]
+    body = sealed[header + blob_len + _NONCE_LEN :]
+    if len(blob) != blob_len or len(nonce) != _NONCE_LEN or len(body) < 16:
+        raise TelegramSecretsError("secrets_corrupt")
+    return blob, nonce, body
+
+
+def _decrypt(dek: bytes, nonce: bytes, body: bytes) -> bytes:
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    try:
+        return AESGCM(dek).decrypt(nonce, body, _AAD)
+    except InvalidTag as exc:
+        raise TelegramSecretsError("secrets_corrupt") from exc
+
+
+def _meta_document(value: TelegramSecrets, previous: dict[str, Any] | None) -> dict[str, Any]:
+    """Non-secret flags for *value*, keeping a previously saved sync scope."""
+    meta: dict[str, Any] = {
+        "version": 1,
+        "logged_in": value.session is not None,
+        "api_configured": value.has_api,
+        "llm_backend": value.llm_backend(),
+        "llm_model": value.llm_model(),
+    }
+    if previous and isinstance(previous.get("sync_scope"), dict):
+        meta["sync_scope"] = previous["sync_scope"]
+    return meta
+
+
+def _scope_document(scope: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "include_channels": scope.get("include_channels") is not False,
+        "include_archived": scope.get("include_archived") is True,
+        "limit_per_dialog": scope.get("limit_per_dialog"),
+        "since_days": scope.get("since_days"),
+        "max_group_size": scope.get("max_group_size", 100),
+    }
 
 
 def _home() -> Path:
@@ -152,8 +214,6 @@ class TeeSecretStore:
     # -- seal / unseal ----------------------------------------------------------
 
     def _seal(self, plaintext: bytes) -> bytes:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
         from ...keyvault import wrap
         from ...keyvault._exceptions import WrapError
 
@@ -163,26 +223,13 @@ class TeeSecretStore:
             blob = wrap.wrap_dek(dek, KEY_ID, backend=self._backend_factory())
         except WrapError as exc:
             raise TelegramSecretsError("tee_unavailable") from exc
-        nonce = _secrets.token_bytes(_NONCE_LEN)
-        body = AESGCM(dek).encrypt(nonce, plaintext, _AAD)
-        return _MAGIC + struct.pack(">H", len(blob)) + blob + nonce + body
+        return _pack(blob, dek, plaintext)
 
     def _unseal(self, sealed: bytes) -> bytes:
-        from cryptography.exceptions import InvalidTag
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
         from ...keyvault import wrap
         from ...keyvault._exceptions import WrapAuthCancelled, WrapError
 
-        header = len(_MAGIC) + 2
-        if len(sealed) < header or not sealed.startswith(_MAGIC):
-            raise TelegramSecretsError("secrets_corrupt")
-        (blob_len,) = struct.unpack(">H", sealed[len(_MAGIC) : header])
-        blob = sealed[header : header + blob_len]
-        nonce = sealed[header + blob_len : header + blob_len + _NONCE_LEN]
-        body = sealed[header + blob_len + _NONCE_LEN :]
-        if len(blob) != blob_len or len(nonce) != _NONCE_LEN or len(body) < 16:
-            raise TelegramSecretsError("secrets_corrupt")
+        blob, nonce, body = _unpack(sealed)
         try:
             # The authorization boundary: ECDH inside the Secure Enclave.
             dek = wrap.unwrap_dek(blob, KEY_ID, audit_sink=self._audit_sink, backend=self._backend_factory())
@@ -190,10 +237,7 @@ class TeeSecretStore:
             raise TelegramSecretsError("tee_auth_cancelled") from exc
         except WrapError as exc:
             raise TelegramSecretsError("tee_unavailable") from exc
-        try:
-            return AESGCM(dek).decrypt(nonce, body, _AAD)
-        except InvalidTag as exc:
-            raise TelegramSecretsError("secrets_corrupt") from exc
+        return _decrypt(dek, nonce, body)
 
     # -- public API -------------------------------------------------------------
 
@@ -269,16 +313,7 @@ class TeeSecretStore:
     def _write_meta(self, value: TelegramSecrets) -> None:
         from ...keyvault._storage import atomic_write
 
-        meta = {
-            "version": 1,
-            "logged_in": value.session is not None,
-            "api_configured": value.has_api,
-            "llm_backend": value.llm_backend(),
-            "llm_model": value.llm_model(),
-        }
-        previous = self._read_meta()
-        if previous and isinstance(previous.get("sync_scope"), dict):
-            meta["sync_scope"] = previous["sync_scope"]
+        meta = _meta_document(value, self._read_meta())
         atomic_write(self.meta_path, json.dumps(meta).encode("utf-8"))
 
     def _read_meta(self) -> dict[str, Any] | None:
@@ -297,14 +332,8 @@ class TeeSecretStore:
     def save_sync_scope(self, scope: dict[str, Any]) -> None:
         from ...keyvault._storage import atomic_write
 
-        meta = self._read_meta() or {"version": 1, "logged_in": False, "llm_backend": None, "llm_model": None}
-        meta["sync_scope"] = {
-            "include_channels": scope.get("include_channels") is not False,
-            "include_archived": scope.get("include_archived") is True,
-            "limit_per_dialog": scope.get("limit_per_dialog"),
-            "since_days": scope.get("since_days"),
-            "max_group_size": scope.get("max_group_size", 100),
-        }
+        meta = self._read_meta() or dict(_DEFAULT_FLAGS)
+        meta["sync_scope"] = _scope_document(scope)
         atomic_write(self.meta_path, json.dumps(meta).encode("utf-8"))
 
     def flags(self) -> dict[str, Any] | None:
@@ -315,8 +344,24 @@ class TeeSecretStore:
         try:
             meta = json.loads(path.read_text("utf-8"))
         except (FileNotFoundError, ValueError):
-            return {"version": 1, "logged_in": False, "llm_backend": None, "llm_model": None}
+            return dict(_DEFAULT_FLAGS)
         return meta if isinstance(meta, dict) else None
 
     def invalidate(self) -> None:
         """No-op: nothing is cached."""
+
+
+def default_secret_store() -> Any:
+    """The platform's production Telegram credential store (the C10b seam).
+
+    ``win32`` gets the custody-role store; macOS/Linux keep the Enclave/TPM
+    store unchanged. Callers that construct ``TeeSecretStore()`` directly on
+    Windows are refused by the raw-directory guard before any filesystem use.
+    """
+    from .store import _platform
+
+    if _platform() == "win32":
+        from .windows_secrets import WindowsCustodySecretStore
+
+        return WindowsCustodySecretStore()
+    return TeeSecretStore()

@@ -20,6 +20,7 @@ import hashlib
 import os
 import sys
 import threading
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,14 @@ from mordred_hermes.keyvault import pow as kvpow
 from mordred_hermes.keyvault.network_fallback import BlackoutNotAsserted
 from mordred_hermes.wizard import keyvault_cli
 from tests._keyvault_fakes import FakeBackend
+
+
+def _parse_keyvault(*args: str) -> argparse.Namespace:
+    from mordred_hermes.wizard.cli import _setup_subparser
+
+    parser = argparse.ArgumentParser(prog="hermes-mordred")
+    _setup_subparser(parser)
+    return parser.parse_args(["keyvault", *args])
 
 
 def _key_id_hash(key_id: str) -> str:
@@ -74,15 +83,21 @@ class TestList:
         assert rc == 0
         assert "no keys" in capsys.readouterr().out.lower()
 
-    def test_lists_each_key_id_and_hash(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_lists_each_key_id_and_hash(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         _build_keyvault(tmp_path, {"default": b"\x11" * 32, "payments": b"\x22" * 32})
-        rc = keyvault_cli.list_keys(home=tmp_path)
+        monkeypatch.setattr(keyvault_cli, "_hermes_home", lambda: tmp_path)
+        args = _parse_keyvault("list")
+        rc = args.func(args)
         assert rc == 0
         out = capsys.readouterr().out
         assert "default" in out
         assert "payments" in out
         assert _key_id_hash("default") in out
         assert "2026-05-16T00:00:00Z" in out
+        assert "11" * 32 not in out
+        assert "22" * 32 not in out
 
     def test_plain_list_escapes_metadata_terminal_controls(
         self,
@@ -104,18 +119,6 @@ class TestList:
         assert created_at not in out
         assert "payments\\n\\x1b[31mowned" in out
         assert "2026-05-16T00:00:00Z\\n\\x1b]52;c;Y2xpcGJvYXJk\\x07" in out
-
-    def test_list_does_not_leak_key_material(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """``list`` must not print the verification digest (key material)."""
-        _build_keyvault(tmp_path, {"default": b"\xab" * 32})
-        keyvault_cli.list_keys(home=tmp_path)
-        assert (b"\xab" * 32).hex() not in capsys.readouterr().out
-
-    def test_cli_list_adapter_delegates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """cli_list(args) delegates to list_keys against the resolved home."""
-        _build_keyvault(tmp_path, {"default": b"\x11" * 32})
-        monkeypatch.setattr(keyvault_cli, "_hermes_home", lambda: tmp_path)
-        assert keyvault_cli.cli_list(argparse.Namespace()) == 0
 
     def test_corrupt_meta_returns_1_with_friendly_message(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -229,15 +232,6 @@ class TestVerifyDigest:
         assert rc == 1
         assert "no keys" in capsys.readouterr().err.lower()
 
-    def test_displays_full_digest_hex(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        digest = bytes(range(32))
-        _build_keyvault(tmp_path, {"default": digest})
-        rc = keyvault_cli.verify_digest(home=tmp_path)
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert digest.hex() in out  # full 64-hex digest, not a prefix
-        assert "default" in out
-
     def test_verify_escapes_metadata_key_id_terminal_controls(
         self,
         tmp_path: Path,
@@ -255,13 +249,19 @@ class TestVerifyDigest:
         assert "payments\\n\\x1b[2Jowned" in captured.out
         assert digest.hex() in captured.out
 
-    def test_displays_every_key(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        _build_keyvault(tmp_path, {"default": b"\x01" * 32, "payments": b"\x02" * 32})
-        rc = keyvault_cli.verify_digest(home=tmp_path)
+    def test_displays_every_key(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _build_keyvault(tmp_path, {"default": bytes(range(32)), "payments": b"\x02" * 32})
+        monkeypatch.setattr(keyvault_cli, "_hermes_home", lambda: tmp_path)
+        args = _parse_keyvault("verify-digest")
+        rc = args.func(args)
         assert rc == 0
         out = capsys.readouterr().out
-        assert (b"\x01" * 32).hex() in out
+        assert "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" in out
         assert (b"\x02" * 32).hex() in out
+        assert "default" in out
+        assert "payments" in out
 
     def test_holds_lifecycle_through_commit_snapshot(
         self,
@@ -415,11 +415,6 @@ class TestVerifyDigest:
         assert "digest directory" in capsys.readouterr().err.lower()
         assert victim.resolve() not in read_paths
         assert victim.read_bytes() == victim_before
-
-    def test_cli_verify_digest_adapter_delegates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        _build_keyvault(tmp_path, {"default": b"\x09" * 32})
-        monkeypatch.setattr(keyvault_cli, "_hermes_home", lambda: tmp_path)
-        assert keyvault_cli.cli_verify_digest(argparse.Namespace()) == 0
 
     def test_corrupt_meta_returns_1_with_friendly_message(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -633,18 +628,26 @@ class TestRecover:
         assert rc == 1
         assert "corrupt" in capsys.readouterr().err.lower()
 
-    def test_recover_roundtrip(self, tmp_path: Path, capsys: pytest.CaptureFixture[str], _fast_pow: None) -> None:
+    def test_recover_roundtrip(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], _fast_pow: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         blob = _make_backup_blob(tmp_path / "a", FakeBackend())
         blob_file = tmp_path / "backup.mrkv"
         blob_file.write_bytes(blob)
 
         home_b = tmp_path / "b"
-        rc = keyvault_cli.recover(
-            blob_path=blob_file,
-            home=home_b,
-            backend=FakeBackend(),
-            prompt_io=ScriptedPromptIO(passwords=[RECOVER_SEED, RECOVER_PASS]),
+        monkeypatch.setattr(
+            keyvault_cli,
+            "recover",
+            partial(
+                keyvault_cli.recover,
+                home=home_b,
+                backend=FakeBackend(),
+                prompt_io=ScriptedPromptIO(passwords=[RECOVER_SEED, RECOVER_PASS]),
+            ),
         )
+        args = _parse_keyvault("recover", "--blob", str(blob_file))
+        rc = args.func(args)
         assert rc == 0
         assert "recovered" in capsys.readouterr().out.lower()
         meta = _storage.load_meta(_storage.resolve_keyvault_dir(home_b))
@@ -758,17 +761,6 @@ class TestRecover:
         assert "not fresh" in err
         assert "reset" in err
 
-    def test_cli_recover_adapter_delegates(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        seen: dict[str, Path] = {}
-
-        def fake(*, blob_path: Path) -> int:
-            seen["blob_path"] = blob_path
-            return 0
-
-        monkeypatch.setattr(keyvault_cli, "recover", fake)
-        assert keyvault_cli.cli_recover(argparse.Namespace(blob="/tmp/x.mrkv")) == 0
-        assert str(seen["blob_path"]) == "/tmp/x.mrkv"
-
     def test_seed_phrase_is_entered_without_echo(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], _fast_pow: None
     ) -> None:
@@ -867,7 +859,9 @@ class TestInit:
             display_fn=self._noop_display,
         )
         assert rc == 1
-        assert "already" in capsys.readouterr().err.lower()
+        err = capsys.readouterr().err
+        assert "already" in err.lower()
+        assert "hermes-mordred keyvault recover" in err
 
     @pytest.mark.parametrize(
         "field",
@@ -1067,23 +1061,6 @@ class TestInit:
         assert "never stored" in intro
         assert "recover" in intro.lower()
 
-    def test_init_success_prints_next_step_hint(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """Success must orient the user toward what the keyvault unlocks next."""
-        rc = keyvault_cli.init_keyvault(
-            home=tmp_path,
-            backend=FakeBackend(),
-            prompt_io=ScriptedPromptIO(
-                texts=[self._expected_digest().hex()],
-                passwords=[self.PASSPHRASE, self.PASSPHRASE],
-            ),
-            surface=FakeSurface(),
-            display_fn=self._noop_display,
-        )
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "Next:" in out
-        assert "hermes-mordred" in out
-
     def test_digest_mismatch_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         rc = keyvault_cli.init_keyvault(
             home=tmp_path,
@@ -1096,10 +1073,24 @@ class TestInit:
         assert "mismatch" in capsys.readouterr().err.lower()
         assert not _storage.load_meta(_storage.resolve_keyvault_dir(tmp_path))["keys"]
 
-    def test_init_success(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = keyvault_cli.init_keyvault(
+    def test_init_success(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from mordred_hermes.keyvault.log_encryption import AUDIT_LOG_KEY_ID
+
+        backend = FakeBackend()
+        captured: dict[str, Any] = {}
+        original_confirm_generate = api.confirm_generate
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            captured["unattended"] = kwargs["unattended"]
+            return original_confirm_generate(*args, **kwargs)
+
+        monkeypatch.setattr(api, "confirm_generate", spy)
+        run_init = partial(
+            keyvault_cli.init_keyvault,
             home=tmp_path,
-            backend=FakeBackend(),
+            backend=backend,
             prompt_io=ScriptedPromptIO(
                 texts=[self._expected_digest().hex()],
                 passwords=[self.PASSPHRASE, self.PASSPHRASE],
@@ -1107,10 +1098,26 @@ class TestInit:
             surface=FakeSurface(),
             display_fn=self._noop_display,
         )
-        assert rc == 0
-        assert "initialised" in capsys.readouterr().out.lower()
-        meta = _storage.load_meta(_storage.resolve_keyvault_dir(tmp_path))
+        monkeypatch.setattr(keyvault_cli, "init_keyvault", run_init)
+        args = _parse_keyvault("init")
+        assert args.func(args) == 0
+        assert captured["unattended"] is None
+        assert not any(call[0] == "ecdh" for call in backend.calls)
+        output = capsys.readouterr()
+        assert "initialised" in output.out.lower()
+        assert "Next:" in output.out
+        assert "hermes-mordred" in output.out
+        assert "[audit] keyvault.init decision=allow (keyvault.init_started)" in output.err.splitlines()
+        assert "[audit] keyvault.init decision=allow (keyvault.init_completed)" in output.err.splitlines()
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        meta = _storage.load_meta(root)
         assert meta["keys"]
+        audit_native_key_id = _native_key_id.scoped_native_key_id(root, AUDIT_LOG_KEY_ID)
+        assert ("generate", audit_native_key_id) in backend.calls
+        assert _native_key_id.PENDING_AUDIT_KEY_FIELD not in meta
+        assert _native_key_id.committed_audit_key_from_meta(root, meta, AUDIT_LOG_KEY_ID) == audit_native_key_id
+        purpose_hash = hashlib.sha256(b"bip39.seed.v1").digest()[:16].hex()
+        assert len(list((root / "ciphertexts").rglob(f"{purpose_hash}/*.gcm"))) == 1
 
     def test_unattended_kwarg_reaches_confirm_generate(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """The ``hermes-mordred setup`` orchestrator threads its resolved
@@ -1128,9 +1135,11 @@ class TestInit:
 
         monkeypatch.setattr(api, "confirm_generate", spy)
 
-        rc = keyvault_cli.init_keyvault(
+        backend = FakeBackend()
+        run_init = partial(
+            keyvault_cli.init_keyvault,
             home=tmp_path,
-            backend=FakeBackend(),
+            backend=backend,
             prompt_io=ScriptedPromptIO(
                 texts=[self._expected_digest().hex()],
                 passwords=[self.PASSPHRASE, self.PASSPHRASE],
@@ -1140,95 +1149,18 @@ class TestInit:
             unattended=True,
         )
 
-        assert rc == 0
+        monkeypatch.setattr(keyvault_cli, "init_keyvault", run_init)
+        args = _parse_keyvault("init", "--store-seed-for-hd")
+        assert args.func(args) == 0
         assert captured["unattended"] is True
-
-    def test_unattended_defaults_to_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Omitting ``unattended`` must preserve today's exact behaviour: ``None``
-        reaches ``api.confirm_generate`` unchanged, which falls back to the
-        ``MORDRED_SEKEY_UNATTENDED`` env var deep in ``_seckey_backend``."""
-        captured: dict[str, Any] = {}
-        original_confirm_generate = api.confirm_generate
-
-        def spy(*args: Any, **kwargs: Any) -> Any:
-            captured["unattended"] = kwargs.get("unattended")
-            return original_confirm_generate(*args, **kwargs)
-
-        monkeypatch.setattr(api, "confirm_generate", spy)
-
-        rc = keyvault_cli.init_keyvault(
-            home=tmp_path,
-            backend=FakeBackend(),
-            prompt_io=ScriptedPromptIO(
-                texts=[self._expected_digest().hex()],
-                passwords=[self.PASSPHRASE, self.PASSPHRASE],
-            ),
-            surface=FakeSurface(),
-            display_fn=self._noop_display,
-        )
-
-        assert rc == 0
-        assert captured["unattended"] is None
-
-    def test_cli_init_adapter_delegates(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured: dict[str, Any] = {}
-
-        def fake(**kwargs: Any) -> int:
-            captured.update(kwargs)
-            return 0
-
-        monkeypatch.setattr(keyvault_cli, "init_keyvault", fake)
-        assert keyvault_cli.cli_init(argparse.Namespace()) == 0
-        assert captured["store_seed_for_hd"] is True
-
-    def test_cli_init_forwards_store_seed_for_hd_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured: dict[str, Any] = {}
-
-        def fake(**kwargs: Any) -> int:
-            captured.update(kwargs)
-            return 0
-
-        monkeypatch.setattr(keyvault_cli, "init_keyvault", fake)
-        keyvault_cli.cli_init(argparse.Namespace(store_seed_for_hd=True))
-        assert captured.get("store_seed_for_hd") is True
-
-    def test_cli_init_forwards_paper_only_opt_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured: dict[str, Any] = {}
-
-        def fake(**kwargs: Any) -> int:
-            captured.update(kwargs)
-            return 0
-
-        monkeypatch.setattr(keyvault_cli, "init_keyvault", fake)
-        keyvault_cli.cli_init(argparse.Namespace(store_seed_for_hd=False))
-        assert captured.get("store_seed_for_hd") is False
-
-    def test_init_provisions_audit_log_wrapping_key(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """init must also generate the audit-log wrapping key so the L465
-        encrypted-audit factory can engage afterward."""
-        from mordred_hermes.keyvault.log_encryption import AUDIT_LOG_KEY_ID
-
-        backend = FakeBackend()
-        rc = keyvault_cli.init_keyvault(
-            home=tmp_path,
-            backend=backend,
-            prompt_io=ScriptedPromptIO(
-                texts=[self._expected_digest().hex()],
-                passwords=[self.PASSPHRASE, self.PASSPHRASE],
-            ),
-            surface=FakeSurface(),
-            display_fn=self._noop_display,
-        )
-        assert rc == 0
+        # Explicit storage and its adapter remain covered without the Ethereum extra.
+        purpose_hash = hashlib.sha256(b"bip39.seed.v1").digest()[:16].hex()
         root = _storage.resolve_keyvault_dir(tmp_path)
-        audit_native_key_id = _native_key_id.scoped_native_key_id(root, AUDIT_LOG_KEY_ID)
-        assert ("generate", audit_native_key_id) in backend.calls
-        meta = _storage.load_meta(root)
-        assert _native_key_id.PENDING_AUDIT_KEY_FIELD not in meta
-        assert _native_key_id.committed_audit_key_from_meta(root, meta, AUDIT_LOG_KEY_ID) == audit_native_key_id
+        assert len(list((root / "ciphertexts").rglob(f"{purpose_hash}/*.gcm"))) == 1
+        assert not any(call[0] == "ecdh" for call in backend.calls)
 
     def test_init_store_seed_for_hd_persists_seed_and_derives(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """init with store_seed_for_hd=True SE-encrypts the seed and lets the
         HD wallet derive deterministic Ethereum accounts from it afterward."""
@@ -1243,7 +1175,8 @@ class TestInit:
         from mordred_hermes.keyvault.ethereum import _SEED_PURPOSE, derive_ethereum_key
 
         backend = FakeBackend()
-        rc = keyvault_cli.init_keyvault(
+        run_init = partial(
+            keyvault_cli.init_keyvault,
             home=tmp_path,
             backend=backend,
             prompt_io=ScriptedPromptIO(
@@ -1252,9 +1185,13 @@ class TestInit:
             ),
             surface=FakeSurface(),
             display_fn=self._noop_display,
-            store_seed_for_hd=True,
         )
-        assert rc == 0
+        monkeypatch.setattr(keyvault_cli, "init_keyvault", run_init)
+        args = _parse_keyvault("init", "--store-seed-for-hd")
+        assert args.func(args) == 0
+
+        # Initial seed storage uses public-key wrapping, without a hardware unwrap prompt.
+        assert not any(call[0] == "ecdh" for call in backend.calls)
 
         # The seed is now stored SE-encrypted under bip39.seed.v1.
         root = _storage.resolve_keyvault_dir(tmp_path)
@@ -1271,34 +1208,16 @@ class TestInit:
         assert addr == expected_addr
         assert path == "m/44'/60'/0'/0/0"
 
-    def test_init_default_stores_seed(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """Default init stores the seed SE-encrypted for later HD use."""
-        import hashlib
-
-        from mordred_hermes.keyvault.ethereum import _SEED_PURPOSE
-
-        rc = keyvault_cli.init_keyvault(
-            home=tmp_path,
-            backend=FakeBackend(),
-            prompt_io=ScriptedPromptIO(
-                texts=[self._expected_digest().hex()],
-                passwords=[self.PASSPHRASE, self.PASSPHRASE],
-            ),
-            surface=FakeSurface(),
-            display_fn=self._noop_display,
-        )
-        assert rc == 0
-        root = _storage.resolve_keyvault_dir(tmp_path)
-        purpose_hash_hex = hashlib.sha256(_SEED_PURPOSE.encode()).digest()[:16].hex()
-        assert len(list((root / "ciphertexts").rglob(f"{purpose_hash_hex}/*.gcm"))) == 1
-
-    def test_init_paper_only_does_not_store_seed(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_init_paper_only_does_not_store_seed(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Explicit paper-only init must NOT persist the seed at rest."""
         import hashlib
 
         from mordred_hermes.keyvault.ethereum import _SEED_PURPOSE
 
-        rc = keyvault_cli.init_keyvault(
+        run_init = partial(
+            keyvault_cli.init_keyvault,
             home=tmp_path,
             backend=FakeBackend(),
             prompt_io=ScriptedPromptIO(
@@ -1307,33 +1226,13 @@ class TestInit:
             ),
             surface=FakeSurface(),
             display_fn=self._noop_display,
-            store_seed_for_hd=False,
         )
-        assert rc == 0
+        monkeypatch.setattr(keyvault_cli, "init_keyvault", run_init)
+        args = _parse_keyvault("init", "--paper-only")
+        assert args.func(args) == 0
         root = _storage.resolve_keyvault_dir(tmp_path)
         purpose_hash_hex = hashlib.sha256(_SEED_PURPOSE.encode()).digest()[:16].hex()
         assert not list((root / "ciphertexts").rglob(f"{purpose_hash_hex}/*.gcm"))
-
-    def test_init_store_seed_does_not_unwrap(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """Storing the seed at init time is offline (wrap uses the public key).
-
-        init must NOT perform an Enclave ECDH/unwrap, which on a real device
-        would force a Touch ID / passcode prompt at the end of init.
-        """
-        backend = FakeBackend()
-        rc = keyvault_cli.init_keyvault(
-            home=tmp_path,
-            backend=backend,
-            prompt_io=ScriptedPromptIO(
-                texts=[self._expected_digest().hex()],
-                passwords=[self.PASSPHRASE, self.PASSPHRASE],
-            ),
-            surface=FakeSurface(),
-            display_fn=self._noop_display,
-            store_seed_for_hd=True,
-        )
-        assert rc == 0
-        assert not any(call[0] == "ecdh" for call in backend.calls)
 
     def test_corrupt_keyvault_meta_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """A corrupt meta.json must surface a clean error, not a traceback."""
@@ -1350,65 +1249,13 @@ class TestInit:
         assert rc == 1
         assert "corrupt" in capsys.readouterr().err.lower()
 
-    def test_init_audit_lines_distinguish_started_from_completed(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """The two ``keyvault.init`` / ``decision=allow`` audit lines must be
-        distinguishable. They share event + decision and only differ by
-        ``reason``; the default stderr sink now appends it so an operator can
-        tell the durability-barrier emit from the completion emit.
-        """
-        rc = keyvault_cli.init_keyvault(
-            home=tmp_path,
-            backend=FakeBackend(),
-            prompt_io=ScriptedPromptIO(
-                texts=[self._expected_digest().hex()],
-                passwords=[self.PASSPHRASE, self.PASSPHRASE],
-            ),
-            surface=FakeSurface(),
-            display_fn=self._noop_display,
-        )
-        assert rc == 0
-        err = capsys.readouterr().err
-        assert "[audit] keyvault.init decision=allow (keyvault.init_started)" in err
-        assert "[audit] keyvault.init decision=allow (keyvault.init_completed)" in err
-
 
 class TestStderrAuditSink:
     """The default ``init`` / ``recover`` audit sink (``_stderr_audit_sink``)."""
 
-    def test_appends_reason_when_present(self, capsys: pytest.CaptureFixture[str]) -> None:
-        keyvault_cli._stderr_audit_sink(
-            {"event": "keyvault.init", "decision": "allow", "reason": "keyvault.init_started"}
-        )
-        assert capsys.readouterr().err.strip() == "[audit] keyvault.init decision=allow (keyvault.init_started)"
-
     def test_omits_suffix_when_reason_absent(self, capsys: pytest.CaptureFixture[str]) -> None:
         keyvault_cli._stderr_audit_sink({"event": "keyvault.import_backup", "decision": "allow"})
         assert capsys.readouterr().err.strip() == "[audit] keyvault.import_backup decision=allow"
-
-
-class TestGuidanceSpelling:
-    """UX review 2026-06-11: failure guidance must name the working CLI form.
-
-    Hermes 0.11 does not wire `hermes mordred ...`; pointing a user there
-    after a failed ceremony strands them (the broad guard lives in
-    test_ux_guidance_guard.py — these pin the two keyvault messages).
-    """
-
-    def test_reinit_guard_points_at_working_recover_command(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        _build_keyvault(tmp_path, {"default": b"\x01" * 32})
-        rc = keyvault_cli.init_keyvault(
-            home=tmp_path,
-            backend=FakeBackend(),
-            prompt_io=ScriptedPromptIO(passwords=["pp", "pp"]),
-            surface=FakeSurface(),
-            display_fn=lambda handle, surface: None,
-        )
-        assert rc == 1
-        assert "hermes-mordred keyvault recover" in capsys.readouterr().err
 
 
 class TestBlackoutGuidance:
@@ -1420,28 +1267,30 @@ class TestBlackoutGuidance:
         assert "Wi-Fi" in text
         assert "route get 1.1.1.1" in text
         assert "nmcli" not in text
+        assert "hermes-mordred keyvault init" in text
+        assert "Nothing has been written" in text
 
     def test_linux_guidance_uses_linux_steps(self) -> None:
         text = keyvault_cli._blackout_guidance("linux")
         assert "nmcli" in text
         assert "ip route" in text
         assert "menu bar" not in text
-
-    def test_both_explain_the_safety_check_and_rerun(self) -> None:
-        for platform in ("darwin", "linux"):
-            text = keyvault_cli._blackout_guidance(platform)
-            assert "hermes-mordred keyvault init" in text
-            assert "Nothing has been written" in text
+        assert "hermes-mordred keyvault init" in text
+        assert "Nothing has been written" in text
 
 
 class TestListJson:
     """Phase 5 (UX review 2026-06-11): read commands need --json for scripting."""
 
-    def test_list_json_carries_ids_and_timestamps(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_list_json_carries_ids_and_timestamps(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         import json
 
         _build_keyvault(tmp_path, {"default": b"\x11" * 32})
-        rc = keyvault_cli.list_keys(home=tmp_path, as_json=True)
+        monkeypatch.setattr(keyvault_cli, "_hermes_home", lambda: tmp_path)
+        args = _parse_keyvault("list", "--json")
+        rc = args.func(args)
         assert rc == 0
         body = json.loads(capsys.readouterr().out)
         assert body == [
@@ -1479,14 +1328,6 @@ class TestListJson:
         assert rc == 0
         assert json.loads(capsys.readouterr().out) == []
 
-    def test_list_json_flag_is_wired(self) -> None:
-        from mordred_hermes.wizard import cli
-
-        parser = argparse.ArgumentParser(prog="hermes-mordred")
-        cli._setup_subparser(parser)
-        ns = parser.parse_args(["keyvault", "list", "--json"])
-        assert ns.json is True
-
 
 class TestTerminalSeedSurface:
     """``keyvault init`` seed rendering: the numbered paper list PLUS a single
@@ -1495,9 +1336,14 @@ class TestTerminalSeedSurface:
 
     _SEED = "swing wasp snack lottery surface rhythm family head aware theme border traffic royal torch truck"
 
-    def test_show_renders_numbered_list_and_one_line(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_show_renders_numbered_list_and_one_line(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
         keyvault_cli.TerminalSeedSurface().show(self._SEED)
         out = capsys.readouterr().out
+        assert "press ENTER" in out
+        assert "verification-digest prompt" in out
 
         # The paper backup: every word numbered, one per line.
         words = self._SEED.split()
@@ -1510,17 +1356,6 @@ class TestTerminalSeedSurface:
         assert " ".join(words) in out
         # The joined line is on a single physical line (no stray newline split).
         assert any(" ".join(words) in line for line in out.splitlines())
-
-    def test_show_prints_enter_to_continue_hint_on_tty(
-        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """On an interactive TTY the operator is told they can press ENTER to
-        clear the seed early and move on (the early-dismiss UX)."""
-        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
-        keyvault_cli.TerminalSeedSurface().show(self._SEED)
-        out = capsys.readouterr().out
-        assert "press ENTER" in out
-        assert "verification-digest prompt" in out
 
     def test_show_omits_enter_hint_off_tty(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch

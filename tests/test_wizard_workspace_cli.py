@@ -67,10 +67,16 @@ class TestEnable:
         assert rc == 1
         assert run.calls == []
 
-    def test_runs_setup_when_not_configured(self, tmp_path: Path) -> None:
+    def test_runs_setup_when_not_configured(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.wizard import cli
+
         run = _Runner(rc=0)
-        rc = workspace_cli.enable(env=_env(tmp_path), platform="darwin", run=run, tool_on_path=lambda _n: True)
-        assert rc == 0
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        monkeypatch.setattr(workspace_cli.sys, "platform", "darwin")
+        monkeypatch.setattr(workspace_cli, "_resolve_env", lambda: _env(tmp_path))
+        monkeypatch.setattr(workspace_cli, "_run", run)
+        monkeypatch.setattr(workspace_cli.shutil, "which", lambda _name: "/fake/claude-private-setup")
+        assert cli.main(["encryption", "enable", "workspace"]) == 0
         assert run.calls == [["claude-private-setup"]]
 
     def test_noop_when_already_configured(self, tmp_path: Path) -> None:
@@ -278,15 +284,6 @@ class TestPurge:
 # CLI dispatch — workspace is a valid target for enable/disable/purge
 # -----------------------------------------------------------------------------
 class TestCliDispatch:
-    def test_enable_workspace_dispatches(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from mordred_hermes.wizard import cli, encryption_cli
-
-        monkeypatch.setattr(encryption_cli, "_hermes_home", lambda: tmp_path / "home")
-        called = {"n": 0}
-        monkeypatch.setattr(workspace_cli, "cli_enable", lambda: called.__setitem__("n", called["n"] + 1) or 0)
-        assert cli.main(["encryption", "enable", "workspace"]) == 0
-        assert called["n"] == 1
-
     def test_purge_workspace_requires_yes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from mordred_hermes.wizard import cli, encryption_cli
 

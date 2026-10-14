@@ -81,18 +81,16 @@ def _read_lines(path: Path) -> list[dict[str, object]]:
 
 
 class TestAppend:
-    def test_creates_file_with_0600_mode(self, tmp_path: Path) -> None:
-        log = tmp_path / "audit.log"
-        writer = NDJSONWriter(path=log)
-        writer.append({"event": "pre_install", "decision": "allow", "reason": None})
-        assert log.exists()
-        mode = stat.S_IMODE(log.stat().st_mode)
-        assert mode == 0o600, f"expected 0600, got {oct(mode)}"
-
     def test_creates_parent_dir_with_0700_mode(self, tmp_path: Path) -> None:
         log = tmp_path / "mordred" / "audit.log"
         writer = NDJSONWriter(path=log)
         writer.append({"event": "x", "decision": "allow"})
+        assert log.exists()
+        assert stat.S_IMODE(log.stat().st_mode) == 0o600
+        entry = _read_lines(log)[0]
+        assert "ts" in entry
+        assert isinstance(entry["ts"], str)
+        assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$", entry["ts"])
         parent_mode = stat.S_IMODE(log.parent.stat().st_mode)
         # 0o700 is the request; the OS may apply umask leniency on
         # pre-existing parents — assert the new dir at least lacks
@@ -166,15 +164,6 @@ class TestAppend:
 
         assert calls == 2
         assert log.read_bytes() == original
-
-    def test_adds_ts_when_missing(self, tmp_path: Path) -> None:
-        log = tmp_path / "audit.log"
-        NDJSONWriter(path=log).append({"event": "x", "decision": "allow"})
-        entry = _read_lines(log)[0]
-        assert "ts" in entry
-        # ISO-8601 UTC w/ millisecond precision
-        assert isinstance(entry["ts"], str)
-        assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$", entry["ts"])
 
     def test_caller_provided_ts_is_preserved(self, tmp_path: Path) -> None:
         log = tmp_path / "audit.log"
@@ -265,18 +254,12 @@ class TestRotation:
         assert log.exists(), "active log should be re-created after rotation"
         rotated = list(tmp_path.glob("audit.log.*.gz"))
         assert rotated, f"expected rotated .gz files, found: {list(tmp_path.iterdir())}"
+        for gz in rotated:
+            assert stat.S_IMODE(gz.stat().st_mode) == 0o600, f"{gz} not 0600"
         # Rotated content is valid gzip + valid NDJSON
         with gzip.open(rotated[0], "rt", encoding="utf-8") as fh:
             for line in fh:
                 json.loads(line)
-
-    def test_rotated_files_are_0600(self, tmp_path: Path) -> None:
-        log = tmp_path / "audit.log"
-        writer = NDJSONWriter(path=log, rotate_bytes=512)
-        for i in range(20):
-            writer.append({"event": "x", "i": i})
-        for gz in tmp_path.glob("audit.log.*.gz"):
-            assert stat.S_IMODE(gz.stat().st_mode) == 0o600, f"{gz} not 0600"
 
     def test_same_day_collision_uses_numeric_suffix(self, tmp_path: Path) -> None:
         log = tmp_path / "audit.log"

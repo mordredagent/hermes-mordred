@@ -292,6 +292,70 @@ def test_cli_local_llm_validates_and_stores(tmp_path):
     assert vault.flags()["llm_backend"] == "local"
 
 
+def test_local_key_is_sealed_and_bound_to_the_configured_endpoint(tmp_path, monkeypatch, capsys):
+    vault, _ = _tee_store(tmp_path)
+    vault.ensure_key()
+    vault.store(_value())
+    monkeypatch.setenv("TEST_LOCAL_KEY", "LOCAL-SECRET")
+    endpoint = "http://127.0.0.1:8080/v1"
+    assert telegram_cli.telegram_local_llm(endpoint=endpoint, model="m", api_key_env="TEST_LOCAL_KEY", store=vault) == 0
+    value = vault.load()
+    assert value.local_api_key == "LOCAL-SECRET"
+    target = service.TelegramService._target(value)
+    assert target.config.api_key == "LOCAL-SECRET"
+    assert "LOCAL-SECRET" not in repr(value) + repr(target) + repr(target.config)
+    assert b"LOCAL-SECRET" not in vault.sealed_path.read_bytes()
+    assert "LOCAL-SECRET" not in json.dumps(vault.flags()) + capsys.readouterr().out
+
+    # Canonical-equivalent URL retains the key; another endpoint must not receive it.
+    assert telegram_cli.telegram_local_llm(endpoint="http://localhost:8080/v1/", model="m2", store=vault) == 0
+    assert vault.load().local_api_key == "LOCAL-SECRET"
+    assert telegram_cli.telegram_local_llm(endpoint="http://127.0.0.1:8081/v1", model="m2", store=vault) == 0
+    assert vault.load().local_api_key is None
+
+
+def test_local_key_prompt_and_explicit_clear_preserve_telegram_credentials(tmp_path):
+    vault, _ = _tee_store(tmp_path)
+    vault.ensure_key()
+    vault.store(_value())
+    endpoint = "http://127.0.0.1:8080/v1"
+    assert (
+        telegram_cli.telegram_local_llm(
+            endpoint=endpoint, model="m", api_key=True, secret_fn=lambda _: "PROMPT-SECRET", store=vault
+        )
+        == 0
+    )
+    assert vault.load().local_api_key == "PROMPT-SECRET"
+    assert telegram_cli.telegram_local_llm(endpoint=endpoint, model="m", clear_api_key=True, store=vault) == 0
+    value = vault.load()
+    assert value.local_api_key is None
+    assert value.session == "SESSION-SECRET" and value.venice_api_key == "VENICE-SECRET"
+
+
+@pytest.mark.parametrize("key", [None, "", "   ", "bad\r\nheader"])
+def test_invalid_local_key_refuses_without_changing_sealed_state(tmp_path, monkeypatch, key):
+    vault, _ = _tee_store(tmp_path)
+    vault.ensure_key()
+    vault.store(_value())
+    previous = vault.sealed_path.read_bytes()
+    if key is None:
+        monkeypatch.delenv("TEST_LOCAL_KEY", raising=False)
+    else:
+        monkeypatch.setenv("TEST_LOCAL_KEY", key)
+    assert (
+        telegram_cli.telegram_local_llm(
+            endpoint="http://127.0.0.1:8080/v1", model="m", api_key_env="TEST_LOCAL_KEY", store=vault
+        )
+        == 1
+    )
+    assert vault.sealed_path.read_bytes() == previous
+
+
+def test_legacy_record_without_local_api_key_still_decodes():
+    value = secrets.decode(secrets.encode(_value()))
+    assert value.local_api_key is None
+
+
 def test_cli_migrate_moves_vault_credentials_into_the_enclave_seal(tmp_path):
     class _Legacy:
         def __init__(self) -> None:

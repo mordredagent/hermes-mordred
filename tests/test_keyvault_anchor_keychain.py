@@ -90,34 +90,16 @@ def store(ops: _FakeOps) -> KeychainAnchorStore:
     return KeychainAnchorStore(service="mordred-hermes.test.anchor", ops=ops)
 
 
-def test_module_imports_on_any_platform() -> None:
-    # Importing must not touch Security.framework (lazy in the production ops).
-    from mordred_hermes.keyvault import _anchor_keychain
-
-    assert hasattr(_anchor_keychain, "KeychainAnchorStore")
-
-
-def test_store_satisfies_anchor_store_protocol(store: KeychainAnchorStore) -> None:
-    assert isinstance(store, anchor.AnchorStore)
-
-
-def test_read_absent_returns_none(store: KeychainAnchorStore) -> None:
-    assert store.read("mordred.vault.absent") is None
-
-
-def test_write_then_read_round_trips(store: KeychainAnchorStore) -> None:
-    store.write("mordred.vault.x", b"anchor-bytes")
-    assert store.read("mordred.vault.x") == b"anchor-bytes"
-
-
 def test_write_overwrites_existing_via_update(store: KeychainAnchorStore, ops: _FakeOps) -> None:
     store.write("mordred.vault.x", b"first")
+    assert store.read("mordred.vault.x") == b"first"
     store.write("mordred.vault.x", b"second")  # add -> errSecDuplicateItem -> update
     assert store.read("mordred.vault.x") == b"second"
     assert ("update", "mordred.vault.x") in ops.calls
 
 
 def test_delete_present_then_absent_is_idempotent(store: KeychainAnchorStore) -> None:
+    assert store.read("mordred.vault.x") is None
     store.write("mordred.vault.x", b"v")
     store.delete("mordred.vault.x")
     assert store.read("mordred.vault.x") is None

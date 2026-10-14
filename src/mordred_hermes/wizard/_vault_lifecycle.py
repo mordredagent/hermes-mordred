@@ -24,7 +24,9 @@ from typing import TYPE_CHECKING
 
 from . import _term
 from ._defaults import resolve_backend, resolve_prompt_io, resolve_store
+from ._file_vault_support import production_file_vault_eligibility
 from ._vault_open import _build_device_auth, _vault_identity
+from ._windows_gates import excluded_refusal
 
 if TYPE_CHECKING:
     from ..keyvault.anchor import AnchorStore
@@ -47,8 +49,9 @@ def init(
     Seals one master under both the device wrapping key (hot path) and an
     Argon2id passphrase recovery sidecar (cold path). The wrapping key prefers
     the Secure Enclave and transparently falls back to a software key when the
-    Enclave is unavailable (e.g. a non-provisioned interpreter); the cold path
-    is unaffected either way.
+    Enclave is unavailable (e.g. a non-provisioned macOS interpreter). The
+    production device anchor requires macOS Keychain; injected stores remain
+    portable. The cold path is unaffected either way.
 
     Refuses to clobber an already-initialised vault (its anchor is present).
     ``backend`` / ``store`` / ``prompt_io`` default to the production
@@ -68,6 +71,14 @@ def init(
     - the freshly created vault stays open in the flow, so the flow's next
       steps enroll through it without unwrapping the master again (no Touch ID).
     """
+    refusal = excluded_refusal("file_vault", "vault init")
+    if refusal is not None:
+        return refusal
+    if store is None:
+        eligible, reason = production_file_vault_eligibility()
+        if not eligible:
+            _term.emit_error(f"Cannot initialise the vault at {root}: {reason}")
+            return 1
     from ..keyvault import anchor, vault
     from ..keyvault._exceptions import WrapError, WrapKeyNotFound
 
@@ -84,7 +95,7 @@ def init(
     # nothing. ``init_vault`` re-checks under the vault lock either way.
     try:
         already_initialised = not _absence_checked and store.read(anchor_label) is not None
-    except (anchor.AnchorError, OSError) as exc:
+    except (anchor.AnchorError, WrapError, OSError) as exc:
         _term.emit_error(f"Cannot determine vault state at {root}: {exc}")
         return 1
     if already_initialised:
@@ -189,11 +200,20 @@ def ensure_initialised(
 
     ``flow_session`` is forwarded to :func:`init` (see there).
     """
-    from ..keyvault import anchor
-
+    refusal = excluded_refusal("file_vault", "vault init")
+    if refusal is not None:
+        return refusal
     if flow_session is not None and flow_session.lend_vault(root) is not None:
         # The flow already holds this vault open, so it exists: no Keychain read.
         return 0
+
+    if store is None:
+        eligible, reason = production_file_vault_eligibility()
+        if not eligible:
+            _term.emit_error(f"Cannot initialise the vault at {root}: {reason}")
+            return 1
+    from ..keyvault import anchor
+    from ..keyvault._exceptions import WrapError
 
     store = resolve_store(store)
 
@@ -201,7 +221,7 @@ def ensure_initialised(
     try:
         if store.read(anchor_label) is not None:
             return 0  # vault already initialised — nothing to do
-    except (anchor.AnchorError, OSError) as exc:
+    except (anchor.AnchorError, WrapError, OSError) as exc:
         # Fail-closed: we cannot prove the vault is absent, so do not risk
         # clobbering one with a fresh init (matches the guard in `init`).
         _term.emit_error(f"Cannot determine vault state at {root}: {exc}")
@@ -238,6 +258,9 @@ def change_passphrase(
     Returns 0 on success, 1 on any failure (no vault, empty / mismatched new
     passphrase, wrong current passphrase, or an unrecoverable device error).
     """
+    refusal = excluded_refusal("recovery", "vault change-passphrase")
+    if refusal is not None:
+        return refusal
     from cryptography.exceptions import InvalidTag
 
     from ..keyvault import anchor, recovery, vault
@@ -251,8 +274,9 @@ def change_passphrase(
         _term.emit_error(f"No vault at {root} — nothing to rotate. Run `encryption enable env` first.")
         return 1
 
-    # Off-macOS the SE backend / keychain don't import; _build_device_auth returns
-    # (None, None) then, and we fall through to the passphrase path below.
+    # With an unsupported production Keychain anchor, _build_device_auth returns
+    # (None, None) before resolving native defaults; injected stores stay portable.
+    # No usable device pair means the passphrase path below authorizes rotation.
     device_backend, device_store = _build_device_auth(backend, store)
     prompt_io = resolve_prompt_io(prompt_io)
 
@@ -341,6 +365,9 @@ def recover(
     wrong passphrase, a tampered manifest / sidecar, or a Secure-Enclave /
     Keychain failure) with a reason printed to stderr.
     """
+    refusal = excluded_refusal("recovery", "vault recover")
+    if refusal is not None:
+        return refusal
     from cryptography.exceptions import InvalidTag
 
     from ..keyvault import anchor, backup, manifest, recovery, vault
@@ -348,13 +375,14 @@ def recover(
 
     key_id = anchor_label = _vault_identity(root)
 
-    # Re-keying needs a usable device backend + anchor store to bind onto. Off
-    # macOS these don't import; _build_device_auth returns (None, None) then, and
-    # we fail closed (there is no device to re-key onto).
+    # Re-keying needs a usable device backend + anchor store to bind onto.
+    # The production file-vault anchor is macOS-only; unsupported defaults are
+    # refused before a passphrase prompt. Injected stores remain portable.
     device_backend, device_store = _build_device_auth(backend, store)
     if device_backend is None or device_store is None:
         _term.emit_error(
-            f"Cannot re-key the vault at {root}: no usable device key on this host (Secure Enclave / TPM unavailable)."
+            f"Cannot re-key the vault at {root}: no usable device key / anchor on this host "
+            "(production file-vault anchors require macOS Keychain)."
         )
         return 1
 

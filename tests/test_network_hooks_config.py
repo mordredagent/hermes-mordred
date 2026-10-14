@@ -201,40 +201,10 @@ class TestRegisterLoadsWizardNetworkSettings:
         assert runtime._config.tor_binary == "/opt/tor/bin/tor", (  # type: ignore[attr-defined]
             "P2: tor_binary_path from config.yaml must reach RuntimeConfig.tor_binary"
         )
-
-    def test_register_reads_tor_socks_port(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from mordred_hermes import network as net_pkg
-        from mordred_hermes.network import api
-
-        policy, config = self._seed(tmp_path)
-        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy)
-        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config)
-        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
-        net_pkg._build_audit_writer.cache_clear()
-
-        ctx = _FakeCtx()
-        net_pkg.register(ctx)
-
-        runtime = api._RUNTIME
         assert runtime is not None
         assert runtime._config.tor_socks_port == 9150, (  # type: ignore[attr-defined]
             "P2: tor_socks_port from config.yaml must reach RuntimeConfig"
         )
-
-    def test_register_reads_mullvad_relay_country(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from mordred_hermes import network as net_pkg
-        from mordred_hermes.network import api
-
-        policy, config = self._seed(tmp_path)
-        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy)
-        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config)
-        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
-        net_pkg._build_audit_writer.cache_clear()
-
-        ctx = _FakeCtx()
-        net_pkg.register(ctx)
-
-        runtime = api._RUNTIME
         assert runtime is not None
         assert runtime._config.mullvad_region == "jp", (  # type: ignore[attr-defined]
             "P2: mullvad_relay_country from config.yaml must reach RuntimeConfig.mullvad_region"

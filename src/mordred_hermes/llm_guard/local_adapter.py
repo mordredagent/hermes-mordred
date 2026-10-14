@@ -29,6 +29,7 @@ from providers.base import ProviderProfile
 
 from .._home import HERMES_BASE
 from .._policy_io import load_policy_mapping
+from ._windows_policy import Decision, read_decision
 
 _LOG = logging.getLogger("mordred.llm_guard.local_adapter")
 
@@ -53,6 +54,7 @@ class MordredLocalProfile(ProviderProfile):  # type: ignore[misc]
 def build_mordred_local_profile(
     *,
     policy_json_path: Path = DEFAULT_POLICY_JSON_PATH,
+    _decision: Decision | None = None,
 ) -> MordredLocalProfile:
     """Construct (but do not register) the ``mordred-local`` profile.
 
@@ -61,7 +63,8 @@ def build_mordred_local_profile(
     Tests call this directly to inspect the profile without touching the
     process-wide provider registry.
     """
-    endpoint = _read_endpoint(policy_json_path)
+    decision = _decision or read_decision(policy_json_path)
+    endpoint = decision.settings.local_endpoint if decision is not None else _read_endpoint(policy_json_path)
     return MordredLocalProfile(
         name=LOCAL_PROVIDER_NAME,
         api_mode="chat_completions",
@@ -75,6 +78,7 @@ def build_mordred_local_profile(
 def register_mordred_local(
     *,
     policy_json_path: Path = DEFAULT_POLICY_JSON_PATH,
+    _decision: Decision | None = None,
 ) -> MordredLocalProfile:
     """Register the ``mordred-local`` profile with the Hermes provider registry.
 
@@ -85,7 +89,7 @@ def register_mordred_local(
     Called from ``mordred_hermes.llm_guard.register(ctx)``. Tests call it
     directly with a synthetic ``policy_json_path``.
     """
-    profile = build_mordred_local_profile(policy_json_path=policy_json_path)
+    profile = build_mordred_local_profile(policy_json_path=policy_json_path, _decision=_decision)
     register_provider(profile)
     _LOG.debug("registered mordred-local provider with base_url=%s", profile.base_url)
     return profile
@@ -93,6 +97,9 @@ def register_mordred_local(
 
 def _read_endpoint(policy_json_path: Path) -> str:
     """Read ``local_llm_endpoint`` from ``policy.json`` with safe fallback."""
+    decision = read_decision(policy_json_path)
+    if decision is not None:
+        return decision.settings.local_endpoint
     data = load_policy_mapping(policy_json_path, log=_LOG)
     endpoint = data.get("local_llm_endpoint")
     if isinstance(endpoint, str) and endpoint:

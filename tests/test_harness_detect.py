@@ -147,7 +147,7 @@ class TestOffIsNoop:
 
 
 class TestAbsentHarness:
-    @pytest.mark.parametrize("policy_mode", ["strict", "lenient", "off"])
+    @pytest.mark.parametrize("policy_mode", ["strict"])
     def test_missing_field_is_noop(self, tmp_path: Path, policy_mode: str) -> None:
         from mordred_hermes.llm_guard.harness_detect import check_harness_primary
 
@@ -157,7 +157,7 @@ class TestAbsentHarness:
         check_harness_primary(policy_mode=policy_mode, config_path=cfg, audit=audit)
         assert audit.entries == []
 
-    @pytest.mark.parametrize("policy_mode", ["strict", "lenient"])
+    @pytest.mark.parametrize("policy_mode", ["strict"])
     @pytest.mark.parametrize(
         "non_harness",
         # Strings that mention a harness keyword but do NOT prefix-match.

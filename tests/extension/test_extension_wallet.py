@@ -51,16 +51,6 @@ def _stub_backend(monkeypatch: pytest.MonkeyPatch, outcomes: list[Any]) -> list[
     return calls
 
 
-def test_repeated_accounts_requests_resolve_the_snapshot_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A burst of requests must cost exactly one keyvault/SE resolution."""
-    calls = _stub_backend(monkeypatch, [(_ADDRESS, 1)])
-
-    results = [extension_wallet._get_account_snapshot() for _ in range(5)]
-
-    assert results == [(_ADDRESS, "0x1")] * 5
-    assert len(calls) == 1
-
-
 def test_snapshot_cache_expires_after_its_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _stub_backend(monkeypatch, [(_ADDRESS, 1)])
     now = [1000.0]
@@ -126,22 +116,22 @@ _NO_ASSET_MOVEMENT = "資産移動なし"
 
 
 @pytest.mark.parametrize(
-    "payload",
+    ("payload", "preview"),
     [
-        "0x" + b"gm wagmi, please sign in".hex(),
-        "Sign in to Example\nNonce: 12345",
+        ("0x" + b"gm wagmi, please sign in".hex(), "gm wagmi, please sign in"),
+        ("Sign in to Example\nNonce: 12345", "Sign in to Example\nNonce: 12345"),
         # Uppercase "0X" is NOT the signer's prefix (case-sensitive
         # ``message.startswith("0x")``), so these 66 characters are signed as
         # literal text — and are readable as such.
-        "0X" + "9a" * 32,
+        ("0X" + "9a" * 32, "0X" + "9a" * 32),
     ],
 )
-def test_readable_personal_sign_keeps_the_no_asset_movement_copy(payload: str) -> None:
+def test_readable_personal_sign_keeps_the_no_asset_movement_copy(payload: str, preview: str) -> None:
     analysis, decoded = extension_wallet.analyze_sign("personal_sign", [payload, _ADDRESS])
 
     assert analysis["risk"] == "low"
     assert _NO_ASSET_MOVEMENT in analysis["summary"]
-    assert decoded["payload_kind"] == "text"
+    assert decoded == {"payload_kind": "text", "message_preview": preview}
 
 
 @pytest.mark.parametrize(
@@ -162,6 +152,9 @@ def test_thirty_two_signed_bytes_are_always_an_opaque_hash(payload: str, reason:
     assert decoded["payload_kind"] == "opaque_hash", reason
     assert analysis["risk"] == "medium"
     assert _NO_ASSET_MOVEMENT not in analysis["summary"]
+    warnings = " ".join(analysis["warnings"])
+    assert "Safe" in warnings
+    assert _NO_ASSET_MOVEMENT not in warnings
 
 
 @pytest.mark.parametrize(
@@ -195,24 +188,12 @@ def test_classification_matches_the_installed_signer_bytes() -> None:
         assert bytes.fromhex(body) == to_bytes(hexstr=payload)
 
 
-def test_opaque_32_byte_hash_warns_about_safe_and_meta_transactions() -> None:
-    """A Safe/meta-tx digest is unreadable — the copy must say so."""
-    analysis, decoded = extension_wallet.analyze_sign("personal_sign", ["0x" + "9a" * 32, _ADDRESS])
-
-    assert _NO_ASSET_MOVEMENT not in analysis["summary"]
-    assert analysis["risk"] == "medium"
-    assert decoded["payload_kind"] == "opaque_hash"
-    warnings = " ".join(analysis["warnings"])
-    assert "Safe" in warnings
-    assert _NO_ASSET_MOVEMENT not in warnings
-
-
 def test_opaque_bytes_payload_never_claims_no_asset_movement() -> None:
     analysis, decoded = extension_wallet.analyze_sign("personal_sign", ["0x" + "ff" * 12, _ADDRESS])
 
     assert _NO_ASSET_MOVEMENT not in analysis["summary"]
     assert analysis["risk"] == "medium"
-    assert decoded["payload_kind"] == "opaque_bytes"
+    assert decoded == {"payload_kind": "opaque_bytes"}
     assert analysis["warnings"]
 
 

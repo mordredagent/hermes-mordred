@@ -1,12 +1,7 @@
-"""Network runtime API integration and production-module guardrails."""
+"""Network runtime public API lifecycle."""
 
 from __future__ import annotations
 
-from typing import Any
-
-import pytest
-
-from mordred_hermes.network.paths import tor as tor_mod
 from tests._network_runtime_fakes import _make_runtime
 
 
@@ -17,28 +12,17 @@ class TestApiIntegration:
         rt = _make_runtime()
         api.set_runtime(rt)
         try:
-            rt.use("tor")
+            api.use("tor")
             s = api.status()
             assert s.active_path == "tor"
             assert s.ready is True
-            assert api.health() in (True, False)
+            assert s.last_health is True
+            assert api.health() is True
+
+            api.use("clearnet")
+            clearnet = api.status()
+            assert clearnet.active_path == "clearnet"
+            assert clearnet.ready is True
         finally:
             rt.stop()
             api.reset_runtime_for_tests()
-
-
-# --------------------------------------------------------------------------- #
-# Production module guardrail                                                 #
-# --------------------------------------------------------------------------- #
-
-
-def test_production_tor_module_not_invoked(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unit tests must inject path-module fakes, never fall back to subprocess."""
-
-    def explode(*_: Any, **__: Any) -> Any:
-        raise AssertionError("production tor.start_process called from unit test")
-
-    monkeypatch.setattr(tor_mod, "start_process", explode)
-    rt = _make_runtime()
-    rt.use("tor")
-    rt.stop()

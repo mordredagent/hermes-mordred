@@ -7,6 +7,7 @@ core ``invoke_hook("<name>", key=value, ...)`` payload consumed by Mordred.
 from __future__ import annotations
 
 import ast
+import importlib.metadata
 import importlib.util
 import json
 import sys
@@ -37,6 +38,89 @@ def _write(tmp_path: Path, rel: str, body: str) -> None:
     p = tmp_path / rel
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(textwrap.dedent(body), encoding="utf-8")
+
+
+class TestOwnedSources:
+    def _distribution(self, root: Path, monkeypatch, files: list[str] | None):
+        info = root / "hermes_agent-1.0.dist-info"
+        info.mkdir()
+        (info / "METADATA").write_text("Name: hermes-agent\nVersion: 1.0\n")
+        if files is not None:
+            (info / "RECORD").write_text("".join(f"{name},,\n" for name in files))
+        dist = importlib.metadata.PathDistribution(info)
+        monkeypatch.setattr(drift.metadata, "distribution", lambda name: dist)
+        return info
+
+    def test_includes_top_level_dispatches_and_excludes_third_party(self, tmp_path: Path, monkeypatch) -> None:
+        _write(tmp_path, "hermes_cli/__init__.py", "")
+        _write(tmp_path, "hermes_cli/plugins.py", 'VALID_HOOKS = {"pre_tool_call"}')
+        _write(tmp_path, "run_agent.py", 'invoke_hook("pre_tool_call", tool_name="x")\ninvoke_hook("pre_tool_call")')
+        _write(tmp_path, "third_party/decoy.py", 'invoke_hook("third_party")')
+        self._distribution(tmp_path, monkeypatch, ["hermes_cli/__init__.py", "hermes_cli/plugins.py", "run_agent.py"])
+        files = drift.installed_hermes_sources(tmp_path)
+        sites = drift.extract_hook_payload_fields(tmp_path, files=files)
+        assert set(sites) == {"pre_tool_call"}
+        assert len(sites["pre_tool_call"]) == 2
+        assert drift.compare({"pre_tool_call": ["tool_name"]}, sites) == [
+            "pre_tool_call: run_agent.py:2 missing payload field(s): tool_name"
+        ]
+        assert drift.extract_valid_hooks(tmp_path) == {"pre_tool_call"}
+
+    @pytest.mark.parametrize("files", [None, [], ["hermes_cli/__init__.py"], ["hermes_cli/plugins.py"]])
+    def test_missing_or_incomplete_metadata_fails_closed(self, tmp_path: Path, monkeypatch, files) -> None:
+        self._distribution(tmp_path, monkeypatch, files)
+        with pytest.raises(ValueError, match="ownership"):
+            drift.installed_hermes_sources(tmp_path)
+
+    def test_missing_distribution_falls_back_clearly(self, tmp_path: Path, monkeypatch) -> None:
+        def missing(name):
+            raise importlib.metadata.PackageNotFoundError(name)
+
+        monkeypatch.setattr(drift.metadata, "distribution", missing)
+        _write(tmp_path, "run_agent.py", 'invoke_hook("pre_tool_call")')
+        with pytest.warns(RuntimeWarning, match="recursive"):
+            files = drift.installed_hermes_sources(tmp_path)
+        assert files is None
+        assert "pre_tool_call" in drift.extract_hook_payload_fields(tmp_path, files=files)
+
+    @pytest.mark.parametrize("editable", [False, True])
+    def test_source_checkout_and_editable_install_fallback(self, tmp_path: Path, monkeypatch, editable: bool) -> None:
+        installed = tmp_path / "installed"
+        installed.mkdir()
+        info = self._distribution(installed, monkeypatch, ["hermes_cli/__init__.py", "hermes_cli/plugins.py"])
+        if editable:
+            (info / "direct_url.json").write_text('{"dir_info": {"editable": true}}')
+        source = tmp_path / "source"
+        _write(source, "hermes_cli/__init__.py", "")
+        _write(source, "run_agent.py", 'invoke_hook("pre_tool_call")')
+        with pytest.warns(RuntimeWarning, match="recursive"):
+            files = drift.installed_hermes_sources(source)
+        assert files is None
+        assert "pre_tool_call" in drift.extract_hook_payload_fields(source, files=files)
+
+    def test_explicit_file_input_cannot_silently_skip_unreadable_sources(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError):
+            drift.extract_hook_payload_fields(tmp_path, files=[tmp_path / "missing.py"])
+
+    def test_explicit_file_input_rejects_empty_selection(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError):
+            drift.extract_hook_payload_fields(tmp_path, files=[])
+
+    @pytest.mark.parametrize("extra", ["missing.py", "../outside.py"])
+    def test_owned_sources_reject_missing_or_external_files(self, tmp_path: Path, monkeypatch, extra: str) -> None:
+        root = tmp_path / "installed"
+        root.mkdir()
+        _write(root, "hermes_cli/__init__.py", "")
+        _write(root, "hermes_cli/plugins.py", 'VALID_HOOKS = {"pre_tool_call"}')
+        _write(tmp_path, "outside.py", 'invoke_hook("pre_tool_call")')
+        self._distribution(root, monkeypatch, ["hermes_cli/__init__.py", "hermes_cli/plugins.py", extra])
+        with pytest.raises(ValueError, match="ownership"):
+            drift.installed_hermes_sources(root)
+
+    def test_explicit_file_input_rejects_unparseable_owned_source(self, tmp_path: Path) -> None:
+        _write(tmp_path, "broken.py", "def f(:\n")
+        with pytest.raises(ValueError, match="cannot scan owned"):
+            drift.extract_hook_payload_fields(tmp_path, files=[tmp_path / "broken.py"])
 
 
 class TestExtract:
@@ -331,16 +415,16 @@ class TestInstalledHermesCanary:
         the monorepo alongside this package. Standalone mordred-hermes has no
         such tree — it just depends on the hermes-agent PyPI package — so
         this mirrors upstream-check.yml's approach instead: point the AST
-        scanner at wherever the currently-installed hermes-agent's source
-        lives (its site-packages parent directory), which works because pip
-        installs plain, uncompiled ``.py`` files.
+        scanner at the distribution-owned Python sources, including top-level
+        modules outside hermes_cli. Source/editable installs retain the
+        recursive scan; missing ownership fails closed or warns on fallback.
         """
         contract = {
             k: v for k, v in json.loads(CONTRACT_PATH.read_text(encoding="utf-8")).items() if not k.startswith("_")
         }
         hermes_cli = pytest.importorskip("hermes_cli")
         hermes_root = Path(hermes_cli.__file__).resolve().parent.parent
-        sites = drift.extract_hook_payload_fields(hermes_root)
+        sites = drift.extract_hook_payload_fields(hermes_root, files=drift.installed_hermes_sources(hermes_root))
         valid_hooks = drift.extract_valid_hooks(hermes_root)
         assert sites, "no invoke_hook dispatch sites found in the installed hermes-agent package"
         assert valid_hooks is not None, "no static VALID_HOOKS declaration found in installed hermes-agent"

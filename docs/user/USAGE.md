@@ -79,7 +79,8 @@ New here? Run `hermes-mordred setup` — the guided, re-runnable orchestrator
 that probes each step below and only runs what is still incomplete. The full
 walkthrough (Purpose / Do / Result, plus what to expect from the interactive
 prompts) lives in **[`QUICKSTART.md`](./QUICKSTART.md)**. In brief, `setup`
-runs these in order (every step is idempotent and safe to re-run):
+runs seven steps in order, starting with the upstream Hermes prerequisite
+check (offering `hermes setup` if needed), then:
 
 ```sh
 hermes-mordred configure              # interactive setup → writes config.yaml + policy.json
@@ -87,14 +88,26 @@ hermes-mordred network init           # OPTIONAL — Tor / VPN / clearnet privac
 hermes-mordred keyvault enable-se     # build the platform key helper (Linux: enable-tpm)
 hermes-mordred keyvault init          # create the hardware-backed keyvault
 hermes-mordred encryption enable env  # macOS only: turn on transparent at-rest encryption
-hermes-mordred encryption enable memory  # macOS only: seal agent-memory files
+hermes-mordred encryption enable memory  # macOS file vault, Linux TPM, or scoped Windows CNG flow
+```
+
+Final status is outside the seven steps:
+
+```sh
 hermes-mordred status                 # verify the result at a glance
 ```
 
-On Linux, the supported operator path stops after keyvault setup and status.
-The TPM-backed keyvault is supported, but transparent env/config runtime
-loading is inactive, `vault recover` lacks a Linux device-anchor store, and
-plaintext remains the runtime source.
+Linux supports the TPM-backed keyvault, dedicated memory encryption and Private
+Telegram. General `setup` and `encryption enable all` enable Linux
+memory through the dedicated TPM engine, skipping env/config file-vault
+enrollment; the standalone memory command remains available. Transparent
+env/config runtime loading is inactive, and `vault recover` lacks a Linux
+device-anchor store. The dedicated memory key has no portable recovery.
+
+Scoped Windows setup and CNG memory/Telegram consumers are implemented;
+capabilities, exclusions and remaining native/live/Windows 11 gates are in
+[`SPEC.md`](../dev/SPEC.md#platform-support-v1) and [`TODO.md`](../dev/TODO.md).
+This is not a blanket Windows product-readiness claim.
 
 `status` prints a single-screen summary (`policy` / `network` / `keyvault` /
 per-target `encryption`); see
@@ -115,8 +128,12 @@ hermes-mordred status --json     # machine-readable
 ### `setup` — resumable first-run orchestrator
 
 Runs the upstream-Hermes check, Mordred configuration, network selection,
-platform helper, keyvault ceremony, macOS env and agent-memory encryption, and
-final status in order. Completed steps are skipped on a rerun. A blocked or
+platform helper, keyvault ceremony, env encryption, and memory encryption as
+seven steps, then final status. macOS uses the file vault; Linux skips env
+enrollment and uses dedicated TPM memory. Windows skips excluded env and
+unported keyvault operations
+and uses its dedicated proof-bound CNG memory ceremony. Completed steps are
+skipped on a rerun. A blocked or
 corrupt keyvault stops with repair guidance; setup never resets it
 automatically.
 
@@ -194,10 +211,16 @@ hermes-mordred audit purge --before YYYY-MM-DD --yes  # delete dated rotated log
 
 ### `encryption` — the recommended on/off switch
 At-rest encryption per target: `env`, `config`, `memory`, `workspace` — or `all`
-to apply the verb to every target at once. The transparent runtime lifecycle is
-currently macOS-only. Off macOS, enrollment can exist but `status` reports the
-target inactive and plaintext remains authoritative; `workspace` is skipped
-when its macOS tooling is unavailable and never fails an `all` batch.
+to apply the verb to every target at once. Env/config and workspace runtime
+lifecycles are macOS-only. Linux enable-all skips env/config enrollment and
+enables memory when the local Hermes seam is supported; unavailable seams
+are explicit skips, while TPM or installed-runtime failures make the batch
+nonzero. Windows skips excluded env/config targets and uses CNG memory.
+`workspace` is skipped when its macOS tooling is unavailable and never fails
+an `all` batch. Production file-vault operations refuse unsupported default
+stores before enrollment. Linux memory does not use that store.
+`all` does not include SQLite databases; use
+[`databases encrypt`](#databases--encrypt-hermess-sqlite-databases-macos) separately on macOS.
 ```sh
 hermes-mordred encryption status                        # all targets (non-prompting)
 hermes-mordred encryption enable  TARGET                # TARGET: env, config, memory, workspace, or all
@@ -222,19 +245,20 @@ the hook reseals the current config and removes the plaintext. Do not re-run
 `encryption enable config` to perform this first seal, and do not delete
 `config.yaml` manually.
 
-> **Memory target.** No Hermes release to date (verified through hermes-agent 0.20.0 and GitHub HEAD)
-> encrypts `~/.hermes/memories/*.md`, so Mordred owns this one end to end: a
-> runtime hook seals every memory write and opens every sealed read, keyed by
-> `HERMES_MEMORY_KEY` from the vault `.env`.
+> **Memory target.** Mordred's runtime hook seals memory writes and opens sealed
+> reads on recognized Hermes seams. macOS uses `HERMES_MEMORY_KEY` from the
+> file-vault `.env`; Linux uses a dedicated TPM-wrapped key; Windows uses checked
+> dedicated CNG custody. See [Linux Private Telegram Design](../dev/SPEC.md#linux-private-telegram-design)
+> and [Windows dedicated custody and memory lifecycle](../dev/SPEC.md#windows-dedicated-custody-and-memory-lifecycle).
 >
-> **Preconditions** (`enable memory` refuses, exit 1, writing nothing, unless
+> **macOS preconditions** (`enable memory` refuses, exit 1, writing nothing, unless
 > all hold): the `env` target is enabled and injecting — that shim is how the
 > key reaches the runtime; macOS; and the interpreter that runs `hermes` (plus
 > any gateway running right now) proves it can open a sealed file. The last
 > check is the same runtime guard the `.env` seal uses, and
 > `--force-runtime-unverified` bypasses it at your own risk.
 >
-> **What the verbs do.** `enable` stores the key (one Touch ID), writes the
+> **macOS verbs.** `enable` stores the key (one Touch ID), writes the
 > opt-in marker, and migrates every plaintext `*.md` (and `*.md.bak.*`
 > snapshot) already on disk to sealed. `disable` decrypts them all back to
 > plaintext, keeps the key, and writes an opt-out marker (`paused`); it
@@ -243,22 +267,28 @@ the hook reseals the current config and removes the plaintext. Do not re-run
 > and only then strips the key.
 >
 > **Status marks.** `on` = armed and everything on disk is sealed; `paused` =
-> opt-out marker (or off macOS); `off` = never enabled; `exposed` = armed but a
+> opt-out marker or unavailable protection; `off` = never enabled; `exposed` = armed but a
 > plaintext memory file is on disk — re-run `encryption enable memory` to seal
 > it.
 >
-> **Restart a running gateway** after enabling or disabling. After `enable`,
+> **On macOS, restart a running gateway** after enabling or disabling. After `enable`,
 > the running process still lacks the freshly-minted key, so — fail-closed,
 > not plaintext — its memory reads/writes are refused until you restart it,
 > and a session may see an empty memory. After `disable`, it still has the
 > hook armed in-process; the marker being gone only stops it sealing new
 > writes starting at the next memory call. `enable` warns and names the pid
-> when it sees one.
+> when it sees one. Normal Linux memory enable requires identified gateways to
+> be stopped; Windows requires gateways to be known stopped before enabling.
 >
-> **Recovery.** `HERMES_SAFE_MODE=1` disarms the hook for one run (memories are
-> then read as-is, sealed ones unreadable) — the escape hatch if a memory
-> problem blocks start-up. The key itself lives in the vault `.env`; without
-> it, sealed memories cannot be recovered.
+> **Refusal and recovery.** A recognized seam raises when a sealed read lacks a
+> usable key or fails authentication. Mordred emits the remedy; Hermes may
+> catch the initial-load exception and continue with an empty view, but hooked
+> writes refuse and preserve the seals. An armed unsupported POSIX seam refuses
+> startup. `HERMES_SAFE_MODE=1` bypasses that POSIX startup refusal and stops new
+> sealing on supported seams; existing seals still require the key and stay
+> sealed on write. Managed/uncertain Windows custody refuses an unsupported
+> seam even in safe mode. On macOS the key lives in the file-vault `.env`;
+> Linux/Windows custody is machine-bound without portable memory recovery.
 >
 > **Known limitations.** Readers that bypass the memory tool see the sealed
 > text rather than plaintext (`hermes doctor`'s size report, the Desktop
@@ -313,8 +343,8 @@ the hook reseals the current config and removes the plaintext. Do not re-run
 > Nothing is migrated by any of this: transcripts already under
 > `~/.claude/projects/` stay plaintext where they are. The target covers only
 > the volume's contents, so it does not reach Hermes's own session storage
-> (`<home>/state.db`, `<home>/sessions/*.jsonl`), which no encryption target
-> covers.
+> (`<home>/state.db`, `<home>/sessions/*.jsonl`). On macOS, `databases encrypt`
+> separately protects `state.db`; session JSONL remains outside its scope.
 
 > **Runtime guard before a seal (macOS).** `enable env` and `enable config`
 > remove the plaintext, so both first prove the file can be unsealed again at
@@ -372,6 +402,8 @@ hermes-mordred keyvault reset               # DESTROY profile-owned key material
 hermes-mordred keyvault enable-se           # macOS: build+install Secure Enclave helper (ad-hoc signed, no Apple Developer account)
                                 # safe to refresh; key policy is selected only by fresh init/recovery — see §4.3
 hermes-mordred keyvault enable-tpm          # Linux: build+install TPM 2.0 helper (machine-bound, Tier 2)
+hermes-mordred keyvault enable-winkey       # Windows: build+install and probe the CNG TPM helper
+hermes-mordred keyvault native init --role memory  # Windows: enroll custody; does not enable memory encryption
 hermes-mordred keyvault eth <sub>           # Ethereum keys — see below
 ```
 
@@ -535,6 +567,16 @@ hermes-mordred desktop uninstall
 > page sends secrets with the Desktop plugin REST bridge
 > (`/api/plugins/mordred/…`, session-token protected, loopback only) straight
 > to Mordred; they are sealed by the Secure Enclave and never returned.
+>
+> **Hermes updates.** Hermes Desktop builds a new Python environment on every
+> update. Mordred registers itself with Hermes's package manager
+> (`<home>/plugins/mordred/pyproject.toml`) so those rebuilds include it. If
+> Mordred is still missing after an update (for example, it was installed by
+> an older version that did not register), Hermes Desktop shows a notice and
+> the Mordred page says "Mordred is not installed in Hermes's current
+> environment" with a **Repair / reinstall Mordred** button (it runs
+> `hermes pm install venv`); restart Hermes afterwards. An install that never
+> registered needs one reinstall with the installer.
 
 ### `uninstall` — remove Mordred and restore Hermes's files
 ```sh
@@ -545,6 +587,53 @@ hermes-mordred uninstall --purge-data   # also delete Mordred's data and device 
 > Decrypts everything Mordred encrypted before it removes anything, and keeps
 > Mordred's data unless `--purge-data` is given. Details:
 > [§9 Uninstall safely](#uninstall-safely).
+
+### `databases` — encrypt Hermes's SQLite databases (macOS)
+```sh
+hermes-mordred databases status            # each Hermes database: plaintext / encrypted
+hermes-mordred databases encrypt --dry-run # list what would be encrypted
+hermes-mordred databases encrypt           # encrypt them all (or at the next Hermes start)
+hermes-mordred databases decrypt           # back to plain SQLite; encryption off
+```
+> Hermes keeps its conversation history and other state in SQLite files
+> (`state.db` with its search indexes, `shared-state.db`, `projects.db`,
+> `cron/*.db`, ... in the Hermes home and each profile home). `encrypt`
+> converts every one of them to SQLCipher and turns database encryption on;
+> databases Hermes creates later are encrypted from the start. The key is
+> derived from the agent-memory key (no new key; run `encryption enable memory`
+> first) and is unlocked once per Hermes process. Files of other programs
+> (Hermes's install, toolchains, MCP servers, skills) and anything outside the
+> Hermes home are left alone. If any Hermes process is running, even before
+> opening a database, conversion is scheduled. Quit all Hermes processes, then
+> restart; the conversion runs before the new process opens any database. The
+> conversion is all-or-nothing and verified (same tables and row counts); an
+> interrupted one is completed on the next start. Old plaintext blocks are
+> replaced, not overwritten: on an SSD they can survive in free space or APFS
+> local snapshots until reused (FileVault keeps them unreadable). Tools outside
+> Hermes (a SQLite browser, the `sqlite3` command) can no longer open these
+> files — that is the point. While encryption is on, Mordred checks at every
+> session start and every turn that each Hermes process uses SQLCipher, has the
+> key, and that no plaintext database has appeared; strict policy stops the turn,
+> lenient policy warns you (through the agent and Hermes Desktop). The agent is
+> told the checked status, so it does not claim encryption that is not in
+> effect. `decrypt` (also scheduled for the next start if Hermes is running)
+> converts everything back. A missing or wrong key leaves encryption enabled
+> and reports failure. Normal uninstall also restores the databases before
+> removing the package or keys. `status` and `--dry-run` do not execute pending
+> conversions.
+>
+> On Linux and Windows, ordinary homes continue using plain SQLite: memory
+> encryption does not encrypt `state.db`. Database encryption is supported only
+> on macOS. If you copy a home with its database-encryption marker or conversion
+> journal to Linux/Windows, startup refuses to open it. Run `databases decrypt`
+> on macOS and let it finish before moving the home.
+
+`setup` and `encryption enable all` do not enable database encryption. Session
+JSONL, text logs (including `agent.log` message previews) and existing ZIP
+backups are not converted. Decrypt databases before purging the memory key or
+file vault, and retain recovery material for encrypted backups.
+On Windows, retained database-protection state also blocks uninstall; reconcile
+it on macOS first.
 
 ### `egress` — limit what the agent's tools may send out
 ```sh
@@ -585,10 +674,10 @@ Start with the [Telegram guide](./TELEGRAM.md); `telegram setup` does
 everything below in one guided command, and `telegram doctor` checks health.
 
 ```sh
-hermes-mordred telegram setup               # guided: Enclave helper, login, privacy LLM, first import
+hermes-mordred telegram setup               # guided: hardware custody, memory, login, privacy LLM, first import
 hermes-mordred telegram doctor              # health check from metadata only (no Touch ID, no content)
-hermes-mordred keyvault enable-se           # once: build the Secure Enclave helper (required)
-hermes-mordred telegram login               # API credentials + phone code (+ 2FA password); sealed by the Secure Enclave
+hermes-mordred keyvault enable-se           # macOS; Linux: enable-tpm; Windows: enable-winkey
+hermes-mordred telegram login               # API credentials + phone code (+ 2FA password); hardware sealed
 hermes-mordred telegram sync                # import new messages from every dialog into the encrypted archive
 hermes-mordred telegram sync --days 3 --skip-archived   # recent window, pinned chats first; options are remembered
 hermes-mordred telegram sync --skip-channels --limit-per-dialog 5000
@@ -599,19 +688,22 @@ hermes-mordred telegram migrate-tee         # move credentials stored by an olde
 hermes-mordred telegram logout              # revoke the session at Telegram; keep the archive
 hermes-mordred telegram logout --forget     # also delete the API credentials, archive key and archive
 ```
-> Requires the `telegram` extra and the Secure Enclave helper
-> (`hermes-mordred keyvault enable-se`). Create your own application at
+> Requires the `telegram` extra and the platform hardware helper; Windows also
+> requires dedicated Telegram custody (see the [Telegram guide](./TELEGRAM.md)).
+> Create your own application at
 > <https://my.telegram.org> → *API development tools* for `api_id` / `api_hash`
 > (or export them as `TELEGRAM_MORDRED_APP_ID` / `TELEGRAM_MORDRED_APP_HASH`).
 >
 > **What is stored where.** The session (a full account credential), the API
 > credentials, the archive key and the LLM key are sealed by a key inside the
-> Secure Enclave and opened by the Enclave on every connection — with Touch ID
-> unless you log in with `--no-touch-id`. There is no software-key fallback,
+> Secure Enclave, Linux TPM or Windows CNG provider and opened on every connection.
+> macOS requests Touch ID unless you log in with `--no-touch-id`; Linux/Windows
+> have no per-use presence prompt. There is no software-key fallback,
 > and nothing is injected into the Hermes environment. Messages are stored in
 > `<home>/mordred/telegram/`, AES-256-GCM encrypted per chat under hashed file
-> names; plaintext exists only in memory (core dumps and debugger attach are
-> disabled). The 2FA password is never stored.
+> names; plaintext is processed in memory. Dump/debugger restrictions are
+> best-effort on macOS/Linux and are not provided on Windows. The 2FA password
+> is never stored.
 >
 > **Read-only by construction.** Every MTProto request passes an allowlist
 > before it is sent: the importer can list chats and read history, but cannot
@@ -1061,10 +1153,12 @@ If none of this rings a bell, `none` is correct.
 The three command families are related, but they are not one nested store:
 
 ```text
-native device backend (Secure Enclave or TPM)
+native device backend (Secure Enclave, TPM, or scoped Windows CNG)
 ├── keyvault   purpose-bound MREN envelopes and wallet/seed material
-└── vault      encrypted file container with its own device key + passphrase
-    └── encryption   macOS-oriented env/config/memory/workspace facade
+├── vault      macOS file container with its own device key + passphrase
+└── dedicated Linux/Windows memory custody
+
+encryption    facade routing each target to its platform-specific engine
 ```
 
 - **`keyvault`** manages the main logical key, purpose-bound secret envelopes,
@@ -1072,9 +1166,10 @@ native device backend (Secure Enclave or TPM)
 - **`vault`** is a separate encrypted file container under
   `<home>/mordred/vault/`. Use its commands for migration, cold recovery, or
   low-level inspection.
-- **`encryption`** drives the vault for common targets. Its transparent runtime
-  lifecycle is macOS-only; Linux keyvault/TPM support does not make these
-  targets active.
+- **`encryption`** routes env/config through the file vault on macOS, workspace
+  through external macOS tooling, and memory through the platform-specific
+  engine. Dedicated Linux TPM/Windows CNG memory does not inherit file-vault
+  recovery or depend on env injection.
 
 See [`SPEC.md`](../dev/SPEC.md) for the security contract and
 [`PATHS.md`](../dev/PATHS.md) for the complete storage inventory.
@@ -1123,12 +1218,32 @@ including under strict mode).
   idle" only (not while mounted under the same user).
 - **Linux**: TPM 2.0 is the key backend (`keyvault enable-tpm`). MVP binding is
   machine-only (Tier 2 — no per-use PIN/PCR prompt). Transparent `.env` and
-  `config.yaml` loading/resealing, agent-memory sealing, and workspace
-  encryption are inactive; plaintext stays the runtime source and status
-  reports the limitation.
+  `config.yaml` loading/resealing and workspace encryption are inactive.
+  Dedicated TPM memory sealing and Private Telegram flows are implemented;
+  general setup/enable-all use the dedicated TPM memory engine and skip
+  env/config file-vault enrollment.
+  Memory is machine-bound without portable recovery.
+- **Windows**: scoped native installer, CNG custody, memory/Telegram and Desktop
+  consumers exist. Env/config file-vault seals and APFS workspace integration
+  are excluded; database encryption is also unsupported. Capability status and
+  remaining native/live/Windows 11 gates govern readiness; see
+  [`SPEC.md`](../dev/SPEC.md#platform-support-v1).
 - **Fallback behavior**: macOS can use a software P-256 key in the login
-  Keychain when Secure Enclave access is unavailable. Linux deliberately has no
-  software fallback and fails closed without the TPM helper.
+  Keychain when Secure Enclave access is unavailable. Linux and Windows have no
+  software fallback and fail closed without their TPM helper.
+
+### Native Windows TPM workflow
+
+Use the [PowerShell installer](../dev/setup.md#native-windows-installer-and-helper-validation-c4)
+with a native Windows account and local NTFS profile. Install Rust MSVC and
+Visual C++ Build Tools, then run `hermes-mordred keyvault enable-winkey`.
+Stop Hermes gateways, run `hermes-mordred encryption enable memory`, and check
+`hermes-mordred status` before restarting. Enable enrolls custody and verifies
+the installed Hermes runtime. `keyvault init` is not ported to Windows.
+
+CNG keys are bound to the TPM, Windows account and profile; there is no per-use
+presence or portable recovery. `keyvault native init --role audit` separately
+enrolls encrypted audit custody; Telegram has its [own setup](./TELEGRAM.md).
 
 ---
 
@@ -1196,6 +1311,13 @@ instead.
 
 ### Uninstall safely
 
+**Windows:** uninstall restores memory; `--purge-data` removes its custody key
+after restoration but retains audit/Telegram custody and data. Use
+`telegram logout --forget` separately to remove Telegram data.
+`--erase-encrypted` is unsupported. Retained macOS database-protection state
+blocks teardown. The shell installer and full cleanup sequence below describe
+macOS/Linux.
+
 One command removes Mordred and gives Hermes its files back:
 
 ```sh
@@ -1214,9 +1336,10 @@ curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/sc
 Quit Hermes Desktop and stop any `hermes gateway` first. The command then runs
 these steps in order; each is safe to repeat, and a second run changes nothing:
 
-1. **Restore plaintext.** Every encryption target that is on is turned off with
-   the same reversible logic as `encryption disable` (config, memory, then env),
-   unlocking the vault once for all of them. `.env`, `config.yaml` and
+1. **Restore plaintext.** Protected databases in the root home and every profile
+   (including loose database backups) are restored first on macOS, followed by config, memory
+   and env using the same reversible logic as `encryption disable`, unlocking
+   the vault once for all of them. `.env`, `config.yaml` and
    `memories/*.md` are back on disk exactly as Hermes wrote them. If the device
    key cannot open the vault you are offered the vault recovery passphrase. If
    any target cannot be restored, the command **stops before removing
@@ -1250,13 +1373,31 @@ these steps in order; each is safe to repeat, and a second run changes nothing:
 
 `--purge-data` also deletes that data: it logs Telegram out (revoking the
 session), deletes the vault's device key and Keychain anchor, resets the
-keyvault (`keyvault reset`), and removes `<home>/mordred/` and
-`<home>/extension/`. A keychain item that only its creator may delete (for
-example a software key another Python created) is reported with the steps to
-remove it in Keychain Access. It asks you to type `delete my data`; `--yes` does not
+keyvault (`keyvault reset`), and removes the data under `<home>/mordred/` and
+`<home>/extension/`. On macOS, the empty `mordred/db-encryption.lock` file and
+its directory remain so concurrent processes keep coordinating on the same
+lock through package removal and afterward. A keychain item that only its
+creator may delete (for example a software key another Python created) is
+reported with the steps to remove it in Keychain Access. It asks you to type `delete my data`; `--yes` does not
 skip that. Afterwards anything encrypted with those keys can be recovered only
 with the keyvault Seed Phrase, Passphrase and backup blob or the vault recovery
 passphrase — and only from a copy of the data kept elsewhere.
+
+`--erase-encrypted` removes encrypted content instead of restoring it and
+implies `--purge-data`. For a home with database protection it deletes all
+in-scope Hermes databases, including profile databases, backups, sidecars and
+prepared conversion copies, before deleting keys. It requires the existing
+typed deletion confirmation even with `--yes`. Both database modes require
+macOS and a stopped Hermes; a missing/wrong key, active process or incomplete
+restore stops normal uninstall before package or key removal. Run from the
+root `HERMES_HOME`, since database protection is shared by all profiles.
+
+Normal uninstall stops if a ZIP under the root or a profile's `backups/`
+contains a protected database or cannot be checked safely. Restore and decrypt
+that backup separately before uninstalling, or use `--erase-encrypted` to
+delete the listed archives along with the databases. Plaintext ZIPs are kept.
+Backups outside the Hermes home and other archive formats are outside this
+command's scope; retain their recovery material before purging keys.
 
 What `uninstall` cannot restore:
 

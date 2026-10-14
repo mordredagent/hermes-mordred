@@ -12,7 +12,7 @@ from __future__ import annotations
 from .base import DEFAULT_RUNNER, PolicyMode, SubprocessRunner, VpnCapabilities, VpnProvider
 from .custom import CustomCommandProvider
 from .mullvad import MullvadProvider
-from .registry import build_provider, known_providers
+from .registry import ProviderCapability, build_provider, known_providers, provider_capability
 from .wireguard import WireGuardProvider
 
 __all__ = [
@@ -20,10 +20,12 @@ __all__ = [
     "CustomCommandProvider",
     "MullvadProvider",
     "PolicyMode",
+    "ProviderCapability",
     "SubprocessRunner",
     "VpnCapabilities",
     "VpnProvider",
     "WireGuardProvider",
     "build_provider",
     "known_providers",
+    "provider_capability",
 ]

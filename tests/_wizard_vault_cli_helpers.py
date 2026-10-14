@@ -19,8 +19,13 @@ class _ReadRaisesStore(FakeAnchorStore):
     so the CLI's fail-closed handling can be exercised cross-platform.
     """
 
+    def __init__(self, error: Exception | None = None) -> None:
+        super().__init__()
+        self.error = error if error is not None else KeychainAnchorError(-25308, "keychain locked")
+
     def read(self, label: str) -> bytes | None:
-        raise KeychainAnchorError(-25308, "keychain locked")
+        self.calls.append(("read", label))
+        raise self.error
 
 
 class _GenerateRaisesBackend(FakeBackend):

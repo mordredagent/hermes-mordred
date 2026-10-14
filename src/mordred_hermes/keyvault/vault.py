@@ -60,12 +60,17 @@ import hmac
 import os
 from pathlib import Path
 from types import TracebackType
+from typing import TYPE_CHECKING
 
 from . import anchor, file_container, manifest, vault_master
 from ._storage import atomic_write, ensure_lock_file, keyvault_lock, safe_read
+from ._vault_errors import VaultError as VaultError
 from .anchor import AnchorStore
 from .kek import MasterKey, open_master_key
 from .wrap import NativeBackend
+
+if TYPE_CHECKING:
+    from ._windows_capability import ExcludedCapability
 
 _RECOVERY_NAME = "recovery.mrkv"
 _LOCK_NAME = ".lock"
@@ -73,19 +78,15 @@ _BLOBS_DIR = "blobs"
 _DIR_MODE = 0o700
 
 
-class VaultError(Exception):
-    """A vault operation failed closed.
+def _refuse_excluded(capability: ExcludedCapability, operation: str) -> None:
+    """Windows excludes the file vault and its recovery: refuse before any I/O (C5e).
 
-    Raised for vault-level faults: an uninitialized / already-initialized
-    root, a missing authoritative manifest, a name that is not enrolled, a
-    ciphertext blob that is missing or does not match its content address,
-    an AEAD failure, or use of a closed vault. Distinct from
-    :class:`mordred_hermes.keyvault.anchor.AnchorError` (freshness-pin
-    failures) and :class:`mordred_hermes.keyvault.manifest.ManifestError`
-    (manifest authentication failures), which propagate as themselves so a
-    caller can tell a tamper attempt from an operational error — but all
-    three are hard failures that prevent the vault from opening or reading.
+    Runs before ``_storage``, anchor/backend use, lock acquisition or plaintext
+    handling, so retained Windows vault state is preserved unchanged.
     """
+    from ._windows_capability import refuse_excluded_on_windows
+
+    refuse_excluded_on_windows(capability, operation)
 
 
 def _manifest_path(root: Path, generation: int) -> Path:
@@ -281,6 +282,7 @@ def init_vault(
         ValueError: ``passphrase`` is empty.
         WrapKeyNotFound: no SE wrapping key exists for ``key_id``.
     """
+    _refuse_excluded("file_vault", "init_vault")
     root = Path(root)
     _ensure_dir(root)
     _ensure_dir(root / _BLOBS_DIR)
@@ -339,6 +341,7 @@ def open_vault(
         VaultError: the authoritative manifest file is missing.
         WrapKeyNotFound / WrapAuthCancelled / ...: SE unwrap failures.
     """
+    _refuse_excluded("file_vault", "open_vault")
     root = Path(root)
     blob, untrusted = _load_pinned_unverified(
         root,
@@ -395,6 +398,7 @@ def recover_vault(root: Path, passphrase: str) -> OpenVault:
         cryptography.exceptions.InvalidTag: wrong passphrase.
         ManifestError: the manifest failed authentication under the master.
     """
+    _refuse_excluded("recovery", "recover_vault")
     root = Path(root)
     recovery_blob = _read_recovery_blob(root, action="cannot recover this vault")
     _generation, blob, untrusted = _load_recovery_matched_unverified(
@@ -472,6 +476,7 @@ def recover_to_device(
         ManifestError: the manifest failed authentication under the recovered master.
         WrapError: the new device wrapping key could not be generated / used.
     """
+    _refuse_excluded("recovery", "recover_to_device")
     root = Path(root)
     _ensure_lock(root)
     with keyvault_lock(root):
@@ -577,6 +582,7 @@ def change_passphrase(
         recovery.RecoveryDigestMismatch / cryptography InvalidTag: wrong
             *old_passphrase* (or a substituted manifest ``wmk``).
     """
+    _refuse_excluded("recovery", "change_passphrase")
     root = Path(root)
     # keyvault_lock opens .lock without O_CREAT, so it must already exist. Mirror
     # init_vault / enroll_file and materialize it first: a vault whose .lock was
@@ -748,6 +754,7 @@ class OpenVault:
             VaultError: the vault is closed, or was opened in recovery mode
                 (no device anchor to commit against — re-key first).
         """
+        _refuse_excluded("file_vault", "enroll_file")
         self._check()
         if self._store is None:
             raise VaultError(
@@ -780,6 +787,7 @@ class OpenVault:
                 anchor to commit against), or the handle is stale (another writer
                 advanced the vault since this handle last committed).
         """
+        _refuse_excluded("file_vault", "unenroll_file")
         self._check()
         if name not in self._manifest.files:
             return  # nothing enrolled under this name — idempotent no-op, no churn

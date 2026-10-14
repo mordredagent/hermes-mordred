@@ -188,6 +188,13 @@ def delete_linux_memory_key(*, home: Path, backend: NativeBackend | None = None)
 
 
 def resolve_memory_key(*, home: Path, platform: str, environ: Mapping[str, str]) -> bytes | None:
+    if platform == "win32":
+        from ._windows_custody import CustodyError, resolve_windows_memory_key
+
+        try:
+            return resolve_windows_memory_key(home=home)
+        except (CustodyError, OSError, ValueError, WrapError, wrap.NativeBackendError) as exc:
+            raise MemoryKeyError("Windows memory custody unavailable; existing data was not replaced") from exc
     if platform == "linux" and linux_memory_managed(home):
         return load_linux_memory_key(home=home)
     value = environ.get("HERMES_MEMORY_KEY")

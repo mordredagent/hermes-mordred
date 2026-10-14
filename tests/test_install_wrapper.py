@@ -108,6 +108,7 @@ class TestLenient:
     def test_clearnet_skill_allows(self, writer: NDJSONWriter, runner: _RunnerSpy, tmp_path: Path) -> None:
         result = run(skill_path=CLEARNET, policy_mode="lenient", audit=writer, runner=runner)
         assert result.outcome.decision == "allow"
+        assert result.outcome.reason is None
         assert runner.calls == [["hermes", "skills", "install", str(CLEARNET)]]
 
 
@@ -209,6 +210,7 @@ class TestRequiresKeyvault:
             keyvault_probe=lambda: True,
         )
         assert result.outcome.decision == "allow"
+        assert result.outcome.reason is None
         assert result.skill_id == "requires-keyvault-skill"
         assert runner.calls == [["hermes", "skills", "install", str(RKV)]]
 

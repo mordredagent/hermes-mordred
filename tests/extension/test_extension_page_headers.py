@@ -47,12 +47,6 @@ def test_policy_pins_every_inline_source_by_hash() -> None:
     for source in ("const a = 1", 'document.body.innerHTML = "<script><\\/script>"'):
         assert _sha256_source(source) in directives["script-src"]
     assert _sha256_source("body{color:red}") in directives["style-src"]
-
-
-def test_policy_denies_framing_and_navigation_sinks() -> None:
-    policy = page_headers.content_security_policy(_DOC, connect_origins=["ws://127.0.0.1:7799"])
-
-    directives = {d.split(" ", 1)[0]: d for d in policy.split("; ")}
     assert directives["default-src"] == "default-src 'self'"
     assert directives["frame-ancestors"] == "frame-ancestors 'none'"
     assert directives["base-uri"] == "base-uri 'none'"

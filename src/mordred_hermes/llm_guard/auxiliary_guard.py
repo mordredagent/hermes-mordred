@@ -14,11 +14,16 @@ usable because its concrete client is guarded after resolution.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
+import os
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, NoReturn
 
@@ -28,6 +33,7 @@ from .._provider_identity import canonicalize_provider
 from .._yaml_io import load_yaml_mapping
 from . import enforce
 from ._exceptions import MordredSessionRefused
+from ._windows_policy import Decision, guarded_audit_factory, read_decision
 from .local_adapter import LOCAL_PROVIDER_NAME
 
 _LOG = logging.getLogger("mordred.llm_guard.auxiliary")
@@ -55,7 +61,52 @@ _REQUIRED_RESOLVER_SEAMS: Final = (
 )
 
 
+@dataclass
+class _Resolution:
+    path: str
+    decision: Decision
+    owner: tuple[int, int, int | None]
+    active: bool = True
+
+
+_resolution: ContextVar[_Resolution | None] = ContextVar("mordred_llm_resolution", default=None)
+
+
+@contextmanager
+def _resolver_snapshot(path: Path, *, internal: bool = False) -> Iterator[Decision | None]:
+    """Share immutable admission only within one synchronous resolver call tree.
+
+    Copied contexts cannot retain this grant after the outer resolver returns,
+    and another thread must always establish its own fresh snapshot.
+    """
+    # Exact spelling only: Unicode casefold can equate distinct Windows paths.
+    key = str(path)
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    owner = (os.getpid(), threading.get_ident(), id(task) if task is not None else None)
+    current = _resolution.get()
+    if internal and current is not None and current.active and current.owner == owner and current.path == key:
+        yield current.decision
+        return
+    decision = read_decision(path)
+    if decision is None:
+        yield None
+        return
+    state = _Resolution(key, decision, owner)
+    token = _resolution.set(state)
+    try:
+        yield decision
+    finally:
+        state.active = False
+        _resolution.reset(token)
+
+
 def _policy_mode(policy_json_path: Path) -> str:
+    decision = read_decision(policy_json_path)
+    if decision is not None:
+        return decision.mode
     return read_policy_mode_fail_closed(
         policy_json_path,
         default="lenient",
@@ -84,6 +135,9 @@ def _guard_inputs(policy_json_path: Path) -> tuple[str, str]:
     including cache hits. Reading and re-parsing ``policy.json`` several times
     per request was pure overhead on a path whose whole purpose is to be cheap.
     """
+    decision = read_decision(policy_json_path)
+    if decision is not None:
+        return decision.mode, decision.settings.local_endpoint
     identity = _policy_identity(policy_json_path)
     if identity is not None:
         with _GUARD_INPUT_LOCK:
@@ -165,40 +219,51 @@ def _guard_resolved_client(
     client: Any,
     policy_json_path: Path,
     audit_path: Path,
+    _decision: Decision | None = None,
 ) -> None:
-    if client is None:
-        return
-    policy_mode, local_endpoint = _guard_inputs(policy_json_path)
-    if policy_mode != "strict":
-        return
-    base_url = _client_base_url(client)
-    effective_provider = (
-        LOCAL_PROVIDER_NAME
-        if _same_configured_endpoint(base_url, local_endpoint)
-        else _effective_provider(provider, base_url)
-    )
-    audit = build_audit_writer(audit_path)
-    if effective_provider is None:
-        _refuse_auxiliary(
-            audit=audit,
-            provider_id=str(provider or "auto"),
-            base_url=base_url,
-            cause="the resolved auxiliary endpoint has no trusted provider identity",
+    token = _resolution.set(None)
+    try:
+        decision = _decision or read_decision(policy_json_path)
+        if client is None:
+            return
+        policy_mode, local_endpoint = (
+            (decision.mode, decision.settings.local_endpoint)
+            if decision is not None
+            else _guard_inputs(policy_json_path)
         )
-    assert effective_provider is not None
-    enforce.check_runtime_provider(
-        policy_mode="strict",
-        policy_json_path=policy_json_path,
-        active_provider=effective_provider,
-        audit=audit,
-        runtime_base_url=base_url,
-        # Background auxiliary calls must never open an interactive approval
-        # surface. Explicit policy configuration is required.
-        prompt_fn=lambda _provider: None,
-        # One probe per short TTL instead of one per auxiliary request; a failing
-        # probe is never memoized, so the local route still fails closed.
-        health_probe=_memoized_health_probe,
-    )
+        if policy_mode != "strict":
+            return
+        base_url = _client_base_url(client)
+        effective_provider = (
+            LOCAL_PROVIDER_NAME
+            if _same_configured_endpoint(base_url, local_endpoint)
+            else _effective_provider(provider, base_url)
+        )
+        audit = guarded_audit_factory(build_audit_writer, audit_path)
+        if effective_provider is None:
+            _refuse_auxiliary(
+                audit=audit,
+                provider_id=str(provider or "auto"),
+                base_url=base_url,
+                cause="the resolved auxiliary endpoint has no trusted provider identity",
+            )
+        assert effective_provider is not None
+        enforce.check_runtime_provider(
+            policy_mode="strict",
+            policy_json_path=policy_json_path,
+            active_provider=effective_provider,
+            audit=audit,
+            runtime_base_url=base_url,
+            # Background auxiliary calls must never open an interactive approval
+            # surface. Explicit policy configuration is required.
+            prompt_fn=lambda _provider: None,
+            # One probe per short TTL instead of one per auxiliary request; a failing
+            # probe is never memoized, so the local route still fails closed.
+            health_probe=_memoized_health_probe,
+            _decision=decision,
+        )
+    finally:
+        _resolution.reset(token)
 
 
 def _wrap_pair_resolver(
@@ -218,13 +283,15 @@ def _wrap_pair_resolver(
 
     @functools.wraps(original)
     def guarded(provider: object, *args: Any, **kwargs: Any) -> Any:
-        result = original(provider, *args, **kwargs)
+        with _resolver_snapshot(policy_json_path, internal=name == "_get_cached_client") as decision:
+            result = original(provider, *args, **kwargs)
         if isinstance(result, tuple) and result:
             _guard_resolved_client(
                 provider=provider,
                 client=result[0],
                 policy_json_path=policy_json_path,
                 audit_path=audit_path,
+                **({"_decision": decision} if decision is not None else {}),
             )
         return result
 
@@ -250,13 +317,15 @@ def _wrap_vision_resolver(
 
     @functools.wraps(original)
     def guarded(*args: Any, **kwargs: Any) -> Any:
-        result = original(*args, **kwargs)
+        with _resolver_snapshot(policy_json_path) as decision:
+            result = original(*args, **kwargs)
         if isinstance(result, tuple) and len(result) >= 2:
             _guard_resolved_client(
                 provider=result[0] or kwargs.get("provider"),
                 client=result[1],
                 policy_json_path=policy_json_path,
                 audit_path=audit_path,
+                **({"_decision": decision} if decision is not None else {}),
             )
         return result
 
@@ -282,6 +351,7 @@ def _wrap_provider_chain(
 
     @functools.wraps(original)
     def guarded() -> list[tuple[str, Callable[..., Any]]]:
+        read_decision(policy_json_path)
         chain = original()
         result: list[tuple[str, Callable[..., Any]]] = []
         for label, resolver in chain:
@@ -292,13 +362,15 @@ def _wrap_provider_chain(
                 __resolver: Callable[..., Any] = resolver,
                 **kwargs: Any,
             ) -> Any:
-                resolved = __resolver(*args, **kwargs)
+                with _resolver_snapshot(policy_json_path) as decision:
+                    resolved = __resolver(*args, **kwargs)
                 if isinstance(resolved, tuple) and resolved:
                     _guard_resolved_client(
                         provider=__label,
                         client=resolved[0],
                         policy_json_path=policy_json_path,
                         audit_path=audit_path,
+                        **({"_decision": decision} if decision is not None else {}),
                     )
                 return resolved
 
@@ -411,6 +483,10 @@ def _refuse_auxiliary(
 
 
 def _policy_cloud_settings(policy_json_path: Path) -> tuple[bool, frozenset[str], str]:
+    decision = read_decision(policy_json_path)
+    if decision is not None:
+        settings = decision.settings
+        return settings.allow_cloud_llm, settings.cloud_allowlist, settings.local_endpoint
     data = load_policy_mapping(policy_json_path, log=_LOG)
     allow_cloud = data.get("allow_cloud_llm") is True
     raw_allowlist = data.get("cloud_provider_allowlist")
@@ -495,9 +571,11 @@ def validate_session(
     audit_path: Path,
 ) -> None:
     """Validate declared auxiliary routes and ensure runtime seams are guarded."""
-    if _policy_mode(policy_json_path) != "strict":
+    decision = read_decision(policy_json_path, config_path)
+    mode = decision.mode if decision is not None else _policy_mode(policy_json_path)
+    if mode != "strict":
         return
-    audit = build_audit_writer(audit_path)
+    audit = guarded_audit_factory(build_audit_writer, audit_path)
     expected_paths = (policy_json_path, audit_path)
     if not _installed or _installed_paths != expected_paths or not _runtime_seams_guarded():
         _refuse_auxiliary(
@@ -510,8 +588,17 @@ def validate_session(
             ),
         )
 
-    allow_cloud, allowlist, local_endpoint = _policy_cloud_settings(policy_json_path)
-    config = load_yaml_mapping(config_path, catch=(Exception,), log=_LOG)
+    if decision is not None:
+        settings = decision.settings
+        allow_cloud, allowlist, local_endpoint = (
+            settings.allow_cloud_llm,
+            settings.cloud_allowlist,
+            settings.local_endpoint,
+        )
+        config = decision.config
+    else:
+        allow_cloud, allowlist, local_endpoint = _policy_cloud_settings(policy_json_path)
+        config = load_yaml_mapping(config_path, catch=(Exception,), log=_LOG)
     _validate_root_fallbacks(
         config=config,
         allow_cloud=allow_cloud,

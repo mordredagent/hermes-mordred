@@ -52,4 +52,5 @@ ReasonCode = Literal[
     "policy.lenient.keyvault_uninitialized_warning",
     "mordred.degraded.audit_encryption_unavailable",
     "policy.egress.tool_blocked",
+    "mordred.db_encryption.violation",
 ]

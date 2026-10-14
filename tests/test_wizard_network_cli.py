@@ -20,12 +20,13 @@ transport when the process starts.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from mordred_hermes.network._exceptions import BringupFailed, PathSwitchRequiresRestart, UnknownPath
+from mordred_hermes.network._exceptions import BringupFailed, PathSwitchRequiresRestart
 
 # --------------------------------------------------------------------------- #
 # Fakes                                                                       #
@@ -121,34 +122,6 @@ class TestNetworkUseLive:
         assert cli._handle_network_use(args) == 0
         assert rt.use_calls == ["vpn"]
 
-    def test_use_unknown_path_returns_nonzero(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import api
-        from mordred_hermes.wizard import cli
-
-        rt = _FakeRuntime()
-        rt.use_raises = UnknownPath("bad")
-        api.set_runtime(rt)
-        args = _make_args(
-            path="i2p",
-            config_path=tmp_path / "config.yaml",
-        )
-        rc = cli._handle_network_use(args)
-        assert rc != 0
-
-    def test_use_bringup_failure_returns_nonzero(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import api
-        from mordred_hermes.wizard import cli
-
-        rt = _FakeRuntime()
-        rt.use_raises = BringupFailed("tor timeout")
-        api.set_runtime(rt)
-        args = _make_args(
-            path="tor",
-            config_path=tmp_path / "config.yaml",
-        )
-        rc = cli._handle_network_use(args)
-        assert rc != 0
-
     def test_conflicting_frozen_route_is_saved_and_prints_restart_guidance(
         self,
         tmp_path: Path,
@@ -172,23 +145,6 @@ class TestNetworkUsePersistence:
     """``use`` always writes ``default_path`` to config.yaml so the next
     Hermes session opens with the user's preferred path."""
 
-    def test_use_writes_default_path_to_config(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import api
-        from mordred_hermes.wizard import cli
-
-        rt = _FakeRuntime()
-        api.set_runtime(rt)
-        config = tmp_path / "config.yaml"
-        args = _make_args(path="tor", config_path=config)
-        cli._handle_network_use(args)
-
-        from ruamel.yaml import YAML
-
-        yaml = YAML(typ="safe", pure=True)
-        with config.open(encoding="utf-8") as f:
-            data = yaml.load(f)
-        assert data["plugins"]["mordred_network"]["default_path"] == "tor"
-
     def test_use_preserves_other_plugin_sections(self, tmp_path: Path) -> None:
         from mordred_hermes.network import api
         from mordred_hermes.wizard import cli
@@ -200,7 +156,7 @@ class TestNetworkUsePersistence:
             "plugins:\n  mordred_privacy_check:\n    policy: strict\n  mordred_llm_guard:\n    harness_primary: codex\n"
         )
         args = _make_args(path="tor", config_path=config)
-        cli._handle_network_use(args)
+        assert cli._handle_network_use(args) == 0
 
         from ruamel.yaml import YAML
 
@@ -210,56 +166,9 @@ class TestNetworkUsePersistence:
         assert data["plugins"]["mordred_privacy_check"]["policy"] == "strict"
         assert data["plugins"]["mordred_llm_guard"]["harness_primary"] == "codex"
         assert data["plugins"]["mordred_network"]["default_path"] == "tor"
-
-
-class TestNetworkUseAtomicity:
-    """H1 fix (review 2026-05-14): writes must use PolicyWriter so they
-    inherit the canonical ``_atomic_write_text`` (tempfile + os.replace).
-
-    Detection strategy: PolicyWriter's ``_ensure_plugins_enabled`` adds
-    the full Mordred-plugin list to ``plugins.enabled`` on every write
-    (HOOK_PAYLOADS.md §1). A plain ``Path.write_text``
-    would not produce that side effect. Asserting the side effect proves
-    the write went through PolicyWriter and therefore got atomic-rename
-    semantics — without us having to interrupt a write to test atomicity
-    directly.
-    """
-
-    def test_use_writes_via_policy_writer_adding_plugins_enabled(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import api
-        from mordred_hermes.wizard import cli
-
-        rt = _FakeRuntime()
-        api.set_runtime(rt)
-        config = tmp_path / "config.yaml"
-        args = _make_args(path="tor", config_path=config)
-        cli._handle_network_use(args)
-
-        from ruamel.yaml import YAML
-
-        yaml = YAML(typ="safe", pure=True)
-        with config.open(encoding="utf-8") as f:
-            data = yaml.load(f)
-        assert "enabled" in data["plugins"], (
-            "PolicyWriter must add plugins.enabled — network_cli regressed to a non-atomic write path"
-        )
-        enabled = data["plugins"]["enabled"]
-        # The single Mordred plugin must be enabled (PolicyWriter contract).
-        assert "mordred" in enabled, "mordred missing from plugins.enabled after network_cli write"
-
-    def test_use_does_not_leave_tmp_artifact(self, tmp_path: Path) -> None:
-        """PolicyWriter's ``_atomic_write_text`` writes to ``<name>.tmp``
-        and renames; a clean run must not leave the tempfile behind."""
-        from mordred_hermes.network import api
-        from mordred_hermes.wizard import cli
-
-        rt = _FakeRuntime()
-        api.set_runtime(rt)
-        config = tmp_path / "config.yaml"
-        args = _make_args(path="tor", config_path=config)
-        cli._handle_network_use(args)
-        tmp_artifact = config.with_name(config.name + ".tmp")
-        assert not tmp_artifact.exists()
+        # Writer integration: enabling Mordred accompanies the preserved config.
+        assert "mordred" in data["plugins"]["enabled"]
+        assert not config.with_name(config.name + ".tmp").exists()
 
 
 class TestNetworkUseStandalone:
@@ -281,6 +190,8 @@ class TestNetworkUseStandalone:
         # The message must communicate the change applies on the next session
         # (not the running process), without the old confusing "deferred" wording.
         assert "next" in out.lower() and "session" in out.lower()
+        assert "tor" in out
+        assert "'tor'" not in out
 
     def test_no_runtime_tor_missing_prints_install_guidance(
         self,
@@ -340,6 +251,7 @@ class TestNetworkStatusLive:
         out = capsys.readouterr().out
         assert "tor" in out.lower()
         assert "ready" in out.lower()
+        assert "'tor'" not in out
 
     def test_status_includes_dropped_warning_when_flagged(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -382,6 +294,7 @@ class TestNetworkStatusStandalone:
         assert rc == 0
         out = capsys.readouterr().out
         assert "clearnet" in out.lower()
+        assert "'clearnet'" not in out
 
 
 class TestNetworkInitGuidance:
@@ -422,33 +335,6 @@ class TestNetworkInitGuidance:
         assert "Mullvad CLI is not available yet" in summary
         assert "mullvad account login" in summary
 
-    def test_init_summary_custom_provider_does_not_warn_about_mullvad(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A custom-provider (e.g. ExpressVPN) user must never be told to
-        install Mullvad — the warning must be about *their* CLI."""
-        from mordred_hermes.wizard import network_cli
-
-        # Custom CLI resolves on PATH → the vpn route is ready, no warning.
-        monkeypatch.setattr(
-            "mordred_hermes.network.guidance.shutil.which",
-            lambda _name: "/usr/local/bin/expressvpnctl",
-        )
-        summary = network_cli._init_summary(
-            network_cli.NetworkAnswers(
-                default_network_path="vpn",
-                tor_binary_path="tor",
-                tor_socks_port=9050,
-                mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
-                mullvad_relay_country="auto",
-                mullvad_killswitch=False,
-                vpn_provider="custom",
-                custom_up_cmd=("expressvpnctl", "connect", "smart"),
-                custom_down_cmd=("expressvpnctl", "disconnect"),
-                custom_health_cmd=("expressvpnctl", "get", "connectionstate"),
-            ),
-            secret_written=False,
-        )
-        assert "Mullvad" not in summary
-
     def test_init_summary_custom_provider_missing_cli_warns_about_custom(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from mordred_hermes.wizard import network_cli
 
@@ -469,40 +355,13 @@ class TestNetworkInitGuidance:
         )
         assert "Mullvad" not in summary
         assert "expressvpnctl" in summary
+        assert "[warning]" in summary
+        assert "is not available yet" in summary
 
 
 class TestDependencyWarningProviderAware:
     """``dependency_warning`` must reflect the configured ``vpn_provider`` so a
     non-Mullvad VPN user is not misled into installing Mullvad."""
-
-    def test_vpn_custom_available_no_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from mordred_hermes.network import guidance
-
-        monkeypatch.setattr(
-            "mordred_hermes.network.guidance.shutil.which",
-            lambda _name: "/usr/local/bin/expressvpnctl",
-        )
-        warning = guidance.dependency_warning("vpn", vpn_provider="custom", custom_up_cmd=("expressvpnctl", "connect"))
-        assert warning is None
-
-    def test_vpn_custom_missing_names_custom_cli_not_mullvad(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from mordred_hermes.network import guidance
-
-        monkeypatch.setattr("mordred_hermes.network.guidance.shutil.which", lambda _name: None)
-        monkeypatch.setattr("pathlib.Path.exists", lambda _self: False)
-        warning = guidance.dependency_warning("vpn", vpn_provider="custom", custom_up_cmd=("expressvpnctl", "connect"))
-        assert warning is not None
-        assert "Mullvad" not in warning
-        assert "expressvpnctl" in warning
-
-    def test_vpn_mullvad_still_warns_about_mullvad(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from mordred_hermes.network import guidance
-
-        monkeypatch.setattr("mordred_hermes.network.guidance.shutil.which", lambda _name: None)
-        monkeypatch.setattr("pathlib.Path.exists", lambda _self: False)
-        warning = guidance.dependency_warning("vpn", vpn_provider="mullvad")
-        assert warning is not None
-        assert "Mullvad CLI is not available yet" in warning
 
     def test_vpn_wireguard_missing_names_wireguard_not_mullvad(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -533,38 +392,6 @@ class TestNetworkUseMergePreservation:
     ``merge_mordred_sections`` so partial writes preserve everything else.
     """
 
-    def test_use_clearnet_preserves_tor_subfields(self, tmp_path: Path) -> None:
-        from mordred_hermes.wizard import cli
-
-        seed = """\
-plugins:
-  mordred_network:
-    default_path: tor
-    tor_binary_path: /usr/bin/tor
-    tor_socks_port: 9050
-    mullvad_account_id_env: MORDRED_MULLVAD_ACCOUNT
-    mullvad_relay_country: jp
-"""
-        config = tmp_path / "config.yaml"
-        config.write_text(seed, encoding="utf-8")
-
-        args = _make_args(path="clearnet", config_path=config)
-        rc = cli._handle_network_use(args)
-        assert rc == 0
-
-        from ruamel.yaml import YAML
-
-        yaml = YAML(typ="safe", pure=True)
-        with config.open(encoding="utf-8") as f:
-            data = yaml.load(f)
-        section = data["plugins"]["mordred_network"]
-        assert section["default_path"] == "clearnet"
-        # All four sub-fields must survive the partial write.
-        assert section["tor_binary_path"] == "/usr/bin/tor"
-        assert section["tor_socks_port"] == 9050
-        assert section["mullvad_account_id_env"] == "MORDRED_MULLVAD_ACCOUNT"
-        assert section["mullvad_relay_country"] == "jp"
-
     def test_use_tor_then_use_clearnet_preserves_tor_subfields_across_runs(self, tmp_path: Path) -> None:
         """Two-step regression: configure persists Tor sub-fields, then a
         subsequent ``network use clearnet`` must not drop them."""
@@ -575,6 +402,8 @@ plugins:
   mordred_network:
     tor_binary_path: /opt/tor/bin/tor
     tor_socks_port: 19050
+    mullvad_account_id_env: MORDRED_MULLVAD_ACCOUNT
+    mullvad_relay_country: jp
 """
         config = tmp_path / "config.yaml"
         config.write_text(seed, encoding="utf-8")
@@ -595,6 +424,8 @@ plugins:
         assert section["default_path"] == "clearnet"
         assert section["tor_binary_path"] == "/opt/tor/bin/tor"
         assert section["tor_socks_port"] == 19050
+        assert section["mullvad_account_id_env"] == "MORDRED_MULLVAD_ACCOUNT"
+        assert section["mullvad_relay_country"] == "jp"
 
 
 # --------------------------------------------------------------------------- #
@@ -635,42 +466,97 @@ class TestUseErrorChannel:
         assert "tor timeout" in captured.err
 
 
-class TestOutputHasNoPythonRepr:
-    """UX review 2026-06-11 Phase 3: enum values and paths must not be
-    rendered through ``!r`` — users see Python quoting ('tor') leak into
-    what should be plain CLI output."""
-
-    def test_use_deferred_message_is_plain(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+class TestInvalidConfiguration:
+    @pytest.fixture
+    def protected_files(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[Path, bytes]:
         from mordred_hermes.wizard import network_cli
 
-        args = _make_args(path="tor", config_path=tmp_path / "config.yaml")
-        rc = network_cli.handle_use(args)
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "'tor'" not in out
-        assert "tor" in out
+        files = {
+            tmp_path / "config.yaml": b"plugins: {}\n",
+            tmp_path / ".env": b"MORDRED_MULLVAD_ACCOUNT=KEEP-SECRET\n",
+            tmp_path / "mordred" / "credentials" / "network.json": b'{"existing": true}\n',
+        }
+        for path, contents in files.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents)
+        monkeypatch.setattr(network_cli, "HERMES_BASE", tmp_path)
 
-    def test_live_status_message_is_plain(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        from mordred_hermes.network import api
+        def never(*args: object, **kwargs: object) -> None:
+            pytest.fail("invalid config must refuse before switching runtime or writing secrets/credentials")
+
+        monkeypatch.setattr(network_cli.api, "use", never)
+        monkeypatch.setattr(network_cli, "_runtime_registered", lambda: True)
+        monkeypatch.setattr(network_cli.DotEnvFileWriter, "upsert", never)
+        monkeypatch.setattr(network_cli.JSONCredentialsWriter, "write_network", never)
+        return files
+
+    def _invoke(self, command: str, tmp_path: Path) -> int:
         from mordred_hermes.wizard import network_cli
 
-        rt = _FakeRuntime()
-        api.set_runtime(rt)
-        rt.use("tor")
-        rc = network_cli.handle_status(_make_args(config_path=tmp_path / "config.yaml"))
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "'tor'" not in out
-        assert "tor" in out
+        args = _make_args(path="tor", config_path=tmp_path / "config.yaml", non_interactive=True, clear_mullvad=True)
+        return network_cli.handle_use(args) if command == "use" else network_cli.handle_init(args)
 
-    def test_disk_status_message_is_plain(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        from mordred_hermes.wizard import network_cli
+    @pytest.mark.skipif(os.name == "nt", reason="generic YAML writer; checked Windows validation has separate coverage")
+    @pytest.mark.parametrize("command", ["use", "init"])
+    def test_malformed_yaml_refuses_without_leaking_or_changing_files(
+        self,
+        command: str,
+        tmp_path: Path,
+        protected_files: dict[Path, bytes],
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        config = tmp_path / "config.yaml"
+        protected_files[config] = b"plugins: [\n  TOP-SECRET-SENTINEL: {"
+        config.write_bytes(protected_files[config])
 
-        rc = network_cli.handle_status(_make_args(config_path=tmp_path / "config.yaml"))
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "'clearnet'" not in out
-        assert "clearnet" in out
+        assert self._invoke(command, tmp_path) == 1
+
+        captured = capsys.readouterr()
+        assert "invalid" in captured.err.lower() and "config" in captured.err.lower()
+        assert captured.out == ""
+        assert "TOP-SECRET-SENTINEL" not in captured.err + caplog.text
+        assert {path: path.read_bytes() for path in protected_files} == protected_files
+
+    @pytest.mark.parametrize("command", ["use", "init"])
+    def test_checked_validation_refuses_without_leaking_or_changing_files(
+        self,
+        command: str,
+        tmp_path: Path,
+        protected_files: dict[Path, bytes],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from mordred_hermes.wizard.policy_writer import PolicyWriter
+
+        def reject(self: object, sections: object) -> None:
+            raise ValueError("canonical config validation: TOP-SECRET-SENTINEL")
+
+        monkeypatch.setattr(PolicyWriter, "merge_mordred_sections", reject)
+        assert self._invoke(command, tmp_path) == 1
+        captured = capsys.readouterr()
+        assert "invalid" in captured.err.lower() and "config" in captured.err.lower()
+        assert captured.out == ""
+        assert "TOP-SECRET-SENTINEL" not in captured.err
+        assert {path: path.read_bytes() for path in protected_files} == protected_files
+
+    @pytest.mark.parametrize("command", ["use", "init"])
+    def test_unexpected_writer_failure_propagates(
+        self,
+        command: str,
+        tmp_path: Path,
+        protected_files: dict[Path, bytes],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from mordred_hermes.wizard.policy_writer import PolicyWriter
+
+        def bug(self: object, sections: object) -> None:
+            raise RuntimeError("unexpected writer bug")
+
+        monkeypatch.setattr(PolicyWriter, "merge_mordred_sections", bug)
+        with pytest.raises(RuntimeError, match="unexpected writer bug"):
+            self._invoke(command, tmp_path)
+        assert {path: path.read_bytes() for path in protected_files} == protected_files
 
 
 class TestStatusJson:

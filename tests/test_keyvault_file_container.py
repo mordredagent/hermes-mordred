@@ -57,8 +57,16 @@ def sealed(backend: FakeBackend) -> tuple[bytes, kek.MasterKey]:
 
 def test_round_trip(sealed: tuple[bytes, kek.MasterKey]) -> None:
     wmk, master = sealed
-    data = b"ANTHROPIC_API_KEY=sk-secret\nFOO=bar\n"
+    data = b"ANTHROPIC_API_KEY=super-secret-token-value\nFOO=bar\n"
     blob = file_container.encode(master, data, key_id=_KEY_ID, wmk=wmk, name=".env")
+    assert b"super-secret-token-value" not in blob
+    assert data not in blob
+    header = json.loads(blob.split(b"\n", 1)[0])
+    assert header["fmt"] == "MVLT"
+    assert header["ver"] == 1
+    assert header["key_id"] == _KEY_ID
+    assert header["name"] == ".env"
+    assert base64.b64decode(header["wmk"], validate=True) == wmk
     assert file_container.decode(blob, master, name=".env") == data
 
 
@@ -86,24 +94,6 @@ def test_tree_relative_name_round_trips(sealed: tuple[bytes, kek.MasterKey]) -> 
 # ---------------------------------------------------------------------------
 # wire format
 # ---------------------------------------------------------------------------
-
-
-def test_header_is_mvlt_v1(sealed: tuple[bytes, kek.MasterKey]) -> None:
-    wmk, master = sealed
-    blob = file_container.encode(master, b"x", key_id=_KEY_ID, wmk=wmk, name=".env")
-    header = json.loads(blob.split(b"\n", 1)[0])
-    assert header["fmt"] == "MVLT"
-    assert header["ver"] == 1
-    assert header["key_id"] == _KEY_ID
-    assert header["name"] == ".env"
-    assert base64.b64decode(header["wmk"], validate=True) == wmk
-
-
-def test_body_carries_no_plaintext(sealed: tuple[bytes, kek.MasterKey]) -> None:
-    wmk, master = sealed
-    secret = b"super-secret-token-value"
-    blob = file_container.encode(master, secret, key_id=_KEY_ID, wmk=wmk, name=".env")
-    assert secret not in blob
 
 
 # ---------------------------------------------------------------------------

@@ -130,12 +130,8 @@ def test_legacy_stub_version_is_strictly_below_compat_version() -> None:
     """
     stub = Version(str(_read(_STUB_PYPROJECT)["version"]))
     compat = Version(str(_read(_COMPAT_PYPROJECT)["version"]))
+    assert stub.is_devrelease
     assert stub < compat, f"stub {stub} must be < compatibility release {compat}"
-
-
-def test_stub_version_is_a_dev_release() -> None:
-    """The reservation stub is a ``.devN`` release — never a real version."""
-    assert Version(str(_read(_STUB_PYPROJECT)["version"])).is_devrelease
 
 
 def test_rename_stub_version_is_a_dev_release_below_the_real_version() -> None:

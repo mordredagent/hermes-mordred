@@ -63,6 +63,7 @@ class TelegramSecrets:
     backend: str | None = None
     local_endpoint: str | None = None
     local_model: str | None = None
+    local_api_key: str | None = None
 
     def __repr__(self) -> str:  # never let a traceback or log line print secrets
         return (
@@ -138,7 +139,7 @@ def encode(value: TelegramSecrets) -> bytes:
         payload["venice_api_key"] = value.venice_api_key
     if value.venice_model is not None:
         payload["venice_model"] = value.venice_model
-    for key in ("backend", "local_endpoint", "local_model"):
+    for key in ("backend", "local_endpoint", "local_model", "local_api_key"):
         if getattr(value, key) is not None:
             payload[key] = getattr(value, key)
     return json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -184,6 +185,7 @@ def decode(blob: bytes) -> TelegramSecrets:
         backend=_optional_str(payload, "backend"),
         local_endpoint=_optional_str(payload, "local_endpoint"),
         local_model=_optional_str(payload, "local_model"),
+        local_api_key=_optional_str(payload, "local_api_key"),
     )
 
 
@@ -219,6 +221,15 @@ class VaultSecretStore:
         return default_vault_root()
 
     def _open(self) -> Any:
+        from .store import _platform
+
+        if _platform() == "win32":
+            # The file vault is excluded on Windows (C5e); refuse before any path use.
+            from ...keyvault._windows_capability import KeyvaultUnsupportedOnWindows
+
+            raise TelegramSecretsError("vault_unavailable") from KeyvaultUnsupportedOnWindows(
+                "file_vault", "telegram_vault_secret_store"
+            )
         from ...keyvault import vault
         from ...keyvault._identity import resolve_backend_store, vault_identity
 

@@ -88,6 +88,16 @@ class TestProbeSuccess:
 
 
 class TestProbeFailure:
+    def test_informational_response_is_not_a_successful_probe(self) -> None:
+        from mordred_hermes.llm_guard._exceptions import MordredLocalUnreachable
+        from mordred_hermes.llm_guard.health import probe
+
+        with pytest.raises(MordredLocalUnreachable, match="103"):
+            probe(
+                endpoint="http://127.0.0.1:1234/v1",
+                transport=httpx.MockTransport(lambda request: httpx.Response(103)),
+            )
+
     def test_500_raises_unreachable(self) -> None:
         from mordred_hermes.llm_guard._exceptions import MordredLocalUnreachable
         from mordred_hermes.llm_guard.health import probe
@@ -118,24 +128,6 @@ class TestProbeFailure:
                 transport=httpx.MockTransport(_timeout_handler),
             )
 
-    def test_unreachable_is_catchable(self) -> None:
-        """Lenient mode must be able to ``except Exception`` and degrade.
-
-        Verifies :class:`MordredLocalUnreachable` is an ``Exception`` subclass
-        (already covered in test_exceptions.py but worth pinning here so the
-        contract doesn't drift if the class is refactored).
-        """
-        from mordred_hermes.llm_guard._exceptions import MordredLocalUnreachable
-        from mordred_hermes.llm_guard.health import probe
-
-        try:
-            probe(
-                endpoint="http://localhost:1234/v1",
-                transport=httpx.MockTransport(_connect_error_handler),
-            )
-        except Exception as e:
-            assert isinstance(e, MordredLocalUnreachable)
-
 
 class TestProbeContract:
     def test_default_timeout_is_short(self) -> None:
@@ -148,17 +140,6 @@ class TestProbeContract:
         from mordred_hermes.llm_guard.health import DEFAULT_TIMEOUT_SECONDS
 
         assert 0 < DEFAULT_TIMEOUT_SECONDS <= 5, f"health probe must be fast; got {DEFAULT_TIMEOUT_SECONDS}s"
-
-    def test_timeout_keyword_propagates(self) -> None:
-        """Explicit ``timeout=`` overrides the default."""
-        from mordred_hermes.llm_guard.health import probe
-
-        # Just exercises the signature — actual timing is mocked.
-        probe(
-            endpoint="http://localhost:1234/v1",
-            transport=httpx.MockTransport(_success_handler),
-            timeout=1.0,
-        )
 
     def test_probe_never_trusts_ambient_proxy_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from mordred_hermes.llm_guard import health
@@ -174,5 +155,7 @@ class TestProbeContract:
         health.probe(
             endpoint="http://127.0.0.1:1234/v1",
             transport=httpx.MockTransport(_success_handler),
+            timeout=1.0,
         )
         assert seen["trust_env"] is False
+        assert seen["timeout"] == 1.0

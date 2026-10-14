@@ -38,34 +38,12 @@ def backend() -> FakeBackend:
     return b
 
 
-def test_seal_returns_wmk_recovery_and_usable_master(backend: FakeBackend) -> None:
-    sealed, master = vault_master.seal(key_id=_KEY_ID, passphrase=_PASS, backend=backend)
-    assert sealed.recovery[:4] == b"MRKV"  # PR2 backup magic
-    # the returned master is immediately usable
-    blob = file_container.encode(master, b"x", key_id=_KEY_ID, wmk=sealed.wmk, name=".env")
-    assert file_container.decode(blob, master, name=".env") == b"x"
-
-
-def test_se_open_yields_same_master(backend: FakeBackend) -> None:
-    """The wmk unwraps (via the Enclave) to the same master that sealed it."""
-    sealed, master = vault_master.seal(key_id=_KEY_ID, passphrase=_PASS, backend=backend)
-    blob = file_container.encode(master, b"secret-value", key_id=_KEY_ID, wmk=sealed.wmk, name=".env")
-    se_master = kek.open_master_key(sealed.wmk, _KEY_ID, backend=backend)
-    assert file_container.decode(blob, se_master, name=".env") == b"secret-value"
-
-
-def test_passphrase_open_yields_same_master(backend: FakeBackend) -> None:
-    """The recovery blob unwraps (via Argon2id) to the same master."""
-    sealed, master = vault_master.seal(key_id=_KEY_ID, passphrase=_PASS, backend=backend)
-    blob = file_container.encode(master, b"secret-value", key_id=_KEY_ID, wmk=sealed.wmk, name=".env")
-    pp_master = vault_master.open_passphrase(sealed.recovery, _PASS, wmk=sealed.wmk)
-    assert file_container.decode(blob, pp_master, name=".env") == b"secret-value"
-
-
 def test_se_and_passphrase_paths_agree(backend: FakeBackend) -> None:
     """Both seals protect the SAME master — SE and passphrase decode identically."""
     sealed, master = vault_master.seal(key_id=_KEY_ID, passphrase=_PASS, backend=backend)
+    assert sealed.recovery[:4] == b"MRKV"
     blob = file_container.encode(master, b"payload", key_id=_KEY_ID, wmk=sealed.wmk, name="config.yaml")
+    assert file_container.decode(blob, master, name="config.yaml") == b"payload"
     se = file_container.decode(blob, kek.open_master_key(sealed.wmk, _KEY_ID, backend=backend), name="config.yaml")
     pp = file_container.decode(
         blob, vault_master.open_passphrase(sealed.recovery, _PASS, wmk=sealed.wmk), name="config.yaml"
@@ -114,16 +92,6 @@ def _new_device_backend() -> FakeBackend:
     return b
 
 
-def test_reseal_changes_wmk(backend: FakeBackend) -> None:
-    """Re-keying onto a (fresh) device produces a different wmk than the old one."""
-    sealed, _master = vault_master.seal(key_id=_KEY_ID, passphrase=_PASS, backend=backend)
-    new_device = _new_device_backend()
-    resealed = vault_master.reseal_onto_device(
-        sealed.recovery, _PASS, old_wmk=sealed.wmk, key_id=_KEY_ID, backend=new_device
-    )
-    assert resealed.wmk != sealed.wmk
-
-
 def test_reseal_preserves_master(backend: FakeBackend) -> None:
     """The master is UNCHANGED — a file sealed before re-keying still decodes
     under the new wmk's SE unwrap and under the new recovery blob."""
@@ -134,6 +102,7 @@ def test_reseal_preserves_master(backend: FakeBackend) -> None:
     resealed = vault_master.reseal_onto_device(
         sealed.recovery, _PASS, old_wmk=sealed.wmk, key_id=_KEY_ID, backend=new_device
     )
+    assert resealed.wmk != sealed.wmk
     # SE hot path on the new device unwraps the new wmk to the same master.
     se_master = kek.open_master_key(resealed.wmk, _KEY_ID, backend=new_device)
     assert file_container.decode(blob, se_master, name=".env") == b"payload"

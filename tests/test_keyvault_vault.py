@@ -69,34 +69,16 @@ def _open(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> vault.Ope
 # ---------------------------------------------------------------------------
 
 
-def test_init_creates_empty_vault(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
+def test_reopen_persists_enrolled_files(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
     v = _init(tmp_path, backend, store)
     assert v.list_files() == []
     assert v.generation == 0
-    v.close()
-
-
-def test_enroll_then_read_round_trips(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
-    v = _init(tmp_path, backend, store)
-    v.enroll_file(".env", b"ANTHROPIC_API_KEY=sk-secret\n")
-    assert v.read_file(".env") == b"ANTHROPIC_API_KEY=sk-secret\n"
-    v.close()
-
-
-def test_enroll_bumps_generation(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
-    v = _init(tmp_path, backend, store)
-    v.enroll_file(".env", b"a")
-    assert v.generation == 1
-    v.enroll_file("config.yaml", b"b")
-    assert v.generation == 2
-    assert sorted(v.list_files()) == [".env", "config.yaml"]
-    v.close()
-
-
-def test_reopen_persists_enrolled_files(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
-    v = _init(tmp_path, backend, store)
     v.enroll_file(".env", b"SECRET=1\n")
+    assert v.generation == 1
+    assert v.read_file(".env") == b"SECRET=1\n"
     v.enroll_file("notes/2026/foo.md", b"# memory\n")
+    assert v.generation == 2
+    assert sorted(v.list_files()) == [".env", "notes/2026/foo.md"]
     v.close()
 
     reopened = _open(tmp_path, backend, store)
@@ -296,17 +278,6 @@ def test_context_manager_closes(tmp_path: Path, backend: FakeBackend, store: Fak
         v.read_file(".env")
 
 
-def test_recovery_sidecar_written(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
-    """init must persist the passphrase recovery blob as a sidecar (NOT inside
-    the manifest — keeping the Argon2id brute-force target out of the
-    integrity-critical registry, per the design review)."""
-    v = _init(tmp_path, backend, store)
-    v.close()
-    sidecar = tmp_path / "recovery.mrkv"
-    assert sidecar.exists()
-    assert sidecar.read_bytes()  # non-empty
-
-
 def test_files_are_owner_only_mode(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
     v = _init(tmp_path, backend, store)
     v.enroll_file(".env", b"x")
@@ -330,17 +301,6 @@ def test_files_are_owner_only_mode(tmp_path: Path, backend: FakeBackend, store: 
 # recovered vault is READ-ONLY until it is re-keyed onto a new device.
 
 
-def test_recover_reads_enrolled_files(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
-    v = _init(tmp_path, backend, store)
-    v.enroll_file(".env", b"ANTHROPIC_API_KEY=sk-secret\n")
-    v.close()
-
-    # Recovery uses neither the SE backend nor the anchor store.
-    rv = vault.recover_vault(tmp_path, _PASSPHRASE)
-    assert rv.read_file(".env") == b"ANTHROPIC_API_KEY=sk-secret\n"
-    rv.close()
-
-
 def test_recover_reads_latest_generation(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
     v = _init(tmp_path, backend, store)
     v.enroll_file(".env", b"v1")
@@ -350,6 +310,7 @@ def test_recover_reads_latest_generation(tmp_path: Path, backend: FakeBackend, s
     rv = vault.recover_vault(tmp_path, _PASSPHRASE)
     assert rv.generation == 2
     assert sorted(rv.list_files()) == [".env", "config.yaml"]
+    assert rv.read_file(".env") == b"v1"
     assert rv.read_file("config.yaml") == b"cfg"
     rv.close()
 
@@ -523,40 +484,6 @@ def test_init_rejects_symlinked_root(tmp_path: Path, backend: FakeBackend, store
 # ---------------------------------------------------------------------------
 
 
-def test_unenroll_removes_name_and_bumps_generation(
-    tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore
-) -> None:
-    v = _init(tmp_path, backend, store)
-    v.enroll_file(".env", b"SECRET=1\n")
-    gen_before = v.generation
-    v.unenroll_file(".env")
-    assert ".env" not in v.list_files()
-    assert v.generation == gen_before + 1
-    with pytest.raises(vault.VaultError):
-        v.read_file(".env")  # fail-closed: no longer enrolled
-    v.close()
-
-
-def test_unenroll_keeps_other_files_intact(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
-    v = _init(tmp_path, backend, store)
-    v.enroll_file(".env", b"SECRET=1\n")
-    v.enroll_file("config.yaml", b"model: x\n")
-    v.unenroll_file(".env")
-    assert v.list_files() == ["config.yaml"]
-    assert v.read_file("config.yaml") == b"model: x\n"
-    v.close()
-
-
-def test_unenroll_gcs_orphan_blob(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
-    v = _init(tmp_path, backend, store)
-    v.enroll_file(".env", b"SECRET=1\n")
-    assert len(list((tmp_path / "blobs").glob("*.blob"))) == 1
-    v.unenroll_file(".env")
-    # the removed file's ciphertext blob is no longer referenced → GC'd
-    assert list((tmp_path / "blobs").glob("*.blob")) == []
-    v.close()
-
-
 def test_unenroll_absent_name_is_noop(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
     v = _init(tmp_path, backend, store)
     v.enroll_file("config.yaml", b"x")
@@ -570,12 +497,24 @@ def test_unenroll_absent_name_is_noop(tmp_path: Path, backend: FakeBackend, stor
 def test_unenroll_persists_after_reopen(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
     v = _init(tmp_path, backend, store)
     v.enroll_file(".env", b"S=1\n")
+    env_blobs = set((tmp_path / "blobs").glob("*.blob"))
+    assert len(env_blobs) == 1
     v.enroll_file("config.yaml", b"y")
+    all_blobs = set((tmp_path / "blobs").glob("*.blob"))
+    assert len(all_blobs) == 2
+    gen_before = v.generation
     v.unenroll_file(".env")
+    assert v.generation == gen_before + 1
+    assert v.list_files() == ["config.yaml"]
+    assert v.read_file("config.yaml") == b"y"
+    with pytest.raises(vault.VaultError):
+        v.read_file(".env")
+    assert set((tmp_path / "blobs").glob("*.blob")) == all_blobs - env_blobs
     v.close()
 
     reopened = _open(tmp_path, backend, store)
     assert reopened.list_files() == ["config.yaml"]
+    assert reopened.read_file("config.yaml") == b"y"
     with pytest.raises(vault.VaultError):
         reopened.read_file(".env")
     reopened.close()

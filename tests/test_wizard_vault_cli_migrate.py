@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import pytest
@@ -30,7 +31,8 @@ class TestMigrate:
             == 0
         )
 
-    def test_enrolls_each_source_under_basename(self, tmp_path: Path) -> None:
+    def test_enrolls_each_source_under_basename(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "platform", "linux")
         root = tmp_path / "v"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
@@ -41,6 +43,9 @@ class TestMigrate:
 
         rc = vault_cli.migrate(root=root, sources=[plain / ".env", plain / "config.yaml"], backend=backend, store=store)
         assert rc == 0
+        # Enrollment leaves the operator's plaintext sources intact.
+        assert (plain / ".env").read_bytes() == b"ANTHROPIC_API_KEY=sk-secret\n"
+        assert (plain / "config.yaml").read_bytes() == b"a: 1\n"
         opened = vault.recover_vault(root, _PASSPHRASE)
         try:
             assert opened.read_file(".env") == b"ANTHROPIC_API_KEY=sk-secret\n"
@@ -87,11 +92,12 @@ class TestMigrate:
         finally:
             opened.close()
 
-    def test_empty_sources_is_noop(self, tmp_path: Path) -> None:
+    def test_empty_sources_is_noop(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "platform", "linux")
         root = tmp_path / "v"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
-        rc = vault_cli.migrate(root=root, sources=[], backend=backend, store=store)
+        rc = vault_cli.migrate(root=root, sources=[])
         assert rc == 0
         opened = vault.recover_vault(root, _PASSPHRASE)
         try:
@@ -115,17 +121,6 @@ class TestMigrate:
         rc = vault_cli.migrate(root=root, sources=[src], backend=backend, store=_ReadRaisesStore())
         assert rc == 1
         assert capsys.readouterr().err.strip() != ""
-
-    def test_does_not_remove_plaintext_source(self, tmp_path: Path) -> None:
-        """Like ``add``, migrate never deletes the plaintext — the operator owns shredding."""
-        root = tmp_path / "v"
-        backend, store = FakeBackend(), FakeAnchorStore()
-        self._init(root, backend, store)
-        src = tmp_path / ".env"
-        src.write_bytes(b"K=v\n")
-        assert vault_cli.migrate(root=root, sources=[src], backend=backend, store=store) == 0
-        assert src.exists()
-        assert src.read_bytes() == b"K=v\n"
 
     def test_overwrite_supersedes(self, tmp_path: Path) -> None:
         root = tmp_path / "v"

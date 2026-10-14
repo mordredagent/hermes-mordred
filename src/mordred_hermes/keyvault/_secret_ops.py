@@ -298,6 +298,9 @@ def encrypt(
     audit entries at this layer (no authorization gate, and the wrap
     layer never emits on the wrap path).
     """
+    from ._windows_capability import refuse_unported_on_windows
+
+    refuse_unported_on_windows("secret_store", "encrypt")  # before any I/O or mkdir (C5e)
     del audit_sink  # documented no-op for encrypt; reserved for symmetry with decrypt
     _validate_purpose(purpose)
     root = _storage.resolve_keyvault_dir(home)
@@ -374,6 +377,9 @@ def decrypt(
     entry via the supplied ``audit_sink``. ``decrypt`` does NOT
     double-emit at the api layer (codex OD-3).
     """
+    from ._windows_capability import refuse_unported_on_windows
+
+    refuse_unported_on_windows("secret_store", "decrypt")  # before any I/O or mkdir (C5e)
     _validate_purpose(purpose)
     _validate_envelope_id(envelope_id)
     root = _storage.resolve_keyvault_dir(home)

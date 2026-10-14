@@ -108,7 +108,11 @@ def _install_journey_guard() -> None:
     Fail-open and lazy, unlike the memory seam above: a missing or refactored
     ``agent.learning_mutations`` is a silent no-op (the guard is defence in depth —
     the read seam already refuses to hand a sealed file back as entries), and a
-    guard problem must never break startup.
+    guard problem must never break startup. Windows is the exception, enforced
+    inside ``install_journey_guard`` rather than here: outside a checked fresh
+    unmanaged profile an unsupported journey seam is replaced by refusal stubs,
+    or the process stops through ``SystemExit`` / ``os._exit`` — neither is an
+    ``Exception``, so this containment cannot swallow it.
 
     Importing the module here is the same trade ``_load_memory_tool`` already
     makes: ``register()`` runs inside plugin discovery, well after the host has
@@ -120,7 +124,7 @@ def _install_journey_guard() -> None:
         from ._memory_hook import install_journey_guard
 
         install_journey_guard(importlib.import_module("agent.learning_mutations"))
-    except Exception:
+    except Exception:  # never the Windows managed/indeterminate stop: that is not an Exception
         import logging
 
         logging.getLogger(__name__).debug("journey guard not installed", exc_info=True)

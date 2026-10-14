@@ -191,23 +191,6 @@ class TestTorUse:
 
         rt.stop()
 
-    def test_no_isolation_token_keeps_bare_url(self) -> None:
-        """Regression guard: unset token → credential-free URL (unchanged)."""
-        env: dict[str, str] = {}
-        tor = _TorFakes(pick_port_return=9050)
-        rt = _make_runtime(tor_fakes=tor, env=env)
-        rt.use("tor")
-        assert env["HTTPS_PROXY"] == "socks5h://127.0.0.1:9050"
-        rt.stop()
-
-    def test_status_reports_tor_active(self) -> None:
-        rt = _make_runtime()
-        rt.use("tor")
-        s = rt.status()
-        assert s.active_path == "tor"
-        assert s.ready is True
-        rt.stop()
-
     def test_tor_bringup_failure_strict_reraises(self) -> None:
         tor = _TorFakes(wait_raises=BringupFailed("bootstrap timeout"))
         rt = _make_runtime(tor_fakes=tor, policy_mode="strict")

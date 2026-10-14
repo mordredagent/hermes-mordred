@@ -95,17 +95,7 @@ class TestMaterializeConfig:
         n = _config_bootstrap.materialize_config(root=root, home=home, backend=backend, store=store)
         assert n == 1
         assert (home / "config.yaml").read_bytes() == _CONFIG
-
-    def test_materialized_file_is_0600(self, tmp_path: Path) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_vault_with_config(root, backend, store, _CONFIG)
-        _write_marker(home)
-
-        _config_bootstrap.materialize_config(root=root, home=home, backend=backend, store=store)
-        mode = stat.S_IMODE((home / "config.yaml").stat().st_mode)
-        assert mode == 0o600
+        assert stat.S_IMODE((home / "config.yaml").stat().st_mode) == 0o600
 
     def test_identical_disk_is_idempotent(self, tmp_path: Path) -> None:
         """A plaintext already equal to the vault copy stays put — still 'present' (1)."""
@@ -241,8 +231,10 @@ class TestMaterializeConfig:
         root, home = tmp_path / "v", tmp_path / "home"
         home.mkdir()
         _write_marker(home)
-        with pytest.raises(vault.VaultError, match="no vault exists"):
+        with pytest.raises(vault.VaultError, match="no vault exists") as refusal:
             _config_bootstrap.materialize_config(root=root, home=home, backend=FakeBackend(), store=FakeAnchorStore())
+        assert "hermes-mordred vault disable-config-decrypt" in str(refusal.value)
+        assert "hermes mordred " not in str(refusal.value)
         assert not (home / "config.yaml").exists()
 
     def test_keychain_read_error_fails_closed(self, tmp_path: Path) -> None:
@@ -431,17 +423,6 @@ class TestInstallConfigDecrypt:
         assert seen["home"] == tmp_path / "home"
 
 
-class TestRecoveryHint:
-    def test_uses_today_working_console_script(self) -> None:
-        """The fail-closed recovery hint must use ``hermes-mordred`` — the console
-        script wired today (``pyproject.toml`` ``[project.scripts]``). The
-        ``hermes mordred ...`` form only works once Hermes 0.12+ wires entry-point
-        CLIs, so emitting it would strand a user on the recovery path on current
-        installs."""
-        assert "hermes-mordred vault disable-config-decrypt" in _config_bootstrap._RECOVERY_HINT
-        assert "hermes mordred " not in _config_bootstrap._RECOVERY_HINT
-
-
 class TestConfigHookInstalled:
     """``config_hook_installed`` detects the force-included startup ``.pth`` in the
     interpreter's site-packages, so ``encryption status`` / ``enable`` can tell
@@ -449,12 +430,6 @@ class TestConfigHookInstalled:
     only whether the opt-in marker is set)."""
 
     _PTH = "mordred_hermes_config_decrypt.pth"
-
-    def test_present_pth_that_wires_bootstrap_is_detected(self, tmp_path: Path) -> None:
-        (tmp_path / self._PTH).write_text(
-            "__import__('mordred_hermes._pth_bootstrap', fromlist=['run']).run()\n", encoding="utf-8"
-        )
-        assert _config_bootstrap.config_hook_installed(site_dirs=[str(tmp_path)]) is True
 
     def test_absent_pth_is_not_detected(self, tmp_path: Path) -> None:
         assert _config_bootstrap.config_hook_installed(site_dirs=[str(tmp_path)]) is False
@@ -467,5 +442,7 @@ class TestConfigHookInstalled:
         empty, has = tmp_path / "a", tmp_path / "b"
         empty.mkdir()
         has.mkdir()
-        (has / self._PTH).write_text("__import__('mordred_hermes._pth_bootstrap')\n", encoding="utf-8")
+        (has / self._PTH).write_text(
+            "__import__('mordred_hermes._pth_bootstrap', fromlist=['run']).run()\n", encoding="utf-8"
+        )
         assert _config_bootstrap.config_hook_installed(site_dirs=[str(empty), str(has)]) is True

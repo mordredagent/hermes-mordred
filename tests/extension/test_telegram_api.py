@@ -195,6 +195,11 @@ def test_sync_runs_in_background_and_records_errors(tmp_path):
     status = asyncio.run(scenario())
     assert status["last_error"] == "telegram_session_revoked"
     assert status["syncing"] is False
+    # The dead session is dropped so setup asks to log in again; the rest stays.
+    kept = svc._secrets.load()
+    assert kept is not None and kept.session is None
+    assert kept.api_id == _value().api_id and kept.store_key == _value().store_key
+    assert status["logged_in"] is False
 
 
 def _collect_ask(svc, request) -> tuple[list[str], list[Any]]:
