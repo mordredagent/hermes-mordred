@@ -14,7 +14,7 @@ import {
   PALETTE_AREA,
 } from '@hermes/plugin-sdk'
 import { jsx, jsxs, Fragment } from 'react/jsx-runtime'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 let rest = null
 // The SDK checkbox's default border is a pale theme colour that disappears on
@@ -57,6 +57,12 @@ const MESSAGES = {
   update_not_a_venv: 'Hermes is not running inside a virtual environment, so Mordred refuses to modify it.',
   update_bad_version: 'That is not a valid release version.',
   update_refused: 'Mordred cannot update itself here. Rerun the installer from a terminal.',
+  update_not_newer: 'That release is not newer than the one installed.',
+  update_busy: 'An uninstall is running. Wait for it to finish.',
+  uninstall_busy: 'A Mordred update is running. Wait for it to finish, then restart Hermes.',
+  update_job_lost: 'The backend no longer reports the update job (it probably restarted). Press Check for updates to see what is installed now; do not start a second update until then.',
+  update_job_timeout: 'The update is taking longer than expected. Leave it running and press Check for updates later; do not start a second update until then.',
+  job_not_found: 'The backend no longer reports that job (it probably restarted). Check the current state before retrying.',
   // Windows (machine-bound CNG custody, no per-use presence).
   telegram_not_enrolled: 'Telegram custody is not enrolled on this Windows profile. Follow the custody step or recovery remedy below.',
   telegram_custody_unavailable: 'Telegram custody could not be checked on this Windows profile.',
@@ -1064,11 +1070,28 @@ function RepairPanel({ probeResult, recheck }) {
 // day-old answer and asks PyPI at most once a day; `refresh=1` is the user's
 // explicit "Check now". The decision whether an update can run here comes from
 // the API (`supported` / `refusal.code`), never from text or the platform guess.
-async function pollJob(jobId) {
+// Poll a job until it ends. Stops when the server no longer knows the job
+// (ok:false: the backend restarted mid-job), after `deadlineMs`, or when
+// `alive()` says the panel went away; a few transport errors in a row are
+// tolerated (the backend may be busy) before giving up.
+const UPDATE_JOB_DEADLINE_MS = 30 * 60 * 1000
+async function pollJob(jobId, { alive = () => true, deadlineMs = UPDATE_JOB_DEADLINE_MS } = {}) {
+  const until = Date.now() + deadlineMs
+  let errors = 0
   for (;;) {
     await new Promise((r) => setTimeout(r, 3000))
-    const res = await rest(`/jobs/${jobId}`)
-    if (res && res.ok && res.state !== 'running') return res
+    if (!alive()) return { state: 'abandoned' }
+    if (Date.now() > until) return { state: 'timeout' }
+    let res
+    try {
+      res = await rest(`/jobs/${jobId}`)
+      errors = 0
+    } catch (e) {
+      if (++errors >= 5) return { state: 'lost', error: 'update_job_lost' }
+      continue
+    }
+    if (!res || res.ok === false) return { state: 'lost', error: (res && res.error) || 'update_job_lost' }
+    if (res.state !== 'running') return res
   }
 }
 
@@ -1085,25 +1108,38 @@ function UpdatePanel({ health, recheck }) {
   const [info, setInfo] = useState(null)
   const [busy, setBusy] = useState(false)
   const [checking, setChecking] = useState(false)
-  const [updated, setUpdated] = useState(null)
+  const [report, setReport] = useState(null)
   const [failure, setFailure] = useState(null)
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
   const load = useCallback(async (refresh) => {
     setChecking(true)
+    setFailure(null)
     try {
       const res = await rest(`/update/check${refresh ? '?refresh=1' : ''}`)
+      if (!mounted.current) return
       if (res && res.ok) setInfo(res)
-      else if (res && res.ok === false) setFailure({ error: res.error })
+      else setFailure({ error: (res && res.error) || 'update_check_failed' })
     } catch (e) {
-      setFailure({ error: 'update_check_failed' })
+      if (mounted.current) setFailure({ error: 'update_check_failed' })
     } finally {
-      setChecking(false)
+      if (mounted.current) setChecking(false)
     }
   }, [])
   useEffect(() => {
     load(false)
   }, [load])
   const check = (info && info.check) || null
-  const available = Boolean(check && check.available === true && check.latest)
+  // The server compares the version on disk with the one this process runs:
+  // true after an update until the gateway restarts, whatever this panel
+  // remembers (it may have been remounted since).
+  const restartRequired = Boolean(info && info.restart_required)
+  const available = !restartRequired && Boolean(check && check.available === true && check.latest)
   const supported = Boolean(info && info.supported)
   const refusal = (info && info.refusal) || null
   const update = async () => {
@@ -1111,20 +1147,29 @@ function UpdatePanel({ health, recheck }) {
     setFailure(null)
     try {
       const started = await rest('/update/apply', { method: 'POST', body: { version: check.latest } })
-      if (!started || started.ok === false) throw Object.assign(new Error('update refused'), { error: (started && started.error) || 'update_refused' })
-      const job = await pollJob(started.job_id)
-      if (job.state !== 'done') {
-        const p = job.progress || {}
-        setFailure({ error: job.error || 'update_failed', step: p.step, output: p.output || p.refusal })
+      if (!started || started.ok === false) {
+        setFailure({ error: (started && started.error) || 'update_refused' })
         return
       }
-      const report = (job.progress && job.progress.report) || {}
-      setUpdated({ previous: report.previous || check.installed, target: report.target || check.latest, warnings: report.warnings || [] })
-      host.notify({ kind: 'success', message: `Mordred ${report.target || check.latest} is installed. Restart Hermes to load it.` })
+      const job = await pollJob(started.job_id, { alive: () => mounted.current })
+      if (!mounted.current) return
+      if (job.state === 'done') {
+        setReport((job.progress && job.progress.report) || { target: check.latest })
+      } else if (job.state === 'failed') {
+        const p = job.progress || {}
+        setFailure({ error: job.error || 'update_failed', step: p.step, output: p.output || p.refusal })
+      } else if (job.state === 'lost') {
+        setFailure({ error: job.error })
+      } else if (job.state === 'timeout') {
+        setFailure({ error: 'update_job_timeout' })
+      }
+      // The job event handler in register() shows the toast; the server says
+      // whether a restart is now required.
+      await load(false)
     } catch (e) {
-      setFailure({ error: (e && e.error) || 'update_failed', output: e && e.error ? '' : String((e && e.message) || e) })
+      if (mounted.current) setFailure({ error: 'update_failed', output: String((e && e.message) || e) })
     } finally {
-      setBusy(false)
+      if (mounted.current) setBusy(false)
     }
   }
   const restart = async () => {
@@ -1138,19 +1183,25 @@ function UpdatePanel({ health, recheck }) {
   }
   const windows = windowsEnvironment(health && health.environment)
   const pre = { whiteSpace: 'pre-wrap', fontSize: 12, maxHeight: 240, overflow: 'auto', background: 'var(--muted, rgba(127,127,127,.12))', padding: 8, borderRadius: 6 }
+  const warnings = (report && report.warnings) || []
   return jsxs('section', {
-    style: available && !updated ? { border: '1px solid var(--primary, #36c)', borderRadius: 10, padding: 16, marginBottom: 12 } : { marginBottom: 12 },
+    style: available ? { border: '1px solid var(--primary, #36c)', borderRadius: 10, padding: 16, marginBottom: 12 } : { marginBottom: 12 },
     children: [
-      available && !updated ? jsx('h3', { style: { margin: '0 0 8px' }, children: `Mordred ${check.latest} is available` }) : null,
-      jsx('p', { style: { fontSize: 12, opacity: 0.8 }, children: updated ? `Updated Mordred ${updated.previous} → ${updated.target}. Restart Hermes so it starts on the new version.` : describeCheck(check) }),
-      available && !updated && !supported && refusal ? jsx('p', { children: explain(refusal.code) }) : null,
-      updated && updated.warnings.length ? jsx('pre', { style: pre, children: updated.warnings.join('\n') }) : null,
+      available ? jsx('h3', { style: { margin: '0 0 8px' }, children: `Mordred ${check.latest} is available` }) : null,
+      jsx('p', {
+        style: { fontSize: 12, opacity: 0.8 },
+        children: restartRequired
+          ? `Mordred ${info.installed} is installed (running: ${info.running}). Restart Hermes so it starts on the new version.`
+          : describeCheck(check),
+      }),
+      available && !supported && refusal ? jsx('p', { children: explain(refusal.code) }) : null,
+      warnings.length ? jsx('pre', { style: pre, children: warnings.join('\n') }) : null,
       jsx(Row, {
         children: [
-          available && !updated && supported && !windows
+          available && supported && !windows
             ? jsx(Button, { key: 'update', disabled: busy, onClick: update, children: busy ? 'Updating… (a few minutes)' : `Update Mordred to ${check.latest}` })
             : null,
-          updated ? jsx(Button, { key: 'restart', onClick: restart, children: 'Restart Hermes backend' }) : null,
+          restartRequired ? jsx(Button, { key: 'restart', onClick: restart, children: 'Restart Hermes backend' }) : null,
           jsx(Button, { key: 'check', variant: 'outline', disabled: busy || checking, onClick: () => load(true), children: checking ? 'Checking…' : 'Check for updates' }),
         ],
       }),

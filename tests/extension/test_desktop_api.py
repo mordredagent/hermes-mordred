@@ -476,14 +476,32 @@ def update_core(monkeypatch):
 
 
 def test_update_check_reuses_cached_answer_and_refresh_asks_pypi(env, update_core):
+    from mordred_hermes import __version__
+
+    update_core.installed = update_core.installed.__class__(
+        __version__, "pypi", None, False, ("macos",), False, "/env/bin/python3", True
+    )
     res = env.http.get("/api/plugins/mordred/update/check").json()
     assert res["ok"] and res["supported"] is True and res["refusal"] is None
+    assert res["running"] == __version__ and res["installed"] == __version__ and res["restart_required"] is False
     assert res["check"]["latest"] == "0.2.0a3" and res["check"]["source"] == "cache"
     assert update_core.refresh_calls == 0
 
     res = env.http.get("/api/plugins/mordred/update/check?refresh=1").json()
     assert res["check"]["latest"] == "0.2.0a4" and res["check"]["source"] == "pypi"
     assert update_core.refresh_calls == 1 and [w.latest for w in update_core.written] == ["0.2.0a4"]
+
+
+def test_update_check_reports_restart_required_from_versions_on_disk(env, update_core):
+    from mordred_hermes import __version__
+
+    # On disk (dist-info) a newer version than the one this process imported.
+    update_core.installed = update_core.installed.__class__(
+        "9.9.9", "pypi", None, False, ("macos",), False, "/env/bin/python3", True
+    )
+    res = env.http.get("/api/plugins/mordred/update/check").json()
+    assert res["installed"] == "9.9.9" and res["running"] == __version__
+    assert res["restart_required"] is True
 
 
 def test_update_check_reports_nothing_known_and_refusals(env, update_core):
@@ -497,19 +515,44 @@ def test_update_check_reports_nothing_known_and_refusals(env, update_core):
     assert "Windows" in res["refusal"]["message"]
 
 
-def test_update_check_refresh_failure_is_cached_not_fatal(env, update_core):
+def test_update_check_refresh_failure_keeps_the_cached_answer(env, update_core):
     from mordred_hermes import _self_update as core
 
     update_core.fresh = core.UpdateCheckFailed("offline")
     res = env.http.get("/api/plugins/mordred/update/check?refresh=1").json()
     assert res["ok"] and res["check"]["latest"] is None and res["check"]["reason"].startswith("check failed")
-    assert update_core.written and update_core.written[-1].reason.startswith("check failed")
+    assert update_core.written == []  # a failed manual check never overwrites a valid answer
 
 
-def test_update_apply_runs_as_a_job_and_reports(env, update_core):
+def test_update_check_route_survives_a_broken_core(env, update_core, monkeypatch):
+    from mordred_hermes import _self_update as core
+
+    def boom(home=None, **kw):
+        raise RuntimeError("metadata exploded")
+
+    monkeypatch.setattr(core, "cached_check", boom)
+    assert env.http.get("/api/plugins/mordred/update/check").json() == {"ok": False, "error": "update_check_failed"}
+
+
+def test_update_apply_runs_as_a_job_and_reports(env, update_core, monkeypatch):
+    import threading
+
+    from mordred_hermes import _self_update as core
+
+    gate = threading.Event()
+    real_apply = core.apply
+
+    def gated_apply(target, **kw):
+        gate.wait(5)
+        return real_apply(target, **kw)
+
+    monkeypatch.setattr(core, "apply", gated_apply)
     assert _post(env, "/update/apply", {}) == {"ok": False, "error": "invalid_request"}
     started = _post(env, "/update/apply", {"version": " 0.2.0a3 "})
     assert started["ok"] and started["kind"] == "update"
+    again = _post(env, "/update/apply", {"version": "0.2.0a3"})
+    assert again["job_id"] == started["job_id"]  # one update at a time
+    gate.set()
     job = _wait_job(env, started["job_id"])
     assert job["state"] == "done"
     assert job["progress"]["report"]["target"] == "0.2.0a3" and job["progress"]["report"]["warnings"] == ["w1"]
@@ -521,9 +564,47 @@ def test_update_apply_runs_as_a_job_and_reports(env, update_core):
 def test_update_apply_refuses_before_starting_a_job(env, update_core):
     from mordred_hermes import _self_update as core
 
+    assert _post(env, "/update/apply", {"version": "latest"}) == {"ok": False, "error": "update_bad_version"}
+    assert _post(env, "/update/apply", {"version": "0.2.0a1"}) == {"ok": False, "error": "update_not_newer"}
+    assert _post(env, "/update/apply", {"version": "0.1.0a20"}) == {"ok": False, "error": "update_not_newer"}
     update_core.refusal = core.UpdateRefused("source-install", "from a checkout")
     assert _post(env, "/update/apply", {"version": "0.2.0a3"}) == {"ok": False, "error": "update_source_install"}
     assert update_core.apply_calls == []
+
+
+def test_update_and_uninstall_exclude_each_other(env, update_core, monkeypatch):
+    import threading
+
+    from mordred_hermes.wizard import uninstall_cli
+
+    gate = threading.Event()
+
+    def slow_apply(target, **kw):
+        gate.wait(5)
+        from mordred_hermes import _self_update as core
+
+        return core.UpdateReport("0.2.0a1", target, ())
+
+    monkeypatch.setattr("mordred_hermes._self_update.apply", slow_apply)
+    monkeypatch.setattr(uninstall_cli, "run_uninstall", lambda ctx, opts: 0)
+    started = _post(env, "/update/apply", {"version": "0.2.0a3"})
+    assert started["ok"]
+    assert _post(env, "/uninstall", {}) == {"ok": False, "error": "uninstall_busy"}
+    gate.set()
+    assert _wait_job(env, started["job_id"])["state"] == "done"
+    # and the other way round
+    gate.clear()
+
+    def slow_uninstall(ctx, opts):
+        gate.wait(5)
+        return 0
+
+    monkeypatch.setattr(uninstall_cli, "run_uninstall", slow_uninstall)
+    removing = _post(env, "/uninstall", {})
+    assert removing["ok"]
+    assert _post(env, "/update/apply", {"version": "0.2.0a3"}) == {"ok": False, "error": "update_busy"}
+    gate.set()
+    assert _wait_job(env, removing["job_id"])["state"] == "done"
 
 
 def test_update_apply_failure_carries_the_step_output(env, update_core):
@@ -534,3 +615,13 @@ def test_update_apply_failure_carries_the_step_output(env, update_core):
     job = _wait_job(env, started["job_id"])
     assert job["state"] == "failed" and job["error"] == "update_failed"
     assert job["progress"] == {"target": "0.2.0a3", "step": "install-package", "output": "resolver said no"}
+
+
+def test_update_apply_refusal_inside_the_job_is_reported(env, update_core):
+    from mordred_hermes import _self_update as core
+
+    update_core.apply_error = core.UpdateRefused("no-uv", "uv vanished")
+    started = _post(env, "/update/apply", {"version": "0.2.0a3"})
+    job = _wait_job(env, started["job_id"])
+    assert job["state"] == "failed" and job["error"] == "update_no_uv"
+    assert job["progress"] == {"target": "0.2.0a3", "refusal": "uv vanished"}
