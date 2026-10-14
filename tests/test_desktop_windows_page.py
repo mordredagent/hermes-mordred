@@ -295,3 +295,33 @@ console.log(JSON.stringify(HealthLine({health: {ok: true, version: '0.2.0a0', pm
     text = json.dumps(result)
     assert "original Windows installer" in text
     assert "Survives Hermes updates:" not in text
+
+
+# -- package updates (the Update Mordred button) ---------------------------------------------
+
+
+def test_update_button_is_gated_by_the_api_not_by_text():
+    page = source()
+    panel = page[page.index("function UpdatePanel(") : page.index("function HealthLine(")]
+    # The page asks the API and keys the button on its structured answer.
+    assert "rest(`/update/check${refresh ? '?refresh=1' : ''}`)" in panel
+    assert "check.available === true" in panel and "info.supported" in panel
+    assert "'/update/apply'" in panel and "{ version: check.latest }" in panel
+    assert "host.restartGateway()" in panel
+    # Refusals are explained from the code table, never by matching English.
+    assert "explain(refusal.code)" in panel
+    for code in (
+        "update_unsupported_windows",
+        "update_source_install",
+        "update_no_uv",
+        "update_failed",
+        "update_check_failed",
+    ):
+        assert f"  {code}:" in page, code
+
+
+def test_startup_notice_mentions_a_known_newer_release_without_forcing_a_request():
+    page = source()
+    start = page[page.index("ctx.setTimeout(async () => {") : page.index("ctx.onEvent('plugin.mordred.job'")]
+    assert "rest('/update/check')" in start and "refresh=1" not in start
+    assert "check.available === true" in start

@@ -48,6 +48,15 @@ const MESSAGES = {
   sync_in_progress: 'An import is already running.',
   telegram_not_configured: 'Set the question model first (step 3).',
   hermes_model_not_private: 'Hermes itself must use a Venice private model or a local model first (step 0).',
+  // Package updates (`hermes-mordred update` behind the Update Mordred button).
+  update_check_failed: 'PyPI could not be asked for Mordred releases right now. Check the network path and try again.',
+  update_failed: 'The update stopped; the previous version is usually still intact. See the step output below, or rerun the installer from a terminal.',
+  update_unsupported_windows: 'In-place updates are not supported on Windows. Rerun the Windows installer, keeping the existing Hermes home and custody keys, then restart Hermes.',
+  update_source_install: 'Mordred was installed from a local checkout. Update it with scripts/install.sh --from-source <checkout>.',
+  update_no_uv: 'uv was not found on PATH or under the Hermes home. Install uv, then try again.',
+  update_not_a_venv: 'Hermes is not running inside a virtual environment, so Mordred refuses to modify it.',
+  update_bad_version: 'That is not a valid release version.',
+  update_refused: 'Mordred cannot update itself here. Rerun the installer from a terminal.',
   // Windows (machine-bound CNG custody, no per-use presence).
   telegram_not_enrolled: 'Telegram custody is not enrolled on this Windows profile. Follow the custody step or recovery remedy below.',
   telegram_custody_unavailable: 'Telegram custody could not be checked on this Windows profile.',
@@ -1051,6 +1060,114 @@ function RepairPanel({ probeResult, recheck }) {
   })
 }
 
+// Package updates. `/update/check` reuses Hermes's own daily plugin check or a
+// day-old answer and asks PyPI at most once a day; `refresh=1` is the user's
+// explicit "Check now". The decision whether an update can run here comes from
+// the API (`supported` / `refusal.code`), never from text or the platform guess.
+async function pollJob(jobId) {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 3000))
+    const res = await rest(`/jobs/${jobId}`)
+    if (res && res.ok && res.state !== 'running') return res
+  }
+}
+
+function describeCheck(check) {
+  if (!check) return 'Not checked yet.'
+  const when = check.checked_at ? new Date(check.checked_at * 1000).toLocaleString() : ''
+  const via = check.source === 'hermes-receipt' ? 'Hermes’s plugin check' : check.source === 'cache' ? 'cached' : 'PyPI'
+  if (check.latest == null) return `Could not determine the newest release (${check.reason || 'unknown'}; ${via}${when ? ', ' + when : ''}).`
+  if (check.available === true) return `Mordred ${check.latest} is available (installed: ${check.installed}).`
+  return `Mordred ${check.installed} is up to date (newest: ${check.latest}; ${via}${when ? ', ' + when : ''}).`
+}
+
+function UpdatePanel({ health, recheck }) {
+  const [info, setInfo] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [checking, setChecking] = useState(false)
+  const [updated, setUpdated] = useState(null)
+  const [failure, setFailure] = useState(null)
+  const load = useCallback(async (refresh) => {
+    setChecking(true)
+    try {
+      const res = await rest(`/update/check${refresh ? '?refresh=1' : ''}`)
+      if (res && res.ok) setInfo(res)
+      else if (res && res.ok === false) setFailure({ error: res.error })
+    } catch (e) {
+      setFailure({ error: 'update_check_failed' })
+    } finally {
+      setChecking(false)
+    }
+  }, [])
+  useEffect(() => {
+    load(false)
+  }, [load])
+  const check = (info && info.check) || null
+  const available = Boolean(check && check.available === true && check.latest)
+  const supported = Boolean(info && info.supported)
+  const refusal = (info && info.refusal) || null
+  const update = async () => {
+    setBusy(true)
+    setFailure(null)
+    try {
+      const started = await rest('/update/apply', { method: 'POST', body: { version: check.latest } })
+      if (!started || started.ok === false) throw Object.assign(new Error('update refused'), { error: (started && started.error) || 'update_refused' })
+      const job = await pollJob(started.job_id)
+      if (job.state !== 'done') {
+        const p = job.progress || {}
+        setFailure({ error: job.error || 'update_failed', step: p.step, output: p.output || p.refusal })
+        return
+      }
+      const report = (job.progress && job.progress.report) || {}
+      setUpdated({ previous: report.previous || check.installed, target: report.target || check.latest, warnings: report.warnings || [] })
+      host.notify({ kind: 'success', message: `Mordred ${report.target || check.latest} is installed. Restart Hermes to load it.` })
+    } catch (e) {
+      setFailure({ error: (e && e.error) || 'update_failed', output: e && e.error ? '' : String((e && e.message) || e) })
+    } finally {
+      setBusy(false)
+    }
+  }
+  const restart = async () => {
+    try {
+      await host.restartGateway()
+      host.notify({ kind: 'info', message: 'Restarting the Hermes backend… If the version shown does not change, quit and reopen Hermes.' })
+    } catch (e) {
+      host.notifyError(e, 'Quit and reopen Hermes to finish')
+    }
+    setTimeout(recheck, 8000)
+  }
+  const windows = windowsEnvironment(health && health.environment)
+  const pre = { whiteSpace: 'pre-wrap', fontSize: 12, maxHeight: 240, overflow: 'auto', background: 'var(--muted, rgba(127,127,127,.12))', padding: 8, borderRadius: 6 }
+  return jsxs('section', {
+    style: available && !updated ? { border: '1px solid var(--primary, #36c)', borderRadius: 10, padding: 16, marginBottom: 12 } : { marginBottom: 12 },
+    children: [
+      available && !updated ? jsx('h3', { style: { margin: '0 0 8px' }, children: `Mordred ${check.latest} is available` }) : null,
+      jsx('p', { style: { fontSize: 12, opacity: 0.8 }, children: updated ? `Updated Mordred ${updated.previous} → ${updated.target}. Restart Hermes so it starts on the new version.` : describeCheck(check) }),
+      available && !updated && !supported && refusal ? jsx('p', { children: explain(refusal.code) }) : null,
+      updated && updated.warnings.length ? jsx('pre', { style: pre, children: updated.warnings.join('\n') }) : null,
+      jsx(Row, {
+        children: [
+          available && !updated && supported && !windows
+            ? jsx(Button, { key: 'update', disabled: busy, onClick: update, children: busy ? 'Updating… (a few minutes)' : `Update Mordred to ${check.latest}` })
+            : null,
+          updated ? jsx(Button, { key: 'restart', onClick: restart, children: 'Restart Hermes backend' }) : null,
+          jsx(Button, { key: 'check', variant: 'outline', disabled: busy || checking, onClick: () => load(true), children: checking ? 'Checking…' : 'Check for updates' }),
+        ],
+      }),
+      failure
+        ? jsxs('div', {
+            role: 'alert',
+            style: { border: '1px solid #b91c1c', borderRadius: 8, padding: 10, marginTop: 10 },
+            children: [
+              jsx('p', { style: { margin: 0 }, children: explain(failure.error) }),
+              failure.step || failure.output ? jsx('pre', { style: pre, children: `${failure.step ? 'step: ' + failure.step + '\n' : ''}${failure.output || ''}` }) : null,
+            ],
+          })
+        : null,
+    ],
+  })
+}
+
 function HealthLine({ health }) {
   if (!health || !health.ok) return null
   const env = health.environment || {}
@@ -1106,6 +1223,7 @@ function SetupPage() {
       jsx('p', { children: 'Private, read-only Telegram for Hermes.' }),
       broken ? jsx(RepairPanel, { probeResult: broken, recheck: refresh }) : null,
       status ? jsx(HealthLine, { health }) : null,
+      status ? jsx(UpdatePanel, { health, recheck: refresh }) : null,
       status && status.hardware_kind === 'cng'
         ? jsx(WindowsSetup, { status, refresh })
         : status
@@ -1158,7 +1276,21 @@ export default {
     // environment (the Python side cannot report it: it is not there).
     ctx.setTimeout(async () => {
       const result = await probe()
-      if (result.kind === 'installed') return
+      if (result.kind === 'installed') {
+        // Newer release known (Hermes's daily plugin check or our day-old
+        // answer; at most one PyPI request a day, none when the user turned
+        // Hermes's check off): say so once, the page has the button.
+        try {
+          const res = await rest('/update/check')
+          const check = res && res.ok && res.check
+          if (check && check.available === true && check.latest) {
+            host.notify({ kind: 'info', message: `Mordred ${check.latest} is available (installed: ${check.installed}). Open Mordred in the sidebar to update.` })
+          }
+        } catch (_) {
+          // nothing to say
+        }
+        return
+      }
       host.notify({
         kind: 'warning',
         message: result.kind === 'missing'

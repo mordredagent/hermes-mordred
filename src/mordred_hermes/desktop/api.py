@@ -717,6 +717,107 @@ async def telegram_logout(body: dict[str, Any] | None = None) -> Any:
     return await windows_logout(_store(), forget=forget)
 
 
+# -- package updates ----------------------------------------------------------------------
+
+_REFUSAL_CODES = {
+    "windows": "update_unsupported_windows",
+    "source-install": "update_source_install",
+    "no-uv": "update_no_uv",
+    "not-a-venv": "update_not_a_venv",
+    "bad-version": "update_bad_version",
+}
+
+
+def _update_view(result: Any) -> dict[str, Any]:
+    """A :class:`.._self_update.CheckResult` for the page, plus whether an in-place update can run here."""
+    from .. import _self_update as core
+
+    view: dict[str, Any] = {"ok": True, "supported": True, "refusal": None}
+    try:
+        core.refuse_if_unsupported(core.installed(), uv=core.find_uv(_home()))
+    except core.UpdateRefused as exc:
+        view["supported"] = False
+        view["refusal"] = {"code": _REFUSAL_CODES.get(exc.code, "update_refused"), "message": exc.message}
+    except Exception as exc:  # metadata unreadable: say so instead of a 500
+        view["supported"] = False
+        view["refusal"] = {"code": "update_refused", "message": f"{type(exc).__name__}: {exc}"}
+    view["check"] = result.to_json() if result is not None else None
+    return view
+
+
+@router.get("/update/check")
+async def update_check(refresh: int = 0) -> Any:
+    """Is a newer Mordred release available?
+
+    Without ``refresh`` this reuses Hermes's fresh plugin-check receipt or our
+    own day-old answer and asks PyPI at most once a day (never when
+    ``plugins.auto_update_check_hours`` is 0). ``refresh=1`` is the user's
+    **Check now**: one request, cached. ``check`` is ``null`` when nothing is
+    known and nothing was asked.
+    """
+    from .. import _self_update as core
+
+    def work() -> Any:
+        if refresh:
+            try:
+                result = core.check()
+            except core.UpdateCheckFailed as exc:
+                result = core.CheckResult(
+                    core.installed().version, None, None, "pypi", time.time(), f"check failed: {exc}"
+                )
+            core.write_cache(result, _home())
+            return result
+        return core.cached_check(_home())
+
+    try:
+        result = await asyncio.to_thread(work)
+    except Exception as exc:
+        _log.warning("mordred update check failed (%s)", type(exc).__name__)
+        return _error("update_check_failed")
+    return _update_view(result)
+
+
+@router.post("/update/apply")
+async def update_apply(body: dict[str, Any] | None = None) -> Any:
+    """Body: ``{"version": "<release>"}``. Runs ``hermes-mordred update --yes`` as a job.
+
+    ``progress.step`` / ``progress.output`` carry the failed step on error;
+    on success ``progress.report`` is the update report and the page offers
+    the gateway restart. Refusals answer before any job starts.
+    """
+    from .. import _self_update as core
+
+    body = body or {}
+    target = body.get("version")
+    if not isinstance(target, str) or not target.strip():
+        return _error("invalid_request")
+    target = target.strip()
+    try:
+        current = core.installed()
+        uv = core.find_uv(_home())
+        core.refuse_if_unsupported(current, uv=uv)
+    except core.UpdateRefused as exc:
+        return _error(_REFUSAL_CODES.get(exc.code, "update_refused"))
+    except Exception as exc:
+        _log.warning("mordred update refused (%s)", type(exc).__name__)
+        return _error("update_refused")
+
+    async def work(job: _Job) -> None:
+        job.progress = {"message": f"Installing hermes-mordred {target}…", "target": target}
+        _emit("progress", {"job_id": job.job_id, **job.progress})
+        try:
+            report = await asyncio.to_thread(core.apply, target, current=current, uv=uv, home=_home())
+        except core.UpdateRefused as exc:
+            job.progress = {"target": target, "refusal": exc.message}
+            raise _Fail(_REFUSAL_CODES.get(exc.code, "update_refused")) from exc
+        except core.UpdateFailed as exc:
+            job.progress = {"target": target, "step": exc.step, "output": exc.output}
+            raise _Fail("update_failed") from exc
+        job.progress = {"target": target, "report": report.to_json()}
+
+    return {"ok": True, **_job_view(_start_job("update", work))}
+
+
 # -- uninstall ----------------------------------------------------------------------------
 
 
