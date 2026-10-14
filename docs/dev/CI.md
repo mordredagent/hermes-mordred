@@ -496,6 +496,74 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 
 ## Manual live-device validation log
 
+- **2026-10-14 — macOS Hermes Desktop dev installation, Telegram import and SQLCipher acceptance.**
+  Installed immutable Mordred candidate `c98493af2dce1179991a26b2cbf9e5c78623db69`
+  into the existing Hermes Desktop-managed environment using
+  `scripts/install.sh --from-source <pinned checkout> --with-telegram`.
+  Hermes reported `0.22.0` (Desktop displayed `v0.22.0+119`), Python 3.14.7,
+  on macOS arm64. Desktop and its backend were stopped before an owner-only
+  full-home and Desktop-settings backup; eight configuration/database files
+  were hash-verified. The four existing databases (`state.db`, `projects.db`,
+  `shared-state.db`, `cron/executions.db`) were readable by standard SQLite
+  and passed `quick_check` before setup.
+  All 254 checked package source/assets matched the pinned candidate both
+  immediately after installation and after Desktop rebuilt its managed
+  environment. The rebuilt environment passed `uv pip check`; the initial
+  environment's sole warning was Hermes source metadata `0.0.0` against
+  Mordred's `hermes-agent>=0.13.0` requirement. The actual Desktop displayed
+  the Mordred setup page, its local source origin, and the expected privacy
+  model gate. Critical feedback initially passed 19 cases with one page-auth
+  timeout during backup; that case passed alone, and the full critical preset
+  then passed **20 tests in 13.95s** (one Starlette deprecation warning).
+  The operator saved the Venice endpoint credential; Desktop accepted
+  `deepseek-v4-flash` as a private Venice model. Secure Enclave helper setup
+  completed and `telegram doctor` reported hardware readiness. Memory setup
+  then failed: the default vault directory and manifests were absent, but
+  its device freshness anchor remained in macOS Keychain. Both the environment
+  injection and memory runtime probes passed (memory seam A). The retained
+  nonsecret anchor was backed up and verified. With the operator's explicit
+  approval, only that helper-owned anchor was reset; no wrapping key was
+  deleted. Retrying Desktop memory setup displayed a recovery passphrase,
+  and `telegram doctor` reported `agent memory sealed`.
+  The operator saved the recovery passphrase. Desktop was fully quit and
+  restarted; its backend became ready and the memory step remained checked.
+  The saved Venice credential was reused through Desktop for Telegram's
+  question model; `telegram doctor` reported the Telegram key present,
+  memory sealed, and Venice `deepseek-v4-flash` configured. The operator
+  completed Telegram login in Desktop. The real three-day import (archived
+  chats excluded, default maximum group size 100) yielded **2 chats / 3
+  messages**. A Desktop reimport added **0 messages**; local authenticated
+  archive reads found no duplicate message IDs and the same identifier set
+  before/after reimport and after restart. All three archive blobs had `MTG1`
+  headers and mode `0600`. No Telegram question was sent to an LLM.
+  With Desktop stopped, `databases encrypt` converted **5 databases**:
+  the original four plus `telemetry/shared_metrics/metrics.sqlite3` created
+  during the live run. All five refused keyless stdlib SQLite reads, passed
+  keyed `integrity_check`, and returned no `cipher_integrity_check` findings,
+  both immediately after conversion and after Desktop writes. No conversion
+  journal remained. Conversion itself compared post-checkpoint table counts
+  and SQLite IDs before swapping files.
+  The independent pre-conversion probe initially used `immutable=1`, which
+  ignored committed WAL pages and undercounted the newly created synthetic
+  chat. The probe was corrected to include WAL. Separate row comparisons
+  confirmed all four preexisting messages survived, along with the two
+  pre-conversion synthetic messages. Desktop reopened that chat, found it by
+  an exact message-content search, and saved a second synthetic user/assistant
+  exchange through the encrypted database (eight total messages afterwards).
+  A final full quit/restart displayed both synthetic replies, and exact
+  content search found the post-encryption reply. Desktop was left running
+  with memory/database encryption enabled and Telegram logged in.
+  Only synthetic chat text was sent to Venice for these checks.
+  One startup logged a cancelled hardware authentication before the backend
+  connected; keyed checks and the subsequent Desktop read/write succeeded.
+  SQLCipher's linked SQLite 3.51.1 triggered Hermes's known WAL-reset warning;
+  the databases used the existing DELETE-journal fallback. Pre-install and
+  pre-conversion plaintext backups were retained in an owner-only directory
+  outside the Hermes home, alongside verified encrypted database backups.
+  No credentials, recovery passphrases, or real message contents are included
+  in this record. Product code was unchanged; this is live-device acceptance,
+  not an additional full regression run.
+
 - **2026-10-12 — Pre-merge Telegram review follow-up.**
   After integration with `dev` at `d3ad9d795`, independent review reproduced
   a diagnostic disclosure when malformed local HTTP coincided with audit
