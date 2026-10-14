@@ -309,7 +309,16 @@ def test_update_button_is_gated_by_the_api_not_by_text():
     assert "'/update/apply'" in panel and "{ version: check.latest }" in panel
     # Whether a restart is pending comes from the server (on-disk vs running
     # version), so a remounted panel cannot claim "up to date" with old code running.
-    assert "info.restart_required" in panel and "host.restartGateway()" in panel
+    assert "info.restart_required" in panel
+    # One restart handler for both panels; the re-probe is skipped once the panel is gone.
+    assert "restartBackend(recheck, () => mounted.current)" in panel
+    repair = page[
+        page.index("function RepairPanel(") : page.index("function pollJob(")
+        if "function pollJob(" in page
+        else page.index("async function pollJob(")
+    ]
+    assert "const restart = () => restartBackend(recheck)" in repair
+    assert page.count("host.restartGateway()") == 1
     assert "const available = !restartRequired &&" in panel
     # Refusals are explained from the code table, never by matching English.
     assert "explain(refusal.code)" in panel
@@ -348,3 +357,5 @@ def test_startup_notice_mentions_a_known_newer_release_without_forcing_a_request
     start = page[page.index("ctx.setTimeout(async () => {") : page.index("ctx.onEvent('plugin.mordred.job'")]
     assert "rest('/update/check')" in start and "refresh=1" not in start
     assert "check.available === true" in start
+    # Only when the page can act on it: not on Windows / source installs, not with a restart pending.
+    assert "res.supported && !res.restart_required" in start

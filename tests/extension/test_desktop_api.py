@@ -465,10 +465,12 @@ def update_core(monkeypatch):
             raise state.apply_error
         return core.UpdateReport("0.2.0a1", target, ("macos",), steps=["freeze"], warnings=["w1"], member_recorded=True)
 
-    monkeypatch.setattr(core, "installed", lambda: state.installed)
+    monkeypatch.setattr(core, "installed", lambda home=None: state.installed)
     monkeypatch.setattr(core, "find_uv", lambda home=None, env=None: Path("/opt/uv"))
     monkeypatch.setattr(core, "refuse_if_unsupported", refuse)
     monkeypatch.setattr(core, "cached_check", lambda home=None, **kw: state.cached)
+    monkeypatch.setattr(core, "hermes_receipt_check", lambda home=None, **kw: None)
+    monkeypatch.setattr(core, "read_cache", lambda home=None, **kw: state.cached)
     monkeypatch.setattr(core, "check", check)
     monkeypatch.setattr(core, "write_cache", lambda result, home=None: state.written.append(result))
     monkeypatch.setattr(core, "apply", apply)
@@ -520,8 +522,14 @@ def test_update_check_refresh_failure_keeps_the_cached_answer(env, update_core):
 
     update_core.fresh = core.UpdateCheckFailed("offline")
     res = env.http.get("/api/plugins/mordred/update/check?refresh=1").json()
-    assert res["ok"] and res["check"]["latest"] is None and res["check"]["reason"].startswith("check failed")
+    # The page keeps the last valid answer and is told the manual check failed.
+    assert res["ok"] and res["check"]["latest"] == "0.2.0a3" and res["check"]["source"] == "cache"
+    assert res["check_error"].startswith("check failed")
     assert update_core.written == []  # a failed manual check never overwrites a valid answer
+    # ... unless that answer is for another version, or itself a failure.
+    update_core.cached = core.CheckResult("0.1.0a20", "0.2.0a3", True, "cache", 1.0)
+    res = env.http.get("/api/plugins/mordred/update/check?refresh=1").json()
+    assert res["check"] is None and res["check_error"].startswith("check failed")
 
 
 def test_update_check_route_survives_a_broken_core(env, update_core, monkeypatch):
@@ -532,6 +540,18 @@ def test_update_check_route_survives_a_broken_core(env, update_core, monkeypatch
 
     monkeypatch.setattr(core, "cached_check", boom)
     assert env.http.get("/api/plugins/mordred/update/check").json() == {"ok": False, "error": "update_check_failed"}
+
+
+def test_update_check_with_unreadable_metadata_is_unsupported_not_fatal(env, update_core, monkeypatch):
+    from mordred_hermes import _self_update as core
+
+    def boom(home=None):
+        raise RuntimeError("no dist-info")
+
+    monkeypatch.setattr(core, "installed", boom)
+    res = env.http.get("/api/plugins/mordred/update/check").json()
+    assert res["ok"] and res["supported"] is False and res["check"] is None
+    assert res["refusal"]["code"] == "update_refused" and "installed" not in res
 
 
 def test_update_apply_runs_as_a_job_and_reports(env, update_core, monkeypatch):
@@ -640,4 +660,18 @@ def test_update_apply_refusal_inside_the_job_is_reported(env, update_core):
     started = _post(env, "/update/apply", {"version": "0.2.0a3"})
     job = _wait_job(env, started["job_id"])
     assert job["state"] == "failed" and job["error"] == "update_no_uv"
-    assert job["progress"] == {"target": "0.2.0a3", "refusal": "uv vanished"}
+    assert job["progress"] == {"target": "0.2.0a3", "refusal": "uv vanished", "rolled_back": None}
+
+
+def test_update_apply_hermes_floor_refusal_reports_a_failed_rollback(env, update_core):
+    from mordred_hermes import _self_update as core
+
+    update_core.apply_error = core.UpdateRefused(
+        "hermes-too-old", "needs Hermes 0.30 (restoring FAILED)", rolled_back=False
+    )
+    started = _post(env, "/update/apply", {"version": "0.2.0a3"})
+    job = _wait_job(env, started["job_id"])
+    assert job["state"] == "failed" and job["error"] == "update_rollback_failed"
+    update_core.apply_error = core.UpdateRefused("hermes-too-old", "needs Hermes 0.30 (restored)", rolled_back=True)
+    started = _post(env, "/update/apply", {"version": "0.2.0a3"})
+    assert _wait_job(env, started["job_id"])["error"] == "update_hermes_too_old"

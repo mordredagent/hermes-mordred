@@ -973,6 +973,21 @@ async function cliExec(argv) {
   return res || { code: -1, output: '' }
 }
 
+// Restart the Hermes backend after a repair or an update, then re-probe once
+// it is back. Shared by RepairPanel and UpdatePanel; the re-probe is skipped
+// when the caller's `alive()` says its panel is gone.
+async function restartBackend(recheck, alive = () => true) {
+  try {
+    await host.restartGateway()
+    host.notify({ kind: 'info', message: 'Restarting the Hermes backend… If Mordred still looks unchanged, quit and reopen Hermes.' })
+  } catch (e) {
+    host.notifyError(e, 'Quit and reopen Hermes to finish')
+  }
+  setTimeout(() => {
+    if (alive()) recheck()
+  }, 8000)
+}
+
 function RepairPanel({ probeResult, recheck }) {
   const [busy, setBusy] = useState(false)
   const [log, setLog] = useState('')
@@ -1029,15 +1044,7 @@ function RepairPanel({ probeResult, recheck }) {
       setBusy(false)
     }
   }
-  const restart = async () => {
-    try {
-      await host.restartGateway()
-      host.notify({ kind: 'info', message: 'Restarting the Hermes backend… If Mordred is still missing, quit and reopen Hermes.' })
-    } catch (e) {
-      host.notifyError(e, 'Quit and reopen Hermes to finish')
-    }
-    setTimeout(recheck, 8000)
-  }
+  const restart = () => restartBackend(recheck)
   return jsxs('section', {
     style: { border: '1px solid var(--destructive, #c33)', borderRadius: 10, padding: 16, marginBottom: 12 },
     children: [
@@ -1125,8 +1132,12 @@ function UpdatePanel({ health, recheck }) {
     try {
       const res = await rest(`/update/check${refresh ? '?refresh=1' : ''}`)
       if (!mounted.current) return
-      if (res && res.ok) setInfo(res)
-      else setFailure({ error: (res && res.error) || 'update_check_failed' })
+      if (res && res.ok) {
+        setInfo(res)
+        if (res.check_error) setFailure({ error: 'update_check_failed', output: res.check_error })
+      } else {
+        setFailure({ error: (res && res.error) || 'update_check_failed' })
+      }
     } catch (e) {
       if (mounted.current) setFailure({ error: 'update_check_failed' })
     } finally {
@@ -1175,15 +1186,7 @@ function UpdatePanel({ health, recheck }) {
       if (mounted.current) setBusy(false)
     }
   }
-  const restart = async () => {
-    try {
-      await host.restartGateway()
-      host.notify({ kind: 'info', message: 'Restarting the Hermes backend… If the version shown does not change, quit and reopen Hermes.' })
-    } catch (e) {
-      host.notifyError(e, 'Quit and reopen Hermes to finish')
-    }
-    setTimeout(recheck, 8000)
-  }
+  const restart = () => restartBackend(recheck, () => mounted.current)
   const windows = windowsEnvironment(health && health.environment)
   const pre = { whiteSpace: 'pre-wrap', fontSize: 12, maxHeight: 240, overflow: 'auto', background: 'var(--muted, rgba(127,127,127,.12))', padding: 8, borderRadius: 6 }
   const warnings = (report && report.warnings) || []
@@ -1336,7 +1339,7 @@ export default {
         // Hermes's check off): say so once, the page has the button.
         try {
           const res = await rest('/update/check')
-          const check = res && res.ok && res.check
+          const check = res && res.ok && res.supported && !res.restart_required && res.check
           if (check && check.available === true && check.latest) {
             host.notify({ kind: 'info', message: `Mordred ${check.latest} is available (installed: ${check.installed}). Open Mordred in the sidebar to update.` })
           }
