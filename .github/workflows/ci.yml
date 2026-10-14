@@ -51,7 +51,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 tools/ci_test_policy.py --policy-file ci-policy.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: ci-policy-${{ github.run_id }}-${{ github.run_attempt }}
           path: ci-policy.json
@@ -79,7 +79,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Download immutable run policy
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: ci-policy-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Install reduced-extras environment
@@ -115,7 +115,7 @@ jobs:
           else
             .venv/bin/python -m pytest -q --cov=mordred_hermes --cov-report=xml
           fi
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: test-linux-${{ matrix.python-version }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -447,7 +447,7 @@ jobs:
           CI_PYTHON: ${{ matrix.python-version }}
         working-directory: ${{ github.workspace }}
         run: .venv/bin/python tools/ci_evidence.py worker --policy ci-policy.json --os linux --python "$CI_PYTHON" --output worker.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: ci-worker-evidence-linux-${{ matrix.python-version }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -472,7 +472,7 @@ jobs:
           python-version: ${{ needs.ci-policy.outputs.platform_python }}
           cache: pip
       - name: Download immutable run policy
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: ci-policy-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Install macOS reduced-extras environment
@@ -497,7 +497,7 @@ jobs:
           else
             .venv/bin/python -m pytest -q --cov=mordred_hermes --cov-report=xml
           fi
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: test-macos-${{ needs.ci-policy.outputs.platform_python }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -558,7 +558,7 @@ jobs:
           CI_PYTHON: ${{ needs.ci-policy.outputs.platform_python }}
         working-directory: ${{ github.workspace }}
         run: .venv/bin/python tools/ci_evidence.py worker --policy ci-policy.json --os macos --python "$CI_PYTHON" --output worker.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: ci-worker-evidence-macos-${{ needs.ci-policy.outputs.platform_python }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -582,7 +582,7 @@ jobs:
           python-version: ${{ needs.ci-policy.outputs.platform_python }}
           cache: pip
       - name: Download immutable run policy
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: ci-policy-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Install scoped dependencies in an isolated venv
@@ -708,7 +708,7 @@ jobs:
             .\.venv\Scripts\python.exe tools/run_ci_native_tests.py --policy ci-policy.json --junitxml native-windows.xml
           }
           if ($LASTEXITCODE -ne 0) { throw "native tests failed" }
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: native-windows-${{ needs.ci-policy.outputs.platform_python }}-shard-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -815,7 +815,7 @@ jobs:
           CI_SHARD: ${{ matrix.shard }}
         working-directory: ${{ github.workspace }}
         run: .venv/Scripts/python.exe tools/ci_evidence.py worker --policy ci-policy.json --os windows --python "$CI_PYTHON" --shard "$CI_SHARD" --native-manifest native-selection.json --output worker.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: ci-worker-evidence-windows-${{ needs.ci-policy.outputs.platform_python }}-shard-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -836,12 +836,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Download immutable run policy
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: ci-policy-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Download all worker manifests
         if: needs.ci-policy.outputs.mode != 'docs'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           pattern: ci-worker-evidence-*-${{ github.run_id }}-${{ github.run_attempt }}
           path: worker-evidence
@@ -868,7 +868,7 @@ jobs:
           CI_NEEDS_JSON: ${{ toJSON(needs) }}
           CI_STEPS_JSON: ${{ toJSON(steps) }}
         run: python3 tools/ci_evidence.py accept --policy ci-policy.json --workers worker-evidence --output evidence.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: ci-acceptance-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: evidence.json
