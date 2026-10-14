@@ -27,6 +27,9 @@ dependencies = [
   "hermes-agent>=0.13.0",
   "ruamel.yaml>=0.18",
   "psutil>=7.2.2",
+  # Version/requirement parsing for the in-place updater and the Desktop
+  # package-manager member; hermes-agent declares it only on Python 3.14+.
+  "packaging>=23",
 ]
 
 [project.optional-dependencies]

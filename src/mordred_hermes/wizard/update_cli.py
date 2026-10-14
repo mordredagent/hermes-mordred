@@ -91,7 +91,15 @@ def _apply(current: core.Installed, target: str, uv: Path | None) -> int:
         return EXIT_REFUSED
     except core.UpdateFailed as exc:
         _term.emit_error(f"update step '{exc.step}' failed:\n{exc.output}")
-        _term.emit_note("the previous install may still be intact; rerun after fixing the cause, or use the installer")
+        if exc.rolled_back is None:
+            _term.emit_note(f"hermes-mordred {current.version} was not replaced; fix the cause and rerun")
+        elif exc.rolled_back:
+            _term.emit_note(f"hermes-mordred {current.version} was reinstalled; fix the cause and rerun")
+        else:
+            _term.emit_error(
+                f"restoring hermes-mordred {current.version} FAILED as well; reinstall with the installer:\n"
+                f"{exc.rollback_output}"
+            )
         return EXIT_FAILED
     for warning in report.warnings:
         _term.emit_warn(warning)

@@ -1307,8 +1307,11 @@ from the environment, so no flags are needed) and never moves a package that
 Hermes pins. When it finishes, restart the Hermes gateway or Hermes Desktop.
 
 `update` refuses to run on Windows (rerun the Windows installer instead), for
-installs from a local checkout (use `scripts/install.sh --from-source`), and
-when `uv` is not found.
+installs from a local checkout (use `scripts/install.sh --from-source`), when
+`uv` is not found, and when the new release needs a newer Hermes than the one
+installed. If a step fails after the package was replaced, the previous
+release is reinstalled automatically and the message says so, so the
+environment is never left half-updated.
 
 The installer remains the fallback, and the only method on Windows and for
 source checkouts. Re-run the installer with the same `--extras`, `--all-extras`, or

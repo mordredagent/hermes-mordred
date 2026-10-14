@@ -43,29 +43,59 @@ def _releases(*versions: str, yanked: tuple[str, ...] = (), empty: tuple[str, ..
 
 
 class FakeRunner:
-    """Records every argv; answers per step with configurable exit codes/output."""
+    """Records every command (argv, cwd, env, timeout); answers per step."""
 
     def __init__(
-        self, freeze: str = "", requirements: str = "", fail: str | None = None, check_codes: list[int] | None = None
+        self,
+        freeze: str = "",
+        requirements: str = "",
+        closure: str | None = "aiohttp\nhermes-agent\nruamel-yaml\n",
+        floor: str = ">=0.13.0\t0.22.0",
+        fail: str | None = None,
+        check_codes: list[int] | None = None,
+        rollback_code: int = 0,
+        stderr: str = "",
     ):
-        self.calls: list[list[str]] = []
+        self.calls: list[tuple[list[str], Path | None, dict[str, str] | None, float | None]] = []
         self.freeze = freeze
         self.requirements = requirements
+        self.closure = closure
+        self.floor = floor
         self.fail = fail
         self.check_codes = check_codes or [0, 0]
+        self.rollback_code = rollback_code
+        self.stderr = stderr
 
-    def __call__(self, argv: list[str]) -> core.CommandResult:
-        self.calls.append(list(argv))
+    @property
+    def argvs(self) -> list[list[str]]:
+        return [c[0] for c in self.calls]
+
+    @property
+    def steps(self) -> list[str]:
+        return [self._step(a) for a in self.argvs]
+
+    def __call__(self, argv: list[str], *, cwd=None, env=None, timeout=None) -> core.CommandResult:
+        self.calls.append((list(argv), cwd, dict(env) if env is not None else None, timeout))
         step = self._step(argv)
         if step == self.fail:
-            return core.CommandResult(1, f"boom in {step}\nline2")
+            return core.CommandResult(1, f"boom in {step}\n", "line2\n")
+        if step == "rollback":
+            return core.CommandResult(self.rollback_code, "", "rollback said no\n" if self.rollback_code else "")
         if step == "check":
-            return core.CommandResult(self.check_codes.pop(0) if self.check_codes else 0, "")
+            return core.CommandResult(self.check_codes.pop(0) if self.check_codes else 0)
         if step == "freeze":
-            return core.CommandResult(0, self.freeze)
+            return core.CommandResult(0, self.freeze, self.stderr)
+        if step == "hermes-closure":
+            return (
+                core.CommandResult(3, "", "no hermes-agent\n")
+                if self.closure is None
+                else core.CommandResult(0, self.closure)
+            )
+        if step == "hermes-floor":
+            return core.CommandResult(0, self.floor + "\n", self.stderr)
         if step == "read-requirements":
-            return core.CommandResult(0, self.requirements)
-        return core.CommandResult(0, "")
+            return core.CommandResult(0, self.requirements, self.stderr)
+        return core.CommandResult(0)
 
     @staticmethod
     def _step(argv: list[str]) -> str:
@@ -73,14 +103,22 @@ class FakeRunner:
             return "check"
         if argv[1:3] == ["pip", "freeze"]:
             return "freeze"
+        if argv[1:3] == ["pip", "uninstall"]:
+            return "remove-legacy"
+        if argv[1:3] == ["pip", "install"] and "--reinstall-package" in argv:
+            return "rollback"
         if argv[1:3] == ["pip", "install"] and "--no-deps" in argv:
             return "install-package"
         if argv[1:3] == ["pip", "install"]:
             return "install-requirements"
-        if "-c" in argv and core._REQUIREMENTS_SCRIPT in argv:
-            return "read-requirements"
-        if "-c" in argv and core._RECORD_MEMBER_SCRIPT in argv:
-            return "record-member"
+        if argv[1:3] == ["-I", "-c"]:
+            script = argv[3]
+            return {
+                core._REQUIREMENTS_SCRIPT: "read-requirements",
+                core._HERMES_CLOSURE_SCRIPT: "hermes-closure",
+                core._HERMES_FLOOR_SCRIPT: "hermes-floor",
+                core._RECORD_MEMBER_SCRIPT: "record-member",
+            }[script]
         raise AssertionError(f"unexpected command {argv!r}")
 
 
@@ -94,11 +132,44 @@ def test_version_floor_matches_installer() -> None:
     assert match.group(1) == core.MIN_MORDRED_VERSION
 
 
-def test_requirements_script_matches_installer() -> None:
-    """The requirement filter is the installer's heredoc, verbatim."""
+def test_requirements_script_is_the_installer_filter_minus_self_references() -> None:
+    """Same filter as the installer's heredoc, plus dropping ``hermes-mordred[...]`` self-references."""
     installer = (REPO / "scripts" / "install.sh").read_text(encoding="utf-8")
     heredoc = installer.split("<<'PY' 2>/dev/null || true\n", 1)[1].split("\nPY\n", 1)[0]
-    assert core._REQUIREMENTS_SCRIPT.strip() == heredoc.strip()
+    ours = (
+        core._REQUIREMENTS_SCRIPT.strip()
+        .replace('skip = {"hermes-agent", sys.argv[1].lower()}\n', "")
+        .replace(
+            'if req.name.lower().replace("_", "-") in skip:', 'if req.name.lower().replace("_", "-") == "hermes-agent":'
+        )
+    )
+    assert ours == heredoc.strip()
+
+
+def test_scripts_run_in_this_interpreter(tmp_path: Path) -> None:
+    """The three ``-I -c`` scripts parse and run against real metadata."""
+    import subprocess
+
+    reqs = subprocess.run(
+        [sys.executable, "-I", "-c", core._REQUIREMENTS_SCRIPT, "hermes-mordred", "keyvault"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    names = {line.split(">=")[0].split("[")[0].lower() for line in reqs.stdout.splitlines()}
+    assert "cryptography" in names and "hermes-agent" not in names and "hermes-mordred" not in names
+    closure = subprocess.run(
+        [sys.executable, "-I", "-c", core._HERMES_CLOSURE_SCRIPT], capture_output=True, text=True, check=False
+    )
+    assert closure.returncode == 0 and "hermes-agent" in closure.stdout.split() and "httpx" in closure.stdout.split()
+    floor = subprocess.run(
+        [sys.executable, "-I", "-c", core._HERMES_FLOOR_SCRIPT, "hermes-mordred"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    spec, have = floor.stdout.strip().split("\t")
+    assert spec.startswith(">=") and have
 
 
 # -- select_latest -------------------------------------------------------------------------
@@ -113,7 +184,7 @@ class TestSelectLatest:
         releases = _releases("0.2.0", "0.2.1", "0.3.0a1")
         assert core.select_latest(releases, "0.2.0") == "0.2.1"
 
-    def test_stable_user_with_only_prereleases_ahead_gets_none(self) -> None:
+    def test_stable_user_with_only_prereleases_ahead_stays_on_the_stable(self) -> None:
         assert core.select_latest(_releases("0.2.0", "0.3.0a1"), "0.2.0") == "0.2.0"
 
     def test_yanked_and_empty_and_below_floor_are_skipped(self) -> None:
@@ -149,7 +220,7 @@ def test_fetch_releases_validates_the_answer() -> None:
 
 
 def test_check_uses_installed_version_and_channel(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(core, "installed", lambda: _installed(version="0.2.0a1"))
+    monkeypatch.setattr(core, "installed", lambda home=None: _installed(version="0.2.0a1"))
     seen: list[str] = []
 
     def fetch(url: str) -> bytes:
@@ -217,6 +288,9 @@ class TestAutoCheckEnabled:
             ("plugins:\n  auto_update_check_hours: 0\n", False),
             ("plugins:\n  auto_update_check_hours: false\n", False),
             ("plugins: []\n", True),
+            ('plugins:\n  auto_update_check_hours: "0"\n', False),
+            ('plugins:\n  auto_update_check_hours: "12"\n', True),
+            ("plugins:\n  auto_update_check_hours: nonsense\n", True),
         ],
     )
     def test_reads_hermes_setting(self, tmp_path: Path, yaml: str, expected: bool) -> None:
@@ -241,6 +315,22 @@ class TestCache:
         assert core.read_cache(tmp_path, now=lambda: 1000.0 + core.FAILURE_CACHE_SECONDS - 1) is not None
         assert core.read_cache(tmp_path, now=lambda: 1000.0 + core.FAILURE_CACHE_SECONDS + 1) is None
 
+    def test_no_qualifying_release_is_a_day_long_answer(self, tmp_path: Path) -> None:
+        core.write_cache(core.CheckResult("0.2.0a1", None, None, "pypi", 1000.0, "no release qualifies"), tmp_path)
+        assert core.read_cache(tmp_path, now=lambda: 1000.0 + core.FAILURE_CACHE_SECONDS + 1) is not None
+
+    def test_receipt_garbage_is_ignored(self, tmp_path: Path) -> None:
+        _write_receipt(tmp_path, kind="plugin-check", finished="2027-01-15T00:00:00+00:00", rows=[ROW])
+        directory = tmp_path / "logs" / "update_receipts"
+        (directory / "pm_b.json").write_text(
+            '{"kind": "plugin-check", "plugin_checks": 7, "finished_at": "2027-01-15T00:00:00+00:00"}'
+        )
+        (directory / "pm_c.json").write_text("[" * 100000 + "]" * 100000)
+        stamp = core._iso_to_epoch("2027-01-15T00:00:00+00:00")
+        assert stamp is not None
+        # the newest usable plugin-check (pm_b) has no rows -> nothing, no crash
+        assert core.hermes_receipt_check(tmp_path, now=lambda: stamp + 1) is None
+
     def test_garbage_is_ignored(self, tmp_path: Path) -> None:
         path = tmp_path / "mordred" / core.CACHE_FILE_NAME
         path.parent.mkdir()
@@ -252,7 +342,7 @@ class TestCache:
 
 class TestCachedCheck:
     def test_order_receipt_cache_pypi(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(core, "installed", lambda: _installed(version="0.2.0a1"))
+        monkeypatch.setattr(core, "installed", lambda home=None: _installed(version="0.2.0a1"))
         calls: list[str] = []
 
         def fetch(url: str) -> bytes:
@@ -276,14 +366,14 @@ class TestCachedCheck:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         core.write_cache(core.CheckResult("0.1.0a20", "0.2.0a1", True, "pypi", 1_800_000_000.0), tmp_path)
-        monkeypatch.setattr(core, "installed", lambda: _installed(version="0.2.0a1"))
+        monkeypatch.setattr(core, "installed", lambda home=None: _installed(version="0.2.0a1"))
         fetch = lambda url: json.dumps({"releases": _releases("0.2.0a1")}).encode()  # noqa: E731
         result = core.cached_check(tmp_path, fetch=fetch, now=lambda: 1_800_000_000.0 + 5)
         assert result is not None and result.source == "pypi" and result.available is False
 
     def test_opt_out_asks_nothing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         (tmp_path / "config.yaml").write_text("plugins:\n  auto_update_check_hours: 0\n", encoding="utf-8")
-        monkeypatch.setattr(core, "installed", lambda: _installed())
+        monkeypatch.setattr(core, "installed", lambda home=None: _installed())
 
         def fetch(url: str) -> bytes:
             raise AssertionError("must not contact PyPI")
@@ -291,7 +381,7 @@ class TestCachedCheck:
         assert core.cached_check(tmp_path, fetch=fetch) is None
 
     def test_failure_is_cached(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(core, "installed", lambda: _installed())
+        monkeypatch.setattr(core, "installed", lambda home=None: _installed())
 
         def fetch(url: str) -> bytes:
             raise OSError("offline")
@@ -347,6 +437,22 @@ def test_find_uv_prefers_path_then_hermes_tools(tmp_path: Path, monkeypatch: pyt
     assert core.find_uv(tmp_path) == Path("/usr/local/bin/uv")
 
 
+def test_installed_adds_member_extras_for_pm_build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from mordred_hermes.desktop import member
+
+    source = member.InstallSource("0.2.0a1", "path", "/e/workspace/plugin-sources/mordred", False, ())
+    monkeypatch.setattr(member, "install_source", lambda: source)
+    monkeypatch.setattr(
+        member,
+        "member_status",
+        lambda plugin_dir: {"present": True, "valid": True, "extras": ["extension", "telegram"]},
+    )
+    monkeypatch.setattr(core, "_platform", lambda: "darwin")
+    current = core.installed(tmp_path)
+    assert current.from_member is True and current.kind == "path"
+    assert current.extras == ("extension", "macos", "telegram")
+
+
 def test_installed_adds_platform_extra(monkeypatch: pytest.MonkeyPatch) -> None:
     from mordred_hermes.desktop import member
 
@@ -366,115 +472,184 @@ FREEZE = """\
 aiohttp==3.9.5
 hermes-agent==0.22.0
 hermes-mordred==0.2.0a1
-mordred-hermes==0.1.0a20
 -e /Users/x/hermes-agent
 ruamel.yaml==0.18.6
+telethon==1.40.0
 """
 
 
+def _apply(runner: FakeRunner, tmp_path: Path, **kw: Any) -> core.UpdateReport:
+    kw.setdefault("current", _installed(extras=("extension", "macos")))
+    kw.setdefault("uv", Path("/opt/uv"))
+    return core.apply("0.2.0a5", runner=runner, home=tmp_path, **kw)
+
+
 class TestApply:
-    def test_sequence_mirrors_the_installer(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        runner = FakeRunner(freeze=FREEZE, requirements="ruamel.yaml>=0.18\npsutil>=7.2.2\n")
-        written: dict[str, str] = {}
-        real_write = core._write_constraints
+    def test_sequence_mirrors_the_installer(self, tmp_path: Path) -> None:
+        runner = FakeRunner(freeze=FREEZE, requirements="ruamel.yaml>=0.18\ntelethon>=1.42\n")
+        constraints: dict[str, str] = {}
 
-        def spy(freeze_output: str, path: Path) -> int:
-            n = real_write(freeze_output, path)
-            written["constraints"] = path.read_text(encoding="utf-8")
-            return n
+        def spy(argv, *, cwd=None, env=None, timeout=None):
+            if "--constraint" in argv:
+                constraints["text"] = Path(argv[argv.index("--constraint") + 1]).read_text(encoding="utf-8")
+            return FakeRunner.__call__(runner, argv, cwd=cwd, env=env, timeout=timeout)
 
-        monkeypatch.setattr(core, "_write_constraints", spy)
-        monkeypatch.setattr(core, "_platform", lambda: "darwin")
-        current = _installed(extras=("extension", "macos"))
-        report = core.apply("0.2.0a5", current=current, uv=Path("/opt/uv"), runner=runner, home=tmp_path)
-
+        report = _apply(spy, tmp_path)  # type: ignore[arg-type]
         assert report.previous == "0.2.0a1" and report.target == "0.2.0a5"
         assert report.steps == [
             "freeze",
             "install-package",
+            "hermes-floor",
             "read-requirements",
             "install-requirements",
             "record-member",
         ]
         assert report.warnings == [] and report.member_recorded is True
-        assert written["constraints"] == "aiohttp==3.9.5\nhermes-agent==0.22.0\nruamel.yaml==0.18.6\n"
+        # Only Hermes's closure is pinned: telethon (Mordred's) stays free to move.
+        assert constraints["text"] == "aiohttp==3.9.5\nhermes-agent==0.22.0\nruamel.yaml==0.18.6\n"
 
-        steps = [FakeRunner._step(c) for c in runner.calls]
-        assert steps == [
-            "check",
+        assert runner.steps == [
             "freeze",
+            "hermes-closure",
+            "check",
             "install-package",
+            "hermes-floor",
             "read-requirements",
             "install-requirements",
             "check",
             "record-member",
         ]
-        install = runner.calls[2]
-        assert install[:3] == ["/opt/uv", "pip", "install"]
-        assert "--python" in install and install[install.index("--python") + 1] == "/env/bin/python3"
+        install = runner.argvs[3]
+        assert install[:3] == ["/opt/uv", "pip", "install"] and "--no-config" in install
+        assert install[install.index("--python") + 1] == "/env/bin/python3"
         assert "--no-python-downloads" in install and "--no-deps" in install
         assert install[install.index("--upgrade-package") + 1] == "hermes-mordred"
         assert install[-1] == f"hermes-mordred[extension,macos]==0.2.0a5,>={core.MIN_MORDRED_VERSION}"
-        read = runner.calls[3]
+        read = runner.argvs[5]
         assert read[:3] == ["/env/bin/python3", "-I", "-c"] and read[-2:] == ["hermes-mordred", "extension,macos"]
-        reqs = runner.calls[4]
-        assert reqs[reqs.index("--constraint") + 1].endswith("constraints.txt")
-        assert reqs[-2:] == ["ruamel.yaml>=0.18", "psutil>=7.2.2"]
-        assert "--upgrade-package" not in reqs
-        assert runner.calls[6][:3] == ["/env/bin/python3", "-I", "-c"]
+        reqs = runner.argvs[6]
+        assert reqs[-2:] == ["ruamel.yaml>=0.18", "telethon>=1.42"] and "--upgrade-package" not in reqs
+        assert runner.argvs[8][:3] == ["/env/bin/python3", "-I", "-c"]
 
-    def test_failed_step_raises_with_tail(self, tmp_path: Path) -> None:
+    def test_commands_are_isolated_from_the_working_directory(self, tmp_path: Path) -> None:
+        runner = FakeRunner(freeze=FREEZE)
+        _apply(runner, tmp_path)
+        for argv, cwd, _env, timeout in runner.calls:
+            assert cwd is not None and cwd.name.startswith("mordred-update-"), argv
+            assert timeout is not None and timeout > 0, argv
+            if argv[0] == "/opt/uv":
+                assert "--no-config" in argv, argv
+            else:
+                assert argv[1] == "-I", argv
+        record = runner.calls[-1]
+        assert record[2] is not None and record[2]["HERMES_HOME"] == str(tmp_path)
+        assert runner.calls[3][3] == core.INSTALL_TIMEOUT_SECONDS and runner.calls[0][3] == core.QUICK_TIMEOUT_SECONDS
+
+    def test_stderr_never_becomes_a_requirement(self, tmp_path: Path) -> None:
+        runner = FakeRunner(freeze=FREEZE, requirements="psutil>=7.2.2\n", stderr="Error processing line 1 of x.pth\n")
+        _apply(runner, tmp_path)
+        reqs = runner.argvs[runner.steps.index("install-requirements")]
+        assert reqs[-1] == "psutil>=7.2.2" and not any("pth" in a for a in reqs)
+
+    def test_unknown_closure_pins_everything_with_a_warning(self, tmp_path: Path) -> None:
+        runner = FakeRunner(freeze=FREEZE, requirements="telethon>=1.42\n", closure=None)
+        seen: dict[str, str] = {}
+
+        def spy(argv, *, cwd=None, env=None, timeout=None):
+            if "--constraint" in argv:
+                seen["text"] = Path(argv[argv.index("--constraint") + 1]).read_text(encoding="utf-8")
+            return runner(argv, cwd=cwd, env=env, timeout=timeout)
+
+        report = _apply(spy, tmp_path)  # type: ignore[arg-type]
+        assert seen["text"] == "aiohttp==3.9.5\nhermes-agent==0.22.0\nruamel.yaml==0.18.6\ntelethon==1.40.0\n"
+        assert any("closure" in w for w in report.warnings)
+
+    def test_legacy_package_is_removed_before_the_install(self, tmp_path: Path) -> None:
+        runner = FakeRunner(freeze=FREEZE + "mordred-hermes==0.1.0a15\n")
+        _apply(runner, tmp_path, record_member=False)
+        steps = runner.steps
+        assert steps.index("remove-legacy") < steps.index("install-package")
+        assert runner.argvs[steps.index("remove-legacy")][-1] == "mordred-hermes"
+
+    def test_failure_before_the_swap_has_nothing_to_undo(self, tmp_path: Path) -> None:
         runner = FakeRunner(freeze=FREEZE, fail="install-package")
         with pytest.raises(core.UpdateFailed) as info:
-            core.apply("0.2.0a5", current=_installed(), uv=Path("/opt/uv"), runner=runner, home=tmp_path)
-        assert info.value.step == "install-package"
+            _apply(runner, tmp_path)
+        assert info.value.step == "install-package" and info.value.rolled_back is None
         assert info.value.output.endswith("line2")
-        assert [FakeRunner._step(c) for c in runner.calls] == ["check", "freeze", "install-package"]
+        assert "rollback" not in runner.steps
+
+    def test_failure_after_the_swap_rolls_back(self, tmp_path: Path) -> None:
+        runner = FakeRunner(freeze=FREEZE, requirements="telethon>=1.42\n", fail="install-requirements")
+        with pytest.raises(core.UpdateFailed) as info:
+            _apply(runner, tmp_path)
+        assert info.value.step == "install-requirements" and info.value.rolled_back is True
+        back = runner.argvs[runner.steps.index("rollback")]
+        assert "--no-deps" in back and back[back.index("--reinstall-package") + 1] == "hermes-mordred"
+        assert back[-1] == f"hermes-mordred[extension,macos]==0.2.0a1,>={core.MIN_MORDRED_VERSION}"
+        assert "record-member" not in runner.steps
+
+    def test_failed_rollback_is_reported(self, tmp_path: Path) -> None:
+        runner = FakeRunner(freeze=FREEZE, requirements="x>=1\n", fail="install-requirements", rollback_code=1)
+        with pytest.raises(core.UpdateFailed) as info:
+            _apply(runner, tmp_path)
+        assert info.value.rolled_back is False and "rollback said no" in info.value.rollback_output
+
+    def test_hermes_floor_unmet_restores_and_refuses(self, tmp_path: Path) -> None:
+        runner = FakeRunner(freeze=FREEZE, floor=">=0.30.0\t0.22.0")
+        with pytest.raises(core.UpdateRefused) as info:
+            _apply(runner, tmp_path)
+        assert info.value.code == "hermes-too-old"
+        assert "hermes-agent>=0.30.0" in info.value.message and "0.22.0" in info.value.message
+        assert "previous release restored" in info.value.message
+        assert "rollback" in runner.steps and "read-requirements" not in runner.steps
+
+    @pytest.mark.parametrize(
+        ("line", "unmet"),
+        [
+            (">=0.13.0\t0.22.0", False),
+            (">=0.13.0\t0.0.0", True),
+            (">=0.13.0\t", True),
+            ("\t0.22.0", False),
+            (">=0.30.0a1\t0.30.0a2", False),
+            ("garbage\t0.22.0", False),
+        ],
+    )
+    def test_hermes_floor_rule(self, line: str, unmet: bool) -> None:
+        assert (core._hermes_floor_unmet(line) is not None) is unmet
 
     def test_new_conflict_is_a_warning_only_when_it_was_clean_before(self, tmp_path: Path) -> None:
         runner = FakeRunner(freeze=FREEZE, check_codes=[0, 1])
-        report = core.apply(
-            "0.2.0a5", current=_installed(), uv=Path("/opt/uv"), runner=runner, home=tmp_path, record_member=False
-        )
+        report = _apply(runner, tmp_path, record_member=False)
         assert any("conflicting dependencies" in w for w in report.warnings)
         runner = FakeRunner(freeze=FREEZE, check_codes=[1, 1])
-        report = core.apply(
-            "0.2.0a5", current=_installed(), uv=Path("/opt/uv"), runner=runner, home=tmp_path, record_member=False
-        )
+        report = _apply(runner, tmp_path, record_member=False)
         assert report.warnings == []
 
     def test_member_refresh_failure_is_a_warning(self, tmp_path: Path) -> None:
         runner = FakeRunner(freeze=FREEZE, fail="record-member")
-        report = core.apply("0.2.0a5", current=_installed(), uv=Path("/opt/uv"), runner=runner, home=tmp_path)
+        report = _apply(runner, tmp_path)
         assert report.member_recorded is False
         assert any("next start" in w for w in report.warnings)
 
     def test_refusals_run_before_anything_else(self, tmp_path: Path) -> None:
         runner = FakeRunner(freeze=FREEZE)
         with pytest.raises(core.UpdateRefused):
-            core.apply(
-                "0.2.0a5",
-                current=_installed(kind="path", path="/src"),
-                uv=Path("/opt/uv"),
-                runner=runner,
-                home=tmp_path,
-            )
+            _apply(runner, tmp_path, current=_installed(kind="path", path="/src"))
         with pytest.raises(core.UpdateRefused, match="PEP 440"):
             core.apply("latest", current=_installed(), uv=Path("/opt/uv"), runner=runner, home=tmp_path)
         assert runner.calls == []
 
     def test_no_requirements_skips_the_second_install(self, tmp_path: Path) -> None:
         runner = FakeRunner(freeze=FREEZE, requirements="")
-        report = core.apply(
-            "0.2.0a5",
-            current=_installed(extras=()),
-            uv=Path("/opt/uv"),
-            runner=runner,
-            home=tmp_path,
-            record_member=False,
-        )
+        report = _apply(runner, tmp_path, current=_installed(extras=()), record_member=False)
         assert "install-requirements" not in report.steps
-        assert runner.calls[2][-1] == f"hermes-mordred==0.2.0a5,>={core.MIN_MORDRED_VERSION}"
+        assert runner.argvs[3][-1] == f"hermes-mordred==0.2.0a5,>={core.MIN_MORDRED_VERSION}"
+
+
+def test_default_runner_times_out_cleanly() -> None:
+    result = core._default_runner([sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.2)
+    assert result.code == 124 and "timed out" in result.stderr
 
 
 # -- the CLI --------------------------------------------------------------------------------
@@ -483,7 +658,7 @@ class TestApply:
 class TestCli:
     @pytest.fixture(autouse=True)
     def _env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(core, "installed", lambda: _installed())
+        monkeypatch.setattr(core, "installed", lambda home=None: _installed())
         monkeypatch.setattr(core, "find_uv", lambda home=None, env=None: Path("/opt/uv"))
         monkeypatch.setattr(core, "refuse_if_unsupported", lambda current, uv, platform=None: None)
 
@@ -553,15 +728,36 @@ class TestCli:
         assert update_cli.run(update_cli.UpdateOptions(yes=True)) == update_cli.EXIT_REFUSED
         assert "Windows" in capsys.readouterr().err
 
-    def test_failed_apply(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    @pytest.mark.parametrize(
+        ("rolled_back", "expect"),
+        [(None, "was not replaced"), (True, "was reinstalled"), (False, "FAILED as well")],
+    )
+    def test_failed_apply_says_what_state_was_left(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], rolled_back: bool | None, expect: str
+    ) -> None:
         monkeypatch.setattr(core, "check", lambda **kw: core.CheckResult("0.2.0a1", "0.2.0a3", True, "pypi", 0.0))
 
         def apply(target: str, **kw: Any) -> core.UpdateReport:
-            raise core.UpdateFailed("install-package", "resolver said no")
+            raise core.UpdateFailed(
+                "install-package", "resolver said no", rolled_back=rolled_back, rollback_output="rb"
+            )
 
         monkeypatch.setattr(core, "apply", apply)
         assert update_cli.run(update_cli.UpdateOptions(yes=True)) == update_cli.EXIT_FAILED
-        assert "resolver said no" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "resolver said no" in err and expect in err
+
+    def test_interactive_prompt_accepts_yes_and_declines_otherwise(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(core, "check", lambda **kw: core.CheckResult("0.2.0a1", "0.2.0a3", True, "pypi", 0.0))
+        applied: list[str] = []
+        monkeypatch.setattr(
+            core, "apply", lambda target, **kw: applied.append(target) or core.UpdateReport("0.2.0a1", target, ())
+        )
+        monkeypatch.setattr("builtins.input", lambda prompt: "n")
+        assert update_cli.run(update_cli.UpdateOptions(interactive=True)) == update_cli.EXIT_REFUSED
+        monkeypatch.setattr("builtins.input", lambda prompt: "Y")
+        assert update_cli.run(update_cli.UpdateOptions(interactive=True)) == update_cli.EXIT_OK
+        assert applied == ["0.2.0a3"]
 
 
 def test_parser_wires_update_flags() -> None:
