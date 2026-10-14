@@ -586,8 +586,28 @@ class TestApply:
         assert info.value.step == "install-requirements" and info.value.rolled_back is True
         back = runner.argvs[runner.steps.index("rollback")]
         assert "--no-deps" in back and back[back.index("--reinstall-package") + 1] == "hermes-mordred"
-        assert back[-1] == f"hermes-mordred[extension,macos]==0.2.0a1,>={core.MIN_MORDRED_VERSION}"
+        assert back[-1] == "hermes-mordred[extension,macos]==0.2.0a1"  # no floor: the old release must come back
         assert "record-member" not in runner.steps
+
+    def test_legacy_removal_arms_the_rollback(self, tmp_path: Path) -> None:
+        runner = FakeRunner(freeze=FREEZE + "mordred-hermes==0.1.0a15\n", fail="install-package")
+        with pytest.raises(core.UpdateFailed) as info:
+            _apply(runner, tmp_path)
+        assert info.value.rolled_back is True  # the legacy package owned the same files
+        assert runner.steps.index("rollback") > runner.steps.index("install-package")
+
+    def test_missing_executable_is_a_failed_step_with_rollback(self, tmp_path: Path) -> None:
+        runner = FakeRunner(freeze=FREEZE, requirements="x>=1\n")
+
+        def flaky(argv, *, cwd=None, env=None, timeout=None):
+            if FakeRunner._step(argv) == "install-requirements":
+                return core._default_runner(["/nonexistent/uv", "pip", "install"], cwd=cwd, timeout=timeout)
+            return runner(argv, cwd=cwd, env=env, timeout=timeout)
+
+        with pytest.raises(core.UpdateFailed) as info:
+            _apply(flaky, tmp_path)  # type: ignore[arg-type]
+        assert info.value.step == "install-requirements" and "cannot run /nonexistent/uv" in info.value.output
+        assert info.value.rolled_back is True
 
     def test_failed_rollback_is_reported(self, tmp_path: Path) -> None:
         runner = FakeRunner(freeze=FREEZE, requirements="x>=1\n", fail="install-requirements", rollback_code=1)
@@ -599,10 +619,16 @@ class TestApply:
         runner = FakeRunner(freeze=FREEZE, floor=">=0.30.0\t0.22.0")
         with pytest.raises(core.UpdateRefused) as info:
             _apply(runner, tmp_path)
-        assert info.value.code == "hermes-too-old"
+        assert info.value.code == "hermes-too-old" and info.value.rolled_back is True
         assert "hermes-agent>=0.30.0" in info.value.message and "0.22.0" in info.value.message
         assert "previous release restored" in info.value.message
         assert "rollback" in runner.steps and "read-requirements" not in runner.steps
+
+    def test_hermes_floor_unmet_with_failed_rollback_says_so(self, tmp_path: Path) -> None:
+        runner = FakeRunner(freeze=FREEZE, floor=">=0.30.0\t0.22.0", rollback_code=1)
+        with pytest.raises(core.UpdateRefused) as info:
+            _apply(runner, tmp_path)
+        assert info.value.rolled_back is False and "FAILED" in info.value.message
 
     @pytest.mark.parametrize(
         ("line", "unmet"),
@@ -645,6 +671,23 @@ class TestApply:
         report = _apply(runner, tmp_path, current=_installed(extras=()), record_member=False)
         assert "install-requirements" not in report.steps
         assert runner.argvs[3][-1] == f"hermes-mordred==0.2.0a5,>={core.MIN_MORDRED_VERSION}"
+
+
+def test_default_runner_reports_a_missing_executable() -> None:
+    result = core._default_runner(["/nonexistent/uv", "pip", "check"], timeout=5)
+    assert result.code == 127 and "cannot run /nonexistent/uv" in result.stderr
+
+
+def test_check_and_cached_check_reuse_a_given_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_walk(home=None):
+        raise AssertionError("installed() must not be called when current is given")
+
+    monkeypatch.setattr(core, "installed", no_walk)
+    fetch = lambda url: json.dumps({"releases": _releases("0.2.0a1", "0.2.0a2")}).encode()  # noqa: E731
+    result = core.check(fetch=fetch, now=lambda: 1.0, current=_installed(version="0.2.0a1"))
+    assert result.latest == "0.2.0a2" and result.installed == "0.2.0a1"
+    cached = core.cached_check(tmp_path, fetch=fetch, now=lambda: 1.0, current=_installed(version="0.2.0a1"))
+    assert cached is not None and cached.source == "pypi"
 
 
 def test_default_runner_times_out_cleanly() -> None:
@@ -718,15 +761,26 @@ class TestCli:
         assert update_cli.run(update_cli.UpdateOptions(version="0.2.0a9", yes=True)) == update_cli.EXIT_OK
         assert update_cli.run(update_cli.UpdateOptions(version="0.2.0a9", check_only=True)) == update_cli.EXIT_REFUSED
 
-    def test_refusal_is_reported(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-        monkeypatch.setattr(core, "check", lambda **kw: core.CheckResult("0.2.0a1", "0.2.0a3", True, "pypi", 0.0))
+    def test_refusal_is_reported_before_pypi_is_asked(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        asked: list[int] = []
+
+        def check(**kw: Any) -> core.CheckResult:
+            asked.append(1)
+            return core.CheckResult("0.2.0a1", "0.2.0a3", True, "pypi", 0.0)
+
+        monkeypatch.setattr(core, "check", check)
 
         def refuse(current: Any, uv: Any, platform: Any = None) -> None:
             raise core.UpdateRefused("windows", "no in-place updates on Windows")
 
         monkeypatch.setattr(core, "refuse_if_unsupported", refuse)
         assert update_cli.run(update_cli.UpdateOptions(yes=True)) == update_cli.EXIT_REFUSED
-        assert "Windows" in capsys.readouterr().err
+        assert "Windows" in capsys.readouterr().err and asked == []
+        # --check is read-only and still works where an in-place update cannot run.
+        assert update_cli.run(update_cli.UpdateOptions(check_only=True)) == update_cli.EXIT_UPDATE_AVAILABLE
+        assert asked == [1]
 
     @pytest.mark.parametrize(
         ("rolled_back", "expect"),

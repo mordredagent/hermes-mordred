@@ -108,10 +108,13 @@ _FAILURE_PREFIX: Final = "check failed"
 class UpdateRefused(Exception):
     """The update cannot run here; ``code`` is stable for callers, ``message`` for people."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, rolled_back: bool | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        #: Set when the refusal came after the package had been replaced
+        #: (``hermes-too-old``): whether the previous release was reinstalled.
+        self.rolled_back = rolled_back
 
 
 class UpdateCheckFailed(Exception):
@@ -303,14 +306,16 @@ class CheckResult:
         return asdict(self)
 
 
-def check(*, fetch: Fetch | None = None, now: Callable[[], float] = time.time) -> CheckResult:
-    """Ask PyPI now (an explicit user action)."""
-    current = installed().version
+def check(
+    *, fetch: Fetch | None = None, now: Callable[[], float] = time.time, current: Installed | None = None
+) -> CheckResult:
+    """Ask PyPI now (an explicit user action). *current* spares a second metadata walk."""
+    current_version = (current or installed()).version
     releases = fetch_releases(fetch)
-    latest = select_latest(releases, current)
-    available = is_newer(latest, current)
+    latest = select_latest(releases, current_version)
+    available = is_newer(latest, current_version)
     reason = "" if latest is not None else "no release qualifies"
-    return CheckResult(current, latest, available, "pypi", now(), reason)
+    return CheckResult(current_version, latest, available, "pypi", now(), reason)
 
 
 # -- reusing Hermes's own answer, and caching ours -------------------------------------
@@ -455,27 +460,29 @@ def cached_check(
     *,
     fetch: Fetch | None = None,
     now: Callable[[], float] = time.time,
+    current: Installed | None = None,
 ) -> CheckResult | None:
     """The answer for a page that merely wants to know, with no fresh request if avoidable.
 
     Order: Hermes's fresh receipt, then our cache, then (only when the user has
     not disabled Hermes's own check) one request, cached. ``None`` means
-    nothing is known and nothing was asked.
+    nothing is known and nothing was asked. *current* spares a metadata walk.
     """
     base = home or hermes_home()
-    current = installed(base).version
+    current = current or installed(base)
+    current_version = current.version
     receipt = hermes_receipt_check(base, now=now)
-    if receipt is not None and receipt.installed == current:
+    if receipt is not None and receipt.installed == current_version:
         return receipt
     cached = read_cache(base, now=now)
-    if cached is not None and cached.installed == current:
+    if cached is not None and cached.installed == current_version:
         return cached
     if not auto_check_enabled(base):
         return None
     try:
-        result = check(fetch=fetch, now=now)
+        result = check(fetch=fetch, now=now, current=current)
     except UpdateCheckFailed as exc:
-        result = CheckResult(current, None, None, "pypi", now(), f"{_FAILURE_PREFIX}: {exc}")
+        result = CheckResult(current_version, None, None, "pypi", now(), f"{_FAILURE_PREFIX}: {exc}")
     write_cache(result, base)
     return result
 
@@ -525,6 +532,8 @@ def _default_runner(
     except subprocess.TimeoutExpired as exc:
         out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
         return CommandResult(124, str(out), f"timed out after {timeout:.0f}s\n" if timeout else "timed out\n")
+    except OSError as exc:  # the executable vanished or is not runnable: a failed step, not a crash
+        return CommandResult(127, "", f"cannot run {argv[0]}: {exc}\n")
     return CommandResult(proc.returncode, proc.stdout or "", proc.stderr or "")
 
 
@@ -681,10 +690,12 @@ def refuse_if_unsupported(current: Installed, *, uv: Path | None, platform: str 
         )
 
 
-def _spec(extras: tuple[str, ...], version: str) -> str:
+def _spec(extras: tuple[str, ...], version: str, *, floor: bool = True) -> str:
+    """``hermes-mordred[extras]==version`` plus the installer's floor (not for a rollback: the
+    previous release may predate the floor and must be restorable regardless)."""
     joined = ",".join(extras)
     name = f"{DISTRIBUTION}[{joined}]" if joined else DISTRIBUTION
-    return f"{name}=={version},>={MIN_MORDRED_VERSION}"
+    return f"{name}=={version}" + (f",>={MIN_MORDRED_VERSION}" if floor else "")
 
 
 def _frozen_names(freeze_output: str) -> list[tuple[str, str]]:
@@ -757,7 +768,7 @@ class _Session:
             "--no-deps",
             "--reinstall-package",
             DISTRIBUTION,
-            _spec(self.report.extras, self.report.previous),
+            _spec(self.report.extras, self.report.previous, floor=False),
         )
         _LOG.warning("update step %s failed; reinstalling %s %s", step, DISTRIBUTION, self.report.previous)
         back = self.probe(argv, timeout=INSTALL_TIMEOUT_SECONDS)
@@ -805,6 +816,9 @@ def _write_constraints(session: _Session) -> Path:
     constraints.write_text("\n".join(pins) + ("\n" if pins else ""), encoding="utf-8")
     if any(name == LEGACY_DISTRIBUTION for name, _ in _frozen_names(freeze.stdout)):
         session.step("remove-legacy", session.uv_cmd("uninstall", LEGACY_DISTRIBUTION), timeout=quick)
+        # The legacy package owned the same files: from here on a failure must
+        # reinstall the previous release to put them back.
+        session.replaced = True
     return constraints
 
 
@@ -830,7 +844,7 @@ def _install(session: _Session, target: str, current: Installed) -> None:
     if unmet is not None:
         failed = session.failure("hermes-floor", unmet)
         restored = " (previous release restored)" if failed.rolled_back else " (restoring the previous release FAILED)"
-        raise UpdateRefused("hermes-too-old", unmet + restored)
+        raise UpdateRefused("hermes-too-old", unmet + restored, rolled_back=failed.rolled_back)
     extras = ",".join(current.extras)
     requirements = session.step(
         "read-requirements", session.python_cmd(_REQUIREMENTS_SCRIPT, DISTRIBUTION, extras), timeout=quick

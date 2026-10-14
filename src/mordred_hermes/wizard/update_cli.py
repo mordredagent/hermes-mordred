@@ -56,7 +56,7 @@ def _confirm(previous: str, target: str, opts: UpdateOptions) -> bool:
     return answer.strip().lower() in {"y", "yes"}
 
 
-def _resolve_target(opts: UpdateOptions) -> tuple[str | None, int]:
+def _resolve_target(opts: UpdateOptions, current: core.Installed) -> tuple[str | None, int]:
     """The release to install, or ``None`` with the exit code to return instead."""
     if opts.version is not None:
         if opts.check_only:
@@ -64,7 +64,7 @@ def _resolve_target(opts: UpdateOptions) -> tuple[str | None, int]:
             return None, EXIT_REFUSED
         return opts.version, EXIT_OK
     try:
-        result = core.check()
+        result = core.check(current=current)
     except core.UpdateCheckFailed as exc:
         _term.emit_error(f"could not ask PyPI for releases: {exc}")
         return None, EXIT_FAILED
@@ -115,15 +115,18 @@ def run(opts: UpdateOptions) -> int:
     except Exception as exc:  # metadata missing / broken environment
         _term.emit_error(f"cannot read the installed hermes-mordred: {type(exc).__name__}: {exc}")
         return EXIT_FAILED
-    target, code = _resolve_target(opts)
+    uv = core.find_uv()
+    if not opts.check_only:
+        # Refuse before touching the network: an environment that can never
+        # update in place should not be told what it is missing first.
+        try:
+            core.refuse_if_unsupported(current, uv=uv)
+        except core.UpdateRefused as exc:
+            _term.emit_error(exc.message)
+            return EXIT_REFUSED
+    target, code = _resolve_target(opts, current)
     if target is None:
         return code
-    uv = core.find_uv()
-    try:
-        core.refuse_if_unsupported(current, uv=uv)
-    except core.UpdateRefused as exc:
-        _term.emit_error(exc.message)
-        return EXIT_REFUSED
     if not _confirm(current.version, target, opts):
         return EXIT_REFUSED
     return _apply(current, target, uv)
