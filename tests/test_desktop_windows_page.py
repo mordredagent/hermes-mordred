@@ -324,6 +324,8 @@ def test_update_button_is_gated_by_the_api_not_by_text():
         "uninstall_busy",
         "update_job_lost",
         "update_job_timeout",
+        "update_rollback_failed",
+        "update_hermes_too_old",
     ):
         assert f"  {code}:" in page, code
 

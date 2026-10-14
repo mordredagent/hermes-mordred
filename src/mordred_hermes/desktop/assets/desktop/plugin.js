@@ -50,7 +50,9 @@ const MESSAGES = {
   hermes_model_not_private: 'Hermes itself must use a Venice private model or a local model first (step 0).',
   // Package updates (`hermes-mordred update` behind the Update Mordred button).
   update_check_failed: 'PyPI could not be asked for Mordred releases right now. Check the network path and try again.',
-  update_failed: 'The update stopped; the previous version is usually still intact. See the step output below, or rerun the installer from a terminal.',
+  update_failed: 'The update stopped and the previous version was kept or reinstalled. See the step output below; fix the cause and try again.',
+  update_rollback_failed: 'The update stopped AND reinstalling the previous version failed. Mordred may not load until you reinstall it from a terminal with the installer.',
+  update_hermes_too_old: 'That Mordred release needs a newer Hermes than the one installed (the previous Mordred was restored). Update Hermes first.',
   update_unsupported_windows: 'In-place updates are not supported on Windows. Rerun the Windows installer, keeping the existing Hermes home and custody keys, then restart Hermes.',
   update_source_install: 'Mordred was installed from a local checkout. Update it with scripts/install.sh --from-source <checkout>.',
   update_no_uv: 'uv was not found on PATH or under the Hermes home. Install uv, then try again.',
@@ -1157,7 +1159,8 @@ function UpdatePanel({ health, recheck }) {
         setReport((job.progress && job.progress.report) || { target: check.latest })
       } else if (job.state === 'failed') {
         const p = job.progress || {}
-        setFailure({ error: job.error || 'update_failed', step: p.step, output: p.output || p.refusal })
+        const rollback = p.rolled_back === false && p.rollback_output ? `\n\nrollback: ${p.rollback_output}` : ''
+        setFailure({ error: job.error || 'update_failed', step: p.step, output: (p.output || p.refusal || '') + rollback })
       } else if (job.state === 'lost') {
         setFailure({ error: job.error })
       } else if (job.state === 'timeout') {

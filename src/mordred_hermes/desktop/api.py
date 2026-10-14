@@ -725,6 +725,7 @@ _REFUSAL_CODES = {
     "no-uv": "update_no_uv",
     "not-a-venv": "update_not_a_venv",
     "bad-version": "update_bad_version",
+    "hermes-too-old": "update_hermes_too_old",
 }
 
 
@@ -847,8 +848,14 @@ async def update_apply(body: dict[str, Any] | None = None) -> Any:
             job.progress = {"target": target, "refusal": exc.message}
             raise _Fail(_REFUSAL_CODES.get(exc.code, "update_refused")) from exc
         except core.UpdateFailed as exc:
-            job.progress = {"target": target, "step": exc.step, "output": exc.output}
-            raise _Fail("update_failed") from exc
+            job.progress = {
+                "target": target,
+                "step": exc.step,
+                "output": exc.output,
+                "rolled_back": exc.rolled_back,
+                "rollback_output": exc.rollback_output,
+            }
+            raise _Fail("update_rollback_failed" if exc.rolled_back is False else "update_failed") from exc
         job.progress = {"target": target, "report": report.to_json()}
 
     return {"ok": True, **_job_view(_start_job("update", work))}

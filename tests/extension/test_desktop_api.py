@@ -614,7 +614,23 @@ def test_update_apply_failure_carries_the_step_output(env, update_core):
     started = _post(env, "/update/apply", {"version": "0.2.0a3"})
     job = _wait_job(env, started["job_id"])
     assert job["state"] == "failed" and job["error"] == "update_failed"
-    assert job["progress"] == {"target": "0.2.0a3", "step": "install-package", "output": "resolver said no"}
+    assert job["progress"] == {
+        "target": "0.2.0a3",
+        "step": "install-package",
+        "output": "resolver said no",
+        "rolled_back": None,
+        "rollback_output": "",
+    }
+
+
+def test_update_apply_failed_rollback_has_its_own_code(env, update_core):
+    from mordred_hermes import _self_update as core
+
+    update_core.apply_error = core.UpdateFailed("install-requirements", "no", rolled_back=False, rollback_output="rb")
+    started = _post(env, "/update/apply", {"version": "0.2.0a3"})
+    job = _wait_job(env, started["job_id"])
+    assert job["state"] == "failed" and job["error"] == "update_rollback_failed"
+    assert job["progress"]["rolled_back"] is False and job["progress"]["rollback_output"] == "rb"
 
 
 def test_update_apply_refusal_inside_the_job_is_reported(env, update_core):
