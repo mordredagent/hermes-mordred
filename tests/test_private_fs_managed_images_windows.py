@@ -209,18 +209,35 @@ def test_native_protected_windows_binary_metadata_and_descriptor_unchanged():
     assert acl(image) == before
 
 
-def test_native_real_defender_platform_image_is_admitted_with_descriptors_unchanged():
+def test_native_real_defender_platform_image_is_admitted_with_descriptors_unchanged(record_property):
     # Read-only: never modifies ProgramData; skipped where Defender is absent.
     platform = Path(system_directory().anchor) / "ProgramData" / "Microsoft" / "Windows Defender" / "Platform"
     images = sorted(platform.glob("*/MsMpEng.exe")) if platform.is_dir() else []
     if not images:
         pytest.skip("no Windows Defender platform image on this host")
+    api = get_api()
+    reparse_refusals = 0
     for image in images[:8]:
         chain = [image, *image.parents]
         before = [acl(path) for path in chain]
+        with api.open(str(image.parent), access=0x20080, share=7) as handle:
+            parent_is_reparse = api.metadata(handle).reparse
+        if parent_is_reparse:
+            # Defender can expose CurrentVersion as a junction. Admission
+            # must reject that spelling, then admit the concrete OS image.
+            with pytest.raises(PrivateFSError) as err:
+                inspect_managed_installation_image(image)
+            assert (err.value.reason, err.value.operation) == ("unsafe", "managed_image_metadata")
+            assert [acl(path) for path in chain] == before
+            reparse_refusals += 1
+            image = image.resolve(strict=True)
+            chain = [image, *image.parents]
+            before = [acl(path) for path in chain]
         info = inspect_managed_installation_image(image)
         assert info.size == image.stat().st_size > 0
         assert [acl(path) for path in chain] == before
+    record_property("defender_images_admitted", len(images[:8]))
+    record_property("defender_reparse_parent_refusals", reparse_refusals)
 
 
 def test_native_current_user_owned_readonly_image_is_refused_without_changes(tmp_path):

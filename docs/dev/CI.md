@@ -564,6 +564,13 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
   in this record. Product code was unchanged; this is live-device acceptance,
   not an additional full regression run.
 
+  Release preparation subsequently hit the existing native Defender-image
+  test's positive admission expectation at `Platform/CurrentVersion`.
+  The test now checks the parent's native reparse metadata, requires alias
+  refusal before inspecting its concrete OS target, preserves descriptor
+  comparisons and records both observations in JUnit. Production admission
+  remains unchanged; the fresh full hosted run must establish native results.
+
 - **2026-10-12 — Pre-merge Telegram review follow-up.**
   After integration with `dev` at `d3ad9d795`, independent review reproduced
   a diagnostic disclosure when malformed local HTTP coincided with audit
