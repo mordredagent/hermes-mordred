@@ -16,6 +16,7 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``, now the ``mordred`` plugi
   order, resuming where it left off (never destroys state; never auto-resets the keyvault)
 - ``configure``                                  — interactive Mordred setup (policy / LLM / harness)
 - ``upgrade [--reset|--non-interactive|...]``    — idempotent migration (detects ~/.openclaw)
+- ``update [--check|--version V|--yes]``         — move the installed package to a newer PyPI release
 - ``install <skill>``                            — install a skill through the policy gate
 - ``network {use,status,init}``                  — network-privacy path control + on-demand setup
 - ``policy {show,explain,dry-run,reload}``       — inspect / explain the active policy
@@ -54,6 +55,7 @@ from ._cli_parsers import (
     _add_status,
     _add_telegram,
     _add_uninstall,
+    _add_update,
     _add_upgrade,
     _add_vault,
     _handle_audit_decrypt,
@@ -91,6 +93,7 @@ from ._cli_parsers import (
     _handle_status,
     _handle_telegram,
     _handle_uninstall,
+    _handle_update,
     _handle_upgrade,
     _handle_vault_add,
     _handle_vault_cat,
@@ -123,6 +126,7 @@ __all__ = [
     "_add_status",
     "_add_telegram",
     "_add_uninstall",
+    "_add_update",
     "_add_upgrade",
     "_add_vault",
     "_handle_audit_decrypt",
@@ -160,6 +164,7 @@ __all__ = [
     "_handle_status",
     "_handle_telegram",
     "_handle_uninstall",
+    "_handle_update",
     "_handle_upgrade",
     "_handle_vault_add",
     "_handle_vault_cat",

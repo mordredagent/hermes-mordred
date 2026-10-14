@@ -141,6 +141,10 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
 
 </details>
 
+**Updating later.** `hermes-mordred update` installs a newer release and keeps
+your extras and Hermes's pins automatically. The manual `uv pip install
+--upgrade-package` commands above remain for manual control.
+
 ### Get the repository
 
 Normal users can skip this section. Contributors can clone the source with:
