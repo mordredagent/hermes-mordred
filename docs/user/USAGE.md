@@ -604,7 +604,17 @@ hermes-mordred desktop uninstall
 > button runs `hermes-mordred update --yes` as a background job (same extras,
 > Hermes pins untouched; see
 > [Upgrade the installed package](#upgrade-the-installed-package)), then shows
-> **Restart Hermes backend**, which is required. At Hermes Desktop start, a
+> **Restart Hermes Desktop**, which restarts the app and its local backend.
+> The button first offers **Restart now** / **Cancel**, explaining that all
+> Desktop windows restart and work in progress may be interrupted. Progress
+> appears on the page immediately; a failed or unconfirmed restart shows
+> manual instructions after at most 30 seconds. Older Desktop versions and
+> remote or unknown connections use manual instructions: quit and reopen the
+> local app, or restart Hermes on the machine serving the remote connection.
+> The messaging gateway restart is not used for package changes. If running
+> code and installed package metadata differ, the page reports both versions;
+> the mismatch alone does not prove a newer package was installed.
+> At Hermes Desktop start, a
 > known newer release also raises a one-time notice pointing to the Mordred
 > sidebar entry. On Windows, from a local checkout, or without `uv`, the panel
 > explains why an in-place update cannot run and offers no button (Windows

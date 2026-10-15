@@ -973,19 +973,103 @@ async function cliExec(argv) {
   return res || { code: -1, output: '' }
 }
 
-// Restart the Hermes backend after a repair or an update, then re-probe once
-// it is back. Shared by RepairPanel and UpdatePanel; the re-probe is skipped
-// when the caller's `alive()` says its panel is gone.
-async function restartBackend(recheck, alive = () => true) {
-  try {
-    await host.restartGateway()
-    host.notify({ kind: 'info', message: 'Restarting the Hermes backend… If Mordred still looks unchanged, quit and reopen Hermes.' })
-  } catch (e) {
-    host.notifyError(e, 'Quit and reopen Hermes to finish')
+// host.restartGateway() targets messaging, not the Desktop backend importing
+// Mordred. Relaunch the whole local app through its optional Electron bridge.
+const DESKTOP_RESTART_DEADLINE_MS = 30_000
+const MANUAL_DESKTOP_RESTART = 'Quit Hermes Desktop completely and open it again. For a remote or unknown connection, restart Hermes on the machine serving that connection.'
+
+function RestartHermesControl() {
+  const [state, setState] = useState({ kind: 'idle' })
+  const mounted = useRef(true)
+  const attempt = useRef(null)
+  const timer = useRef(null)
+  const sent = useRef(false)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      attempt.current = null
+      clearTimeout(timer.current)
+    }
+  }, [])
+
+  const restart = async () => {
+    // The ref closes the gap before React renders the disabled state, and
+    // latches a sent IPC even if it later rejects or times out.
+    if (attempt.current || sent.current || !mounted.current) return
+    const request = {}
+    attempt.current = request
+    const active = () => mounted.current && attempt.current === request
+    const finish = (kind, message) => {
+      if (!active()) return
+      attempt.current = null
+      clearTimeout(timer.current)
+      timer.current = null
+      setState({ kind, message })
+    }
+    setState({ kind: 'restarting' })
+    timer.current = setTimeout(() => {
+      finish('manual', `The restart could not be confirmed. ${MANUAL_DESKTOP_RESTART}`)
+    }, DESKTOP_RESTART_DEADLINE_MS)
+    try {
+      const bridge = typeof window !== 'undefined' && window.hermesDesktop
+      const connection = host.state && host.state.connectionId
+      if (!bridge || typeof bridge.relaunchApp !== 'function' ||
+          !connection || typeof connection.get !== 'function' || typeof host.connections !== 'function') {
+        finish('manual', MANUAL_DESKTOP_RESTART)
+        return
+      }
+      const connectionId = connection.get()
+      if (!connectionId) {
+        finish('manual', MANUAL_DESKTOP_RESTART)
+        return
+      }
+      const rows = await host.connections()
+      // A late registry result must not relaunch after timeout, disposal, or
+      // switching to a different connection. Unknown ownership stays manual.
+      if (!active()) return
+      const matches = Array.isArray(rows) ? rows.filter(row => row && row.id === connectionId) : []
+      if (matches.length !== 1 || matches[0].kind !== 'local' ||
+          host.state?.connectionId?.get?.() !== connectionId) {
+        finish('manual', MANUAL_DESKTOP_RESTART)
+        return
+      }
+      sent.current = true
+      const result = await bridge.relaunchApp()
+      if (result === false || (result && result.ok === false)) {
+        finish('failed', `Hermes Desktop could not be restarted. ${MANUAL_DESKTOP_RESTART}`)
+      }
+      // An accepted IPC is not proof of restart. Keep progress visible until
+      // this window exits, or the deadline offers manual recovery.
+    } catch (_) {
+      finish('failed', `Hermes Desktop could not be restarted. ${MANUAL_DESKTOP_RESTART}`)
+    }
   }
-  setTimeout(() => {
-    if (alive()) recheck()
-  }, 8000)
+  return jsxs('div', {
+    children: [
+      state.kind === 'idle'
+        ? jsx(Button, { onClick: () => setState({ kind: 'confirm' }), children: 'Restart Hermes Desktop' })
+        : null,
+      state.kind === 'confirm'
+        ? jsxs(Fragment, {
+            children: [
+              jsx('p', { children: 'Restart all Hermes Desktop windows? Work in progress may be interrupted.' }),
+              jsx(Button, { onClick: restart, children: 'Restart now' }),
+              jsx(Button, { variant: 'outline', onClick: () => setState({ kind: 'idle' }), children: 'Cancel' }),
+            ],
+          })
+        : null,
+      state.kind === 'restarting'
+        ? jsxs(Fragment, {
+            children: [
+              jsx('p', { role: 'status', 'aria-live': 'polite', children: 'Restarting Hermes Desktop…' }),
+              jsx(Button, { disabled: true, children: 'Restarting…' }),
+            ],
+          })
+        : null,
+      state.message ? jsx('p', { role: state.kind === 'failed' ? 'alert' : 'status', children: state.message }) : null,
+    ],
+  })
 }
 
 function RepairPanel({ probeResult, recheck }) {
@@ -1044,7 +1128,6 @@ function RepairPanel({ probeResult, recheck }) {
       setBusy(false)
     }
   }
-  const restart = () => restartBackend(recheck)
   return jsxs('section', {
     style: { border: '1px solid var(--destructive, #c33)', borderRadius: 10, padding: 16, marginBottom: 12 },
     children: [
@@ -1065,7 +1148,7 @@ function RepairPanel({ probeResult, recheck }) {
           windows ? null : missing && !memberOk
             ? jsx(Button, { key: 'copy', onClick: () => navigator.clipboard && navigator.clipboard.writeText(INSTALL_COMMAND), children: 'Copy reinstall command' })
             : jsx(Button, { key: 'repair', disabled: busy || repaired, onClick: repair, children: busy ? 'Repairing… (a few minutes)' : 'Repair / reinstall Mordred' }),
-          repaired ? jsx(Button, { key: 'restart', onClick: restart, children: 'Restart Hermes backend' }) : null,
+          repaired ? jsx(RestartHermesControl, { key: 'restart' }) : null,
           jsx(Button, { key: 'check', variant: 'outline', disabled: busy, onClick: recheck, children: 'Check again' }),
         ],
       }),
@@ -1113,7 +1196,7 @@ function describeCheck(check) {
   return `Mordred ${check.installed} is up to date (newest: ${check.latest}; ${via}${when ? ', ' + when : ''}).`
 }
 
-function UpdatePanel({ health, recheck }) {
+function UpdatePanel({ health }) {
   const [info, setInfo] = useState(null)
   const [busy, setBusy] = useState(false)
   const [checking, setChecking] = useState(false)
@@ -1186,7 +1269,6 @@ function UpdatePanel({ health, recheck }) {
       if (mounted.current) setBusy(false)
     }
   }
-  const restart = () => restartBackend(recheck, () => mounted.current)
   const windows = windowsEnvironment(health && health.environment)
   const pre = { whiteSpace: 'pre-wrap', fontSize: 12, maxHeight: 240, overflow: 'auto', background: 'var(--muted, rgba(127,127,127,.12))', padding: 8, borderRadius: 6 }
   const warnings = (report && report.warnings) || []
@@ -1197,7 +1279,7 @@ function UpdatePanel({ health, recheck }) {
       jsx('p', {
         style: { fontSize: 12, opacity: 0.8 },
         children: restartRequired
-          ? `Mordred ${info.installed} is installed (running: ${info.running}). Restart Hermes so it starts on the new version.`
+          ? `Running Mordred: ${info.running}. Installed package metadata: ${info.installed}. These differ; restarting Hermes reloads its installed environment.`
           : describeCheck(check),
       }),
       available && !supported && refusal ? jsx('p', { children: explain(refusal.code) }) : null,
@@ -1207,7 +1289,7 @@ function UpdatePanel({ health, recheck }) {
           available && supported && !windows
             ? jsx(Button, { key: 'update', disabled: busy, onClick: update, children: busy ? 'Updating… (a few minutes)' : `Update Mordred to ${check.latest}` })
             : null,
-          restartRequired ? jsx(Button, { key: 'restart', onClick: restart, children: 'Restart Hermes backend' }) : null,
+          restartRequired ? jsx(RestartHermesControl, { key: 'restart' }) : null,
           jsx(Button, { key: 'check', variant: 'outline', disabled: busy || checking, onClick: () => load(true), children: checking ? 'Checking…' : 'Check for updates' }),
         ],
       }),
@@ -1280,7 +1362,7 @@ function SetupPage() {
       jsx('p', { children: 'Private, read-only Telegram for Hermes.' }),
       broken ? jsx(RepairPanel, { probeResult: broken, recheck: refresh }) : null,
       status ? jsx(HealthLine, { health }) : null,
-      status ? jsx(UpdatePanel, { health, recheck: refresh }) : null,
+      status ? jsx(UpdatePanel, { health }) : null,
       status && status.hardware_kind === 'cng'
         ? jsx(WindowsSetup, { status, refresh })
         : status
