@@ -506,6 +506,20 @@ console.log(JSON.stringify(render()))
     assert "new version" not in text
 
 
+def test_foreign_source_explains_itself_and_offers_no_restart():
+    result = restart_page("""
+states = [{ok: true, restart_required: false, foreign_source: '/stray/src/mordred_hermes', running: '0.3.0a2',
+  installed: '0.2.0a1', supported: false, refusal: {code: 'update_foreign_source'}}]
+view = () => UpdatePanel({health: {}, recheck: () => {}})
+console.log(JSON.stringify(render()))
+""")
+    text = json.dumps(result)
+    assert "was loaded from /stray/src/mordred_hermes" in text
+    assert "Restart Hermes Desktop" not in text
+    page = source()
+    assert "info.foreign_source" in page[page.index("function UpdatePanel(") : page.index("function HealthLine(")]
+
+
 def test_update_button_is_gated_by_the_api_not_by_text():
     page = source()
     panel = page[page.index("function UpdatePanel(") : page.index("function HealthLine(")]

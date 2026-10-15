@@ -724,6 +724,7 @@ _REFUSAL_CODES = {
     "source-install": "update_source_install",
     "no-uv": "update_no_uv",
     "not-a-venv": "update_not_a_venv",
+    "foreign-source": "update_foreign_source",
     "bad-version": "update_bad_version",
     "hermes-too-old": "update_hermes_too_old",
 }
@@ -738,9 +739,12 @@ def _update_view(result: Any, *, current: Any | None, error: str | None = None) 
 
     ``running`` is this process's version and ``installed`` the one on disk;
     they differ after an update until the gateway restarts
-    (``restart_required``), whatever the page remembers. ``check_error`` is
-    set when an explicit check failed while ``check`` still shows the last
-    valid answer.
+    (``restart_required``), whatever the page remembers. When the running
+    package was imported from somewhere other than the installed distribution,
+    ``foreign_source`` names that place and no restart is offered: the two
+    versions will differ until that copy is removed. ``check_error`` is set
+    when an explicit check failed while ``check`` still shows the last valid
+    answer.
     """
     from .. import __version__
     from .. import _self_update as core
@@ -757,7 +761,9 @@ def _update_view(result: Any, *, current: Any | None, error: str | None = None) 
     except Exception as exc:  # metadata unreadable: say so instead of a 500
         view["supported"] = False
         view["refusal"] = {"code": "update_refused", "message": f"{type(exc).__name__}: {exc}"}
-    view["restart_required"] = view.get("installed") not in (None, __version__)
+    foreign = current.foreign_source if current is not None else None
+    view["foreign_source"] = foreign
+    view["restart_required"] = foreign is None and view.get("installed") not in (None, __version__)
     view["check"] = result.to_json() if result is not None else None
     view["check_error"] = error
     return view
