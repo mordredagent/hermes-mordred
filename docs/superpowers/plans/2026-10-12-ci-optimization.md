@@ -1,9 +1,9 @@
 # Minimal Routine CI and Consolidated Release Validation Implementation Plan
 
-**Status:** Approved revision 2; implementation underway, hosted validation pending.
+**Status:** Proposed revision 2; planning only, no implementation performed.
 **Planner:** Astra, responding to the request to reduce CI further than 13 ordinary / 15 final jobs.
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans`. The user approved implementation and Astra for difficult parts.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` after this plan is approved. The current request authorizes planning, not implementation.
 
 **Goal:** Make normal CI three jobs by default, add platform work only for relevant changes, and consolidate comprehensive final validation into six jobs.
 **Architecture:** Linux always runs the whole default suite for ordinary code changes. A small explicit path table selects optional macOS/Windows workers and additional check steps; shared security, infrastructure and unknown changes select final validation. Release accepts only final evidence for the exact release SHA.
