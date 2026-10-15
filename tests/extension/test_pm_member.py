@@ -11,6 +11,7 @@ import sys
 import tomllib
 import venv
 import zipfile
+from collections.abc import Callable
 from importlib import metadata
 from pathlib import Path
 from types import ModuleType
@@ -504,13 +505,41 @@ def test_foreign_source_owns_the_managed_environment(tmp_path: Path) -> None:
         d.mkdir(parents=True)
     wheel = member.InstallSource("0.3.0a2", "pypi", None, False, (), str(site))
     managed = member.Environment(str(env_dir / "venv" / "bin" / "python"), str(env_dir / "venv"), True)
-    assert member.foreign_source(wheel, old_build, env=managed) is None
-    assert member.foreign_source(wheel, stray, env=managed) == str(stray.resolve())
-    assert member.foreign_source(wheel, checkout, env=managed) == str(checkout.resolve())
-    assert member.foreign_source(wheel, sibling, env=managed) == str(sibling.resolve())
+
+    def persists(running: Path) -> Callable[[], Path]:
+        return lambda: running  # a fresh interpreter imports the same place
+
+    assert member.foreign_source(wheel, old_build, env=managed, fresh=persists(old_build)) is None
+    assert member.foreign_source(wheel, stray, env=managed, fresh=persists(stray)) == str(stray.resolve())
+    assert member.foreign_source(wheel, checkout, env=managed, fresh=persists(checkout)) == str(checkout.resolve())
+    assert member.foreign_source(wheel, sibling, env=managed, fresh=persists(sibling)) == str(sibling.resolve())
     # Without a venv there is no managed environment to own anything.
     base = member.Environment(sys.executable, sys.prefix, False)
-    assert member.foreign_source(wheel, old_build, env=base) == str(old_build.resolve())
+    assert member.foreign_source(wheel, old_build, env=base, fresh=persists(old_build)) == str(old_build.resolve())
+
+
+def test_foreign_source_is_stale_not_foreign_when_a_fresh_interpreter_imports_the_install(tmp_path: Path) -> None:
+    """An editable checkout replaced by a wheel: this process still runs the checkout, a restart loads the wheel."""
+    env_dir = tmp_path / "environments" / "abc123"
+    site, _ = _venv(env_dir / "venv")
+    checkout = tmp_path / "dev" / "checkout" / "src" / "mordred_hermes"
+    installed = site / "mordred_hermes"
+    for d in (checkout, installed):
+        d.mkdir(parents=True)
+    wheel = member.InstallSource("0.3.0a2", "pypi", None, False, (), str(site))
+    managed = member.Environment(str(env_dir / "venv" / "bin" / "python"), str(env_dir / "venv"), True)
+    assert member.foreign_source(wheel, checkout, env=managed, fresh=lambda: installed) is None
+    # A fresh interpreter that still imports the checkout, or cannot be asked, leaves it foreign.
+    assert member.foreign_source(wheel, checkout, env=managed, fresh=lambda: checkout) == str(checkout.resolve())
+    assert member.foreign_source(wheel, checkout, env=managed, fresh=lambda: None) == str(checkout.resolve())
+    # The owned case never asks.
+    assert member.foreign_source(wheel, installed, env=managed, fresh=lambda: pytest.fail("asked")) is None
+
+
+def test_fresh_import_location_matches_this_interpreter() -> None:
+    """The real probe, on the test interpreter: a fresh process imports the same package as this one."""
+    assert member.fresh_import_location() == member.running_package()
+    assert member.fresh_import_location(python=str(Path("/nonexistent") / "python")) is None
 
 
 def test_environment_info_reports_the_managed_environment(monkeypatch: pytest.MonkeyPatch) -> None:

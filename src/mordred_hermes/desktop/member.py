@@ -34,8 +34,9 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
@@ -154,17 +155,67 @@ def running_package() -> Path:
     return Path(mordred_hermes.__file__).resolve().parent
 
 
-def foreign_source(source: InstallSource, running: Path | None = None, *, env: Environment | None = None) -> str | None:
+# Run with ``python -I -c`` in this process's interpreter, with the site
+# directories this process has on top of the interpreter's own (Hermes
+# Desktop's venv overlay): where a fresh process imports Mordred from.
+_FRESH_IMPORT_SCRIPT = """\
+import site, sys
+for d in sys.argv[1:]:
+    site.addsitedir(d)
+import mordred_hermes
+print(mordred_hermes.__file__)
+"""
+FRESH_IMPORT_TIMEOUT_SECONDS = 20.0
+
+
+def fresh_import_location(python: str | None = None) -> Path | None:
+    """The package directory a fresh interpreter of this process's kind imports, else ``None``.
+
+    Site directories are re-read from disk, so an editable install's ``.pth``
+    that an update removed no longer counts, while a copy still registered
+    (on the base interpreter, say) does. ``None`` when the probe cannot run.
+    """
+    overlays = [p for p in sys.path if p and Path(p).name == "site-packages" and Path(p).is_dir()]
+    argv = [python or sys.executable, "-I", "-c", _FRESH_IMPORT_SCRIPT, *overlays]
+    try:
+        done = subprocess.run(
+            argv, capture_output=True, text=True, timeout=FRESH_IMPORT_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0 or not done.stdout.strip():
+        return None
+    return Path(done.stdout.strip().splitlines()[-1]).resolve().parent
+
+
+def _owned(path: Path, owners: Iterable[Path]) -> bool:
+    for owner in owners:
+        try:
+            if path.is_relative_to(owner.resolve()):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def foreign_source(
+    source: InstallSource,
+    running: Path | None = None,
+    *,
+    env: Environment | None = None,
+    fresh: Callable[[], Path | None] = fresh_import_location,
+) -> str | None:
     """Where the running package came from when that is not the managed install.
 
     The installed distribution owns its ``site-packages``, a path install its
     source directory, and the managed environment its venv plus, in the pm
     layout (``<environment>/venv`` beside
-    ``<environment>/workspace/plugin-sources/``), the member builds a restart
-    replaces (an editable member updated to a wheel still runs from the old
-    build until then). A package imported from anywhere else (a checkout added
-    to the base interpreter, a sibling checkout, a stray ``.pth``) is what the
-    status line calls the running version, and no restart reconciles it.
+    ``<environment>/workspace/plugin-sources/``), the member builds. A package
+    running from anywhere else is either stale (an editable install replaced
+    by a wheel while Hermes kept running: a restart loads the wheel) or a
+    persistent copy (a checkout registered on the base interpreter, a stray
+    ``.pth``): *fresh* tells them apart by importing in a new interpreter.
+    Only the persistent copy is foreign; no restart reconciles it.
     """
     running = running or running_package()
     owners = [Path(p) for p in (source.site, source.path) if p]
@@ -173,13 +224,12 @@ def foreign_source(source: InstallSource, running: Path | None = None, *, env: E
         owners.append(root)
         if root.name == "venv":  # pm layout: the member builds beside the venv, nothing else there
             owners.append(root.parent / "workspace" / "plugin-sources")
-    for owner in owners:
-        try:
-            if running.is_relative_to(owner.resolve()):
-                return None
-        except OSError:
-            continue
-    return str(running) if owners else None
+    if not owners or _owned(running, owners):
+        return None
+    after_restart = fresh()
+    if after_restart is not None and _owned(after_restart, owners):
+        return None
+    return str(running)
 
 
 def _direct_url(dist: metadata.Distribution) -> dict[str, Any] | None:

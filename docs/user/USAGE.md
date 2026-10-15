@@ -1347,11 +1347,13 @@ installs from a local checkout (use `scripts/install.sh --from-source`), when
 the package is not inside a virtual environment, when `uv` is not found, and
 when the new release needs a newer Hermes than the one installed. It also
 refuses when the running Mordred was imported from somewhere other than the
-installed package (for example a checkout added to Hermes's base interpreter
-with `pip install -e`): updating the package would not change what runs, so
-the message names that place; remove the copy (for an editable install,
+installed package and a fresh interpreter would import it from there again
+(for example a checkout added to Hermes's base interpreter with
+`pip install -e`): updating the package would not change what runs, so the
+message names that place; remove the copy (for an editable install,
 `uv pip uninstall hermes-mordred --python <that interpreter>`), restart
-Hermes, then update. If a step fails after the package was replaced, the
+Hermes, then update. An editable install that was merely replaced by a wheel
+while Hermes kept running is not that case: a restart loads the wheel. If a step fails after the package was replaced, the
 previous release is reinstalled automatically and the message says so, so the
 environment is never left half-updated.
 
