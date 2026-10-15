@@ -3,8 +3,9 @@
 This is the Python twin of ``scripts/install.sh``'s install step, used by
 ``hermes-mordred update`` and by the Hermes Desktop page's **Update Mordred**
 button. It never installs a fresh Mordred: it moves an existing PyPI install
-inside the environment this process runs in to a newer release, keeping the
-same feature extras and never moving a package Hermes itself depends on.
+inside the environment that holds it (the venv around its metadata, which under
+Hermes Desktop is not the interpreter this process runs on) to a newer release,
+keeping the same feature extras and never moving a package Hermes itself depends on.
 
 The sequence (every ``uv`` call runs with ``--no-config`` from a private
 temporary directory, so a ``uv.toml`` / ``pyproject.toml`` in the caller's
@@ -150,6 +151,9 @@ class Installed:
     from_member: bool
     python: str
     in_venv: bool
+    #: Where the running package was imported from when that is not this
+    #: distribution (``member.foreign_source``): no restart reconciles the two.
+    foreign_source: str | None = None
 
 
 def _platform() -> str:
@@ -184,6 +188,7 @@ def installed(home: Path | None = None) -> Installed:
     extra = platform_extra()
     if extra:
         extras.add(extra)
+    env = member.environment()
     return Installed(
         version=source.version,
         kind=source.kind,
@@ -191,8 +196,9 @@ def installed(home: Path | None = None) -> Installed:
         editable=source.editable,
         extras=tuple(sorted(extras)),
         from_member=from_member,
-        python=sys.executable,
-        in_venv=sys.prefix != sys.base_prefix,
+        python=env.python,
+        in_venv=env.in_venv,
+        foreign_source=member.foreign_source(source),
     )
 
 
@@ -676,6 +682,14 @@ def refuse_if_unsupported(current: Installed, *, uv: Path | None, platform: str 
     if not current.in_venv:
         raise UpdateRefused(
             "not-a-venv", f"{current.python} is not inside a virtual environment; refusing to modify it."
+        )
+    if current.foreign_source:
+        raise UpdateRefused(
+            "foreign-source",
+            f"The running Mordred was imported from {current.foreign_source}, not from the installed "
+            f"package ({current.version}); updating the package would not change what runs. Remove that "
+            "copy (for an editable install: uv pip uninstall hermes-mordred --python <its interpreter>), "
+            "restart Hermes, then update.",
         )
     if current.kind == "path" and not current.from_member:
         how = "editable checkout" if current.editable else "local checkout"

@@ -613,7 +613,11 @@ hermes-mordred desktop uninstall
 > local app, or restart Hermes on the machine serving the remote connection.
 > The messaging gateway restart is not used for package changes. If running
 > code and installed package metadata differ, the page reports both versions;
-> the mismatch alone does not prove a newer package was installed.
+> the mismatch alone does not prove a newer package was installed. When the
+> running package was loaded from outside the installed package (a stray copy
+> on Hermes's base interpreter, say), the page names that place instead,
+> offers no restart (it would change nothing) and refuses updates until the
+> copy is removed.
 > At Hermes Desktop start, a
 > known newer release also raises a one-time notice pointing to the Mordred
 > sidebar entry. On Windows, from a local checkout, or without `uv`, the panel
@@ -1332,11 +1336,23 @@ command installs with the same feature extras as the current install (inferred
 from the environment, so no flags are needed) and never moves a package that
 Hermes pins. When it finishes, restart the Hermes gateway or Hermes Desktop.
 
+The command updates the environment that holds the installed package: the
+virtual environment around its metadata, found by its `pyvenv.cfg`. That is
+the Hermes package-manager environment even under Hermes Desktop, whose
+backend runs on Hermes's base interpreter with that environment merely on its
+module path. Hermes's base interpreter itself is never modified.
+
 `update` refuses to run on Windows (rerun the Windows installer instead), for
 installs from a local checkout (use `scripts/install.sh --from-source`), when
-`uv` is not found, and when the new release needs a newer Hermes than the one
-installed. If a step fails after the package was replaced, the previous
-release is reinstalled automatically and the message says so, so the
+the package is not inside a virtual environment, when `uv` is not found, and
+when the new release needs a newer Hermes than the one installed. It also
+refuses when the running Mordred was imported from somewhere other than the
+installed package (for example a checkout added to Hermes's base interpreter
+with `pip install -e`): updating the package would not change what runs, so
+the message names that place; remove the copy (for an editable install,
+`uv pip uninstall hermes-mordred --python <that interpreter>`), restart
+Hermes, then update. If a step fails after the package was replaced, the
+previous release is reinstalled automatically and the message says so, so the
 environment is never left half-updated.
 
 Hermes Desktop users can do the same from the Mordred page (see

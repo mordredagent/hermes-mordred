@@ -72,6 +72,7 @@ class InstallSource:
     path: str | None
     editable: bool
     extras: tuple[str, ...]
+    site: str | None = None  # the site-packages holding its metadata (None when not on disk)
 
 
 def _canonical(name: str) -> str:
@@ -79,7 +80,97 @@ def _canonical(name: str) -> str:
 
 
 def _distribution() -> metadata.Distribution:
-    return metadata.distribution(DISTRIBUTION)
+    """``hermes-mordred``'s metadata.
+
+    Hermes Desktop runs its gateway on the base interpreter with the pm
+    environment's ``site-packages`` added to ``sys.path``, so a copy installed
+    into that base interpreter is visible next to the real one. The copy inside
+    a virtual environment is the install Mordred manages; it wins whatever
+    ``sys.path`` order put first.
+    """
+    found = list(metadata.distributions(name=DISTRIBUTION))
+    if not found:
+        raise metadata.PackageNotFoundError(DISTRIBUTION)
+    for dist in found:
+        site = _site_dir(dist)
+        if site is not None and _venv_root(site) is not None:
+            return dist
+    return found[0]
+
+
+def _site_dir(dist: metadata.Distribution) -> Path | None:
+    """The ``site-packages`` directory holding *dist*'s metadata, if it is on disk."""
+    try:
+        site = Path(str(dist.locate_file("")))
+    except Exception:  # a finder without files (tests, zipimport)
+        return None
+    return site if site.is_dir() else None
+
+
+def _venv_root(site: Path) -> Path | None:
+    """The virtual environment whose ``site-packages`` *site* is, by its ``pyvenv.cfg``.
+
+    POSIX: ``<venv>/lib/pythonX.Y/site-packages``; Windows: ``<venv>/Lib/site-packages``.
+    """
+    for candidate in site.parents[:3]:
+        if (candidate / "pyvenv.cfg").is_file():
+            return candidate
+    return None
+
+
+@dataclass(frozen=True)
+class Environment:
+    """The interpreter environment that holds the ``hermes-mordred`` distribution."""
+
+    python: str  # the interpreter ``uv pip --python`` must target
+    prefix: str  # its root (a venv directory, else ``sys.prefix``)
+    in_venv: bool
+
+
+def environment(dist: metadata.Distribution | None = None) -> Environment:
+    """Where the installed Mordred lives: the venv around its metadata, not this process.
+
+    ``sys.prefix`` describes this process. Under Hermes Desktop that is the
+    base interpreter, with the pm venv merely on ``sys.path``; updating must
+    still target the venv, and never the base interpreter.
+    """
+    site = _site_dir(dist or _distribution())
+    root = _venv_root(site) if site is not None else None
+    if root is None:
+        return Environment(sys.executable, sys.prefix, sys.prefix != sys.base_prefix)
+    exe = Path(sys.executable)
+    if root not in exe.parents:
+        candidates: tuple[Path, ...] = (root / "Scripts" / "python.exe",)
+        if _platform() != "win32":
+            candidates = (root / "bin" / "python", root / "bin" / "python3")
+        exe = next((c for c in candidates if c.is_file()), candidates[0])
+    return Environment(str(exe), str(root), True)
+
+
+def running_package() -> Path:
+    """The ``mordred_hermes`` package this process imported."""
+    import mordred_hermes
+
+    return Path(mordred_hermes.__file__).resolve().parent
+
+
+def foreign_source(source: InstallSource, running: Path | None = None) -> str | None:
+    """Where the running package came from when that is not the installed distribution.
+
+    The installed distribution owns its ``site-packages`` and, for a path
+    install, its source directory. A package imported from anywhere else
+    (a checkout added to the base interpreter, a stray ``.pth``) is what the
+    status line calls the running version, and no restart reconciles it.
+    """
+    running = running or running_package()
+    owners = [Path(p) for p in (source.site, source.path) if p]
+    for owner in owners:
+        try:
+            if running.is_relative_to(owner.resolve()):
+                return None
+        except OSError:
+            continue
+    return str(running) if owners else None
 
 
 def _direct_url(dist: metadata.Distribution) -> dict[str, Any] | None:
@@ -162,7 +253,8 @@ def install_source(dist: metadata.Distribution | None = None) -> InstallSource:
 
         path = unquote(urlparse(str(direct["url"])).path)
         editable = bool((direct.get("dir_info") or {}).get("editable"))
-    return InstallSource(dist.version, kind, path, editable, inferred_extras(dist))
+    site = _site_dir(dist)
+    return InstallSource(dist.version, kind, path, editable, inferred_extras(dist), str(site) if site else None)
 
 
 def built_from_member(source: InstallSource) -> bool:
@@ -460,7 +552,14 @@ def member_status(plugin_dir: Path) -> dict[str, Any]:
 
 
 def environment_info() -> dict[str, Any]:
-    """The interpreter/environment this process runs in (for the status line)."""
-    prefix = Path(sys.prefix)
+    """The environment holding the installed Mordred (for the status line).
+
+    Under Hermes Desktop the gateway process itself runs on the base
+    interpreter; the pm environment is the one people (and updates) care about.
+    """
+    try:
+        prefix = Path(environment().prefix)
+    except Exception:  # metadata unreadable: describe this process instead of failing the health line
+        prefix = Path(sys.prefix)
     env_id = prefix.parent.name if prefix.name == "venv" else prefix.name
     return {"prefix": str(prefix), "environment": env_id, "python": sys.version.split()[0], "platform": _platform()}

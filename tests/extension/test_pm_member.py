@@ -407,3 +407,100 @@ def test_a_pm_built_install_never_rewrites_the_member(tmp_path: Path, monkeypatc
     assert member.ensure_member(plugin_dir, package_root=pkg, dist=_dist(pkg)) is False
     assert {p.relative_to(plugin_dir): p.read_bytes() for p in plugin_dir.rglob("*") if p.is_file()} == before
     assert member.member_status(plugin_dir)["valid"] is False
+
+
+# -- environment / foreign source -------------------------------------------------------------
+
+
+def _venv(root: Path, *, windows: bool = False) -> tuple[Path, Path]:
+    """A fake venv: returns (site-packages, interpreter)."""
+    root.mkdir(parents=True)
+    (root / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    if windows:
+        site, exe = root / "Lib" / "site-packages", root / "Scripts" / "python.exe"
+    else:
+        site, exe = root / "lib" / "python3.14" / "site-packages", root / "bin" / "python"
+    site.mkdir(parents=True)
+    exe.parent.mkdir(parents=True)
+    exe.write_text("", encoding="utf-8")
+    return site, exe
+
+
+class _FakeDist:
+    def __init__(self, site: Path) -> None:
+        self._site = site
+
+    def locate_file(self, path: str) -> Path:
+        return self._site / path
+
+
+def test_venv_root_finds_pyvenv_cfg_within_three_parents(tmp_path: Path) -> None:
+    site, _ = _venv(tmp_path / "pm" / "venv")
+    assert member._venv_root(site) == tmp_path / "pm" / "venv"
+    plain = tmp_path / "base" / "lib" / "python3.14" / "site-packages"
+    plain.mkdir(parents=True)
+    assert member._venv_root(plain) is None
+
+
+def test_environment_targets_the_venv_interpreter(tmp_path: Path) -> None:
+    venv = tmp_path / "pm" / "venv"
+    site, exe = _venv(venv)
+    got = member.environment(_FakeDist(site))  # type: ignore[arg-type]
+    assert got == member.Environment(str(exe), str(venv), True)
+
+
+def test_environment_windows_uses_scripts_python(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(member, "_platform", lambda: "win32")
+    venv = tmp_path / "pm" / "venv"
+    site, exe = _venv(venv, windows=True)
+    got = member.environment(_FakeDist(site))  # type: ignore[arg-type]
+    assert got == member.Environment(str(exe), str(venv), True)
+
+
+def test_environment_outside_a_venv_describes_this_process(tmp_path: Path) -> None:
+    site = tmp_path / "base" / "lib" / "python3.14" / "site-packages"
+    site.mkdir(parents=True)
+    got = member.environment(_FakeDist(site))  # type: ignore[arg-type]
+    assert got == member.Environment(sys.executable, sys.prefix, sys.prefix != sys.base_prefix)
+
+
+def test_distribution_prefers_the_venv_resident_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    plain = tmp_path / "base" / "lib" / "python3.14" / "site-packages"
+    plain.mkdir(parents=True)
+    site, _ = _venv(tmp_path / "pm" / "venv")
+    stray, real = _FakeDist(plain), _FakeDist(site)
+    monkeypatch.setattr(member.metadata, "distributions", lambda **kw: iter([stray, real]))
+    assert member._distribution() is real
+    monkeypatch.setattr(member.metadata, "distributions", lambda **kw: iter([stray]))
+    assert member._distribution() is stray
+    monkeypatch.setattr(member.metadata, "distributions", lambda **kw: iter([]))
+    with pytest.raises(metadata.PackageNotFoundError):
+        member._distribution()
+
+
+def test_foreign_source(tmp_path: Path) -> None:
+    site = tmp_path / "pm" / "site-packages"
+    checkout = tmp_path / "checkout"
+    elsewhere = tmp_path / "stray" / "mordred_hermes"
+    for d in (site / "mordred_hermes", checkout / "src" / "mordred_hermes", elsewhere):
+        d.mkdir(parents=True)
+    pypi = member.InstallSource("0.2.0a1", "pypi", None, False, (), str(site))
+    assert member.foreign_source(pypi, site / "mordred_hermes") is None
+    assert member.foreign_source(pypi, elsewhere) == str(elsewhere.resolve())
+    path_install = member.InstallSource("0.2.0a1", "path", str(checkout), True, (), str(site))
+    assert member.foreign_source(path_install, checkout / "src" / "mordred_hermes") is None
+    assert member.foreign_source(member.InstallSource("0.2.0a1", "pypi", None, False, ()), elsewhere) is None
+
+
+def test_environment_info_reports_the_managed_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        member, "environment", lambda: member.Environment("/x/bin/python", "/x/environments/abc123/venv", True)
+    )
+    info = member.environment_info()
+    assert info["prefix"] == "/x/environments/abc123/venv" and info["environment"] == "abc123"
+
+    def boom() -> member.Environment:
+        raise metadata.PackageNotFoundError("hermes-mordred")
+
+    monkeypatch.setattr(member, "environment", boom)
+    assert member.environment_info()["prefix"] == sys.prefix
