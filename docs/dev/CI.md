@@ -496,6 +496,32 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 
 ## Manual live-device validation log
 
+- **2026-10-15 — macOS Desktop package-change restart control.**
+  With Hermes Desktop `v0.22.0+119` / Python 3.14.7 on arm64, reproduced the
+  old button calling the messaging restart: only the statusbar changed,
+  followed by a delayed notice, while the Desktop backend PID stayed fixed.
+  Backed up the page in an owner-only temporary directory
+  (`mordred-desktop-restart-qa-e5s4mwgr/plugin.js`) and staged only the new
+  page asset, SHA-256
+  `926f058f396467c46a512b13be42da92cb124f121e67140e4e0891130a35b6ed`.
+  The actual page showed the neutral running-code/installed-metadata copy
+  and **Restart Hermes Desktop**. **Cancel** left Desktop/backend PIDs
+  `88830` / `88924` unchanged. **Restart now** invoked the app relaunch at
+  13:11:36 local time: Desktop became PID `94831`, backend became `94933`,
+  and the backend reported ready at 13:11:49. The tool observed the window
+  exit before capturing the short pending state; immediate pending and
+  deadline/failure/remote/disposal paths are covered by the Node harness.
+  Reconnection briefly waited on the Secure Enclave helper. The actual
+  Mordred page subsequently returned, with the same running/installed
+  versions and the model, hardware, memory and Telegram checks preserved.
+  The sidebar reported a session-list retry and messaging stopped; no
+  session-content or messaging-platform acceptance is claimed here.
+  The base Python's editable pointer still imports `0.3.0a1` from the
+  original repository, while Hermes's selected environment/member report
+  `0.2.0a1` from the older checkout. Bootstrap restored that source's old
+  page asset after relaunch. No package provenance, metadata, credentials,
+  custody key or configuration was changed to hide this mismatch.
+
 - **2026-10-14 — macOS Hermes Desktop dev installation, Telegram import and SQLCipher acceptance.**
   Installed immutable Mordred candidate `c98493af2dce1179991a26b2cbf9e5c78623db69`
   into the existing Hermes Desktop-managed environment using
