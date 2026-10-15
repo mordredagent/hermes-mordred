@@ -57,6 +57,7 @@ const MESSAGES = {
   update_source_install: 'Mordred was installed from a local checkout. Update it with scripts/install.sh --from-source <checkout>.',
   update_no_uv: 'uv was not found on PATH or under the Hermes home. Install uv, then try again.',
   update_not_a_venv: 'Hermes is not running inside a virtual environment, so Mordred refuses to modify it.',
+  update_foreign_source: 'The running Mordred was not loaded from the installed package, so updating the package would not change what runs. Remove that copy, restart Hermes, then update.',
   update_bad_version: 'That is not a valid release version.',
   update_refused: 'Mordred cannot update itself here. Rerun the installer from a terminal.',
   update_not_newer: 'That release is not newer than the one installed.',
@@ -1235,6 +1236,11 @@ function UpdatePanel({ health }) {
   // true after an update until the gateway restarts, whatever this panel
   // remembers (it may have been remounted since).
   const restartRequired = Boolean(info && info.restart_required)
+  // The running package was imported from outside the installed distribution
+  // (a checkout added to Hermes's base interpreter, for instance): the server
+  // names the place, offers no restart (it would change nothing) and refuses
+  // the update until that copy is gone.
+  const foreign = (info && info.foreign_source) || null
   const available = !restartRequired && Boolean(check && check.available === true && check.latest)
   const supported = Boolean(info && info.supported)
   const refusal = (info && info.refusal) || null
@@ -1278,11 +1284,13 @@ function UpdatePanel({ health }) {
       available ? jsx('h3', { style: { margin: '0 0 8px' }, children: `Mordred ${check.latest} is available` }) : null,
       jsx('p', {
         style: { fontSize: 12, opacity: 0.8 },
-        children: restartRequired
-          ? `Running Mordred: ${info.running}. Installed package metadata: ${info.installed}. These differ; restarting Hermes reloads its installed environment.`
-          : describeCheck(check),
+        children: foreign
+          ? `Running Mordred ${info.running} was loaded from ${foreign}, not from the installed package (${info.installed}). Restarting Hermes does not change that: remove that copy (for an editable install: uv pip uninstall hermes-mordred --python <its interpreter>), restart Hermes, then update.`
+          : restartRequired
+            ? `Running Mordred: ${info.running}. Installed package metadata: ${info.installed}. These differ; restarting Hermes reloads its installed environment.`
+            : describeCheck(check),
       }),
-      available && !supported && refusal ? jsx('p', { children: explain(refusal.code) }) : null,
+      available && !supported && refusal && !foreign ? jsx('p', { children: explain(refusal.code) }) : null,
       warnings.length ? jsx('pre', { style: pre, children: warnings.join('\n') }) : null,
       jsx(Row, {
         children: [

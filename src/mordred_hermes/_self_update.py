@@ -3,8 +3,9 @@
 This is the Python twin of ``scripts/install.sh``'s install step, used by
 ``hermes-mordred update`` and by the Hermes Desktop page's **Update Mordred**
 button. It never installs a fresh Mordred: it moves an existing PyPI install
-inside the environment this process runs in to a newer release, keeping the
-same feature extras and never moving a package Hermes itself depends on.
+inside the environment that holds it (the venv around its metadata, which under
+Hermes Desktop is not the interpreter this process runs on) to a newer release,
+keeping the same feature extras and never moving a package Hermes itself depends on.
 
 The sequence (every ``uv`` call runs with ``--no-config`` from a private
 temporary directory, so a ``uv.toml`` / ``pyproject.toml`` in the caller's
@@ -20,8 +21,9 @@ working directory cannot redirect where packages come from):
 3. Install the new ``hermes-mordred[<extras>]==<version>`` with ``--no-deps``
    so resolving its ``hermes-agent`` requirement cannot re-resolve Hermes.
 4. Check the new release's ``hermes-agent`` floor against the Hermes actually
-   installed (``hermes_cli.__version__`` for a source / Desktop Hermes whose
-   distribution says ``0.0.0``).
+   installed (for a source / Desktop Hermes whose distribution says ``0.0.0``:
+   ``hermes_cli.version_info.get_version_info().base_version``, what
+   ``hermes --version`` prints, then ``hermes_cli.__version__``).
 5. Install Mordred's own requirements for those extras (read from the *new*
    metadata in a fresh interpreter, stdout only, self-references and
    ``hermes-agent`` dropped) under the constraints from step 1.
@@ -150,6 +152,9 @@ class Installed:
     from_member: bool
     python: str
     in_venv: bool
+    #: Where the running package was imported from when that is not this
+    #: distribution (``member.foreign_source``): no restart reconciles the two.
+    foreign_source: str | None = None
 
 
 def _platform() -> str:
@@ -184,6 +189,7 @@ def installed(home: Path | None = None) -> Installed:
     extra = platform_extra()
     if extra:
         extras.add(extra)
+    env = member.environment()
     return Installed(
         version=source.version,
         kind=source.kind,
@@ -191,8 +197,9 @@ def installed(home: Path | None = None) -> Installed:
         editable=source.editable,
         extras=tuple(sorted(extras)),
         from_member=from_member,
-        python=sys.executable,
-        in_venv=sys.prefix != sys.base_prefix,
+        python=env.python,
+        in_venv=env.in_venv,
+        foreign_source=member.foreign_source(source, env=env),
     )
 
 
@@ -632,7 +639,9 @@ for key in sorted(seen):
 
 # Prints "<hermes-agent specifier of the installed hermes-mordred>\\t<Hermes version>".
 # A source / Desktop Hermes reports 0.0.0 as a distribution; its real version
-# is hermes_cli.__version__ (the install stamp).
+# is what ``hermes --version`` prints (``hermes_cli.version_info``, from the
+# install stamp or git), and only then ``hermes_cli.__version__``, which reads
+# the install stamp alone and is 0.0.0 on a Desktop checkout without one.
 _HERMES_FLOOR_SCRIPT: Final = """\
 import sys
 from importlib.metadata import PackageNotFoundError, requires, version
@@ -649,6 +658,12 @@ try:
 except PackageNotFoundError:
     have = ""
 if have in ("", "0.0.0"):
+    try:
+        from hermes_cli.version_info import get_version_info
+        have = str(get_version_info().base_version)
+    except Exception:
+        pass
+if have in ("", "0.0.0", "unknown"):
     try:
         import hermes_cli
         have = str(hermes_cli.__version__)
@@ -676,6 +691,14 @@ def refuse_if_unsupported(current: Installed, *, uv: Path | None, platform: str 
     if not current.in_venv:
         raise UpdateRefused(
             "not-a-venv", f"{current.python} is not inside a virtual environment; refusing to modify it."
+        )
+    if current.foreign_source:
+        raise UpdateRefused(
+            "foreign-source",
+            f"The running Mordred was imported from {current.foreign_source}, not from the installed "
+            f"package ({current.version}); updating the package would not change what runs. Remove that "
+            "copy (for an editable install: uv pip uninstall hermes-mordred --python <its interpreter>), "
+            "restart Hermes, then update.",
         )
     if current.kind == "path" and not current.from_member:
         how = "editable checkout" if current.editable else "local checkout"
@@ -727,7 +750,8 @@ def _hermes_floor_unmet(output: str) -> str | None:
         spec = SpecifierSet(spec_text)
     except InvalidSpecifier:
         return None
-    if not have:
+    if not have or have in ("0.0.0", "unknown"):
+        # A source / Desktop checkout whose stamp and git are both unreadable.
         return f"the new release requires hermes-agent{spec_text}, but no Hermes version could be determined"
     if _parse(have) is None or spec.contains(have, prereleases=True):
         return None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -417,6 +418,22 @@ class TestRefusals:
         current = _installed(kind="path", path="/e/workspace/plugin-sources/mordred", from_member=True)
         core.refuse_if_unsupported(current, uv=Path("/uv"), platform="linux")
 
+    def test_foreign_source(self) -> None:
+        with pytest.raises(core.UpdateRefused) as info:
+            core.refuse_if_unsupported(
+                _installed(foreign_source="/elsewhere/mordred_hermes"), uv=Path("/uv"), platform="darwin"
+            )
+        assert info.value.code == "foreign-source"
+
+    def test_not_a_venv_wins_over_foreign_source(self) -> None:
+        with pytest.raises(core.UpdateRefused) as info:
+            core.refuse_if_unsupported(
+                _installed(in_venv=False, foreign_source="/elsewhere/mordred_hermes"),
+                uv=Path("/uv"),
+                platform="darwin",
+            )
+        assert info.value.code == "not-a-venv"
+
     def test_missing_uv(self) -> None:
         with pytest.raises(core.UpdateRefused) as info:
             core.refuse_if_unsupported(_installed(), uv=None, platform="linux")
@@ -463,6 +480,55 @@ def test_installed_adds_platform_extra(monkeypatch: pytest.MonkeyPatch) -> None:
     assert current.extras == ("extension", "keyvault")
     assert current.kind == "pypi" and current.from_member is False
     assert current.python == sys.executable
+
+
+def test_installed_carries_environment_and_foreign_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mordred_hermes.desktop import member
+
+    source = member.InstallSource(
+        "0.2.0a1", "pypi", None, False, ("extension",), "/pm/venv/lib/python3.14/site-packages"
+    )
+    monkeypatch.setattr(member, "install_source", lambda: source)
+    monkeypatch.setattr(member, "environment", lambda: member.Environment("/pm/venv/bin/python", "/pm/venv", True))
+    monkeypatch.setattr(
+        member, "foreign_source", lambda src, env=None: "/stray/mordred_hermes" if src is source and env else None
+    )
+    monkeypatch.setattr(core, "_platform", lambda: "linux")
+    current = core.installed()
+    assert current.python == "/pm/venv/bin/python" and current.in_venv is True
+    assert current.foreign_source == "/stray/mordred_hermes"
+
+
+class TestUpdateView:
+    @pytest.fixture(autouse=True)
+    def _api(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        pytest.importorskip("fastapi")
+        monkeypatch.setattr(core, "find_uv", lambda home=None: Path("/uv"))
+        monkeypatch.setattr(core, "_platform", lambda: "linux")
+
+    def test_foreign_source_refuses_and_offers_no_restart(self) -> None:
+        from mordred_hermes.desktop import api
+
+        view = api._update_view(None, current=_installed(version="0.2.0a1", foreign_source="/elsewhere"))
+        assert view["restart_required"] is False
+        assert view["foreign_source"] == "/elsewhere"
+        assert view["supported"] is False
+        assert view["refusal"]["code"] == "update_foreign_source"
+
+    def test_version_difference_requires_restart_without_foreign_source(self) -> None:
+        from mordred_hermes import __version__
+        from mordred_hermes.desktop import api
+
+        other = "0.0.1a0" if __version__ != "0.0.1a0" else "0.0.2a0"
+        view = api._update_view(None, current=_installed(version=other, foreign_source=None))
+        assert view["restart_required"] is True and view["foreign_source"] is None
+        assert view["supported"] is True
+
+    def test_unreadable_metadata_has_no_foreign_source(self) -> None:
+        from mordred_hermes.desktop import api
+
+        view = api._update_view(None, current=None)
+        assert view["foreign_source"] is None and view["restart_required"] is False
 
 
 # -- apply ----------------------------------------------------------------------------------
@@ -639,10 +705,38 @@ class TestApply:
             ("\t0.22.0", False),
             (">=0.30.0a1\t0.30.0a2", False),
             ("garbage\t0.22.0", False),
+            (">=0.13.0\tunknown", True),
         ],
     )
     def test_hermes_floor_rule(self, line: str, unmet: bool) -> None:
         assert (core._hermes_floor_unmet(line) is not None) is unmet
+
+    def test_hermes_floor_placeholder_version_is_undetermined_not_too_old(self) -> None:
+        message = core._hermes_floor_unmet(">=0.13.0\t0.0.0")
+        assert message is not None and "no Hermes version could be determined" in message
+        assert "update Hermes first" not in message
+
+    def test_hermes_floor_script_reads_hermes_real_version(self, tmp_path: Path) -> None:
+        """A source / Desktop Hermes is distribution 0.0.0; the probe asks hermes_cli.version_info."""
+        site = tmp_path / "site"
+        (site / "hermes_cli").mkdir(parents=True)
+        (site / "hermes_cli" / "__init__.py").write_text('__version__ = "0.0.0"\n', encoding="utf-8")
+        (site / "hermes_cli" / "version_info.py").write_text(
+            "class _Info:\n    base_version = '0.22.0'\n\ndef get_version_info():\n    return _Info()\n",
+            encoding="utf-8",
+        )
+        dists = (("hermes_agent-0.0.0", ""), ("hermes_mordred-0.3.0a2", "Requires-Dist: hermes-agent>=0.13.0\n"))
+        for name, requires in dists:
+            info = site / f"{name}.dist-info"
+            info.mkdir()
+            dist, _, version = name.partition("-")
+            header = f"Metadata-Version: 2.1\nName: {dist.replace('_', '-')}\nVersion: {version}\n"
+            info.joinpath("METADATA").write_text(header + requires, encoding="utf-8")
+        script = f"import sys; sys.path.insert(0, {str(site)!r})\n" + core._HERMES_FLOOR_SCRIPT
+        done = subprocess.run([sys.executable, "-I", "-c", script, "hermes-mordred"], capture_output=True, text=True)
+        assert done.returncode == 0, done.stderr
+        assert done.stdout == ">=0.13.0\t0.22.0\n"
+        assert core._hermes_floor_unmet(done.stdout) is None
 
     def test_new_conflict_is_a_warning_only_when_it_was_clean_before(self, tmp_path: Path) -> None:
         runner = FakeRunner(freeze=FREEZE, check_codes=[0, 1])
