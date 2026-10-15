@@ -593,6 +593,22 @@ hermes-mordred desktop uninstall
 > keeps Mordred installed but does not update it. A newer Mordred release is
 > installed with `hermes-mordred update` (see
 > [Upgrade the installed package](#upgrade-the-installed-package)).
+>
+> **Updating from the page.** Under the health line, the page shows either a
+> highlighted "Mordred X is available" section with an **Update Mordred to X**
+> button, or a one-line "up to date" status. **Check for updates** asks PyPI
+> explicitly (one request, cached for a day). Otherwise the page reuses
+> Hermes's daily plugin update check or Mordred's own cached answer and asks
+> PyPI at most once a day; it never asks when `plugins.auto_update_check_hours`
+> is `0`, and requests follow the active Mordred network path (Tor / VPN). The
+> button runs `hermes-mordred update --yes` as a background job (same extras,
+> Hermes pins untouched; see
+> [Upgrade the installed package](#upgrade-the-installed-package)), then shows
+> **Restart Hermes backend**, which is required. At Hermes Desktop start, a
+> known newer release also raises a one-time notice pointing to the Mordred
+> sidebar entry. On Windows, from a local checkout, or without `uv`, the panel
+> explains why an in-place update cannot run and offers no button (Windows
+> users rerun the Windows installer).
 
 ### `uninstall` — remove Mordred and restore Hermes's files
 ```sh
@@ -1312,6 +1328,9 @@ installs from a local checkout (use `scripts/install.sh --from-source`), when
 installed. If a step fails after the package was replaced, the previous
 release is reinstalled automatically and the message says so, so the
 environment is never left half-updated.
+
+Hermes Desktop users can do the same from the Mordred page (see
+[`desktop`](#desktop--mordred-setup-page-in-hermes-desktop)).
 
 The installer remains the fallback, and the only method on Windows and for
 source checkouts. Re-run the installer with the same `--extras`, `--all-extras`, or

@@ -295,3 +295,67 @@ console.log(JSON.stringify(HealthLine({health: {ok: true, version: '0.2.0a0', pm
     text = json.dumps(result)
     assert "original Windows installer" in text
     assert "Survives Hermes updates:" not in text
+
+
+# -- package updates (the Update Mordred button) ---------------------------------------------
+
+
+def test_update_button_is_gated_by_the_api_not_by_text():
+    page = source()
+    panel = page[page.index("function UpdatePanel(") : page.index("function HealthLine(")]
+    # The page asks the API and keys the button on its structured answer.
+    assert "rest(`/update/check${refresh ? '?refresh=1' : ''}`)" in panel
+    assert "check.available === true" in panel and "info.supported" in panel
+    assert "'/update/apply'" in panel and "{ version: check.latest }" in panel
+    # Whether a restart is pending comes from the server (on-disk vs running
+    # version), so a remounted panel cannot claim "up to date" with old code running.
+    assert "info.restart_required" in panel
+    # One restart handler for both panels; the re-probe is skipped once the panel is gone.
+    assert "restartBackend(recheck, () => mounted.current)" in panel
+    repair = page[
+        page.index("function RepairPanel(") : page.index("function pollJob(")
+        if "function pollJob(" in page
+        else page.index("async function pollJob(")
+    ]
+    assert "const restart = () => restartBackend(recheck)" in repair
+    assert page.count("host.restartGateway()") == 1
+    assert "const available = !restartRequired &&" in panel
+    # Refusals are explained from the code table, never by matching English.
+    assert "explain(refusal.code)" in panel
+    for code in (
+        "update_unsupported_windows",
+        "update_source_install",
+        "update_no_uv",
+        "update_failed",
+        "update_check_failed",
+        "update_not_newer",
+        "update_busy",
+        "uninstall_busy",
+        "update_job_lost",
+        "update_job_timeout",
+        "update_rollback_failed",
+        "update_hermes_too_old",
+    ):
+        assert f"  {code}:" in page, code
+
+
+def test_update_polling_is_bounded_and_stops_when_the_job_is_lost():
+    page = source()
+    poll = page[page.index("async function pollJob(") : page.index("function describeCheck(")]
+    assert "if (!alive()) return { state: 'abandoned' }" in poll
+    assert "if (Date.now() > until) return { state: 'timeout' }" in poll
+    assert "if (!res || res.ok === false) return { state: 'lost'" in poll
+    assert "if (++errors >= 5) return { state: 'lost', error: 'update_job_lost' }" in poll
+    panel = page[page.index("function UpdatePanel(") : page.index("function HealthLine(")]
+    assert "pollJob(started.job_id, { alive: () => mounted.current })" in panel
+    # One toast per job: the register() handler shows it, the panel does not.
+    assert "host.notify({ kind: 'success'" not in panel
+
+
+def test_startup_notice_mentions_a_known_newer_release_without_forcing_a_request():
+    page = source()
+    start = page[page.index("ctx.setTimeout(async () => {") : page.index("ctx.onEvent('plugin.mordred.job'")]
+    assert "rest('/update/check')" in start and "refresh=1" not in start
+    assert "check.available === true" in start
+    # Only when the page can act on it: not on Windows / source installs, not with a restart pending.
+    assert "res.supported && !res.restart_required" in start
