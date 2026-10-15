@@ -16,7 +16,7 @@
 - Feature PR targets `dev`; releases use `dev` → `main` and exact-SHA final acceptance.
 - No Hermes upstream changes, new dependencies, backend restart endpoint or process-kill workaround.
 - Use `uv run` / `.venv/bin/…`; never alter production keys, configuration, installation provenance or metadata to make this UI fix pass.
-- Work in `/Users/kazuko/dev/work/intmax/hermes-mordred-desktop-restart`, branch `fix/desktop-restart`.
+- Work in the isolated `hermes-mordred-desktop-restart` worktree, branch `fix/desktop-restart`.
 - User authorized planning, inline implementation and release; proceed through the existing checks without additional permission gates.
 
 ## Review Focus
