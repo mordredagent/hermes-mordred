@@ -154,16 +154,25 @@ def running_package() -> Path:
     return Path(mordred_hermes.__file__).resolve().parent
 
 
-def foreign_source(source: InstallSource, running: Path | None = None) -> str | None:
-    """Where the running package came from when that is not the installed distribution.
+def foreign_source(source: InstallSource, running: Path | None = None, *, env: Environment | None = None) -> str | None:
+    """Where the running package came from when that is not the managed install.
 
-    The installed distribution owns its ``site-packages`` and, for a path
-    install, its source directory. A package imported from anywhere else
-    (a checkout added to the base interpreter, a stray ``.pth``) is what the
-    status line calls the running version, and no restart reconciles it.
+    The installed distribution owns its ``site-packages``, a path install its
+    source directory, and the managed environment everything under it: its
+    venv and, in the pm layout (``<environment>/venv`` beside
+    ``<environment>/workspace/plugin-sources/``), the member builds a restart
+    replaces (an editable member updated to a wheel still runs from the old
+    build until then). A package imported from anywhere else (a checkout added
+    to the base interpreter, a stray ``.pth``) is what the status line calls
+    the running version, and no restart reconciles it.
     """
     running = running or running_package()
     owners = [Path(p) for p in (source.site, source.path) if p]
+    if env is not None and env.in_venv:
+        root = Path(env.prefix)
+        owners.append(root)
+        if root.name == "venv":
+            owners.append(root.parent)
     for owner in owners:
         try:
             if running.is_relative_to(owner.resolve()):

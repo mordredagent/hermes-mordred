@@ -490,7 +490,9 @@ def test_installed_carries_environment_and_foreign_source(monkeypatch: pytest.Mo
     )
     monkeypatch.setattr(member, "install_source", lambda: source)
     monkeypatch.setattr(member, "environment", lambda: member.Environment("/pm/venv/bin/python", "/pm/venv", True))
-    monkeypatch.setattr(member, "foreign_source", lambda src: "/stray/mordred_hermes" if src is source else None)
+    monkeypatch.setattr(
+        member, "foreign_source", lambda src, env=None: "/stray/mordred_hermes" if src is source and env else None
+    )
     monkeypatch.setattr(core, "_platform", lambda: "linux")
     current = core.installed()
     assert current.python == "/pm/venv/bin/python" and current.in_venv is True

@@ -199,7 +199,7 @@ def installed(home: Path | None = None) -> Installed:
         from_member=from_member,
         python=env.python,
         in_venv=env.in_venv,
-        foreign_source=member.foreign_source(source),
+        foreign_source=member.foreign_source(source, env=env),
     )
 
 

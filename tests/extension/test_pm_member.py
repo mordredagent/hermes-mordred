@@ -492,6 +492,25 @@ def test_foreign_source(tmp_path: Path) -> None:
     assert member.foreign_source(member.InstallSource("0.2.0a1", "pypi", None, False, ()), elsewhere) is None
 
 
+def test_foreign_source_owns_the_managed_environment(tmp_path: Path) -> None:
+    """An editable pm member updated to a wheel still runs from plugin-sources until the restart."""
+    env_dir = tmp_path / "environments" / "abc123"
+    site, _ = _venv(env_dir / "venv")
+    old_build = env_dir / "workspace" / "plugin-sources" / "mordred-579d" / "mordred_hermes"
+    stray = tmp_path / "tools" / "python-3.14" / "lib" / "python3.14" / "site-packages" / "mordred_hermes"
+    checkout = tmp_path / "dev" / "checkout" / "src" / "mordred_hermes"
+    for d in (old_build, stray, checkout):
+        d.mkdir(parents=True)
+    wheel = member.InstallSource("0.3.0a2", "pypi", None, False, (), str(site))
+    managed = member.Environment(str(env_dir / "venv" / "bin" / "python"), str(env_dir / "venv"), True)
+    assert member.foreign_source(wheel, old_build, env=managed) is None
+    assert member.foreign_source(wheel, stray, env=managed) == str(stray.resolve())
+    assert member.foreign_source(wheel, checkout, env=managed) == str(checkout.resolve())
+    # Without a venv there is no managed environment to own anything.
+    base = member.Environment(sys.executable, sys.prefix, False)
+    assert member.foreign_source(wheel, old_build, env=base) == str(old_build.resolve())
+
+
 def test_environment_info_reports_the_managed_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         member, "environment", lambda: member.Environment("/x/bin/python", "/x/environments/abc123/venv", True)
