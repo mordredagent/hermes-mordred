@@ -181,6 +181,17 @@ hermes-mordred upgrade --non-interactive --policy-conflict keep-existing
 Key flags: `--reset`, `--non-interactive`, `--audit-merge {skip,append-all,abort}`,
 `--policy-conflict {keep-existing,overwrite,abort}`.
 
+### `update` — install a newer Mordred release
+```sh
+hermes-mordred update
+hermes-mordred update --check
+hermes-mordred update --version VERSION
+```
+Installs the newest release in your channel with your current feature extras,
+leaving Hermes's pinned packages alone, then reminds you to restart Hermes.
+`--check` only reports. `upgrade` migrates configuration and never updates the
+package. Details: [§9 Upgrade the installed package](#upgrade-the-installed-package).
+
 ### `policy` — inspect the active policy
 ```sh
 hermes-mordred policy show                  # print resolved policy.json
@@ -577,6 +588,27 @@ hermes-mordred desktop uninstall
 > environment" with a **Repair / reinstall Mordred** button (it runs
 > `hermes pm install venv`); restart Hermes afterwards. An install that never
 > registered needs one reinstall with the installer.
+>
+> The rebuild installs the same Mordred version into the new environment: it
+> keeps Mordred installed but does not update it. A newer Mordred release is
+> installed with `hermes-mordred update` (see
+> [Upgrade the installed package](#upgrade-the-installed-package)).
+>
+> **Updating from the page.** Under the health line, the page shows either a
+> highlighted "Mordred X is available" section with an **Update Mordred to X**
+> button, or a one-line "up to date" status. **Check for updates** asks PyPI
+> explicitly (one request, cached for a day). Otherwise the page reuses
+> Hermes's daily plugin update check or Mordred's own cached answer and asks
+> PyPI at most once a day; it never asks when `plugins.auto_update_check_hours`
+> is `0`, and requests follow the active Mordred network path (Tor / VPN). The
+> button runs `hermes-mordred update --yes` as a background job (same extras,
+> Hermes pins untouched; see
+> [Upgrade the installed package](#upgrade-the-installed-package)), then shows
+> **Restart Hermes backend**, which is required. At Hermes Desktop start, a
+> known newer release also raises a one-time notice pointing to the Mordred
+> sidebar entry. On Windows, from a local checkout, or without `uv`, the panel
+> explains why an in-place update cannot run and offers no button (Windows
+> users rerun the Windows installer).
 
 ### `uninstall` — remove Mordred and restore Hermes's files
 ```sh
@@ -1272,7 +1304,36 @@ enrolls encrypted audit custody; Telegram has its [own setup](./TELEGRAM.md).
 
 ### Upgrade the installed package
 
-Re-run the installer with the same `--extras`, `--all-extras`, or
+`hermes-mordred update` is the primary method. It asks PyPI for the newest
+release in the same channel as the installed one (pre-release installs get
+pre-releases; stable installs get stable releases only), shows "X is installed;
+Y is available", and asks for confirmation before installing:
+
+```sh
+hermes-mordred update
+hermes-mordred update --check
+hermes-mordred update --version VERSION
+```
+
+`--yes` skips the confirmation; without it, a non-interactive run refuses.
+`--check` only reports and exits with code 10 when a newer release exists
+(0 when you are current). `--version VERSION` installs an exact release. The
+command installs with the same feature extras as the current install (inferred
+from the environment, so no flags are needed) and never moves a package that
+Hermes pins. When it finishes, restart the Hermes gateway or Hermes Desktop.
+
+`update` refuses to run on Windows (rerun the Windows installer instead), for
+installs from a local checkout (use `scripts/install.sh --from-source`), when
+`uv` is not found, and when the new release needs a newer Hermes than the one
+installed. If a step fails after the package was replaced, the previous
+release is reinstalled automatically and the message says so, so the
+environment is never left half-updated.
+
+Hermes Desktop users can do the same from the Mordred page (see
+[`desktop`](#desktop--mordred-setup-page-in-hermes-desktop)).
+
+The installer remains the fallback, and the only method on Windows and for
+source checkouts. Re-run the installer with the same `--extras`, `--all-extras`, or
 `--with-extension` flags used for the original installation, then restart the
 Hermes gateway or standalone Extension server:
 

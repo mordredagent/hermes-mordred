@@ -717,6 +717,171 @@ async def telegram_logout(body: dict[str, Any] | None = None) -> Any:
     return await windows_logout(_store(), forget=forget)
 
 
+# -- package updates ----------------------------------------------------------------------
+
+_REFUSAL_CODES = {
+    "windows": "update_unsupported_windows",
+    "source-install": "update_source_install",
+    "no-uv": "update_no_uv",
+    "not-a-venv": "update_not_a_venv",
+    "bad-version": "update_bad_version",
+    "hermes-too-old": "update_hermes_too_old",
+}
+
+
+def _running(kind: str) -> bool:
+    return any(j.kind == kind and j.state == "running" for j in _JOBS.values())
+
+
+def _update_view(result: Any, *, current: Any | None, error: str | None = None) -> dict[str, Any]:
+    """A :class:`.._self_update.CheckResult` for the page, plus whether an in-place update can run here.
+
+    ``running`` is this process's version and ``installed`` the one on disk;
+    they differ after an update until the gateway restarts
+    (``restart_required``), whatever the page remembers. ``check_error`` is
+    set when an explicit check failed while ``check`` still shows the last
+    valid answer.
+    """
+    from .. import __version__
+    from .. import _self_update as core
+
+    view: dict[str, Any] = {"ok": True, "supported": True, "refusal": None, "running": __version__}
+    try:
+        if current is None:
+            raise RuntimeError("installed metadata unreadable")
+        view["installed"] = current.version
+        core.refuse_if_unsupported(current, uv=core.find_uv(_home()))
+    except core.UpdateRefused as exc:
+        view["supported"] = False
+        view["refusal"] = {"code": _REFUSAL_CODES.get(exc.code, "update_refused"), "message": exc.message}
+    except Exception as exc:  # metadata unreadable: say so instead of a 500
+        view["supported"] = False
+        view["refusal"] = {"code": "update_refused", "message": f"{type(exc).__name__}: {exc}"}
+    view["restart_required"] = view.get("installed") not in (None, __version__)
+    view["check"] = result.to_json() if result is not None else None
+    view["check_error"] = error
+    return view
+
+
+@router.get("/update/check")
+async def update_check(refresh: int = 0) -> Any:
+    """Is a newer Mordred release available?
+
+    Without ``refresh`` this reuses Hermes's fresh plugin-check receipt or our
+    own day-old answer and asks PyPI at most once a day (never when
+    ``plugins.auto_update_check_hours`` is 0). ``refresh=1`` is the user's
+    **Check now**: one request, cached on success only; when it fails the
+    answer still shows the last valid one (``check``) and names the failure
+    (``check_error``). ``check`` is ``null`` when nothing is known and nothing
+    was asked.
+    """
+    from .. import _self_update as core
+
+    def work() -> dict[str, Any]:
+        home = _home()
+        try:
+            current = core.installed(home)
+        except Exception:
+            _log.warning("mordred installed metadata unreadable", exc_info=True)
+            current = None
+        result: core.CheckResult | None
+        error: str | None = None
+        if refresh and current is not None:
+            try:
+                result = core.check(current=current)
+                core.write_cache(result, home)
+            except core.UpdateCheckFailed as exc:
+                # Keep showing the last valid answer (no new request); name the failure.
+                error = f"check failed: {exc}"
+                result = core.hermes_receipt_check(home) or core.read_cache(home)
+                if result is not None and (result.failed or result.installed != current.version):
+                    result = None
+        elif current is not None:
+            result = core.cached_check(home, current=current)
+        else:
+            result = None
+        return _update_view(result, current=current, error=error)
+
+    try:
+        return await asyncio.to_thread(work)
+    except Exception as exc:
+        _log.warning("mordred update check failed (%s)", type(exc).__name__)
+        return _error("update_check_failed")
+
+
+def _prepare_update(target: str) -> tuple[Any, Any] | str:
+    """The install source and uv for an update to *target*, or the refusal code."""
+    from .. import _self_update as core
+
+    try:
+        current = core.installed(_home())
+        uv = core.find_uv(_home())
+        core.refuse_if_unsupported(current, uv=uv)
+    except core.UpdateRefused as exc:
+        return _REFUSAL_CODES.get(exc.code, "update_refused")
+    except Exception as exc:
+        _log.warning("mordred update refused (%s)", type(exc).__name__)
+        return "update_refused"
+    newer = core.is_newer(target, current.version)
+    if newer is None:
+        return "update_bad_version"
+    if not newer:
+        return "update_not_newer"
+    return current, uv
+
+
+@router.post("/update/apply")
+async def update_apply(body: dict[str, Any] | None = None) -> Any:
+    """Body: ``{"version": "<release>"}``. Runs ``hermes-mordred update --yes`` as a job.
+
+    The version must parse and be newer than the one on disk: this route
+    never downgrades (the CLI's ``--version`` is the explicit way). Refusals
+    answer before any job starts; an uninstall in progress is a refusal too.
+    ``progress.step`` / ``progress.output`` carry the failed step on error; on
+    success ``progress.report`` is the update report and the page offers the
+    gateway restart.
+    """
+    from .. import _self_update as core
+
+    body = body or {}
+    target = body.get("version")
+    if not isinstance(target, str) or not target.strip():
+        return _error("invalid_request")
+    target = target.strip()
+    if _running("uninstall"):
+        return _error("update_busy")
+    prepared = await asyncio.to_thread(_prepare_update, target)
+    if isinstance(prepared, str):
+        return _error(prepared)
+    current, uv = prepared
+    if _running("uninstall"):  # an uninstall may have started during the await
+        return _error("update_busy")
+
+    async def work(job: _Job) -> None:
+        job.progress = {"message": f"Installing hermes-mordred {target}…", "target": target}
+        _emit("progress", {"job_id": job.job_id, **job.progress})
+        try:
+            report = await asyncio.to_thread(core.apply, target, current=current, uv=uv, home=_home())
+        except core.UpdateRefused as exc:
+            job.progress = {"target": target, "refusal": exc.message, "rolled_back": exc.rolled_back}
+            code = (
+                "update_rollback_failed" if exc.rolled_back is False else _REFUSAL_CODES.get(exc.code, "update_refused")
+            )
+            raise _Fail(code) from exc
+        except core.UpdateFailed as exc:
+            job.progress = {
+                "target": target,
+                "step": exc.step,
+                "output": exc.output,
+                "rolled_back": exc.rolled_back,
+                "rollback_output": exc.rollback_output,
+            }
+            raise _Fail("update_rollback_failed" if exc.rolled_back is False else "update_failed") from exc
+        job.progress = {"target": target, "report": report.to_json()}
+
+    return {"ok": True, **_job_view(_start_job("update", work))}
+
+
 # -- uninstall ----------------------------------------------------------------------------
 
 
@@ -786,6 +951,8 @@ async def uninstall(body: dict[str, Any] | None = None) -> Any:
     if purge and phrase.strip() != PURGE_PHRASE:
         return _error("uninstall_confirm_mismatch")
     prompt = _UninstallAnswers(str(body.get("recovery_passphrase") or ""), phrase)
+    if _running("update"):
+        return _error("uninstall_busy")
 
     async def work(job: _Job) -> None:
         def run() -> tuple[int, str]:
