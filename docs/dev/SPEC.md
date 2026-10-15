@@ -868,6 +868,7 @@ status
 setup
 configure
 upgrade
+update
 install
 network     use | status | init
 policy      show | explain | dry-run | reload

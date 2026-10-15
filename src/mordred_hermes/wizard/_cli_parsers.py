@@ -10,6 +10,7 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 
 - ``configure``                                  — interactive Mordred setup (policy / LLM / harness)
 - ``upgrade [--reset|--non-interactive|...]``    — idempotent migration (detects ~/.openclaw)
+- ``update [--check|--version V|--yes]``         — move the installed package to a newer PyPI release
 - ``install <skill>``                            — install a skill through the policy gate
 - ``network {use,status,init}``                  — network-privacy path control + on-demand setup
 - ``policy {show,explain,dry-run,reload}``       — inspect / explain the active policy
@@ -46,6 +47,7 @@ def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) 
     _add_setup(sub)
     _add_configure(sub)
     _add_upgrade(sub)
+    _add_update(sub)
     _add_install(sub)
     _add_network(sub)
     _add_policy(sub)
@@ -806,6 +808,25 @@ def _handle_configure(args: argparse.Namespace) -> int:
     return configure.cli_handler(args)
 
 
+def _add_update(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "update",
+        help="Update the installed hermes-mordred package to a newer PyPI release (same extras; keeps Hermes's pins)",
+    )
+    p.add_argument(
+        "--check", action="store_true", help="Only report whether a newer release exists (exit 10 when it does)"
+    )
+    p.add_argument("--version", metavar="VERSION", help="Install this exact release instead of the newest one")
+    p.add_argument("--yes", action="store_true", help="Do not ask for confirmation")
+    p.set_defaults(func=_handle_update)
+
+
+def _handle_update(args: argparse.Namespace) -> int:
+    from . import update_cli
+
+    return update_cli.cli_update(args)
+
+
 def _handle_upgrade(args: argparse.Namespace) -> int:
     from . import upgrade
     from .policy_writer import PolicyWriter
@@ -818,6 +839,7 @@ def _handle_upgrade(args: argparse.Namespace) -> int:
     )
     report = upgrade.run(options=options, policy_writer=PolicyWriter())
     print(upgrade.render_report(report))
+    print("(This migrates configuration only. To install a newer Mordred release, run: hermes-mordred update)")
     return 0
 
 
