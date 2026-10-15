@@ -73,6 +73,19 @@ Version pins, optional features, inspect-before-running steps, platform
 commands, and expected output are documented in the
 [Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md).
 
+### Keep it up to date
+
+```sh
+hermes-mordred update          # newest release, same extras, Hermes's own packages untouched
+hermes-mordred update --check  # only tell me
+```
+
+Restart the Hermes gateway (or Hermes Desktop) afterwards. Hermes Desktop
+users can also press **Update Mordred** on the Mordred page; a notice appears
+there when a newer release is known. Details, refusals and the installer
+fallback are in the
+[usage guide](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/USAGE.md#upgrade-the-installed-package).
+
 ### Use it
 
 Use `hermes-mordred status` for the overall state. On macOS, guided setup also
