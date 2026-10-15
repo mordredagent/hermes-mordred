@@ -63,17 +63,17 @@ Production diagnosis found base-Python `_editable_impl_hermes_mordred.pth` point
 - Produces `RestartHermesControl(): ReactElement`, used by both `RepairPanel` and `UpdatePanel`; neither caller supplies a restart/recheck callback.
 - Internal capability helper, if extracted: `desktopRestartCapability(): Promise<{kind: 'local', connectionId: string} | {kind: 'manual', reason: string}>`; caller owns deadline and stale-result checks.
 
-- [ ] Extend `render_page` with stable refs, effect disposal, deferred promises and a controllable timer queue; retain existing component test behavior.
-- [ ] Add `test_restart_local_confirmation_and_pending`: click opens confirmation; cancel yields zero IPC calls; confirm immediately shows pending; double-click invokes relaunch exactly once; gateway restart count is zero.
-- [ ] Add `test_restart_manual_capability_fallbacks` parametrized for absent bridge/SDK, null or unmatched identity, remote row and rejected registry lookup; assert visible manual remedy and zero relaunch calls.
-- [ ] Add `test_restart_route_change_and_late_lookup`: switch identity during lookup, resolve after timeout, and resolve after unmount; every case must make zero relaunch calls.
-- [ ] Add `test_restart_request_outcomes`: synchronous throw and rejection show inline failure; resolved and never-settled IPC remain pending until the 30,000 ms deadline, then show manual recovery without claiming success or allowing a duplicate request.
-- [ ] Add `test_restart_unmount_cleans_timer`: dispose the mounted control, assert timer cancellation and no state writes from late async continuations.
-- [ ] Add `test_both_panels_use_desktop_restart_control` and `test_version_mismatch_is_neutral`: render both panels' restart action; running `0.3.0a1` / installed `0.2.0a1` must show both facts and no “new version” promise. Assert confirmation mentions all windows and interrupted work.
-- [ ] Run `uv run pytest -q tests/test_desktop_windows_page.py`; confirm new behavioral assertions fail for the current implementation before changing production code.
-- [ ] Implement the contract in `plugin.js`; replace the old restart handler and obsolete structural test expectations. Keep the component self-contained and the existing update/repair job APIs intact.
-- [ ] Run `uv run pytest -q tests/test_desktop_windows_page.py` and `uv run python tools/run_critical_tests.py`; require pass, including existing page syntax validation.
-- [ ] Inspect the diff and commit the tested UI fix and tests with `fix(desktop): restart the Desktop app after Mordred changes`.
+- [x] Extend `render_page` with stable refs, effect disposal, deferred promises and a controllable timer queue; retain existing component test behavior.
+- [x] Add `test_restart_local_confirmation_and_pending`: click opens confirmation; cancel yields zero IPC calls; confirm immediately shows pending; double-click invokes relaunch exactly once; gateway restart count is zero.
+- [x] Add `test_restart_manual_capability_fallbacks` parametrized for absent bridge/SDK, null or unmatched identity, remote row and rejected registry lookup; assert visible manual remedy and zero relaunch calls.
+- [x] Add `test_restart_route_change_and_late_lookup`: switch identity during lookup, resolve after timeout, and resolve after unmount; every case must make zero relaunch calls.
+- [x] Add `test_restart_request_outcomes`: synchronous throw and rejection show inline failure; resolved and never-settled IPC remain pending until the 30,000 ms deadline, then show manual recovery without claiming success or allowing a duplicate request.
+- [x] Add `test_restart_unmount_cleans_timer`: dispose the mounted control, assert timer cancellation and no state writes from late async continuations.
+- [x] Add `test_both_panels_use_desktop_restart_control` and `test_version_mismatch_is_neutral`: render both panels' restart action; running `0.3.0a1` / installed `0.2.0a1` must show both facts and no “new version” promise. Assert confirmation mentions all windows and interrupted work.
+- [x] Run `uv run pytest -q tests/test_desktop_windows_page.py`; confirm new behavioral assertions fail for the current implementation before changing production code.
+- [x] Implement the contract in `plugin.js`; replace the old restart handler and obsolete structural test expectations. Keep the component self-contained and the existing update/repair job APIs intact.
+- [x] Run `uv run pytest -q tests/test_desktop_windows_page.py` and `uv run python tools/run_critical_tests.py`; require pass, including existing page syntax validation.
+- [x] Inspect the diff and commit the tested UI fix and tests with `fix(desktop): restart the Desktop app after Mordred changes`.
 
 ### Task 2: Synchronize documentation and exercise actual Desktop
 

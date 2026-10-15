@@ -120,12 +120,14 @@ let states = [], cursor = 0
 const host = {notify: n => notifications.push(n), notifyError: e => notifications.push({error: e.message})}
 const Button = 'button', Checkbox = 'checkbox', Input = 'input', Fragment = 'fragment'
 const ROUTES_AREA = '', SIDEBAR_NAV_AREA = '', PALETTE_AREA = ''
-const useCallback = f => f, useEffect = () => {}
+const effects = []
+const useCallback = f => f, useEffect = f => {effects.push(f)}
 const useState = initial => {
   const index = cursor++
   if (!(index in states)) states[index] = initial
   return [states[index], value => {states[index] = value}]
 }
+const useRef = initial => useState({current: initial})[0]
 let jsx = (type, props) => typeof type === 'function' ? type(props) : {type, props}
 let jsxs = jsx
 const find = (node, predicate) => {
@@ -300,6 +302,210 @@ console.log(JSON.stringify(HealthLine({health: {ok: true, version: '0.2.0a0', pm
 # -- package updates (the Update Mordred button) ---------------------------------------------
 
 
+RESTART_FIXTURE = """
+let connectionId = 'local', relaunches = 0, gatewayRestarts = 0
+host.state = {connectionId: {get: () => connectionId}}
+host.connections = async () => [{id: 'local', kind: 'local'}]
+host.restartGateway = async () => {gatewayRestarts++; return true}
+globalThis.window = {hermesDesktop: {relaunchApp: async () => {relaunches++}}}
+const timers = new Map()
+let timerId = 0
+globalThis.setTimeout = (fn, delay) => {timers.set(++timerId, {fn, delay}); return timerId}
+globalThis.clearTimeout = id => timers.delete(id)
+const expire = () => {const pending = [...timers.values()]; timers.clear(); pending.forEach(t => t.fn())}
+const flush = async () => {for (let i = 0; i < 6; i++) await Promise.resolve()}
+let view = () => RestartHermesControl()
+const render = () => {cursor = 0; return view()}
+const button = (tree, label) => find(tree, n => n.type === 'button' && n.props.children === label)
+const press = (tree, label) => {
+  const target = button(tree, label)
+  if (!target) throw new Error('Missing button: ' + label)
+  return target.props.onClick()
+}
+"""
+
+
+def restart_page(script):
+    return render_page(RESTART_FIXTURE + script)
+
+
+def test_restart_local_confirmation_and_pending():
+    result = restart_page("""
+let tree = render()
+await press(tree, 'Restart Hermes Desktop')
+tree = render()
+const confirmation = JSON.stringify(tree)
+await press(tree, 'Cancel')
+tree = render()
+const callsAfterCancel = relaunches
+await press(tree, 'Restart Hermes Desktop')
+tree = render()
+const confirmed = button(tree, 'Restart now')
+const first = confirmed.props.onClick()
+const immediate = render()
+const second = confirmed.props.onClick()
+await Promise.all([first, second])
+tree = render()
+console.log(JSON.stringify({confirmation, callsAfterCancel, immediate, tree,
+  relaunches, gatewayRestarts, delays: [...timers.values()].map(t => t.delay)}))
+""")
+    assert "all" in result["confirmation"].lower() and "windows" in result["confirmation"].lower()
+    assert "interrupt" in result["confirmation"].lower()
+    assert result["callsAfterCancel"] == 0
+    assert result["relaunches"] == 1 and result["gatewayRestarts"] == 0
+    assert "Restarting Hermes Desktop" in json.dumps(result["immediate"])
+    assert "Restarting Hermes Desktop" in json.dumps(result["tree"])
+    assert result["delays"] == [30_000]
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [
+        "delete window.hermesDesktop",
+        "delete host.state",
+        "delete host.connections",
+        "connectionId = null",
+        "connectionId = 'unknown'",
+        "host.connections = async () => [{id: 'local', kind: 'ssh'}]",
+        "host.connections = async () => {throw new Error('registry unavailable')}",
+        "host.connections = async () => null",
+    ],
+)
+def test_restart_manual_capability_fallbacks(setup):
+    result = restart_page(
+        setup
+        + """
+let tree = render()
+await press(tree, 'Restart Hermes Desktop')
+tree = render()
+await press(tree, 'Restart now')
+tree = render()
+console.log(JSON.stringify({tree, relaunches, gatewayRestarts, timers: timers.size}))
+"""
+    )
+    text = json.dumps(result["tree"]).lower()
+    assert "restart" in text and ("quit" in text or "host" in text or "machine" in text)
+    assert result["relaunches"] == result["gatewayRestarts"] == result["timers"] == 0
+
+
+@pytest.mark.parametrize("end", ["route-change", "timeout", "unmount"])
+def test_restart_route_change_and_late_lookup(end):
+    result = restart_page(
+        """
+let resolveLookup
+host.connections = () => new Promise(resolve => {resolveLookup = resolve})
+let tree = render()
+const cleanup = effects.shift()()
+await press(tree, 'Restart Hermes Desktop')
+tree = render()
+const pending = press(tree, 'Restart now')
+"""
+        + {"route-change": "connectionId = 'remote'", "timeout": "expire()", "unmount": "cleanup()"}[end]
+        + """
+const before = JSON.stringify(states)
+resolveLookup([{id: 'local', kind: 'local'}])
+await pending
+tree = render()
+console.log(JSON.stringify({tree, relaunches, gatewayRestarts, timers: timers.size,
+  unchanged: before === JSON.stringify(states)}))
+"""
+    )
+    assert result["relaunches"] == result["gatewayRestarts"] == result["timers"] == 0
+    if end == "unmount":
+        assert result["unchanged"]
+    else:
+        assert "restart" in json.dumps(result["tree"]).lower()
+
+
+@pytest.mark.parametrize("outcome", ["throw", "reject", "false", "refused", "resolve", "hang"])
+def test_restart_request_outcomes(outcome):
+    setup = {
+        "throw": "() => {relaunches++; throw new Error('IPC failed')}",
+        "reject": "async () => {relaunches++; throw new Error('IPC failed')}",
+        "false": "async () => {relaunches++; return false}",
+        "refused": "async () => {relaunches++; return {ok: false}}",
+        "resolve": "async () => {relaunches++}",
+        "hang": "() => {relaunches++; return new Promise(() => {})}",
+    }[outcome]
+    result = restart_page(
+        "window.hermesDesktop.relaunchApp = "
+        + setup
+        + """
+let tree = render()
+await press(tree, 'Restart Hermes Desktop')
+tree = render()
+const pending = press(tree, 'Restart now')
+await flush()
+const beforeDeadline = render()
+expire()
+tree = render()
+console.log(JSON.stringify({beforeDeadline, tree, relaunches, gatewayRestarts,
+  timers: timers.size, duplicate: Boolean(button(tree, 'Restart now') || button(tree, 'Restart Hermes Desktop'))}))
+"""
+    )
+    assert result["relaunches"] == 1 and result["gatewayRestarts"] == 0
+    assert result["timers"] == 0 and not result["duplicate"]
+    assert "quit" in json.dumps(result["tree"]).lower()
+    if outcome in ("resolve", "hang"):
+        assert "Restarting Hermes Desktop" in json.dumps(result["beforeDeadline"])
+    else:
+        assert '"role": "alert"' in json.dumps(result["beforeDeadline"])
+
+
+def test_restart_unmount_cleans_timer_and_ignores_late_rejection():
+    result = restart_page("""
+let rejectRestart
+window.hermesDesktop.relaunchApp = () => {relaunches++; return new Promise((_, reject) => {rejectRestart = reject})}
+let tree = render()
+const cleanup = effects.shift()()
+await press(tree, 'Restart Hermes Desktop')
+tree = render()
+const pending = press(tree, 'Restart now')
+await flush()
+cleanup()
+const before = JSON.stringify(states)
+rejectRestart(new Error('closed'))
+await pending
+console.log(JSON.stringify({relaunches, timers: timers.size, unchanged: before === JSON.stringify(states)}))
+""")
+    assert result == {"relaunches": 1, "timers": 0, "unchanged": True}
+
+
+@pytest.mark.parametrize("panel", ["repair", "update"])
+def test_both_panels_use_desktop_restart_control(panel):
+    result = restart_page(
+        {
+            "repair": """
+states = [false, '', true]
+view = () => RepairPanel({probeResult: {kind: 'unreachable'}, recheck: () => {}})
+""",
+            "update": """
+states = [{ok: true, restart_required: true, running: '0.3.0a1', installed: '0.2.0a1'}]
+view = () => UpdatePanel({health: {}, recheck: () => {}})
+""",
+        }[panel]
+        + """
+let tree = render()
+await press(tree, 'Restart Hermes Desktop')
+tree = render()
+await press(tree, 'Restart now')
+console.log(JSON.stringify({tree: render(), relaunches, gatewayRestarts}))
+"""
+    )
+    assert result["relaunches"] == 1 and result["gatewayRestarts"] == 0
+
+
+def test_version_mismatch_is_neutral():
+    result = restart_page("""
+states = [{ok: true, restart_required: true, running: '0.3.0a1', installed: '0.2.0a1'}]
+view = () => UpdatePanel({health: {}, recheck: () => {}})
+console.log(JSON.stringify(render()))
+""")
+    text = json.dumps(result)
+    assert "Running Mordred: 0.3.0a1" in text and "Installed package metadata: 0.2.0a1" in text
+    assert "new version" not in text
+
+
 def test_update_button_is_gated_by_the_api_not_by_text():
     page = source()
     panel = page[page.index("function UpdatePanel(") : page.index("function HealthLine(")]
@@ -310,15 +516,6 @@ def test_update_button_is_gated_by_the_api_not_by_text():
     # Whether a restart is pending comes from the server (on-disk vs running
     # version), so a remounted panel cannot claim "up to date" with old code running.
     assert "info.restart_required" in panel
-    # One restart handler for both panels; the re-probe is skipped once the panel is gone.
-    assert "restartBackend(recheck, () => mounted.current)" in panel
-    repair = page[
-        page.index("function RepairPanel(") : page.index("function pollJob(")
-        if "function pollJob(" in page
-        else page.index("async function pollJob(")
-    ]
-    assert "const restart = () => restartBackend(recheck)" in repair
-    assert page.count("host.restartGateway()") == 1
     assert "const available = !restartRequired &&" in panel
     # Refusals are explained from the code table, never by matching English.
     assert "explain(refusal.code)" in panel
