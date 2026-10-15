@@ -3404,6 +3404,23 @@ exists (C5e reports `helper-missing` in place of `not-enrolled`); this is fail
 closed.
 ### Windows Desktop integration and extension server shutdown (C11)
 
+Shared Desktop package-change restart behavior applies on every platform.
+Repair and update panels offer **Restart Hermes Desktop**, with an inline
+**Restart now** / **Cancel** confirmation explaining that all windows restart
+and active work may be interrupted. Automatic relaunch uses the optional
+Electron `relaunchApp` bridge only when the current SDK connection id matches
+exactly one registry entry of kind `local`, rechecked after asynchronous
+lookup. Unknown, remote or unsupported ownership uses manual recovery;
+restarting the local app must not claim to restart a remote backend.
+Progress is immediate, duplicate requests are prevented, and one 30-second
+deadline covers capability lookup and IPC. Rejection or an unconfirmed
+restart leaves instructions on the page; an accepted IPC is not completion.
+Timeout/unmount invalidates late lookup results and clears timers; once IPC
+was sent, it remains latched for that page lifetime. Package changes never
+invoke the messaging gateway restart. A version mismatch reports running
+code and installed distribution metadata separately without promising an
+upgrade. This UI does not rewrite package provenance or installation state.
+
 C11 is the Desktop and extension-server consumer of C4-C6 and C10. It adds no
 keyvault, wizard or Telegram API: `desktop/api.py` routes `win32` to
 `desktop/_windows.py` (API) and `desktop/_windows_assets.py` (placement), and

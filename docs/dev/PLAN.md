@@ -2165,6 +2165,19 @@ longer skip the revocation or drop the credentials from the deleted list;
 pins the wizard's store-error mapping to `store._store_error`.
 ### Windows Desktop and extension server (C11)
 
+The shared `RestartHermesControl` in `desktop/assets/desktop/plugin.js` handles
+repair/update restarts on all platforms. It confirms whole-app interruption,
+checks the current connection against `host.connections()` for unique local
+ownership, then feature-detects Electron's `relaunchApp` bridge. It never calls
+`host.restartGateway()` for package changes. Immediate pending state, a
+30-second lookup/IPC deadline, a sent-request latch and unmount disposal
+prevent silent results, duplicate relaunches and late side effects. Manual
+recovery covers remote/unknown connections, older SDKs and bridge failures;
+resolved IPC alone never claims completion. Version mismatch copy reports
+running code and installed package metadata neutrally. The Node behavior
+harness in `tests/test_desktop_windows_page.py` exercises both panel handlers,
+confirmation/cancel, deadlines, connection changes, failures and disposal.
+
 The Desktop/extension slice consuming C4-C6 and C10; SPEC.md §Windows Desktop
 integration and extension server shutdown (C11) freezes the wire shapes. New
 modules keep `desktop/api.py` close to its size: `desktop/_windows.py`
