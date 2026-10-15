@@ -194,32 +194,21 @@ class TestCollectNetworkAnswers:
         assert "wireguard_config_path" not in section
         assert "custom_up_cmd" not in section
 
-    def test_invalid_tor_socks_port_falls_back_to_default(self) -> None:
-        prompts = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", "not-a-port"])
+    @pytest.mark.parametrize(
+        "port", ["not-a-port", "70000", "65535"], ids=["malformed", "out-of-range", "control-overflow"]
+    )
+    def test_invalid_tor_socks_port_falls_back_to_default(self, port: str) -> None:
+        # SOCKS 65535 is also invalid: the control port needs the following port.
+        prompts = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", port])
         inputs = collect_network_answers(prompts)
         assert inputs.network_answers.tor_socks_port == 9050
 
-    def test_out_of_range_tor_socks_port_falls_back_to_default(self) -> None:
-        prompts = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", "70000"])
+    @pytest.mark.parametrize("country,expected", [("unitedstates", "auto"), ("JP", "jp")])
+    def test_relay_country_is_normalized(self, country: str, expected: str) -> None:
+        # Relay coercion only happens on the vpn+mullvad route.
+        prompts = _ScriptedPromptIO(answers=["vpn", "mullvad", "", country, False])
         inputs = collect_network_answers(prompts)
-        assert inputs.network_answers.tor_socks_port == 9050
-
-    def test_65535_falls_back_because_control_port_needs_plus_one(self) -> None:
-        prompts = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", "65535"])
-        inputs = collect_network_answers(prompts)
-        assert inputs.network_answers.tor_socks_port == 9050
-
-    def test_invalid_relay_country_falls_back_to_auto(self) -> None:
-        # Relay coercion only happens on the vpn+mullvad route, so the path
-        # must be "vpn" (not "clearnet") for the relay prompt to fire at all.
-        prompts = _ScriptedPromptIO(answers=["vpn", "mullvad", "", "unitedstates", False])
-        inputs = collect_network_answers(prompts)
-        assert inputs.network_answers.mullvad_relay_country == "auto"
-
-    def test_2letter_relay_country_lowercased(self) -> None:
-        prompts = _ScriptedPromptIO(answers=["vpn", "mullvad", "", "JP", False])
-        inputs = collect_network_answers(prompts)
-        assert inputs.network_answers.mullvad_relay_country == "jp"
+        assert inputs.network_answers.mullvad_relay_country == expected
 
     def test_prompt_secret_false_skips_password_prompt(self) -> None:
         # With provider=mullvad but the password prompt off, the consumed
@@ -816,69 +805,39 @@ class TestPersistNetworkErrorChannel:
     unhandled traceback instead of the ``error:`` + exit-1 convention the
     rest of the CLI uses."""
 
-    def test_policy_writer_failure_reports_to_stderr_with_rc_1(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    @pytest.mark.parametrize(
+        "writer_name,method,message",
+        [
+            ("policy_writer", "merge_mordred_sections", "disk full"),
+            ("env_writer", "upsert", "permission denied"),
+            ("credentials_writer", "write_network", "read-only filesystem"),
+        ],
+    )
+    def test_writer_failure_reports_to_stderr_with_rc_1(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        writer_name: str,
+        method: str,
+        message: str,
     ) -> None:
-        class _BoomPolicyWriter:
-            config_path = tmp_path / "config.yaml"
+        writers = {
+            "policy_writer": _writer(tmp_path),
+            "env_writer": _SpyEnvFileWriter(),
+            "credentials_writer": _SpyCredentialsWriter(),
+        }
 
-            def merge_mordred_sections(self, sections: object) -> None:
-                raise OSError("disk full")
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise OSError(message)
 
+        monkeypatch.setattr(writers[writer_name], method, _boom)
         prompts = _ScriptedPromptIO(answers=list(_ANSWERS_VPN_MULLVAD))
-        rc = run_init(
-            prompt_io=prompts,
-            policy_writer=_BoomPolicyWriter(),  # type: ignore[arg-type]
-            env_writer=_SpyEnvFileWriter(),
-            credentials_writer=_SpyCredentialsWriter(),
-        )
-        assert rc == 1
+        assert run_init(prompt_io=prompts, **writers) == 1  # type: ignore[arg-type]
         captured = capsys.readouterr()
-        assert "disk full" in captured.err
-        assert captured.out == ""
-
-    def test_env_writer_failure_reports_to_stderr_with_rc_1(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        class _BoomEnvWriter:
-            def upsert(self, path: Path, *, key: str, value: str) -> None:
-                raise OSError("permission denied")
-
-        prompts = _ScriptedPromptIO(answers=list(_ANSWERS_VPN_MULLVAD))
-        rc = run_init(
-            prompt_io=prompts,
-            policy_writer=_writer(tmp_path),
-            env_writer=_BoomEnvWriter(),  # type: ignore[arg-type]
-            credentials_writer=_SpyCredentialsWriter(),
-        )
-        assert rc == 1
-        captured = capsys.readouterr()
-        assert "permission denied" in captured.err
-
-    def test_credentials_writer_failure_reports_to_stderr_with_rc_1(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        class _BoomCredentialsWriter:
-            def write_network(
-                self,
-                path: Path,
-                *,
-                mullvad_account_id_env: str,
-                mullvad_relay_country: str,
-                mullvad_killswitch: bool,
-            ) -> None:
-                raise OSError("read-only filesystem")
-
-        prompts = _ScriptedPromptIO(answers=list(_ANSWERS_VPN_MULLVAD))
-        rc = run_init(
-            prompt_io=prompts,
-            policy_writer=_writer(tmp_path),
-            env_writer=_SpyEnvFileWriter(),
-            credentials_writer=_BoomCredentialsWriter(),  # type: ignore[arg-type]
-        )
-        assert rc == 1
-        captured = capsys.readouterr()
-        assert "read-only filesystem" in captured.err
+        assert message in captured.err
+        if writer_name == "policy_writer":
+            assert captured.out == ""
 
     def test_handle_init_non_interactive_surfaces_same_error(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]

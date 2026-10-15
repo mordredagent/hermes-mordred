@@ -213,98 +213,6 @@ class TestEnableSE:
 
 
 class TestEnableSESeams:
-    """Direct coverage tests for the enable-se seams (mocked at the stdlib edge)."""
-
-    def test_locate_sekey_source_delegates(self) -> None:
-        # In a source checkout this resolves the native/sekey-helper tree.
-        src = keyvault_native_cli._locate_sekey_source()
-        assert src is not None
-        assert (src / "build.sh").is_file()
-
-    def test_run_sekey_build_forwards_env_and_returns_output(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        seen: dict[str, Any] = {}
-        monkeypatch.delenv("MORDRED_SEKEY_UNATTENDED", raising=False)
-
-        class _CP:
-            returncode = 0
-            stdout = "ok-out"
-            stderr = ""
-
-        def _fake_run(cmd: list[str], **kwargs: Any) -> Any:
-            seen["cmd"] = cmd
-            seen["env"] = kwargs["env"]
-            return _CP()
-
-        monkeypatch.setattr("subprocess.run", _fake_run)
-        rc, out = keyvault_native_cli._run_sekey_build(tmp_path, install_dir=tmp_path / "bin", unattended=True)
-        assert rc == 0 and "ok-out" in out
-        assert seen["env"]["MORDRED_SEKEY_INSTALL_DIR"] == str(tmp_path / "bin")
-        assert "MORDRED_SEKEY_UNATTENDED" not in seen["env"]
-        assert seen["cmd"][0] == "bash"
-
-    def test_run_sekey_build_oserror_returns_1(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        def _boom(*a: Any, **k: Any) -> Any:
-            raise OSError("no bash")
-
-        monkeypatch.setattr("subprocess.run", _boom)
-        rc, out = keyvault_native_cli._run_sekey_build(tmp_path, install_dir=None, unattended=None)
-        assert rc == 1 and "no bash" in out
-
-    def test_verify_sekey_helper_false_when_no_binary(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper._find_helper", lambda: None)
-        assert keyvault_native_cli._verify_sekey_helper() is False
-
-    def test_verify_sekey_helper_true_on_probe_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper._find_helper", lambda: "/fake/helper")
-
-        class _Ops:
-            def __init__(self, binary: str) -> None:
-                pass
-
-            def probe(self) -> None:
-                return None
-
-        monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper._HelperSecKeyOps", _Ops)
-        assert keyvault_native_cli._verify_sekey_helper() is True
-
-    def test_verify_sekey_helper_false_on_probe_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper._find_helper", lambda: "/fake/helper")
-
-        class _Ops:
-            def __init__(self, binary: str) -> None:
-                pass
-
-            def probe(self) -> None:
-                raise RuntimeError("boom")
-
-        monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper._HelperSecKeyOps", _Ops)
-        assert keyvault_native_cli._verify_sekey_helper() is False
-
-    def test_verify_sekey_helper_prefers_install_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        # enable-se parity with codex MEDIUM-1: when --install-dir is given, verify
-        # must probe the binary THERE, not only env / ~/.local/bin / PATH via
-        # _find_helper.
-        binary = tmp_path / "mordred-hermes-sekey"
-        binary.write_text("#!/bin/sh\n")
-        monkeypatch.setattr(
-            "mordred_hermes.keyvault._seckey_helper._find_helper",
-            lambda: pytest.fail("must not fall back to _find_helper when install_dir has the binary"),
-        )
-        seen: dict[str, str] = {}
-
-        class _Ops:
-            def __init__(self, b: str) -> None:
-                seen["binary"] = b
-
-            def probe(self) -> None:
-                return None
-
-        monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper._HelperSecKeyOps", _Ops)
-        assert keyvault_native_cli._verify_sekey_helper(install_dir=tmp_path) is True
-        assert seen["binary"] == str(binary)
-
     def test_verify_sekey_helper_falls_back_when_install_dir_binary_absent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -451,20 +359,22 @@ class TestEnableTPM:
         assert calls["verify_install_dir"] == install_dir
 
 
-class TestEnableTPMSeams:
-    """Direct coverage tests for the enable-tpm seams (mocked at the stdlib edge)."""
+@pytest.mark.parametrize("helper,finder", [("sekey", "_find_helper"), ("tpmkey", "find_tpmkey_helper")])
+class TestNativeHelperSeams:
+    """Exercise each platform adapter at the stdlib edge without real hardware."""
 
-    def test_locate_tpmkey_source_delegates(self) -> None:
-        # In a source checkout this resolves the native/tpmkey-helper tree.
-        src = keyvault_native_cli._locate_tpmkey_source()
+    def test_locate_source_delegates(self, helper: str, finder: str) -> None:
+        src = getattr(keyvault_native_cli, f"_locate_{helper}_source")()
         assert src is not None
         assert (src / "build.sh").is_file()
-        assert (src / "Cargo.toml").is_file()
+        if helper == "tpmkey":
+            assert (src / "Cargo.toml").is_file()
 
-    def test_run_tpmkey_build_forwards_env_and_returns_output(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    def test_build_forwards_env_and_returns_output(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, helper: str, finder: str
     ) -> None:
         seen: dict[str, Any] = {}
+        monkeypatch.delenv("MORDRED_SEKEY_UNATTENDED", raising=False)
 
         class _CP:
             returncode = 0
@@ -477,59 +387,53 @@ class TestEnableTPMSeams:
             return _CP()
 
         monkeypatch.setattr("subprocess.run", _fake_run)
-        rc, out = keyvault_native_cli._run_tpmkey_build(tmp_path, install_dir=tmp_path / "bin")
+        kwargs = {"unattended": True} if helper == "sekey" else {}
+        rc, out = getattr(keyvault_native_cli, f"_run_{helper}_build")(tmp_path, install_dir=tmp_path / "bin", **kwargs)
         assert rc == 0 and "ok-out" in out
-        assert seen["env"]["MORDRED_TPMKEY_INSTALL_DIR"] == str(tmp_path / "bin")
-        # Tier 2 has no per-use gate, so the TPM build never sets an unattended flag.
-        assert "MORDRED_TPMKEY_UNATTENDED" not in seen["env"]
+        assert seen["env"][f"MORDRED_{helper.upper()}_INSTALL_DIR"] == str(tmp_path / "bin")
+        assert f"MORDRED_{helper.upper()}_UNATTENDED" not in seen["env"]
         assert seen["cmd"][0] == "bash"
 
-    def test_run_tpmkey_build_oserror_returns_1(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_build_oserror_returns_1(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, helper: str, finder: str
+    ) -> None:
         def _boom(*a: Any, **k: Any) -> Any:
             raise OSError("no bash")
 
         monkeypatch.setattr("subprocess.run", _boom)
-        rc, out = keyvault_native_cli._run_tpmkey_build(tmp_path, install_dir=None)
+        kwargs = {"unattended": None} if helper == "sekey" else {}
+        rc, out = getattr(keyvault_native_cli, f"_run_{helper}_build")(tmp_path, install_dir=None, **kwargs)
         assert rc == 1 and "no bash" in out
 
-    def test_verify_tpmkey_helper_false_when_no_binary(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper.find_tpmkey_helper", lambda: None)
-        assert keyvault_native_cli._verify_tpmkey_helper() is False
+    def test_verify_false_when_no_binary(self, monkeypatch: pytest.MonkeyPatch, helper: str, finder: str) -> None:
+        monkeypatch.setattr(f"mordred_hermes.keyvault._seckey_helper.{finder}", lambda: None)
+        assert getattr(keyvault_native_cli, f"_verify_{helper}_helper")() is False
 
-    def test_verify_tpmkey_helper_true_on_probe_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper.find_tpmkey_helper", lambda: "/fake/helper")
-
-        class _Ops:
-            def __init__(self, binary: str) -> None:
-                pass
-
-            def probe(self) -> None:
-                return None
-
-        monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper._HelperSecKeyOps", _Ops)
-        assert keyvault_native_cli._verify_tpmkey_helper() is True
-
-    def test_verify_tpmkey_helper_false_on_probe_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper.find_tpmkey_helper", lambda: "/fake/helper")
+    @pytest.mark.parametrize("probe_ok", [True, False], ids=["probe-ok", "probe-error"])
+    def test_verify_reflects_probe_result(
+        self, monkeypatch: pytest.MonkeyPatch, helper: str, finder: str, probe_ok: bool
+    ) -> None:
+        monkeypatch.setattr(f"mordred_hermes.keyvault._seckey_helper.{finder}", lambda: "/fake/helper")
 
         class _Ops:
             def __init__(self, binary: str) -> None:
                 pass
 
             def probe(self) -> None:
-                raise RuntimeError("boom")
+                if not probe_ok:
+                    raise RuntimeError("boom")
 
         monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper._HelperSecKeyOps", _Ops)
-        assert keyvault_native_cli._verify_tpmkey_helper() is False
+        assert getattr(keyvault_native_cli, f"_verify_{helper}_helper")() is probe_ok
 
-    def test_verify_tpmkey_helper_prefers_install_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        # codex MEDIUM-1: when --install-dir is given, verify must probe the
-        # binary THERE, not only env / ~/.local/bin / PATH via find_tpmkey_helper.
-        binary = tmp_path / "mordred-hermes-tpmkey"
+    def test_verify_prefers_install_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, helper: str, finder: str
+    ) -> None:
+        binary = tmp_path / f"mordred-hermes-{helper}"
         binary.write_text("#!/bin/sh\n")
         monkeypatch.setattr(
-            "mordred_hermes.keyvault._seckey_helper.find_tpmkey_helper",
-            lambda: pytest.fail("must not fall back to find_tpmkey_helper when install_dir has the binary"),
+            f"mordred_hermes.keyvault._seckey_helper.{finder}",
+            lambda: pytest.fail("must not fall back when install_dir has the binary"),
         )
         seen: dict[str, str] = {}
 
@@ -541,7 +445,7 @@ class TestEnableTPMSeams:
                 return None
 
         monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper._HelperSecKeyOps", _Ops)
-        assert keyvault_native_cli._verify_tpmkey_helper(install_dir=tmp_path) is True
+        assert getattr(keyvault_native_cli, f"_verify_{helper}_helper")(install_dir=tmp_path) is True
         assert seen["binary"] == str(binary)
 
 

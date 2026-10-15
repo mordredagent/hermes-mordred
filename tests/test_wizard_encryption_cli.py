@@ -18,7 +18,6 @@ is not actually wired.
 from __future__ import annotations
 
 import json
-import random
 from pathlib import Path
 
 import pytest
@@ -135,6 +134,7 @@ class TestEnvStatus:
         assert st.target == "env"
         assert st.configured is False
         assert st.active is False
+        assert encryption_cli.status_mark(st) == "off"
 
     def test_enrolled_inactive_off_macos(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(encryption_cli, "_enrolled_names", lambda _root: {".env"})
@@ -364,6 +364,8 @@ class TestMemoryFilePathsSymlinks:
         outside.write_text("plaintext outside the memories dir\n", encoding="utf-8")
         link = memories / "linked.md"
         link.symlink_to(outside)
+        # The drift scanner must also ignore the linked plaintext target.
+        assert encryption_cli._unsealed_memory_files(home) == []
         real = memories / "MEMORY.md"
         real.write_text("real file\n", encoding="utf-8")
 
@@ -381,17 +383,6 @@ class TestMemoryFilePathsSymlinks:
 
         assert encryption_cli._memory_file_paths(home) == []
 
-    def test_symlink_is_ignored_by_the_drift_scan(self, tmp_path: Path) -> None:
-        """A symlink whose target "looks" plaintext must never influence
-        `status` -- it is invisible, not classified either way (W2)."""
-        home = tmp_path / "home"
-        memories = self._memories(home)
-        outside = tmp_path / "outside.md"
-        outside.write_text("plaintext outside\n", encoding="utf-8")
-        (memories / "linked.md").symlink_to(outside)
-
-        assert encryption_cli._unsealed_memory_files(home) == []
-
 
 # -----------------------------------------------------------------------------
 # _unsealed_memory_files — classification must run on the WHOLE file, never a
@@ -406,35 +397,31 @@ class TestUnsealedMemoryFilesFullFileClassification:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def test_a_5kb_sealed_file_is_classified_sealed(self, tmp_path: Path) -> None:
+    def test_head_probe_classifies_both_sides_of_its_boundary(self, tmp_path: Path) -> None:
         home = tmp_path / "home"
         memories = self._memories(home)
-        blob = seal(b"x" * 5000, key=_MEMORY_KEY, name="MEMORY.md")
-        assert len(blob) > encryption_cli._SEAL_PROBE_BYTES  # actually exercises the fix
-        (memories / "MEMORY.md").write_bytes(blob)
-
-        assert encryption_cli._unsealed_memory_files(home) == []
-
-    def test_head_probe_agrees_with_the_full_check_across_many_sizes(self, tmp_path: Path) -> None:
-        home = tmp_path / "home"
-        memories = self._memories(home)
-        rng = random.Random(20260819)
-        for i in range(100):
-            size = rng.randint(0, 4096)
-            plaintext = bytes(rng.randrange(256) for _ in range(size))
-            path = memories / f"MEMORY{i}.md"
-            path.write_bytes(seal(plaintext, key=_MEMORY_KEY, name=path.name))
+        lengths = []
+        # The frozen wire format produces 62-byte seals for sizes 0..2 and
+        # 66-byte seals for 3..5: all three base64 residues on each side of
+        # the 64-byte head probe, including an empty plaintext. The separate
+        # 5 KB spy below proves that long files reach is_sealed in full.
+        for size in range(6):
+            path = memories / f"MEMORY{size}.md"
+            blob = seal(b"x" * size, key=_MEMORY_KEY, name=path.name)
+            lengths.append(len(blob))
+            path.write_bytes(blob)
+        assert min(lengths) < encryption_cli._SEAL_PROBE_BYTES < max(lengths)
 
         unsealed = encryption_cli._unsealed_memory_files(home)
 
-        assert unsealed == []  # every real seal, whatever its length, reads sealed
+        assert unsealed == []
 
     def test_classification_runs_on_the_full_file_not_the_truncated_head(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         home = tmp_path / "home"
         memories = self._memories(home)
-        blob = seal(b"y" * 1000, key=_MEMORY_KEY, name="MEMORY.md")
+        blob = seal(b"y" * 5000, key=_MEMORY_KEY, name="MEMORY.md")
         (memories / "MEMORY.md").write_bytes(blob)
         assert len(blob) > encryption_cli._SEAL_PROBE_BYTES
 
@@ -535,20 +522,12 @@ class TestWorkspaceStatus:
 # Aggregation + rendering
 # -----------------------------------------------------------------------------
 class TestRender:
-    def test_status_mark_reflects_active_not_just_configured(self) -> None:
-        on = encryption_cli.TargetStatus("env", configured=True, active=True, detail="active")
-        paused = encryption_cli.TargetStatus("env", configured=True, active=False, detail="disabled")
-        off = encryption_cli.TargetStatus("env", configured=False, active=False, detail="not enrolled")
-        assert encryption_cli.status_mark(on) == "on"
-        # configured but not active -> 'paused', NOT 'on' (the misleading old behavior)
-        assert encryption_cli.status_mark(paused) == "paused"
-        assert encryption_cli.status_mark(off) == "off"
-
     def test_render_text_marks_disabled_target_paused_with_legend(self) -> None:
         statuses = [
             encryption_cli.TargetStatus("env", configured=True, active=False, detail="disabled"),
             encryption_cli.TargetStatus("config", configured=False, active=False, detail="not vault-managed"),
         ]
+        assert [encryption_cli.status_mark(status) for status in statuses] == ["paused", "off"]
         text = encryption_cli.render_text(statuses)
         assert "[paused]" in text  # the disabled-but-enrolled target reads paused
         assert "legend:" in text  # legend explains 'paused' whenever it appears
@@ -560,6 +539,7 @@ class TestRender:
             encryption_cli.TargetStatus("env", configured=True, active=True, detail="active"),
             encryption_cli.TargetStatus("config", configured=False, active=False, detail="not vault-managed"),
         ]
+        assert [encryption_cli.status_mark(status) for status in statuses] == ["on", "off"]
         text = encryption_cli.render_text(statuses)
         assert "[on ]" in text
         assert "[off]" in text
