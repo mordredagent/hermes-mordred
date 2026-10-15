@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -577,7 +578,7 @@ def test_update_apply_runs_as_a_job_and_reports(env, update_core, monkeypatch):
     assert job["state"] == "done"
     assert job["progress"]["report"]["target"] == "0.2.0a3" and job["progress"]["report"]["warnings"] == ["w1"]
     ((target, kw),) = update_core.apply_calls
-    assert target == "0.2.0a3" and kw["current"] is update_core.installed and str(kw["uv"]) == "/opt/uv"
+    assert target == "0.2.0a3" and kw["current"] is update_core.installed and kw["uv"] == Path("/opt/uv")
     assert kw["home"] == env.tmp
 
 
