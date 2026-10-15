@@ -21,8 +21,9 @@ working directory cannot redirect where packages come from):
 3. Install the new ``hermes-mordred[<extras>]==<version>`` with ``--no-deps``
    so resolving its ``hermes-agent`` requirement cannot re-resolve Hermes.
 4. Check the new release's ``hermes-agent`` floor against the Hermes actually
-   installed (``hermes_cli.__version__`` for a source / Desktop Hermes whose
-   distribution says ``0.0.0``).
+   installed (for a source / Desktop Hermes whose distribution says ``0.0.0``:
+   ``hermes_cli.version_info.get_version_info().base_version``, what
+   ``hermes --version`` prints, then ``hermes_cli.__version__``).
 5. Install Mordred's own requirements for those extras (read from the *new*
    metadata in a fresh interpreter, stdout only, self-references and
    ``hermes-agent`` dropped) under the constraints from step 1.
@@ -638,7 +639,9 @@ for key in sorted(seen):
 
 # Prints "<hermes-agent specifier of the installed hermes-mordred>\\t<Hermes version>".
 # A source / Desktop Hermes reports 0.0.0 as a distribution; its real version
-# is hermes_cli.__version__ (the install stamp).
+# is what ``hermes --version`` prints (``hermes_cli.version_info``, from the
+# install stamp or git), and only then ``hermes_cli.__version__``, which reads
+# the install stamp alone and is 0.0.0 on a Desktop checkout without one.
 _HERMES_FLOOR_SCRIPT: Final = """\
 import sys
 from importlib.metadata import PackageNotFoundError, requires, version
@@ -655,6 +658,12 @@ try:
 except PackageNotFoundError:
     have = ""
 if have in ("", "0.0.0"):
+    try:
+        from hermes_cli.version_info import get_version_info
+        have = str(get_version_info().base_version)
+    except Exception:
+        pass
+if have in ("", "0.0.0", "unknown"):
     try:
         import hermes_cli
         have = str(hermes_cli.__version__)
@@ -741,7 +750,8 @@ def _hermes_floor_unmet(output: str) -> str | None:
         spec = SpecifierSet(spec_text)
     except InvalidSpecifier:
         return None
-    if not have:
+    if not have or have in ("0.0.0", "unknown"):
+        # A source / Desktop checkout whose stamp and git are both unreadable.
         return f"the new release requires hermes-agent{spec_text}, but no Hermes version could be determined"
     if _parse(have) is None or spec.contains(have, prereleases=True):
         return None

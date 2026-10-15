@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -702,10 +703,38 @@ class TestApply:
             ("\t0.22.0", False),
             (">=0.30.0a1\t0.30.0a2", False),
             ("garbage\t0.22.0", False),
+            (">=0.13.0\tunknown", True),
         ],
     )
     def test_hermes_floor_rule(self, line: str, unmet: bool) -> None:
         assert (core._hermes_floor_unmet(line) is not None) is unmet
+
+    def test_hermes_floor_placeholder_version_is_undetermined_not_too_old(self) -> None:
+        message = core._hermes_floor_unmet(">=0.13.0\t0.0.0")
+        assert message is not None and "no Hermes version could be determined" in message
+        assert "update Hermes first" not in message
+
+    def test_hermes_floor_script_reads_hermes_real_version(self, tmp_path: Path) -> None:
+        """A source / Desktop Hermes is distribution 0.0.0; the probe asks hermes_cli.version_info."""
+        site = tmp_path / "site"
+        (site / "hermes_cli").mkdir(parents=True)
+        (site / "hermes_cli" / "__init__.py").write_text('__version__ = "0.0.0"\n', encoding="utf-8")
+        (site / "hermes_cli" / "version_info.py").write_text(
+            "class _Info:\n    base_version = '0.22.0'\n\ndef get_version_info():\n    return _Info()\n",
+            encoding="utf-8",
+        )
+        dists = (("hermes_agent-0.0.0", ""), ("hermes_mordred-0.3.0a2", "Requires-Dist: hermes-agent>=0.13.0\n"))
+        for name, requires in dists:
+            info = site / f"{name}.dist-info"
+            info.mkdir()
+            dist, _, version = name.partition("-")
+            header = f"Metadata-Version: 2.1\nName: {dist.replace('_', '-')}\nVersion: {version}\n"
+            info.joinpath("METADATA").write_text(header + requires, encoding="utf-8")
+        script = f"import sys; sys.path.insert(0, {str(site)!r})\n" + core._HERMES_FLOOR_SCRIPT
+        done = subprocess.run([sys.executable, "-I", "-c", script, "hermes-mordred"], capture_output=True, text=True)
+        assert done.returncode == 0, done.stderr
+        assert done.stdout == ">=0.13.0\t0.22.0\n"
+        assert core._hermes_floor_unmet(done.stdout) is None
 
     def test_new_conflict_is_a_warning_only_when_it_was_clean_before(self, tmp_path: Path) -> None:
         runner = FakeRunner(freeze=FREEZE, check_codes=[0, 1])
