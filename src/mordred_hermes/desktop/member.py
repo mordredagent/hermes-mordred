@@ -158,21 +158,21 @@ def foreign_source(source: InstallSource, running: Path | None = None, *, env: E
     """Where the running package came from when that is not the managed install.
 
     The installed distribution owns its ``site-packages``, a path install its
-    source directory, and the managed environment everything under it: its
-    venv and, in the pm layout (``<environment>/venv`` beside
+    source directory, and the managed environment its venv plus, in the pm
+    layout (``<environment>/venv`` beside
     ``<environment>/workspace/plugin-sources/``), the member builds a restart
     replaces (an editable member updated to a wheel still runs from the old
     build until then). A package imported from anywhere else (a checkout added
-    to the base interpreter, a stray ``.pth``) is what the status line calls
-    the running version, and no restart reconciles it.
+    to the base interpreter, a sibling checkout, a stray ``.pth``) is what the
+    status line calls the running version, and no restart reconciles it.
     """
     running = running or running_package()
     owners = [Path(p) for p in (source.site, source.path) if p]
     if env is not None and env.in_venv:
         root = Path(env.prefix)
         owners.append(root)
-        if root.name == "venv":
-            owners.append(root.parent)
+        if root.name == "venv":  # pm layout: the member builds beside the venv, nothing else there
+            owners.append(root.parent / "workspace" / "plugin-sources")
     for owner in owners:
         try:
             if running.is_relative_to(owner.resolve()):

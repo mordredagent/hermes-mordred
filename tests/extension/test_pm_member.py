@@ -499,13 +499,15 @@ def test_foreign_source_owns_the_managed_environment(tmp_path: Path) -> None:
     old_build = env_dir / "workspace" / "plugin-sources" / "mordred-579d" / "mordred_hermes"
     stray = tmp_path / "tools" / "python-3.14" / "lib" / "python3.14" / "site-packages" / "mordred_hermes"
     checkout = tmp_path / "dev" / "checkout" / "src" / "mordred_hermes"
-    for d in (old_build, stray, checkout):
+    sibling = env_dir / "mordred-checkout" / "src" / "mordred_hermes"  # beside the venv, not a member build
+    for d in (old_build, stray, checkout, sibling):
         d.mkdir(parents=True)
     wheel = member.InstallSource("0.3.0a2", "pypi", None, False, (), str(site))
     managed = member.Environment(str(env_dir / "venv" / "bin" / "python"), str(env_dir / "venv"), True)
     assert member.foreign_source(wheel, old_build, env=managed) is None
     assert member.foreign_source(wheel, stray, env=managed) == str(stray.resolve())
     assert member.foreign_source(wheel, checkout, env=managed) == str(checkout.resolve())
+    assert member.foreign_source(wheel, sibling, env=managed) == str(sibling.resolve())
     # Without a venv there is no managed environment to own anything.
     base = member.Environment(sys.executable, sys.prefix, False)
     assert member.foreign_source(wheel, old_build, env=base) == str(old_build.resolve())
