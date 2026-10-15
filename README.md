@@ -1,5 +1,6 @@
 # hermes-mordred
 
+[![Latest release (including pre-releases)](https://img.shields.io/github/v/release/mordredagent/hermes-mordred?include_prereleases&sort=date&label=release&color=orange)](https://github.com/mordredagent/hermes-mordred/releases)
 [![PyPI](https://img.shields.io/pypi/v/hermes-mordred)](https://pypi.org/project/hermes-mordred/)
 [![CI](https://github.com/mordredagent/hermes-mordred/actions/workflows/ci.yml/badge.svg)](https://github.com/mordredagent/hermes-mordred/actions/workflows/ci.yml)
 
@@ -13,7 +14,9 @@ sandbox. See the
 [specification](https://github.com/mordredagent/hermes-mordred/blob/main/docs/dev/SPEC.md#threat-model--accepted-limitations)
 for the security boundary and accepted limitations.
 
-**Status: active alpha.** New users should start with the
+**Status: active alpha.** See the
+[latest alpha release and release notes](https://github.com/mordredagent/hermes-mordred/releases).
+New users should start with the
 **[Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md)**.
 
 ## The plugin
@@ -72,6 +75,19 @@ configures Mordred and creates keys. It runs `configure`, which enables the
 Version pins, optional features, inspect-before-running steps, platform
 commands, and expected output are documented in the
 [Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md).
+
+### Keep it up to date
+
+```sh
+hermes-mordred update          # newest release, same extras, Hermes's own packages untouched
+hermes-mordred update --check  # only tell me
+```
+
+Restart the Hermes gateway (or Hermes Desktop) afterwards. Hermes Desktop
+users can also press **Update Mordred** on the Mordred page; a notice appears
+there when a newer release is known. Details, refusals and the installer
+fallback are in the
+[usage guide](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/USAGE.md#upgrade-the-installed-package).
 
 ### Use it
 
