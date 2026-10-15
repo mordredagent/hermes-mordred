@@ -511,8 +511,11 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
   and the backend reported ready at 13:11:49. The tool observed the window
   exit before capturing the short pending state; immediate pending and
   deadline/failure/remote/disposal paths are covered by the Node harness.
-  Reconnection then waited on the Secure Enclave helper; post-reconnect
-  health remains a separate observation until that completes.
+  Reconnection briefly waited on the Secure Enclave helper. The actual
+  Mordred page subsequently returned, with the same running/installed
+  versions and the model, hardware, memory and Telegram checks preserved.
+  The sidebar reported a session-list retry and messaging stopped; no
+  session-content or messaging-platform acceptance is claimed here.
   The base Python's editable pointer still imports `0.3.0a1` from the
   original repository, while Hermes's selected environment/member report
   `0.2.0a1` from the older checkout. Bootstrap restored that source's old

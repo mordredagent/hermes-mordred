@@ -81,13 +81,13 @@ Production diagnosis found base-Python `_editable_impl_hermes_mordred.pth` point
 
 **Interfaces:** Consumes Task 1's control and labels; produces documented behavior and timestamped actual-UI evidence including backend identity before/after.
 
-- [ ] Update the existing user section to describe whole-app confirmation, pending/failure/manual fallback and neutral metadata mismatch. Add the same bounded contract to the existing Desktop spec/plan sections.
-- [ ] Record initial Desktop/backend PIDs, selected runtime paths and health. Confirm source provenance before restarting; preserve the known base-Python editable-path explanation.
-- [ ] Back up the installed Desktop `plugin.js` and stage only Task 1's asset using the discovered production page path; verify its bytes match the reviewed asset. Keep the backup path in QA evidence and restore it if staging fails.
-- [ ] Through the actual UI, open the new control and cancel once; verify the app and backend PIDs are unchanged and no restart was issued.
-- [ ] Through the actual UI, confirm restart; observe immediate pending state, Desktop reopen and a different Desktop backend PID. Verify Mordred health and both version fields after reopening; mismatch persistence is recorded truthfully, not treated as restart failure.
-- [ ] Record outcomes and limitations in the manual validation log. Automated tests cover unsupported/remote/timeout cases that are not safely reproducible on the live installation.
-- [ ] Run `git diff --check` and `uv run pytest -q tests/test_desktop_windows_page.py`; commit the documentation and actual-UI evidence with `docs(desktop): document app restart behavior and validation`.
+- [x] Update the existing user section to describe whole-app confirmation, pending/failure/manual fallback and neutral metadata mismatch. Add the same bounded contract to the existing Desktop spec/plan sections.
+- [x] Record initial Desktop/backend PIDs, selected runtime paths and health. Confirm source provenance before restarting; preserve the known base-Python editable-path explanation.
+- [x] Back up the installed Desktop `plugin.js` and stage only Task 1's asset using the discovered production page path; verify its bytes match the reviewed asset. Keep the backup path in QA evidence and restore it if staging fails.
+- [x] Through the actual UI, open the new control and cancel once; verify the app and backend PIDs are unchanged and no restart was issued.
+- [x] Through the actual UI, confirm restart; observe immediate pending state, Desktop reopen and a different Desktop backend PID. Verify Mordred health and both version fields after reopening; mismatch persistence is recorded truthfully, not treated as restart failure.
+- [x] Record outcomes and limitations in the manual validation log. Automated tests cover unsupported/remote/timeout cases that are not safely reproducible on the live installation.
+- [x] Run `git diff --check` and `uv run pytest -q tests/test_desktop_windows_page.py`; commit the documentation and actual-UI evidence with `docs(desktop): document app restart behavior and validation`.
 
 ### Task 3: Freeze, review and integrate `0.3.0a2` into dev
 
