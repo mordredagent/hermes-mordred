@@ -890,6 +890,11 @@ telegram    setup | doctor | login | sync | status | logout | venice |
 uninstall
 ```
 
+`hermes-mordred --version` and the registered Hermes-host compatibility alias
+print the invoked command name and the Mordred package version, then exit successfully.
+`status` shows the package version immediately after its heading and includes
+the same string in the top-level `version` field of `status --json`.
+
 `status`, `policy show`, keyvault listing, vault status, and encryption status
 are non-mutating. `configure`, `keyvault init/reset`, `network init`, vault
 mutations, encryption toggles, audit purge, pairing, serving, and `uninstall`

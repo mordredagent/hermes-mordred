@@ -456,13 +456,30 @@ class TestEnableTPMWiring:
 
 
 class TestVersionFlag:
-    def test_version_prints_and_exits_zero(self, capsys: pytest.CaptureFixture[str]) -> None:
+    @pytest.mark.parametrize("integrated", [False, True], ids=["standalone", "hermes"])
+    def test_version_prints_and_exits_zero(self, integrated: bool, capsys: pytest.CaptureFixture[str]) -> None:
         from mordred_hermes.__about__ import __version__
 
         with pytest.raises(SystemExit) as excinfo:
-            main(["--version"])
+            if integrated:
+                _build_parser().parse_args(["mordred", "--version"])
+            else:
+                main(["--version"])
         assert excinfo.value.code == 0
-        assert __version__ in capsys.readouterr().out
+        output = capsys.readouterr()
+        prog = "hermes mordred" if integrated else "hermes-mordred"
+        assert output.out == f"{prog} {__version__}\n"
+        assert output.err == ""
+
+    @pytest.mark.parametrize("integrated", [False, True], ids=["standalone", "hermes"])
+    def test_help_lists_version(self, integrated: bool, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            if integrated:
+                _build_parser().parse_args(["mordred", "--help"])
+            else:
+                main(["--help"])
+        assert excinfo.value.code == 0
+        assert "--version" in capsys.readouterr().out
 
 
 class TestConfigureFlags:

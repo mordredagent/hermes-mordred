@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from mordred_hermes.__about__ import __version__
 from mordred_hermes.keyvault import _native_key_id, _storage
 from mordred_hermes.wizard import status_cli
 from mordred_hermes.wizard.encryption_cli import WORKSPACE_LEGEND_BODY, TargetStatus, WorkspacePaths
@@ -296,6 +297,7 @@ class TestRendering:
         assert rc == 0
         out = capsys.readouterr().out
         assert "\033" not in out
+        assert out.splitlines()[:2] == ["Mordred status:", f"  version     : {__version__}"]
         assert "policy" in out
         assert "network" in out
         assert "keyvault" in out
@@ -375,6 +377,7 @@ class TestRendering:
 
         assert cli.main(["status", "--json"]) == 0
         body = json.loads(capsys.readouterr().out)
+        assert body["version"] == __version__
         assert body["policy"]["mode"] == "lenient"
         assert body["network"]["configured_path"] == "clearnet"
         assert body["network"]["live"] is False
