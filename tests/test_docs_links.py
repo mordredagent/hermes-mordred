@@ -33,6 +33,7 @@ _CANONICAL_LINE_REF_RE = re.compile(
 _MAINTAINED_DEV_DOCS = {
     "CI.md",
     "HOOK_PAYLOADS.md",
+    "MAINTENANCE_PLAN.md",
     "PATHS.md",
     "PLAN.md",
     "POLICY.md",

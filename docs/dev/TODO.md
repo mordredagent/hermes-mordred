@@ -635,3 +635,19 @@ C11 integration follow-up (R-C11-5/R-C11-6):
   source and sdist-derived wheel environments; retain the real Telegram
   account and Windows 11 acceptance gates. Wizard setup completion wording
   remains a separate wizard slice; C10c changes no wizard user flow.
+
+
+## Maintenance execution (2026-10-18)
+
+- [ ] Extension/Desktop/wizard: share immutable LLM-setting transformations and
+  prove endpoint changes cannot retain a previous local API key.
+- [ ] Desktop package management: bind member provenance to the target venv,
+  retaining legitimate editable managed builds and ordinary-source refusals.
+- [ ] Keyvault tests: share immutable backup/seed fixtures without losing
+  cases, covered branches or verify-before-decrypt fault detection.
+- [ ] Shared dotenv/wizard/extension: extract text and transaction ownership,
+  preserving both text modes, concurrency and checked Windows publication.
+- [ ] Desktop: own background work, preserve mutation exclusion through
+  cancellation and bound completed-job retention to 64 records/3600 seconds.
+- [ ] Integration: review each change, run full regression/coverage and static
+  checks, and record relevant native/live execution separately in CI.md.

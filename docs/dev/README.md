@@ -25,6 +25,7 @@ design diaries and upstream snapshots remain available through Git history.
 
 | Document | Purpose |
 |---|---|
+| [`MAINTENANCE_PLAN.md`](./MAINTENANCE_PLAN.md) | Current bug-fix, shared-helper and test-fixture maintenance tasks and acceptance |
 | [`setup.md`](./setup.md) | Development setup, the two venvs, and isolated validation |
 | [`UBUNTU_MANUAL_INSTALL_NOTES.md`](./UBUNTU_MANUAL_INSTALL_NOTES.md) | Observed Ubuntu Desktop/TPM installation issues and remedies |
 | [`WINDOWS_CONFIG_IO.md`](./WINDOWS_CONFIG_IO.md) | Canonical Windows configuration API, ownership and verification |

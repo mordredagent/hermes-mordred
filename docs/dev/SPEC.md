@@ -3652,3 +3652,45 @@ before secrets, archive or network access, and its existing error mapper
 retains it for extension and Hermes-tool transport. POSIX status routing and
 the public signatures are unchanged. This slice imports no Desktop code and
 does not establish native Windows, live-account or Windows 11 acceptance.
+
+
+## Maintenance contracts (2026-10-18)
+
+The maintenance work in `MAINTENANCE_PLAN.md` preserves public CLI and HTTP
+interfaces, credential serialization and existing security gates. Shared
+primitives are introduced before component adapters migrate to them.
+
+Telegram LLM-setting transformations belong to the extension domain and run
+inside each adapter's existing single credential-store update. An omitted
+local API key is retained only for the same normalized full endpoint; a changed,
+missing or invalid previous endpoint clears it. Explicit replacement or clearing
+retains the existing CLI semantics. Desktop adds no key-input option. Unrelated
+Telegram and alternate-backend credentials are preserved; no extra unwrap or
+preliminary credential load is introduced.
+
+A package-manager build is identified relative to the target distribution's
+managed virtual environment and its sibling `workspace/plugin-sources` tree,
+not by a pathname substring. Legitimate managed builds may be editable. A
+source outside that tree retains source-install refusal and normal registration;
+another environment or a symlink escape cannot prove managed provenance.
+
+Dotenv text and transactions have neutral shared owners. Wizard and extension
+text modes preserve their current differences in whitespace matching,
+duplicate handling, empty-value deletion and terminal newlines. POSIX lock,
+private-file, atomic-publication and durability semantics remain intact;
+Windows exclusively uses checked canonical transactions. Slack overwrite
+admission and publication remain one transaction.
+
+Desktop owns every background Task and blocking operation until actual
+completion. Same-kind requests reuse the running job; update and uninstall
+exclude one another. Cancelling an async waiter does not make a running
+blocking operation safe to retry. Existing states, events and HTTP-200 error
+bodies remain unchanged. Terminal records are retained for at most 3600 seconds
+after completion and at most 64 records, oldest completion first. Active jobs
+are never evicted. Pruning occurs at start, lookup, status and completion;
+missing or evicted results use the existing `job_not_found` response.
+
+Test setup may reuse immutable backup bytes and BIP39 seed material while
+retaining every input case, independent tamper buffer, exporter/randomness
+contract and real decrypt check. Reduced setup cost is not reduced security
+coverage or evidence for native/live acceptance.

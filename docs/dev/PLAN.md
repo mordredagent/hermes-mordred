@@ -2286,3 +2286,19 @@ pin their platform seam explicitly, including when run on native Windows.
 
 Native Windows source/wheel reruns, a real Telegram account and Windows 11
 acceptance remain independent completion gates.
+
+
+## Maintenance implementation sequence (2026-10-18)
+
+[`MAINTENANCE_PLAN.md`](./MAINTENANCE_PLAN.md) contains the bounded task
+interfaces, preservation requirements and validation for the maintenance
+contracts in SPEC. Submit this documentation separately before cross-component
+implementation. Introduce shared primitives first and migrate component
+adapters in separately reviewable changes. Use one worktree per agent.
+
+The first independent tasks cover Telegram LLM settings and endpoint-bound
+keys, environment-bound package-manager provenance, and immutable crypto test
+fixtures. Dotenv extraction and Desktop job ownership follow; Desktop settings
+and job migrations must not edit the API concurrently. Run critical feedback
+and complete affected modules during iteration, then one full regression with
+coverage at integration. Native/live results remain separate explicit evidence.
