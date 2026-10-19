@@ -17,7 +17,7 @@ unchanged. Use a Mordred-owned encrypted database, short lifecycle callbacks,
 an optional tool-free reviewer, and two bundled skills. No cron job is required.
 
 The selected storage path is
-`<profile-home>/plugin-data/mordred/activity.db`. This deliberately revises the
+`<profile-home>/plugin-data/mordred/mordred.db`. This deliberately revises the
 earlier proposal to add browser-history tables to the physical `state.db` file.
 Hermes still uses the experience through the Mordred plugin; sharing a database
 file is not required for that integration.
@@ -199,7 +199,7 @@ by that home. No process-global default home or environment fallback is allowed
 for a queued job. Store the profile binding in DB metadata and verify it before
 reading or writing.
 
-The following tables are proposed, all in `activity.db`:
+The following tables are proposed, all in `mordred.db`:
 
 | Table | Main contents and constraints |
 |---|---|
@@ -477,7 +477,7 @@ Disable or redact collector debug payloads, operator logs, screenshots, relay
 traces, request dumps and review errors along the protected collection path.
 If an operation necessarily creates an uncontrolled plaintext artifact, that
 operation is outside protected capture and the UI shows the limitation. Do not
-claim that encrypting `activity.db` retroactively protects existing artifacts.
+claim that encrypting `mordred.db` retroactively protects existing artifacts.
 Audit only identifiers, counts, classified failures and usage; do not include
 page content or credentials in status, metrics or exception text.
 
