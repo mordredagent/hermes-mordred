@@ -28,16 +28,17 @@ repair is complete; historical restoration details remain in Git.
 
 ## `ci.yml` details
 
-The workflow has five job definitions. Final validation expands Linux and
-Windows to two workers each:
+The workflow has six job definitions. Final validation runs two Linux main
+workers, a parallel Linux compatibility-floor worker, macOS and four Windows
+workers:
 
 | Scope | Scheduled jobs | Python and validation |
 |---|---:|---|
 | Ordinary portable change | 3 | Policy, Ubuntu 3.12 default suite, acceptance |
-| Ordinary platform change | 4–5 | Adds one macOS and/or one Windows 3.12 worker |
+| Ordinary platform change | 4–6 | Adds selected macOS, Windows and/or Linux floor workers |
 | Ready allowlisted user-documentation PR | 2 | Policy and complete documentation contract checks |
 | Draft feedback | 3–5 | Critical preset on Ubuntu 3.12 and mapped platforms |
-| Final validation | 7 | Policy, Linux 3.11/3.13, macOS 3.11, two Windows 3.11 shards, acceptance |
+| Final validation | 10 | Policy, Linux 3.11/3.13, Linux floor 3.11, macOS 3.11, four Windows 3.11 shards, acceptance |
 
 `ci-policy` discovers the complete cumulative PR diff through paginated GitHub
 API responses. It checks the reported file count and rechecks head/base metadata;
@@ -67,7 +68,7 @@ Key policy:
   >=80% and strict mypy. Drafts run critical feedback plus CI-tool tests.
 - The optional macOS worker runs the complete default suite, coverage, typing
   and status guard; drafts retain critical feedback and the status guard.
-- Ordinary/draft Windows requests use one worker; final uses two isolated
+- Ordinary/draft Windows requests use one worker; final uses four isolated
   Windows runners. Ordinary workers retain complete mapped modules and remaining
   critical cases. Final workers cover all 84 frozen native modules once; routine
   Windows validation excludes only 28 reviewed portable cases. Full Windows
@@ -79,13 +80,15 @@ Key policy:
   Auxiliary environments, including the documentation-test environment,
   live under `RUNNER_TEMP` outside the checkout so dependency documentation
   cannot enter repository Markdown or packaging scans.
-- Final Linux 3.11 also runs feature-import proofs and focused suites, Hermes
-  0.13 compatibility, canonical/compatibility package smoke, Docker Tor,
+- Final Linux 3.11 also runs feature-import proofs and focused suites,
+  canonical/compatibility package smoke, Docker Tor,
   TPM Rust/MSRV and swtpm/Linux Telegram checks as blocking steps. Linux 3.13
-  retains the complete default suite and typing. macOS absorbs Swift and TPM
+  retains the complete default suite and typing. A separate `linux-floor` job
+  runs the complete Hermes 0.13 suite and version guard whenever selected; it
+  depends only on policy, so it runs alongside the main suites. macOS absorbs Swift and TPM
   Rust checks; Windows absorbs winkey stable/MSRV/build checks and wheel smoke.
 - `CI acceptance` always runs after all selected workers and fails if a worker,
-  pack or successful blocking step is missing. Unique OS/version/shard/run/attempt
+  pack or successful blocking step is missing. Unique OS/version/role/shard/run/attempt
   manifests avoid last-writer-wins matrix outputs. Feedback/documents and routine Windows evidence cannot
   qualify a production release. Release admission requires final mode and the
   full Windows tier for the exact branch SHA. Rerun **all jobs** for accepted fresh evidence;
@@ -112,8 +115,10 @@ Baseline observations from 13 current 25-job successful runs: median elapsed
 route has a 7.25-minute historical proxy (budget 8–12 minutes); the consolidated
 final route has an 80.88-minute raw-time proxy (budget 75–95 minutes). The
 successful consolidated run `38204317824` measured 52m39s workflow elapsed and
-52m24s on Windows, including 49m27s of native pytest. The two-runner routine
-profile targets approximately 25 minutes; see the measured selection below.
+52m24s on Windows, including 49m27s of native pytest. Later two-runner runs `38814638531` (PR) and `38817644917` (`main`) took
+21m03s and 29m49s respectively. Four workers plus a parallel floor pack target
+12–18 minutes for a final run. This is a target, not a measured guarantee;
+see the measured selection below.
 Queue time and runner speed vary. Raw summed job time is not billed minutes.
 
 ### Critical feedback and full regression
@@ -200,12 +205,12 @@ between unchanged batches. Coverage floors, platform gates, live-device gates,
 hook-name membership, and every consumed-field assertion remain in force.
 
 `windows-private-fs` uses Server 2022: one Python 3.12 runner for mapped
-ordinary/draft feedback, or two isolated Python 3.11 runners for final mode.
+ordinary/draft feedback, or four isolated Python 3.11 runners for final mode.
 The named native step retains the entire 84-module selector, including the
 frozen 82-module hash, for the external harness. Whole modules are assigned
 once using deterministic measured-duration balancing. Shard 1's estimate
 includes the helper/wheel overhead, which avoids an unbalanced critical path.
-Both shards retain the existing native lock, process, ACL, crypto, publication,
+The four shards collectively retain the existing native lock, process, ACL, crypto, publication,
 uncertainty, restore/purge and platform validation tests and their timeouts.
 
 There are two explicit final Windows tiers:
@@ -213,10 +218,10 @@ There are two explicit final Windows tiers:
 - **Routine:** verified ready PRs targeting `dev` and verified `dev` pushes
   omit exactly the 28 parameterized node IDs in `tools/native_test_profile.json`.
   They exercise portable presentation/orchestration contracts and still run in
-  the complete Linux/macOS suites. The successful baseline recorded 306.555s
-  for these cases; the remaining native test weight is 2649.052s. Two shards
-  balance approximately 23 minutes including measured helper overhead, leaving
-  setup/acceptance room for the approximately 25-minute workflow target.
+  the complete Linux/macOS suites. Module weights and the helper overhead
+  are recorded with their source run in `tools/native_test_durations.json`.
+  Fixture simplification can change these weights without changing the
+  selection; refresh them from successful full-tier Windows JUnit artifacts.
 - **Full:** `main`, manual dispatch and `ci:full` retain all Windows cases.
   Uncertain provenance also selects full conservatively. Full validation can
   take longer than the routine target. A routine green cannot authorize a
@@ -230,32 +235,77 @@ remain. Test files and assertions are retained. This is a bounded reduction,
 not an important-only security preset.
 
 `tools/run_native_pytest.py` records the actual pre-exclusion collection,
-exclusions, completed test outcomes and exit code. Schema-2 acceptance checks
-both shard identities, exact module assignment, exclusion digest, collection
+exclusions, completed test outcomes and exit code. Schema-3 acceptance checks
+all four shard identities, exact module assignment, exclusion digest, collection
 counts/hashes and every requested pack, in the same SHA/ref/run/attempt context.
 Missing/duplicate/overlapping shards, failed native tests and skipped required
-steps cannot become accepted evidence. Schema-1 manifests are conservatively
-refused; upgrading can therefore require one full baseline run.
+steps cannot become accepted evidence. Every worker has an explicit `main` or
+`floor` role; the Linux floor pack requires its own successful worker and GitHub
+job. Schema-1/2 manifests are conservatively refused; upgrading therefore
+requires fresh schema-3 baseline evidence. The release gate still requires the
+exact `main` SHA, full Windows tier and matching run/attempt.
 
 Ordinary validation still uses `tools/run_ci_native_tests.py`: complete mapped
 modules replace overlapping critical node IDs, and remaining critical cases
 stay included. Wheel/helper packs run once on shard 1 when selected. PowerShell
 checks native exit codes immediately. JUnit, selection and worker artifacts
-include shard and run attempt. Both final workers have a 60-minute timeout;
+include shard and run attempt. All final workers have a 60-minute timeout;
 this is a failure bound, not a way to manufacture the runtime target.
 
 For local reproduction, use the complete workflow selector with
-`--shard-index 1 --shard-count 2 --tier routine --manifest native-selection.json
---junitxml native.xml`, then shard 2 on a separate host or isolated environment.
+`--shard-index 1 --shard-count 4 --tier routine --manifest native-selection.json
+--junitxml native.xml`, then shards 2–4 on separate hosts or isolated environments.
 Use `--tier full` for complete Windows validation; one-runner full execution
 remains available with `--shard-count 1`. Missing measured weights receive a
 nonzero default. Invalid selectors, indices/counts and malformed inputs fail.
 
 Historical comparison: the nine-shard run (`38014669836`, `5bf2b868d`) reduced
 maximum Windows latency from 47m06s to 18m32s but increased summed Windows
-wall time from 6952s to 8258s. The two-runner design adds only one setup and
-removes reviewed duplication to balance turnaround against runner consumption.
+wall time from 6952s to 8258s. Four Windows workers add two setups compared
+with the previous two-worker design; the independent floor job adds one Linux
+setup. This trades more concurrent runners for a shorter release path.
 Hosted elapsed time must be measured after changing this configuration.
+
+The wizard message and dispatch tests avoid repeated key enrollment where the
+assertion only concerns routing or wording. Their real integration counterparts
+remain in the complete default and native selectors:
+
+| Lightweight contract | Retained integration coverage |
+|---|---|
+| Audit decrypt's 11-row exception/stop/continue matrix | `test_wizard_windows_audit_cli.py`: real encrypted history, retained generations, corruption and native authentication refusal; `test_wizard_windows_audit_cli_decrypt.py`: real rotation and bounded relisting |
+| Telegram classified remedies and CLI acknowledgement flag forwarding | `test_wizard_windows_telegram.py`: real custody/store login, doctor, setup, forget and uncertain-write paths; `test_wizard_windows_telegram_native.py`: native platform paths |
+| Native-init role parsing and runtime-interpreter dispatch | `test_wizard_windows_memory.py`: real role isolation, enrollment, installed child proof and enable/disable/purge lifecycle; native memory/proof suites remain selected |
+
+Before/after local Python 3.12 runs of all four affected wizard modules on
+baseline `a904a840b` passed 204 cases each, with no lost executed production lines or branches. Observed
+wall time was 254.099s then 165.952s; cache/host variation prevents attributing
+all of that difference to this change. Process-local fault injection confirmed
+that wrong stop/continue behavior, wrong audit wording, swallowed unexpected
+exceptions, wrong Telegram results, wrong enrollment roles and wrong interpreter
+selection are still detected. These local observations are not native Windows
+acceptance or a forecast for the complete workflow.
+
+Hosted measurements after fixture simplification (all rows use the full
+Windows tier; elapsed includes policy, queueing and acceptance):
+
+| Run | Windows workers | Linux floor | Workflow elapsed | Longest Windows job | Linux 3.11 main | Raw summed job time |
+|---|---:|---|---:|---:|---:|---:|
+| [39192105875](https://github.com/mordredagent/hermes-mordred/actions/runs/39192105875), previous release PR | 2 | Serial | 20m46s | 20m24s | 16m16s | 71m10s |
+| [39194838640](https://github.com/mordredagent/hermes-mordred/actions/runs/39194838640), optimization candidate | 4 | Parallel | 14m46s | 14m22s | 12m01s | 87m11s |
+
+The second run passed all ten jobs and the remote exact-branch evidence check.
+Its complete Windows selection produced 2,705 passed and 111 skipped cases
+across all 84 modules. The floor job took 5m37s alongside the main suites.
+Observed elapsed time fell by 28.9%, while raw summed job time rose by 22.5%;
+these are individual hosted observations, not controlled benchmarks or billed
+minutes. More concurrent workers trade runner consumption for faster feedback.
+
+`tools/native_test_durations.json` now uses that successful run's full JUnit
+measurements, including 107s for the shard-1 helper/wheel steps. These weights
+rebalance the observed 480–791s native shard times into approximately 678s of
+full-tier work per shard (635s routine), including the shard-1 support cost.
+Those balanced values are model estimates; the next run validates the changed
+assignment. All whole modules and the exact reviewed exclusions are preserved.
 
 The installed-Hermes hook canary scans all Python sources owned by the
 `hermes-agent` distribution, including top-level modules outside `hermes_cli`,
