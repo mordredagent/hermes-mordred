@@ -11,7 +11,6 @@ import importlib.metadata
 import json
 import os
 import socket
-import stat
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +23,8 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from mordred_hermes.extension import extension_api
 from mordred_hermes.extension import extension_crypto as xc
 from mordred_hermes.extension import extension_pairing as pairing
+from tests._checked_fixture_helpers import assert_private, seed_private_text
+from tests._checked_fixture_helpers import tmp_path as tmp_path
 
 
 def test_reported_package_version_prefers_canonical_distribution(monkeypatch):
@@ -783,28 +784,29 @@ def test_upsert_env_vars_new_file_is_0600(tmp_path):
     world-readable) rather than the atomic writer's tmp-file mode."""
     env = tmp_path / ".env"
     extension_api._upsert_env_vars(env, {"SLACK_BOT_TOKEN": "xoxb-a"})
-    assert oct(stat.S_IMODE(os.stat(env).st_mode)) == "0o600"
+    assert_private(env)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode repair; native Windows refuses widened DACLs")
 def test_upsert_env_vars_tightens_a_loosely_permissioned_existing_file(tmp_path):
     """A host-managed ``.env`` may legitimately pre-exist at 0o644 (unlike
     ``keyvault._storage.atomic_write``, which refuses that case outright) --
     ``os.replace`` gives the result the tmp file's 0o600 mode, tightening the
     permissions rather than preserving the leak."""
     env = tmp_path / ".env"
-    env.write_text("EXISTING=1\n", encoding="utf-8")
+    seed_private_text(env, "EXISTING=1\n", encoding="utf-8")
     os.chmod(env, 0o644)
 
     extension_api._upsert_env_vars(env, {"SLACK_BOT_TOKEN": "xoxb-a"})
 
-    assert oct(stat.S_IMODE(os.stat(env).st_mode)) == "0o600"
+    assert_private(env)
 
 
 def test_upsert_env_vars_preserves_unrelated_existing_vars(tmp_path):
     """The atomic upsert (mkstemp + os.replace) must not clobber vars already
     in the file that the update did not touch."""
     env = tmp_path / ".env"
-    env.write_text("KEEP_ME=untouched\nSLACK_BOT_TOKEN=old\n", encoding="utf-8")
+    seed_private_text(env, "KEEP_ME=untouched\nSLACK_BOT_TOKEN=old\n", encoding="utf-8")
 
     extension_api._upsert_env_vars(env, {"SLACK_BOT_TOKEN": "xoxb-new"})
 
@@ -816,7 +818,8 @@ def test_upsert_env_vars_preserves_unrelated_existing_vars(tmp_path):
 
 def test_upsert_env_vars_replaces_export_assignments_without_leaving_old_tokens(tmp_path):
     env = tmp_path / ".env"
-    env.write_text(
+    seed_private_text(
+        env,
         "export SLACK_BOT_TOKEN=xoxb-old\nexport SLACK_APP_TOKEN=xapp-old\nKEEP_ME=untouched\n",
         encoding="utf-8",
     )
@@ -842,7 +845,7 @@ def test_upsert_env_vars_replaces_export_assignments_without_leaving_old_tokens(
 def test_slack_setup_requires_explicit_overwrite_for_existing_tokens(tmp_path):
     env = tmp_path / ".env"
     original = "KEEP_ME=untouched\nSLACK_BOT_TOKEN=xoxb-old\nSLACK_APP_TOKEN=xapp-old\n"
-    env.write_text(original, encoding="utf-8")
+    seed_private_text(env, original, encoding="utf-8")
     conn = _authed_conn()
 
     asyncio.run(
@@ -1957,3 +1960,38 @@ def test_page_route_error_replies_still_carry_security_headers(tmp_path, monkeyp
         assert headers["Referrer-Policy"] == "no-referrer"
         assert headers["X-Frame-Options"] == "DENY"
         assert "frame-ancestors 'none'" in headers["Content-Security-Policy"]
+
+
+def test_dotenv_extension_does_not_load_wizard(tmp_path: Path) -> None:
+    """Credential writes must work without importing the wizard dependency tree."""
+    import os
+    import subprocess
+    import sys
+
+    code = r"""
+import importlib.abc
+import sys
+from pathlib import Path
+
+class RefuseWizard(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if fullname == "mordred_hermes.wizard" or fullname.startswith("mordred_hermes.wizard."):
+            raise AssertionError("dotenv operation imported wizard")
+        return None
+
+sys.meta_path.insert(0, RefuseWizard())
+from mordred_hermes.extension.api import _upsert_env_vars, _update_slack_env
+path = Path(sys.argv[1]) / ".env"
+_upsert_env_vars(path, {"KEEP": "unchanged"})
+assert _update_slack_env(path, {"SLACK_BOT_TOKEN": "test-token"}, False)
+assert not _update_slack_env(path, {"SLACK_BOT_TOKEN": "replacement"}, False)
+assert path.read_text() == "KEEP=unchanged\nSLACK_BOT_TOKEN=test-token\n"
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path)],
+        env={**os.environ, "HERMES_HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr

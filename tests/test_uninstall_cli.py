@@ -10,6 +10,7 @@ must be back to what they were.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -42,7 +43,12 @@ from mordred_hermes.wizard._uninstall_hermes_env import (
 from mordred_hermes.wizard.env_file_writer import DotEnvFileWriter
 from mordred_hermes.wizard.policy_writer import PolicySnapshot, PolicyWriter
 from mordred_hermes.wizard.uninstall_cli import UninstallContext, UninstallOptions, run_uninstall
+from tests._checked_fixture_helpers import file_symlink as file_symlink
+from tests._platform_test_helpers import posix_modes as posix_modes
+from tests._platform_test_helpers import require_legacy_encrypted_database_custody, require_legacy_sealed_install
 
+from ._checked_fixture_helpers import seed_private_directory, seed_private_text
+from ._checked_fixture_helpers import tmp_path as tmp_path
 from ._helpers import _init_empty_vault
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend
 
@@ -164,10 +170,11 @@ def _hermes_env(home: Path) -> Path:
 
 @pytest.fixture
 def installed(tmp_path: Path) -> Installed:
+    require_legacy_sealed_install()  # before any profile publication
     home, user_home = tmp_path / "hermes", tmp_path / "user"
-    home.mkdir()
-    (home / "config.yaml").write_text(_CONFIG, encoding="utf-8")
-    (home / ".env").write_text(_ENV, encoding="utf-8")
+    seed_private_directory(home)
+    seed_private_text(home / "config.yaml", _CONFIG)
+    seed_private_text(home / ".env", _ENV)
     (home / "memories").mkdir()
     for name, text in _MEMORIES.items():
         (home / "memories" / name).write_text(text, encoding="utf-8")
@@ -178,7 +185,11 @@ def installed(tmp_path: Path) -> Installed:
     launcher.write_text(_LAUNCHER, encoding="utf-8")
 
     # --- install Mordred the way its commands do -----------------------------
-    writer = PolicyWriter(config_path=home / "config.yaml", policy_json_path=home / "mordred" / "policy.json")
+    writer = PolicyWriter(
+        config_path=home / "config.yaml",
+        policy_json_path=home / "mordred" / "policy.json",
+        mordred_dir=home / "mordred",
+    )
     writer.write(PolicySnapshot(policy="strict", audit_log_path=str(home / "mordred" / "audit.log")))
     DotEnvFileWriter().upsert(home / ".env", key="MORDRED_MULLVAD_ACCOUNT", value="1234567890")
     assert desktop_install.install(home) == 0
@@ -475,7 +486,8 @@ class TestPurge:
 class TestConfigCleanup:
     def test_reports_what_it_cannot_restore(self, tmp_path: Path) -> None:
         path = tmp_path / "config.yaml"
-        path.write_text(
+        seed_private_text(
+            path,
             "model:\n  provider: mordred-local\nplugins:\n  enabled:\n    - mordred_network\n    - x\n"
             "  mordred_network:\n    default_path: tor\nmemory:\n  encryption:\n    enabled: false\n",
             encoding="utf-8",
@@ -488,7 +500,7 @@ class TestConfigCleanup:
 
     def test_unparseable_config_is_left_alone(self, tmp_path: Path) -> None:
         path = tmp_path / "config.yaml"
-        path.write_text("plugins: [unclosed\n", encoding="utf-8")
+        seed_private_text(path, "plugins: [unclosed\n", encoding="utf-8")
 
         plan = plan_config_cleanup(path)
 
@@ -496,7 +508,11 @@ class TestConfigCleanup:
 
 
 class TestHermesEnvDetection:
-    def test_managed_launcher_reports_its_environment(self, tmp_path: Path) -> None:
+    def test_managed_launcher_reports_its_environment(self, tmp_path: Path, monkeypatch) -> None:
+        from mordred_hermes.wizard import _uninstall_hermes_env as model
+        from tests._helpers import PlatformSys
+
+        monkeypatch.setattr(model, "sys", PlatformSys("linux"))
         home = tmp_path / "hermes"
         env_root = tmp_path / "installs" / "env" / "venv"
         (env_root / "bin").mkdir(parents=True)
@@ -508,7 +524,11 @@ class TestHermesEnvDetection:
         launcher.parent.mkdir(parents=True)
         launcher.write_text("#!/bin/sh\nexec /opt/python3 -I -c 'boot' \"$@\"\n", encoding="utf-8")
         launcher.chmod(0o755)
-        site = f"sys.path = [\n    '{env_root}/lib/python3.14/site-packages',\n]\n"
+        # A Unix launcher emits Unix site text even on a Windows test runner.
+        model_root = "/task-owned/venv"
+        real_path = Path
+        monkeypatch.setattr(model, "Path", lambda value: env_root if value == model_root else real_path(value))
+        site = f"sys.path = [\n    '{model_root}/lib/python3.14/site-packages',\n]\n"
 
         def runner(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
             if list(argv[1:]) == ["--run-module", "site"]:
@@ -521,7 +541,12 @@ class TestHermesEnvDetection:
         assert env.python == python
         assert env.problem == "uv was not found (not on PATH, not under <home>/tools)"
 
-    def test_foreign_launcher_is_kept_and_symlink_to_console_script_removed(self, tmp_path: Path) -> None:
+    @pytest.mark.usefixtures("file_symlink")
+    def test_foreign_launcher_is_kept_and_symlink_to_console_script_removed(self, tmp_path: Path, monkeypatch) -> None:
+        from mordred_hermes.wizard import _uninstall_hermes_env as model
+        from tests._helpers import PlatformSys
+
+        monkeypatch.setattr(model, "sys", PlatformSys("linux"))
         user_home = tmp_path / "user"
         bin_dir = user_home / ".local" / "bin"
         bin_dir.mkdir(parents=True)
@@ -599,6 +624,7 @@ def encrypted_databases(installed: Installed, monkeypatch: pytest.MonkeyPatch) -
     import contextlib
     import sqlite3
 
+    require_legacy_encrypted_database_custody()
     pytest.importorskip("sqlcipher3")
     from mordred_hermes import dbcrypt
     from mordred_hermes.dbcrypt import _key, _migrate
@@ -950,6 +976,7 @@ class TestDatabaseUninstall:
         assert installed.runner.uninstalls == []
 
     @pytest.mark.parametrize("markerless", [False, True])
+    @pytest.mark.usefixtures("file_symlink")
     def test_erase_removes_protected_archives_but_keeps_plaintext_backups(
         self,
         installed: Installed,
@@ -1113,3 +1140,66 @@ finally:
     plan = uninstall_cli.build_plan(ctx, UninstallOptions())
     assert plan.nothing_to_do
     assert lock not in [path for path, _description in plan.data]
+
+
+@pytest.fixture
+def plain_install(tmp_path, monkeypatch):
+    """Independent unsealed profile; only package command execution is modeled."""
+    home, user_home = tmp_path / "plain-hermes", tmp_path / "plain-user"
+    seed_private_directory(home)
+    seed_private_directory(user_home)
+    writer = PolicyWriter(home / "config.yaml", home / "mordred" / "policy.json", home / "mordred")
+    writer.write(PolicySnapshot(policy="strict"))
+    seed_private_text(home / ".env", "OTHER=value\n")
+    env_root = home / "owned-runtime"
+    bindir = env_root / ("Scripts" if os.name == "nt" else "bin")
+    bindir.mkdir(parents=True)
+    (env_root / "pyvenv.cfg").write_text("home = test-runtime\n")
+    python = bindir / ("python.exe" if os.name == "nt" else "python3")
+    python.write_bytes(b"owned runtime model")
+    uv = home / ("uv.exe" if os.name == "nt" else "uv")
+    uv.write_bytes(b"owned package runner model")
+    runner = FakeRunner()
+    runtime = HermesEnv(None, python, uv, ("hermes-mordred",))
+    monkeypatch.setattr(uninstall_cli, "detect_hermes_env", lambda *args, **kwargs: runtime)
+    context = UninstallContext(
+        home=home,
+        vault_root=home / "mordred" / "vault",
+        user_home=user_home,
+        platform=sys.platform,
+        runner=runner,
+        which=lambda _name: None,
+        interactive=False,
+        gateways=lambda _home: [],
+    )
+    return context, runner
+
+
+class TestPlainProfileBehavior:
+    def test_noninteractive_requires_confirmation(self, plain_install, capsys):
+        context, runner = plain_install
+        before = _tree(context.home)
+        assert run_uninstall(context, UninstallOptions()) == 1
+        assert "--yes" in capsys.readouterr().err
+        assert _tree(context.home) == before and runner.uninstalls == []
+
+    def test_package_failure_is_reported(self, plain_install, capsys):
+        context, runner = plain_install
+        runner.uninstall_rc = 1
+        assert run_uninstall(context, UninstallOptions(yes=True)) == 1
+        assert "pip uninstall failed" in capsys.readouterr().err
+        assert len(runner.uninstalls) == 1
+        assert (context.home / ".env").read_bytes() == b"OTHER=value\n"
+
+    def test_dry_run_preserves_plain_profile(self, plain_install):
+        context, runner = plain_install
+        before = _tree(context.home)
+        assert run_uninstall(context, UninstallOptions(dry_run=True)) == 0
+        assert _tree(context.home) == before and runner.uninstalls == []
+
+    def test_wrong_purge_phrase_preserves_plain_profile(self, plain_install):
+        context, runner = plain_install
+        context.prompt_io = _TypedPrompt("yes")
+        before = _tree(context.home)
+        assert run_uninstall(context, UninstallOptions(yes=True, purge_data=True)) == 1
+        assert _tree(context.home) == before and runner.uninstalls == []

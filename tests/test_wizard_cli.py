@@ -342,110 +342,46 @@ class TestMainStandaloneEntry:
         assert "invalid choice" in err
 
 
-class TestEnableSEWiring:
-    """``hermes mordred keyvault enable-se`` parser wiring + adapter."""
+@pytest.mark.parametrize("helper", ["se", "tpm"])
+class TestNativeHelperWiring:
+    """Both native helper installers expose install-dir, never unattended use."""
 
-    def test_enable_se_rejects_unattended_installer_flag(self) -> None:
-        parser = _build_parser()
+    def test_rejects_unattended_installer_flag(self, helper: str) -> None:
         with pytest.raises(SystemExit) as exc:
-            parser.parse_args(["mordred", "keyvault", "enable-se", "--unattended"])
+            _build_parser().parse_args(["mordred", "keyvault", f"enable-{helper}", "--unattended"])
         assert exc.value.code == 2
 
-    def test_cli_enable_se_forwards_args(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize("install_dir", [None, "/tmp/bin"], ids=["default", "explicit"])
+    def test_adapter_forwards_install_dir(
+        self, monkeypatch: pytest.MonkeyPatch, helper: str, install_dir: str | None
+    ) -> None:
         captured: dict[str, Any] = {}
 
-        def _fake_enable_se(**kwargs: Any) -> int:
+        def _fake_enable(**kwargs: Any) -> int:
             captured.update(kwargs)
             return 0
 
-        monkeypatch.setattr(keyvault_native_cli, "enable_se", _fake_enable_se)
-        ns = _build_parser().parse_args(["mordred", "keyvault", "enable-se", "--install-dir", "/tmp/bin"])
+        monkeypatch.setattr(keyvault_native_cli, f"enable_{helper}", _fake_enable)
+        argv = ["mordred", "keyvault", f"enable-{helper}"]
+        if install_dir is not None:
+            argv.extend(["--install-dir", install_dir])
+        ns = _build_parser().parse_args(argv)
         assert callable(ns.func)
-        rc = keyvault_native_cli.cli_enable_se(ns)
-        assert rc == 0
-        assert captured["install_dir"] == Path("/tmp/bin")
+        assert getattr(keyvault_native_cli, f"cli_enable_{helper}")(ns) == 0
+        assert captured["install_dir"] == (Path(install_dir) if install_dir is not None else None)
         assert "unattended" not in captured
 
-    def test_cli_enable_se_absent_flags_pass_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured: dict[str, Any] = {}
-
-        def _fake_enable_se(**kwargs: Any) -> int:
-            captured.update(kwargs)
-            return 0
-
-        monkeypatch.setattr(keyvault_native_cli, "enable_se", _fake_enable_se)
-        ns = _build_parser().parse_args(["mordred", "keyvault", "enable-se"])
-        assert callable(ns.func)
-        keyvault_native_cli.cli_enable_se(ns)
-        assert captured["install_dir"] is None
-        assert "unattended" not in captured
-
-    def test_dispatch_routes_handler_to_native_cli(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # End-to-end: the cli.py handler must import + delegate to
-        # keyvault_native_cli (the post-split home), not the old keyvault_cli.
+    def test_dispatch_routes_handler_to_native_cli(self, monkeypatch: pytest.MonkeyPatch, helper: str) -> None:
+        # Keep this separate from the direct adapter test: the parser's handler
+        # must import the post-split native module and propagate its return code.
         seen: dict[str, Any] = {}
 
-        def _fake_cli_enable_se(args: argparse.Namespace) -> int:
+        def _fake_cli_enable(args: argparse.Namespace) -> int:
             seen["args"] = args
             return 7
 
-        monkeypatch.setattr(keyvault_native_cli, "cli_enable_se", _fake_cli_enable_se)
-        ns = _build_parser().parse_args(["mordred", "keyvault", "enable-se"])
-        assert dispatch(ns) == 7
-        assert seen["args"] is ns
-
-
-class TestEnableTPMWiring:
-    """``hermes mordred keyvault enable-tpm`` parser wiring + adapter (v2-OS2 2c).
-
-    The TPM is Tier 2 (machine-bound), so ``enable-tpm`` exposes only
-    ``--install-dir`` — there is deliberately no ``--unattended`` per-use gate.
-    """
-
-    def test_enable_tpm_rejects_unattended_flag(self) -> None:
-        parser = _build_parser()
-        with pytest.raises(SystemExit):
-            parser.parse_args(["mordred", "keyvault", "enable-tpm", "--unattended"])
-
-    def test_cli_enable_tpm_forwards_install_dir(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured: dict[str, Any] = {}
-
-        def _fake_enable_tpm(**kwargs: Any) -> int:
-            captured.update(kwargs)
-            return 0
-
-        monkeypatch.setattr(keyvault_native_cli, "enable_tpm", _fake_enable_tpm)
-        ns = _build_parser().parse_args(["mordred", "keyvault", "enable-tpm", "--install-dir", "/tmp/bin"])
-        assert callable(ns.func)
-        rc = keyvault_native_cli.cli_enable_tpm(ns)
-        assert rc == 0
-        assert captured["install_dir"] == Path("/tmp/bin")
-        assert "unattended" not in captured  # Tier 2: no per-use gate
-
-    def test_cli_enable_tpm_absent_install_dir_passes_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured: dict[str, Any] = {}
-
-        def _fake_enable_tpm(**kwargs: Any) -> int:
-            captured.update(kwargs)
-            return 0
-
-        monkeypatch.setattr(keyvault_native_cli, "enable_tpm", _fake_enable_tpm)
-        ns = _build_parser().parse_args(["mordred", "keyvault", "enable-tpm"])
-        assert callable(ns.func)
-        keyvault_native_cli.cli_enable_tpm(ns)
-        assert captured["install_dir"] is None
-
-    def test_dispatch_routes_handler_to_native_cli(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # End-to-end: the cli.py handler must import + delegate to
-        # keyvault_native_cli (the post-split home), not the old keyvault_cli.
-        seen: dict[str, Any] = {}
-
-        def _fake_cli_enable_tpm(args: argparse.Namespace) -> int:
-            seen["args"] = args
-            return 7
-
-        monkeypatch.setattr(keyvault_native_cli, "cli_enable_tpm", _fake_cli_enable_tpm)
-        ns = _build_parser().parse_args(["mordred", "keyvault", "enable-tpm"])
+        monkeypatch.setattr(keyvault_native_cli, f"cli_enable_{helper}", _fake_cli_enable)
+        ns = _build_parser().parse_args(["mordred", "keyvault", f"enable-{helper}"])
         assert dispatch(ns) == 7
         assert seen["args"] is ns
 
@@ -456,13 +392,30 @@ class TestEnableTPMWiring:
 
 
 class TestVersionFlag:
-    def test_version_prints_and_exits_zero(self, capsys: pytest.CaptureFixture[str]) -> None:
+    @pytest.mark.parametrize("integrated", [False, True], ids=["standalone", "hermes"])
+    def test_version_prints_and_exits_zero(self, integrated: bool, capsys: pytest.CaptureFixture[str]) -> None:
         from mordred_hermes.__about__ import __version__
 
         with pytest.raises(SystemExit) as excinfo:
-            main(["--version"])
+            if integrated:
+                _build_parser().parse_args(["mordred", "--version"])
+            else:
+                main(["--version"])
         assert excinfo.value.code == 0
-        assert __version__ in capsys.readouterr().out
+        output = capsys.readouterr()
+        prog = "hermes mordred" if integrated else "hermes-mordred"
+        assert output.out == f"{prog} {__version__}\n"
+        assert output.err == ""
+
+    @pytest.mark.parametrize("integrated", [False, True], ids=["standalone", "hermes"])
+    def test_help_lists_version(self, integrated: bool, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            if integrated:
+                _build_parser().parse_args(["mordred", "--help"])
+            else:
+                main(["--help"])
+        assert excinfo.value.code == 0
+        assert "--version" in capsys.readouterr().out
 
 
 class TestConfigureFlags:

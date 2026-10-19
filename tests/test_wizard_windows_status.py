@@ -290,3 +290,64 @@ def test_status_never_changes_memory_files(seeded, monkeypatch, capsys, name):
     report(env, capsys)
     memory_line(env)
     assert (env.home / "memories" / name).read_bytes() == before
+
+
+@pytest.mark.parametrize("missing", ["cryptography", "cryptography.hazmat.primitives", "argon2.low_level", "blake3"])
+def test_optional_crypto_import_failure_is_unavailable_without_observation_side_effects(monkeypatch, tmp_path, missing):
+    import builtins
+
+    from mordred_hermes.keyvault import _windows_custody
+    from mordred_hermes.wizard import _windows_memory, _windows_status
+
+    home = tmp_path / "retained"
+    home.mkdir()
+    retained = home / "MEMORY.md"
+    retained.write_bytes(b"retained synthetic memory")
+    before = retained.read_bytes(), retained.stat().st_ino
+    original_import = builtins.__import__
+
+    def missing_dependency(name, *args, **kwargs):
+        if name == "keyvault._memory_storage":
+            raise ModuleNotFoundError("synthetic dependency failure", name=missing)
+        return original_import(name, *args, **kwargs)
+
+    def tripwire(*args, **kwargs):
+        raise AssertionError("read-only observation reached a mutation/native/process boundary")
+
+    monkeypatch.setattr(_windows_custody, "windows_backend", tripwire)
+    monkeypatch.setattr(_windows_custody.WindowsCustodySession, "enroll_role", tripwire)
+    monkeypatch.setattr(wrap, "unwrap_dek", tripwire)
+    monkeypatch.setattr(wrap, "wrap_dek", tripwire)
+    monkeypatch.setattr(subprocess, "Popen", tripwire)
+    monkeypatch.setattr(builtins, "__import__", missing_dependency)
+
+    observation = _windows_memory.observe(home)
+    target = _windows_status.memory_target_status(observation)
+
+    assert observation.capability is None and observation.report is None
+    assert observation.reason == "custody-uncertain"
+    assert not target.active and not target.configured
+    assert target.detail.startswith("UNAVAILABLE (custody-uncertain)")
+    assert missing.split(".")[0] in target.detail
+    assert (retained.read_bytes(), retained.stat().st_ino) == before
+    assert sorted(p.name for p in home.iterdir()) == ["MEMORY.md"]
+
+
+@pytest.mark.parametrize("missing", ["unexpected_dependency", "cryptography_helpers", None])
+def test_unrelated_missing_observation_import_propagates(monkeypatch, tmp_path, missing):
+    import builtins
+
+    from mordred_hermes.wizard import _windows_memory
+
+    original_import = builtins.__import__
+    failure = ModuleNotFoundError("unexpected dependency failure", name=missing)
+
+    def missing_dependency(name, *args, **kwargs):
+        if name == "keyvault._memory_storage":
+            raise failure
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", missing_dependency)
+    with pytest.raises(ModuleNotFoundError) as raised:
+        _windows_memory.observe(tmp_path)
+    assert raised.value is failure

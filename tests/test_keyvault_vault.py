@@ -27,13 +27,17 @@ real Keychain are stubbed.
 
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 from pathlib import Path
 
 import pytest
 from cryptography.exceptions import InvalidTag
 
 from mordred_hermes.keyvault import anchor, manifest, recovery, vault
+from tests._platform_test_helpers import require_legacy_file_vault
 
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend
 
@@ -44,6 +48,7 @@ _PASSPHRASE = "correct horse battery staple"
 
 @pytest.fixture
 def backend() -> FakeBackend:
+    require_legacy_file_vault()  # before generating any fixture key
     b = FakeBackend()
     b.generate_enclave_key(_KEY_ID)
     return b
@@ -55,12 +60,14 @@ def store() -> FakeAnchorStore:
 
 
 def _init(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> vault.OpenVault:
+    require_legacy_file_vault()
     return vault.init_vault(
         root, key_id=_KEY_ID, passphrase=_PASSPHRASE, backend=backend, store=store, anchor_label=_LABEL
     )
 
 
 def _open(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> vault.OpenVault:
+    require_legacy_file_vault()
     return vault.open_vault(root, key_id=_KEY_ID, backend=backend, store=store, anchor_label=_LABEL)
 
 
@@ -711,6 +718,7 @@ def test_recover_to_device_wrong_passphrase_raises(
 
 
 def test_recover_to_device_no_vault_raises(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
+    require_legacy_file_vault()
     new_backend, new_store = _fresh_machine()
     with pytest.raises(vault.VaultError):
         vault.recover_to_device(

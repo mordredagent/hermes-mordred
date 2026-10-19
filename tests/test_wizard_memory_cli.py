@@ -20,6 +20,7 @@ platform; the cross-interpreter probes are monkeypatched (they shell out).
 
 from __future__ import annotations
 
+import os
 import stat
 from pathlib import Path
 
@@ -32,6 +33,10 @@ from mordred_hermes.keyvault._runtime_probe import GatewayRuntime
 from mordred_hermes.keyvault.memory_crypto import MAGIC, decode_key, is_sealed, seal, unseal
 from mordred_hermes.wizard import encryption_cli, memory_cli
 from mordred_hermes.wizard.vault_memory_key import _MEMORY_KEY_ENV, _effective_memory_key, _is_valid_memory_key
+from tests._checked_fixture_helpers import file_symlink as file_symlink
+from tests._platform_test_helpers import legacy_secret_store as legacy_secret_store
+from tests._platform_test_helpers import posix_modes as posix_modes
+from tests._platform_test_helpers import require_legacy_file_vault
 
 from ._helpers import _init_empty_vault
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend, FixedPassphrasePromptIO
@@ -103,6 +108,7 @@ def _setup_home_and_vault(tmp_path: Path) -> tuple[Path, Path, FakeBackend, Fake
     root, home = tmp_path / "v", tmp_path / "home"
     home.mkdir()
     backend, store = FakeBackend(), FakeAnchorStore()
+    require_legacy_file_vault()
     _init_empty_vault(root, backend, store)
     return root, home, backend, store
 
@@ -131,15 +137,24 @@ class TestEnableGates:
         assert "tools.memory_tool is missing" in err
         assert "set-memory-key" in err
 
-    def test_refuses_unsupported_platform(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_refuses_unsupported_platform(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch
+    ) -> None:
         root, home = tmp_path / "v", tmp_path / "home"
         home.mkdir()
 
-        rc = memory_cli.enable(home=home, root=root, backend=FakeBackend(), store=FakeAnchorStore(), platform="win32")
+        from mordred_hermes.keyvault import _seckey_helper
+
+        monkeypatch.setattr(_seckey_helper, "find_winkey_helper", lambda: None)
+        backend, store = FakeBackend(), FakeAnchorStore()
+        rc = memory_cli.enable(home=home, root=root, backend=backend, store=store, platform="win32")
 
         assert rc == 1
         assert not memory_marker_path(home).exists()
-        assert "unsupported" in capsys.readouterr().err.lower()
+        error = capsys.readouterr().err.lower()
+        assert ("capabilities step (helper-missing)" if os.name == "nt" else "unsupported") in error
+        assert backend.calls == [] and not root.exists()
+        assert not (home / "mordred").exists()
 
     def test_refuses_when_env_target_is_not_enrolled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -337,6 +352,7 @@ class TestEnable:
         assert (home / "memories" / "MEMORY.md").read_text(encoding="utf-8") == "still plaintext\n"
 
     def test_missing_vault_is_auto_created(self, tmp_path: Path) -> None:
+        require_legacy_file_vault()
         root, home = tmp_path / "v", tmp_path / "home"
         home.mkdir()
         backend, store = FakeBackend(), FakeAnchorStore()
@@ -370,6 +386,7 @@ class TestEnable:
         assert rc == 1
         assert not memory_marker_path(home).exists()
 
+    @pytest.mark.usefixtures("file_symlink")
     def test_symlinked_memory_file_is_not_followed(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """W2: `_memory_file_paths` excludes symlinks, so `enable` never even
         sees one -- the target is untouched, the link stays a link, and the
@@ -397,6 +414,7 @@ class TestEnable:
 class TestSealPlaintextFiles:
     _KEY = b"\x01" * 32
 
+    @pytest.mark.usefixtures("file_symlink")
     def test_symlink_counts_as_a_failure_not_a_silent_skip(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -558,6 +576,7 @@ class TestDisable:
         assert "pid 99" in err
         assert "armed" in err
 
+    @pytest.mark.usefixtures("file_symlink")
     def test_refuses_when_a_symlink_reaches_the_unseal_step(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -639,6 +658,7 @@ class TestDisable:
 # refuse (not silently skip) a file that is no longer sealed when it gets there.
 # -----------------------------------------------------------------------------
 class TestUnsealFiles:
+    @pytest.mark.usefixtures("file_symlink")
     def test_symlink_counts_as_a_failure(self, tmp_path: Path) -> None:
         home = tmp_path / "home"
         memories = _memories(home)
@@ -788,6 +808,7 @@ class TestPurge:
 # `upgrade` with `encryption {disable,purge} memory` caused gratuitous
 # config.yaml diff churn on lists that were never touched by this command.
 # -----------------------------------------------------------------------------
+@pytest.mark.usefixtures("posix_modes")
 class TestSetEncryptionFlagPreservesFormatting:
     def test_plugins_enabled_list_formatting_survives_round_trip(self, tmp_path: Path) -> None:
         from mordred_hermes.wizard.policy_writer import PolicySnapshot, PolicyWriter
@@ -825,3 +846,20 @@ def _macos_key_custody_contract(monkeypatch):
     from tests._helpers import PlatformSys
 
     monkeypatch.setattr(module, "sys", PlatformSys("darwin"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="actual checked Windows canonical writer formatting counterpart")
+def test_windows_checked_writer_preserves_plugins_enabled_formatting(tmp_path):
+    from mordred_hermes.wizard.policy_writer import PolicySnapshot, PolicyWriter
+    from tests._checked_fixture_helpers import assert_private, seed_private_directory
+
+    home = tmp_path / "checked-home"
+    seed_private_directory(home)
+    writer = PolicyWriter(home / "config.yaml", home / "mordred" / "policy.json", home / "mordred")
+    writer.write(PolicySnapshot(policy="lenient"))
+    block = "  enabled:\n    - mordred\n"
+    before = (home / "config.yaml").read_text(encoding="utf-8")
+    assert block in before
+    writer.merge_mordred_sections({"mordred_wizard": {"done": True}})
+    assert block in (home / "config.yaml").read_text(encoding="utf-8")
+    assert_private(home / "config.yaml")

@@ -6,7 +6,7 @@ copy-pasted, near-verbatim, across four call sites:
 * :func:`mordred_hermes.extension.pairing._state_lock` -- the
   ``~/.hermes/extension/.lock`` mutex guarding ``pending.json`` /
   ``state.json`` read-modify-write cycles.
-* :func:`mordred_hermes.wizard.env_file_writer._dotenv_lock` -- the
+* :func:`mordred_hermes._dotenv_io._dotenv_lock` -- the
   ``~/.hermes/.env.lock`` mutex shared by every Mordred dotenv writer.
 * :func:`mordred_hermes.wizard.policy_writer._policy_write_lock` -- the
   ``.policy-write.lock`` mutex serializing ``config.yaml`` / ``policy.json``

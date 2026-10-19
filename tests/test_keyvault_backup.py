@@ -46,6 +46,14 @@ PASSPHRASE = "correct horse battery staple"
 SECRET = b"the quick brown fox jumps over 24 BIP39 words"
 
 
+@pytest.fixture(scope="module")
+def valid_blob() -> bytes:
+    """Share real immutable bytes; tamper cases copy before modifying them."""
+    from mordred_hermes.keyvault import backup
+
+    return backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
+
+
 class TestRoundtrip:
     def test_export_then_import_returns_original_secret(self) -> None:
         from mordred_hermes.keyvault import backup
@@ -150,13 +158,13 @@ class TestAadBinding:
             65,  # verification_digest[31]
         ],
     )
-    def test_header_tamper_raises_invalid_tag(self, header_byte_offset_to_flip: int) -> None:
+    def test_header_tamper_raises_invalid_tag(self, valid_blob: bytes, header_byte_offset_to_flip: int) -> None:
         """Flipping a bit anywhere in the AAD range (bytes 0..65) must
         cause decrypt to fail with InvalidTag, NOT BackupCorrupt — the
         header is structurally fine, but no longer authenticates."""
         from mordred_hermes.keyvault import backup
 
-        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        blob = bytearray(valid_blob)
         blob[header_byte_offset_to_flip] ^= 0x01
         # parse_header may succeed (the magic / version / kdf are still
         # in legal ranges even after a 1-bit flip in those fields, when
@@ -171,12 +179,12 @@ class TestAadBinding:
         with pytest.raises(InvalidTag):
             backup.decrypt_body(parsed, PASSPHRASE)
 
-    def test_aes_blob_tamper_raises_invalid_tag(self) -> None:
+    def test_aes_blob_tamper_raises_invalid_tag(self, valid_blob: bytes) -> None:
         """Tampering with the ciphertext body itself must also raise
         InvalidTag (AES-GCM intrinsic property)."""
         from mordred_hermes.keyvault import backup
 
-        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        blob = bytearray(valid_blob)
         # Flip a bit ~25 bytes into the AES blob (past nonce, inside ct).
         blob[backup.HEADER_LEN + 25] ^= 0x01
         parsed = backup.parse_header(bytes(blob))
@@ -190,70 +198,70 @@ class TestStructuralValidation:
     distinction between (a) structurally wrong blob and (b) wrong
     passphrase / tampered authenticated payload (InvalidTag)."""
 
-    def test_bad_magic_raises_backup_corrupt(self) -> None:
+    def test_bad_magic_raises_backup_corrupt(self, valid_blob: bytes) -> None:
         from mordred_hermes.keyvault import backup
 
-        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        blob = bytearray(valid_blob)
         blob[:4] = b"XXXX"
         with pytest.raises(backup.BackupCorrupt, match="magic") as raised:
             backup.parse_header(bytes(blob))
         assert isinstance(raised.value, ValueError)
 
-    def test_unknown_version_raises_backup_corrupt(self) -> None:
+    def test_unknown_version_raises_backup_corrupt(self, valid_blob: bytes) -> None:
         from mordred_hermes.keyvault import backup
 
-        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        blob = bytearray(valid_blob)
         blob[4] = 99  # unknown version
         with pytest.raises(backup.BackupCorrupt, match="version"):
             backup.parse_header(bytes(blob))
 
-    def test_unknown_kdf_id_raises_backup_corrupt(self) -> None:
+    def test_unknown_kdf_id_raises_backup_corrupt(self, valid_blob: bytes) -> None:
         from mordred_hermes.keyvault import backup
 
-        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        blob = bytearray(valid_blob)
         blob[5] = 99  # unknown kdf
         with pytest.raises(backup.BackupCorrupt, match="kdf"):
             backup.parse_header(bytes(blob))
 
-    def test_excessive_m_cost_raises_backup_corrupt(self) -> None:
+    def test_excessive_m_cost_raises_backup_corrupt(self, valid_blob: bytes) -> None:
         """DOS guard: a tampered ``m_cost`` MSB → 16+ GiB Argon2
         allocation request would hang/OOM the host. parse_header must
         reject before the KDF runs."""
         from mordred_hermes.keyvault import backup
 
-        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        blob = bytearray(valid_blob)
         # Rewrite m_cost field (offset 6, 4 bytes BE) to 2 GiB worth of
         # KiB — well above the 1 GiB cap.
         blob[6:10] = (2 * 1024 * 1024).to_bytes(4, "big")
         with pytest.raises(backup.BackupCorrupt, match="m_cost"):
             backup.parse_header(bytes(blob))
 
-    def test_excessive_t_cost_raises_backup_corrupt(self) -> None:
+    def test_excessive_t_cost_raises_backup_corrupt(self, valid_blob: bytes) -> None:
         """DOS guard: tampered ``t_cost`` MSB → 16M iterations would
         run for years. parse_header rejects."""
         from mordred_hermes.keyvault import backup
 
-        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        blob = bytearray(valid_blob)
         blob[10:14] = (1_000_000).to_bytes(4, "big")
         with pytest.raises(backup.BackupCorrupt, match="t_cost"):
             backup.parse_header(bytes(blob))
 
-    def test_excessive_p_cost_raises_backup_corrupt(self) -> None:
+    def test_excessive_p_cost_raises_backup_corrupt(self, valid_blob: bytes) -> None:
         """DOS guard: tampered ``p_cost`` MSB → millions of threads
         would exhaust the system."""
         from mordred_hermes.keyvault import backup
 
-        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        blob = bytearray(valid_blob)
         blob[14:18] = (100).to_bytes(4, "big")
         with pytest.raises(backup.BackupCorrupt, match="p_cost"):
             backup.parse_header(bytes(blob))
 
-    def test_zero_m_cost_raises_backup_corrupt(self) -> None:
+    def test_zero_m_cost_raises_backup_corrupt(self, valid_blob: bytes) -> None:
         """``m_cost=0`` would let an attacker bypass the KDF entirely
         (free brute-force on the passphrase). Reject."""
         from mordred_hermes.keyvault import backup
 
-        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        blob = bytearray(valid_blob)
         blob[6:10] = (0).to_bytes(4, "big")
         with pytest.raises(backup.BackupCorrupt, match="m_cost"):
             backup.parse_header(bytes(blob))
@@ -274,38 +282,39 @@ class TestCanonicalKdfProfileV1:
     check dispatches on version.
     """
 
-    def test_within_cap_but_non_canonical_m_cost_raises(self) -> None:
+    def test_within_cap_but_non_canonical_m_cost_raises(self, valid_blob: bytes) -> None:
         """``m_cost=512 MiB`` is well within the 1 GiB DOS cap and a
         plausible "stronger profile" attacker substitution, but it's
         not the v1 canonical value. Must reject at parse_header."""
         from mordred_hermes.keyvault import backup
 
-        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        blob = bytearray(valid_blob)
         # 512 MiB in KiB = 524288, within cap (1 GiB = 1048576 KiB).
         blob[6:10] = (512 * 1024).to_bytes(4, "big")
         with pytest.raises(backup.BackupCorrupt, match=r"canonical|m_cost"):
             backup.parse_header(bytes(blob))
 
-    def test_within_cap_but_non_canonical_t_cost_raises(self) -> None:
+    def test_within_cap_but_non_canonical_t_cost_raises(self, valid_blob: bytes) -> None:
         """t_cost=4 is within the cap of 64 but != canonical 1."""
         from mordred_hermes.keyvault import backup
 
-        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        blob = bytearray(valid_blob)
         blob[10:14] = (4).to_bytes(4, "big")
         with pytest.raises(backup.BackupCorrupt, match=r"canonical|t_cost"):
             backup.parse_header(bytes(blob))
 
-    def test_within_cap_but_non_canonical_p_cost_raises(self) -> None:
+    def test_within_cap_but_non_canonical_p_cost_raises(self, valid_blob: bytes) -> None:
         """p_cost=2 is within the cap of 16 but != canonical 1."""
         from mordred_hermes.keyvault import backup
 
-        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        blob = bytearray(valid_blob)
         blob[14:18] = (2).to_bytes(4, "big")
         with pytest.raises(backup.BackupCorrupt, match=r"canonical|p_cost"):
             backup.parse_header(bytes(blob))
 
     def test_decrypt_body_rejects_hand_crafted_non_canonical_parsed_header(
         self,
+        valid_blob: bytes,
         monkeypatch,  # type: ignore[no-untyped-def]
     ) -> None:
         """Codex third-pass MEDIUM-2 (2026-05-14): a caller that
@@ -319,8 +328,8 @@ class TestCanonicalKdfProfileV1:
         """
         from mordred_hermes.keyvault import backup
 
-        # Build a real blob so we get a valid AAD/aes_blob/salt/digest.
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
+        # Use the real fixture for a valid AAD/aes_blob/salt/digest.
+        blob = valid_blob
         legit = backup.parse_header(blob)
 
         # Now hand-craft a ParsedHeader that swaps in a wider m_cost
@@ -345,25 +354,25 @@ class TestCanonicalKdfProfileV1:
         with pytest.raises(backup.BackupCorrupt, match="non-canonical"):
             backup.decrypt_body(tampered, PASSPHRASE)
 
-    def test_truncated_header_raises_backup_corrupt(self) -> None:
+    def test_truncated_header_raises_backup_corrupt(self, valid_blob: bytes) -> None:
         from mordred_hermes.keyvault import backup
 
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
+        blob = valid_blob
         with pytest.raises(backup.BackupCorrupt):
             # 50 bytes — less than the 70-byte header.
             backup.parse_header(blob[:50])
 
-    def test_aes_blob_length_mismatch_raises_backup_corrupt(self) -> None:
+    def test_aes_blob_length_mismatch_raises_backup_corrupt(self, valid_blob: bytes) -> None:
         """The aes_blob_len field in the header must match the actual
         trailing bytes. Trim a few bytes from the end without updating
         the length field → length mismatch."""
         from mordred_hermes.keyvault import backup
 
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
+        blob = valid_blob
         with pytest.raises(backup.BackupCorrupt, match="length"):
             backup.parse_header(blob[:-3])
 
-    def test_aes_blob_too_short_to_contain_gcm_envelope_raises(self) -> None:
+    def test_aes_blob_too_short_to_contain_gcm_envelope_raises(self, valid_blob: bytes) -> None:
         """Codex review #5: a self-described aes_blob shorter than 28
         bytes (12-byte nonce + 16-byte tag minimum) cannot be valid
         GCM output, so reject at parse rather than letting AESGCM raise
@@ -372,7 +381,7 @@ class TestCanonicalKdfProfileV1:
 
         # Build a blob with an advertised aes_blob_len of 20 bytes
         # (still > 0, but < 28).
-        prefix = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        prefix = bytearray(valid_blob)
         short_aes = b"\x00" * 20
         # Rewrite the aes_blob_len field (4 bytes BE at offset 66).
         len_offset = backup.HEADER_LEN - 4
@@ -384,7 +393,7 @@ class TestCanonicalKdfProfileV1:
 
 
 class TestWrongPassphrase:
-    def test_wrong_passphrase_raises_invalid_tag_not_backup_corrupt(self) -> None:
+    def test_wrong_passphrase_raises_invalid_tag_not_backup_corrupt(self, valid_blob: bytes) -> None:
         """Codex review #5: wrong passphrase derives a different KEK ⇒
         AES-GCM tag mismatch ⇒ ``InvalidTag``. This must NOT be
         normalized to BackupCorrupt — callers (recovery.py) need to
@@ -392,7 +401,7 @@ class TestWrongPassphrase:
         on disk is structurally broken"."""
         from mordred_hermes.keyvault import backup
 
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
+        blob = valid_blob
         parsed = backup.parse_header(blob)
         with pytest.raises(InvalidTag):
             backup.decrypt_body(parsed, "WRONG passphrase")
@@ -405,7 +414,7 @@ class TestParseHeaderDoesNotDecrypt:
     recovery.import_backup compare verification_digest BEFORE the
     expensive Argon2id run."""
 
-    def test_parse_header_does_not_call_argon2(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def test_parse_header_does_not_call_argon2(self, valid_blob: bytes, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """If parse_header invokes Argon2id at all, the spy below will
         raise. parse_header is allowed to read the cost params from the
         header but MUST NOT feed them to ``hash_secret_raw``.
@@ -419,8 +428,8 @@ class TestParseHeaderDoesNotDecrypt:
         """
         from mordred_hermes.keyvault import backup
 
-        # First, do a real export — this DOES call argon2 once.
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
+        # The module fixture performs its real export before the test-local spy.
+        blob = valid_blob
 
         # Now install the explosive spy and confirm parse_header is
         # callable without triggering it.
@@ -430,12 +439,12 @@ class TestParseHeaderDoesNotDecrypt:
         monkeypatch.setattr(backup, "hash_secret_raw", boom)
         backup.parse_header(blob)  # must not raise
 
-    def test_parse_header_does_not_call_aes_decrypt(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def test_parse_header_does_not_call_aes_decrypt(self, valid_blob: bytes, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """parse_header MUST NOT decrypt — see TestParseHeaderDoesNotCall…
         for rationale."""
         from mordred_hermes.keyvault import backup, crypto
 
-        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
+        blob = valid_blob
 
         def boom(*_args, **_kwargs):  # type: ignore[no-untyped-def]
             raise AssertionError("parse_header MUST NOT call crypto.decrypt — Codex review #4")

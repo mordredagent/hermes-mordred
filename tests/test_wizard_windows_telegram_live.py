@@ -34,6 +34,9 @@ from pathlib import Path
 from mordred_hermes.extension.telegram.windows_secrets import WindowsCustodySecretStore
 value = WindowsCustodySecretStore(Path(sys.argv[1]), audit_sink=lambda entry: None).load()
 assert value is not None and value.session == "SYNTHETIC-SESSION-NOT-A-REAL-ACCOUNT"
+assert value.venice_api_key == "SYNTHETIC-VENICE-KEY" and value.venice_model == "synthetic-venice-model"
+assert value.backend == "local" and value.local_endpoint == "http://127.0.0.1:8081/v1"
+assert value.local_model == "synthetic-local-model" and value.local_api_key is None
 print("reloaded", flush=True)
 """
 
@@ -112,6 +115,25 @@ def test_wizard_telegram_ceremony_login_logout_forget_real_cng(monkeypatch, caps
             acknowledge_machine_bound=True,
         )
         assert rc == 0
+        # Synthetic saved settings only: no endpoint is contacted and no account is used.
+        assert (
+            telegram_cli.telegram_venice(model="synthetic-venice-model", secret_fn=lambda _: "SYNTHETIC-VENICE-KEY")
+            == 0
+        )
+        assert telegram_cli.telegram_venice(model=None, secret_fn=lambda _: "") == 0
+        monkeypatch.setenv("MORDRED_SYNTHETIC_LOCAL_KEY", "SYNTHETIC-LOCAL-KEY")
+        assert (
+            telegram_cli.telegram_local_llm(
+                endpoint="http://127.0.0.1:8080/v1",
+                model="synthetic-local-model",
+                api_key_env="MORDRED_SYNTHETIC_LOCAL_KEY",
+            )
+            == 0
+        )
+        assert telegram_cli.telegram_local_llm(endpoint="http://localhost:8080/v1/", model="synthetic-local-model") == 0
+        saved = WindowsCustodySecretStore(home, audit_sink=lambda entry: None).load()
+        assert saved.local_api_key == "SYNTHETIC-LOCAL-KEY", "equivalent endpoints retain the synthetic key"
+        assert telegram_cli.telegram_local_llm(endpoint="http://127.0.0.1:8081/v1", model="synthetic-local-model") == 0
         reloaded = subprocess.run(
             [sys.executable, "-c", _RELOAD, str(home)], capture_output=True, text=True, timeout=120, check=False
         )

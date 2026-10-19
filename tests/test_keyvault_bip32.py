@@ -32,55 +32,56 @@ _HARDHAT_ADDRESSES = {
 _HARDHAT_ACCOUNT0_PRIVKEY_HEX = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 
 
-def _seed() -> bytes:
+@pytest.fixture(scope="module")
+def seed() -> bytes:
     return _bip39.mnemonic_to_seed(_HARDHAT_MNEMONIC)
 
 
-def test_master_key_from_seed_returns_32_byte_key_and_chaincode() -> None:
-    key, chain = _bip32.master_key_from_seed(_seed())
+def test_master_key_from_seed_returns_32_byte_key_and_chaincode(seed: bytes) -> None:
+    key, chain = _bip32.master_key_from_seed(seed)
     assert len(key) == 32
     assert len(chain) == 32
 
 
-def test_bip44_derives_known_account0_private_key() -> None:
-    priv = _bip32.derive_path(_seed(), "m/44'/60'/0'/0/0")
+def test_bip44_derives_known_account0_private_key(seed: bytes) -> None:
+    priv = _bip32.derive_path(seed, "m/44'/60'/0'/0/0")
     assert priv.hex() == _HARDHAT_ACCOUNT0_PRIVKEY_HEX
-    assert _bip32.derive_path(_seed(), "m/44'/60'/0'/0/0") == priv
+    assert _bip32.derive_path(seed, "m/44'/60'/0'/0/0") == priv
 
 
 @pytest.mark.parametrize("index,expected_address", list(_HARDHAT_ADDRESSES.items()))
-def test_bip44_derives_known_ethereum_addresses(index: int, expected_address: str) -> None:
+def test_bip44_derives_known_ethereum_addresses(seed: bytes, index: int, expected_address: str) -> None:
     keys = pytest.importorskip("eth_keys").keys
-    priv = _bip32.derive_path(_seed(), f"m/44'/60'/0'/0/{index}")
+    priv = _bip32.derive_path(seed, f"m/44'/60'/0'/0/{index}")
     assert keys.PrivateKey(priv).public_key.to_checksum_address() == expected_address
 
 
-def test_derive_path_rejects_non_master_prefix() -> None:
+def test_derive_path_rejects_non_master_prefix(seed: bytes) -> None:
     with pytest.raises(ValueError):
-        _bip32.derive_path(_seed(), "44'/60'/0'/0/0")  # missing leading "m"
+        _bip32.derive_path(seed, "44'/60'/0'/0/0")  # missing leading "m"
 
 
-def test_hardened_and_unhardened_indices_differ() -> None:
-    assert _bip32.derive_path(_seed(), "m/44'/60'/0'/0/0") != _bip32.derive_path(_seed(), "m/44'/60'/0'/0/0'")
+def test_hardened_and_unhardened_indices_differ(seed: bytes) -> None:
+    assert _bip32.derive_path(seed, "m/44'/60'/0'/0/0") != _bip32.derive_path(seed, "m/44'/60'/0'/0/0'")
 
 
-def test_derive_path_rejects_negative_index() -> None:
+def test_derive_path_rejects_negative_index(seed: bytes) -> None:
     with pytest.raises(ValueError):
-        _bip32.derive_path(_seed(), "m/44'/60'/0'/0/-1")
+        _bip32.derive_path(seed, "m/44'/60'/0'/0/-1")
 
 
-def test_derive_path_rejects_oversized_index() -> None:
+def test_derive_path_rejects_oversized_index(seed: bytes) -> None:
     # 2**32 cannot be serialized into the 4-byte BIP32 child number field.
     with pytest.raises(ValueError):
-        _bip32.derive_path(_seed(), "m/44'/60'/0'/0/4294967296")
+        _bip32.derive_path(seed, "m/44'/60'/0'/0/4294967296")
 
 
-def test_derive_path_rejects_hardened_overflow() -> None:
+def test_derive_path_rejects_hardened_overflow(seed: bytes) -> None:
     # A child number >= 2**31 is invalid before the hardened offset is added.
     with pytest.raises(ValueError):
-        _bip32.derive_path(_seed(), "m/44'/60'/0'/0/2147483648'")
+        _bip32.derive_path(seed, "m/44'/60'/0'/0/2147483648'")
 
 
-def test_derive_path_rejects_non_integer_segment() -> None:
+def test_derive_path_rejects_non_integer_segment(seed: bytes) -> None:
     with pytest.raises(ValueError):
-        _bip32.derive_path(_seed(), "m/44'/60'/0'/0/abc")
+        _bip32.derive_path(seed, "m/44'/60'/0'/0/abc")

@@ -14,6 +14,8 @@ import pytest
 
 from mordred_hermes.wizard import upgrade
 from mordred_hermes.wizard.policy_writer import PolicySnapshot
+from tests._checked_fixture_helpers import assert_private, seed_private_file, seed_private_text
+from tests.test_openclaw_migration import windows_source as windows_source
 
 from ._helpers import _writer
 
@@ -102,8 +104,8 @@ class TestRunStory1Apply:
         w = _writer(tmp_path)
         w.config_path.write_text("profile: default\n", encoding="utf-8")
         override = {"corp-proxy": {"transport": "httpx", "future_unsafe_fact": True}}
-        w.policy_json_path.parent.mkdir(parents=True)
-        w.policy_json_path.write_text(
+        seed_private_text(
+            w.policy_json_path,
             json.dumps(
                 {
                     "policy": "off",
@@ -111,8 +113,8 @@ class TestRunStory1Apply:
                     "unknown_top_level": "drop",
                 }
             ),
-            encoding="utf-8",
         )
+        assert_private(w.mordred_dir, directory=True)
 
         report = upgrade.run(
             options=upgrade.UpgradeOptions(),
@@ -416,3 +418,131 @@ class TestPluginIdentityMigration:
 
         assert report.plugin_notes == ()
         assert "Hermes plugin" not in upgrade.render_report(report)
+
+
+# Source-only admission is modeled independently of host identity. Actual NTFS
+# publication/refusal cases are in test_wizard_config_native_windows.py.
+
+
+class TestWindowsSourceSnapshot:
+    @pytest.mark.parametrize(
+        "layout", ["absent-root", "absent-base", "empty", "unrecognized", "scalar", "null-config", "list-config"]
+    )
+    def test_supported_no_policy_returns_noop(self, windows_source, tmp_path, layout):
+        from mordred_hermes.wizard import openclaw_migration as migration
+
+        base, _, _ = windows_source
+        if layout != "absent-root":
+            base.parent.mkdir(parents=True)
+        if layout not in ("absent-root", "absent-base"):
+            base.mkdir()
+        body = {
+            "unrecognized": {},
+            "scalar": 3,
+            "null-config": {"plugins": {"entries": {"mordred-privacy-check": {"config": None}}}},
+            "list-config": {"plugins": {"entries": {"mordred-privacy-check": {"config": []}}}},
+        }.get(layout)
+        if layout in ("unrecognized", "scalar", "null-config", "list-config"):
+            (base.parent / "openclaw.json").write_text(json.dumps(body))
+        w = _writer(tmp_path / "destination")
+        # A marker alone does not authorize source reads or block no-legacy work.
+        marker = w.mordred_dir / migration.MARKER_FILENAME
+        seed_private_file(marker, b"retained marker")
+        assert_private(w.mordred_dir, directory=True)
+        before = marker.stat().st_ino, marker.read_bytes()
+        report = upgrade.run(options=upgrade.UpgradeOptions(reset=True), policy_writer=w, openclaw_base=base)
+        assert report.story1_action == report.story1_5_action == "noop"
+        assert migration.migrate(openclaw_base=base, policy_writer=w, options=upgrade.UpgradeOptions()) == "noop"
+        assert (marker.stat().st_ino, marker.read_bytes()) == before
+
+    def test_upgrade_uses_one_snapshot_even_when_source_changes(self, windows_source, tmp_path, monkeypatch):
+        from mordred_hermes._config_io import CONFIG_LIMIT
+        from mordred_hermes.wizard import openclaw_migration as migration
+
+        base, events, _ = windows_source
+        base.mkdir(parents=True)
+        source = base.parent / "openclaw.json"
+        body = {"plugins": {"entries": {"mordred-privacy-check": {"config": {"policy": "strict"}}}}}
+        source.write_text(json.dumps(body))
+        w = _writer(tmp_path / "destination")
+        w.config_path.parent.mkdir(parents=True)
+        w.config_path.write_bytes(b"model: retained\n")
+        original = w.migrate_plugin_identity
+        calls = []
+
+        def change_after_admission():
+            calls.append("plugin")
+            source.write_text("SECRET INVALID JSON")
+            (base / "audit.log").write_bytes(b"later secret")
+            return original()
+
+        monkeypatch.setattr(w, "migrate_plugin_identity", change_after_admission)
+        for name in ("detect", "_migrate_audit", "_migrate_directory", "_write_marker", "read_policy_snapshot"):
+            monkeypatch.setattr(migration, name, lambda *a, **kw: pytest.fail("later raw source access"))
+        report = upgrade.run(options=upgrade.UpgradeOptions(), policy_writer=w, openclaw_base=base)
+        assert calls == ["plugin"]
+        assert report.story1_action == "applied"
+        assert report.story1_5_action == "migrated"
+        assert json.loads(w.policy_json_path.read_bytes())["policy"] == "strict"
+        assert events.count((base.parent, "read", "openclaw.json", CONFIG_LIMIT)) == 1
+
+    def test_sibling_policy_supplies_target_with_absent_base(self, windows_source, tmp_path):
+        base, _, _ = windows_source
+        base.parent.mkdir()
+        (base.parent / "openclaw.json").write_text(
+            json.dumps({"plugins": {"entries": {"mordred-privacy-check": {"config": {"policy": "strict"}}}}})
+        )
+        w = _writer(tmp_path / "destination")
+        w.config_path.parent.mkdir()
+        w.config_path.write_bytes(b"model: retained\n")
+        report = upgrade.run(options=upgrade.UpgradeOptions(), policy_writer=w, openclaw_base=base)
+        assert report.story1_action == "applied"
+        assert report.story1_5_action == "noop"
+        assert json.loads(w.policy_json_path.read_bytes())["policy"] == "strict"
+
+
+def test_windows_admission_prevents_the_former_partial_upgrade(windows_source, tmp_path, monkeypatch):
+    """An admitted-source refusal must precede actual plugin and policy writes."""
+    from mordred_hermes.wizard import openclaw_migration as migration
+    from tests.test_openclaw_migration import _tree_evidence
+
+    base, _, _ = windows_source
+    base.mkdir(parents=True)
+    (base / "audit.log").write_bytes(b"retained legacy bytes")
+    w = _writer(tmp_path / "destination")
+    w.config_path.parent.mkdir(parents=True)
+    w.config_path.write_bytes(b"plugins:\n  enabled: [mordred_network]\n")
+    before = _tree_evidence(base.parent), _tree_evidence(w.config_path.parent)
+    calls = []
+    identity = w.migrate_plugin_identity
+    write = w.write
+
+    def observed_identity():
+        calls.append("identity")
+        return identity()
+
+    def observed_write(snapshot):
+        calls.append("write")
+        return write(snapshot)
+
+    def late_refusal(*args, **kwargs):
+        calls.append("late-native-refusal")
+        raise SystemExit("unsupported legacy native operation")
+
+    monkeypatch.setattr(w, "migrate_plugin_identity", observed_identity)
+    monkeypatch.setattr(w, "write", observed_write)
+    monkeypatch.setattr(migration, "_migrate_audit", late_refusal)
+    try:
+        with pytest.raises(SystemExit, match="unsupported on Windows; retained data is unchanged"):
+            upgrade.run(
+                options=upgrade.UpgradeOptions(reset=True),
+                policy_writer=w,
+                target_snapshot=PolicySnapshot("strict"),
+                openclaw_base=base,
+            )
+    finally:
+        after = _tree_evidence(base.parent), _tree_evidence(w.config_path.parent)
+        assert calls == [] and after == before, (
+            f"partial upgrade calls: {calls}; source unchanged={after[0] == before[0]}; "
+            f"destination unchanged={after[1] == before[1]}"
+        )

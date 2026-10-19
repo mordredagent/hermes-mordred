@@ -34,7 +34,6 @@ import logging
 import secrets
 import sys
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +41,8 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from ._capture import captured_output
+from ._jobs import Job as _Job
+from ._jobs import JobBusy, JobRegistry, JobWork
 
 _log = logging.getLogger(__name__)
 router = APIRouter()
@@ -101,37 +102,11 @@ def _writable_store() -> Any:
     return store
 
 
-@dataclass
-class _Job:
-    job_id: str
-    kind: str
-    state: str = "running"  # running | done | failed
-    error: str | None = None
-    progress: dict[str, Any] = field(default_factory=dict)
-    started: float = field(default_factory=time.time)
+_JOBS = JobRegistry(emit=lambda event, payload: _emit(event, payload))
 
 
-_JOBS: dict[str, _Job] = {}
-
-
-def _start_job(kind: str, work: Any) -> _Job:
-    for job in _JOBS.values():
-        if job.kind == kind and job.state == "running":
-            return job
-    job = _Job(secrets.token_urlsafe(12), kind)
-    _JOBS[job.job_id] = job
-
-    async def run() -> None:
-        try:
-            await work(job)
-            job.state = "done"
-        except Exception as exc:
-            job.state, job.error = "failed", _code(exc, f"{kind}_failed")
-            _log.warning("mordred desktop job %s failed (%s)", kind, type(exc).__name__)
-        _emit("job", {"job_id": job.job_id, "kind": kind, "state": job.state, "error": job.error})
-
-    asyncio.get_running_loop().create_task(run())
-    return job
+def _start_job(kind: str, work: JobWork) -> _Job:
+    return _JOBS.start(kind, work)
 
 
 def _job_view(job: _Job) -> dict[str, Any]:
@@ -207,7 +182,7 @@ async def status(client_version: int = 1) -> dict[str, Any]:
         "hardware_kind": {"darwin": "secure_enclave", "linux": "tpm"}.get(sys.platform),
         "user_presence_supported": sys.platform == "darwin",
     }
-    jobs = [_job_view(j) for j in _JOBS.values() if j.state == "running"]
+    jobs = [_job_view(j) for j in _JOBS.running()]
     if not platform_status["telegram_supported"]:
         return {"ok": True, **platform_status, "checks": {}, "jobs": jobs}
 
@@ -229,7 +204,7 @@ async def _windows_status() -> dict[str, Any]:
     """Windows status for a compatible client: capabilities, helper, memory, Telegram; no unwrap or launch."""
     from . import _windows
 
-    jobs = [_job_view(j) for j in _JOBS.values() if j.state == "running"]
+    jobs = [_job_view(j) for j in _JOBS.running()]
     payload = await asyncio.to_thread(_windows.status_payload, _home(), _store())
     result: dict[str, Any] = {"ok": True, **payload, "hermes_model": await hermes_model_check(), "jobs": jobs}
     if payload["telegram_supported"]:
@@ -282,7 +257,7 @@ async def hardware_build() -> Any:
 
         job.progress = {"message": "Building and probing the TPM 2.0 helper…"}
         _emit("progress", {"job_id": job.job_id, **job.progress})
-        rc = await asyncio.to_thread(_quiet, enable_tpm)
+        rc = await job.run_sync(_quiet, enable_tpm)
         if rc != 0:
             raise _Fail("tpm_build_failed")
 
@@ -299,7 +274,7 @@ async def enclave_build() -> Any:
 
         job.progress = {"message": "Building the Secure Enclave helper (a few minutes)…"}
         _emit("progress", {"job_id": job.job_id, **job.progress})
-        rc = await asyncio.to_thread(_quiet, enable_se)
+        rc = await job.run_sync(_quiet, enable_se)
         if rc != 0:
             raise _Fail("enclave_build_failed")
 
@@ -567,8 +542,7 @@ def _hermes_venice_key() -> str | None:
 
 
 def _set_venice(api_key: str, model: str | None) -> None:
-    from dataclasses import replace
-
+    from ..extension.telegram.llm_settings import with_venice_settings
     from ..extension.telegram.secrets import empty_secrets
 
     store = _writable_store()
@@ -576,7 +550,7 @@ def _set_venice(api_key: str, model: str | None) -> None:
 
     def mutate(old: Any) -> Any:
         base = old if old is not None else empty_secrets()
-        return replace(base, venice_api_key=api_key, venice_model=model or base.venice_model, backend="venice")
+        return with_venice_settings(base, api_key=api_key, model=model)
 
     store.update(mutate)
 
@@ -620,13 +594,12 @@ async def llm_local(body: dict[str, Any]) -> Any:
         canonical = normalize_local_endpoint(endpoint)
     except LlmConfigError as exc:
         return _error(exc.code)
-    from dataclasses import replace
-
+    from ..extension.telegram.llm_settings import KEEP_KEY, with_local_settings
     from ..extension.telegram.secrets import empty_secrets
 
     def mutate(old: Any) -> Any:
         base = old if old is not None else empty_secrets()
-        return replace(base, backend="local", local_endpoint=canonical, local_model=model.strip())
+        return with_local_settings(base, endpoint=canonical, model=model, api_key=KEEP_KEY)
 
     def save() -> None:
         store = _writable_store()
@@ -731,7 +704,7 @@ _REFUSAL_CODES = {
 
 
 def _running(kind: str) -> bool:
-    return any(j.kind == kind and j.state == "running" for j in _JOBS.values())
+    return _JOBS.is_running(kind)
 
 
 def _update_view(result: Any, *, current: Any | None, error: str | None = None) -> dict[str, Any]:
@@ -867,7 +840,7 @@ async def update_apply(body: dict[str, Any] | None = None) -> Any:
         job.progress = {"message": f"Installing hermes-mordred {target}…", "target": target}
         _emit("progress", {"job_id": job.job_id, **job.progress})
         try:
-            report = await asyncio.to_thread(core.apply, target, current=current, uv=uv, home=_home())
+            report = await job.run_sync(core.apply, target, current=current, uv=uv, home=_home())
         except core.UpdateRefused as exc:
             job.progress = {"target": target, "refusal": exc.message, "rolled_back": exc.rolled_back}
             code = (
@@ -885,7 +858,11 @@ async def update_apply(body: dict[str, Any] | None = None) -> Any:
             raise _Fail("update_rollback_failed" if exc.rolled_back is False else "update_failed") from exc
         job.progress = {"target": target, "report": report.to_json()}
 
-    return {"ok": True, **_job_view(_start_job("update", work))}
+    try:
+        job = _start_job("update", work)
+    except JobBusy as exc:
+        return _error(exc.code)
+    return {"ok": True, **_job_view(job)}
 
 
 # -- uninstall ----------------------------------------------------------------------------
@@ -968,9 +945,13 @@ async def uninstall(body: dict[str, Any] | None = None) -> Any:
                 )
             return rc, out.getvalue()
 
-        rc, summary = await asyncio.to_thread(run)
+        rc, summary = await job.run_sync(run)
         job.progress = {"summary": summary}
         if rc != 0:
             raise _Fail("uninstall_failed")
 
-    return {"ok": True, **_job_view(_start_job("uninstall", work))}
+    try:
+        job = _start_job("uninstall", work)
+    except JobBusy as exc:
+        return _error(exc.code)
+    return {"ok": True, **_job_view(job)}

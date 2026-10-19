@@ -579,6 +579,32 @@ def test_venice_and_local_llm_use_the_custody_store_without_presence(wt, monkeyp
     assert generated(wt) == 1
 
 
+def test_windows_settings_retain_only_the_matching_local_key_without_presence(wt, monkeypatch):
+    enroll(wt.custody, wt.home, wt.backend, "telegram")
+
+    def no_presence(self, **kwargs):
+        pytest.fail("settings updates must use the enrolled Windows role directly")
+
+    monkeypatch.setattr(WindowsCustodySecretStore, "ensure_key", no_presence)
+    monkeypatch.setenv("SYNTHETIC_WINDOWS_LOCAL_KEY", "synthetic-local-key")
+    assert telegram_cli.telegram_venice(model=" old-model ", secret_fn=lambda _: "synthetic-venice-key") == 0
+    assert telegram_cli.telegram_venice(model=None, secret_fn=lambda _: "") == 0
+    assert (
+        telegram_cli.telegram_local_llm(
+            endpoint="http://127.0.0.1:8080/v1", model="old", api_key_env="SYNTHETIC_WINDOWS_LOCAL_KEY"
+        )
+        == 0
+    )
+    assert telegram_cli.telegram_local_llm(endpoint="http://localhost:8080/v1/", model=" new ") == 0
+    value = windows_store(wt.home, wt.backend).load()
+    assert value.local_api_key == "synthetic-local-key" and value.local_model == "new"
+    assert telegram_cli.telegram_local_llm(endpoint="http://127.0.0.1:8081/v1", model="changed") == 0
+    value = windows_store(wt.home, wt.backend).load()
+    assert value.local_api_key is None
+    assert value.venice_api_key == "synthetic-venice-key" and value.venice_model == " old-model "
+    assert generated(wt) == 1
+
+
 def test_sync_routes_the_windows_memory_guard(wt, monkeypatch):
     built: list[dict] = []
 

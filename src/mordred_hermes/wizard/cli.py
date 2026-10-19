@@ -245,8 +245,6 @@ def main(argv: list[str] | None = None) -> int:
     Wired in ``pyproject.toml`` ``[project.scripts]`` as
     ``hermes-mordred = "mordred_hermes.wizard.cli:main"``.
     """
-    from ..__about__ import __version__
-
     parser = argparse.ArgumentParser(
         prog="hermes-mordred",
         description="Mordred privacy layer (standalone CLI).",
@@ -281,7 +279,6 @@ def main(argv: list[str] | None = None) -> int:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--no-color",
         action="store_true",

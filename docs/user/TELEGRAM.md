@@ -140,7 +140,7 @@ hermes-mordred telegram doctor --probe-llm --json
 This explicitly unseals credentials (macOS may request Touch ID) and sends
 one fixed synthetic prompt to the saved local model. It never reads the
 message archive or sends a probe to Venice. The probe has a 30-second total
-HTTP deadline and a 64-token output limit; loading a slow model or spending
+HTTP deadline and a 512-token output limit; loading a slow model or spending
 the budget on reasoning can therefore fail this check. Success requires a
 completed stream with visible answer text. Failure reports the connection
 origin, error type, HTTP status when available, and a fix hint.

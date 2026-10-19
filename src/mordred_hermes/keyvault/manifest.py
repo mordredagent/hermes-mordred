@@ -54,6 +54,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
+from .._bounded_json import JSONDepthError, _BoundedJSONDecoder
 from .kek import MasterKey
 
 MAGIC: Final = "MVMF"
@@ -150,8 +151,8 @@ def _verify_mac(body: bytes, tag_b64: bytes, master: MasterKey) -> None:
 def _parse_body(body: bytes) -> VaultManifest:
     """Parse an already-authenticated manifest body into a :class:`VaultManifest`."""
     try:
-        parsed: Any = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        parsed: Any = json.loads(body, cls=_BoundedJSONDecoder)
+    except (json.JSONDecodeError, UnicodeDecodeError, JSONDepthError) as e:
         raise ManifestError("manifest body is not valid JSON") from e
     if not isinstance(parsed, dict) or parsed.get("fmt") != MAGIC or parsed.get("ver") != FORMAT_VERSION:
         raise ManifestError(f"not a {MAGIC} v{FORMAT_VERSION} manifest")

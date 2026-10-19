@@ -29,6 +29,11 @@ import pytest
 from mordred_hermes.privacy_check.audit import NDJSONWriter
 from mordred_hermes.wizard import openclaw_migration, upgrade
 from mordred_hermes.wizard.policy_writer import PolicyWriter
+from tests._checked_fixture_helpers import file_symlink as file_symlink
+from tests._checked_fixture_helpers import seed_private_directory, seed_private_text
+from tests._checked_fixture_helpers import tmp_path as tmp_path
+from tests._platform_test_helpers import posix_audit_migration as posix_audit_migration
+from tests._platform_test_helpers import posix_tree_migration as posix_tree_migration
 
 
 def _writer(tmp_path: Path) -> PolicyWriter:
@@ -53,7 +58,7 @@ def _seed_openclaw(
     ``base`` is the OpenClaw root (e.g. ``tmp_path / "openclaw" / "mordred"``).
     The sibling ``openclaw.json`` lives at ``base.parent / "openclaw.json"``.
     """
-    base.mkdir(parents=True, exist_ok=True)
+    seed_private_directory(base)
     if audit_lines:
         (base / "audit.log").write_text("\n".join(audit_lines) + "\n", encoding="utf-8")
     if policy is not None:
@@ -65,7 +70,7 @@ def _seed_openclaw(
         (base / "credentials").mkdir(exist_ok=True)
         (base / "credentials" / "network.json").write_bytes(b'{"x": 1}')
     if openclaw_json is not None:
-        (base.parent / "openclaw.json").write_text(json.dumps(openclaw_json), encoding="utf-8")
+        seed_private_text(base.parent / "openclaw.json", json.dumps(openclaw_json))
 
 
 # -----------------------------------------------------------------------------
@@ -121,7 +126,7 @@ class TestMigrateNoOp:
         was actually copied or written, so "migrated" would mislead the
         `hermes-mordred upgrade` summary line."""
         base = tmp_path / "openclaw" / "mordred"
-        base.mkdir(parents=True)
+        seed_private_directory(base)
         result = openclaw_migration.migrate(
             openclaw_base=base,
             policy_writer=_writer(tmp_path),
@@ -135,6 +140,7 @@ class TestMigrateNoOp:
 # -----------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("posix_audit_migration")
 class TestAuditMigration:
     def test_safe_append_when_no_existing_audit(self, tmp_path: Path) -> None:
         base = tmp_path / "openclaw" / "mordred"
@@ -427,6 +433,7 @@ class TestAuditMigration:
 # -----------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("posix_tree_migration")
 class TestKeyvaultCredentialsNeverOverwrite:
     def test_keyvault_copied_when_dest_absent(self, tmp_path: Path) -> None:
         base = tmp_path / "openclaw" / "mordred"
@@ -508,6 +515,7 @@ class TestKeyvaultCredentialsNeverOverwrite:
         # Existing data must remain untouched
         assert (hermes_kv / "key1.bin").read_bytes() == b"different-content"
 
+    @pytest.mark.usefixtures("file_symlink")
     def test_dangling_destination_symlink_is_never_replaced(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         src.mkdir()
@@ -520,6 +528,7 @@ class TestKeyvaultCredentialsNeverOverwrite:
 
         assert dest.is_symlink()
 
+    @pytest.mark.usefixtures("file_symlink")
     def test_symlinked_source_root_is_refused(self, tmp_path: Path) -> None:
         actual = tmp_path / "actual"
         actual.mkdir()
@@ -533,6 +542,7 @@ class TestKeyvaultCredentialsNeverOverwrite:
 
         assert not dest.exists()
 
+    @pytest.mark.usefixtures("file_symlink")
     def test_nested_source_symlink_is_refused(self, tmp_path: Path) -> None:
         outside = tmp_path / "outside.bin"
         outside.write_bytes(b"outside-secret")
@@ -558,6 +568,7 @@ class TestKeyvaultCredentialsNeverOverwrite:
 
         assert not dest.exists()
 
+    @pytest.mark.usefixtures("file_symlink")
     def test_staged_tree_is_revalidated_before_publish(
         self,
         tmp_path: Path,
@@ -776,8 +787,9 @@ class TestCodexFindings:
         existing Hermes section even from OpenClaw migration overwrites."""
         # Pre-seed Hermes config with strict
         config = tmp_path / "hermes" / "config.yaml"
-        config.parent.mkdir(parents=True)
-        config.write_text(
+        seed_private_directory(config.parent)
+        seed_private_text(
+            config,
             "plugins:\n  mordred_privacy_check:\n    policy: strict\n"
             "    allow_cloud_llm: false\n    cloud_provider_allowlist: []\n",
             encoding="utf-8",
@@ -809,8 +821,9 @@ class TestCodexFindings:
     def test_openclaw_policy_respects_policy_conflict_abort(self, tmp_path: Path) -> None:
         """Codex P1-A: --policy-conflict=abort must SystemExit on OpenClaw policy mismatch."""
         config = tmp_path / "hermes" / "config.yaml"
-        config.parent.mkdir(parents=True)
-        config.write_text(
+        seed_private_directory(config.parent)
+        seed_private_text(
+            config,
             "plugins:\n  mordred_privacy_check:\n    policy: strict\n"
             "    allow_cloud_llm: false\n    cloud_provider_allowlist: []\n",
             encoding="utf-8",
@@ -886,8 +899,9 @@ class TestCodexFindings:
         )
         w = _writer(tmp_path)
         override = {"corp-proxy": {"transport": "httpx", "future_unsafe_fact": True}}
-        w.policy_json_path.parent.mkdir(parents=True)
-        w.policy_json_path.write_text(
+        seed_private_directory(w.policy_json_path.parent)
+        seed_private_text(
+            w.policy_json_path,
             json.dumps({"policy": "off", "provider_overrides": override}),
             encoding="utf-8",
         )
@@ -957,9 +971,14 @@ class TestPolicyTransform:
             },
         )
         w = _writer(tmp_path)
-        openclaw_migration.migrate(openclaw_base=base, policy_writer=w, options=upgrade.UpgradeOptions())
-        ytext = (tmp_path / "hermes" / "config.yaml").read_text(encoding="utf-8")
-        assert "allow_cloud_llm: false" in ytext.lower()
+        if os.name == "nt":
+            with pytest.raises(SystemExit, match=r"^hermes-mordred upgrade: refusing invalid OpenClaw policy$"):
+                openclaw_migration.migrate(openclaw_base=base, policy_writer=w, options=upgrade.UpgradeOptions())
+            assert not w.config_path.exists() and not w.mordred_dir.exists()
+        else:
+            openclaw_migration.migrate(openclaw_base=base, policy_writer=w, options=upgrade.UpgradeOptions())
+            ytext = (tmp_path / "hermes" / "config.yaml").read_text(encoding="utf-8")
+            assert "allow_cloud_llm: false" in ytext.lower()
 
     def test_missing_openclaw_policy_section_is_handled(self, tmp_path: Path) -> None:
         base = tmp_path / "openclaw" / "mordred"
@@ -971,3 +990,432 @@ class TestPolicyTransform:
         # credentials either, so nothing was actually migrated: "noop", not
         # the misleading "migrated" (Codex review, see TestMigrateNoOp above).
         assert result == "noop"
+
+
+# Windows source admission is modeled only at the checked capability boundary.
+# The actual NTFS counterpart lives in test_wizard_config_native_windows.py.
+@pytest.fixture
+def windows_source(monkeypatch, tmp_path):
+    from contextlib import contextmanager
+
+    from mordred_hermes._private_fs import PrivateFSError
+
+    events = []
+    faults = {}
+
+    def event(name):
+        events.append(name)
+        if name in faults:
+            if callable(faults[name]):
+                faults[name]()
+            else:
+                raise faults[name]
+
+    class Source:
+        def __init__(self, path):
+            self.path = path
+
+        def list_names(self, *, max_entries):
+            event((self.path, "list"))
+            assert max_entries == 10_000
+            names = tuple(p.name for p in self.path.iterdir())
+            event((self.path, "after-list"))
+            if len(names) > max_entries:
+                raise PrivateFSError("unsafe", "overflow")
+            return names
+
+        def read_bytes(self, name, *, max_bytes):
+            event((self.path, "read", name, max_bytes))
+            path = self.path / name
+            meta = path.lstat()
+            if not stat.S_ISREG(meta.st_mode) or meta.st_nlink != 1 or getattr(meta, "st_reparse_tag", 0):
+                raise PrivateFSError("unsafe", "read")
+            data = path.read_bytes()
+            if len(data) > max_bytes:
+                raise PrivateFSError("unsafe", "oversize")
+            return data
+
+    @contextmanager
+    def opener(path):
+        event((path, "open"))
+        try:
+            meta = path.lstat()
+        except FileNotFoundError:
+            yield None
+            return
+        if not stat.S_ISDIR(meta.st_mode) or getattr(meta, "st_reparse_tag", 0):
+            raise PrivateFSError("unsafe", "open")
+        try:
+            yield Source(path)
+        finally:
+            events.append((path, "close"))
+
+    # The adapter-local seam preserves real host identity and pathlib behavior.
+    monkeypatch.setattr(openclaw_migration, "_windows", lambda: True, raising=False)
+    monkeypatch.setattr(openclaw_migration, "open_optional_confidential_directory", opener, raising=False)
+    return tmp_path / "openclaw" / "mordred", events, faults
+
+
+def _source_redirect(path, target):
+    if os.name == "nt":
+        import subprocess
+
+        subprocess.run(["cmd.exe", "/c", "mklink", "/J", str(path), str(target)], check=True, capture_output=True)
+    else:
+        path.symlink_to(target, target_is_directory=True)
+
+
+def _tree_evidence(root):
+    """Retain entry identity, mode, mtime and bytes without following links."""
+    try:
+        root.lstat()
+    except FileNotFoundError:
+        return None
+    result = {}
+    pending = [root]
+    while pending:
+        path = pending.pop()
+        meta = path.lstat()
+        reparse = bool(getattr(meta, "st_reparse_tag", 0))
+        content = path.read_bytes() if stat.S_ISREG(meta.st_mode) and not reparse else None
+        result[str(path.relative_to(root))] = (meta.st_dev, meta.st_ino, meta.st_mode, meta.st_mtime_ns, content)
+        if stat.S_ISDIR(meta.st_mode) and not reparse:
+            pending.extend(path.iterdir())
+    return result
+
+
+def _publication_tripwires(monkeypatch, writer):
+    calls = []
+
+    def forbid(name):
+        def invoked(*args, **kwargs):
+            calls.append(name)
+            raise AssertionError(f"publication before admission: {name}")
+
+        return invoked
+
+    for name in (
+        "write",
+        "emit_policy_json",
+        "upsert_mordred_sections",
+        "merge_mordred_sections",
+        "migrate_plugin_identity",
+    ):
+        monkeypatch.setattr(writer, name, forbid(name))
+    for name in ("_migrate_audit", "_migrate_directory", "_write_marker", "_policy_write_lock", "exclusive_audit_lock"):
+        monkeypatch.setattr(openclaw_migration, name, forbid(name))
+    monkeypatch.setattr(upgrade, "_preserve_provider_overrides", forbid("provider-read"))
+    monkeypatch.setattr(openclaw_migration, "_preserve_provider_overrides", forbid("provider-read"))
+    from mordred_hermes.keyvault import _windows_custody
+
+    monkeypatch.setattr(_windows_custody, "windows_backend", forbid("native-custody"))
+    return calls
+
+
+class TestWindowsAdmission:
+    @pytest.mark.parametrize("artifact", ["audit.log", "KEYVAULT", "Credentials"])
+    @pytest.mark.parametrize("kind", ["empty-file", "file", "directory", "nonempty-directory", "broken-link"])
+    @pytest.mark.parametrize("entrypoint", ["upgrade", "migrate", "read"])
+    def test_unsupported_source_refuses_before_any_publication(
+        self, windows_source, monkeypatch, tmp_path, artifact, kind, entrypoint
+    ):
+        base, events, _ = windows_source
+        base.mkdir(parents=True)
+        entry = base / artifact
+        if kind in ("directory", "nonempty-directory"):
+            entry.mkdir()
+            if kind == "nonempty-directory":
+                (entry / "retained.bin").write_bytes(b"retained-secret")
+        elif kind == "broken-link":
+            _source_redirect(entry, base / "missing")
+        else:
+            entry.write_bytes(b"" if kind == "empty-file" else b"retained-secret")
+        w = _writer(tmp_path)
+        w.mordred_dir.mkdir(parents=True)
+        w.config_path.write_bytes(b"plugins:\n  enabled: [mordred_network]\n")
+        w.policy_json_path.write_bytes(b'{"policy":"strict"}')
+        (w.mordred_dir / openclaw_migration.MARKER_FILENAME).write_bytes(b"retained marker")
+        calls = _publication_tripwires(monkeypatch, w)
+        before = _tree_evidence(base.parent), _tree_evidence(w.config_path.parent)
+        try:
+            with pytest.raises(SystemExit, match="unsupported on Windows; retained data is unchanged"):
+                if entrypoint == "upgrade":
+                    upgrade.run(
+                        options=upgrade.UpgradeOptions(reset=True),
+                        policy_writer=w,
+                        target_snapshot=upgrade.PolicySnapshot("off"),
+                        openclaw_base=base,
+                    )
+                elif entrypoint == "migrate":
+                    openclaw_migration.migrate(
+                        openclaw_base=base, policy_writer=w, options=upgrade.UpgradeOptions(reset=True)
+                    )
+                else:
+                    openclaw_migration.read_policy_snapshot(base, w)
+        finally:
+            assert calls == []
+            assert (_tree_evidence(base.parent), _tree_evidence(w.config_path.parent)) == before
+            assert not any(len(e) > 2 and e[1] == "read" for e in events)
+
+    @pytest.mark.parametrize("fault", ["root-open", "root-list", "base-open", "base-list", "policy-read"])
+    def test_uncertain_source_refuses_before_publication(self, windows_source, monkeypatch, tmp_path, fault):
+        from mordred_hermes._config_io import CONFIG_LIMIT
+        from mordred_hermes._private_fs import PrivateFSError
+
+        base, events, faults = windows_source
+        base.mkdir(parents=True)
+        (base.parent / "openclaw.json").write_bytes(b"{}")
+        key = {
+            "root-open": (base.parent, "open"),
+            "root-list": (base.parent, "list"),
+            "base-open": (base, "open"),
+            "base-list": (base, "list"),
+            "policy-read": (base.parent, "read", "openclaw.json", CONFIG_LIMIT),
+        }[fault]
+        faults[key] = PrivateFSError("io", "SECRET-MUST-NOT-LEAK")
+        w = _writer(tmp_path)
+        calls = _publication_tripwires(monkeypatch, w)
+        before = _tree_evidence(base.parent), _tree_evidence(w.config_path.parent)
+        try:
+            with pytest.raises(SystemExit, match="refusing unsafe OpenClaw source; retained data is unchanged") as exc:
+                upgrade.run(options=upgrade.UpgradeOptions(), policy_writer=w, openclaw_base=base)
+            assert "SECRET" not in str(exc.value)
+        finally:
+            assert calls == []
+            assert (_tree_evidence(base.parent), _tree_evidence(w.config_path.parent)) == before
+        assert events.count(key) == 1
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            b'{"secret":',
+            b"\xff",
+            *[
+                json.dumps({"plugins": {"entries": {"mordred-privacy-check": {"config": {field: value}}}}}).encode()
+                for field, values in (
+                    ("policy", [None, True, 0, [], {}, "", "STRICT", "unknown"]),
+                    ("allow_cloud_llm", [None, 0, 1, "false", [], {}]),
+                    (
+                        "cloud_provider_allowlist",
+                        [None, False, 0, "anthropic", {}, [None], [1], [True], [{}], [[]], ["anthropic", 1]],
+                    ),
+                )
+                for value in values
+            ],
+        ],
+    )
+    @pytest.mark.parametrize("entrypoint", ["upgrade", "migrate", "read"])
+    def test_invalid_policy_is_content_free_and_prepublication(
+        self, windows_source, monkeypatch, tmp_path, payload, entrypoint
+    ):
+        base, _, _ = windows_source
+        base.mkdir(parents=True)
+        (base.parent / "openclaw.json").write_bytes(payload)
+        w = _writer(tmp_path)
+        calls = _publication_tripwires(monkeypatch, w)
+        before = _tree_evidence(base.parent), _tree_evidence(w.config_path.parent)
+        try:
+            with pytest.raises(SystemExit) as exc:
+                if entrypoint == "upgrade":
+                    upgrade.run(
+                        options=upgrade.UpgradeOptions(reset=True),
+                        policy_writer=w,
+                        target_snapshot=upgrade.PolicySnapshot("strict"),
+                        openclaw_base=base,
+                    )
+                elif entrypoint == "migrate":
+                    openclaw_migration.migrate(openclaw_base=base, policy_writer=w, options=upgrade.UpgradeOptions())
+                else:
+                    openclaw_migration.read_policy_snapshot(base, w)
+            assert str(exc.value) == "hermes-mordred upgrade: refusing invalid OpenClaw policy"
+        finally:
+            assert calls == []
+            assert (_tree_evidence(base.parent), _tree_evidence(w.config_path.parent)) == before
+
+    @pytest.mark.parametrize("member", ["base", "policy"])
+    def test_listed_then_missing_refuses(self, windows_source, monkeypatch, tmp_path, member):
+        base, events, faults = windows_source
+        base.mkdir(parents=True)
+        policy = base.parent / "openclaw.json"
+        policy.write_bytes(b"{}")
+        faults[base.parent, "after-list"] = base.rmdir if member == "base" else policy.unlink
+        w = _writer(tmp_path)
+        calls = _publication_tripwires(monkeypatch, w)
+        with pytest.raises(SystemExit, match="refusing unsafe OpenClaw source"):
+            upgrade.run(options=upgrade.UpgradeOptions(), policy_writer=w, openclaw_base=base)
+        assert calls == []
+        assert events.count((base.parent, "after-list")) == 1
+        assert not w.config_path.parent.exists()
+
+    @pytest.mark.parametrize(
+        "member",
+        [
+            "root",
+            "base",
+            "root-file",
+            "base-file",
+            "policy",
+            "overflow-root",
+            "overflow-base",
+            "oversize-policy",
+            "hardlink-policy",
+        ],
+    )
+    def test_unsafe_source_is_not_treated_as_empty(self, windows_source, monkeypatch, tmp_path, member):
+        from mordred_hermes._private_fs import PrivateFSError
+
+        base, events, faults = windows_source
+        base.mkdir(parents=True)
+        policy = base.parent / "openclaw.json"
+        policy.write_bytes(b"{}")
+        if member in ("root", "base"):
+            directory = base.parent if member == "root" else base
+            saved = directory.with_name(directory.name + "-saved")
+            directory.rename(saved)
+            _source_redirect(directory, saved)
+        elif member in ("root-file", "base-file"):
+            directory = base.parent if member == "root-file" else base
+            saved = directory.with_name(directory.name + "-saved")
+            directory.rename(saved)
+            directory.write_bytes(b"directory replaced by file")
+        elif member == "policy":
+            saved = policy.with_suffix(".saved")
+            policy.rename(saved)
+            target = saved
+            if os.name == "nt":
+                target = policy.with_name("policy-directory-target")
+                target.mkdir()
+            _source_redirect(policy, target)
+        elif member.startswith("overflow"):
+            directory = base.parent if member == "overflow-root" else base
+            faults[directory, "list"] = PrivateFSError("unsafe", "list_limit")
+        elif member == "hardlink-policy":
+            os.link(policy, policy.with_suffix(".linked"))
+        else:
+            from mordred_hermes._config_io import CONFIG_LIMIT
+
+            policy.write_bytes(b" " * (CONFIG_LIMIT + 1))
+        w = _writer(tmp_path)
+        before = _tree_evidence(tmp_path)
+        calls = _publication_tripwires(monkeypatch, w)
+        with pytest.raises(SystemExit, match="refusing unsafe OpenClaw source"):
+            upgrade.run(options=upgrade.UpgradeOptions(), policy_writer=w, openclaw_base=base)
+        assert calls == []
+        assert events
+        assert _tree_evidence(tmp_path) == before
+        assert not w.config_path.parent.exists()
+
+    @pytest.mark.parametrize(
+        "options",
+        [
+            upgrade.UpgradeOptions(policy_conflict="keep-existing"),
+            upgrade.UpgradeOptions(policy_conflict="overwrite"),
+            upgrade.UpgradeOptions(policy_conflict="abort"),
+            upgrade.UpgradeOptions(reset=True),
+        ],
+    )
+    def test_invalid_sibling_refuses_even_without_base_and_with_conflict_options(
+        self, windows_source, monkeypatch, tmp_path, options
+    ):
+        base, _, _ = windows_source
+        base.parent.mkdir()
+        (base.parent / "openclaw.json").write_text(
+            json.dumps({"plugins": {"entries": {"mordred-privacy-check": {"config": {"policy": None}}}}})
+        )
+        w = _writer(tmp_path)
+        calls = _publication_tripwires(monkeypatch, w)
+        with pytest.raises(SystemExit, match="refusing invalid OpenClaw policy"):
+            upgrade.run(
+                options=options, policy_writer=w, target_snapshot=upgrade.PolicySnapshot("off"), openclaw_base=base
+            )
+        assert calls == []
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            {},
+            {"unknown": {"arbitrary": [None, 1]}},
+            {"policy": "strict"},
+            {"policy": "lenient"},
+            {"policy": "off"},
+            {"allow_cloud_llm": True},
+            {"allow_cloud_llm": False},
+            {"cloud_provider_allowlist": []},
+            {"cloud_provider_allowlist": ["anthropic", "custom-provider", "", "ANTHROPIC", "anthropic"]},
+        ],
+    )
+    def test_valid_fields_keep_existing_defaults_and_no_normalization(self, windows_source, tmp_path, config):
+        base, events, _ = windows_source
+        base.mkdir(parents=True)
+        (base.parent / "openclaw.json").write_text(
+            json.dumps({"plugins": {"entries": {"mordred-privacy-check": {"config": config}}}})
+        )
+        snapshot = openclaw_migration.read_policy_snapshot(base, _writer(tmp_path))
+        assert snapshot is not None
+        assert snapshot.policy == config.get("policy", "lenient")
+        assert snapshot.allow_cloud_llm == config.get("allow_cloud_llm", False)
+        assert snapshot.cloud_provider_allowlist == tuple(config.get("cloud_provider_allowlist", []))
+        assert len([event for event in events if event[1] == "read"]) == 1
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            None,
+            False,
+            0,
+            "text",
+            [],
+            {},
+            *[{"plugins": value} for value in (None, [])],
+            *[{"plugins": {"entries": value}} for value in (None, [])],
+            *[{"plugins": {"entries": {"mordred-privacy-check": value}}} for value in (None, [])],
+            *[{"plugins": {"entries": {"mordred-privacy-check": {"config": value}}}} for value in (None, [])],
+        ],
+    )
+    def test_valid_unrecognized_json_is_no_policy(self, windows_source, tmp_path, body):
+        base, _, _ = windows_source
+        base.mkdir(parents=True)
+        (base.parent / "openclaw.json").write_text(json.dumps(body))
+        assert openclaw_migration.read_policy_snapshot(base, _writer(tmp_path)) is None
+
+    def test_case_insensitive_base_and_policy_names(self, windows_source, tmp_path):
+        base, events, _ = windows_source
+        actual_base = base.with_name("MORDRED")
+        actual_base.mkdir(parents=True)
+        (base.parent / "OpenClaw.JSON").write_text(
+            json.dumps({"plugins": {"entries": {"mordred-privacy-check": {"config": {"policy": "strict"}}}}})
+        )
+        snapshot = openclaw_migration.read_policy_snapshot(base, _writer(tmp_path))
+        assert snapshot is not None and snapshot.policy == "strict"
+        assert (actual_base, "open") in events
+
+    @pytest.mark.parametrize("alias", ["MORDRED", "OPENCLAW.JSON"])
+    def test_ambiguous_folded_source_names_refuse(self, windows_source, monkeypatch, tmp_path, alias):
+        from contextlib import contextmanager
+
+        base, events, _ = windows_source
+        base.mkdir(parents=True)
+        (base.parent / "openclaw.json").write_bytes(b"{}")
+        original = openclaw_migration.open_optional_confidential_directory
+
+        @contextmanager
+        def duplicate_names(path):
+            with original(path) as directory:
+                if path == base.parent:
+                    listed = directory.list_names
+
+                    def ambiguous(*, max_entries):
+                        return (*listed(max_entries=max_entries), alias)
+
+                    directory.list_names = ambiguous
+                yield directory
+
+        monkeypatch.setattr(openclaw_migration, "open_optional_confidential_directory", duplicate_names)
+        w = _writer(tmp_path)
+        before = _tree_evidence(tmp_path)
+        calls = _publication_tripwires(monkeypatch, w)
+        with pytest.raises(SystemExit, match="refusing unsafe OpenClaw source"):
+            upgrade.run(options=upgrade.UpgradeOptions(), policy_writer=w, openclaw_base=base)
+        assert calls == []
+        assert _tree_evidence(tmp_path) == before
+        assert events.count((base.parent, "list")) == 1

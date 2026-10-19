@@ -73,6 +73,7 @@ from typing import Any, Final, Protocol
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
+from ._bounded_json import _BoundedJSONDecoder
 from ._home import hermes_home
 
 _LOG = logging.getLogger(__name__)
@@ -180,7 +181,8 @@ def installed(home: Path | None = None) -> Installed:
     from .desktop.install import plugin_dir
 
     source = member.install_source()
-    from_member = member.built_from_member(source)
+    env = member.environment()
+    from_member = member.built_from_member(source, env=env)
     extras = set(source.extras)
     if from_member:
         recorded = member.member_status(plugin_dir(home))
@@ -189,7 +191,6 @@ def installed(home: Path | None = None) -> Installed:
     extra = platform_extra()
     if extra:
         extras.add(extra)
-    env = member.environment()
     return Installed(
         version=source.version,
         kind=source.kind,
@@ -287,7 +288,7 @@ def fetch_releases(fetch: Fetch | None = None) -> dict[str, Any]:
     if len(raw) > MAX_FETCH_BYTES:
         raise UpdateCheckFailed("PyPI answer too large")
     try:
-        data = json.loads(raw)
+        data = json.loads(raw, cls=_BoundedJSONDecoder)
     except (ValueError, RecursionError, TypeError) as exc:
         raise UpdateCheckFailed("PyPI answer is not JSON") from exc
     releases = data.get("releases") if isinstance(data, dict) else None
@@ -342,7 +343,7 @@ def _iso_to_epoch(text: Any) -> float | None:
 def _read_json(path: Path) -> Any:
     """``None`` for anything unreadable or malformed (a receipt or cache is never trusted)."""
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        return json.loads(path.read_text(encoding="utf-8-sig"), cls=_BoundedJSONDecoder)
     except Exception:
         return None
 

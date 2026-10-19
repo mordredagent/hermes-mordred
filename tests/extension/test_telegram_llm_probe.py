@@ -65,10 +65,28 @@ def test_probe_uses_saved_endpoint_model_and_key_without_archive(doctor):
         assert request["path"] == "/v1/chat/completions"
         assert request["body"]["model"] == "synthetic-model"
         assert request["body"]["stream"] is True
-        assert request["body"]["max_tokens"] == 64
+        assert request["body"]["max_tokens"] == 512
         assert len(request["body"]["messages"]) == 1
         assert "PRIVATE-MESSAGE" not in json.dumps(request)
         assert "SEALED-SECRET" not in json.dumps(check)
+
+
+def test_probe_leaves_budget_for_visible_reply_after_reasoning(doctor):
+    def response(body):
+        # Model a 256-token reasoning prelude followed by a two-token reply.
+        answer = "OK" if body["max_tokens"] >= 258 else ""
+        terminal = {"choices": [{"delta": {"content": answer}, "finish_reason": "stop" if answer else "length"}]}
+        return (
+            b'data: {"choices":[{"delta":{"reasoning":"PRIVATE-REASONING"}}]}\n\n'
+            + b"data: "
+            + json.dumps(terminal).encode()
+            + b"\n\n"
+        )
+
+    with LocalLlmServer(response=response) as peer:
+        rc, check = doctor(MemorySecrets(peer.endpoint))
+    assert rc == 0 and check["ok"] is True, check
+    assert "PRIVATE-REASONING" not in json.dumps(check)
 
 
 @pytest.mark.parametrize("status", [401, 404, 500, 307])

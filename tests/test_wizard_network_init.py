@@ -54,6 +54,27 @@ from mordred_hermes.wizard.network_cli import (
 
 from ._helpers import _writer
 
+
+@pytest.fixture(autouse=True, params=["host", "windows-path-admission"])
+def _network_path_admission(request, monkeypatch):
+    """Exercise every init case with Windows path admission on any host.
+
+    Only the adapter's structural dispatch is modeled. Its validator is real;
+    PolicyWriter and the env/credential consumers keep their host backends.
+    Native checked filesystem acceptance lives in test_wizard_config_native_windows.
+    """
+    if request.param == "windows-path-admission":
+        from types import SimpleNamespace
+
+        from mordred_hermes.wizard import network_cli, policy_writer
+
+        monkeypatch.setattr(
+            network_cli,
+            "_policy_writer",
+            SimpleNamespace(_windows=lambda: True, _canonical_paths=policy_writer._canonical_paths),
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Test doubles                                                                #
 # --------------------------------------------------------------------------- #
@@ -194,32 +215,21 @@ class TestCollectNetworkAnswers:
         assert "wireguard_config_path" not in section
         assert "custom_up_cmd" not in section
 
-    def test_invalid_tor_socks_port_falls_back_to_default(self) -> None:
-        prompts = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", "not-a-port"])
+    @pytest.mark.parametrize(
+        "port", ["not-a-port", "70000", "65535"], ids=["malformed", "out-of-range", "control-overflow"]
+    )
+    def test_invalid_tor_socks_port_falls_back_to_default(self, port: str) -> None:
+        # SOCKS 65535 is also invalid: the control port needs the following port.
+        prompts = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", port])
         inputs = collect_network_answers(prompts)
         assert inputs.network_answers.tor_socks_port == 9050
 
-    def test_out_of_range_tor_socks_port_falls_back_to_default(self) -> None:
-        prompts = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", "70000"])
+    @pytest.mark.parametrize("country,expected", [("unitedstates", "auto"), ("JP", "jp")])
+    def test_relay_country_is_normalized(self, country: str, expected: str) -> None:
+        # Relay coercion only happens on the vpn+mullvad route.
+        prompts = _ScriptedPromptIO(answers=["vpn", "mullvad", "", country, False])
         inputs = collect_network_answers(prompts)
-        assert inputs.network_answers.tor_socks_port == 9050
-
-    def test_65535_falls_back_because_control_port_needs_plus_one(self) -> None:
-        prompts = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", "65535"])
-        inputs = collect_network_answers(prompts)
-        assert inputs.network_answers.tor_socks_port == 9050
-
-    def test_invalid_relay_country_falls_back_to_auto(self) -> None:
-        # Relay coercion only happens on the vpn+mullvad route, so the path
-        # must be "vpn" (not "clearnet") for the relay prompt to fire at all.
-        prompts = _ScriptedPromptIO(answers=["vpn", "mullvad", "", "unitedstates", False])
-        inputs = collect_network_answers(prompts)
-        assert inputs.network_answers.mullvad_relay_country == "auto"
-
-    def test_2letter_relay_country_lowercased(self) -> None:
-        prompts = _ScriptedPromptIO(answers=["vpn", "mullvad", "", "JP", False])
-        inputs = collect_network_answers(prompts)
-        assert inputs.network_answers.mullvad_relay_country == "jp"
+        assert inputs.network_answers.mullvad_relay_country == expected
 
     def test_prompt_secret_false_skips_password_prompt(self) -> None:
         # With provider=mullvad but the password prompt off, the consumed
@@ -386,11 +396,13 @@ class TestRunInitPersistsConfig:
             env_writer=env_w,
             credentials_writer=cred_w,
             env_path=tmp_path / ".env",
-            credentials_path=tmp_path / "credentials" / "network.json",
+            credentials_path=tmp_path / "mordred" / "credentials" / "network.json",
         )
         assert rc == 0
         assert env_w.calls == [(tmp_path / ".env", "MORDRED_MULLVAD_ACCOUNT", "MULL-secret-99")]
-        assert cred_w.calls == [(tmp_path / "credentials" / "network.json", "MORDRED_MULLVAD_ACCOUNT", "jp", True)]
+        assert cred_w.calls == [
+            (tmp_path / "mordred" / "credentials" / "network.json", "MORDRED_MULLVAD_ACCOUNT", "jp", True)
+        ]
 
         from ruamel.yaml import YAML
 
@@ -419,14 +431,15 @@ class TestRunInitPersistsConfig:
         )
         prompts = _ScriptedPromptIO(answers=list(_ANSWERS_VPN_MULLVAD))
         w = _writer(tmp_path)
-        run_init(
+        rc = run_init(
             prompt_io=prompts,
             policy_writer=w,
             env_writer=_SpyEnvFileWriter(),
             credentials_writer=_SpyCredentialsWriter(),
             env_path=tmp_path / ".env",
-            credentials_path=tmp_path / "credentials" / "network.json",
+            credentials_path=tmp_path / "mordred" / "credentials" / "network.json",
         )
+        assert rc == 0
 
         from ruamel.yaml import YAML
 
@@ -445,28 +458,37 @@ class TestRunInitRoutesSecret:
         instead of stripping the .env line (Codex review 2026-06-05)."""
         prompts = _ScriptedPromptIO(answers=["vpn", "mullvad", "", "auto", False])
         env_w = _SpyEnvFileWriter()
-        run_init(
+        cred_w = _SpyCredentialsWriter()
+        rc = run_init(
             prompt_io=prompts,
             policy_writer=_writer(tmp_path),
             env_writer=env_w,
-            credentials_writer=_SpyCredentialsWriter(),
+            credentials_writer=cred_w,
             env_path=tmp_path / ".env",
-            credentials_path=tmp_path / "credentials" / "network.json",
+            credentials_path=tmp_path / "mordred" / "credentials" / "network.json",
         )
+        assert rc == 0
+        assert cred_w.calls == [
+            (tmp_path / "mordred" / "credentials" / "network.json", "MORDRED_MULLVAD_ACCOUNT", "auto", False)
+        ]
+        assert "default_path: vpn" in (tmp_path / "config.yaml").read_text(encoding="utf-8")
         assert env_w.calls == [], "blank secret must NOT call the env writer (would wipe the existing line)"
 
     def test_blank_secret_preserves_existing_env_line(self, tmp_path: Path) -> None:
         env_path = tmp_path / ".env"
         env_path.write_text("MORDRED_MULLVAD_ACCOUNT=OLD-SECRET-KEEP\n", encoding="utf-8")
         prompts = _ScriptedPromptIO(answers=["vpn", "mullvad", "", "auto", False])
-        run_init(
+        rc = run_init(
             prompt_io=prompts,
             policy_writer=_writer(tmp_path),
             env_writer=DotEnvFileWriter(),
             credentials_writer=JSONCredentialsWriter(),
             env_path=env_path,
-            credentials_path=tmp_path / "credentials" / "network.json",
+            credentials_path=tmp_path / "mordred" / "credentials" / "network.json",
         )
+        assert rc == 0
+        assert (tmp_path / "mordred" / "credentials" / "network.json").is_file()
+        assert "default_path: vpn" in (tmp_path / "config.yaml").read_text(encoding="utf-8")
         assert "MORDRED_MULLVAD_ACCOUNT=OLD-SECRET-KEEP" in env_path.read_text(encoding="utf-8")
 
 
@@ -486,20 +508,28 @@ class TestRunInitSeedsDefaultsFromDisk:
             "    mullvad_killswitch: true\n",
             encoding="utf-8",
         )
-        run_init(
+        env_w = _SpyEnvFileWriter()
+        cred_w = _SpyCredentialsWriter()
+        rc = run_init(
             prompt_io=_DefaultEchoPromptIO(),
             policy_writer=_writer(tmp_path),
-            env_writer=_SpyEnvFileWriter(),
-            credentials_writer=_SpyCredentialsWriter(),
+            env_writer=env_w,
+            credentials_writer=cred_w,
             env_path=tmp_path / ".env",
-            credentials_path=tmp_path / "credentials" / "network.json",
+            credentials_path=tmp_path / "mordred" / "credentials" / "network.json",
         )
+        assert rc == 0
+        assert env_w.calls == []
+        assert cred_w.calls == [
+            (tmp_path / "mordred" / "credentials" / "network.json", "MORDRED_MULLVAD_ACCOUNT", "se", True)
+        ]
 
         from ruamel.yaml import YAML
 
         yaml = YAML(typ="safe", pure=True)
         with config.open(encoding="utf-8") as f:
             data = yaml.load(f)
+        assert "mordred" in data["plugins"]["enabled"]
         section = data["plugins"]["mordred_network"]
         assert section["default_path"] == "tor"
         assert section["tor_binary_path"] == "/opt/tor/bin/tor"
@@ -636,14 +666,15 @@ class TestInitSummary:
         prompts = _ScriptedPromptIO(answers=list(_ANSWERS_VPN_MULLVAD))
         buf = io.StringIO()
         with redirect_stdout(buf):
-            run_init(
+            rc = run_init(
                 prompt_io=prompts,
                 policy_writer=_writer(tmp_path),
                 env_writer=_SpyEnvFileWriter(),
                 credentials_writer=_SpyCredentialsWriter(),
                 env_path=tmp_path / ".env",
-                credentials_path=tmp_path / "credentials" / "network.json",
+                credentials_path=tmp_path / "mordred" / "credentials" / "network.json",
             )
+        assert rc == 0
         out = buf.getvalue()
         assert "vpn" in out  # _ANSWERS_VPN_MULLVAD default_path
         assert "jp" in out  # _ANSWERS_VPN_MULLVAD relay country
@@ -734,7 +765,7 @@ class TestClearMullvad:
             env_writer=env_w,
             credentials_writer=_SpyCredentialsWriter(),
             env_path=env_path,
-            credentials_path=tmp_path / "credentials" / "network.json",
+            credentials_path=tmp_path / "mordred" / "credentials" / "network.json",
             clear_mullvad=True,
         )
         assert rc == 0
@@ -752,7 +783,7 @@ class TestClearMullvad:
             env_writer=DotEnvFileWriter(),
             credentials_writer=JSONCredentialsWriter(),
             env_path=env_path,
-            credentials_path=tmp_path / "credentials" / "network.json",
+            credentials_path=tmp_path / "mordred" / "credentials" / "network.json",
             clear_mullvad=True,
         )
         assert rc == 0
@@ -816,69 +847,39 @@ class TestPersistNetworkErrorChannel:
     unhandled traceback instead of the ``error:`` + exit-1 convention the
     rest of the CLI uses."""
 
-    def test_policy_writer_failure_reports_to_stderr_with_rc_1(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    @pytest.mark.parametrize(
+        "writer_name,method,message",
+        [
+            ("policy_writer", "merge_mordred_sections", "disk full"),
+            ("env_writer", "upsert", "permission denied"),
+            ("credentials_writer", "write_network", "read-only filesystem"),
+        ],
+    )
+    def test_writer_failure_reports_to_stderr_with_rc_1(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        writer_name: str,
+        method: str,
+        message: str,
     ) -> None:
-        class _BoomPolicyWriter:
-            config_path = tmp_path / "config.yaml"
+        writers = {
+            "policy_writer": _writer(tmp_path),
+            "env_writer": _SpyEnvFileWriter(),
+            "credentials_writer": _SpyCredentialsWriter(),
+        }
 
-            def merge_mordred_sections(self, sections: object) -> None:
-                raise OSError("disk full")
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise OSError(message)
 
+        monkeypatch.setattr(writers[writer_name], method, _boom)
         prompts = _ScriptedPromptIO(answers=list(_ANSWERS_VPN_MULLVAD))
-        rc = run_init(
-            prompt_io=prompts,
-            policy_writer=_BoomPolicyWriter(),  # type: ignore[arg-type]
-            env_writer=_SpyEnvFileWriter(),
-            credentials_writer=_SpyCredentialsWriter(),
-        )
-        assert rc == 1
+        assert run_init(prompt_io=prompts, **writers) == 1  # type: ignore[arg-type]
         captured = capsys.readouterr()
-        assert "disk full" in captured.err
-        assert captured.out == ""
-
-    def test_env_writer_failure_reports_to_stderr_with_rc_1(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        class _BoomEnvWriter:
-            def upsert(self, path: Path, *, key: str, value: str) -> None:
-                raise OSError("permission denied")
-
-        prompts = _ScriptedPromptIO(answers=list(_ANSWERS_VPN_MULLVAD))
-        rc = run_init(
-            prompt_io=prompts,
-            policy_writer=_writer(tmp_path),
-            env_writer=_BoomEnvWriter(),  # type: ignore[arg-type]
-            credentials_writer=_SpyCredentialsWriter(),
-        )
-        assert rc == 1
-        captured = capsys.readouterr()
-        assert "permission denied" in captured.err
-
-    def test_credentials_writer_failure_reports_to_stderr_with_rc_1(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        class _BoomCredentialsWriter:
-            def write_network(
-                self,
-                path: Path,
-                *,
-                mullvad_account_id_env: str,
-                mullvad_relay_country: str,
-                mullvad_killswitch: bool,
-            ) -> None:
-                raise OSError("read-only filesystem")
-
-        prompts = _ScriptedPromptIO(answers=list(_ANSWERS_VPN_MULLVAD))
-        rc = run_init(
-            prompt_io=prompts,
-            policy_writer=_writer(tmp_path),
-            env_writer=_SpyEnvFileWriter(),
-            credentials_writer=_BoomCredentialsWriter(),  # type: ignore[arg-type]
-        )
-        assert rc == 1
-        captured = capsys.readouterr()
-        assert "read-only filesystem" in captured.err
+        assert message in captured.err
+        if writer_name == "policy_writer":
+            assert captured.out == ""
 
     def test_handle_init_non_interactive_surfaces_same_error(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -1049,3 +1050,70 @@ class TestRouteGatedPrompts:
         assert na.custom_down_cmd == ("expressvpnctl", "disconnect")
         assert na.custom_health_cmd == ("expressvpnctl", "status")
         assert prompts.answers == [], "only the two Tor prompts should have been asked"
+
+
+class TestSelectedHomeDefaults:
+    @pytest.mark.parametrize("clear", [False, True])
+    def test_omitted_paths_follow_policy_writer_home(self, tmp_path, monkeypatch, clear):
+        from mordred_hermes.wizard import network_cli as nc
+
+        selected = tmp_path / "selected home 日本語"
+        other = tmp_path / "import-time home"
+        monkeypatch.setattr(nc, "HERMES_BASE", other)
+        from mordred_hermes._private_fs import open_private_directory
+
+        with open_private_directory(selected, create=True) as directory, directory.transaction() as transaction:
+            transaction.create_bytes(".env", b"OTHER=keep\nMORDRED_MULLVAD_ACCOUNT=old\n")
+        prompts = _ScriptedPromptIO(
+            ["vpn", "mullvad", "jp", True] if clear else ["vpn", "mullvad", "new-secret", "jp", True]
+        )
+        assert (
+            run_init(
+                prompt_io=prompts,
+                policy_writer=_writer(selected),
+                env_writer=DotEnvFileWriter(),
+                credentials_writer=JSONCredentialsWriter(),
+                clear_mullvad=clear,
+            )
+            == 0
+        )
+        assert (selected / ".env").read_bytes() == (
+            b"OTHER=keep\n" if clear else b"OTHER=keep\nMORDRED_MULLVAD_ACCOUNT=new-secret\n"
+        )
+        import json
+
+        body = json.loads((selected / "mordred" / "credentials" / "network.json").read_bytes())
+        assert body["mullvad"]["relay_country"] == "jp"
+        assert not other.exists()
+
+
+class TestPosixPathOverrides:
+    def test_explicit_paths_reach_writers_under_posix_admission(self, tmp_path, monkeypatch):
+        """Model only POSIX adapter admission; host storage guards stay real."""
+        from types import SimpleNamespace
+
+        from mordred_hermes.wizard import network_cli, policy_writer
+
+        monkeypatch.setattr(
+            network_cli,
+            "_policy_writer",
+            SimpleNamespace(_windows=lambda: False, _canonical_paths=policy_writer._canonical_paths),
+        )
+        env_w = _SpyEnvFileWriter()
+        cred_w = _SpyCredentialsWriter()
+        env_path = tmp_path / "custom.env"
+        credentials_path = tmp_path / "credentials" / "custom-network.json"
+        assert (
+            run_init(
+                prompt_io=_ScriptedPromptIO(list(_ANSWERS_VPN_MULLVAD)),
+                policy_writer=_writer(tmp_path),
+                env_writer=env_w,
+                credentials_writer=cred_w,
+                env_path=env_path,
+                credentials_path=credentials_path,
+            )
+            == 0
+        )
+        assert env_w.calls == [(env_path, "MORDRED_MULLVAD_ACCOUNT", "MULL-secret-99")]
+        assert cred_w.calls == [(credentials_path, "MORDRED_MULLVAD_ACCOUNT", "jp", True)]
+        assert "default_path: vpn" in (tmp_path / "config.yaml").read_text(encoding="utf-8")

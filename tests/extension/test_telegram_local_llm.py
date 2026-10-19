@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
+import socket
+import time
 from dataclasses import replace
 from types import SimpleNamespace
 
+import aiohttp
 import pytest
 
 from mordred_hermes.extension.telegram import hermes_tools, secrets, service, store
@@ -125,12 +129,36 @@ def test_http_failure_reaches_tool_and_audit_without_secrets(status, code, ask_l
         assert secret not in exposed
 
 
-def test_closed_port_reports_connection_failure(ask_local):
-    with LocalLlmServer() as peer:
-        endpoint, origin = peer.endpoint, peer.origin
-    result, _ = ask_local(endpoint)
+def test_connector_error_reports_connection_failure(ask_local, monkeypatch):
+    calls = 0
+
+    def refused(_session, _url, **_kwargs):
+        nonlocal calls
+        calls += 1
+        key = SimpleNamespace(host="127.0.0.1", port=1, ssl=False)
+        raise aiohttp.ClientConnectorError(key, ConnectionRefusedError(errno.ECONNREFUSED, "synthetic refusal"))
+
+    monkeypatch.setattr(aiohttp.ClientSession, "post", refused)
+    result, _ = ask_local("http://127.0.0.1:1/v1")
     assert result["error"] == "local_llm_unavailable"
     assert result["detail"]["failure"] == "connection_failed"
+    assert result["detail"]["endpoint"] == "http://127.0.0.1:1"
+    assert "http_status" not in result["detail"]
+    assert calls == 1
+
+
+def test_closed_port_reports_connection_failure(ask_local):
+    # Keep ownership until the request completes: no other peer can reuse this port.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as refused:
+        refused.bind(("127.0.0.1", 0))
+        origin = f"http://127.0.0.1:{refused.getsockname()[1]}"
+        started = time.monotonic()
+        result, _ = ask_local(origin + "/v1", timeout=10)
+        elapsed = time.monotonic() - started
+    assert result["error"] == "local_llm_unavailable"
+    assert result["detail"]["failure"] == "connection_failed", (
+        f"failure={result['detail']['failure']}, elapsed={elapsed:.3f}s"
+    )
     assert result["detail"]["endpoint"] == origin
     assert "http_status" not in result["detail"]
 
@@ -154,7 +182,8 @@ def test_success_still_returns_the_local_answer(ask_local):
     assert not any(event["event"] == "telegram.ask.failed" for event in events)
 
 
-def test_authenticated_server_answers_after_cli_key_configuration(ask_local, monkeypatch, capsys):
+@pytest.mark.parametrize("windows_custody", [False, True])
+def test_authenticated_server_answers_after_cli_key_configuration(ask_local, monkeypatch, capsys, windows_custody):
     import argparse
 
     from mordred_hermes.wizard import _cli_parsers, telegram_cli
@@ -165,6 +194,11 @@ def test_authenticated_server_answers_after_cli_key_configuration(ask_local, mon
         assert result["error"] == "local_llm_unauthorized"
         monkeypatch.setenv("TEST_LOCAL_KEY", "LOCAL-SECRET")
         monkeypatch.setattr(telegram_cli, "_secret_store", lambda: vault)
+        monkeypatch.setattr(telegram_cli._windows_telegram, "routed", lambda: windows_custody)
+        if windows_custody:
+            # The in-memory custody substitute includes admission, independent of
+            # this host's real helper/profile. Real refusal is tested separately.
+            monkeypatch.setattr(telegram_cli._windows_telegram, "custody_code", lambda: None)
         parser = argparse.ArgumentParser()
         _cli_parsers._add_telegram(parser.add_subparsers())
         args = parser.parse_args(
@@ -185,3 +219,26 @@ def test_authenticated_server_answers_after_cli_key_configuration(ask_local, mon
         assert result["answer"] == "The budget moved."
         assert peer.requests[-1]["authorization"] == "Bearer LOCAL-SECRET"
     assert "LOCAL-SECRET" not in json.dumps([result, events]) + capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("reason", "diagnostic"), [("helper-missing", "tee_unavailable"), ("custody-unsafe", "custody-unsafe")]
+)
+def test_cli_custody_denial_does_not_update_synthetic_store(monkeypatch, capsys, reason, diagnostic):
+    from mordred_hermes.wizard import telegram_cli
+
+    vault = MemorySecrets("http://127.0.0.1:1/v1")
+    before = vault.value
+
+    def no_update(_mutate):
+        pytest.fail("custody refusal must precede credential updates")
+
+    monkeypatch.setattr(vault, "update", no_update)
+    monkeypatch.setattr(telegram_cli, "_secret_store", lambda: vault)
+    monkeypatch.setattr(telegram_cli._windows_telegram, "routed", lambda: True)
+    monkeypatch.setattr(telegram_cli._windows_telegram, "telegram_capability", lambda home=None: reason)
+    assert telegram_cli.telegram_local_llm(endpoint="http://127.0.0.1:2/v1", model="changed") == 1
+    assert vault.value is before
+    captured = capsys.readouterr()
+    assert diagnostic in captured.err
+    assert "Questions now go" not in captured.out

@@ -198,6 +198,13 @@ def _owned(path: Path, owners: Iterable[Path]) -> bool:
     return False
 
 
+def _member_sources(root: Path) -> Path | None:
+    """The member-build tree beside a managed venv, if its layout is recognized."""
+    if root.is_absolute() and root.name == "venv":
+        return root.parent / "workspace" / "plugin-sources"
+    return None
+
+
 def foreign_source(
     source: InstallSource,
     running: Path | None = None,
@@ -222,8 +229,9 @@ def foreign_source(
     if env is not None and env.in_venv:
         root = Path(env.prefix)
         owners.append(root)
-        if root.name == "venv":  # pm layout: the member builds beside the venv, nothing else there
-            owners.append(root.parent / "workspace" / "plugin-sources")
+        sources = _member_sources(root)
+        if sources is not None:
+            owners.append(sources)
     if not owners or _owned(running, owners):
         return None
     after_restart = fresh()
@@ -316,9 +324,26 @@ def install_source(dist: metadata.Distribution | None = None) -> InstallSource:
     return InstallSource(dist.version, kind, path, editable, inferred_extras(dist), str(site) if site else None)
 
 
-def built_from_member(source: InstallSource) -> bool:
-    """Whether this install is pm's build of the member rather than a user install."""
-    return source.kind == "path" and source.path is not None and "/plugin-sources/" in source.path.replace("\\", "/")
+def built_from_member(source: InstallSource, *, env: Environment) -> bool:
+    """Whether the source is a build inside this distribution's managed environment."""
+    if source.kind != "path" or not source.path or not env.in_venv:
+        return False
+    try:
+        prefix = Path(env.prefix)
+        path = Path(source.path)
+        if not prefix.is_absolute() or not path.is_absolute():
+            return False
+        venv = prefix.resolve(strict=True)
+        sources = _member_sources(venv)
+        if sources is None or not venv.is_dir():
+            return False
+        root = sources.resolve(strict=True)
+        if root != sources:  # neither workspace nor plugin-sources may redirect the trust root
+            return False
+        resolved = path.resolve(strict=True)
+        return resolved != root and resolved.is_relative_to(root) and resolved.is_dir()
+    except (OSError, ValueError, RuntimeError):  # Python 3.11 reports symlink loops as RuntimeError
+        return False
 
 
 def member_requirements(dist: metadata.Distribution, extras: Iterable[str]) -> list[str]:
@@ -494,7 +519,7 @@ def _ensure_member_locked(plugin_dir: Path, *, package_root: Path | None, dist: 
     dist = dist or _distribution()
     source = install_source(dist)
     root = package_root or _package_root()
-    if root.resolve().is_relative_to(plugin_dir.resolve()) or built_from_member(source):
+    if root.resolve().is_relative_to(plugin_dir.resolve()) or built_from_member(source, env=environment(dist)):
         # Running from the vendored copy itself, or from
         # pm's build of the member (its own copy under
         # environments/<id>/workspace/plugin-sources/). Its metadata no longer
