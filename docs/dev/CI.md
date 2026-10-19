@@ -496,6 +496,122 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 
 ## Manual live-device validation log
 
+- **2026-10-19 — macOS Ollama/Qwen3 local inference and Telegram archive questions.**
+  Source candidate `f87de8046ed20723e29e72051885636828a240cb` was exercised
+  on macOS 26.6.2 arm64 / Python 3.11.15 against the existing loopback
+  Ollama 0.40.3 service and `qwen3-14b-q4-4k:latest` (14.8B, Q4_K_M,
+  actual serving context 4096). No existing model settings were changed.
+  The original 64-token probe returned HTTP 200 but exhausted its budget
+  on reasoning, producing no visible answer. Keeping the same prompt,
+  streaming client and 30-second deadline while allowing 512 tokens
+  produced visible `OK` in 7.08 seconds. The probe-only budget correction
+  retains empty-answer and incomplete-stream refusal; it does not guarantee
+  success for every reasoning model.
+
+  The explicit `tests/integration/test_telegram_local_llm.py` run retained
+  its original probe failure; after the correction, the unchanged test
+  passed in 100.90 seconds, including saved-target configuration, a real
+  streamed probe and an actual `telegram_ask` answer. Independent English
+  and Japanese questions over the same synthetic encrypted message returned
+  the expected weekday, Monday, in 60.25 and 69.03 seconds. The English
+  answer added a calendar date absent from the message, and neither answer
+  cited its source: this validates transport and weekday retrieval, not
+  citation compliance or general answer quality. Archive encryption was
+  real; key custody and policy/memory guards used explicit test boundaries.
+  No real Telegram account, Telegram network connection or physical
+  Secure Enclave was used. This 4k-context result does not establish normal
+  64k Hermes chat readiness or large-archive acceptance. The existing
+  installed Hermes environment was not replaced.
+
+  One full source regression retained 8,062 passes, 84 failures and 295
+  skips, with 50 default deselections and 90.54% coverage. All 84 failures
+  were private harness environment errors: one used `HOME/.hermes` instead
+  of a distinct `HERMES_HOME`, and 83 invoked a mise Node shim whose trust
+  state was unavailable under the isolated HOME. With a separate test
+  Hermes home and the existing real Node 24.21.0 binary on PATH, the six
+  complete containing/affected modules passed all 147 cases. Every original
+  failed node passed; the reconciled original scope is 8,146 passes and 295
+  skips across multiple runs, not a single clean full run. Production code
+  did not change between these executions. The final critical preset passed
+  20 cases; Ruff, formatting and strict mypy also passed. No production home,
+  credentials or mise trust settings were modified.
+
+- **2026-10-18 — Maintenance repair validation on isolated Linux and Windows Server.**
+  The tested code is `2ed57454803fa588b520a301cb9b9896decc1017`.
+  On Ubuntu 24.04.5 / Python 3.12.3, the full source regression at
+  `be0368137332fd5f5fe821834dc7c48d021aaa7a` passed 8,048 cases, with
+  358 selected skips, two additional module collection skips and 50 default
+  deselections; coverage was 88.19%. The subsequent revisions changed five
+  test files only. Complete changed modules passed again on both operating
+  systems and both source/installed-wheel runtimes. Production, native,
+  build and dependency inputs remained identical; every independently rebuilt
+  wheel retained SHA-256
+  `64ad3da109ba90889c6dd2272ee414a38a5efb67f66f0d2d92d0a7c661f4c422`.
+  Linux's first wheel run retained its original 2,639 passes, 197 skips and one
+  packaging-fixture setup error. The corrected private build-data context
+  subsequently passed the complete three-case packaging-proof module without
+  changing installed imports. Real TPM tests passed twice per runtime; each
+  source/wheel transition checked 11 public operations. All four source/wheel
+  plain/authenticated local-LLM gates passed, including initial 401 then saved-key
+  success. The 0.5B model does not establish normal 64k Hermes chat readiness.
+
+  Windows Server 2025 / NTFS / Python 3.11.17 used an ordinary, non-elevated
+  token. Default collection selected 8,406 cases; this is collection evidence,
+  not a global Windows execution claim. The original four-shard 116-module
+  execution retained 3,756 passes, 384 skips and 21 failures. All 21 have exact
+  passing corrections from complete containing modules in both runtimes.
+  Combining those corrections with fresh N1 execution reconciles the same
+  4,161 scoped cases to 3,789 passes and 372 explicit prerequisite skips;
+  this is a multiple-run ledger, not a relabeled original run. The complete
+  frozen 67-module installed-wheel execution passed 2,552 cases with 285 skips
+  and zero failures/errors, outside the checkout with unchanged static/RECORD
+  payload. All 20 final validation controllers exited successfully.
+
+  Public configuration/network tests passed all 87 cases per runtime. Actual
+  CNG settings, Desktop settings, explicit private-source migration, inherited
+  confidential roundtrip and mixed dotenv concurrency gates passed in both
+  runtimes. Fresh distinct N1 fixtures passed 16 cases per runtime, with two
+  ordinary-token mutation skips. An additional complete six-case Telegram
+  module verified actual NTFS/SID/DACL/hardlink/junction/process-lock behavior
+  with its explicitly modeled CNG backend; real CNG proof remains separate.
+  All 294 original failure entries were reconciled individually: 151 exact
+  required-context passes and 143 qualified platform contracts with explicit
+  prerequisites, supported-context witnesses and native counterparts. All
+  211 source and 165 required wheel counterpart IDs passed. The 18 original
+  SQLCipher-dependent uninstall cases separately passed on supported macOS;
+  these are not Linux/Windows SQLCipher passes.
+
+  Both final runtime audits passed; all four new custody profiles had empty
+  Telegram generations, no memory lease and no archive payloads. No known
+  test process/listener or task-related visibility gap remained. Unrelated
+  process visibility gaps and historical inventory errors remain disclosed.
+  Both exact owned N1 roots were removed after admission. The selected Linux
+  retained inventory and Windows 68-root/1,902-file inventory were unchanged,
+  including the same three Windows historical errors and original retained
+  subset. The final Windows archive contained 81 independently hash-verified
+  JSON/XML evidence files. Original SSH ingress was restored, only the owned
+  backstops/forward were removed, and both validation instances were independently
+  confirmed stopped before local guard disarm; the unrelated fixture stayed
+  stopped. No production home, real Telegram account, existing custody key or
+  production gateway port 7788 was modified. Private receipts and exact ledger
+  are retained under `mordred-maintenance-failure-repair-20261018`, including
+  `final-acceptance-r5-03.md`. Earlier failed validation entries remain historical.
+
+- **2026-10-18 — Maintenance validation on isolated macOS worktrees.**
+  Python 3.11 editable imports were verified against each task worktree,
+  with task-local `HERMES_HOME` set before imports. The explicitly selected
+  `tests/test_wizard_windows_telegram_live.py` and
+  `tests/integration/test_telegram_local_llm.py` gates both skipped: this host
+  cannot run Windows CNG and has no configured real local inference model.
+  The CNG recipe now checks synthetic LLM-setting retention and endpoint-change
+  key removal through a fresh-process reload. The Desktop/Telegram native
+  selection skipped 9 cases. Dotenv's complete affected-module selection
+  skipped 6 Windows cases; a separate native selection skipped 28.
+  These are recorded selections, not native or live acceptance. Actual Windows
+  checked-filesystem/CNG and real local inference reruns remain open. No
+  production home, real Telegram account or existing custody key was used;
+  production gateway port 7788 was untouched.
+
 - **2026-10-15 — macOS Desktop package-change restart control.**
   With Hermes Desktop `v0.22.0+119` / Python 3.14.7 on arm64, reproduced the
   old button calling the messaging restart: only the statusbar changed,
@@ -1585,6 +1701,59 @@ completion acceptance matrix track later work and current open gates.
   Disabling memory encryption restored the whole file to plaintext, the same
   two entries remained readable through Hermes, and the temporary fact was
   absent. The pre-test gateway and encryption states were restored afterward.
+
+- **2026-10-18 — Linux and Windows Server maintenance validation (Windows acceptance failed).**
+  Candidate `e2e9095087ea04e4d5865eff223fa292c5711425` used verified source
+  and exact sdist-derived-wheel environments; Windows verified 117 dependencies
+  and 297 static members.
+
+  **Linux:** Ubuntu 24.04.5 LTS, Python 3.12.3, Hermes 0.19.0, actual
+  AMZN NitroTPM. Final source: **7,735 passed, 285 skipped, 50 deselected;
+  88.7161% coverage**, 8,018 runtime nodes reconciled. Earlier
+  umask/missing-uv and ignored-SIGINT input failures remain recorded; baseline
+  and signal controls justified umask 022, uv and normal-signal inputs without
+  weakening guards/assertions.
+  Controlled wheel: **1,355 passed, 11 failed, 25 skipped**; source-parent-only
+  injected-proof restrictions remain; those nodes passed in source.
+  No complete wheel pass is claimed. Actual TPM passed **two tests per
+  environment**; Desktop/CLI probes completed **22 fresh-process steps**.
+  Real-model doctor/`telegram_ask` passed **four plain/authenticated source/wheel
+  gates**, including 401 then saved-key success. Owned native keys were cleaned,
+  children/listeners cleared, **20,740 retained rows** matched; Linux stopped,
+  original ingress restored, guard disarmed, failed fixtures preserved.
+
+  **Windows Server 2025 Datacenter:** Python 3.11.17, Hermes 0.21.5. Native
+  validation passed **eight stages and fourteen postflight checks**, including
+  real CNG ceremonies. Global collection failed; **the same three errors
+  reproduced with baseline test modules under the candidate runtime**.
+  Frozen scoped source **109 modules / 3,556 nodes** completed FAILED:
+  **3,172 passed, 204 failed, 41 errors, 139 skipped**. Its native84 subset
+  (**2,704 nodes: 2,583 passed, one failed, 120 skipped**) retains the
+  SYSTEM-created junction failure: its DACL lacks ordinary/Everyone read
+  permission; actual ordinary opening returned `access_denied/open/native5`
+  before metadata. No repair/retry; native acceptance remains failed.
+  Original wheel: **1,217 passed, 195 failed, 76 errors, 35 skipped**;
+  recovery: **139 passed, 11 failed**. Baseline reproduced two exception
+  defects: status crashing with blocked cryptography and malformed-config
+  `ParserError`.
+
+  Extension API's eight findings are two Slack routing, two POSIX-mode and
+  four WebAuthn/history missing-file failures; four isolated candidate/baseline
+  HTTP passes cover only the Slack nodes. Combined source LLM's **nine
+  memory-guard failures remain unresolved**. Fresh LLM **eight passed/one
+  baseline failure** reports an authenticated-CLI missing helper/profile
+  custody-key refusal. Source Telegram TEE has one unresolved
+  `MemoryEncryptionRequired` direct-loopback failure beyond the wheel's
+  nineteen; fresh LLM observation did not cover it.
+  Ordinary audit: **67 roots, 1,633 selected hashes unchanged**, same two
+  historical errors. Intermediate pytest-temp preservation is not guaranteed.
+  Four recorded native custody states were empty after purge. No ordinary-SID
+  process remained; only the exact observer/launcher were found. PID0/Registry
+  metadata gaps and 86 historical process owners remain unknown. The owned
+  fixture/shutdown task were removed; SSM forwarding ended; both tested hosts and the shared-group
+  instance were independently confirmed stopped at **03:06:51Z**; the Windows
+  guard was then disarmed.
+  No Windows global/product, Windows 11 or whole-product acceptance is claimed.
 
 After changing a live-gated path, rerun the relevant command and append a dated
 result here. Do not replace the previous result without recording the new date.

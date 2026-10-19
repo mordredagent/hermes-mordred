@@ -182,7 +182,7 @@ def no_native_unwrap(env) -> None:
 @pytest.mark.parametrize("client_version", [1, 2])
 def test_old_client_on_windows_keeps_the_unsupported_shape_without_side_effects(monkeypatch, client_version):
     monkeypatch.setattr(api, "sys", SimpleNamespace(platform="win32"))
-    monkeypatch.setattr(api, "_JOBS", {})
+    monkeypatch.setattr(api, "_JOBS", api.JobRegistry(emit=lambda event, payload: api._emit(event, payload)))
 
     def unexpected(*args, **kwargs):
         pytest.fail("an older client must not reach capabilities, memory, credentials or a provider")
@@ -824,6 +824,35 @@ def test_windows_question_model_needs_the_role_and_the_acknowledgement(telegram,
     assert telegram.store.ensure_calls == [{"require_presence": False}]
     assert telegram.store.value is not None and telegram.store.value.backend in ("venice", "local")
     assert SECRET_VENICE not in json.dumps(result)
+
+
+def test_windows_local_endpoint_change_clears_key_in_one_acknowledged_update(telegram, monkeypatch):
+    from dataclasses import replace
+
+    from mordred_hermes.extension.telegram.service import TelegramService
+
+    original = replace(
+        tg_secrets.empty_secrets(),
+        backend="local",
+        local_endpoint="http://127.0.0.1:8080/v1",
+        local_model="old-model",
+        local_api_key="SYNTHETIC-LOCAL-KEY",
+    )
+    telegram.store.value = original
+
+    def no_load(**kwargs):
+        pytest.fail("settings updates must not unseal outside update()")
+
+    monkeypatch.setattr(telegram.store, "load", no_load)
+    body = {"endpoint": "http://localhost:8081/v1/", "model": " new-model "}
+    assert post(telegram.http, "/llm/local", body)["error"] == "presence_acknowledgement_required"
+    assert telegram.store.value is original and telegram.store.updates == 0
+    result = post(telegram.http, "/llm/local", {**body, "acknowledge_no_presence": True})
+    assert result == {"ok": True, "endpoint": "http://127.0.0.1:8081/v1"}
+    assert telegram.store.updates == 1 and telegram.store.ensure_calls == [{"require_presence": False}]
+    value = telegram.store.value
+    assert value.local_api_key is None and value.local_model == "new-model"
+    assert TelegramService._target(value).api_key is None
 
 
 def test_windows_api_store_is_the_c10b_custody_store(monkeypatch):

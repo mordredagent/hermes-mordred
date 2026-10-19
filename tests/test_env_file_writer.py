@@ -26,6 +26,10 @@ from pathlib import Path
 
 import pytest
 
+from tests._checked_fixture_helpers import assert_private, seed_private_file, seed_private_text
+from tests._checked_fixture_helpers import file_symlink as file_symlink
+from tests._checked_fixture_helpers import tmp_path as tmp_path
+
 
 class TestDotEnvFileWriter:
     def test_creates_file_with_0600_mode_when_absent(self, tmp_path: Path) -> None:
@@ -36,34 +40,50 @@ class TestDotEnvFileWriter:
         w.upsert(env_path, key="MORDRED_MULLVAD_ACCOUNT", value="abc123")
 
         assert env_path.exists()
-        mode = stat.S_IMODE(os.stat(env_path).st_mode)
-        assert mode == 0o600, f"expected 0o600, got 0o{mode:o}"
+        assert_private(env_path)
 
     def test_creates_parent_dir_with_0700_mode(self, tmp_path: Path) -> None:
         from mordred_hermes.wizard.env_file_writer import DotEnvFileWriter
 
         env_path = tmp_path / "freshdir" / ".env"
         DotEnvFileWriter().upsert(env_path, key="FOO", value="bar")
-        parent_mode = stat.S_IMODE(os.stat(env_path.parent).st_mode)
-        assert parent_mode == 0o700, f"parent mode {parent_mode:o}"
+        assert_private(env_path.parent, directory=True)
 
     def test_unreadable_existing_file_is_never_replaced(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from mordred_hermes.wizard import policy_writer
+        from mordred_hermes import _config_text_io
         from mordred_hermes.wizard.env_file_writer import DotEnvFileWriter
 
         env_path = tmp_path / ".env"
         original = b"OPENAI_API_KEY=keep-me\n"
-        env_path.write_bytes(original)
-        real_open = policy_writer.os.open
+        seed_private_file(env_path, original)
+        hits = []
+        if os.name == "nt":
+            from mordred_hermes._private_fs import PrivateFSError, _windows_io
 
-        def deny_target_read(path: object, *args: object, **kwargs: object) -> int:
-            if os.fspath(path) == os.fspath(env_path):
-                raise PermissionError("simulated ACL denial")
-            return real_open(path, *args, **kwargs)  # type: ignore[arg-type]
+            real_read = _windows_io._Transaction.read_bytes
 
-        monkeypatch.setattr(policy_writer.os, "open", deny_target_read)
-        with pytest.raises(PermissionError, match="ACL denial"):
+            def deny_read(tx, name, *, max_bytes):
+                if name == ".env":
+                    hits.append(name)
+                    raise PrivateFSError("unsafe", "injected_dotenv_read")
+                return real_read(tx, name, max_bytes=max_bytes)
+
+            monkeypatch.setattr(_windows_io._Transaction, "read_bytes", deny_read)
+            expected, message = PrivateFSError, "injected_dotenv_read"
+        else:
+            real_open = _config_text_io.os.open
+
+            def deny_target_read(path: object, *args: object, **kwargs: object) -> int:
+                if os.fspath(path) == os.fspath(env_path):
+                    hits.append(".env")
+                    raise PermissionError("simulated ACL denial")
+                return real_open(path, *args, **kwargs)  # type: ignore[arg-type]
+
+            monkeypatch.setattr(_config_text_io.os, "open", deny_target_read)
+            expected, message = PermissionError, "ACL denial"
+        with pytest.raises(expected, match=message):
             DotEnvFileWriter().upsert(env_path, key="MORDRED_MULLVAD_ACCOUNT", value="new")
+        assert hits == [".env"]
 
         assert env_path.read_bytes() == original
 
@@ -81,7 +101,7 @@ class TestDotEnvFileWriter:
         from mordred_hermes.wizard.env_file_writer import DotEnvFileWriter
 
         env_path = tmp_path / ".env"
-        env_path.write_text("FOO=old\nBAR=keep\n", encoding="utf-8")
+        seed_private_text(env_path, "FOO=old\nBAR=keep\n", encoding="utf-8")
         DotEnvFileWriter().upsert(env_path, key="FOO", value="new")
 
         body = env_path.read_text(encoding="utf-8")
@@ -93,7 +113,8 @@ class TestDotEnvFileWriter:
         from mordred_hermes.wizard.env_file_writer import DotEnvFileWriter
 
         env_path = tmp_path / ".env"
-        env_path.write_text(
+        seed_private_text(
+            env_path,
             "# user-owned env file\n"
             "# Mordred extends -- do not delete this header\n"
             "MY_OPENAI_KEY=sk-redacted\n"
@@ -112,7 +133,7 @@ class TestDotEnvFileWriter:
         from mordred_hermes.wizard.env_file_writer import DotEnvFileWriter
 
         env_path = tmp_path / ".env"
-        env_path.write_text("EXISTING=1\n", encoding="utf-8")
+        seed_private_text(env_path, "EXISTING=1\n", encoding="utf-8")
         DotEnvFileWriter().upsert(env_path, key="NEW_KEY", value="2")
 
         body = env_path.read_text(encoding="utf-8")
@@ -126,7 +147,7 @@ class TestDotEnvFileWriter:
         from mordred_hermes.wizard.env_file_writer import DotEnvFileWriter
 
         env_path = tmp_path / ".env"
-        env_path.write_text("FOO=existing\nBAR=keep\n", encoding="utf-8")
+        seed_private_text(env_path, "FOO=existing\nBAR=keep\n", encoding="utf-8")
         DotEnvFileWriter().upsert(env_path, key="FOO", value="")
 
         body = env_path.read_text(encoding="utf-8")
@@ -137,10 +158,25 @@ class TestDotEnvFileWriter:
         from mordred_hermes.wizard.env_file_writer import DotEnvFileWriter
 
         env_path = tmp_path / ".env"
-        env_path.write_text("BAR=keep\n", encoding="utf-8")
+        seed_private_file(env_path, b"BAR=keep\n")
         first_mtime = env_path.stat().st_mtime_ns
         DotEnvFileWriter().upsert(env_path, key="MORDRED_MULLVAD_ACCOUNT", value="")
         assert env_path.stat().st_mtime_ns == first_mtime, "empty value + absent key must no-op"
+
+    def test_crlf_normalizes_once_then_is_a_true_no_op(self, tmp_path: Path) -> None:
+        from mordred_hermes.wizard.env_file_writer import DotEnvFileWriter
+
+        env_path = tmp_path / ".env"
+        seed_private_file(env_path, b"BAR=old\r\n")
+        writer = DotEnvFileWriter()
+        writer.upsert(env_path, key="BAR", value="keep")
+        assert env_path.read_bytes() == b"BAR=keep\n"
+        before = env_path.stat()
+        writer.upsert(env_path, key="BAR", value="keep")
+        after = env_path.stat()
+        assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+        assert env_path.read_bytes() == b"BAR=keep\n"
+        assert_private(env_path)
 
     def test_refuses_invalid_key(self, tmp_path: Path) -> None:
         """Keys must be valid POSIX env-var names. ``foo`` lowercase, or
@@ -175,9 +211,8 @@ class TestDotEnvFileWriter:
         from mordred_hermes.wizard.env_file_writer import DotEnvFileWriter
 
         env_path = tmp_path / ".env"
-        env_path.write_text(
-            "OTHER=keep\nMORDRED_MULLVAD_ACCOUNT=old1\nMORDRED_MULLVAD_ACCOUNT=old2\n",
-            encoding="utf-8",
+        seed_private_text(
+            env_path, "OTHER=keep\nMORDRED_MULLVAD_ACCOUNT=old1\nMORDRED_MULLVAD_ACCOUNT=old2\n", encoding="utf-8"
         )
 
         DotEnvFileWriter().upsert(env_path, key="MORDRED_MULLVAD_ACCOUNT", value="new")
@@ -197,9 +232,8 @@ class TestDotEnvFileWriter:
         from mordred_hermes.wizard.env_file_writer import DotEnvFileWriter
 
         env_path = tmp_path / ".env"
-        env_path.write_text(
-            "OTHER=keep\nMORDRED_MULLVAD_ACCOUNT=old1\nMORDRED_MULLVAD_ACCOUNT=old2\n",
-            encoding="utf-8",
+        seed_private_text(
+            env_path, "OTHER=keep\nMORDRED_MULLVAD_ACCOUNT=old1\nMORDRED_MULLVAD_ACCOUNT=old2\n", encoding="utf-8"
         )
 
         DotEnvFileWriter().upsert(env_path, key="MORDRED_MULLVAD_ACCOUNT", value="")
@@ -210,15 +244,15 @@ class TestDotEnvFileWriter:
         )
         assert "OTHER=keep" in text
 
-    def test_refuses_symlink_without_touching_target(self, tmp_path: Path) -> None:
+    def test_refuses_symlink_without_touching_target(self, tmp_path: Path, file_symlink: None) -> None:
         from mordred_hermes.wizard.env_file_writer import DotEnvFileWriter
 
         target = tmp_path / "outside.env"
-        target.write_text("KEEP=secret\n", encoding="utf-8")
+        seed_private_text(target, "KEEP=secret\n", encoding="utf-8")
         env_path = tmp_path / ".env"
         env_path.symlink_to(target)
 
-        with pytest.raises(OSError, match="regular file"):
+        with pytest.raises(OSError, match="unsafe" if os.name == "nt" else "regular file"):
             DotEnvFileWriter().upsert(env_path, key="FOO", value="bar")
 
         assert env_path.is_symlink()
@@ -254,23 +288,24 @@ class TestDotEnvFileWriter:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        from mordred_hermes import _dotenv_io
         from mordred_hermes.extension import api as extension_api
         from mordred_hermes.wizard import env_file_writer
 
         env_path = tmp_path / ".env"
-        env_path.write_text("KEEP=unchanged\n", encoding="utf-8")
-        real_atomic_write = env_file_writer._atomic_write_text
-        slack_at_commit = threading.Event()
+        seed_private_text(env_path, "KEEP=unchanged\n", encoding="utf-8")
+        real_updated_env_text = extension_api._updated_env_text
+        slack_in_transform = threading.Event()
         release_slack = threading.Event()
         wizard_done = threading.Event()
         failures: list[BaseException] = []
 
-        def delayed_atomic_write(path: Path, text: str, *, mode: int | None = None) -> None:
-            if threading.current_thread().name == "slack-writer":
-                slack_at_commit.set()
-                if not release_slack.wait(timeout=5):
-                    raise RuntimeError("test release timed out")
-            real_atomic_write(path, text, mode=mode)
+        def delayed_transform(existing: str, updates: dict[str, str]) -> str:
+            # The transform runs inside both the POSIX and Windows transactions.
+            slack_in_transform.set()
+            if not release_slack.wait(timeout=5):
+                raise RuntimeError("test release timed out")
+            return real_updated_env_text(existing, updates)
 
         def write_slack() -> None:
             try:
@@ -290,16 +325,19 @@ class TestDotEnvFileWriter:
             finally:
                 wizard_done.set()
 
-        monkeypatch.setattr(env_file_writer, "_atomic_write_text", delayed_atomic_write)
+        monkeypatch.setattr(extension_api, "_updated_env_text", delayed_transform)
         slack = threading.Thread(target=write_slack, name="slack-writer")
         wizard = threading.Thread(target=write_wizard, name="wizard-writer")
         slack.start()
-        assert slack_at_commit.wait(timeout=5)
-        wizard.start()
-        assert not wizard_done.wait(timeout=0.1), "wizard bypassed the shared dotenv lock"
-        release_slack.set()
-        slack.join(timeout=5)
-        wizard.join(timeout=5)
+        try:
+            assert slack_in_transform.wait(timeout=5)
+            wizard.start()
+            assert not wizard_done.wait(timeout=0.1), "wizard bypassed the shared dotenv lock"
+        finally:
+            release_slack.set()
+            slack.join(timeout=5)
+            if wizard.ident is not None:
+                wizard.join(timeout=5)
 
         assert not slack.is_alive() and not wizard.is_alive()
         assert failures == []
@@ -307,7 +345,8 @@ class TestDotEnvFileWriter:
         assert "KEEP=unchanged" in text
         assert "SLACK_BOT_TOKEN=xoxb-new" in text
         assert "MORDRED_MULLVAD_ACCOUNT=account" in text
-        assert stat.S_IMODE((tmp_path / ".env.lock").stat().st_mode) == 0o600
+        if not _dotenv_io._windows():
+            assert stat.S_IMODE((tmp_path / ".env.lock").stat().st_mode) == 0o600
 
 
 class TestEnvFileWriterProtocol:

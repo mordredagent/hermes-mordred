@@ -12,14 +12,66 @@ import tomllib
 import venv
 import zipfile
 from collections.abc import Callable
+from contextlib import contextmanager
+from dataclasses import replace
 from importlib import metadata
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import pytest
 
 from mordred_hermes.desktop import install, member
+from tests._checked_fixture_helpers import file_symlink as file_symlink
+from tests._helpers import PlatformSys
+from tests._platform_test_helpers import directory_redirect as directory_redirect
+
+
+@pytest.fixture
+def posix_member_model(monkeypatch, tmp_path):
+    """Model POSIX orchestration/locking and synthetic URI paths on the host filesystem."""
+    from mordred_hermes import _file_lock
+
+    monkeypatch.setattr(member, "_platform", lambda: "linux")
+    monkeypatch.setattr(install, "_platform", lambda: "linux")
+    install_source = member.install_source
+
+    def fixture_install_source(dist=None):
+        source = install_source(dist)
+        if sys.platform != "win32" or dist is None or source.kind != "path":
+            return source
+        site = member._site_dir(dist)
+        if site is None or not site.is_relative_to(tmp_path):
+            return source
+        # The POSIX parser remains real; only this test's native file-URI
+        # representation needs adapting before real filesystem consumers run.
+        direct = json.loads(dist.read_text("direct_url.json"))
+        uri = urlparse(direct["url"])
+        assert uri.scheme == "file" and not uri.netloc
+        path = Path(url2pathname(uri.path))
+        assert path.is_absolute()
+        return replace(source, path=str(path))
+
+    monkeypatch.setattr(member, "install_source", fixture_install_source)
+    entered, exited = [], []
+
+    @contextmanager
+    def lock_boundary(path, *, nonblock, **_callbacks):
+        assert path.name == ".pm-member.lock" and nonblock is False
+        assert path.parent.name == "mordred"
+        entered.append(path)
+        path.touch(mode=0o600, exist_ok=True)
+        try:
+            yield
+        finally:
+            exited.append(path)
+
+    monkeypatch.setattr(_file_lock, "private_flock", lock_boundary)
+    yield
+    assert entered == exited
+
 
 DIST = metadata.distribution("hermes-mordred")
 SHIM = Path(install.__file__).parent / "assets" / "dashboard" / "plugin_api.py"
@@ -27,16 +79,18 @@ PTH_SOURCE = Path(__file__).resolve().parents[2] / "packaging" / "pth"
 BOOTSTRAPS = ("mordred_hermes_config_decrypt.pth", "mordred_hermes_runtime.pth")
 
 
-def _dist(pkg: Path, *, editable: bool = False) -> metadata.Distribution:
+def _dist(
+    pkg: Path, *, editable: bool = False, source: Path | None = None, site: Path | None = None
+) -> metadata.Distribution:
     """A distribution rooted in this fixture, never the runner's installation."""
-    info = pkg.parent / "hermes_mordred.dist-info"
+    info = (site or pkg.parent) / "hermes_mordred.dist-info"
     info.mkdir(exist_ok=True)
     (info / "METADATA").write_text(DIST.read_text("METADATA") or "")
     (info / "entry_points.txt").write_text(DIST.read_text("entry_points.txt") or "")
     (info / "RECORD").write_text("".join(f"{name},,\n" for name in BOOTSTRAPS))
-    if editable:
+    if editable or source is not None:
         (info / "direct_url.json").write_text(
-            json.dumps({"url": pkg.parent.parent.as_uri(), "dir_info": {"editable": True}})
+            json.dumps({"url": (source or pkg.parent.parent).as_uri(), "dir_info": {"editable": editable}})
         )
     return metadata.PathDistribution(info)
 
@@ -69,6 +123,7 @@ def test_base_requirements_without_extras() -> None:
     assert not any(r.lower().startswith(("argon2", "telethon", "pytest")) for r in reqs)
 
 
+@pytest.mark.usefixtures("posix_member_model")
 def test_ensure_member_writes_a_buildable_member_once(tmp_path: Path) -> None:
     pkg = _package(tmp_path)
     plugin_dir = tmp_path / "home" / "plugins" / "mordred"
@@ -95,6 +150,7 @@ def test_ensure_member_writes_a_buildable_member_once(tmp_path: Path) -> None:
     assert {p: p.stat().st_mtime_ns for p in before} == before
 
 
+@pytest.mark.usefixtures("posix_member_model")
 def test_ensure_member_refreshes_changed_and_stale_files(tmp_path: Path) -> None:
     pkg = _package(tmp_path)
     plugin_dir = tmp_path / "plugins" / "mordred"
@@ -114,6 +170,7 @@ def test_ensure_member_refreshes_changed_and_stale_files(tmp_path: Path) -> None
 
 
 @pytest.mark.parametrize("editable, name", [(False, BOOTSTRAPS[0]), (True, BOOTSTRAPS[1])])
+@pytest.mark.usefixtures("posix_member_model")
 def test_member_refuses_missing_bootstrap_before_updating_existing_member(
     tmp_path: Path, name: str, editable: bool
 ) -> None:
@@ -126,6 +183,8 @@ def test_member_refuses_missing_bootstrap_before_updating_existing_member(
     else:
         source_pth = pkg.parent
     dist = _dist(pkg, editable=editable)
+    if editable:
+        assert member.install_source(dist).path == str(pkg.parent.parent)
     plugin_dir = tmp_path / "plugins" / "mordred"
     member.ensure_member(plugin_dir, package_root=pkg, dist=dist)
     for filename in BOOTSTRAPS:
@@ -141,6 +200,7 @@ def test_member_refuses_missing_bootstrap_before_updating_existing_member(
 @pytest.mark.parametrize(
     "name, damage", [(BOOTSTRAPS[0], "missing"), (BOOTSTRAPS[1], "empty"), (BOOTSTRAPS[0], "unmapped")]
 )
+@pytest.mark.usefixtures("posix_member_model")
 def test_member_health_rejects_incomplete_bootstraps(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, damage: str
 ) -> None:
@@ -160,6 +220,7 @@ def test_member_health_rejects_incomplete_bootstraps(
     assert client.post("/api/plugins/mordred/repair", json={}).json()["error"] == "member_missing"
 
 
+@pytest.mark.usefixtures("posix_member_model")
 def test_built_member_wheel_preserves_and_executes_both_startup_bootstraps(tmp_path: Path) -> None:
     uv = shutil.which("uv")
     if uv is None:
@@ -220,6 +281,7 @@ def test_built_member_wheel_preserves_and_executes_both_startup_bootstraps(tmp_p
     assert not started.stderr
 
 
+@pytest.mark.usefixtures("posix_member_model")
 def test_ensure_member_keeps_dashboard_files_and_skips_symlinks(tmp_path: Path) -> None:
     pkg = _package(tmp_path)
     plugin_dir = tmp_path / "plugins" / "mordred"
@@ -227,11 +289,19 @@ def test_ensure_member_keeps_dashboard_files_and_skips_symlinks(tmp_path: Path) 
     (plugin_dir / "dashboard" / "plugin_api.py").write_text("shim")
     member.ensure_member(plugin_dir, package_root=pkg, dist=_dist(pkg))
     assert (plugin_dir / "dashboard" / "plugin_api.py").read_text() == "shim"
+
+
+@pytest.mark.usefixtures("posix_member_model", "file_symlink")
+def test_ensure_member_refuses_literal_symlink(tmp_path: Path) -> None:
+    pkg = _package(tmp_path)
+    plugin_dir = tmp_path / "plugins" / "mordred"
+    member.ensure_member(plugin_dir, package_root=pkg, dist=_dist(pkg))
     link = tmp_path / "plugins" / "linked"
     link.symlink_to(plugin_dir)
     assert member.ensure_member(link, package_root=pkg, dist=_dist(pkg)) is False
 
 
+@pytest.mark.usefixtures("posix_member_model")
 def test_member_status_and_remove(tmp_path: Path) -> None:
     pkg = _package(tmp_path)
     plugin_dir = tmp_path / "plugins" / "mordred"
@@ -246,6 +316,7 @@ def test_member_status_and_remove(tmp_path: Path) -> None:
     assert not any((plugin_dir / name).exists() for name in BOOTSTRAPS)
 
 
+@pytest.mark.usefixtures("posix_member_model")
 def test_editable_member_refuses_bootstraps_from_an_unrelated_checkout(tmp_path: Path) -> None:
     pkg = _package(tmp_path / "first")
     other = _package(tmp_path / "other")
@@ -254,8 +325,10 @@ def test_editable_member_refuses_bootstraps_from_an_unrelated_checkout(tmp_path:
     for name in BOOTSTRAPS:
         shutil.copyfile(PTH_SOURCE / name, pth / name)
     plugin_dir = tmp_path / "plugins" / "mordred"
+    dist = _dist(other, editable=True)
+    assert member.install_source(dist).path == str(other.parent.parent)
     with pytest.raises(OSError, match="editable"):
-        member.ensure_member(plugin_dir, package_root=pkg, dist=_dist(other, editable=True))
+        member.ensure_member(plugin_dir, package_root=pkg, dist=dist)
     assert member.member_status(plugin_dir) == {"present": False}
 
 
@@ -266,6 +339,7 @@ def test_install_source_reads_direct_url(tmp_path: Path) -> None:
     assert source.kind == ("path" if direct and '"file://' in direct else "pypi")
 
 
+@pytest.mark.usefixtures("posix_member_model")
 def test_install_ensure_member_only_on_pm_managed_hermes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[Path] = []
     monkeypatch.setattr(member, "ensure_member", lambda plugin_dir: calls.append(plugin_dir) or True)
@@ -276,6 +350,7 @@ def test_install_ensure_member_only_on_pm_managed_hermes(tmp_path: Path, monkeyp
     assert calls == [tmp_path / "plugins" / "mordred"]
 
 
+@pytest.mark.usefixtures("posix_member_model")
 def test_pm_reads_the_member_as_a_workspace_member(tmp_path: Path) -> None:
     """Hermes's own declaration reader accepts the member (needs a Hermes checkout's pm)."""
     declarations = pytest.importorskip("pm.plugin_declarations")
@@ -301,6 +376,7 @@ def _load_shim(monkeypatch: pytest.MonkeyPatch, plugin_dir: Path) -> ModuleType:
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "sys", PlatformSys("linux"))
     return module
 
 
@@ -325,6 +401,7 @@ def test_shim_reports_missing_mordred_and_refuses_repair_without_member(
     assert client.post("/api/plugins/mordred/repair", json={}).json()["error"] == "member_missing"
 
 
+@pytest.mark.usefixtures("posix_member_model")
 def test_shim_repair_runs_hermes_pm_install_venv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     plugin_dir = tmp_path / "plugins" / "mordred"
     pkg = _package(tmp_path)
@@ -367,6 +444,7 @@ def test_shim_uses_the_real_router_when_mordred_is_installed() -> None:
     assert module.router is api.router
 
 
+@pytest.mark.usefixtures("posix_member_model")
 def test_health_reports_version_environment_and_member(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("fastapi")
     from mordred_hermes import __version__
@@ -383,31 +461,57 @@ def test_health_reports_version_environment_and_member(tmp_path: Path, monkeypat
     assert body["member"] == {"present": False} and body["environment"]["prefix"] == sys.prefix
 
 
-def test_a_pm_built_install_never_rewrites_the_member(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from mordred_hermes.desktop import member
-
-    pm_copy = member.InstallSource(
-        "0.2.0a0",
-        "path",
-        "/h/installs/x/environments/abc/workspace/plugin-sources/mordred-7b50b48140f67e3d",
-        True,
-        (),
-    )
-    user = member.InstallSource("0.2.0a0", "path", "/Users/me/repos/hermes-mordred", False, ("macos",))
-    assert member.built_from_member(pm_copy)
-    assert not member.built_from_member(user)
-    assert not member.built_from_member(member.InstallSource("0.2.0a0", "pypi", None, False, ("macos",)))
+@pytest.mark.parametrize("editable", [False, True])
+@pytest.mark.usefixtures("posix_member_model")
+def test_a_pm_built_install_never_rewrites_the_member(tmp_path: Path, editable: bool) -> None:
     pkg = _package(tmp_path)
     plugin_dir = tmp_path / "plugins" / "mordred"
     member.ensure_member(plugin_dir, package_root=pkg, dist=_dist(pkg))
     (plugin_dir / BOOTSTRAPS[0]).unlink(missing_ok=True)
     before = {p.relative_to(plugin_dir): p.read_bytes() for p in plugin_dir.rglob("*") if p.is_file()}
-    monkeypatch.setattr(member, "install_source", lambda dist: pm_copy)
+    env_dir = tmp_path / "environments" / "abc123"
+    site, _ = _venv(env_dir / "venv")
+    source = env_dir / "workspace" / "plugin-sources" / "mordred-579d"
+    source.mkdir(parents=True)
+    pm_package = (source if editable else site) / "mordred_hermes"
+    shutil.copytree(pkg, pm_package)
+    dist = _dist(pm_package, source=source, site=site, editable=editable)
+    assert member.install_source(dist).path == str(source)
     for name in BOOTSTRAPS:
         (pkg.parent / name).unlink()
-    assert member.ensure_member(plugin_dir, package_root=pkg, dist=_dist(pkg)) is False
+    assert member.ensure_member(plugin_dir, package_root=pm_package, dist=dist) is False
     assert {p.relative_to(plugin_dir): p.read_bytes() for p in plugin_dir.rglob("*") if p.is_file()} == before
     assert member.member_status(plugin_dir)["valid"] is False
+
+
+@pytest.mark.parametrize("editable", [False, True])
+@pytest.mark.parametrize("location", ["arbitrary", "other-environment"])
+@pytest.mark.usefixtures("posix_member_model")
+def test_source_named_plugin_sources_still_records_member(tmp_path: Path, editable: bool, location: str) -> None:
+    site, _ = _venv(tmp_path / "environments" / "target" / "venv")
+    if location == "arbitrary":
+        source = tmp_path / "checkout" / "plugin-sources" / "mordred"
+    else:
+        source = tmp_path / "environments" / "other" / "workspace" / "plugin-sources" / "mordred"
+    pkg = _package(source)
+    if editable:
+        pth = source / "packaging" / "pth"
+        pth.mkdir(parents=True)
+        for name in BOOTSTRAPS:
+            shutil.copyfile(PTH_SOURCE / name, pth / name)
+    dist = _dist(pkg, source=source, site=site, editable=editable)
+    assert member.install_source(dist).path == str(source)
+    if not editable:
+        installed = site / "mordred_hermes"
+        shutil.copytree(pkg, installed)
+        for name in BOOTSTRAPS:
+            shutil.copyfile(PTH_SOURCE / name, site / name)
+        pkg = installed
+    plugin_dir = tmp_path / "home" / "plugins" / "mordred"
+    assert member.ensure_member(plugin_dir, package_root=pkg, dist=dist) is True
+    status = member.member_status(plugin_dir)
+    assert status["valid"] is True and status["source"] == "path"
+    assert (plugin_dir / "mordred_hermes" / "__init__.py").read_text() == "x = 1\n"
 
 
 # -- environment / foreign source -------------------------------------------------------------
@@ -435,6 +539,135 @@ class _FakeDist:
         return self._site / path
 
 
+@pytest.mark.parametrize("editable", [False, True])
+@pytest.mark.parametrize(
+    "location, managed",
+    [
+        ("member", True),
+        ("arbitrary", False),
+        ("other-environment", False),
+        ("prefix", False),
+        ("root", False),
+        ("missing", False),
+        ("relative", False),
+        ("symlink-escape", False),
+        ("file", False),
+    ],
+)
+def test_built_from_member_requires_resolved_target_membership(
+    tmp_path: Path, editable: bool, location: str, managed: bool, directory_redirect
+) -> None:
+    venv = tmp_path / "environments" / "target" / "venv"
+    _venv(venv)
+    sources = venv.parent / "workspace" / "plugin-sources"
+    sources.mkdir(parents=True)
+    paths = {
+        "member": sources / "mordred",
+        "arbitrary": tmp_path / "checkout" / "plugin-sources" / "mordred",
+        "other-environment": tmp_path / "environments" / "other" / "workspace" / "plugin-sources" / "mordred",
+        "prefix": sources.parent / "plugin-sources-other" / "mordred",
+        "root": sources,
+        "missing": sources / "missing",
+        "relative": Path("workspace/plugin-sources/mordred"),
+        "symlink-escape": sources / "escaped",
+        "file": sources / "file",
+    }
+    source = paths[location]
+    if location == "symlink-escape":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        directory_redirect(source, outside)
+    elif location == "file":
+        source.write_text("not a source tree")
+    elif location not in {"root", "missing", "relative"}:
+        source.mkdir(parents=True)
+    env = member.Environment(str(venv / "bin" / "python"), str(venv), True)
+    installed = member.InstallSource("0.2.0a1", "path", str(source), editable, ())
+    assert member.built_from_member(installed, env=env) is managed
+
+
+@pytest.mark.parametrize("in_venv, dirname", [(False, "venv"), (True, ".venv")])
+def test_built_from_member_requires_managed_venv_layout(tmp_path: Path, in_venv: bool, dirname: str) -> None:
+    venv = tmp_path / dirname
+    _venv(venv)
+    source = tmp_path / "workspace" / "plugin-sources" / "mordred"
+    source.mkdir(parents=True)
+    env = member.Environment(str(venv / "bin" / "python"), str(venv), in_venv)
+    installed = member.InstallSource("0.2.0a1", "path", str(source), False, ())
+    assert member.built_from_member(installed, env=env) is False
+
+
+@pytest.mark.parametrize("kind, path", [("pypi", None), ("path", None), ("path", ""), ("path", "bad\0path")])
+def test_built_from_member_rejects_invalid_source(tmp_path: Path, kind: str, path: str | None) -> None:
+    venv = tmp_path / "venv"
+    _venv(venv)
+    env = member.Environment(str(venv / "bin" / "python"), str(venv), True)
+    installed = member.InstallSource("0.2.0a1", kind, path, False, ())
+    assert member.built_from_member(installed, env=env) is False
+
+
+@pytest.mark.parametrize("error", [OSError("unreadable"), ValueError("invalid path")])
+def test_built_from_member_resolution_error_is_unmanaged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    venv = tmp_path / "venv"
+    _venv(venv)
+    source = tmp_path / "workspace" / "plugin-sources" / "mordred"
+    source.mkdir(parents=True)
+    env = member.Environment(str(venv / "bin" / "python"), str(venv), True)
+    installed = member.InstallSource("0.2.0a1", "path", str(source), False, ())
+
+    def fail(self: Path, *args: Any, **kwargs: Any) -> Path:
+        raise error
+
+    monkeypatch.setattr(Path, "resolve", fail)
+    assert member.built_from_member(installed, env=env) is False
+
+
+@pytest.mark.parametrize("redirect", ["workspace", "plugin-sources"])
+def test_built_from_member_rejects_redirected_sources_root(tmp_path: Path, redirect: str, directory_redirect) -> None:
+    venv = tmp_path / "environments" / "target" / "venv"
+    _venv(venv)
+    outside = tmp_path / "environments" / "other" / "workspace"
+    source = outside / "plugin-sources" / "mordred"
+    source.mkdir(parents=True)
+    workspace = venv.parent / "workspace"
+    if redirect == "workspace":
+        directory_redirect(workspace, outside)
+    else:
+        workspace.mkdir()
+        directory_redirect(workspace / "plugin-sources", outside / "plugin-sources")
+    env = member.Environment(str(venv / "bin" / "python"), str(venv), True)
+    installed = member.InstallSource("0.2.0a1", "path", str(workspace / "plugin-sources" / "mordred"), True, ())
+    assert member.built_from_member(installed, env=env) is False
+
+
+def test_built_from_member_accepts_alias_of_the_same_environment(tmp_path: Path, directory_redirect) -> None:
+    actual = tmp_path / "environments" / "target"
+    _venv(actual / "venv")
+    source = actual / "workspace" / "plugin-sources" / "mordred"
+    source.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    directory_redirect(alias, actual)
+    env = member.Environment(str(alias / "venv" / "bin" / "python"), str(alias / "venv"), True)
+    installed = member.InstallSource(
+        "0.2.0a1", "path", str(alias / "workspace" / "plugin-sources" / "mordred"), True, ()
+    )
+    assert member.built_from_member(installed, env=env) is True
+
+
+def test_built_from_member_rejects_symlink_loop(tmp_path: Path, directory_redirect) -> None:
+    venv = tmp_path / "venv"
+    _venv(venv)
+    sources = tmp_path / "workspace" / "plugin-sources"
+    sources.mkdir(parents=True)
+    loop = sources / "loop"
+    directory_redirect(loop, loop)
+    env = member.Environment(str(venv / "bin" / "python"), str(venv), True)
+    installed = member.InstallSource("0.2.0a1", "path", str(loop), True, ())
+    assert member.built_from_member(installed, env=env) is False
+
+
 def test_venv_root_finds_pyvenv_cfg_within_three_parents(tmp_path: Path) -> None:
     site, _ = _venv(tmp_path / "pm" / "venv")
     assert member._venv_root(site) == tmp_path / "pm" / "venv"
@@ -443,7 +676,8 @@ def test_venv_root_finds_pyvenv_cfg_within_three_parents(tmp_path: Path) -> None
     assert member._venv_root(plain) is None
 
 
-def test_environment_targets_the_venv_interpreter(tmp_path: Path) -> None:
+def test_environment_targets_the_venv_interpreter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(member, "_platform", lambda: "linux")
     venv = tmp_path / "pm" / "venv"
     site, exe = _venv(venv)
     got = member.environment(_FakeDist(site))  # type: ignore[arg-type]
@@ -547,7 +781,7 @@ def test_environment_info_reports_the_managed_environment(monkeypatch: pytest.Mo
         member, "environment", lambda: member.Environment("/x/bin/python", "/x/environments/abc123/venv", True)
     )
     info = member.environment_info()
-    assert info["prefix"] == "/x/environments/abc123/venv" and info["environment"] == "abc123"
+    assert info["prefix"] == str(Path("/x/environments/abc123/venv")) and info["environment"] == "abc123"
 
     def boom() -> member.Environment:
         raise metadata.PackageNotFoundError("hermes-mordred")

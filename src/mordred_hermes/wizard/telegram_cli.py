@@ -607,7 +607,9 @@ def _revoke_after_forget(
 
 
 def telegram_venice(*, model: str | None, secret_fn: InputFn = getpass.getpass, store: Any = None) -> int:
-    from ..extension.telegram.secrets import TelegramSecretsError
+    from ..extension.telegram.llm import LlmConfigError
+    from ..extension.telegram.llm_settings import KEEP_KEY, with_venice_settings
+    from ..extension.telegram.secrets import TelegramSecretsError, empty_secrets
 
     secrets_store = store if store is not None else _secret_store()
     windows = _windows_telegram.routed()
@@ -617,30 +619,18 @@ def telegram_venice(*, model: str | None, secret_fn: InputFn = getpass.getpass, 
             return _report(_windows_telegram.refine(code, secrets_store))
     key = secret_fn("Venice API key (hidden; Enter keeps the stored key): ").strip()
 
-    class _NoKey(Exception):
-        pass
-
     def mutate(old: Any) -> Any:
-        # Decided on the value update() already unsealed, so the whole command
-        # costs one Enclave unwrap (one Touch ID), not a load() plus an update().
-        if not key and (old is None or old.venice_api_key is None):
-            raise _NoKey
-        return replace(
-            old if old is not None else empty_secrets(),
-            venice_api_key=key or (old.venice_api_key if old else None),
-            venice_model=model if model else (old.venice_model if old else None),
-            backend="venice",
-        )
+        # Reuse the record update() already unsealed: one Enclave unwrap.
+        base = old if old is not None else empty_secrets()
+        return with_venice_settings(base, api_key=key if key else KEEP_KEY, model=model)
 
     try:
-        from ..extension.telegram.secrets import empty_secrets
-
         # Windows: update() itself verifies the enrolled role (presence is excluded there).
         ensure = None if windows else getattr(secrets_store, "ensure_key", None)
         if ensure is not None:
             ensure()  # public-key lookup / key creation only: no unseal
         secrets_store.update(mutate)
-    except _NoKey:
+    except LlmConfigError:
         _term.emit_error("no Venice API key given.")
         return 1
     except TelegramSecretsError as exc:
@@ -666,19 +656,6 @@ def _read_local_key(api_key: bool, api_key_env: str | None, clear_api_key: bool,
     return validate_local_api_key(raw_key)
 
 
-def _retained_local_key(old: Any, endpoint: str) -> str | None:
-    from ..extension.telegram.llm import LlmConfigError, normalize_local_endpoint
-
-    if old is not None:
-        try:
-            if normalize_local_endpoint(old.local_endpoint or "") == endpoint:
-                key: str | None = old.local_api_key
-                return key
-        except LlmConfigError:
-            pass
-    return None
-
-
 def telegram_local_llm(
     *,
     endpoint: str,
@@ -691,6 +668,7 @@ def telegram_local_llm(
 ) -> int:
     """Send questions to a model on THIS machine instead of Venice."""
     from ..extension.telegram.llm import LlmConfigError, normalize_local_endpoint
+    from ..extension.telegram.llm_settings import KEEP_KEY, with_local_settings
     from ..extension.telegram.secrets import TelegramSecretsError
 
     try:
@@ -719,16 +697,9 @@ def telegram_local_llm(
             ensure()
 
         def updated(old: Any) -> Any:
-            saved_key = key
-            if not api_key and api_key_env is None and not clear_api_key:
-                saved_key = _retained_local_key(old, canonical)
-            return replace(
-                old if old is not None else empty_secrets(),
-                backend="local",
-                local_endpoint=canonical,
-                local_model=model.strip(),
-                local_api_key=saved_key,
-            )
+            base = old if old is not None else empty_secrets()
+            key_option = key if api_key or api_key_env is not None or clear_api_key else KEEP_KEY
+            return with_local_settings(base, endpoint=canonical, model=model, api_key=key_option)
 
         secrets_store.update(updated)
     except TelegramSecretsError as exc:

@@ -28,7 +28,12 @@ from mordred_hermes.wizard import cli, configure, encryption_cli, network_cli, s
 from mordred_hermes.wizard._prompt_io import NonInteractiveAbort, _RefusingPromptIO
 from mordred_hermes.wizard.encryption_cli import WorkspacePaths
 from mordred_hermes.wizard.policy_writer import PolicyWriter
+from tests._checked_fixture_helpers import file_symlink as file_symlink
+from tests._checked_fixture_helpers import seed_private_file, seed_private_text
+from tests._checked_fixture_helpers import tmp_path as tmp_path
 from tests._helpers import _writer as _policy_writer
+from tests._platform_test_helpers import posix_modes as posix_modes
+from tests._platform_test_helpers import require_legacy_secret_store
 
 _STEP_HERMES = setup_cli._STEP_HERMES
 _STEP_CONFIGURE = setup_cli._STEP_CONFIGURE
@@ -210,6 +215,7 @@ def _force_steps_done(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
 def _build_keyvault(home: Path, keys: dict[str, bytes]) -> Path:
     """Materialize a keyvault under ``home`` with the given ``{key_id: digest}``."""
     root = _storage.resolve_keyvault_dir(home)
+    require_legacy_secret_store()
     _storage.ensure_layout(root)
     meta = _storage.load_meta(root)
     for key_id, digest in keys.items():
@@ -280,6 +286,7 @@ class TestRunSetupOrchestration:
         # which fails _check_dir_mode's own 0o700 requirement first and would
         # silently test the wrong code path.
         root = _storage.resolve_keyvault_dir(tmp_path)
+        require_legacy_secret_store()
         _storage.ensure_layout(root)
         meta_path = root / "meta.json"
         meta_path.write_text("{not json", encoding="utf-8")
@@ -502,7 +509,7 @@ class TestHermesStep:
         monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/hermes" if name == "hermes" else None)
         # A non-`plugins` top-level key is the upstream-authored evidence (F3):
         # `model` here stands in for whatever `hermes setup` itself writes.
-        (tmp_path / "config.yaml").write_text("model:\n  provider: openai\nplugins: {}\n", encoding="utf-8")
+        seed_private_text(tmp_path / "config.yaml", "model:\n  provider: openai\nplugins: {}\n", encoding="utf-8")
         complete, detail = setup_cli._probe_hermes(home=tmp_path)
         assert complete is True
         assert "upstream" in detail.lower()
@@ -514,7 +521,7 @@ class TestHermesStep:
         section is not evidence that upstream `hermes setup` ever ran -- Mordred's
         own `configure` step creates exactly this file."""
         monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/hermes" if name == "hermes" else None)
-        (tmp_path / "config.yaml").write_text("plugins: {}\n", encoding="utf-8")
+        seed_private_text(tmp_path / "config.yaml", "plugins: {}\n", encoding="utf-8")
         complete, detail = setup_cli._probe_hermes(home=tmp_path)
         assert complete is False
         assert "plugins" in detail.lower()
@@ -577,7 +584,7 @@ class TestHermesStep:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/hermes" if name == "hermes" else None)
-        (tmp_path / "config.yaml").write_text("model:\n  provider: openai\nplugins: {}\n", encoding="utf-8")
+        seed_private_text(tmp_path / "config.yaml", "model:\n  provider: openai\nplugins: {}\n", encoding="utf-8")
         assert setup_cli._probe_hermes(home=tmp_path)[0] is True
         runner = _FakeSetupRunner(rc=0)
 
@@ -624,7 +631,7 @@ class TestConfigureStep:
     def test_probe_incomplete_with_config_yaml_but_no_policy_json(self, tmp_path: Path) -> None:
         pw = _policy_writer(tmp_path)
         pw.config_path.parent.mkdir(parents=True, exist_ok=True)
-        pw.config_path.write_text("plugins: {}\n", encoding="utf-8")
+        seed_private_text(pw.config_path, "plugins: {}\n")
         complete, detail = setup_cli._probe_configure(policy_writer=pw)
         assert complete is False
         assert "policy.json" in detail
@@ -682,13 +689,11 @@ class TestConfigureStep:
 
     def test_partial_state_missing_llm_guard_section_is_incomplete(self, tmp_path: Path) -> None:
         pw = _policy_writer(tmp_path)
-        pw.config_path.parent.mkdir(parents=True, exist_ok=True)
-        pw.config_path.write_text(
+        seed_private_text(
+            pw.config_path,
             "plugins:\n  mordred_privacy_check:\n    policy: lenient\n  enabled: [mordred_privacy_check]\n",
-            encoding="utf-8",
         )
-        pw.policy_json_path.parent.mkdir(parents=True, exist_ok=True)
-        pw.policy_json_path.write_text("{}", encoding="utf-8")
+        seed_private_file(pw.policy_json_path, b"{}")
         complete, detail = setup_cli._probe_configure(policy_writer=pw)
         assert complete is False
         assert "llm_guard" in detail
@@ -705,14 +710,18 @@ class TestNetworkStep:
         assert complete is False
 
     def test_probe_complete_with_valid_default_path(self, tmp_path: Path) -> None:
-        (tmp_path / "config.yaml").write_text("plugins:\n  mordred_network:\n    default_path: tor\n", encoding="utf-8")
+        seed_private_text(
+            tmp_path / "config.yaml", "plugins:\n  mordred_network:\n    default_path: tor\n", encoding="utf-8"
+        )
         complete, detail = setup_cli._probe_network(config_path=tmp_path / "config.yaml")
         assert complete is True
         assert "tor" in detail
 
     def test_probe_incomplete_with_invalid_default_path_value(self, tmp_path: Path) -> None:
-        (tmp_path / "config.yaml").write_text(
-            "plugins:\n  mordred_network:\n    default_path: not-a-real-path\n", encoding="utf-8"
+        seed_private_text(
+            tmp_path / "config.yaml",
+            "plugins:\n  mordred_network:\n    default_path: not-a-real-path\n",
+            encoding="utf-8",
         )
         complete, _ = setup_cli._probe_network(config_path=tmp_path / "config.yaml")
         assert complete is False
@@ -820,6 +829,7 @@ class TestKeyvaultProbe:
         assert state == "absent"
 
     def test_empty_layout_with_no_keys_is_absent(self, tmp_path: Path) -> None:
+        require_legacy_secret_store()
         _storage.ensure_layout(_storage.resolve_keyvault_dir(tmp_path))
         state, _ = setup_cli._probe_keyvault(home=tmp_path)
         assert state == "absent"
@@ -830,6 +840,7 @@ class TestKeyvaultProbe:
         assert state == "initialised"
         assert "2 key" in detail
 
+    @pytest.mark.usefixtures("posix_modes")
     def test_unreadable_dir_mode_is_blocked(self, tmp_path: Path) -> None:
         root = _storage.resolve_keyvault_dir(tmp_path)
         root.mkdir(parents=True)  # left at the umask default, not 0o700
@@ -840,6 +851,7 @@ class TestKeyvaultProbe:
     @pytest.mark.parametrize("field_name", [_native_key_id.AUDIT_KEY_FIELD, _native_key_id.PENDING_AUDIT_KEY_FIELD])
     def test_residual_ownership_with_empty_keys_is_blocked(self, field_name: str, tmp_path: Path) -> None:
         root = _storage.resolve_keyvault_dir(tmp_path)
+        require_legacy_secret_store()
         _storage.ensure_layout(root)
         meta = _storage.load_meta(root)
         meta[field_name] = {"residual": True}
@@ -896,6 +908,13 @@ class TestResolveUnattendedKeys:
 
 
 class TestKeyvaultStep:
+    @pytest.fixture(autouse=True)
+    def posix_keyvault_step_model(self, monkeypatch):
+        """Delegation wiring; native Windows exclusion is tested separately."""
+        from tests._helpers import PlatformSys
+
+        monkeypatch.setattr(setup_cli, "sys", PlatformSys("linux"))
+
     def test_initialised_is_done_without_running(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         _build_keyvault(tmp_path, {"default": b"\x01" * 32})
         monkeypatch.setattr(setup_cli, "_run_keyvault_init", _raiser("must not run init_keyvault"))

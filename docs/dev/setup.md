@@ -200,7 +200,7 @@ released package:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --reinstall "hermes-mordred[macos,extension,ethereum]==0.3.0a3"
+  --reinstall "hermes-mordred[macos,extension,ethereum]==0.3.0a4"
 
 uv pip check --python ~/.hermes/hermes-agent/venv/bin/python3
 ~/.hermes/hermes-agent/venv/bin/python3 -c \

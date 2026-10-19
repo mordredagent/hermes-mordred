@@ -79,7 +79,7 @@ def test_unsupported_setup_refuses_before_starting_work(monkeypatch, platform, h
 @pytest.mark.parametrize("return_code, state, error", [(0, "done", None), (1, "failed", "enclave_build_failed")])
 def test_macos_enclave_build_still_reports_job_result(monkeypatch, return_code, state, error):
     monkeypatch.setattr(api, "sys", SimpleNamespace(platform="darwin"))
-    monkeypatch.setattr(api, "_JOBS", {})
+    monkeypatch.setattr(api, "_JOBS", api.JobRegistry(emit=lambda event, payload: api._emit(event, payload)))
     monkeypatch.setattr(api, "_emit", lambda *args: None)
     # The hardware builder is the only platform-dependent operation here.
     monkeypatch.setattr(keyvault_native_cli, "enable_se", lambda: return_code)
@@ -87,8 +87,8 @@ def test_macos_enclave_build_still_reports_job_result(monkeypatch, return_code, 
     async def run():
         started = await api.enclave_build()
         async with asyncio.timeout(5):
-            while api._JOBS[started["job_id"]].state == "running":
-                await asyncio.sleep(0.01)
+            job = api._JOBS.get(started["job_id"])
+            await asyncio.gather(job._task, return_exceptions=True)
         return await api.job_status(started["job_id"])
 
     result = asyncio.run(run())
@@ -144,15 +144,15 @@ def test_linux_memory_enable_does_not_create_vault_passphrase(monkeypatch, tmp_p
 
 def test_linux_hardware_build_dispatches_tpm(monkeypatch):
     monkeypatch.setattr(api, "sys", SimpleNamespace(platform="linux"))
-    monkeypatch.setattr(api, "_JOBS", {})
+    monkeypatch.setattr(api, "_JOBS", api.JobRegistry(emit=lambda event, payload: api._emit(event, payload)))
     monkeypatch.setattr(api, "_emit", lambda *a: None)
     monkeypatch.setattr(keyvault_native_cli, "enable_tpm", lambda: 0)
 
     async def run():
         started = await api.hardware_build()
         async with asyncio.timeout(5):
-            while api._JOBS[started["job_id"]].state == "running":
-                await asyncio.sleep(0.01)
+            job = api._JOBS.get(started["job_id"])
+            await asyncio.gather(job._task, return_exceptions=True)
         return await api.job_status(started["job_id"])
 
     assert asyncio.run(run())["state"] == "done"

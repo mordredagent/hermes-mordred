@@ -98,22 +98,30 @@ def observe(home: Path, *, blocking: bool = False) -> MemoryObservation:
     With ``blocking=False`` the scan joins a non-blocking canonical session, so a
     lock held by another process is reported as ``custody-uncertain``.
     """
-    from .._config_io import CanonicalPaths, canonical_session
-    from ..keyvault._memory_storage import verify_memory_purge_candidates
-    from ..keyvault._windows_capability import windows_capability
+    try:
+        from .._config_io import CanonicalPaths, canonical_session
+        from ..keyvault._memory_storage import verify_memory_purge_candidates
+        from ..keyvault._windows_capability import windows_capability
 
-    try:
-        capability = windows_capability(home, "memory_custody")
-    except _errors() as exc:
-        return MemoryObservation(None, None, classify_exception(exc), _describe(exc))
-    if capability.reason in CUSTODY_FAILURES:
-        return MemoryObservation(capability, None, capability.reason)
-    try:
-        with canonical_session(CanonicalPaths(home), scope="policy", blocking=blocking):
-            report = verify_memory_purge_candidates(home)
-    except _errors() as exc:
-        return MemoryObservation(capability, None, classify_exception(exc), _describe(exc))
-    return MemoryObservation(capability, report)
+        try:
+            capability = windows_capability(home, "memory_custody")
+        except _errors() as exc:
+            return MemoryObservation(None, None, classify_exception(exc), _describe(exc))
+        if capability.reason in CUSTODY_FAILURES:
+            return MemoryObservation(capability, None, capability.reason)
+        try:
+            with canonical_session(CanonicalPaths(home), scope="policy", blocking=blocking):
+                report = verify_memory_purge_candidates(home)
+        except _errors() as exc:
+            return MemoryObservation(capability, None, classify_exception(exc), _describe(exc))
+        return MemoryObservation(capability, report)
+    except ModuleNotFoundError as exc:
+        dependency = (exc.name or "").split(".", 1)[0]
+        if dependency not in {"cryptography", "argon2", "blake3"}:
+            raise
+        return MemoryObservation(
+            None, None, "custody-uncertain", f"optional crypto dependency unavailable: {dependency}"
+        )
 
 
 def _preflight(verb: str, observation: MemoryObservation) -> int | None:

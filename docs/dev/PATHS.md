@@ -494,6 +494,14 @@ private-file paths or POSIX permissions described in this document.
 `hermes-mordred upgrade` can detect `~/.openclaw/mordred/` and migrate the
 legacy audit log, policy snapshot/config, keyvault tree, and credentials tree.
 
+On Windows, checked source admission precedes provider reads, plugin identity
+changes and policy publication, including explicit targets and `--reset`.
+Any `audit.log`, `keyvault` or `credentials` source entry refuses without opening
+it or changing retained data. No legacy custody or audit copy is supported.
+Absent/empty sources and policy-only `openclaw.json` use a single bounded,
+checked snapshot; unsafe, inaccessible or invalid policy input refuses.
+A destination audit marker alone does not block a no-legacy upgrade.
+
 - Audit input must be plaintext UTF-8 NDJSON with valid object rows. Overlap
   requires `--audit-merge=skip|append-all|abort`; the migration marker prevents
   duplicate append on ordinary reruns.

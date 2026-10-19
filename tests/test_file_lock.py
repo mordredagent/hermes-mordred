@@ -3,7 +3,7 @@
 Covers :mod:`mordred_hermes._file_lock` -- the pure-stdlib module that
 single-sources the descriptor lifecycle four cross-process mutexes used to
 carry a near-verbatim copy of (``extension.pairing._state_lock``,
-``wizard.env_file_writer._dotenv_lock``,
+``_dotenv_io._dotenv_lock``,
 ``wizard.policy_writer._policy_write_lock``,
 ``keyvault._extension_config._wallet_file_lock``).
 
@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -40,11 +41,59 @@ import pytest
 
 from mordred_hermes import _file_lock
 from mordred_hermes._file_lock import LOCK_MODE, private_flock
+from tests._checked_fixture_helpers import file_symlink as file_symlink
+from tests._platform_test_helpers import posix_modes as posix_modes
+from tests._platform_test_helpers import rename_open_inode as rename_open_inode
 
 try:
     import fcntl as _fcntl
 except ImportError:  # pragma: no cover - non-POSIX fallback
     _fcntl = None  # type: ignore[assignment]
+
+
+class _LockOS:
+    O_RDWR, O_CREAT = 1, 2
+
+    def __init__(self):
+        self.events = []
+        self.mode = stat.S_IFREG | 0o600
+        self.next_fd = 100
+        self.open_error = None
+        self.stat_error = None
+        self.close_error = None
+
+    def open(self, path, flags, mode):
+        self.events.append(("open", str(path), flags, mode))
+        if self.open_error is not None:
+            raise self.open_error
+        self.next_fd += 1
+        return self.next_fd
+
+    def fstat(self, fd):
+        self.events.append(("fstat", fd))
+        if self.stat_error is not None:
+            raise self.stat_error
+        return types.SimpleNamespace(st_mode=self.mode)
+
+    def close(self, fd):
+        self.events.append(("close", fd))
+        if self.close_error is not None:
+            raise self.close_error
+
+
+@pytest.fixture
+def lock_model(monkeypatch):
+    """Descriptor lifecycle model; no native mode, no-follow or flock evidence."""
+    model = _LockOS()
+
+    def flock(fd, operation):
+        model.events.append(("flock", fd, operation))
+
+    monkeypatch.setattr(_file_lock, "os", model)
+    monkeypatch.setattr(_file_lock, "fcntl", types.SimpleNamespace(LOCK_EX=1, LOCK_UN=2, flock=flock))
+    for name, bit in (("_O_CLOEXEC", 4), ("_O_NOFOLLOW", 8), ("_O_NONBLOCK", 16)):
+        monkeypatch.setattr(_file_lock, name, bit)
+    return model
 
 
 class _Sentinel(Exception):
@@ -68,6 +117,7 @@ def _boom_lock(lock_path: Path, exc: OSError) -> NoReturn:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.usefixtures("posix_modes")
 def test_creates_an_absent_lock_file_at_mode_0600(tmp_path: Path) -> None:
     lock = tmp_path / ".thing.lock"
     with private_flock(lock, on_unsafe=_boom_unsafe):
@@ -76,6 +126,7 @@ def test_creates_an_absent_lock_file_at_mode_0600(tmp_path: Path) -> None:
     assert stat.S_IMODE(lock.stat().st_mode) == LOCK_MODE
 
 
+@pytest.mark.usefixtures("posix_modes")
 def test_reuses_an_existing_private_lock_file(tmp_path: Path) -> None:
     lock = tmp_path / ".thing.lock"
     lock.touch(mode=LOCK_MODE)
@@ -86,32 +137,32 @@ def test_reuses_an_existing_private_lock_file(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("widened", [0o644, 0o660, 0o777])
+@pytest.mark.usefixtures("posix_modes")
 def test_refuses_a_lock_file_whose_mode_was_widened(tmp_path: Path, widened: int) -> None:
     """A lock nobody else can be excluded from is worse than no lock at all."""
     lock = tmp_path / ".thing.lock"
     lock.touch()
     os.chmod(lock, widened)
 
-    with pytest.raises(_Sentinel, match=f"unsafe:{lock}"), private_flock(lock, on_unsafe=_boom_unsafe):
+    with pytest.raises(_Sentinel, match=re.escape(f"unsafe:{lock}")), private_flock(lock, on_unsafe=_boom_unsafe):
         raise AssertionError("the guarded body must not run for an unsafe lock")  # pragma: no cover
 
 
-def test_refuses_a_lock_path_that_is_a_directory(tmp_path: Path) -> None:
+def test_refuses_a_lock_path_that_is_a_directory(tmp_path, lock_model):
     lock = tmp_path / ".thing.lock"
-    lock.mkdir(mode=LOCK_MODE)
-
-    # os.open(O_RDWR) on a directory fails with EISDIR before the mode check,
-    # so this exercises the open-error handler rather than on_unsafe.
+    error = OSError(errno.EISDIR, "is a directory")
+    lock_model.open_error = error
     with (
-        pytest.raises(_Sentinel, match=f"open:{lock}") as caught,
+        pytest.raises(_Sentinel, match=re.escape(f"open:{lock}")) as caught,
         private_flock(lock, on_unsafe=_boom_unsafe, on_open_error=_boom_open),
     ):
-        pass
-    cause = caught.value.__cause__
-    assert isinstance(cause, OSError) and cause.errno == errno.EISDIR
+        pytest.fail("body reached")
+    assert caught.value.__cause__ is error
+    assert [event[0] for event in lock_model.events] == ["open"]
 
 
 @pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="platform has no O_NOFOLLOW")
+@pytest.mark.usefixtures("posix_modes", "file_symlink")
 def test_refuses_to_follow_a_symlinked_lock_path(tmp_path: Path) -> None:
     """The whole point of O_NOFOLLOW: a planted symlink must not redirect the lock."""
     victim = tmp_path / "victim"
@@ -120,7 +171,7 @@ def test_refuses_to_follow_a_symlinked_lock_path(tmp_path: Path) -> None:
     lock.symlink_to(victim)
 
     with (
-        pytest.raises(_Sentinel, match=f"open:{lock}") as caught,
+        pytest.raises(_Sentinel, match=re.escape(f"open:{lock}")) as caught,
         private_flock(lock, on_unsafe=_boom_unsafe, on_open_error=_boom_open),
     ):
         pass
@@ -128,16 +179,15 @@ def test_refuses_to_follow_a_symlinked_lock_path(tmp_path: Path) -> None:
     assert isinstance(cause, OSError) and cause.errno in (errno.ELOOP, errno.EMLINK)
 
 
-def test_without_an_open_handler_the_original_oserror_propagates(tmp_path: Path) -> None:
-    """``pairing._state_lock``'s behaviour: no wrapping, no errno rewrite."""
-    lock = tmp_path / "absent-dir" / ".thing.lock"
-
-    with pytest.raises(OSError) as caught, private_flock(lock, on_unsafe=_boom_unsafe):
-        pass
-    assert caught.value.errno == errno.ENOENT
-    assert caught.type is FileNotFoundError
+def test_without_an_open_handler_the_original_oserror_propagates(tmp_path, lock_model):
+    error = FileNotFoundError(errno.ENOENT, "missing")
+    lock_model.open_error = error
+    with pytest.raises(FileNotFoundError) as caught, private_flock(tmp_path / "lock", on_unsafe=_boom_unsafe):
+        pytest.fail("body reached")
+    assert caught.value is error
 
 
+@pytest.mark.usefixtures("posix_modes", "rename_open_inode")
 def test_the_mode_check_reads_the_opened_descriptor_not_the_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -215,37 +265,20 @@ def test_releases_the_lock_when_the_guarded_body_raises(tmp_path: Path) -> None:
     assert _lock_is_free(lock)
 
 
-def test_closes_the_descriptor_on_both_the_happy_and_failing_paths(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    opened: list[int] = []
-    closed: list[int] = []
-    real_open, real_close = os.open, os.close
-
-    def spy_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
-        fd = real_open(path, flags, *args, **kwargs)
-        opened.append(fd)
-        return fd
-
-    def spy_close(fd: int) -> None:
-        closed.append(fd)
-        real_close(fd)
-
-    monkeypatch.setattr(os, "open", spy_open)
-    monkeypatch.setattr(os, "close", spy_close)
-
-    lock = tmp_path / ".thing.lock"
-    with private_flock(lock, on_unsafe=_boom_unsafe):
-        pass
-    with pytest.raises(RuntimeError), private_flock(lock, on_unsafe=_boom_unsafe):
-        raise RuntimeError("boom")
-
-    assert len(opened) == 2
-    assert set(opened) <= set(closed)
+def test_closes_the_descriptor_on_both_the_happy_and_failing_paths(tmp_path, lock_model):
+    for fail in (False, True):
+        try:
+            with private_flock(tmp_path / "lock", on_unsafe=_boom_unsafe):
+                if fail:
+                    raise RuntimeError("body")
+        except RuntimeError:
+            assert fail
+    assert [event[0] for event in lock_model.events] == ["open", "fstat", "flock", "flock", "close"] * 2
+    assert lock_model.events[4] == ("close", 101)
+    assert lock_model.events[9] == ("close", 102)
 
 
-@pytest.mark.skipif(_fcntl is None, reason="fcntl is unavailable")
-def test_a_flock_failure_reaches_the_lock_handler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_flock_failure_reaches_the_lock_handler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_model) -> None:
     import mordred_hermes._file_lock as file_lock
 
     def refuse(fd: int, operation: int) -> None:
@@ -255,14 +288,15 @@ def test_a_flock_failure_reaches_the_lock_handler(tmp_path: Path, monkeypatch: p
 
     lock = tmp_path / ".thing.lock"
     with (
-        pytest.raises(_Sentinel, match=f"flock:{lock}"),
+        pytest.raises(_Sentinel, match=re.escape(f"flock:{lock}")),
         private_flock(lock, on_unsafe=_boom_unsafe, on_lock_error=_boom_lock),
     ):
         pass
 
 
-@pytest.mark.skipif(_fcntl is None, reason="fcntl is unavailable")
-def test_without_a_lock_handler_a_flock_failure_propagates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_without_a_lock_handler_a_flock_failure_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_model
+) -> None:
     import mordred_hermes._file_lock as file_lock
 
     def refuse(fd: int, operation: int) -> None:
@@ -276,8 +310,9 @@ def test_without_a_lock_handler_a_flock_failure_propagates(tmp_path: Path, monke
     assert caught.value.errno == errno.ENOLCK
 
 
-@pytest.mark.skipif(_fcntl is None, reason="fcntl is unavailable")
-def test_unlock_errors_are_swallowed_only_when_asked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unlock_errors_are_swallowed_only_when_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_model
+) -> None:
     """``_wallet_file_lock`` swallows them so teardown cannot mask the real error."""
     import mordred_hermes._file_lock as file_lock
 
@@ -303,54 +338,34 @@ def test_unlock_errors_are_swallowed_only_when_asked(tmp_path: Path, monkeypatch
 # --------------------------------------------------------------------------- #
 
 
-def _flags_used(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, nonblock: bool) -> int:
-    seen: list[int] = []
-    real_open = os.open
+def _flags_used(tmp_path, monkeypatch, *, nonblock):
+    seen = []
+    real_open = _file_lock.os.open
 
-    def spy_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+    def spy_open(path, flags, mode):
         seen.append(flags)
-        return real_open(path, flags, *args, **kwargs)
+        return real_open(path, flags, mode)
 
-    monkeypatch.setattr(os, "open", spy_open)
-    with private_flock(tmp_path / ".thing.lock", on_unsafe=_boom_unsafe, nonblock=nonblock):
+    monkeypatch.setattr(_file_lock.os, "open", spy_open)
+    with private_flock(tmp_path / "lock", on_unsafe=_boom_unsafe, nonblock=nonblock):
         pass
     return seen[0]
 
 
-def test_open_flags_are_private_and_nofollow_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    flags = _flags_used(tmp_path, monkeypatch, nonblock=True)
-    assert flags & os.O_RDWR == os.O_RDWR
-    assert flags & os.O_CREAT
-    for name in ("O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK"):
-        bit = getattr(os, name, 0)
-        assert not bit or flags & bit, f"{name} missing from the lock open flags"
+def test_open_flags_are_private_and_nofollow_by_default(tmp_path, monkeypatch, lock_model):
+    assert _flags_used(tmp_path, monkeypatch, nonblock=True) == 1 | 2 | 4 | 8 | 16
 
 
-def test_nonblock_false_omits_only_o_nonblock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``_wallet_file_lock`` never passed O_NONBLOCK; everything else is unchanged."""
-    flags = _flags_used(tmp_path, monkeypatch, nonblock=False)
-    nonblock = getattr(os, "O_NONBLOCK", 0)
-    assert not nonblock or not flags & nonblock
-    for name in ("O_NOFOLLOW", "O_CLOEXEC"):
-        bit = getattr(os, name, 0)
-        assert not bit or flags & bit
+def test_nonblock_false_omits_only_o_nonblock(tmp_path, monkeypatch, lock_model):
+    assert _flags_used(tmp_path, monkeypatch, nonblock=False) == 1 | 2 | 4 | 8
 
 
-def test_holds_no_reentrancy_state_of_its_own(tmp_path: Path) -> None:
-    """Sequential entries are independent -- exactly as in every original copy.
-
-    ``private_flock`` opens a fresh descriptor per entry and keeps no
-    thread-local depth counter: the reentrancy bookkeeping that lets
-    ``policy_writer`` nest transactions stays in ``policy_writer``, and the
-    other three call sites deliberately have none. (Nesting two entries on one
-    path in one thread would block on ``flock`` here just as it would have
-    before the refactor, so that is not something this helper newly permits.)
-    """
-    lock = tmp_path / ".thing.lock"
+def test_holds_no_reentrancy_state_of_its_own(tmp_path, lock_model):
     for _ in range(3):
-        with private_flock(lock, on_unsafe=_boom_unsafe):
-            assert stat.S_IMODE(lock.stat().st_mode) == LOCK_MODE
-    assert _fcntl is None or _lock_is_free(lock)
+        with private_flock(tmp_path / "lock", on_unsafe=_boom_unsafe):
+            pass
+    assert [event[1] for event in lock_model.events if event[0] == "close"] == [101, 102, 103]
+    assert [event[0] for event in lock_model.events] == ["open", "fstat", "flock", "flock", "close"] * 3
 
 
 # --------------------------------------------------------------------------- #
@@ -362,34 +377,30 @@ def _returning_handler(*_args: object) -> None:
     return None
 
 
-def test_a_returning_on_unsafe_handler_is_refused_and_the_body_never_runs(tmp_path: Path) -> None:
-    lock = tmp_path / "lock"
-    lock.touch()
-    os.chmod(lock, 0o644)
-    ran = False
+@pytest.mark.parametrize("mode", [stat.S_IFREG | 0o644, stat.S_IFDIR | 0o600])
+def test_a_returning_on_unsafe_handler_is_refused_and_the_body_never_runs(tmp_path, lock_model, mode):
+    lock_model.mode = mode
     with (
         pytest.raises(RuntimeError, match="on_unsafe returned"),
-        private_flock(lock, on_unsafe=cast(Any, _returning_handler)),
+        private_flock(tmp_path / "lock", on_unsafe=cast(Any, _returning_handler)),
     ):
-        ran = True
-    assert not ran
+        pytest.fail("body reached")
+    assert [event[0] for event in lock_model.events] == ["open", "fstat", "close"]
 
 
-def test_a_returning_on_open_error_handler_is_refused(tmp_path: Path) -> None:
-    ran = False
+def test_a_returning_on_open_error_handler_is_refused(tmp_path, lock_model):
+    lock_model.open_error = OSError(errno.EACCES, "denied")
     with (
         pytest.raises(RuntimeError, match="on_open_error returned"),
-        private_flock(
-            tmp_path / "missing-parent" / "lock",
-            on_unsafe=cast(Any, _returning_handler),
-            on_open_error=cast(Any, _returning_handler),
-        ),
+        private_flock(tmp_path / "lock", on_unsafe=_boom_unsafe, on_open_error=cast(Any, _returning_handler)),
     ):
-        ran = True
-    assert not ran
+        pytest.fail("body reached")
+    assert [event[0] for event in lock_model.events] == ["open"]
 
 
-def test_a_returning_on_lock_error_handler_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_returning_on_lock_error_handler_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_model
+) -> None:
     real = _file_lock.fcntl
     assert real is not None
 
@@ -408,3 +419,23 @@ def test_a_returning_on_lock_error_handler_is_refused(tmp_path: Path, monkeypatc
     ):
         ran = True
     assert not ran
+
+
+@pytest.mark.parametrize("point", ["fstat", "close"])
+def test_descriptor_errors_propagate_after_required_cleanup(tmp_path, lock_model, point):
+    error = OSError(errno.EBADF, "descriptor fault")
+    setattr(lock_model, "stat_error" if point == "fstat" else "close_error", error)
+    with pytest.raises(OSError) as caught, private_flock(tmp_path / "lock", on_unsafe=_boom_unsafe):
+        assert point == "close"
+    assert caught.value is error
+    assert lock_model.events[-1] == ("close", 101)
+
+
+@pytest.mark.skipif(_fcntl is None, reason="actual fcntl.flock process-exclusion capability")
+@pytest.mark.usefixtures("posix_modes")
+def test_real_sequential_entries_keep_private_mode_and_release(tmp_path):
+    lock = tmp_path / ".thing.lock"
+    for _ in range(3):
+        with private_flock(lock, on_unsafe=_boom_unsafe):
+            assert stat.S_IMODE(lock.stat().st_mode) == LOCK_MODE
+    assert _lock_is_free(lock)

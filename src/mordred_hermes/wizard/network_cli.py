@@ -38,12 +38,14 @@ from typing import Any
 from ruamel.yaml.error import YAMLError
 
 from .._home import HERMES_BASE
+from .._private_fs import PrivateFSError
 from .._yaml_io import load_plugin_section
 from ..network import api
 from ..network._exceptions import MordredNetworkError
 from ..network.guidance import dependency_warning
 from ..network.settings import read_default_path
 from . import _term
+from . import policy_writer as _policy_writer
 from ._network_answers import (
     _VALID_PATHS,
     NetworkAnswers,
@@ -192,7 +194,10 @@ def _write_default_path_to_config(config_path: Path, default_path: str) -> None:
     """
     from .policy_writer import PolicyWriter
 
-    PolicyWriter(config_path=config_path).merge_mordred_sections({"mordred_network": {"default_path": default_path}})
+    mordred = config_path.parent / "mordred"
+    PolicyWriter(config_path, mordred / "policy.json", mordred).merge_mordred_sections(
+        {"mordred_network": {"default_path": default_path}}
+    )
 
 
 def _read_default_path_from_config(config_path: Path) -> str:
@@ -284,9 +289,10 @@ def _persist_network(
     from ``network init``.
     """
     na = inputs.network_answers
-    resolved_env_path = env_path if env_path is not None else (HERMES_BASE / ".env")
+    home = policy_writer.config_path.parent
+    resolved_env_path = env_path if env_path is not None else (home / ".env")
     resolved_credentials_path = (
-        credentials_path if credentials_path is not None else (HERMES_BASE / "mordred" / "credentials" / "network.json")
+        credentials_path if credentials_path is not None else (home / "mordred" / "credentials" / "network.json")
     )
     # ``secret_written`` / ``secret_cleared`` are bools (never the plaintext); the
     # secret itself is accessed only inline at the upsert call, so it never sits
@@ -294,6 +300,22 @@ def _persist_network(
     # could surface it (Codex review 2026-06-05).
     secret_written = False
     secret_cleared = False
+    if _policy_writer._windows():
+        try:
+            # Structural admission only: each consumer still owns its
+            # checked filesystem session and publication outcome.
+            paths = _policy_writer._canonical_paths(
+                policy_writer.config_path, policy_writer.policy_json_path, policy_writer.mordred_dir
+            )
+            if (
+                policy_writer.mordred_dir != paths.home / "mordred"
+                or resolved_env_path != paths.home / ".env"
+                or resolved_credentials_path != paths.home / "mordred" / "credentials" / "network.json"
+            ):
+                raise ValueError("network persistence requires canonical selected-home paths")
+        except (ValueError, PrivateFSError):
+            _term.emit_error("invalid network configuration; repair config.yaml before retrying")
+            return 1
     try:
         try:
             policy_writer.merge_mordred_sections({"mordred_network": na.to_config_yaml_section()})
@@ -340,7 +362,8 @@ def handle_init(args: argparse.Namespace) -> int:
     non_interactive = bool(getattr(args, "non_interactive", False))
     clear_mullvad = bool(getattr(args, "clear_mullvad", False))
     config_path = _resolve_config_path(args)
-    policy_writer = PolicyWriter(config_path=config_path)
+    mordred = config_path.parent / "mordred"
+    policy_writer = PolicyWriter(config_path, mordred / "policy.json", mordred)
     env_writer = DotEnvFileWriter()
     credentials_writer = JSONCredentialsWriter()
 

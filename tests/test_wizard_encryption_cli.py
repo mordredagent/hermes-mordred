@@ -27,6 +27,9 @@ from mordred_hermes.keyvault._config_bootstrap import _marker_path
 from mordred_hermes.keyvault._memory_hook import memory_marker_path, memory_optout_marker_path
 from mordred_hermes.keyvault.memory_crypto import seal
 from mordred_hermes.wizard import encryption_cli
+from tests._checked_fixture_helpers import file_symlink as file_symlink
+from tests._platform_test_helpers import posix_modes as posix_modes
+from tests._platform_test_helpers import require_legacy_file_vault
 
 from ._helpers import _init_empty_vault
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend
@@ -52,13 +55,27 @@ class TestEnrolledNames:
     def test_lists_enrolled_names_without_keys(self, tmp_path: Path) -> None:
         root = tmp_path / "v"
         backend, store = FakeBackend(), FakeAnchorStore()
+        require_legacy_file_vault()
         _init_empty_vault(root, backend, store)
         _enroll(root, ".env", b"A=1\n", backend, store)
 
         # No backend / store / passphrase passed — purely reads the plaintext manifest body.
         assert ".env" in encryption_cli._enrolled_names(root)
 
-    def test_degrades_without_crypto_stack_in_subprocess(self) -> None:
+    @pytest.mark.parametrize(
+        "platform,command",
+        [
+            ("native", ["status"]),
+            ("win32", ["status"]),
+            ("win32", ["status", "--json"]),
+            ("win32", ["encryption", "status"]),
+            ("win32", ["encryption", "status", "--json"]),
+        ],
+        ids=["native", "windows-text", "windows-json", "windows-encryption-text", "windows-encryption-json"],
+    )
+    def test_degrades_without_crypto_stack_in_subprocess(
+        self, tmp_path: Path, platform: str, command: list[str]
+    ) -> None:
         """Minimal install (no ``[keyvault]`` extra): the lazy keyvault import
         raises ``ModuleNotFoundError`` for argon2 — ``_enrolled_names`` must
         degrade to the empty set (its never-raise contract) and the whole
@@ -77,7 +94,7 @@ class TestEnrolledNames:
 
         script = textwrap.dedent(
             """
-            import argparse, os, sys, tempfile
+            import contextlib, io, json, os, subprocess, sys
             from pathlib import Path
 
             class _Blocker:
@@ -88,18 +105,70 @@ class TestEnrolledNames:
                     return None
 
             sys.meta_path.insert(0, _Blocker())
-            os.environ["HERMES_HOME"] = tempfile.mkdtemp()
+            os.environ["HERMES_HOME"] = sys.argv[1]
+            home = Path(sys.argv[1])
+            home.mkdir(mode=0o700)
+            retained = home / "config.yaml"
+            retained.write_bytes(b"# retained config\\nprofile: default\\n")
+            if os.name == "nt":
+                from mordred_hermes._private_fs import open_confidential_directory
+                with open_confidential_directory(home) as directory:
+                    with directory.transaction():
+                        pass
+            expected_names = [".mordred-fs.lock", "config.yaml"] if os.name == "nt" else ["config.yaml"]
+            assert sorted(p.name for p in home.iterdir()) == expected_names
+
+            def inventory():
+                return {
+                    p.name: (p.read_bytes(), p.stat().st_dev, p.stat().st_ino)
+                    for p in home.iterdir()
+                }
+
+            home_before = inventory()
+            before = retained.read_bytes(), retained.stat().st_ino
+
+            def no_process(*args, **kwargs):
+                raise AssertionError("read-only status launched a subprocess")
+            subprocess.Popen = no_process
+
+            if sys.argv[2] == "win32":
+                from mordred_hermes.keyvault import _windows_capability
+                from mordred_hermes.wizard import _windows_gates
+                _windows_capability._platform = lambda: "win32"
+                _windows_gates.host_platform = lambda: "win32"
 
             from mordred_hermes.wizard import encryption_cli
             assert encryption_cli._enrolled_names(Path("/nonexistent/vault")) == set()
 
-            from mordred_hermes.wizard._cli_parsers import _handle_status
-            rc = _handle_status(argparse.Namespace(json=False))
+            from mordred_hermes.wizard import cli
+            command = json.loads(sys.argv[3])
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = cli.main(command)
             assert rc == 0, f"status must degrade cleanly, got rc={rc}"
+            assert (retained.read_bytes(), retained.stat().st_ino) == before
+            home_after = inventory()
+            assert home_after == home_before, f"status changed home entries: {sorted(home_after)}"
+            if sys.argv[2] == "win32":
+                if "--json" in command:
+                    payload = json.loads(output.getvalue())
+                    targets = payload["encryption"] if command[0] == "status" else payload
+                    memory = next(row for row in targets if row["target"] == "memory")
+                    assert memory["active"] is False and memory["configured"] is False
+                    assert memory["detail"].startswith("UNAVAILABLE (custody-uncertain)")
+                    assert "cryptography" in memory["detail"]
+                else:
+                    assert "UNAVAILABLE (custody-uncertain)" in output.getvalue()
             print("OK")
             """
         )
-        proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60, check=False)
+        proc = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path / "minimal-home"), platform, json.dumps(command)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
         assert proc.returncode == 0, f"status crashed without crypto stack:\n{proc.stderr}"
         assert "OK" in proc.stdout
 
@@ -357,6 +426,7 @@ class TestMemoryFilePathsSymlinks:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    @pytest.mark.usefixtures("file_symlink")
     def test_symlink_is_excluded_from_the_scan(self, tmp_path: Path) -> None:
         home = tmp_path / "home"
         memories = self._memories(home)
@@ -374,6 +444,7 @@ class TestMemoryFilePathsSymlinks:
         assert link not in paths
         assert real in paths
 
+    @pytest.mark.usefixtures("file_symlink")
     def test_symlinked_backup_snapshot_is_also_excluded(self, tmp_path: Path) -> None:
         home = tmp_path / "home"
         memories = self._memories(home)

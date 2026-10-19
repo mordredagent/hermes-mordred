@@ -197,7 +197,7 @@ browser extension, using a Venice.ai private model.
   `telegram doctor --probe-llm` explicitly unseals the saved local target and
   key, then sends a synthetic streaming completion through the same direct,
   redirect-disabled client as `telegram_ask`. It uses a 30-second total HTTP
-  deadline and 64 output tokens, consumes the stream and requires visible
+  deadline and 512 output tokens, consumes the stream and requires visible
   non-reasoning text and an explicit terminal event (`[DONE]` or a valid
   `finish_reason`); clean HTTP EOF alone is insufficient. It never opens
   the archive or probes a cloud backend;
@@ -377,7 +377,11 @@ six-plugin set without modifying upstream source.
 `hermes-mordred upgrade` detects a legacy `~/.openclaw` tree, applies explicit
 row-level conflict policies, and remains idempotent. It never overwrites an
 existing conflicting Mordred configuration silently. The exact source,
-destination, and conflict ownership are in [`PATHS.md`](./PATHS.md).
+destination, and conflict ownership are in [`PATHS.md`](./PATHS.md). Windows
+supports checked policy-only and no-legacy upgrades. Any source audit log,
+keyvault or credentials entry refuses before provider reads or publication;
+legacy custody and audit migration remain unsupported on Windows. Unsafe or
+invalid policy sources refuse without changing retained data.
 
 ### Story 2: New user setup
 

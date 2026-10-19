@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import Any
 
 import pytest
@@ -15,6 +16,11 @@ from mordred_hermes.extension.telegram import llm, secrets, service, store, tee,
 from mordred_hermes.extension.telegram.ask import AskRequest
 from mordred_hermes.keyvault._exceptions import WrapKeyAlreadyExists, WrapKeyNotFound
 from mordred_hermes.wizard import telegram_cli
+from tests._platform_test_helpers import require_posix_tee
+from tests.test_windows_telegram_custody import custody_fixture as custody_fixture
+from tests.test_windows_telegram_custody import enroll, ops, sealed_path, windows_store
+from tests.test_windows_telegram_custody import telegram_fs as telegram_fs
+from tests.test_wizard_windows_telegram import wt as wt
 
 
 class _FakeEnclave:
@@ -61,15 +67,67 @@ def _value(**overrides: Any) -> secrets.TelegramSecrets:
 
 
 def _tee_store(tmp_path, enclave: _FakeEnclave | None = None) -> tuple[tee.TeeSecretStore, _FakeEnclave]:
+    require_posix_tee()
     fake = enclave or _FakeEnclave()
     return tee.TeeSecretStore(tmp_path / "tg", backend_factory=lambda: fake, audit_sink=lambda _e: None), fake
+
+
+class _CheckedBoundary:
+    """Accounting adapter only; Windows store/custody/crypto remain real."""
+
+    def __init__(self, backend, native_key_id):
+        self.backend = backend
+        self.native_key_id = native_key_id
+
+    @property
+    def ecdh_calls(self):
+        return ops(self.backend, "ecdh")
+
+    def generate_enclave_key(self, key_id):
+        assert key_id == tee.KEY_ID
+        return self.backend.generate_enclave_key(self.native_key_id)
+
+
+class _CheckedStore:
+    def __init__(self, home, backend, native_key_id):
+        self.store_impl = windows_store(home, backend, audit=[])
+        self.sealed_path = sealed_path(home)
+        self.boundary = _CheckedBoundary(backend, native_key_id)
+
+    def ensure_key(self):
+        # Enrollment is an explicit fixture ceremony, never store fallback.
+        assert self.boundary.native_key_id in self.boundary.backend._keys
+
+    def _backend_factory(self):
+        return self.boundary
+
+    def __getattr__(self, name):
+        return getattr(self.store_impl, name)
+
+
+@pytest.fixture(params=["legacy-posix", "checked-windows"])
+def sealed_store_factory(request):
+    if request.param == "legacy-posix":
+        require_posix_tee()
+        return _tee_store
+    env = request.getfixturevalue("wt")
+    lease = enroll(env.custody, env.home, env.backend, "telegram")["telegram"]
+
+    def factory(_tmp_path, enclave=None):
+        from tests._keyvault_fakes import FakeBackend
+
+        backend = env.backend if enclave is None else FakeBackend()
+        vault = _CheckedStore(env.home, backend, lease.native_key_id)
+        return vault, vault.boundary
+
+    return factory
 
 
 # -- Enclave seal ---------------------------------------------------------------------
 
 
-def test_sealed_file_holds_no_plaintext_and_needs_the_enclave(tmp_path):
-    vault, _enclave = _tee_store(tmp_path)
+def test_sealed_file_holds_no_plaintext_and_needs_the_enclave(tmp_path, sealed_store_factory):
+    vault, _enclave = sealed_store_factory(tmp_path)
     vault.ensure_key()
     vault.store(_value())
     raw = vault.sealed_path.read_bytes()
@@ -79,14 +137,14 @@ def test_sealed_file_holds_no_plaintext_and_needs_the_enclave(tmp_path):
     assert vault.load() == _value()
 
     # Another device (a different Enclave key) cannot open it.
-    other, _ = _tee_store(tmp_path, _FakeEnclave())
+    other, _ = sealed_store_factory(tmp_path, _FakeEnclave())
     other._backend_factory().generate_enclave_key(tee.KEY_ID)
     with pytest.raises(secrets.TelegramSecretsError):
         other.load()
 
 
-def test_every_load_is_a_fresh_enclave_unwrap_and_status_uses_none(tmp_path):
-    vault, enclave = _tee_store(tmp_path)
+def test_every_load_is_a_fresh_enclave_unwrap_and_status_uses_none(tmp_path, sealed_store_factory):
+    vault, enclave = sealed_store_factory(tmp_path)
     vault.ensure_key()
     vault.store(_value())
     before = enclave.ecdh_calls
@@ -114,8 +172,8 @@ def test_key_requires_presence_by_default(tmp_path):
     assert enclave2.unattended[tee.KEY_ID] is True
 
 
-def test_tampered_seal_is_refused(tmp_path):
-    vault, _ = _tee_store(tmp_path)
+def test_tampered_seal_is_refused(tmp_path, sealed_store_factory):
+    vault, _ = sealed_store_factory(tmp_path)
     vault.ensure_key()
     vault.store(_value())
     raw = bytearray(vault.sealed_path.read_bytes())
@@ -139,6 +197,10 @@ def test_hardware_backend_has_no_software_fallback(monkeypatch, tmp_path):
 
     monkeypatch.setattr(_seckey_helper, "find_sekey_helper", lambda: "/nonexistent/helper")
     monkeypatch.setattr(_seckey_helper, "find_tpmkey_helper", lambda: "/nonexistent/helper")
+    if os.name == "nt":
+        with pytest.raises(secrets.TelegramSecretsError, match="tee_unavailable"):
+            tee.hardware_backend(tmp_path)
+        return
     backend = tee.hardware_backend(tmp_path)
     assert backend._sw_ops is None and backend._legacy_ops is None
 
@@ -281,8 +343,8 @@ def test_redirects_are_errors_not_followed():
 # -- CLI -----------------------------------------------------------------------------------
 
 
-def test_cli_local_llm_validates_and_stores(tmp_path):
-    vault, _ = _tee_store(tmp_path)
+def test_cli_local_llm_validates_and_stores(tmp_path, sealed_store_factory):
+    vault, _ = sealed_store_factory(tmp_path)
     vault.ensure_key()
     vault.store(_value())
     assert telegram_cli.telegram_local_llm(endpoint="http://10.0.0.2:1/v1", model="m", store=vault) == 1
@@ -292,8 +354,8 @@ def test_cli_local_llm_validates_and_stores(tmp_path):
     assert vault.flags()["llm_backend"] == "local"
 
 
-def test_local_key_is_sealed_and_bound_to_the_configured_endpoint(tmp_path, monkeypatch, capsys):
-    vault, _ = _tee_store(tmp_path)
+def test_local_key_is_sealed_and_bound_to_the_configured_endpoint(tmp_path, monkeypatch, capsys, sealed_store_factory):
+    vault, _ = sealed_store_factory(tmp_path)
     vault.ensure_key()
     vault.store(_value())
     monkeypatch.setenv("TEST_LOCAL_KEY", "LOCAL-SECRET")
@@ -314,8 +376,8 @@ def test_local_key_is_sealed_and_bound_to_the_configured_endpoint(tmp_path, monk
     assert vault.load().local_api_key is None
 
 
-def test_local_key_prompt_and_explicit_clear_preserve_telegram_credentials(tmp_path):
-    vault, _ = _tee_store(tmp_path)
+def test_local_key_prompt_and_explicit_clear_preserve_telegram_credentials(tmp_path, sealed_store_factory):
+    vault, _ = sealed_store_factory(tmp_path)
     vault.ensure_key()
     vault.store(_value())
     endpoint = "http://127.0.0.1:8080/v1"
@@ -333,8 +395,8 @@ def test_local_key_prompt_and_explicit_clear_preserve_telegram_credentials(tmp_p
 
 
 @pytest.mark.parametrize("key", [None, "", "   ", "bad\r\nheader"])
-def test_invalid_local_key_refuses_without_changing_sealed_state(tmp_path, monkeypatch, key):
-    vault, _ = _tee_store(tmp_path)
+def test_invalid_local_key_refuses_without_changing_sealed_state(tmp_path, monkeypatch, key, sealed_store_factory):
+    vault, _ = sealed_store_factory(tmp_path)
     vault.ensure_key()
     vault.store(_value())
     previous = vault.sealed_path.read_bytes()
@@ -374,3 +436,70 @@ def test_cli_migrate_moves_vault_credentials_into_the_enclave_seal(tmp_path):
     assert vault.load() == _value()
     assert enclave.unattended[tee.KEY_ID] is False
     assert telegram_cli.telegram_migrate_tee(store=vault, legacy=legacy) == 1  # nothing left to move
+
+
+@pytest.mark.parametrize("model", [None, "", " new-model "])
+def test_cli_venice_keeps_key_and_model_contract_with_one_unseal(tmp_path, model, sealed_store_factory):
+    vault, enclave = sealed_store_factory(tmp_path)
+    vault.ensure_key()
+    before = _value(venice_model="old-model", local_api_key="LOCAL-SECRET")
+    vault.store(before)
+    calls = enclave.ecdh_calls
+    assert telegram_cli.telegram_venice(model=model, secret_fn=lambda _: "", store=vault) == 0
+    assert enclave.ecdh_calls == calls + 1
+    value = vault.load()
+    assert value.venice_api_key == "VENICE-SECRET"
+    assert value.venice_model == (" new-model " if model else "old-model")
+    assert value.local_api_key == before.local_api_key and value.session == before.session
+
+
+@pytest.mark.parametrize("old_endpoint", ["http://localhost:8080/v1/", None, "malformed"])
+def test_cli_local_omitted_key_changes_record_with_one_unseal(tmp_path, old_endpoint, sealed_store_factory):
+    vault, enclave = sealed_store_factory(tmp_path)
+    vault.ensure_key()
+    vault.store(_value(local_endpoint=old_endpoint, local_model="old", local_api_key="LOCAL-SECRET"))
+    calls = enclave.ecdh_calls
+    assert telegram_cli.telegram_local_llm(endpoint="http://127.0.0.1:8080/v1", model=" new ", store=vault) == 0
+    assert enclave.ecdh_calls == calls + 1
+    value = vault.load()
+    assert value.local_api_key == ("LOCAL-SECRET" if old_endpoint == "http://localhost:8080/v1/" else None)
+    assert value.local_model == "new" and value.session == "SESSION-SECRET"
+
+
+def test_cli_venice_missing_key_keeps_error_and_sealed_record(tmp_path, capsys, sealed_store_factory):
+    vault, enclave = sealed_store_factory(tmp_path)
+    vault.ensure_key()
+    vault.store(_value(venice_api_key=None))
+    sealed = vault.sealed_path.read_bytes()
+    calls = enclave.ecdh_calls
+    assert telegram_cli.telegram_venice(model=None, secret_fn=lambda _: "", store=vault) == 1
+    assert enclave.ecdh_calls == calls + 1 and vault.sealed_path.read_bytes() == sealed
+    assert "no Venice API key given." in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows legacy backend refusal")
+def test_windows_legacy_store_refuses_before_creation_or_native_calls(tmp_path, monkeypatch):
+    from mordred_hermes.keyvault import _seckey_backend, _seckey_helper
+
+    backend_calls = []
+
+    def forbidden_backend(*args, **kwargs):
+        backend_calls.append((args, kwargs))
+        pytest.fail("legacy Windows store reached a native backend")
+
+    target = tmp_path / "legacy-telegram"
+    raw = tee.TeeSecretStore(target, backend_factory=forbidden_backend, audit_sink=lambda _event: None)
+    assert not target.exists() and backend_calls == []
+    for operation in (raw.flags, raw.load, lambda: raw.store(_value())):
+        with pytest.raises(store.StoreError) as excinfo:
+            operation()
+        assert excinfo.value.code == "store_path_unsafe"
+        assert not target.exists() and backend_calls == []
+
+    monkeypatch.setattr(_seckey_helper, "_helper_ops_or_none", forbidden_backend)
+    monkeypatch.setattr(_seckey_backend, "_SecKeyBackend", forbidden_backend)
+    with pytest.raises(secrets.TelegramSecretsError) as excinfo:
+        tee.hardware_backend(target)
+    assert excinfo.value.code == "tee_unavailable"
+    assert not target.exists()
+    assert backend_calls == []

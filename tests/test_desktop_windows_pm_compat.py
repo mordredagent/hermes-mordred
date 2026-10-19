@@ -13,6 +13,19 @@ import pytest
 from mordred_hermes.desktop import install, member
 
 
+@pytest.mark.parametrize(
+    "prefix, source",
+    [
+        (r"C:\pm\venv", r"C:\pm\workspace\plugin-sources\mordred"),
+        ("C:/pm/venv", "C:/pm/workspace/plugin-sources/mordred"),
+    ],
+)
+def test_windows_style_provenance_does_not_prove_managed_membership(prefix, source):
+    installed = member.InstallSource("0.2.0a1", "path", source, True, ())
+    env = member.Environment(prefix + "/Scripts/python.exe", prefix, True)
+    assert member.built_from_member(installed, env=env) is False
+
+
 class NoProfileIOPath(type(Path())):
     """A profile path whose first filesystem operation exposes a missing gate."""
 

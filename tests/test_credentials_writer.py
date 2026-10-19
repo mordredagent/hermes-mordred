@@ -18,18 +18,19 @@ Tests cover:
 from __future__ import annotations
 
 import json
-import os
-import stat
 from pathlib import Path
 
 import pytest
+
+from tests._checked_fixture_helpers import assert_private
+from tests._checked_fixture_helpers import tmp_path as tmp_path
 
 
 class TestJSONCredentialsWriter:
     def test_creates_dir_at_0700_and_file_at_0600(self, tmp_path: Path) -> None:
         from mordred_hermes.wizard.credentials_writer import JSONCredentialsWriter
 
-        credentials_path = tmp_path / "credentials" / "network.json"
+        credentials_path = tmp_path / "mordred" / "credentials" / "network.json"
         w = JSONCredentialsWriter()
         w.write_network(
             credentials_path,
@@ -38,15 +39,13 @@ class TestJSONCredentialsWriter:
             mullvad_killswitch=True,
         )
         assert credentials_path.exists()
-        dir_mode = stat.S_IMODE(os.stat(credentials_path.parent).st_mode)
-        file_mode = stat.S_IMODE(os.stat(credentials_path).st_mode)
-        assert dir_mode == 0o700, f"dir mode 0o{dir_mode:o}"
-        assert file_mode == 0o600, f"file mode 0o{file_mode:o}"
+        assert_private(credentials_path.parent, directory=True)
+        assert_private(credentials_path)
 
     def test_json_shape_matches_contract(self, tmp_path: Path) -> None:
         from mordred_hermes.wizard.credentials_writer import JSONCredentialsWriter
 
-        path = tmp_path / "network.json"
+        path = tmp_path / "mordred" / "credentials" / "network.json"
         JSONCredentialsWriter().write_network(
             path,
             mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
@@ -65,7 +64,7 @@ class TestJSONCredentialsWriter:
     def test_idempotent(self, tmp_path: Path) -> None:
         from mordred_hermes.wizard.credentials_writer import JSONCredentialsWriter
 
-        path = tmp_path / "network.json"
+        path = tmp_path / "mordred" / "credentials" / "network.json"
         w = JSONCredentialsWriter()
         w.write_network(
             path,
@@ -88,7 +87,7 @@ class TestJSONCredentialsWriter:
         look like an env-var name) must be refused."""
         from mordred_hermes.wizard.credentials_writer import JSONCredentialsWriter
 
-        path = tmp_path / "network.json"
+        path = tmp_path / "mordred" / "credentials" / "network.json"
         w = JSONCredentialsWriter()
         for bad_env_ref in (
             "actual-account-1234567",  # looks like a secret
@@ -106,7 +105,7 @@ class TestJSONCredentialsWriter:
     def test_atomic_write_no_lingering_tmp(self, tmp_path: Path) -> None:
         from mordred_hermes.wizard.credentials_writer import JSONCredentialsWriter
 
-        path = tmp_path / "credentials" / "network.json"
+        path = tmp_path / "mordred" / "credentials" / "network.json"
         JSONCredentialsWriter().write_network(
             path,
             mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",

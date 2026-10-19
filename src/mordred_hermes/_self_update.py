@@ -180,7 +180,8 @@ def installed(home: Path | None = None) -> Installed:
     from .desktop.install import plugin_dir
 
     source = member.install_source()
-    from_member = member.built_from_member(source)
+    env = member.environment()
+    from_member = member.built_from_member(source, env=env)
     extras = set(source.extras)
     if from_member:
         recorded = member.member_status(plugin_dir(home))
@@ -189,7 +190,6 @@ def installed(home: Path | None = None) -> Installed:
     extra = platform_extra()
     if extra:
         extras.add(extra)
-    env = member.environment()
     return Installed(
         version=source.version,
         kind=source.kind,

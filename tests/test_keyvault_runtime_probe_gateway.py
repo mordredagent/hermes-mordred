@@ -19,9 +19,9 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import signal
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -33,8 +33,46 @@ from mordred_hermes.keyvault._runtime_probe import (
     discover_running_gateway_runtimes,
     environment_key,
 )
+from tests._checked_fixture_helpers import file_symlink as file_symlink
+from tests._helpers import PlatformSys
+from tests._platform_test_helpers import posix_modes as posix_modes
 
-_UID = os.getuid()
+_UID = 12345
+
+
+class _ProcessOS:
+    name = "posix"
+
+    def getuid(self):
+        return _UID
+
+    def access(self, path, mode):
+        return Path(path).is_file() if os.name == "nt" else os.access(path, mode)
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+
+class _ProcessPath(type(Path())):
+    def stat(self, *, follow_symlinks=True):
+        info = super().stat(follow_symlinks=follow_symlinks)
+        fields = list(info)
+        fields[4] = _UID
+        if os.name == "nt":
+            import stat
+
+            fields[0] = (stat.S_IFDIR if stat.S_ISDIR(info.st_mode) else stat.S_IFREG) | 0o755
+        return os.stat_result(fields)
+
+
+@pytest.fixture(autouse=True)
+def process_table_model(request, monkeypatch):
+    if request.node.name == "test_real_discovery_returns_a_list_without_raising":
+        return
+    monkeypatch.setattr(_runtime_probe, "os", _ProcessOS())
+    monkeypatch.setattr(_runtime_probe, "Path", _ProcessPath)
+    monkeypatch.setattr(_runtime_probe, "sys", PlatformSys("darwin"))
+
 
 # The incident's two interpreters, in `ps args=` form.
 _MANAGED_ARGV = "{py} -m hermes_cli.main gateway run --replace"
@@ -47,7 +85,7 @@ def _make_python(bindir: Path, name: str = "python") -> Path:
     py = bindir / name
     py.write_text("#!/bin/sh\nexit 0\n")
     py.chmod(0o755)
-    return py
+    return _ProcessPath(py)
 
 
 def _scan_row(pid: int, args: str, *, uid: int = _UID) -> str:
@@ -84,7 +122,7 @@ class _FakePs:
 @pytest.fixture
 def macos(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the platform so the Linux-only ``/proc`` branch stays out of the way."""
-    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(_runtime_probe, "sys", PlatformSys("darwin"))
 
 
 def _install_ps(monkeypatch: pytest.MonkeyPatch, fake: _FakePs) -> _FakePs:
@@ -124,10 +162,17 @@ class TestScanMatching:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None
     ) -> None:
         bindir = tmp_path / "rt" / "bin"
-        py = _make_python(bindir, "python3")
+        py = _make_python(tmp_path / "runtime with spaces" / "bin", "python3")
+        bindir.mkdir(parents=True)
         launcher = bindir / "hermes"
-        launcher.write_text(f"#!{py}\n")
+        launcher.write_text(f"#!{shlex.quote(str(py))}\n")
         launcher.chmod(0o755)
+
+        def refuse_sibling(_launcher):
+            pytest.fail("the shebang must resolve without a sibling-interpreter guess")
+
+        monkeypatch.setattr(_runtime_probe, "_guarded_sibling_python", refuse_sibling)
+        assert _runtime_probe._interpreter_from_shebang(launcher.read_text()[2:]) == py
         _install_ps(monkeypatch, _FakePs(scan=_scan_row(77, f"{launcher} gateway run --replace")))
         assert discover_running_gateway_pythons(home=tmp_path / "home") == [py]
 
@@ -150,10 +195,17 @@ class TestScanMatching:
     ) -> None:
         # A `#!/usr/bin/env bash` wrapper appears as `bash /path/hermes gateway run`.
         bindir = tmp_path / "rt" / "bin"
-        py = _make_python(bindir, "python3")
+        py = _make_python(tmp_path / "runtime with spaces" / "bin", "python3")
+        bindir.mkdir(parents=True)
         launcher = bindir / "hermes"
-        launcher.write_text(f"#!{py}\n")
+        launcher.write_text(f"#!{shlex.quote(str(py))}\n")
         launcher.chmod(0o755)
+
+        def refuse_sibling(_launcher):
+            pytest.fail("the shebang must resolve without a sibling-interpreter guess")
+
+        monkeypatch.setattr(_runtime_probe, "_guarded_sibling_python", refuse_sibling)
+        assert _runtime_probe._interpreter_from_shebang(launcher.read_text()[2:]) == py
         _install_ps(monkeypatch, _FakePs(scan=_scan_row(77, f"/bin/bash {launcher} gateway run --replace")))
         assert discover_running_gateway_pythons(home=tmp_path / "home") == [py]
 
@@ -246,7 +298,7 @@ class TestPsUnavailable:
         def _boom() -> int:
             raise RuntimeError("no uid here")
 
-        monkeypatch.setattr(os, "getuid", _boom)
+        monkeypatch.setattr(_runtime_probe.os, "getuid", _boom)
         _install_ps(monkeypatch, _FakePs(scan=_scan_row(1, "/bin/python3 -m hermes_cli.main gateway run")))
         assert discover_running_gateway_pythons(home=tmp_path / "home") == []
 
@@ -288,18 +340,21 @@ class TestCandidateAcceptance:
         _install_ps(monkeypatch, _FakePs(scan=self._scan_for(d)))
         assert discover_running_gateway_pythons(home=tmp_path / "home") == []
 
+    @pytest.mark.usefixtures("posix_modes")
     def test_non_executable_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None) -> None:
         py = _make_python(tmp_path / "bin", "python3")
         py.chmod(0o644)
         _install_ps(monkeypatch, _FakePs(scan=self._scan_for(py)))
         assert discover_running_gateway_pythons(home=tmp_path / "home") == []
 
+    @pytest.mark.usefixtures("posix_modes")
     def test_group_writable_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None) -> None:
         py = _make_python(tmp_path / "bin", "python3")
         py.chmod(0o775)
         _install_ps(monkeypatch, _FakePs(scan=self._scan_for(py)))
         assert discover_running_gateway_pythons(home=tmp_path / "home") == []
 
+    @pytest.mark.usefixtures("posix_modes")
     def test_world_writable_parent_directory_rejected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None
     ) -> None:
@@ -311,6 +366,7 @@ class TestCandidateAcceptance:
         finally:
             py.parent.chmod(0o755)
 
+    @pytest.mark.usefixtures("posix_modes")
     def test_world_writable_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None) -> None:
         py = _make_python(tmp_path / "bin", "python3")
         py.chmod(0o777)
@@ -335,6 +391,7 @@ class TestLauncherPathHardening:
         _install_ps(monkeypatch, _FakePs(scan=_scan_row(6, "hermes gateway run --replace")))
         assert discover_running_gateway_pythons(home=tmp_path / "home") == []
 
+    @pytest.mark.usefixtures("posix_modes")
     def test_fifo_launcher_does_not_hang(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None) -> None:
         # Opening a FIFO for reading blocks until a writer appears. A regression
         # here would hang the CLI forever, so bound the test with SIGALRM.
@@ -376,11 +433,12 @@ class TestLauncherPathHardening:
 # /proc/<pid>/exe — authoritative on Linux, never consulted on macOS
 # -----------------------------------------------------------------------------
 class TestProcExe:
+    @pytest.mark.usefixtures("file_symlink")
     def test_absolute_argv0_is_preferred_over_proc_exe(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # /proc/<pid>/exe resolves symlinks, so a gateway running a venv's
         # bin/python reports the BASE interpreter — whose site-packages is not the
         # venv's. A usable argv[0] must win, or Linux would probe the wrong env.
-        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(_runtime_probe, "sys", PlatformSys("linux"))
         base = _make_python(tmp_path / "base" / "bin", "python3.13")
         venv_py = tmp_path / "repo" / ".venv" / "bin" / "python3"
         venv_py.parent.mkdir(parents=True)
@@ -392,13 +450,13 @@ class TestProcExe:
                 return str(base)
             raise OSError(22, "not a symlink")  # os.path.realpath probes components this way
 
-        monkeypatch.setattr(os, "readlink", _readlink)
+        monkeypatch.setattr(_runtime_probe.os, "readlink", _readlink)
         assert discover_running_gateway_pythons(home=tmp_path / "home") == [venv_py]
 
     def test_proc_exe_used_when_argv0_is_unusable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # A relative argv[0] is never trusted (it would resolve against OUR cwd),
         # so on Linux the kernel's answer is the remaining source.
-        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(_runtime_probe, "sys", PlatformSys("linux"))
         real_py = _make_python(tmp_path / "real" / "bin", "python3")
         _install_ps(monkeypatch, _FakePs(scan=_scan_row(4242, "python3 -m hermes_cli.main gateway run --replace")))
 
@@ -407,22 +465,22 @@ class TestProcExe:
                 return str(real_py)
             raise OSError(22, "not a symlink")
 
-        monkeypatch.setattr(os, "readlink", _readlink)
+        monkeypatch.setattr(_runtime_probe.os, "readlink", _readlink)
         assert discover_running_gateway_pythons(home=tmp_path / "home") == [real_py]
 
     def test_falls_back_to_argv_when_proc_unreadable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(_runtime_probe, "sys", PlatformSys("linux"))
         argv_py = _make_python(tmp_path / "argv" / "bin", "python3")
         _install_ps(monkeypatch, _FakePs(scan=_scan_row(4242, _MANAGED_ARGV.format(py=argv_py))))
 
         def _denied(_path: str, *_a: object, **_k: object) -> str:
             raise PermissionError("/proc is not readable here")
 
-        monkeypatch.setattr(os, "readlink", _denied)
+        monkeypatch.setattr(_runtime_probe.os, "readlink", _denied)
         assert discover_running_gateway_pythons(home=tmp_path / "home") == [argv_py]
 
     def test_proc_not_consulted_on_macos(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(_runtime_probe, "sys", PlatformSys("darwin"))
         argv_py = _make_python(tmp_path / "argv" / "bin", "python3")
         _install_ps(monkeypatch, _FakePs(scan=_scan_row(4242, _MANAGED_ARGV.format(py=argv_py))))
 
@@ -432,7 +490,7 @@ class TestProcExe:
             seen.append(str(path))
             raise OSError(22, "not a symlink")
 
-        monkeypatch.setattr(os, "readlink", _spy)
+        monkeypatch.setattr(_runtime_probe.os, "readlink", _spy)
         assert discover_running_gateway_pythons(home=tmp_path / "home") == [argv_py]
         assert not any(p.startswith("/proc") for p in seen)  # macOS has no /proc
 
@@ -450,7 +508,7 @@ class TestStateFilePid:
         # The recorded argv names the managed venv (as it did in the incident) —
         # the process table says otherwise, and the process table wins.
         _write_state(home, {"pid": 4242, "argv": [str(managed), "-m", "hermes_cli.main", "gateway", "run"]})
-        monkeypatch.setattr(os, "kill", lambda _pid, _sig: None)
+        monkeypatch.setattr(_runtime_probe.os, "kill", lambda _pid, _sig: None)
         fake = _install_ps(monkeypatch, _FakePs(per_pid={4242: _pid_row(_REPO_ARGV.format(py=live))}))
         assert discover_running_gateway_runtimes(home=home) == [GatewayRuntime(pid=4242, python=live)]
         assert ["ps", "-p", "4242", "-o", "uid=,args="] in fake.calls
@@ -462,7 +520,7 @@ class TestStateFilePid:
         def _dead(_pid: int, _sig: int) -> None:
             raise ProcessLookupError
 
-        monkeypatch.setattr(os, "kill", _dead)
+        monkeypatch.setattr(_runtime_probe.os, "kill", _dead)
         fake = _install_ps(monkeypatch, _FakePs(scan=""))
         assert discover_running_gateway_pythons(home=home) == []
         assert all("-p" not in call for call in fake.calls)
@@ -497,7 +555,7 @@ class TestStateFilePid:
         home = tmp_path / "home"
         py = _make_python(tmp_path / "repo" / ".venv" / "bin", "python")
         _write_state(home, {"pid": 4242})
-        monkeypatch.setattr(os, "kill", lambda _pid, _sig: None)
+        monkeypatch.setattr(_runtime_probe.os, "kill", lambda _pid, _sig: None)
         args = _REPO_ARGV.format(py=py)
         _install_ps(monkeypatch, _FakePs(scan=_scan_row(4242, args), per_pid={4242: _pid_row(args)}))
         assert discover_running_gateway_runtimes(home=home) == [GatewayRuntime(pid=4242, python=py)]
@@ -524,6 +582,7 @@ class TestStateFilePid:
 # environment_key — venv identity, NOT the fully resolved interpreter
 # -----------------------------------------------------------------------------
 class TestEnvironmentKey:
+    @pytest.mark.usefixtures("file_symlink")
     def test_two_venvs_sharing_a_base_interpreter_are_different(self, tmp_path: Path) -> None:
         base = _make_python(tmp_path / "base" / "bin", "python3.13")
         managed = tmp_path / "managed" / "bin" / "python3"

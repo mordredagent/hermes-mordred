@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -15,7 +16,7 @@ class LocalLlmServer:
         status: int = 200,
         api_key: str | None = None,
         delay: float = 0,
-        response: bytes | None = None,
+        response: bytes | Callable[[dict[str, Any]], bytes] | None = None,
         truncate: bool = False,
         chunked: bool = False,
     ) -> None:
@@ -37,7 +38,7 @@ class LocalLlmServer:
                 actual_status = status
                 if api_key is not None and self.headers.get("Authorization") != f"Bearer {api_key}":
                     actual_status = 401
-                payload = response
+                payload = response(json.loads(body)) if callable(response) else response
                 if payload is None:
                     payload = (
                         b'data: {"choices":[{"delta":{"content":"The budget moved."}}]}\n\ndata: [DONE]\n\n'
