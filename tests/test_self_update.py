@@ -283,13 +283,13 @@ def test_update_metadata_nesting_boundary(tmp_path: Path, depth: int, container:
     "encoding", ["utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be"]
 )
 def test_release_json_preserves_encodings_and_quoted_brackets(encoding: str) -> None:
-    releases = {"1.0": [{"filename": 'quoted " and slash \\ ' + "[{]}" * 200 + " 日本語"}]}
+    releases = {"1.0": [{"filename": 'quoted " and slash \\ ' + "[{" * 200 + " 日本語"}]}
     payload = json.dumps({"releases": releases}, ensure_ascii=False).encode(encoding)
     assert core.fetch_releases(lambda url: payload) == releases
 
 
 def test_receipt_json_ignores_quoted_brackets_and_escaped_quotes(tmp_path: Path) -> None:
-    value = {"message": 'quoted " and slash \\ ' + "[{]}" * 200}
+    value = {"message": 'quoted " and slash \\ ' + "[{" * 200}
     path = tmp_path / "receipt.json"
     path.write_text(json.dumps(value), encoding="utf-8-sig")
     assert core._read_json(path) == value
