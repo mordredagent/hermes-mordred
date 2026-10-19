@@ -10,7 +10,11 @@ import threading
 
 import pytest
 
-from mordred_hermes.desktop import api
+
+class CodedFailure(Exception):
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
 
 
 def async_test(work):
@@ -29,13 +33,13 @@ async def checkpoint():
 
 @async_test
 async def test_pre_start_cancellation_finalizes_job(registry):
-    _, events = registry
+    jobs, events = registry
 
     async def work(job):
         pytest.fail("cancelled before first execution")
 
     before = asyncio.all_tasks()
-    job = api._start_job("prestart", work)
+    job = jobs.start("prestart", work)
     task = (asyncio.all_tasks() - before).pop()
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
@@ -50,13 +54,32 @@ async def test_pre_start_cancellation_finalizes_job(registry):
 
 
 @pytest.fixture
-def registry(monkeypatch):
+def registry():
     from mordred_hermes.desktop._jobs import JobRegistry
 
     events = []
     instance = JobRegistry(emit=lambda event, payload: events.append((event, payload)))
-    monkeypatch.setattr(api, "_JOBS", instance)
     return instance, events
+
+
+@pytest.fixture
+def api(registry, monkeypatch):
+    pytest.importorskip("fastapi")
+    from mordred_hermes.desktop import api
+
+    monkeypatch.setattr(api, "_JOBS", registry[0])
+    return api
+
+
+@async_test
+async def test_api_start_job_uses_registry(api, registry):
+    jobs, events = registry
+    job = api._start_job("prestart", succeed)
+    assert jobs.get(job.job_id) is job
+    job._task.cancel()
+    await finish(job)
+    assert (job.state, job.error) == ("failed", "prestart_failed")
+    assert len(events) == 1
 
 
 async def finish(job):
@@ -91,7 +114,7 @@ async def test_blocking_work_drains_repeated_cancellation_and_preserves_result(r
         loop.call_soon_threadsafe(entered.set)
         assert release.wait(5), "test must release worker"
         if outcome == "coded":
-            raise api._Fail("worker_refused")
+            raise CodedFailure("worker_refused")
         if outcome == "generic":
             raise RuntimeError("do not expose")
         if outcome == "cancelled":
@@ -269,7 +292,7 @@ async def test_event_failure_does_not_retain_resources_or_running_state():
 @pytest.mark.parametrize("kind", ["hardware", "enclave", "update", "uninstall"])
 @pytest.mark.parametrize("failed", [False, True])
 async def test_real_api_callback_keeps_outcome_and_progress_after_cancellation(
-    registry, monkeypatch, tmp_path, kind, failed
+    api, registry, monkeypatch, tmp_path, kind, failed
 ):
     from types import SimpleNamespace
 
@@ -357,7 +380,7 @@ async def test_real_api_callback_keeps_outcome_and_progress_after_cancellation(
 
 
 @async_test
-async def test_update_checks_uninstall_started_during_preflight(registry, monkeypatch):
+async def test_update_checks_uninstall_started_during_preflight(api, registry, monkeypatch):
     import json
 
     jobs, _ = registry
@@ -391,7 +414,9 @@ async def test_update_checks_uninstall_started_during_preflight(registry, monkey
 
 @async_test
 @pytest.mark.parametrize("kind,conflict", [("update", "uninstall"), ("uninstall", "update")])
-async def test_final_admission_conflict_keeps_http_error_and_confirmation_order(registry, monkeypatch, kind, conflict):
+async def test_final_admission_conflict_keeps_http_error_and_confirmation_order(
+    api, registry, monkeypatch, kind, conflict
+):
     import json
 
     jobs, _ = registry
@@ -418,7 +443,7 @@ async def test_final_admission_conflict_keeps_http_error_and_confirmation_order(
 
 
 @async_test
-async def test_status_prunes_and_missing_expired_evicted_results_keep_wire_error(monkeypatch):
+async def test_status_prunes_and_missing_expired_evicted_results_keep_wire_error(api, monkeypatch):
     import json
     from types import SimpleNamespace
 
@@ -479,7 +504,7 @@ async def test_cancellation_at_completed_worker_preserves_result(registry, faile
         loop.call_soon_threadsafe(entered.set)
         assert release.wait(5)
         if failed:
-            raise api._Fail("worker_error")
+            raise CodedFailure("worker_error")
         return 7
 
     async def work(job):
