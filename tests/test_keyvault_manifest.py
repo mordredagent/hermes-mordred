@@ -25,6 +25,9 @@ from __future__ import annotations
 
 import base64
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -287,3 +290,86 @@ def test_parse_unverified_rejects_non_hex_digest_values(sealed: tuple[bytes, kek
     blob = manifest.encode(_manifest(wmk, files={".env": bad}), master)
     with pytest.raises(manifest.ManifestError):
         manifest.parse_unverified(blob)
+
+
+@pytest.mark.parametrize("operation", ["decode", "parse_unverified"])
+def test_deep_manifest_is_refused_with_large_recursion_limit(operation: str) -> None:
+    script = """
+import base64
+import sys
+from pathlib import Path
+if sys.platform != "win32":
+    import resource
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+from mordred_hermes.keyvault import kek, manifest
+assert Path(manifest.__file__).resolve() == Path(sys.argv[2])
+sys.setrecursionlimit(100000)
+body = b"[" * 100000 + b"]" * 100000
+with kek.MasterKey(b"m" * 32) as master:
+    tag = master.mac(body, info=b"mordred-vault-manifest-v1")
+    blob = body + b"\\n" + base64.b64encode(tag)
+    try:
+        if sys.argv[1] == "decode":
+            manifest.decode(blob, master)
+        else:
+            manifest.parse_unverified(blob)
+    except manifest.ManifestError as exc:
+        assert str(exc) == "manifest body is not valid JSON"
+    else:
+        raise AssertionError("deep manifest was not refused")
+assert sys.getrecursionlimit() == 100000
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-X", "faulthandler", "-c", script, operation, str(Path(manifest.__file__).resolve())],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("depth", [128, 129])
+@pytest.mark.parametrize("container", ["array", "object"])
+def test_manifest_nesting_boundary(sealed: tuple[bytes, kek.MasterKey], depth: int, container: str) -> None:
+    wmk, master = sealed
+    body = manifest.encode(_manifest(wmk), master).partition(b"\n")[0]
+    opening, closing = (b"[", b"]") if container == "array" else (b'{"value":', b"}")
+    # The outer manifest object itself accounts for one container.
+    body = body[:-1] + b',"extra":' + opening * (depth - 1) + b"0" + closing * (depth - 1) + b"}"
+    blob = body + b"\n" + base64.b64encode(master.mac(body, info=b"mordred-vault-manifest-v1"))
+    if depth == 129:
+        for parse in (lambda: manifest.decode(blob, master), lambda: manifest.parse_unverified(blob)):
+            with pytest.raises(manifest.ManifestError, match="manifest body is not valid JSON"):
+                parse()
+    else:
+        assert manifest.decode(blob, master) == _manifest(wmk)
+        assert manifest.parse_unverified(blob) == _manifest(wmk)
+
+
+def test_deep_manifest_authentication_precedes_parsing() -> None:
+    body = b"[" * 100000 + b"]" * 100000
+    with (
+        kek.MasterKey(b"m" * 32) as master,
+        pytest.raises(manifest.ManifestError, match="failed authentication"),
+    ):
+        manifest.decode(body + b"\n" + base64.b64encode(b"wrong tag"), master)
+
+
+@pytest.mark.parametrize(
+    "encoding", ["utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be"]
+)
+def test_manifest_preserves_encodings_and_quoted_brackets(encoding: str) -> None:
+    value = manifest.VaultManifest(
+        key_id='quoted " and slash \\ ' + "[{" * 200 + " 日本語", wmk=b"wrapped", files={}, generation=0
+    )
+    with kek.MasterKey(b"m" * 32) as master:
+        original = manifest.encode(value, master).partition(b"\n")[0]
+        body = original.decode().encode(encoding)
+        tag = base64.b64encode(master.mac(body, info=b"mordred-vault-manifest-v1"))
+        # _parse_body receives the exact body after framing/authentication;
+        # UTF-16/32 wire framing remains unchanged and is not widened here.
+        assert manifest._parse_body(body) == value
+        if encoding in ("utf-8", "utf-8-sig"):
+            assert manifest.decode(body + b"\n" + tag, master) == value
+            assert manifest.parse_unverified(body + b"\n" + tag) == value

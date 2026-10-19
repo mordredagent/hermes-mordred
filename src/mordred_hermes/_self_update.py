@@ -73,6 +73,7 @@ from typing import Any, Final, Protocol
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
+from ._bounded_json import _BoundedJSONDecoder
 from ._home import hermes_home
 
 _LOG = logging.getLogger(__name__)
@@ -91,7 +92,6 @@ MIN_MORDRED_VERSION: Final = "0.1.0a16"
 PYPI_JSON_URL: Final = f"https://pypi.org/pypi/{DISTRIBUTION}/json"
 FETCH_TIMEOUT_SECONDS: Final = 10.0
 MAX_FETCH_BYTES: Final = 4 * 1024 * 1024
-_MAX_JSON_DEPTH: Final = 128
 #: How long a successful answer (ours or Hermes's receipt) is reused.
 CHECK_CACHE_SECONDS: Final = 24 * 3600
 #: How long a failed lookup is remembered before asking PyPI again.
@@ -106,32 +106,6 @@ MEMBER_TIMEOUT_SECONDS: Final = 5 * 60
 _PLATFORM_EXTRA: Final[dict[str, str]] = {"darwin": "macos", "linux": "keyvault"}
 _FROZEN_PIN_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==[^ ]+$")
 _FAILURE_PREFIX: Final = "check failed"
-
-
-class _BoundedJSONDecoder(json.JSONDecoder):
-    """Refuse update metadata beyond 128 containers before native JSON decoding."""
-
-    def raw_decode(self, s: str, idx: int = 0) -> tuple[Any, int]:
-        depth = 0
-        quoted = False
-        escaped = False
-        for char in s[idx:]:
-            if quoted:
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == '"':
-                    quoted = False
-            elif char == '"':
-                quoted = True
-            elif char in "[{":
-                depth += 1
-                if depth > _MAX_JSON_DEPTH:
-                    raise ValueError("update JSON nesting exceeds 128 containers")
-            elif char in "]}":
-                depth -= 1
-        return super().raw_decode(s, idx)
 
 
 class UpdateRefused(Exception):
