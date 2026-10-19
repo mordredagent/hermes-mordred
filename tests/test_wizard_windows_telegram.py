@@ -127,16 +127,22 @@ class Factory:
         return self.client
 
 
-@pytest.fixture
-def windows_routing(monkeypatch):
-    """Message and parser tests need platform routing, not a custody profile."""
+def _route_to_windows(monkeypatch):
     monkeypatch.setattr(_windows_capability, "_platform", lambda: "win32")
     monkeypatch.setattr(_windows_gates, "host_platform", lambda: "win32")
 
 
 @pytest.fixture
-def wt(tg, windows_routing, monkeypatch):
+def windows_routing(monkeypatch):
+    """Message and parser tests need platform routing, not a custody profile."""
+    _route_to_windows(monkeypatch)
+
+
+@pytest.fixture
+def wt(tg, monkeypatch):
     """Windows routing on any host over the C10b custody fixture."""
+    # Other modules import this fixture; keep its existing fixture dependencies.
+    _route_to_windows(monkeypatch)
     c, home, backend = tg
     helper = str(home.parent / "bin" / "mordred-hermes-winkey.exe")
     monkeypatch.setattr(_seckey_helper, "find_winkey_helper", lambda: helper)
