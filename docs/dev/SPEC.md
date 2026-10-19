@@ -992,6 +992,8 @@ validated in tests and cause an explicit refusal or diagnostic on drift.
 Self-update JSON from PyPI, Hermes receipts, and the update cache is limited
 to 128 nested arrays/objects. Deeper input is rejected as an invalid PyPI
 answer or ignored local metadata; brackets inside JSON strings do not count.
+The `MVMF` manifest parser applies the same limit and reports `ManifestError`
+for deeper input. Authenticated decoding still verifies the MAC before parsing.
 
 Persistent `MRKV`, `MRKW`, `MREN`, and `MRAL` layouts require versioned readers.
 Stable audit reason strings and documented policy fields are compatibility
