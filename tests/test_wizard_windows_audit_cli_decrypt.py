@@ -2,9 +2,10 @@
 
 Same host pattern as ``test_wizard_windows_audit_cli.py`` (real custody, C7a
 sessions and MRKW/MRAL; native boundary, SID, openers and platform injected):
-the per-file stop/continue matrix, rotation between listing and decrypt, bound
-remedies, plaintext guidance for an unenrolled profile, UTF-8 output on Windows
-and the remaining absence/gate branches.
+rotation between listing and decrypt, bound remedies, plaintext guidance for
+an unenrolled profile, UTF-8 output and the remaining absence/gate branches.
+The per-file stop/continue matrix injects checked listing/decrypt results; its
+public CLI, exception classification, messages and continuation remain real.
 """
 
 from __future__ import annotations
@@ -13,18 +14,19 @@ import contextlib
 import io
 import os
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
 
 from mordred_hermes._audit_session import AuditSession
 from mordred_hermes._config_io import PolicyPendingError
-from mordred_hermes._private_fs import PrivateFSError
+from mordred_hermes._private_fs import FileIdentity, PrivateFSError
 from mordred_hermes.keyvault import _windows_capability
 from mordred_hermes.keyvault._exceptions import WrapAuthCancelled, WrapKeyNotFound, WrapNativeUnavailable
 from mordred_hermes.keyvault._windows_profile import CustodyError
 from mordred_hermes.keyvault.log_encryption import AuditLogDecryptError
-from mordred_hermes.wizard import audit_cli
+from mordred_hermes.wizard import _windows_gates, audit_cli
 from tests.test_wizard_windows_audit_cli import (
     DAY,
     decrypted,
@@ -50,17 +52,46 @@ def two_targets(env, monkeypatch) -> list[str]:
     return [f"audit.log.{DAY}.gz", f"audit.log.{DAY}.1.gz"]
 
 
-def fail_first(monkeypatch, error) -> list[str]:
+@pytest.fixture
+def listed_targets(monkeypatch, tmp_path):
+    """Only routing/error classification: real custody and rotation are tested below.
+
+    Keep the public decrypt entry point and its history recheck real. The
+    checked enumeration and decrypt boundaries return explicit synthetic data;
+    no key or encrypted log is needed for each error-table row.
+    """
+    home = tmp_path / "home"
+    directory = home / "mordred"
+    names = [f"audit.log.{DAY}.gz", f"audit.log.{DAY}.1.gz"]
+    selected = {names[0]: FileIdentity(1, b"first"), names[1]: FileIdentity(1, b"second")}
+
+    def admitted(selected_home, selected_directory):
+        assert (selected_home, selected_directory) == (home, directory)
+        return None
+
+    def targets(selected_directory, target):
+        assert (selected_directory, target) == (directory, date(2026, 5, 10))
+        return dict(selected)
+
+    monkeypatch.setattr(_windows_gates, "host_platform", lambda: "win32")
+    monkeypatch.setattr(windows_cli(), "native_audit_refusal", admitted)
+    monkeypatch.setattr(windows_cli(), "decrypt_targets", targets)
+    return home, directory, names
+
+
+def fail_first(monkeypatch, error, expected_home, names) -> list[str]:
     from mordred_hermes.keyvault import windows_audit
 
     calls: list[str] = []
-    real = windows_audit.decrypt_windows_log_file
 
-    def hook(path, **kwargs):
+    def hook(path, *, home, backend, audit_sink):
+        assert home == expected_home and path.parent == expected_home / "mordred"
+        assert backend is None and callable(audit_sink)
+        assert path.name == names[len(calls)]
         calls.append(Path(path).name)
         if len(calls) == 1:
             raise error(Path(path))
-        return real(path, **kwargs)
+        return [{"event": "b"}]
 
     monkeypatch.setattr(windows_audit, "decrypt_windows_log_file", hook)
     return calls
@@ -84,10 +115,12 @@ MATRIX = [
 
 
 @pytest.mark.parametrize(("case", "error", "stops", "wording"), MATRIX, ids=[row[0] for row in MATRIX])
-def test_first_file_failure_stops_or_continues_as_documented(win, monkeypatch, capsys, case, error, stops, wording):
-    names = two_targets(win, monkeypatch)
-    calls = fail_first(monkeypatch, error)
-    assert audit_cli.decrypt(date=DAY) == 1
+def test_first_file_failure_stops_or_continues_as_documented(
+    listed_targets, monkeypatch, capsys, case, error, stops, wording
+):
+    home, directory, names = listed_targets
+    calls = fail_first(monkeypatch, error, home, names)
+    assert audit_cli.decrypt(date=DAY, audit_dir=directory, keyvault_home=home) == 1
     captured = capsys.readouterr()
     assert wording in captured.err
     assert f"{names[0]}:" in captured.err or names[0] in captured.err
@@ -100,11 +133,11 @@ def test_first_file_failure_stops_or_continues_as_documented(win, monkeypatch, c
         assert decrypted(captured.out) == ["b"]
 
 
-def test_unexpected_failure_propagates(win, monkeypatch):
-    two_targets(win, monkeypatch)
-    fail_first(monkeypatch, lambda p: RuntimeError("bug"))
+def test_unexpected_failure_propagates(listed_targets, monkeypatch):
+    home, directory, names = listed_targets
+    fail_first(monkeypatch, lambda p: RuntimeError("bug"), home, names)
     with pytest.raises(RuntimeError, match="bug"):
-        audit_cli.decrypt(date=DAY)
+        audit_cli.decrypt(date=DAY, audit_dir=directory, keyvault_home=home)
 
 
 # --- rotation between listing and decrypt -------------------------------------------------
