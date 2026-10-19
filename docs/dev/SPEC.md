@@ -197,7 +197,7 @@ browser extension, using a Venice.ai private model.
   `telegram doctor --probe-llm` explicitly unseals the saved local target and
   key, then sends a synthetic streaming completion through the same direct,
   redirect-disabled client as `telegram_ask`. It uses a 30-second total HTTP
-  deadline and 64 output tokens, consumes the stream and requires visible
+  deadline and 512 output tokens, consumes the stream and requires visible
   non-reasoning text and an explicit terminal event (`[DONE]` or a valid
   `finish_reason`); clean HTTP EOF alone is insufficient. It never opens
   the archive or probes a cloud backend;
@@ -377,7 +377,11 @@ six-plugin set without modifying upstream source.
 `hermes-mordred upgrade` detects a legacy `~/.openclaw` tree, applies explicit
 row-level conflict policies, and remains idempotent. It never overwrites an
 existing conflicting Mordred configuration silently. The exact source,
-destination, and conflict ownership are in [`PATHS.md`](./PATHS.md).
+destination, and conflict ownership are in [`PATHS.md`](./PATHS.md). Windows
+supports checked policy-only and no-legacy upgrades. Any source audit log,
+keyvault or credentials entry refuses before provider reads or publication;
+legacy custody and audit migration remain unsupported on Windows. Unsafe or
+invalid policy sources refuse without changing retained data.
 
 ### Story 2: New user setup
 
@@ -890,6 +894,11 @@ telegram    setup | doctor | login | sync | status | logout | venice |
 uninstall
 ```
 
+`hermes-mordred --version` and the registered Hermes-host compatibility alias
+print the invoked command name and the Mordred package version, then exit successfully.
+`status` shows the package version immediately after its heading and includes
+the same string in the top-level `version` field of `status --json`.
+
 `status`, `policy show`, keyvault listing, vault status, and encryption status
 are non-mutating. `configure`, `keyvault init/reset`, `network init`, vault
 mutations, encryption toggles, audit purge, pairing, serving, and `uninstall`
@@ -979,6 +988,12 @@ of truth and is updated through `tools/bump_version.py`. The minimum supported
 Hermes version is declared in `pyproject.toml`; CI checks both the floor and a
 current release. Private upstream seams used by compatibility guards must be
 validated in tests and cause an explicit refusal or diagnostic on drift.
+
+Self-update JSON from PyPI, Hermes receipts, and the update cache is limited
+to 128 nested arrays/objects. Deeper input is rejected as an invalid PyPI
+answer or ignored local metadata; brackets inside JSON strings do not count.
+The `MVMF` manifest parser applies the same limit and reports `ManifestError`
+for deeper input. Authenticated decoding still verifies the MAC before parsing.
 
 Persistent `MRKV`, `MRKW`, `MREN`, and `MRAL` layouts require versioned readers.
 Stable audit reason strings and documented policy fields are compatibility

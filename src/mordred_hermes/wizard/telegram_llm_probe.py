@@ -23,7 +23,7 @@ async def _probe(target: LlmTarget) -> None:
             session,
             target.config,
             [{"role": "user", "content": "Reply with just OK, without reasoning."}],
-            max_tokens=64,
+            max_tokens=512,
             backend="local",
             require_complete=True,
         )

@@ -225,11 +225,18 @@ def run(
             by ``configure``.
         openclaw_base: Override for tests; production = ``~/.openclaw/mordred``.
     """
+    # Source admission precedes even destination provider reads and plugin
+    # identity publication, including explicit targets and --reset.
+    admission = openclaw_migration._admit_windows_source(openclaw_base) if openclaw_migration._windows() else None
     if target_snapshot is None:
         # An integrated OpenClaw upgrade must back-fill Hermes with the legacy
         # policy itself, not first write today's lenient default and then
         # mistake that self-created value for an operator conflict.
-        target_snapshot = openclaw_migration.read_policy_snapshot(openclaw_base, policy_writer)
+        target_snapshot = (
+            admission.snapshot
+            if admission is not None
+            else openclaw_migration.read_policy_snapshot(openclaw_base, policy_writer)
+        )
         if target_snapshot is None:
             target_snapshot = PolicySnapshot(policy="lenient")
     # Upgrade rewrites the wizard-owned snapshot fields, but must not erase the
@@ -244,5 +251,9 @@ def run(
     # Hermes no longer loads).
     plugin_notes = tuple(policy_writer.migrate_plugin_identity().notes())
     story1 = _resolve_story1(options, policy_writer, target_snapshot)
-    story1_5 = _resolve_story1_5(options, policy_writer, openclaw_base)
+    story1_5 = (
+        openclaw_migration._migrate_windows_policy(admission, policy_writer, options)
+        if admission is not None
+        else _resolve_story1_5(options, policy_writer, openclaw_base)
+    )
     return UpgradeReport(story1_action=story1, story1_5_action=story1_5, plugin_notes=plugin_notes)

@@ -87,7 +87,7 @@ def env(monkeypatch, tmp_path):
         api, "_FLOWS", LoginFlows(store, client_factory=lambda *a, **k: client, save_session=lambda c: c.session)
     )
     monkeypatch.setattr(api, "_home", lambda: home)
-    monkeypatch.setattr(api, "_JOBS", {})
+    monkeypatch.setattr(api, "_JOBS", api.JobRegistry(emit=lambda event, payload: api._emit(event, payload)))
     monkeypatch.setattr(
         "mordred_hermes.extension.telegram.memory_guard.memory_encryption_active", lambda home=None: True
     )
@@ -195,6 +195,90 @@ def test_local_llm_must_be_loopback(env):
     }
     ok = _post(env, "/llm/local", {"endpoint": "http://localhost:11434/v1", "model": "qwen3"})
     assert ok == {"ok": True, "endpoint": "http://127.0.0.1:11434/v1"}
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://127.0.0.1:8081/v1",
+        "https://127.0.0.1:8080/v1",
+        "http://[::1]:8080/v1",
+        "http://127.0.0.1:8080/other",
+    ],
+)
+def test_local_llm_changed_endpoint_clears_key_before_resolving_target(env, endpoint):
+    from dataclasses import replace
+
+    from mordred_hermes.extension.telegram.service import TelegramService
+
+    _configured(env)
+    env.store.value = replace(
+        env.store.value,
+        backend="local",
+        local_endpoint="http://127.0.0.1:8080/v1",
+        local_model="old-model",
+        local_api_key="OLD-LOCAL-SECRET",
+    )
+    assert _post(env, "/llm/local", {"endpoint": endpoint, "model": "new-model"}) == {
+        "ok": True,
+        "endpoint": endpoint,
+    }
+    assert env.store.value.local_api_key is None
+    target = TelegramService._target(env.store.value)
+    assert target.base_url == endpoint and target.api_key is None
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/llm/local", {"endpoint": "http://localhost:8080/v1/", "model": " new-model "}),
+        ("/llm/venice", {"api_key": " new-venice-key ", "model": " new-model "}),
+    ],
+)
+def test_question_model_update_uses_one_transaction_without_preliminary_load(env, monkeypatch, path, body):
+    from dataclasses import replace
+
+    _configured(env)
+    env.store.value = replace(
+        env.store.value,
+        backend="local",
+        local_endpoint="http://127.0.0.1:8080/v1",
+        local_model="old-model",
+        local_api_key="OLD-LOCAL-SECRET",
+        venice_api_key="old-venice-key",
+    )
+    old = env.store.value
+    events = []
+    update = env.store.update
+
+    def ensure_key():
+        events.append("ensure")
+
+    def mutate_once(callback):
+        events.append("update")
+        return update(callback)
+
+    def no_load(**kwargs):
+        pytest.fail("settings updates must use the record already unsealed by update()")
+
+    monkeypatch.setattr(env.store, "load", no_load)
+    monkeypatch.setattr(env.store, "ensure_key", ensure_key)
+    monkeypatch.setattr(env.store, "update", mutate_once)
+    assert _post(env, path, body)["ok"] is True
+    assert events == ["ensure", "update"]
+    saved = env.store.value
+    assert (saved.api_id, saved.api_hash, saved.store_key, saved.session) == (
+        old.api_id,
+        old.api_hash,
+        old.store_key,
+        old.session,
+    )
+    assert saved.local_api_key == "OLD-LOCAL-SECRET"
+    if path == "/llm/local":
+        assert saved.local_endpoint == "http://127.0.0.1:8080/v1" and saved.local_model == "new-model"
+        assert saved.venice_api_key == "old-venice-key"
+    else:
+        assert saved.venice_api_key == "new-venice-key" and saved.venice_model == "new-model"
 
 
 def test_memory_enable_returns_a_generated_passphrase_once(env, monkeypatch):

@@ -33,8 +33,30 @@ import atexit
 import os
 import shutil
 import tempfile
+from pathlib import Path
+
+import pytest
 
 if "HERMES_HOME" not in os.environ:
     _home = tempfile.mkdtemp(prefix="mordred-tests-home-")
     os.environ["HERMES_HOME"] = _home
     atexit.register(shutil.rmtree, _home, ignore_errors=True)
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """Refuse extension execution if the runner loses its local autouse fixtures.
+
+    Pytest 9.1.0/9.1.1 can orphan directory conftests with interleaved file
+    arguments. Check the public fixture closure after normal deselection;
+    ``memory_plain`` still requires the fixture, whose body implements that opt-out.
+    """
+    extension = Path(__file__).parent / "extension"
+    required = {"_isolated_home", "_memory_encryption_on"}
+    missing = []
+    for item in session.items:
+        if isinstance(item, pytest.Function) and item.path.is_relative_to(extension):
+            absent = required.difference(item.fixturenames)
+            if absent:
+                missing.append(f"{item.nodeid}: {', '.join(sorted(absent))}")
+    if missing:
+        raise pytest.UsageError("extension isolation fixtures missing; refusing test execution:\n" + "\n".join(missing))

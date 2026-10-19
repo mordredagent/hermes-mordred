@@ -26,7 +26,11 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import fcntl
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 import json
 import os
 import select
@@ -36,10 +40,12 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from mordred_hermes.keyvault import _storage
+from tests._platform_test_helpers import legacy_secret_store as legacy_secret_store
 
 # ---------------------------- resolve_keyvault_dir ----------------------------
 
@@ -55,6 +61,7 @@ class TestResolveKeyvaultDir:
 # ---------------------------- ensure_layout ----------------------------
 
 
+@pytest.mark.usefixtures("legacy_secret_store")
 class TestEnsureLayout:
     def test_creates_root_with_0700_mode(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
@@ -141,6 +148,7 @@ class TestEnsureLayout:
 # ---------------------------- atomic_write ----------------------------
 
 
+@pytest.mark.usefixtures("legacy_secret_store")
 class TestAtomicWrite:
     def test_overwrites_existing_atomically(self, tmp_path: Path) -> None:
         target = tmp_path / "file.bin"
@@ -199,6 +207,11 @@ class TestAtomicWrite:
 
 
 class TestFsyncDurable:
+    @pytest.fixture(autouse=True)
+    def fsync_boundary(self, monkeypatch):
+        monkeypatch.setattr(_storage, "fcntl", SimpleNamespace(fcntl=lambda fd, cmd: None))
+        monkeypatch.setattr(_storage, "os", SimpleNamespace(fsync=os.fsync))
+
     def test_uses_f_fullfsync_when_available(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fcntl_calls: list[tuple[int, int]] = []
         fsync_calls: list[int] = []
@@ -274,6 +287,7 @@ class TestFsyncDurable:
         assert fsync_calls == []
 
 
+@pytest.mark.usefixtures("legacy_secret_store")
 class TestAtomicWriteUsesFsyncDurable:
     def test_atomic_write_calls_fsync_durable_for_tmp_and_parent_fd(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -312,6 +326,7 @@ class TestAtomicWriteUsesFsyncDurable:
 # ---------------------------- safe_read ----------------------------
 
 
+@pytest.mark.usefixtures("legacy_secret_store")
 class TestSafeRead:
     def test_symlink_refused(self, tmp_path: Path) -> None:
         real = tmp_path / "real.bin"
@@ -337,6 +352,7 @@ class TestSafeRead:
 # ---------------------------- keyvault_lock ----------------------------
 
 
+@pytest.mark.usefixtures("legacy_secret_store")
 class TestKeyvaultLock:
     def test_nested_lifecycle_and_keyvault_locks_are_reentrant(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
@@ -560,6 +576,7 @@ with _storage.keyvault_lifecycle_lock(root):
                 os.waitpid(child_pid, 0)
 
 
+@pytest.mark.usefixtures("legacy_secret_store")
 class TestLifecycleLockPathSafety:
     def test_symlinked_lifecycle_lock_is_refused_without_touching_target(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
@@ -587,6 +604,7 @@ class TestLifecycleLockPathSafety:
             pass
 
 
+@pytest.mark.usefixtures("legacy_secret_store")
 class TestKeyvaultReadLock:
     def test_absent_profile_does_not_create_parent_or_lock(self, tmp_path: Path) -> None:
         root = tmp_path / "missing-parent" / "kv"
@@ -637,6 +655,7 @@ class TestKeyvaultReadLock:
             pass
 
 
+@pytest.mark.usefixtures("legacy_secret_store")
 class TestResetJournalDurability:
     def test_failed_clear_flush_restores_visible_journal(
         self,
@@ -686,9 +705,15 @@ class TestResetJournalDurability:
 
 
 class TestLoadMeta:
+    @pytest.fixture(autouse=True)
+    def schema_read_boundary(self, monkeypatch):
+        """Schema/error-channel unit; native storage admission has separate tests."""
+        monkeypatch.setattr(_storage, "safe_read", lambda path: path.read_bytes())
+
     def test_returns_empty_struct_when_missing(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
-        _storage.ensure_layout(root)
+        root.mkdir()
+        (root / "meta.json").write_bytes(b'{"version": 1, "keys": {}}')
         # ensure_layout writes the initial meta, so this hits the "exists" path.
         # Verify behavior when the file is then removed:
         (root / "meta.json").unlink()
@@ -696,7 +721,8 @@ class TestLoadMeta:
 
     def test_invalid_json_raises_corrupt(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
-        _storage.ensure_layout(root)
+        root.mkdir()
+        (root / "meta.json").write_bytes(b'{"version": 1, "keys": {}}')
         (root / "meta.json").write_text("not json{{")
         with pytest.raises(_storage.KeyvaultCorruptError) as excinfo:
             _storage.load_meta(root)
@@ -704,7 +730,8 @@ class TestLoadMeta:
 
     def test_non_utf8_json_raises_corrupt_without_leaking_bytes(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
-        _storage.ensure_layout(root)
+        root.mkdir()
+        (root / "meta.json").write_bytes(b'{"version": 1, "keys": {}}')
         secret_marker = b"\xffSECRET_NON_UTF8_MARKER"
         (root / "meta.json").write_bytes(secret_marker)
 
@@ -716,7 +743,8 @@ class TestLoadMeta:
 
     def test_version_mismatch_raises_corrupt(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
-        _storage.ensure_layout(root)
+        root.mkdir()
+        (root / "meta.json").write_bytes(b'{"version": 1, "keys": {}}')
         (root / "meta.json").write_text('{"version": 2, "keys": {}}')
         with pytest.raises(_storage.KeyvaultCorruptError):
             _storage.load_meta(root)
@@ -727,7 +755,8 @@ class TestLoadMeta:
         # contain secret-shaped material that we do not want leaking into
         # exception traces or log scraping.
         root = tmp_path / "kv"
-        _storage.ensure_layout(root)
+        root.mkdir()
+        (root / "meta.json").write_bytes(b'{"version": 1, "keys": {}}')
         secret_marker = "SECRET_DO_NOT_LEAK_INTO_TRACEBACK"
         (root / "meta.json").write_text(f'{{"keys": {{}}, "corrupt": "{secret_marker}"}}')
         try:
@@ -739,6 +768,7 @@ class TestLoadMeta:
             pytest.fail("expected KeyvaultCorruptError")
 
 
+@pytest.mark.usefixtures("legacy_secret_store")
 class TestSaveMeta:
     def test_round_trips_through_load(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
@@ -754,6 +784,7 @@ class TestSaveMeta:
 # ---------------------- codex pre-merge review-fix tests ----------------------
 
 
+@pytest.mark.usefixtures("legacy_secret_store")
 class TestEnsureLayoutRefusesSymlinks:
     """Codex P2-2: ``_check_dir_mode`` used ``path.stat()`` which follows
     symlinks. A symlinked root/digests/ciphertexts directory passed the
@@ -789,6 +820,7 @@ class TestEnsureLayoutRefusesSymlinks:
             _storage.ensure_layout(root)
 
 
+@pytest.mark.usefixtures("legacy_secret_store")
 class TestAtomicWriteShortWrites:
     """Codex P2-3: ``os.write`` is not guaranteed to flush the full buffer;
     short writes truncated the file as if the transaction succeeded."""
@@ -814,34 +846,43 @@ class TestAtomicWriteShortWrites:
 
 
 class TestLoadMetaKeysFieldValidation:
+    @pytest.fixture(autouse=True)
+    def schema_read_boundary(self, monkeypatch):
+        """Schema/error-channel unit; native storage admission has separate tests."""
+        monkeypatch.setattr(_storage, "safe_read", lambda path: path.read_bytes())
+
     """Codex P2-4: ``load_meta`` accepted ``{"version": 1}`` (no keys) or
     ``{"version": 1, "keys": [...]}`` (wrong type). Both shapes break the
     read-modify-write pattern downstream. Fix: reject in load_meta."""
 
     def test_missing_keys_field_raises_corrupt(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
-        _storage.ensure_layout(root)
+        root.mkdir()
+        (root / "meta.json").write_bytes(b'{"version": 1, "keys": {}}')
         (root / "meta.json").write_text('{"version": 1}')
         with pytest.raises(_storage.KeyvaultCorruptError):
             _storage.load_meta(root)
 
     def test_keys_field_as_list_raises_corrupt(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
-        _storage.ensure_layout(root)
+        root.mkdir()
+        (root / "meta.json").write_bytes(b'{"version": 1, "keys": {}}')
         (root / "meta.json").write_text('{"version": 1, "keys": []}')
         with pytest.raises(_storage.KeyvaultCorruptError):
             _storage.load_meta(root)
 
     def test_keys_field_as_string_raises_corrupt(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
-        _storage.ensure_layout(root)
+        root.mkdir()
+        (root / "meta.json").write_bytes(b'{"version": 1, "keys": {}}')
         (root / "meta.json").write_text('{"version": 1, "keys": "oops"}')
         with pytest.raises(_storage.KeyvaultCorruptError):
             _storage.load_meta(root)
 
     def test_keys_field_as_null_raises_corrupt(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
-        _storage.ensure_layout(root)
+        root.mkdir()
+        (root / "meta.json").write_bytes(b'{"version": 1, "keys": {}}')
         (root / "meta.json").write_text('{"version": 1, "keys": null}')
         with pytest.raises(_storage.KeyvaultCorruptError):
             _storage.load_meta(root)
@@ -850,6 +891,7 @@ class TestLoadMetaKeysFieldValidation:
 # ---------------- second codex pass — P2-C non-regular file refusal ----------------
 
 
+@pytest.mark.usefixtures("legacy_secret_store")
 class TestNonRegularFileRefusal:
     """Codex second-pass P2-C: ``_check_file_mode`` only checked permission
     bits, so a FIFO / device / directory at mode 0o600 would have passed.
@@ -889,6 +931,7 @@ class TestNonRegularFileRefusal:
             _storage.safe_read(fifo)
 
 
+@pytest.mark.usefixtures("legacy_secret_store")
 class TestCheckFileModeSymlinkRefusal:
     """The lstat-side ELOOP refusal in ``_check_file_mode`` is a guard
     distinct from the shared ``_assert_regular_at_mode`` pair: a symlink

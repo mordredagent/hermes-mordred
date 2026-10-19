@@ -38,8 +38,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .._audit_io import audit_lock_path, audit_path_stat, exclusive_audit_lock, open_audit_file
+from .._config_io import CONFIG_LIMIT
 from .._log_rotation import utcnow_iso as _utcnow_iso
 from .._policy_types import POLICY_MODES
+from .._private_fs import PrivateFSError, open_optional_confidential_directory
 from .._yaml_io import load_plugin_section
 from .policy_writer import (
     PolicySnapshot,
@@ -51,6 +53,7 @@ from .policy_writer import (
     _preserve_provider_overrides,
     _section_matches_dict,
 )
+from .policy_writer import _windows as _windows
 
 if TYPE_CHECKING:
     from .upgrade import Story1_5Action, UpgradeOptions
@@ -58,6 +61,89 @@ if TYPE_CHECKING:
 _LOG = logging.getLogger("mordred.wizard.openclaw_migration")
 
 MARKER_FILENAME = ".audit-migrated-from-openclaw"
+
+
+_SOURCE_ENTRY_LIMIT = 10_000
+_UNSUPPORTED_SOURCE = (
+    "hermes-mordred upgrade: OpenClaw audit, keyvault or credentials migration "
+    "is unsupported on Windows; retained data is unchanged"
+)
+_UNSAFE_SOURCE = "hermes-mordred upgrade: refusing unsafe OpenClaw source; retained data is unchanged"
+_INVALID_POLICY = "hermes-mordred upgrade: refusing invalid OpenClaw policy"
+
+
+@dataclass(frozen=True, slots=True)
+class _WindowsAdmission:
+    """One read-only source snapshot; never authorizes later legacy file access."""
+
+    base_present: bool
+    snapshot: PolicySnapshot | None
+
+
+def _validate_windows_policy(config: dict[str, Any]) -> None:
+    """Validate supplied recognized fields before legacy default coercion."""
+    if "policy" in config and (not isinstance(config["policy"], str) or config["policy"] not in POLICY_MODES):
+        raise ValueError("invalid policy")
+    if "allow_cloud_llm" in config and not isinstance(config["allow_cloud_llm"], bool):
+        raise ValueError("invalid cloud flag")
+    if "cloud_provider_allowlist" in config:
+        providers = config["cloud_provider_allowlist"]
+        if not isinstance(providers, list) or not all(isinstance(provider, str) for provider in providers):
+            raise ValueError("invalid cloud allowlist")
+
+
+def _admit_windows_source(openclaw_base: Path) -> _WindowsAdmission:
+    """Pin checked source ancestors and consume only bounded policy input."""
+    try:
+        with open_optional_confidential_directory(openclaw_base.parent) as root:
+            if root is None:
+                return _WindowsAdmission(False, None)
+            listed_names = root.list_names(max_entries=_SOURCE_ENTRY_LIMIT)
+            root_names = {name.casefold(): name for name in listed_names}
+            if len(root_names) != len(listed_names):
+                raise SystemExit(_UNSAFE_SOURCE)
+            base_name = root_names.get(openclaw_base.name.casefold())
+            base_present = base_name is not None
+            with ExitStack() as checked:
+                if base_name is not None:
+                    base = checked.enter_context(open_optional_confidential_directory(openclaw_base.parent / base_name))
+                    if base is None:
+                        raise SystemExit(_UNSAFE_SOURCE)
+                    names = {name.casefold() for name in base.list_names(max_entries=_SOURCE_ENTRY_LIMIT)}
+                    if names & {"audit.log", "keyvault", "credentials"}:
+                        # Observe names only. Even an empty/broken/hostile entry
+                        # is unsupported, without opening the secret or audit.
+                        raise SystemExit(_UNSUPPORTED_SOURCE)
+                policy_name = root_names.get("openclaw.json")
+                snapshot = None
+                if policy_name is not None:
+                    data = root.read_bytes(policy_name, max_bytes=CONFIG_LIMIT)
+                    try:
+                        body = json.loads(data.decode("utf-8"))
+                        config = _extract_privacy_config(body)
+                        if config is not None:
+                            _validate_windows_policy(config)
+                            snapshot = _coerce_snapshot(config)
+                    except (UnicodeError, ValueError, TypeError):
+                        raise SystemExit(_INVALID_POLICY) from None
+                return _WindowsAdmission(base_present, snapshot)
+    except (PrivateFSError, OSError):
+        raise SystemExit(_UNSAFE_SOURCE) from None
+
+
+def _migrate_windows_policy(
+    admission: _WindowsAdmission,
+    policy_writer: PolicyWriter,
+    options: UpgradeOptions,
+) -> Story1_5Action:
+    """Publish only an admitted policy; never re-open or detect legacy paths."""
+    if not admission.base_present or admission.snapshot is None:
+        return "noop"
+    snapshot = _preserve_provider_overrides(admission.snapshot, policy_writer.policy_json_path)
+    if not _should_write_policy(policy_writer, snapshot, options):
+        return "noop"
+    policy_writer.write(snapshot)
+    return "migrated"
 
 
 @dataclass(frozen=True, slots=True)
@@ -482,6 +568,11 @@ def _migrate_directory(src: Path, dest: Path, kind: str) -> bool:
 
 def read_policy_snapshot(openclaw_base: Path, policy_writer: PolicyWriter) -> PolicySnapshot | None:
     """Read the legacy policy without mutating Hermes state."""
+    if _windows():
+        admission = _admit_windows_source(openclaw_base)
+        if admission.snapshot is None:
+            return None
+        return _preserve_provider_overrides(admission.snapshot, policy_writer.policy_json_path)
     src = openclaw_base.parent / "openclaw.json"
     if not src.is_file():
         return None
@@ -647,6 +738,8 @@ def migrate(
     was actually copied or written, so reporting ``migrated`` would mislead
     the ``hermes-mordred upgrade`` summary.
     """
+    if _windows():
+        return _migrate_windows_policy(_admit_windows_source(openclaw_base), policy_writer, options)
     if not openclaw_base.exists():
         return "noop"
 

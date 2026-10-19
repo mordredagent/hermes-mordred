@@ -220,6 +220,81 @@ def test_fetch_releases_validates_the_answer() -> None:
         core.fetch_releases(lambda url: (_ for _ in ()).throw(OSError("down")))
 
 
+@pytest.mark.parametrize("source", ["receipt", "pypi"])
+def test_deep_update_json_is_refused_with_large_recursion_limit(tmp_path: Path, source: str) -> None:
+    script = """
+import sys
+from pathlib import Path
+if sys.platform != "win32":
+    import resource
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+from mordred_hermes import _self_update as core
+assert Path(core.__file__).resolve() == Path(sys.argv[3])
+sys.setrecursionlimit(100000)
+payload = "[" * 100000 + "]" * 100000
+if sys.argv[1] == "receipt":
+    path = Path(sys.argv[2])
+    path.write_text(payload, encoding="utf-8")
+    assert core._read_json(path) is None
+else:
+    try:
+        core.fetch_releases(lambda url: payload.encode())
+    except core.UpdateCheckFailed as exc:
+        assert str(exc) == "PyPI answer is not JSON"
+    else:
+        raise AssertionError("deep PyPI JSON was not refused")
+"""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-X",
+            "faulthandler",
+            "-c",
+            script,
+            source,
+            str(tmp_path / "receipt.json"),
+            str(Path(core.__file__).resolve()),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("depth", [128, 129])
+@pytest.mark.parametrize("container", ["array", "object"])
+def test_update_metadata_nesting_boundary(tmp_path: Path, depth: int, container: str) -> None:
+    opening, closing = ("[", "]") if container == "array" else ('{"value":', "}")
+    path = tmp_path / "metadata.json"
+    path.write_text(opening * depth + "0" + closing * depth, encoding="utf-8")
+    value = core._read_json(path)
+    if depth == 129:
+        assert value is None
+    else:
+        for _ in range(depth):
+            value = value[0] if container == "array" else value["value"]
+        assert value == 0
+
+
+@pytest.mark.parametrize(
+    "encoding", ["utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be"]
+)
+def test_release_json_preserves_encodings_and_quoted_brackets(encoding: str) -> None:
+    releases = {"1.0": [{"filename": 'quoted " and slash \\ ' + "[{" * 200 + " 日本語"}]}
+    payload = json.dumps({"releases": releases}, ensure_ascii=False).encode(encoding)
+    assert core.fetch_releases(lambda url: payload) == releases
+
+
+def test_receipt_json_ignores_quoted_brackets_and_escaped_quotes(tmp_path: Path) -> None:
+    value = {"message": 'quoted " and slash \\ ' + "[{" * 200}
+    path = tmp_path / "receipt.json"
+    path.write_text(json.dumps(value), encoding="utf-8-sig")
+    assert core._read_json(path) == value
+
+
 def test_check_uses_installed_version_and_channel(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(core, "installed", lambda home=None: _installed(version="0.2.0a1"))
     seen: list[str] = []
@@ -454,11 +529,22 @@ def test_find_uv_prefers_path_then_hermes_tools(tmp_path: Path, monkeypatch: pyt
     assert core.find_uv(tmp_path) == Path("/usr/local/bin/uv")
 
 
-def test_installed_adds_member_extras_for_pm_build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("editable", [False, True])
+def test_installed_adds_member_extras_for_pm_build(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, editable: bool
+) -> None:
     from mordred_hermes.desktop import member
 
-    source = member.InstallSource("0.2.0a1", "path", "/e/workspace/plugin-sources/mordred", False, ())
+    venv = tmp_path / "environments" / "target" / "venv"
+    source_dir = venv.parent / "workspace" / "plugin-sources" / "mordred"
+    source_dir.mkdir(parents=True)
+    venv.mkdir()
+    source = member.InstallSource("0.2.0a1", "path", str(source_dir), editable, ())
     monkeypatch.setattr(member, "install_source", lambda: source)
+    monkeypatch.setattr(
+        member, "environment", lambda: member.Environment(str(venv / "bin" / "python"), str(venv), True)
+    )
+    monkeypatch.setattr(member, "running_package", lambda: source_dir / "mordred_hermes")
     monkeypatch.setattr(
         member,
         "member_status",
@@ -468,6 +554,34 @@ def test_installed_adds_member_extras_for_pm_build(monkeypatch: pytest.MonkeyPat
     current = core.installed(tmp_path)
     assert current.from_member is True and current.kind == "path"
     assert current.extras == ("extension", "macos", "telegram")
+    core.refuse_if_unsupported(current, uv=Path("/uv"), platform="darwin")
+
+
+@pytest.mark.parametrize("editable", [False, True])
+@pytest.mark.parametrize("location", ["arbitrary", "other-environment"])
+def test_installed_refuses_unmanaged_plugin_sources(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, editable: bool, location: str
+) -> None:
+    from mordred_hermes.desktop import member
+
+    venv = tmp_path / "environments" / "target" / "venv"
+    venv.mkdir(parents=True)
+    if location == "arbitrary":
+        source_dir = tmp_path / "checkout" / "plugin-sources" / "mordred"
+    else:
+        source_dir = tmp_path / "environments" / "other" / "workspace" / "plugin-sources" / "mordred"
+    source_dir.mkdir(parents=True)
+    source = member.InstallSource("0.2.0a1", "path", str(source_dir), editable, ())
+    monkeypatch.setattr(member, "install_source", lambda: source)
+    monkeypatch.setattr(
+        member, "environment", lambda: member.Environment(str(venv / "bin" / "python"), str(venv), True)
+    )
+    monkeypatch.setattr(member, "running_package", lambda: source_dir / "src" / "mordred_hermes")
+    current = core.installed(tmp_path)
+    with pytest.raises(core.UpdateRefused) as info:
+        core.refuse_if_unsupported(current, uv=Path("/uv"), platform="linux")
+    assert info.value.code == "source-install"
+    assert current.from_member is False and current.foreign_source is None
 
 
 def test_installed_adds_platform_extra(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -551,6 +665,10 @@ def _apply(runner: FakeRunner, tmp_path: Path, **kw: Any) -> core.UpdateReport:
 
 
 class TestApply:
+    @pytest.fixture(autouse=True)
+    def posix_update_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(core, "_platform", lambda: "linux")
+
     def test_sequence_mirrors_the_installer(self, tmp_path: Path) -> None:
         runner = FakeRunner(freeze=FREEZE, requirements="ruamel.yaml>=0.18\ntelethon>=1.42\n")
         constraints: dict[str, str] = {}
@@ -586,7 +704,8 @@ class TestApply:
             "record-member",
         ]
         install = runner.argvs[3]
-        assert install[:3] == ["/opt/uv", "pip", "install"] and "--no-config" in install
+        assert Path(install[0]) == Path("/opt/uv")
+        assert install[1:3] == ["pip", "install"] and "--no-config" in install
         assert install[install.index("--python") + 1] == "/env/bin/python3"
         assert "--no-python-downloads" in install and "--no-deps" in install
         assert install[install.index("--upgrade-package") + 1] == "hermes-mordred"
@@ -603,7 +722,7 @@ class TestApply:
         for argv, cwd, _env, timeout in runner.calls:
             assert cwd is not None and cwd.name.startswith("mordred-update-"), argv
             assert timeout is not None and timeout > 0, argv
-            if argv[0] == "/opt/uv":
+            if Path(argv[0]) == Path("/opt/uv"):
                 assert "--no-config" in argv, argv
             else:
                 assert argv[1] == "-I", argv

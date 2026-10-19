@@ -156,8 +156,12 @@ def _load(path: Path) -> tuple[Any, Any, str | None, str | None]:
     if _windows():
         pair = read_canonical_snapshot(CanonicalPaths(path.parent, config_name=path.name))
         policy_mapping_from_snapshot(pair)
-        root = yaml_mapping_from_snapshot(pair, round_trip=True)
-        return yaml, root, pair.config.data.decode("utf-8") if pair.config else None, None
+        text = pair.config.data.decode("utf-8") if pair.config else None
+        try:
+            root = yaml_mapping_from_snapshot(pair, round_trip=True)
+        except YAMLError as exc:
+            return yaml, None, text, f"{path} is not valid YAML ({exc.__class__.__name__}); edit it by hand"
+        return yaml, root, text, None
     try:
         text = _read_regular_text(path)
     except (OSError, UnicodeDecodeError) as exc:

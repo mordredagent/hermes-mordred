@@ -136,7 +136,7 @@ integration = [
   "boto3>=1.34",
 ]
 dev = [
-  "pytest>=8",
+  "pytest>=8,!=9.1.0,!=9.1.1",
   "pytest-cov",
   # Pin the linters exactly. CI installs this extra with unpinned pip, so a
   # floating ruff/mypy silently reformats or re-type-checks the whole tree on

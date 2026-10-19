@@ -41,10 +41,10 @@ PASSPHRASE = "correct horse battery staple"
 SECRET = b"the quick brown fox jumps over 24 BIP39 words"
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def valid_blob() -> bytes:
     """A real backup blob produced via ``backup.export`` with the
-    canonical ``DIGEST_FIXTURE``."""
+    canonical ``DIGEST_FIXTURE``, before any test-local monkeypatch."""
     from mordred_hermes.keyvault import backup
 
     return backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)

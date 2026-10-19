@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 
+from ..__about__ import __version__
 from .._policy_types import ACTIVE_PATHS, POLICY_MODES
 
 
@@ -41,6 +42,7 @@ def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) 
     given). The standalone ``main`` passes ``required=False`` so a bare
     ``hermes-mordred`` can greet with the quickstart help instead of erroring.
     """
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="mordred_command", required=required, metavar="COMMAND")
 
     _add_status(sub)

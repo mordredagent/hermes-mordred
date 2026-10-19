@@ -754,40 +754,17 @@ class TestSnapshotFromArgsHardening:
         ).snapshot
         assert snapshot.provider_overrides == raw
 
-    def test_non_interactive_write_failure_reports_cleanly(
+    @pytest.mark.parametrize("non_interactive", [True, False], ids=["non-interactive", "interactive"])
+    def test_write_failure_reports_cleanly(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
+        non_interactive: bool,
     ) -> None:
-        """An unwritable policy dir must yield stderr + rc 1, not a traceback."""
-        _patch_for_cli(monkeypatch, tmp_path)
-
-        class _FailingWriter:
-            policy_json_path = tmp_path / "mordred" / "policy.json"
-            config_path = tmp_path / "config.yaml"
-
-            def write(self, snapshot: object) -> None:
-                raise OSError("read-only filesystem")
-
-        monkeypatch.setattr(configure, "PolicyWriter", _FailingWriter)
-        rc = cli_handler(argparse.Namespace(non_interactive=True, policy="lenient"))
-        assert rc == 1
-        assert "read-only filesystem" in capsys.readouterr().err
-
-    def test_interactive_write_failure_reports_cleanly(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        """Codex review: run()'s policy_writer.write() call was UNGUARDED, unlike
-        the --non-interactive branch above -- cli.dispatch() only catches
-        KeyboardInterrupt / EOFError / NonInteractiveAbort / ModuleNotFoundError,
-        so the same disk-write failure hit during interactive `configure` used to
-        surface as a raw traceback instead of this clean error: + rc 1."""
+        # Both CLI branches must convert policy publication failures to stderr + rc 1.
         scripted = _ScriptedPromptIO(answers=_core_answers(policy="lenient"))
-        _patch_for_cli(monkeypatch, tmp_path, prompt_io=scripted)
+        _patch_for_cli(monkeypatch, tmp_path, prompt_io=None if non_interactive else scripted)
 
         class _FailingWriter:
             policy_json_path = tmp_path / "mordred" / "policy.json"
@@ -797,8 +774,10 @@ class TestSnapshotFromArgsHardening:
                 raise OSError("read-only filesystem")
 
         monkeypatch.setattr(configure, "PolicyWriter", _FailingWriter)
-        rc = cli_handler(argparse.Namespace(non_interactive=False))
-        assert rc == 1
+        args = argparse.Namespace(non_interactive=non_interactive)
+        if non_interactive:
+            args.policy = "lenient"
+        assert cli_handler(args) == 1
         assert "read-only filesystem" in capsys.readouterr().err
 
 
@@ -1052,11 +1031,6 @@ class TestPromptToolkitIO:
         io = configure.PromptToolkitIO()
         assert io.ask_text("Endpoint", default="http://x") == "answer"
         assert prompts == ["Endpoint [http://x]: "]
-
-    def test_ask_text_empty_answer_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("prompt_toolkit.prompt", lambda message, **kw: "")
-        io = configure.PromptToolkitIO()
-        assert io.ask_text("Endpoint", default="http://x") == "http://x"
 
     def test_ask_text_prints_description_above_a_bare_prompt(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

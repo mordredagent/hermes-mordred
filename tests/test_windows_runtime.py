@@ -6,6 +6,7 @@ import subprocess
 import pytest
 
 from mordred_hermes import _windows_runtime as runtime
+from tests._helpers import PlatformSys
 
 
 def fixture_python(root, *, conda=False):
@@ -71,7 +72,7 @@ def test_wizard_windows_environment_uses_shared_resolver(monkeypatch, tmp_path):
     from mordred_hermes.wizard import _uninstall_hermes_env as env
 
     exe = fixture_python(tmp_path / "hermes-agent/venv")
-    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(env, "sys", PlatformSys("win32"))
     assert env.find_hermes_python(tmp_path, None, runner=runner_for(exe)) == exe
     detected = env.HermesEnv(None, exe, None, ())
     assert detected.console_script == exe.parent / "hermes-mordred.exe"
@@ -107,7 +108,9 @@ def test_wizard_runtime_guidance_uses_selected_windows_interpreter(monkeypatch, 
 
     monkeypatch.setattr(_runtime_probe, "discover_runtime_python", lambda **kw: None)
     selected = tmp_path / "selected env/Scripts/python.exe"
-    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(_runtime_gate, "sys", PlatformSys("win32"))
+    monkeypatch.setattr(_runtime_probe, "sys", PlatformSys("win32"))
+    monkeypatch.setattr(_uninstall_hermes_env, "sys", PlatformSys("win32"))
     monkeypatch.setattr(_uninstall_hermes_env, "find_hermes_launcher", lambda home: None)
     monkeypatch.setattr(runtime, "resolve_windows_python", lambda *args, **kwargs: selected)
     assert _runtime_gate._expected_runtime_python(tmp_path) == selected
@@ -132,7 +135,7 @@ def test_windows_uninstall_honors_selected_uv_and_interpreter(monkeypatch, tmp_p
     uv_b = tmp_path / "uv B.exe"
     uv_a.touch()
     uv_b.touch()
-    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(env, "sys", PlatformSys("win32"))
     monkeypatch.setenv("MORDRED_HERMES_PYTHON", str(selected))
     monkeypatch.setenv("MORDRED_HERMES_UV", str(uv_a))
     calls = []
@@ -161,7 +164,7 @@ def test_windows_runner_matches_utf8_child_output_and_capture(monkeypatch, which
         assert kw["encoding"] == "utf-8"
         return subprocess.CompletedProcess(argv, 0, "Hermes 日本", "")
 
-    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(env, "sys", PlatformSys("win32"))
     monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
     monkeypatch.setattr("subprocess.run", run)
     runner = runtime.default_runner if which_runner == "runtime" else env.default_runner

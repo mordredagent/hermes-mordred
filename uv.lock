@@ -1501,7 +1501,7 @@ requires-dist = [
     { name = "pyobjc-framework-quartz", marker = "extra == 'macos'", specifier = ">=10.0" },
     { name = "pyobjc-framework-security", marker = "extra == 'macos'", specifier = ">=10.0" },
     { name = "pyobjc-framework-systemconfiguration", marker = "extra == 'macos'", specifier = ">=10.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8,!=9.1.0,!=9.1.1" },
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "python-socks", extras = ["asyncio"], marker = "extra == 'telegram'", specifier = ">=2.4" },
     { name = "qrcode", marker = "extra == 'messaging'", specifier = ">=7.4" },

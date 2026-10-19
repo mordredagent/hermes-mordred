@@ -5,6 +5,7 @@ UX review 2026-06-11: Mordred state was scattered over five read commands
 ``keyvault list`` / ``policy show``). This module aggregates the answer
 to "how am I protected right now?" into one screen:
 
+- **version**    — the running Mordred package version.
 - **policy**     — the active policy mode (same source as the install hook).
 - **network**    — configured default path, plus live runtime state when one
   is registered in this process.
@@ -34,6 +35,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..__about__ import __version__
 from .._home import hermes_home as _hermes_home
 from .._policy_io import (
     policy_transaction_marker_for_config,
@@ -94,6 +96,7 @@ class StatusReport:
     #: Windows only: every capability in fixed order, or the classified read failure.
     windows_capabilities: tuple[WindowsCapability, ...] = ()
     windows_error: str | None = None
+    version: str = __version__
 
     def to_dict(self) -> dict[str, object]:
         out = self._base_dict()
@@ -107,6 +110,7 @@ class StatusReport:
 
     def _base_dict(self) -> dict[str, object]:
         return {
+            "version": self.version,
             "policy": {"mode": self.policy_mode},
             "network": {
                 "configured_path": self.network_configured_path,
@@ -349,6 +353,7 @@ def render_text(report: StatusReport, *, color: bool = False) -> str:
         keyvault = f"{report.keyvault_detail} ({helper})"
     lines = [
         _term.heading("Mordred status:", enabled=color),
+        f"  version     : {report.version}",
         f"  policy mode : {policy}",
         f"  network     : {network}",
         f"  keyvault    : {keyvault}",

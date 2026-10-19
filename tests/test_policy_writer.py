@@ -19,12 +19,15 @@ from pathlib import Path
 
 import pytest
 
+from mordred_hermes import _config_text_io
 from mordred_hermes.wizard.policy_writer import (
     MORDRED_CONFIG_SECTIONS,
     MORDRED_PLUGIN_NAMES,
     PolicySnapshot,
     _atomic_write_text,
 )
+from tests._checked_fixture_helpers import assert_private, seed_private_file, seed_private_text
+from tests._checked_fixture_helpers import tmp_path as tmp_path
 
 from ._helpers import _writer
 
@@ -52,8 +55,7 @@ class TestEmitPolicyJson:
             "disable_ipv6": True,
             "provider_overrides": {},
         }
-        st_mode = stat.S_IMODE(os.stat(path).st_mode)
-        assert st_mode == 0o600, f"expected 0o600, got 0o{st_mode:o}"
+        assert_private(path)
 
     def test_field_order_preserved(self, tmp_path: Path) -> None:
         w = _writer(tmp_path)
@@ -85,6 +87,7 @@ class TestEmitPolicyJson:
         w.emit_policy_json(snap)
         assert path.stat().st_mtime_ns == first_mtime, "no-op write must not touch mtime"
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX mode repair; native Windows refuses widened DACLs")
     def test_idempotent_write_repairs_secret_file_mode(self, tmp_path: Path) -> None:
         w = _writer(tmp_path)
         snap = PolicySnapshot(policy="strict")
@@ -96,6 +99,10 @@ class TestEmitPolicyJson:
 
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="raw generic atomic helper is POSIX-only; Windows canonical read refusal has native coverage",
+    )
     def test_atomic_write_never_replaces_an_unreadable_existing_file(
         self,
         tmp_path: Path,
@@ -104,26 +111,27 @@ class TestEmitPolicyJson:
         path = tmp_path / "secret.json"
         original = b'{"operator_managed": true}\n'
         path.write_bytes(original)
-        from mordred_hermes.wizard import policy_writer as pw
 
-        real_open = pw.os.open
+        real_open = _config_text_io.os.open
+        hits = []
 
         def deny_target_read(candidate: object, *args: object, **kwargs: object) -> int:
             if os.fspath(candidate) == os.fspath(path):
+                hits.append(candidate)
                 raise PermissionError("simulated ACL denial")
             return real_open(candidate, *args, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(pw.os, "open", deny_target_read)
+        monkeypatch.setattr(_config_text_io.os, "open", deny_target_read)
 
         with pytest.raises(PermissionError, match="ACL denial"):
             _atomic_write_text(path, '{"replacement": true}\n', mode=0o600)
+        assert hits == [path]
         assert path.read_bytes() == original
 
     def test_preserves_hand_edited_provider_overrides_only(self, tmp_path: Path) -> None:
         """Configure-owned fields update, while the opaque extension survives."""
         w = _writer(tmp_path)
         path = tmp_path / "mordred" / "policy.json"
-        path.parent.mkdir(parents=True)
         override = {
             "corp-proxy": {
                 "transport": "httpx",
@@ -134,7 +142,8 @@ class TestEmitPolicyJson:
                 "transport_class": "http",
             }
         }
-        path.write_text(
+        seed_private_text(
+            path,
             json.dumps(
                 {
                     "policy": "off",
@@ -183,11 +192,7 @@ class TestEmitPolicyJson:
 
         w = _writer(tmp_path)
         path = tmp_path / "mordred" / "policy.json"
-        path.parent.mkdir(parents=True)
-        path.write_text(
-            json.dumps({"policy": "strict", "provider_overrides": malformed}),
-            encoding="utf-8",
-        )
+        seed_private_text(path, json.dumps({"policy": "strict", "provider_overrides": malformed}), encoding="utf-8")
 
         w.emit_policy_json(PolicySnapshot(policy="strict"))
 
@@ -307,7 +312,7 @@ plugins:
     custom: value
 """
         config_path = tmp_path / "config.yaml"
-        config_path.write_text(seed, encoding="utf-8")
+        seed_private_text(config_path, seed, encoding="utf-8")
 
         w = _writer(tmp_path)
         w.upsert_mordred_sections(
@@ -364,7 +369,7 @@ plugins:
     - mordred_wizard
 """
         config_path = tmp_path / "config.yaml"
-        config_path.write_text(seed, encoding="utf-8")
+        seed_private_text(config_path, seed, encoding="utf-8")
 
         w = _writer(tmp_path)
         w.upsert_mordred_sections(
@@ -390,7 +395,7 @@ plugins:
     ) -> None:
         """A successful configure must not leave Hermes's opt-in list unusable."""
         config_path = tmp_path / "config.yaml"
-        config_path.write_text(f"plugins:\n  enabled: {raw_enabled}\n", encoding="utf-8")
+        seed_private_text(config_path, f"plugins:\n  enabled: {raw_enabled}\n", encoding="utf-8")
 
         w = _writer(tmp_path)
         w.upsert_mordred_sections({"mordred_privacy_check": {"policy": "strict", "allow_cloud_llm": False}})
@@ -411,7 +416,8 @@ plugins:
         tmp_path: Path,
     ) -> None:
         config_path = tmp_path / "config.yaml"
-        config_path.write_text(
+        seed_private_text(
+            config_path,
             """\
 plugins:
   enabled:
@@ -492,7 +498,7 @@ plugins:
     mullvad_account_id_env: MORDRED_MULLVAD_ACCOUNT
 """
         config_path = tmp_path / "config.yaml"
-        config_path.write_text(seed, encoding="utf-8")
+        seed_private_text(config_path, seed, encoding="utf-8")
 
         w = _writer(tmp_path)
         w.merge_mordred_sections({"mordred_network": {"default_path": "clearnet"}})
@@ -516,7 +522,7 @@ plugins:
     tor_binary_path: /usr/bin/tor
 """
         config_path = tmp_path / "config.yaml"
-        config_path.write_text(seed, encoding="utf-8")
+        seed_private_text(config_path, seed, encoding="utf-8")
 
         w = _writer(tmp_path)
         w.merge_mordred_sections({"mordred_network": {"default_path": "tor"}})
@@ -544,7 +550,7 @@ plugins:
     custom: value
 """
         config_path = tmp_path / "config.yaml"
-        config_path.write_text(seed, encoding="utf-8")
+        seed_private_text(config_path, seed, encoding="utf-8")
 
         w = _writer(tmp_path)
         w.merge_mordred_sections({"mordred_network": {"default_path": "clearnet"}})
@@ -581,7 +587,7 @@ plugins:
     custom: value
 """
         config_path = tmp_path / "config.yaml"
-        config_path.write_text(seed, encoding="utf-8")
+        seed_private_text(config_path, seed, encoding="utf-8")
 
         w = _writer(tmp_path)
         w.merge_mordred_sections({"mordred_network": {"default_path": "vpn"}})
@@ -603,7 +609,7 @@ plugins:
   mordred_network: "string-instead-of-mapping"
 """
         config_path = tmp_path / "config.yaml"
-        config_path.write_text(seed, encoding="utf-8")
+        seed_private_text(config_path, seed, encoding="utf-8")
 
         w = _writer(tmp_path)
         w.merge_mordred_sections({"mordred_network": {"default_path": "tor"}})
@@ -727,7 +733,7 @@ plugins:
     default_path: tor
     custom_user_field: keep-me
 """
-        config_path.write_text(seed, encoding="utf-8")
+        seed_private_text(config_path, seed, encoding="utf-8")
 
         w = _writer(tmp_path)
         na = NetworkAnswers(
@@ -760,7 +766,7 @@ class TestCorruptedPluginsScalarRecovery:
 
     def test_merge_recovers_from_plugins_scalar(self, tmp_path: Path) -> None:
         config_path = tmp_path / "config.yaml"
-        config_path.write_text("plugins: a-string\n", encoding="utf-8")
+        seed_private_text(config_path, "plugins: a-string\n", encoding="utf-8")
 
         w = _writer(tmp_path)
         # Must not crash with AttributeError.
@@ -775,7 +781,7 @@ class TestCorruptedPluginsScalarRecovery:
 
     def test_upsert_recovers_from_plugins_scalar(self, tmp_path: Path) -> None:
         config_path = tmp_path / "config.yaml"
-        config_path.write_text("plugins: 42\n", encoding="utf-8")
+        seed_private_text(config_path, "plugins: 42\n", encoding="utf-8")
 
         w = _writer(tmp_path)
         # Must not crash with TypeError on int subscript.
@@ -792,7 +798,7 @@ class TestCorruptedPluginsScalarRecovery:
 
     def test_merge_recovers_from_plugins_list(self, tmp_path: Path) -> None:
         config_path = tmp_path / "config.yaml"
-        config_path.write_text("plugins:\n  - item1\n  - item2\n", encoding="utf-8")
+        seed_private_text(config_path, "plugins:\n  - item1\n  - item2\n", encoding="utf-8")
 
         w = _writer(tmp_path)
         w.merge_mordred_sections({"mordred_network": {"default_path": "vpn"}})
@@ -823,7 +829,7 @@ plugins:
     tor_socks_port: 9050
 """
         config_path = tmp_path / "config.yaml"
-        config_path.write_text(seed, encoding="utf-8")
+        seed_private_text(config_path, seed, encoding="utf-8")
 
         w = _writer(tmp_path)
         w.upsert_mordred_sections({"mordred_network": {"default_path": "clearnet"}})
@@ -858,6 +864,9 @@ class TestWriteCompose:
         leftovers = sorted(p.name for p in tmp_path.rglob("*.tmp"))
         assert leftovers == [], f"unexpected .tmp leftovers: {leftovers}"
 
+    @pytest.mark.skipif(
+        os.name == "nt", reason="legacy marker helper is POSIX-only; native canonical recovery is tested separately"
+    )
     def test_begin_resynchronizes_an_idempotent_existing_marker(
         self,
         tmp_path: Path,
@@ -867,15 +876,13 @@ class TestWriteCompose:
 
         w = _writer(tmp_path)
         marker = pw.policy_transaction_marker_for_policy(w.policy_json_path)
-        marker.parent.mkdir(parents=True)
-        marker.write_text("pending\n", encoding="utf-8")
-        marker.chmod(0o600)
+        seed_private_file(marker, b"pending\n")
         synced_fds: list[int] = []
         synced_parents: list[Path] = []
 
         monkeypatch.setattr(pw, "_atomic_write_text", lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(pw, "_fsync_durable", lambda fd: synced_fds.append(fd))
-        monkeypatch.setattr(pw, "_fsync_parent", lambda path: synced_parents.append(path))
+        monkeypatch.setattr(_config_text_io, "_fsync_durable", lambda fd: synced_fds.append(fd))
+        monkeypatch.setattr(_config_text_io, "_fsync_parent", lambda path: synced_parents.append(path))
 
         assert pw._begin_policy_transaction(w.policy_json_path) == marker
         assert len(synced_fds) == 1
@@ -894,25 +901,46 @@ class TestWriteCompose:
     ) -> None:
         from mordred_hermes import _policy_io
         from mordred_hermes.privacy_check import _runtime as privacy_runtime
-        from mordred_hermes.wizard import policy_writer as pw
 
         w = _writer(tmp_path)
         w.write(PolicySnapshot(policy=old_mode))  # type: ignore[arg-type]
-        real_atomic_write = pw._atomic_write_text
+        hits = []
+        if os.name == "nt":
+            from mordred_hermes._private_fs import PrivateFSError, _windows_io
 
-        def fail_config_write(path: Path, text: str, *, mode: int | None = None) -> None:
-            if path == w.config_path:
-                raise OSError("injected config write failure")
-            real_atomic_write(path, text, mode=mode)
+            real_publish = _windows_io._Transaction.replace_bytes
 
-        monkeypatch.setattr(pw, "_atomic_write_text", fail_config_write)
+            def fail_policy_write(tx, name, data):
+                if name == "policy.json":
+                    hits.append(name)
+                    raise PrivateFSError("unsafe", "injected_policy_write")
+                return real_publish(tx, name, data)
 
-        with pytest.raises(OSError, match="injected config write failure"):
+            monkeypatch.setattr(_windows_io._Transaction, "replace_bytes", fail_policy_write)
+            expected, message = PrivateFSError, "injected_policy_write"
+        else:
+            real_replace = _config_text_io.os.replace
+
+            def fail_config_replace(source, destination):
+                if destination == w.config_path:
+                    hits.append("config.yaml")
+                    raise OSError("injected config write failure")
+                return real_replace(source, destination)
+
+            monkeypatch.setattr(_config_text_io.os, "replace", fail_config_replace)
+            expected, message = OSError, "injected config write failure"
+
+        with pytest.raises(expected, match=message) as failure:
             w.write(PolicySnapshot(policy=new_mode))  # type: ignore[arg-type]
+        assert hits == (["policy.json"] if os.name == "nt" else ["config.yaml"])
+        if os.name == "nt":
+            assert failure.value.commit_state == "uncertain"
 
         marker = _policy_io.policy_transaction_marker_for_policy(w.policy_json_path)
         assert marker.is_file()
-        assert json.loads(w.policy_json_path.read_text(encoding="utf-8"))["policy"] == new_mode
+        assert json.loads(w.policy_json_path.read_text(encoding="utf-8"))["policy"] == (
+            old_mode if os.name == "nt" else new_mode
+        )
         assert _policy_io.load_policy_mapping(w.policy_json_path) == {}
         assert (
             _policy_io.read_policy_mode_fail_closed(
@@ -926,7 +954,10 @@ class TestWriteCompose:
 
         # A later successful configure reconciles both mirrors and is the only
         # operation allowed to clear the stale marker.
-        monkeypatch.setattr(pw, "_atomic_write_text", real_atomic_write)
+        if os.name == "nt":
+            monkeypatch.setattr(_windows_io._Transaction, "replace_bytes", real_publish)
+        else:
+            monkeypatch.setattr(_config_text_io.os, "replace", real_replace)
         w.write(PolicySnapshot(policy=new_mode))  # type: ignore[arg-type]
         assert not marker.exists()
         assert (
@@ -981,6 +1012,10 @@ class TestHasConfigYamlSectionProtocol:
         assert data["plugins"]["mordred_network"]["tor_socks_port"] == 9050
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="raw generic atomic helper is POSIX-only; native canonical publication has separate coverage",
+)
 class TestAtomicWriteHardening:
     """H3+M5+M6 (review 2026-05-14): the canonical ``_atomic_write_text``
     writes the tmpfile via ``Path.write_text``, which creates the file at
@@ -1016,6 +1051,8 @@ class TestAtomicWriteHardening:
         target = tmp_path / "policy.json"
         captured_pre_chmod: list[int] = []
         real_chmod = os.chmod
+        real_replace = _config_text_io.os.replace
+        publication_modes = []
 
         def capturing_chmod(path: object, mode: int, *args: object, **kwargs: object) -> None:
             with contextlib.suppress(FileNotFoundError):
@@ -1023,9 +1060,17 @@ class TestAtomicWriteHardening:
                     captured_pre_chmod.append(stat.S_IMODE(os.stat(str(path)).st_mode))
             real_chmod(path, mode, *args, **kwargs)  # type: ignore[arg-type]
 
+        def capture_publication(src, dst):
+            assert dst == target
+            publication_modes.append(stat.S_IMODE(Path(src).stat().st_mode))
+            real_replace(src, dst)
+
+        monkeypatch.setattr(_config_text_io.os, "replace", capture_publication)
         monkeypatch.setattr(os, "chmod", capturing_chmod)
         pw._atomic_write_text(target, "secret-payload\n", mode=0o600)
 
+        assert publication_modes == [0o600]
+        assert target.read_bytes() == b"secret-payload\n"
         too_broad = [oct(m) for m in captured_pre_chmod if m > 0o600]
         assert not too_broad, (
             f"tmpfile observed at mode wider than 0o600 before chmod: {too_broad}; "
@@ -1084,14 +1129,14 @@ class TestAtomicWriteHardening:
         target.write_text("same\n", encoding="utf-8")
         target.chmod(0o644)
         replacements: list[tuple[object, object]] = []
-        real_replace = pw.os.replace
+        real_replace = _config_text_io.os.replace
 
         def record_replace(src: object, dst: object) -> None:
             replacements.append((src, dst))
             real_replace(src, dst)  # type: ignore[arg-type]
 
-        monkeypatch.delattr(pw.os, "fchmod", raising=False)
-        monkeypatch.setattr(pw.os, "replace", record_replace)
+        monkeypatch.delattr(_config_text_io.os, "fchmod", raising=False)
+        monkeypatch.setattr(_config_text_io.os, "replace", record_replace)
 
         pw._atomic_write_text(target, "same\n", mode=0o600)
 
@@ -1146,7 +1191,8 @@ class TestSinglePluginIdentity:
 
     def test_write_migrates_legacy_names(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
         config_path = tmp_path / "config.yaml"
-        config_path.write_text(
+        seed_private_text(
+            config_path,
             """\
 # operator comment
 plugins:
@@ -1185,7 +1231,7 @@ plugins:
   mordred_network:
     default_path: tor
 """
-        config_path.write_text(seed, encoding="utf-8")
+        seed_private_text(config_path, seed, encoding="utf-8")
         w = _writer(tmp_path)
 
         migration = w.migrate_plugin_identity()
@@ -1209,7 +1255,7 @@ plugins:
 
     def test_explicitly_disabled_mordred_is_respected_and_reported(self, tmp_path: Path) -> None:
         config_path = tmp_path / "config.yaml"
-        config_path.write_text("plugins:\n  enabled: [mordred]\n  disabled: [mordred]\n", encoding="utf-8")
+        seed_private_text(config_path, "plugins:\n  enabled: [mordred]\n  disabled: [mordred]\n", encoding="utf-8")
 
         migration = _writer(tmp_path).migrate_plugin_identity()
 

@@ -146,7 +146,7 @@ def test_windows_install_places_assets_through_checked_primitives(windows_instal
 def test_windows_install_migrates_only_the_explicit_home(windows_install, monkeypatch):
     from ruamel.yaml import YAML
 
-    from mordred_hermes import _config_io
+    from mordred_hermes import _config_io, _config_text_io
     from mordred_hermes.wizard import policy_writer
 
     home = windows_install.home
@@ -168,6 +168,7 @@ def test_windows_install_migrates_only_the_explicit_home(windows_install, monkey
         b"  disabled: [unrelated, mordred_wizard]\n  mordred_network:\n    keep: true\n",
     )
     monkeypatch.setattr(policy_writer, "_windows", lambda: True)
+    monkeypatch.setattr(_config_text_io, "_windows", lambda: True)
     monkeypatch.setattr(_config_io, "open_confidential_directory", open_private_directory)
     monkeypatch.setattr(_config_io, "open_optional_confidential_directory", host_optional_private)
 

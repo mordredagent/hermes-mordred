@@ -1,4 +1,4 @@
-"""Installed-runtime Windows memory proof through a real child interpreter.
+"""Portable emulated proof units through a real installed child interpreter.
 
 The "installed runtime" is a non-editable environment built from this test
 venv's real interpreter: a fresh venv whose site-packages holds a copy of the
@@ -6,7 +6,8 @@ package and the packaged ``.pth`` bootstrap lines, with the test venv's
 site-packages exposed for dependencies. The native CNG boundary is the
 test-only file-backed P-256 backend (``tests/_windows_proof_runtime.py``)
 selected through ``MORDRED_TEST_INJECT_BACKEND``. Custody, MRKW and AES-GCM are
-real; no proof is ever hand-built.
+real; no proof is ever hand-built. Parent source-test admission is modeled only
+inside ``proof_env``; these units do not establish native CNG admission.
 """
 
 from __future__ import annotations
@@ -62,7 +63,7 @@ def installed_runtime(tmp_path_factory):
         ).stdout.strip()
     )
     package = Path(os.path.realpath(mordred_hermes.__file__)).parent
-    shutil.copytree(package, purelib / "mordred_hermes", ignore=shutil.ignore_patterns("__pycache__"))
+    _copy_static_package(package, purelib / "mordred_hermes")
     for name in ("mordred_hermes_runtime.pth", "mordred_hermes_config_decrypt.pth"):
         shutil.copyfile(ROOT / "packaging" / "pth" / name, purelib / name)
     # Path lines only: the test venv's own .pth files (editable source) never run.
@@ -73,6 +74,19 @@ def installed_runtime(tmp_path_factory):
     dependencies += [root for root in _hermes_source_roots() if root not in dependencies]
     (purelib / "_mordred_test_dependencies.pth").write_text("\n".join(dependencies) + "\n", encoding="utf-8")
     return python
+
+
+def _copy_static_package(package: Path, destination: Path) -> None:
+    """Copy static payload without inspecting generated Rust helper output."""
+    cargo_helpers = {package / "_native" / helper for helper in ("tpmkey-helper", "winkey-helper")}
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        excluded = {"__pycache__"}.intersection(names)
+        if Path(directory) in cargo_helpers:
+            excluded.update({"target"}.intersection(names))
+        return excluded
+
+    shutil.copytree(package, destination, ignore=ignore)
 
 
 def _hermes_source_roots() -> list[str]:
@@ -111,6 +125,13 @@ def proof_env(fs, monkeypatch, installed_runtime, tmp_path):
     custody, storage, home, _ = fs
     backend = injected.backend_for(home)
     injected.emulate(monkeypatch.setattr, backend)
+    # This fixture already emulates the native boundary. Model only the
+    # parent's source-test admission so wheel-parent units use that same
+    # boundary. Path/pytest checks, env scrub and installed child stay real.
+    tests = INJECTION.parent
+    assert tests == Path(os.path.realpath(ROOT / "tests"))
+    assert (tests / "__init__.py").is_file()
+    monkeypatch.setattr(proof_module(), "_source_test_tree", lambda package_file=None: tests)
     if os.name != "nt":
         from mordred_hermes.keyvault import _memory_storage
 
@@ -151,11 +172,14 @@ def refused(reason):
     return pytest.raises(proof_module().WindowsRuntimeProofError, match=rf"\({reason}\)")
 
 
-def test_proof_binds_installed_runtime_and_custody(proof_env):
+def test_proof_binds_installed_runtime_and_custody(proof_env, record_property):
     env = proof_env
     lease = enroll(env)
     proof = prove(env)
     assert proof.python == env.python
+    record_property("parent_package", os.path.realpath(mordred_hermes.__file__))
+    record_property("child_package", proof.module_path)
+    record_property("child_python", os.fspath(env.python))
     runtime_root = Path(os.path.realpath(env.python.parent.parent))
     assert Path(proof.module_path).is_relative_to(runtime_root)
     assert proof.module_path != os.path.realpath(mordred_hermes.__file__), "editable source cannot prove"
@@ -431,27 +455,50 @@ def _injection(environ_value, *, pytest_marker=True, package_file=None):
     return proof_module()._preserved_injection(environ, package_file=package_file)
 
 
-def test_injection_dropped_outside_pytest():
-    assert _injection(str(INJECTION)) == str(INJECTION)
-    assert _injection(str(INJECTION), pytest_marker=False) is None
+@pytest.fixture
+def source_injection(tmp_path):
+    root = tmp_path / "checkout"
+    package = root / "src" / "mordred_hermes" / "__init__.py"
+    package.parent.mkdir(parents=True)
+    package.write_text("", encoding="utf-8")
+    (root / "pyproject.toml").write_text("", encoding="utf-8")
+    tests = root / "tests"
+    tests.mkdir()
+    (tests / "__init__.py").write_text("", encoding="utf-8")
+    injection = tests / "backend.py"
+    injection.write_text("def install():\n    pass\n", encoding="utf-8")
+    return package, injection
+
+
+def test_injection_dropped_outside_pytest(source_injection):
+    package, injection = source_injection
+    assert _injection(str(injection), package_file=str(package)) == str(injection)
+    assert _injection(str(injection), pytest_marker=False, package_file=str(package)) is None
     env = proof_module()._child_environment({"MORDRED_TEST_INJECT_BACKEND": str(INJECTION)}, Path("/home"))
     assert "MORDRED_TEST_INJECT_BACKEND" not in env
 
 
-def test_injection_dropped_for_modules_outside_test_tree(tmp_path):
+def test_injection_dropped_for_modules_outside_test_tree(tmp_path, source_injection):
+    package, injection = source_injection
+
+    def preserved(value):
+        return _injection(str(value), package_file=str(package))
+
+    assert preserved(injection) == str(injection)
     outside = tmp_path / "backend.py"
     outside.write_text("def install():\n    pass\n", encoding="utf-8")
-    assert _injection(str(outside)) is None
-    traversal = ROOT / "tests" / ".." / "src" / "mordred_hermes" / "__init__.py"
-    assert _injection(str(traversal)) is None
-    assert _injection("tests/_windows_proof_runtime.py") is None  # relative
-    assert _injection(str(ROOT / "tests" / "__init__.py.txt")) is None
-    link = tmp_path / "link.py"
+    assert preserved(outside) is None
+    assert preserved(injection.parent / ".." / "tests" / injection.name) is None
+    assert preserved("tests/backend.py") is None  # relative
+    wrong_suffix = injection.with_suffix(".txt")
+    wrong_suffix.write_text("", encoding="utf-8")
+    assert preserved(wrong_suffix) is None
+    link = injection.parent / "link.py"
     try:
-        link.symlink_to(INJECTION)
+        link.symlink_to(injection)
     except OSError:  # Windows tokens without the symlink privilege
         return
-    assert _injection(str(link)) is None
+    assert preserved(link) is None
 
 
 def test_injection_dropped_for_installed_package(tmp_path):
@@ -460,6 +507,50 @@ def test_injection_dropped_for_installed_package(tmp_path):
     (site / "__init__.py").write_text("", encoding="utf-8")
     assert proof_module()._source_test_tree(str(site / "__init__.py")) is None
     assert _injection(str(INJECTION), package_file=str(site / "__init__.py")) is None
+
+
+def test_real_installed_origin_drops_injection_without_side_effects(installed_runtime, tmp_path, record_property):
+    """Independent of proof_env: actual installed origin never admits injection."""
+    import json
+
+    home = tmp_path / "unused-home"
+    script = r"""
+import json, os, sys
+from pathlib import Path
+import pytest
+import mordred_hermes
+from mordred_hermes.keyvault import _seckey_helper, _windows_custody, _windows_proof
+
+calls = []
+def forbidden(*args, **kwargs):
+    calls.append("native")
+    raise AssertionError("native/backend side effect")
+_seckey_helper.find_winkey_helper = forbidden
+_windows_custody.windows_backend = forbidden
+assert _windows_proof._source_test_tree() is None
+original = {"MORDRED_TEST_INJECT_BACKEND": sys.argv[1], "PYTEST_CURRENT_TEST": "tests/x.py::y (call)"}
+env = _windows_proof._child_environment(original, Path(os.environ["HERMES_HOME"]))
+assert "MORDRED_TEST_INJECT_BACKEND" not in env
+assert "_mordred_proof_injection" not in sys.modules
+assert calls == []
+assert not Path(os.environ["HERMES_HOME"]).exists()
+origin = Path(os.path.realpath(mordred_hermes.__file__))
+assert origin.is_relative_to(Path(sys.prefix))
+print(json.dumps({"origin": str(origin), "path": sys.path}))
+"""
+    result = subprocess.run(
+        [str(installed_runtime), "-c", script, str(INJECTION)],
+        cwd=tmp_path,
+        env={**os.environ, "HERMES_HOME": str(home)},
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    report = json.loads(result.stdout)
+    assert report["origin"] != os.path.realpath(mordred_hermes.__file__)
+    assert not any(Path(path).name == "src" for path in report["path"])
+    record_property("unpatched_installed_origin", report["origin"])
 
 
 def test_probe_directory_is_exact_private(proof_env, monkeypatch):
