@@ -276,14 +276,36 @@ remain in the complete default and native selectors:
 | Telegram classified remedies and CLI acknowledgement flag forwarding | `test_wizard_windows_telegram.py`: real custody/store login, doctor, setup, forget and uncertain-write paths; `test_wizard_windows_telegram_native.py`: native platform paths |
 | Native-init role parsing and runtime-interpreter dispatch | `test_wizard_windows_memory.py`: real role isolation, enrollment, installed child proof and enable/disable/purge lifecycle; native memory/proof suites remain selected |
 
-Before/after local Python 3.12 runs of all four affected wizard modules passed
-204 cases each, with no lost executed production lines or branches. Observed
+Before/after local Python 3.12 runs of all four affected wizard modules on
+baseline `a904a840b` passed 204 cases each, with no lost executed production lines or branches. Observed
 wall time was 254.099s then 165.952s; cache/host variation prevents attributing
 all of that difference to this change. Process-local fault injection confirmed
 that wrong stop/continue behavior, wrong audit wording, swallowed unexpected
 exceptions, wrong Telegram results, wrong enrollment roles and wrong interpreter
 selection are still detected. These local observations are not native Windows
 acceptance or a forecast for the complete workflow.
+
+Hosted measurements after fixture simplification (all rows use the full
+Windows tier; elapsed includes policy, queueing and acceptance):
+
+| Run | Windows workers | Linux floor | Workflow elapsed | Longest Windows job | Linux 3.11 main | Raw summed job time |
+|---|---:|---|---:|---:|---:|---:|
+| [39192105875](https://github.com/mordredagent/hermes-mordred/actions/runs/39192105875), previous release PR | 2 | Serial | 20m46s | 20m24s | 16m16s | 71m10s |
+| [39194838640](https://github.com/mordredagent/hermes-mordred/actions/runs/39194838640), optimization candidate | 4 | Parallel | 14m46s | 14m22s | 12m01s | 87m11s |
+
+The second run passed all ten jobs and the remote exact-branch evidence check.
+Its complete Windows selection produced 2,705 passed and 111 skipped cases
+across all 84 modules. The floor job took 5m37s alongside the main suites.
+Observed elapsed time fell by 28.9%, while raw summed job time rose by 22.5%;
+these are individual hosted observations, not controlled benchmarks or billed
+minutes. More concurrent workers trade runner consumption for faster feedback.
+
+`tools/native_test_durations.json` now uses that successful run's full JUnit
+measurements, including 107s for the shard-1 helper/wheel steps. These weights
+rebalance the observed 480–791s native shard times into approximately 678s of
+full-tier work per shard (635s routine), including the shard-1 support cost.
+Those balanced values are model estimates; the next run validates the changed
+assignment. All whole modules and the exact reviewed exclusions are preserved.
 
 The installed-Hermes hook canary scans all Python sources owned by the
 `hermes-agent` distribution, including top-level modules outside `hermes_cli`,
