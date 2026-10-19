@@ -989,6 +989,10 @@ Hermes version is declared in `pyproject.toml`; CI checks both the floor and a
 current release. Private upstream seams used by compatibility guards must be
 validated in tests and cause an explicit refusal or diagnostic on drift.
 
+Self-update JSON from PyPI, Hermes receipts, and the update cache is limited
+to 128 nested arrays/objects. Deeper input is rejected as an invalid PyPI
+answer or ignored local metadata; brackets inside JSON strings do not count.
+
 Persistent `MRKV`, `MRKW`, `MREN`, and `MRAL` layouts require versioned readers.
 Stable audit reason strings and documented policy fields are compatibility
 surfaces and are not renamed casually.

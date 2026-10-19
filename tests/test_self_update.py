@@ -220,6 +220,81 @@ def test_fetch_releases_validates_the_answer() -> None:
         core.fetch_releases(lambda url: (_ for _ in ()).throw(OSError("down")))
 
 
+@pytest.mark.parametrize("source", ["receipt", "pypi"])
+def test_deep_update_json_is_refused_with_large_recursion_limit(tmp_path: Path, source: str) -> None:
+    script = """
+import sys
+from pathlib import Path
+if sys.platform != "win32":
+    import resource
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+from mordred_hermes import _self_update as core
+assert Path(core.__file__).resolve() == Path(sys.argv[3])
+sys.setrecursionlimit(100000)
+payload = "[" * 100000 + "]" * 100000
+if sys.argv[1] == "receipt":
+    path = Path(sys.argv[2])
+    path.write_text(payload, encoding="utf-8")
+    assert core._read_json(path) is None
+else:
+    try:
+        core.fetch_releases(lambda url: payload.encode())
+    except core.UpdateCheckFailed as exc:
+        assert str(exc) == "PyPI answer is not JSON"
+    else:
+        raise AssertionError("deep PyPI JSON was not refused")
+"""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-X",
+            "faulthandler",
+            "-c",
+            script,
+            source,
+            str(tmp_path / "receipt.json"),
+            str(Path(core.__file__).resolve()),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("depth", [128, 129])
+@pytest.mark.parametrize("container", ["array", "object"])
+def test_update_metadata_nesting_boundary(tmp_path: Path, depth: int, container: str) -> None:
+    opening, closing = ("[", "]") if container == "array" else ('{"value":', "}")
+    path = tmp_path / "metadata.json"
+    path.write_text(opening * depth + "0" + closing * depth, encoding="utf-8")
+    value = core._read_json(path)
+    if depth == 129:
+        assert value is None
+    else:
+        for _ in range(depth):
+            value = value[0] if container == "array" else value["value"]
+        assert value == 0
+
+
+@pytest.mark.parametrize(
+    "encoding", ["utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be"]
+)
+def test_release_json_preserves_encodings_and_quoted_brackets(encoding: str) -> None:
+    releases = {"1.0": [{"filename": 'quoted " and slash \\ ' + "[{]}" * 200 + " 日本語"}]}
+    payload = json.dumps({"releases": releases}, ensure_ascii=False).encode(encoding)
+    assert core.fetch_releases(lambda url: payload) == releases
+
+
+def test_receipt_json_ignores_quoted_brackets_and_escaped_quotes(tmp_path: Path) -> None:
+    value = {"message": 'quoted " and slash \\ ' + "[{]}" * 200}
+    path = tmp_path / "receipt.json"
+    path.write_text(json.dumps(value), encoding="utf-8-sig")
+    assert core._read_json(path) == value
+
+
 def test_check_uses_installed_version_and_channel(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(core, "installed", lambda home=None: _installed(version="0.2.0a1"))
     seen: list[str] = []
