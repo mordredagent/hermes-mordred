@@ -23,7 +23,12 @@ def scheduled_jobs(outputs: dict[str, str]) -> list[str]:
     jobs: list[str] = []
     for name, job in workflow()["jobs"].items():
         condition = job.get("if", "always()")
-        if condition != "always()":
+        pack_condition = re.fullmatch(r"contains\(fromJSON\(needs\.ci-policy\.outputs\.(\w+)\), '([^']+)'\)", condition)
+        if pack_condition:
+            key, pack = pack_condition.groups()
+            if pack not in json.loads(outputs[key]):
+                continue
+        elif condition != "always()":
             match = re.fullmatch(r"needs\.ci-policy\.outputs\.(\w+)\s*(==|!=)\s*'([^']*)'", condition)
             assert match is not None, f"unhandled job routing: {name}: {condition}"
             key, operation, value = match.groups()
@@ -55,7 +60,18 @@ def scheduled_jobs(outputs: dict[str, str]) -> list[str]:
             "final",
             True,
             True,
-            ["ci-policy", "linux", "linux", "macos", "windows-private-fs", "windows-private-fs", "ci-acceptance"],
+            [
+                "ci-policy",
+                "linux",
+                "linux",
+                "linux-floor",
+                "macos",
+                "windows-private-fs",
+                "windows-private-fs",
+                "windows-private-fs",
+                "windows-private-fs",
+                "ci-acceptance",
+            ],
         ),
     ],
 )
@@ -65,7 +81,8 @@ def test_only_requested_workers_are_scheduled(mode, macos, windows, want) -> Non
         "linux_versions": json.dumps([] if mode == "docs" else ["3.11", "3.13"] if mode == "final" else ["3.12"]),
         "macos": str(macos).lower(),
         "windows": str(windows).lower(),
-        "windows_shards": json.dumps([1, 2] if mode == "final" else [1] if windows else []),
+        "windows_shards": json.dumps([1, 2, 3, 4] if mode == "final" else [1] if windows else []),
+        "linux_packs": json.dumps(["main", "static", "floor"] if mode == "final" else ["main", "static"]),
         # Characterize the pre-change graph's real fan-out too.
         "full": str(mode != "critical").lower(),
         "critical": str(mode == "critical").lower(),
@@ -78,9 +95,30 @@ def test_acceptance_runs_after_failures_and_checks_every_worker() -> None:
     assert "ci-acceptance" in jobs, "no positive scope acceptance job"
     acceptance = jobs["ci-acceptance"]
     assert acceptance["if"] == "always()"
-    assert set(acceptance["needs"]) == {"ci-policy", "linux", "macos", "windows-private-fs"}
+    assert set(acceptance["needs"]) == {"ci-policy", "linux", "linux-floor", "macos", "windows-private-fs"}
     assert acceptance["name"] == "CI acceptance"
     assert not any(step.get("continue-on-error") for job in jobs.values() for step in job["steps"])
+
+
+def test_floor_runs_in_parallel_with_main_only_when_requested() -> None:
+    outputs = {
+        "mode": "ordinary",
+        "linux_versions": '["3.12"]',
+        "macos": "false",
+        "windows": "false",
+        "windows_shards": "[]",
+        "linux_packs": '["main", "static", "floor"]',
+    }
+    assert scheduled_jobs(outputs) == ["ci-policy", "linux", "linux-floor", "ci-acceptance"]
+    jobs = workflow()["jobs"]
+    floor = jobs["linux-floor"]
+    assert floor["needs"] == ["ci-policy"]
+    floor_ids = {s.get("id") for s in floor["steps"]}
+    assert {"floor_install", "floor_guard", "floor_tests", "evidence"} <= floor_ids
+    assert not {"floor_install", "floor_guard", "floor_tests"} & {s.get("id") for s in jobs["linux"]["steps"]}
+    test = next(s for s in floor["steps"] if s.get("id") == "floor_tests")
+    assert "-m pytest -q --deselect" in test["run"]
+    assert "--role floor" in next(s for s in floor["steps"] if s.get("id") == "evidence")["run"]
 
 
 def test_ready_conversion_and_manual_validation_cannot_be_path_filtered() -> None:

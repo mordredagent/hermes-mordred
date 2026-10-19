@@ -25,7 +25,7 @@ def evidence_tool():
 
 def policy(mode="ordinary"):
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "mode": mode,
         "repository": "owner/repo",
         "workflow_path": ".github/workflows/ci.yml",
@@ -63,6 +63,7 @@ def needs():
     return {
         "ci-policy": {"result": "success", "outputs": {}},
         "linux": {"result": "success", "outputs": {}},
+        "linux-floor": {"result": "skipped", "outputs": {}},
         "macos": {"result": "skipped", "outputs": {}},
         "windows-private-fs": {"result": "skipped", "outputs": {}},
     }
@@ -78,6 +79,74 @@ def test_complete_ordinary_evidence_is_not_release_evidence():
     assert result["accepted"] is True
     assert result["policy"]["mode"] == "ordinary"
     assert result["workers"][0]["actual_python"] == "3.12"
+
+
+def test_floor_is_a_distinct_required_worker_with_no_main_suite_claim():
+    tool = evidence_tool()
+    p = final_policy()
+    expected = tool.expected_workers(p)
+    assert expected[("linux", "3.11", 1, "floor")] == ["floor"]
+    assert "floor" not in expected[("linux", "3.11", 1, "main")]
+    assert {shard for os_name, _, shard, _ in expected if os_name == "windows"} == {1, 2, 3, 4}
+
+
+@pytest.mark.parametrize("mutation", ["duplicate", "main_role", "missing_role", "old_schema", "stale_ref", "failed"])
+def test_floor_worker_cannot_be_substituted_or_reused(mutation):
+    tool = evidence_tool()
+    evidence = final_evidence()
+    floor = next(w for w in evidence["workers"] if w["role"] == "floor")
+    if mutation == "duplicate":
+        evidence["workers"].append(copy.deepcopy(floor))
+    elif mutation == "main_role":
+        floor["role"] = "main"
+    elif mutation == "missing_role":
+        del floor["role"]
+    elif mutation == "old_schema":
+        floor["schema_version"] = 2
+    elif mutation == "stale_ref":
+        floor["context"]["ref"] = "refs/heads/other"
+    else:
+        floor["packs"]["floor"]["floor_tests"]["outcome"] = "failure"
+    with pytest.raises(ValueError):
+        tool.validate_acceptance(evidence)
+
+
+def test_ordinary_floor_scope_requires_separate_worker_and_remote_job(monkeypatch):
+    tool = evidence_tool()
+    p = policy()
+    p["linux_packs"].append("floor")
+    floor = tool.build_worker(
+        p,
+        "linux",
+        "3.12",
+        successful_steps("floor_install", "floor_guard", "floor_tests"),
+        actual_python="3.12",
+        role="floor",
+    )
+    jobs = needs()
+    jobs["linux-floor"]["result"] = "success"
+    evidence = tool.accept(p, [worker(tool, p), floor], jobs, {})
+    checker = checker_tool()
+    responses = api_fixture(evidence)
+    page = responses["actions/runs/42/attempts/2/jobs?per_page=100&page=1"]
+    job = copy.deepcopy(page["jobs"][0])
+    job.update(id=99, name="linux-floor")
+    page["jobs"].append(job)
+    page["total_count"] += 1
+    install_api(monkeypatch, checker, responses)
+    assert checker.has_ci_evidence("owner/repo", SHA, "dev", "ordinary") is True
+    page["jobs"].pop()
+    page["total_count"] -= 1
+    assert checker.has_ci_evidence("owner/repo", SHA, "dev", "ordinary") is False
+
+
+@pytest.mark.parametrize("schema", [1, 2])
+def test_previous_evidence_schema_requires_a_fresh_baseline(schema):
+    tool = evidence_tool()
+    p = policy()
+    p["schema_version"] = schema
+    with pytest.raises(ValueError, match="schema"):
+        tool.validate_policy(p)
 
 
 @pytest.mark.parametrize("state", ["skipped", "failure", "cancelled", None])
@@ -250,7 +319,7 @@ def final_policy(tier="full"):
         macos_packs=["main", "swift", "tpm"],
         windows_packs=["main", "winkey", "windows-wheel"],
         windows_modules=inventory["native_modules"],
-        windows_shards=[1, 2],
+        windows_shards=[1, 2, 3, 4],
         windows_test_tier=tier,
         windows_exclusions_sha256=planner().exclusions_digest(tier),
     )
@@ -276,9 +345,6 @@ def final_evidence(tier="full"):
                 "feature_install",
                 "feature_imports",
                 "feature_tests",
-                "floor_install",
-                "floor_guard",
-                "floor_tests",
                 "package_build",
                 "package_smoke",
                 "integration_install",
@@ -298,6 +364,14 @@ def final_evidence(tier="full"):
             actual_python="3.11",
         ),
         tool.build_worker(p, "linux", "3.13", successful_steps("install", "mypy", "pytest"), actual_python="3.13"),
+        tool.build_worker(
+            p,
+            "linux",
+            "3.11",
+            successful_steps("floor_install", "floor_guard", "floor_tests"),
+            actual_python="3.11",
+            role="floor",
+        ),
         tool.build_worker(
             p,
             "macos",
@@ -336,18 +410,21 @@ def final_evidence(tier="full"):
             shard=1,
             native_selection=native_selection(p, 1),
         ),
-        tool.build_worker(
-            p,
-            "windows",
-            "3.11",
-            successful_steps("install", "private_home", "native"),
-            actual_python="3.11",
-            shard=2,
-            native_selection=native_selection(p, 2),
-        ),
+        *[
+            tool.build_worker(
+                p,
+                "windows",
+                "3.11",
+                successful_steps("install", "private_home", "native"),
+                actual_python="3.11",
+                shard=shard,
+                native_selection=native_selection(p, shard),
+            )
+            for shard in (2, 3, 4)
+        ],
     ]
     jobs = needs()
-    jobs["macos"]["result"] = jobs["windows-private-fs"]["result"] = "success"
+    jobs["linux-floor"]["result"] = jobs["macos"]["result"] = jobs["windows-private-fs"]["result"] = "success"
     return tool.accept(p, manifests, jobs, {})
 
 
@@ -355,14 +432,17 @@ def test_final_requires_both_linux_versions_and_every_support_pack():
     tool = evidence_tool()
     evidence = final_evidence()
     assert evidence["accepted"] is True
-    assert [(w["os"], w["python"], w["shard"]) for w in evidence["workers"]] == [
-        ("linux", "3.11", 1),
-        ("linux", "3.13", 1),
-        ("macos", "3.11", 1),
-        ("windows", "3.11", 1),
-        ("windows", "3.11", 2),
+    assert [(w["os"], w["python"], w["shard"], w["role"]) for w in evidence["workers"]] == [
+        ("linux", "3.11", 1, "main"),
+        ("linux", "3.11", 1, "floor"),
+        ("linux", "3.13", 1, "main"),
+        ("macos", "3.11", 1, "main"),
+        ("windows", "3.11", 1, "main"),
+        ("windows", "3.11", 2, "main"),
+        ("windows", "3.11", 3, "main"),
+        ("windows", "3.11", 4, "main"),
     ]
-    for index in range(5):
+    for index in range(8):
         damaged = copy.deepcopy(evidence)
         damaged["workers"].pop(index)
         with pytest.raises(ValueError):
@@ -380,7 +460,7 @@ def test_final_requires_both_linux_versions_and_every_support_pack():
         ("windows", "windows-wheel"),
     ]:
         damaged = copy.deepcopy(evidence)
-        manifest = next(w for w in damaged["workers"] if w["os"] == os_name)
+        manifest = next(w for w in damaged["workers"] if w["os"] == os_name and pack in w["packs"])
         del manifest["packs"][pack]
         with pytest.raises(ValueError):
             tool.validate_acceptance(damaged)
@@ -424,9 +504,12 @@ def api_fixture(evidence):
         "ci-policy",
         "linux (3.11)",
         "linux (3.13)",
+        "linux-floor",
         "macos",
         "windows-private-fs (1)",
         "windows-private-fs (2)",
+        "windows-private-fs (3)",
+        "windows-private-fs (4)",
         "CI acceptance",
     ]
     if p["mode"] != "final":
@@ -833,7 +916,7 @@ def test_complete_ordinary_native_family_and_wheel_only_scope_are_valid():
     p.update(
         windows=True, windows_packs=["main"], windows_modules=network, windows_shards=[1], windows_test_tier="full"
     )
-    assert ("windows", "3.12", 1) in tool.expected_workers(p)
+    assert ("windows", "3.12", 1, "main") in tool.expected_workers(p)
     p.update(windows_packs=["main", "windows-wheel"], windows_modules=[])
     tool.validate_policy(p)
 
@@ -962,7 +1045,9 @@ def planner():
 
 def native_selection(p, shard):
     plan = planner()
-    modules = plan.plan_native_modules(p["windows_modules"], tier=p["windows_test_tier"], shard=shard, count=2)
+    modules = plan.plan_native_modules(
+        p["windows_modules"], tier=p["windows_test_tier"], shard=shard, count=len(p["windows_shards"])
+    )
     excluded = plan.exclusions_for(modules, p["windows_test_tier"])
     tests = [{"nodeid": module + "::test_contract", "outcome": "passed"} for module in modules]
     ids = sorted([test["nodeid"] for test in tests] + excluded)
@@ -970,7 +1055,7 @@ def native_selection(p, shard):
         "schema_version": 1,
         "tier": p["windows_test_tier"],
         "shard": shard,
-        "shard_count": 2,
+        "shard_count": len(p["windows_shards"]),
         "modules": modules,
         "excluded_nodeids": excluded,
         "tests": tests,
@@ -1067,12 +1152,13 @@ def test_windows_shards_are_bound_to_the_same_complete_execution(mutation):
         tool.validate_acceptance(evidence)
 
 
+@pytest.mark.parametrize("name", ["linux-floor", *[f"windows-private-fs ({i})" for i in range(1, 5)]])
 @pytest.mark.parametrize("mutation", ["missing", "duplicate", "failed", "old_name"])
-def test_remote_requires_each_named_windows_shard(monkeypatch, mutation):
+def test_remote_requires_each_named_parallel_worker(monkeypatch, mutation, name):
     checker = checker_tool()
     responses = api_fixture(final_evidence())
     page = responses["actions/runs/42/attempts/2/jobs?per_page=100&page=1"]
-    index = next(i for i, job in enumerate(page["jobs"]) if job["name"] == "windows-private-fs (2)")
+    index = next(i for i, job in enumerate(page["jobs"]) if job["name"] == name)
     if mutation == "missing":
         page["jobs"].pop(index)
     elif mutation == "duplicate":
