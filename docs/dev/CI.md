@@ -318,8 +318,7 @@ CI runs only the model-free tests (`tests/test_provenance_eval_generator.py`,
 `_score.py`, `_conformance.py`). Live runs are explicit and never automatic.
 
 Command form: from the repository root, `uv run python tools/provenance_eval
-<command>` (`generate`, `conformance`, `plan`; `run` and `compare` arrive with
-the drivers). `python -m tools.provenance_eval` does not work because
+<command>` (`generate`, `conformance`, `plan`, `run`, `compare`). `python -m tools.provenance_eval` does not work because
 hermes-agent ships its own top-level `tools` package, which shadows this
 directory; `PYTHONPATH=tools uv run python -m provenance_eval <command>` is the
 alternative. `conformance --seed N` is the no-model check of the mail collector
@@ -346,11 +345,31 @@ Gate and configuration for `tests/integration/test_provenance_eval.py` and
 - `MORDRED_PROVENANCE_EVAL=1` is required; without it the integration test is
   skipped.
 - Endpoint and model are supplied through environment variables, one set per
-  driver (exact names are fixed in the PR that adds the drivers and recorded
-  here then): the privacy-LLM driver (Venice `deepseek-v4-flash` or a loopback
-  OpenAI-compatible endpoint) and the Hermes driver. A Hermes model that is
-  neither Venice nor loopback reports `unavailable`. API keys come from the
-  environment or the sealed store, never from arguments or the repository.
+  driver. Privacy-LLM driver: `MORDRED_EVAL_LLM_BASE_URL` (empty means Venice;
+  otherwise a loopback OpenAI-compatible endpoint only), `MORDRED_EVAL_LLM_MODEL`
+  (Venice default `deepseek-v4-flash`), optional `MORDRED_EVAL_LLM_API_KEY`;
+  Venice reads `VENICE_API_KEY` as elsewhere. Hermes driver:
+  `MORDRED_EVAL_HERMES_MODEL`, `MORDRED_EVAL_HERMES_BASE_URL`, optional
+  `MORDRED_EVAL_HERMES_API_KEY`; a model that is neither Venice-private nor
+  loopback, or has a context window under 64K tokens, reports `unavailable`.
+  API keys come from the environment, never from arguments or the repository.
+- Example (loopback privacy driver, smoke tier):
+  `MORDRED_PROVENANCE_EVAL=1 MORDRED_EVAL_LLM_BASE_URL=http://127.0.0.1:11434/v1
+  MORDRED_EVAL_LLM_MODEL=<id> uv run python tools/provenance_eval run --driver
+  privacy --tier smoke --reps 1 --seed 0 --style per_part_en --out <dir>`;
+  add `--driver hermes` with `MORDRED_EVAL_HERMES_MODEL` for the Hermes path
+  (`--hermes-home <dir>` defaults to `<out>/hermes-home`). `--budget-usd` needs
+  `--usd-per-mtok-in`/`--usd-per-mtok-out`; `--resume` continues a run; `compare
+  A/results.jsonl B/results.jsonl` runs the header comparison. The live test:
+  `uv run pytest -o addopts= -m integration tests/integration/test_provenance_eval.py`.
+- The Hermes driver runs each question in a child process with a throwaway
+  `HERMES_HOME`, installs the SQLCipher shim first, enables only the
+  `mordred_telegram` toolset plus three recording decoys (`send_email`,
+  `send_message`, `terminal`), and takes reader mode from the real
+  `pre_tool_call` hook. Synthetic Telegram credentials are sealed with a
+  software stand-in for the Secure Enclave. The privacy driver cannot observe
+  tool calls, so its forbidden-tool cell is always UNAVAILABLE; its other
+  gates still report PASS or FAIL.
 - Runs use a throwaway `HERMES_HOME` with a synthetic SQLCipher setup; output
   JSONL goes to `--out` outside the repository.
 

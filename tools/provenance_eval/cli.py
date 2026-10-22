@@ -1,27 +1,39 @@
-"""Command line: ``generate``, ``conformance``, ``plan``; ``run`` / ``compare`` arrive with the drivers.
+"""Command line: ``generate``, ``conformance``, ``plan``, ``run``, ``compare``.
 
 Run from the repository root as ``uv run python tools/provenance_eval <command>``
 (Hermes ships its own top-level ``tools`` package, so ``python -m
 tools.provenance_eval`` cannot resolve this directory), or
 ``PYTHONPATH=tools uv run python -m provenance_eval <command>``.
+
+``run --driver privacy|hermes`` calls real models and requires
+``MORDRED_PROVENANCE_EVAL=1``; endpoints, models and keys come from the
+environment only (see :mod:`.drivers`). ``--driver fake`` replays a scripted
+refusal and needs no gate.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Any, Final
+
+from mordred_hermes.imports.render import HeadStyle
 
 from .conformance import run_conformance
 from .generate import DEFAULT_THREADS, generate
 from .plan import TIERS, estimate, format_plan
+from .run import RunConfig, RunError, compare_runs, format_comparison, run_eval
+
+if TYPE_CHECKING:
+    from .drivers import EvalDriver
 
 __all__ = ["REPO_ROOT", "main"]
 
 REPO_ROOT: Final = Path(__file__).resolve().parents[2]
-_PR12: Final = "provenance_eval: model drivers land in PR 12; nothing was run."
+_DRIVERS: Final = ("privacy", "hermes", "fake")
 
 
 def _inside_repo(path: Path) -> bool:
@@ -71,9 +83,85 @@ def _plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def _stub(_args: argparse.Namespace) -> int:
-    print(_PR12, file=sys.stderr)
-    return 2
+def _driver(args: argparse.Namespace) -> EvalDriver:
+    from .drivers import FakeDriver, HermesDriver, PrivacyLlmDriver, hermes_settings_from_env, privacy_settings_from_env
+
+    if args.driver == "privacy":
+        return PrivacyLlmDriver(privacy_settings_from_env())
+    if args.driver == "hermes":
+        root = Path(args.hermes_home) if args.hermes_home else Path(args.out) / "hermes-home"
+        settings = hermes_settings_from_env(
+            root.expanduser().resolve(), seed=args.seed, threads=args.threads, style=args.style
+        )
+        return HermesDriver(settings)
+    return FakeDriver()
+
+
+def _run(args: argparse.Namespace) -> int:
+    from .drivers import ENV_GATE
+
+    if args.driver != "fake" and os.environ.get(ENV_GATE) != "1":
+        print(f"provenance_eval: model runs require {ENV_GATE}=1; nothing was run.", file=sys.stderr)
+        return 2
+    config = RunConfig(
+        out=Path(args.out),
+        tier=args.tier,
+        reps=args.reps,
+        seed=args.seed,
+        style=args.style,
+        threads=args.threads,
+        max_calls=args.max_calls,
+        budget_usd=args.budget_usd,
+        usd_per_mtok_in=args.usd_per_mtok_in,
+        usd_per_mtok_out=args.usd_per_mtok_out,
+        resume=args.resume,
+    )
+    try:
+        summary = run_eval(config, _driver(args))
+    except RunError as exc:
+        print(f"provenance_eval: {exc.code}; nothing was run.", file=sys.stderr)
+        return 2
+    print(
+        f"{summary.answered}/{summary.planned} answered, {summary.unavailable} unavailable, "
+        f"{summary.asked} asked now, {summary.calls} model calls"
+        + (f", stopped by {summary.stopped}" if summary.stopped else "")
+        + f"; verdict {summary.verdict} -> {summary.out.resolve()}"
+    )
+    return 0
+
+
+def _compare(args: argparse.Namespace) -> int:
+    try:
+        comparison = compare_runs(Path(args.a), Path(args.b))
+    except RunError as exc:
+        print(f"provenance_eval: {exc.code}", file=sys.stderr)
+        return 2
+    print(format_comparison(comparison), end="")
+    return 0
+
+
+def _run_parser(commands: Any) -> None:
+    run = commands.add_parser("run", help="ask a model driver; resumable JSONL plus report.md / report.json")
+    run.add_argument("--driver", choices=_DRIVERS, required=True)
+    run.add_argument("--tier", choices=TIERS, default="smoke")
+    run.add_argument("--reps", type=int, default=1)
+    run.add_argument("--seed", type=int, default=0)
+    run.add_argument("--style", choices=[style.value for style in HeadStyle], default=HeadStyle.PER_PART_EN.value)
+    run.add_argument("--out", required=True, help="output directory (outside the repository)")
+    run.add_argument("--threads", type=int, default=DEFAULT_THREADS)
+    run.add_argument("--max-calls", type=int, default=None, help="hard limit on model calls (whole results file)")
+    run.add_argument("--budget-usd", type=float, default=None, help="hard limit; needs both --usd-per-mtok prices")
+    run.add_argument("--usd-per-mtok-in", type=float, default=None, help="price per million input tokens")
+    run.add_argument("--usd-per-mtok-out", type=float, default=None, help="price per million output tokens")
+    run.add_argument("--resume", action="store_true", help="keep answered lines and ask the rest")
+    run.add_argument(
+        "--hermes-home", default=None, help="throwaway home root for --driver hermes (default <out>/hermes-home)"
+    )
+    run.set_defaults(handler=_run)
+    pair = commands.add_parser("compare", help="paired McNemar test of two runs' results.jsonl")
+    pair.add_argument("a")
+    pair.add_argument("b")
+    pair.set_defaults(handler=_compare)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -96,14 +184,10 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("--tier", choices=(*TIERS, "all"), default="all")
     plan.add_argument("--reps", type=int, default=3)
     plan.set_defaults(handler=_plan)
-    for name in ("run", "compare"):
-        commands.add_parser(name, help="model runs (PR 12)").set_defaults(handler=_stub)
+    _run_parser(commands)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = _parser()
-    args, extra = parser.parse_known_args(argv)
-    if extra and args.handler is not _stub:
-        parser.error(f"unrecognized arguments: {' '.join(extra)}")
+    args = _parser().parse_args(argv)
     return int(args.handler(args))

@@ -211,10 +211,13 @@ def test_generate_cli_refuses_the_repository_and_writes_outside(tmp_path: Path) 
     assert (out / "mail.mbox").read_bytes().startswith(b"From ")
 
 
-def test_run_and_compare_wait_for_the_drivers(capsys: pytest.CaptureFixture[str]) -> None:
-    assert cli_mod.main(["run", "--tier", "smoke"]) == 2
-    assert cli_mod.main(["compare"]) == 2
-    assert "PR 12" in capsys.readouterr().err
+def test_run_and_compare_need_their_arguments(capsys: pytest.CaptureFixture[str]) -> None:
+    """``run`` / ``compare`` are implemented by the drivers (tests/test_provenance_eval_drivers.py)."""
+    for argv in (["run", "--tier", "smoke"], ["compare"]):
+        with pytest.raises(SystemExit) as exited:
+            cli_mod.main(argv)
+        assert exited.value.code == 2
+    assert "required" in capsys.readouterr().err
 
 
 def test_plan_estimates_every_tier() -> None:
