@@ -7,8 +7,10 @@ tools in :mod:`.tools`). It never opens the store itself: callers pass an
 (:mod:`._history_access`). Every query is bounded: at most
 :data:`SCAN_EPISODES` of the newest episodes in the requested window are
 considered, and at most :data:`MAX_SUMMARY_EVENTS` events are read per
-summarized episode (its first task start and last corrections in the user's
-words are read separately: Hermes's own capture writes a task start when its
+summarized episode, the earliest in time (``observed_at``, then the order
+received: collectors send a task start when the task or turn ends, with the
+time it started); its first task start and last corrections in the user's
+words are read separately (Hermes's own capture writes a task start when its
 turn ends, after the turn's calls).
 
 Two kinds of text come out of the store and they are kept apart:
@@ -129,7 +131,7 @@ LAST_CALL_SESSION_EPISODES: Final = 8
 #: Phases of a call that ran, and the results that say it failed (:func:`_with_work`).
 _RAN_PHASES: Final = ("dispatched", "observed")
 _FAILED_RESULTS: Final = ("claimed_failure", "verified_failure")
-#: Events read to summarize one episode (task, routes, titles, outcome).
+#: Events read to summarize one episode (routes, titles, outcome): the earliest in time (:func:`_summary`).
 MAX_SUMMARY_EVENTS: Final = 400
 #: Events read for :func:`episode_detail`: task starts, corrections and other boundaries first, then the newest.
 MAX_DETAIL_EVENTS: Final = 1000
@@ -226,7 +228,7 @@ class EpisodeSummary:
     #: The user's own words (:func:`speaks_for_user`): the task start text and the user's corrections.
     tasks: tuple[str, ...]
     corrections: tuple[str, ...]
-    #: Metadata: the pages in order, consecutive repeats collapsed.
+    #: Metadata: the pages in time order, consecutive repeats collapsed.
     route: tuple[Hop, ...]
     #: Site-controlled: page titles in first-seen order (never in a turn-start block).
     titles: tuple[str, ...]
@@ -473,16 +475,18 @@ def _in(ids: Sequence[str]) -> str:
 
 
 def _sites(conn: sqlite3.Connection, ids: Sequence[str]) -> dict[str, list[str]]:
-    """Hosts per episode, in first-seen order (one row per episode and host)."""
+    """Hosts per episode, in first-seen order: each host by its earliest event in time (``observed_at``, then
+    receipt), so a task start sent when its task ended still names the first host (one row per episode and host)."""
     if not ids:
         return {}
     rows = conn.execute(
-        "SELECT episode_id, site, MIN(receipt) FROM activity_events WHERE site IS NOT NULL "
-        f"AND episode_id IN ({_in(ids)}) GROUP BY episode_id, site",
+        "SELECT episode_id, site FROM (SELECT episode_id, site, observed_at, receipt, ROW_NUMBER() OVER "
+        "(PARTITION BY episode_id, site ORDER BY observed_at, receipt) AS nth FROM activity_events "
+        f"WHERE site IS NOT NULL AND episode_id IN ({_in(ids)})) WHERE nth = 1 ORDER BY observed_at, receipt",
         tuple(ids),
-    ).fetchall()
+    )
     sites: dict[str, list[str]] = {}
-    for episode_id, site, _first in sorted(rows, key=lambda row: (row[0], row[2])):
+    for episode_id, site in rows:
         sites.setdefault(str(episode_id), []).append(str(site))
     return sites
 
@@ -576,8 +580,10 @@ _SUMMARY_COLUMNS: Final = "phase, site, route, query, page_title"
 
 
 def _summary(conn: sqlite3.Connection, head: _Head, sites: Sequence[str]) -> EpisodeSummary:
+    # In time order (``observed_at``, then receipt): a collector sends a task start when its task or turn ends,
+    # with the time it started, so the start page still leads the route and the cap keeps the earliest events.
     rows = conn.execute(
-        f"SELECT {_SUMMARY_COLUMNS} FROM activity_events WHERE episode_id = ? ORDER BY receipt LIMIT ?",
+        f"SELECT {_SUMMARY_COLUMNS} FROM activity_events WHERE episode_id = ? ORDER BY observed_at, receipt LIMIT ?",
         (head.episode_id, MAX_SUMMARY_EVENTS),
     ).fetchall()
     # The user's own words are read even past the event cap: the first task starts (Hermes's own capture writes
@@ -841,13 +847,7 @@ def episode_detail(
         if row is None:
             return None
         head = _Head(str(row[0]), int(row[1]), float(row[2]), float(row[3]), str(row[4]))
-        sites: list[str] = []
-        for (site,) in conn.execute(
-            "SELECT site FROM activity_events WHERE episode_id = ? AND site IS NOT NULL ORDER BY receipt",
-            (episode_id,),
-        ):
-            if site not in sites:
-                sites.append(str(site))
+        sites = _sites(conn, [episode_id]).get(episode_id, [])
         if _hidden(conn, [episode_id], {episode_id: sites}, excluded_sites):
             return None
         summary = _summary(conn, head, sites)
@@ -896,7 +896,8 @@ def _shown_text(op: str, text: Any, *, user: bool = False) -> str | None:
 def latest_page_text(
     store: ActivityStore, episode_ids: Sequence[str], site: str, chars: int, *, excluded_sites: frozenset[str]
 ) -> dict[str, str]:
-    """Per episode, an excerpt (at most ``chars`` characters) of the newest page text recorded on ``site``.
+    """Per episode, an excerpt (at most ``chars`` characters) of the newest page text recorded on ``site``: newest
+    in time (``observed_at``, then receipt), not the start page of a task start sent when its task ended.
 
     Episodes that touched an excluded host (:func:`_hidden`, checked again in this transaction) get none.
     """
@@ -910,7 +911,7 @@ def latest_page_text(
                 continue
             rows = conn.execute(
                 "SELECT site, substr(page_text, 1, ?) FROM activity_events WHERE episode_id = ? "
-                "AND page_text IS NOT NULL AND site IS NOT NULL ORDER BY receipt DESC LIMIT 50",
+                "AND page_text IS NOT NULL AND site IS NOT NULL ORDER BY observed_at DESC, receipt DESC LIMIT 50",
                 (max(0, chars), episode_id),
             )
             for event_site, text in rows:

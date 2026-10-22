@@ -4184,14 +4184,17 @@ per-process state.
   opener passes that bound to the SQLCipher shim's schema probe, and the
   read then waits only for what is left of it.
 - **Bounded queries.** At most the 300 newest episodes in the time window
-  are considered per query; a summary reads at most 400 events of an episode
-  (the user's first task start and last corrections are read separately, so
-  a task start Hermes writes after a long turn's calls is never cut off) and
-  an episode detail at most 1000: task starts, corrections and other task
-  boundaries first, then the newest remaining events, returned in time
-  order (`observed_at`, then the order they were received; a task start or
-  correction Hermes writes when its turn ends carries the turn's start, so it
-  leads the turn's calls).
+  are considered per query; a summary reads at most 400 events of an episode,
+  the earliest in time (`observed_at`, then the order they were received: a
+  collector sends a task start when its task or turn ends, with the time it
+  started, so the start page still leads the route, the titles and the
+  episode's hosts; the user's first task start and last corrections are read
+  separately, so a task start Hermes writes after a long turn's calls is never
+  cut off) and an episode detail at most 1000: task starts, corrections and
+  other task boundaries first, then the newest remaining events, returned in
+  time order (`observed_at`, then the order they were received; a task start
+  or correction Hermes writes when its turn ends carries the turn's start, so
+  it leads the turn's calls).
   `episodes_for_site` matches a host and its subdomains (a leading `www.` is
   ignored). `episodes_for_terms` matches the `terms` of the user's own words
   (task starts and corrections, below) and the labels of the episode's hosts
@@ -4315,7 +4318,8 @@ per-process state.
   the master switch on and the gate passing). `mordred_browser_history(query,
   site, since, until, limit ≤ 10)` returns episodes (id, sites, start and last
   time, task, outcome, steps, routes, corrections, titles) and,
-  with `site`, a 600-character excerpt of the newest page text on that host;
+  with `site`, a 600-character excerpt of the newest page text on that host
+  (newest by `observed_at`, then receipt);
   `since` / `until` take `YYYY-MM-DD` (local, inclusive) or ISO date-times;
   with a site or period whose words match nothing, the newest episodes are
   returned. `mordred_browser_history_episode(episode_id)` returns the

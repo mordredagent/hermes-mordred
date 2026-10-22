@@ -512,6 +512,125 @@ def test_the_operators_real_field_values_qualify_and_its_summary_does_not(histor
     assert "AGENTSUMMARY" in end["text"] and "from_user" not in end
 
 
+# --- a task start the collector sends when the task ends --------------------------------------------------
+
+
+def _page(
+    seq: int, episode: str, phase: str, op: str, route: str, at: float, *, site: str = "example.com", **fields: Any
+) -> dict[str, Any]:
+    """An operator event observed at ``at`` on ``site`` / ``route``; ``actor`` defaults to ``agent``."""
+    actor = fields.pop("actor", "agent")
+    raw = _operator_event(seq, episode, phase, op, source="operator", actor=actor, observed_at=at, **fields)
+    raw["action"].update(site=site, route=route)
+    return raw
+
+
+def _ingest(home: Any, store: Any, *batches: list[dict[str, Any]]) -> None:
+    """Each batch through the real receiver, in order (the order the store receives the events)."""
+    write_config(home, {**ENABLED, "collection_enabled": True})
+    receiver = StoreReceiver(home, config_loader=ActivityConfig.load, store_factory=lambda _home: store)
+    for batch in batches:
+        assert receiver.ingest(OPERATOR, _operator_batch(*batch))["type"] == "activity_ack"
+
+
+def _late_start(home: Any, store: Any, *, start_site: str = "example.com") -> None:
+    """An operator task as its collector sends it now: the task's actions as they happen; then, once the task
+    ends, its start (held until then: its ``observed_at`` is still the task's start, and it names the start page
+    with that page's title and text) and its end (no page read)."""
+    t0 = round(time.time() - 100, 3)
+    actions = [
+        _page(
+            1,
+            "ep-late",
+            "observed",
+            "navigate",
+            "/search.html",
+            t0 + 2,
+            attempt_id="a1",
+            status="claimed_success",
+            page_title="Search results",
+            page_text="SEARCH-PAGE-TEXT",
+        ),
+        _page(2, "ep-late", "dispatched", "click", "/search.html", t0 + 3, attempt_id="a2", target="First result"),
+    ]
+    held = [
+        _page(
+            3,
+            "ep-late",
+            "boundary",
+            "task_start",
+            "/index.html",
+            t0,
+            site=start_site,
+            actor="human",
+            text=TASK,
+            page_title="Acme home",
+            page_text="HOME-PAGE-TEXT",
+        ),
+        _page(4, "ep-late", "boundary", "task_end", "/search.html", t0 + 4, status="claimed_success"),
+    ]
+    _ingest(home, store, actions, held)
+
+
+def test_a_task_start_received_last_leads_the_route_and_titles_by_its_time(history_home) -> None:
+    home, store = history_home
+    _late_start(home, store)
+
+    [summary] = history.episodes_for_site(store, "example.com", excluded_sites=frozenset()).episodes
+    assert [hop.route for hop in summary.route] == ["/index.html", "/search.html"]
+    assert summary.titles == ("Acme home", "Search results")
+    assert summary.tasks == (TASK,)
+    assert "route /index.html → /search.html" in json.loads(_navigate("nav"))[RESULT_KEY]
+    [record] = _lookup("lookup", query="", site="example.com")["episodes"]
+    assert record["routes"] == ["/index.html", "/search.html"]
+    assert record["page_text"] == "SEARCH-PAGE-TEXT"  # the newest page in time, not the start page received last
+
+
+def test_a_task_start_received_last_names_the_episodes_first_site(history_home) -> None:
+    home, store = history_home
+    _late_start(home, store, start_site="start.example")
+
+    [summary] = history.episodes_for_site(store, "example.com", excluded_sites=frozenset()).episodes
+    detail = history.episode_detail(store, "ep-late", excluded_sites=frozenset())
+    assert detail is not None
+    assert summary.sites == detail.summary.sites == ("start.example", "example.com")
+    [record] = _lookup("lookup", query="", site="example.com")["episodes"]
+    assert (record["site"], record["other_sites"]) == ("start.example", ["example.com"])
+
+
+def test_events_observed_at_the_same_time_keep_the_order_they_were_received(history_home) -> None:
+    home, store = history_home
+    at = round(time.time() - 100, 3)
+    zeta = _page(
+        1,
+        "ep-tie",
+        "observed",
+        "navigate",
+        "/zeta",
+        at,
+        site="zeta.example",
+        attempt_id="a1",
+        page_title="Zeta",
+    )
+    alpha = _page(
+        2,
+        "ep-tie",
+        "observed",
+        "navigate",
+        "/alpha",
+        at,
+        site="alpha.example",
+        attempt_id="a2",
+        page_title="Alpha",
+    )
+    _ingest(home, store, [zeta], [alpha])
+
+    [summary] = history.episodes_for_terms(store, set(), excluded_sites=frozenset(), newest_if_none=True).episodes
+    assert [hop.route for hop in summary.route] == ["/zeta", "/alpha"]
+    assert summary.titles == ("Zeta", "Alpha")
+    assert summary.sites == ("zeta.example", "alpha.example")
+
+
 # --- rows stored before a URL rule existed ----------------------------------------------------------------
 
 
