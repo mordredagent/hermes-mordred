@@ -178,8 +178,10 @@ def test_with_exclusions_a_task_start_keeps_only_a_persons_words(capture_home) -
     write_config(home, EXCLUDING)
     turn()
     navigate()
+    end_turn()  # a turn's task start is written when the turn ends
     turn("check the order page", session="s2", turn_id="s2:t1:bb22", platform="telegram")  # not a person's words
     navigate(session="s2", turn_id="s2:t1:bb22")
+    end_turn(session="s2", turn_id="s2:t1:bb22")
     starts = {event.actor: event for event in events(store) if event.op == "task_start"}
     person, agent = starts["human"], starts["agent"]
     assert (person.actor, person.text, person.exclusions) == ("human", MESSAGE, ())
