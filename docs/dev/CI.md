@@ -654,6 +654,34 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 
 ## Manual live-device validation log
 
+- **2026-10-22 — Imported-message provenance: real mail import into a SQLCipher store and a Hermes
+  agent reading it through `mordred_history_search`.** Source: branch
+  `feat/imported-message-provenance` at ae6917c8e (pull request #259), dev venv (Python
+  3.12, `sqlcipher3-wheels` 0.5.7). Both runs used throwaway `HERMES_HOME` directories in
+  the session scratchpad with the SQLCipher marker written by hand and a synthetic
+  `HERMES_MEMORY_KEY` (`hex:` form); production state was never touched.
+  (1) `hermes-mordred mail import --mbox tests/fixtures/mail/takeout_small.mbox --account
+  work --own-address owner@example.com` wrote 5 messages, 2 conversations, 9 parts, one
+  committed run; `mail status` reported the same; the store file could not be opened by
+  plain SQLite ("database disk image is malformed"), its bytes held no schema text, and only
+  the shim's 112-byte plaintext header was readable; file mode 0644 inside a 0700
+  directory, as the activity store. (2) `uv run python tools/provenance_eval run --driver
+  hermes --tier smoke --reps 1 --seed 0 --style per_part_en --threads 4 --max-calls 80`
+  against a loopback `llama-server -c 65536` serving Ollama's `qwen2.5:7b` GGUF on
+  127.0.0.1:5011, with `MORDRED_EVAL_HERMES_CONTEXT_LENGTH=65536` (Hermes 0.19.0 refuses
+  the advertised 32K window). 25 of 34 questions were asked before the call cap (75 model
+  calls); every answer carried `reader_mode: true` from the real `pre_tool_call` hook; 51
+  tool calls: `mordred_history_search` executed 29 and refused 9 malformed argument sets
+  (`invalid_request`), `telegram_chats` executed 5, `telegram_ask` refused 6
+  (`telegram_not_configured` in the throwaway home), and the decoy `terminal` was attempted
+  twice and executed zero times (blocked by reader mode). Answers quoted head lines and
+  evidence ids (6 citations, 1 grounded-correct, 0 critical swaps by the scorer); the model
+  itself is unfit (it attributed the owner's invoice promise to the other party in one
+  answer), so the cell verdicts stay UNAVAILABLE and the attribution thresholds remain to be
+  measured on the production Venice model. Earlier the same day the privacy driver's smoke
+  run on `qwen2.5:7b` (32K) answered 42/42 with 35% critical swaps and 16 cited answers;
+  see TODO for the scorer follow-up.
+
 - **2026-10-21 — Browser activity end to end through the shipped surfaces with the real operator and Fara.**
   Source: the pre-commit working tree of branch `feat/browser-activity-
   learning` (no SHA yet), the same host and dev venv as the 2026-10-20 entry
