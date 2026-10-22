@@ -1013,6 +1013,32 @@ def test_a_crafted_message_naming_two_triples_bridges_neither(tmp_path: Path, ex
     assert len({tuple(sorted((conv, tuple(ids)) for conv, ids in threads.items())) for *_, threads in outcomes}) == 1
 
 
+@pytest.mark.parametrize("crafted_date", [_DATES[1], "Sun, 04 Oct 2026 10:00:00 +0900"])  # first or last
+def test_pairs_under_absent_parents_and_a_crafted_message_naming_both_stay_apart(
+    tmp_path: Path, crafted_date: str
+) -> None:
+    """The eighth-pass review: with ``References`` only, Ai names the absent Ui and Pi names (Ai, Vi) with
+    Vi absent, all with Alice, and Mallory's message references (A0, A1). Absent ids never order the
+    grouping, so each Pi joins Ai before the crafted message is weighed, whatever its date."""
+    owner = f"Owner <{ADDRESS}>"
+    messages: list[FakeMessage] = []
+    for pair in range(2):
+        first, reply = 10 * pair + 10, 10 * pair + 11
+        headers = f"References: <absent-u{pair}@example.net>\r\n"
+        messages.append(FakeMessage(mail(first, sender=_ALICE, to=owner, extra_headers=headers, date=_DATES[2])))
+        headers = f"References: <msg{first}@example.net> <absent-v{pair}@example.net>\r\n"
+        messages.append(FakeMessage(mail(reply, sender=owner, to=_ALICE, extra_headers=headers, date=_DATES[3])))
+    headers = "References: <msg10@example.net> <msg20@example.net>\r\n"
+    crafted = mail(99, sender=_MALLORY, to=f"{owner}, {_ALICE}", extra_headers=headers, date=crafted_date)
+    pairs = [{f"msg{10 * pair + 10 + k}@example.net" for k in range(2)} for pair in range(2)]
+    outcomes = _sync_in_three_orders(tmp_path, [*messages, FakeMessage(crafted)])
+    for planned, written, threads in outcomes:
+        assert planned > 0 and written > 0  # the grouping held it back, and the store, weighing the same edges
+        _assert_apart(threads, pairs)
+        assert any({*pairs[1], _CRAFTED} == set(ids) for ids in threads.values())  # through its direct parent
+    assert len({tuple(sorted((conv, tuple(ids)) for conv, ids in threads.items())) for *_, threads in outcomes}) == 1
+
+
 def test_a_reply_chain_in_one_batch_is_one_conversation(home: Path, store: ImportStore) -> None:
     chain = {1: _chain_message(1, None), 2: _chain_message(2, 1), 3: _chain_message(3, 2)}
     box = FakeMailbox(uidvalidity=2, messages={1: chain[3], 2: chain[1], 3: chain[2]})  # out of order

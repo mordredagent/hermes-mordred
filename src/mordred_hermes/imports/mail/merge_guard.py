@@ -8,7 +8,9 @@ joined:
 - the grouping of one batch (:func:`.threading.build_threads`: a message and its direct
   parent, or its siblings with the same participants under an absent parent, by rules 2
   and 3 between the two, ancestors first; every other reference edge by :func:`fold_plan`,
-  fewest followed ids first, after those reply chains formed);
+  after those reply chains formed: first, in repeated passes, messages whose references to
+  messages of the batch fall into one group or into single messages only, then the rest,
+  each pass ordered by fewest such references, never by absent ids);
 - the store's reconciliation across batches (``ImportStore.write_batch(..., refs=...)``).
 
 The rules (:func:`followed_refs`, :func:`fold_plan`):

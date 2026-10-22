@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import random
 from collections import Counter
 
@@ -426,3 +427,40 @@ def test_replies_with_extra_references_still_form_one_conversation() -> None:
         (thread,) = build_threads(order, own={OWNER}, stats=stats)
         assert (thread.members, stats["merge_skipped"]) == (("z", "a", "b", "c", "d", "y"), 0)
         assert thread.thread_key == default_thread_key(tree[2]) and not thread.partial  # A, the root most name
+
+
+# --- the eighth-pass review: pairs formed through one present ancestor, a crafted message dated first ---
+
+
+def _two_pairs_under_absent_parents(crafted_at: int | None) -> list[ThreadInput]:
+    """The eighth-pass probe, all with Alice, no ``In-Reply-To``: Ai references the absent Ui (dated
+    100+i), Pi references (Ai, Vi) with Vi absent (dated 200+i), and X references (A0, A1)."""
+    pair = frozenset({ALICE, OWNER})
+    items: list[ThreadInput] = []
+    for n in range(2):
+        items.append(item(f"a{n}", mid=f"A{n}", refs=(f"U{n}",), people=pair, at=100 + n))
+        items.append(item(f"p{n}", mid=f"P{n}", refs=(f"A{n}", f"V{n}"), people=pair, at=200 + n))
+    if crafted_at is not None:
+        items.append(item("x", mid="X", refs=("A0", "A1"), people=frozenset({MALLORY, ALICE, OWNER}), at=crafted_at))
+    return items
+
+
+@pytest.mark.parametrize("crafted_at", [0, 1_000])  # dated before or after both pairs
+def test_pairs_formed_through_one_present_ancestor_settle_before_a_crafted_message_naming_both(
+    crafted_at: int,
+) -> None:
+    """Each Pi's absent parent Vi leaves its pair to phase 2; absent ids never order it, so Pi (one present
+    reference) joins Ai before X (two) is weighed, in every one of the 120 batch orders and whatever X's
+    date: X attaches through its direct parent (A1) alone and is held back from the other pair."""
+    pairs = [{f"a{n}", f"p{n}"} for n in range(2)]
+    legit = build_threads(_two_pairs_under_absent_parents(None), own={OWNER})
+    assert sorted(thread.members for thread in legit) == [("a0", "p0"), ("a1", "p1")]  # without X: two
+    results = set()
+    for order in itertools.permutations(_two_pairs_under_absent_parents(crafted_at)):
+        stats: Counter[str] = Counter()
+        threads = build_threads(list(order), own={OWNER}, stats=stats)
+        _assert_kept_apart(threads, pairs, "x")
+        assert {"a1", "p1", "x"} in [set(thread.members) for thread in threads]
+        assert stats["merge_skipped"] > 0
+        results.add(tuple((thread.thread_key, thread.members) for thread in threads))
+    assert len(results) == 1  # the same threads and keys whatever the order of the batch

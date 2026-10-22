@@ -26,18 +26,25 @@
      parent, and rule 3 keeps it from bridging that thread with another in
      phase 2. An absent parent then belongs to the largest group of its
      children.
-  2. Weak edges, fewest followed ids first (then date, then source uid), so
-     single-reference replies settle before any message naming several groups
-     is weighed: the groups of a message's followed ids (the last
-     ``MAX_MERGE_REFS``, parent kept) that name a message of the import, and
-     the group holding its absent parent, are decided together by
-     :func:`.merge_guard.fold_plan`, the guard the store applies across
-     batches, against the groups as they stand: a group joins only when it
-     shares a participant other than the owner, at most one group that
-     already holds several messages takes part in a merge, and a Gmail thread
-     is never folded into another. A message following more than
-     ``_MANY_REFS`` ids that names more than one group already holding several
-     messages merges nothing. Older absent ancestors are not followed.
+  2. Weak edges, in rounds. A message's followed ids (the last
+     ``MAX_MERGE_REFS``, parent kept) that name a message of the import are its
+     *present* references; absent ids never order anything. First, every
+     message whose present references all fall into one group, or into
+     single messages only, is weighed, and the pass repeats until it weighs
+     none; then the remaining messages are weighed against the groups as they
+     stand. Within a pass the order is fewest present references, then fewest
+     groups they named after phase 1, then date, then source uid, so a pair
+     formed through one present ancestor is established before a message
+     naming several of them is weighed, whatever the dates. For each message
+     the groups of its present references and the group holding its absent
+     parent are decided together by :func:`.merge_guard.fold_plan`, the guard
+     the store applies across batches, against the groups as they stand: a
+     group joins only when it shares a participant other than the owner, at
+     most one group that already holds several messages takes part in a
+     merge, and a Gmail thread is never folded into another. A message
+     following more than ``_MANY_REFS`` ids that names more than one group
+     already holding several messages merges nothing. Older absent ancestors
+     are not followed.
 
   A message a guard held back counts once as ``merge_skipped`` in ``stats``.
 - ``excluded`` messages (copies the store will not write: duplicates and
@@ -66,7 +73,7 @@ import hashlib
 import re
 import unicodedata
 from collections import Counter
-from collections.abc import Collection, Container, Iterator, Mapping, Sequence
+from collections.abc import Collection, Container, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Final
 
@@ -179,9 +186,14 @@ def _direct_parent(item: ThreadInput) -> str | None:
     return item.references[-1] if item.references else None
 
 
+def _present_refs(item: ThreadInput, present: Container[str]) -> list[str]:
+    """``item``'s followed ids that name messages of the import (the only ones that order phase 2)."""
+    return [ref for ref in followed_refs(item.in_reply_to, item.references) if ref in present]
+
+
 def _targets(item: ThreadInput, present: Container[str]) -> list[str]:
-    """The ids phase 2 weighs for ``item``: its followed ids naming messages of the import, then its absent parent."""
-    refs = [ref for ref in followed_refs(item.in_reply_to, item.references) if ref in present]
+    """The ids phase 2 weighs for ``item``: its present references, then its absent parent."""
+    refs = _present_refs(item, present)
     parent = _direct_parent(item)
     if parent is not None and parent not in present:
         refs.append(parent)
@@ -239,6 +251,15 @@ class _Groups:
             return False
         self.union(a, b)
         return True
+
+    def named(self, refs: Iterable[str]) -> set[str]:
+        """The groups the present Message-IDs ``refs`` fall into."""
+        return {self.root(f"m:{ref}") for ref in refs}
+
+    def unambiguous(self, refs: Iterable[str]) -> bool:
+        """True when the present ``refs`` fall into one group (or none), or into single messages only."""
+        named = self.named(refs)
+        return len(named) < 2 or all(self.facts(root).messages < 2 for root in named)
 
     def follow(self, item: ThreadInput, targets: Sequence[str]) -> None:
         """Weak edges: join ``item``'s group with the groups of ``targets`` (:func:`_targets`) as the guard allows.
@@ -354,6 +375,29 @@ def _strong_edges(
         groups.union(f"m:{parent}", min(sizes, key=lambda root: (-sizes[root], root)))  # a placeholder: brings nobody
 
 
+def _weak_edges(groups: _Groups, followers: Sequence[ThreadInput], present: Container[str]) -> None:
+    """Phase 2: unambiguous messages in passes until a pass weighs none, then the rest (module docstring)."""
+    targets = {item.key: _targets(item, present) for item in followers}
+    refs = {item.key: _present_refs(item, present) for item in followers}
+    pending = sorted(
+        followers,
+        key=lambda item: (len(refs[item.key]), len(groups.named(refs[item.key])), *_dated_order(item)),
+    )
+    weighed = True
+    while weighed:
+        weighed = False
+        waiting: list[ThreadInput] = []
+        for item in pending:
+            if groups.unambiguous(refs[item.key]):
+                groups.follow(item, targets[item.key])
+                weighed = True
+            else:
+                waiting.append(item)
+        pending = waiting
+    for item in pending:  # each names several groups, one at least already a thread: the guard decides
+        groups.follow(item, targets[item.key])
+
+
 def _components(
     items: Sequence[ThreadInput], own: Container[str], excluded: Collection[str]
 ) -> tuple[dict[str, list[ThreadInput]], int]:
@@ -368,9 +412,7 @@ def _components(
             present.setdefault(item.message_id, item.key)
     followers = [item for item in items if item.key not in excluded and not item.gm_thread_id]
     _strong_edges(groups, followers, present, people)
-    targets = {item.key: _targets(item, present) for item in followers}
-    for item in sorted(followers, key=lambda item: (len(targets[item.key]), *_dated_order(item))):
-        groups.follow(item, targets[item.key])
+    _weak_edges(groups, followers, present)
     found: dict[str, list[ThreadInput]] = {}
     for item in items:
         found.setdefault(groups.root(f"k:{item.key}"), []).append(item)

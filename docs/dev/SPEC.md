@@ -4686,10 +4686,12 @@ part of this delivery ([`TODO.md`](./TODO.md)).
   `In-Reply-To` id, else the last `References` id), ancestors first, or its
   siblings with the same participants under an absent parent, when the two
   share a participant (whatever else it references, so through its direct
-  parent it attaches to one thread at most), and only then, fewest referenced
-  ids first, are its other references weighed by the guard against those
-  groups (a message naming more than three ids and more than one
-  multi-message group merges nothing);
+  parent it attaches to one thread at most), and only then are its other
+  references weighed by the guard against those groups: first, in repeated
+  passes, the messages whose references to messages of the batch fall into
+  one group or into single messages only, then the rest, each pass fewest
+  such references first (absent ids never order them; a message naming more
+  than three ids and more than one multi-message group merges nothing);
   no union ever joins two groups that both already hold several messages, so
   neither the batch's order nor a forged date lets one message bridge threads;
   a copy the store will not write (a duplicate or a rejected copy of a

@@ -321,6 +321,12 @@ After the seventh-pass review a reply joins its direct parent whatever else it
 references (deferring one that also named other groups let a forged date
 order the merges again), so a crafted message attaches through its direct
 parent to one thread at most and its other references bridge none.
+After the eighth-pass review absent ids no longer order the other references:
+messages whose references to messages of the batch fall into one group or
+into single messages only are weighed first, in repeated passes, then the
+rest, each pass fewest such references first, so a pair formed through one
+present ancestor is established before a crafted message naming several such
+pairs is weighed, whatever its date.
 A store created before
 import schema v2 has no stored references for the messages it already holds,
 so a later-arriving parent cannot join them until those children are fetched
