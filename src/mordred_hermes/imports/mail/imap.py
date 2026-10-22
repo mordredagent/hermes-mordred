@@ -39,9 +39,11 @@ Bounds (:class:`IoLimits`, enforced inside imaplib's own ``read``/``readline``):
   read alive, and a socket timeout per operation that never reaches past it;
 - a :class:`CancelToken` that shuts the socket down at once (``"cancelled"``);
 - connection establishment runs under the same bounds (:class:`Link`, armed
-  before the route is resolved): ``getaddrinfo`` runs in a helper daemon thread
-  that is waited for only until the hard deadline or a cancellation (a stalled
-  resolver is abandoned), the TCP connect is non-blocking and polled, and the
+  before the route is resolved): the route lookup and ``getaddrinfo`` each run
+  in a helper daemon thread that is waited for only until the hard deadline or
+  a cancellation (a stalled lookup is abandoned), the TCP connect is
+  non-blocking and polled, each address for at most ``min(op_timeout,
+  remaining)`` so a stalled address never starves the next one, and the
   SOCKS5 exchange and the TLS handshake read from a socket the watchdog and a
   cancellation shut down. A connection that is not open by the hard deadline
   is ``imap_unreachable``; a cancellation is ``ImapStopped("cancelled")``;
@@ -72,7 +74,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any, Final, TypeVar
 
 from ._imap_codec import (
     DrainedLiteral,
@@ -121,6 +123,7 @@ HARD_GRACE_S: Final = 30.0
 LOGOUT_GRACE_S: Final = 5.0
 WATCHDOG_NAME: Final = "mordred-imap-watchdog"
 RESOLVER_NAME: Final = "mordred-imap-resolver"
+ROUTE_RESOLVER_NAME: Final = "mordred-imap-route"
 _WATCHDOG_SLACK_S: Final = 0.25
 #: How often a pending TCP connect looks at the cancellation and the deadline.
 _CONNECT_POLL_S: Final = 0.05
@@ -151,6 +154,7 @@ _SEARCH_ARG_RE: Final = re.compile(r"UID|SINCE|BEFORE|ALL|\d{1,2}-[A-Z][a-z]{2}-
 _HOST_LABEL: Final = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
 _HOST_RE: Final = re.compile(rf"(?=.{{1,253}}\Z){_HOST_LABEL}(?:\.{_HOST_LABEL})+")
 _IMAP_COMMAND: Final[Any] = getattr(imaplib.IMAP4, "_command")  # noqa: B009 - private, absent from typeshed
+_T = TypeVar("_T")
 
 
 class ImapError(Exception):
@@ -293,9 +297,9 @@ class Link:
 
     :meth:`arm` starts the watchdog (the hard deadline) and hooks the cancellation
     BEFORE anything touches the network. Either one then shuts down the socket the
-    link holds (:meth:`hold`) and wakes a resolver wait, so DNS, the TCP connect,
-    the SOCKS5 exchange, the TLS handshake and every command end by the absolute
-    deadline. During establishment a deadline is ``imap_unreachable`` and a
+    link holds (:meth:`hold`) and wakes a :meth:`bounded` wait, so the route lookup,
+    DNS, the TCP connect, the SOCKS5 exchange, the TLS handshake and every command
+    end by the absolute deadline. During establishment a deadline is ``imap_unreachable`` and a
     cancellation ``ImapStopped("cancelled")`` (:meth:`failure`).
     """
 
@@ -394,21 +398,23 @@ class Link:
 
     # -- establishment ------------------------------------------------------------------------
 
-    def resolve(self, host: str, port: int) -> list[Any]:
-        """``getaddrinfo`` in a daemon helper thread, waited for until the deadline or a cancellation.
+    def bounded(self, call: Callable[[], _T], *, name: str) -> _T:
+        """``call()`` in a daemon helper thread, waited for until the hard deadline or a cancellation.
 
-        A resolver that has not answered by then is abandoned (its thread ends whenever
-        the system call returns) and the attempt is :meth:`failure`.
+        A call that has not returned by then is abandoned (its thread ends whenever
+        the call returns) and the attempt is :meth:`failure`; an exception the call
+        raised is re-raised here. The route lookup and ``getaddrinfo`` run this way,
+        so neither can hold a connection attempt past its deadline.
         """
         self.check()
         wake = threading.Event()
-        box: dict[str, list[Any]] = {}
+        box: dict[str, Any] = {}
 
         def work() -> None:
             try:
-                box["found"] = list(_getaddrinfo(host, port))
-            except Exception:  # a failed lookup is reported as a code, never stringified
-                pass
+                box["value"] = call()
+            except Exception as exc:  # handed to the waiting thread, never stringified here
+                box["error"] = exc
             finally:
                 wake.set()
 
@@ -416,28 +422,53 @@ class Link:
             fired, self._wake = self._fired, wake
         try:
             if not fired:
-                threading.Thread(target=work, name=RESOLVER_NAME, daemon=True).start()
+                threading.Thread(target=work, name=name, daemon=True).start()
                 wake.wait(max(self.remaining(), 0.0))
         finally:
             with self._lock:
                 self._wake = None
         self.check()
-        found = box.get("found")
+        if "error" in box:
+            raise box["error"]
+        if "value" not in box:
+            raise self.failure()  # woken without an answer: an interrupt raced the deadline check
+        value: _T = box["value"]
+        return value
+
+    def resolve(self, host: str, port: int) -> list[Any]:
+        """``getaddrinfo`` under :meth:`bounded`; a failed or empty lookup is ``imap_unreachable``."""
+        try:
+            found = self.bounded(lambda: list(_getaddrinfo(host, port)), name=RESOLVER_NAME)
+        except ImapError:
+            raise
+        except Exception:  # a failed lookup is reported as a code, never stringified
+            raise ImapError("imap_unreachable") from None
         if not found:
             raise ImapError("imap_unreachable")
         return found
 
     def connect_tcp(self, host: str, port: int) -> socket.socket:
-        """A TCP connection to the first address of ``host`` that answers before the deadline."""
+        """A TCP connection to the first address of ``host`` that answers before the deadline.
+
+        Each address gets at most ``min(op_timeout, remaining)`` (:meth:`_connect_one`),
+        so a stalled first address cannot use up the budget of the ones after it.
+        """
         for family, kind, proto, _name, address in self.resolve(host, port):
             self.check()
-            with contextlib.suppress(OSError):  # refused or unreachable: the next address
+            with contextlib.suppress(OSError):  # refused, unreachable or timed out: the next address
                 return self._connect_one(family, kind, proto, address)
         self.check()
         raise ImapError("imap_unreachable")
 
     def _connect_one(self, family: int, kind: int, proto: int, address: Any) -> socket.socket:
-        """A non-blocking connect, polled so that the deadline and a cancellation end it."""
+        """A non-blocking connect, polled so that the deadline, a cancellation and its own timeout end it.
+
+        The attempt's own limit is ``min(op_timeout, remaining)``: past it the attempt
+        is a ``TimeoutError`` (the caller tries the next address); past the hard
+        deadline or after a cancellation it is :meth:`failure`.
+        """
+        clock = self.limits.clock
+        attempt_end = clock() + min(self.limits.op_timeout, max(self.remaining(), 0.0))
         sock = socket.socket(family, kind, proto)
         try:
             self.hold(sock)
@@ -447,8 +478,10 @@ class Link:
                 raise OSError(code, "connect")
             with _new_selector() as selector:
                 selector.register(sock, selectors.EVENT_WRITE)
-                while not selector.select(min(_CONNECT_POLL_S, max(self.remaining(), 0.0))):
+                while not selector.select(min(_CONNECT_POLL_S, max(attempt_end - clock(), 0.0))):
                     self.check()
+                    if clock() >= attempt_end:
+                        raise TimeoutError(errno.ETIMEDOUT, "connect")
             self.check()
             code = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
             if code:
@@ -561,12 +594,10 @@ def open_route_socket(
     """A connected TCP socket to ``host:port`` over the route the network policy selects, bounded by ``link``."""
     from ...extension.egress import EgressError, socks_proxy
 
-    link.check()
     try:
-        route = route_resolver(host)
+        route = link.bounded(lambda: route_resolver(host), name=ROUTE_RESOLVER_NAME)
     except EgressError:
         raise ImapError("routing_unavailable") from None
-    link.check()
     if route.http_proxy_url is not None:
         raise ImapError("egress_unsupported")
     try:

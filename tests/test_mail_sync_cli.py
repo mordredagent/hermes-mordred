@@ -602,6 +602,9 @@ def test_forget_reports_an_enclave_key_it_could_not_delete(
     code, _out, err = run(["mail", "forget", "--yes"], capsys)
     assert code == 1 and "key_left" in err and KEY_ID in enclave.keys
     assert not sealed_forget_env["store"].sealed_path.exists()
+    code, out, err = run(["mail", "forget", "--yes"], capsys)  # no file is left, the key still cannot go
+    assert code == 1 and "key_left" in err and KEY_ID in enclave.keys
+    assert "No mail credentials were set up." in out
     enclave.delete_enclave_key = real_delete
     code, _out, err = run(["mail", "forget", "--yes"], capsys)  # nothing left on disk: the retry deletes the key
     assert code == 0, err

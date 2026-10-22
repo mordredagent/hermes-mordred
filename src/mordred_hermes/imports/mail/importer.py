@@ -88,7 +88,8 @@ class ImportPlan:
     account: str
     threads: tuple[PlannedThread, ...]
     report: DryRunReport
-    #: source uid → the normalised Message-IDs it references (``In-Reply-To``, then ``References``).
+    #: source uid → the normalised Message-IDs it references, nearest last: ``References`` in header order
+    #: (root first), then ``In-Reply-To`` (the store follows only the last ``store.MAX_MERGE_REFS``).
     refs: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def __repr__(self) -> str:
@@ -377,11 +378,12 @@ def plan_import(
 
 
 def _references(indexer: _Indexer, planned: Iterable[str]) -> dict[str, tuple[str, ...]]:
-    """The referenced ids of every planned message that has any."""
+    """The referenced ids of every planned message that has any, nearest last (``In-Reply-To`` at the end)."""
     refs: dict[str, tuple[str, ...]] = {}
     for uid in planned:
         thread = indexer.copies[uid].thread
-        ids = tuple(dict.fromkeys((*thread.in_reply_to, *thread.references)))
+        parents = set(thread.in_reply_to)
+        ids = tuple(dict.fromkeys((*(ref for ref in thread.references if ref not in parents), *thread.in_reply_to)))
         if ids:
             refs[uid] = ids
     return refs

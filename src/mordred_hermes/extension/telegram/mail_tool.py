@@ -31,8 +31,14 @@ the conversation, ``state.db`` or a log.
   budget plus :data:`ABANDON_GRACE_S` (something the session's bounds cannot
   interrupt) is cancelled and abandoned: the call returns ``partial: true``,
   ``partial_reason: "cancelled"`` and ``abandoned: true`` with zero counts.
-  An abandoned worker stops at its next check (a batch already being written
-  still commits atomically with its cursor), so the next call continues.
+  Before the handler returns (or re-raises a cancellation whose worker is still
+  running) it abandons the fetch's :class:`~...imports.mail.imap_sync.FetchLease`:
+  the worker's open run is marked ``failed`` with the counts-only reason
+  ``abandoned`` (``ImportStore.write_batch`` refuses a late batch inside its
+  transaction), every later store write of the worker is refused, and the
+  writer lock is released, so the next call proceeds while the abandoned worker
+  is still blocked. A batch that committed before that keeps its cursor, so the
+  next call continues.
 - **Reader mode**: not a reader tool (nothing private is returned), allowed in a
   reader session and never a taint source (``privacy_check.egress.MAIL_SYNC_TOOL``).
 """
@@ -48,6 +54,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
     from ...imports.mail.imap import CancelToken
+    from ...imports.mail.imap_sync import FetchLease
 
 TOOL_NAME: Final = "mordred_mail_sync"
 WORKER_NAME: Final = "mordred-mail-sync"
@@ -129,11 +136,11 @@ def mail_sync_available() -> bool:
     return _store_gate_open() and _mail_configured()
 
 
-def _fetch(max_messages: int, cancel: CancelToken | None = None) -> dict[str, Any]:
+def _fetch(max_messages: int, cancel: CancelToken | None = None, lease: FetchLease | None = None) -> dict[str, Any]:
     from ...imports.mail import imap_sync
 
     options = imap_sync.FetchOptions(
-        max_messages=max_messages, budget_s=imap_sync.TOOL_BUDGET_S, via="tool", cancel=cancel
+        max_messages=max_messages, budget_s=imap_sync.TOOL_BUDGET_S, via="tool", cancel=cancel, lease=lease
     )
     return dict(imap_sync.run_fetch(options, imap_sync.default_env()).as_dict())
 
@@ -171,17 +178,32 @@ def _abandoned() -> dict[str, Any]:
     return dict(FetchResult(partial=True, partial_reason="cancelled", abandoned=True).as_dict())
 
 
+async def _abandon(lease: FetchLease) -> None:
+    """``lease.abandon()`` off the event loop, waited for to the end (cancellations absorbed).
+
+    It is bounded: a few short store transactions (the store's busy timeout each) and an
+    ``flock`` release; it never raises.
+    """
+    done = asyncio.ensure_future(asyncio.to_thread(lease.abandon))
+    while not done.done():
+        try:
+            await asyncio.shield(done)
+        except asyncio.CancelledError:
+            continue  # the run must be failed and the lock released before the handler ends
+
+
 async def _run_worker(max_messages: int) -> dict[str, Any] | None:
     """The fetch in a named worker thread; every wait for it is bounded (see the module docstring)."""
     from ...imports.mail import imap_sync
     from ...imports.mail.imap import CancelToken
 
     cancel = CancelToken()
+    lease = imap_sync.FetchLease()
     box: dict[str, dict[str, Any]] = {}
 
     def target() -> None:
         try:
-            box["result"] = _fetch(max_messages, cancel)
+            box["result"] = _fetch(max_messages, cancel, lease)
         except Exception:  # never stringified; the handler reports fetch_failed
             box.pop("result", None)
 
@@ -192,10 +214,12 @@ async def _run_worker(max_messages: int) -> dict[str, Any] | None:
         ended = await _joined(worker, budget_end + ABANDON_GRACE_S)
     except asyncio.CancelledError:
         cancel.cancel()  # the fetch stops at once: its IMAP socket is shut down, a resolver wait woken
-        await _joined_after_cancel(worker, max(budget_end, time.monotonic()) + CANCEL_GRACE_S)
+        if not await _joined_after_cancel(worker, max(budget_end, time.monotonic()) + CANCEL_GRACE_S):
+            await _abandon(lease)  # its run failed, its writes refused, the writer lock released
         raise  # an abandoned worker is a daemon that has been told to stop
     if not ended:
         cancel.cancel()
+        await _abandon(lease)
         return _abandoned()
     return box.get("result")
 

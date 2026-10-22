@@ -524,12 +524,13 @@ def test_the_soft_deadline_stops_before_the_next_command_and_logout_stays_polite
 
 # --- the deadline and cancellation cover connection establishment ------------------------------------
 #
-# Each stage stalls for ever: a resolver that never returns, a TCP connect that never completes, a
-# SOCKS5 proxy that never answers the method selection, a TLS peer that never answers the ClientHello.
+# Each stage stalls for ever: a route lookup or a resolver that never returns, a TCP connect that never
+# completes, a SOCKS5 proxy that never answers the method selection, a TLS peer that never answers the
+# ClientHello.
 # With a 0.2 s budget (hard deadline 0.4 s) the attempt is imap_unreachable well within a second; a
 # cancellation is ImapStopped("cancelled") at once. No watchdog and no non-daemon thread survives.
 
-_STAGES = ("dns", "tcp", "socks", "tls")
+_STAGES = ("route", "dns", "tcp", "socks", "tls")
 
 
 class _NeverReady:
@@ -574,6 +575,12 @@ def _stalled(stage: str, monkeypatch: pytest.MonkeyPatch) -> Any:
     peer = threading.Thread(target=_silent_peer, args=(listener, release), daemon=True)
     peer.start()
     route = EgressRoute(None, None)
+
+    def resolver(_host: str) -> EgressRoute:
+        if stage == "route":
+            release.wait(30)  # the network policy never answers
+        return route
+
     if stage == "dns":
 
         def never(_host: str, _port: int) -> list[Any]:
@@ -588,7 +595,7 @@ def _stalled(stage: str, monkeypatch: pytest.MonkeyPatch) -> Any:
         if stage == "tcp":
             monkeypatch.setattr(imap, "_new_selector", _NeverReady)
     try:
-        yield lambda _host: route
+        yield resolver
     finally:
         release.set()
         peer.join(5)
@@ -610,7 +617,8 @@ def test_a_stalled_connection_stage_ends_at_the_deadline(stage: str, monkeypatch
     assert not isinstance(raised.value, ImapStopped) and raised.value.code == "imap_unreachable"
     assert elapsed < 1.0
     assert _guard_threads() == [] and _non_daemon_threads() == before
-    assert all(t.daemon for t in threading.enumerate() if t.name == imap.RESOLVER_NAME)  # abandoned, never joined
+    helpers = (imap.RESOLVER_NAME, imap.ROUTE_RESOLVER_NAME)
+    assert all(t.daemon for t in threading.enumerate() if t.name in helpers)  # abandoned, never joined
 
 
 @pytest.mark.parametrize("stage", _STAGES)
@@ -643,3 +651,53 @@ def test_a_connection_cancelled_before_it_starts_never_touches_the_network(monke
     with pytest.raises(ImapStopped) as raised:
         imap.connect("imap.example.com", 993, limits=IoLimits.for_budget(60.0, cancel=cancel), route_resolver=route)
     assert raised.value.reason == "cancelled" and lookups == [] and routes == [] and _guard_threads() == []
+
+
+def test_a_route_lookup_failure_inside_the_helper_is_routing_unavailable() -> None:
+    def refuse(_host: str) -> EgressRoute:
+        raise EgressError()
+
+    with pytest.raises(ImapError) as raised:
+        imap.connect("imap.example.com", 993, limits=IoLimits.for_budget(5.0), route_resolver=refuse)
+    assert raised.value.code == "routing_unavailable" and _guard_threads() == []
+
+
+def test_a_stalled_first_address_leaves_the_budget_to_the_next_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each address gets min(op_timeout, remaining): the second address answers well within the budget."""
+    listener, address = _listener()
+    entry = (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", address)
+    monkeypatch.setattr(imap, "_getaddrinfo", lambda _host, _port: [entry, entry])
+    selectors_made: list[str] = []
+
+    def first_stalls() -> Any:
+        selectors_made.append("stalled" if not selectors_made else "real")
+        return _NeverReady() if selectors_made[-1] == "stalled" else imap.selectors.DefaultSelector()
+
+    monkeypatch.setattr(imap, "_new_selector", first_stalls)
+    limits = IoLimits.for_budget(5.0)
+    limits.op_timeout = 0.3
+    link = Link(limits)
+    link.arm()
+    try:
+        started = time.monotonic()
+        sock = link.connect_tcp("imap.example.com", 993)
+        elapsed = time.monotonic() - started
+        accepted = [listener.accept()[0] for _ in range(2)]  # the stalled attempt reached the backlog too
+        sock.sendall(b"ping")
+        assert b"ping" in b"".join(_drain(conn) for conn in accepted)
+        for conn in accepted:
+            conn.close()
+    finally:
+        link.release()
+        link.drop()
+        listener.close()
+    assert selectors_made == ["stalled", "real"]
+    assert 0.25 <= elapsed < 2.0  # the first attempt gave up at op_timeout, not at the 5 s budget
+
+
+def _drain(conn: socket.socket) -> bytes:
+    conn.settimeout(0.5)
+    try:
+        return conn.recv(16)
+    except OSError:
+        return b""

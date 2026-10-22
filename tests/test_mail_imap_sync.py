@@ -409,6 +409,50 @@ def test_a_second_fetch_while_one_runs_is_sync_in_progress(home: Path, store: Im
     assert rows(store, "SELECT count(*) FROM import_runs") == [(0,)]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX flock")
+def test_an_abandoned_lease_releases_the_writer_lock_its_holder_still_keeps(home: Path) -> None:
+    lease = imap_sync.FetchLease()
+    inside, leave = threading.Event(), threading.Event()
+
+    def holder() -> None:
+        with imap_sync.fetch_lock(home, lease):
+            inside.set()
+            leave.wait(10)  # a worker blocked under the lock
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    try:
+        assert inside.wait(5)
+        with pytest.raises(imap_sync.FetchStop) as busy, imap_sync.fetch_lock(home):
+            pass
+        assert busy.value.code == "sync_in_progress"
+        lease.abandon()
+        with imap_sync.fetch_lock(home):  # taken while the holder is still blocked
+            pass
+    finally:
+        leave.set()
+        thread.join(5)
+    with pytest.raises(imap_sync._Abandoned), imap_sync.fetch_lock(home, lease):
+        pytest.fail("nothing runs under an abandoned lease")
+    with imap_sync.fetch_lock(home):  # ... and that refusal left no lock behind
+        pass
+
+
+def test_an_abandoned_lease_fails_its_open_run_and_refuses_later_writes(store: ImportStore) -> None:
+    lease = imap_sync.FetchLease()
+    run_id = store.run_begin("mail")
+    assert lease.opened(store, run_id)
+    lease.abandon()
+    assert rows(store, "SELECT state, counts_json FROM import_runs") == [("failed", '{"abandoned":1}')]
+    with pytest.raises(ImportRefused) as refused:
+        store.write_batch(run_id, [], conversations=[], meta_updates={"mail_imap.mail.mabc": "1"})
+    assert refused.value.code == "run_not_open" and store.get_meta("mail_imap.mail.mabc") is None
+    assert not lease.opened(store, store.run_begin("mail"))
+    with pytest.raises(imap_sync._Abandoned):
+        lease.write(lambda: store.set_meta("mail_imap.mail.mabc", "1"))
+    assert store.get_meta("mail_imap.mail.mabc") is None
+
+
 def test_a_mailbox_restriction_outside_the_configured_roles_is_invalid(home: Path, store: ImportStore) -> None:
     result = run_fetch(FetchOptions(roles=("sent",)), make_env(home, store, gmail_server(), FakeSecrets(gmail_creds())))
     assert result.error == "invalid_request"
@@ -649,11 +693,17 @@ _DATES = {
 }
 
 
+_CHAIN_SENDERS = ("Taro Tanaka <taro@example.net>", "Hanako <hanako@example.org>", "Jiro <jiro@example.com>")
+
+
 def _chain_message(n: int, parent: int | None, *, offset: int = 0) -> FakeMessage:
-    """Message ``offset + n`` replying to ``offset + parent`` only (``In-Reply-To`` and ``References``)."""
+    """Message ``offset + n`` replying to ``offset + parent`` only (``In-Reply-To`` and ``References``).
+
+    A reply is addressed to its parent's sender with the owner in copy, as a reply is.
+    """
     references = None if parent is None else f"msg{offset + parent}@example.net"
-    sender = ("Taro Tanaka <taro@example.net>", "Hanako <hanako@example.org>", "Jiro <jiro@example.com>")[n - 1]
-    return FakeMessage(mail(offset + n, references=references, sender=sender, date=_DATES[n]))
+    to = f"Owner <{ADDRESS}>" if parent is None else f"{_CHAIN_SENDERS[parent - 1]}, Owner <{ADDRESS}>"
+    return FakeMessage(mail(offset + n, references=references, sender=_CHAIN_SENDERS[n - 1], to=to, date=_DATES[n]))
 
 
 def _fetch_one_by_one(home: Path, store: ImportStore, order: list[tuple[int, FakeMessage]]) -> None:
@@ -697,6 +747,20 @@ def test_two_independent_threads_stay_separate_whatever_the_order(home: Path, st
     _fetch_one_by_one(home, store, [(2, x[2]), (2, y[2]), (1, y[1]), (1, x[1])])
     threads = sorted(_threads_of(store).values())
     assert threads == [["msg11@example.net", "msg12@example.net"], ["msg1@example.net", "msg2@example.net"]]
+
+
+def test_a_strangers_message_naming_a_late_parent_stays_apart_and_is_reported(home: Path, store: ImportStore) -> None:
+    box = FakeMailbox(uidvalidity=2)
+    env = make_env(home, store, FakeImapServer({"INBOX": box}), FakeSecrets(generic_creds(sent=False)))
+    stray = mail(9, sender="Mallory <mallory@example.com>", references="msg2@example.net", date=_DATES[3])
+    box.messages[1] = FakeMessage(stray)  # names B before B is stored, and shares no participant with it
+    assert run_fetch(FetchOptions(), env).merge_skipped == 0
+    box.messages[2] = _chain_message(2, 1)
+    result = run_fetch(FetchOptions(), env)
+    assert (result.inserted, result.merge_skipped, result.as_dict()["merge_skipped"]) == (1, 1, 1)
+    box.messages[3] = _chain_message(3, 2)  # a real reply to B joins B's conversation
+    assert run_fetch(FetchOptions(), env).merge_skipped == 0
+    assert sorted(_threads_of(store).values()) == [["msg2@example.net", "msg3@example.net"], ["msg9@example.net"]]
 
 
 def test_references_are_kept_per_message_and_deleted_with_the_rows(home: Path, store: ImportStore) -> None:

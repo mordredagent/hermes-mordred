@@ -8,7 +8,11 @@ One implementation for ``hermes-mordred mail fetch`` and the Hermes tool
 Order of gates: macOS, sealed credentials present (flags only), memory
 encryption armed, the ``mordred.db`` protection gate, the per-home fetch lock
 (``sync_in_progress``), then ONE Enclave unseal and the IMAP login. A crashed
-fetch's ``open`` mail runs are marked failed under the lock.
+fetch's ``open`` mail runs are marked failed under the lock. A caller running
+the fetch in a worker thread (the Hermes tool) passes a :class:`FetchLease`:
+when it abandons a stuck worker, the worker's open run is failed
+(``{"abandoned": 1}``, so ``write_batch`` refuses its late batch), its later
+store writes are refused and the writer lock is released at once.
 
 Per mailbox (Gmail: All Mail; other servers: INBOX, then the sent folder chosen at
 ``mail setup``):
@@ -42,11 +46,12 @@ Per mailbox (Gmail: All Mail; other servers: INBOX, then the sent folder chosen 
   conversation merge by :meth:`~..store.ImportStore.write_batch`, which also
   keeps every message's referenced ids and merges the conversations of
   replies fetched before their parent (C, then B, then A ends as one
-  conversation).
+  conversation), within its guards against forged ``References``
+  (``merge_skipped`` counts the messages a guard held back).
 - Deadlines: the session (:class:`~.imap.IoLimits`) refuses to start a command
   after ``budget_s`` and cuts an in-flight one at the hard deadline, connection
-  establishment included (DNS, TCP, SOCKS5, TLS: a connection not open by then
-  is ``imap_unreachable``); the run also checks between batches, and stops at a
+  establishment included (route lookup, DNS, TCP, SOCKS5, TLS: a connection not
+  open by then is ``imap_unreachable``); the run also checks between batches, and stops at a
   :class:`~.imap.CancelToken`.
   Stopping early returns ``partial`` with the cursor at the last committed
   batch; at most :data:`RUN_BYTES` of mail is read per run (``max_bytes``).
@@ -65,11 +70,12 @@ import json
 import os
 import stat
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
 from .imap import CancelToken, ImapError, ImapSession, ImapStopped, IoLimits
 from .secrets import MailCredentials, MailSecretsError, ensure_private_dir, mail_dir
@@ -85,6 +91,7 @@ __all__ = [
     "TOOL_BUDGET_S",
     "Cursor",
     "FetchEnv",
+    "FetchLease",
     "FetchOptions",
     "FetchResult",
     "cursor_key",
@@ -151,6 +158,13 @@ class _Partial(Exception):
         self.reason = reason
 
 
+class _Abandoned(_Partial):
+    """The caller abandoned this fetch (:class:`FetchLease`): it writes nothing more and stops."""
+
+    def __init__(self) -> None:
+        super().__init__("cancelled")
+
+
 # --- result ---------------------------------------------------------------------------------------
 
 
@@ -168,6 +182,9 @@ class FetchResult:
     batches: int = 0
     mailboxes: int = 0
     excluded_history: int = 0
+    #: Messages whose reference edges the store did not (all) follow: a merge guard held it back
+    #: (``ImportStore.write_batch``: no shared participant, or more than one existing thread to fold).
+    merge_skipped: int = 0
     gmail: bool = False
     cursor_reset: bool = False
     partial: bool = False
@@ -195,6 +212,7 @@ _INT_FIELDS: Final = frozenset(
         "batches",
         "mailboxes",
         "excluded_history",
+        "merge_skipped",
     }
 )
 _BOOL_FIELDS: Final = frozenset({"gmail", "cursor_reset", "partial", "dry_run", "abandoned"})
@@ -317,12 +335,118 @@ def imap_date(day: _dt.date) -> str:
     return f"{day.day}-{_MONTHS[day.month - 1]}-{day.year}"
 
 
-# --- lock -----------------------------------------------------------------------------------------
+# --- lock and lease -------------------------------------------------------------------------------
+
+#: How often :meth:`FetchLease.abandon` tries to mark an open run failed while the store is busy.
+_ABANDON_ATTEMPTS: Final = 3
+#: The counts-only reason an abandoned run is failed with (``import_runs.counts_json``).
+ABANDONED_COUNTS: Final[Mapping[str, int]] = {"abandoned": 1}
+
+
+class FetchLease:
+    """The tie between a fetch running in a worker thread and the caller that may abandon it.
+
+    The Hermes tool creates one per call (:attr:`FetchOptions.lease`). The fetch
+    registers with it the writer lock it holds (:func:`fetch_lock`) and every
+    ``import_runs`` row it opens, and makes every other store write (the crash
+    recovery of open runs, the own addresses, a cursor-only move, the last-fetch
+    record) through :meth:`write`. :meth:`abandon`, called when the tool stops
+    waiting for its worker, then in this order: refuses every later registration
+    and write (a write in flight finishes first), marks the open run ``failed``
+    with the counts-only reason :data:`ABANDONED_COUNTS` (so
+    ``ImportStore.write_batch`` refuses a late batch inside its transaction) and
+    releases the writer lock, so the next fetch proceeds while the abandoned
+    worker is still blocked. The worker stops at its next registration, write or
+    check (:class:`_Abandoned`, ``partial_reason: cancelled``).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._abandoned = False
+        self._release: Callable[[], None] | None = None
+        self._runs: dict[str, Any] = {}
+
+    @property
+    def abandoned(self) -> bool:
+        return self._abandoned
+
+    def hold_lock(self, release: Callable[[], None]) -> bool:
+        """Register the writer lock's release; ``False`` (the caller releases it) once abandoned."""
+        with self._lock:
+            if self._abandoned:
+                return False
+            self._release = release
+            return True
+
+    def opened(self, store: Any, run_id: str) -> bool:
+        """Register an open run; ``False`` (the caller fails it and stops) once abandoned."""
+        with self._lock:
+            if self._abandoned:
+                return False
+            self._runs[run_id] = store
+            return True
+
+    def closed(self, run_id: str) -> None:
+        """The run was committed or failed by the fetch itself."""
+        with self._lock:
+            self._runs.pop(run_id, None)
+
+    def write(self, action: Callable[[], object]) -> None:
+        """Run the store write ``action`` unless abandoned (:class:`_Abandoned`); :meth:`abandon` waits for it."""
+        with self._lock:
+            if self._abandoned:
+                raise _Abandoned()
+            action()
+
+    def abandon(self) -> None:
+        """Refuse every later write, fail the open run (``abandoned``), release the writer lock. Never raises."""
+        with self._lock:
+            self._abandoned = True
+            runs, self._runs = dict(self._runs), {}
+            release, self._release = self._release, None
+        for run_id, store in runs.items():
+            for _attempt in range(_ABANDON_ATTEMPTS):
+                try:
+                    store.run_fail(run_id, ABANDONED_COUNTS)
+                except Exception as exc:  # run_not_open: the batch committed first; busy: try again
+                    if getattr(exc, "code", None) == "busy":
+                        continue
+                break
+        if release is not None:
+            with contextlib.suppress(Exception):
+                release()
+
+
+def _unlocker(fd: int) -> Callable[[], None]:
+    """An idempotent, thread-safe ``flock`` release of ``fd`` (the descriptor itself stays open)."""
+    import fcntl  # POSIX only
+
+    guard = threading.Lock()
+    held = [True]
+
+    def release() -> None:
+        with guard:
+            if held[0]:
+                held[0] = False
+                fcntl.flock(fd, fcntl.LOCK_UN)
+
+    return release
+
+
+class WriterLock(Protocol):
+    """:func:`fetch_lock`'s signature (``FetchEnv.lock``)."""
+
+    def __call__(self, home: Path, lease: FetchLease | None = None) -> contextlib.AbstractContextManager[None]: ...
 
 
 @contextlib.contextmanager
-def fetch_lock(home: Path) -> Iterator[None]:
-    """The per-home mail writer lock (``<home>/mordred/mail/.lock``); held elsewhere → ``sync_in_progress``."""
+def fetch_lock(home: Path, lease: FetchLease | None = None) -> Iterator[None]:
+    """The per-home mail writer lock (``<home>/mordred/mail/.lock``); held elsewhere → ``sync_in_progress``.
+
+    With a ``lease`` the lock's release is registered with it, so a caller that
+    abandons the fetch releases the lock at once; a lease already abandoned
+    releases it before anything runs under it (:class:`_Abandoned`).
+    """
     if sys.platform == "win32":  # no mordred.db on Windows: nothing to serialize
         yield
         return
@@ -347,10 +471,13 @@ def fetch_lock(home: Path) -> Iterator[None]:
             if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
                 raise FetchStop("sync_in_progress") from None
             raise FetchStop("store_path_unsafe") from None
+        release = _unlocker(fd)
         try:
+            if lease is not None and not lease.hold_lock(release):
+                raise _Abandoned()
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            release()  # a no-op when the lease released it already; the descriptor is closed only here
     finally:
         os.close(fd)
 
@@ -368,6 +495,8 @@ class FetchOptions:
     via: str = "cli"
     #: Set from another thread to stop the fetch (the tool's worker on a cancelled call).
     cancel: CancelToken | None = field(default=None, compare=False, repr=False)
+    #: Lets the caller abandon the fetch: the writer lock released, the open run failed, later writes refused.
+    lease: FetchLease | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if isinstance(self.max_messages, bool) or not 1 <= self.max_messages <= MAX_MAX_MESSAGES:
@@ -387,7 +516,7 @@ class FetchEnv:
     platform: Callable[[], str] = field(default=lambda: sys.platform)
     clock: Callable[[], float] = time.monotonic
     now: Callable[[], float] = time.time
-    lock: Callable[[Path], contextlib.AbstractContextManager[None]] = fetch_lock
+    lock: WriterLock = fetch_lock
     harden: Callable[[], None] = field(default=lambda: None)
 
 
@@ -457,6 +586,14 @@ def _chunks(items: Sequence[int], size: int) -> Iterator[list[int]]:
 Commit = Callable[[list[int]], Mapping[str, str]]
 
 
+def _leased(options: FetchOptions, action: Callable[[], object]) -> None:
+    """A store write outside a batch: under the lease when there is one (:class:`_Abandoned` once abandoned)."""
+    if options.lease is None:
+        action()
+    else:
+        options.lease.write(action)
+
+
 @dataclass
 class _Run:
     """One fetch in progress (the gates have passed and the session is open)."""
@@ -483,7 +620,7 @@ class _Run:
     def save(self, key: str, cursor: Cursor) -> None:
         """A cursor move that publishes no row (nothing new below it, or an empty mailbox)."""
         if not self.options.dry_run:
-            self.store.set_meta(key, cursor.to_json())
+            _leased(self.options, lambda: self.store.set_meta(key, cursor.to_json()))
 
     # -- UID discovery ----------------------------------------------------------------------
 
@@ -561,8 +698,12 @@ class _Run:
         updates = commit(covered)
         if not messages:
             if not self.options.dry_run:
-                for key, value in updates.items():
-                    self.store.set_meta(key, value)
+
+                def move() -> None:
+                    for key, value in updates.items():
+                        self.store.set_meta(key, value)
+
+                _leased(self.options, move)
             return
         self.publish(messages, updates)
 
@@ -573,6 +714,21 @@ class _Run:
         except Exception:
             raise FetchStop("run_failed") from None
         return {item.message.message_id: item.conversation.conversation_id for item in found}
+
+    def open_run(self) -> str:
+        """A new ``open`` mail run, registered with the lease (:class:`_Abandoned` once the caller gave up)."""
+        lease = self.options.lease
+        if lease is not None and lease.abandoned:
+            raise _Abandoned()  # not even a run row: the caller has given this fetch up
+        try:
+            run_id = str(self.store.run_begin("mail"))
+        except Exception:
+            raise FetchStop("run_failed") from None
+        if lease is not None and not lease.opened(self.store, run_id):
+            with contextlib.suppress(Exception):
+                self.store.run_fail(run_id, ABANDONED_COUNTS)
+            raise _Abandoned()
+        return run_id
 
     def publish(self, messages: list[tuple[bytes, TrustedMeta]], updates: Mapping[str, str]) -> None:
         from .importer import plan_import
@@ -594,10 +750,8 @@ class _Run:
             self.result.batches += 1  # planned, never written
             return
         counts: dict[str, int] = {"fetched": len(messages), "parsed": plan.report.parsed, "skipped": skipped}
-        try:
-            run_id = self.store.run_begin("mail")
-        except Exception:
-            raise FetchStop("run_failed") from None
+        run_id = self.open_run()
+        lease = self.options.lease
         try:
             written = self.store.write_batch(
                 run_id,
@@ -610,11 +764,16 @@ class _Run:
         except BaseException as exc:
             with contextlib.suppress(Exception):
                 self.store.run_fail(run_id, counts)  # nothing of the batch is visible: it was rolled back
+            if lease is not None and lease.abandoned:
+                raise _Abandoned() from None  # the run was failed under it: the batch was refused
             if isinstance(exc, Exception):
                 raise FetchStop("run_failed") from None
             raise
+        finally:
+            if lease is not None:
+                lease.closed(run_id)
         self.result.batches += 1  # committed together with its cursor
-        for key in ("inserted", "duplicates", "revised", "conflicts"):
+        for key in ("inserted", "duplicates", "revised", "conflicts", "merge_skipped"):
             setattr(self.result, key, getattr(self.result, key) + int(getattr(written, key)))
 
     # -- mailboxes --------------------------------------------------------------------------
@@ -744,7 +903,9 @@ def _sync(store: Any, creds: MailCredentials, options: FetchOptions, env: FetchE
     try:
         own = tuple(sorted(set(creds.own_addresses) | stored_own_addresses(store, creds.account)))
         if not options.dry_run:
-            remember_own_addresses(store, creds.account, creds.own_addresses)
+            _leased(options, lambda: remember_own_addresses(store, creds.account, creds.own_addresses))
+    except _Abandoned:
+        raise
     except Exception as exc:
         raise FetchStop(_store_code(exc)) from None
     limits = IoLimits.for_budget(options.budget_s, clock=env.clock, cancel=options.cancel)
@@ -797,7 +958,9 @@ def _unseal(env: FetchEnv) -> MailCredentials:
 def _locked_fetch(store: Any, options: FetchOptions, env: FetchEnv, result: FetchResult) -> None:
     if not options.dry_run:
         try:
-            store.fail_open_runs("mail")
+            _leased(options, lambda: store.fail_open_runs("mail"))
+        except _Abandoned:
+            raise
         except Exception as exc:
             raise FetchStop(_store_code(exc)) from None
     creds = _unseal(env)
@@ -806,8 +969,8 @@ def _locked_fetch(store: Any, options: FetchOptions, env: FetchEnv, result: Fetc
     finally:
         del creds
     if not options.dry_run:
-        with contextlib.suppress(Exception):
-            store.set_meta(last_fetch_key(_account_of(env)), _last_json(result, env))
+        with contextlib.suppress(Exception):  # an abandoned fetch (_Abandoned) records nothing either
+            _leased(options, lambda: store.set_meta(last_fetch_key(_account_of(env)), _last_json(result, env)))
 
 
 def _account_of(env: FetchEnv) -> str:
@@ -833,17 +996,23 @@ def _audit(env: FetchEnv, options: FetchOptions, result: FetchResult) -> None:
         env.audit(entry)
 
 
+def _writer_lock(options: FetchOptions, env: FetchEnv) -> contextlib.AbstractContextManager[None]:
+    return env.lock(env.home) if options.lease is None else env.lock(env.home, options.lease)
+
+
 def run_fetch(options: FetchOptions, env: FetchEnv | None = None) -> FetchResult:
     """Fetch new mail into ``mordred.db``; never raises for a refusal (the code is ``result.error``)."""
     env = env if env is not None else default_env()
     result = FetchResult(dry_run=options.dry_run)
     try:
         store = _gated_store(options, env)
-        lock = contextlib.nullcontext() if options.dry_run else env.lock(env.home)
+        lock = contextlib.nullcontext() if options.dry_run else _writer_lock(options, env)
         with lock:
             _locked_fetch(store, options, env, result)
     except FetchStop as stop:
         result.error = stop.code
+    except _Partial as stop:  # abandoned before or while taking the lock, or in its crash recovery
+        result.partial, result.partial_reason = True, stop.reason
     except ImapStopped as stopped:
         result.partial, result.partial_reason = True, stopped.reason
     except ImapError as exc:

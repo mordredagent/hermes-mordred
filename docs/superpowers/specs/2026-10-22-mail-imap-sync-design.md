@@ -292,7 +292,17 @@ rows, unions the participants, keeps the maximum `last_message_at`, recounts
 holding the earliest-dated message (then the smaller `conv_uid`), and a
 conversation keyed by a Gmail thread id is never folded into another (Gmail's
 thread ids stay authoritative, as in `threading.build_threads`). Two threads
-that never reference each other stay apart.
+that never reference each other stay apart. After the third-pass review the
+references are taken only from a copy that is written or from an identical
+copy (same bytes revision and content digest), which records them for a
+stored message that has none yet (a v1 row: a `--since` re-fetch attaches
+them, since they cannot be recovered from the stored data); a rejected
+weaker or different copy contributes none, so it cannot connect unrelated
+threads. Because `References` is attacker-controlled the merge is guarded:
+only the last 10 referenced ids count, a conversation is folded only when it
+shares a participant with the new message's (the account owner never
+counts), and nothing is merged for a message whose fold would take more than
+one conversation that already holds several messages (`merge_skipped`).
 
 ### Counts-only output, enforced by a fixed serializer
 
@@ -302,7 +312,9 @@ integer and boolean fields is the only output path: `{inserted, duplicates,
 revised, conflicts, skipped_oversize, batches, mailboxes, gmail, cursor_reset,
 partial, partial_reason, excluded_history, error}` (the implementation adds
 `fetched`, `skipped`, `dry_run` and, after the second-pass review, `abandoned`:
-the tool gave up waiting for its worker, see below). `error` and
+the tool gave up waiting for its worker, see below; after the third-pass
+review, `merge_skipped`: messages whose reference merge a guard held back).
+`error` and
 `partial_reason` are drawn from a closed enum. `imaplib.Debug` stays 0;
 exceptions are mapped to codes and never stringified into results, logs or
 audit.
@@ -341,7 +353,8 @@ longer hides a sealed file from forget. The sealed file, the flags and the
 Enclave key are deleted, the unknown label is reported (`account_unknown`,
 exit 1; rows and cursors need `--account LABEL`), forget never reports
 success while a credential file remains (`credentials_left`), and an Enclave
-key it could not delete is reported (`key_left`) and deleted by a retry.
+key it could not delete is reported (`key_left`, also by a retry that finds no
+credential file left) and deleted by a retry.
 
 ### Tool hardening
 
@@ -366,9 +379,10 @@ before every IMAP command (and between batches), and an in-flight command is
 cut at a hard deadline at most 30 seconds later by a watchdog that shuts the
 socket down, because a socket timeout alone resets on every byte a trickling
 server sends. The same bounds cover connection establishment, armed before
-the route is resolved: `getaddrinfo` runs in a daemon helper thread that is
-waited for only until the hard deadline or a cancellation (a stalled resolver
-is abandoned), the TCP connect is non-blocking and polled, and the SOCKS5
+the route is resolved: the route lookup and `getaddrinfo` each run in a
+daemon helper thread that is waited for only until the hard deadline or a
+cancellation (a stalled lookup is abandoned), the TCP connect is non-blocking
+and polled, each address for at most `min(op_timeout, remaining)`, and the SOCKS5
 exchange and the TLS handshake read from a socket the watchdog and a
 cancellation shut down; a connection not open by the hard deadline is
 `imap_unreachable`. A cancelled tool call cancels the fetch (the socket is
@@ -377,9 +391,11 @@ the remaining budget plus 30 seconds, absorbing repeated cancellations only
 until then, so a cancellation always completes. A worker still running 40
 seconds after the budget (stuck where the session's bounds cannot reach) is
 cancelled and abandoned as a daemon thread; the call returns `partial: true`,
-`partial_reason: "cancelled"` and `abandoned: true` with zero counts, and
-the abandoned worker stops at its next check (a batch already being written
-commits atomically with its cursor). The CLI keeps a 10 minute budget.
+`partial_reason: "cancelled"` and `abandoned: true` with zero counts. Before
+returning, the handler fails the worker's open run (counts `{"abandoned": 1}`;
+`write_batch` refuses a late batch inside its transaction), refuses its later
+store writes and releases the writer lock it held, so the next call proceeds
+while the abandoned worker is still blocked. The CLI keeps a 10 minute budget.
 
 ### Open questions, decided
 

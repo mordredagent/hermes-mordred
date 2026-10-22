@@ -4576,9 +4576,11 @@ part of this delivery ([`TODO.md`](./TODO.md)).
   else (no `AUTHENTICATE`, so no mechanism negotiation can downgrade it;
   `LOGINDISABLED` is `imap_auth_failed`). Connection establishment runs under
   the session's deadline and cancellation (`imap.Link`, armed before the
-  route is resolved): `getaddrinfo` runs in a helper daemon thread waited for
-  only until the hard deadline or a cancellation (a stalled resolver is
-  abandoned), the TCP connect is non-blocking and polled, and the SOCKS5
+  route is resolved): the route lookup and `getaddrinfo` each run in a helper
+  daemon thread waited for only until the hard deadline or a cancellation (a
+  stalled lookup is abandoned), the TCP connect is non-blocking and polled,
+  each resolved address for at most `min(op_timeout, remaining)` (a stalled
+  address never uses up the budget of the next one), and the SOCKS5
   method selection, authentication and `CONNECT` reply and the TLS handshake
   read from a socket the watchdog and a cancellation shut down. A connection
   not open (greeting included) by the hard deadline is `imap_unreachable`; a
@@ -4656,18 +4658,28 @@ part of this delivery ([`TODO.md`](./TODO.md)).
   left by a crash `failed`.
 - **Thread reconciliation.** The planning step above only finds parents that
   are already stored. So the batch also writes each message's referenced ids
-  (`In-Reply-To`, `References`, normalised) to `import_mail_refs`, and in the
+  (`In-Reply-To`, `References`, normalised; the last 10 only, nearest
+  ancestors with `In-Reply-To` last) to `import_mail_refs`, and in the
   same transaction, for every message M of the batch, merges M's conversation
   with those of the stored messages M references and of the stored messages
   that reference M (replies fetched earlier) (`ImportStore.merge_conversations`:
   message rows repointed, participants unioned, `last_message_at` the
-  maximum, `message_count` recounted, the emptied rows dropped). The survivor
+  maximum, `message_count` recounted, the emptied rows dropped). References
+  come from a copy that is written, or from an identical copy (same bytes
+  revision and content digest) of a stored message that has none yet (a row
+  stored before schema v2: a re-fetch such as `--since` attaches them); a
+  rejected different copy (weaker duplicate, conflict) contributes none.
+  Because `References` is attacker-controlled, a conversation is folded only
+  when it shares a participant with M's (a sender id or recipient address;
+  the account owner never counts), and nothing is merged for M when more
+  than one of the conversations to fold already holds several messages; each
+  message held back counts in `merge_skipped`. The survivor
   is the conversation holding the earliest-dated message (unknown dates last,
   then the smaller `conv_uid`). A conversation keyed by a Gmail thread id is
   authoritative: never folded into another, and the survivor when one is
   involved. A chain A←B←C fetched as C, then B, then A (each naming only its
-  parent) is one conversation of three messages; threads that never reference
-  each other stay apart.
+  parent, each reply addressed to its parent's sender) is one conversation of
+  three messages; threads that never reference each other stay apart.
 - **Budgets.** `max_messages` 1 to 2000 (default 2000) across the mailboxes
   of one call; at most 1 GiB of announced mail per call (`max_bytes`); a 30 s
   socket timeout per operation; a time budget, 600 s for the CLI and 60 s for
@@ -4682,7 +4694,7 @@ part of this delivery ([`TODO.md`](./TODO.md)).
 - **Output.** `FetchResult` is the only output, serialized through a fixed
   allowlist: integers `inserted`, `duplicates`, `revised`, `conflicts`,
   `fetched`, `skipped`, `skipped_oversize`, `batches`, `mailboxes`,
-  `excluded_history`; booleans `gmail`, `cursor_reset`, `partial`, `dry_run`,
+  `excluded_history`, `merge_skipped`; booleans `gmail`, `cursor_reset`, `partial`, `dry_run`,
   `abandoned` (set only by the tool, below); `partial_reason` and `error`
   from closed enums. Error codes:
   `unsupported_platform`, `mail_not_configured`, `memory_encryption_required`,
@@ -4728,7 +4740,8 @@ between the two files) the credentials are still deleted and the unknown label
 is reported (`account_unknown`, exit 1: the rows and cursors need `--account
 LABEL`); forget never reports success while a sealed or flags file remains
 (`credentials_left`, exit 1), and an Enclave key it could not delete is
-`key_left` (exit 1; running forget again deletes it).
+`key_left` (exit 1, also on a retry that finds no credential file left;
+running forget again deletes it).
 `mail status` adds the account label, the path and scope, the last
 fetch and the cursor positions.
 
@@ -4750,9 +4763,13 @@ Hermes tool `mordred_mail_sync` (toolset `mordred_telegram`, beside
   then completes. A worker still running 40 s after the budget (something the
   session's bounds cannot interrupt) is cancelled and abandoned: the call
   returns `partial: true`, `partial_reason: "cancelled"`, `abandoned: true`
-  and zero counts. An abandoned worker stops at its next check (a batch
-  already being written commits atomically with its cursor), so the next call
-  continues from the committed cursor.
+  and zero counts. Before the handler returns (or re-raises a cancellation
+  whose worker still runs) it abandons the fetch (`imap_sync.FetchLease`): the
+  worker's open run is marked `failed` with counts `{"abandoned": 1}`, so
+  `write_batch` refuses its late batch inside the transaction, every later
+  store write of the worker is refused, and the writer lock is released, so
+  the next call proceeds at once. A batch committed before that keeps its
+  cursor, so the next call continues from it.
 - Not a reader tool and not a taint source. It is in
   `privacy_check.egress.READER_ALLOWED` (allowed in a reader session) and in
   `FIRST_PARTY_TOOLS` (its destination is fixed, so it also runs under
@@ -4790,6 +4807,14 @@ Where the code differs from the design record:
   conversations when a missing parent arrives; `mail forget` deletes sealed
   credentials whose flags are missing or corrupt (codes `account_unknown`,
   `credentials_left`, `key_left`, CLI only).
+- After the Codex third-pass review (2026-10-22): the route lookup runs under
+  the connection deadline like DNS; each TCP address attempt has its own
+  timeout; an abandoned tool worker's run is failed and its writer lock
+  released before the handler returns; a rejected copy's references are
+  ignored and an identical copy's are recorded for pre-v2 rows; merges are
+  guarded against forged `References` (last 10 ids, a shared participant, at
+  most one existing multi-message conversation; result field
+  `merge_skipped`); `key_left` is reported whenever the key remains.
 
 ## Imported-message provenance evaluation (2026-10-22)
 

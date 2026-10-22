@@ -48,7 +48,7 @@ def store(tmp_path: Path) -> ImportStore:
 def fetches(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     seen: list[int] = []
 
-    def fake(max_messages: int, cancel: Any = None) -> dict[str, Any]:
+    def fake(max_messages: int, cancel: Any = None, lease: Any = None) -> dict[str, Any]:
         seen.append(max_messages)
         return dict(FetchResult(inserted=1).as_dict())
 
@@ -357,9 +357,11 @@ def stuck_fetch(monkeypatch: pytest.MonkeyPatch) -> Any:
     """``_fetch`` stuck somewhere that ignores the cancel token; short budget and graces."""
     release = threading.Event()
     tokens: list[Any] = []
+    leases: list[Any] = []
 
-    def stuck(_max_messages: int, cancel: Any = None) -> dict[str, Any]:
+    def stuck(_max_messages: int, cancel: Any = None, lease: Any = None) -> dict[str, Any]:
         tokens.append(cancel)
+        leases.append(lease)
         release.wait(30)
         return dict(FetchResult(inserted=7).as_dict())
 
@@ -367,7 +369,7 @@ def stuck_fetch(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(imap_sync, "TOOL_BUDGET_S", 0.2)
     monkeypatch.setattr(mail_tool, "CANCEL_GRACE_S", 0.3)
     monkeypatch.setattr(mail_tool, "ABANDON_GRACE_S", 0.3)
-    yield SimpleNamespace(release=release, tokens=tokens)
+    yield SimpleNamespace(release=release, tokens=tokens, leases=leases)
     release.set()
     for thread in _worker_threads():
         thread.join(5)  # the abandoned worker ends once released: nothing leaks into later tests
@@ -396,6 +398,8 @@ def test_repeated_cancellations_complete_within_the_bound_and_abandon_the_worker
     [token] = stuck_fetch.tokens
     assert token.cancelled
     assert all(thread.daemon for thread in _worker_threads()) and _worker_threads()  # abandoned, a daemon
+    [lease] = stuck_fetch.leases
+    assert lease.abandoned  # its writes are refused and its lock released before the cancellation completed
 
 
 def test_a_worker_past_the_bound_is_abandoned_with_a_counts_only_result(stuck_fetch: Any) -> None:
@@ -408,7 +412,107 @@ def test_a_worker_past_the_bound_is_abandoned_with_a_counts_only_result(stuck_fe
     [token] = stuck_fetch.tokens
     assert token.cancelled  # told to stop: it writes nothing more once it notices
     assert all(thread.daemon for thread in _worker_threads())
+    [lease] = stuck_fetch.leases
+    assert lease.abandoned
 
 
 def test_a_normal_result_is_never_abandoned(fetches: list[int]) -> None:
     assert _call({})["abandoned"] is False
+
+
+# -- an abandoned worker holds no lock and writes nothing later ------------------------------------
+
+
+def _short_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(imap_sync, "TOOL_BUDGET_S", 0.2)
+    monkeypatch.setattr(mail_tool, "CANCEL_GRACE_S", 0.3)
+    monkeypatch.setattr(mail_tool, "ABANDON_GRACE_S", 0.3)
+
+
+def _join_workers() -> None:
+    for thread in _worker_threads():
+        thread.join(10)
+    assert _worker_threads() == []
+
+
+def _runs(store: ImportStore) -> list[tuple[str, str]]:
+    with store.connection() as conn:
+        return [(str(a), str(b)) for a, b in conn.execute("SELECT state, counts_json FROM import_runs ORDER BY rowid")]
+
+
+class _BlockingSecrets(FakeSecrets):
+    """The first unseal blocks (a Touch ID prompt nobody answers) until released; later ones answer."""
+
+    def __init__(self, creds: Any) -> None:
+        super().__init__(creds)
+        self.entered, self.release = threading.Event(), threading.Event()
+
+    def load(self) -> Any:
+        if self.loads == 0:
+            self.loads += 1
+            self.entered.set()
+            self.release.wait(30)
+            return self.creds
+        return super().load()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX flock")
+def test_a_second_sync_right_after_an_abandonment_proceeds(
+    tmp_path: Path, store: ImportStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secrets_ = _BlockingSecrets(gmail_creds())
+    env = make_env(tmp_path, store, gmail_server(), secrets_)
+    _use_env(monkeypatch, env)
+    _short_bounds(monkeypatch)
+    try:
+        first = _call({})
+        assert (first["abandoned"], first["partial_reason"]) == (True, "cancelled")
+        assert secrets_.entered.is_set() and _worker_threads()  # still blocked in the unseal, under the lock
+        second = _call({})  # the lock was released by the handler: no sync_in_progress
+        assert (second["error"], second["inserted"], second["abandoned"]) == (None, 3, False)
+        cursors = store.meta_items("mail_imap.mail.")
+    finally:
+        secrets_.release.set()
+        _join_workers()
+    assert store.meta_items("mail_imap.mail.") == cursors  # the abandoned worker wrote nothing after waking
+    assert rows_of(store) == 3 and [state for state, _counts in _runs(store)] == ["committed"]
+    assert _call({})["error"] is None  # and no lock is left behind by it either
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX flock")
+def test_an_abandoned_workers_late_batch_is_refused(
+    tmp_path: Path, store: ImportStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mordred_hermes.imports.store import ImportRefused
+
+    env = make_env(tmp_path, store, gmail_server(), FakeSecrets(gmail_creds()))
+    _use_env(monkeypatch, env)
+    _short_bounds(monkeypatch)
+    real = store.write_batch
+    entered, release = threading.Event(), threading.Event()
+    outcomes: list[str] = []
+
+    def late(*args: Any, **kwargs: Any) -> Any:
+        if not outcomes:
+            entered.set()
+            release.wait(30)  # the run is open; the handler gives up meanwhile
+        try:
+            written = real(*args, **kwargs)
+        except ImportRefused as exc:
+            outcomes.append(exc.code)
+            raise
+        outcomes.append("written")
+        return written
+
+    monkeypatch.setattr(store, "write_batch", late)
+    try:
+        result = _call({})
+        assert entered.is_set() and result["abandoned"] is True
+        assert _runs(store) == [("failed", '{"abandoned":1}')]  # failed BEFORE the handler returned
+    finally:
+        release.set()
+        _join_workers()
+    assert outcomes == ["run_not_open"]  # the late batch was refused inside its transaction
+    assert rows_of(store) == 0 and store.meta_items("mail_imap.mail.") == {}
+    again = _call({})
+    assert (again["error"], again["inserted"]) == (None, 3) and outcomes[-1] == "written"

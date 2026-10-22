@@ -351,12 +351,135 @@ def test_bad_references_publish_nothing(store: ImportStore, refs: dict[str, Any]
     assert rows(store, "SELECT count(*) FROM import_mail_refs") == [(0,)]
 
 
+_TARO, _HANAKO, _JIRO = "Taro Tanaka <taro@example.net>", "Hanako <hanako@example.org>", "Jiro <jiro@example.com>"
+_OWNER = "Owner <owner@example.com>"
+
+
+def _reply(n: int, sender: str, parent_sender: str, parent: int, **kwargs: Any) -> bytes:
+    """Message ``n`` replying to message ``parent`` only, addressed to its sender with the owner in copy."""
+    return mail(n, sender=sender, to=f"{parent_sender}, {_OWNER}", references=f"msg{parent}@example.net", **kwargs)
+
+
 def test_a_reply_stored_before_its_parent_is_merged_when_the_parent_arrives(store: ImportStore) -> None:
-    late_reply = _committed(store, mail(3, sender="Jiro <jiro@example.com>", references="msg2@example.net"))
+    late_reply = _committed(store, _reply(3, _JIRO, _HANAKO, 2))
     root = _committed(store, mail(1, date="Wed, 30 Sep 2026 10:00:00 +0900"))
     assert rows(store, "SELECT ref_message_id FROM import_mail_refs") == [("msg2@example.net",)]
     assert len(rows(store, "SELECT conv_uid FROM import_conversations")) == 2
-    middle = _committed(store, mail(2, sender="Hanako <hanako@example.org>", references="msg1@example.net"))
+    middle = _committed(store, _reply(2, _HANAKO, _TARO, 1))
     assert len({late_reply.conversation.conv_uid, root.conversation.conv_uid, middle.conversation.conv_uid}) == 2
     [(conv, count)] = rows(store, "SELECT conv_uid, message_count FROM import_conversations")
     assert (conv, count) == (root.conversation.conv_uid, 3)  # the conversation of the earliest message survives
+
+
+# --- references of rejected copies, the v1 backfill and the merge guards ---------------------------
+
+
+def _synced(store: ImportStore, data: bytes, *, role: str = "inbox", sent_label: bool = False) -> BatchResult:
+    """One fetched message written as the IMAP sync writes it (trusted metadata and its references)."""
+    labels = (system_label("\\Sent"),) if sent_label else ()
+    trusted = TrustedMeta(labels=tuple(label for label in labels if label), folder_role=role)
+    plan = plan_import([TrustedBytes([(data, trusted)])], account="mail", own_addresses=["owner@example.com"])
+    run_id = store.run_begin("mail")
+    return store.write_batch(
+        run_id,
+        [thread.messages for thread in plan.threads],
+        conversations=[thread.conversation for thread in plan.threads],
+        meta_updates={},
+        refs=plan.refs,
+    )
+
+
+def _conversations(store: ImportStore) -> list[list[str]]:
+    """Each conversation's message ids (sorted), and every row's count matches its messages."""
+    found: dict[str, list[str]] = {}
+    for conv, message_id in rows(store, "SELECT conv_uid, message_id FROM import_messages ORDER BY message_id"):
+        found.setdefault(conv, []).append(message_id)
+    assert dict(rows(store, "SELECT conv_uid, message_count FROM import_conversations")) == {
+        conv: len(ids) for conv, ids in found.items()
+    }
+    return sorted(found.values())
+
+
+def test_a_rejected_copy_never_contributes_references(store: ImportStore) -> None:
+    sent = mail(1, sender=_OWNER, to=_TARO, body="AS SENT")
+    _synced(store, sent, role="all", sent_label=True)  # the authoritative Sent copy of M1
+    _synced(store, mail(2, sender=_TARO, to=_OWNER))  # M2: another thread with the same correspondent
+    forged = mail(1, sender=_OWNER, to=_TARO, body="AS RELAYED", references="msg2@example.net")
+    assert _synced(store, forged) == BatchResult(0, 1, 0, 0)  # a weaker, different copy: rejected
+    assert _conversations(store) == [["msg1@example.net"], ["msg2@example.net"]]
+    assert rows(store, "SELECT count(*) FROM import_mail_refs WHERE source_uid = 'mail:mail:msg1@example.net'") == [
+        (0,)
+    ]
+
+
+def _as_v1(store: ImportStore) -> None:
+    with store.connection() as conn:
+        conn.execute("DROP TABLE import_mail_refs")
+        conn.execute("DROP INDEX import_messages_message_id")
+        conn.execute("UPDATE import_meta SET value = '1' WHERE key = 'schema_version'")
+
+
+def test_a_refetch_attaches_references_to_rows_stored_before_v2(store: ImportStore, tmp_path: Path) -> None:
+    root = mail(1, sender=_TARO, to=_OWNER, date="Thu, 01 Oct 2026 10:00:00 +0900")
+    middle = _reply(2, _HANAKO, _TARO, 1, date="Fri, 02 Oct 2026 10:00:00 +0900")
+    late = _reply(3, _JIRO, _HANAKO, 2, date="Sat, 03 Oct 2026 10:00:00 +0900")
+    _as_v1(store)
+    for data in (late, middle):  # C, then B, stored by a v1 Mordred: no references kept
+        plan = plan_import([EmlBytes([data])], account="mail", own_addresses=["owner@example.com"])
+        [thread] = plan.threads
+        store.write_batch(
+            store.run_begin("mail"), [thread.messages], conversations=[thread.conversation], meta_updates={}
+        )
+    assert ImportStore(tmp_path / "mordred.db", sqlite3.connect).initialize(tmp_path).schema_version == 2
+    _synced(store, root)  # A joins B's conversation; nothing connects C yet (the v1 rows have no references)
+    assert _conversations(store) == [["msg1@example.net", "msg2@example.net"], ["msg3@example.net"]]
+    assert _synced(store, late) == BatchResult(0, 1, 0, 0)  # the same bytes again (a --since re-fetch) ...
+    assert _synced(store, middle) == BatchResult(0, 1, 0, 0)
+    assert _conversations(store) == [["msg1@example.net", "msg2@example.net", "msg3@example.net"]]  # ... connect it
+    assert rows(store, "SELECT source_uid, ref_message_id FROM import_mail_refs ORDER BY source_uid") == [
+        ("mail:mail:msg2@example.net", "msg1@example.net"),
+        ("mail:mail:msg3@example.net", "msg2@example.net"),
+    ]
+
+
+def test_only_the_last_references_are_kept_and_followed(store: ImportStore) -> None:
+    chain = " ".join(f"<anc{n}@example.net>" for n in range(15))
+    data = mail(5, extra_headers=f"References: {chain}\r\nIn-Reply-To: <parent@example.net>\r\n")
+    _synced(store, data)
+    kept = {ref for (ref,) in rows(store, "SELECT ref_message_id FROM import_mail_refs")}
+    assert kept == {f"anc{n}@example.net" for n in range(6, 15)} | {"parent@example.net"}
+
+
+_ALICE, _MALLORY = "Alice <alice@example.org>", "Mallory <mallory@example.com>"
+
+
+def test_a_message_referencing_five_unrelated_conversations_merges_nothing(store: ImportStore) -> None:
+    for thread in range(5):  # five threads of two messages, all with the same correspondent
+        root, reply = 10 * thread + 10, 10 * thread + 11
+        _synced(store, mail(root, sender=_ALICE, to=_OWNER))
+        _synced(store, mail(reply, sender=_OWNER, to=_ALICE, references=f"msg{root}@example.net"))
+    before = _conversations(store)
+    assert len(before) == 5 and all(len(ids) == 2 for ids in before)
+    roots = " ".join(f"<msg{10 * thread + 10}@example.net>" for thread in range(5))
+    forged = mail(99, sender=_MALLORY, to=f"{_OWNER}, {_ALICE}", extra_headers=f"References: {roots}\r\n")
+    result = _synced(store, forged)
+    assert (result.inserted, result.merge_skipped) == (1, 1)
+    after = _conversations(store)
+    assert len(after) == 5 and sorted(len(ids) for ids in after) == [2, 2, 2, 2, 3]  # it joined one thread only
+    [(counts,)] = rows(store, "SELECT counts_json FROM import_runs ORDER BY rowid DESC LIMIT 1")
+    assert json.loads(counts)["merge_skipped"] == 1
+
+
+def test_conversations_without_a_shared_participant_stay_separate(store: ImportStore) -> None:
+    stray = mail(3, sender=_MALLORY, to=_OWNER, references="msg2@example.net")  # names B, shares no one with it
+    _synced(store, stray)
+    result = _synced(store, _reply(2, _ALICE, _TARO, 1))  # B arrives: a late parent of a stranger's message
+    assert result.merge_skipped == 1
+    assert _conversations(store) == [["msg2@example.net"], ["msg3@example.net"]]
+
+
+def test_a_late_parent_with_a_shared_participant_still_merges(store: ImportStore) -> None:
+    _synced(store, _reply(3, _JIRO, _ALICE, 2))  # C replies to B, addressed to B's sender
+    result = _synced(store, _reply(2, _ALICE, _TARO, 1))
+    assert result.merge_skipped == 0
+    assert _conversations(store) == [["msg2@example.net", "msg3@example.net"]]

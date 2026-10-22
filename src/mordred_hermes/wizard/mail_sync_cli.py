@@ -609,7 +609,7 @@ def _report_forget(done: _Forgotten, rows: bool) -> int:
     """What forget did and what it could not do (exit 1 whenever something the operator asked for remains)."""
     print("Mail credentials removed." if done.had_credentials else "No mail credentials were set up.")
     status = 0
-    if done.had_credentials and not done.key_gone:
+    if not done.key_gone:  # whatever files there were: a key left behind is reported until a retry deletes it
         _term.emit_error(
             "the Enclave key could not be deleted (key_left); run `hermes-mordred mail forget --yes` again"
         )
