@@ -29,6 +29,7 @@ __all__ = [
     "ActivityRefused",
     "Refusal",
     "check_protection",
+    "keyed_opener",
     "open_store",
     "verify_keyed_connection",
 ]
@@ -126,7 +127,8 @@ def _process_sqlite() -> Any:
     return sys.modules.get("sqlite3", sqlite3)
 
 
-def _keyed_opener(path: Path) -> sqlite3.Connection:
+def keyed_opener(path: Path) -> sqlite3.Connection:
+    """A connection to ``path`` through the process ``sqlite3``; refused unless the shim keyed it."""
     from .store import BUSY_TIMEOUT_S
 
     conn = _process_sqlite().connect(str(path), timeout=BUSY_TIMEOUT_S)
@@ -134,6 +136,9 @@ def _keyed_opener(path: Path) -> sqlite3.Connection:
         conn.close()
         raise ActivityRefused(refusal("unkeyed_connection"))
     return cast(sqlite3.Connection, conn)
+
+
+_keyed_opener = keyed_opener  # compatibility alias for the pre-imports private name
 
 
 def _copy_opener(path: Path) -> sqlite3.Connection:
@@ -168,7 +173,7 @@ def open_store(home: Path, *, config: ActivityConfig | None = None) -> ActivityS
 
     if path.is_file() and path.stat().st_size > 0 and _monitor.is_plaintext(path):
         raise ActivityRefused(refusal("plaintext_store"))
-    store = ActivityStore(path, _keyed_opener, copy_opener=_copy_opener, verify_copy=_verify_copy)
+    store = ActivityStore(path, keyed_opener, copy_opener=_copy_opener, verify_copy=_verify_copy)
     store.initialize(Path(os.path.realpath(home)))
     with store.connection() as conn:
         found = verify_keyed_connection(conn, path)
