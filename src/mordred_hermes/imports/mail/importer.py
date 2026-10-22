@@ -8,9 +8,12 @@ records) to build:
   replaces its classification); otherwise the first copy wins. A second copy
   with identical bytes is a ``duplicate``, with different bytes a
   ``conflict`` — never an overwrite;
-- the :class:`~.link.MetadataIndex` (owner records: Message-ID, address,
-  date, authored-text key) so a quote can link to an owner message that
-  appears later in the file;
+- the :class:`~.link.MetadataIndex` (Message-ID, address, date and
+  authored-text key of true Sent copies only — owner evidence in
+  :data:`~.link.ANCHOR_EVIDENCE`) so a quote can link to an owner message
+  that appears later in the file. An ``own_address`` or ``list_rewrite``
+  record is the owner for display but never anchors a quote link: its
+  ``From``/``X-Original-From`` is a header anyone can type;
 - the threads (:func:`.threading.build_threads`).
 
 Pass 2 reads the sources again and normalises the chosen copies into
@@ -41,7 +44,7 @@ from ..records import (
 from ..render import conversation_label, render_part
 from ._text import clean_line, link_key
 from .headers import MailHeaders, parse_headers
-from .link import IndexEntry, Linker, MetadataIndex, chain_linkers
+from .link import ANCHOR_EVIDENCE, IndexEntry, Linker, MetadataIndex, chain_linkers
 from .normalize import (
     NormalizeContext,
     NormalizedMessage,
@@ -151,6 +154,8 @@ class _Indexer:
         entry, name = (None, "")
         if cls.owner_class is OwnerClass.ACCOUNT_OWNER:
             entry, name = self._owner_entry(raw, headers, cls)
+            if cls.evidence_code not in ANCHOR_EVIDENCE:
+                entry = None  # owner for display only: a header claim never anchors a quote link
         self.copies[uid] = _Copy(
             (source_index, raw.origin_index), digest, sent, thread_input(headers, uid, self.order), entry, name
         )

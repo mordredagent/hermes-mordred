@@ -75,6 +75,39 @@ def test_sent_label_wins_over_dmarc_fail() -> None:
 
 def test_list_rewrite_via_original_from() -> None:
     assert summary(fixture_headers("list_rewrite.eml")) == ("account_owner", "user", "source_claimed", "list_rewrite")
+    rewritten = (
+        "From: Owner via ML <ml@lists.example.org>\nX-Original-From: owner@example.com\nList-Id: <ml.example.org>\n"
+    )
+    assert summary(headers(PASS_TOP + rewritten + "\n")) == ("account_owner", "user", "source_claimed", "list_rewrite")
+
+
+def test_original_from_without_list_id_is_not_a_list_rewrite() -> None:
+    h = headers("From: phish@example.net\nX-Original-From: Owner <owner@example.com>\n\n")
+    assert summary(h) == ("other", "user", "source_claimed", "from_address")
+
+
+def test_list_rewrite_needs_a_from_that_was_actually_rewritten() -> None:
+    # X-Original-From equal to From: nothing was rewritten, so an own Reply-To proves nothing.
+    h = headers(
+        "From: phish@example.net\nX-Original-From: phish@example.net\nList-Id: <l.example.org>\n"
+        "Reply-To: owner@example.com\n\n"
+    )
+    assert summary(h) == ("other", "channel", "source_claimed", "mailing_list")
+    # Gmail dot/plus forms of the same address are the same address.
+    same = headers(
+        "From: Fixture.Phish+x@gmail.com\nX-Original-From: fixturephish@googlemail.com\nList-Id: <l.example.org>\n"
+        "Reply-To: owner@example.com\n\n"
+    )
+    assert summary(same)[3] == "mailing_list"
+
+
+def test_list_rewrite_with_google_dmarc_fail_is_unknown() -> None:
+    rewritten = "From: ml@lists.example.org\nX-Original-From: owner@example.com\nList-Id: <ml.example.org>\n"
+    assert summary(headers(FAIL_TOP + rewritten + "\n")) == ("unknown", "unknown", "unknown", "dmarc_fail")
+    reply_to = "From: ml@lists.example.org\nReply-To: owner@example.com\nList-Id: <ml.example.org>\n"
+    assert summary(headers(FAIL_TOP + reply_to + "\n"))[3] == "dmarc_fail"
+    # A DMARC fail on a message that claims no own author changes nothing.
+    assert summary(headers(FAIL_TOP + "From: a@example.net\n\n"))[3] == "from_address"
 
 
 def test_reply_to_own_counts_only_on_list_mail() -> None:

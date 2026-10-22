@@ -12,7 +12,10 @@
   ``other``), never by file name.
 - A ``message/rfc822`` attachment becomes a forwarded message (attached
   messages nested up to depth 2; deeper ones are counted as attachments only).
-- Body text is bounded before segmentation; part texts are capped later.
+- Body text is bounded before segmentation; part texts are capped later. The
+  decoded text is first cut to ``4 * MAX_BODY_BYTES`` (UTF-8) *before* any HTML
+  conversion or cleaning, so conversion cost is bounded by the input cap, and
+  :class:`HtmlToText` does bounded work per tag (see its docstring).
 """
 
 from __future__ import annotations
@@ -29,11 +32,25 @@ from ._charset import decode_bytes
 from ._text import cap_utf8, clean_text
 from .headers import MailHeaders, parse_headers
 
-__all__ = ["MAX_BODY_BYTES", "MAX_RFC822_DEPTH", "BodyResult", "ForwardedMail", "HtmlToText", "extract_body"]
+__all__ = [
+    "MAX_BODY_BYTES",
+    "MAX_OPEN_TAGS",
+    "MAX_RFC822_DEPTH",
+    "BodyResult",
+    "ForwardedMail",
+    "HtmlToText",
+    "extract_body",
+]
 
 MAX_RFC822_DEPTH: Final = 2
 #: Upper bound on body text handed to the segmenter (each part is capped at 64 KiB later).
 MAX_BODY_BYTES: Final = 4 * 1024 * 1024
+#: Decoded body text is cut to this many times ``MAX_BODY_BYTES`` before conversion.
+_RAW_BODY_FACTOR: Final = 4
+#: Open HTML elements tracked at most; deeper opens (and their closes) are ignored.
+MAX_OPEN_TAGS: Final = 256
+#: ``> `` prefixes per converted line at most (the segmenter stops nesting at 8 anyway).
+_MAX_QUOTE_PREFIX: Final = 32
 _SKIP_TAGS: Final = frozenset({"script", "style", "head", "title", "template", "noscript"})
 _VOID_TAGS: Final = frozenset({"br", "hr", "img", "meta", "link", "input", "wbr", "area", "base", "col", "source"})
 _BLOCK_TAGS: Final = frozenset(
@@ -76,29 +93,53 @@ class BodyResult:
 
 
 class HtmlToText(HTMLParser):
-    """Convert mail HTML to plain lines with ``> `` quote prefixes."""
+    """Convert mail HTML to plain lines with ``> `` quote prefixes.
 
-    def __init__(self) -> None:
+    Work per tag is bounded: at most :data:`MAX_OPEN_TAGS` open elements are
+    tracked (deeper opens and their matching closes are ignored; a deeper
+    script/style still hides its text), an end tag is matched through per-tag
+    open counts instead of a stack scan, a line carries at most 32 quote
+    prefixes, and once more than ``max_chars`` characters of output exist
+    further text is dropped (``truncated``).
+    """
+
+    def __init__(self, *, max_chars: int | None = None) -> None:
         super().__init__(convert_charrefs=True)
         self.lines: list[str] = []
+        self.truncated = False
         self._buffer: list[str] = []
         self._stack: list[tuple[str, int, bool]] = []  # (tag, quote delta, skipped)
+        self._open: dict[str, int] = {}  # tag -> open elements of that tag on the stack
+        self._ignored: dict[str, int] = {}  # tag -> opens beyond MAX_OPEN_TAGS (all deeper than the stack)
         self._depth = 0
         self._rest_quote = 0
         self._skip = 0
         self._pre = 0
+        self._max_chars = max_chars
+        self._chars = 0
+        self._last_text = False  # the last line has text beyond its quote prefix
+
+    def _append(self, line: str, *, has_text: bool) -> None:
+        if self._max_chars is not None and self._chars > self._max_chars:
+            self.truncated = True
+            return
+        self._chars += len(line) + 1
+        self.lines.append(line)
+        self._last_text = has_text
 
     def _flush(self, *, blank_ok: bool = False) -> None:
         text = "".join(self._buffer)
         self._buffer = []
+        if self.truncated:
+            return
         text = text if self._pre else " ".join(text.split())
-        depth = self._depth + self._rest_quote
+        depth = min(self._depth + self._rest_quote, _MAX_QUOTE_PREFIX)
         prefix = "> " * depth
         for line in text.split("\n") if self._pre else [text]:
             if line.strip():
-                self.lines.append(f"{prefix}{line}" if depth else line)
-            elif (blank_ok or self._pre) and self.lines and self.lines[-1].strip("> "):
-                self.lines.append(prefix.rstrip())
+                self._append(f"{prefix}{line}" if depth else line, has_text=True)
+            elif (blank_ok or self._pre) and self._last_text:
+                self._append(prefix.rstrip(), has_text=False)
 
     def _quote_delta(self, tag: str, attrs: dict[str, str]) -> int:
         if tag == "blockquote":
@@ -111,25 +152,47 @@ class HtmlToText(HTMLParser):
         return 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        values = {key.lower(): value or "" for key, value in attrs}
         if tag in _BLOCK_TAGS or tag == "br":
             self._flush(blank_ok=tag in {"br", "p"})
         if tag in _VOID_TAGS:
             return
         skipped = tag in _SKIP_TAGS
-        delta = 0 if skipped else self._quote_delta(tag, values)
         self._skip += skipped
+        if len(self._stack) >= MAX_OPEN_TAGS:
+            self._ignored[tag] = self._ignored.get(tag, 0) + 1  # too deep: no quote depth, no pre
+            return
+        delta = 0 if skipped else self._quote_delta(tag, {key.lower(): value or "" for key, value in attrs})
         self._depth += max(delta, 0)
         self._pre += tag == "pre"
+        self._open[tag] = self._open.get(tag, 0) + 1
         self._stack.append((tag, delta, skipped))
 
-    def handle_endtag(self, tag: str) -> None:
-        if tag in _VOID_TAGS or all(item[0] != tag for item in self._stack):
-            return
+    def _close_ignored(self, tag: str) -> None:
         if tag in _BLOCK_TAGS:
             self._flush()
+        self._ignored[tag] -= 1
+        self._skip -= tag in _SKIP_TAGS
+
+    def _drop_ignored(self) -> None:
+        """Closing a tracked element implicitly closes every (deeper) ignored one."""
+        self._skip -= sum(count for name, count in self._ignored.items() if name in _SKIP_TAGS)
+        self._ignored.clear()
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _VOID_TAGS:
+            return
+        if self._ignored.get(tag, 0) > 0:  # the innermost open of ``tag`` is an ignored one
+            self._close_ignored(tag)
+            return
+        if self._open.get(tag, 0) <= 0:
+            return  # a stray end tag
+        if tag in _BLOCK_TAGS:
+            self._flush()
+        if self._ignored:
+            self._drop_ignored()
         while self._stack:
             name, delta, skipped = self._stack.pop()
+            self._open[name] -= 1
             if delta == _HEADER_BLOCK:
                 self._flush()
                 self._buffer.append("")  # the header block ends with a blank line
@@ -142,7 +205,7 @@ class HtmlToText(HTMLParser):
                 break
 
     def handle_data(self, data: str) -> None:
-        if not self._skip:
+        if not self._skip and not self.truncated:
             self._buffer.append(data)
 
     def text(self) -> str:
@@ -151,10 +214,15 @@ class HtmlToText(HTMLParser):
         return "\n".join(self.lines)
 
 
-def html_to_text(html: str) -> str:
-    parser = HtmlToText()
+def _convert_html(html: str, max_chars: int | None) -> tuple[str, bool]:
+    parser = HtmlToText(max_chars=max_chars)
     parser.feed(html)
-    return parser.text()
+    text = parser.text()
+    return text, parser.truncated
+
+
+def html_to_text(html: str, *, max_chars: int | None = None) -> str:
+    return _convert_html(html, max_chars)[0]
 
 
 def _decoded(part: Message, stats: Counter[str]) -> str:
@@ -215,8 +283,12 @@ def extract_body(msg: Message, stats: Counter[str], *, depth: int = 0) -> BodyRe
     body = _select_body(msg)
     html_only = body is not None and body.get_content_type() == "text/html"
     raw = "" if body is None else _decoded(body, stats)
-    text = clean_text(html_to_text(raw) if html_only else raw)
-    text, truncated = cap_utf8(text, MAX_BODY_BYTES)
+    raw, truncated = cap_utf8(raw, _RAW_BODY_FACTOR * MAX_BODY_BYTES)  # bound the cost of what follows
+    if html_only:
+        raw, dropped = _convert_html(raw, MAX_BODY_BYTES)
+        truncated = truncated or dropped
+    text, capped = cap_utf8(clean_text(raw), MAX_BODY_BYTES)
+    truncated = truncated or capped
     kinds: list[str] = []
     forwarded: list[ForwardedMail] = []
     for leaf in _attachment_leaves(msg, body):

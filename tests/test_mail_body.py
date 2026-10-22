@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import time
 from collections import Counter
 from pathlib import Path
 
 import pytest
 
 from mordred_hermes.imports.mail import body as body_mod
-from mordred_hermes.imports.mail.body import extract_body, html_to_text
+from mordred_hermes.imports.mail.body import MAX_OPEN_TAGS, HtmlToText, extract_body, html_to_text
 from mordred_hermes.imports.mail.normalize import parse_mail
 from mordred_hermes.imports.mail.segment import segment_body
 from mordred_hermes.imports.records import PartKind
@@ -154,3 +155,54 @@ def test_parser_defects_are_counted_by_class_name() -> None:
     stats: Counter[str] = Counter()
     body_of(b'Content-Type: multipart/mixed; boundary="never"\n\nno boundary here\n', stats)
     assert any(key.startswith("defect:") for key in stats)
+
+
+def test_html_body_is_cut_before_conversion_and_converted_in_linear_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = 128 * 1024
+    monkeypatch.setattr(body_mod, "MAX_BODY_BYTES", cap)
+    fed: list[int] = []
+    original_feed = HtmlToText.feed
+
+    def feed(self: HtmlToText, data: str) -> None:
+        fed.append(len(data.encode()))
+        original_feed(self, data)
+
+    monkeypatch.setattr(HtmlToText, "feed", feed)
+    # Unclosed opens plus end tags that match nothing: a stack scan per end tag was quadratic.
+    unit = "<b>" * 1000 + "</i>" * 1000 + "<p>text</p>"
+    html = unit * (1024 * 1024 // len(unit) + 1)
+    raw = b"Content-Type: text/html; charset=UTF-8\n\n" + html.encode()
+    assert len(raw) > 1024 * 1024
+    started = time.perf_counter()
+    result = body_of(raw)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 2.0
+    assert result.html_only and result.truncated
+    assert fed and sum(fed) <= 4 * cap  # cut to 4 * MAX_BODY_BYTES before the parser saw it
+    assert result.text.startswith("text\n")
+    assert len(result.text.encode()) <= cap
+
+
+def test_converted_output_is_bounded_and_flags_truncation() -> None:
+    parser = HtmlToText(max_chars=100)
+    parser.feed("<p>" + "word " * 50 + "</p>" + "<p>more</p>" * 100)
+    text = parser.text()
+    assert parser.truncated
+    assert "more" not in text and len(text) < 300
+    # Outlook header blocks never close their quote level, but prefixes stop growing.
+    outlook = html_to_text('<div id="divRplyFwdMsg">h</div>x' * 100)
+    assert max(len(line) for line in outlook.split("\n")) <= len("> " * 32 + "x")
+
+
+def test_deep_nesting_is_bounded_and_still_produces_text() -> None:
+    assert html_to_text("<div>" * 10_000 + "deep text" + "</div>" * 10_000 + "after").split("\n") == [
+        "deep text",
+        "after",
+    ]
+    quoted = html_to_text("<blockquote>" * 10_000 + "q" + "</blockquote>" * 10_000 + "after").split("\n")
+    assert quoted == ["> " * 32 + "q", "after"]
+    # Too deep to track, a skip tag still hides its text until it (or an outer element) closes.
+    deep = "<span>" * MAX_OPEN_TAGS
+    assert html_to_text(deep + "<style>hidden</style>shown") == "shown"
+    assert html_to_text(deep + "<head>hidden</span>shown") == "shown"
+    assert html_to_text("</b></div>stray<p>end tags</p>") == "stray\nend tags"

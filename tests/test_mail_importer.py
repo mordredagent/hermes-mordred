@@ -18,7 +18,9 @@ from mordred_hermes.imports.mail import (
     QuoteClaim,
     SourceError,
     plan_import,
+    quote_contained,
 )
+from mordred_hermes.imports.mail.link import MIN_QUOTE_KEY_CHARS
 from mordred_hermes.imports.records import (
     OwnerClass,
     RecordError,
@@ -34,10 +36,28 @@ ALL_SOURCES = (
     MboxSource(FIXTURES / "mboxo_from_escape.mbox"),
     EmlSource(FIXTURES),
 )
+# A true Sent copy (Gmail filed it as sent): the only kind of record a quote may link to.
 OWNER_ORIGINAL = (
-    "Message-ID: <orig1@mail.example.com>\nDate: Tue, 06 Oct 2026 09:30:20 +0900\nFrom: owner@example.com\n"
-    "To: jiro@example.org\nSubject: Meeting\nContent-Type: text/plain; charset=UTF-8\n"
+    "X-Gmail-Labels: Sent\nMessage-ID: <orig1@mail.example.com>\nDate: Tue, 06 Oct 2026 09:30:20 +0900\n"
+    "From: owner@example.com\nTo: jiro@example.org\nSubject: Meeting\nContent-Type: text/plain; charset=UTF-8\n"
     "Content-Transfer-Encoding: 8bit\n\n田中さん\n\n来週の打ち合わせは木曜でお願いします。CANARY-OUTLOOK-ORIGINAL\n"
+).encode()
+# The same message whose ownership rests on headers anyone can type (owner for display only).
+OWNER_CLAIMED_FROM = OWNER_ORIGINAL.removeprefix(b"X-Gmail-Labels: Sent\n")
+OWNER_LIST_REWRITE = OWNER_CLAIMED_FROM.replace(
+    b"From: owner@example.com\n",
+    b"From: dev-ml@lists.example.org\nX-Original-From: owner@example.com\nList-Id: <dev-ml.lists.example.org>\n",
+)
+REPLY_BY_ID = (
+    "Message-ID: <r11@example.net>\nIn-Reply-To: <orig1@mail.example.com>\nFrom: x@example.net\n"
+    "Date: Tue, 06 Oct 2026 11:00:00 +0900\nSubject: Re\nContent-Type: text/plain; charset=UTF-8\n"
+    "Content-Transfer-Encoding: 8bit\n\nsee below\n\n2026年10月6日(火) 9:30 佐々木 葵 <owner@example.com>:\n"
+    "> 来週の打ち合わせは木曜でお願いします。CANARY-OUTLOOK-ORIGINAL\n"
+).encode()
+REPLY_BY_TEXT = (
+    "Message-ID: <r9@example.net>\nFrom: x@example.net\nSubject: Re\nContent-Type: text/plain; charset=UTF-8\n"
+    "Content-Transfer-Encoding: 8bit\n\nok\n\n"
+    "> 田中さん\n>\n> 来週の打ち合わせは木曜で\n> お願いします。CANARY-OUTLOOK-ORIGINAL\n"  # re-wrapped
 ).encode()
 
 
@@ -101,13 +121,51 @@ def test_outlook_quote_links_by_address_and_date_only_with_the_owner_record() ->
 
 
 def test_exact_text_links_an_unattributed_quote() -> None:
-    reply = (
-        "Message-ID: <r9@example.net>\nFrom: x@example.net\nSubject: Re\nContent-Type: text/plain; charset=UTF-8\n"
-        "Content-Transfer-Encoding: 8bit\n\nok\n\n"
-        "> 田中さん\n>\n> 来週の打ち合わせは木曜で\n> お願いします。CANARY-OUTLOOK-ORIGINAL\n"  # re-wrapped
-    ).encode()
-    result = plan(EmlBytes([reply, OWNER_ORIGINAL]))  # the owner record comes later in the source
+    result = plan(EmlBytes([REPLY_BY_TEXT, OWNER_ORIGINAL]))  # the owner record comes later in the source
     assert authors(result, "mail:work:r9@example.net")[1] == ("account_owner", "linked_text_hash")
+
+
+@pytest.mark.parametrize(
+    ("anchor", "anchor_evidence", "by_id", "by_address_date", "by_text"),
+    [
+        (OWNER_ORIGINAL, "gmail_label_sent", "linked_message_id", "linked_address_date", "linked_text_hash"),
+        (OWNER_CLAIMED_FROM, "own_address", "claimed_own_unlinked", "claimed_own_unlinked", "no_attribution"),
+        (OWNER_LIST_REWRITE, "list_rewrite", "claimed_own_unlinked", "claimed_own_unlinked", "no_attribution"),
+    ],
+)
+def test_only_a_sent_copy_anchors_a_quote_link(
+    anchor: bytes, anchor_evidence: str, by_id: str, by_address_date: str, by_text: str
+) -> None:
+    result = plan(EmlBytes([anchor, REPLY_BY_ID, REPLY_BY_TEXT]), EmlSource(FIXTURES / "outlook_ja_reply.eml"))
+    record = message(result, "mail:work:orig1@mail.example.com")
+    assert (record.owner_class, record.owner_evidence) == (OwnerClass.ACCOUNT_OWNER, anchor_evidence)
+    assert authors(result, "mail:work:r11@example.net")[1][1] == by_id
+    assert authors(result, "mail:work:outlook1@example.org")[1][1] == by_address_date
+    assert authors(result, "mail:work:r9@example.net")[1][1] == by_text
+
+
+def test_quote_containment_needs_a_long_key_or_the_whole_record() -> None:
+    record = "来週の打ち合わせは木曜でお願いします。資料は前日までに共有します。"
+    assert MIN_QUOTE_KEY_CHARS == 24
+    assert not quote_contained("お願いしま", record)  # 5 characters inside a long record
+    assert not quote_contained(record[: MIN_QUOTE_KEY_CHARS - 1], record)
+    assert quote_contained(record[:MIN_QUOTE_KEY_CHARS], record)
+    assert quote_contained("OK!", "OK!")  # a short quote of a whole short record
+    assert not quote_contained("OK", "OK!")
+    assert not quote_contained("", record) and not quote_contained(record, "")
+
+
+def test_short_quote_of_a_long_owner_message_never_links() -> None:
+    short = REPLY_BY_ID.split(b"\n> ", 1)[0] + "\n> 田中さん\n".encode()  # 4 characters of the record
+    assert authors(plan(EmlBytes([OWNER_ORIGINAL, short])), "mail:work:r11@example.net")[1] == (
+        "unknown",
+        "claimed_own_unlinked",
+    )
+    whole_short = OWNER_ORIGINAL.split(b"\n\n", 1)[0] + "\n\n田中さん\n".encode()
+    assert authors(plan(EmlBytes([whole_short, short])), "mail:work:r11@example.net")[1] == (
+        "account_owner",
+        "linked_message_id",
+    )
 
 
 def test_altered_quote_of_an_owner_message_never_links() -> None:

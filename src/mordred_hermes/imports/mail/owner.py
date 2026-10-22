@@ -11,8 +11,14 @@ evidence code is stored as ``owner_evidence``:
    ``source_claimed``), unless the topmost ``Authentication-Results`` whose
    authserv-id is ``mx.google.com`` says ``dmarc=fail`` → ``unknown``
    (``dmarc_fail``).
-5. A list-rewritten ``From`` whose ``X-Original-From`` (or ``Reply-To`` on a
-   list message) is own → ``account_owner`` (``list_rewrite``).
+5. A list-rewritten ``From`` whose ``X-Original-From`` (or ``Reply-To``) is
+   own → ``account_owner`` (``list_rewrite``, ``source_claimed``) only with
+   real list evidence: ``List-Id`` is present and the ``From`` address differs
+   from every ``X-Original-From`` address (the list really rewrote it). The
+   same DMARC check as rule 4 applies → ``unknown`` (``dmarc_fail``). Both
+   headers are typed by the sender, so a ``list_rewrite`` (like an
+   ``own_address``) record is the owner for display only and never anchors a
+   quote link (:mod:`.importer` indexes Sent copies only).
 6. ``Auto-Submitted`` (not ``no``), a no-reply style local part, ``List-Id`` or
    ``Precedence: bulk|list|junk`` → sender kind ``bot``/``channel``, owner
    class ``other``.
@@ -136,6 +142,25 @@ def _any_own(addresses: Iterable[Address], own: OwnAddresses) -> bool:
     return any(item.address in own for item in addresses)
 
 
+def _list_rewrite(headers: MailHeaders, sender: Address, own: OwnAddresses) -> bool:
+    """An own author behind a list-rewritten ``From`` (rule 5), with real list evidence only."""
+    if not headers.list_id:
+        return False
+    originals = {canonical_address(item.address) for item in headers.x_original_from if item.address}
+    if canonical_address(sender.address) in originals:
+        return False  # From was not rewritten: no list rewrite happened
+    return _any_own(headers.x_original_from, own) or _any_own(headers.reply_to, own)
+
+
+def _own_claim(headers: MailHeaders, sender: Address, own: OwnAddresses) -> str | None:
+    """``own_address`` (rule 4), ``list_rewrite`` (rule 5) or ``None``."""
+    if sender.address in own:
+        return "own_address"
+    if _list_rewrite(headers, sender, own):
+        return "list_rewrite"
+    return None
+
+
 def _automated(headers: MailHeaders, sender: Address) -> tuple[SenderKind, str] | None:
     if headers.auto_submitted is not None and headers.auto_submitted.split(";", 1)[0].strip() != "no":
         return SenderKind.BOT, "auto_submitted"
@@ -168,15 +193,11 @@ def classify(headers: MailHeaders, own_addresses: OwnAddresses, *, sent_label: s
     sender = headers.sender
     if sender is None:
         return _result(OwnerClass.UNKNOWN, SenderKind.UNKNOWN, ProvenanceQuality.UNKNOWN, "no_from")
-    if sender.address in own_addresses:
+    own_claim = _own_claim(headers, sender, own_addresses)
+    if own_claim is not None:
         if dmarc_failed(headers.authentication_results):
             return _result(OwnerClass.UNKNOWN, SenderKind.UNKNOWN, ProvenanceQuality.UNKNOWN, "dmarc_fail")
-        return _result(OwnerClass.ACCOUNT_OWNER, SenderKind.USER, ProvenanceQuality.SOURCE_CLAIMED, "own_address")
-    list_own = _any_own(headers.x_original_from, own_addresses) or (
-        bool(headers.list_id) and _any_own(headers.reply_to, own_addresses)
-    )
-    if list_own:
-        return _result(OwnerClass.ACCOUNT_OWNER, SenderKind.USER, ProvenanceQuality.SOURCE_CLAIMED, "list_rewrite")
+        return _result(OwnerClass.ACCOUNT_OWNER, SenderKind.USER, ProvenanceQuality.SOURCE_CLAIMED, own_claim)
     automated = _automated(headers, sender)
     if automated is not None:
         return _result(OwnerClass.OTHER, automated[0], ProvenanceQuality.SOURCE_CLAIMED, automated[1])

@@ -21,7 +21,11 @@ A line state machine (no model, no network). At every nesting level it reads:
 
 Limits: nesting depth :data:`MAX_DEPTH` and at most :data:`MAX_PARTS` parts per
 message (authored text counts as one part; overflow quotes are merged into one
-quote with no attribution). A line that merely *looks like* a rendered head
+quote with no attribution). A line longer than :data:`MAX_MARKER_LINE_CHARS`
+is never tried as a banner, header-block or attribution line (it is body
+text), the attribution patterns bound their free-text groups to 200
+characters, and a quoted header value keeps at most that many characters, so
+the cost per line stays linear. A line that merely *looks like* a rendered head
 line (``[Mail …] speaker: …``) is ordinary text; nothing here parses it.
 
 Segments carry *claims* only (:class:`Attribution`); deciding a part's author
@@ -42,6 +46,7 @@ from ._text import clean_line, strip_blank_edges
 
 __all__ = [
     "MAX_DEPTH",
+    "MAX_MARKER_LINE_CHARS",
     "MAX_PARTS",
     "Attribution",
     "Segment",
@@ -52,7 +57,10 @@ __all__ = [
 
 MAX_DEPTH: Final = 8
 MAX_PARTS: Final = 64
+#: Longer lines cannot be forward banners, header blocks or attribution lines.
+MAX_MARKER_LINE_CHARS: Final = 1024
 _MAX_HEADER_LINES: Final = 24
+_MAX_FIELD_CHARS: Final = 200  # a quoted header value (From/Date/...) is parsed from this much at most
 _MAX_BLANK_GAP: Final = 2
 
 _QUOTE_RE: Final = re.compile(r"^[ \t]{0,3}((?:[>\uff1e][ \t]?)+)")
@@ -90,13 +98,17 @@ _BARE_ADDR_RE: Final = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2
 _TIME_TOKEN_RE: Final = re.compile(
     r"\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AaPp]\.?[Mm]\.?(?![A-Za-z]))?(?:\s*(?:GMT|UTC)\s*[+-]\d{1,4})?"
 )
-_ON_WROTE_RE: Final = re.compile(r"On\s+(?P<body>.+?)\s*wrote\s*[:\uff1a]")
+# Free-text groups are bounded ([^\n]{1,200}) so a long line cannot make a match quadratic.
+_ON_WROTE_RE: Final = re.compile(r"On\s+(?P<body>[^\n]{1,200}?)\s*wrote\s*[:\uff1a]")
 _GMAIL_JA_RE: Final = re.compile(
-    r"(?P<date>\d{4}年\d{1,2}月\d{1,2}日(?:\s*[(\uff08][^)\uff09]{1,3}[)\uff09])?\s*\d{1,2}:\d{2})\s+(?P<who>.+?<[^<>]+@[^<>]+>)\s*[:\uff1a]"
+    r"(?P<date>\d{4}年\d{1,2}月\d{1,2}日(?:\s*[(\uff08][^)\uff09]{1,3}[)\uff09])?\s*\d{1,2}:\d{2})\s+"
+    r"(?P<who>[^\n]{1,200}?<[^<>\n]{1,200}@[^<>\n]{1,200}>)\s*[:\uff1a]"
 )
-_JA_WROTE_RE: Final = re.compile(r"(?P<who>.+?)\s*さんは書きました\s*[:\uff1a]?")
-_JA_APPLE_RE: Final = re.compile(r"(?P<date>.+?\d{1,2}:\d{2})\s*[、,]\s*(?P<who>.+?)\s*のメール\s*[:\uff1a]")
-_DATE_FIRST_RE: Final = re.compile(r"(?P<date>.+?\d{1,2}:\d{2})\s*[、,]\s*(?P<rest>.+)")
+_JA_WROTE_RE: Final = re.compile(r"(?P<who>[^\n]{1,200}?)\s*さんは書きました\s*[:\uff1a]?")
+_JA_APPLE_RE: Final = re.compile(
+    r"(?P<date>[^\n]{1,200}?\d{1,2}:\d{2})\s*[、,]\s*(?P<who>[^\n]{1,200}?)\s*のメール\s*[:\uff1a]"
+)
+_DATE_FIRST_RE: Final = re.compile(r"(?P<date>[^\n]{1,200}?\d{1,2}:\d{2})\s*[、,]\s*(?P<rest>[^\n]{1,200})")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -143,6 +155,10 @@ def _strip_one(line: str) -> str:
 
 def _blank(line: str) -> bool:
     return not line.strip()
+
+
+def _long(line: str) -> bool:
+    return len(line) > MAX_MARKER_LINE_CHARS
 
 
 def _skip_blank(lines: Sequence[str], index: int, limit: int = _MAX_BLANK_GAP) -> int:
@@ -242,11 +258,11 @@ def _header_lines(lines: Sequence[str], start: int) -> _Headers:
         match = _HEADER_RE.match(lines[index])
         if match is not None:
             key, locale = _HEADER_LABELS[match.group("label").lower()]
-            found.fields.setdefault(key, match.group("value").strip())
+            found.fields.setdefault(key, match.group("value").strip()[:_MAX_FIELD_CHARS])
             found.locale = "ja" if locale == "ja" else found.locale
             last = key
         elif last is not None and _continues(lines[index], last):
-            found.fields[last] = f"{found.fields[last]} {lines[index].strip()}"
+            found.fields[last] = f"{found.fields[last]} {lines[index].strip()}"[:_MAX_FIELD_CHARS]
         else:
             break
         index += 1
@@ -341,7 +357,7 @@ class _Segmenter:
     def attribution_at(self, lines: Sequence[str], index: int) -> tuple[Attribution, int] | None:
         for width in (1, 2, 3):
             chunk = lines[index : index + width]
-            if len(chunk) < width or any(_blank(item) or quote_depth(item) for item in chunk):
+            if len(chunk) < width or any(_long(item) or _blank(item) or quote_depth(item) for item in chunk):
                 return None
             found = match_attribution(" ".join(item.strip() for item in chunk), self.tz)
             if found is not None:
@@ -365,6 +381,10 @@ class _Segmenter:
                 own = []
                 self.quote_block(lines[index:end], depth, claimed)
                 index = end
+                continue
+            if _long(lines[index]):  # body text: never tried as a banner, header block or attribution
+                own.append(lines[index])
+                index += 1
                 continue
             nested = self.forward_at(lines, index)
             nested_kind = PartKind.FORWARDED

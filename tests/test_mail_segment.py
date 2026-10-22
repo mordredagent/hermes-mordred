@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import datetime as dt
+import time
 
 import pytest
 
-from mordred_hermes.imports.mail.segment import MAX_DEPTH, MAX_PARTS, Segment, segment_body
+from mordred_hermes.imports.mail.segment import (
+    MAX_DEPTH,
+    MAX_MARKER_LINE_CHARS,
+    MAX_PARTS,
+    Segment,
+    match_attribution,
+    segment_body,
+)
 from mordred_hermes.imports.records import PartKind
 
 JST = 540
@@ -226,3 +234,44 @@ def test_naive_dates_need_the_container_zone() -> None:
     (segment,) = segment_body("On 10/5/26 10:00 AM, T <t@example.net> wrote:\n> x", tz_offset_minutes=JST).segments
     assert segment.attribution is not None
     assert segment.attribution.sent_at is None  # ambiguous numeric date stays unknown
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "On ",  # an "On ... wrote:" that never ends
+        "1:00、",  # date-first Japanese forms: a time token and a comma over and over (was quadratic)
+    ],
+)
+def test_long_lines_are_body_text_in_linear_time(unit: str) -> None:
+    line = unit * (200 * 1024 // len(unit.encode()))
+    text = f"Top.\n{line}\n{line}\n{line}\n> quoted"
+    started = time.perf_counter()
+    result = segment_body(text, tz_offset_minutes=JST)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 1.0
+    assert [(segment.kind, segment.attribution) for segment in result.segments] == [(A, None), (Q, None)]
+    assert result.segments[0].text == f"Top.\n{line}\n{line}\n{line}"
+    assert not any(key.startswith(("attribution", "forward_banner", "header_block")) for key in result.markers)
+
+
+def test_marker_lines_longer_than_the_limit_are_never_tried() -> None:
+    banner = "---------- Forwarded message ---------"
+    forward = f"\n\n{FORWARD_HEADERS}\n\nbody"
+    assert [row[0] for row in shape(banner + " " * 8 + forward)] == [F]  # trailing blanks are stripped
+    padded = segment_body(banner + " " * MAX_MARKER_LINE_CHARS + forward)  # too long to be a banner
+    assert padded.segments[0].kind is A and padded.segments[0].text.startswith(banner)
+    assert padded.markers["forward_banner:en"] == 0
+    too_long = "x" * (MAX_MARKER_LINE_CHARS + 1)
+    assert [row[0] for row in shape(f"{too_long}\n{banner}{forward}")] == [A, F]
+    attribution = "On Mon, Oct 5, 2026 at 10:00 AM Taro Yamada <taro@example.net> wrote:"
+    assert shape(f"{attribution}{' ' * MAX_MARKER_LINE_CHARS}\n> q")[1] == (Q, None, "q")
+
+
+def test_bounded_attribution_groups_still_match_real_lines() -> None:
+    name = "Very Long Display Name (Example Company, Platform Engineering Division)"
+    found = match_attribution(f"On Monday, October 5, 2026 at 10:00:00 AM {name} <taro@example.net> wrote:", JST)
+    assert found is not None
+    assert (found.address, found.name) == ("taro@example.net", name)
+    assert match_attribution("On " + "x" * 201 + " wrote:", JST) is None
+    assert match_attribution("x" * 201 + " さんは書きました:", JST) is None

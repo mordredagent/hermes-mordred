@@ -3,7 +3,9 @@
 A quote or forward *claims* an author (an attribution line or a forwarded
 header). A claim naming an own address is not proof: anyone can type it. A
 part becomes ``account_owner`` only when a :data:`Linker` resolves it to an
-imported owner record:
+imported owner record that is a true Sent copy (owner evidence in
+:data:`ANCHOR_EVIDENCE`; an ``own_address`` or ``list_rewrite`` record is
+itself only a header claim and never anchors a link):
 
 - ``linked_message_id`` — a Message-ID the container references (or the
   attached message's own id) belongs to an owner record AND the quote text is
@@ -14,7 +16,9 @@ imported owner record:
   record author.
 
 Text comparison uses :func:`~._text.link_key` (NFKC, whitespace ignored), so
-re-wrapped quotes still link but an altered quote does not. The store-backed
+re-wrapped quotes still link but an altered quote does not. Containment needs
+a quote key of at least :data:`MIN_QUOTE_KEY_CHARS` characters (a shorter
+quote links only when it is the record's whole text). The store-backed
 linker of the CLI (PR 10) implements the same :data:`Linker` callable against
 ``import_parts``; :class:`MetadataIndex` is the in-plan implementation built
 by the importer's first pass.
@@ -31,7 +35,9 @@ from ..records import OwnerClass, PartKind, SenderKind
 from .owner import canonical_address
 
 __all__ = [
+    "ANCHOR_EVIDENCE",
     "LINK_WINDOW_SECONDS",
+    "MIN_QUOTE_KEY_CHARS",
     "IndexEntry",
     "LinkedAuthor",
     "Linker",
@@ -43,6 +49,13 @@ __all__ = [
 ]
 
 LINK_WINDOW_SECONDS: Final = 600
+#: A quote key (``link_key``: NFKC, no whitespace) shorter than this is contained in
+#: almost any long text (``ok``, ``Thanks!``), so it links by containment only when it
+#: equals the record's whole authored text.
+MIN_QUOTE_KEY_CHARS: Final = 24
+#: Owner evidence of the records a quote may link to: Gmail filed the copy as sent.
+#: ``own_address``/``list_rewrite`` owners rest on headers anyone can type.
+ANCHOR_EVIDENCE: Final = frozenset({"gmail_label_sent"})
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -82,8 +95,15 @@ def text_digest(key: str) -> str:
 
 
 def quote_contained(quote_key: str, record_key: str) -> bool:
-    """True when the (link-normalised) quote is a substring of the record's authored text."""
-    return bool(quote_key) and bool(record_key) and quote_key in record_key
+    """True when the (link-normalised) quote is a substring of the record's authored text.
+
+    A key shorter than :data:`MIN_QUOTE_KEY_CHARS` must equal ``record_key``.
+    """
+    if not quote_key or not record_key:
+        return False
+    if len(quote_key) < MIN_QUOTE_KEY_CHARS:
+        return quote_key == record_key
+    return quote_key in record_key
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -102,7 +122,11 @@ class IndexEntry:
 
 @dataclass
 class MetadataIndex:
-    """In-plan :data:`Linker` over the records of one import (owner records only)."""
+    """In-plan :data:`Linker` over the records of one import (owner records only).
+
+    The caller adds anchor records only (:data:`ANCHOR_EVIDENCE`); ``add``
+    itself rejects any record that is not ``account_owner``.
+    """
 
     window_seconds: int = LINK_WINDOW_SECONDS
     _by_id: dict[str, IndexEntry] = field(default_factory=dict, repr=False)
