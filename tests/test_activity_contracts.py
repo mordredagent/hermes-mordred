@@ -7,6 +7,7 @@ import hashlib
 import json
 import time
 import uuid
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -858,19 +859,38 @@ def test_kept_typed_text_is_never_rewritten() -> None:
     assert "text_secrets_redacted" not in event.exclusions
 
 
-def test_the_text_redactor_is_linear_on_hostile_input() -> None:
+def _assert_linear(shapes: list[Callable[[int], str]]) -> None:
+    """Each hostile shape redacted at a quarter of its size (``shape(4)``) and at its full size (``shape(1)``):
+    linear work costs 4 times as much, quadratic work 16 times, so the full size must cost under 8 times the
+    quarter (a floor absorbs timer noise on tiny times). The ratio, not an absolute time, is the check: coverage
+    tracing on Python 3.11 CI runners made these linear shapes take 5.9 s; the ceiling only catches a hang."""
     started = time.monotonic()
-    for text in (
-        "password " * 30_000,
-        "pin:" * 60_000,
-        "pin:a://" * 30_000,
-        "pin:1://" * 30_000,
-        'password "' * 25_000,
-        "パスワードは" * 40_000,
-        "token: " + "a" * 250_000,
-    ):
-        contracts.redact_text_secrets(text)
-    assert time.monotonic() - started < 5.0
+    slow = []
+    for shape in shapes:
+        times = []
+        for part in (4, 1):
+            text = shape(part)
+            begun = time.perf_counter()
+            contracts.redact_text_secrets(text)
+            times.append(time.perf_counter() - begun)
+        if times[1] >= 8 * max(times[0], 0.02):
+            slow.append((shape(400)[:40], times))
+    assert not slow, slow
+    assert time.monotonic() - started < 120.0
+
+
+def test_the_text_redactor_is_linear_on_hostile_input() -> None:
+    _assert_linear(
+        [
+            lambda part: "password " * (30_000 // part),
+            lambda part: "pin:" * (60_000 // part),
+            lambda part: "pin:a://" * (30_000 // part),
+            lambda part: "pin:1://" * (30_000 // part),
+            lambda part: 'password "' * (25_000 // part),
+            lambda part: "パスワードは" * (40_000 // part),
+            lambda part: "token: " + "a" * (250_000 // part),
+        ]
+    )
 
 
 @pytest.mark.parametrize("cut", [0, 1, 255, 256, 257])
@@ -1010,21 +1030,20 @@ def test_both_values_around_one_keyword_are_replaced() -> None:
 
 
 def test_value_first_redaction_is_linear_on_hostile_input() -> None:
-    started = time.monotonic()
-    for text in (
-        "x as the password " * 20_000,
-        "a" * 250_000 + " as the password",
-        "as " * 100_000 + "password",
-        "type '" + "a " * 100_000 + "' as the password",
-        '"' * 100_000 + " as the password",
-        "aをパスワードに" * 40_000,
-        "a" * 250_000 + "をパスワードに",
-        "パスワードにa" * 40_000,
-        "パスワードに" + "a" * 250_000 + "を",
-        "」というパスワード" * 30_000,
-    ):
-        contracts.redact_text_secrets(text)
-    assert time.monotonic() - started < 5.0
+    _assert_linear(
+        [
+            lambda part: "x as the password " * (20_000 // part),
+            lambda part: "a" * (250_000 // part) + " as the password",
+            lambda part: "as " * (100_000 // part) + "password",
+            lambda part: "type '" + "a " * (100_000 // part) + "' as the password",
+            lambda part: '"' * (100_000 // part) + " as the password",
+            lambda part: "aをパスワードに" * (40_000 // part),
+            lambda part: "a" * (250_000 // part) + "をパスワードに",
+            lambda part: "パスワードにa" * (40_000 // part),
+            lambda part: "パスワードに" + "a" * (250_000 // part) + "を",
+            lambda part: "」というパスワード" * (30_000 // part),
+        ]
+    )
 
 
 # --- a value after "to" or after a short qualifier (follow-up to D1) ------------------------------------------
@@ -1095,17 +1114,16 @@ def test_ordinary_text_after_to_or_a_qualifier_is_untouched(text: str) -> None:
 
 
 def test_qualified_redaction_is_linear_on_hostile_input() -> None:
-    started = time.monotonic()
-    for text in (
-        "set the password to " * 20_000,
-        "the password for a b c is " * 20_000,
-        "password for " + "a" * 250_000 + " is x1",
-        "set " + "a" * 250_000 + " password to x1",
-        "password for: " * 30_000,
-        "update the PIN to " + "1" * 250_000,
-    ):
-        contracts.redact_text_secrets(text)
-    assert time.monotonic() - started < 5.0
+    _assert_linear(
+        [
+            lambda part: "set the password to " * (20_000 // part),
+            lambda part: "the password for a b c is " * (20_000 // part),
+            lambda part: "password for " + "a" * (250_000 // part) + " is x1",
+            lambda part: "set " + "a" * (250_000 // part) + " password to x1",
+            lambda part: "password for: " * (30_000 // part),
+            lambda part: "update the PIN to " + "1" * (250_000 // part),
+        ]
+    )
 
 
 # --- every keyword is read on its own: no match hides another (Codex review P1) ------------------------------
@@ -1168,15 +1186,14 @@ def test_every_value_the_base_revision_redacted_stays_redacted(text: str, spans:
 
 
 def test_nested_keyword_redaction_is_linear_on_hostile_input() -> None:
-    started = time.monotonic()
-    for text in (  # "pin:" * 60_000 (every keyword inside one long value) is in the test above
-        "password for a pin=1 is " * 10_000,
-        "set the password for a pin=1 to " * 7_500,
-        "token=" * 40_000,
-        "password: " + "x" * 300 + "-pin:" * 40_000,
-    ):
-        contracts.redact_text_secrets(text)
-    assert time.monotonic() - started < 5.0
+    _assert_linear(  # "pin:" * 60_000 (every keyword inside one long value) is in the test above
+        [
+            lambda part: "password for a pin=1 is " * (10_000 // part),
+            lambda part: "set the password for a pin=1 to " * (7_500 // part),
+            lambda part: "token=" * (40_000 // part),
+            lambda part: "password: " + "x" * 300 + "-pin:" * (40_000 // part),
+        ]
+    )
 
 
 # --- the user's own words: secret-shaped tokens without a keyword (live B2 re-run, N4) ----------------------

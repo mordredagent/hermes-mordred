@@ -4579,7 +4579,12 @@ per-process state.
     Tests check the bound and the time on Codex's inputs at 10 KB and
     40 KB, on the redactor's adversarial shapes and on runs of overlapping
     values, and that both replace and find exactly what the combined pattern
-    of every value did (`tests/test_activity_redaction_properties.py`). The held text is dropped when the turn never ends (an
+    of every value did (`tests/test_activity_redaction_properties.py`; on
+    Python 3.11, whose `re.IGNORECASE` character sets miss the other case of
+    a letter beyond the BMP that it matches on its own, and which compiles an
+    alternation of single characters into such a set, the pattern's
+    alternatives are kept out of a set, so each character is compared as
+    `re.IGNORECASE` compares it alone). The held text is dropped when the turn never ends (an
     interrupted last turn, a process that exits, a session forgotten), when
     recording it is off at the turn's end, or while the session is
     suspended; a refused write is not retried, and the turn's calls stay in

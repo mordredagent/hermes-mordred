@@ -447,15 +447,36 @@ def test_codex_input_is_named_fast() -> None:
 # --- given values are found as the combined pattern found them, without one ------------------------------------
 
 
-def _alternation(text: str, values: Iterable[str]) -> tuple[str, bool]:
-    """``contracts.redact_values`` of 7a1084bee: one pattern of every value, the longest first."""
+#: Whether ``re.IGNORECASE`` pairs the cases of a letter beyond the BMP inside a character set as it does alone.
+#: Python 3.11 does not: ``[\U00010400i]`` misses ``\U00010428`` although ``\U00010400`` alone matches it, and it
+#: compiles an alternation of single characters (``\U00010400|i``) into such a set.
+SETS_PAIR_CASES = bool(re.fullmatch("[\U00010400i]", "\U00010428", re.IGNORECASE))
+
+
+def _alternation(text: str, values: Iterable[str], *, as_sets: bool = False) -> tuple[str, bool]:
+    """``contracts.redact_values`` of 7a1084bee: one pattern of every value, the longest first. Each alternative ends
+    in an empty lookahead, which keeps ``re`` from compiling single-character ones into a character set (unless
+    ``as_sets``, exactly the old pattern): that changes nothing where :data:`SETS_PAIR_CASES`, and elsewhere keeps
+    the comparison of each character as ``re.IGNORECASE`` makes it alone."""
     ordered = sorted({value for value in values if value}, key=len, reverse=True)
     if not ordered:
         return text, False
-    pattern = re.compile(
-        r"(?<![A-Za-z0-9])(?:" + "|".join(map(re.escape, ordered)) + r")(?![A-Za-z0-9])", re.IGNORECASE
-    )
+    end = "" if as_sets else "(?=)"
+    alternatives = "|".join(re.escape(value) + end for value in ordered)
+    pattern = re.compile(r"(?<![A-Za-z0-9])(?:" + alternatives + r")(?![A-Za-z0-9])", re.IGNORECASE)
     return pattern.subn(contracts.REDACTED, text)[0], bool(pattern.search(text))
+
+
+def test_values_are_compared_as_re_ignorecase_compares_each_character() -> None:
+    """Where Python 3.11's character sets miss the other case of a letter beyond the BMP, the values are still
+    compared as ``re.IGNORECASE`` compares that letter on its own (the matcher never uses ``re``'s case folding)."""
+    upper, lower = "\U00010400", "\U00010428"
+    assert re.fullmatch(upper, lower, re.IGNORECASE)
+    assert contracts.redact_values(f"a {lower} b i", [upper, "i"]) == ("a redacted b redacted", True)
+    assert contracts.contains_values(lower, [upper, "i"])
+    assert _alternation(f"a {lower} b i", [upper, "i"]) == ("a redacted b redacted", True)
+    if SETS_PAIR_CASES:
+        assert _alternation(f"a {lower} b i", [upper, "i"], as_sets=True) == ("a redacted b redacted", True)
 
 
 #: Pieces of generated values and texts: word joiners and boundaries, and characters whose case ``re`` pairs.
@@ -481,6 +502,8 @@ def test_given_values_are_found_exactly_as_the_combined_pattern_found_them() -> 
         expected = _alternation(text, values)
         if contracts.redact_values(text, values) != expected or contracts.contains_values(text, values) != expected[1]:
             failures.append((text, values))
+        if SETS_PAIR_CASES and _alternation(text, values, as_sets=True) != expected:  # the old pattern itself
+            failures.append((text, values))
     assert not failures, failures[:5]
 
 
@@ -492,6 +515,7 @@ def test_hard_value_sets_are_found_exactly_as_the_combined_pattern_found_them(ca
             expected = _alternation(typed, values)
             assert contracts.redact_values(typed, values) == expected, (case, typed)
             assert contracts.contains_values(typed, values) == expected[1], (case, typed)
+            assert not SETS_PAIR_CASES or _alternation(typed, values, as_sets=True) == expected, (case, typed)
 
 
 def _codes() -> list[int]:
