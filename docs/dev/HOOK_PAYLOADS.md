@@ -22,7 +22,7 @@ Current contract:
 | `pre_tool_call` | `tool_name` | Privacy and network generic tool guards |
 | `pre_api_request` | `provider`, `base_url` | LLM and network egress policy |
 | `pre_gateway_dispatch` | `event`, `gateway` | Mandatory gateway E2E |
-| `pre_llm_call` | `user_message`, `session_id`, `task_id` | Turn-start browser history (activity); dbcrypt's per-turn database check reads nothing |
+| `pre_llm_call` | `user_message`, `session_id` (`task_id` only when present; hermes-agent 0.13.0 does not pass it) | Turn-start browser history (activity); dbcrypt's per-turn database check reads nothing |
 | `transform_tool_result` | `tool_name`, `args`, `result`, `session_id`, `task_id` | Browser history block in navigation results (activity) |
 
 Callbacks may accept additional keyword arguments for compatibility, but policy
@@ -108,7 +108,8 @@ text in the API copy of the user message only (`api_content`, persisted in
 not a string (multimodal) gets no plugin context. `PluginManager.invoke_hook`
 catches `Exception` per callback, so an ordinary exception only drops that
 callback's context; a `BaseException` aborts the turn. The activity callback
-reads `user_message`, `session_id` and `task_id`, catches every `Exception`
+reads `user_message`, `session_id` and, when present, `task_id` (hermes-agent
+0.13.0 does not pass it), catches every `Exception`
 and returns `None` or `{"context": block}` (SPEC §"History for Hermes").
 
 The return channel is unsuitable for rewriting the resolved provider, so
