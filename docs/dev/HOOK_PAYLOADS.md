@@ -20,9 +20,10 @@ Current contract:
 | `on_session_start` | `session_id` | Network activation and shared startup integrity |
 | `on_session_end` | none | Network cleanup and keyvault resealing |
 | `pre_tool_call` | `tool_name` | Privacy and network generic tool guards |
+| `post_tool_call` | `tool_name`, `args`, `result`, `session_id`, `task_id`, `tool_call_id` (`turn_id` and `status` only when present; hermes-agent 0.13.0 passes neither) | Recording Hermes's own browser calls (activity) |
 | `pre_api_request` | `provider`, `base_url` | LLM and network egress policy |
 | `pre_gateway_dispatch` | `event`, `gateway` | Mandatory gateway E2E |
-| `pre_llm_call` | `user_message`, `session_id` (`task_id` only when present; hermes-agent 0.13.0 does not pass it) | Turn-start browser history (activity); dbcrypt's per-turn database check reads nothing |
+| `pre_llm_call` | `user_message`, `session_id`, `platform` (`task_id` and `turn_id` only when present; hermes-agent 0.13.0 passes neither) | Turn-start browser history and the turn record for capture and chat corrections (activity); dbcrypt's per-turn database check reads nothing |
 | `transform_tool_result` | `tool_name`, `args`, `result`, `session_id`, `task_id` | Browser history block in navigation results (activity) |
 
 Callbacks may accept additional keyword arguments for compatibility, but policy
@@ -94,8 +95,9 @@ tests explicitly adopt it.
 Two components register `pre_llm_call`, in wiring order: `dbcrypt` (the
 per-turn database-encryption check; it reads no field, returns a warning
 context under lenient policy and raises `DatabaseEncryptionRefused`, a
-`BaseException`, under strict policy) and `activity` (the turn-start browser
-history). Verified against the installed Hermes 0.19.0
+`BaseException`, under strict policy) and `activity`, twice: the turn-start
+browser history, then the capture's turn record (`activity/capture_hermes.py`).
+Verified against the installed Hermes 0.19.0
 (`agent/turn_context.py`): the hook fires once per user turn with
 `session_id`, `task_id`, `turn_id`, `user_message`, `conversation_history`,
 `is_first_turn`, `model`, `platform` and `sender_id` (plus
@@ -107,10 +109,18 @@ text in the API copy of the user message only (`api_content`, persisted in
 `state.db`; the stored `content` stays clean). A turn whose user content is
 not a string (multimodal) gets no plugin context. `PluginManager.invoke_hook`
 catches `Exception` per callback, so an ordinary exception only drops that
-callback's context; a `BaseException` aborts the turn. The activity callback
+callback's context; a `BaseException` aborts the turn. The history callback
 reads `user_message`, `session_id` and, when present, `task_id` (hermes-agent
 0.13.0 does not pass it), catches every `Exception`
-and returns `None` or `{"context": block}` (SPEC §"History for Hermes").
+and returns `None` or `{"context": block}` (SPEC §"History for Hermes"). The
+capture callback reads `user_message`, `session_id`, `platform` (a `subagent`
+or `cron` turn is not a person's message) and, when present, `task_id` and
+`turn_id` (0.13.0 passes neither; each call then starts a local turn), records a
+`correct:` message (or its Japanese equivalent) as a correction, catches every `Exception` and
+always returns `None`. Verified against the hermes-agent 0.13.0 floor
+(`run_agent.py`): its single dispatch site passes `session_id`,
+`user_message`, `conversation_history`, `is_first_turn`, `model`, `platform`
+and `sender_id`.
 
 The return channel is unsuitable for rewriting the resolved provider, so
 policy is split across boundaries that observe the real client/request:
@@ -144,6 +154,28 @@ activity callback reads `tool_name`, `args`, `result`, `session_id` and
 `task_id`; for a successful `browser_navigate` (or a `browser_snapshot` /
 `browser_back` on a new host) it returns the same JSON object with one added
 field, `mordred_browser_history`, and otherwise `None`.
+
+### 5.2 `post_tool_call` payload
+
+The activity component registers `post_tool_call` to record Hermes's own
+browser calls (`activity/capture_hermes.py`, SPEC §"History for Hermes").
+Verified against the installed Hermes 0.19.0: every call site goes through
+`model_tools._emit_post_tool_call_hook` (registry tools, agent-loop tools in
+`agent/agent_runtime_helpers.py`, terminal outcomes in
+`agent/tool_executor.py`), whose single `invoke_hook` passes `tool_name`,
+`args`, `result`, `task_id`, `session_id`, `tool_call_id`, `turn_id`,
+`api_request_id`, `duration_ms`, `status` (`ok`, `error`, `blocked`,
+`cancelled`, `timeout`), `error_type`, `error_message` and
+`middleware_trace`; it also fires for a call a `pre_tool_call` hook blocked
+(`status` `blocked`), before `transform_tool_result`, and ignores the return
+value. The hermes-agent 0.13.0 floor has one dispatch site
+(`model_tools.handle_function_call`) passing `tool_name`, `args`, `result`,
+`task_id`, `session_id`, `tool_call_id` and `duration_ms` only, and fires
+nothing for a blocked call. The contract therefore lists `tool_name`, `args`,
+`result`, `session_id`, `task_id` and `tool_call_id`; `turn_id` and `status`
+are read only when present (without `status` the outcome comes from the
+result's `success` / `error`). The callback ignores every tool not named
+`browser_*`, catches every `Exception` and returns `None`.
 
 ## 6. `pre_gateway_dispatch` payload and return action shape
 

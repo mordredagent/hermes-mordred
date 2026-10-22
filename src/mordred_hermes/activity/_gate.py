@@ -151,12 +151,17 @@ def _verify_copy(path: Path) -> Refusal | None:
     return refusal("plaintext_store") if _monitor.is_plaintext(path) else None
 
 
-def open_store(home: Path, *, config: ActivityConfig | None = None) -> ActivityStore:
+def open_store(
+    home: Path, *, config: ActivityConfig | None = None, busy_timeout_s: float | None = None
+) -> ActivityStore:
     """Gate, open, verify and bind the store of ``home``; raises :class:`ActivityRefused`.
 
     ``config`` is accepted so callers that already loaded it can pass it on;
     opening the store does not depend on collection settings (status and
-    retention must work while collection is off).
+    retention must work while collection is off). ``busy_timeout_s`` bounds
+    how long opening (the shim's schema probe) and every statement wait for
+    another writer's lock (default :data:`.store.BUSY_TIMEOUT_S`); Hermes's
+    own capture passes a lower bound so a tool call never waits long.
     """
     del config
     found = check_protection(home)
@@ -170,7 +175,16 @@ def open_store(home: Path, *, config: ActivityConfig | None = None) -> ActivityS
 
     if path.is_file() and path.stat().st_size > 0 and _monitor.is_plaintext(path):
         raise ActivityRefused(refusal("plaintext_store"))
-    store = ActivityStore(path, _keyed_opener, copy_opener=_copy_opener, verify_copy=_verify_copy)
+    if busy_timeout_s is None:
+        store = ActivityStore(path, _keyed_opener, copy_opener=_copy_opener, verify_copy=_verify_copy)
+    else:
+
+        def bounded_opener(target: Path) -> sqlite3.Connection:
+            return _keyed_opener(target, timeout=busy_timeout_s)
+
+        store = ActivityStore(
+            path, bounded_opener, copy_opener=_copy_opener, verify_copy=_verify_copy, busy_timeout_s=busy_timeout_s
+        )
     store.initialize(Path(os.path.realpath(home)))
     with store.connection() as conn:
         found = verify_keyed_connection(conn, path)

@@ -4,7 +4,12 @@
   is disabled or the store refused it;
 - ``activity.history_unavailable``: a Hermes-side history surface (navigation
   block, turn-start context, lookup tool) could not read the store and went on
-  without history.
+  without history;
+- ``activity.capture_suspended``: recording Hermes's own browser calls
+  (:mod:`.capture_hermes`) was suspended for one Hermes session after repeated
+  slow appends. Unlike the two codes above it is emitted once per suspended
+  session (a session is suspended at most once per process), capped per
+  process.
 
 The dedupe keeps a gate that keeps refusing from flooding the audit log.
 Entries carry the refusal code and, for capture, the peer id when known; never
@@ -21,13 +26,15 @@ from typing import Final
 
 from .._audit_support import safe_audit_append
 
-__all__ = ["audit_capture_refused", "audit_history_unavailable"]
+__all__ = ["audit_capture_refused", "audit_capture_suspended", "audit_history_unavailable"]
 
 _LOG = logging.getLogger(__name__)
 #: Refusal codes come from small fixed sets; the cap only bounds a misbehaving caller.
 _MAX_CODES: Final = 32
 _EMITTED: set[str] = set()
 _HISTORY_EMITTED: set[str] = set()
+#: Suspension entries this process has written (one per suspended session, at most ``_MAX_CODES``).
+_SUSPENDED: list[int] = [0]
 _LOCK = threading.Lock()
 
 
@@ -71,5 +78,22 @@ def audit_history_unavailable(code: str) -> None:
             "decision": "refuse",
             "reason": "activity.history_unavailable",
             "code": code,
+        }
+    )
+
+
+def audit_capture_suspended(code: str, *, peer_id: str) -> None:
+    """Audit that capture of Hermes's browser calls was suspended for one session (``code`` says why)."""
+    with _LOCK:
+        if _SUSPENDED[0] >= _MAX_CODES:
+            return
+        _SUSPENDED[0] += 1
+    _append(
+        {
+            "event": "activity_capture",
+            "decision": "refuse",
+            "reason": "activity.capture_suspended",
+            "code": code,
+            "peer_id": peer_id,
         }
     )

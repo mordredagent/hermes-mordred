@@ -833,7 +833,8 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 >
 > **Hermes uses this history** while the feature is enabled (master switch
 > `history_enabled`, default on; `activity use off` turns it off from the next
-> turn, without a restart, and does not stop recording). After Hermes opens a
+> turn, without a restart; the collectors keep recording, only Hermes's own
+> browser calls stop being recorded). After Hermes opens a
 > site with `browser_navigate`, the browser result carries a short block of
 > your earlier work there (tasks, routes, outcomes, page titles, your
 > corrections; never page text or typed text). When your message names a site
@@ -857,6 +858,20 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > key, password or card number (JWTs, `sk-`, `ghp_`, `AKIA`, `xoxb-` style
 > keys, `password: …`, Luhn-valid card numbers, long random tokens) is never
 > stored.
+>
+> **Hermes's own browser work is recorded too** while collection is on
+> (`history_capture_hermes`, default on; needs `collection_enabled` and
+> `history_enabled`): every `browser_*` call Hermes makes becomes an event in
+> the same encrypted store, one episode per turn, starting with your message
+> for that turn as the task. Elements are named by their label, never their
+> value; text Hermes types into a password, PIN, card, one-time-code, secret
+> or token field is never stored, other typed text is (unless it looks like a
+> key or password). Type `correct: …` (or the Japanese "teisei:", the operator's prefix) in Hermes chat to record
+> a correction of Hermes's last browser action (`history_chat_corrections`,
+> default on); the message still goes to Hermes as usual. Recording never
+> slows or breaks a tool call: a write waits at most 250 ms for the store,
+> and after three slow writes recording stops for that session (audited as
+> `activity.capture_suspended`).
 > Contract:
 > [SPEC](../dev/SPEC.md#browser-activity-and-conditional-learning-2026-10-20)
 > (§"History for Hermes").

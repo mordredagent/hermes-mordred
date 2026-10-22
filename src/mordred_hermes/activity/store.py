@@ -6,7 +6,8 @@ connections. Tests construct it directly with a plain-SQLite opener on a
 temporary directory; that constructor argument is the only test seam.
 
 Every public method opens one short connection, runs one transaction and
-closes it. ``busy_timeout`` is 2 s and the host's journal mode is left alone.
+closes it. ``busy_timeout`` is 2 s unless the caller bounds it lower (Hermes's
+own capture, :mod:`.capture_hermes`) and the host's journal mode is left alone.
 SQLite failures become :class:`._gate.ActivityRefused` with ``busy``,
 ``disk_full`` or ``store_unavailable``; nothing is retried here and no
 exception text carries event content.
@@ -191,9 +192,12 @@ class ActivityStore:
         *,
         copy_opener: Opener | None = None,
         verify_copy: CopyCheck | None = None,
+        busy_timeout_s: float = BUSY_TIMEOUT_S,
     ) -> None:
         self.path = path
         self._opener = opener
+        #: How long a statement waits for another connection's lock before the store refuses as ``busy``.
+        self._busy_timeout_ms = max(1, int(busy_timeout_s * 1000))
         # Backups live outside the store; production opens them through the
         # process sqlite3 (the shim encrypts a new destination with the store's key).
         self._copy_opener = copy_opener or opener
@@ -208,7 +212,7 @@ class ActivityStore:
             conn = self._opener(self.path)
             try:
                 conn.isolation_level = None  # explicit BEGIN / COMMIT below
-                conn.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT_S * 1000)}")
+                conn.execute(f"PRAGMA busy_timeout = {self._busy_timeout_ms}")
                 yield conn
             finally:
                 conn.close()

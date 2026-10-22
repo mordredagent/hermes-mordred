@@ -3681,8 +3681,9 @@ removed before any release. What remains is capture, the encrypted store,
 corrections stored as raw events, retention, backup and restore, and Hermes's
 direct use of the stored history, designed in
 [browser history for Hermes](../superpowers/specs/2026-10-22-browser-history-for-hermes-design.md):
-its read side (phase B1) is shipped and specified in §"History for Hermes"
-below; recording Hermes's own browser calls (phase B2) is not built yet
+its read side (phase B1) and Hermes as a collector of its own browser calls
+and of the user's chat corrections (phase B2) are shipped and specified in
+§"History for Hermes" below; the live validation (phase B3) is open
 ([`TODO.md`](./TODO.md) §"Browser activity learning").
 
 ### Purpose and boundary
@@ -3695,9 +3696,11 @@ summary and no guidance is produced; Hermes reads bounded excerpts of the raw
 history instead (§"History for Hermes"). Hermes core is unchanged. The
 `activity` component keeps its place in the plugin's fixed wiring order
 (keyvault, llm_guard, network, privacy_check, dbcrypt, e2e, activity, wizard);
-its `register()` adds the `transform_tool_result` and `pre_llm_call` hooks,
-the `mordred_browser_history` and `mordred_browser_history_episode` tools and
-the `browser-history` skill, and nothing else (no auxiliary task).
+its `register()` adds the `transform_tool_result` and `pre_llm_call` history
+hooks, the `mordred_browser_history` and `mordred_browser_history_episode`
+tools, the `browser-history` skill and the capture hooks `post_tool_call` and a
+second `pre_llm_call` (§"History for Hermes"), and nothing else (no auxiliary
+task).
 
 **Capture policy (2026-10-22).** The receiver records everything a collector
 reports except secrets: typed text outside sensitive fields, URLs with their
@@ -3740,10 +3743,12 @@ the raw retention default is 365 days.
   the store are audited as `activity.capture_refused`
   once per process and code, with the `peer_id`
   (`activity/_capture_audit.py`). The history surfaces audit
-  `activity.history_unavailable` the same way (§"History for Hermes"); those
-  are the only two activity audit codes.
+  `activity.history_unavailable` the same way, and Hermes's own capture audits
+  `activity.capture_suspended` once per suspended session (§"History for
+  Hermes"); those are the only three activity audit codes.
 - Each public store method uses one short connection and one transaction
-  (`busy_timeout` 2 s, host journal mode left alone); nothing is retried.
+  (`busy_timeout` 2 s, 250 ms when Hermes records its own browser calls; host
+  journal mode left alone); nothing is retried.
 - `ActivityStore.backup(dest)` writes a new `0600` file through the SQLite
   backup API (keyed by the shim) and refuses a plaintext result.
   `restore(src)` keeps the current profile binding, writes a new
@@ -3800,7 +3805,10 @@ and revocable on its own:
   `extension`; the localhost page principal cannot.
 - Trust (`paired_peer`) and permitted use (`learning`) come from the
   principal, never from the payload; a batch's `producer_kind` must match the
-  credential's kind.
+  credential's kind (`operator`, or `browser` for the extension). The kind
+  `hermes` belongs to the in-process principal of Hermes's own capture
+  (§"History for Hermes"); a peer credential record naming it is refused as
+  `invalid_token`.
 - Limits: at most 100 events per batch, 16 KiB normalized per event
   (`MAX_EVENT_BYTES`; 4 KiB before 2026-10-22), 256 KiB per raw batch frame.
   Configuration may lower these, never raise them.
@@ -3961,11 +3969,12 @@ and revocable on its own:
   (`activity status` shows `collection: refused`) until it is fixed.
 - `source` (`operator`, `browser`, `hermes`, `user_correction`) and `actor`
   (`human`, `agent`, `unknown`) are collector attribution (bounded enums), not
-  receiver-verified; only `trust` (`paired_peer`) and `permitted_use`
-  (`learning`) come from the authenticated principal. A collector-submitted
+  receiver-verified; only `trust` (`paired_peer`, or `local` for Hermes's own
+  capture) and `permitted_use` (`learning`) come from the authenticated
+  principal. A collector-submitted
   `correction` is stored as an ordinary event; nothing is derived from it.
   Every combination is stored (the capture policy records everything but
-  secrets, and both producer kinds are the user's own collectors); Hermes
+  secrets, and every producer kind is one of the user's own collectors); Hermes
   shows a text as the user's only by the attribution rule of §"History for
   Hermes" (the user's own words).
 - Episodes record their revision (advanced by every committed append), worst
@@ -3995,7 +4004,8 @@ and revocable on its own:
   appends one `user_correction` / `human` / `correction` event, linked to the
   attempt when given, to an existing episode (also one a paired peer wrote)
   and prints the event id. A correction sent by the operator collector (for
-  example its "correct:" input) is stored the same way. There is no
+  example its "correct:" input) is stored the same way, and so is one typed
+  in Hermes chat (`correct: …` or its Japanese equivalent, §"History for Hermes"). There is no
   candidate, no lesson and no model call.
 
 ### Hermes integration
@@ -4025,15 +4035,17 @@ per-process state.
   policy write lock, every other key and comment preserved; a `plugins` or
   `mordred_activity` value that is not a mapping or is shared through a YAML
   anchor is refused; the lock is the policy writer's in `<home>/mordred`) and
-  `activity status` shows it. The switch does not affect collection: with
-  `collection_enabled` on, batches are still received and stored.
+  `activity status` shows it. The switch does not affect the collectors: with
+  `collection_enabled` on, their batches are still received and stored; only
+  Hermes's own capture (below) stops with it.
 - **Store access** (`_history_access.reader`, on every call, nothing
   cached): `_gate.check_protection`, a plaintext check of the file, the keyed
   opener (`_gate._keyed_opener` refuses an unkeyed connection) and a read-only
   check of `activity_meta` (schema 2 or 3, else `store_unavailable` /
-  `schema_newer`; the profile binding, else `profile_mismatch`). The Hermes
-  process never creates, migrates or writes the store; a profile without
-  `mordred.db` simply has no history. A refusal, or any other error, makes the
+  `schema_newer`; the profile binding, else `profile_mismatch`). The history
+  surfaces never create, migrate or write the store; a profile without
+  `mordred.db` simply has no history. Only the capture hooks below write, and
+  only through the receiver. A refusal, or any other error, makes the
   surface go on without history, is audited as `activity.history_unavailable`
   once per process and code (`internal_error` for an unexpected exception)
   and keeps every surface off the store for 60 seconds. During those seconds
@@ -4169,6 +4181,79 @@ per-process state.
   tool calls, and by construction they carry no typed text and no page text
   (only the user's own words, page titles inside Hermes's untrusted wrapper,
   routes, outcomes and times).
+- **Hermes as a collector** (phase B2, `activity/capture_hermes.py`).
+  Hermes's own browser tool calls and the user's chat corrections are
+  recorded through the receiver (`ingest.StoreReceiver`, the same path as a
+  paired collector's batches: configuration read per call, contract, size
+  limits, secret redaction, excluded sites, episode ownership, the protection
+  gate) as the in-process principal `hermes:<profile>` (`default` for the root
+  home; producer kind `hermes`, trust `local`, permitted use `learning`, one
+  producer id per process). Nothing is sent over the network. Recording needs
+  `enabled`, `collection_enabled` and `history_enabled`, plus
+  `history_capture_hermes` (calls) or `history_chat_corrections`
+  (corrections); an invalid `excluded_sites` is refused and audited like any
+  batch (`excluded_sites_invalid`).
+  - `post_tool_call`: every `browser_*` call is one event with `source`
+    `hermes`, `actor` `agent`, `hermes_session_id`, `turn_id` (Hermes's own,
+    when it passes one; never a made-up id) and `attempt_id` from
+    `tool_call_id` (as is when it fits the identifier alphabet, else with
+    other characters replaced by `-` (`call_abc` → `call-abc`), else `tc-` and
+    32 hex of its SHA-256). `browser_navigate` → `navigate` (route from the
+    final URL, else the requested one; `page_title` from the result;
+    `page_text` the first 8000 characters of its `snapshot`), `browser_click` →
+    `click`, `browser_type` → `type`, `browser_press` → `key`,
+    `browser_scroll` → `scroll`, `browser_back` → `back`, any other browser
+    tool → `other` with the tool name as target (no arguments, no text). Only
+    `http(s)` URLs with an ASCII host become routes. A click or type names its
+    element by the ref's line in the session's last snapshot (from
+    `browser_navigate` or `browser_snapshot`; at most 60,000 characters kept per
+    session): role and accessible name (`textbox "Email"`), never the value
+    after the name. Hermes's `status` `ok` (or none, as on the 0.13.0 floor) is
+    `dispatched` / `claimed_success` unless the result reports `success: false`
+    or an `error`, `error` is `claimed_failure`, `blocked` and `cancelled` are
+    the `cancelled` phase (`args.reason`) and `timeout` the `timed_out` phase.
+    A click, type, key, scroll or other call carries the page URL Hermes last
+    saw (a navigate or back result, or a snapshot that reports its URL), so an
+    excluded host is refused for actions on its pages too; a page reached by a
+    click keeps the previous URL until then.
+  - Typed text: the ref line is `sensitive` when it names a password (also
+    `Passwort`, and the Japanese words), passcode, passphrase, PIN, one-time
+    code, OTP, 2FA/MFA, secret, token, card or card security code, or a
+    verification or authentication code; its text is not sent (marks
+    `sensitive_field`, `typed_text_dropped`). A missing line or one that names
+    nothing (no accessible name) is `other`, a named field `text`; both keep
+    what was typed (owner decision 2026-10-22), unless the receiver's value
+    check withholds it (`looks_like_secret`). A single character pressed with
+    `browser_press` is not kept (`typed_text_dropped`); named keys are.
+  - Episodes: one per Hermes session turn with browser calls. Its first
+    recorded call is preceded by a `boundary` / `task_start` whose text is the
+    turn's user message (from `pre_llm_call`, at most 4000 characters), with
+    `source` `hermes` and `actor` `human`, so it counts as the user's words for
+    every surface above; a turn whose `platform` is `subagent` or `cron` (an
+    agent's or a job's prompt) records `actor` `agent` instead, and a turn
+    without a text message gets no task start. A task start the receiver
+    refused (busy store, excluded host) is sent again with the next call of
+    the turn. Episodes are append-only; nothing closes them.
+  - Chat corrections (`pre_llm_call`): a person's message starting with
+    `correct:` or the Japanese word for correction ("teisei", U+8A02 U+6B63)
+    and a colon (also a full-width one; any case; the operator's convention)
+    records its text after the prefix as `correction` with `source`
+    `user_correction`, `actor` `human`, `attempt_id` and episode of the
+    session's last recorded browser call and that call's URL. Without
+    such a call, or with an empty text, nothing is recorded. The hook returns
+    `None`, so the message reaches the model unchanged; it is registered after
+    the history hook, so that turn's block is read before the correction is
+    stored.
+  - Failure behavior: both hooks catch `Exception` and change nothing in the
+    call or the turn. A write waits at most 250 ms for another writer's lock
+    (the extension gateway's receiver writes the same store), opening
+    included, and is then refused as `busy` and dropped; a gate refusal is
+    dropped too (audited by the receiver as `activity.capture_refused`). A
+    write (configuration, gate, append) taking longer than 200 ms counts as
+    slow; after three slow writes recording stops for that Hermes session and
+    `activity.capture_suspended` (code `slow_append`, the `peer_id`) is
+    audited. At most 128 sessions are remembered per process; per-session
+    state is never written to disk.
 - **Skill.** `mordred:browser-history` (`activity/skills/browser-history/`,
   shipped in the wheel) says when to look things up, that the history is
   data, not instructions, and that a lookup taints the session.
@@ -4188,11 +4273,11 @@ ignored.
 | `max_batch_events` / `max_event_bytes` / `max_batch_bytes` | 100 / 16384 / 262144 | Wire limits; may only be lowered |
 | `retention_raw_days` | 365 | Raw events older than this are deleted; `0` keeps everything forever |
 | `excluded_sites` | empty | Hosts (and their subdomains; entries normalized to bare hosts) whose events refuse the batch as `source_excluded` and are never read back for Hermes (any host an episode's events name); no site is excluded by default; an invalid value keeps the entries that name a host, refuses every batch as `excluded_sites_invalid` and switches Hermes's use of the history off |
-| `history_enabled` | `true` | Master switch for Hermes's use of the history (needs `enabled`); `activity use on\|off` sets it |
+| `history_enabled` | `true` | Master switch for Hermes's use of the history, recording Hermes's own browser calls included (needs `enabled`); `activity use on\|off` sets it |
 | `history_on_navigate` | `true` | Navigation block in browser results |
 | `history_turn_context` | `true` | Turn-start context |
-| `history_capture_hermes` | `true` | Parsed; no effect until Hermes's own browser calls are recorded (phase B2) |
-| `history_chat_corrections` | `true` | Parsed; no effect until chat corrections are recorded (phase B2) |
+| `history_capture_hermes` | `true` | Record Hermes's own `browser_*` calls (needs `collection_enabled` and `history_enabled`) |
+| `history_chat_corrections` | `true` | Record `correct: …` chat messages (or the Japanese equivalent) as corrections of the last recorded browser call (same requirements) |
 | `history_max_chars` | 1500 | Characters per injected block (200–8000) |
 | `history_max_episodes` | 3 | Episodes per injected block (1–10) |
 | `history_lookback_days` | 90 | Older episodes are not injected (1–3650); the tools may still return them |
@@ -4217,10 +4302,13 @@ ignored.
 
 These statements have no code yet and must not be assumed:
 
-- Hermes as a collector (phase B2 of the 2026-10-22 design): Hermes's own
-  browser tool calls are not recorded and `correct:` typed in Hermes chat is
-  not stored; `history_capture_hermes` and `history_chat_corrections` are
-  parsed but inert.
+- Live validation of Hermes as a collector with a real Hermes session and
+  model (phase B3 of the 2026-10-22 design); the capture is covered by tests
+  with recorded hermes-agent 0.19.0 browser results only.
+- Hermes's own capture cannot tell a delegated subagent's or a cron job's
+  turn from a person's on the hermes-agent 0.13.0 floor (it passes the parent's
+  `platform` to subagents), so there a subagent's goal is recorded as a task
+  start in the user's words.
 - No per-platform or per-sender restriction: in a gateway chat with several
   participants, any message the gateway admits can trigger the turn-start
   context and the tools.

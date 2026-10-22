@@ -715,9 +715,13 @@ injection channels are `transform_tool_result` and `pre_llm_call`).
 - [ ] Live LLM check of B1 with a real Hermes session on a throwaway home
   (navigation block, turn-start context, both tools), recorded in
   [`CI.md`](./CI.md) §"Manual live-device validation log".
-- [ ] B2: record Hermes's own browser tool calls as `source: hermes` events via
+- [x] B2: record Hermes's own browser tool calls as `source: hermes` events via
   `post_tool_call` (episode per session turn, task text from `pre_llm_call`,
   field kind from the ref's snapshot line); accept `correct:` (or its
-  Japanese equivalent) corrections typed in Hermes chat.
+  Japanese equivalent) corrections typed in Hermes chat
+  (`activity/capture_hermes.py`, audit code `activity.capture_suspended`).
+- [ ] Live check of B2 with a real Hermes session on a throwaway home (browser
+  calls, task start, a chat correction, a concurrent operator batch),
+  recorded in [`CI.md`](./CI.md) §"Manual live-device validation log".
 - [ ] B3: live validation with a real Hermes session and the operator's
   extended capture, recorded in CI.md.

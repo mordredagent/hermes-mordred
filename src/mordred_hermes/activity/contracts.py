@@ -64,13 +64,15 @@ SCHEMA_VERSION: Final = 1
 class PeerPrincipal:
     """Authenticated submitter of activity batches.
 
-    ``peer_id`` is ``operator:<12 hex>`` for an activity peer and ``extension``
-    for the paired browser extension. ``trust`` and ``permitted_use`` come from
-    the authentication path, never from a payload.
+    ``peer_id`` is ``operator:<12 hex>`` for an activity peer, ``extension``
+    for the paired browser extension and ``hermes:<profile>`` for Hermes's own
+    browser calls (:mod:`.capture_hermes`, an in-process principal with trust
+    ``local``, never reachable over the network). ``trust`` and
+    ``permitted_use`` come from the authentication path, never from a payload.
     """
 
     peer_id: str
-    kind: str  # "operator" | "browser"
+    kind: str  # "operator" | "browser" | "hermes"
     trust: str = "paired_peer"
     permitted_use: str = "learning"
 
@@ -105,7 +107,9 @@ OPS: Final = frozenset(
 COVERAGES: Final = frozenset({"selected_tab", "partial", "gap"})
 #: Higher is worse; an episode's coverage is the worst any of its events reported.
 COVERAGE_RANK: Final[Mapping[str, int]] = {"selected_tab": 0, "partial": 1, "gap": 2}
-PRODUCER_KINDS: Final = frozenset({"operator", "browser"})
+#: A batch's ``producer_kind`` must equal its principal's ``kind`` (the receiver refuses anything else as
+#: ``malformed``), so a paired peer can never claim to be Hermes.
+PRODUCER_KINDS: Final = frozenset({"operator", "browser", "hermes"})
 
 MAX_BATCH_EVENTS: Final = 100
 MAX_EVENT_BYTES: Final = 16384

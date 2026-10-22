@@ -19,8 +19,9 @@ fixed, so a typo never means "record or show what was excluded before".
 
 The ``history_*`` keys govern Hermes's use of the stored history
 (:mod:`.history`): ``history_enabled`` is the master switch over every surface;
-``history_capture_hermes`` and ``history_chat_corrections`` are parsed but have
-no effect yet (the next phase records Hermes's own browser calls).
+``history_capture_hermes`` and ``history_chat_corrections`` switch recording
+Hermes's own browser calls and the user's chat corrections
+(:mod:`.capture_hermes`), which also needs ``collection_enabled``.
 """
 
 from __future__ import annotations
@@ -65,9 +66,9 @@ class ActivityConfig:
     #: Add the user's own task and correction texts (and metadata) to the turn when the message names a host or
     #: shares task terms.
     history_turn_context: bool = True
-    #: Record Hermes's own browser tool calls (parsed; no effect until that phase ships).
+    #: Record Hermes's own browser tool calls (needs ``collection_enabled`` and ``history_enabled``).
     history_capture_hermes: bool = True
-    #: Record ``correct:`` messages typed in Hermes chat (parsed; no effect until that phase ships).
+    #: Record ``correct:`` / ``訂正:`` messages typed in Hermes chat as corrections of the last recorded call.
     history_chat_corrections: bool = True
     #: Characters per injected block.
     history_max_chars: int = HISTORY_MAX_CHARS

@@ -120,6 +120,17 @@ def test_wrong_and_non_string_tokens_are_refused():
     assert peers.authenticate("") is None
 
 
+def test_a_paired_peer_can_never_claim_hermess_own_producer_kind():
+    """``hermes`` is the in-process principal of Hermes's own capture; a stored peer record naming it is
+    refused like an unknown token, so a paired collector cannot write as Hermes."""
+    code, _ = peers.generate_peer_code()
+    result = peers.handle_pair_init(code)
+    stored = json.loads(peers._peers_path().read_text("utf-8"))
+    stored[result["peer_id"]]["kind"] = "hermes"
+    peers._write(peers._peers_path(), stored)
+    assert peers.check_token(result["peer_token"]) == (None, "invalid_token")
+
+
 def test_revoke_is_idempotent_and_refuses_the_token():
     code, _ = peers.generate_peer_code()
     result = peers.handle_pair_init(code)

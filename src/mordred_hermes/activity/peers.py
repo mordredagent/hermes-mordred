@@ -249,7 +249,10 @@ def check_token(peer_token: object) -> tuple[PeerPrincipal | None, str | None]:
     peer_id, record = match
     if record.get("revoked_at") is not None:
         return None, "peer_revoked"
-    return PeerPrincipal(peer_id=peer_id, kind=str(record.get("kind") or "operator")), None
+    kind = str(record.get("kind") or "operator")
+    if kind == "hermes":  # Hermes's own capture is an in-process principal, never a paired peer
+        return None, "invalid_token"
+    return PeerPrincipal(peer_id=peer_id, kind=kind), None
 
 
 def authenticate(peer_token: object) -> PeerPrincipal | None:

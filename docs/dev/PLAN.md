@@ -2334,8 +2334,9 @@ Delivery as shipped:
 3. **Hermes-side use of the history** — designed in
    [`2026-10-22-browser-history-for-hermes-design.md`](../superpowers/specs/2026-10-22-browser-history-for-hermes-design.md).
    B1 (read side: navigation block, turn-start context, lookup tools, master
-   switch, secret-shaped typed-text check) is shipped; B2 (Hermes as a
-   collector) and B3 (live validation) remain, see [`TODO.md`](./TODO.md)
+   switch, secret-shaped typed-text check) and B2 (Hermes as a collector of
+   its own browser calls and of chat corrections) are shipped; B3 (live
+   validation) remains, see [`TODO.md`](./TODO.md)
    §"Browser activity learning".
 4. **Measured expansion (deferred)** — more collectors (including human DOM
    observation), an encrypted client outbox and a raw-history administrative

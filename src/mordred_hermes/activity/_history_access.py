@@ -10,8 +10,9 @@
   :data:`.history.READ_BUSY_MS`, so the shim's schema probe never waits
   longer for a writer's lock) and a read-only check of the schema version and
   profile binding.
-  It never creates, migrates or writes the store (that is the receiver's job),
-  so a Hermes turn never waits for a write lock. There is no plaintext path; a
+  It never creates, migrates or writes the store (that is the receiver's job;
+  Hermes's own capture, :mod:`.capture_hermes`, writes only through the
+  receiver), so a history read never takes a write lock. There is no plaintext path; a
   refusal raises :class:`._gate.ActivityRefused` and a profile that has
   recorded nothing yet raises :class:`NoHistory`. After a refusal the surfaces
   stay off for :data:`RETRY_AFTER_S` (the same refusal is raised as a

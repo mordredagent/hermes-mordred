@@ -1,8 +1,9 @@
 # Browser history for Hermes — design
 
-Status: design (2026-10-22). Phase B1 (read side) is implemented; the shipped
-contract and its differences from this text are in `docs/dev/SPEC.md`
-§"History for Hermes". Phases B2 and B3 are not built. Builds on the
+Status: design (2026-10-22). Phases B1 (read side) and B2 (Hermes as a
+collector) are implemented; the shipped contract and its differences from
+this text are in `docs/dev/SPEC.md` §"History for Hermes". Phase B3 (live
+validation) is open. Builds on the
 browser-activity component shipped by
 [`2026-10-19-browser-activity-learning-design.md`](./2026-10-19-browser-activity-learning-design.md)
 and its 2026-10-22 decision log (record everything except secrets). The
