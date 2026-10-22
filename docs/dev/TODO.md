@@ -786,6 +786,11 @@ Follow-ups left by the landed code:
   Message-ID is indistinguishable from the real parent and can bridge that parent's
   sibling groups; the merge guard still bounds the damage to that parent's
   children. Revisit if real mail shows abuse.
+- [ ] `databases encrypt --dry-run` (and any command that opens the keyvault) prints a
+  full traceback when the device-bound anchor pins a generation whose manifest is
+  missing (`VaultError: authoritative manifest ... is missing`); it should print the
+  content-free code and point at `keyvault recover` / `keyvault reset`. Seen on
+  2026-10-22 on a home whose vault directory had been removed under 0.2.0a0.
 - [ ] IMAP sync beyond the chosen mailboxes (other folders and labels' own
   folders), IP-literal or loopback hosts (for example a local bridge), and a
   way to change the Touch ID choice without `mail forget` and a new setup.
