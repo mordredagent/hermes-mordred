@@ -11,8 +11,11 @@ Reads Gmail Takeout mbox files, single ``.eml`` files and directories of
 - :mod:`.link` — quote-authorship linking (owner only when linked).
 - :mod:`.normalize` — one raw message → :class:`~..records.ImportMessage`.
 - :mod:`.importer` — :func:`plan_import` (two passes) and :class:`ImportPlan`.
+- :mod:`.store_link` — :class:`StoreLinker` (quote links to committed records) and the
+  account's own addresses in ``import_accounts``; used by ``hermes-mordred mail import``.
 
-Nothing here writes to the store, logs content, or creates temporary files.
+Only :mod:`.store_link` touches the store (reads, and the own-address row). Nothing here
+logs content or creates temporary files.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from .normalize import NormalizeContext, NormalizedMessage, Skipped, normalize
 from .owner import Classification, OwnAddresses, classify
 from .report import DryRunReport
 from .source import EmlBytes, EmlSource, MailSource, MboxBytes, MboxSource, RawMessage, SourceError
+from .store_link import StoreLinker, mail_store_status, remember_own_addresses, stored_own_addresses
 
 __all__ = [
     "Classification",
@@ -45,9 +49,13 @@ __all__ = [
     "RawMessage",
     "Skipped",
     "SourceError",
+    "StoreLinker",
     "chain_linkers",
     "classify",
+    "mail_store_status",
     "normalize",
     "plan_import",
     "quote_contained",
+    "remember_own_addresses",
+    "stored_own_addresses",
 ]

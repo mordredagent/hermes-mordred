@@ -640,6 +640,59 @@ class ImportStore:
             rows = _select_in(conn, f"SELECT m.source_uid FROM {_COMMITTED_MESSAGES} WHERE m.source_uid IN", uids)
         return {str(row[0]) for row in rows}
 
+    def find_messages(
+        self,
+        source: Source | str,
+        source_account: str,
+        *,
+        message_ids: Iterable[str] | None = None,
+        sender_address: str | None = None,
+        sent_between: tuple[int, int] | None = None,
+        owner_class: OwnerClass | str | None = None,
+    ) -> list[StoredPart]:
+        """Every part of one account's committed messages that match ALL the given filters.
+
+        ``message_ids`` match the stored message id exactly, ``sender_address`` the
+        sender id case-insensitively, ``sent_between=(lo, hi)`` is inclusive (unknown
+        dates never match) and ``owner_class`` the message's owner class. Messages
+        come in reading order (``sent_at``, unknown dates last, then source uid) and
+        each message's parts by ordinal. Read-only; used by the mail collector's
+        store-backed quote linker.
+        """
+        ids = None if message_ids is None else list(dict.fromkeys(message_ids))
+        if ids is not None and not ids:
+            return []
+        where = ["c.source = ?", "c.source_account = ?"]
+        params: list[Any] = [_source_value(source), source_account]
+        if sender_address is not None:
+            where.append("lower(m.sender_id) = ?")
+            params.append(sender_address.lower())
+        if sent_between is not None:
+            where.append("m.sent_at BETWEEN ? AND ?")
+            params.extend((int(sent_between[0]), int(sent_between[1])))
+        if owner_class is not None:
+            try:
+                params.append(OwnerClass(owner_class).value)
+            except ValueError:
+                raise RecordError("unknown_enum") from None
+            where.append("m.owner_class = ?")
+        sql = (
+            f"SELECT m.source_uid FROM {_COMMITTED_MESSAGES} "
+            f"JOIN import_conversations c ON c.conv_uid = m.conv_uid WHERE {' AND '.join(where)}"
+        )
+        chunks: list[list[str]] = [[]] if ids is None else [ids[i : i + _CHUNK] for i in range(0, len(ids), _CHUNK)]
+        with self._transaction(write=False) as conn:
+            uids: set[str] = set()
+            for chunk in chunks:
+                clause = f" AND m.message_id IN ({_marks(len(chunk))})" if chunk else ""
+                uids.update(str(row[0]) for row in conn.execute(sql + clause, [*params, *chunk]))
+            hydrated = self._hydrate(conn, sorted(uids))
+        found = sorted(
+            hydrated.values(),
+            key=lambda item: (item[1].sent_at is None, item[1].sent_at or 0, item[1].source_uid),
+        )
+        return [StoredPart(conv, msg, part) for conv, msg in found for part in msg.parts]
+
     def search(
         self,
         query: str | None,

@@ -22,6 +22,7 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 - ``plugins migrate``                            — switch config.yaml to the single ``mordred`` plugin
 - ``activity {status,pair-operator,peers,correct,candidates,validate,adopt,reject,lessons,
   review,jobs,backup,restore,retention}`` — browser activity learning administration
+- ``mail {import,status}``                       — file-based mail import (mbox / .eml) into ``mordred.db``
 - ``uninstall [--dry-run|--yes|--purge-data|--remove-helper]`` — remove Mordred, restore Hermes's files
 """
 
@@ -65,6 +66,7 @@ def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) 
     _add_egress(sub)
     _add_databases(sub)
     _add_activity(sub)
+    _add_mail(sub)
     _add_desktop(sub)
     _add_uninstall(sub)
 
@@ -164,6 +166,14 @@ def _add_activity(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     from .activity_review_cli import add_parsers as _add_review_parsers
 
     _add_review_parsers(asub)
+
+
+def _add_mail(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser("mail", help="File-based mail import (Gmail Takeout mbox / .eml) into the encrypted store")
+    msub = p.add_subparsers(dest="mail_command", required=True, metavar="COMMAND")
+    from .mail_cli import add_parsers as _add_mail_parsers
+
+    _add_mail_parsers(msub, _handle_mail)
 
 
 def _add_egress(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -1121,6 +1131,12 @@ def _handle_activity(args: argparse.Namespace) -> int:
     from . import activity_cli
 
     return activity_cli.cli_activity(args)
+
+
+def _handle_mail(args: argparse.Namespace) -> int:
+    from . import mail_cli
+
+    return mail_cli.cli_mail(args)
 
 
 def _handle_egress(args: argparse.Namespace) -> int:
