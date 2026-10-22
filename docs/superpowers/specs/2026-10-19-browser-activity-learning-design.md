@@ -67,7 +67,7 @@ and the hook reference when implementation adopts them. In particular, do not
 require the newer `failed` or exit-reason fields on 0.19.0, or infer a trusted
 human origin merely from `session_id` or `platform`.
 
-The existing [imported-message provenance proposal](2026-10-19-imported-message-provenance-design.md)
+The imported-message provenance proposal (developed on its own branch)
 is separate work. Browser history must preserve its source restrictions, but
 this feature does not implement or depend on that proposal's archive adapters.
 
