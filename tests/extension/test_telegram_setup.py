@@ -37,7 +37,7 @@ def test_register_tools_registers_skill_and_section():
     hermes_tools.register_tools(ctx)
     assert seen["skill"] == ("mordred-telegram", hermes_tools.SKILL_PATH)
     assert seen["section"] == ("mordred.telegram", hermes_tools.system_prompt_section)
-    assert sorted(seen["tools"]) == ["telegram_ask", "telegram_chats"]
+    assert sorted(seen["tools"]) == ["mordred_history_search", "telegram_ask", "telegram_chats"]
 
 
 def _patch_checks(monkeypatch, *, enclave=True, flags=None, archive=True, hermes=True):

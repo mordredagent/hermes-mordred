@@ -172,6 +172,7 @@ def test_hermes_tool_passes_dates_and_reports_coverage(monkeypatch):
             yield "ok"
 
     monkeypatch.setattr(hermes_tools, "_service", lambda: _Svc())
+    monkeypatch.setattr(hermes_tools, "_reader_mode_ready", lambda _session_id: True)
     monkeypatch.setattr(hermes_tools, "_coverage", lambda: {"archive_updated": "x", "sync_running": False, "hint": ""})
     agent = SimpleNamespace(model="m", base_url="http://127.0.0.1:1/v1")
     out = json.loads(

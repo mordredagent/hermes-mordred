@@ -44,6 +44,7 @@ def test_live_saved_local_model_probe_and_telegram_ask(tmp_path, monkeypatch, ca
         memory_guard=lambda: None,
     )
     monkeypatch.setattr(hermes_tools, "_service", lambda: svc)
+    monkeypatch.setattr(hermes_tools, "_reader_mode_ready", lambda _session_id: True)
 
     def ask():
         return json.loads(

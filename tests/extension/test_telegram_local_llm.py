@@ -66,6 +66,7 @@ def ask_local(tmp_path, monkeypatch):
             http_session_factory=lambda route, _timeout: service._default_http_session(route, timeout),
         )
         monkeypatch.setattr(hermes_tools, "_service", lambda: svc)
+        monkeypatch.setattr(hermes_tools, "_reader_mode_ready", lambda _session_id: True)
         result = asyncio.run(
             hermes_tools.telegram_ask(
                 {"question": "budget?", "chat_ids": [-5]},

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import re
 import stat
@@ -13,6 +15,7 @@ from typing import Any, get_args
 import pytest
 
 from mordred_hermes._private_fs import open_private_directory
+from mordred_hermes.extension.telegram import hermes_tools
 from mordred_hermes.privacy_check import _reader_sessions, egress, hooks
 from mordred_hermes.privacy_check._audit_reasons import EgressRule, ReasonCode
 
@@ -112,6 +115,27 @@ def test_reader_tool_at_level_off_is_allowed_taints_and_records_durably(hook: _H
     if _POSIX:
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
         assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+
+def test_history_search_taints_at_level_off_and_only_then_passes_its_handler_self_check(
+    hook: _Hook, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hook first (durable record + in-process mark), then the handler's own check."""
+    assert "mordred_history_search" in egress.READER_TOOLS
+    monkeypatch.setattr(hermes_tools, "_configured_model", lambda: (None, None))
+    session = _sid()
+
+    def search() -> Any:
+        return json.loads(asyncio.run(hermes_tools.mordred_history_search({"query": "q"}, session_id=session)))
+
+    assert search()["error"] == "reader_mode_unavailable"  # the hook has not run for this session
+    assert hook.policy.level == "off"
+    assert hook("mordred_history_search", {"query": "q"}, session) is None
+    assert egress.is_tainted(session) and egress.reader_mode_established(session)
+    assert _reader_sessions.load(hook.home) == (_reader_sessions.digest(session),)
+    # The self-check passes now; the next gate (the Hermes model's endpoint) answers instead.
+    assert search() == {"error": "hermes_model_not_allowed"}
+    assert hook("write_file", {"path": "x"}, session) is not None
 
 
 def test_reader_mode_entry_is_audited_once_without_arguments(hook: _Hook) -> None:
