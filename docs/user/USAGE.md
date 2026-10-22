@@ -694,7 +694,7 @@ hermes-mordred egress taint on               # no plaintext writes after a sessi
 >
 > | Level | Tools may reach the internet |
 > |---|---|
-> | `lockdown` | Never. Local tools and Mordred's own Telegram tools only. |
+> | `lockdown` | Never. Local tools and Mordred's own Telegram and browser-history tools only. |
 > | `search` | Web search only. No URL fetching, browsing, remote APIs, scheduling, or arbitrary commands. |
 > | `ask` (default) | Tools work. Web search and local commands run as usual; any other internet use (a URL, browser, remote API, a command that uses the network, an unknown tool) shows Hermes's approval prompt with where it goes and what it sends. Blocklisted domains and bare IP addresses are refused outright. |
 > | `blocklist` | Everything except blocklisted domains/tools (paste sites, webhooks and tunnels are built in). |
@@ -704,13 +704,14 @@ hermes-mordred egress taint on               # no plaintext writes after a sessi
 > destination cannot be checked, so under `lockdown`/`search` only exact
 > read-only Mordred commands (`hermes-mordred telegram doctor`, `status`, …)
 > may run. Unknown tools count as internet-capable. With taint on (default),
-> a session that has read private data (the Telegram tools) cannot delegate or
+> a session that has read private data (the Telegram tools, the
+> browser-history lookup tools) cannot delegate or
 > write files, skills, memory or kanban (private data stays out of plaintext
 > storage); under `lockdown`/`search`/`blocklist` it is also locked down, and
 > under `ask` every approval prompt warns that the chat has read private data
 > (`lockdown_after_private_data: true` locks it down under `ask` too). Under
 > `ask` Mordred also tells the agent to prefer local work and web search.
-> Mordred's own Telegram tools are never blocked. Blocked and prompted calls
+> Mordred's own Telegram and browser-history tools are never blocked. Blocked and prompted calls
 > are audited as `policy.egress.tool_blocked` (`decision` `block` / `ask`).
 > Changes apply on the next tool call.
 
@@ -814,7 +815,10 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > Discord, Slack, Gmail, Outlook and others) are recorded too, including what
 > you type there. To keep a site out, list its host in
 > `plugins.mordred_activity.excluded_sites`; events from that host and its
-> subdomains are then refused. Raw events are kept
+> subdomains are then refused. If one entry of that list names no host, the
+> other entries still apply but every batch is refused
+> (`excluded_sites_invalid`; `activity status` shows `collection: refused`)
+> until you fix it, so a typo never records a site you excluded. Raw events are kept
 > for `retention_raw_days` (default 365; `0` keeps them forever);
 > `activity retention` runs or plans one pass, and the receiver runs one at
 > most once an hour.
@@ -834,16 +838,22 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > your earlier work there (tasks, routes, outcomes, page titles, your
 > corrections; never page text or typed text). When your message names a site
 > or matches an earlier task, the turn gets a block with only your own task
-> texts and corrections plus sites, routes, outcomes and times. Hermes can
+> texts and corrections (the instruction and corrections you typed, never the
+> operator's own summary) plus sites, routes, outcomes and times. Hermes can
 > also look things up with `mordred_browser_history` and
 > `mordred_browser_history_episode` (skill `mordred:browser-history`). Blocks
 > are bounded (`history_max_chars` 1500, `history_max_episodes` 3,
 > `history_lookback_days` 90, `history_session_budget_chars` 8000 per session;
 > tool results `history_max_tool_bytes` 4096), an episode is shown once per
-> session, and nothing from an `excluded_sites` host is ever shown (an
-> invalid `excluded_sites` value switches Hermes's use of the history off;
-> `activity status` says so). At the default tool-egress level `ask`, Mordred
-> asks before Hermes calls the two lookup tools. Typed text that looks like a
+> session, and nothing from an `excluded_sites` host is ever shown, also when
+> an earlier episode only linked or redirected to it (an invalid
+> `excluded_sites` value switches Hermes's use of the history off;
+> `activity status` says so). The two lookup tools run at every tool-egress
+> level and, with taint on (default), mark the session as having read private
+> data like the Telegram tools: that session can no longer write files,
+> skills, memory or kanban, and under `lockdown`/`search`/`blocklist` its
+> internet use is locked down. The automatic blocks do not taint (they never
+> carry typed text or page text). Typed text that looks like a
 > key, password or card number (JWTs, `sk-`, `ghp_`, `AKIA`, `xoxb-` style
 > keys, `password: …`, Luhn-valid card numbers, long random tokens) is never
 > stored.

@@ -69,10 +69,12 @@ def _switches(home: Path) -> tuple[bool, bool] | None:
     return read_activity_switches(home)
 
 
-def _history_switches(home: Path) -> tuple[bool, bool, tuple[str, ...]] | None:
-    """``(feature enabled, history_enabled, config warnings)`` from the activity config, or ``None``.
+def _history_switches(home: Path) -> tuple[bool, bool, tuple[str, ...], str | None] | None:
+    """``(feature enabled, history_enabled, config warnings, collection refusal)`` from the activity config, or
+    ``None``.
 
-    Warnings name keys only (``invalid value for excluded_sites``), never values.
+    Warnings name keys only (``invalid value for excluded_sites``), never values; the collection refusal is
+    the receiver's code (``collection_disabled``, ``excluded_sites_invalid``) or ``None`` while it collects.
     """
     try:
         from ..activity.config import ActivityConfig
@@ -80,7 +82,7 @@ def _history_switches(home: Path) -> tuple[bool, bool, tuple[str, ...]] | None:
         config = ActivityConfig.load(home)
     except Exception:
         return None
-    return config.enabled, config.history_enabled, config.warnings
+    return config.enabled, config.history_enabled, config.warnings, config.collection_refusal
 
 
 def _gate_refusal(home: Path) -> str | None:
@@ -136,6 +138,7 @@ def collect_status(home: Path) -> dict[str, Any]:
     report: dict[str, Any] = {
         "feature_enabled": feature,
         "collection_enabled": collection,
+        "collection_refusal": None if collection else (history[3] if history is not None else "store_unavailable"),
         "history_enabled": history_switch,
         "history_in_use": feature and history_switch and exclusions_ok,
         "config_warnings": warnings,
@@ -187,13 +190,21 @@ def _history_line(report: Mapping[str, Any]) -> str:
     return "off (excluded_sites is invalid; fix it so no excluded site can be shown)"
 
 
+def _collection_line(report: Mapping[str, Any]) -> str:
+    if report["collection_enabled"]:
+        return "enabled"
+    if report.get("collection_refusal") == "excluded_sites_invalid":
+        return "refused (excluded_sites is invalid; batches are refused until it is fixed)"
+    return "disabled"
+
+
 def _print_status(report: Mapping[str, Any]) -> None:
     color = _term.should_color(sys.stdout)
     print(_term.heading("Mordred activity history", enabled=color))
     if not report["config_available"]:
         _term.emit_warn("activity configuration could not be read; collection is refused")
     print(f"  feature:     {'enabled' if report['feature_enabled'] else 'disabled'}")
-    print(f"  collection:  {'enabled' if report['collection_enabled'] else 'disabled'}")
+    print(f"  collection:  {_collection_line(report)}")
     print(f"  hermes use:  {_history_line(report)}")
     for warning in report["config_warnings"]:
         _term.emit_warn(f"plugins.mordred_activity: {_display(warning, 120)}")
@@ -371,15 +382,15 @@ def set_history_enabled(config_path: Path, value: bool) -> None:
 
     Round-trip YAML (comments and order preserved), written atomically under the policy write lock in
     ``<home>/mordred`` (the one :class:`PolicyWriter` takes for ``network use`` and ``configure``). A
-    ``plugins`` or ``mordred_activity`` value that is not a mapping, or one shared through a YAML
-    anchor (writing through it would change the other section too), is refused (:class:`ValueError`)
-    rather than replaced.
+    ``plugins`` or ``mordred_activity`` value that is not a mapping, or one shared with another part of
+    the file (a YAML anchor, an alias, or a ``<<:`` merge key that inherits it: writing through it would
+    change the other section too), is refused (:class:`ValueError`) rather than replaced.
     """
     from .policy_writer import PolicyWriter, _windows
 
     def edit(root: Any) -> None:
-        plugins = _mapping(root, "plugins")
-        section = _mapping(plugins, "mordred_activity")
+        plugins = _mapping(root, root, "plugins")
+        section = _mapping(root, plugins, "mordred_activity")
         section["history_enabled"] = value
 
     if _windows():
@@ -389,17 +400,41 @@ def set_history_enabled(config_path: Path, value: bool) -> None:
     _edit_posix(config_path, edit)
 
 
-def _mapping(parent: MutableMapping[str, Any], key: str) -> MutableMapping[str, Any]:
-    """``parent[key]`` as a mapping, created when absent or empty; any other value is refused."""
+def _mapping(root: Any, parent: MutableMapping[str, Any], key: str) -> MutableMapping[str, Any]:
+    """``parent[key]`` as a mapping, created when absent or empty; any other value is refused, and so is a
+    mapping that another part of the document shares (:func:`_holders`)."""
     if parent.get(key) is None:
         parent[key] = {}
     child = parent[key]
     if not isinstance(child, MutableMapping):
         raise ValueError(f"{key} is not a mapping")
     anchor = getattr(getattr(child, "anchor", None), "value", None)
-    if anchor:
-        raise ValueError(f"{key} is a YAML anchor shared with another section; edit it by hand")
+    if anchor or (child is not root and _holders(root, child) > 1):
+        raise ValueError(f"{key} is shared with another section (YAML anchor, alias or merge key); edit it by hand")
     return child
+
+
+def _holders(root: Any, target: object) -> int:
+    """How many places of the loaded YAML document hold ``target``.
+
+    An alias, or a ``<<:`` merge key (whose inherited keys a round-trip mapping lists with its own, as the
+    very same objects), makes one mapping appear in more than one place. Each container is walked once, so
+    recursive aliases terminate.
+    """
+    count = 0
+    seen: set[int] = set()
+    stack: list[Any] = [root]
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        children = node.values() if isinstance(node, Mapping) else node if isinstance(node, list) else ()
+        for child in children:
+            count += child is target
+            if isinstance(child, Mapping | list):
+                stack.append(child)
+    return count
 
 
 def _edit_posix(config_path: Path, edit: Callable[[Any], None]) -> None:

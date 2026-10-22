@@ -32,11 +32,34 @@ def test_unknown_site_keys_are_ignored_with_a_warning() -> None:
     assert config.warnings == ("unknown key allowed_sites",)
 
 
-@pytest.mark.parametrize("raw", ["mail.example", [1], [" "], None])
-def test_invalid_excluded_sites_fall_back_with_a_warning(raw: Any) -> None:
-    config = ActivityConfig.from_mapping({"excluded_sites": raw})
-    assert config.excluded_sites == DEFAULT_EXCLUDED_SITES
+@pytest.mark.parametrize(
+    ("raw", "kept"),
+    [
+        ("mail.example", {"mail.example"}),
+        ([1], set()),
+        ([" "], set()),
+        (None, set()),
+        (["bank.example", "not a host"], {"bank.example"}),
+        (["Bank.example", 7, "*.pay.example"], {"bank.example", "pay.example"}),
+    ],
+)
+def test_invalid_excluded_sites_warn_keep_the_named_hosts_and_stop_collection(raw: Any, kept: set[str]) -> None:
+    config = ActivityConfig.from_mapping({"enabled": True, "collection_enabled": True, "excluded_sites": raw})
+    assert config.excluded_sites == DEFAULT_EXCLUDED_SITES | kept
     assert config.warnings == ("invalid value for excluded_sites",)
+    # Never "record what was excluded before": the receiver refuses until the value is fixed.
+    assert (config.collecting, config.collection_refusal) == (False, "excluded_sites_invalid")
+    assert config.history_active is False
+
+
+def test_collection_refusal_codes() -> None:
+    assert ActivityConfig.from_mapping({}).collection_refusal == "collection_disabled"
+    assert ActivityConfig.from_mapping({"enabled": True}).collection_refusal == "collection_disabled"
+    on = ActivityConfig.from_mapping({"enabled": True, "collection_enabled": True, "excluded_sites": ["a.example"]})
+    assert (on.collecting, on.collection_refusal) == (True, None)
+    # Collection off wins over the exclusions: the switch is the reason a collector sees.
+    off = ActivityConfig.from_mapping({"enabled": True, "excluded_sites": "a.example"})
+    assert off.collection_refusal == "collection_disabled"
 
 
 def test_raw_retention_defaults_to_a_year() -> None:

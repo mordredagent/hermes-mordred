@@ -6,7 +6,10 @@
 - :func:`reader` returns the profile's store only through the protection gate,
   on every call: :func:`._gate.check_protection`, a plaintext check of the
   file, the keyed opener (:func:`._gate._keyed_opener` refuses an unkeyed
-  connection) and a read-only check of the schema version and profile binding.
+  connection; :data:`OPENER` gives it the read bound
+  :data:`.history.READ_BUSY_MS`, so the shim's schema probe never waits
+  longer for a writer's lock) and a read-only check of the schema version and
+  profile binding.
   It never creates, migrates or writes the store (that is the receiver's job),
   so a Hermes turn never waits for a write lock. There is no plaintext path; a
   refusal raises :class:`._gate.ActivityRefused` and a profile that has
@@ -28,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -60,8 +64,17 @@ _MAX_SESSION_KEY_CHARS: Final = 256
 RETRY_AFTER_S: Final = 60.0
 #: The oldest schema the history queries can read (``query`` / ``page_title`` / ``page_text`` exist from v2).
 MIN_READ_SCHEMA: Final = 2
+
+
+def _read_opener(path: Path) -> sqlite3.Connection:
+    """The keyed opener with the read bound: opening waits at most ``READ_BUSY_MS`` for a writer's lock."""
+    from .history import READ_BUSY_MS
+
+    return _keyed_opener(path, timeout=READ_BUSY_MS / 1000)
+
+
 #: The opener for reads; production only ever uses the keyed opener (tests replace this seam).
-OPENER = _keyed_opener
+OPENER = _read_opener
 
 #: Injected characters and shown ``(episode id, revision)`` pairs per Hermes session.
 BUDGET: Final = SessionBudget()

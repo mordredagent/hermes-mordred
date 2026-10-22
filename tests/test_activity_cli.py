@@ -347,6 +347,50 @@ def test_use_refuses_a_section_shared_through_a_yaml_anchor(_home, capsys):
     assert "anchor" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # plugins inherits mordred_activity through a merge key: writing through it would change `defaults`.
+        "defaults: &defaults\n  mordred_activity:\n    enabled: true\nplugins:\n  <<: *defaults\n  other: 1\n",
+        # the whole plugins mapping comes from a root-level merge key.
+        "common: &common\n  plugins:\n    mordred_activity:\n      enabled: true\n<<: *common\n",
+        # an alias of a mapping that holds the section.
+        "base: &base\n  mordred_activity:\n    enabled: true\nplugins: *base\n",
+    ],
+)
+def test_use_refuses_sections_shared_through_merge_keys_or_aliases(_home, capsys, text):
+    path = _home / "config.yaml"
+    path.write_text(text, encoding="utf-8")
+
+    assert cli.main(["activity", "use", "off"]) == 1
+
+    assert path.read_text(encoding="utf-8") == text
+    assert "shared with another section" in capsys.readouterr().err
+
+
+def test_use_edits_an_own_section_next_to_a_merge_key(_home):
+    path = _home / "config.yaml"
+    text = "defaults: &defaults\n  other: 1\nplugins:\n  <<: *defaults\n  mordred_activity:\n    enabled: true\n"
+    path.write_text(text, encoding="utf-8")
+
+    assert cli.main(["activity", "use", "off"]) == 0
+
+    assert path.read_text(encoding="utf-8") == text + "    history_enabled: false\n"
+
+
+def test_status_says_an_invalid_exclusion_list_refuses_collection(_home, monkeypatch, capsys):
+    section = {"enabled": True, "collection_enabled": True, "excluded_sites": ["bank.example", "not a host"]}
+    (_home / "config.yaml").write_text(json.dumps({"plugins": {"mordred_activity": section}}), encoding="utf-8")
+    monkeypatch.setattr(activity_cli, "_gate_refusal", lambda home: "not_armed")
+
+    assert cli.main(["activity", "status", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert (report["collection_enabled"], report["collection_refusal"]) == (False, "excluded_sites_invalid")
+
+    assert cli.main(["activity", "status"]) == 0
+    assert "collection:  refused (excluded_sites is invalid" in capsys.readouterr().out
+
+
 def test_use_names_only_the_error_type_for_unparsable_yaml(_home, capsys):
     path = _home / "config.yaml"
     path.write_text("plugins: [unclosed\nsecret_line: hunter2\n", encoding="utf-8")

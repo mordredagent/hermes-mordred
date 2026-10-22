@@ -6,7 +6,8 @@ history directly (:mod:`.history`): :func:`register` wires
 
 - the ``transform_tool_result`` and ``pre_llm_call`` hooks
   (:func:`.hooks_history.register_hooks`), which add a site's history to
-  browser navigation results and relevant human-authored history to a turn;
+  browser navigation results and the user's own relevant task and correction
+  texts (with metadata) to a turn;
 - the ``mordred_browser_history`` / ``mordred_browser_history_episode`` lookup
   tools and the ``browser-history`` skill (:func:`.tools.register_tools`).
 

@@ -311,3 +311,19 @@ def test_configured_limit_is_clamped(tmp_path, monkeypatch, value):
     monkeypatch.setattr(config.ActivityConfig, "load", classmethod(lambda cls, home: Config()))
     limit = activity_api.resolve_max_batch_bytes(tmp_path)
     assert 1024 <= limit <= 4 * 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    ("section", "expected"),
+    [
+        ({}, ("disabled", "collection_disabled")),
+        (
+            {"enabled": True, "collection_enabled": True, "excluded_sites": ["bank.example", "not a host"]},
+            ("disabled", "excluded_sites_invalid"),
+        ),
+    ],
+)
+def test_collection_status_names_the_receivers_refusal(tmp_path, section, expected):
+    (tmp_path / "config.yaml").write_text(json.dumps({"plugins": {"mordred_activity": section}}), encoding="utf-8")
+    assert activity_api.collection_status(tmp_path) == expected
+    assert activity_api.read_activity_switches(tmp_path) == (bool(section), False)

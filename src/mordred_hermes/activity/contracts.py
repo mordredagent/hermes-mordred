@@ -700,6 +700,17 @@ def scrub_urls(text: str) -> str:
     return _scrub(text)[0]
 
 
+def scrub_query(suffix: str) -> str:
+    """A stored ``?query#fragment`` with its secrets replaced by :data:`REDACTED` again, by the rules of
+    :func:`scrub_urls` (credential parameters, secret-shaped values, nested URLs with their userinfo).
+
+    Readers apply it so that a suffix stored before a rule existed is shown as the receiver stores it now;
+    a suffix with nothing to redact is returned unchanged.
+    """
+    text = suffix if suffix.startswith(("?", "#")) else "?" + suffix
+    return _scrub_suffix(text)[0]
+
+
 def _secret_shaped_token(token: str) -> bool:
     """One whitespace-free token of 16+ characters mixing letters with digits or symbols, not ordinary text."""
     if len(token) < SECRET_TOKEN_MIN_CHARS or not token.isascii():

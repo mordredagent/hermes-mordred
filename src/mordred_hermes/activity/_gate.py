@@ -126,10 +126,12 @@ def _process_sqlite() -> Any:
     return sys.modules.get("sqlite3", sqlite3)
 
 
-def _keyed_opener(path: Path) -> sqlite3.Connection:
+def _keyed_opener(path: Path, *, timeout: float | None = None) -> sqlite3.Connection:
+    """A keyed connection; ``timeout`` (default :data:`.store.BUSY_TIMEOUT_S`) also bounds how long the
+    SQLCipher shim's schema probe waits for a writer's lock while opening."""
     from .store import BUSY_TIMEOUT_S
 
-    conn = _process_sqlite().connect(str(path), timeout=BUSY_TIMEOUT_S)
+    conn = _process_sqlite().connect(str(path), timeout=BUSY_TIMEOUT_S if timeout is None else timeout)
     if getattr(conn, "mordred_key", None) is None:
         conn.close()
         raise ActivityRefused(refusal("unkeyed_connection"))

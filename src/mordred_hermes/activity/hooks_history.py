@@ -9,9 +9,14 @@
 - ``pre_llm_call``: when the user message names a host or URL, or shares task
   terms with recent episodes, ``{"context": block}`` is returned. Hermes
   appends it to the API copy of the user message and persists it with the
-  turn, outside the untrusted wrapper, so this block holds only human-authored
-  text (task boundaries, corrections) and metadata (site, route path,
-  outcome, time).
+  turn, outside the untrusted wrapper, so this block holds only the user's own
+  words (task starts and corrections the collector attributes to the user,
+  :func:`.history.speaks_for_user`) and metadata (site, route path, outcome,
+  time).
+
+Neither block taints the session in the tool-egress policy (unlike the lookup
+tools, :mod:`.tools`): by construction they carry no typed text and no page
+text.
 
 Both hooks read configuration on every call (cached by file modification
 time), so ``history_enabled`` and the per-surface switches apply from the next
@@ -203,11 +208,11 @@ def transform_tool_result(
 def _turn_matches(
     store: ActivityStore, config: ActivityConfig, text: str, shown: frozenset[tuple[str, int]]
 ) -> Matches:
-    """Episodes with human-authored text on the hosts the message names, then episodes whose task or
-    correction text shares its terms; newest first.
+    """Episodes with the user's own words on the hosts the message names, then episodes whose task or
+    correction text in the user's words shares its terms; newest first.
 
-    Episodes without a task boundary or correction text never qualify, and host labels are not matched:
-    the turn-start block must stand on what the user wrote.
+    Episodes without a task start or correction attributed to the user (:func:`.history.speaks_for_user`)
+    never qualify, and host labels are not matched: the turn-start block must stand on what the user wrote.
     """
     from . import history
     from .matching import terms
@@ -275,7 +280,7 @@ def _turn_block(user_message: Any, session_id: Any, task_id: Any) -> str | None:
 
 
 def pre_llm_call(user_message: Any = None, session_id: Any = None, task_id: Any = None, **_kwargs: Any) -> Any:
-    """``{"context": block}`` with relevant human-authored history, or ``None``; never raises ``Exception``."""
+    """``{"context": block}`` with the user's own relevant history, or ``None``; never raises ``Exception``."""
     try:
         block = _turn_block(user_message, session_id, task_id)
     except Exception as exc:  # a history problem must never abort the turn

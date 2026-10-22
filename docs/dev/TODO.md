@@ -708,11 +708,10 @@ injection channels are `transform_tool_result` and `pre_llm_call`).
   `browser-history` skill; config keys `history_*` and `activity use on|off`;
   the secret-shaped typed-text check; hook payload contract, HOOK_PAYLOADS.md,
   SPEC §"History for Hermes" and USAGE.
-- [ ] Separate PR (`privacy_check`): classify `mordred_browser_history` and
-  `mordred_browser_history_episode` in the tool-egress policy (they read the
-  local encrypted store only; today the default level `ask` asks before each
-  call like any unknown tool) and decide whether reading them taints the
-  session like the Telegram tools.
+- [x] `privacy_check`: `mordred_browser_history` and
+  `mordred_browser_history_episode` are first-party taint sources like the
+  Telegram tools (allowed at every level; a call taints the session); the
+  injected blocks do not taint (no typed text or page text).
 - [ ] Live LLM check of B1 with a real Hermes session on a throwaway home
   (navigation block, turn-start context, both tools), recorded in
   [`CI.md`](./CI.md) §"Manual live-device validation log".

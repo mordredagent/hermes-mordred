@@ -9,7 +9,8 @@ internet at the configured level:
 
 =============  ================================================================
 ``lockdown``   No internet from tools. Local tools and Mordred's own Telegram
-               tools (fixed Venice/loopback destination) only.
+               tools (fixed Venice/loopback destination) and browser-history
+               tools (local encrypted store) only.
 ``search``     ``lockdown`` + ``web_search``. No URL fetching,
                browsing, remote APIs, or arbitrary commands.
 ``ask``        (default) Tools work. ``web_search`` and local work run as
@@ -30,7 +31,8 @@ Rules that hold at every restricted level:
   reliably, so under ``lockdown`` and ``search`` only exact first-party
   read-only commands (``hermes-mordred telegram doctor`` ...) may run. A tool
   this module does not know is treated as internet-capable.
-- **Taint.** Once a session has read private data (the Telegram tools), that
+- **Taint.** Once a session has read private data (the Telegram tools, the
+  browser-history lookup tools), that
   session is raised to ``lockdown`` for the rest of its life: a search query
   is an exfiltration channel too. Delegation is refused for a tainted session
   because a child agent would start untainted, and tools that write plaintext
@@ -99,13 +101,21 @@ LOCAL_TOOLS = frozenset(
         "show_tip",
         "react_to_message",
         "desktop_project",
-        # Mordred's browser history: reads the local encrypted mordred.db only.
-        "mordred_browser_history",
-        "mordred_browser_history_episode",
     }
 )
-# Mordred's own tools: the destination is fixed in code (Venice or loopback).
-FIRST_PARTY_TOOLS = frozenset({"telegram_ask", "telegram_chats"})
+# Mordred's own tools, allowed at every level: the Telegram tools' destination
+# is fixed in code (Venice or loopback); the browser-history lookup tools read
+# the local encrypted mordred.db only.
+TELEGRAM_TOOLS = frozenset({"telegram_ask", "telegram_chats"})
+# The browser-history lookup tools can return typed text, page text and query
+# strings, so a call taints the session like a Telegram read. Mordred's
+# automatic history blocks (the navigation block in a browser result and the
+# turn-start context) are not tool calls and do not taint: by construction
+# they carry no typed text and no page text (only task and correction text
+# attributed to the user, page titles inside Hermes's untrusted wrapper,
+# routes, outcomes and times; see SPEC "History for Hermes").
+BROWSER_HISTORY_TOOLS = frozenset({"mordred_browser_history", "mordred_browser_history_episode"})
+FIRST_PARTY_TOOLS = TELEGRAM_TOOLS | BROWSER_HISTORY_TOOLS
 # Reading any of these puts private data into the session (taint source).
 TAINT_SOURCES = FIRST_PARTY_TOOLS
 SEARCH_TOOLS = frozenset({"web_search"})
@@ -415,7 +425,7 @@ def _preview(value: Any) -> str:
 
 
 def _ask(tool: str, where: str, what: Any, rule_key: str, *, tainted: bool) -> Decision:
-    warning = "This chat has read your private (Telegram) data. " if tainted else ""
+    warning = "This chat has read your private data (Telegram or browser history). " if tainted else ""
     return Decision(
         allow=False,
         approve=True,

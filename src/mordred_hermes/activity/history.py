@@ -11,19 +11,29 @@ summarized episode.
 
 Two kinds of text come out of the store and they are kept apart:
 
-- *human-authored* text: task boundaries (``boundary`` / ``task_start``) and
-  corrections; plus metadata (site, route path, outcome, time, step count);
-- *site-controlled* text: page titles, page text, element labels, URL query
-  strings — and typed text.
+- *the user's own words*: the text of a task start or a correction that the
+  collector attributes to the user (:func:`speaks_for_user`, the same rule as
+  :data:`USER_TEXT_SQL`): a ``boundary`` / ``task_start`` whose ``actor`` is
+  ``human``, a ``correction`` whose ``source`` is ``user_correction`` and
+  whose ``actor`` is ``human``; plus metadata (site, route path, outcome,
+  time, step count). The operator sends exactly these values for the user's
+  instruction and corrections; its task-end summary (``actor`` ``agent``)
+  and any text labelled ``agent`` or ``unknown`` never count;
+- *everything else*: page titles, page text, element labels, URL query
+  strings, typed text, and boundary or correction text not attributed to the
+  user.
 
 :func:`render_block` builds the injected blocks. With ``titles=False`` (the
 turn-start context, which Hermes persists outside its untrusted-data wrapper)
-only human-authored text and metadata appear; with ``titles=True`` (the
+only the user's own words and metadata appear; with ``titles=True`` (the
 navigation block, inside the wrapper) page titles are added, bounded to
 :data:`TITLE_CHARS` each. Page text and typed text never appear in a block.
 
-An episode that touched an excluded site (``excluded_sites`` at read time) is
-dropped whole, wherever it appears.
+An episode that touched an excluded host (``excluded_sites`` at read time) is
+dropped whole, wherever it appears: on any event's ``site``, or named by a URL
+in any event's route, query or target label (:func:`.contracts.event_hosts`,
+the extraction the receiver applies at ingest), so an exclusion added after
+capture hides earlier episodes too.
 """
 
 from __future__ import annotations
@@ -34,12 +44,20 @@ import re
 import sqlite3
 import time
 import unicodedata
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 from urllib.parse import urlsplit
 
-from .contracts import TYPED_OPS, looks_like_secret, redact_text_secrets, site_excluded
+from .contracts import (
+    TYPED_OPS,
+    event_hosts,
+    looks_like_secret,
+    redact_text_secrets,
+    scrub_query,
+    scrub_urls,
+    site_excluded,
+)
 from .matching import terms
 from .store import ActivityStore
 
@@ -48,6 +66,7 @@ __all__ = [
     "NAVIGATION_HEADER",
     "SCAN_EPISODES",
     "TURN_HEADER",
+    "USER_TEXT_SQL",
     "WITHHELD_TEXT",
     "EpisodeDetail",
     "EpisodeEvent",
@@ -55,6 +74,7 @@ __all__ = [
     "Hop",
     "Matches",
     "clean",
+    "clean_query",
     "episode_detail",
     "episodes_for_site",
     "episodes_for_sites",
@@ -66,6 +86,7 @@ __all__ = [
     "render_block",
     "route_text",
     "site_matches",
+    "speaks_for_user",
 ]
 
 #: Newest episodes considered by one query (inside its time window).
@@ -81,7 +102,20 @@ _DETAIL_PRIORITY: Final = (
     "CASE WHEN phase = 'boundary' AND op = 'task_start' THEN 0 WHEN phase = 'correction' THEN 1 "
     "WHEN phase = 'boundary' THEN 2 ELSE 3 END"
 )
-#: A read waits this long for a writer's lock before the surface goes on without history.
+#: Events whose text is the user's own words (SQL over ``activity_events``; :func:`speaks_for_user` in Python).
+USER_TEXT_SQL: Final = (
+    "(actor = 'human' AND ((phase = 'boundary' AND op = 'task_start') "
+    "OR (phase = 'correction' AND source = 'user_correction')))"
+)
+#: Events whose route, query or target label may hold a URL, and so name a host besides their site: a superset
+#: of the rows where :func:`.contracts.event_hosts` can find one (a literal ``://``, or an encoded ``%3A`` in a
+#: parameter value it decodes).
+_URL_FIELDS_SQL: Final = (
+    "(instr(target, '://') > 0 OR instr(route, ':') > 0 OR instr(lower(route), '%3a') > 0 "
+    "OR instr(query, ':') > 0 OR instr(lower(query), '%3a') > 0)"
+)
+#: A read waits this long for a writer's lock before the surface goes on without history, opening included
+#: (the keyed opener's schema probe gets the same bound: :data:`._history_access.OPENER`).
 READ_BUSY_MS: Final = 250
 
 TASK_CHARS: Final = 160
@@ -134,7 +168,7 @@ class EpisodeSummary:
     last_event_at: float
     outcome: str
     steps: int
-    #: Human-authored: the task boundary text(s) and the user's corrections.
+    #: The user's own words (:func:`speaks_for_user`): the task start text and the user's corrections.
     tasks: tuple[str, ...]
     corrections: tuple[str, ...]
     #: Metadata: the pages in order, consecutive repeats collapsed.
@@ -176,6 +210,8 @@ class EpisodeEvent:
     text: str | None
     title: str | None
     page_text: str | None
+    #: ``text`` is the user's own words (:func:`speaks_for_user`): a task instruction or a correction.
+    from_user: bool = False
 
 
 @dataclass(frozen=True)
@@ -194,6 +230,19 @@ class _Head:
     last_event_at: float
     observed_outcome: str
 
+    @property
+    def key(self) -> tuple[str, int]:
+        return (self.episode_id, self.revision)
+
+
+def speaks_for_user(phase: str, op: str, source: str, actor: str) -> bool:
+    """The event's text is the user's own words, by the collector's attribution (the rule of
+    :data:`USER_TEXT_SQL`): a task start whose ``actor`` is ``human``, or a correction whose ``source`` is
+    ``user_correction`` and whose ``actor`` is ``human``. Text labelled ``agent`` or ``unknown`` never is."""
+    if actor != "human":
+        return False
+    return (phase == "boundary" and op == "task_start") or (phase == "correction" and source == "user_correction")
+
 
 # --------------------------------------------------------------------------- #
 # Text helpers
@@ -204,15 +253,25 @@ def clean(value: Any, limit: int) -> str:
     """One line of printable text, bounded with ``…``.
 
     Whitespace runs (every Unicode line break included) collapse to one space, control and format
-    characters are dropped, and every secret :func:`.contracts.redact_text_secrets` finds (JWTs,
-    key-prefixed tokens, PEM armour lines, the value after a password-like keyword) becomes ``redacted``,
-    so text stored before the receiver redacted it never reaches a block or a tool result.
+    characters are dropped, every URL is scrubbed again by the receiver's current rules
+    (:func:`.contracts.scrub_urls`: credential parameters, secret-shaped values, userinfo) and every secret
+    :func:`.contracts.redact_text_secrets` finds (JWTs, key-prefixed tokens, PEM armour lines, the value
+    after a password-like keyword) becomes ``redacted``, so text stored before the receiver redacted it
+    never reaches a block or a tool result.
     """
     if not isinstance(value, str):
         return ""
     text = " ".join("".join(ch for ch in value if unicodedata.category(ch)[0] != "C" or ch.isspace()).split())
-    text = redact_text_secrets(text)[0]
+    text = redact_text_secrets(scrub_urls(text))[0]
     return text if len(text) <= limit else text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def clean_query(value: Any, limit: int) -> str:
+    """A stored ``?query#fragment`` for display: scrubbed again by the receiver's current rules
+    (:func:`.contracts.scrub_query`), then :func:`clean`."""
+    if not isinstance(value, str) or not value:
+        return ""
+    return clean(scrub_query(value), limit)
 
 
 def _quoted(value: str, limit: int) -> str:
@@ -286,13 +345,16 @@ def route_text(route: str, *, strict: bool) -> str:
 
     Not ``strict``: secret-shaped segments (reset tokens, magic links) become ``:id``. ``strict`` (the
     turn-start block, outside Hermes's untrusted wrapper): only short word-like segments (a letter, then
-    up to 23 letters, digits, ``_``, ``.`` or ``-``, at most two digits) are kept, any other segment
-    becomes ``:id``, and at most :data:`STRICT_SEGMENTS` segments are shown.
+    up to 23 letters, digits, ``_``, ``.`` or ``-``, at most two digits) that are not secret-shaped either
+    are kept, any other segment becomes ``:id``, and at most :data:`STRICT_SEGMENTS` segments are shown.
     """
     path = _PATH_PARAMS_RE.sub("", route)
     segments = [segment for segment in path.split("/") if segment]
     if strict:
-        shown = [s if _WORD_SEGMENT_RE.fullmatch(s) and not _id_like(s) else ":id" for s in segments]
+        shown = [
+            s if _WORD_SEGMENT_RE.fullmatch(s) and not _id_like(s) and not looks_like_secret(s) else ":id"
+            for s in segments
+        ]
         if len(shown) > STRICT_SEGMENTS:
             shown = [*shown[:STRICT_SEGMENTS], "…"]
     else:
@@ -307,9 +369,15 @@ def route_text(route: str, *, strict: bool) -> str:
 
 @contextlib.contextmanager
 def _reading(store: ActivityStore) -> Iterator[sqlite3.Connection]:
-    """One short read transaction; SQLite failures surface as the store's content-free refusals."""
+    """One short read transaction; SQLite failures surface as the store's content-free refusals.
+
+    Opening may already have waited for a writer's lock (the keyed opener's schema probe, bounded by the
+    same :data:`READ_BUSY_MS`); the read then waits only for what is left of that bound.
+    """
+    started = time.monotonic()
     with store.connection() as conn:
-        conn.execute(f"PRAGMA busy_timeout = {READ_BUSY_MS}")
+        left = READ_BUSY_MS - int((time.monotonic() - started) * 1000)
+        conn.execute(f"PRAGMA busy_timeout = {max(1, left)}")
         conn.execute("BEGIN")
         try:
             yield conn
@@ -350,14 +418,43 @@ def _sites(conn: sqlite3.Connection, ids: Sequence[str]) -> dict[str, list[str]]
     return sites
 
 
-def _human_texts(conn: sqlite3.Connection, ids: Sequence[str]) -> dict[str, list[str]]:
-    """Task boundary and correction texts per episode."""
+def _hidden(
+    conn: sqlite3.Connection, ids: Sequence[str], sites: Mapping[str, Sequence[str]], excluded_sites: frozenset[str]
+) -> set[str]:
+    """The episodes among ``ids`` that touched an excluded host: an event's ``site`` (``sites``, per episode),
+    or a host named by a URL in an event's route, query or target label (:func:`.contracts.event_hosts`, the
+    receiver's ingest extraction), so an exclusion added after capture hides earlier episodes too.
+
+    Nothing is read without exclusions; otherwise one query over these episodes' events, limited to the
+    distinct rows whose route, query or target may hold a URL (:data:`_URL_FIELDS_SQL`).
+    """
+    if not excluded_sites or not ids:
+        return set()
+    hidden = {i for i in ids if any(site_excluded(site, excluded_sites) for site in sites.get(i, ()))}
+    rest = [i for i in dict.fromkeys(ids) if i not in hidden]
+    if not rest:
+        return hidden
+    rows = conn.execute(
+        "SELECT DISTINCT episode_id, route, query, target FROM activity_events "
+        f"WHERE episode_id IN ({_in(rest)}) AND {_URL_FIELDS_SQL}",
+        tuple(rest),
+    )
+    for episode_id, route, query, target in rows:
+        if str(episode_id) in hidden:
+            continue
+        hosts = event_hosts({"route": route, "target": target}, query)
+        if any(site_excluded(host, excluded_sites) for host in hosts):
+            hidden.add(str(episode_id))
+    return hidden
+
+
+def _user_texts(conn: sqlite3.Connection, ids: Sequence[str]) -> dict[str, list[str]]:
+    """Per episode, the texts that are the user's own words (task starts and corrections, :data:`USER_TEXT_SQL`)."""
     texts: dict[str, list[str]] = {}
     if not ids:
         return texts
     rows = conn.execute(
-        "SELECT episode_id, text FROM activity_events WHERE text IS NOT NULL "
-        "AND (phase = 'correction' OR (phase = 'boundary' AND op = 'task_start')) "
+        f"SELECT episode_id, text FROM activity_events WHERE text IS NOT NULL AND {USER_TEXT_SQL} "
         f"AND episode_id IN ({_in(ids)}) ORDER BY receipt",
         tuple(ids),
     )
@@ -386,6 +483,7 @@ class _Scan:
 
     heads: list[_Head]
     sites: dict[str, list[str]]
+    #: The user's own words per episode (:func:`_user_texts`).
     texts: dict[str, list[str]]
     pages: dict[str, list[str]]
 
@@ -396,12 +494,12 @@ def _scan(conn: sqlite3.Connection, window: tuple[float, float], *, texts: bool,
     return _Scan(
         heads,
         _sites(conn, ids),
-        _human_texts(conn, ids) if texts else {},
+        _user_texts(conn, ids) if texts else {},
         _page_fields(conn, ids) if pages else {},
     )
 
 
-_SUMMARY_COLUMNS: Final = "phase, op, site, route, query, text, page_title"
+_SUMMARY_COLUMNS: Final = "phase, op, source, actor, site, route, query, text, page_title"
 
 
 def _summary(conn: sqlite3.Connection, head: _Head, sites: Sequence[str]) -> EpisodeSummary:
@@ -414,7 +512,7 @@ def _summary(conn: sqlite3.Connection, head: _Head, sites: Sequence[str]) -> Epi
         str(row[0])
         for row in conn.execute(
             "SELECT text FROM activity_events WHERE episode_id = ? AND phase = 'correction' AND text IS NOT NULL "
-            "ORDER BY receipt DESC LIMIT ?",
+            f"AND {USER_TEXT_SQL} ORDER BY receipt DESC LIMIT ?",
             (head.episode_id, MAX_CORRECTIONS),
         )
     ][::-1]
@@ -428,8 +526,8 @@ def _summary(conn: sqlite3.Connection, head: _Head, sites: Sequence[str]) -> Epi
     queries: list[str] = []
     hops: list[Hop] = []
     last_stop = None
-    for phase, op, site, route, query, text, title in rows:
-        if phase == "boundary" and op == "task_start" and text and len(tasks) < MAX_TASKS:
+    for phase, op, source, actor, site, route, query, text, title in rows:
+        if op == "task_start" and text and len(tasks) < MAX_TASKS and speaks_for_user(phase, op, source, actor):
             tasks.append(str(text))
         if title and title not in titles:
             titles.append(str(title))
@@ -460,12 +558,10 @@ def _summary(conn: sqlite3.Connection, head: _Head, sites: Sequence[str]) -> Epi
     )
 
 
-def _admissible(
-    head: _Head, sites: Sequence[str], excluded_sites: frozenset[str], shown: frozenset[tuple[str, int]]
-) -> bool:
-    if (head.episode_id, head.revision) in shown:
-        return False
-    return not any(site_excluded(site, excluded_sites) for site in sites)
+def _visible(conn: sqlite3.Connection, heads: list[_Head], scan: _Scan, excluded_sites: frozenset[str]) -> list[_Head]:
+    """``heads`` without the episodes that touched an excluded host (:func:`_hidden`), in order."""
+    hidden = _hidden(conn, [head.episode_id for head in heads], scan.sites, excluded_sites)
+    return [head for head in heads if head.episode_id not in hidden]
 
 
 def episodes_for_sites(
@@ -482,8 +578,8 @@ def episodes_for_sites(
 ) -> Matches:
     """Newest episodes that touched any of ``sites`` (with ``subdomains``, also their subdomains).
 
-    ``shown`` episodes, episodes on an excluded host and, with ``require_human_text``, episodes without a
-    task boundary or correction text are skipped.
+    ``shown`` episodes, episodes that touched an excluded host (:func:`_hidden`) and, with
+    ``require_human_text``, episodes without a task start or correction in the user's own words are skipped.
     """
     wanted = [site for site in sites if not site_excluded(site, excluded_sites)]
     if not wanted:
@@ -498,9 +594,10 @@ def episodes_for_sites(
                 for site in wanted
                 for s in scan.sites.get(head.episode_id, ())
             )
-            and _admissible(head, scan.sites.get(head.episode_id, ()), excluded_sites, shown)
+            and head.key not in shown
             and (not require_human_text or head.episode_id in scan.texts)
         ]
+        matched = _visible(conn, matched, scan, excluded_sites)
         chosen = [_summary(conn, head, scan.sites.get(head.episode_id, ())) for head in matched[: max(0, limit)]]
     return Matches(tuple(chosen), len(matched) - len(chosen))
 
@@ -527,11 +624,12 @@ def episodes_for_terms(
 ) -> Matches:
     """Episodes sharing at least ``min_shared`` terms with ``wanted``, best match first, then newest.
 
-    Episodes are matched on their human-authored text (task boundaries, corrections); ``host_labels``
-    adds the labels of their hosts (``github`` of ``github.com``) and ``page_fields`` (lookup tools only)
-    page titles, routes and query strings. With ``site`` only episodes on that host count.
+    Episodes are matched on the user's own words (task starts, corrections: :func:`speaks_for_user`);
+    ``host_labels`` adds the labels of their hosts (``github`` of ``github.com``) and ``page_fields`` (lookup
+    tools only) page titles, routes and query strings. With ``site`` only episodes on that host count.
     ``newest_if_none`` returns the newest admissible episodes when nothing shares a term (a lookup by site
-    or period whose words match nothing).
+    or period whose words match nothing). Episodes that touched an excluded host (:func:`_hidden`) are
+    skipped; only the matching ones are checked.
     """
     if site is not None and site_excluded(site, excluded_sites):
         return Matches((), 0)
@@ -540,7 +638,7 @@ def episodes_for_terms(
         candidates = [
             head
             for head in scan.heads
-            if _admissible(head, scan.sites.get(head.episode_id, ()), excluded_sites, shown)
+            if head.key not in shown
             and (site is None or any(site_matches(site, s) for s in scan.sites.get(head.episode_id, ())))
         ]
         scored: list[tuple[int, _Head]] = []
@@ -551,8 +649,10 @@ def episodes_for_terms(
             shared = len(wanted & own)
             if wanted and shared >= max(1, min_shared):
                 scored.append((shared, head))
+        visible = set(_visible(conn, [head for _score, head in scored], scan, excluded_sites))
+        scored = [(score, head) for score, head in scored if head in visible]
         if not scored and newest_if_none:
-            scored = [(0, head) for head in candidates]
+            scored = [(0, head) for head in _visible(conn, candidates, scan, excluded_sites)]
         scored.sort(key=lambda pair: (-pair[0], -pair[1].last_event_at))
         chosen = [_summary(conn, head, scan.sites.get(head.episode_id, ())) for _score, head in scored[: max(0, limit)]]
     return Matches(tuple(chosen), len(scored) - len(chosen))
@@ -570,7 +670,8 @@ def read_meta(store: ActivityStore) -> dict[str, str]:
 def episode_detail(
     store: ActivityStore, episode_id: str, *, excluded_sites: frozenset[str], excerpt_chars: int = 1000
 ) -> EpisodeDetail | None:
-    """One episode's events in order; ``None`` when it is unknown or touched an excluded site.
+    """One episode's events in order; ``None`` when it is unknown or touched an excluded host (:func:`_hidden`:
+    any event's site, or a URL in any event's route, query or target label).
 
     Page text is read as an excerpt of at most ``excerpt_chars`` characters per event.
     """
@@ -590,7 +691,7 @@ def episode_detail(
         ):
             if site not in sites:
                 sites.append(str(site))
-        if any(site_excluded(site, excluded_sites) for site in sites):
+        if _hidden(conn, [episode_id], {episode_id: sites}, excluded_sites):
             return None
         summary = _summary(conn, head, sites)
         count = conn.execute("SELECT COUNT(*) FROM activity_events WHERE episode_id = ?", (episode_id,)).fetchone()
@@ -599,8 +700,8 @@ def episode_detail(
         # task end, the last pages); they are returned in the order they were received.
         rows = conn.execute(
             "SELECT observed_at, phase, op, site, route, query, target, result_status, text, page_title, "
-            "substr(page_text, 1, ?) FROM activity_events WHERE receipt IN (SELECT receipt FROM activity_events "
-            f"WHERE episode_id = ? ORDER BY {_DETAIL_PRIORITY}, receipt DESC LIMIT ?) ORDER BY receipt",
+            "substr(page_text, 1, ?), source, actor FROM activity_events WHERE receipt IN (SELECT receipt FROM "
+            f"activity_events WHERE episode_id = ? ORDER BY {_DETAIL_PRIORITY}, receipt DESC LIMIT ?) ORDER BY receipt",
             (max(0, excerpt_chars), episode_id, MAX_DETAIL_EVENTS),
         ).fetchall()
     events = tuple(
@@ -616,6 +717,7 @@ def episode_detail(
             text=_shown_text(str(r[2]), r[8]),
             title=r[9],
             page_text=r[10] or None,
+            from_user=bool(r[8]) and speaks_for_user(str(r[1]), str(r[2]), str(r[11]), str(r[12])),
         )
         for r in rows
     )
@@ -636,15 +738,15 @@ def latest_page_text(
 ) -> dict[str, str]:
     """Per episode, an excerpt (at most ``chars`` characters) of the newest page text recorded on ``site``.
 
-    Episodes that touched an excluded host (checked again in this transaction) get none.
+    Episodes that touched an excluded host (:func:`_hidden`, checked again in this transaction) get none.
     """
     excerpts: dict[str, str] = {}
     if not episode_ids:
         return excerpts
     with _reading(store) as conn:
-        sites = _sites(conn, list(episode_ids))
+        hidden = _hidden(conn, list(episode_ids), _sites(conn, list(episode_ids)), excluded_sites)
         for episode_id in episode_ids:
-            if any(site_excluded(s, excluded_sites) for s in sites.get(episode_id, ())):
+            if episode_id in hidden:
                 continue
             rows = conn.execute(
                 "SELECT site, substr(page_text, 1, ?) FROM activity_events WHERE episode_id = ? "

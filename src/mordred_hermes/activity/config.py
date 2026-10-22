@@ -11,6 +11,12 @@ excluded by default, so every exclusion comes from ``excluded_sites`` here.
 removed lesson pipeline (``review_*``, ``recall_*``,
 ``retention_candidate_days``) are unknown keys like any other.
 
+An ``excluded_sites`` value that is not a list, or one entry that names no
+host, is invalid (``invalid value for excluded_sites``): the entries that do
+name a host stay in effect, and the receiver refuses every batch
+(``excluded_sites_invalid``) and Hermes's history surfaces are off until it is
+fixed, so a typo never means "record or show what was excluded before".
+
 The ``history_*`` keys govern Hermes's use of the stored history
 (:mod:`.history`): ``history_enabled`` is the master switch over every surface;
 ``history_capture_hermes`` and ``history_chat_corrections`` are parsed but have
@@ -49,13 +55,15 @@ class ActivityConfig:
     #: ``0`` means raw events and episodes are never deleted.
     retention_raw_days: int = 365
     #: The effective exclusions: ``DEFAULT_EXCLUDED_SITES | configured``.
-    #: The default set is empty, so only configured hosts (and their subdomains) are excluded.
+    #: The default set is empty, so only configured hosts (and their subdomains) are excluded. With an invalid
+    #: value the entries that name a host are kept (and collection and history are off: :attr:`collection_refusal`).
     excluded_sites: frozenset[str] = DEFAULT_EXCLUDED_SITES
     #: Master switch: Hermes uses the history in ordinary conversations and browser work (needs ``enabled``).
     history_enabled: bool = True
     #: Append a site's history to successful ``browser_navigate`` results.
     history_on_navigate: bool = True
-    #: Add human-authored history to the turn when the user message names a host or shares task terms.
+    #: Add the user's own task and correction texts (and metadata) to the turn when the message names a host or
+    #: shares task terms.
     history_turn_context: bool = True
     #: Record Hermes's own browser tool calls (parsed; no effect until that phase ships).
     history_capture_hermes: bool = True
@@ -74,8 +82,18 @@ class ActivityConfig:
     warnings: tuple[str, ...] = ()
 
     @property
+    def collection_refusal(self) -> str | None:
+        """Why the receiver refuses batches (``collection_disabled``, ``excluded_sites_invalid``), or ``None``."""
+        if not (self.enabled and self.collection_enabled):
+            return "collection_disabled"
+        if not self.excluded_sites_valid:
+            return "excluded_sites_invalid"
+        return None
+
+    @property
     def collecting(self) -> bool:
-        return self.enabled and self.collection_enabled
+        """The receiver accepts batches: the feature and collection are on and ``excluded_sites`` is valid."""
+        return self.collection_refusal is None
 
     @property
     def excluded_sites_valid(self) -> bool:
@@ -95,6 +113,13 @@ class ActivityConfig:
         for key, raw in section.items():
             if key not in known:
                 warnings.append(f"unknown key {key}" if isinstance(key, str) else "unknown key")
+                continue
+            if key == _EXCLUDED_SITES:
+                # Never all-or-nothing: the hosts that parse stay excluded even when another entry is invalid.
+                hosts, valid = _sites(raw)
+                values[key] = hosts
+                if not valid:
+                    warnings.append(f"invalid value for {key}")
                 continue
             parsed = _PARSERS[key](raw)
             if parsed is _INVALID:
@@ -162,20 +187,21 @@ def _site(entry: Any) -> str | None:
     return host if _HOST_LABELS_RE.fullmatch(host) else None
 
 
-def _sites(raw: Any) -> Any:
-    """Every entry must name a host; one that does not makes the whole value invalid (never a partial list)."""
-    if not isinstance(raw, list):
-        return _INVALID
-    hosts = [_site(entry) for entry in raw]
-    if any(host is None for host in hosts):
-        return _INVALID
-    return frozenset(host for host in hosts if host is not None)
+def _sites(raw: Any) -> tuple[frozenset[str], bool]:
+    """``(hosts, valid)``: the entries that name a host, and whether every entry did (and ``raw`` is a list).
+
+    A single string is invalid but still excludes the host it names; an invalid value turns collection and
+    the history surfaces off (:attr:`ActivityConfig.collection_refusal`, :attr:`ActivityConfig.history_active`).
+    """
+    entries = raw if isinstance(raw, list) else [raw]
+    hosts = [_site(entry) for entry in entries]
+    valid = isinstance(raw, list) and all(host is not None for host in hosts)
+    return frozenset(host for host in hosts if host is not None), valid
 
 
 _PARSERS: Final[Mapping[str, Callable[[Any], Any]]] = {
     "enabled": _bool,
     "collection_enabled": _bool,
-    "excluded_sites": _sites,
     "retention_raw_days": _non_negative_int,
     "max_batch_events": _capped_int(MAX_BATCH_EVENTS),
     "max_event_bytes": _capped_int(MAX_EVENT_BYTES),
