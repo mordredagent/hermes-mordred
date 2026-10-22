@@ -4140,9 +4140,13 @@ per-process state.
   read then waits only for what is left of it.
 - **Bounded queries.** At most the 300 newest episodes in the time window
   are considered per query; a summary reads at most 400 events of an episode
-  (corrections are read separately) and an episode detail at most 1000:
-  task starts, corrections and other task boundaries first, then the newest
-  remaining events, returned in the order they were received.
+  (the user's first task start and last corrections are read separately, so
+  a task start Hermes writes after a long turn's calls is never cut off) and
+  an episode detail at most 1000: task starts, corrections and other task
+  boundaries first, then the newest remaining events, returned in time
+  order (`observed_at`, then the order they were received; a task start or
+  correction Hermes writes when its turn ends carries the turn's start, so it
+  leads the turn's calls).
   `episodes_for_site` matches a host and its subdomains (a leading `www.` is
   ignored). `episodes_for_terms` matches the `terms` of the user's own words
   (task starts and corrections, below) and the labels of the episode's hosts

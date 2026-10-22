@@ -7,7 +7,9 @@ tools in :mod:`.tools`). It never opens the store itself: callers pass an
 (:mod:`._history_access`). Every query is bounded: at most
 :data:`SCAN_EPISODES` of the newest episodes in the requested window are
 considered, and at most :data:`MAX_SUMMARY_EVENTS` events are read per
-summarized episode.
+summarized episode (its first task start and last corrections in the user's
+words are read separately: Hermes's own capture writes a task start when its
+turn ends, after the turn's calls).
 
 Two kinds of text come out of the store and they are kept apart:
 
@@ -557,7 +559,7 @@ def _scan(conn: sqlite3.Connection, window: tuple[float, float], *, texts: bool,
     )
 
 
-_SUMMARY_COLUMNS: Final = "phase, op, source, actor, site, route, query, text, page_title"
+_SUMMARY_COLUMNS: Final = "phase, site, route, query, page_title"
 
 
 def _summary(conn: sqlite3.Connection, head: _Head, sites: Sequence[str]) -> EpisodeSummary:
@@ -565,28 +567,28 @@ def _summary(conn: sqlite3.Connection, head: _Head, sites: Sequence[str]) -> Epi
         f"SELECT {_SUMMARY_COLUMNS} FROM activity_events WHERE episode_id = ? ORDER BY receipt LIMIT ?",
         (head.episode_id, MAX_SUMMARY_EVENTS),
     ).fetchall()
-    # Corrections are what the user said was wrong; read them even past the event cap.
-    corrections = [
-        str(row[0])
-        for row in conn.execute(
-            "SELECT text FROM activity_events WHERE episode_id = ? AND phase = 'correction' AND text IS NOT NULL "
-            f"AND {USER_TEXT_SQL} ORDER BY receipt DESC LIMIT ?",
-            (head.episode_id, MAX_CORRECTIONS),
-        )
-    ][::-1]
+    # The user's own words are read even past the event cap: the first task starts (Hermes's own capture writes
+    # a task start when its turn ends, after the turn's calls) and the last corrections, in one query.
+    words = conn.execute(
+        "SELECT 0, text, receipt FROM (SELECT text, receipt FROM activity_events WHERE episode_id = ? "
+        f"AND phase = 'boundary' AND op = 'task_start' AND text <> '' AND {USER_TEXT_SQL} "
+        "ORDER BY receipt LIMIT ?) UNION ALL SELECT 1, text, receipt FROM (SELECT text, receipt "
+        "FROM activity_events WHERE episode_id = ? AND phase = 'correction' AND text IS NOT NULL "
+        f"AND {USER_TEXT_SQL} ORDER BY receipt DESC LIMIT ?) ORDER BY 1, 3",
+        (head.episode_id, MAX_TASKS, head.episode_id, MAX_CORRECTIONS),
+    ).fetchall()
+    tasks = [str(text) for kind, text, _receipt in words if kind == 0]
+    corrections = [str(text) for kind, text, _receipt in words if kind == 1]
     steps_row = conn.execute(
         "SELECT COUNT(DISTINCT attempt_id), COALESCE(SUM(attempt_id IS NULL), 0) FROM activity_events "
         f"WHERE episode_id = ? AND phase IN ({', '.join('?' * len(_STEP_PHASES))})",
         (head.episode_id, *_STEP_PHASES),
     ).fetchone()
-    tasks: list[str] = []
     titles: list[str] = []
     queries: list[str] = []
     hops: list[Hop] = []
     last_stop = None
-    for phase, op, source, actor, site, route, query, text, title in rows:
-        if op == "task_start" and text and len(tasks) < MAX_TASKS and speaks_for_user(phase, op, source, actor):
-            tasks.append(str(text))
+    for phase, site, route, query, title in rows:
         if title and title not in titles:
             titles.append(str(title))
         if query and query not in queries:
@@ -785,8 +787,8 @@ def read_meta(store: ActivityStore) -> dict[str, str]:
 def episode_detail(
     store: ActivityStore, episode_id: str, *, excluded_sites: frozenset[str], excerpt_chars: int = 1000
 ) -> EpisodeDetail | None:
-    """One episode's events in order; ``None`` when it is unknown or touched an excluded host (:func:`_hidden`:
-    any event's site, or a URL in any event's route, query or target label).
+    """One episode's events in time order (``observed_at``, then receipt); ``None`` when it is unknown or touched an
+    excluded host (:func:`_hidden`: any event's site, or a URL in any event's route, query or target label).
 
     Page text is read as an excerpt of at most ``excerpt_chars`` characters per event.
     """
@@ -812,11 +814,13 @@ def episode_detail(
         count = conn.execute("SELECT COUNT(*) FROM activity_events WHERE episode_id = ?", (episode_id,)).fetchone()
         total = int(count[0])
         # Past the cap the task boundaries and corrections still come first, then the newest events (the
-        # task end, the last pages); they are returned in the order they were received.
+        # task end, the last pages); they are returned in time order, then the order they were received (a
+        # task start Hermes wrote when its turn ended carries the turn's start: it leads that turn's calls).
         rows = conn.execute(
             "SELECT observed_at, phase, op, site, route, query, target, result_status, text, page_title, "
             "substr(page_text, 1, ?), source, actor FROM activity_events WHERE receipt IN (SELECT receipt FROM "
-            f"activity_events WHERE episode_id = ? ORDER BY {_DETAIL_PRIORITY}, receipt DESC LIMIT ?) ORDER BY receipt",
+            f"activity_events WHERE episode_id = ? ORDER BY {_DETAIL_PRIORITY}, receipt DESC LIMIT ?) "
+            "ORDER BY observed_at, receipt",
             (max(0, excerpt_chars), episode_id, MAX_DETAIL_EVENTS),
         ).fetchall()
     events = tuple(

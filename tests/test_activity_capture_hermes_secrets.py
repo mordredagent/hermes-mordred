@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.activity import _history_access, capture_hermes, contracts, hooks_history, tools
+from mordred_hermes.activity import _history_access, capture_hermes, contracts, history, hooks_history, tools
 from mordred_hermes.activity.ingest import StoreReceiver
 from mordred_hermes.activity.store import ActivityStore
 from tests._activity_capture_helpers import (
@@ -232,6 +232,42 @@ def test_a_turn_that_ends_without_post_llm_call_is_written_by_the_next_turn(capt
     turn("thanks", turn_id=T2)
     [start] = _starts(store)
     assert start.text == "Sign in on 127.0.0.1 with demo-user / redacted"
+
+
+def test_a_task_start_written_after_more_calls_than_a_summary_reads_is_still_shown(capture_home) -> None:
+    """Codex review P2: a turn with more calls than a summary reads (:data:`.history.MAX_SUMMARY_EVENTS`) gets its
+    task start after all of them; the summary, both blocks, the lookup and the episode detail still show it."""
+    _home, store = capture_home
+    task = "export every invoice on 127.0.0.1 page by page"
+    turn(task)
+    _navigate()
+    for _ in range(history.MAX_SUMMARY_EVENTS):
+        call("browser_scroll", {"direction": "down"}, ok(scrolled="down"))
+    end_turn()
+    [record] = store.list_episodes()
+    assert record.event_count == history.MAX_SUMMARY_EVENTS + 2
+    assert store.events_for_episode(record.episode_id)[-1].op == "task_start"  # received last
+    assert record.started_at == _starts(store)[0].observed_at  # the episode starts with its turn
+
+    [summary] = history.episodes_for_sites(store, ["127.0.0.1"], excluded_sites=frozenset()).episodes
+    assert summary.tasks == (task,)
+    block = hooks_history.pre_llm_call(
+        user_message="What did you do in the browser on 127.0.0.1 earlier?", session_id="s5", turn_id="s5:t:1"
+    )
+    navigation = hooks_history.transform_tool_result(
+        tool_name="browser_navigate",
+        args={"url": LOGIN},
+        result=nav_result(LOGIN, title="Sign in to Acme", snapshot=LOGIN_SNAPSHOT),
+        session_id="s6",
+        task_id="t6",
+    )
+    lookup = json.loads(tools.browser_history({"query": "invoice page"}, session_id="s7").split("\n")[2])
+    assert block is not None and f'task "{task}"' in block["context"]
+    assert navigation is not None and task in navigation
+    assert [episode["task"] for episode in lookup["episodes"]] == [task]
+    detail = history.episode_detail(store, record.episode_id, excluded_sites=frozenset())
+    assert detail is not None and detail.summary.tasks == (task,)
+    assert (detail.events[0].op, detail.events[0].text) == ("task_start", task)  # in time order: the turn's start
 
 
 def test_hermes_0_13_ends_a_turn_without_ids(capture_home) -> None:
