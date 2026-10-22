@@ -19,6 +19,7 @@ from collections.abc import Callable, Iterable
 import pytest
 
 from mordred_hermes.activity import contracts
+from tests import _activity_redaction_baseline as base
 from tests._activity_redaction_baseline import BASE_SPANS, base_spans
 
 #: One phrase per form, positive and negative, English and Japanese.
@@ -51,11 +52,25 @@ PHRASES = [
     "the password field is empty",
     "pin the tab",
     "set the password to expire",
+    # control characters, other spaces, zero-width characters and other scripts (security review 2026-10-22)
+    "Hun\x01ter2-x をパスワードに入力",
+    "Hun\x7fter2-xをパスワードに",
+    "パスワードにHun\x1bter2を入力",
+    "use Hun\x00ter2-x for the password",
+    "the password for the bank is Hun\x08ter2-x",
+    "set the password to Hun\x0eter2-x",
+    "my password is\xa0Hunter2-fake-pw",
+    "my\u3000password\u3000is\u3000Hunter2-x",
+    "パスワードは\u3000abc123",
+    "password\u200b: Hunter2-x",
+    "Hunter2-x\u200b as the password",
+    "пароль Hunter2-x as the password \U0001f642",
+    "the password is \u0397unter2-x",
 ]
 #: Separators that end a phrase: what one phrase loses it must still lose next to another.
 CLAUSE_SEPARATORS = [". ", "; ", ", ", "\n"]
 #: Every separator, words merged too: the base revision's values must still be replaced.
-ALL_SEPARATORS = [*CLAUSE_SEPARATORS, " ", ""]
+ALL_SEPARATORS = [*CLAUSE_SEPARATORS, " ", "", "\xa0", "\u3000", "\u200b", "\x01", "\x7f"]
 #: Frames that nest a phrase in a qualifier, before or after "to" / "is", or after "as".
 FRAMES = [
     "password for account {} is Hunter2-x",
@@ -115,6 +130,107 @@ def _each_form(text: str) -> list[tuple[int, int]]:
             if span is not None and not any(lo < span[0] < hi or lo < span[1] < hi for lo, hi in urls):
                 spans.append(span)
     return spans
+
+
+class _ReferenceIndex:
+    """The scans the near-linear index (:class:`.contracts._TextIndex`) replaced, one character at a time, with
+    the character classes of the code they replaced."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def run_end(self, pos: int) -> int:
+        tail = base._VALUE_TAIL_RE.match(self.text, pos)
+        return tail.end() if tail else pos
+
+    def trimmed(self, start: int, end: int) -> int:
+        return int(base._without_closing_marks(self.text, start, end))
+
+    def opened(self, start: int, end: int) -> int:
+        while start < end and self.text[start] in base._VALUE_QUOTES:
+            start += 1
+        return start
+
+    def token_start(self, end: int) -> int:
+        while end > 0 and not self.text[end - 1].isspace():
+            end -= 1
+        return end
+
+    def ascii_start(self, end: int) -> int:
+        while end > 0 and self.text[end - 1].isascii() and not self.text[end - 1].isspace():
+            end -= 1
+        return end
+
+    def ascii_end(self, pos: int) -> int:
+        while pos < len(self.text) and self.text[pos].isascii() and not self.text[pos].isspace():
+            pos += 1
+        return pos
+
+    def breaker(self, pos: int) -> int:
+        marks = {*base._VALUE_QUOTES, *contracts._JA_AFTER_KEYWORD}
+        return next((at for at in range(pos, len(self.text)) if self.text[at] in marks), len(self.text))
+
+
+#: Pieces of generated text: every kind of character the scans tell apart, and runs longer than the index's
+#: local look (:data:`.contracts._LOCAL_SCAN_CHARS`), so its tables are used too.
+PIECES = [
+    *(" ", "\xa0", "\u3000", "\u200b", "\ufeff", "\x00", "\x01", "\x7f", "\x1c", "\t", "\n", "\r"),
+    *(".", ")", "\u201d", ":", "=", "\uff1a", "(", "\u300c", "'", '"', "a", "Z", "9", "-", "_", "/"),
+    *("\u3092", "\u306b", "\u3068", "\u6b04", "\u30d1\u30b9\u30ef\u30fc\u30c9", "password", "pin", "PIN"),
+    *(" is ", " for ", " to ", " as the password", "set ", "Hunter2-x", "\u043f", "\u0397", "\U0001f642"),
+    *("a" * 70, "." * 70, " " * 40, "(" * 70, "\x01" * 70, "\u3000" * 40, "pin:" * 20, "\u201d" * 70),
+]
+
+
+def _generated(count: int, seed: int) -> list[str]:
+    chooser = random.Random(seed)
+    return ["".join(chooser.choice(PIECES) for _ in range(chooser.randint(1, 60))) for _ in range(count)]
+
+
+def test_the_index_reads_the_same_characters_as_the_scans_it_replaced() -> None:
+    """Each table of the index stops at exactly the characters the replaced scan stopped at (every BMP code
+    point and a sample beyond); the ASCII run may only be wider than the printable run it replaced forward."""
+    for code in [*range(0x10000), *range(0x10000, 0x110000, 997), 0x1F642]:
+        char = chr(code)
+        assert bool(contracts._WHITESPACE_RE.match(char)) == char.isspace(), hex(code)
+        assert bool(contracts._NOT_VALUE_RE.match(char)) != bool(base._VALUE_TAIL_RE.fullmatch(char)), hex(code)
+        assert bool(contracts._NOT_CLOSING_RE.match(char)) == (char not in base._TRAILING_MARKS), hex(code)
+        assert bool(contracts._NOT_OPENING_RE.match(char)) == (char not in base._VALUE_QUOTES), hex(code)
+        ascii_run = char.isascii() and not char.isspace()
+        assert (not contracts._NOT_ASCII_RUN_RE.match(char)) == ascii_run == contracts._ascii_not_space(char)
+        assert contracts._not_space(char) == (not char.isspace())
+        breaker = char in base._VALUE_QUOTES or char in contracts._JA_AFTER_KEYWORD
+        assert bool(contracts._REGION_BREAKERS_RE.match(char)) == breaker, hex(code)
+        if "!" <= char <= "~":
+            assert ascii_run  # never narrower than the printable run it replaced
+
+
+def test_the_index_answers_like_the_scans_it_replaced() -> None:
+    for text in _generated(150, seed=1):
+        fast, slow = contracts._TextIndex(text), _ReferenceIndex(text)
+        for pos in range(len(text) + 1):
+            assert fast.run_end(pos) == slow.run_end(pos), (text, pos)
+            assert fast.token_start(pos) == slow.token_start(pos), (text, pos)
+            assert fast.ascii_start(pos) == slow.ascii_start(pos), (text, pos)
+            assert fast.ascii_end(pos) == slow.ascii_end(pos), (text, pos)
+            assert fast.breaker(pos) == slow.breaker(pos), (text, pos)
+            for start in {0, max(0, pos - 3), pos}:
+                assert fast.trimmed(start, pos) == slow.trimmed(start, pos), (text, start, pos)
+                assert fast.opened(start, len(text)) == slow.opened(start, len(text)), (text, start)
+
+
+def test_the_index_redacts_exactly_like_the_scans_it_replaced(monkeypatch: pytest.MonkeyPatch) -> None:
+    texts = [*_generated(400, seed=2), *PHRASES, *(" ".join(parts) for parts in _triples(100))]
+    fast = [contracts._secret_spans(text) for text in texts]
+    monkeypatch.setattr(contracts, "_TextIndex", _ReferenceIndex)
+    slow = [contracts._secret_spans(text) for text in texts]
+    assert [(text, a) for text, a, b in zip(texts, fast, slow, strict=True) if a != b] == []
+
+
+def test_a_control_character_inside_a_value_never_splits_it() -> None:
+    for text in ("Hun\x01ter2-x をパスワードに入力", "Hun\x7fter2-xをパスワードに", "パスワードにHun\x1bter2を入力"):
+        clean, replaced = contracts.redact_text_secrets(text)
+        assert replaced and "ter2" not in clean and "Hun" not in clean, repr(clean)
 
 
 def test_the_frozen_base_redactor_matches_what_the_base_revision_replaced() -> None:

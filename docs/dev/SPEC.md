@@ -3987,8 +3987,13 @@ and revocable on its own:
   is still replaced (a frozen copy of it in
   `tests/_activity_redaction_baseline.py`), that whatever one form finds for
   one keyword alone is replaced, also in generated pairs, triples and nested
-  phrasings (`tests/test_activity_redaction_properties.py`), and that 28
-  adversarial shapes stay near-linear between 10 KB and 40 KB.
+  phrasings (`tests/test_activity_redaction_properties.py`), that the index
+  stops at exactly the characters the scans it replaced stopped at (every
+  BMP code point; an ASCII run is ASCII without whitespace, control
+  characters included) and redacts generated text with control characters,
+  other spaces, zero-width characters and other scripts exactly as those
+  scans did, and that 28 adversarial shapes stay near-linear between 10 KB
+  and 40 KB.
   Keywords inside a URL are left to URL scrubbing. Known gaps: a plain word
   after whitespace alone ("password swordfish"), a plain word after `to` or
   after a qualifier ("set the password to swordfish", "the password for the

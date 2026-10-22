@@ -447,7 +447,8 @@ _REGION_BREAKERS_RE: Final = re.compile(
 _MIN_CLOSED_VALUE_CHARS: Final = 8
 #: Characters that end a token, an ASCII run, a run of closing marks or of opening marks (:class:`_TextIndex`).
 _WHITESPACE_RE: Final = re.compile(r"\s")
-_NOT_ASCII_RUN_RE: Final = re.compile(r"[^\x21-\x7e]")
+#: A run of ASCII (a Japanese sentence's unquoted value) is ASCII without whitespace, control characters too.
+_NOT_ASCII_RUN_RE: Final = re.compile(r"[^\x00-\x7f]|\s")
 _NOT_CLOSING_RE: Final = re.compile("[^" + "".join(re.escape(char) for char in sorted(_TRAILING_MARKS)) + "]")
 _NOT_OPENING_RE: Final = re.compile("[^" + "".join(re.escape(char) for char in sorted(_VALUE_QUOTES)) + "]")
 #: How far an index question looks before it builds its table.
@@ -1016,16 +1017,25 @@ class _TextIndex:
         return self.backward(_WHITESPACE_RE, _not_space, end) + 1
 
     def ascii_start(self, end: int) -> int:
-        """The start of the run of printable ASCII that ends at ``end``."""
-        return self.backward(_NOT_ASCII_RUN_RE, _printable_ascii, end) + 1
+        """The start of the run of ASCII without whitespace that ends at ``end``."""
+        return self.backward(_NOT_ASCII_RUN_RE, _ascii_not_space, end) + 1
+
+    def ascii_end(self, pos: int) -> int:
+        """The end of the run of ASCII without whitespace that goes on from ``pos``."""
+        return self.forward(_NOT_ASCII_RUN_RE, pos)
+
+    def breaker(self, pos: int) -> int:
+        """The first opening quote or bracket, or first character of a Japanese form after a keyword
+        (:data:`_REGION_BREAKERS_RE`), at or after ``pos``."""
+        return self.forward(_REGION_BREAKERS_RE, pos)
 
 
 def _not_space(char: str) -> bool:
     return not char.isspace()
 
 
-def _printable_ascii(char: str) -> bool:
-    return "!" <= char <= "~"
+def _ascii_not_space(char: str) -> bool:
+    return char.isascii() and not char.isspace()
 
 
 def _closed_part(index: _TextIndex, span: tuple[int, int]) -> tuple[int, int] | None:
@@ -1041,7 +1051,7 @@ def _closed_part(index: _TextIndex, span: tuple[int, int]) -> tuple[int, int] | 
     start, end = span
     if end - start < _MIN_CLOSED_VALUE_CHARS or index.run_end(start) < end:
         return None
-    if index.forward(_REGION_BREAKERS_RE, start) < end or index.trimmed(end, index.run_end(end)) != end:
+    if index.breaker(start) < end or index.trimmed(end, index.run_end(end)) != end:
         return None
     labels = 0
     while labels <= _MAX_CONNECTORS and index.text[end - labels - 1] in _LABEL_MARKS:
@@ -1315,7 +1325,7 @@ def _japanese_value_after(index: _TextIndex, keyword: re.Match[str]) -> tuple[in
     span = _quoted_value(text, pos)
     quoted, end = span is not None, span[1] + 1 if span else pos
     if span is None:
-        end = index.forward(_NOT_ASCII_RUN_RE, pos)
+        end = index.ascii_end(pos)
         span = _unquoted_value(index, pos, end) if end > pos else None
     if span is None or not text.startswith(_JA_OBJECT, _space_after(text, end)):
         return None
