@@ -19,6 +19,10 @@ Hermes model itself may read it:
   ``private`` in Venice's live catalog. Anything else is refused before the
   archive is opened.
 
+``mordred_mail_sync`` (:mod:`.mail_tool`) is registered in the same toolset: it
+fetches new mail into ``mordred.db`` and returns counts only, so it is not a
+reader tool (see that module).
+
 Opening the archive unseals the credentials through the Secure Enclave (Touch
 ID unless disabled), exactly like the CLI and the browser extension.
 
@@ -612,12 +616,15 @@ def register_tools(ctx: Any) -> None:
     register = getattr(ctx, "register_tool", None)
     if register is None:
         return
-    tools: tuple[tuple[dict[str, Any], Any, Any], ...] = (
-        (_ASK_SCHEMA, telegram_ask, tools_available),
-        (_CHATS_SCHEMA, telegram_chats, tools_available),
-        (_SEARCH_SCHEMA, mordred_history_search, history_search_available),
+    from . import mail_tool
+
+    tools: tuple[tuple[dict[str, Any], Any, Any, str], ...] = (
+        (_ASK_SCHEMA, telegram_ask, tools_available, "✈️"),
+        (_CHATS_SCHEMA, telegram_chats, tools_available, "✈️"),
+        (_SEARCH_SCHEMA, mordred_history_search, history_search_available, "✈️"),
+        (mail_tool.SCHEMA, mail_tool.mordred_mail_sync, mail_tool.mail_sync_available, "✉️"),
     )
-    for schema, handler, check_fn in tools:
+    for schema, handler, check_fn, emoji in tools:
         try:
             register(
                 name=schema["name"],
@@ -627,7 +634,7 @@ def register_tools(ctx: Any) -> None:
                 check_fn=check_fn,
                 is_async=True,
                 description=schema["description"],
-                emoji="✈️",
+                emoji=emoji,
             )
         except Exception as exc:
             _log.warning("mordred_e2e: could not register %s (%s)", schema["name"], type(exc).__name__)

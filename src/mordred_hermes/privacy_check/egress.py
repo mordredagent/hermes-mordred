@@ -48,6 +48,13 @@ session durably (:mod:`._reader_sessions`) before the first read runs, so a
 restarted Hermes keeps the restriction; a reader tool without a session id,
 or whose record cannot be written, is refused.
 
+``mordred_mail_sync`` (:data:`MAIL_SYNC_TOOL`) is a first-party tool that is
+NOT a reader tool: its only argument is a number and its result is counts, so
+it neither taints nor enters reader mode, it stays allowed in a reader session
+(:data:`READER_ALLOWED`), and its fixed destination (the IMAP server sealed at
+``mail setup``) lets it run under ``lockdown``/``search`` (:data:`FIRST_PARTY_TOOLS`).
+The operator's tool blocklist still applies to it at every level.
+
 Configuration (``config.yaml``)::
 
     plugins:
@@ -117,9 +124,12 @@ LOCAL_TOOLS = frozenset(
 # Tools that read imported private history (Telegram, the imported-message
 # store) into the session. Calling one puts the session into reader mode.
 READER_TOOLS = frozenset({"telegram_ask", "telegram_chats", "mordred_history_search"})
-# Mordred's own tools: the destination is fixed in code (Venice, loopback or
-# the local store).
-FIRST_PARTY_TOOLS = READER_TOOLS
+# Fetches new mail into the encrypted store; arguments carry no session data
+# and the result carries counts only, so it is not a reader tool.
+MAIL_SYNC_TOOL = "mordred_mail_sync"
+# Mordred's own tools: the destination is fixed in code (Venice, loopback, the
+# local store, or the IMAP server sealed at ``mail setup``).
+FIRST_PARTY_TOOLS = READER_TOOLS | frozenset({MAIL_SYNC_TOOL})
 # Reading any of these puts private data into the session (taint source).
 TAINT_SOURCES = READER_TOOLS
 SEARCH_TOOLS = frozenset({"web_search"})
@@ -145,6 +155,7 @@ EXEC_TOOLS = frozenset({"terminal", "execute_code", "browser_console", "browser_
 # once the session has read imported history.
 READER_ALLOWED = READER_TOOLS | frozenset(
     {
+        MAIL_SYNC_TOOL,
         "read_file",
         "search_files",
         "session_search",
@@ -678,8 +689,8 @@ def _decide_tool(
 ) -> Decision:
     level = policy.level
     # The operator's tool blocklist wins first; at level "off" it still
-    # covers the reader tools (an operator may switch imports off entirely).
-    if tool in policy.blocked_tools and (level != "off" or tool in READER_TOOLS):
+    # covers Mordred's own tools (an operator may switch imports off entirely).
+    if tool in policy.blocked_tools and (level != "off" or tool in FIRST_PARTY_TOOLS):
         return _block(level, "egress.blocked_tool", f"the tool {tool} is blocklisted.")
     if tool in READER_TOOLS:
         if session_id is None:
@@ -736,8 +747,8 @@ def _decide_level(tool: str, args: dict[str, Any], session_id: str | None, polic
     guard = _session_guard(tool, tainted, effective)
     if guard is not None:
         return guard
-    if _is_local(tool):
-        return Decision(allow=True)
+    if _is_local(tool) or tool in FIRST_PARTY_TOOLS:
+        return Decision(allow=True)  # local, or a destination fixed in code (never a taint source here)
     if tool == "delegate_task":
         return Decision(allow=True)  # child agents' tools pass through this hook too
     if effective == "ask":

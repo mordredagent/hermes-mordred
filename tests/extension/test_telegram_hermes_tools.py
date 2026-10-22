@@ -220,10 +220,18 @@ def test_tools_hidden_unless_logged_in_and_model_allowed(monkeypatch):
 def test_register_tools_uses_the_check_fn():
     calls: list[dict[str, Any]] = []
     hermes_tools.register_tools(SimpleNamespace(register_tool=lambda **kw: calls.append(kw)))
-    assert {c["name"] for c in calls} == {"telegram_ask", "telegram_chats", "mordred_history_search"}
+    assert {c["name"] for c in calls} == {
+        "telegram_ask",
+        "telegram_chats",
+        "mordred_history_search",
+        "mordred_mail_sync",
+    }
     checks = {c["name"]: c["check_fn"] for c in calls}
     assert checks["telegram_ask"] is checks["telegram_chats"] is hermes_tools.tools_available
     assert checks["mordred_history_search"] is hermes_tools.history_search_available
+    from mordred_hermes.extension.telegram import mail_tool
+
+    assert checks["mordred_mail_sync"] is mail_tool.mail_sync_available
     assert all(c["is_async"] for c in calls)
     hermes_tools.register_tools(SimpleNamespace())  # hosts without plugin tools: no-op
 

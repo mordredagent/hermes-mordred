@@ -477,7 +477,42 @@ def test_every_emitted_egress_rule_is_registered() -> None:
 
 def test_reader_tool_sets_are_consistent() -> None:
     assert {"telegram_ask", "telegram_chats"} <= egress.READER_TOOLS <= egress.READER_ALLOWED
-    assert egress.FIRST_PARTY_TOOLS == egress.TAINT_SOURCES == egress.READER_TOOLS
+    assert egress.TAINT_SOURCES == egress.READER_TOOLS
+    # The mail sync is first-party (fixed destination) and reader-allowed, but never a reader or taint source.
+    assert egress.READER_TOOLS | {egress.MAIL_SYNC_TOOL} == egress.FIRST_PARTY_TOOLS
+    assert egress.MAIL_SYNC_TOOL in egress.READER_ALLOWED and egress.MAIL_SYNC_TOOL not in egress.READER_TOOLS
     assert not egress.READER_ALLOWED & egress.READER_WEB_TOOLS
     assert not (egress.PERSIST_TOOLS | egress.EXEC_TOOLS) & (egress.READER_ALLOWED | egress.READER_WEB_TOOLS)
     assert {"web_search", "web_extract", "browser_navigate", "fetch_url"} <= egress.READER_WEB_TOOLS
+
+
+# -- mordred_mail_sync -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("level", ["off", "blocklist", "ask", "search", "lockdown"])
+def test_mail_sync_runs_in_a_reader_session_and_taints_nothing(hook: _Hook, level: str) -> None:
+    hook.policy = egress.EgressPolicy(level=level)
+    fresh = _sid()
+    assert hook("mordred_mail_sync", {"max_messages": 10}, fresh) is None, level
+    assert not egress.is_tainted(fresh) and not egress.reader_mode_established(fresh)
+    assert not egress.is_reader_session(fresh, home=hook.home)
+    reader = _sid()
+    assert hook("mordred_history_search", {"query": "x"}, reader) is None
+    assert hook("mordred_mail_sync", {}, reader) is None, level
+    # Still a reader session: actions stay refused after the sync.
+    blocked = hook("send_message", {"text": "x"}, reader)
+    assert blocked is not None and blocked["action"] == "block"
+
+
+def test_mail_sync_follows_the_operator_blocklist_even_at_level_off(hook: _Hook) -> None:
+    hook.policy = egress.EgressPolicy(level="off", blocked_tools=frozenset({"mordred_mail_sync"}))
+    result = hook("mordred_mail_sync", {}, _sid())
+    assert result is not None and result["action"] == "block"
+    assert hook.rules()[-1] == "egress.blocked_tool"
+
+
+def test_mail_sync_inside_a_bridge_batch_of_reads_is_allowed(hook: _Hook) -> None:
+    session = _sid()
+    calls = [{"name": "mordred_mail_sync", "arguments": {}}, {"name": "mordred_history_search", "arguments": {}}]
+    assert hook("tool_call", {"calls": calls}, session) is None
+    assert egress.reader_mode_established(session)
