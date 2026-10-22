@@ -3853,7 +3853,10 @@ and revocable on its own:
   the operator's `validate` and `adopt`.
 - Episodes record their revision (advanced by every committed append), worst
   reported coverage (`selected_tab` < `partial` < `gap`) and an observed
-  outcome; recording gaps stay explicit.
+  outcome; recording gaps stay explicit. An episode belongs to the peer that
+  first wrote to it; a batch from another peer naming that episode is refused
+  as `conflict` (only the local `activity correct` command may add a
+  correction to it).
 - **Corrections join their attempt's episode.** Before the replay check,
   `ActivityStore.append_batch` stores a `correction` event that carries an
   `attempt_id` in the episode of that attempt, looked up first among the same

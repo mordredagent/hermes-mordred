@@ -8,6 +8,7 @@ import json
 import time
 import uuid
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -164,6 +165,17 @@ def test_an_empty_top_level_query_falls_back_to_the_routes() -> None:
             "https://x.example/login?next=https%3A%2F%2Fy.example%2Fcb%3Ftoken%3Ds1",
             "https://x.example/login?next=https%3A%2F%2Fy.example%2Fcb%3Ftoken%3Dredacted",
         ),
+        ("https://x.example/a?a=1;token=abc", "https://x.example/a?a=1&token=redacted"),
+        ("https://x.example/a?a=1&b=2;token=s1&c=3;d=4", "https://x.example/a?a=1&b=2&token=redacted&c=3&d=4"),
+        ("https://x.example/cb#x=1;access_token=abc", "https://x.example/cb#x=1&access_token=redacted"),
+        ("https://x.example/#/cb?state=ok;code=s1", "https://x.example/#/cb?state=ok&code=redacted"),
+        (
+            "https://x.example/login?next=https%3A%2F%2Fy.example%2Fcb%3Fa%3D1%3Btoken%3Ds1",
+            "https://x.example/login?next=https%3A%2F%2Fy.example%2Fcb%3Fa%3D1%26token%3Dredacted",
+        ),
+        ("https://user:p@ss:w0rd@x.example/x", "https://user:redacted@x.example/x"),
+        ("https://:s1@x.example/a", "https://:redacted@x.example/a"),
+        ("https://u:s@1@x.example:8443/a?q=1", "https://u:redacted@x.example:8443/a?q=1"),
     ],
 )
 def test_credentials_in_urls_are_redacted(url: str, scrubbed: str) -> None:
@@ -181,6 +193,10 @@ def test_credentials_in_urls_are_redacted(url: str, scrubbed: str) -> None:
         "https://x.example/a?token=",
         "https://x.example/p#SECTION-2",
         "https://x.example/a?monkey=1&keyboard=2&sessions=3",
+        "https://x.example/a?a=1;b=2&c=3#x=1;y=2",
+        "https://user@x.example/a;v=1?q=a;b",
+        "https://user:@x.example/a",
+        "https://x.example:8443/@name:handle/a@b",
     ],
 )
 def test_urls_without_credentials_are_kept_verbatim(url: str) -> None:
@@ -193,6 +209,16 @@ def test_urls_without_credentials_are_kept_verbatim(url: str) -> None:
 def test_non_credential_parameters_keep_their_values_and_order_beside_a_redaction() -> None:
     url = "https://x.example/a?b=2&token=s1&a=1&q=shoes"
     assert scrub_urls(url) == "https://x.example/a?b=2&token=redacted&a=1&q=shoes"
+
+
+def test_a_userinfo_password_holding_at_and_colon_is_redacted_whole() -> None:
+    secret = "p@ss:w0rd@:x"
+    scrubbed = scrub_urls(f"https://user:{secret}@Host.Example:8443/x?q=1")
+
+    assert scrubbed == "https://user:redacted@Host.Example:8443/x?q=1"
+    assert not any(part in scrubbed for part in ("p@ss", "ss:w", "w0rd", "@:x"))
+    parts = urlsplit(scrubbed)
+    assert (parts.hostname, parts.port, parts.username, parts.password) == ("host.example", 8443, "user", "redacted")
 
 
 def test_deeply_nested_redirect_urls_are_redacted_without_unbounded_recursion() -> None:

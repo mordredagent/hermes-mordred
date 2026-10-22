@@ -176,8 +176,6 @@ _JWT_RE: Final = re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]
 #: URLs nested inside parameter values (a redirect target's own redirect) are scrubbed this deep;
 #: a value nested deeper that still holds a URL is redacted whole.
 _MAX_URL_NESTING: Final = 4
-#: ``scheme://user:password@`` — the password group is redacted.
-_USERINFO_RE: Final = re.compile(r"(?i)^([a-z][a-z0-9+.-]*://[^/?#@:]*:)([^/?#@]+)@")
 _SUFFIX_RE: Final = re.compile(r"[?#]")
 
 #: Allowlisted ``args`` keys and how each value is checked; anything else is dropped.
@@ -349,10 +347,14 @@ def _scrub_value(value: str, depth: int) -> tuple[str, bool]:
 
 
 def _scrub_params(params: str, depth: int) -> tuple[str, bool]:
-    """``a=1&token=x`` with credential values redacted, order kept; verbatim when nothing was redacted."""
+    """``a=1&token=x`` with credential values redacted, order kept; verbatim when nothing was redacted.
+
+    ``;`` separates parameters like ``&`` (servers that honour it would otherwise see a hidden
+    ``token``); a rebuilt list joins them with ``&``.
+    """
     scrubbed: list[tuple[str, str]] = []
     redacted = False
-    for name, value in parse_qsl(params, keep_blank_values=True):
+    for name, value in parse_qsl(params.replace(";", "&"), keep_blank_values=True):
         if credential_param(name) and value:
             scrubbed.append((name, REDACTED))
             redacted = True
@@ -398,12 +400,28 @@ def _split_suffix(url: str) -> tuple[str, str]:
     return (url, "") if cut is None else (url[: cut.start()], url[cut.start() :])
 
 
+def _scrub_userinfo(head: str) -> tuple[str, bool]:
+    """``scheme://user:password@host/path`` (no suffix) with a non-empty password redacted.
+
+    As in :func:`urllib.parse.urlsplit`, the authority ends at the first ``/`` and the userinfo at
+    its LAST ``@``, and the password follows the userinfo's first ``:``; so a password holding ``@``
+    or ``:`` is redacted whole. The username (possibly empty) and the host stay as sent.
+    """
+    scheme, sep, rest = head.partition("://")
+    authority, slash, path = rest.partition("/")
+    userinfo, at, host = authority.rpartition("@")
+    username, colon, password = userinfo.partition(":")
+    if not (sep and at and colon and password):
+        return head, False
+    return f"{scheme}{sep}{username}:{REDACTED}@{host}{slash}{path}", True
+
+
 def _scrub_url(url: str, depth: int) -> tuple[str, bool]:
     head, suffix = _split_suffix(url)
-    head, userinfo_hits = _USERINFO_RE.subn(rf"\1{REDACTED}@", head)
+    head, userinfo_hit = _scrub_userinfo(head)
     head, path_hit = _scrub_jwts(head)
     suffix, suffix_hit = _scrub_suffix(suffix, depth)
-    return head + suffix, userinfo_hits > 0 or path_hit or suffix_hit
+    return head + suffix, userinfo_hit or path_hit or suffix_hit
 
 
 def _scrub(text: str, depth: int = 0) -> tuple[str, bool]:

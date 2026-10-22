@@ -707,10 +707,19 @@ the receiver side is [`SPEC.md`](./SPEC.md) §"Event contract".
 
 ### Hermes-side use of the history (next design)
 
-- [ ] Inject admitted or raw history for the current host before browser tool
-  calls via `pre_tool_call`.
-- [ ] A bounded raw-history recall tool for Hermes; the admitted-lessons-only
-  rule of the recall tools is to be revisited.
-- [ ] Record Hermes's own browser tool calls as `source: hermes` events via
-  `post_tool_call`.
-- [ ] Accept `訂正:` / `correct:` corrections typed in Hermes chat.
+Design: `docs/superpowers/specs/2026-10-22-browser-history-for-hermes-design.md`
+(2026-10-22; `pre_tool_call` cannot annotate in Hermes 0.19.0, so the
+injection channels are `transform_tool_result` and `pre_llm_call`).
+
+- [ ] B1: `activity/history.py` reader and summarizer; site block appended to
+  `browser_navigate` results via `transform_tool_result`; turn-start context
+  via `pre_llm_call` when the user message names a host or shares task terms;
+  tools `mordred_browser_history` / `mordred_browser_history_episode`; config
+  keys `history_*`; hook payload contract, HOOK_PAYLOADS.md (§5 is stale about
+  `pre_llm_call`), SPEC and USAGE.
+- [ ] B2: record Hermes's own browser tool calls as `source: hermes` events via
+  `post_tool_call` (episode per session turn, task text from `pre_llm_call`,
+  field kind from the ref's snapshot line); accept `correct:` (or its
+  Japanese equivalent) corrections typed in Hermes chat.
+- [ ] B3: live validation with a real Hermes session and the operator's
+  extended capture, recorded in CI.md.

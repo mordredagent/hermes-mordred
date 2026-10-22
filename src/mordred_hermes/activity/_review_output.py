@@ -97,7 +97,6 @@ _CONSEQUENTIAL_RE: Final = re.compile(
     r"|支払|決済|購入|買う|買い|送金|振込|振り込|削除|消去|メッセージを送|メッセージ送信|メールを送|メール送信|"
     r"パスワード|ログイン情報|認証情報"
 )
-_CHECKED_TEXT: Final = ("guidance", "check_before_use")
 
 
 # --------------------------------------------------------------------------- #
@@ -192,7 +191,7 @@ def _semantics(output: ReviewOutput, snapshot: Snapshot) -> ReviewOutput | Outpu
         return OutputRejected("invalid_output")
     if any(event_id not in snapshot.event_ids for event_id in output.evidence_ids):
         return OutputRejected("evidence_unknown")
-    checked = [output.lesson[key] for key in _CHECKED_TEXT] + [output.verification_proposal]
+    checked = [output.lesson[key] for key in LESSON_KEYS] + [output.explanation, output.verification_proposal]
     if any(_CONSEQUENTIAL_RE.search(text) for text in checked):
         return OutputRejected("scope_disallowed")
     site_known = output.scope_site in snapshot.sites

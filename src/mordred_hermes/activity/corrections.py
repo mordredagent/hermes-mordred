@@ -86,7 +86,8 @@ def record_correction(
         event = normalize_event(raw, excluded_sites=excluded_sites)
     except EventRejected as exc:
         raise _refuse(exc.code) from None
-    store.append_batch(CORRECTION_PEER, f"{CORRECTION_PEER}:{store.meta().store_generation}", [event])
+    producer = f"{CORRECTION_PEER}:{store.meta().store_generation}"
+    store.append_batch(CORRECTION_PEER, producer, [event], foreign_episodes=True)
     return event
 
 

@@ -61,7 +61,8 @@ CopyCheck = Callable[[Path], Refusal | None]
 
 
 class BatchConflict(ActivityRefused):
-    """An ``event_id`` (or producer sequence) already stored with different content; nothing was written."""
+    """An ``event_id`` (or producer sequence) already stored with different content, or an episode
+    another peer owns; nothing was written."""
 
     def __init__(self) -> None:
         super().__init__(refusal("conflict"))
@@ -305,14 +306,22 @@ class ActivityStore:
         *,
         trust: str = "paired_peer",
         permitted_use: str = "learning",
+        foreign_episodes: bool = False,
     ) -> AppendResult:
-        """Append new events in one transaction; replays are duplicates, changed replays a conflict."""
+        """Append new events in one transaction; replays are duplicates, changed replays a conflict.
+
+        An episode belongs to the peer that first wrote to it; new events naming another peer's episode
+        are a conflict. Only the local ``activity correct`` command passes ``foreign_episodes=True`` to
+        add a correction to an episode a peer wrote; paired peers never do.
+        """
         now = time.time()
         with self._transaction() as conn:
             # Re-homing must precede the replay check: it is a pure function of batch and store, so a resent
             # batch re-homes identically and stays a duplicate instead of a conflict.
             events = self._rehome_corrections(conn, peer_id, events)
             fresh = self._fresh_events(conn, peer_id, producer_id, events)
+            if not foreign_episodes:
+                self._check_episode_owners(conn, peer_id, fresh)
             revisions: dict[str, int] = {}
             for episode_id in dict.fromkeys(event.episode_id for event in fresh):
                 group = [event for event in fresh if event.episode_id == episode_id]
@@ -389,6 +398,17 @@ class ActivityStore:
                 raise BatchConflict()
             fresh.append(event)
         return fresh
+
+    @staticmethod
+    def _check_episode_owners(conn: sqlite3.Connection, peer_id: str, fresh: Sequence[NormalizedEvent]) -> None:
+        """An episode belongs to the peer that first wrote to it; raises :class:`BatchConflict` otherwise."""
+        for episode_id in dict.fromkeys(event.episode_id for event in fresh):
+            owner = conn.execute(
+                "SELECT peer_id FROM activity_events WHERE episode_id = ? ORDER BY episode_revision, receipt LIMIT 1",
+                (episode_id,),
+            ).fetchone()
+            if owner is not None and owner[0] != peer_id:
+                raise BatchConflict()
 
     @staticmethod
     def _advance_episode(

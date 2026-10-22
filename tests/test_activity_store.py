@@ -23,9 +23,11 @@ from mordred_hermes.activity.contracts import (
     canonical_json,
     normalize_event,
 )
+from mordred_hermes.activity.corrections import CORRECTION_PEER
 from mordred_hermes.activity.store import SUPPORTED_SCHEMA_VERSION, ActivityStore, BatchConflict
 
 PEER = "operator:peer-a"
+PEER_B = "operator:peer-b"
 PRODUCER = "prod-1"
 
 
@@ -95,6 +97,48 @@ def test_another_peer_cannot_claim_an_existing_event_id(tmp_path: Path) -> None:
     store.append_batch(PEER, PRODUCER, [original])
     with pytest.raises(BatchConflict):
         store.append_batch("operator:peer-b", PRODUCER, [original])
+
+
+def test_another_peer_cannot_append_to_an_episode_it_did_not_start(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    own = [event(1), event(2)]
+    store.append_batch(PEER, PRODUCER, own)
+    before = store.episode("ep-1")
+
+    with pytest.raises(BatchConflict) as caught:
+        store.append_batch(PEER_B, PRODUCER, [event(1, episode="ep-b"), event(2, phase="correction", text="x")])
+
+    assert caught.value.code == "conflict"
+    assert rows(store, "SELECT count(*) FROM activity_events") == [(2,)]
+    assert store.episode("ep-b") is None
+    assert store.episode("ep-1") == before
+    replay = store.append_batch(PEER, PRODUCER, own)
+    assert (replay.accepted, replay.duplicates, replay.episode_revisions) == (0, 2, {"ep-1": 1})
+    assert store.append_batch(PEER, PRODUCER, [event(3)]).episode_revisions == {"ep-1": 2}
+
+
+def test_another_peer_may_start_its_own_episode(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    store.append_batch(PEER, PRODUCER, [event(1)])
+
+    result = store.append_batch(PEER_B, PRODUCER, [event(1, episode="ep-b")])
+
+    assert (result.accepted, result.duplicates, result.episode_revisions) == (1, 0, {"ep-b": 1})
+    assert rows(store, "SELECT DISTINCT peer_id FROM activity_events WHERE episode_id = 'ep-b'") == [(PEER_B,)]
+
+
+def test_a_local_correction_does_not_take_over_the_peers_episode(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    store.append_batch(PEER, PRODUCER, [event(1)])
+    fix = event(1, phase="correction", source="user_correction", actor="human", text="use the switcher")
+
+    store.append_batch(CORRECTION_PEER, "cli", [fix], foreign_episodes=True)
+
+    assert store.append_batch(PEER, PRODUCER, [event(2)]).episode_revisions == {"ep-1": 3}
+    with pytest.raises(BatchConflict):
+        store.append_batch(PEER_B, PRODUCER, [event(1)])
+    with pytest.raises(BatchConflict):
+        store.append_batch(CORRECTION_PEER, "cli", [event(2, phase="correction", text="again")])
 
 
 def test_a_reused_producer_sequence_is_a_conflict(tmp_path: Path) -> None:
@@ -461,11 +505,32 @@ def test_a_correction_for_an_unknown_attempt_keeps_its_own_episode(tmp_path: Pat
 
 def test_a_correction_never_joins_another_peers_attempt(tmp_path: Path) -> None:
     store = make_store(tmp_path)
-    store.append_batch("operator:peer-b", PRODUCER, operator_task())
+    store.append_batch(PEER_B, PRODUCER, operator_task())
+    before = store.episode("ep-task")
+    fix = post_task_correction()
 
-    store.append_batch(PEER, PRODUCER, [post_task_correction()])
+    store.append_batch(PEER, PRODUCER, [fix])
 
     assert store.episode("ep-fresh") is not None
+    assert store.episode("ep-task") == before
+    assert rows(store, "SELECT episode_id, peer_id FROM activity_events WHERE event_id = ?", fix.event_id) == [
+        ("ep-fresh", PEER)
+    ]
+    assert rows(store, "SELECT DISTINCT peer_id FROM activity_events WHERE episode_id = 'ep-task'") == [(PEER_B,)]
+
+
+def test_a_correction_cannot_follow_its_own_batch_into_another_peers_episode(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    store.append_batch(PEER_B, PRODUCER, operator_task())
+    before = store.episode("ep-task")
+    claimed = event(6, "ep-task", phase="intended", attempt_id="att-2")
+
+    with pytest.raises(BatchConflict):
+        store.append_batch(PEER, PRODUCER, [claimed, post_task_correction(seq=7, attempt_id="att-2")])
+
+    assert store.episode("ep-task") == before
+    assert store.episode("ep-fresh") is None
+    assert rows(store, "SELECT DISTINCT peer_id FROM activity_events") == [(PEER_B,)]
 
 
 def test_a_correction_stored_before_its_attempt_replays_as_a_duplicate(tmp_path: Path) -> None:
