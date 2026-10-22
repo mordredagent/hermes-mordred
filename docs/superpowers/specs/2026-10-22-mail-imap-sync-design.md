@@ -311,7 +311,13 @@ review that grouping has two phases, so a crafted message cannot be weighed
 before the reply chains it names have formed: each message first joins its
 direct parent in the batch (or its siblings under an absent parent) when the
 two share a participant, then its other references are weighed by the guard
-in date order against those groups. A store created before
+in date order against those groups. After the sixth-pass review a reply
+without `In-Reply-To` takes its last `References` id as its direct parent,
+siblings under an absent parent join only with the same participants, direct
+parents are joined ancestors first and other references fewest first, and no
+union joins two groups that both already hold several messages, so neither
+the batch's order nor a forged date lets one crafted message bridge threads.
+A store created before
 import schema v2 has no stored references for the messages it already holds,
 so a later-arriving parent cannot join them until those children are fetched
 again (`mail fetch --since <date>` re-fetches identical copies, which attach

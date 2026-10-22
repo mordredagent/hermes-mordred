@@ -277,3 +277,93 @@ def test_only_the_last_ten_references_are_followed_and_the_parent_is_kept() -> N
     threads = {thread.members: thread for thread in build_threads([far, near, reply], own={OWNER})}
     assert set(threads) == {("far",), ("near", "reply")}  # anc0 is beyond the followed ids
     assert threads[("near", "reply")].partial  # but still marks the thread partial
+
+
+# --- the sixth-pass review: References-only replies and siblings of an absent parent ---------------
+
+BOB = "bob@example.net"
+
+
+def test_references_only_replies_and_a_crafted_message_dated_earliest_stay_six_threads() -> None:
+    """Replies without ``In-Reply-To`` (one reference each) still join their parent before the crafted
+    message naming the five roots is weighed, whatever the batch order, although it is dated first."""
+    pair = frozenset({ALICE, OWNER})
+    items: list[ThreadInput] = []
+    for n in range(5):
+        items.append(item(f"r{n}", mid=f"root{n}", people=pair, at=1_000 + n))
+        items.append(item(f"p{n}", mid=f"reply{n}", refs=(f"root{n}",), people=pair, at=2_000 + n))
+    roots = tuple(f"root{n}" for n in range(5))
+    items.append(item("x", mid="crafted", refs=roots, people=frozenset({MALLORY, ALICE, OWNER}), at=500))
+    results = set()
+    for order in _orders(items):
+        stats: Counter[str] = Counter()
+        threads = build_threads(order, own={OWNER}, stats=stats)
+        assert sorted(thread.members for thread in threads) == [
+            ("r0", "p0"), ("r1", "p1"), ("r2", "p2"), ("r3", "p3"), ("r4", "p4"), ("x",)
+        ]  # fmt: skip
+        assert stats["merge_skipped"] > 0
+        results.add(tuple((thread.thread_key, thread.members) for thread in threads))
+    assert len(results) == 1
+
+
+def _two_branches_and_a_crafted_sibling(shape: str) -> list[ThreadInput]:
+    """Two two-message branches under the absent parent A with disjoint correspondents (Alice, Bob), and
+    Mallory's reply to A naming both, dated first. ``siblings``: all four reply to A; ``chain``: each
+    branch is a reply to A and a reply to that."""
+    items = [item("x", mid="X", irt=("A",), refs=("A",), people=frozenset({MALLORY, ALICE, BOB, OWNER}), at=50)]
+    for branch, (who, at) in {"b": (ALICE, 100), "c": (BOB, 300)}.items():
+        pair = frozenset({who, OWNER})
+        items.append(item(f"{branch}1", mid=f"{branch}1", irt=("A",), refs=("A",), people=pair, at=at))
+        parent = "A" if shape == "siblings" else f"{branch}1"
+        refs = ("A",) if shape == "siblings" else ("A", f"{branch}1")
+        items.append(item(f"{branch}2", mid=f"{branch}2", irt=(parent,), refs=refs, people=pair, at=at + 100))
+    return items
+
+
+@pytest.mark.parametrize("shape", ["siblings", "chain"])
+def test_a_crafted_sibling_naming_both_correspondents_bridges_no_branches(shape: str) -> None:
+    results = set()
+    for order in _orders(_two_branches_and_a_crafted_sibling(shape)):
+        stats: Counter[str] = Counter()
+        threads = [set(thread.members) for thread in build_threads(order, own={OWNER}, stats=stats)]
+        b_side = next(members for members in threads if "b1" in members)
+        c_side = next(members for members in threads if "c1" in members)
+        assert b_side != c_side and {"b1", "b2"} <= b_side and {"c1", "c2"} <= c_side
+        assert (b_side | c_side) - {"x"} == {"b1", "b2", "c1", "c2"}  # the crafted message joins one or none
+        assert stats["merge_skipped"] > 0
+        results.add(tuple(sorted(tuple(sorted(members)) for members in threads)))
+    assert len(results) == 1
+
+
+def test_siblings_of_an_absent_parent_with_the_same_correspondents_and_their_replies_group() -> None:
+    """Two replies to an absent root (same correspondents) each with a reply: one thread in any order."""
+    pair = frozenset({ALICE, BOB, OWNER})
+    items = [
+        item("b1", mid="B1", irt=("A",), refs=("A",), people=pair, at=100),
+        item("c1", mid="C1", irt=("A",), refs=("A",), people=pair, at=200),
+        item("b2", mid="B2", irt=("B1",), refs=("A", "B1"), people=pair, at=300),
+        item("c2", mid="C2", refs=("A", "C1"), people=pair, at=400),  # References only
+    ]
+    for order in _orders(items):
+        stats: Counter[str] = Counter()
+        (thread,) = build_threads(order, own={OWNER}, stats=stats)
+        assert (thread.members, stats["merge_skipped"]) == (("b1", "c1", "b2", "c2"), 0)
+
+
+def test_a_branching_tree_with_references_only_replies_groups_whatever_the_order() -> None:
+    """Every union is guarded (two multi-message groups never join), yet a tree forms: ancestors join first."""
+    pair = frozenset({ALICE, OWNER})
+    tree = [
+        item("a", mid="A", people=pair, at=100),
+        item("b", mid="B", refs=("A",), people=pair, at=200),
+        item("e", mid="E", irt=("A",), refs=("A",), people=pair, at=210),
+        item("c", mid="C", refs=("A", "B"), people=pair, at=300),
+        item("f", mid="F", irt=("E",), people=pair, at=310),
+        item("d", mid="D", refs=("A", "B", "C"), people=pair, at=None),
+    ]
+    for seed in range(5):
+        shuffled = random.Random(seed).sample(tree, len(tree))
+        stats: Counter[str] = Counter()
+        (thread,) = build_threads(shuffled, own={OWNER}, stats=stats)
+        assert (thread.members, stats["merge_skipped"]) == (("a", "b", "e", "c", "f", "d"), 0)
+        assert thread.thread_key == default_thread_key(tree[0]) and not thread.partial

@@ -6,8 +6,9 @@ conversation. ONE implementation decides it for both places mail threads are
 joined:
 
 - the grouping of one batch (:func:`.threading.build_threads`: a message and its direct
-  parent, or its siblings under an absent parent, by rule 2 between the two messages;
-  every other reference edge by :func:`fold_plan`, after those reply chains formed);
+  parent, or its siblings with the same participants under an absent parent, by rules 2
+  and 3 between the two, ancestors first; every other reference edge by :func:`fold_plan`,
+  fewest followed ids first, after those reply chains formed);
 - the store's reconciliation across batches (``ImportStore.write_batch(..., refs=...)``).
 
 The rules (:func:`followed_refs`, :func:`fold_plan`):

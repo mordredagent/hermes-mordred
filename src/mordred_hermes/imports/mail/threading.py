@@ -8,22 +8,36 @@
   Those headers are typed by the sender, so the grouping runs in two phases
   whose result does not depend on the order of the input:
 
-  1. Strong edges. A message joins its direct parent (the last ``In-Reply-To``
-     id) when that message is in the import, or, when it is not, the other
-     messages naming the same absent parent; each such pair is joined only when
-     the two messages share a participant other than the account owner
-     (``own``). Every edge is decided by its two messages alone, so reply
-     chains are formed before any message naming several of them is weighed.
-     An absent parent then belongs to the largest group of its children.
-  2. Weak edges, in date order (then source uid): the groups of a message's
-     followed ids (the last ``MAX_MERGE_REFS``, parent kept) that name a message
-     of the import, and the group holding its absent parent, are decided
-     together by :func:`.merge_guard.fold_plan`, the guard the store applies
-     across batches, against the groups as they stand: a group joins only when
-     it shares a participant other than the owner, at most one group that
+  A message's direct parent is its last ``In-Reply-To`` id, else (RFC 5322)
+  its last ``References`` id. No union, in either phase, joins two groups that
+  both already hold several messages (rule 3 of :mod:`.merge_guard`).
+
+  1. Strong edges, decided by the structure of the batch alone (never its
+     order or the dates senders typed). Children of the same absent parent
+     whose non-owner participant sets are equal join first (``own`` holds the
+     account owner's addresses, which never count). Then, top-down along the
+     parents that are in the import (ancestors first, then source uid), a
+     message joins its direct parent when the two messages share a
+     participant and every other followed id it names that is in the import
+     is already in its parent's group; a message naming other groups is left
+     to phase 2. Each message so joins its parent's group while it is still on
+     its own, so reply chains form whatever their order, and the direct
+     parents form a forest, so no message joins two groups here. An absent
+     parent then belongs to the largest group of its children.
+  2. Weak edges, fewest followed ids first (then date, then source uid), so
+     single-reference replies settle before any message naming several groups
+     is weighed: the groups of a message's followed ids (the last
+     ``MAX_MERGE_REFS``, parent kept) that name a message of the import, and
+     the group holding its absent parent, are decided together by
+     :func:`.merge_guard.fold_plan`, the guard the store applies across
+     batches, against the groups as they stand: a group joins only when it
+     shares a participant other than the owner, at most one group that
      already holds several messages takes part in a merge, and a Gmail thread
-     is never folded into another. Older absent ancestors are not followed. A
-     message the guard held back counts once as ``merge_skipped`` in ``stats``.
+     is never folded into another. A message following more than
+     ``_MANY_REFS`` ids that names more than one group already holding several
+     messages merges nothing. Older absent ancestors are not followed.
+
+  A message a guard held back counts once as ``merge_skipped`` in ``stats``.
 - ``excluded`` messages (copies the store will not write: duplicates and
   rejected copies of stored rows) take no part: their references are not
   followed and an id they carry is not a join point (another message naming it
@@ -67,6 +81,8 @@ __all__ = [
 ]
 
 HEURISTIC_WINDOW_SECONDS: Final = 30 * 24 * 3600
+#: Phase 2: a message following more ids than this merges nothing when it names several multi-message groups.
+_MANY_REFS: Final = 3
 _PREFIX_RE: Final = re.compile(
     r"^\s*(?:"
     r"(?:re|fwd?|fw|aw|wg|返信|転送)\s*(?:\[\d{1,4}\]|\(\d{1,4}\))?\s*[:\uff1a]"
@@ -154,6 +170,22 @@ def _sort_key(item: ThreadInput) -> tuple[int, int, int]:
     return (item.sent_at is None, item.sent_at or 0, item.order)
 
 
+def _direct_parent(item: ThreadInput) -> str | None:
+    """The id ``item`` replies to: its last ``In-Reply-To`` id, else its last ``References`` id (RFC 5322)."""
+    if item.in_reply_to:
+        return item.in_reply_to[-1]
+    return item.references[-1] if item.references else None
+
+
+def _targets(item: ThreadInput, present: Container[str]) -> list[str]:
+    """The ids phase 2 weighs for ``item``: its followed ids naming messages of the import, then its absent parent."""
+    refs = [ref for ref in followed_refs(item.in_reply_to, item.references) if ref in present]
+    parent = _direct_parent(item)
+    if parent is not None and parent not in present:
+        refs.append(parent)
+    return refs
+
+
 def _referenced(item: ThreadInput) -> tuple[str, ...]:
     return (*item.in_reply_to, *reversed(item.references))
 
@@ -173,7 +205,7 @@ class _Groups:
     def __init__(self) -> None:
         self._uf = _UnionFind()
         self._facts: dict[str, GroupFacts] = {}
-        self.skipped = 0
+        self.held: set[str] = set()  # source uids of the messages a guard held back (each counts once)
 
     def root(self, node: str) -> str:
         return self._uf.find(node)
@@ -194,25 +226,37 @@ class _Groups:
         if linked and item.message_id:
             self.union(node, f"m:{item.message_id}")
 
-    def follow(self, item: ThreadInput, present: Container[str]) -> None:
-        """Weak edges: join ``item``'s group with the groups it names, as the merge guard allows.
+    def join(self, item_key: str, node: str) -> bool:
+        """Strong edge: join the message ``item_key`` with ``node``'s group unless both already hold several messages.
 
-        Those are the groups of the messages of the import (``present``) among its
-        followed ids, and the group holding its absent parent (phase 1 gave it to
-        the largest group of that parent's children).
+        A refused edge counts ``item_key`` as held back (rule 3 of :mod:`.merge_guard`).
+        """
+        a, b = self.root(f"k:{item_key}"), self.root(node)
+        if a != b and self.facts(a).messages > 1 and self.facts(b).messages > 1:
+            self.held.add(item_key)
+            return False
+        self.union(a, b)
+        return True
+
+    def follow(self, item: ThreadInput, targets: Sequence[str]) -> None:
+        """Weak edges: join ``item``'s group with the groups of ``targets`` (:func:`_targets`) as the guard allows.
+
+        The absent parent's group is the one phase 1 gave it (the largest group of
+        that parent's children).
         """
         home = self.root(f"k:{item.key}")
-        refs = [ref for ref in followed_refs(item.in_reply_to, item.references) if ref in present]
-        parent = item.in_reply_to[-1] if item.in_reply_to else None
-        if parent is not None and parent not in present:
-            refs.append(parent)
-        involved = {home, *(self.root(f"m:{ref}") for ref in refs)}
+        involved = {home, *(self.root(f"m:{ref}") for ref in targets)}
         if len(involved) < 2:
             return
-        survivor, others, guarded = fold_plan(home, {root: self.facts(root) for root in involved})
+        facts = {root: self.facts(root) for root in involved}
+        if len(targets) > _MANY_REFS and sum(facts[root].messages > 1 for root in involved - {home}) > 1:
+            self.held.add(item.key)  # it names several established threads: it joins none of them
+            return
+        survivor, others, guarded = fold_plan(home, facts)
         for other in others:
             self.union(survivor, other)
-        self.skipped += guarded
+        if guarded:
+            self.held.add(item.key)
 
     def union(self, left: str, right: str) -> None:
         """Join the groups of the nodes ``left`` and ``right`` (``k:`` source uid, ``m:`` Message-ID, ``g:`` Gmail)."""
@@ -226,39 +270,88 @@ class _Groups:
         self._facts.pop(child, None)
 
 
+def _depths(parents: Mapping[str, str]) -> dict[str, int]:
+    """Each key's depth along its parents in the import (a key absent from ``parents`` is a root, depth 0).
+
+    Keys on, or leading into, a cycle of crafted ids get none (they have no strong edge).
+    """
+    depth: dict[str, int] = {}
+    cyclic: set[str] = set()
+    for start in parents:
+        path: list[str] = []
+        seen: set[str] = set()
+        node = start
+        while node in parents and node not in depth and node not in cyclic and node not in seen:
+            path.append(node)
+            seen.add(node)
+            node = parents[node]
+        if node in cyclic or node in seen:
+            cyclic.update(path)
+            continue
+        base = depth.get(node, 0)
+        for offset, key in enumerate(reversed(path), start=1):
+            depth[key] = base + offset
+    return depth
+
+
+def _sibling_classes(
+    groups: _Groups, children: Mapping[str, list[ThreadInput]], people: Mapping[str, frozenset[str]]
+) -> None:
+    """Children of the same absent parent with the same (non-empty) participant set join: equivalence classes."""
+    for kids in children.values():
+        first: dict[frozenset[str], str] = {}
+        for kid in sorted(kids, key=lambda kid: kid.key):
+            if people[kid.key]:
+                groups.join(kid.key, f"k:{first.setdefault(people[kid.key], kid.key)}")
+
+
+def _parent_edges(
+    groups: _Groups,
+    items: Sequence[ThreadInput],
+    parents: Mapping[str, str],
+    present: Container[str],
+    people: Mapping[str, frozenset[str]],
+) -> None:
+    """Each message with its direct parent, ancestors first, so it joins while still on its own (module doc)."""
+    depth = _depths(parents)
+    for item in sorted((item for item in items if item.key in depth), key=lambda item: (depth[item.key], item.key)):
+        parent = parents[item.key]
+        if not people[item.key] & people[parent]:
+            continue  # weighed (and counted) in phase 2
+        home = groups.root(f"k:{parent}")
+        named = (ref for ref in followed_refs(item.in_reply_to, item.references) if ref in present)
+        if all(groups.root(f"m:{ref}") == home for ref in named):
+            groups.join(item.key, f"k:{parent}")
+
+
 def _strong_edges(
     groups: _Groups,
     items: Sequence[ThreadInput],
     present: Mapping[str, str],
     people: Mapping[str, frozenset[str]],
 ) -> None:
-    """Phase 1: each message with its direct parent, or with its siblings under the same absent parent.
+    """Phase 1: sibling classes under absent parents, then direct parents top-down (module docstring).
 
-    A pair is joined only when the two messages share a participant (the owner's
-    addresses are already left out of ``people``); each decision depends on the
-    pair alone, never on the order of the input. Siblings are joined through the
-    first sibling seen with each address, which forms the same groups as
-    comparing every pair. Each absent parent's node then joins the largest group
-    of its children (then the smallest root), so in phase 2 only the children
-    outside that group are weighed against it.
+    Each absent parent's node then joins the largest group of its children (then
+    the smallest root), so in phase 2 only the children outside that group are
+    weighed against it.
     """
-    first_with: dict[tuple[str, str], str] = {}
-    children: dict[str, list[str]] = {}
+    children: dict[str, list[ThreadInput]] = {}
+    parents: dict[str, str] = {}
     for item in items:
-        if not item.in_reply_to:
+        parent = _direct_parent(item)
+        if parent is None:
             continue
-        parent = item.in_reply_to[-1]
         found = present.get(parent)
-        if found is not None:
-            if people[item.key] & people[found]:
-                groups.union(f"k:{item.key}", f"k:{found}")
-            continue
-        children.setdefault(parent, []).append(item.key)
-        for address in people[item.key]:
-            groups.union(f"k:{item.key}", f"k:{first_with.setdefault((parent, address), item.key)}")
-    for parent, keys in children.items():
-        sizes = Counter(groups.root(f"k:{key}") for key in keys)
-        groups.union(f"m:{parent}", min(sizes, key=lambda root: (-sizes[root], root)))
+        if found is None:
+            children.setdefault(parent, []).append(item)
+        else:
+            parents[item.key] = found
+    _sibling_classes(groups, children, people)
+    _parent_edges(groups, items, parents, present, people)
+    for parent, kids in children.items():
+        sizes = Counter(groups.root(f"k:{kid.key}") for kid in kids)
+        groups.union(f"m:{parent}", min(sizes, key=lambda root: (-sizes[root], root)))  # a placeholder: brings nobody
 
 
 def _components(
@@ -275,12 +368,13 @@ def _components(
             present.setdefault(item.message_id, item.key)
     followers = [item for item in items if item.key not in excluded and not item.gm_thread_id]
     _strong_edges(groups, followers, present, people)
-    for item in sorted(followers, key=_dated_order):
-        groups.follow(item, present)
+    targets = {item.key: _targets(item, present) for item in followers}
+    for item in sorted(followers, key=lambda item: (len(targets[item.key]), *_dated_order(item))):
+        groups.follow(item, targets[item.key])
     found: dict[str, list[ThreadInput]] = {}
     for item in items:
         found.setdefault(groups.root(f"k:{item.key}"), []).append(item)
-    return found, groups.skipped
+    return found, len(groups.held)
 
 
 def _heuristic_groups(singles: list[ThreadInput]) -> list[list[ThreadInput]]:

@@ -782,6 +782,10 @@ Follow-ups left by the landed code:
   Japanese questions in Chinese and citing evidence ids in 16 of 42 answers; rerun
   on the production Venice private model before drawing conclusions about the
   head-line format.
+- [ ] In-batch grouping residual: a message that reuses an absent parent's exact
+  Message-ID is indistinguishable from the real parent and can bridge that parent's
+  sibling groups; the merge guard still bounds the damage to that parent's
+  children. Revisit if real mail shows abuse.
 - [ ] IMAP sync beyond the chosen mailboxes (other folders and labels' own
   folders), IP-literal or loopback hosts (for example a local bridge), and a
   way to change the Touch ID choice without `mail forget` and a new setup.

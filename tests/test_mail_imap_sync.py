@@ -910,6 +910,75 @@ def test_replies_naming_absent_ancestors_and_a_crafted_message_stay_six_conversa
     assert len(outcomes) == 1  # the same conversations whatever the order
 
 
+def _sync_in_three_orders(tmp_path: Path, messages: list[FakeMessage]) -> list[tuple[int, int, dict[str, list[str]]]]:
+    """(the grouping's and the store's ``merge_skipped``, the conversations) of a fresh store syncing
+    ``messages`` as one batch, in the mailbox's UID order as built, reversed and shuffled with a fixed seed.
+    The grouping's count is the dry run's: a written batch reports the store's, which sees no absent parent."""
+    orders = [messages, messages[::-1], random.Random(20261022).sample(messages, len(messages))]
+    outcomes = []
+    for run, order in enumerate(orders):
+        home, place = tmp_path / f"home{run}", tmp_path / f"store{run}"
+        home.mkdir()
+        place.mkdir()
+        store = make_store(place, home)
+        box = FakeMailbox(uidvalidity=2, messages=dict(enumerate(order, start=1)))
+        env = make_env(home, store, FakeImapServer({"INBOX": box}), FakeSecrets(generic_creds(sent=False)))
+        planned = run_fetch(FetchOptions(dry_run=True), env)
+        result = run_fetch(FetchOptions(), env)
+        assert (result.error, result.batches, result.inserted) == (None, 1, len(messages))  # one batch
+        outcomes.append((planned.merge_skipped, result.merge_skipped, _threads_of(store)))
+    return outcomes
+
+
+def test_references_only_replies_and_a_crafted_message_dated_first_stay_six_conversations(tmp_path: Path) -> None:
+    """The sixth-pass review: replies carry ``References`` only (one id, no ``In-Reply-To``) and Mallory's
+    message naming the five roots is dated before every thread."""
+    owner = f"Owner <{ADDRESS}>"
+    messages: list[FakeMessage] = []
+    for thread in range(5):
+        root, reply = 10 * thread + 10, 10 * thread + 11
+        messages.append(FakeMessage(mail(root, sender=_ALICE, to=owner, date=_DATES[2])))
+        headers = f"References: <msg{root}@example.net>\r\n"
+        messages.append(FakeMessage(mail(reply, sender=owner, to=_ALICE, extra_headers=headers, date=_DATES[3])))
+    roots = " ".join(f"<msg{10 * thread + 10}@example.net>" for thread in range(5))
+    crafted = mail(
+        99, sender=_MALLORY, to=f"{owner}, {_ALICE}", extra_headers=f"References: {roots}\r\n", date=_DATES[1]
+    )
+    outcomes = _sync_in_three_orders(tmp_path, [*messages, FakeMessage(crafted)])
+    for planned, written, threads in outcomes:
+        assert planned > 0 and written > 0  # the grouping held it back, and the store, weighing the same edges
+        assert len(threads) == 6 and ["msg99@example.net"] in threads.values()
+    assert len({tuple(sorted((conv, tuple(ids)) for conv, ids in threads.items())) for *_, threads in outcomes}) == 1
+
+
+@pytest.mark.parametrize("shape", ["siblings", "chain"])
+def test_a_crafted_sibling_naming_both_correspondents_keeps_two_branches_apart(tmp_path: Path, shape: str) -> None:
+    """The sixth-pass review: two two-message branches under an absent parent with disjoint correspondents,
+    and Mallory's reply to that parent naming both, dated first (``chain``: each branch's second message
+    replies to its first)."""
+    owner, bob = f"Owner <{ADDRESS}>", "Bob <bob@example.com>"
+    absent = "<absent@example.net>"
+    messages: list[FakeMessage] = []
+    for first, who, day in ((10, _ALICE, 2), (20, bob, 3)):
+        headers = f"References: {absent}\r\nIn-Reply-To: {absent}\r\n"
+        messages.append(FakeMessage(mail(first, sender=who, to=owner, extra_headers=headers, date=_DATES[day])))
+        if shape == "chain":
+            parent = f"<msg{first}@example.net>"
+            headers = f"References: {absent} {parent}\r\nIn-Reply-To: {parent}\r\n"
+        messages.append(FakeMessage(mail(first + 1, sender=owner, to=who, extra_headers=headers, date=_DATES[day])))
+    crafted_headers = f"References: {absent}\r\nIn-Reply-To: {absent}\r\n"
+    crafted = mail(99, sender=_MALLORY, to=f"{owner}, {_ALICE}, {bob}", extra_headers=crafted_headers, date=_DATES[1])
+    outcomes = _sync_in_three_orders(tmp_path, [*messages, FakeMessage(crafted)])
+    alice_side, bob_side = {"msg10@example.net", "msg11@example.net"}, {"msg20@example.net", "msg21@example.net"}
+    for planned, _written, threads in outcomes:
+        assert planned > 0  # the grouping held a merge back (the absent parent is no stored edge)
+        conversations = [set(ids) for ids in threads.values()]
+        assert not any(alice_side & ids and bob_side & ids for ids in conversations)
+        assert any(alice_side <= ids for ids in conversations) and any(bob_side <= ids for ids in conversations)
+        assert len(conversations) in (2, 3)  # the crafted message joins one branch or none
+    assert len({tuple(sorted((conv, tuple(ids)) for conv, ids in threads.items())) for *_, threads in outcomes}) == 1
+
+
 def test_a_reply_chain_in_one_batch_is_one_conversation(home: Path, store: ImportStore) -> None:
     chain = {1: _chain_message(1, None), 2: _chain_message(2, 1), 3: _chain_message(3, 2)}
     box = FakeMailbox(uidvalidity=2, messages={1: chain[3], 2: chain[1], 3: chain[2]})  # out of order

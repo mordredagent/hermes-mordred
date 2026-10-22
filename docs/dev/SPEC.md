@@ -4682,10 +4682,14 @@ part of this delivery ([`TODO.md`](./TODO.md)).
   three messages; threads that never reference each other stay apart. The same
   guards (one function, `imports/mail/merge_guard.py`) decide the grouping of
   a batch before it is written, so messages fetched together are held to them
-  too: a message first joins its direct parent (`In-Reply-To`) in the batch,
-  or its siblings under an absent parent, when the two share a participant,
-  and only then, in date order, are its other references weighed by the guard
-  against those groups, so the result does not depend on the batch's order;
+  too: a message first joins its direct parent in the batch (the last
+  `In-Reply-To` id, else the last `References` id), ancestors first, or its
+  siblings with the same participants under an absent parent, when the two
+  share a participant, and only then, fewest referenced ids first, are its
+  other references weighed by the guard against those groups (a message naming
+  more than three ids and more than one multi-message group merges nothing);
+  no union ever joins two groups that both already hold several messages, so
+  neither the batch's order nor a forged date lets one message bridge threads;
   a copy the store will not write (a duplicate or a rejected copy of a
   stored message, per `ImportStore.classify_incoming`) takes no part in that
   grouping. A store created before import schema v2 has no stored references
