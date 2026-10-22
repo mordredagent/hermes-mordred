@@ -820,11 +820,13 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > the page's title, text, labels and query and without any text other than
 > the instruction or correction you typed (`page_host_unknown`), since it
 > could come from an excluded page; an episode in which the collector marked
-> a batch as refused for an excluded host (`source_excluded`) is never shown
+> a batch as refused for an excluded host (`source_excluded`) or an event as
+> on a host excluded in the collector itself (`site_excluded`) is never shown
 > to Hermes, also after you remove the exclusion. Your own instruction is still stored, so do not name the
 > excluded site's private details in it. Also exclude the host in the
 > collector itself when it can (the operator's `--activity-exclude-site`):
-> then nothing from that host leaves the collector. If one entry of that list names no host, the
+> then nothing from that host leaves the collector but where its events fall
+> in the episode (marked `site_excluded`). If one entry of that list names no host, the
 > other entries still apply but every batch is refused
 > (`excluded_sites_invalid`; `activity status` shows `collection: refused`)
 > until you fix it, so a typo never records a site you excluded. Raw events are kept

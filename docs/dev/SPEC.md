@@ -4109,17 +4109,24 @@ per-process state.
   its `site`, and the hosts of URLs in its stored route, query and target
   label (parameter values decoded), so a host added to `excluded_sites`
   after capture hides earlier episodes that only linked or redirected to it.
-  An episode holding a refusal marker, an event whose `args.reason` is
-  `source_excluded` (the `gap` the operator records for a batch the receiver
-  refused as an excluded host's), is hidden the same way whatever
-  `excluded_sites` holds at read time (`history.REFUSED_SQL`): it touched an
-  excluded host the marker does not name, and a receiver older than the rule
-  for events without a page host (§"Event contract") kept the page content
-  of its host-less task boundaries. Hermes's own capture never records such
-  a marker (a call on an unknown page is dropped, not marked). One query over
-  the candidate episodes' distinct rows checks both: the rows holding a
-  marker and, only while `excluded_sites` is non-empty, the rows that can
-  hold a URL. A lookup or navigation naming an excluded host gets nothing. Hosts are
+  An episode holding either marker of an excluded host is hidden the same
+  way whatever `excluded_sites` holds at read time: a refusal marker, an
+  event whose `args.reason` is `source_excluded` (the `gap` the operator
+  records for a batch the receiver refused as an excluded host's;
+  `history.REFUSED_SQL`), or the collector's exclusion mark, an event whose
+  `exclusions` hold `site_excluded` (the operator sends an event on a host
+  excluded in the collector itself, `--activity-exclude-site`, with its
+  position only: no site, route, target or content;
+  `history.COLLECTOR_EXCLUDED_SQL` matches that whole token of the stored
+  JSON array). Such an episode touched an excluded host the marker does not
+  name: a receiver older than the rule for events without a page host
+  (§"Event contract") kept the page content of its host-less task
+  boundaries, and its `human` task start keeps the user's instruction for
+  that host (2026-10-22). Hermes's own capture never records either marker
+  (a call on an unknown page is dropped, not marked). One query over the
+  candidate episodes' distinct rows checks both: the rows holding a marker
+  and, only while `excluded_sites` is non-empty, the rows that can hold a
+  URL. A lookup or navigation naming an excluded host gets nothing. Hosts are
   compared without case or a trailing dot. Configured entries are normalized
   to bare hosts (`https://Bank.example/x`, `*.bank.example`, `bank.example.`
   and `bank.example:443` all mean `bank.example`; IDNA for non-ASCII); one
@@ -4388,7 +4395,7 @@ ignored.
 | `collection_enabled` | `false` | Accept batches (requires `enabled`) |
 | `max_batch_events` / `max_event_bytes` / `max_batch_bytes` | 100 / 16384 / 262144 | Wire limits; may only be lowered |
 | `retention_raw_days` | 365 | Raw events older than this are deleted; `0` keeps everything forever |
-| `excluded_sites` | empty | Hosts (and their subdomains; entries normalized to bare hosts) whose events refuse the batch as `source_excluded` and are never read back for Hermes (any host an episode's events name; an episode with a `source_excluded` refusal marker is never read back either); while non-empty, an event without a page host is stored without its page content (`page_host_unknown`); no site is excluded by default; an invalid value keeps the entries that name a host, refuses every batch as `excluded_sites_invalid` and switches Hermes's use of the history off |
+| `excluded_sites` | empty | Hosts (and their subdomains; entries normalized to bare hosts) whose events refuse the batch as `source_excluded` and are never read back for Hermes (any host an episode's events name; an episode with a `source_excluded` refusal marker or a collector's `site_excluded` mark is never read back either); while non-empty, an event without a page host is stored without its page content (`page_host_unknown`); no site is excluded by default; an invalid value keeps the entries that name a host, refuses every batch as `excluded_sites_invalid` and switches Hermes's use of the history off |
 | `history_enabled` | `true` | Master switch for Hermes's use of the history, recording Hermes's own browser calls included (needs `enabled`); `activity use on\|off` sets it |
 | `history_on_navigate` | `true` | Navigation block in browser results |
 | `history_turn_context` | `true` | Turn-start context |

@@ -33,13 +33,17 @@ An episode that touched an excluded host (``excluded_sites`` at read time) is
 dropped whole, wherever it appears: on any event's ``site``, or named by a URL
 in any event's route, query or target label (:func:`.contracts.event_hosts`,
 the extraction the receiver applies at ingest), so an exclusion added after
-capture hides earlier episodes too. So is an episode holding a refusal marker
-(:data:`REFUSED_SQL`: an event whose ``args.reason`` is ``source_excluded``,
-the ``gap`` a collector records for a batch the receiver refused as an
-excluded host's), whatever ``excluded_sites`` holds at read time: it touched
-an excluded host the marker does not name, and a receiver older than the
-page-host rule (:mod:`.contracts`) kept the content of its events that named
-no host.
+capture hides earlier episodes too. So is an episode holding either marker of
+an excluded host, whatever ``excluded_sites`` holds at read time: a refusal
+marker (:data:`REFUSED_SQL`: an event whose ``args.reason`` is
+``source_excluded``, the ``gap`` a collector records for a batch the receiver
+refused as an excluded host's) or the collector's own exclusion mark
+(:data:`COLLECTOR_EXCLUDED_SQL`: ``site_excluded`` in an event's
+``exclusions``, sent for an event on a host excluded in the collector itself,
+with no site, route or content). Such an episode touched an excluded host the
+marker does not name; a receiver older than the page-host rule
+(:mod:`.contracts`) kept the content of its events that named no host, and
+its task start still holds the user's instruction for that host.
 
 The automatic blocks (``require_work``) also skip an episode with no site and
 no successfully dispatched call (:func:`_with_work`: every call refused,
@@ -78,6 +82,8 @@ from .matching import terms
 from .store import ActivityStore
 
 __all__ = [
+    "COLLECTOR_EXCLUDED_MARK",
+    "COLLECTOR_EXCLUDED_SQL",
     "MAX_SUMMARY_EVENTS",
     "NAVIGATION_HEADER",
     "REFUSED_SQL",
@@ -144,6 +150,14 @@ _URL_FIELDS_SQL: Final = (
 #: operator's ``gap`` marker) in the canonical ``args_json`` the receiver writes (sorted keys, no spaces, quotes
 #: inside values escaped, so only the key itself matches).
 REFUSED_SQL: Final = """(instr(args_json, '"reason":"source_excluded"') > 0)"""
+#: A collector's quality exclusion for an event on a host excluded in the collector itself (the operator's
+#: ``--activity-exclude-site``): sent with the event's position only (no site, route, target or content).
+COLLECTOR_EXCLUDED_MARK: Final = "site_excluded"
+#: Events holding :data:`COLLECTOR_EXCLUDED_MARK` in ``exclusions``, the JSON array of tokens (``[a-z0-9_]``
+#: only) the receiver writes: the quoted token matches that whole entry and no other code.
+COLLECTOR_EXCLUDED_SQL: Final = f"""(instr(exclusions, '"{COLLECTOR_EXCLUDED_MARK}"') > 0)"""
+#: Events marking an episode that touched an excluded host it does not name (:func:`_hidden`).
+_MARKED_SQL: Final = f"({REFUSED_SQL} OR {COLLECTOR_EXCLUDED_SQL})"
 #: A read waits this long for a writer's lock before the surface goes on without history, opening included
 #: (the keyed opener's schema probe gets the same bound: :data:`._history_access.OPENER`).
 READ_BUSY_MS: Final = 250
@@ -464,10 +478,11 @@ def _hidden(
     """The episodes among ``ids`` that touched an excluded host: an event's ``site`` (``sites``, per episode),
     a host named by a URL in an event's route, query or target label (:func:`.contracts.event_hosts`, the
     receiver's ingest extraction), so an exclusion added after capture hides earlier episodes too, or, whatever
-    ``excluded_sites`` holds, a refusal marker (:data:`REFUSED_SQL`) among their events.
+    ``excluded_sites`` holds, a marker among their events: a refusal marker (:data:`REFUSED_SQL`) or the
+    collector's exclusion mark (:data:`COLLECTOR_EXCLUDED_SQL`).
 
-    One query over the episodes no site hides: their distinct rows holding a refusal marker and, only while
-    sites are excluded, those whose route, query or target may hold a URL (:data:`_URL_FIELDS_SQL`).
+    One query over the episodes no site hides: their distinct rows holding either marker and, only while sites
+    are excluded, those whose route, query or target may hold a URL (:data:`_URL_FIELDS_SQL`).
     """
     if not ids:
         return set()
@@ -475,16 +490,16 @@ def _hidden(
     rest = [i for i in dict.fromkeys(ids) if i not in hidden]
     if not rest:
         return hidden
-    where = f"({REFUSED_SQL} OR {_URL_FIELDS_SQL})" if excluded_sites else REFUSED_SQL
+    where = f"({_MARKED_SQL} OR {_URL_FIELDS_SQL})" if excluded_sites else _MARKED_SQL
     rows = conn.execute(
-        f"SELECT DISTINCT episode_id, route, query, target, {REFUSED_SQL} FROM activity_events "
+        f"SELECT DISTINCT episode_id, route, query, target, {_MARKED_SQL} FROM activity_events "
         f"WHERE episode_id IN ({_in(rest)}) AND {where}",
         tuple(rest),
     )
-    for episode_id, route, query, target, refused in rows:
+    for episode_id, route, query, target, marked in rows:
         if str(episode_id) in hidden:
             continue
-        if refused or any(
+        if marked or any(
             site_excluded(host, excluded_sites) for host in event_hosts({"route": route, "target": target}, query)
         ):
             hidden.add(str(episode_id))

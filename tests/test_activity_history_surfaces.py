@@ -3,7 +3,8 @@
 - Read-time exclusion looks at every host an episode names: its events' sites and the URLs in their route,
   query and target label, so a host added to ``excluded_sites`` after capture hides the episode everywhere.
 - An episode holding a ``source_excluded`` refusal marker (a batch the receiver refused as an excluded host's) is
-  hidden everywhere, whatever ``excluded_sites`` holds at read time (live check 2026-10-22, D1).
+  hidden everywhere, whatever ``excluded_sites`` holds at read time (live check 2026-10-22, D1); so is one holding
+  the collector's ``site_excluded`` mark (a host excluded in the collector itself, live check 2026-10-22, C2).
 - Only text the collector attributes to the user is shown as the user's task or correction.
 - Rows stored before a URL rule existed are scrubbed again when shown.
 - A writer's lock refuses a read within the read bound, opening included.
@@ -136,11 +137,12 @@ class _Recorder:
         return iter(())
 
 
-def test_without_exclusions_the_check_reads_only_refusal_markers() -> None:
+def test_without_exclusions_the_check_reads_only_the_markers() -> None:
     conn = _Recorder()
     assert history._hidden(conn, ["ep-1"], {"ep-1": ["bank.example"]}, frozenset()) == set()  # type: ignore[arg-type]
-    [query] = conn.queries  # one query, for the refusal markers: no URL is read
-    assert history._URL_FIELDS_SQL not in query and history.REFUSED_SQL in query
+    [query] = conn.queries  # one query, for both markers: no URL is read
+    assert history._URL_FIELDS_SQL not in query
+    assert history.REFUSED_SQL in query and history.COLLECTOR_EXCLUDED_SQL in query
     nothing = _Recorder()
     assert history._hidden(nothing, [], {}, frozenset({"bank.example"})) == set()  # type: ignore[arg-type]
     assert nothing.queries == []
@@ -151,7 +153,8 @@ def test_with_exclusions_the_check_is_one_query() -> None:
     ids = [f"ep-{index}" for index in range(50)]
     assert history._hidden(conn, ids, {}, frozenset({"bank.example"})) == set()  # type: ignore[arg-type]
     [query] = conn.queries
-    assert history._URL_FIELDS_SQL in query and history.REFUSED_SQL in query
+    assert history._URL_FIELDS_SQL in query
+    assert history.REFUSED_SQL in query and history.COLLECTOR_EXCLUDED_SQL in query
 
 
 def test_excluded_sites_are_checked_on_site_rows_without_reading_urls(history_home) -> None:
@@ -253,6 +256,139 @@ def test_an_episode_with_a_refused_excluded_batch_is_hidden_from_every_surface(h
     assert json.loads(shown["episode_refused"]) == {"status": "not_found"}
     assert history.episode_detail(store, "ep-refused", excluded_sites=frozenset()) is None
     assert history.latest_page_text(store, ["ep-refused"], "example.com", 600, excluded_sites=frozenset()) == {}
+
+
+# --- an episode on a host the collector itself excludes ----------------------------------------------------
+
+SITE_EXCLUDED = "site_excluded"
+
+
+def _position_only(seq: int, episode: str, phase: str, op: str, *, marks: list[str], **fields: Any) -> dict[str, Any]:
+    """An event as the operator sends it on a host excluded in the collector itself (``--activity-exclude-site``,
+    live check 2026-10-22, C2): its position only (no site, route, target or content), coverage ``partial`` and
+    the collector's ``marks``."""
+    raw = _operator_event(seq, episode, phase, op, source="operator", actor="agent", **fields)
+    raw["action"] = {"op": op, "target": None, "site": None, "route": None, "args": {}}
+    raw["quality"].update(coverage="partial", exclusions=marks)
+    return raw
+
+
+def _collector_excluded_episode(
+    receiver: StoreReceiver, episode: str, seq0: int, *, marks: list[str], moved: bool
+) -> None:
+    """The user's task (a human task start with the instruction and no host) and, with ``moved``, a navigation on
+    example.com; then a click and the task end on the host the collector excludes, one batch through the
+    receiver (``marks`` on those last events)."""
+    task = _operator_event(
+        seq0,
+        episode,
+        "boundary",
+        "task_start",
+        source="operator",
+        actor="human",
+        text=f"settle the utility bill {episode.upper()}",
+    )
+    task["action"].update(site=None, route=None)
+    events = [task]
+    if moved:
+        navigation = _operator_event(
+            seq0 + 1,
+            episode,
+            "observed",
+            "navigate",
+            source="operator",
+            actor="agent",
+            attempt_id=f"{episode}-a1",
+            status="claimed_success",
+            page_title="Billing overview",
+            page_text=f"{episode.upper()} the invoice table",
+        )
+        events.append(navigation)
+    click = {"attempt_id": f"{episode}-a2"}
+    events += [
+        _position_only(seq0 + 2, episode, "intended", "click", marks=marks, **click),
+        _position_only(seq0 + 3, episode, "dispatched", "click", marks=marks, status="claimed_success", **click),
+        _position_only(seq0 + 4, episode, "boundary", "task_end", marks=marks, status="claimed_success"),
+    ]
+    assert receiver.ingest(OPERATOR, _operator_batch(*events))["type"] == "activity_ack"
+
+
+@pytest.mark.parametrize("moved", [False, True], ids=["started-there", "moved-there"])
+@pytest.mark.parametrize("excluded", [["localhost"], []], ids=["both-sides", "collector-only"])
+def test_an_episode_on_a_host_the_collector_excludes_is_hidden_from_every_surface(
+    history_home, excluded, moved
+) -> None:
+    home, store = history_home
+    write_config(home, {**ENABLED, "collection_enabled": True, "excluded_sites": excluded})
+    receiver = StoreReceiver(home, config_loader=ActivityConfig.load, store_factory=lambda _home: store)
+    _collector_excluded_episode(receiver, "ep-plain", 1, marks=[], moved=moved)
+    _collector_excluded_episode(receiver, "ep-marked", 20, marks=[SITE_EXCLUDED], moved=moved)
+    with store.connection() as conn:  # stored as sent: the user's instruction, then position-only marked events
+        stored = conn.execute(
+            "SELECT op, site, text, exclusions FROM activity_events WHERE episode_id = 'ep-marked' AND site IS NULL "
+            "ORDER BY producer_seq"
+        ).fetchall()
+    assert [(op, site, text) for op, site, text, _marks in stored] == [
+        ("task_start", None, "settle the utility bill EP-MARKED"),
+        ("click", None, None),
+        ("click", None, None),
+        ("task_end", None, None),
+    ]
+    assert [SITE_EXCLUDED in json.loads(marks) for *_row, marks in stored] == [False, True, True, True]
+
+    write_config(home, {**ENABLED, "excluded_sites": excluded})
+    turn = _turn("settle the utility bill on example.com again", "marked-turn")
+    shown = {
+        "turn": turn["context"] if turn else "",
+        "lookup_terms": json.dumps(_lookup("marked-terms", query="settle the utility bill")),
+        "episode_plain": _episode("ep-plain", "marked-plain"),
+        "episode_marked": _episode("ep-marked", "marked-episode"),
+    }
+    if moved:  # only an episode that named example.com is shown for it
+        nav = _navigate("marked-nav")
+        shown["navigation"] = json.loads(nav)[RESULT_KEY] if nav else ""
+        shown["lookup"] = json.dumps(_lookup("marked-lookup", query="", site="example.com"))
+
+    for surface, text in shown.items():
+        assert "EP-PLAIN" in text or surface == "episode_marked", surface  # without the mark: unaffected
+        assert "EP-MARKED" not in text, surface
+    assert json.loads(shown["episode_marked"]) == {"status": "not_found"}
+    assert history.episode_detail(store, "ep-marked", excluded_sites=frozenset()) is None
+    if moved:
+        assert history.latest_page_text(store, ["ep-marked"], "example.com", 600, excluded_sites=frozenset()) == {}
+        assert "EP-PLAIN" in history.latest_page_text(
+            store, ["ep-plain"], "example.com", 600, excluded_sites=frozenset()
+        ).get("ep-plain", "")
+
+
+@pytest.mark.parametrize(
+    ("marks", "hidden"),
+    [
+        ([SITE_EXCLUDED], True),
+        (["page_host_unknown", SITE_EXCLUDED], True),
+        (["site_excluded_v2"], False),
+        (["no_site_excluded"], False),
+        (["sensitive_field"], False),
+        ([], False),
+    ],
+)
+def test_only_the_exact_collector_mark_in_exclusions_hides_an_episode(history_home, marks, hidden) -> None:
+    _home, store = history_home
+    seq = Seq()
+    seed_episode(store, seq, episode="ep-1", task=f'what does "{SITE_EXCLUDED}" mean', correction=None)
+    marked = event(
+        seq(),
+        "ep-1",
+        at=time.time() - 30,
+        phase="dispatched",
+        action={"op": "click", "site": "example.com", "route": "/links"},
+        quality={"coverage": "partial", "exclusions": marks},
+    )
+    store.append_batch(PEER, PRODUCER, [marked])
+    with store.connection() as conn:  # the token in the user's text never counts: only ``exclusions`` is read
+        assert history._hidden(conn, ["ep-1"], {"ep-1": ["example.com"]}, frozenset()) == (
+            {"ep-1"} if hidden else set()
+        )
 
 
 # --- which text speaks for the user -----------------------------------------------------------------------
