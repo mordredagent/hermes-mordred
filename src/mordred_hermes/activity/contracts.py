@@ -356,6 +356,7 @@ SECRET_VALUE_STOP_WORDS: Final = frozenset(
         "please",
         # placeholders that name no value ("type something into the password field")
         *("something", "anything", "nothing", "everything", "whatever", "same", "value", "values", "text"),
+        *("case-sensitive", "case-insensitive"),
         # the Japanese words for field, input field, field (katakana), reset, change, screen, input, setting,
         # resetting and confirmation
         *("欄", "入力欄", "フィールド", "リセット"),
@@ -429,6 +430,28 @@ _JA_SLOTS: Final = ("\u3068\u3057\u3066", "\u306b", "\u3078")
 _OPENER_OF: Final[Mapping[str, str]] = {closer: opener for opener, closer in _VALUE_QUOTES.items()}
 #: A run of printable ASCII (a Japanese sentence's unquoted value).
 _ASCII_RUN_RE: Final = re.compile(r"[\x21-\x7e]+")
+#: "set the password to X" (:func:`_value_after_to`): the keyword, ``to``, the value, and a verb that sets it at
+#: most :data:`_MAX_SET_VERB_DISTANCE` words before the keyword.
+_TO_RE: Final = re.compile(r"(?i)\s{1,32}to\s{1,32}")
+_SET_VERB_RE: Final = re.compile(
+    r"(?i)(?:set(?:s|ting)?|chang(?:e|es|ed|ing)|updat(?:e|es|ed|ing)|reset(?:s|ting)?|modif(?:y|ies|ied|ying))"
+)
+_MAX_SET_VERB_DISTANCE: Final = 3
+#: "the password for the bank is X" (:func:`_qualified_value`): the keyword, one of these words, at most
+#: :data:`_MAX_QUALIFIER_WORDS` words in all, then ``is`` / ``was`` or ``:`` / ``=``.
+_QUALIFIER_LINKS: Final = frozenset({"for", "on", "at", "of", "in"})
+_MAX_QUALIFIER_WORDS: Final = 4
+#: A whitespace-separated word; a label mark ends it when whitespace (or the end) follows.
+_WORD_AFTER_RE: Final = re.compile(r"\s{1,32}((?:[^\s:=\uff1a\uff1d]|[:=\uff1a\uff1d](?=\S))+)")
+_IS_WAS_RE: Final = re.compile(r"(?i)(?:is|was)(?=[\s:=\uff1a\uff1d\"'\u201c\u2018「『])")
+#: Words after a number that make it a length or a count, not a secret ("to 12 characters"); without case.
+_VALUE_UNITS: Final = frozenset(
+    {
+        *("char", "chars", "character", "characters", "digit", "digits", "letter", "letters", "symbol", "symbols"),
+        *("word", "words", "day", "days", "hour", "hours", "minute", "minutes", "week", "weeks", "month", "months"),
+        *("year", "years", "time", "times"),
+    }
+)
 _CLAUSE_MARKS: Final = frozenset(".,;:!?")
 #: A run of 13-19 digits, optionally grouped by single spaces or dashes (a payment card number candidate).
 _CARD_RE: Final = re.compile(r"(?<![0-9])[0-9](?:[ -]?[0-9]){12,18}(?![0-9])")
@@ -888,6 +911,30 @@ def _plausible_value(value: str, keyword: str, connection: _Connection, quoted: 
     return _credential_shaped(value)
 
 
+def _value_at(text: str, pos: int) -> tuple[tuple[int, int] | None, bool, bool]:
+    """``(span, quoted, capped)`` of the value at ``pos``: inside a quote or bracket, else one bare token
+    (:func:`_bare_value`)."""
+    span = _quoted_value(text, pos)
+    if span is not None:
+        return span, True, False
+    span, capped = _bare_value(text, pos + 1 if text[pos : pos + 1] in _VALUE_QUOTES else pos)
+    return span, False, capped
+
+
+def _to_its_end(text: str, span: tuple[int, int], capped: bool) -> tuple[int, int]:
+    """A long run is redacted to its end, never left half visible."""
+    if not capped:
+        return span
+    tail = _VALUE_TAIL_RE.match(text, span[0])
+    return span[0], _without_closing_marks(text, span[0], tail.end() if tail else span[1])
+
+
+def _counted(text: str, end: int) -> bool:
+    """The word after ``end`` makes the value a length or a count (:data:`_VALUE_UNITS`)."""
+    unit = _NEXT_WORD_RE.match(text, end)
+    return unit is not None and unit.group(1).lower() in _VALUE_UNITS
+
+
 def _secret_value(text: str, keyword: re.Match[str]) -> tuple[int, int] | None:
     """``(start, end)`` of the secret value following ``keyword``, or ``None``."""
     connection = _connection(text, keyword.end())
@@ -895,16 +942,81 @@ def _secret_value(text: str, keyword: re.Match[str]) -> tuple[int, int] | None:
     direct = text[pos : pos + 1] in _DIRECT_QUOTES
     if not (connection.joined or direct or not keyword.group(0).isascii()):
         return None  # ``password_reset``, ``password?``
-    span = _quoted_value(text, pos)
-    quoted, capped = span is not None, False
-    if span is None:
-        span, capped = _bare_value(text, pos + 1 if text[pos : pos + 1] in _VALUE_QUOTES else pos)
+    span, quoted, capped = _value_at(text, pos)
     if span is None or not _plausible_value(text[span[0] : span[1]], keyword.group(0), connection, quoted):
         return None
-    if capped:  # a long run is redacted to its end, never left half visible
-        tail = _VALUE_TAIL_RE.match(text, span[0])
-        return span[0], _without_closing_marks(text, span[0], tail.end() if tail else span[1])
-    return span
+    return _to_its_end(text, span, capped)
+
+
+def _set_verb_before(text: str, start: int) -> bool:
+    """A verb that sets a value (``set``, ``change``, ``update``, ``reset``, ``modify``) at most
+    :data:`_MAX_SET_VERB_DISTANCE` words before ``start``, with no sentence punctuation between."""
+    for _ in range(_MAX_SET_VERB_DISTANCE):
+        token = _token_before(text, start)
+        if token is None or text[token[1] - 1] in _CLAUSE_MARKS:
+            return False
+        if _SET_VERB_RE.fullmatch(text[token[0] : token[1]]):
+            return True
+        start = token[0]
+    return False
+
+
+def _value_after_to(text: str, keyword: re.Match[str]) -> tuple[int, int] | None:
+    """``(start, end)`` of the value in "set the password to X" (:func:`redact_text_secrets`)."""
+    to = _TO_RE.match(text, keyword.end())
+    if to is None or not _set_verb_before(text, keyword.start()):
+        return None
+    span, quoted, capped = _value_at(text, to.end())
+    if span is None or not _value_like(value := text[span[0] : span[1]]) or (not quoted and _counted(text, span[1])):
+        return None
+    name = keyword.group(0).lower()
+    if quoted:
+        plausible = True
+    elif name == "pin":  # a PIN is digits
+        plausible = value.isdigit() and 4 <= len(value) <= 12
+    elif name in AMBIGUOUS_SECRET_KEYWORDS:  # "update the token to v2" is a version
+        plausible = _credential_shaped(value) and len(value) >= 8
+    else:
+        plausible = _credential_shaped(value)
+    return _to_its_end(text, span, capped) if plausible else None
+
+
+def _link_end(text: str, pos: int) -> int | None:
+    """The end of ``is`` / ``was`` after whitespace, or of ``:`` / ``=`` (full-width too), at ``pos``."""
+    space = _SPACE_RE.match(text, pos)
+    after = space.end() if space else pos
+    if text[after : after + 1] in _LABEL_MARKS:
+        return after + 1
+    word = _IS_WAS_RE.match(text, after) if space else None
+    return word.end() if word else None
+
+
+def _qualified_value(text: str, keyword: re.Match[str]) -> tuple[int, int] | None:
+    """``(start, end)`` of the value in "the password for the bank is X" (:func:`redact_text_secrets`)."""
+    first = _WORD_AFTER_RE.match(text, keyword.end())
+    if first is None or first.group(1).lower() not in _QUALIFIER_LINKS:
+        return None
+    pos, link = first.end(), None
+    for words in range(1, _MAX_QUALIFIER_WORDS + 1):
+        link = _link_end(text, pos) if words > 1 else None
+        if link is not None:
+            break
+        token = _WORD_AFTER_RE.match(text, pos)
+        if token is None or token.group(1)[-1] in _CLAUSE_MARKS:
+            return None
+        pos = token.end()
+    else:
+        link = _link_end(text, pos)
+    if link is None:
+        return None
+    span, quoted, capped = _value_at(text, _connection(text, link).start)
+    if span is None or not _value_like(value := text[span[0] : span[1]]) or (not quoted and _counted(text, span[1])):
+        return None
+    if keyword.group(0).lower() in AMBIGUOUS_SECRET_KEYWORDS:  # "the PIN for the map is A1"
+        plausible = quoted or (any(char.isdigit() for char in value) and len(value) >= 4)
+    else:
+        plausible = quoted or _credential_shaped(value)
+    return _to_its_end(text, span, capped) if plausible else None
 
 
 def _space_before(text: str, end: int) -> int:
@@ -1066,8 +1178,11 @@ def _value_before(text: str, keyword: re.Match[str]) -> tuple[int, int] | None:
 
 def _value_after(text: str, keyword: re.Match[str]) -> tuple[int, int] | None:
     """``(start, end)`` of a secret value named after ``keyword``, or ``None``."""
-    span = _secret_value(text, keyword)
-    return span if span is not None else _japanese_value_after(text, keyword)
+    for find in (_secret_value, _value_after_to, _qualified_value, _japanese_value_after):
+        span = find(text, keyword)
+        if span is not None:
+            return span
+    return None
 
 
 def _redact_keyword_values(text: str) -> tuple[str, bool]:
@@ -1123,7 +1238,19 @@ def redact_text_secrets(text: str) -> tuple[str, bool]:
       (``.,;:!?)]}>`` and quotes) kept outside the replacement;
     * after a Japanese keyword (and an optional field word) also the target particle or the word for "as",
       then the value (quoted, or one run of ASCII characters), then the object particle
-      (:func:`_japanese_value_after`).
+      (:func:`_japanese_value_after`);
+    * "set the password to X" (:func:`_value_after_to`): the keyword, ``to``, the value, with a verb that sets
+      it (``set``, ``change``, ``update``, ``reset``, ``modify`` and their inflections) at most
+      :data:`_MAX_SET_VERB_DISTANCE` words before the keyword and no sentence punctuation between. The value
+      is quoted or credential-shaped; after ``pin`` an unquoted value is 4-12 digits, after ``token`` and
+      ``secret`` it is credential-shaped and at least 8 characters long;
+    * "the password for the bank is X" (:func:`_qualified_value`): the keyword, one of ``for``, ``on``,
+      ``at``, ``of``, ``in`` and one to three more words (none ending in ``.,;!?``), then ``is`` / ``was``
+      or ``:`` / ``=`` (full-width too), then the value: quoted or credential-shaped; after
+      :data:`AMBIGUOUS_SECRET_KEYWORDS` quoted, or at least 4 characters holding a digit.
+
+    In the last two forms an unquoted value followed by a unit word (:data:`_VALUE_UNITS`: "to 12
+    characters") is a length, not a secret.
 
     The value before a keyword (value first):
 

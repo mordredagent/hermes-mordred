@@ -1026,6 +1026,87 @@ def test_value_first_redaction_is_linear_on_hostile_input() -> None:
     assert time.monotonic() - started < 5.0
 
 
+# --- a value after "to" or after a short qualifier (follow-up to D1) ------------------------------------------
+
+QUALIFIED_TEXTS = [
+    pytest.param("set the password to Hunter2-x", "set the password to redacted", id="set-to"),
+    pytest.param("change my password to 'abc def'", "change my password to 'redacted'", id="change-to-quoted"),
+    pytest.param("update the PIN to 4821", "update the PIN to redacted", id="update-pin-digits"),
+    pytest.param(
+        "I changed the admin password to Spring-2026 yesterday",
+        "I changed the admin password to redacted yesterday",
+        id="changed-qualified-keyword",
+    ),
+    pytest.param("reset the token to abc123def456", "reset the token to redacted", id="reset-token-long"),
+    pytest.param(
+        "the password for the bank is Hunter2-x", "the password for the bank is redacted", id="for-the-bank-is"
+    ),
+    pytest.param(
+        "my password on example.com is: abc123!", "my password on example.com is: redacted!", id="on-host-is-colon"
+    ),
+    pytest.param("password for admin = s3cr3t!", "password for admin = redacted!", id="for-admin-equals"),
+    pytest.param("My password for GitHub: Github2024!", "My password for GitHub: redacted!", id="for-colon"),
+    pytest.param(
+        'the passcode of my work account was "x y z"',
+        'the passcode of my work account was "redacted"',
+        id="of-four-words-quoted",
+    ),
+    pytest.param("the PIN for my card is 4821.", "the PIN for my card is redacted.", id="pin-for-is-digits"),
+    pytest.param("パスワードをHunter2-xに変更して", "パスワードをredactedに変更して", id="ja-object-to-change"),
+    pytest.param("パスワードを 「abc def」 に設定", "パスワードを 「redacted」 に設定", id="ja-object-quoted-set"),
+    pytest.param("PINを1234に変更", "PINをredactedに変更", id="ja-ascii-pin-change"),
+]
+
+QUALIFIED_KEPT = [
+    pytest.param("set the password to expire", id="set-to-expire"),
+    pytest.param("change your password to something stronger", id="something-stronger"),
+    pytest.param("the password for the account is required", id="is-required"),
+    pytest.param("the password for the bank is in my notes", id="is-in-notes"),
+    pytest.param("update the token to the latest version", id="token-latest"),
+    pytest.param("password for admin is redacted", id="already-redacted"),
+    pytest.param("set the pin to the top", id="pin-top"),
+    pytest.param("change the password to 12 characters", id="length-unit"),
+    pytest.param("the password for this site is 8-64 characters", id="range-unit"),
+    pytest.param("set the token to v2", id="token-short"),
+    pytest.param("the PIN for the map is A1", id="pin-short"),
+    pytest.param("Add the password to 1Password", id="no-set-verb"),
+    pytest.param("send the password to alice@example.com", id="send-to"),
+    pytest.param("reset the password to default", id="plain-default"),
+    pytest.param("set the PIN to ABCD", id="pin-letters"),
+    pytest.param("the password for the bank, is Hunter2-x", id="comma-in-qualifier"),
+    pytest.param("the password for my old work account at home is Hunter2-x", id="qualifier-too-long"),
+    pytest.param("a password of at least 8 characters", id="policy"),
+    pytest.param("the password for your account is now changed", id="now-changed"),
+    pytest.param("set it up so the password to Hunter2-x works", id="verb-too-far"),
+    pytest.param("パスワードを変更する", id="ja-change"),
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), QUALIFIED_TEXTS)
+def test_a_value_after_to_or_a_short_qualifier_is_replaced(text: str, expected: str) -> None:
+    assert contracts.redact_text_secrets(text) == (expected, True)
+    assert _task_start(text).text == expected
+
+
+@pytest.mark.parametrize("text", QUALIFIED_KEPT)
+def test_ordinary_text_after_to_or_a_qualifier_is_untouched(text: str) -> None:
+    assert contracts.redact_text_secrets(text) == (text, False)
+
+
+def test_qualified_redaction_is_linear_on_hostile_input() -> None:
+    started = time.monotonic()
+    for text in (
+        "set the password to " * 20_000,
+        "the password for a b c is " * 20_000,
+        "password for " + "a" * 250_000 + " is x1",
+        "set " + "a" * 250_000 + " password to x1",
+        "password for: " * 30_000,
+        "update the PIN to " + "1" * 250_000,
+    ):
+        contracts.redact_text_secrets(text)
+    assert time.monotonic() - started < 5.0
+
+
 # --- credential parameters and userinfo ------------------------------------------------------------------
 
 

@@ -3947,14 +3947,37 @@ and revocable on its own:
   `secret` or `token` the value must then be quoted or credential-shaped.
   The stop words also hold
   placeholders (`something`, `anything`, `nothing`, `everything`,
-  `whatever`, `same`, `value`, `values`, `text`).
+  `whatever`, `same`, `value`, `values`, `text`) and `case-sensitive`,
+  `case-insensitive`.
+  Two more forms name the value after its keyword. "Set the password to
+  Hunter2-x": the keyword, `to`, the value, with a verb that sets it (`set`,
+  `change`, `update`, `reset`, `modify` and their inflections) at most three
+  words before the keyword and no sentence punctuation between; the value is
+  quoted or credential-shaped, after `pin` an unquoted value must be 4-12
+  digits and after `token` or `secret` credential-shaped and at least 8
+  characters ("update the PIN to 4821" is replaced; "set the password to
+  expire", "update the token to the latest version", "set the token to v2"
+  and "add the password to 1Password" stay). "The password for the bank is
+  Hunter2-x": the keyword, one of `for`, `on`, `at`, `of`, `in` and one to
+  three more words (none ending in `.,;!?`), then `is` / `was` or `:` / `=`,
+  then the value, quoted or credential-shaped (after `pin`, `secret` and
+  `token`: quoted, or at least 4 characters holding a digit): "my password
+  on example.com is: abc123!" and "password for admin = s3cr3t!" are
+  replaced, "the password for the account is required" and "the password for
+  the bank is in my notes" stay. In both forms an unquoted value followed by
+  a unit word (`characters`, `digits`, `days` ...) is a length, not a secret
+  ("change the password to 12 characters"). The Japanese "password, object
+  particle, value, target particle, set/change" order is covered by the
+  particle rule above.
   Keywords inside a URL are left to URL scrubbing. Known gaps: a plain word
-  after whitespace alone ("password swordfish"), a value separated from its
-  keyword by other words ("password for the bank is …", "set the password
-  to Hunter2-x"), a value before its keyword that is joined to it by other
-  words ("log in with Hunter2-x, that is the password") or is a plain word
-  without such a verb ("admin for the password"), plural keywords, card
-  numbers and secrets without a keyword in free text are kept. Hermes's own
+  after whitespace alone ("password swordfish"), a plain word after `to` or
+  after a qualifier ("set the password to swordfish", "the password for the
+  bank is swordfish"), a qualifier of more than four words or holding
+  sentence punctuation ("the password for my old work account at home is
+  …"), a value before its keyword that is joined to it by other words ("log
+  in with Hunter2-x, that is the password") or is a plain word without such
+  a verb ("admin for the password"), plural keywords, card numbers and
+  secrets without a keyword in free text are kept. Hermes's own
   capture additionally replaces, whatever the phrasing, every value it typed
   into a secret field in its turn's task start and correction
   (§"History for Hermes").
