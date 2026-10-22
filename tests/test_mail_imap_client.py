@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import imaplib
 import socket
 import ssl
 import threading
+import time
+import tracemalloc
 from typing import Any
 
 import pytest
@@ -24,7 +27,15 @@ from mordred_hermes.imports.mail._imap_codec import (
     quote_mailbox,
     search_uids,
 )
-from mordred_hermes.imports.mail.imap import GuardedIMAP4, GuardedIMAP4SSL, ImapError
+from mordred_hermes.imports.mail.imap import (
+    CancelToken,
+    GuardedIMAP4,
+    GuardedIMAP4SSL,
+    ImapError,
+    ImapSession,
+    ImapStopped,
+    IoLimits,
+)
 from tests._fake_imap import FakeImapServer, FakeMailbox, FakeMessage, mail
 
 # --- modified UTF-7 and labels --------------------------------------------------------------------
@@ -121,9 +132,9 @@ def test_the_ssl_client_wraps_the_route_socket_with_sni_of_the_sealed_host() -> 
     wrapped: list[tuple[Any, str | None]] = []
 
     class RecordingContext:
-        def wrap_socket(self, sock: socket.socket, server_hostname: str | None = None) -> socket.socket:
+        def wrap_socket(self, sock: socket.socket, server_hostname: str | None = None, **_kw: Any) -> socket.socket:
             wrapped.append((sock, server_hostname))
-            return sock  # the fake server speaks plain IMAP
+            return sock  # the fake server speaks plain IMAP (no do_handshake: nothing to negotiate)
 
     conn = GuardedIMAP4SSL(
         "imap.example.com",
@@ -173,7 +184,7 @@ def test_a_routing_refusal_is_routing_unavailable() -> None:
 def _socks_server(listener: socket.socket, seen: list[bytes], *, auth: bool) -> None:
     conn, _ = listener.accept()
     with conn:
-        greeting = conn.recv(3 if not auth else 4)
+        greeting = conn.recv(3)
         seen.append(greeting)
         if auth:
             conn.sendall(b"\x05\x02")
@@ -210,7 +221,7 @@ def test_socks5_route_sends_the_hostname_for_remote_dns(auth: bool, scheme: str)
     name = b"imap.example.com"
     assert seen[-1] == b"\x05\x01\x00\x03" + bytes([len(name)]) + name + (993).to_bytes(2, "big")
     if auth:
-        assert seen[0] == b"\x05\x02\x00\x02"
+        assert seen[0] == b"\x05\x01\x02"  # with credentials, "no authentication" is never offered
         assert seen[1] == b"\x01\x08iso user\x05token"
     else:
         assert seen[0] == b"\x05\x01\x00"
@@ -279,3 +290,197 @@ def test_login_failure_and_unreachable_are_codes() -> None:
     with pytest.raises(ImapError) as raised:
         imap.connect("not a host", 993)
     assert raised.value.code == "imap_unreachable"
+
+
+# --- framing, authentication, port ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.xatom("NOOP", "\r\nZ1 STORE 1 +FLAGS (\\Seen)"),  # a second command framed into an argument
+        lambda c: c.xatom("NOOP", "x"),  # NOOP, CAPABILITY and LOGOUT take no argument
+        lambda c: c.list('""', '"*"\r\nZ2 STORE 1 +FLAGS (\\Seen)'),
+        lambda c: c.list('"[Gmail]"', '"*"'),  # LIST is fixed to "" "*"
+        lambda c: c.select('"INBOX"\r\nZ3 EXPUNGE', readonly=True),
+        lambda c: c.select("INBOX", readonly=True),  # EXAMINE takes one quoted name only
+        lambda c: c.uid("SEARCH", "UID", "1:*\r\nZ4 STORE 1 +FLAGS (\\Seen)"),
+        lambda c: c.uid("SEARCH", "UID", "1:*", "SINCE", "1-Oct-2026\x00"),
+        lambda c: c.uid("FETCH", "1", "(UID)\nZ5 EXPUNGE"),
+        lambda c: c.authenticate("PLAIN", lambda _challenge: b"\0user\0pass"),  # LOGIN is the only mechanism
+    ],
+)
+def test_framing_injection_and_unlisted_arguments_never_leave_the_process(call: Any, connected: Any) -> None:
+    conn, server = connected
+    before = list(server.commands)
+    with pytest.raises(ImapError) as raised:
+        call(conn)
+    assert raised.value.code == "imap_command_refused"
+    assert server.commands == before and server.violations == []
+    conn.logout()
+
+
+def test_list_names_that_could_frame_a_command_are_dropped() -> None:
+    entries = list_entries(
+        [
+            (b'(\\HasNoChildren) "/" {14}', b"INBOX\r\nZ1 NOOP"),
+            b"",
+            (b'(\\HasNoChildren \\Sent) "/" {5}', b"Se\x00nt"),
+            b"",
+            b'(\\HasNoChildren) "/" "Archive"',
+        ]
+    )
+    assert [entry.name for entry in entries] == ["Archive"]
+    with pytest.raises(ImapProtocolError):
+        quote_mailbox("Tab\tName")
+
+
+def test_connect_refuses_every_port_but_993() -> None:
+    for port in (143, 465, 0, 994):
+        with pytest.raises(ImapError) as raised:
+            imap.connect("imap.example.com", port)
+        assert raised.value.code == "imap_unreachable"
+
+
+def _downgrading_proxy(listener: socket.socket, seen: list[bytes]) -> None:
+    conn, _ = listener.accept()
+    with conn:
+        seen.append(conn.recv(16))
+        conn.sendall(b"\x05\x00")  # "no authentication": the isolation credentials would be dropped
+        conn.settimeout(2.0)
+        with contextlib.suppress(OSError):
+            seen.append(conn.recv(300))
+
+
+def test_a_proxy_that_drops_the_configured_authentication_is_refused() -> None:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    seen: list[bytes] = []
+    thread = threading.Thread(target=_downgrading_proxy, args=(listener, seen), daemon=True)
+    thread.start()
+    route = EgressRoute(f"socks5://iso:token@127.0.0.1:{port}", None)
+    try:
+        with pytest.raises(ImapError) as raised:
+            imap.open_route_socket("imap.example.com", 993, 5.0, route_resolver=lambda _h: route)
+    finally:
+        thread.join(5)
+        listener.close()
+    assert raised.value.code == "egress_unsupported"
+    assert seen[0] == b"\x05\x01\x02"
+    assert all(b"imap.example.com" not in item for item in seen)  # no CONNECT was ever sent
+
+
+# --- literal limits, deadlines and cancellation -----------------------------------------------------
+
+MiB = 1024 * 1024
+
+
+def _logged_in(server: FakeImapServer, limits: IoLimits | None = None) -> ImapSession:
+    session = server.session(limits)
+    session.login("owner@example.com", "app-password-1")
+    session.examine("INBOX")
+    return session
+
+
+def _guard_threads() -> list[str]:
+    return [thread.name for thread in threading.enumerate() if thread.name == "mordred-imap-watchdog"]
+
+
+def test_an_announced_literal_over_the_budget_is_refused_before_any_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    # RFC822.SIZE says 1 byte, the FETCH announces a 256 MiB literal (and would never send it).
+    lie = FakeMessage(b"x", size=1, literal=256 * MiB)
+    server = FakeImapServer({"INBOX": FakeMailbox(uidvalidity=3, messages={1: lie})})
+    session = _logged_in(server)
+    reads: list[int] = []
+    real_read = imaplib.IMAP4.read
+
+    def spy(self: Any, size: int) -> bytes:
+        reads.append(size)
+        return real_read(self, size)
+
+    monkeypatch.setattr(imaplib.IMAP4, "read", spy)
+    assert session.sizes([1]) == {1: 1}
+    tracemalloc.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(ImapError) as raised:
+            session.fetch([1], gmail=False)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert raised.value.code == "imap_protocol"
+    assert reads == [] and peak < 4 * MiB and time.monotonic() - started < 2.0
+    commands = len(server.commands)
+    session.logout()
+    assert len(server.commands) == commands  # the stream is mid-literal: shut down, no LOGOUT on it
+    assert _guard_threads() == []
+
+
+def test_a_literal_over_25_mib_that_fits_is_drained_unread() -> None:
+    messages = {
+        1: FakeMessage(mail(1)),
+        2: FakeMessage(b"y" * (30 * MiB), size=1),  # under-reported: the literal is 30 MiB
+        3: FakeMessage(mail(3)),
+    }
+    server = FakeImapServer({"INBOX": FakeMailbox(uidvalidity=3, messages=messages)})
+    session = _logged_in(server)
+    fetched = {item.uid: item for item in session.fetch([1, 2, 3], gmail=False)}
+    assert fetched[2].oversize and fetched[2].data == b""
+    assert not fetched[1].oversize and fetched[3].data == mail(3)
+    session.logout()
+    assert server.verbs[-1] == "LOGOUT"  # the stream stayed in step: a polite goodbye
+
+
+def test_literals_beyond_64_mib_per_response_abort_the_connection() -> None:
+    messages = {uid: FakeMessage(b"z" * (20 * MiB), size=1) for uid in range(1, 5)}  # 80 MiB, announced 4 bytes
+    server = FakeImapServer({"INBOX": FakeMailbox(uidvalidity=3, messages=messages)})
+    session = _logged_in(server)
+    with pytest.raises(ImapError) as raised:
+        session.fetch([1, 2, 3, 4], gmail=False)
+    assert raised.value.code == "imap_protocol"
+    session.logout()
+
+
+def test_a_trickling_server_cannot_outlast_the_hard_deadline() -> None:
+    server = FakeImapServer({"INBOX": FakeMailbox(uidvalidity=3, messages={1: FakeMessage(mail(1))})})
+    server.trickle_s = 0.01  # one byte every 10 ms: no socket timeout ever fires
+    session = _logged_in(server, IoLimits.for_budget(0.5))
+    started = time.monotonic()
+    with pytest.raises(ImapStopped) as raised:
+        session.fetch([1], gmail=False)
+    elapsed = time.monotonic() - started
+    assert raised.value.reason == "time_budget" and elapsed < 3.0
+    assert server.trickled > 5  # the server really kept sending
+    session.logout()
+    assert server.closed.wait(5) and _guard_threads() == []
+
+
+def test_a_cancellation_shuts_the_socket_at_once() -> None:
+    server = FakeImapServer({"INBOX": FakeMailbox(uidvalidity=3, messages={1: FakeMessage(mail(1))})})
+    server.trickle_s = 0.01
+    cancel = CancelToken()
+    session = _logged_in(server, IoLimits.for_budget(60.0, cancel=cancel))
+    timer = threading.Timer(0.3, cancel.cancel)
+    timer.start()
+    started = time.monotonic()
+    with pytest.raises(ImapStopped) as raised:
+        session.fetch([1], gmail=False)
+    timer.join()
+    assert raised.value.reason == "cancelled" and time.monotonic() - started < 3.0
+    session.logout()
+    assert server.closed.wait(5) and _guard_threads() == []
+
+
+def test_the_soft_deadline_stops_before_the_next_command_and_logout_stays_polite() -> None:
+    now = [0.0]
+    server = FakeImapServer({"INBOX": FakeMailbox(uidvalidity=3, messages={1: FakeMessage(mail(1))})})
+    session = _logged_in(server, IoLimits.for_budget(60.0, clock=lambda: now[0]))
+    now[0] = 61.0
+    before = list(server.commands)
+    with pytest.raises(ImapStopped) as raised:
+        session.search("UID", "1:*")
+    assert raised.value.reason == "time_budget" and server.commands == before  # nothing was sent
+    session.logout()
+    assert server.verbs[-1] == "LOGOUT"

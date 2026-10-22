@@ -4562,18 +4562,26 @@ part of this delivery ([`TODO.md`](./TODO.md)).
   runtime, so a standalone CLI with the VPN path refuses; no proxy variable is
   read elsewhere). The collector builds the socket: direct TCP, or SOCKS5 with
   the hostname sent to the proxy (remote DNS) and the route's credentials (the
-  Tor isolation token). An HTTP or any other proxy refuses with
-  `egress_unsupported`; a routing refusal is `routing_unavailable`. TLS is
-  implicit (port 993 by default) with `ssl.create_default_context()`,
-  certificate and hostname checks on, TLS 1.2 or newer, SNI the sealed host;
-  no STARTTLS, no referrals. The host must be a DNS name.
+  Tor isolation token); with credentials only username/password is offered and
+  a proxy that answers "no authentication" is refused (`egress_unsupported`).
+  An HTTP or any other proxy refuses with `egress_unsupported`; a routing
+  refusal is `routing_unavailable`. TLS is implicit on port 993 only (`setup`
+  refuses other ports and the sealed payload is validated on every load) with
+  `ssl.create_default_context()`, certificate and hostname checks on, TLS 1.2
+  or newer, SNI the sealed host; no STARTTLS, no referrals. The host must be a
+  DNS name. Authentication is `LOGIN` inside that TLS connection and nothing
+  else (no `AUTHENTICATE`, so no mechanism negotiation can downgrade it;
+  `LOGINDISABLED` is `imap_auth_failed`).
 - **Read-only protocol.** The client refuses, before sending, every command
-  outside `CAPABILITY`, `LOGIN`/`AUTHENTICATE`, `LIST`, `EXAMINE`,
-  `UID SEARCH` (UID sets, `SINCE`) and `UID FETCH` with only `UID`,
-  `RFC822.SIZE`, `BODY.PEEK[]`, `X-GM-LABELS`, `X-GM-THRID` and `X-GM-MSGID`
-  (`imap_command_refused`), so nothing is selected read-write, flagged,
-  copied, expunged or appended and nothing is marked read. imaplib's debug
-  output and command log are disabled.
+  outside `CAPABILITY`, `LOGIN`, `LIST` (`"" "*"` only), `EXAMINE` (one quoted
+  name), `UID SEARCH` (UID sets, `SINCE`, `BEFORE`), `UID FETCH` with only
+  `UID`, `RFC822.SIZE`, `BODY.PEEK[]`, `X-GM-LABELS`, `X-GM-THRID` and
+  `X-GM-MSGID`, and `NOOP`/`LOGOUT` without arguments, and every argument
+  containing CR, LF or NUL (`imap_command_refused`), so nothing is selected
+  read-write, flagged, copied, expunged or appended, no second command can be
+  framed into an argument and nothing is marked read. `LIST` names with
+  control characters are never offered at setup, and sealed mailbox names are
+  printable ASCII. imaplib's debug output and command log are disabled.
 - **Mailboxes.** Gmail (`X-GM-EXT-1`): the `\All` special-use mailbox
   (`[Gmail]/All Mail` or `[Google Mail]/All Mail` as fallback, else the
   operator picks), which holds archived mail and not Spam or Trash, fetched
@@ -4583,38 +4591,67 @@ part of this delivery ([`TODO.md`](./TODO.md)).
 - **Trusted metadata.** The raw bytes are never modified. `RawMessage` carries
   `trusted: TrustedMeta(labels, thread_id, folder_role)`, filled only by the
   collector; when present, the embedded `X-Gmail-Labels` and `X-GM-THRID`
-  headers are ignored. Gmail system labels are matched in their protocol form
-  (custom labels are decoded from modified UTF-7 and never classify): `\Sent`
-  gives `gmail_label_sent` (`api_identity`, a quote anchor); `\Draft`,
-  `\Spam` and `\Trash` are skipped. A generic sent folder gives
+  headers are ignored. Gmail system labels are recognised in their protocol
+  form on the wire, before any decoding, and kept as a distinct type; custom
+  labels are decoded from modified UTF-7 afterwards and never classify, even
+  when they read `\Sent` or ` \Sent ` once decoded. Every label of a message
+  is inspected (at most 64 custom labels are kept): `\Sent` gives
+  `gmail_label_sent` (`api_identity`, a quote anchor); `\Draft`, `\Spam` and
+  `\Trash` are skipped wherever they appear. A generic sent folder gives
   `imap_sent_folder`: owner for display, quality `source_claimed`, never a
   quote anchor (`link.ANCHOR_EVIDENCE` is unchanged); as a sent copy it still
-  wins over a received copy of the same Message-ID inside one plan.
+  wins over a received copy of the same Message-ID inside one plan, and in the
+  store ("Sent evidence wins", `imports/store.SENT_EVIDENCE_RANK`):
+  `gmail_label_sent` over `imap_sent_folder` over any other evidence, so a
+  stronger copy revises the stored record even with identical bytes and a
+  weaker copy (a changed received copy) never replaces a stored sent record.
 - **Cursors.** Per mailbox, the `import_meta` key `mail_imap.<account>.m<12 hex>`
   (SHA-256 of host, port, address and mailbox name) holds JSON `{base, epoch,
   low, mailbox_digest, role, uid, uidvalidity}`. A changed `UIDVALIDITY`
   starts a new epoch (`cursor_reset`; the re-fetch is idempotent). The first
   run of an epoch takes the newest `max_messages` UIDs and reports the rest as
-  `excluded_history`; later runs fetch UIDs above `uid`. `--since YYYY-MM-DD`
-  backfills older mail (server date on or after the day, newest first) with
-  its own state `<key>.back` (`low`) and never moves the forward cursor.
+  `excluded_history`; later runs fetch UIDs above `uid`. When the per-call cap
+  is used up, a later mailbox's cursor is never moved without fetching: the
+  call returns `partial` (`max_messages`). `--since YYYY-MM-DD` backfills
+  older mail (server date on or after the day, newest first) with its own
+  state `<key>.back` and never moves the forward cursor: it walks UIDs
+  downward from the lowest one it covered whatever the messages' dates
+  (`SINCE` only filters), records the day it covered (`since`), and a later,
+  wider `--since` first re-scans the covered range for the days it never asked
+  for (`SINCE new BEFORE old`, progress in `wsince`/`whigh`) before extending
+  below it.
   UIDs come from windowed `UID SEARCH` (at most 100000 UIDs per window), and a
   UID at or below the cursor (`UID n:*` returns the last message) is dropped.
   `mail_imap.<account>.last` records `{at, error, gmail, partial}`.
 - **Batches.** Groups of at most 200 UIDs are size-checked with `UID FETCH
-  (UID RFC822.SIZE)`; a message over 25 MiB is counted as `skipped_oversize`
-  and never downloaded. Batches of at most 64 MiB of literals are fetched with
-  `BODY.PEEK[]`, planned, written thread by thread under ONE `import_runs` row
-  (`source = mail`) with `write_thread(..., merge_conversation=True)` (stored
-  participants are kept, `last_message_at` is the maximum, the stored title is
-  kept, `message_count` is recounted), and published together with the cursor
-  by `ImportStore.commit_batch` in one transaction. A crash re-fetches at most
-  one batch; a fetch first marks `open` mail runs left by a crash `failed`.
+  (UID RFC822.SIZE)`; a message announced over 25 MiB is counted as
+  `skipped_oversize` and never downloaded. Batches of at most 48 MiB of
+  announced sizes are fetched with `BODY.PEEK[]`; announced sizes are never
+  trusted alone: the client checks each literal's length BEFORE reading it,
+  drains (reads in 64 KiB chunks and discards) a literal over 25 MiB and counts
+  it as `skipped_oversize`, and aborts the connection (`imap_protocol`) without
+  reading when a literal would take one response over 64 MiB of literals or
+  the session over its byte budget. Each batch is planned (quote linker, and
+  the store's thread keys for the messages it contains or references, so a
+  reply chain split across batches stays one conversation) and then written
+  and published by `ImportStore.write_batch` in ONE transaction under ONE
+  `import_runs` row (`source = mail`): the messages, the merge of the
+  conversation rows (stored participants are kept, `last_message_at` is the
+  maximum, the stored title is kept, `message_count` is recounted from
+  committed rows), the run's commit and the cursor. A failed batch leaves
+  every published row, revision and conversation field as it was; a
+  concurrent reader sees the state before or after a batch, never between. A
+  crash re-fetches at most one batch; a fetch first marks `open` mail runs
+  left by a crash `failed`.
 - **Budgets.** `max_messages` 1 to 2000 (default 2000) across the mailboxes
-  of one call; a 30 s socket timeout; a time budget checked between batches,
-  600 s for the CLI and 60 s for the tool. Stopping early is `partial: true`
-  with `partial_reason` `time_budget`, `max_messages` or `error`, and the next
-  call continues from the committed cursor.
+  of one call; at most 1 GiB of announced mail per call (`max_bytes`); a 30 s
+  socket timeout per operation; a time budget, 600 s for the CLI and 60 s for
+  the tool, checked before every IMAP command (and between batches), with a
+  hard deadline at most 30 s later after which a watchdog shuts the socket
+  down, so a server that keeps trickling bytes cannot hold a command open.
+  Stopping early is `partial: true` with `partial_reason` `time_budget`,
+  `max_messages`, `max_bytes`, `cancelled` or `error`, and the next call
+  continues from the committed cursor.
 - **Output.** `FetchResult` is the only output, serialized through a fixed
   allowlist: integers `inserted`, `duplicates`, `revised`, `conflicts`,
   `fetched`, `skipped`, `skipped_oversize`, `batches`, `mailboxes`,
@@ -4634,21 +4671,29 @@ part of this delivery ([`TODO.md`](./TODO.md)).
 CLI:
 
 ```
-hermes-mordred mail setup [--imap-host H] [--imap-port P] [--account LABEL] [--no-touch-id]
+hermes-mordred mail setup [--imap-host H] [--imap-port 993] [--account LABEL] [--no-touch-id]
 hermes-mordred mail fetch [--max N] [--mailbox all|inbox|sent] [--since YYYY-MM-DD] [--dry-run] [--json]
-hermes-mordred mail forget [--rows] --yes
+hermes-mordred mail forget [--rows] [--account LABEL] --yes
 hermes-mordred mail status [--json]
 ```
 
 `setup` defaults the host to `imap.gmail.com` for Gmail addresses and asks
-for it otherwise. `fetch` exits 0 on success (a partial fetch included), 1 on
+for it otherwise; its probe and sealing run under the same writer lock as
+`fetch`, `mail import` and `forget` (`sync_in_progress`). `fetch` exits 0 on
+success (a partial fetch included), 1 on
 a refusal or failure, 2 on bad arguments; `--json` prints exactly the
 serialized `FetchResult`; `--dry-run` fetches and plans but writes no rows,
-runs, cursors or audit entry. `forget --yes` deletes the sealed credentials,
-the Enclave key and the account's cursors (a store refusal leaves the cursors
-and exits 1); `--rows` first deletes the account's mail rows
+runs, cursors or audit entry. `forget --yes` deletes the account's cursors and
+then the sealed credentials and the Enclave key (a store refusal leaves the
+cursors and exits 1); `--rows` first deletes the account's mail rows
 (`delete_source`) and stops with exit 1, touching nothing, when the store
-refuses. `mail status` adds the account label, the path and scope, the last
+refuses. The label is resolved before the lock and re-checked under it: if a
+`mail setup` replaced the credentials meanwhile (`setup_id` in the flags),
+nothing is deleted (`credentials_changed`). Rows and cursors always go before
+the credentials, so a failed forget can be retried; once the credentials are
+gone, `forget [--rows] --yes --account LABEL` deletes that label's rows and
+cursors (`account_mismatch` when the label differs from the sealed one).
+`mail status` adds the account label, the path and scope, the last
 fetch and the cursor positions.
 
 Hermes tool `mordred_mail_sync` (toolset `mordred_telegram`, beside
@@ -4661,8 +4706,10 @@ Hermes tool `mordred_mail_sync` (toolset `mordred_telegram`, beside
   model again (a Venice model must be `private`; `hermes_model_not_allowed`,
   `hermes_model_not_private`) and the fetch repeats every gate above.
 - Result: the serialized `FetchResult` plus a fixed `note`; errors before the
-  fetch are `{error, note}`. The fetch runs in a worker thread that has
-  finished before the result is returned.
+  fetch are `{error, note}`. The fetch runs in one worker thread that has
+  finished before the result is returned; a cancelled call cancels the fetch
+  (its IMAP socket is shut down at once) and waits for the worker before the
+  cancellation completes, so no fetch continues in the background.
 - Not a reader tool and not a taint source. It is in
   `privacy_check.egress.READER_ALLOWED` (allowed in a reader session) and in
   `FIRST_PARTY_TOOLS` (its destination is fixed, so it also runs under
@@ -4675,16 +4722,24 @@ Where the code differs from the design record:
   must start with a letter), and the digest covers host, port and address as
   well as the mailbox name, so a later setup of another account under the same
   label never reuses a cursor. The value adds `role`, `base` and `low`.
-- Conversation merging is the `merge_conversation=True` option of
-  `write_thread`, used by the fetch only; `upsert_conversation` and the other
-  callers are unchanged.
+- Conversation merging happens inside `ImportStore.write_batch` (one
+  transaction with the batch's rows, the run's commit and the cursor), used by
+  the fetch only; `commit_batch` and `write_thread(..., merge_conversation=True)`
+  remain as lower-level pieces, and `upsert_conversation` and the other callers
+  are unchanged.
 - `--mailbox` takes a role (`all`, `inbox`, `sent`) among the configured ones,
   not a folder name.
 - A dry run opens the store (to read the cursor and link quotes) but takes no
   lock and writes nothing.
 - Codes added beyond the record: `routing_unavailable`,
-  `imap_command_refused`, `fetch_failed`, `tty_required` (CLI only) and the
-  gate codes; result fields added: `fetched`, `skipped`, `dry_run`.
+  `imap_command_refused`, `fetch_failed`, `tty_required`,
+  `credentials_changed` and `account_mismatch` (CLI only) and the gate codes;
+  partial reasons added: `max_bytes`, `cancelled`; result fields added:
+  `fetched`, `skipped`, `dry_run`.
+- After the Codex implementation review (2026-10-22): batches are planned at
+  48 MiB of announced sizes so that the 64 MiB limit applies to the literals
+  actually received; the port is fixed to 993; `AUTHENTICATE` left the
+  allowlist.
 
 ## Imported-message provenance evaluation (2026-10-22)
 

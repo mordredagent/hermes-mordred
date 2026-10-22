@@ -14,7 +14,12 @@ records) to build:
   that appears later in the file. An ``own_address`` or ``list_rewrite``
   record is the owner for display but never anchors a quote link: its
   ``From``/``X-Original-From`` is a header anyone can type;
-- the threads (:func:`.threading.build_threads`).
+- the threads (:func:`.threading.build_threads`). With a ``thread_resolver``
+  (the IMAP fetch plans one batch at a time) a thread that is not a Gmail
+  thread joins the stored conversation of a committed message it contains or
+  references (``Message-ID``, ``In-Reply-To``, ``References``), so a reply
+  chain A→B→C split across batches stays one conversation; threads of the
+  plan that resolve to the same stored conversation are merged.
 
 Pass 2 reads the sources again and normalises the chosen copies into
 :class:`PlannedThread` objects (one :class:`~..records.ImportConversation`
@@ -27,8 +32,8 @@ from __future__ import annotations
 import hashlib
 import time
 from collections import Counter
-from collections.abc import Iterable, Iterator, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 
 from ..records import (
     ConversationKind,
@@ -61,7 +66,10 @@ from .report import DryRunReport
 from .source import MailSource, RawMessage, iter_raw
 from .threading import Thread, ThreadInput, build_threads, normalize_subject
 
-__all__ = ["ImportPlan", "PlannedThread", "plan_import"]
+__all__ = ["ImportPlan", "PlannedThread", "ThreadResolver", "plan_import"]
+
+#: Message ids → the thread key (conversation id) of the committed message with that id.
+ThreadResolver = Callable[[Sequence[str]], Mapping[str, str]]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -279,6 +287,43 @@ def _normalize_pass(
     return normalized
 
 
+def _thread_ids(thread: Thread, inputs: Mapping[str, ThreadInput]) -> tuple[list[str], list[str]]:
+    """(the members' own message ids, the ids they reference)."""
+    items = [inputs[uid] for uid in thread.members if uid in inputs]
+    own = [item.message_id for item in items if item.message_id]
+    refs = [ref for item in items for ref in (*item.in_reply_to, *item.references)]
+    return own, refs
+
+
+def _join_stored(threads: list[Thread], indexer: _Indexer, resolver: ThreadResolver) -> list[Thread]:
+    """Threads re-keyed onto the stored conversation they continue (see the module docstring)."""
+    inputs = {copy.thread.key: copy.thread for copy in indexer.copies.values()}
+    open_threads = [thread for thread in threads if thread.method != "gmail_thrid"]
+    wanted = sorted({ident for thread in open_threads for ids in _thread_ids(thread, inputs) for ident in ids})
+    stored = resolver(wanted) if wanted else {}
+    if not stored:
+        return threads
+    grouped: dict[str, list[Thread]] = {}
+    for thread in threads:
+        key = thread.thread_key
+        if thread.method != "gmail_thrid":
+            own, refs = _thread_ids(thread, inputs)
+            found = sorted({stored[i] for i in own if i in stored}) or sorted({stored[r] for r in refs if r in stored})
+            key = found[0] if found else key
+        grouped.setdefault(key, []).append(thread)
+    joined: list[Thread] = []
+    for key, group in grouped.items():
+        if len(group) == 1:
+            joined.append(replace(group[0], thread_key=key))
+            continue
+        members = sorted(
+            {uid for thread in group for uid in thread.members},
+            key=lambda uid: (inputs[uid].sent_at is None, inputs[uid].sent_at or 0, inputs[uid].order),
+        )
+        joined.append(Thread(key, "references", tuple(members), any(thread.partial for thread in group)))
+    return sorted(joined, key=lambda thread: thread.thread_key)
+
+
 def plan_import(
     sources: Iterable[MailSource],
     *,
@@ -287,11 +332,14 @@ def plan_import(
     sent_label: str = "Sent",
     linker: Linker | None = None,
     imported_at: int | None = None,
+    thread_resolver: ThreadResolver | None = None,
 ) -> ImportPlan:
     """Plan an import of ``sources`` (read twice, never written).
 
     ``linker`` (e.g. the store-backed linker of the CLI) is consulted after the
     in-plan index for quotes that do not link to a record of this import.
+    ``thread_resolver`` (the IMAP fetch's store lookup) attaches threads to the
+    stored conversations they continue; what it raises propagates.
     Raises :class:`~.source.SourceError` for an unreadable source,
     :class:`~..records.RecordError` (``bad_account``) for an invalid account
     label and ``ValueError("bad_own_address")`` for an invalid own address.
@@ -306,6 +354,8 @@ def plan_import(
         for raw in iter_raw(source, source_stats):
             indexer.add(raw, source_index)
     threads = build_threads([copy.thread for copy in indexer.copies.values()])
+    if thread_resolver is not None:
+        threads = _join_stored(threads, indexer, thread_resolver)
     stats: Counter[str] = Counter()
     ctx = NormalizeContext(
         account=account,

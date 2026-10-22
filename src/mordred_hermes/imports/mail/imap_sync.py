@@ -20,17 +20,31 @@ Per mailbox (Gmail: All Mail; other servers: INBOX, then the sent folder chosen 
 - First run of an epoch: the newest ``max_messages`` UIDs; older ones are
   counted as ``excluded_history`` and fetched only by ``--since`` (backfill,
   its own ``.back`` cursor, newest first, never moving the forward cursor).
+  When the per-run cap is used up, a later mailbox's cursor is never moved
+  without fetching: the run reports ``partial``/``max_messages`` instead.
+- Backfill walks UIDs downward from the lowest one it covered, whatever the
+  messages' dates; ``SINCE`` only filters. Its cursor records the day it
+  covered (``since``); a later, wider ``--since`` first re-scans the covered
+  range for the days it never asked for (``SINCE new BEFORE old``), then
+  extends below it.
 - UIDs are found with windowed ``UID SEARCH`` (bounded responses); a UID at or
   below the cursor (``UID n:*`` returns the last message) is filtered out.
 - Groups of at most 200 UIDs: ``UID FETCH (UID RFC822.SIZE)`` first, so a
-  message over 25 MiB is skipped and counted without downloading it; then
-  batches of at most 64 MiB of literals, each fetched with ``BODY.PEEK[]``,
-  planned by :func:`~.importer.plan_import` with the store-backed quote linker,
-  written thread by thread under ONE ``import_runs`` row and published together
-  with the cursor by :meth:`~..store.ImportStore.commit_batch`.
-- The time budget (``budget_s``) is checked between batches; the socket
-  timeout bounds a batch. Stopping early returns ``partial`` with the cursor at
-  the last committed batch.
+  message announced over 25 MiB is skipped and counted without downloading
+  it; then batches of at most :data:`BATCH_BYTES` of announced sizes, each
+  fetched with ``BODY.PEEK[]`` under the session's literal limits (a literal
+  over 25 MiB is drained unread and counted, more than 64 MiB per response or
+  a literal that does not fit aborts the connection: announced sizes are never
+  trusted alone), planned by :func:`~.importer.plan_import` with the
+  store-backed quote linker and the store's thread keys for referenced
+  messages (so a reply chain split across batches stays one conversation),
+  and written AND published in ONE transaction with the cursor and the
+  conversation merge by :meth:`~..store.ImportStore.write_batch`.
+- Deadlines: the session (:class:`~.imap.IoLimits`) refuses to start a command
+  after ``budget_s`` and cuts an in-flight one at the hard deadline; the run
+  also checks between batches, and stops at a :class:`~.imap.CancelToken`.
+  Stopping early returns ``partial`` with the cursor at the last committed
+  batch; at most :data:`RUN_BYTES` of mail is read per run (``max_bytes``).
 
 Output is :class:`FetchResult` only: integers, booleans and closed-enum codes.
 No subject, name, address, label or body is returned, logged or audited.
@@ -48,11 +62,11 @@ import stat
 import sys
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Final
 
-from .imap import ImapError, ImapSession
+from .imap import CancelToken, ImapError, ImapSession, ImapStopped, IoLimits
 from .secrets import MailCredentials, MailSecretsError, ensure_private_dir, mail_dir
 from .source import MAX_MESSAGE_BYTES, TrustedBytes, TrustedMeta
 
@@ -79,14 +93,17 @@ MAX_MAX_MESSAGES: Final = 2000
 CLI_BUDGET_S: Final = 600.0
 TOOL_BUDGET_S: Final = 60.0
 GROUP_UIDS: Final = 200
-BATCH_BYTES: Final = 64 * 1024 * 1024
+#: Announced bytes planned per body fetch; the session refuses more than 64 MiB of actual literals.
+BATCH_BYTES: Final = 48 * 1024 * 1024
+#: Announced bytes fetched per run before it stops with ``partial_reason: max_bytes``.
+RUN_BYTES: Final = 1024 * 1024 * 1024
 _FIRST_WINDOW: Final = 4096
 _MAX_WINDOW: Final = 100_000
 CURSOR_PREFIX: Final = "mail_imap"
 _LOCK_NAME: Final = ".lock"
 _MONTHS: Final = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
-PARTIAL_REASONS: Final = frozenset({"time_budget", "max_messages", "error"})
+PARTIAL_REASONS: Final = frozenset({"time_budget", "max_messages", "max_bytes", "cancelled", "error"})
 #: Store-gate codes passed through as they are; every other store refusal is ``import_store_unavailable``.
 _GATE_CODES: Final = frozenset({"not_armed", "conversion_pending", "unprotected_process", "no_key"})
 ERROR_CODES: Final = frozenset(
@@ -208,7 +225,13 @@ def _checked_value(key: str, value: object) -> int | bool | str | None:
 
 @dataclass(frozen=True)
 class Cursor:
-    """Forward (``uid``/``base``) or backfill (``low``) state of one mailbox in one ``UIDVALIDITY`` epoch."""
+    """Forward (``uid``/``base``) or backfill (``low``) state of one mailbox in one ``UIDVALIDITY`` epoch.
+
+    Backfill: every UID in ``[low, base)`` whose server date is on or after the day
+    ``since`` (a proleptic Gregorian ordinal; 0 = unknown) has been fetched or
+    skipped. ``wsince``/``whigh`` record a wider ``--since`` in progress: the UIDs
+    in ``[whigh, base)`` were re-scanned for the days ``[wsince, since)``.
+    """
 
     mailbox_digest: str
     uidvalidity: int
@@ -217,21 +240,24 @@ class Cursor:
     uid: int = 0
     base: int = 0
     low: int = 0
+    since: int = 0
+    wsince: int = 0
+    whigh: int = 0
 
     def to_json(self) -> str:
-        return json.dumps(
-            {
-                "base": self.base,
-                "epoch": self.epoch,
-                "low": self.low,
-                "mailbox_digest": self.mailbox_digest,
-                "role": self.role,
-                "uid": self.uid,
-                "uidvalidity": self.uidvalidity,
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        )
+        data: dict[str, object] = {
+            "base": self.base,
+            "epoch": self.epoch,
+            "low": self.low,
+            "mailbox_digest": self.mailbox_digest,
+            "role": self.role,
+            "uid": self.uid,
+            "uidvalidity": self.uidvalidity,
+        }
+        for name in _OPTIONAL_NUMBERS:  # backfill only; omitted when 0 so a value stays within 256 characters
+            if getattr(self, name):
+                data[name] = getattr(self, name)
+        return json.dumps(data, separators=(",", ":"), sort_keys=True)
 
     @classmethod
     def parse(cls, raw: str | None, digest: str) -> Cursor | None:
@@ -245,16 +271,22 @@ class Cursor:
         if not isinstance(data, dict) or data.get("mailbox_digest") != digest:
             return None
         numbers: list[int] = []
-        for name in ("uidvalidity", "epoch", "uid", "base", "low"):
-            value = data.get(name)
+        for name in ("uidvalidity", "epoch", "uid", "base", "low", *_OPTIONAL_NUMBERS):
+            value = data.get(name, 0 if name in _OPTIONAL_NUMBERS else None)
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 return None
             numbers.append(value)
         role = data.get("role")
         if role not in ("all", "inbox", "sent"):
             return None
-        validity, epoch, uid, base, low = numbers
-        return cls(digest, validity, epoch, str(role), uid, base, low)
+        validity, epoch, uid, base, low, since, wsince, whigh = numbers
+        if max(since, wsince) > _MAX_DAY:
+            return None  # not a day this module wrote
+        return cls(digest, validity, epoch, str(role), uid, base, low, since, wsince, whigh)
+
+
+_OPTIONAL_NUMBERS: Final = ("since", "wsince", "whigh")
+_MAX_DAY: Final = _dt.date.max.toordinal()
 
 
 def mailbox_digest(creds: MailCredentials, name: str) -> str:
@@ -326,6 +358,8 @@ class FetchOptions:
     dry_run: bool = False
     budget_s: float = CLI_BUDGET_S
     via: str = "cli"
+    #: Set from another thread to stop the fetch (the tool's worker on a cancelled call).
+    cancel: CancelToken | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if isinstance(self.max_messages, bool) or not 1 <= self.max_messages <= MAX_MAX_MESSAGES:
@@ -338,7 +372,7 @@ class FetchEnv:
 
     home: Path
     secret_store: Any
-    connect: Callable[[MailCredentials], ImapSession]
+    connect: Callable[[MailCredentials, IoLimits], ImapSession]
     open_store: Callable[[Path], Any]
     memory_guard: Callable[[Path], None]
     audit: Callable[[Mapping[str, Any]], None]
@@ -349,10 +383,10 @@ class FetchEnv:
     harden: Callable[[], None] = field(default=lambda: None)
 
 
-def _default_connect(creds: MailCredentials) -> ImapSession:
+def _default_connect(creds: MailCredentials, limits: IoLimits) -> ImapSession:
     from .imap import connect
 
-    return connect(creds.imap_host, creds.imap_port)
+    return connect(creds.imap_host, creds.imap_port, limits=limits)
 
 
 def _default_open_store(home: Path) -> Any:
@@ -412,9 +446,12 @@ def _chunks(items: Sequence[int], size: int) -> Iterator[list[int]]:
         yield list(items[start : start + size])
 
 
+Commit = Callable[[list[int]], Mapping[str, str]]
+
+
 @dataclass
 class _Run:
-    """One fetch in progress (the gates have passed and the session is logged in)."""
+    """One fetch in progress (the gates have passed and the session is open)."""
 
     store: Any
     session: ImapSession
@@ -429,8 +466,16 @@ class _Run:
     # -- budget -----------------------------------------------------------------------------
 
     def check_time(self) -> None:
+        cancel = self.options.cancel
+        if cancel is not None and cancel.cancelled:
+            raise _Partial("cancelled")
         if self.env.clock() >= self.deadline:
             raise _Partial("time_budget")
+
+    def save(self, key: str, cursor: Cursor) -> None:
+        """A cursor move that publishes no row (nothing new below it, or an empty mailbox)."""
+        if not self.options.dry_run:
+            self.store.set_meta(key, cursor.to_json())
 
     # -- UID discovery ----------------------------------------------------------------------
 
@@ -447,6 +492,7 @@ class _Run:
         found: set[int] = set()
         low, window = after + 1, _FIRST_WINDOW
         while low <= top and len(found) <= limit:
+            self.check_time()
             high = min(low + window - 1, top)
             criterion = f"{low}:*" if high >= top else f"{low}:{high}"
             found.update(uid for uid in self.session.search("UID", criterion) if after < uid <= top and uid >= low)
@@ -454,22 +500,21 @@ class _Run:
         ordered = sorted(found)
         return ordered[:limit], len(ordered) > limit or (len(ordered) >= limit and low <= top)
 
-    def older_than(self, below: int, limit: int, since: _dt.date | None) -> tuple[list[int], bool]:
-        """Up to ``limit`` UIDs under ``below`` (matching ``SINCE``), newest first; whether more remain."""
+    def walk_down(self, below: int, floor: int, limit: int, criteria: Sequence[str] = ()) -> tuple[list[int], bool]:
+        """Up to ``limit`` UIDs in ``[floor, below)`` matching ``criteria``, newest first; whether more remain."""
         found: set[int] = set()
         high, window = below - 1, _FIRST_WINDOW
-        extra = ("SINCE", imap_date(since)) if since is not None else ()
-        while high >= 1 and len(found) <= limit:
+        while high >= floor and len(found) <= limit:
             self.check_time()
-            low = max(1, high - window + 1)
-            found.update(uid for uid in self.session.search("UID", f"{low}:{high}", *extra) if low <= uid <= high)
+            low = max(floor, high - window + 1)
+            found.update(uid for uid in self.session.search("UID", f"{low}:{high}", *criteria) if low <= uid <= high)
             high, window = low - 1, min(window * 2, _MAX_WINDOW)
         ordered = sorted(found, reverse=True)
-        return ordered[:limit], len(ordered) > limit or (len(ordered) >= limit and high >= 1)
+        return ordered[:limit], len(ordered) > limit or (len(ordered) >= limit and high >= floor)
 
     # -- batches ----------------------------------------------------------------------------
 
-    def process(self, uids: Sequence[int], role: str, commit: Callable[[list[int]], Mapping[str, str]]) -> None:
+    def process(self, uids: Sequence[int], role: str, commit: Commit) -> None:
         """Size-check, fetch, plan and publish ``uids`` in order; ``commit(covered)`` gives the cursor updates."""
         for group in _chunks(uids, GROUP_UIDS):
             self.check_time()
@@ -483,24 +528,24 @@ class _Run:
                     self.result.skipped_oversize += 1
                 elif size is not None:
                     if batch and batch_bytes + size > BATCH_BYTES:
-                        self.batch(batch, covered, role, commit)
-                        self.check_time()
+                        self.batch(batch, covered, role, commit, batch_bytes)
                         batch, covered, batch_bytes = [], [], 0
                     batch.append(uid)
                     batch_bytes += size
                 covered.append(uid)  # vanished and oversize UIDs are passed, never retried
-            self.batch(batch, covered, role, commit)
+            self.batch(batch, covered, role, commit, batch_bytes)
 
-    def batch(
-        self, uids: list[int], covered: list[int], role: str, commit: Callable[[list[int]], Mapping[str, str]]
-    ) -> None:
+    def batch(self, uids: list[int], covered: list[int], role: str, commit: Commit, announced: int) -> None:
         if not covered:
             return
+        self.check_time()
+        if uids and self.session.bytes_read + announced > RUN_BYTES:
+            raise _Partial("max_bytes")
         fetched = self.session.fetch(uids, gmail=self.creds.gmail) if uids else []
         messages: list[tuple[bytes, TrustedMeta]] = []
         for item in fetched:
-            if len(item.data) > MAX_MESSAGE_BYTES:
-                self.result.skipped_oversize += 1  # the server under-reported its size
+            if item.oversize or len(item.data) > MAX_MESSAGE_BYTES:
+                self.result.skipped_oversize += 1  # the server under-reported its size: drained unread
                 continue
             labels = item.labels if self.creds.gmail else ()
             messages.append((item.data, TrustedMeta(labels=labels, thread_id=item.thread_id, folder_role=role)))
@@ -513,12 +558,26 @@ class _Run:
             return
         self.publish(messages, updates)
 
+    def stored_threads(self, message_ids: Sequence[str]) -> dict[str, str]:
+        """Message id → thread key of this account's committed messages (cross-batch threading)."""
+        try:
+            found = self.store.find_messages("mail", self.creds.account, message_ids=message_ids)
+        except Exception:
+            raise FetchStop("run_failed") from None
+        return {item.message.message_id: item.conversation.conversation_id for item in found}
+
     def publish(self, messages: list[tuple[bytes, TrustedMeta]], updates: Mapping[str, str]) -> None:
         from .importer import plan_import
         from .store_link import StoreLinker
 
         linker = StoreLinker(self.store, self.creds.account)
-        plan = plan_import([TrustedBytes(messages)], account=self.creds.account, own_addresses=self.own, linker=linker)
+        plan = plan_import(
+            [TrustedBytes(messages)],
+            account=self.creds.account,
+            own_addresses=self.own,
+            linker=linker,
+            thread_resolver=self.stored_threads,
+        )
         if linker.error is not None:
             raise FetchStop("run_failed")  # never publish weaker attributions after a store failure
         skipped = sum(plan.report.skipped.values())
@@ -527,24 +586,27 @@ class _Run:
             self.result.batches += 1  # planned, never written
             return
         counts: dict[str, int] = {"fetched": len(messages), "parsed": plan.report.parsed, "skipped": skipped}
-        run_id = self.store.run_begin("mail")
         try:
-            for thread in plan.threads:
-                written = self.store.write_thread(
-                    run_id, thread.messages, conversation=thread.conversation, merge_conversation=True
-                )
-                for key in ("inserted", "duplicates", "revised", "conflicts"):
-                    counts[key] = counts.get(key, 0) + int(getattr(written, key))
-            self.store.commit_batch(run_id, counts, updates)
+            run_id = self.store.run_begin("mail")
+        except Exception:
+            raise FetchStop("run_failed") from None
+        try:
+            written = self.store.write_batch(
+                run_id,
+                [thread.messages for thread in plan.threads],
+                conversations=[thread.conversation for thread in plan.threads],
+                counts=counts,
+                meta_updates=updates,
+            )
         except BaseException as exc:
             with contextlib.suppress(Exception):
-                self.store.run_fail(run_id, counts)
+                self.store.run_fail(run_id, counts)  # nothing of the batch is visible: it was rolled back
             if isinstance(exc, Exception):
                 raise FetchStop("run_failed") from None
             raise
         self.result.batches += 1  # committed together with its cursor
         for key in ("inserted", "duplicates", "revised", "conflicts"):
-            setattr(self.result, key, getattr(self.result, key) + counts.get(key, 0))
+            setattr(self.result, key, getattr(self.result, key) + int(getattr(written, key)))
 
     # -- mailboxes --------------------------------------------------------------------------
 
@@ -563,25 +625,30 @@ class _Run:
         top = self.top_uid(status.uidnext, status.exists)
         cursor = self.forward(role, key, digest, status, forward, epoch, top)
         if self.options.since is not None and cursor is not None:
-            self.backfill(role, key, digest, cursor)
+            self.backfill(key, digest, cursor, self.options.since.toordinal())
 
     def forward(
         self, role: str, key: str, digest: str, status: Any, forward: Cursor | None, epoch: int, top: int
     ) -> Cursor | None:
-        state: dict[str, Cursor | None] = {"cursor": forward}
+        if forward is None and status.exists <= 0:  # an empty mailbox: start the epoch at its top
+            fresh = Cursor(digest, status.uidvalidity, epoch, role, uid=top, base=top + 1)
+            self.save(key, fresh)
+            return fresh
+        if self.remaining <= 0:
+            if forward is None or top > forward.uid:
+                raise _Partial("max_messages")  # never move a cursor past mail this run did not fetch
+            return forward
         if forward is not None:
             uids, more = self.newer_than(forward.uid, top, self.remaining)
             base = forward.base
         else:
-            uids, more = self.newest(top)
-            base = uids[0] if uids else top + 1
+            uids, more = self.newest(top), False
+            if not uids:
+                return None  # the server lists mail but SEARCH finds none: leave the cursor unset
+            base = uids[0]
             self.result.excluded_history += max(status.exists - len(uids), 0)
-            if not uids:  # an empty mailbox: start the epoch at its top so the next run fetches forward
-                fresh = Cursor(digest, status.uidvalidity, epoch, role, uid=top, base=base)
-                if not self.options.dry_run:
-                    self.store.set_meta(key, fresh.to_json())
-                return fresh
         self.remaining -= len(uids)
+        state: dict[str, Cursor | None] = {"cursor": forward}
 
         def commit(covered: list[int]) -> Mapping[str, str]:
             current = Cursor(digest, status.uidvalidity, epoch, role, uid=max(covered), base=base)
@@ -593,31 +660,64 @@ class _Run:
             raise _Partial("max_messages")
         return state["cursor"]
 
-    def newest(self, top: int) -> tuple[list[int], bool]:
+    def newest(self, top: int) -> list[int]:
         """The newest ``remaining`` UIDs at or below ``top``, oldest first (a first run never reports ``more``)."""
-        if self.remaining <= 0:
-            return [], False
-        newest, _more = self.older_than(top + 1, self.remaining, None)
-        return sorted(newest), False
+        newest, _more = self.walk_down(top + 1, 1, self.remaining)
+        return sorted(newest)
 
-    def backfill(self, role: str, key: str, digest: str, forward: Cursor) -> None:
+    # -- backfill ---------------------------------------------------------------------------
+
+    def backfill(self, key: str, digest: str, forward: Cursor, target: int) -> None:
+        """``--since``: widen the covered range to ``target`` if needed, then extend it downward."""
         back_key = f"{key}.back"
-        stored = Cursor.parse(self.store.get_meta(back_key), digest)
-        if stored is not None and (stored.uidvalidity, stored.epoch) != (forward.uidvalidity, forward.epoch):
-            stored = None
-        below = forward.base if stored is None else min(stored.low, forward.base)
-        if self.remaining <= 0 or below <= 1:
-            return
-        uids, more = self.older_than(below, self.remaining, self.options.since)
+        state = Cursor.parse(self.store.get_meta(back_key), digest)
+        epoch = (forward.uidvalidity, forward.epoch)
+        if state is None or (state.uidvalidity, state.epoch) != epoch or state.low >= forward.base:
+            state = Cursor(digest, forward.uidvalidity, forward.epoch, forward.role, low=forward.base, since=target)
+        if state.since == 0 or target < state.since:
+            state = self.widen(back_key, state, target, forward.base)
+        self.extend(back_key, state, target)
+
+    def widen(self, back_key: str, state: Cursor, target: int, base: int) -> Cursor:
+        """Re-scan the covered ``[low, base)`` for the days ``[target, since)`` an earlier run never asked for."""
+        if state.wsince != target or not state.low <= state.whigh <= base:
+            state = replace(state, wsince=target, whigh=base)
+        criteria: tuple[str, ...] = ("SINCE", imap_date(_dt.date.fromordinal(target)))
+        if state.since:
+            criteria += ("BEFORE", imap_date(_dt.date.fromordinal(state.since)))
+        uids, more = self.walk_down(state.whigh, state.low, self.remaining, criteria)
         self.remaining -= len(uids)
+        current = {"state": state}
 
         def commit(covered: list[int]) -> Mapping[str, str]:
-            low = min(covered)
-            return {back_key: Cursor(digest, forward.uidvalidity, forward.epoch, role, low=low).to_json()}
+            current["state"] = replace(current["state"], whigh=min(covered))
+            return {back_key: current["state"].to_json()}
 
-        self.process(uids, role, commit)
+        self.process(uids, state.role, commit)
         if more:
             raise _Partial("max_messages")
+        done = replace(current["state"], since=target, wsince=0, whigh=0)
+        self.save(back_key, done)
+        return done
+
+    def extend(self, back_key: str, state: Cursor, target: int) -> None:
+        """Walk below ``low`` by UID, whatever the dates: every UID dated on or after ``target``."""
+        covers = max(state.since, target)  # a narrower request makes the record claim less, never more
+        criteria = ("SINCE", imap_date(_dt.date.fromordinal(target)))
+        uids, more = self.walk_down(state.low, 1, self.remaining, criteria)
+        self.remaining -= len(uids)
+        current = {"state": state}
+
+        def commit(covered: list[int]) -> Mapping[str, str]:
+            current["state"] = replace(current["state"], low=min(covered), since=covers)
+            return {back_key: current["state"].to_json()}
+
+        self.process(uids, state.role, commit)
+        if more:
+            raise _Partial("max_messages")
+        done = replace(current["state"], low=1, since=covers)
+        if done != state:
+            self.save(back_key, done)
 
 
 def _roles(creds: MailCredentials, options: FetchOptions) -> tuple[str, ...]:
@@ -638,17 +738,23 @@ def _sync(store: Any, creds: MailCredentials, options: FetchOptions, env: FetchE
             remember_own_addresses(store, creds.account, creds.own_addresses)
     except Exception as exc:
         raise FetchStop(_store_code(exc)) from None
-    session = env.connect(creds)
+    limits = IoLimits.for_budget(options.budget_s, clock=env.clock, cancel=options.cancel)
     try:
-        session.login(creds.address, creds.app_password)
-        deadline = env.clock() + options.budget_s
-        run = _Run(store, session, creds, own, options, env, result, deadline, options.max_messages)
+        session = env.connect(creds, limits)
+    except ImapStopped as stop:
+        result.partial, result.partial_reason = True, stop.reason
+        return
+    try:
+        run = _Run(store, session, creds, own, options, env, result, limits.deadline, options.max_messages)
         try:
+            session.login(creds.address, creds.app_password)
             for role in roles:
                 run.check_time()
                 run.mailbox(role)
         except _Partial as stop:
             result.partial, result.partial_reason = True, stop.reason
+        except ImapStopped as stopped:  # the session's deadline or a cancellation, inside a command
+            result.partial, result.partial_reason = True, stopped.reason
     finally:
         session.logout()
 
@@ -729,6 +835,8 @@ def run_fetch(options: FetchOptions, env: FetchEnv | None = None) -> FetchResult
             _locked_fetch(store, options, env, result)
     except FetchStop as stop:
         result.error = stop.code
+    except ImapStopped as stopped:
+        result.partial, result.partial_reason = True, stopped.reason
     except ImapError as exc:
         result.error = _code(exc, "imap_protocol")
     except MailSecretsError as exc:

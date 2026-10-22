@@ -225,8 +225,11 @@ folder_role)` filled only by the IMAP collector. When present, `normalize` and
 `owner.classify` use it and ignore the embedded label/thread headers entirely.
 Gmail system labels arrive as `\Sent`, `\Draft`, `\Spam`, `\Trash`,
 `\Inbox`, `\Important`, `\Starred` and custom labels in modified UTF-7; the
-collector decodes them and maps system labels explicitly, so `gmail_label_sent`
-is emitted only for the real `\Sent` system label.
+collector recognises system labels on the wire before decoding anything and
+keeps them as a distinct type, then decodes the custom labels, so
+`gmail_label_sent` is emitted only for the real `\Sent` system label (a custom
+label that decodes to `\Sent` or ` \Sent ` never classifies) and every label
+of a message is inspected, whatever its position.
 
 ### Conservative evidence for generic servers
 
@@ -244,23 +247,37 @@ version; `status` reports that scope.
 
 Readers expose only committed runs, so the fetch uses one `import_runs` row
 per batch (at most 200 messages, at most 64 MiB of literals). Each batch is
-one store transaction: threads written, the batch's run committed, and the
-cursor (`uidvalidity`, `uid`) updated together through a new
-`ImportStore.commit_batch(run_id, counts, meta_updates)`. A crash therefore
-re-fetches at most one batch and never advances the cursor past unpublished
-rows. Cursor keys fit the store's key grammar (at most four lowercase dotted
+one store transaction: threads written, conversation rows merged, the batch's
+run committed, and the cursor (`uidvalidity`, `uid`) updated together through
+`ImportStore.write_batch(run_id, threads, *, conversations, meta_updates,
+counts)` (the implementation review showed that per-thread transactions
+followed by a separate `commit_batch` let a failed batch hide a revised row
+and leak merged participants, dates and counts). A crash therefore
+re-fetches at most one batch, never advances the cursor past unpublished
+rows, and never changes a published row or conversation field. Cursor keys fit the store's key grammar (at most four lowercase dotted
 components): `mail_imap.<account>.<sha256(mailbox)[:12]>` with a JSON value
 `{"mailbox_digest", "uidvalidity", "uid", "epoch"}`. A changed `UIDVALIDITY`
 starts a new epoch in the same transaction. The forward cursor and the
 historical backfill (`--since`) are separate state; backfill never moves the
-forward cursor. `UID SEARCH UID <last+1>:*` can return the last UID itself;
-the collector filters it out. Sizes are checked with a preliminary `UID FETCH
+forward cursor. Backfill walks UIDs downward from the lowest one it covered,
+whatever the dates, records the day it covered, and re-scans that range for
+the missing days when a later `--since` is wider. A per-run cap used up by
+one mailbox never moves a later mailbox's cursor (the run is `partial`).
+`UID SEARCH UID <last+1>:*` can return the last UID itself; the collector
+filters it out. Sizes are checked with a preliminary `UID FETCH
 (RFC822.SIZE)` so oversize messages are skipped before any literal is
-downloaded. At fetch start, an `open` run for source `mail` left by a crash is
+downloaded, and because a server can lie about them, the client also checks
+every literal's announced length before reading it: over 25 MiB it is drained
+and counted, over the response's 64 MiB (batches are planned at 48 MiB of
+announced sizes) or the run's byte budget the connection is aborted. At fetch start, an `open` run for source `mail` left by a crash is
 marked `failed` and its rows are reclaimed by the store's existing rule.
 `upsert_conversation` merges rather than replaces: `last_message_at` is the
 maximum, participants are unioned, `message_count` is recomputed from the
-store.
+store. Each batch is planned with the store's thread keys for the message ids
+it contains or references, so a reply chain split across batches stays one
+conversation, and the store lets Sent evidence win: a stronger sent-copy
+evidence revises a stored record even with identical bytes, a weaker copy
+never replaces a stored sent record.
 
 ### Counts-only output, enforced by a fixed serializer
 
@@ -281,8 +298,13 @@ its own connection: direct TCP, or SOCKS5 with remote DNS (`socks5h`) and
 proxy authentication from the route; any other proxy kind refuses with
 `egress_unsupported`. TLS is implicit on port 993 with
 `ssl.create_default_context()`, certificate verification on and SNI set to
-the sealed hostname; STARTTLS and referrals are never followed. A VPN drop or
-reset surfaces as `imap_unreachable` and the run fails cleanly.
+the sealed hostname; STARTTLS and referrals are never followed. Only port 993
+is accepted (setup and every credential load check it). When the route has
+proxy credentials, only authenticated SOCKS5 is offered; a proxy that answers
+"no authentication" is refused (`egress_unsupported`). Authentication is
+`LOGIN` inside the TLS connection only; `AUTHENTICATE` is not allowlisted, so
+nothing can negotiate a weaker mechanism. A VPN drop or reset surfaces as
+`imap_unreachable` and the run fails cleanly.
 
 ### Credential custody
 
@@ -292,6 +314,10 @@ unsealed secret lives in one scope for the duration of a fetch; Python cannot
 guarantee zeroization of immutable strings, and the design does not claim it.
 `mail forget --yes` removes the sealed credentials and cursors; `mail forget
 --rows --yes` additionally deletes the account's rows via `delete_source`.
+Rows and cursors are deleted first and the credentials last, under the writer
+lock that `mail setup` also takes; the target label is re-checked under the
+lock (a credentials `setup_id`), so a concurrent setup is never undone, and
+`--account LABEL` retries the deletion once the credentials are gone.
 
 ### Tool hardening
 
@@ -301,19 +327,23 @@ gate inside the handler. It is added to `privacy_check.egress.FIRST_PARTY_TOOLS`
 (fixed destination in code) as well as `READER_ALLOWED`, because
 `READER_ALLOWED` alone still runs the level rules that block unknown tools
 under lockdown; it is not a reader tool and does not taint. The IMAP client
-wrapper enforces a runtime command allowlist: `CAPABILITY`, `LOGIN`/
-`AUTHENTICATE`, `LIST`, `EXAMINE`, `UID SEARCH`, `UID FETCH` with `BODY.PEEK`
-and metadata items only, `NOOP`, `LOGOUT`; anything else raises before it is
-sent. The scope promise is "the sync path never puts mail text into Hermes";
+wrapper enforces a runtime command allowlist: `CAPABILITY`, `LOGIN`, `LIST`,
+`EXAMINE`, `UID SEARCH`, `UID FETCH` with `BODY.PEEK` and metadata items only,
+`NOOP`, `LOGOUT`, each with its argument shape, and no argument containing
+CR, LF or NUL; anything else raises before it is sent. The scope promise is "the sync path never puts mail text into Hermes";
 `mordred_history_search` returns text by design.
 
 ### Partial returns and cancellation
 
-The tool stops after about 60 seconds at a batch boundary and returns
-`partial: true` with `partial_reason: "time_budget"`; the cursor already
-holds the committed progress, so the next call continues. The deadline is
-checked between batches and enforced by the socket timeout inside one; the
-worker thread is joined before the result is returned, so no fetch continues
+The tool stops after about 60 seconds and returns `partial: true` with
+`partial_reason: "time_budget"`; the cursor already holds the committed
+progress, so the next call continues. The deadline is absolute: it is checked
+before every IMAP command (and between batches), and an in-flight command is
+cut at a hard deadline at most 30 seconds later by a watchdog that shuts the
+socket down, because a socket timeout alone resets on every byte a trickling
+server sends. A cancelled tool call cancels the fetch (the socket is shut
+down at once) and waits for the worker; the worker thread is joined before
+the result is returned or the cancellation completes, so no fetch continues
 in the background. The CLI keeps a 10 minute budget.
 
 ### Open questions, decided

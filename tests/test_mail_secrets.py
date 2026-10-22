@@ -80,7 +80,12 @@ def test_flags_never_hold_the_address_host_or_password(tmp_path: Path, enclave: 
     store.ensure_key()
     store.store(gmail_creds("work"))
     flags = store.flags()
+    assert flags is not None
+    setup_id = flags.pop("setup_id")
     assert flags == {"account": "work", "gmail": True, "roles": ["all"], "touch_id": True, "version": 1}
+    assert isinstance(setup_id, str) and len(setup_id) == 32  # names this setup; a new setup gets a new one
+    store.store(gmail_creds("work"))
+    assert store.flags()["setup_id"] != setup_id  # type: ignore[index]
     text = store.meta_path.read_text("utf-8")
     assert "@" not in text and PASSWORD not in text and "imap" not in text
     calls = enclave.ecdh_calls
@@ -149,3 +154,15 @@ def test_invalid_records_are_refused() -> None:
     for account, boxes in (("Work", {"inbox": "INBOX"}), ("work", {}), ("work", {"trash": "Trash"})):
         with pytest.raises(MailSecretsError):
             MailCredentials(**base, account=account, mailboxes=boxes)
+    # Mailbox names are sent as quoted strings: no CR, LF, NUL or other control characters, ASCII only.
+    for name in ("INBOX\r\nA1 STORE 1 +FLAGS (\\Seen)", "Sent\x00", "Tab\tbed", "Gesendete Objekte\u00e9", ""):
+        with pytest.raises(MailSecretsError):
+            MailCredentials(**base, account="work", mailboxes={"inbox": name})
+
+
+@pytest.mark.parametrize("port", [143, 465, 0, 994])
+def test_only_port_993_is_ever_loaded(port: int) -> None:
+    good = secrets.encode(gmail_creds())
+    with pytest.raises(MailSecretsError) as raised:
+        secrets.decode(good.replace(b'"imap_port":993', b'"imap_port":%d' % port))
+    assert raised.value.code == "secrets_corrupt"

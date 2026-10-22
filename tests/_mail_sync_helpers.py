@@ -94,7 +94,7 @@ def make_env(
     return FetchEnv(
         home=home,
         secret_store=secrets,
-        connect=lambda _creds: server.session(),
+        connect=lambda _creds, limits: server.session(limits),
         open_store=open_store or (lambda _home: store),
         memory_guard=memory_guard or (lambda _home: None),
         audit=sink.append,

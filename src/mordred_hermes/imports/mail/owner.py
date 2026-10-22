@@ -28,12 +28,16 @@ A display name never decides identity: only addresses are compared. Gmail dot
 and plus normalisation applies to ``gmail.com``/``googlemail.com`` only.
 
 Fetched mail (``trusted`` is the IMAP collector's :class:`~.source.TrustedMeta`)
-replaces rules 1 and 2, and the embedded ``X-Gmail-Labels`` header is ignored:
+replaces rules 1 and 2, and the embedded ``X-Gmail-Labels`` header is ignored.
+Only labels the collector marked as system labels (:class:`._imap_codec.SystemLabel`,
+recognised on the wire before decoding) count; a custom label never classifies,
+even when its decoded text is ``\\Sent`` or `` \\Sent `` (no trimming, no folding
+of custom labels), and every label is inspected whatever its position:
 
 1. The Gmail system labels ``\\Draft``, ``\\Spam``, ``\\Trash`` → skipped
    (custom labels never skip).
 2. The Gmail system label ``\\Sent`` → ``gmail_label_sent`` (``api_identity``);
-   a custom label named "Sent" is not the system label.
+   a custom label named "Sent" (or "\\Sent") is not the system label.
 2b. The generic server's sent folder chosen at ``mail setup`` (folder role
     ``sent``) → ``account_owner`` (``imap_sent_folder``, ``source_claimed``):
     the folder names its purpose, it does not verify authorship, so such a
@@ -50,6 +54,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from ..records import OwnerClass, ProvenanceQuality, SenderKind
+from ._imap_codec import SystemLabel
 from .headers import Address, MailHeaders
 from .source import TrustedMeta
 
@@ -213,12 +218,12 @@ def _skipped(reason: str) -> Classification:
 
 
 def _trusted_rules(trusted: TrustedMeta) -> Classification | None:
-    """Rules 1, 2 and 2b for fetched mail: the server's labels and folder role only."""
-    folded = {label.strip().casefold() for label in trusted.labels}
+    """Rules 1, 2 and 2b for fetched mail: the server's system labels and folder role only."""
+    system = {label.casefold() for label in trusted.labels if isinstance(label, SystemLabel)}
     for label, reason in SYSTEM_SKIP_LABELS.items():
-        if label in folded:
+        if label in system:
             return _skipped(reason)
-    if _SYSTEM_SENT in folded:
+    if _SYSTEM_SENT in system:
         return _result(OwnerClass.ACCOUNT_OWNER, SenderKind.USER, ProvenanceQuality.API_IDENTITY, "gmail_label_sent")
     if trusted.folder_role == "sent":
         return _result(OwnerClass.ACCOUNT_OWNER, SenderKind.USER, ProvenanceQuality.SOURCE_CLAIMED, IMAP_SENT_FOLDER)

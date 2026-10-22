@@ -22,9 +22,14 @@ Idempotency on ``source_uid``, decided per message in this order:
 1. not stored, or last written by another run that never committed: ``inserted``;
 2. an incoming ``legacy`` record never replaces a non-legacy one: ``duplicates``;
 3. a non-legacy record replaces a ``legacy`` one (provenance upgrade): ``revised``;
-4. same ``source_revision`` and ``content_digest``: ``duplicates``;
-5. a different ``source_revision``: ``revised`` (the row and all its parts are replaced);
-6. same ``source_revision``, different ``content_digest``: ``conflicts``, nothing overwritten.
+4. Sent evidence wins (:data:`SENT_EVIDENCE_RANK`): a copy with stronger sent-copy
+   owner evidence replaces the stored record even when the bytes are identical
+   (``revised``: an INBOX copy later seen in Sent, or with Gmail's ``\\Sent``),
+   and a copy with weaker evidence never replaces a stored sent copy, whatever
+   its revision (``duplicates``: a changed received copy keeps the Sent record);
+5. same ``source_revision`` and ``content_digest``: ``duplicates``;
+6. a different ``source_revision``: ``revised`` (the row and all its parts are replaced);
+7. same ``source_revision``, different ``content_digest``: ``conflicts``, nothing overwritten.
 
 Backup and restore: ``ActivityStore.backup`` / ``restore`` copy the whole
 ``mordred.db`` file, ``import_*`` tables included; there is no second copy path.
@@ -35,13 +40,21 @@ settable that way. :data:`TELEGRAM_RETIRED_ACCOUNT` names the Telegram account w
 history lives here, so a reader can choose ``mordred.db`` without unsealing the Telegram
 credentials to read ``index.enc``.
 
-Batched collectors (the IMAP mail sync) publish each batch with
-:meth:`ImportStore.commit_batch`, which commits the run and moves the
-collector's ``import_meta`` cursor in ONE transaction, reclaim a crashed
-writer's ``open`` runs with :meth:`ImportStore.fail_open_runs`, and write threads
-with ``merge_conversation=True`` so a later batch never shrinks a conversation row
-(participants are unioned, ``last_message_at`` is the maximum and
-``message_count`` is recounted from the store).
+Batched collectors (the IMAP mail sync) write and publish each batch with
+:meth:`ImportStore.write_batch`: the batch's messages, the merge of its
+conversation rows (participants are unioned, ``last_message_at`` is the
+maximum, the stored title is kept, ``message_count`` is recounted from
+committed rows), the run's commit and the collector's ``import_meta`` cursor in
+ONE ``BEGIN IMMEDIATE`` transaction. A failed batch therefore leaves every
+published row, revision and conversation field exactly as it was, and a
+concurrent reader sees the state before or after the batch, never between.
+A crashed writer's ``open`` runs are reclaimed with
+:meth:`ImportStore.fail_open_runs`. The lower-level pieces stay available:
+:meth:`ImportStore.commit_batch` publishes a run already written with
+:meth:`ImportStore.write_thread` together with a cursor, and
+``write_thread(..., merge_conversation=True)`` merges a conversation row, but
+each ``write_thread`` is its own transaction, so only :meth:`write_batch`
+keeps a revised row and the merged metadata unpublished until the batch is.
 """
 
 from __future__ import annotations
@@ -92,8 +105,10 @@ __all__ = [
     "MAX_NEIGHBORS",
     "MAX_SEARCH_LIMIT",
     "RESERVED_META_KEYS",
+    "SENT_EVIDENCE_RANK",
     "SUPPORTED_SCHEMA_VERSION",
     "TELEGRAM_RETIRED_ACCOUNT",
+    "BatchResult",
     "ImportMeta",
     "ImportRefused",
     "ImportStore",
@@ -120,6 +135,10 @@ _META_KEY_RE: Final = re.compile(r"[a-z][a-z0-9_]{0,31}(?:\.[a-z][a-z0-9_]{0,31}
 _MAX_META_VALUE: Final = 256
 #: Upper bound on participants kept on a merged conversation row.
 _MAX_MERGED_PARTICIPANTS: Final = 256
+#: Owner evidence of a sent copy, by strength ("Sent evidence wins", rule 4 above): Gmail's
+#: ``\Sent`` system label (the server vouches for authorship) over a generic server's sent
+#: folder (it names its purpose); every other evidence ranks 0. Mirrors ``mail.owner.SENT_EVIDENCE``.
+SENT_EVIDENCE_RANK: Final[Mapping[str, int]] = {"gmail_label_sent": 2, "imap_sent_folder": 1}
 
 Opener = Callable[[Path], sqlite3.Connection]
 CopyCheck = Callable[[Path], Refusal | None]
@@ -206,6 +225,24 @@ class WriteResult:
     duplicates: int
     revised: int
     conflicts: int
+
+
+@dataclass(frozen=True)
+class BatchResult:
+    """What :meth:`ImportStore.write_batch` wrote; the batch is published (its run is committed)."""
+
+    inserted: int
+    duplicates: int
+    revised: int
+    conflicts: int
+
+    def counts(self) -> dict[str, int]:
+        return {
+            "inserted": self.inserted,
+            "duplicates": self.duplicates,
+            "revised": self.revised,
+            "conflicts": self.conflicts,
+        }
 
 
 @dataclass(frozen=True)
@@ -340,6 +377,11 @@ def _meta_value(value: object) -> str:
 
 def _participant_key(participant: Participant) -> tuple[str, str]:
     return (str(participant.owner_class), participant.stable_id or f"name:{participant.display_name}")
+
+
+def _meta_updates(updates: Mapping[str, str | None]) -> dict[str, str | None]:
+    """Validated cursor updates for one transaction (``None`` deletes the key)."""
+    return {_meta_key(key): None if value is None else _meta_value(value) for key, value in updates.items()}
 
 
 def _counts_json(counts: Mapping[str, int]) -> str:
@@ -598,24 +640,93 @@ class ImportStore:
         and never stays behind rows that are. A dry run is refused (``run_not_open``).
         """
         payload = _counts_json(counts)
-        updates = {_meta_key(key): None if value is None else _meta_value(value) for key, value in meta_updates.items()}
+        updates = _meta_updates(meta_updates)
         with self._transaction() as conn:
             _, state = self._open_run(conn, run_id)
             if state != "open":
                 raise ImportRefused("run_not_open")
-            conn.execute(
-                "UPDATE import_runs SET state = 'committed', finished_at = ?, counts_json = ? WHERE run_id = ?",
-                (time.time(), payload, run_id),
-            )
-            for key, value in updates.items():
-                if value is None:
-                    conn.execute("DELETE FROM import_meta WHERE key = ?", (key,))
-                else:
-                    conn.execute(
-                        "INSERT INTO import_meta (key, value) VALUES (?, ?) "
-                        "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                        (key, value),
-                    )
+            self._publish(conn, run_id, payload)
+            self._apply_meta(conn, updates)
+
+    def write_batch(
+        self,
+        run_id: str,
+        threads: Sequence[Sequence[ImportMessage]],
+        *,
+        conversations: Sequence[ImportConversation],
+        meta_updates: Mapping[str, str | None],
+        counts: Mapping[str, int] | None = None,
+    ) -> BatchResult:
+        """Write ``threads``, merge ``conversations``, commit ``run_id`` and apply ``meta_updates`` in ONE transaction.
+
+        Each conversation is merged into its stored row (:meth:`_merged`), every
+        message is decided by the idempotency rules of the module docstring, the
+        run is committed with ``counts`` plus the write counts, every touched
+        conversation's ``message_count`` is recounted from committed rows, and the
+        cursor keys in ``meta_updates`` are set (``None`` deletes). All records and
+        keys are validated before the transaction starts. Any failure rolls all of
+        it back: a revised row keeps its published revision, no participant, date
+        or count of the batch becomes visible, and the cursor does not move. A
+        dry run (or a closed run) is refused with ``run_not_open``.
+        """
+        convs = list(conversations)
+        for conv in convs:
+            validate_conversation(conv)
+        messages = [msg for thread in threads for msg in thread]
+        for msg in messages:
+            validate_message(msg)
+        updates = _meta_updates(meta_updates)
+        extra = dict(counts or {})
+        _counts_json(extra)
+        tally: Counter[str] = Counter()
+        with self._transaction() as conn:
+            source, state = self._open_run(conn, run_id)
+            if state != "open":
+                raise ImportRefused("run_not_open")
+            touched = {conv.conv_uid for conv in convs}
+            for conv in convs:
+                if Source(conv.source).value != source:
+                    raise RecordError("source_mismatch")
+                self._upsert_conversation(conn, self._merged(conn, conv))
+            for msg in messages:
+                self._check_target(conn, msg, source)
+                outcome = self._outcome(conn, run_id, msg)
+                if outcome in _WRITES:
+                    touched.update(self._stored_conversations(conn, msg.source_uid))
+                    self._store_message(conn, run_id, msg)
+                touched.add(msg.conv_uid)
+                tally[outcome] += 1
+            result = BatchResult(tally["inserted"], tally["duplicates"], tally["revised"], tally["conflicts"])
+            self._publish(conn, run_id, _counts_json({**extra, **result.counts()}))
+            for conv_uid in sorted(touched):
+                self._recount(conn, run_id, conv_uid)
+            self._apply_meta(conn, updates)
+        return result
+
+    @staticmethod
+    def _publish(conn: sqlite3.Connection, run_id: str, payload: str) -> None:
+        conn.execute(
+            "UPDATE import_runs SET state = 'committed', finished_at = ?, counts_json = ? WHERE run_id = ?",
+            (time.time(), payload, run_id),
+        )
+
+    @staticmethod
+    def _apply_meta(conn: sqlite3.Connection, updates: Mapping[str, str | None]) -> None:
+        for key, value in updates.items():
+            if value is None:
+                conn.execute("DELETE FROM import_meta WHERE key = ?", (key,))
+            else:
+                conn.execute(
+                    "INSERT INTO import_meta (key, value) VALUES (?, ?) "
+                    "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    (key, value),
+                )
+
+    @staticmethod
+    def _stored_conversations(conn: sqlite3.Connection, source_uid: str) -> set[str]:
+        """The conversation a stored row of ``source_uid`` belongs to (recounted when the row moves)."""
+        rows = conn.execute("SELECT conv_uid FROM import_messages WHERE source_uid = ?", (source_uid,)).fetchall()
+        return {str(row[0]) for row in rows}
 
     def fail_open_runs(self, source: Source | str) -> int:
         """Mark every ``open`` run of ``source`` failed (left by a crashed writer); returns how many.
@@ -740,19 +851,23 @@ class ImportStore:
     def _outcome(conn: sqlite3.Connection, run_id: str, msg: ImportMessage) -> str:
         """``inserted`` / ``duplicates`` / ``revised`` / ``conflicts`` (see the module docstring)."""
         row = conn.execute(
-            "SELECT m.source_revision, m.content_digest, m.provenance_quality, m.run_id = ?, r.state "
-            "FROM import_messages m LEFT JOIN import_runs r ON r.run_id = m.run_id WHERE m.source_uid = ?",
+            "SELECT m.source_revision, m.content_digest, m.provenance_quality, m.owner_evidence, m.run_id = ?, "
+            "r.state FROM import_messages m LEFT JOIN import_runs r ON r.run_id = m.run_id WHERE m.source_uid = ?",
             (run_id, msg.source_uid),
         ).fetchone()
         if row is None:
             return "inserted"
-        revision, digest, quality, same_run, state = row
+        revision, digest, quality, evidence, same_run, state = row
         if not same_run and state != "committed":
             return "inserted"  # left behind by an open, failed or vanished run: reclaim it
         stored_legacy = quality == ProvenanceQuality.LEGACY.value
         incoming_legacy = ProvenanceQuality(msg.provenance_quality) is ProvenanceQuality.LEGACY
         if incoming_legacy != stored_legacy:
             return "duplicates" if incoming_legacy else "revised"
+        incoming_rank = SENT_EVIDENCE_RANK.get(msg.owner_evidence, 0)
+        stored_rank = SENT_EVIDENCE_RANK.get(str(evidence), 0)
+        if incoming_rank != stored_rank:  # Sent evidence wins, in both directions
+            return "revised" if incoming_rank > stored_rank else "duplicates"
         if revision == msg.source_revision:
             return "duplicates" if digest == msg.content_digest else "conflicts"
         return "revised"

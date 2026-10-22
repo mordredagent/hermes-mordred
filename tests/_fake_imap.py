@@ -6,6 +6,12 @@ the collector is exercised for real. Every command line is recorded; any
 command that would change server state (``SELECT``, ``STORE``, ``COPY``,
 ``EXPUNGE``, ``APPEND``, ...) or a body fetch without ``.PEEK`` is recorded as a
 violation and answered ``BAD``. Fixture text uses RFC 2606 domains only.
+
+Adversarial knobs: ``FakeMessage.literal`` announces a literal size other than
+the bytes sent (a lie the client must catch before reading), ``trickle_s``
+answers a body fetch with a huge literal and then one byte per interval for
+ever (a server that never lets a read time out), and ``raw_labels`` sends the
+``X-GM-LABELS`` list verbatim.
 """
 
 from __future__ import annotations
@@ -14,11 +20,12 @@ import datetime as dt
 import re
 import socket
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from mordred_hermes.imports.mail._imap_codec import encode_mutf7
-from mordred_hermes.imports.mail.imap import GuardedIMAP4, ImapSession
+from mordred_hermes.imports.mail.imap import GuardedIMAP4, ImapSession, IoLimits
 
 _FORBIDDEN = {"SELECT", "STORE", "COPY", "MOVE", "EXPUNGE", "APPEND", "CREATE", "DELETE", "RENAME", "CLOSE", "XLIST"}
 _ALLOWED = {"CAPABILITY", "LOGIN", "LIST", "EXAMINE", "UID", "NOOP", "LOGOUT"}
@@ -34,6 +41,8 @@ class FakeMessage:
     msg_id: int | None = None
     size: int | None = None  # reported RFC822.SIZE (defaults to len(data))
     date: dt.date = dt.date(2026, 10, 1)
+    literal: int | None = None  # announced BODY[] literal size (defaults to len(data))
+    raw_labels: bytes | None = None  # the X-GM-LABELS list as sent, verbatim
 
 
 @dataclass
@@ -83,6 +92,11 @@ def _tokens(text: str) -> list[str]:
     return out
 
 
+def _date(text: str) -> dt.date:
+    day, month, year = text.split("-")
+    return dt.date(int(year), _MONTHS[month], int(day))
+
+
 def _uid_set(spec: str, highest: int) -> set[int]:
     found: set[int] = set()
     for part in spec.split(","):
@@ -124,6 +138,9 @@ class FakeImapServer:
         self.violations: list[str] = []
         self.on_body_fetch: Callable[[list[int]], None] | None = None
         self.fail_body_fetch_after: int | None = None
+        self.trickle_s: float | None = None
+        self.trickled = 0
+        self.closed = threading.Event()
         self._body_fetches = 0
         self._selected: FakeMailbox | None = None
         self._threads: list[threading.Thread] = []
@@ -137,8 +154,8 @@ class FakeImapServer:
         self._threads.append(thread)
         return client
 
-    def session(self) -> ImapSession:
-        conn = GuardedIMAP4("imap.example.com", 993, raw_socket=self.connect, timeout=5.0)
+    def session(self, limits: IoLimits | None = None) -> ImapSession:
+        conn = GuardedIMAP4("imap.example.com", 993, raw_socket=self.connect, timeout=5.0, limits=limits)
         return ImapSession(conn)
 
     def join(self, timeout: float = 5.0) -> None:
@@ -179,6 +196,7 @@ class FakeImapServer:
         finally:
             stream.close()
             sock.close()
+            self.closed.set()
 
     def _record(self, text: str) -> None:
         parts = text.split(" ")
@@ -242,9 +260,11 @@ class FakeImapServer:
             uids = _uid_set(parts[parts.index("UID") + 1], highest) if "UID" in parts else set(box.messages)
             uids &= set(box.messages)
             if "SINCE" in parts:
-                day, month, year = parts[parts.index("SINCE") + 1].split("-")
-                since = dt.date(int(year), _MONTHS[month], int(day))
+                since = _date(parts[parts.index("SINCE") + 1])
                 uids = {uid for uid in uids if box.messages[uid].date >= since}
+            if "BEFORE" in parts:
+                before = _date(parts[parts.index("BEFORE") + 1])
+                uids = {uid for uid in uids if box.messages[uid].date < before}
             reply(("* SEARCH " + " ".join(str(uid) for uid in sorted(uids))).rstrip().encode() + b"\r\n")
             reply(f"{tag} OK SEARCH done\r\n".encode())
             return
@@ -266,12 +286,22 @@ class FakeImapServer:
             if self.fail_body_fetch_after is not None and self._body_fetches > self.fail_body_fetch_after:
                 reply(b"* 1 FETCH (UID 1 BODY[] {99999}\r\nshort")  # a truncated literal, then hang up
                 raise OSError("hang up")
+            if self.trickle_s is not None:
+                self._trickle(reply)
         order = sorted(box.messages)
         for uid in wanted:
             reply(self._fetch_line(order.index(uid) + 1, uid, box.messages[uid], upper))
             if self.unsolicited_flags:
                 reply(b"* 1 FETCH (FLAGS (\\Seen))\r\n")
         reply(f"{tag} OK FETCH done\r\n".encode())
+
+    def _trickle(self, reply: Callable[[bytes], None]) -> None:
+        """A 1 MiB literal, one byte per interval, until the client hangs up (never a quiet socket)."""
+        reply(b"* 1 FETCH (UID 1 BODY[] {1048576}\r\n")
+        while True:
+            reply(b"x")
+            self.trickled += 1
+            time.sleep(self.trickle_s or 0.01)
 
     def _fetch_line(self, seq: int, uid: int, msg: FakeMessage, items: str) -> bytes:
         head: list[bytes] = []
@@ -280,13 +310,15 @@ class FakeImapServer:
         if self.gmail and "X-GM-MSGID" in items:
             head.append(b"X-GM-MSGID %d" % (msg.msg_id or uid))
         if self.gmail and "X-GM-LABELS" in items:
-            head.append(b"X-GM-LABELS (" + b" ".join(_label_atom(label) for label in msg.labels) + b")")
+            labels = msg.raw_labels if msg.raw_labels is not None else b" ".join(_label_atom(x) for x in msg.labels)
+            head.append(b"X-GM-LABELS (" + labels + b")")
         uid_item = b"UID %d" % uid
         if "RFC822.SIZE" in items:
             head.append(b"RFC822.SIZE %d" % (msg.size if msg.size is not None else len(msg.data)))
         if "BODY.PEEK[]" not in items:
             return b"* %d FETCH (" % seq + b" ".join([uid_item, *head]) + b")\r\n"
-        body = b"BODY[] {%d}\r\n" % len(msg.data) + msg.data
+        announced = msg.literal if msg.literal is not None else len(msg.data)
+        body = b"BODY[] {%d}\r\n" % announced + msg.data
         if self.uid_after_body:
             return b"* %d FETCH (" % seq + b" ".join(head) + b" " + body + b" " + uid_item + b")\r\n"
         return b"* %d FETCH (" % seq + b" ".join([uid_item, *head]) + b" " + body + b")\r\n"

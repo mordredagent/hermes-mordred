@@ -1,4 +1,4 @@
-"""Hermes tool ``mordred_mail_sync``: strict arguments, gates, counts-only result, time budget."""
+"""Hermes tool ``mordred_mail_sync``: strict arguments, gates, counts-only result, deadlines, cancellation."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ import asyncio
 import json
 import sqlite3
 import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -46,7 +48,7 @@ def store(tmp_path: Path) -> ImportStore:
 def fetches(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     seen: list[int] = []
 
-    def fake(max_messages: int) -> dict[str, Any]:
+    def fake(max_messages: int, cancel: Any = None) -> dict[str, Any]:
         seen.append(max_messages)
         return dict(FetchResult(inserted=1).as_dict())
 
@@ -223,3 +225,65 @@ def test_reader_sessions_can_sync_and_stay_untainted_by_it(
     fresh = "mail-sync-fresh"
     assert _call({}, session=fresh)["inserted"] == 3
     assert not egress.is_tainted(fresh) and not egress.reader_mode_established(fresh)
+
+
+# -- deadlines, cancellation and the worker thread -----------------------------------------------
+
+_THREADS = ("mordred-mail-sync", "mordred-imap-watchdog")
+
+
+def _fetch_threads() -> list[str]:
+    return [thread.name for thread in threading.enumerate() if thread.name in _THREADS]
+
+
+def _trickling(tmp_path: Path, store: ImportStore, monkeypatch: pytest.MonkeyPatch, budget: float) -> FakeImapServer:
+    from tests._mail_sync_helpers import generic_creds
+
+    server = FakeImapServer({"INBOX": FakeMailbox(uidvalidity=2, messages=many(3))})
+    server.trickle_s = 0.01  # a byte every 10 ms: the socket never goes quiet long enough to time out
+    env = make_env(tmp_path, store, server, FakeSecrets(generic_creds(sent=False)), clock=time.monotonic)
+    _use_env(monkeypatch, env)
+    monkeypatch.setattr(imap_sync, "TOOL_BUDGET_S", budget)
+    return server
+
+
+def test_a_trickling_server_returns_partial_and_no_thread_outlives_the_handler(
+    tmp_path: Path, store: ImportStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = _trickling(tmp_path, store, monkeypatch, budget=0.5)
+    started = time.monotonic()
+    result = _call({})
+    assert (result["partial"], result["partial_reason"], result["error"]) == (True, "time_budget", None)
+    assert time.monotonic() - started < 5.0 and server.trickled > 5
+    assert _fetch_threads() == []  # the worker and the session watchdog have ended
+    assert server.closed.wait(5)
+
+
+def test_a_cancelled_call_stops_the_fetch_and_joins_the_worker(
+    tmp_path: Path, store: ImportStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = _trickling(tmp_path, store, monkeypatch, budget=60.0)
+
+    async def scenario() -> float:
+        task = asyncio.create_task(mail_tool.mordred_mail_sync({}, parent_agent=_LOCAL, session_id="s-1"))
+        for _ in range(200):  # until the worker is inside the trickling body fetch
+            await asyncio.sleep(0.02)
+            if server.trickled:
+                break
+        assert server.trickled and "mordred-mail-sync" in _fetch_threads()
+        started = time.monotonic()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return time.monotonic() - started
+
+    elapsed = asyncio.run(scenario())
+    assert elapsed < 5.0
+    assert _fetch_threads() == []  # joined before the cancellation finished
+    assert server.closed.wait(5)
+    assert rows_of(store) == 0
+
+
+def rows_of(store: ImportStore) -> int:
+    with store.connection() as conn:
+        return int(conn.execute("SELECT count(*) FROM import_messages").fetchone()[0])

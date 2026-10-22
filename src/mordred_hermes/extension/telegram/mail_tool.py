@@ -16,10 +16,15 @@ the conversation, ``state.db`` or a log.
 - **Every call** repeats the gates: the running model's endpoint (a Venice model
   must be ``private`` in the live catalog), then inside the fetch the platform,
   the sealed credentials, memory encryption, the store gate and the fetch lock.
-- **Budget**: about 60 seconds of fetching, checked between batches; the result
-  then says ``partial: true`` with ``partial_reason: "time_budget"`` and the
-  cursor already holds the committed progress, so the next call continues. The
-  fetch runs in a worker thread that has finished before the result returns.
+- **Budget**: about 60 seconds: no IMAP command starts after it, an in-flight
+  one is cut at most 30 seconds later (the session's watchdog shuts the socket
+  down, so a server trickling bytes cannot extend it); the result then says
+  ``partial: true`` with ``partial_reason: "time_budget"`` and the cursor
+  already holds the committed progress, so the next call continues.
+- **Worker**: the fetch runs in one named thread (:data:`WORKER_NAME`). The
+  handler never returns, and never finishes a cancellation, before that thread
+  has ended: a cancelled call sets the fetch's :class:`CancelToken` (which shuts
+  the IMAP socket down at once), then waits for the worker and re-raises.
 - **Reader mode**: not a reader tool (nothing private is returned), allowed in a
   reader session and never a taint source (``privacy_check.egress.MAIL_SYNC_TOOL``).
 """
@@ -29,10 +34,16 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from typing import Any, Final
+import threading
+from typing import TYPE_CHECKING, Any, Final
+
+if TYPE_CHECKING:
+    from ...imports.mail.imap import CancelToken
 
 TOOL_NAME: Final = "mordred_mail_sync"
+WORKER_NAME: Final = "mordred-mail-sync"
 _MAX: Final = 2000
+_POLL_S: Final = 0.05
 NOTE: Final = (
     "Mordred fetched the user's new mail into its encrypted store; only counts are reported here. "
     "partial=true means more remains: call this tool again to continue. To read or quote messages use "
@@ -104,11 +115,54 @@ def mail_sync_available() -> bool:
     return _store_gate_open() and _mail_configured()
 
 
-def _fetch(max_messages: int) -> dict[str, Any]:
-    from ...imports.mail.imap_sync import TOOL_BUDGET_S, FetchOptions, default_env, run_fetch
+def _fetch(max_messages: int, cancel: CancelToken | None = None) -> dict[str, Any]:
+    from ...imports.mail import imap_sync
 
-    options = FetchOptions(max_messages=max_messages, budget_s=TOOL_BUDGET_S, via="tool")
-    return dict(run_fetch(options, default_env()).as_dict())
+    options = imap_sync.FetchOptions(
+        max_messages=max_messages, budget_s=imap_sync.TOOL_BUDGET_S, via="tool", cancel=cancel
+    )
+    return dict(imap_sync.run_fetch(options, imap_sync.default_env()).as_dict())
+
+
+async def _joined(worker: threading.Thread) -> None:
+    """Wait for ``worker`` without blocking the event loop."""
+    while worker.is_alive():
+        await asyncio.sleep(_POLL_S)
+    worker.join()
+
+
+async def _joined_after_cancel(worker: threading.Thread) -> None:
+    """Wait for ``worker`` however often the call is cancelled again: it never outlives the handler."""
+    while worker.is_alive():
+        try:
+            await asyncio.sleep(_POLL_S)
+        except asyncio.CancelledError:
+            continue
+    worker.join()
+
+
+async def _run_worker(max_messages: int) -> dict[str, Any] | None:
+    """The fetch in a named worker thread, joined before this returns or re-raises a cancellation."""
+    from ...imports.mail.imap import CancelToken
+
+    cancel = CancelToken()
+    box: dict[str, dict[str, Any]] = {}
+
+    def target() -> None:
+        try:
+            box["result"] = _fetch(max_messages, cancel)
+        except Exception:  # never stringified; the handler reports fetch_failed
+            box.pop("result", None)
+
+    worker = threading.Thread(target=target, name=WORKER_NAME, daemon=True)
+    worker.start()
+    try:
+        await _joined(worker)
+    except asyncio.CancelledError:
+        cancel.cancel()  # the fetch stops at once: its IMAP socket is shut down
+        await _joined_after_cancel(worker)
+        raise
+    return box.get("result")
 
 
 def _error(code: str) -> str:
@@ -132,5 +186,7 @@ async def mordred_mail_sync(
         code = getattr(exc, "code", None)
         allowed = {"hermes_model_not_allowed", "hermes_model_not_private", "routing_unavailable"}
         return _error(code if code in allowed else "fetch_failed")
-    result = await asyncio.to_thread(_fetch, max_messages)  # awaited: the worker is done before we return
+    result = await _run_worker(max_messages)  # the worker has ended before this line runs
+    if result is None:
+        return _error("fetch_failed")
     return json.dumps({**result, "note": NOTE})

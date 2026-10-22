@@ -5,7 +5,11 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import sqlite3
 import sys
+import threading
+import time
+import tracemalloc
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +29,7 @@ from mordred_hermes.imports.mail.imap_sync import (
 from mordred_hermes.imports.store import ImportRefused, ImportStore
 from tests._fake_imap import FakeImapServer, FakeMailbox, FakeMessage, mail
 from tests._mail_sync_helpers import (
+    ADDRESS,
     CANARIES,
     Clock,
     FakeSecrets,
@@ -239,11 +244,12 @@ def test_groups_of_200_uids_become_one_committed_run_each(home: Path, store: Imp
     assert rows(store, "SELECT state, count(*) FROM import_runs GROUP BY state") == [("committed", 3)]
 
 
-def test_batches_split_at_64_mib_of_reported_literals(home: Path, store: ImportStore) -> None:
+def test_batches_are_planned_at_48_mib_of_announced_sizes(home: Path, store: ImportStore) -> None:
+    # 48 MiB of announced sizes per batch leaves room under the 64 MiB the session accepts per response.
     server = FakeImapServer({"INBOX": FakeMailbox(uidvalidity=2, messages=many(4, size=20 * MiB))})
     result = run_fetch(FetchOptions(), make_env(home, store, server, FakeSecrets(generic_creds(sent=False))))
     assert result.batches == 2
-    assert server.body_fetch_sets() == ["1:3", "4"]
+    assert server.body_fetch_sets() == ["1:2", "3:4"]
 
 
 def test_oversize_messages_are_skipped_before_any_literal_is_downloaded(home: Path, store: ImportStore) -> None:
@@ -262,16 +268,16 @@ def test_a_failed_batch_leaves_the_cursor_at_the_last_committed_batch(
 ) -> None:
     server = FakeImapServer({"INBOX": FakeMailbox(uidvalidity=2, messages=many(450))})
     creds = generic_creds(sent=False)
-    real = store.commit_batch
+    real = store.write_batch
     calls: list[int] = []
 
-    def flaky(*args: Any, **kwargs: Any) -> None:
+    def flaky(*args: Any, **kwargs: Any) -> Any:
         calls.append(1)
         if len(calls) == 2:
             raise ImportRefused("disk_full")
-        real(*args, **kwargs)
+        return real(*args, **kwargs)
 
-    monkeypatch.setattr(store, "commit_batch", flaky)
+    monkeypatch.setattr(store, "write_batch", flaky)
     result = run_fetch(FetchOptions(), make_env(home, store, server, FakeSecrets(creds)))
     assert (result.error, result.partial, result.partial_reason, result.inserted) == ("run_failed", True, "error", 200)
     assert forward_cursor(store, creds, "INBOX").uid == 200  # type: ignore[union-attr]
@@ -441,9 +447,194 @@ def test_a_failed_first_batch_is_an_error_without_partial_progress(
     def broken(*_args: Any, **_kwargs: Any) -> None:
         raise ImportRefused("busy")
 
-    monkeypatch.setattr(store, "commit_batch", broken)
+    monkeypatch.setattr(store, "write_batch", broken)
     creds = gmail_creds()
     result = run_fetch(FetchOptions(), make_env(home, store, gmail_server(), FakeSecrets(creds)))
     assert (result.error, result.partial, result.batches, result.inserted) == ("run_failed", False, 0, 0)
     assert forward_cursor(store, creds, "[Gmail]/All Mail") is None
     assert rows(store, "SELECT state FROM import_runs") == [("failed",)]
+
+
+# --- review regressions: sizes, deadlines, cursors, threading, provenance, labels -------------------
+
+
+def _watchdogs() -> list[str]:
+    return [thread.name for thread in threading.enumerate() if thread.name == "mordred-imap-watchdog"]
+
+
+def test_an_announced_size_lie_stops_the_run_without_reading_the_literal(home: Path, store: ImportStore) -> None:
+    messages = many(3)
+    messages[2] = FakeMessage(b"x", size=1, literal=256 * MiB)  # RFC822.SIZE 1, then a 256 MiB literal header
+    server = FakeImapServer({"INBOX": FakeMailbox(uidvalidity=2, messages=messages)})
+    creds = generic_creds(sent=False)
+    tracemalloc.start()
+    started = time.monotonic()
+    try:
+        result = run_fetch(FetchOptions(), make_env(home, store, server, FakeSecrets(creds)))
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert (result.error, result.inserted, result.batches) == ("imap_protocol", 0, 0)
+    assert peak < 8 * MiB and time.monotonic() - started < 5.0
+    assert forward_cursor(store, creds, "INBOX") is None  # nothing published, the cursor never moved
+    assert "LOGOUT" not in server.verbs  # the stream was abandoned mid-literal: shut down, not logged out
+    assert _watchdogs() == []
+
+
+def test_an_under_reported_message_is_drained_and_counted(home: Path, store: ImportStore) -> None:
+    messages = many(3)
+    messages[2] = FakeMessage(b"y" * (30 * MiB), size=1)
+    server = FakeImapServer({"INBOX": FakeMailbox(uidvalidity=2, messages=messages)})
+    creds = generic_creds(sent=False)
+    result = run_fetch(FetchOptions(), make_env(home, store, server, FakeSecrets(creds)))
+    assert (result.error, result.skipped_oversize, result.inserted, result.fetched) == (None, 1, 2, 2)
+    assert forward_cursor(store, creds, "INBOX").uid == 3  # type: ignore[union-attr]
+
+
+def test_a_trickling_server_cannot_hold_the_fetch_past_its_deadline(home: Path, store: ImportStore) -> None:
+    server = FakeImapServer({"INBOX": FakeMailbox(uidvalidity=2, messages=many(3))})
+    server.trickle_s = 0.01
+    creds = generic_creds(sent=False)
+    env = make_env(home, store, server, FakeSecrets(creds), clock=time.monotonic)
+    started = time.monotonic()
+    result = run_fetch(FetchOptions(budget_s=0.5, via="tool"), env)
+    assert (result.partial, result.partial_reason, result.error) == (True, "time_budget", None)
+    assert time.monotonic() - started < 4.0 and server.trickled > 5
+    assert forward_cursor(store, creds, "INBOX") is None
+    assert server.closed.wait(5) and _watchdogs() == []
+
+
+def test_an_exhausted_cap_never_moves_a_later_mailbox_cursor(home: Path, store: ImportStore) -> None:
+    inbox = FakeMailbox(uidvalidity=11, messages=many(4))
+    sent = FakeMailbox(uidvalidity=12, attributes=("\\Sent",), messages=many(3, start=20))
+    server = FakeImapServer({"INBOX": inbox, "Sent Items": sent})
+    creds = generic_creds()
+    env = make_env(home, store, server, FakeSecrets(creds))
+    result = run_fetch(FetchOptions(max_messages=4), env)
+    assert (result.fetched, result.partial, result.partial_reason) == (4, True, "max_messages")
+    assert forward_cursor(store, creds, "Sent Items") is None  # never set to its top without fetching
+    rest = run_fetch(FetchOptions(), env)
+    assert (rest.fetched, rest.partial) == (3, False)
+    assert forward_cursor(store, creds, "Sent Items").uid == 22  # type: ignore[union-attr]
+
+
+def test_backfill_walks_by_uid_and_a_wider_since_rescans_what_it_never_covered(home: Path, store: ImportStore) -> None:
+    messages = many(10)
+    for uid, message in messages.items():
+        message.date = dt.date(2026, 9, uid)
+    messages[6].date = dt.date(2026, 8, 20)  # appended later with an old date: dates are not monotonic in UIDs
+    server = FakeImapServer({"INBOX": FakeMailbox(uidvalidity=2, messages=messages)})
+    creds = generic_creds(sent=False)
+    env = make_env(home, store, server, FakeSecrets(creds))
+    run_fetch(FetchOptions(max_messages=3), env)  # forward: 8, 9, 10 (base 8)
+    september = run_fetch(FetchOptions(max_messages=10, since=dt.date(2026, 9, 4)), env)
+    assert (september.fetched, september.partial) == (3, False)  # 7, 5, 4 by date; 6 is from August
+    assert server.body_fetch_sets()[-1] == "4:5,7"
+    digest = mailbox_digest(creds, "INBOX")
+    back = Cursor.parse(store.get_meta(cursor_key("mail", digest) + ".back"), digest)
+    assert back is not None and (back.low, back.since) == (1, dt.date(2026, 9, 4).toordinal())
+    wider = run_fetch(FetchOptions(max_messages=10, since=dt.date(2026, 8, 1)), env)
+    assert (wider.fetched, wider.partial, wider.inserted) == (4, False, 4)  # 6 (re-scanned range) and 1-3
+    assert any("SINCE 1-Aug-2026 BEFORE 4-Sep-2026" in line for line in server.commands)
+    found = committed_messages(store)
+    assert all(f"mail:mail:msg{uid}@example.net" in found for uid in range(1, 11))
+    again = run_fetch(FetchOptions(max_messages=10, since=dt.date(2026, 8, 1)), env)
+    assert again.fetched == 0  # everything since August is covered now
+
+
+def test_a_widening_interrupted_by_the_cap_resumes_where_it_stopped(home: Path, store: ImportStore) -> None:
+    messages = many(10)
+    for uid, message in messages.items():
+        message.date = dt.date(2026, 7, uid)  # every message older than the first --since
+    server = FakeImapServer({"INBOX": FakeMailbox(uidvalidity=2, messages=messages)})
+    creds = generic_creds(sent=False)
+    env = make_env(home, store, server, FakeSecrets(creds))
+    run_fetch(FetchOptions(max_messages=2), env)  # forward: 9, 10
+    assert run_fetch(FetchOptions(max_messages=10, since=dt.date(2026, 9, 1)), env).fetched == 0
+    first = run_fetch(FetchOptions(max_messages=3, since=dt.date(2026, 7, 1)), env)
+    assert (first.fetched, first.partial, first.partial_reason) == (3, True, "max_messages")
+    second = run_fetch(FetchOptions(max_messages=10, since=dt.date(2026, 7, 1)), env)
+    assert (second.fetched, second.inserted, second.partial) == (5, 5, False)
+    assert len(committed_messages(store)) == 10
+
+
+def test_a_reply_chain_split_across_batches_stays_one_conversation(home: Path, store: ImportStore) -> None:
+    box = FakeMailbox(uidvalidity=2, messages={1: FakeMessage(mail(1))})
+    server = FakeImapServer({"INBOX": box})
+    creds = generic_creds(sent=False)
+    env = make_env(home, store, server, FakeSecrets(creds))
+    run_fetch(FetchOptions(), env)
+    in_reply_only = "In-Reply-To: <msg{}@example.net>\r\n"
+    box.messages[2] = FakeMessage(mail(2, extra_headers=in_reply_only.format(1), sender="Hanako <hanako@example.org>"))
+    run_fetch(FetchOptions(), env)
+    box.messages[3] = FakeMessage(mail(3, extra_headers=in_reply_only.format(2)))  # C names only B
+    run_fetch(FetchOptions(), env)
+    convs = rows(store, "SELECT conv_uid, message_count FROM import_conversations")
+    assert len(convs) == 1 and convs[0][1] == 3
+    [(people,)] = rows(store, "SELECT participants_json FROM import_conversations")
+    assert "hanako@example.org" in people and "taro@example.net" in people
+
+
+def test_a_sent_copy_upgrades_the_inbox_copy_of_the_same_message(home: Path, store: ImportStore) -> None:
+    own = mail(10, sender=f"Owner <{ADDRESS}>", to="Taro Tanaka <taro@example.net>")
+    inbox = FakeMailbox(uidvalidity=11, messages={1: FakeMessage(own)})  # e.g. Bcc to self
+    sent = FakeMailbox(uidvalidity=12, attributes=("\\Sent",), messages={1: FakeMessage(own)})
+    server = FakeImapServer({"INBOX": inbox, "Sent Items": sent})
+    result = run_fetch(FetchOptions(), make_env(home, store, server, FakeSecrets(generic_creds())))
+    assert (result.inserted, result.revised) == (1, 1)
+    assert committed_messages(store)["mail:mail:msg10@example.net"][1] == "imap_sent_folder"
+
+
+def test_a_changed_received_copy_never_overwrites_a_gmail_sent_record(home: Path, store: ImportStore) -> None:
+    sent = FakeMessage(mail(10, sender=f"Owner <{ADDRESS}>", body="AS SENT"), labels=("\\Sent",), thread_id=5)
+    box = FakeMailbox(uidvalidity=2, messages={1: sent})
+    server = FakeImapServer({"[Gmail]/All Mail": box}, gmail=True)
+    env = make_env(home, store, server, FakeSecrets(gmail_creds()))
+    run_fetch(FetchOptions(), env)
+    relayed = mail(10, sender=f"Owner <{ADDRESS}>", body="AS RELAYED")  # same Message-ID, other bytes
+    box.messages[2] = FakeMessage(relayed, labels=("\\Inbox",), thread_id=5)
+    result = run_fetch(FetchOptions(), env)
+    assert (result.revised, result.duplicates) == (0, 1)
+    assert committed_messages(store)["mail:mail:msg10@example.net"][1:] == ("gmail_label_sent", "api_identity")
+
+
+def test_custom_labels_named_like_system_labels_never_classify(home: Path, store: ImportStore) -> None:
+    many_custom = b" ".join(b'"tag %d"' % n for n in range(100))
+    box = FakeMailbox(
+        uidvalidity=2,
+        messages={
+            1: FakeMessage(mail(1, sender=f"Owner <{ADDRESS}>"), raw_labels=b'" \\\\Sent " &AFw-Sent', thread_id=1),
+            2: FakeMessage(mail(2), raw_labels=b"&AFw-Draft &AFw-Spam", thread_id=2),
+            3: FakeMessage(mail(3, sender=f"Owner <{ADDRESS}>"), raw_labels=many_custom + b" \\Draft", thread_id=3),
+        },
+    )
+    server = FakeImapServer({"[Gmail]/All Mail": box}, gmail=True)
+    result = run_fetch(FetchOptions(), make_env(home, store, server, FakeSecrets(gmail_creds())))
+    found = committed_messages(store)
+    assert found["mail:mail:msg1@example.net"][1] == "own_address"  # not gmail_label_sent
+    assert found["mail:mail:msg2@example.net"][1] == "from_address"  # not skipped as a draft or spam
+    assert "mail:mail:msg3@example.net" not in found and result.skipped == 1  # a late \Draft is still seen
+
+
+def test_a_failed_batch_keeps_the_published_revision(
+    home: Path, store: ImportStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box = FakeMailbox(uidvalidity=2, messages={1: FakeMessage(mail(1, body="FIRST-REVISION"))})
+    server = FakeImapServer({"INBOX": box})
+    creds = generic_creds(sent=False)
+    env = make_env(home, store, server, FakeSecrets(creds))
+    run_fetch(FetchOptions(), env)
+    before = rows(store, "SELECT message_count, last_message_at, participants_json FROM import_conversations")
+    box.messages[2] = FakeMessage(mail(1, body="SECOND-REVISION"))  # the same Message-ID, revised
+    box.messages[3] = FakeMessage(mail(3, sender="Hanako <hanako@example.org>", references="msg1@example.net"))
+
+    def broken(*_args: Any, **_kwargs: Any) -> None:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(ImportStore, "_recount", staticmethod(broken))  # fails inside the batch transaction
+    result = run_fetch(FetchOptions(), env)
+    assert (result.error, result.inserted, result.revised) == ("run_failed", 0, 0)
+    texts = [item.part.text for item in store.find_messages("mail", "mail", message_ids=["msg1@example.net"])]
+    assert any("FIRST-REVISION" in text for text in texts)  # the published revision is still readable
+    assert rows(store, "SELECT message_count, last_message_at, participants_json FROM import_conversations") == before
+    assert forward_cursor(store, creds, "INBOX").uid == 1  # type: ignore[union-attr]

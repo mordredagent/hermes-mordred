@@ -17,8 +17,14 @@ was created with ``--no-touch-id``). Python cannot zero immutable strings; the
 caller keeps the unsealed value in one scope for one fetch and drops it.
 
 ``credentials.meta.json`` next to it holds non-secret flags (account label,
-Gmail path, mailbox roles, presence) so status and the Hermes tool's
-availability check never touch the Enclave and never see the address.
+Gmail path, mailbox roles, presence, and a random ``setup_id`` naming this
+setup) so status and the Hermes tool's availability check never touch the
+Enclave and never see the address; ``mail forget`` uses ``setup_id`` to tell
+the credentials it resolved from ones a concurrent ``mail setup`` installed.
+
+The sealed payload is validated on every load: port 993 only (implicit TLS),
+a DNS host name, mailbox names that are printable ASCII without control
+characters (they are sent as quoted strings), at least one own address.
 
 Other platforms refuse with ``unsupported_platform`` before any filesystem use
 (``mordred.db`` is macOS-only, and Windows custody roles are frozen by C5a).
@@ -61,6 +67,9 @@ _MAX_SEALED_BYTES: Final = 64 * 1024
 #: The account label used in uids and cursor keys: one lowercase ``import_meta`` key component.
 ACCOUNT_RE: Final = re.compile(r"[a-z][a-z0-9_]{0,31}")
 _ROLES: Final = frozenset({"all", "inbox", "sent"})
+#: The only port: implicit TLS (``imap.IMAPS_PORT``).
+IMAPS_PORT: Final = 993
+_MAX_MAILBOX_CHARS: Final = 1000
 _GITIGNORE: Final = b"# Mordred mail credentials: sealed, never version-controlled.\n*\n"
 
 
@@ -86,11 +95,18 @@ class MailCredentials:
     mailboxes: dict[str, str] = field(repr=False)
 
     def __post_init__(self) -> None:
+        from ._imap_codec import safe_mailbox_name
+        from .imap import valid_host
+
         if not ACCOUNT_RE.fullmatch(self.account):
             raise MailSecretsError("secrets_corrupt")
         if not self.mailboxes or not set(self.mailboxes) <= _ROLES:
             raise MailSecretsError("secrets_corrupt")
-        if isinstance(self.imap_port, bool) or not 0 < self.imap_port < 65536:
+        if not all(safe_mailbox_name(name) and len(name) <= _MAX_MAILBOX_CHARS for name in self.mailboxes.values()):
+            raise MailSecretsError("secrets_corrupt")  # a name that could frame an IMAP command
+        if isinstance(self.imap_port, bool) or self.imap_port != IMAPS_PORT:
+            raise MailSecretsError("secrets_corrupt")
+        if not valid_host(self.imap_host) or not self.own_addresses:
             raise MailSecretsError("secrets_corrupt")
 
     def __repr__(self) -> str:  # never let a traceback or log line print secrets
@@ -335,6 +351,7 @@ class MailSecretStore:
             "gmail": value.gmail,
             "roles": list(value.roles),
             "touch_id": require_presence,
+            "setup_id": _secrets.token_hex(16),
         }
         atomic_write(self.meta_path, json.dumps(flags, sort_keys=True).encode("utf-8"))
 

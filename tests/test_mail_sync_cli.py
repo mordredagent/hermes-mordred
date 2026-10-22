@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -145,7 +146,9 @@ def test_setup_refuses_without_a_tty(
     assert setup_env["prompts"] == [] and setup_env["store"].flags() is None
 
 
-@pytest.mark.parametrize("argv", [["--account", "Work"], ["--account", "a@b"], ["--imap-port", "0"]])
+@pytest.mark.parametrize(
+    "argv", [["--account", "Work"], ["--account", "a@b"], ["--imap-port", "0"], ["--imap-port", "143"]]
+)
 def test_setup_bad_arguments_exit_2(
     setup_env: dict[str, Any], argv: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -383,3 +386,111 @@ def test_mail_import_shares_the_writer_lock(store: ImportStore, home: Path, caps
         code, _out, err = run(argv, capsys)
     assert code == 1 and "sync_in_progress" in err
     assert rows(store, "SELECT count(*) FROM import_runs") == [(0,)]
+
+
+# --- setup and forget under the writer lock ----------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX flock")
+def test_setup_takes_the_writer_lock(
+    setup_env: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mordred_hermes.imports.mail.imap_sync import fetch_lock
+
+    server = gmail_server()
+    use_server(monkeypatch, server)
+    setup_env["answers"].extend(["owner@example.com", ""])
+    with fetch_lock(home):
+        code, _out, err = run(["mail", "setup", "--imap-host", "imap.example.com"], capsys)
+    assert code == 1 and "sync_in_progress" in err
+    assert setup_env["store"].flags() is None and server.commands == []  # neither probed nor sealed
+
+
+def test_setup_refuses_every_port_but_993(setup_env: dict[str, Any], capsys: pytest.CaptureFixture[str]) -> None:
+    for port in ("143", "465", "994"):
+        try:
+            code = cli.main(["mail", "setup", "--imap-port", port])
+        except SystemExit as exc:
+            code = int(exc.code or 0)
+        capsys.readouterr()
+        assert code == 2 and setup_env["store"].flags() is None and setup_env["prompts"] == []
+
+
+def test_forget_rows_is_retryable_after_the_credentials_are_gone(
+    forget_env: dict[str, Any], store: ImportStore, capsys: pytest.CaptureFixture[str]
+) -> None:
+    forget_env["secrets"].creds = None  # an earlier plain forget removed the credentials and the label with them
+    code, out, err = run(["mail", "forget", "--rows", "--yes"], capsys)
+    assert code == 0 and "No mail credentials" in out
+    assert int(store.status()["sources"]["mail"]["messages"]) == 3  # without a label nothing is guessed
+    code, out, err = run(["mail", "forget", "--rows", "--yes", "--account", "mail"], capsys)
+    assert code == 0, err
+    assert "Deleted 3 imported mail message(s)" in out and "Removed 2 cursor record(s)." in out
+    assert rows(store, "SELECT count(*) FROM import_messages") == [(0,)]
+    assert store.meta_items("mail_imap.mail.") == {}
+
+
+def test_forget_deletes_rows_first_and_credentials_last(
+    forget_env: dict[str, Any], store: ImportStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    order: list[str] = []
+    real_delete = store.delete_source
+
+    def delete_source(*args: Any) -> int:
+        order.append("rows")
+        assert forget_env["secrets"].creds is not None  # the credentials still exist while rows go
+        return real_delete(*args)
+
+    monkeypatch.setattr(store, "delete_source", delete_source)
+    real_forget = forget_env["secrets"].forget
+
+    def forget() -> None:
+        order.append("credentials")
+        real_forget()
+
+    monkeypatch.setattr(forget_env["secrets"], "forget", forget)
+    assert run(["mail", "forget", "--rows", "--yes"], capsys)[0] == 0
+    assert order == ["rows", "credentials"]
+
+
+def test_forget_with_another_label_than_the_sealed_one_touches_nothing(
+    forget_env: dict[str, Any], store: ImportStore, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _out, err = run(["mail", "forget", "--rows", "--yes", "--account", "work"], capsys)
+    assert code == 1 and "account_mismatch" in err
+    assert forget_env["secrets"].creds is not None
+    assert int(store.status()["sources"]["mail"]["messages"]) == 3
+
+
+def test_a_setup_that_ran_before_the_lock_is_never_undone_by_forget(
+    forget_env: dict[str, Any], store: ImportStore, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secrets = forget_env["secrets"]
+    seen: list[int] = []
+    real_flags = secrets.flags
+
+    def flags() -> dict[str, Any] | None:
+        value = real_flags()
+        seen.append(1)
+        if value is not None:  # the second read (under the lock) sees a NEW setup under the same label
+            value = {**value, "setup_id": "first" if len(seen) == 1 else "second"}
+        return value
+
+    secrets.flags = flags  # type: ignore[method-assign]
+    code, _out, err = run(["mail", "forget", "--rows", "--yes"], capsys)
+    assert code == 1 and "credentials_changed" in err
+    assert secrets.creds is not None  # the fresh credentials stay
+    assert int(store.status()["sources"]["mail"]["messages"]) == 3 and store.meta_items("mail_imap.mail.")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX flock")
+def test_forget_waits_for_no_one_while_a_fetch_runs(
+    forget_env: dict[str, Any], store: ImportStore, home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mordred_hermes.imports.mail.imap_sync import fetch_lock
+
+    with fetch_lock(home):
+        code, _out, err = run(["mail", "forget", "--rows", "--yes"], capsys)
+    assert code == 1 and "sync_in_progress" in err
+    assert forget_env["secrets"].creds is not None
+    assert int(store.status()["sources"]["mail"]["messages"]) == 3

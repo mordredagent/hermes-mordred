@@ -8,6 +8,12 @@
 - :func:`fetch_records` turns a ``UID FETCH`` result into ``{item: value}``
   dicts; :func:`list_entries` parses ``LIST``; :func:`search_uids` parses
   ``UID SEARCH``; :func:`gmail_labels` maps ``X-GM-LABELS``.
+- :class:`DrainedLiteral` stands in for a literal the client discarded unread
+  (over the size limit, see :mod:`.imap`); it parses to a :class:`Literal`
+  with ``drained=True`` and never to message bytes.
+- :class:`SystemLabel` marks a Gmail system label recognised on the wire
+  BEFORE any decoding; a custom label is a plain ``str`` even when its decoded
+  text reads ``\\Sent``, so it can never pass for a system label.
 
 Every failure is :class:`ImapProtocolError` (code ``imap_protocol``); no
 exception carries response text.
@@ -23,22 +29,29 @@ from dataclasses import dataclass
 from typing import Final
 
 __all__ = [
+    "GMAIL_SYSTEM_LABELS",
+    "DrainedLiteral",
     "ImapProtocolError",
     "ListEntry",
     "Literal",
+    "SystemLabel",
     "decode_mutf7",
     "encode_mutf7",
     "fetch_records",
     "gmail_labels",
+    "is_drained",
     "list_entries",
     "quote_mailbox",
     "search_uids",
+    "system_label",
     "tokenize",
 ]
 
 _LITERAL_TAIL_RE: Final = re.compile(rb"\{(\d{1,10})\}\Z")
 _MAX_DEPTH: Final = 16
-_MAX_LABELS: Final = 64
+#: Custom labels kept per message (they never classify; system labels are always all inspected).
+_MAX_CUSTOM_LABELS: Final = 64
+_UNSAFE_NAME_CHARS: Final = frozenset(chr(code) for code in (*range(0x20), 0x7F))
 _MAX_SEARCH_UIDS: Final = 1_000_000
 _SPECIALS: Final = frozenset(b" ()")
 #: Gmail system labels (``X-GM-LABELS``) in their canonical spelling, keyed by the case-folded form.
@@ -58,12 +71,45 @@ class ImapProtocolError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class Literal:
-    """A literal (``{n}`` followed by n bytes) inside a response."""
+    """A literal (``{n}`` followed by n bytes) inside a response; ``drained``: discarded unread."""
 
     data: bytes
+    drained: bool = False
 
     def __repr__(self) -> str:
-        return f"Literal(bytes={len(self.data)})"
+        return f"Literal(bytes={len(self.data)}, drained={self.drained})"
+
+
+class DrainedLiteral(bytes):
+    """What the guarded client returns for a literal it read and discarded (``size`` bytes, never kept)."""
+
+    size: int
+
+    def __new__(cls, size: int) -> DrainedLiteral:
+        obj = super().__new__(cls, b"")
+        obj.size = size
+        return obj
+
+
+def is_drained(value: Value) -> bool:
+    """True for the parsed form of a :class:`DrainedLiteral`."""
+    return isinstance(value, Literal) and value.drained
+
+
+class SystemLabel(str):
+    """A Gmail system label (``\\Sent``, ``\\Draft``, ...) in canonical spelling.
+
+    Only :func:`system_label` creates one, from a label whose wire form IS a known
+    system label; :func:`gmail_labels` never makes one out of a decoded custom label.
+    """
+
+    __slots__ = ()
+
+
+def system_label(wire: str) -> SystemLabel | None:
+    """The canonical :class:`SystemLabel` for an exact wire form (case-insensitive, no trimming), else ``None``."""
+    canonical = GMAIL_SYSTEM_LABELS.get(wire.casefold())
+    return None if canonical is None else SystemLabel(canonical)
 
 
 # --- modified UTF-7 -------------------------------------------------------------------------------
@@ -121,7 +167,7 @@ def encode_mutf7(value: str) -> str:
 
 def quote_mailbox(name: str) -> str:
     """A quoted IMAP string for an (already modified-UTF-7) mailbox name."""
-    if not name or not name.isascii() or any(char in "\r\n\0" for char in name):
+    if not safe_mailbox_name(name):
         raise ImapProtocolError()
     return '"' + name.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
@@ -192,10 +238,12 @@ def tokenize(record: Sequence[bytes | tuple[bytes, bytes]]) -> list[Token]:
         if isinstance(element, tuple):
             head, literal = element
             match = _LITERAL_TAIL_RE.search(head)
-            if match is None or int(match.group(1)) != len(literal):
+            drained = isinstance(literal, DrainedLiteral)
+            size = literal.size if isinstance(literal, DrainedLiteral) else len(literal)
+            if match is None or int(match.group(1)) != size:
                 raise ImapProtocolError()
             tokens.extend(_text_tokens(head[: match.start()]))
-            tokens.append(Literal(bytes(literal)))
+            tokens.append(Literal(b"", drained=True) if drained else Literal(bytes(literal)))
         else:
             tokens.extend(_text_tokens(element))
     return tokens
@@ -256,6 +304,8 @@ def records(data: Iterable[object]) -> Iterator[list[bytes | tuple[bytes, bytes]
 
 def _text(value: Value) -> str:
     if isinstance(value, Literal):
+        if value.drained:
+            raise ImapProtocolError()
         value = value.data
     if not isinstance(value, bytes):
         raise ImapProtocolError()
@@ -286,8 +336,10 @@ def number(value: Value) -> int:
 
 
 def body_bytes(value: Value) -> bytes:
-    """The ``BODY[]`` value: a literal (or, rarely, a quoted string)."""
+    """The ``BODY[]`` value: a literal (or, rarely, a quoted string); a drained literal is an error."""
     if isinstance(value, Literal):
+        if value.drained:
+            raise ImapProtocolError()
         return value.data
     if isinstance(value, bytes):
         return value
@@ -295,19 +347,37 @@ def body_bytes(value: Value) -> bytes:
 
 
 def gmail_labels(value: Value) -> tuple[str, ...]:
-    """``X-GM-LABELS`` → system labels in canonical form (``\\Sent``) and decoded custom labels."""
+    """``X-GM-LABELS`` → every system label (:class:`SystemLabel`), then decoded custom labels.
+
+    A label is a system label only when its wire form (atom or quoted string, before
+    any modified UTF-7 decoding and without trimming) is one of
+    :data:`GMAIL_SYSTEM_LABELS`; ``" \\Sent "`` or ``&AFw-Sent`` stay custom labels.
+    Every item is inspected, so a ``\\Draft`` is found at any position; at most
+    :data:`_MAX_CUSTOM_LABELS` custom labels are kept (they never classify). A custom
+    label that is not valid modified UTF-7 is kept in its wire form.
+    """
     if not isinstance(value, list):
         raise ImapProtocolError()
-    labels: list[str] = []
-    for item in value[:_MAX_LABELS]:
+    system: list[SystemLabel] = []
+    custom: list[str] = []
+    for item in value:
         if item is None:
             continue
-        text = _text(item)
-        system = text.startswith("\\")
-        label = GMAIL_SYSTEM_LABELS.get(text.casefold(), text) if system else decode_mutf7(text)
-        if label and label not in labels:
-            labels.append(label)
-    return tuple(labels)
+        wire = _text(item)
+        known = system_label(wire)
+        if known is not None:
+            if known not in system:
+                system.append(known)
+            continue
+        if len(custom) >= _MAX_CUSTOM_LABELS:
+            continue
+        try:
+            label = decode_mutf7(wire)
+        except ImapProtocolError:
+            label = wire
+        if label and label not in custom:
+            custom.append(label)
+    return (*system, *custom)
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,8 +400,13 @@ class ListEntry:
         return not ({"\\noselect", "\\nonexistent"} & self.attributes)
 
 
+def safe_mailbox_name(name: str) -> bool:
+    """A mailbox name that can be sent as a quoted string: printable ASCII, no CR, LF or NUL."""
+    return bool(name) and name.isascii() and not (_UNSAFE_NAME_CHARS & set(name))
+
+
 def list_entries(data: Iterable[object]) -> list[ListEntry]:
-    """``LIST`` data → entries; ``NIL``/``None`` rows are skipped."""
+    """``LIST`` data → entries; ``NIL``/``None`` rows and names with control characters are skipped."""
     entries: list[ListEntry] = []
     for record in records(data):
         values = parse_values(record)
@@ -339,7 +414,7 @@ def list_entries(data: Iterable[object]) -> list[ListEntry]:
             raise ImapProtocolError()
         attributes = frozenset(_text(item).casefold() for item in values[0] if item is not None)
         name = _text(values[2])
-        if name:
+        if safe_mailbox_name(name):  # a name that could frame a command is never offered or sealed
             entries.append(ListEntry(attributes, name))
     return entries
 

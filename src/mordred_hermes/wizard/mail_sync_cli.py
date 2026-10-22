@@ -2,9 +2,9 @@
 
 ::
 
-    hermes-mordred mail setup [--imap-host H] [--imap-port P] [--account LABEL] [--no-touch-id]
+    hermes-mordred mail setup [--imap-host H] [--imap-port 993] [--account LABEL] [--no-touch-id]
     hermes-mordred mail fetch [--max N] [--mailbox all|inbox|sent] [--since YYYY-MM-DD] [--dry-run] [--json]
-    hermes-mordred mail forget [--rows] --yes
+    hermes-mordred mail forget [--rows] [--account LABEL] --yes
 
 - ``setup`` reads the address and the app password on a TTY (never from argv or
   the environment), logs in once read-only (``CAPABILITY``, ``LIST``), chooses
@@ -12,16 +12,26 @@
   INBOX plus the ``\\Sent`` special-use folder, or the operator's pick, or
   none) and seals everything with the Secure Enclave
   (:mod:`mordred_hermes.imports.mail.secrets`). It prints the account label and
-  the path, never the address.
+  the path, never the address. Port 993 (implicit TLS) is the only port. The
+  probe and the sealing run under the per-home mail writer lock, the lock
+  ``fetch``, ``mail import`` and ``forget`` take (``sync_in_progress`` when
+  held).
 - ``fetch`` runs :func:`mordred_hermes.imports.mail.imap_sync.run_fetch`, the same
   function as the Hermes tool ``mordred_mail_sync``, with a 10 minute budget, and
   prints the fixed counts-only result (``--json``: exactly
   :meth:`~mordred_hermes.imports.mail.imap_sync.FetchResult.as_dict`) plus, in
   text mode, the cursor positions. Exit 0 on success (a partial fetch included),
   1 on a refusal or failure, 2 on bad arguments.
-- ``forget --yes`` deletes the sealed credentials, the Enclave key and the
-  account's cursors; ``--rows`` first deletes the account's mail rows
-  (``delete_source``) and stops (exit 1, nothing touched) if the store refuses.
+- ``forget --yes`` deletes the account's cursors and then the sealed
+  credentials and the Enclave key; ``--rows`` first deletes the account's mail
+  rows (``delete_source``) and stops (exit 1, nothing touched) if the store
+  refuses. The account label is resolved once, before the lock; under the lock
+  the credentials must still be the same setup (``setup_id``), else nothing is
+  deleted (``credentials_changed``): a concurrent ``mail setup`` is never
+  undone. Rows and cursors go first and the credentials last, so a failed
+  forget is retried; ``--account LABEL`` deletes a label's rows and cursors
+  when its credentials are already gone (``account_mismatch`` when it names
+  another label than the sealed one).
 
 Nothing here prints a subject, name, address, label or body.
 """
@@ -255,14 +265,14 @@ def _probe(host: str, port: int, address: str, password: str) -> tuple[bool, dic
 
 
 def _setup_values(args: argparse.Namespace) -> tuple[str, str, int, str, list[str]]:
-    from ..imports.mail.secrets import ACCOUNT_RE
+    from ..imports.mail.secrets import ACCOUNT_RE, IMAPS_PORT
 
     account = str(getattr(args, "account", None) or "mail")
     if not ACCOUNT_RE.fullmatch(account):
         raise _Usage("--account must be 1-32 lowercase letters, digits or '_', starting with a letter")
-    port = int(getattr(args, "imap_port", 993) or 993)
-    if not 0 < port < 65536:
-        raise _Usage("--imap-port must be between 1 and 65535")
+    port = int(getattr(args, "imap_port", IMAPS_PORT) or IMAPS_PORT)
+    if port != IMAPS_PORT:
+        raise _Usage("--imap-port must be 993 (implicit TLS); other ports are not supported")
     if _platform() != "darwin":
         raise _Refused("unsupported_platform")
     if not _isatty():
@@ -272,27 +282,44 @@ def _setup_values(args: argparse.Namespace) -> tuple[str, str, int, str, list[st
     return account, host, port, address, _extra_addresses()
 
 
+def _seal(
+    store: Any, values: tuple[str, str, int, str, list[str]], password: str, presence: bool
+) -> tuple[bool, dict[str, str]]:
+    """Probe the server and seal the credentials, both under the mail writer lock."""
+    from ..imports.mail.imap_sync import FetchStop
+    from ..imports.mail.secrets import MailCredentials, own_address_list
+
+    account, host, port, address, extra = values
+    try:
+        with _lock(_home()):
+            gmail, mailboxes = _probe(host, port, address, password)
+            creds = MailCredentials(
+                address=address,
+                app_password=password,
+                imap_host=host,
+                imap_port=port,
+                own_addresses=own_address_list(address, extra),
+                account=account,
+                gmail=gmail,
+                mailboxes=mailboxes,
+            )
+            store.store(creds, require_presence=presence)
+    except FetchStop as exc:
+        raise _Refused(exc.code) from None
+    return gmail, mailboxes
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
-    from ..imports.mail.secrets import MailCredentials, MailSecretsError, own_address_list
+    from ..imports.mail.secrets import MailSecretsError
 
     try:
-        account, host, port, address, extra = _setup_values(args)
-        password = _password(host)
+        values = _setup_values(args)
+        account = values[0]
+        password = _password(values[1])
         store = _secret_store()
         presence = not bool(getattr(args, "no_touch_id", False))
         store.ensure_key(require_presence=presence)  # fail before the server is contacted
-        gmail, mailboxes = _probe(host, port, address, password)
-        creds = MailCredentials(
-            address=address,
-            app_password=password,
-            imap_host=host,
-            imap_port=port,
-            own_addresses=own_address_list(address, extra),
-            account=account,
-            gmail=gmail,
-            mailboxes=mailboxes,
-        )
-        store.store(creds, require_presence=presence)
+        gmail, mailboxes = _seal(store, values, password, presence)
     except _Usage as exc:
         _term.emit_error(str(exc))
         return 2
@@ -457,7 +484,7 @@ def _print_cursors(env: FetchEnv) -> None:
 
 
 def _forget_store(account: str, rows: bool) -> tuple[int, int, str | None]:
-    """(messages deleted, cursors deleted, the code that left cursors behind)."""
+    """(messages deleted, cursors deleted, the code that left cursors behind); rows first, then cursors."""
     from ..imports.mail.imap_sync import CURSOR_PREFIX
 
     try:
@@ -480,7 +507,44 @@ def _forget_store(account: str, rows: bool) -> tuple[int, int, str | None]:
     return deleted, len(keys), None
 
 
+def _identity(flags: Mapping[str, Any] | None) -> tuple[str, str] | None:
+    """Which setup the sealed credentials are: (account label, setup id)."""
+    if not flags:
+        return None
+    return str(flags.get("account")), str(flags.get("setup_id", ""))
+
+
+def _forget_target(args: argparse.Namespace, sealed: tuple[str, str] | None) -> str | None:
+    """The label whose rows and cursors are deleted: the sealed one, or ``--account`` once they are gone."""
+    from ..imports.mail.secrets import ACCOUNT_RE
+
+    named = getattr(args, "account", None)
+    if named is not None and not ACCOUNT_RE.fullmatch(str(named)):
+        raise _Usage("--account must be 1-32 lowercase letters, digits or '_', starting with a letter")
+    if sealed is not None:
+        if named is not None and str(named) != sealed[0]:
+            raise _Refused("account_mismatch")  # the sealed credentials belong to another label
+        return sealed[0]
+    return None if named is None else str(named)
+
+
+def _locked_forget(
+    secrets_store: Any, args: argparse.Namespace, resolved: tuple[str, str] | None
+) -> tuple[str | None, int, int, str | None, bool]:
+    """Under the lock: re-check the setup, delete rows and cursors, then the credentials (last)."""
+    sealed = _identity(secrets_store.flags())
+    if sealed != resolved:
+        raise _Refused("credentials_changed")  # a setup ran since this forget started: touch nothing
+    account = _forget_target(args, sealed)
+    rows = bool(getattr(args, "rows", False))
+    deleted, cursors, left = _forget_store(account, rows) if account else (0, 0, None)
+    if sealed is not None:
+        secrets_store.forget()
+    return account, deleted, cursors, left, sealed is not None
+
+
 def cmd_forget(args: argparse.Namespace) -> int:
+    from ..imports.mail.imap_sync import FetchStop
     from ..imports.mail.secrets import MailSecretsError
 
     if not getattr(args, "yes", False):
@@ -490,24 +554,28 @@ def cmd_forget(args: argparse.Namespace) -> int:
     if _platform() != "darwin":
         return _refused("unsupported_platform")
     secrets_store = _secret_store()
-    flags = secrets_store.flags()
-    account = str(flags.get("account")) if flags else None
+    resolved = _identity(secrets_store.flags())  # the target, decided before waiting for the lock
     try:
+        _forget_target(args, resolved)
         with _lock(_home()):
-            deleted, cursors, left = _forget_store(account, rows) if account else (0, 0, None)
-            secrets_store.forget()
+            account, deleted, cursors, left, had_credentials = _locked_forget(secrets_store, args, resolved)
+    except _Usage as exc:
+        _term.emit_error(str(exc))
+        return 2
     except _Refused as exc:
+        return _refused(exc.code)
+    except FetchStop as exc:
         return _refused(exc.code)
     except (MailSecretsError, OSError) as exc:
         return _refused(_code(exc, "store_path_unsafe"))
     except Exception as exc:
         return _refused(_code(exc, "fetch_failed"))
     _audit({"event": "mail.forget", "decision": "allow", "reason": None, "rows": rows, "messages_deleted": deleted})
-    print("Mail credentials removed." if account else "No mail credentials were set up.")
-    if rows:
+    print("Mail credentials removed." if had_credentials else "No mail credentials were set up.")
+    if rows and account:
         print(f"Deleted {deleted} imported mail message(s) of account '{account}'.")
     if left is not None:
-        _term.emit_error(f"the mail cursors were left in the store ({left})")
+        _term.emit_error(f"the mail cursors were left in the store ({left}); retry with --account {account}")
         return 1
     print(f"Removed {cursors} cursor record(s).")
     return 0
@@ -533,15 +601,15 @@ def _port(raw: str) -> int:
         value = int(raw)
     except ValueError:
         raise argparse.ArgumentTypeError("P must be a port number") from None
-    if not 0 < value < 65536:
-        raise argparse.ArgumentTypeError("P must be between 1 and 65535")
+    if value != 993:
+        raise argparse.ArgumentTypeError("only port 993 (implicit TLS) is supported")
     return value
 
 
 def add_parsers(msub: Any, handler: Callable[[argparse.Namespace], int]) -> None:
     p = msub.add_parser("setup", help="Seal IMAP credentials (address and app password typed on a TTY)")
     p.add_argument("--imap-host", metavar="H", help="IMAP server (default imap.gmail.com for Gmail addresses)")
-    p.add_argument("--imap-port", type=_port, default=993, metavar="P", help="Implicit-TLS port (default 993)")
+    p.add_argument("--imap-port", type=_port, default=993, metavar="P", help="Implicit-TLS port (993 only)")
     p.add_argument("--account", default="mail", metavar="LABEL", help="Short lowercase account label (default mail)")
     p.add_argument("--no-touch-id", action="store_true", help="Create the Enclave key without Touch ID (cron use)")
     p.set_defaults(func=handler)
@@ -554,5 +622,8 @@ def add_parsers(msub: Any, handler: Callable[[argparse.Namespace], int]) -> None
     p_fetch.set_defaults(func=handler)
     p_forget = msub.add_parser("forget", help="Delete the sealed mail credentials and cursors (--rows: also mail rows)")
     p_forget.add_argument("--rows", action="store_true", help="Also delete the account's imported mail rows")
+    p_forget.add_argument(
+        "--account", metavar="LABEL", help="The label whose rows and cursors to delete when its credentials are gone"
+    )
     p_forget.add_argument("--yes", action="store_true", help="Confirm the deletion")
     p_forget.set_defaults(func=handler)
