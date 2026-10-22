@@ -610,7 +610,8 @@ def _remove_helpers(plan: UninstallPlan, opts: UninstallOptions) -> None:
 def _default_telegram_forget() -> int:
     from .telegram_cli import telegram_logout
 
-    return telegram_logout(forget=True)
+    # Never stop the uninstall on undeletable mordred.db rows: forget the rest, report the rows (exit 1).
+    return telegram_logout(forget=True, force=True)
 
 
 def _default_keyvault_reset(ctx: UninstallContext) -> Callable[[Path], int]:

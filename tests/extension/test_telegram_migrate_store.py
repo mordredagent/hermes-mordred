@@ -632,6 +632,25 @@ def test_cli_logout_forget_needs_force_to_leave_rows_behind(
     assert imports.status()["sources"]["telegram"]["messages"] == 6
 
 
+def test_uninstall_forget_never_stops_on_rows_it_cannot_delete(
+    archive: store.ArchiveStore,
+    imports: ImportStore,
+    sealed: _Secrets,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mordred_hermes.wizard import uninstall_cli
+
+    migrate.run_migration(archive, imports, commit=True)
+    _refuse_the_store(monkeypatch)
+    assert uninstall_cli._default_telegram_forget() == 1
+    out, err = capsys.readouterr()
+    assert f"{_FORGOTTEN} (--force)." in out
+    assert "import_rows_not_deleted:import_store_unavailable" in err and "left them behind" in err
+    assert sealed.value is None and not list(archive._root.rglob("*.enc"))  # forgotten despite the rows
+    assert imports.status()["sources"]["telegram"]["messages"] == 6
+
+
 def test_logout_forget_of_an_unmigrated_archive_never_opens_the_store(
     archive: store.ArchiveStore, key: bytes, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -662,8 +662,9 @@ def forget_imported_history(
     """``logout --forget``: delete the account's Telegram ``import_*`` rows when the index is retired.
 
     Returns ``None`` when there was nothing to delete or the rows are gone, and a
-    content-free code when the store could not be reached; the caller still wipes
-    the ``.enc`` files either way. Must run before the archive (and its index) is wiped.
+    content-free code when the index or the store could not be read; on a code the
+    caller removes nothing else unless ``--force`` is given (then it forgets the rest
+    and leaves the rows). Must run before the archive (and its index) is wiped.
     """
     try:
         index = archive.load_index()
