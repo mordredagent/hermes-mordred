@@ -18,12 +18,14 @@
      account owner's addresses, which never count). Then, top-down along the
      parents that are in the import (ancestors first, then source uid), a
      message joins its direct parent when the two messages share a
-     participant and every other followed id it names that is in the import
-     is already in its parent's group; a message naming other groups is left
-     to phase 2. Each message so joins its parent's group while it is still on
-     its own, so reply chains form whatever their order, and the direct
-     parents form a forest, so no message joins two groups here. An absent
-     parent then belongs to the largest group of its children.
+     participant, whatever else it references (deferring it to phase 2 would
+     let a forged date decide which threads form first). Each message so
+     joins its parent's group while it is still on its own, so reply chains
+     form whatever their order, and the direct parents form a forest: a
+     message attaches here to at most one thread, the one holding its direct
+     parent, and rule 3 keeps it from bridging that thread with another in
+     phase 2. An absent parent then belongs to the largest group of its
+     children.
   2. Weak edges, fewest followed ids first (then date, then source uid), so
      single-reference replies settle before any message naming several groups
      is weighed: the groups of a message's followed ids (the last
@@ -309,18 +311,16 @@ def _parent_edges(
     groups: _Groups,
     items: Sequence[ThreadInput],
     parents: Mapping[str, str],
-    present: Container[str],
     people: Mapping[str, frozenset[str]],
 ) -> None:
-    """Each message with its direct parent, ancestors first, so it joins while still on its own (module doc)."""
+    """Each message with its direct parent, ancestors first, so it joins while still on its own (module doc).
+
+    The edge never depends on the message's other references (they are weighed in phase 2).
+    """
     depth = _depths(parents)
     for item in sorted((item for item in items if item.key in depth), key=lambda item: (depth[item.key], item.key)):
         parent = parents[item.key]
-        if not people[item.key] & people[parent]:
-            continue  # weighed (and counted) in phase 2
-        home = groups.root(f"k:{parent}")
-        named = (ref for ref in followed_refs(item.in_reply_to, item.references) if ref in present)
-        if all(groups.root(f"m:{ref}") == home for ref in named):
+        if people[item.key] & people[parent]:  # otherwise weighed (and counted) in phase 2
             groups.join(item.key, f"k:{parent}")
 
 
@@ -348,7 +348,7 @@ def _strong_edges(
         else:
             parents[item.key] = found
     _sibling_classes(groups, children, people)
-    _parent_edges(groups, items, parents, present, people)
+    _parent_edges(groups, items, parents, people)
     for parent, kids in children.items():
         sizes = Counter(groups.root(f"k:{kid.key}") for kid in kids)
         groups.union(f"m:{parent}", min(sizes, key=lambda root: (-sizes[root], root)))  # a placeholder: brings nobody

@@ -10,6 +10,7 @@ import pytest
 from mordred_hermes.imports.mail.merge_guard import followed_refs
 from mordred_hermes.imports.mail.threading import (
     HEURISTIC_WINDOW_SECONDS,
+    Thread,
     ThreadInput,
     build_threads,
     default_thread_key,
@@ -142,6 +143,12 @@ def test_thread_keys_are_content_free() -> None:
 ALICE, MALLORY, OWNER = "alice@example.org", "mallory@example.com", "owner@example.com"
 
 
+def _assert_kept_apart(threads: list[Thread], expected: list[set[str]], crafted: str) -> None:
+    """Each ``expected`` group is one thread of its own: ``crafted`` sits alone or in one of them, bridging none."""
+    found = sorted(sorted(set(thread.members) - {crafted}) for thread in threads)
+    assert [members for members in found if members] == sorted(sorted(group) for group in expected)
+
+
 def _five_threads_and_a_crafted_message(crafted_at: int) -> list[ThreadInput]:
     """Five two-message threads with Alice and one message from Mallory naming all five roots."""
     items: list[ThreadInput] = []
@@ -155,18 +162,17 @@ def _five_threads_and_a_crafted_message(crafted_at: int) -> list[ThreadInput]:
 
 
 @pytest.mark.parametrize("crafted_at", [500, 1_500, 3_000])  # before, between and after the threads
-def test_a_message_naming_five_threads_in_one_batch_joins_none_of_them(crafted_at: int) -> None:
+def test_a_message_naming_five_threads_in_one_batch_bridges_none_of_them(crafted_at: int) -> None:
     items = _five_threads_and_a_crafted_message(crafted_at)
     for seed in range(3):
         shuffled = items[:]
         random.Random(seed).shuffle(shuffled)
         stats: Counter[str] = Counter()
         threads = build_threads(shuffled, own={OWNER}, stats=stats)
-        assert sorted(thread.members for thread in threads) == [
-            ("r0", "p0"), ("r1", "p1"), ("r2", "p2"), ("r3", "p3"), ("r4", "p4"), ("x",)
-        ]  # fmt: skip
+        _assert_kept_apart(threads, [{f"r{n}", f"p{n}"} for n in range(5)], "x")
+        assert {"r4", "p4", "x"} in [set(thread.members) for thread in threads]  # through its direct parent only
         assert stats["merge_skipped"] == 1
-        assert len({thread.thread_key for thread in threads}) == 6  # it names root0 first, yet keeps its own key
+        assert len({thread.thread_key for thread in threads}) == len(threads)  # distinct, though it names root0 first
         keys = {thread.members: thread.thread_key for thread in threads}
         assert keys[("r0", "p0")] == default_thread_key(items[0])  # the thread holding the root keeps its key
 
@@ -197,9 +203,7 @@ def test_replies_naming_absent_ancestors_form_their_threads_before_a_crafted_mes
     for order in _orders(items):
         stats: Counter[str] = Counter()
         threads = build_threads(order, own={OWNER}, stats=stats)
-        assert sorted(thread.members for thread in threads) == [
-            ("r0", "p0"), ("r1", "p1"), ("r2", "p2"), ("r3", "p3"), ("r4", "p4"), ("x",)
-        ]  # fmt: skip
+        _assert_kept_apart(threads, [{f"r{n}", f"p{n}"} for n in range(5)], "x")
         assert stats["merge_skipped"] > 0
         results.add(tuple((thread.thread_key, thread.members, thread.partial) for thread in threads))
     assert len(results) == 1  # the same threads and keys whatever the order of the batch
@@ -284,9 +288,10 @@ def test_only_the_last_ten_references_are_followed_and_the_parent_is_kept() -> N
 BOB = "bob@example.net"
 
 
-def test_references_only_replies_and_a_crafted_message_dated_earliest_stay_six_threads() -> None:
+def test_references_only_replies_and_a_crafted_message_dated_earliest_bridge_no_threads() -> None:
     """Replies without ``In-Reply-To`` (one reference each) still join their parent before the crafted
-    message naming the five roots is weighed, whatever the batch order, although it is dated first."""
+    message naming the five roots is weighed, whatever the batch order, although it is dated first: it
+    attaches to at most one thread (its direct parent's) and bridges none."""
     pair = frozenset({ALICE, OWNER})
     items: list[ThreadInput] = []
     for n in range(5):
@@ -298,9 +303,7 @@ def test_references_only_replies_and_a_crafted_message_dated_earliest_stay_six_t
     for order in _orders(items):
         stats: Counter[str] = Counter()
         threads = build_threads(order, own={OWNER}, stats=stats)
-        assert sorted(thread.members for thread in threads) == [
-            ("r0", "p0"), ("r1", "p1"), ("r2", "p2"), ("r3", "p3"), ("r4", "p4"), ("x",)
-        ]  # fmt: skip
+        _assert_kept_apart(threads, [{f"r{n}", f"p{n}"} for n in range(5)], "x")
         assert stats["merge_skipped"] > 0
         results.add(tuple((thread.thread_key, thread.members) for thread in threads))
     assert len(results) == 1
@@ -367,3 +370,59 @@ def test_a_branching_tree_with_references_only_replies_groups_whatever_the_order
         (thread,) = build_threads(shuffled, own={OWNER}, stats=stats)
         assert (thread.members, stats["merge_skipped"]) == (("a", "b", "e", "c", "f", "d"), 0)
         assert thread.thread_key == default_thread_key(tree[0]) and not thread.partial
+
+
+# --- the seventh-pass review: a reply naming other groups still joins its direct parent first -------
+
+
+def _two_triples_and_a_crafted_message(*, explicit_parent: bool, crafted: bool = True) -> list[ThreadInput]:
+    """Two triples (Ai, Ri, Pi): Ai and Ri reference nothing, Pi references (Ai, Ri) (``explicit_parent``:
+    with ``In-Reply-To: Ri`` too), all with Alice; Mallory's X, dated first, references (R0, R1)."""
+    pair = frozenset({ALICE, OWNER})
+    items: list[ThreadInput] = []
+    if crafted:
+        items.append(item("x", mid="X", refs=("R0", "R1"), people=frozenset({MALLORY, ALICE, OWNER}), at=500))
+    for n in range(2):
+        items.append(item(f"a{n}", mid=f"A{n}", people=pair, at=1_000 + n))
+        items.append(item(f"r{n}", mid=f"R{n}", people=pair, at=1_100 + n))
+        irt = (f"R{n}",) if explicit_parent else ()
+        items.append(item(f"p{n}", mid=f"P{n}", irt=irt, refs=(f"A{n}", f"R{n}"), people=pair, at=1_200 + n))
+    return items
+
+
+def test_a_crafted_message_naming_two_triples_bridges_neither_with_or_without_in_reply_to() -> None:
+    """The seventh-pass probe: each Pi joins Ri in phase 1 whatever else it names, so the date X forged
+    decides nothing. X attaches through its direct parent (R1) alone; its other reference names a second
+    established thread, so its weak edges merge nothing and it is counted."""
+    triples = [{f"a{n}", f"r{n}", f"p{n}"} for n in range(2)]
+    results = set()
+    for explicit_parent in (False, True):
+        legit = build_threads(_two_triples_and_a_crafted_message(explicit_parent=explicit_parent, crafted=False))
+        _assert_kept_apart(legit, triples, "x")  # without X: two conversations
+        for order in _orders(_two_triples_and_a_crafted_message(explicit_parent=explicit_parent)):
+            stats: Counter[str] = Counter()
+            threads = build_threads(order, own={OWNER}, stats=stats)
+            _assert_kept_apart(threads, triples, "x")
+            assert {"a1", "r1", "p1", "x"} in [set(thread.members) for thread in threads]
+            assert stats["merge_skipped"] > 0
+            results.add(tuple((thread.thread_key, thread.members) for thread in threads))
+    assert len(results) == 1  # whatever the order, and with or without In-Reply-To
+
+
+def test_replies_with_extra_references_still_form_one_conversation() -> None:
+    """Replies naming, besides their direct parent, another branch of their thread or an earlier message
+    that references nothing join their parents first, then pull those in: one conversation in any order."""
+    pair = frozenset({ALICE, BOB, OWNER})
+    tree = [
+        item("z", mid="Z", people=pair, at=50),  # an earlier message the thread cites, with no references
+        item("a", mid="A", people=pair, at=100),
+        item("b", mid="B", irt=("A",), refs=("A",), people=pair, at=200),
+        item("c", mid="C", irt=("A",), refs=("A",), people=pair, at=210),
+        item("d", mid="D", irt=("C",), refs=("A", "B", "C"), people=pair, at=300),  # names the other branch
+        item("y", mid="Y", refs=("Z", "D"), people=pair, at=400),  # References only, naming Z too
+    ]
+    for order in _orders(tree):
+        stats: Counter[str] = Counter()
+        (thread,) = build_threads(order, own={OWNER}, stats=stats)
+        assert (thread.members, stats["merge_skipped"]) == (("z", "a", "b", "c", "d", "y"), 0)
+        assert thread.thread_key == default_thread_key(tree[2]) and not thread.partial  # A, the root most name

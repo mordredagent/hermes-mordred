@@ -317,6 +317,10 @@ siblings under an absent parent join only with the same participants, direct
 parents are joined ancestors first and other references fewest first, and no
 union joins two groups that both already hold several messages, so neither
 the batch's order nor a forged date lets one crafted message bridge threads.
+After the seventh-pass review a reply joins its direct parent whatever else it
+references (deferring one that also named other groups let a forged date
+order the merges again), so a crafted message attaches through its direct
+parent to one thread at most and its other references bridge none.
 A store created before
 import schema v2 has no stored references for the messages it already holds,
 so a later-arriving parent cannot join them until those children are fetched

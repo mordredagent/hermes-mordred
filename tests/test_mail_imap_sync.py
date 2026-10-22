@@ -831,10 +831,20 @@ def test_gmail_thread_ids_stay_authoritative_across_batches(home: Path, store: I
 # --- the merge guard inside one batch, and copies the store will not write ---------------------------
 
 _ALICE, _MALLORY = "Alice <alice@example.org>", "Mallory <mallory@example.com>"
+_CRAFTED = "msg99@example.net"
+#: The five two-message threads (root, reply) the crafted message names.
+_FIVE_PAIRS = [{f"msg{10 * thread + 10}@example.net", f"msg{10 * thread + 11}@example.net"} for thread in range(5)]
+
+
+def _assert_apart(threads: dict[str, list[str]], expected: list[set[str]]) -> None:
+    """Each ``expected`` group is one conversation of its own: the crafted message sits alone or in one
+    of them (through its direct parent), bridging none."""
+    found = sorted(sorted(set(ids) - {_CRAFTED}) for ids in threads.values())
+    assert [ids for ids in found if ids] == sorted(sorted(group) for group in expected)
 
 
 @pytest.mark.parametrize("crafted_date", [_DATES[1], _DATES[3]])  # dated before or after the threads
-def test_five_threads_and_a_message_naming_them_in_one_batch_stay_six_conversations(
+def test_five_threads_and_a_message_naming_them_in_one_batch_stay_apart(
     home: Path, store: ImportStore, crafted_date: str
 ) -> None:
     messages: dict[int, FakeMessage] = {}
@@ -860,8 +870,7 @@ def test_five_threads_and_a_message_naming_them_in_one_batch_stay_six_conversati
     result = run_fetch(FetchOptions(), env)
     assert (result.error, result.batches, result.inserted) == (None, 1, 11)  # one batch
     assert result.merge_skipped > 0  # and the store, weighing the same edges, did too
-    threads = sorted(_threads_of(store).values())
-    assert len(threads) == 6 and ["msg99@example.net"] in threads
+    _assert_apart(_threads_of(store), _FIVE_PAIRS)
 
 
 def _threads_with_absent_ancestors(crafted_date: str) -> list[FakeMessage]:
@@ -888,7 +897,7 @@ def _threads_with_absent_ancestors(crafted_date: str) -> list[FakeMessage]:
 
 
 @pytest.mark.parametrize("crafted_date", [_DATES[1], _DATES[3]])  # dated before or after the threads
-def test_replies_naming_absent_ancestors_and_a_crafted_message_stay_six_conversations_in_any_order(
+def test_replies_naming_absent_ancestors_and_a_crafted_message_stay_apart_in_any_order(
     tmp_path: Path, crafted_date: str
 ) -> None:
     messages = _threads_with_absent_ancestors(crafted_date)
@@ -905,7 +914,7 @@ def test_replies_naming_absent_ancestors_and_a_crafted_message_stay_six_conversa
         assert (result.error, result.batches, result.inserted) == (None, 1, 11)  # one batch
         assert result.merge_skipped > 0
         threads = _threads_of(store)
-        assert len(threads) == 6 and ["msg99@example.net"] in threads.values()
+        _assert_apart(threads, _FIVE_PAIRS)
         outcomes.add(tuple(sorted((conv, tuple(ids)) for conv, ids in threads.items())))
     assert len(outcomes) == 1  # the same conversations whatever the order
 
@@ -930,7 +939,7 @@ def _sync_in_three_orders(tmp_path: Path, messages: list[FakeMessage]) -> list[t
     return outcomes
 
 
-def test_references_only_replies_and_a_crafted_message_dated_first_stay_six_conversations(tmp_path: Path) -> None:
+def test_references_only_replies_and_a_crafted_message_dated_first_stay_apart(tmp_path: Path) -> None:
     """The sixth-pass review: replies carry ``References`` only (one id, no ``In-Reply-To``) and Mallory's
     message naming the five roots is dated before every thread."""
     owner = f"Owner <{ADDRESS}>"
@@ -947,7 +956,7 @@ def test_references_only_replies_and_a_crafted_message_dated_first_stay_six_conv
     outcomes = _sync_in_three_orders(tmp_path, [*messages, FakeMessage(crafted)])
     for planned, written, threads in outcomes:
         assert planned > 0 and written > 0  # the grouping held it back, and the store, weighing the same edges
-        assert len(threads) == 6 and ["msg99@example.net"] in threads.values()
+        _assert_apart(threads, _FIVE_PAIRS)
     assert len({tuple(sorted((conv, tuple(ids)) for conv, ids in threads.items())) for *_, threads in outcomes}) == 1
 
 
@@ -976,6 +985,31 @@ def test_a_crafted_sibling_naming_both_correspondents_keeps_two_branches_apart(t
         assert not any(alice_side & ids and bob_side & ids for ids in conversations)
         assert any(alice_side <= ids for ids in conversations) and any(bob_side <= ids for ids in conversations)
         assert len(conversations) in (2, 3)  # the crafted message joins one branch or none
+    assert len({tuple(sorted((conv, tuple(ids)) for conv, ids in threads.items())) for *_, threads in outcomes}) == 1
+
+
+@pytest.mark.parametrize("explicit_parent", [False, True])
+def test_a_crafted_message_naming_two_triples_bridges_neither(tmp_path: Path, explicit_parent: bool) -> None:
+    """The seventh-pass review: two triples (Ai, Ri, Pi) where Ai and Ri reference nothing and Pi references
+    (Ai, Ri) (``explicit_parent``: with ``In-Reply-To: Ri`` too), all with Alice, and Mallory's message dated
+    first referencing (R0, R1). Each Pi joins Ri whatever else it names, so the forged date decides nothing."""
+    owner = f"Owner <{ADDRESS}>"
+    messages: list[FakeMessage] = []
+    for triple in range(2):
+        first, root, reply = 10 * triple + 10, 10 * triple + 11, 10 * triple + 12
+        messages.append(FakeMessage(mail(first, sender=_ALICE, to=owner, date=_DATES[2])))
+        messages.append(FakeMessage(mail(root, sender=_ALICE, to=owner, date=_DATES[2])))
+        headers = f"References: <msg{first}@example.net> <msg{root}@example.net>\r\n"
+        if explicit_parent:
+            headers += f"In-Reply-To: <msg{root}@example.net>\r\n"
+        messages.append(FakeMessage(mail(reply, sender=owner, to=_ALICE, extra_headers=headers, date=_DATES[3])))
+    headers = "References: <msg11@example.net> <msg21@example.net>\r\n"
+    crafted = mail(99, sender=_MALLORY, to=f"{owner}, {_ALICE}", extra_headers=headers, date=_DATES[1])
+    triples = [{f"msg{10 * triple + 10 + k}@example.net" for k in range(3)} for triple in range(2)]
+    outcomes = _sync_in_three_orders(tmp_path, [*messages, FakeMessage(crafted)])
+    for planned, written, threads in outcomes:
+        assert planned > 0 and written > 0  # the grouping held it back, and the store, weighing the same edges
+        _assert_apart(threads, triples)
     assert len({tuple(sorted((conv, tuple(ids)) for conv, ids in threads.items())) for *_, threads in outcomes}) == 1
 
 
