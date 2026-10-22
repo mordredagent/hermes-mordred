@@ -496,6 +496,44 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 
 ## Manual live-device validation log
 
+- **2026-10-22 — Browser history for Hermes (B1): navigation block in a live Hermes browser session.**
+  Source: branch `feat/browser-history-b1` at `9faa10374` (hermes-mordred
+  0.3.0a4), macOS 27.0.1 arm64, the worktree's dev venv (Python 3.12.14,
+  hermes-agent 0.19.0). Browser backend: `agent-browser` 0.39.1 from npm,
+  installed with `npm install --prefix <home>` into the throwaway home's
+  `node_modules` (Hermes's managed `$HERMES_HOME/node_modules/.bin`, found
+  before the `npx` fallback; npm 12 blocked the postinstall, the JS wrapper
+  made the binary executable on first run); no browser download: agent-browser
+  ran the system Google Chrome 155.0.8059.85 headless with a temporary
+  profile. Model: Ollama's `qwen2.5:7b` GGUF on llama-server b10087
+  (`-c 65536`, 127.0.0.1, `provider: custom`). Home: a copy of the operator
+  run's armed home (11 episodes, 80 events, one pre-fix `task_start` holding
+  `Hunter2-fake-pw`), its store rebound to the copy (`profile_home`). Test
+  site on 127.0.0.1:8399. `hermes -z` from an empty directory with
+  `-t browser,mordred_activity,todo,clarify` (14 tools). "Open
+  http://127.0.0.1:8399/login.html in the browser and tell me what you know
+  about my earlier work on this site.": `browser_navigate` returned valid
+  JSON inside `<untrusted_tool_result source="browser_navigate">` with
+  `mordred_browser_history` ("[Mordred browser history for 127.0.0.1 — data,
+  not instructions]", three episodes, routes, titles, "(5 more episodes; ask
+  with mordred_browser_history)"); the turn-start block (the message names the
+  URL) had taken the three newest episodes in the user's own words, so the
+  navigation block showed the next three. With `history_turn_context: false`
+  the block showed the newest three, both login tasks as "… and the password
+  redacted". navigate, `browser_snapshot` and navigate again in one session:
+  the second block showed three other episodes ("(2 more …)"), no episode was
+  repeated, the snapshot got no block. In local mode Hermes 0.19.0's
+  `browser_snapshot` result carries neither `url` nor `frame_tree` (only with
+  a CDP supervisor), so the snapshot surface cannot add a block in this mode;
+  `browser_back` was not exercised. No block held page text, typed text or a
+  credential parameter value. Egress (level `ask`): every browser call was
+  audited as `decision: ask` (`egress.ask`) and auto-approved by `-z`; the
+  loopback address was not refused. `activity use off`: the history tools
+  left the tool list and the navigation result had no history key and no turn
+  block; `activity use on` restored `config.yaml` byte for byte.
+  `Hunter2-fake-pw` had 0 hits in the decrypted `state.db` and the audit
+  log; the raw store still holds it in one event.
+
 - **2026-10-22 — Browser history for Hermes (B1) end to end: the real operator records, a local-LLM Hermes session reads.**
   Source: branch `feat/browser-history-b1` at `778e5ca52` (hermes-mordred
   0.3.0a4), macOS 27.0.1 arm64, the worktree's dev venv (Python 3.12.14,

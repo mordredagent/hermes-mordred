@@ -4084,7 +4084,10 @@ per-process state.
 - **Navigation block** (`transform_tool_result`). After a successful
   `browser_navigate`, and after a `browser_snapshot` or `browser_back` whose
   page host (the result's `url`, else the CDP `frame_tree.top.url`) differs
-  from the last host the session saw, the newest episodes on that exact host
+  from the last host the session saw (in Hermes 0.19.0's local agent-browser
+  mode a `browser_snapshot` result carries neither, so only navigation and
+  back add a block there; `frame_tree` exists with a CDP supervisor), the
+  newest episodes on that exact host
   (a leading `www.` ignored, subdomains not included) within
   `history_lookback_days` are added to the JSON result as the field
   `mordred_browser_history`; the result stays valid JSON and Hermes wraps it
