@@ -81,7 +81,7 @@ import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 from urllib.parse import urlsplit
 
 _platform = os.name
@@ -496,6 +496,32 @@ def free_text_argument(name: str) -> bool:
     return any(word.lower() in FREE_TEXT_WORDS for word in _NAME_WORD.findall(name))
 
 
+_UNPARSEABLE: Final = "an unparseable address"
+
+
+def _prompt_host(url: str) -> str:
+    """The host an approval prompt names for ``url``; never the raw URL, which may carry credentials."""
+    try:
+        host = urlsplit(url if "://" in url else f"https://{url}").hostname
+    except ValueError:
+        host = None
+    return host or _UNPARSEABLE
+
+
+def _unparseable_as_length(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    """``args`` with every URL argument whose host cannot be parsed shown by its length only."""
+    names = URL_ARGS.get(tool, ())
+
+    def shown(value: Any) -> Any:
+        if isinstance(value, str) and _prompt_host(value) == _UNPARSEABLE:
+            return _length(value)
+        if isinstance(value, list | tuple):
+            return [shown(item) for item in value]
+        return value
+
+    return {key: (shown(value) if key in names else value) for key, value in args.items()}
+
+
 def _scrubbed(text: str) -> str:
     """``text`` with URL credentials scrubbed and free-text secrets redacted (the activity receiver's rules)."""
     from ..activity.contracts import redact_text_secrets, scrub_urls
@@ -568,8 +594,9 @@ def _decide_ask(tool: str, args: dict[str, Any], policy: EgressPolicy, *, tainte
     if tool == "desktop_preview" and all(_is_local_target(u) for u in urls):
         return Decision(allow=True)
     if urls:
-        hosts = sorted({(urlsplit(u if "://" in u else f"https://{u}").hostname or u) for u in urls})
-        return _ask(tool, ", ".join(hosts), args, f"mordred.egress:{tool}:{','.join(hosts)}", tainted=tainted)
+        hosts = sorted({_prompt_host(u) for u in urls})
+        shown = _unparseable_as_length(tool, args)
+        return _ask(tool, ", ".join(hosts), shown, f"mordred.egress:{tool}:{','.join(hosts)}", tainted=tainted)
     return _ask(tool, "an external service", args, f"mordred.egress:{tool}", tainted=tainted)
 
 

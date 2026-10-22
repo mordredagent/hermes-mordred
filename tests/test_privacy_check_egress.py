@@ -331,6 +331,13 @@ def test_ask_never_quotes_typed_text_into_the_prompt():
     assert PASSWORD not in decision.rule_key
 
 
+@pytest.mark.parametrize("url", [f"https://[{PASSWORD}", f"https://:{PASSWORD}@/x", f"{PASSWORD}@"])
+def test_an_unparseable_address_is_never_quoted_into_the_prompt(url: str) -> None:
+    decision = _ask("browser_navigate", {"url": url})
+    assert PASSWORD not in decision.message and "Hunter" not in decision.message
+    assert PASSWORD not in decision.rule_key
+
+
 def test_free_text_arguments_are_shown_by_length_only_wherever_they_are():
     args = {
         "chat_id": "12345",
