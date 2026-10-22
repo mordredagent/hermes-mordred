@@ -12,7 +12,13 @@ sender is ``other``, an empty sender is ``unknown``; quality ``legacy``).
   import run. ``commit=False`` is the store's dry-run run (every write rolled
   back); ``commit=True`` commits the run, then rewrites ``index.enc`` as version
   2 with ``retired_to: mordred.db`` (account id, label, dialogs and cursors kept),
-  so an older Mordred refuses the archive instead of syncing into ``.enc``.
+  so an older Mordred refuses the archive instead of syncing into ``.enc``, and
+  then records the account in ``mordred.db``'s retirement marker
+  (:data:`~mordred_hermes.imports.store.TELEGRAM_RETIRED_ACCOUNT`), so readers
+  choose the store without unsealing the credentials to read the index. The
+  marker comes second on purpose: a marker beside a version-1 index would send
+  readers to the store while syncs still append to ``.enc``; an index without
+  the marker only costs readers that unseal.
 - :func:`finalize` checks, for every indexed dialog, that every archived message
   is committed in ``mordred.db`` and only then deletes the ``dialogs/*.enc``
   segment files; ``index.enc`` stays as the retirement marker. Any mismatch
@@ -55,7 +61,7 @@ from ...imports.records import (
     validate_conversation,
     validate_message,
 )
-from ...imports.store import ImportRefused, ImportStore
+from ...imports.store import TELEGRAM_RETIRED_ACCOUNT, ImportRefused, ImportStore
 from .history import committed_stats, stored_conversations
 from .store import RETIRED_TO_IMPORT_STORE, ArchiveIndex, ArchiveStore, DialogInfo, StoredMessage, StoreError
 
@@ -400,7 +406,20 @@ def run_migration(
             if not retired:
                 archive.save_index(replace(index, retired_to=RETIRED_TO_IMPORT_STORE))
                 retired = True
+            _mark_retired(store, view.account_id)
     return MigrationResult(committed=commit, retired=retired, counts=_run_counts(totals))
+
+
+def _mark_retired(store: ImportStore, account_id: int) -> None:
+    """Record the retired account in ``mordred.db`` once ``index.enc`` names it (every commit, so reruns backfill).
+
+    Best effort: the rows and the index are already committed, and without the
+    marker a reader still learns where the history lives from the index.
+    """
+    try:
+        store.set_meta(TELEGRAM_RETIRED_ACCOUNT, str(account_id))
+    except ImportRefused as exc:
+        _log.warning("telegram migration left the retirement marker unset (%s)", exc.code)
 
 
 # -- finalize ---------------------------------------------------------------------------------

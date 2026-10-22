@@ -502,6 +502,68 @@ def test_an_empty_store_has_no_runs(tmp_path: Path) -> None:
     assert make_store(tmp_path).status() == {"schema_version": 1, "sources": {}, "runs": {}, "last_run": None}
 
 
+def test_sources_count_committed_messages_only(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    assert store.sources() == {}
+    commit(store, tg_conv(), [authored(1), authored(2)])
+    run = store.run_begin("mail")
+    store.write_thread(run, [mail_message("m1@example.com", "draft")], conversation=mail_conv())
+    assert store.sources() == {"telegram": 2}  # the open mail run is invisible
+    store.run_commit(run, {})
+    assert store.sources() == {"mail": 1, "telegram": 2}
+
+
+# --- import_meta markers --------------------------------------------------------------------------
+
+
+def test_meta_markers_round_trip(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    key = store_module.TELEGRAM_RETIRED_ACCOUNT
+    assert key == "telegram.retired_account" and store.get_meta(key) is None
+    store.set_meta(key, OWNER_ID)
+    assert store.get_meta(key) == OWNER_ID
+    store.set_meta(key, "100")  # replaced, never duplicated
+    assert store.get_meta(key) == "100"
+    assert rows(store, "SELECT count(*) FROM import_meta WHERE key = ?", key) == [(1,)]
+    store.delete_meta(key)
+    store.delete_meta(key)  # absent is fine
+    assert store.get_meta(key) is None
+    assert store.get_meta("schema_version") == "1"  # reserved keys stay readable
+    assert store.meta() == store_module.ImportMeta(1, str(tmp_path.resolve()))
+
+
+@pytest.mark.parametrize("key", sorted(store_module.RESERVED_META_KEYS))
+def test_reserved_meta_keys_are_never_settable(tmp_path: Path, key: str) -> None:
+    store = make_store(tmp_path)
+    before = rows(store, "SELECT key, value FROM import_meta ORDER BY key")
+    for change in (lambda: store.set_meta(key, "x"), lambda: store.delete_meta(key)):
+        with pytest.raises(RecordError) as raised:
+            change()
+        assert raised.value.code == "reserved_meta_key"
+    assert rows(store, "SELECT key, value FROM import_meta ORDER BY key") == before
+    assert store.meta().schema_version == 1
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("", "1"),
+        ("Telegram.account", "1"),
+        ("telegram..account", "1"),
+        ("telegram.account; DROP TABLE import_meta", "1"),
+        ("telegram.retired_account", "1\n2"),
+        ("telegram.retired_account", "x" * 257),
+        ("telegram.retired_account", 7),
+    ],
+)
+def test_malformed_meta_is_refused(tmp_path: Path, key: str, value: Any) -> None:
+    store = make_store(tmp_path)
+    with pytest.raises(RecordError) as raised:
+        store.set_meta(key, value)
+    assert raised.value.code == "bad_meta"
+    assert store.get_meta("telegram.retired_account") is None
+
+
 # --- failures -------------------------------------------------------------------------------------
 
 

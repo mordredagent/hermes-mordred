@@ -27,7 +27,7 @@ from mordred_hermes.imports.records import (
     ProvenanceQuality,
 )
 from mordred_hermes.imports.render import HeadStyle
-from mordred_hermes.imports.store import ImportRefused, ImportStore
+from mordred_hermes.imports.store import TELEGRAM_RETIRED_ACCOUNT, ImportRefused, ImportStore
 from tests.imports._factories import (
     DIALOG,
     ORIGINAL_AT,
@@ -220,6 +220,53 @@ def test_retired_index_never_falls_back_to_the_archive(tmp_path):
         history.load_ask_records(archive, index, ask.AskRequest(question="x"), home=tmp_path, opener=refuse)
     with pytest.raises(store.StoreError, match="import_store_unavailable"):
         history.load_ask_records(archive, index, ask.AskRequest(question="x"))  # no home: no guess
+
+
+def test_the_retirement_marker_selects_mordred_db_without_the_index(tmp_path, monkeypatch):
+    archive, _index, imports = _retired_store(tmp_path)
+    imports.set_meta(TELEGRAM_RETIRED_ACCOUNT, OWNER_ID)
+    monkeypatch.setattr(archive, "load_messages", lambda _d: pytest.fail("the .enc archive must not be read"))
+    request = ask.AskRequest(question="x", dialog_ids=(DIALOG,))
+    unretired = store.ArchiveIndex()  # whatever the index says, the store's marker decides
+    records = history.load_ask_records(archive, unretired, request, home=tmp_path, opener=lambda _h: imports)
+    assert [conv.conv_uid for conv, _messages in records] == ["tg:-100123"]
+    assert [msg.source_uid for msg in records[0][1]] == ["tg:-100123:4567", "tg:-100123:4569", "tg:-100123:4571"]
+
+
+def test_an_unretired_archive_is_read_even_when_the_store_opens(tmp_path):
+    archive, index = _legacy_archive(tmp_path)
+    imports = _import_store(tmp_path)  # opens, but carries no marker for this account
+    request = ask.AskRequest(question="budget", dialog_ids=(-5,), pseudonymize=False)
+    records = history.load_ask_records(archive, index, request, home=tmp_path, opener=lambda _h: imports)
+    assert [msg.provenance_quality for _conv, messages in records for msg in messages] == [ProvenanceQuality.LEGACY] * 3
+
+
+def _count_unseals(svc: Any) -> list[bool]:
+    loads: list[bool] = []
+    sealed = svc._secrets
+
+    def load(fresh: bool = True) -> Any:
+        loads.append(fresh)
+        return sealed.load(fresh=fresh)
+
+    svc._secrets = SimpleNamespace(load=load, flags=sealed.flags)
+    return loads
+
+
+def test_each_question_unseals_once_for_the_privacy_llm_on_either_path(tmp_path):
+    """The model's key and endpoint are sealed with the credentials: a question always unseals, exactly once."""
+    _archive, _index, imports = _retired_store(tmp_path)
+    imports.set_meta(TELEGRAM_RETIRED_ACCOUNT, OWNER_ID)
+    svc, _session = _service(tmp_path, ["ok (tg:-100123:4567#a)"], imports)
+    loads = _count_unseals(svc)
+    _ask(svc, ask.AskRequest(question="x", dialog_ids=(DIALOG,)))
+    assert loads == [True]
+    (tmp_path / "legacy").mkdir()
+    _legacy_archive(tmp_path / "legacy")
+    legacy_svc, _session = _service(tmp_path / "legacy", ["Moved (tg:-5:1#a)."])
+    legacy_loads = _count_unseals(legacy_svc)
+    _ask(legacy_svc, ask.AskRequest(question="budget"))
+    assert legacy_loads == [True]
 
 
 def test_owner_label_and_japanese_labels_reach_the_system_prompt(tmp_path):

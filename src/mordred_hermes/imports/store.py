@@ -28,6 +28,12 @@ Idempotency on ``source_uid``, decided per message in this order:
 
 Backup and restore: ``ActivityStore.backup`` / ``restore`` copy the whole
 ``mordred.db`` file, ``import_*`` tables included; there is no second copy path.
+
+``import_meta`` also carries small content-free markers (:meth:`ImportStore.get_meta` /
+:meth:`ImportStore.set_meta`); the store's own keys (:data:`RESERVED_META_KEYS`) are never
+settable that way. :data:`TELEGRAM_RETIRED_ACCOUNT` names the Telegram account whose
+history lives here, so a reader can choose ``mordred.db`` without unsealing the Telegram
+credentials to read ``index.enc``.
 """
 
 from __future__ import annotations
@@ -77,7 +83,9 @@ from .records import (
 __all__ = [
     "MAX_NEIGHBORS",
     "MAX_SEARCH_LIMIT",
+    "RESERVED_META_KEYS",
     "SUPPORTED_SCHEMA_VERSION",
+    "TELEGRAM_RETIRED_ACCOUNT",
     "ImportMeta",
     "ImportRefused",
     "ImportStore",
@@ -96,6 +104,12 @@ _MAX_TERMS: Final = 32
 _CHUNK: Final = 500  # bound on ``IN (...)`` parameters per statement
 _COUNT_KEY_RE: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _WRITES: Final = frozenset({"inserted", "revised"})
+#: ``import_meta`` keys only the store itself writes (``store_generation`` mirrors the activity store's).
+RESERVED_META_KEYS: Final = frozenset({"schema_version", "profile_home", "store_generation"})
+#: Marker key: the Telegram account id (decimal) whose history is retired to ``mordred.db``.
+TELEGRAM_RETIRED_ACCOUNT: Final = "telegram.retired_account"
+_META_KEY_RE: Final = re.compile(r"[a-z][a-z0-9_]{0,31}(?:\.[a-z][a-z0-9_]{0,31}){0,3}")
+_MAX_META_VALUE: Final = 256
 
 Opener = Callable[[Path], sqlite3.Connection]
 CopyCheck = Callable[[Path], Refusal | None]
@@ -298,6 +312,15 @@ def _select_in(conn: sqlite3.Connection, prefix: str, values: Sequence[str]) -> 
     return rows
 
 
+def _meta_key(key: str) -> str:
+    """A settable ``import_meta`` key: dotted lowercase words, never one of :data:`RESERVED_META_KEYS`."""
+    if not isinstance(key, str) or _META_KEY_RE.fullmatch(key) is None:
+        raise RecordError("bad_meta")
+    if key in RESERVED_META_KEYS:
+        raise RecordError("reserved_meta_key")
+    return key
+
+
 def _counts_json(counts: Mapping[str, int]) -> str:
     """Content-free run counters only: short lowercase keys, non-negative integers."""
     for key, value in counts.items():
@@ -470,6 +493,30 @@ class ImportStore:
     def meta(self) -> ImportMeta:
         with self._transaction(write=False) as conn:
             return self._checked_meta(self._read_meta(conn))
+
+    def get_meta(self, key: str) -> str | None:
+        """One ``import_meta`` value (reserved keys included), or ``None`` when unset."""
+        with self._transaction(write=False) as conn:
+            row = conn.execute("SELECT value FROM import_meta WHERE key = ?", (key,)).fetchone()
+        return None if row is None else str(row[0])
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Set a content-free marker; reserved keys and malformed keys or values raise :class:`RecordError`."""
+        _meta_key(key)
+        if not isinstance(value, str) or len(value) > _MAX_META_VALUE or not value.isprintable():
+            raise RecordError("bad_meta")
+        with self._transaction() as conn:
+            conn.execute(
+                "INSERT INTO import_meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
+    def delete_meta(self, key: str) -> None:
+        """Remove a marker set with :meth:`set_meta` (absent is fine); reserved keys raise :class:`RecordError`."""
+        _meta_key(key)
+        with self._transaction() as conn:
+            conn.execute("DELETE FROM import_meta WHERE key = ?", (key,))
 
     # --- conversations ------------------------------------------------------------------
 
@@ -789,6 +836,15 @@ class ImportStore:
             own = tuple(sorted(parts.get(str(row[0]), []), key=lambda part: part.ordinal))
             result[str(row[0])] = (conv, ImportMessage(**_decoded(_MESSAGE_FIELDS, row), parts=own))
         return result
+
+    def sources(self) -> dict[str, int]:
+        """Committed message count per source; a source without committed messages is left out."""
+        with self._transaction(write=False) as conn:
+            rows = conn.execute(
+                f"SELECT c.source, count(*) FROM {_COMMITTED_MESSAGES} "
+                "JOIN import_conversations c ON c.conv_uid = m.conv_uid GROUP BY c.source ORDER BY c.source"
+            ).fetchall()
+        return {str(source): int(count) for source, count in rows}
 
     def status(self) -> dict[str, Any]:
         """Identifiers and counts only: per-source rows, runs per state, and the latest run."""

@@ -31,10 +31,11 @@ from mordred_hermes.imports.records import (
     telegram_source_uid,
 )
 from mordred_hermes.imports.render import TRUNCATION_MARKER
-from mordred_hermes.imports.store import ImportRefused, ImportStore
+from mordred_hermes.imports.store import TELEGRAM_RETIRED_ACCOUNT, ImportRefused, ImportStore
 from mordred_hermes.privacy_check import egress
 from tests.imports._factories import (
     DIALOG,
+    MAIL_CONV_UID,
     ORIGINAL_AT,
     OWNER,
     OWNER_ID,
@@ -43,6 +44,8 @@ from tests.imports._factories import (
     TANAKA,
     TG_CONV_UID,
     authored,
+    mail_conv,
+    mail_uid,
     message,
     part,
     tg_conv,
@@ -131,18 +134,39 @@ class _Opener:
         return self.imports
 
 
-def _service(tmp_path: Path, opener: _Opener | None = None) -> Any:
-    value = secrets.TelegramSecrets(
-        api_id=1,
-        api_hash="ab" * 16,
-        store_key=_KEY,
-        session="s",
-        backend="local",
-        local_endpoint="http://127.0.0.1:1/v1",
-        local_model="m",
-    )
+class _Secrets:
+    """The sealed Telegram credentials; ``load`` is the unseal (Touch ID). ``value=None``: not configured."""
+
+    def __init__(self, *, configured: bool = True, forbidden: bool = False) -> None:
+        self.value = (
+            secrets.TelegramSecrets(
+                api_id=1,
+                api_hash="ab" * 16,
+                store_key=_KEY,
+                session="s",
+                backend="local",
+                local_endpoint="http://127.0.0.1:1/v1",
+                local_model="m",
+            )
+            if configured
+            else None
+        )
+        self.forbidden = forbidden
+        self.unseals = 0
+
+    def load(self, fresh: bool = True) -> secrets.TelegramSecrets | None:
+        self.unseals += 1
+        if self.forbidden:
+            raise AssertionError("the Telegram credentials must not be unsealed")
+        return self.value
+
+    def flags(self) -> dict[str, Any] | None:
+        return {} if self.value is not None else None
+
+
+def _service(tmp_path: Path, opener: _Opener | None = None, sealed: _Secrets | None = None) -> Any:
     return service.TelegramService(
-        secret_store=SimpleNamespace(load=lambda fresh=True: value, flags=lambda: {}),
+        secret_store=sealed if sealed is not None else _Secrets(),
         archive_root=tmp_path / "tg",
         policy_check=lambda _b, _u: None,
         import_store_opener=opener,
@@ -405,7 +429,7 @@ def test_legacy_archive_is_searched_with_the_same_item_shape(legacy: _Opener, se
     assert head.startswith("[Telegram tg:-5:1#a] speaker: Carol (legacy: forwards not distinguished) → chat: ")
     assert body == "  Budget review moved to Monday"
     assert out["conversations"][0]["conv_uid"] == "tg:-5"
-    assert legacy.opened == 0  # mordred.db is never touched for an unretired index
+    assert legacy.opened == 1  # mordred.db is probed first; its refusal leaves the unretired .enc archive
 
 
 def test_legacy_archive_filters_and_neighbours(legacy: _Opener, session: str) -> None:
@@ -417,6 +441,150 @@ def test_legacy_archive_filters_and_neighbours(legacy: _Opener, session: str) ->
     assert _ids(near) == ["tg:-5:1#a", "tg:-5:2#a", "tg:-5:3#a"]
     # Without words, chats or dates the archive is read for its last week only: never "complete".
     assert _search({}, session)["search"]["complete"] is False
+
+
+# -- choosing the source without unsealing the Telegram credentials -------------------------------
+
+
+def _mail_message(message_id: str, text: str, sent_at: int) -> ImportMessage:
+    uid = mail_uid(message_id)
+    own = part(uid, author=TANAKA, text=text)
+    quoted = part(uid, PartKind.QUOTED, 1, ordinal=1, author=OWNER, text="前回の件、承知しました")
+    return message(uid, (own, quoted), conv_uid=MAIL_CONV_UID, sender=TANAKA, sent_at=sent_at, recipients=(OWNER,))
+
+
+def _mail_store(tmp_path: Path) -> ImportStore:
+    """Imported mail only: two messages of one thread, no Telegram rows and no retirement marker."""
+    imports = ImportStore(tmp_path / "mordred.db", _plain_opener)
+    imports.initialize(tmp_path)
+    run = imports.run_begin(Source.MAIL)
+    imports.write_thread(
+        run,
+        [
+            _mail_message("m1@example.com", "見積もりは来週お送りします", SENT_AT),
+            _mail_message("m2@example.com", "The budget draft is attached", SENT_AT + 60),
+        ],
+        conversation=mail_conv(),
+    )
+    imports.run_commit(run, {"inserted": 2})
+    return imports
+
+
+def _use(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, opener: _Opener, sealed: _Secrets) -> None:
+    monkeypatch.setattr(hermes_tools, "_service", lambda: _service(tmp_path, opener, sealed))
+
+
+def test_mail_only_home_is_searched_without_any_telegram_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session: str
+) -> None:
+    opener, sealed = _Opener(_mail_store(tmp_path)), _Secrets(configured=False, forbidden=True)
+    _use(monkeypatch, tmp_path, opener, sealed)
+    assert not (tmp_path / "tg").exists()  # no Telegram archive, no index.enc, no credentials
+
+    out = _search({"query": "見積もり"}, session)
+    first = "mail:work:m1@example.com#a"
+    assert _ids(out) == [first]
+    head, body = out["items"][0]["text"].split("\n", 1)
+    assert head.startswith(f"[Mail {first}] speaker: 田中 太郎") and body == "  見積もりは来週お送りします"
+    assert out["search"] == {"mode": "fts", "candidates": 1, "returned": 1, "truncated": False, "complete": True}
+    assert out["conversations"] == [{"conv_uid": MAIL_CONV_UID, "label": "✉ 見積もりの件 · 田中 太郎 ⇄ account owner"}]
+
+    newest = _search({}, session)
+    assert _ids(newest)[:2] == ["mail:work:m2@example.com#a", "mail:work:m2@example.com#q1"]
+    quoted = newest["items"][1]
+    assert (quoted["speaker_class"], quoted["part_kind"]) == ("account_owner", "quoted")
+    near = _search({"around_evidence_id": first}, session)
+    assert set(_ids(near)) == {first, "mail:work:m1@example.com#q1", *_ids(newest)[:2]}
+    pseudonymized = _search({"query": "budget", "pseudonymize": True}, session)
+    assert pseudonymized["conversations"][0]["label"].startswith("✉ ⟦C1⟧ · ⟦P")
+
+    assert sealed.unseals == 0 and opener.opened == 4  # opened afresh per call, never unsealed
+
+
+def test_a_retired_store_with_the_marker_is_searched_without_the_unseal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retired: _Opener, session: str
+) -> None:
+    assert retired.imports is not None
+    retired.imports.set_meta(TELEGRAM_RETIRED_ACCOUNT, OWNER_ID)
+    sealed = _Secrets(forbidden=True)
+    _use(monkeypatch, tmp_path, retired, sealed)
+    out = _search({"query": "BUDGET"}, session)
+    assert sorted(_ids(out)) == ["tg:-100123:4573#a", "tg:-200:7#a"] and out["search"]["mode"] == "fts"
+    assert sealed.unseals == 0
+
+
+def test_a_retired_index_without_the_marker_costs_one_unseal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retired: _Opener, session: str
+) -> None:
+    sealed = _Secrets()  # retired by a Mordred that wrote no marker: index.enc is read once
+    _use(monkeypatch, tmp_path, retired, sealed)
+    assert sorted(_ids(_search({"query": "BUDGET"}, session))) == ["tg:-100123:4573#a", "tg:-200:7#a"]
+    assert sealed.unseals == 1
+
+
+def test_an_unmigrated_archive_is_searched_beside_the_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy: _Opener, session: str
+) -> None:
+    opener, sealed = _Opener(_mail_store(tmp_path)), _Secrets()
+    _use(monkeypatch, tmp_path, opener, sealed)
+    out = _search({"query": "budget"}, session)
+    assert _ids(out) == ["mail:work:m2@example.com#a", "tg:-5:1#a"]  # newest first across both
+    assert out["search"] == {
+        "mode": "fts+legacy",
+        "candidates": 2,
+        "returned": 2,
+        "truncated": False,
+        "complete": True,
+    }
+    assert [c["conv_uid"] for c in out["conversations"]] == [MAIL_CONV_UID, "tg:-5"]
+    assert _ids(_search({"around_evidence_id": "mail:work:m1@example.com#a"}, session))[0].startswith("mail:")
+    assert _ids(_search({"around_evidence_id": "tg:-5:1#a"}, session)) == ["tg:-5:1#a", "tg:-5:2#a", "tg:-5:3#a"]
+    assert sealed.unseals == 3  # the .enc archive is the only reason to unseal
+    empty = ImportStore(tmp_path / "empty.db", _plain_opener)
+    empty.initialize(tmp_path)
+    _use(monkeypatch, tmp_path, _Opener(empty), sealed)
+    assert _search({"query": "budget"}, session)["search"]["mode"] == "legacy"  # nothing imported beside it
+
+
+def test_a_marked_store_that_refuses_never_falls_back_to_enc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retired: _Opener, session: str
+) -> None:
+    assert retired.imports is not None
+    retired.imports.set_meta(TELEGRAM_RETIRED_ACCOUNT, OWNER_ID)
+    archive = store.ArchiveStore(_KEY, tmp_path / "tg")
+    archive.append_messages(-5, [store.StoredMessage(id=1, date=SENT_AT, sender="Carol", text="stale budget row")])
+    opener, sealed = _Opener(retired.imports, refusal="no_key"), _Secrets()
+    _use(monkeypatch, tmp_path, opener, sealed)
+    assert _search({"query": "budget"}, session) == {"error": "import_store_unavailable"}
+    assert opener.opened == 1 and sealed.unseals == 1  # the marker is unreachable; index.enc names the store
+
+
+@pytest.mark.parametrize(
+    ("refusal", "code"),
+    [("not_armed", "no_history"), ("unsupported_platform", "no_history"), ("no_key", "import_store_unavailable")],
+)
+def test_no_store_and_no_telegram_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session: str, refusal: str, code: str
+) -> None:
+    opener, sealed = _Opener(None, refusal=refusal), _Secrets(configured=False, forbidden=True)
+    _use(monkeypatch, tmp_path, opener, sealed)
+    assert _search({"query": "budget"}, session) == {"error": code}
+    assert sealed.unseals == 0
+
+
+def test_an_empty_store_and_no_telegram_archive_is_no_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session: str
+) -> None:
+    imports = ImportStore(tmp_path / "mordred.db", _plain_opener)
+    imports.initialize(tmp_path)
+    sealed = _Secrets(forbidden=True)  # logged in, never synced: no index.enc
+    _use(monkeypatch, tmp_path, _Opener(imports), sealed)
+    assert _search({}, session) == {"error": "no_history"}
+    assert sealed.unseals == 0
+    (tmp_path / "other").mkdir()
+    mail = _mail_store(tmp_path / "other")
+    _use(monkeypatch, tmp_path, _Opener(mail), sealed)
+    assert _search({"query": "absent words"}, session)["items"] == []  # history exists: an honest empty result
 
 
 # -- arguments and gates -------------------------------------------------------------------------

@@ -14,7 +14,7 @@ import pytest
 
 from mordred_hermes.extension.telegram import client, history, secrets, service, store
 from mordred_hermes.imports.records import OwnerClass, Participant, ProvenanceQuality, SenderKind
-from mordred_hermes.imports.store import ImportRefused, ImportStore
+from mordred_hermes.imports.store import TELEGRAM_RETIRED_ACCOUNT, ImportRefused, ImportStore
 
 OWNER = 7
 KEY = b"\x01" * 32
@@ -235,13 +235,28 @@ def test_retired_index_never_falls_back_to_enc(tmp_path):
 
 def test_fresh_account_on_macos_goes_straight_to_mordred_db(tmp_path, darwin):
     archive = _archive(tmp_path)
-    opener, _ = _counting(_import_store(tmp_path))
+    imports = _import_store(tmp_path)
+    opener, _ = _counting(imports)
     index = archive.load_index()
     sink = history.select_sink(archive, index, home=tmp_path, opener=opener)
     assert isinstance(sink, history.ImportSink)
     assert index.retired_to == "mordred.db"
     assert archive._read("index.enc", "index")["version"] == 2  # rewritten before the first write
     assert archive.load_index().retired_to == "mordred.db"
+    # The account is unknown until the sync verifies it: the marker follows in begin().
+    assert imports.get_meta(TELEGRAM_RETIRED_ACCOUNT) is None
+    index.account_id = OWNER
+    sink.begin(index)
+    assert imports.get_meta(TELEGRAM_RETIRED_ACCOUNT) == str(OWNER)
+    sink.fail()
+
+
+def test_every_sync_into_mordred_db_marks_the_account_retired(tmp_path, darwin):
+    archive, imports = _archive(tmp_path), _import_store(tmp_path)
+    archive.save_index(store.ArchiveIndex(account_id=OWNER, retired_to="mordred.db"))  # retired by an older Mordred
+    assert imports.get_meta(TELEGRAM_RETIRED_ACCOUNT) is None
+    _sync(_fake_client(), archive, imports)
+    assert imports.get_meta(TELEGRAM_RETIRED_ACCOUNT) == str(OWNER)  # backfilled by the next sync
 
 
 def test_fresh_account_elsewhere_or_with_the_gate_closed_stays_on_enc(tmp_path, monkeypatch):
@@ -495,8 +510,10 @@ def test_service_refuses_a_retired_index_when_the_gate_refuses(tmp_path, monkeyp
 def test_forget_deletes_the_accounts_import_rows(tmp_path, darwin):
     archive, imports = _archive(tmp_path), _import_store(tmp_path)
     _sync(_fake_client(), archive, imports)
+    assert imports.get_meta(TELEGRAM_RETIRED_ACCOUNT) == str(OWNER)
     assert history.forget_imported_history(archive, home=tmp_path, opener=lambda _h: imports) is None
     assert imports.status()["sources"] == {}
+    assert imports.get_meta(TELEGRAM_RETIRED_ACCOUNT) is None  # nothing is retired here any more
 
 
 def test_forget_reports_an_unavailable_store_and_skips_unretired_archives(tmp_path):

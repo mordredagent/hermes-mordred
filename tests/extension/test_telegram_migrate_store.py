@@ -22,7 +22,7 @@ import pytest
 from mordred_hermes.extension.telegram import hardening, migrate, secrets, store
 from mordred_hermes.imports import store as store_module
 from mordred_hermes.imports.records import OwnerClass
-from mordred_hermes.imports.store import ImportRefused, ImportStore
+from mordred_hermes.imports.store import TELEGRAM_RETIRED_ACCOUNT, ImportRefused, ImportStore
 from mordred_hermes.wizard import cli, telegram_cli, telegram_migrate_cli
 
 pytestmark = pytest.mark.skipif(
@@ -195,6 +195,7 @@ def test_store_dry_run_reports_inserts_and_keeps_nothing(archive: store.ArchiveS
     status = imports.status()
     assert status["runs"] == {"dry_run": 1} and status["sources"] == {}
     assert archive.load_index().retired_to is None
+    assert imports.get_meta(TELEGRAM_RETIRED_ACCOUNT) is None  # no retirement marker either
 
 
 # -- commit ------------------------------------------------------------------------------------
@@ -214,6 +215,7 @@ def test_commit_writes_attributed_rows_retires_the_index_and_reruns_only_duplica
     assert _index_version(archive) == 2 and after.retired_to == store.RETIRED_TO_IMPORT_STORE
     assert (after.account_id, after.account_label, after.last_sync) == (OWNER, before.account_label, before.last_sync)
     assert after.dialogs == before.dialogs  # cursors and counts kept; nothing else cleared
+    assert imports.get_meta(TELEGRAM_RETIRED_ACCOUNT) == str(OWNER)  # readers need no unseal to find the store
 
     parts = imports.parts_for([f"tg:{DIRECT}:1#a", f"tg:{DIRECT}:2#a", f"tg:{DIRECT}:3#a", f"tg:{GROUP}:6#a"])
     classes = {uid: part.part.author_owner_class for uid, part in parts.items()}
@@ -232,6 +234,36 @@ def test_commit_writes_attributed_rows_retires_the_index_and_reruns_only_duplica
     assert imports.status()["runs"] == {"committed": 2}
     replan = migrate.plan_migration(archive, imports)
     assert replan.retired is True and (replan.totals()["would_insert"], replan.totals()["present"]) == (0, 6)
+
+
+def test_commit_marks_the_store_only_after_the_index_is_retired(
+    archive: store.ArchiveStore, imports: ImportStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failing_save(_index: store.ArchiveIndex) -> None:
+        raise store.StoreError("store_path_unsafe")
+
+    monkeypatch.setattr(archive, "save_index", failing_save)
+    with pytest.raises(store.StoreError, match="store_path_unsafe"):
+        migrate.run_migration(archive, imports, commit=True)
+    # A marker beside a version-1 index would send readers to mordred.db while syncs still append to .enc.
+    assert imports.get_meta(TELEGRAM_RETIRED_ACCOUNT) is None and archive.load_index().retired_to is None
+
+
+def test_commit_rerun_backfills_the_marker_and_a_refused_marker_is_best_effort(
+    archive: store.ArchiveStore, imports: ImportStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_set_meta = imports.set_meta
+
+    def refused(_key: str, _value: str) -> None:
+        raise ImportRefused("busy")
+
+    monkeypatch.setattr(imports, "set_meta", refused)
+    result = migrate.run_migration(archive, imports, commit=True)
+    assert (result.committed, result.retired) == (True, True)  # rows and index are committed regardless
+    assert imports.get_meta(TELEGRAM_RETIRED_ACCOUNT) is None and _index_version(archive) == 2
+    monkeypatch.setattr(imports, "set_meta", real_set_meta)
+    migrate.run_migration(archive, imports, commit=True)  # an already retired index: the marker is backfilled
+    assert imports.get_meta(TELEGRAM_RETIRED_ACCOUNT) == str(OWNER)
 
 
 def test_commit_rerun_never_overwrites_a_conversation_a_later_sync_advanced(

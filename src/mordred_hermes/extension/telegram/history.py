@@ -29,10 +29,24 @@ Every refusal becomes a content-free :class:`~.store.StoreError` code
 (``import_store_unavailable``, ``account_mismatch``, ``import_record_invalid``);
 the store's own code is logged, never message content.
 
-Questions read the same place (:func:`load_ask_records`): the committed
-``import_*`` rows when the index is retired, else the ``.enc`` archive mapped
-on the fly by :mod:`mordred_hermes.imports.legacy_enc` (quality ``legacy``,
-``out`` = account owner). A retired index never falls back to ``.enc``.
+The retirement marker: :meth:`ImportSink.begin` records the verified account
+id in ``mordred.db`` (``import_meta`` key
+:data:`~mordred_hermes.imports.store.TELEGRAM_RETIRED_ACCOUNT`) on every sync
+into the store, after ``index.enc`` names ``mordred.db``; ``migrate-store
+--commit`` does the same. Readers can then choose ``mordred.db`` from the
+store alone, without unsealing the Telegram credentials to decrypt
+``index.enc``. A marker that is missing (an older Mordred retired the index)
+only costs that unseal: the index still says where the history lives.
+
+Questions read the same place (:func:`load_ask_records`): given the Hermes
+home, the store is probed first (:func:`probe_history_store`); with the marker
+set, the committed ``import_*`` rows of the marked account are read. Otherwise
+the index decides exactly as before: the ``import_*`` rows when it is retired
+(never a fallback to ``.enc``; a refused store is ``import_store_unavailable``),
+else the ``.enc`` archive mapped on the fly by
+:mod:`mordred_hermes.imports.legacy_enc` (quality ``legacy``, ``out`` =
+account owner). ``telegram_ask`` unseals the credentials for every question
+in any case: the privacy LLM's key and endpoint are sealed with them.
 """
 
 from __future__ import annotations
@@ -64,7 +78,7 @@ from ...imports.records import (
     telegram_source_uid,
     validate_message,
 )
-from ...imports.store import ImportRefused, ImportStore
+from ...imports.store import TELEGRAM_RETIRED_ACCOUNT, ImportRefused, ImportStore
 from .ask import AskRecords, AskRequest, candidate_window
 from .client import (
     PartAuthor,
@@ -77,15 +91,19 @@ from .client import (
 from .store import RETIRED_TO_IMPORT_STORE, ArchiveIndex, ArchiveStore, DialogInfo, StoredMessage, StoreError
 
 __all__ = [
+    "NO_STORE_CODES",
     "ArchiveSink",
     "ImportSink",
     "ImportStoreOpener",
+    "StoreProbe",
     "SyncSink",
     "dialog_rows",
     "forget_imported_history",
     "list_conversations",
     "load_ask_records",
     "open_history_store",
+    "probe_history_store",
+    "retired_account",
     "select_sink",
     "summary",
 ]
@@ -108,6 +126,8 @@ _LEGACY_KINDS: Final = {
     ConversationKind.CHANNEL: "channel",
     ConversationKind.THREAD: "group",
 }
+#: Gate refusals that mean this home has no import store at all (rather than one unavailable right now).
+NO_STORE_CODES: Final = frozenset({"unsupported_platform", "not_armed"})
 
 _H = TypeVar("_H")  # per-dialog handle
 _R = TypeVar("_R")  # converted record
@@ -273,6 +293,8 @@ class ImportSink:
         self._imported_at = int(self._clock())
         with _refused():
             self._stored = stored_conversations(self.store, self._account)
+            # Readers choose mordred.db from this marker without unsealing to read index.enc.
+            self.store.set_meta(TELEGRAM_RETIRED_ACCOUNT, self._account)
             self._run_id = self.store.run_begin(Source.TELEGRAM)
 
     def open_dialog(self, dialog: Any, *, archived: bool) -> _ImportDialog:
@@ -479,13 +501,51 @@ def _default_opener(home: Path) -> ImportStore:
 
 def open_history_store(home: Path, opener: ImportStoreOpener | None = None) -> ImportStore:
     """The gated import store for a retired index; any refusal is ``import_store_unavailable``."""
+    probe = probe_history_store(home, opener)
+    if probe.store is None:
+        raise StoreError("import_store_unavailable")  # never a fallback to .enc
+    return probe.store
+
+
+@dataclass(frozen=True)
+class StoreProbe:
+    """One attempt to open ``mordred.db``'s import tables: the store, or the refusal's code."""
+
+    store: ImportStore | None
+    refusal: str | None = None
+
+    @property
+    def absent(self) -> bool:
+        """No import store on this home (unsupported platform, not armed), not one that is unavailable now."""
+        return self.store is None and self.refusal in NO_STORE_CODES
+
+
+def probe_history_store(home: Path, opener: ImportStoreOpener | None = None) -> StoreProbe:
+    """Open the gated import store for ``home`` afresh, never touching the Telegram credentials."""
     try:
-        return (opener or _default_opener)(home)
+        return StoreProbe((opener or _default_opener)(home))
+    except ImportRefused as exc:  # expected on Linux/Windows and unarmed homes; worth a warning otherwise
+        _log.log(
+            logging.INFO if exc.code in NO_STORE_CODES else logging.WARNING, "import store not opened (%s)", exc.code
+        )
+        return StoreProbe(None, exc.code)
+    except Exception as exc:  # the gate also touches the filesystem
+        _log.warning("import store not opened (%s)", type(exc).__name__)
+        return StoreProbe(None, "store_unavailable")
+
+
+def retired_account(store: ImportStore) -> str | None:
+    """The Telegram account id whose history this store holds (the retirement marker), or ``None``.
+
+    An unreadable or malformed marker is ``None`` too: the caller then decides
+    from ``index.enc``, which names the store of every retired account.
+    """
+    try:
+        value = store.get_meta(TELEGRAM_RETIRED_ACCOUNT)
     except ImportRefused as exc:
-        _log.warning("telegram import store unavailable (%s)", exc.code)
-    except Exception as exc:  # the gate also touches the filesystem; never a fallback to .enc
-        _log.warning("telegram import store unavailable (%s)", type(exc).__name__)
-    raise StoreError("import_store_unavailable")
+        _log.warning("telegram retirement marker unreadable (%s)", exc.code)
+        return None
+    return value if value is not None and value.isdigit() and int(value) > 0 else None
 
 
 def select_sink(
@@ -513,10 +573,14 @@ def select_sink(
 
 def list_conversations(store: ImportStore, index: ArchiveIndex) -> list[ImportConversation]:
     """The account's conversations, newest activity first (unknown dates last)."""
-    if index.account_id <= 0:
+    return _account_conversations(store, str(index.account_id) if index.account_id > 0 else "")
+
+
+def _account_conversations(store: ImportStore, account: str) -> list[ImportConversation]:
+    if not account.isdigit() or int(account) <= 0:
         return []
     with _refused():
-        convs = list(stored_conversations(store, str(index.account_id)).values())
+        convs = list(stored_conversations(store, account).values())
     return sorted(convs, key=lambda c: (c.last_message_at is None, -(c.last_message_at or 0), c.conv_uid))
 
 
@@ -593,8 +657,8 @@ def _committed_messages(
     return by_conv
 
 
-def _stored_ask_records(store: ImportStore, index: ArchiveIndex, request: AskRequest) -> AskRecords:
-    convs = list_conversations(store, index)
+def _stored_ask_records(store: ImportStore, account: str, request: AskRequest) -> AskRecords:
+    convs = _account_conversations(store, account)
     window = candidate_window(convs, request)
     wanted = [conv.conv_uid for conv in convs if window.may_hold(conv)]
     with _refused():
@@ -642,17 +706,24 @@ def load_ask_records(
 ) -> AskRecords:
     """Every conversation a question may read, with the messages it can use, in reading order.
 
-    The source follows the index: ``mordred.db`` (committed runs only) when it
-    is retired there, which needs ``home`` and never falls back to ``.enc``;
-    otherwise the ``.enc`` archive, mapped to canonical records on the fly
-    (one ``#a`` part of quality ``legacy`` per row). Conversations outside
-    ``request.dialog_ids`` or the question's period come back without
-    messages, unloaded; :func:`.ask.select_context` applies the same window.
+    With ``home``, ``mordred.db`` is probed first (:func:`probe_history_store`):
+    when it opens and carries the retirement marker, the marked account's
+    committed rows are read. Otherwise the index decides: ``mordred.db`` when
+    it is retired there, never falling back to ``.enc`` (no ``home`` or a
+    refused store is ``import_store_unavailable``); else the ``.enc`` archive,
+    mapped to canonical records on the fly (one ``#a`` part of quality
+    ``legacy`` per row). Conversations outside ``request.dialog_ids`` or the
+    question's period come back without messages, unloaded;
+    :func:`.ask.select_context` applies the same window.
     """
-    if index.retired_to is not None:
-        if home is None:
+    imports = probe_history_store(home, opener).store if home is not None else None
+    account = retired_account(imports) if imports is not None else None
+    if account is None and index.retired_to is not None:
+        if imports is None:
             raise StoreError("import_store_unavailable")
-        return _stored_ask_records(open_history_store(home, opener), index, request)
+        account = str(index.account_id)
+    if imports is not None and account is not None:
+        return _stored_ask_records(imports, account, request)
     return _legacy_ask_records(archive, index, request, imported_at=int(clock()))
 
 
@@ -676,6 +747,7 @@ def forget_imported_history(
         store = open_history_store(home, opener)
         with _refused():
             store.delete_source(Source.TELEGRAM, str(index.account_id))
+            store.delete_meta(TELEGRAM_RETIRED_ACCOUNT)  # no Telegram history is retired here any more
     except StoreError as exc:
         return exc.code
     return None

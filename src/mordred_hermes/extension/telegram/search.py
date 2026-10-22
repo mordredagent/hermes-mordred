@@ -5,20 +5,32 @@ rendered by :func:`mordred_hermes.imports.render.render_part`: one head line
 built by code from stored provenance (evidence id first, ``speaker:``,
 quoted/forwarded qualifiers, chat, date), then the text indented two spaces.
 
-Where the parts come from follows the Telegram index, exactly like
-:func:`.history.load_ask_records`:
+Where the parts come from (:func:`search_service`) is decided from
+``mordred.db`` first, so a home with imported mail and no Telegram at all
+searches without any Telegram configuration:
 
-- **``fts``** — the index is retired to ``mordred.db``: the gated import store
-  is opened afresh for every call (never cached) and searched with
-  :meth:`~mordred_hermes.imports.store.ImportStore.search` (trigram FTS, an
-  escaped ``LIKE`` for terms under three characters) plus SQL filters, then
-  hydrated with ``parts_for``; ``around_evidence_id`` uses ``neighbors``. The
-  store is source-neutral: imported mail is searched too.
-- **``legacy``** — the ``.enc`` archive, mapped to canonical records on the fly
-  (one ``#a`` part of quality ``legacy`` per row) and matched by case-folded
-  substring over each part's text, bounded by :data:`_MAX_LEGACY_SCAN`.
+1. The gated import store is opened afresh (never cached) WITHOUT touching
+   the Telegram credentials. When it opens and either carries the Telegram
+   retirement marker (:func:`.history.retired_account`) or no Telegram
+   ``index.enc`` exists, only the store is searched (mode **``fts``**, every
+   source: Telegram and mail): :meth:`~mordred_hermes.imports.store.ImportStore.search`
+   (trigram FTS, an escaped ``LIKE`` for terms under three characters) plus SQL
+   filters, hydrated with ``parts_for``; ``around_evidence_id`` uses
+   ``neighbors``. A store holding no committed message at all, with nothing
+   found, is ``no_history``.
+2. Otherwise the credentials are unsealed (Touch ID unless disabled; the only
+   unseal on this path) and ``index.enc`` decides: retired to ``mordred.db``
+   searches the store as in 1 when it opened and is ``import_store_unavailable``
+   when it did not (never ``.enc``); an unretired archive is searched as
+   **``legacy``** records (one ``#a`` part of quality ``legacy`` per row,
+   case-folded substring match, bounded by :data:`_MAX_LEGACY_SCAN`), merged
+   with the open store's parts (mode **``fts+legacy``**, newest first) so
+   imported mail stays searchable beside an unmigrated archive.
+3. No store and no ``index.enc``: ``no_history`` when the gate says this home
+   has no import store (unsupported platform, encryption not armed), else
+   ``import_store_unavailable``.
 
-Both paths return the same item shape. Bodies are capped at
+Every path returns the same item shape. Bodies are capped at
 :data:`MAX_BODY_CHARS` with the renderer's truncation marker, and the whole
 result at about :data:`MAX_RESULT_CHARS` by dropping trailing items
 (``truncated``). Nothing here logs content; failures are content-free codes.
@@ -54,7 +66,7 @@ from .ask import AskError, AskRecords, AskRequest, local_day_bounds
 from .store import StoreError
 
 if TYPE_CHECKING:
-    from .history import ImportStoreOpener
+    from .history import StoreProbe
     from .service import TelegramService
     from .store import ArchiveStore
 
@@ -135,7 +147,7 @@ class SearchItem:
 
 @dataclass(frozen=True)
 class SearchResult:
-    mode: str  # "fts" | "legacy"
+    mode: str  # "fts" | "legacy" | "fts+legacy"
     #: Parts that matched (bounded by the search; ``complete`` is false at the bound).
     candidates: int
     items: tuple[SearchItem, ...]
@@ -330,6 +342,19 @@ def _legacy_around(records: AskRecords, request: SearchRequest) -> _Found:
     return _Found((), 0, partial=False)
 
 
+def _legacy_found(records: AskRecords, request: SearchRequest) -> _Found:
+    return (_legacy_around if request.around_evidence_id is not None else _legacy_matches)(records, request)
+
+
+def _merged(stored: _Found, legacy: _Found, request: SearchRequest) -> _Found:
+    """The store's parts beside an unmigrated archive's: newest first, or the one window holding the anchor."""
+    if request.around_evidence_id is not None:
+        parts = list(stored.parts or legacy.parts)  # an evidence id lives in one of them only
+    else:
+        parts = sorted([*stored.parts, *legacy.parts], key=_newest_first)[: request.limit]
+    return _Found(parts, stored.candidates + legacy.candidates, partial=stored.partial or legacy.partial)
+
+
 def legacy_ask_request(request: SearchRequest) -> AskRequest:
     """The :class:`.ask.AskRequest` whose window loads what ``request`` can match from ``.enc``."""
     if request.around_evidence_id is not None:
@@ -407,52 +432,112 @@ def search_history(
     *,
     lang: str = "en",
     budget: int = MAX_RESULT_CHARS - ENVELOPE_CHARS,
+    legacy: AskRecords | None = None,
 ) -> SearchResult:
     """Search ``mordred.db`` (an :class:`ImportStore`, mode ``fts``) or legacy records (mode ``legacy``).
 
-    ``budget`` bounds the JSON size of the items plus their conversation
-    labels; the caller's envelope (note, rules, coverage) is the rest of
-    :data:`MAX_RESULT_CHARS`. Raises :class:`~.store.StoreError` when the store
-    refuses a read.
+    ``legacy`` records given beside a store are searched too and merged with
+    its parts (mode ``fts+legacy``). ``budget`` bounds the JSON size of the
+    items plus their conversation labels; the caller's envelope (note, rules,
+    coverage) is the rest of :data:`MAX_RESULT_CHARS`. Raises
+    :class:`~.store.StoreError` when the store refuses a read.
     """
-    if isinstance(source, ImportStore):
-        return _assemble(_store_found(source, request), request, mode="fts", lang=lang, budget=budget)
-    finder = _legacy_around if request.around_evidence_id is not None else _legacy_matches
-    return _assemble(finder(source, request), request, mode="legacy", lang=lang, budget=budget)
+    if not isinstance(source, ImportStore):
+        return _assemble(_legacy_found(source, request), request, mode="legacy", lang=lang, budget=budget)
+    found = _store_found(source, request)
+    if legacy is None:
+        return _assemble(found, request, mode="fts", lang=lang, budget=budget)
+    merged = _merged(found, _legacy_found(legacy, request), request)
+    return _assemble(merged, request, mode="fts+legacy", lang=lang, budget=budget)
 
 
-# -- the service's archive ------------------------------------------------------------------------
+# -- choosing the source --------------------------------------------------------------------------
 
 
-def _search_archive(
-    archive: ArchiveStore, request: SearchRequest, home: Path, opener: ImportStoreOpener | None
+def _archive_present(root: Path | None) -> bool:
+    """Whether a Telegram ``index.enc`` exists, decided without any unseal; an unreadable answer counts as yes.
+
+    The legacy path then reports the archive's own refusal, exactly as before.
+    """
+    from .store import archive_updated
+
+    try:
+        return archive_updated(root) is not None
+    except StoreError:
+        return True
+
+
+def _has_history(store: ImportStore) -> bool:
+    try:
+        return bool(store.sources())
+    except ImportRefused as exc:
+        _log.warning("history search: import store refused (%s)", exc.code)
+        raise StoreError("import_store_unavailable") from None
+
+
+def _holds_history(store: ImportStore) -> bool:
+    """Whether to search the store beside an unretired archive; a refusal leaves the archive alone, as before."""
+    try:
+        return _has_history(store)
+    except StoreError:
+        return False
+
+
+def _search_store(
+    store: ImportStore, request: SearchRequest, home: Path, legacy: AskRecords | None = None
 ) -> SearchResult:
-    """Worker thread: read the index, then search the store it names (never a fallback to ``.enc``)."""
-    from .history import load_ask_records, open_history_store
+    """Worker thread: search ``mordred.db`` (and ``legacy`` records beside it, when given)."""
+    from .service import _label_language
+
+    result = search_history(store, request, lang=_label_language(home), legacy=legacy)
+    if legacy is None and result.candidates == 0 and not _has_history(store):
+        raise StoreError("no_history")  # nothing was ever imported here
+    return result
+
+
+def _search_archive(archive: ArchiveStore, request: SearchRequest, home: Path, probe: StoreProbe) -> SearchResult:
+    """Worker thread, after the unseal: ``index.enc`` decides (a retired index never falls back to ``.enc``)."""
+    from .history import load_ask_records
     from .service import _label_language
 
     index = archive.load_index()
-    lang = _label_language(home)
     if index.retired_to is not None:
-        # A fresh gate check and store open for every call; nothing is cached.
-        return search_history(open_history_store(home, opener), request, lang=lang)
+        if probe.store is None:
+            raise StoreError("import_store_unavailable")
+        return _search_store(probe.store, request, home)
     records = load_ask_records(archive, index, legacy_ask_request(request), clock=time.time)
-    return search_history(records, request, lang=lang)
+    if probe.store is None or not _holds_history(probe.store):
+        return search_history(records, request, lang=_label_language(home))
+    return _search_store(probe.store, request, home, legacy=records)
 
 
 async def search_service(service: TelegramService, request: SearchRequest) -> SearchResult:
-    """Run ``request`` with the service's credentials and stores, like :meth:`.TelegramService.ask` without a model.
+    """Run ``request`` over ``mordred.db`` and, only when needed, the service's ``.enc`` archive.
 
-    The memory guard runs first and the credentials are unwrapped afresh
-    (Touch ID unless disabled); only the archive handle outlives the unwrap.
+    The memory guard runs first. The import store is probed without any
+    Telegram credential, and the archive directory is only checked for an
+    ``index.enc`` file; the credentials are unwrapped afresh (Touch ID unless
+    disabled) on the legacy path only, and only the archive handle outlives
+    the unwrap.
     """
+    from .history import probe_history_store, retired_account
     from .service import TelegramServiceError
 
     await asyncio.to_thread(service._memory_guard)
+    home = service._profile_home()
+    probe = await asyncio.to_thread(probe_history_store, home, service._import_store_opener)
+    archived = await asyncio.to_thread(_archive_present, service._archive_root)
+    if probe.store is not None:
+        marked = await asyncio.to_thread(retired_account, probe.store)
+        if marked is not None or not archived:
+            return await asyncio.to_thread(_search_store, probe.store, request, home)
+    elif not archived:
+        raise StoreError("no_history" if probe.absent else "import_store_unavailable")
     value = await service._load_secrets(fresh=True)
     if value is None:
+        if probe.store is not None:  # an index.enc without credentials cannot be read: the store alone
+            return await asyncio.to_thread(_search_store, probe.store, request, home)
         raise TelegramServiceError("telegram_not_configured")
     archive = service._archive(value)
     del value
-    home = service._profile_home()
-    return await asyncio.to_thread(_search_archive, archive, request, home, service._import_store_opener)
+    return await asyncio.to_thread(_search_archive, archive, request, home, probe)
