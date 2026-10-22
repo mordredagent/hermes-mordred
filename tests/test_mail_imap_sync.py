@@ -964,7 +964,9 @@ def test_references_only_replies_and_a_crafted_message_dated_first_stay_apart(tm
 def test_a_crafted_sibling_naming_both_correspondents_keeps_two_branches_apart(tmp_path: Path, shape: str) -> None:
     """The sixth-pass review: two two-message branches under an absent parent with disjoint correspondents,
     and Mallory's reply to that parent naming both, dated first (``chain``: each branch's second message
-    replies to its first)."""
+    replies to its first). Its participants equal neither branch's and its only reference is the absent
+    parent, which no weak edge follows: it stays alone and no guard is involved (``merge_skipped`` 0 since
+    the set-based grouping)."""
     owner, bob = f"Owner <{ADDRESS}>", "Bob <bob@example.com>"
     absent = "<absent@example.net>"
     messages: list[FakeMessage] = []
@@ -979,12 +981,12 @@ def test_a_crafted_sibling_naming_both_correspondents_keeps_two_branches_apart(t
     crafted = mail(99, sender=_MALLORY, to=f"{owner}, {_ALICE}, {bob}", extra_headers=crafted_headers, date=_DATES[1])
     outcomes = _sync_in_three_orders(tmp_path, [*messages, FakeMessage(crafted)])
     alice_side, bob_side = {"msg10@example.net", "msg11@example.net"}, {"msg20@example.net", "msg21@example.net"}
-    for planned, _written, threads in outcomes:
-        assert planned > 0  # the grouping held a merge back (the absent parent is no stored edge)
+    for planned, written, threads in outcomes:
+        assert planned == written == 0  # nothing to hold back: the absent parent is no edge, in a batch or stored
         conversations = [set(ids) for ids in threads.values()]
         assert not any(alice_side & ids and bob_side & ids for ids in conversations)
         assert any(alice_side <= ids for ids in conversations) and any(bob_side <= ids for ids in conversations)
-        assert len(conversations) in (2, 3)  # the crafted message joins one branch or none
+        assert len(conversations) == 3  # the crafted message joins neither branch
     assert len({tuple(sorted((conv, tuple(ids)) for conv, ids in threads.items())) for *_, threads in outcomes}) == 1
 
 
@@ -1014,12 +1016,14 @@ def test_a_crafted_message_naming_two_triples_bridges_neither(tmp_path: Path, ex
 
 
 @pytest.mark.parametrize("crafted_date", [_DATES[1], "Sun, 04 Oct 2026 10:00:00 +0900"])  # first or last
-def test_pairs_under_absent_parents_and_a_crafted_message_naming_both_stay_apart(
+def test_pairs_under_absent_parents_and_a_message_naming_both_are_one_conversation_whatever_its_date(
     tmp_path: Path, crafted_date: str
 ) -> None:
     """The eighth-pass review: with ``References`` only, Ai names the absent Ui and Pi names (Ai, Vi) with
-    Vi absent, all with Alice, and Mallory's message references (A0, A1). Absent ids never order the
-    grouping, so each Pi joins Ai before the crafted message is weighed, whatever its date."""
+    Vi absent, all with Alice, and Mallory's message references (A0, A1). Since the set-based grouping the
+    only strong component is {A1, X} (X's direct parent A1 is present); P1 and the weak cluster {A0, P0}
+    each reach that one established component, so the batch is one conversation whatever X's date and the
+    order (the eighth-pass grouping kept {A0, P0} apart; no established thread is bridged)."""
     owner = f"Owner <{ADDRESS}>"
     messages: list[FakeMessage] = []
     for pair in range(2):
@@ -1030,12 +1034,11 @@ def test_pairs_under_absent_parents_and_a_crafted_message_naming_both_stay_apart
         messages.append(FakeMessage(mail(reply, sender=owner, to=_ALICE, extra_headers=headers, date=_DATES[3])))
     headers = "References: <msg10@example.net> <msg20@example.net>\r\n"
     crafted = mail(99, sender=_MALLORY, to=f"{owner}, {_ALICE}", extra_headers=headers, date=crafted_date)
-    pairs = [{f"msg{10 * pair + 10 + k}@example.net" for k in range(2)} for pair in range(2)]
+    everything = {f"msg{10 * pair + 10 + k}@example.net" for pair in range(2) for k in range(2)} | {_CRAFTED}
     outcomes = _sync_in_three_orders(tmp_path, [*messages, FakeMessage(crafted)])
     for planned, written, threads in outcomes:
-        assert planned > 0 and written > 0  # the grouping held it back, and the store, weighing the same edges
-        _assert_apart(threads, pairs)
-        assert any({*pairs[1], _CRAFTED} == set(ids) for ids in threads.values())  # through its direct parent
+        assert planned == written == 0  # nothing held back: the store sees one conversation already
+        assert [set(ids) for ids in threads.values()] == [everything]
     assert len({tuple(sorted((conv, tuple(ids)) for conv, ids in threads.items())) for *_, threads in outcomes}) == 1
 
 

@@ -4680,23 +4680,27 @@ part of this delivery ([`TODO.md`](./TODO.md)).
   involved. A chain A←B←C fetched as C, then B, then A (each naming only its
   parent, each reply addressed to its parent's sender) is one conversation of
   three messages; threads that never reference each other stay apart. The same
-  guards (one function, `imports/mail/merge_guard.py`) decide the grouping of
+  rules (one module, `imports/mail/merge_guard.py`) decide the grouping of
   a batch before it is written, so messages fetched together are held to them
-  too: a message first joins its direct parent in the batch (the last
-  `In-Reply-To` id, else the last `References` id), ancestors first, or its
-  siblings with the same participants under an absent parent, when the two
-  share a participant (whatever else it references, so through its direct
-  parent it attaches to one thread at most), and only then are its other
-  references weighed by the guard against those groups: first, in repeated
-  passes, the messages whose references to messages of the batch fall into
-  one group or into single messages only, then the rest, each pass fewest
-  such references first (absent ids never order them; a message naming more
-  than three ids and more than one multi-message group merges nothing);
-  no union ever joins two groups that both already hold several messages, so
-  neither the batch's order nor a forged date lets one message bridge threads;
-  a copy the store will not write (a duplicate or a rejected copy of a
-  stored message, per `ImportStore.classify_incoming`) takes no part in that
-  grouping. A store created before import schema v2 has no stored references
+  too, and that grouping is a pure function of the batch's set of messages
+  (neither their order nor a forged date changes it). First, strong
+  components: messages of one Gmail thread id or one Message-ID, a message
+  and its direct parent in the batch (the last `In-Reply-To` id, else the
+  last `References` id) when the two share a participant, and siblings under
+  an absent parent with equal participant sets; a strong edge attaches a
+  message to its one parent, so none bridges two components. A component of
+  several messages (or keyed by a Gmail thread id) is established. Then the
+  messages left alone form clusters over their weak edges with each other
+  (one of the last 10 referenced ids naming a message of the batch, the two
+  sharing a participant; absent ids are ignored), and each cluster joins the
+  established component its weak edges reach, in either direction, when
+  there is exactly one, and none when there are several (counted once in
+  `merge_skipped`). Established components never join each other through
+  weak edges; a message whose reference is refused for lack of a shared
+  participant, or because it would join two established components, counts
+  in `merge_skipped` too. A copy the store will not write (a duplicate or a
+  rejected copy of a stored message, per `ImportStore.classify_incoming`)
+  takes no part in that grouping. A store created before import schema v2 has no stored references
   for the messages it already holds, so a parent that arrives later cannot join
   them until those children are fetched again (`mail fetch --since <date>`
   re-fetches identical copies, which attach their references).

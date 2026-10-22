@@ -327,6 +327,21 @@ into single messages only are weighed first, in repeated passes, then the
 rest, each pass fewest such references first, so a pair formed through one
 present ancestor is established before a crafted message naming several such
 pairs is weighed, whatever its date.
+After the ninth-pass review (a 2+2 fold inside one approved merge, and a
+grouping that changed with a forged date) the batch's grouping is set-based,
+a pure function of its messages: strong components first (one Gmail thread
+id, one Message-ID, a message and its present direct parent sharing a
+participant, equal-participant siblings under an absent parent), computed
+completely; then clusters of the remaining single messages over their weak
+edges with each other (followed ids naming a message of the batch, sharing a
+participant; absent ids ignored); then each cluster joins the one established
+component (several messages, or a Gmail thread) its weak edges reach in
+either direction, or none when they reach several (`merge_skipped`, once per
+cluster). Established components never join each other through weak edges.
+So the 2+2 input is one conversation {A, B, D, X}, its extension with C is
+one conversation for every date of C, and the eighth-pass pairs joined only by
+weak edges form one conversation with the message naming both, whatever its
+date; threads formed by strong edges stay apart.
 A store created before
 import schema v2 has no stored references for the messages it already holds,
 so a later-arriving parent cannot join them until those children are fetched

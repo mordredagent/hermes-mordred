@@ -1,10 +1,12 @@
-"""Threading: Gmail ids, reference union-find, guarded subject heuristic, partial threads."""
+"""Threading: Gmail ids, set-based guarded reference grouping, subject heuristic, partial threads."""
 
 from __future__ import annotations
 
 import itertools
 import random
 from collections import Counter
+from collections.abc import Iterator
+from dataclasses import replace
 
 import pytest
 
@@ -183,6 +185,38 @@ def _orders(items: list[ThreadInput]) -> list[list[ThreadInput]]:
     return [items, items[::-1], random.Random(20261022).sample(items, len(items))]
 
 
+#: The dates a suspicious message is given: before and after every other message of a batch.
+EARLIEST, LATEST = 0, 10_000
+
+
+def _variants(items: list[ThreadInput], suspicious: str) -> Iterator[list[ThreadInput]]:
+    """The batch forward, reversed and shuffled, with ``suspicious`` dated earliest, then latest."""
+    for at in (EARLIEST, LATEST):
+        yield from _orders([replace(entry, sent_at=at) if entry.key == suspicious else entry for entry in items])
+
+
+Grouping = tuple[frozenset[frozenset[str]], int]
+
+
+def _grouping(items: list[ThreadInput]) -> Grouping:
+    """(the conversations as sets of source uids, ``merge_skipped``)."""
+    stats: Counter[str] = Counter()
+    threads = build_threads(items, own={OWNER}, stats=stats)
+    return frozenset(frozenset(thread.members) for thread in threads), stats["merge_skipped"]
+
+
+def _one_grouping(items: list[ThreadInput], suspicious: str) -> Grouping:
+    """The grouping of every :func:`_variants` batch, asserted to be the same one."""
+    found = {_grouping(batch) for batch in _variants(items, suspicious)}
+    assert len(found) == 1, found
+    return found.pop()
+
+
+def _conversations(*groups: str) -> frozenset[frozenset[str]]:
+    """``"a b", "c"`` → {{a, b}, {c}}."""
+    return frozenset(frozenset(group.split()) for group in groups)
+
+
 @pytest.mark.parametrize("shared_ancestors", [False, True])
 @pytest.mark.parametrize("crafted_at", [500, 1_500, 3_000])  # before, between and after the threads
 def test_replies_naming_absent_ancestors_form_their_threads_before_a_crafted_message_is_weighed(
@@ -211,14 +245,17 @@ def test_replies_naming_absent_ancestors_form_their_threads_before_a_crafted_mes
 
 
 @pytest.mark.parametrize("stranger_at", [100, 900])  # dated before or after the children
-def test_a_stranger_among_the_children_of_an_absent_parent_is_held_back_once(stranger_at: int) -> None:
+def test_a_stranger_among_the_children_of_an_absent_parent_stays_apart(stranger_at: int) -> None:
+    """Children of an absent parent join only with equal participants; the stranger's only reference is the
+    absent id, which no weak edge follows, so no guard is involved (``merge_skipped`` 0 since the set-based
+    grouping: the earlier two-phase grouping weighed it against the absent parent's placeholder)."""
     children = [item(f"c{n}", mid=f"C{n}", irt=("A",), refs=("A",), at=200 + n) for n in range(3)]
     stranger = item("s", mid="S", irt=("A",), refs=("A",), people=frozenset({MALLORY, OWNER}), at=stranger_at)
     for order in _orders([*children, stranger]):
         stats: Counter[str] = Counter()
         threads = build_threads(order, own={OWNER}, stats=stats)
         assert sorted(thread.members for thread in threads) == [("c0", "c1", "c2"), ("s",)]
-        assert stats["merge_skipped"] == 1
+        assert stats["merge_skipped"] == 0
 
 
 def test_held_keys_never_name_a_thread_by_an_id_it_only_references() -> None:
@@ -260,7 +297,7 @@ def test_the_owner_is_never_the_shared_participant() -> None:
 def test_siblings_of_an_absent_parent_still_group() -> None:
     first = item("b", mid="B", irt=("A",), refs=("A",), at=200)
     second = item("c", mid="C", irt=("A",), refs=("A",), at=300, order=1)
-    (thread,) = build_threads([first, second], own={OWNER})  # the absent parent's placeholder brings nobody
+    (thread,) = build_threads([first, second], own={OWNER})  # equal participants under an absent parent
     assert thread.members == ("b", "c") and thread.partial
 
 
@@ -290,9 +327,9 @@ BOB = "bob@example.net"
 
 
 def test_references_only_replies_and_a_crafted_message_dated_earliest_bridge_no_threads() -> None:
-    """Replies without ``In-Reply-To`` (one reference each) still join their parent before the crafted
-    message naming the five roots is weighed, whatever the batch order, although it is dated first: it
-    attaches to at most one thread (its direct parent's) and bridges none."""
+    """Replies without ``In-Reply-To`` (one reference each) join their parent by a strong edge, so the
+    crafted message naming the five roots, dated first, attaches to at most one thread (its direct
+    parent's) and bridges none, whatever the batch order."""
     pair = frozenset({ALICE, OWNER})
     items: list[ThreadInput] = []
     for n in range(5):
@@ -326,17 +363,11 @@ def _two_branches_and_a_crafted_sibling(shape: str) -> list[ThreadInput]:
 
 @pytest.mark.parametrize("shape", ["siblings", "chain"])
 def test_a_crafted_sibling_naming_both_correspondents_bridges_no_branches(shape: str) -> None:
-    results = set()
-    for order in _orders(_two_branches_and_a_crafted_sibling(shape)):
-        stats: Counter[str] = Counter()
-        threads = [set(thread.members) for thread in build_threads(order, own={OWNER}, stats=stats)]
-        b_side = next(members for members in threads if "b1" in members)
-        c_side = next(members for members in threads if "c1" in members)
-        assert b_side != c_side and {"b1", "b2"} <= b_side and {"c1", "c2"} <= c_side
-        assert (b_side | c_side) - {"x"} == {"b1", "b2", "c1", "c2"}  # the crafted message joins one or none
-        assert stats["merge_skipped"] > 0
-        results.add(tuple(sorted(tuple(sorted(members)) for members in threads)))
-    assert len(results) == 1
+    """The crafted sibling's participants equal neither branch's and its only reference is the absent
+    parent (never followed by a weak edge): it stays alone, and no guard is involved (``merge_skipped`` 0
+    since the set-based grouping), whatever the batch order and its date."""
+    expected = (_conversations("b1 b2", "c1 c2", "x"), 0)
+    assert _one_grouping(_two_branches_and_a_crafted_sibling(shape), "x") == expected
 
 
 def test_siblings_of_an_absent_parent_with_the_same_correspondents_and_their_replies_group() -> None:
@@ -376,13 +407,16 @@ def test_a_branching_tree_with_references_only_replies_groups_whatever_the_order
 # --- the seventh-pass review: a reply naming other groups still joins its direct parent first -------
 
 
-def _two_triples_and_a_crafted_message(*, explicit_parent: bool, crafted: bool = True) -> list[ThreadInput]:
+def _two_triples_and_a_crafted_message(
+    *, explicit_parent: bool, crafted: bool = True, crafted_at: int = 500
+) -> list[ThreadInput]:
     """Two triples (Ai, Ri, Pi): Ai and Ri reference nothing, Pi references (Ai, Ri) (``explicit_parent``:
     with ``In-Reply-To: Ri`` too), all with Alice; Mallory's X, dated first, references (R0, R1)."""
     pair = frozenset({ALICE, OWNER})
     items: list[ThreadInput] = []
     if crafted:
-        items.append(item("x", mid="X", refs=("R0", "R1"), people=frozenset({MALLORY, ALICE, OWNER}), at=500))
+        people = frozenset({MALLORY, ALICE, OWNER})
+        items.append(item("x", mid="X", refs=("R0", "R1"), people=people, at=crafted_at))
     for n in range(2):
         items.append(item(f"a{n}", mid=f"A{n}", people=pair, at=1_000 + n))
         items.append(item(f"r{n}", mid=f"R{n}", people=pair, at=1_100 + n))
@@ -391,22 +425,24 @@ def _two_triples_and_a_crafted_message(*, explicit_parent: bool, crafted: bool =
     return items
 
 
-def test_a_crafted_message_naming_two_triples_bridges_neither_with_or_without_in_reply_to() -> None:
-    """The seventh-pass probe: each Pi joins Ri in phase 1 whatever else it names, so the date X forged
-    decides nothing. X attaches through its direct parent (R1) alone; its other reference names a second
-    established thread, so its weak edges merge nothing and it is counted."""
+@pytest.mark.parametrize("crafted_at", [500, 5_000])  # dated before or after both triples
+def test_a_crafted_message_naming_two_triples_bridges_neither_with_or_without_in_reply_to(crafted_at: int) -> None:
+    """The seventh-pass probe: each Pi joins Ri by a strong edge whatever else it names, so the date X forged
+    decides nothing. X attaches through its direct parent (R1) alone; its other reference joins two
+    established components, which weak edges never do, so it is counted."""
     triples = [{f"a{n}", f"r{n}", f"p{n}"} for n in range(2)]
     results = set()
     for explicit_parent in (False, True):
         legit = build_threads(_two_triples_and_a_crafted_message(explicit_parent=explicit_parent, crafted=False))
         _assert_kept_apart(legit, triples, "x")  # without X: two conversations
-        for order in _orders(_two_triples_and_a_crafted_message(explicit_parent=explicit_parent)):
+        batch = _two_triples_and_a_crafted_message(explicit_parent=explicit_parent, crafted_at=crafted_at)
+        for order in _orders(batch):
             stats: Counter[str] = Counter()
             threads = build_threads(order, own={OWNER}, stats=stats)
             _assert_kept_apart(threads, triples, "x")
             assert {"a1", "r1", "p1", "x"} in [set(thread.members) for thread in threads]
-            assert stats["merge_skipped"] > 0
-            results.add(tuple((thread.thread_key, thread.members) for thread in threads))
+            assert stats["merge_skipped"] == 1
+            results.add(tuple((thread.thread_key, frozenset(thread.members)) for thread in threads))
     assert len(results) == 1  # whatever the order, and with or without In-Reply-To
 
 
@@ -446,21 +482,169 @@ def _two_pairs_under_absent_parents(crafted_at: int | None) -> list[ThreadInput]
 
 
 @pytest.mark.parametrize("crafted_at", [0, 1_000])  # dated before or after both pairs
-def test_pairs_formed_through_one_present_ancestor_settle_before_a_crafted_message_naming_both(
+def test_pairs_formed_by_weak_edges_and_a_message_naming_both_are_one_conversation_whatever_the_dates(
     crafted_at: int,
 ) -> None:
-    """Each Pi's absent parent Vi leaves its pair to phase 2; absent ids never order it, so Pi (one present
-    reference) joins Ai before X (two) is weighed, in every one of the 120 batch orders and whatever X's
-    date: X attaches through its direct parent (A1) alone and is held back from the other pair."""
-    pairs = [{f"a{n}", f"p{n}"} for n in range(2)]
+    """Each Pi's direct parent Vi is absent, so the pairs are no strong components: only X (whose direct
+    parent A1 is present) forms one, {A1, X}. The other messages join through their weak edges: P1 and the
+    cluster {A0, P0} each reach that one established component. One conversation, nothing held back, in
+    every one of the 120 batch orders and whatever X's date (the eighth-pass grouping kept {A0, P0} apart;
+    no established thread of the batch is bridged, so the set-based grouping joins them)."""
     legit = build_threads(_two_pairs_under_absent_parents(None), own={OWNER})
     assert sorted(thread.members for thread in legit) == [("a0", "p0"), ("a1", "p1")]  # without X: two
     results = set()
     for order in itertools.permutations(_two_pairs_under_absent_parents(crafted_at)):
         stats: Counter[str] = Counter()
         threads = build_threads(list(order), own={OWNER}, stats=stats)
-        _assert_kept_apart(threads, pairs, "x")
-        assert {"a1", "p1", "x"} in [set(thread.members) for thread in threads]
-        assert stats["merge_skipped"] > 0
+        assert [set(thread.members) for thread in threads] == [{"a0", "p0", "a1", "p1", "x"}]
+        assert stats["merge_skipped"] == 0
         results.add(tuple((thread.thread_key, thread.members) for thread in threads))
-    assert len(results) == 1  # the same threads and keys whatever the order of the batch
+    assert len(results) == 1  # the same thread and key whatever the order of the batch
+
+
+# --- the ninth-pass review: set-based grouping, a pure function of the batch's messages ----------------
+
+
+def _two_and_two(*, fourth: bool) -> list[ThreadInput]:
+    """The ninth-pass inputs, all with Alice and no ``In-Reply-To``: A references the absent U, B the absent
+    V, D references (A, B, Z) with Z absent and X references (D). ``fourth``: C references (A, B, W) with W
+    absent, and X references (C, D)."""
+    alice = frozenset({ALICE, OWNER})
+    items = [
+        item("a", mid="A", refs=("U",), people=alice, at=100),
+        item("b", mid="B", refs=("V",), people=alice, at=101),
+        item("d", mid="D", refs=("A", "B", "Z"), people=alice, at=200),
+        item("x", mid="X", refs=("C", "D") if fourth else ("D",), people=alice, at=300),
+    ]
+    if fourth:
+        items.append(item("c", mid="C", refs=("A", "B", "W"), people=alice, at=150))
+    return items
+
+
+@pytest.mark.parametrize("suspicious", ["a", "d", "x"])
+def test_two_single_messages_named_by_one_thread_join_it(suspicious: str) -> None:
+    """Input A (the "2+2 fold"): X's direct parent D is present, so {D, X} is the one strong component; A
+    and B are single messages that D references, and each reaches that one established component only.
+    One conversation, nothing held back, whatever the order and the dates."""
+    assert _one_grouping(_two_and_two(fourth=False), suspicious) == (_conversations("a b d x"), 0)
+
+
+@pytest.mark.parametrize("suspicious", ["c", "d", "x"])
+def test_a_cluster_reaching_one_thread_joins_it_whatever_its_date(suspicious: str) -> None:
+    """Input B: C references (A, B), so {A, B, C} is one weak cluster; it reaches the one established
+    component {D, X} (X names C, D names A and B). The ninth-pass grouping split it from {D, X} when C was
+    dated first; now it is one conversation for every date of C, D and X."""
+    assert _one_grouping(_two_and_two(fourth=True), suspicious) == (_conversations("a b c d x"), 0)
+
+
+@pytest.mark.parametrize("replies", ["in_reply_to", "references_only"])
+@pytest.mark.parametrize("parent", ["last_reference", "in_reply_to_a_root", "absent"])
+def test_a_message_naming_five_threads_attaches_to_one_at_most(replies: str, parent: str) -> None:
+    """Five two-message threads (replies with ``In-Reply-To``, or ``References`` only) and Mallory's message
+    naming the five roots: through a strong direct-parent edge (its last reference, or an ``In-Reply-To``
+    naming root2) it attaches to that thread alone; with an absent direct parent it joins none. Either way
+    it is counted once, and the five stay apart whatever the order and its date."""
+    pair = frozenset({ALICE, OWNER})
+    items: list[ThreadInput] = []
+    for n in range(5):
+        items.append(item(f"r{n}", mid=f"root{n}", people=pair, at=1_000 + n))
+        irt = (f"root{n}",) if replies == "in_reply_to" else ()
+        items.append(item(f"p{n}", mid=f"reply{n}", irt=irt, refs=(f"root{n}",), people=pair, at=2_000 + n))
+    irt = {"last_reference": (), "in_reply_to_a_root": ("root2",), "absent": ("elsewhere",)}[parent]
+    roots = tuple(f"root{n}" for n in range(5))
+    items.append(item("x", mid="X", irt=irt, refs=roots, people=frozenset({MALLORY, ALICE, OWNER})))
+    joined = {"last_reference": 4, "in_reply_to_a_root": 2, "absent": None}[parent]
+    expected = [f"r{n} p{n}" + (" x" if n == joined else "") for n in range(5)]
+    if joined is None:
+        expected.append("x")
+    assert _one_grouping(items, "x") == (_conversations(*expected), 1)
+
+
+@pytest.mark.parametrize("parent", [(), ("elsewhere",)])
+def test_a_message_naming_two_gmail_threads_joins_one_at_most(parent: tuple[str, ...]) -> None:
+    """A Gmail thread counts as established whatever its size (it is never folded into another): a message
+    without a Gmail id naming two of them joins its direct parent's thread, or none, and is counted."""
+    items = [
+        item("g1", mid="G1", thrid="11", at=100),
+        item("g2", mid="G2", thrid="22", at=200),
+        item("n", mid="N", irt=parent, refs=("G1", "G2"), at=300),
+    ]
+    expected = _conversations("g1", "g2", "n") if parent else _conversations("g1", "g2 n")
+    assert _one_grouping(items, "n") == (expected, 1)
+
+
+_PROPERTY_PEOPLE = (ALICE, BOB, MALLORY, "carol@example.org")
+
+
+def _random_batch(rng: random.Random) -> list[ThreadInput]:
+    """4 to 12 messages with random references (present, own or absent ids), participants, Gmail ids and dates."""
+    size = rng.randint(4, 12)
+    pool = [*(f"M{n}" for n in range(size)), "U0", "U1", "U2"]
+    batch: list[ThreadInput] = []
+    for n in range(size):
+        people = frozenset(rng.sample(_PROPERTY_PEOPLE, rng.randint(1, 2))) | {OWNER}
+        batch.append(
+            item(
+                f"k{n}",
+                mid=f"M{n}",
+                irt=(rng.choice(pool),) if rng.random() < 0.3 else (),
+                refs=tuple(rng.sample(pool, rng.randint(0, 4))),
+                thrid=rng.choice(("1", "2")) if rng.random() < 0.1 else None,
+                subject=f"subject {n}",  # distinct: the subject heuristic never applies
+                people=people,
+                at=None if rng.random() < 0.1 else rng.randint(0, 10_000),
+                order=n,
+            )
+        )
+    return batch
+
+
+def _strong_oracle(batch: list[ThreadInput]) -> list[set[str]]:
+    """Step 1, computed independently: the strong components of several messages."""
+    parent = {entry.key: entry.key for entry in batch}
+
+    def find(key: str) -> str:
+        while parent[key] != key:
+            key = parent[key]
+        return key
+
+    def union(left: str, right: str) -> None:
+        parent[find(left)] = find(right)
+
+    holders = {entry.message_id: entry for entry in batch}
+    firsts: dict[object, str] = {}
+    for entry in batch:
+        if entry.gm_thread_id:
+            union(entry.key, firsts.setdefault(("gmail", entry.gm_thread_id), entry.key))
+            continue
+        direct = (entry.in_reply_to or entry.references or (None,))[-1]
+        people = entry.participants - {OWNER}
+        if direct in holders:
+            if people & (holders[direct].participants - {OWNER}):
+                union(entry.key, holders[direct].key)
+        elif direct is not None:
+            union(entry.key, firsts.setdefault((direct, people), entry.key))
+    found: dict[str, set[str]] = {}
+    for entry in batch:
+        found.setdefault(find(entry.key), set()).add(entry.key)
+    return [members for members in found.values() if len(members) > 1]
+
+
+def test_the_grouping_is_a_pure_function_of_the_message_set() -> None:
+    """300 seeded random batches: the conversations and ``merge_skipped`` are the same under 20 random
+    orders and date shuffles each; no conversation holds two strong components of several messages, nor
+    two Gmail thread ids."""
+    rng = random.Random(20261022)
+    for _ in range(300):
+        batch = _random_batch(rng)
+        expected = _grouping(batch)
+        conversations, _skipped = expected
+        for _trial in range(20):
+            dates = rng.sample([entry.sent_at for entry in batch], len(batch))
+            shuffled = [replace(entry, sent_at=at) for entry, at in zip(batch, dates, strict=True)]
+            assert _grouping(rng.sample(shuffled, len(shuffled))) == expected, batch
+        components = _strong_oracle(batch)
+        assert all(any(component <= conversation for conversation in conversations) for component in components)
+        for conversation in conversations:
+            assert sum(component <= conversation for component in components) <= 1, batch
+            assert len({entry.gm_thread_id for entry in batch if entry.key in conversation} - {None}) <= 1
