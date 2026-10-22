@@ -1,6 +1,7 @@
 # Browser activity and conditional learning for Mordred
 
 Status: proposed architecture, revised after the Fable review of 2026-10-19.
+The capture policy was revised on 2026-10-22; see §"Decision log".
 
 ## Purpose and selected design
 
@@ -567,14 +568,51 @@ contract. No Hermes core modification is assumed to solve that alternative.
   [authenticated extension API](../../../src/mordred_hermes/extension/api.py),
   [encryption checks](../../../src/mordred_hermes/dbcrypt/_hooks.py), and
   [auxiliary request guard](../../../src/mordred_hermes/llm_guard/auxiliary_guard.py).
-- [Hermes recovery allowlist](../../../../hermes-agent/hermes_cli/session_recovery.py),
-  [plugin storage](../../../../hermes-agent/plugins/plugin_storage.py),
-  [public plugin LLM facade](../../../../hermes-agent/agent/plugin_llm.py),
-  [turn finalization](../../../../hermes-agent/agent/turn_finalizer.py), and
-  [hook output spill](../../../../hermes-agent/tools/hook_output_spill.py).
-- [Operator actions](../../../../mordred-browser-os-oparator/src/mordred/fara_runner.py)
-  and [CDP relay](../../../../mordred-browser-os-oparator/src/mordred/cdp_relay.py).
+- Hermes sibling checkout: recovery allowlist
+  (`hermes-agent/hermes_cli/session_recovery.py`), plugin storage
+  (`hermes-agent/plugins/plugin_storage.py`), public plugin LLM facade
+  (`hermes-agent/agent/plugin_llm.py`), turn finalization
+  (`hermes-agent/agent/turn_finalizer.py`), and hook output spill
+  (`hermes-agent/tools/hook_output_spill.py`).
+- Operator sibling checkout: operator actions
+  (`mordred-browser-os-oparator/src/mordred/fara_runner.py`) and CDP relay
+  (`mordred-browser-os-oparator/src/mordred/cdp_relay.py`).
 
 Sibling-checkout links are navigation aids for this workspace. The recorded
 baseline and runtime capability tests govern compatibility after those checkouts
 move; local source paths are not a supported production API.
+
+## Decision log
+
+**2026-10-22 — record everything a collector reports except secrets.** The
+owner of the browser-activity component decided that the receiver keeps
+everything a collector reports except secrets, because the owner wants the
+stored history itself to be useful to Hermes; secrets stay out. Lessons remain
+available as an optional path, but they are no longer the reason data is kept.
+It supersedes the stricter capture rules in §"Capture and event contract" (no
+typed text, stripped query strings and fragments, no page bodies), the 4 KiB
+per-event limit in §"Authenticated ingestion and delivery" and the 30-day raw
+default in §"Database and encryption lifecycle"; the private-messaging refusal
+in §"Privacy and failure behavior" is dropped: no site is excluded by default,
+and an operator excludes hosts only through `excluded_sites` in configuration.
+The shipped contract is [`SPEC.md`](../../dev/SPEC.md)
+§"Event contract".
+
+- Kept: typed text of `type`/`search` operations whose field the collector
+  classifies (`args.field_kind`) as anything other than `sensitive`, bounded
+  to 4000 characters.
+- Kept: URL query strings and fragments, with credential parameter values and
+  JWT-looking values replaced by `redacted` (exclusion `url_params_redacted`);
+  `route` stays the path and the scrubbed suffix goes to the new field
+  `query`.
+- Kept: the optional `page_title` (300 characters) and `page_text`
+  visible-text excerpt (8000 characters) when the collector sends them.
+- Kept: events from every site, messaging and mail included; the default
+  exclusion list is empty.
+- Kept longer: raw events default to 365 days (`0` never ages them out);
+  unadopted candidates stay at 90 days. The per-event limit is 16 KiB and the
+  store schema is v2.
+- Not kept: text of password fields, fields marked `sensitive` and
+  unclassified fields (`typed_text_dropped`); credential parameter values;
+  screenshots and the DOM; events from hosts the operator lists in
+  `excluded_sites`.

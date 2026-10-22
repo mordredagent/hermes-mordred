@@ -25,6 +25,8 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``, now the ``mordred`` plugi
 - ``vault {init,add,status,cat,migrate,...}``    — at-rest secrets/env vault
 - ``plugins list``                               — show the Mordred plugin and its components
 - ``plugins migrate``                            — switch config.yaml to the single ``mordred`` plugin
+- ``activity {status,pair-operator,peers,correct,candidates,validate,adopt,reject,lessons,
+  review,jobs,backup,restore,retention}`` — browser activity learning administration
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from . import _term
 # ``cli._setup_subparser`` (Hermes registration in ``wizard/__init__.py``) and
 # ``cli._handle_*`` (tests) keep resolving here. See ``__all__``.
 from ._cli_parsers import (
+    _add_activity,
     _add_audit,
     _add_configure,
     _add_desktop,
@@ -58,6 +61,7 @@ from ._cli_parsers import (
     _add_update,
     _add_upgrade,
     _add_vault,
+    _handle_activity,
     _handle_audit_decrypt,
     _handle_audit_grep,
     _handle_audit_purge,
@@ -111,6 +115,7 @@ from ._defaults import is_missing_keyvault_stack
 from ._prompt_io import NonInteractiveAbort
 
 __all__ = [
+    "_add_activity",
     "_add_audit",
     "_add_configure",
     "_add_desktop",
@@ -129,6 +134,7 @@ __all__ = [
     "_add_update",
     "_add_upgrade",
     "_add_vault",
+    "_handle_activity",
     "_handle_audit_decrypt",
     "_handle_audit_grep",
     "_handle_audit_purge",

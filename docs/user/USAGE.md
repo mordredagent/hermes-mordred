@@ -787,6 +787,48 @@ hermes-mordred telegram logout --forget     # also delete the API credentials, a
 > address (`127.0.0.1` / `[::1]`, reached without any proxy). Redirects are
 > never followed.
 
+### `activity` — learn from corrected browser work (preview, macOS)
+
+```sh
+hermes-mordred activity status                # switches, protection gate, counts, peers (no content)
+hermes-mordred activity pair-operator         # single-use code for the browser operator's collector
+hermes-mordred activity peers list            # peers revoke <peer_id> stops a collector at once
+hermes-mordred activity correct --episode ID --text "Open the official site instead"
+hermes-mordred activity candidates list       # candidates show <lesson_id> for fields and evidence ids
+hermes-mordred activity candidates build --episode ID   # rebuild deterministic candidates for an episode's corrections
+hermes-mordred activity validate <lesson_id> --revision N --method user_confirmed
+hermes-mordred activity adopt <lesson_id> --revision N   # asks for the evidence digest
+hermes-mordred activity lessons list          # lessons suspend|retire|revise; reject for candidates
+hermes-mordred activity lessons retire <lesson_id> --revision N --reason obsolete
+hermes-mordred activity review --dry-run      # what an explicit review would do; no model call
+hermes-mordred activity review                # one explicit, budgeted review (may call the model)
+hermes-mordred activity jobs list             # review jobs: identifiers, states, codes
+hermes-mordred activity backup --output ~/mordred-activity.bak  # encrypted; file must not exist
+hermes-mordred activity restore --input ~/mordred-activity.bak  # preview; add --yes to restore
+hermes-mordred activity retention --dry-run   # what one retention pass would remove
+```
+> Off until `plugins.mordred_activity.enabled` and `collection_enabled` are set
+> in `config.yaml`. Records are stored only in the SQLCipher-encrypted
+> `<home>/plugin-data/mordred/mordred.db`, so database encryption must be
+> enabled first (`databases encrypt`); otherwise recording and recall refuse.
+> Everything the collector reports is recorded except secrets: operations,
+> typed text except in password or sensitive fields, URLs with credential
+> parameters (tokens, keys, session ids, codes) replaced by `redacted`, and the
+> page title and a visible-text excerpt when the collector sends them.
+> No site is excluded by default: messaging and mail sites (Telegram, WhatsApp,
+> Discord, Slack, Gmail, Outlook and others) are recorded too, including what
+> you type there. To keep a site out, list its host in
+> `plugins.mordred_activity.excluded_sites`; events from that host and its
+> subdomains are then refused. Raw events are kept
+> for `retention_raw_days` (default 365; `0` keeps them forever).
+> Hermes sees only lessons you adopted, through the
+> `mordred_activity_search` / `mordred_activity_get` tools; it never sees raw
+> history or candidates, and nothing is written to memory or skills. A
+> correction typed in the operator after a task finished is attributed to that
+> task when it names the task's last action. Stop
+> `extension serve` and Hermes sessions before restoring. Contract:
+> [SPEC](../dev/SPEC.md#browser-activity-and-conditional-learning-2026-10-20).
+
 ---
 
 ## 4. Interactive command walkthroughs

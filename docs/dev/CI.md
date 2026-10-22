@@ -496,6 +496,92 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 
 ## Manual live-device validation log
 
+- **2026-10-21 — Browser activity end to end through the shipped surfaces with the real operator and Fara.**
+  Source: the pre-commit working tree of branch `feat/browser-activity-
+  learning` (no SHA yet), the same host and dev venv as the 2026-10-20 entry
+  (Python 3.11, `sqlcipher3`, SQLite 3.51.1); operator `mordred-browser-os-
+  oparator` branch `feat/activity-events` working tree in its own Python
+  3.12.14 venv. Every run used a throwaway `HERMES_HOME`
+  (`plugins.mordred_activity` with `enabled`, `collection_enabled`,
+  `review_mode: manual`; the SQLCipher marker written by hand) and a synthetic
+  32-byte key as `HERMES_MEMORY_KEY` (`hex:` form), so the shipped `.pth`
+  bootstrap installed the shim in every `hermes-mordred` process; afterwards
+  no production home state, marker, `plugin-data`, peer file or default-
+  location operator credential existed. Gateway: `hermes-mordred extension
+  serve --port 7799` (receiver from `_resolve_activity_receiver`). Pairing:
+  `activity pair-operator` and `mordred-activity pair` wrote a `0600`
+  credential, `activity peers list` showed the peer active,
+  `activity_pending.json` and `activity_peers.json` were `0600` with SHA-256
+  digests only, and `mordred-activity status` answered `activity_auth_ok` /
+  `collection enabled`. Operator: `mordred --text --headless --activity` with
+  Playwright headless Chromium, Fara1.5-4B on llama-server b10087 and Ollama
+  `qwen2.5:7b` as interpreter, against the operator's test page served over
+  HTTP on 127.0.0.1 (a `file://` page has no site, and a candidate needs one).
+  Run 1 (task cut off at 240 s, cancelled at exit) stored 34 events in 1
+  episode; run 2 (a guarded click declined, then a typed correction in the
+  same episode) derived candidate `d5ad2142` with the site/route scope, the
+  task text and 3 evidence events. Found and fixed: in run 3 Fara completed
+  the task and the correction typed afterwards was refused as
+  `attempt_unknown` and stored as a one-event episode, because the operator
+  closes its episode at task end while the correction's `attempt_id` names the
+  finished attempt; `ActivityStore.append_batch` now stores such a correction
+  in its attempt's episode (SPEC §"Event contract"), and run 4 with the same
+  script derived candidate `40d3fd28` with the correction joined to the task's
+  episode and no extra episode. Correction loop on the live store through the
+  shipped CLI: `candidates list/show` printed fields, digest and evidence
+  lines without page text; `validate --method user_confirmed`, a wrong digest
+  refused `confirmation_mismatch`, `adopt` with 12 digest characters admitted
+  the lesson; the recall tools (shim installed) returned it for the same site,
+  a reference on repeat, nothing for another site and `not_admitted` for an
+  unknown id; `lessons suspend` stopped recall at once, `lessons revise` made
+  revision 2 a candidate, and the audit log carried `activity.lesson_adopted`
+  and `activity.lesson_suspended`; `backup --output` wrote a `0600` copy the
+  stdlib `sqlite3` refuses, with no fixture strings; `review --dry-run`
+  resolved `route_unavailable` (Hermes 0.19.0 `complete_structured` takes no
+  `task` and no override route was set), enqueued jobs and made no model call;
+  `retention --dry-run` counted 0/0/0; `activity peers revoke` made the next
+  `mordred-activity status` fail with `peer_revoked`, and a second revoke
+  reported no change. Final store: 5 episodes, 51 events, 3 lesson revisions
+  (2 candidates, 1 suspended), 3 pending review jobs. Operator-side notes
+  (they belong to that repository, not this one): address Fara as 127.0.0.1
+  since `localhost` resolved to `::1` where the AirPlay receiver answers,
+  `--text` needs stdin to be a pipe, and a typed "stop" while the guard awaits
+  approval is a decline. Not covered: the Chrome-extension relay path and its
+  navigation observations (Playwright mode only), any real provider review
+  call, lost-ACK resend live (unit tests only), and Windows checked storage.
+
+- **2026-10-20 — Browser activity store on live SQLCipher, operator↔receiver delivery and the correction loop.**
+  Source: the pre-commit working tree of branch `feat/browser-activity-learning`
+  (no SHA yet), macOS 27.0.1 arm64 / Python 3.11.15, `sqlcipher3-wheels` 0.5.7
+  (SQLite 3.51.1) added to the dev venv with `uv pip install`, uv 0.12.9. Every
+  run used a throwaway `HERMES_HOME`, a synthetic 32-byte memory key injected
+  through `dbcrypt.KeyProvider`, and `dbcrypt.arm` + `dbcrypt.install` in the
+  test process; no production home, key, marker or configuration was touched.
+  Store: `open_store` passed the gate and created `plugin-data/mordred/mordred.db`;
+  nine synthetic operator events were appended and the same batch replayed as
+  nine duplicates with no second insert; the stdlib `sqlite3` refused the file
+  (`DatabaseError`), the plaintext probe was false for the store and for the
+  `activity backup` copy (mode `0600`), no fixture string appeared in the file
+  bytes, and a copy placed under another home was refused. Delivery: a real
+  `ExtensionAPIServer` with `build_receiver(home)` on 127.0.0.1 (ports 7817 and
+  7818), `mordred-activity pair <code>` from the operator venv (Python 3.12.14)
+  wrote a `0600` credential, `activity_auth` succeeded, and one batch was
+  acknowledged after commit; lost-ACK resend was covered by unit tests only.
+  Correction loop on the same store through the shipped CLI handlers: the
+  ingestion-derived candidate was validated and adopted (a wrong digest refused
+  `confirmation_mismatch`), the recall tools returned only the admitted lesson
+  (nothing for another site, a reference only on repeat, nothing after
+  suspension), `review --dry-run` enqueued one job without a model call, and
+  the audit log carried `activity.lesson_adopted` and `activity.lesson_suspended`.
+  Not covered: any real provider review call (no paid evaluation was run), the
+  extension's navigation observation in a real Chrome (the operator's relay
+  tests need Chromium and were skipped), Windows checked storage, and the
+  30-task pilot benchmark. Full source regression on the final tree: 8,452
+  passed, 299 skipped, 1 deselected (`tests/extension/test_pm_member.py` wheel
+  test: the temporary venv's interpreter aborts loading `libpython3.11.dylib` on
+  this host, unrelated to the change); critical preset 20 passed; Ruff,
+  formatting and strict mypy passed. Operator repository: 355 passed.
+
 - **2026-10-19 — macOS Ollama/Qwen3 local inference and Telegram archive questions.**
   Source candidate `f87de8046ed20723e29e72051885636828a240cb` was exercised
   on macOS 26.6.2 arm64 / Python 3.11.15 against the existing loopback

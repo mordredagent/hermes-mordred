@@ -17,6 +17,10 @@ Message protocol: ``Mordred-Extension/SPEC.ja.md`` §6 and the extension's
 - ``telegram_status`` / ``telegram_sync`` / ``telegram_dialogs`` → read-only Telegram importer
 - ``telegram_ask`` → Venice private-model answer streamed as ``telegram_ask_meta`` +
   ``telegram_ask_chunk*`` + ``telegram_ask_end`` (or ``telegram_ask_error``)
+- ``activity_pair_init`` / ``activity_auth`` (pre-auth), ``activity_batch`` / ``activity_status``
+  → :mod:`mordred_hermes.extension.activity_api`. An ``activity_auth`` socket is an
+  activity principal limited to those two authed frames; the page principal never
+  reaches them; the paired extension may submit ``activity_batch``.
 
 Server-initiated frames: ``ping`` (app-level keepalive, see
 ``_Connection.keepalive``) and ``error`` (malformed JSON / crashed handler).
@@ -38,7 +42,8 @@ from urllib.parse import quote, urlsplit
 
 from aiohttp import WSMsgType, web
 
-from . import page_headers, pairing
+from ..activity.peers import PeerPrincipal
+from . import activity_api, page_headers, pairing
 from ._windows_storage import ExtensionStorageError
 from .crypto import (
     DecryptError,
@@ -85,7 +90,7 @@ _SLACK_APP_TOKEN_RE = re.compile(r"xapp-[A-Za-z0-9-]+")
 # ``test_page_allowlist_entries_are_all_used_by_the_shipped_page`` pins each
 # entry to a call site in the shipped bundle.
 _PAGE_ALLOWED = frozenset({"chat", "accounts_request", "history_get", "history_clear"})
-_EXTENSION_CAPABILITIES = ["discord_channel_resolve_v1", "telegram_import_v1"]
+_EXTENSION_CAPABILITIES = ["discord_channel_resolve_v1", "telegram_import_v1", activity_api.ACTIVITY_CAPABILITY]
 
 # A sign_request entry leaves _pending_sign only on approve/reject (or when the
 # socket dies), so an authed client that never approves would grow it without
@@ -247,6 +252,9 @@ class ExtensionAPIServer:
         discord_resolver: DiscordResolver | None = None,
         telegram_service: Any = None,
         keepalive_interval: float = DEFAULT_KEEPALIVE_INTERVAL,
+        activity_receiver: Any = None,
+        activity_max_batch_bytes: int = activity_api.DEFAULT_MAX_BATCH_BYTES,
+        activity_llm: Any = None,
     ) -> None:
         if not _is_loopback_host(host):
             raise ValueError(f"extension API host must be loopback-only (got {host!r})")
@@ -258,6 +266,12 @@ class ExtensionAPIServer:
         # Built lazily so a server without the Telegram extra never imports it.
         self._telegram_service = telegram_service
         self.keepalive_interval = keepalive_interval
+        # ``None`` → every activity_batch answers ``activity_refused: store_unavailable``.
+        self.activity_receiver = activity_receiver
+        self.activity_max_batch_bytes = activity_max_batch_bytes
+        # Host LLM facade for automatic activity review after delivery; ``None``
+        # (the standalone server) leaves automatic review unavailable.
+        self.activity_llm = activity_llm
         self._runner: web.AppRunner | None = None
         # Per-process page principal. It is printed only as a URL fragment by
         # the foreground launcher; fragments never cross the HTTP boundary.
@@ -360,6 +374,9 @@ class ExtensionAPIServer:
             telegram_service=self.telegram_service,
             page_token=page_token,
             client_origin=origin,
+            activity_receiver=self.activity_receiver,
+            activity_max_batch_bytes=self.activity_max_batch_bytes,
+            server=self,
         )
         await conn.send_challenge()
         keepalive = asyncio.create_task(conn.keepalive(self.keepalive_interval))
@@ -387,6 +404,9 @@ class _Connection:
         telegram_service: Any = None,
         page_token: str | None = None,
         client_origin: str | None = None,
+        activity_receiver: Any = None,
+        activity_max_batch_bytes: int = activity_api.DEFAULT_MAX_BATCH_BYTES,
+        server: Any = None,
     ) -> None:
         self.ws = ws
         self.chat_handler = chat_handler
@@ -401,6 +421,15 @@ class _Connection:
         # Page sessions use the separate process-bound page principal.
         self._authentication_generation: bytes | None = None
         self._page_authenticated = False
+        # Activity peers (activity_auth) are a separate, narrower principal,
+        # revalidated per frame against their own credential record.
+        self._activity_principal: PeerPrincipal | None = None
+        self._activity_generation: bytes | None = None
+        self.activity_receiver = activity_receiver
+        self.activity_max_batch_bytes = activity_max_batch_bytes
+        # The owning ExtensionAPIServer (launch-permit consumer); ``None`` in direct tests.
+        self.server = server
+        self._frame_bytes = 0
         self._nonce = b""
         self._pending_sign: dict[str, dict[str, Any]] = {}
         self._telegram_asks: dict[str, asyncio.Task[None]] = {}
@@ -467,13 +496,19 @@ class _Connection:
         return msg
 
     async def dispatch(self, raw: str) -> None:
+        self._frame_bytes = len(raw.encode("utf-8", "surrogatepass"))
         msg = await self._parse_frame(raw)
         if msg is None:
             return
         mtype = msg.get("type")
         # Two dispatch tables keep the auth gate explicit: pre-auth messages are
         # always allowed; everything else requires a completed auth handshake.
-        pre_auth = {"pair_init": self._on_pair_init, "auth": self._on_auth}
+        pre_auth = {
+            "pair_init": self._on_pair_init,
+            "auth": self._on_auth,
+            "activity_pair_init": self._on_activity_pair_init,
+            "activity_auth": self._on_activity_auth,
+        }
         authed = {
             "chat": self._on_chat,
             "encrypt": self._on_encrypt,
@@ -492,28 +527,15 @@ class _Connection:
             "telegram_dialogs": self._on_telegram_dialogs,
             "telegram_ask": self._on_telegram_ask,
             "telegram_ask_cancel": self._on_telegram_ask_cancel,
+            "activity_batch": self._on_activity_batch,
+            "activity_status": self._on_activity_status,
         }
         try:
             if mtype in pre_auth:
                 await pre_auth[mtype](msg)
-            elif not self.authed:
-                await self._send({"type": "auth_fail", "reason": "not_authenticated"})
-            elif mtype in authed and (failure := self._authentication_failure()) is not None:
-                self._invalidate_authentication()
-                await self._send({"type": "auth_fail", "reason": failure})
-            elif self.page_token is not None and mtype in authed and mtype not in _PAGE_ALLOWED:
-                # Page session (local-origin socket): only the read-only /
-                # conversational handlers in _PAGE_ALLOWED are permitted; every
-                # other authed handler (credential/key writes, the K_master
-                # crypto oracle, the wallet signer) is refused. Reply rather than
-                # ignore so the caller never hangs on its ``id``.
-                await self._send(
-                    {
-                        "id": msg.get("id"),
-                        "type": "error",
-                        "reason": "page_session_forbidden",
-                    }
-                )
+            elif (refusal := self._authed_refusal(mtype, mtype in authed)) is not None:
+                # Error refusals reply keyed by ``id`` so the caller never hangs.
+                await self._send({"id": msg.get("id"), **refusal} if refusal["type"] == "error" else refusal)
             elif mtype in authed:
                 await authed[mtype](msg)
         except ExtensionStorageError as exc:
@@ -527,12 +549,34 @@ class _Connection:
                 err["id"] = msg["id"]
             await self._send(err)
 
+    def _authed_refusal(self, mtype: Any, known: bool) -> dict[str, Any] | None:
+        """The refusal frame for a post-auth message, ``None`` when it may run."""
+        if not self.authed:
+            return {"type": "auth_fail", "reason": "not_authenticated"}
+        if self._activity_principal is not None and mtype not in activity_api.ACTIVITY_ALLOWED:
+            # Activity peers hold a submission-only credential: allowlist.
+            return {"type": "error", "reason": "activity_session_forbidden"}
+        if not known:
+            return None
+        if (failure := self._authentication_failure()) is not None:
+            self._invalidate_authentication()
+            return {"type": "auth_fail", "reason": failure}
+        if self.page_token is not None and mtype not in _PAGE_ALLOWED:
+            # Page session (local-origin socket): only the read-only /
+            # conversational handlers in _PAGE_ALLOWED are permitted; every
+            # other authed handler (credential/key writes, the K_master
+            # crypto oracle, the wallet signer, activity submission) is refused.
+            return {"type": "error", "reason": "page_session_forbidden"}
+        return None
+
     # -- pairing / auth -----------------------------------------------------
 
     def _invalidate_authentication(self) -> None:
         self.authed = False
         self._authentication_generation = None
         self._page_authenticated = False
+        self._activity_principal = None
+        self._activity_generation = None
         # An approval captured under a revoked principal must not survive a
         # re-authentication with a replacement pairing.
         self._pending_sign.clear()
@@ -583,6 +627,8 @@ class _Connection:
             return False
         if self._page_authenticated:
             return self.page_token is not None
+        if self._activity_principal is not None:
+            return activity_api.principal_is_current(self._activity_principal, self._activity_generation)
         expected = self._authentication_generation
         if expected is None:
             return False
@@ -611,6 +657,18 @@ class _Connection:
         # principal on this same socket before returning the new credential.
         self._invalidate_authentication()
         await self._send({"id": mid, "type": "pair_complete", **result})
+
+    async def _on_activity_pair_init(self, msg: dict[str, Any]) -> None:
+        await activity_api.on_activity_pair_init(self, msg)
+
+    async def _on_activity_auth(self, msg: dict[str, Any]) -> None:
+        await activity_api.on_activity_auth(self, msg)
+
+    async def _on_activity_batch(self, msg: dict[str, Any]) -> None:
+        await activity_api.on_activity_batch(self, msg)
+
+    async def _on_activity_status(self, msg: dict[str, Any]) -> None:
+        await activity_api.on_activity_status(self, msg)
 
     async def _on_auth(self, msg: dict[str, Any]) -> None:
         token = msg.get("ext_token", "")
@@ -779,6 +837,7 @@ class _Connection:
                 return
         kid = key_id(ek) if ek is not None else ""
 
+        activity_api.before_foreground_input(self.server)
         gen = self.chat_handler(content, context)
         try:
             async for chunk in gen:
@@ -788,7 +847,8 @@ class _Connection:
                     # (finally below) lets the chat layer detach the running
                     # turn instead of streaming into the void.
                     return
-            await self._send({"id": mid, "type": "chat_end"})
+            if await self._send({"id": mid, "type": "chat_end"}):
+                await activity_api.after_foreground_delivery(self.server, mid if isinstance(mid, str) else None)
         except Exception as exc:
             # An injected chat handler's exception text is not ours to publish
             # (agent internals, provider URLs, file paths): reply with a code.

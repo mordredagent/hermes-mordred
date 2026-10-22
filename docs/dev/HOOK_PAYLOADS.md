@@ -17,8 +17,9 @@ Current contract:
 
 | Hook | Fields Mordred reads | Consumers |
 |---|---|---|
-| `on_session_start` | `session_id` | Network activation and shared startup integrity |
-| `on_session_end` | none | Network cleanup and keyvault resealing |
+| `on_session_start` | `session_id` | Network activation, shared startup integrity, and the activity interaction registry (`activity/boundary.py`) |
+| `on_session_end` | `session_id` | Network cleanup and keyvault resealing (no field); the activity interaction registry records a completion observation (`completed` / `interrupted` are optional and never required) |
+| `on_session_finalize` | `session_id` | The activity interaction registry records the boundary and revokes unused automatic-review launch permits |
 | `pre_tool_call` | `tool_name` | Privacy and network generic tool guards |
 | `pre_api_request` | `provider`, `base_url` | LLM and network egress policy |
 | `pre_gateway_dispatch` | `event`, `gateway` | Mandatory gateway E2E |
@@ -35,8 +36,8 @@ argument that Mordred can rely on.
 
 Mordred is one plugin, `mordred` (`mordred_hermes.plugin`). Its `register()`
 registers the integrity callback first, then the components in a fixed order
-(keyvault, llm_guard, network, privacy_check, e2e, wizard), so component
-callbacks run in that order within each hook. A callback registered by more
+(keyvault, llm_guard, network, privacy_check, dbcrypt, e2e, activity, wizard),
+so component callbacks run in that order within each hook. A callback registered by more
 than one component (the shared `check_plugin_integrity`) is registered once.
 The `.pth` runtime bootstrap additionally keeps a mandatory integrity bridge at
 the front of `on_session_start`. Network startup still uses explicit readiness

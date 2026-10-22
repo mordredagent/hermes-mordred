@@ -11,11 +11,17 @@ module's :func:`register` wires every component in a fixed order:
                         auxiliary-client guards, session / request enforcement.
 3. ``network``       — the process-wide Tor / VPN / clearnet route and hooks.
 4. ``privacy_check`` — tool-call policy and the session-start integrity gate.
-5. ``e2e``           — encrypted gateway dispatch, outbound re-encryption and
+5. ``dbcrypt``       — the database-encryption monitor and status line.
+6. ``e2e``           — encrypted gateway dispatch, outbound re-encryption and
                         the read-only Telegram tools.
-6. ``wizard``        — the ``hermes mordred`` CLI subcommand.
+7. ``activity``      — browser activity learning; registers the session
+                        start/end/finalize observation hooks, the
+                        ``mordred_activity_review`` auxiliary task when the host
+                        offers it, the two recall tools and the two skills (the
+                        store is never opened at registration).
+8. ``wizard``        — the ``hermes mordred`` CLI subcommand.
 
-Components 1-4 and 6 keep the relative order they had as separate plugins
+Components 1-4 and 8 keep the relative order they had as separate plugins
 (Hermes loaded those alphabetically: keyvault, llm_guard, network,
 privacy_check, wizard). ``e2e`` used to load first only because its old name
 sorted first; it now loads after the runtime guards it relies on.
@@ -64,6 +70,7 @@ COMPONENTS: Final[tuple[tuple[str, str], ...]] = (
     ("privacy_check", "mordred_hermes.privacy_check"),
     ("dbcrypt", "mordred_hermes.dbcrypt"),
     ("e2e", "mordred_hermes.extension.gateway_plugin"),
+    ("activity", "mordred_hermes.activity"),
     ("wizard", "mordred_hermes.wizard"),
 )
 
@@ -77,6 +84,7 @@ COMPONENT_REQUIRED_HOOKS: Final[dict[str, frozenset[str]]] = {
     "privacy_check": frozenset({"on_session_start", "pre_tool_call"}),
     "dbcrypt": frozenset({"on_session_start", "pre_llm_call"}),
     "e2e": frozenset({"on_session_start", "pre_gateway_dispatch"}),
+    "activity": frozenset({"on_session_start", "on_session_end", "on_session_finalize"}),
     "wizard": frozenset(),
 }
 

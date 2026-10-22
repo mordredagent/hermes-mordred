@@ -2,7 +2,7 @@
 
 ``ReasonCode`` is deliberately a ``Literal`` so mypy catches drift between
 emit sites and consumers. ``docs/dev/POLICY.md`` owns the current meaning and
-live/reserved status of all 31 values. Existing strings are compatibility
+live/reserved status of all 37 values. Existing strings are compatibility
 surfaces: add or retire behavior without renaming an established code.
 
 Two values are reserved and have no current emit site:
@@ -53,4 +53,8 @@ ReasonCode = Literal[
     "mordred.degraded.audit_encryption_unavailable",
     "policy.egress.tool_blocked",
     "mordred.db_encryption.violation",
+    "activity.capture_refused",
+    "activity.lesson_adopted",
+    "activity.lesson_suspended",
+    "activity.review_attempt",
 ]

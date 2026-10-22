@@ -20,6 +20,8 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 - ``vault {init,add,status,cat,migrate,...}``    — at-rest secrets/env vault
 - ``plugins list``                               — show the Mordred plugin and its components
 - ``plugins migrate``                            — switch config.yaml to the single ``mordred`` plugin
+- ``activity {status,pair-operator,peers,correct,candidates,validate,adopt,reject,lessons,
+  review,jobs,backup,restore,retention}`` — browser activity learning administration
 - ``uninstall [--dry-run|--yes|--purge-data|--remove-helper]`` — remove Mordred, restore Hermes's files
 """
 
@@ -62,6 +64,7 @@ def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) 
     _add_telegram(sub)
     _add_egress(sub)
     _add_databases(sub)
+    _add_activity(sub)
     _add_desktop(sub)
     _add_uninstall(sub)
 
@@ -132,6 +135,35 @@ def _add_databases(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     )
     p_decrypt.add_argument("--dry-run", action="store_true", help="List what would be decrypted; change nothing")
     p_decrypt.set_defaults(func=_handle_databases)
+
+
+def _add_activity(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser("activity", help="Browser activity learning: status, pairing, peers, corrections and lessons")
+    asub = p.add_subparsers(dest="activity_command", required=True, metavar="COMMAND")
+    p_status = asub.add_parser("status", help="Show switches, protection gate, store counts and peers (no content)")
+    p_status.add_argument("--json", action="store_true", help="Print one JSON object")
+    p_status.set_defaults(func=_handle_activity)
+    p_pair = asub.add_parser("pair-operator", help="Generate a single-use pair code for the operator collector")
+    p_pair.add_argument("--label", default="operator", help="Label recorded for the new peer (default: operator)")
+    p_pair.add_argument("--timeout", type=float, default=600.0, help="Seconds to wait (default: 600)")
+    p_pair.set_defaults(func=_handle_activity)
+    p_peers = asub.add_parser("peers", help="List or revoke activity peer credentials")
+    psub = p_peers.add_subparsers(dest="activity_peers_command", required=True, metavar="COMMAND")
+    p_list = psub.add_parser("list", help="List activity peers")
+    p_list.add_argument("--json", action="store_true", help="Print one JSON object")
+    p_list.set_defaults(func=_handle_activity)
+    p_revoke = psub.add_parser("revoke", help="Revoke an activity peer (idempotent)")
+    p_revoke.add_argument("peer_id", help="Peer id, e.g. operator:0123456789ab")
+    p_revoke.set_defaults(func=_handle_activity)
+    from .activity_lessons_cli import add_parsers as _add_lesson_parsers
+
+    _add_lesson_parsers(asub, _handle_activity)
+    from .activity_store_cli import add_parsers as _add_store_parsers
+
+    _add_store_parsers(asub, _handle_activity)
+    from .activity_review_cli import add_parsers as _add_review_parsers
+
+    _add_review_parsers(asub)
 
 
 def _add_egress(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -1083,6 +1115,12 @@ def _handle_databases(args: argparse.Namespace) -> int:
     from . import databases_cli
 
     return databases_cli.cli_databases(args)
+
+
+def _handle_activity(args: argparse.Namespace) -> int:
+    from . import activity_cli
+
+    return activity_cli.cli_activity(args)
 
 
 def _handle_egress(args: argparse.Namespace) -> int:

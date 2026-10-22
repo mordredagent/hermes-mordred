@@ -9,7 +9,8 @@ Standalone package repository for **hermes-mordred**, a plugin suite for
 [hermes-agent](https://pypi.org/project/hermes-agent/). It ships ONE entry-point
 plugin, `mordred` (`src/mordred_hermes/plugin.py`), whose `register()` wires the
 components in `src/mordred_hermes/` in a fixed order: `keyvault`, `llm_guard`,
-`network`, `privacy_check`, `e2e` (`extension/gateway_plugin.py`), `wizard`.
+`network`, `privacy_check`, `dbcrypt`, `e2e` (`extension/gateway_plugin.py`),
+`activity`, `wizard`.
 The pre-0.2.0a0 per-component plugin names (`mordred_network`, ...) survive
 only as `plugins.mordred_*` config section names and are migrated out of
 `plugins.enabled` / `plugins.disabled` (`_plugin_identity.py`). It is **not** a fork of Hermes upstream — never send
@@ -63,6 +64,8 @@ See `docs/dev/CI.md` for exact evidence and rerun rules.
 - **Port 7788 belongs to the production extension gateway.** For local runs use
   `.venv/bin/hermes-mordred extension serve --port 7799`; check holders with
   `lsof -nP -iTCP:7788 -sTCP:LISTEN`.
+- **The activity store never opens without SQLCipher;** tests pass an explicit
+  opener — never add a plaintext path.
 - **Live-gated tests require explicit execution.** Secure Enclave and live-LLM
   suites have no CI automation. The Mullvad suite has a manual-only GitHub
   Actions workflow (`integration-vpn.yml`); it never runs on pushes or PRs.

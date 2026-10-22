@@ -1,7 +1,8 @@
 {
-  "_comment": "Payload fields Mordred plugins consume per Hermes hook. Keys must match exactly the hooks registered by mordred_hermes plugins (tests/test_hook_payload_drift.py enforces this); values are the sorted kwargs the handlers read. Consumers: network/hooks.py on_session_start (session_id), privacy_check + network pre_tool_call (tool_name), llm_guard + network pre_api_request (base_url, provider), and extension/gateway_plugin.py pre_gateway_dispatch (event, gateway). pre_llm_call (dbcrypt's per-turn database check) and on_session_end only need the hook to fire.",
+  "_comment": "Payload fields Mordred plugins consume per Hermes hook. Keys must match exactly the hooks registered by mordred_hermes plugins (tests/test_hook_payload_drift.py enforces this); values are the sorted kwargs the handlers read. Consumers: network/hooks.py + activity/boundary.py on_session_start (session_id), activity/boundary.py on_session_end and on_session_finalize (session_id; completed and interrupted are optional keyword arguments; the newer failed and exit-reason fields are never required), privacy_check + network pre_tool_call (tool_name), llm_guard + network pre_api_request (base_url, provider), and extension/gateway_plugin.py pre_gateway_dispatch (event, gateway). pre_llm_call (dbcrypt's per-turn database check) only needs the hook to fire; network cleanup and keyvault resealing on on_session_end read no field.",
   "on_session_start": ["session_id"],
-  "on_session_end": [],
+  "on_session_end": ["session_id"],
+  "on_session_finalize": ["session_id"],
   "pre_tool_call": ["tool_name"],
   "pre_llm_call": [],
   "pre_api_request": ["base_url", "provider"],

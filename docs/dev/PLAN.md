@@ -12,9 +12,11 @@ Hermes upstream.
 ## Current architecture
 
 One Hermes entry point, `mordred` (`plugin.py`), registers these components in
-this order: keyvault, llm_guard, network, privacy_check, e2e, wizard. The
-component names below are the pre-0.2.0a0 entry-point names, which survive as
-config section names (`plugins.mordred_network`, ...).
+this order: keyvault, llm_guard, network, privacy_check, dbcrypt, e2e,
+activity, wizard. The component names below are the pre-0.2.0a0 entry-point
+names, which survive as config section names (`plugins.mordred_network`, ...);
+`dbcrypt` and `activity` never had their own entry point (`activity` reads
+`plugins.mordred_activity`).
 
 | Component (former entry point) | Implementation | Responsibility |
 |---|---|---|
@@ -24,6 +26,7 @@ config section names (`plugins.mordred_network`, ...).
 | `mordred_network` | `network/` | Process-wide Tor/VPN/clearnet route |
 | `mordred_keyvault` | `keyvault/` | Vault, hardware key, backup, and signing |
 | `mordred_e2e` | `extension/gateway_plugin.py` | Slack/Discord E2E gateway hook, Telegram tools |
+| (none) | `activity/` | Encrypted browser-activity store, lessons, recall tools, review |
 
 Shared policy, path, audit, YAML, provider, and terminal boundaries live at the
 package root. The extension package also contains the standalone localhost
@@ -2286,3 +2289,50 @@ pin their platform seam explicitly, including when run on native Windows.
 
 Native Windows source/wheel reruns, a real Telegram account and Windows 11
 acceptance remain independent completion gates.
+
+## Browser activity learning implementation
+
+Behavior: [`SPEC.md`](./SPEC.md) §"Browser activity and conditional learning
+(2026-10-20)". Design:
+[`2026-10-19-browser-activity-learning-design.md`](../superpowers/specs/2026-10-19-browser-activity-learning-design.md);
+implementation plan:
+[`2026-10-20-browser-activity-learning-plan.md`](../superpowers/plans/2026-10-20-browser-activity-learning-plan.md).
+
+| Design component | Modules |
+|---|---|
+| Operator and extension collectors | operator repository (`src/mordred/activity.py`, `activity_cli.py`, `docs/activity.md`); no collector code in this repository |
+| Authenticated receiver | `activity/peers.py` (peer credentials), `extension/activity_api.py` (frames, principal revalidation), `activity/contracts.py` (normalization, `PeerPrincipal`), `activity/ingest.py` (`build_receiver`, hourly bounded retention after append), `activity/_capture_audit.py` (`activity.capture_refused`, once per process and code) |
+| Activity store | `activity/_paths.py`, `activity/_gate.py` (protection gate, keyed opener), `activity/_schema.py` (schema v2, in-place v1→v2 migration), `activity/store.py` (append, episodes, status, backup/restore, `plan_retention`/`apply_retention`) |
+| Boundary coordinator | `activity/boundary.py` (`register_hooks`: the three session hooks and the auxiliary review task; bounded hook registry, launch permits, one worker per home); permit consumer in `extension/api.py` around `chat_end` |
+| Review worker | `activity/review.py` (facade) over `_review_snapshot.py` (bounded snapshots, eligibility), `_review_output.py` (instructions, schema and semantic output checks), `_review_jobs.py` (jobs, leases, attempt reservations, budget, attempt audit) and `_review_run.py` (routing and the review run) |
+| Adoption service | `activity/corrections.py` (deterministic candidates), `activity/lessons.py` (revisions, states, digest-bound adoption) |
+| Retrieval adapter | `activity/retrieval.py` (admitted-only search/get, bounds, use records), `activity/tools.py` (tool registration, `check_fn`) |
+| Skills | `activity/skills/activity-recall/SKILL.md`, `activity/skills/activity-review/SKILL.md` |
+| Commands | `wizard/activity_cli.py` (`status`, `pair-operator`, `peers`), `wizard/activity_lessons_cli.py` (`correct`, `candidates` (`list`, `show`, `build`), `validate`, `adopt`, `reject`, `lessons`), `wizard/activity_review_cli.py` (`review`, `jobs list`), `wizard/activity_store_cli.py` (`backup`, `restore`, `retention`) |
+| Configuration | `activity/config.py` (`plugins.mordred_activity`) |
+
+`plugin.py` registers `activity` after `e2e` and before `wizard`, with
+`on_session_start`, `on_session_end` and `on_session_finalize` as its
+required hooks. Tests use an explicit plain-SQLite
+opener passed to `ActivityStore`; production code only uses the opener built
+by `_gate.open_store` after the gate passed.
+
+Delivery as shipped:
+
+1. **Contracts and recording** — gate, store, receiver, peer credentials, WS
+   frames, `status`/`pair-operator`/`peers` CLI, operator collector. No review
+   LLM call.
+2. **One correction loop** — `correct`, deterministic candidates, validation,
+   digest-bound adoption, the two recall tools and the two skills.
+3. **Conditional review** — durable jobs, attempt reservation and budget,
+   explicit routing, tool-free review with Mordred-side output validation,
+   launch permits for `task_boundary`, and the four `activity.*` audit reason
+   codes ([`POLICY.md`](./POLICY.md) rows 34–37).
+4. **Measured expansion (deferred)** — selective context insertion, more
+   collectors (including human DOM observation), an encrypted client outbox,
+   a raw-history administrative viewer, and skill/memory export. Each waits
+   for measured benefit; see [`TODO.md`](./TODO.md) §"Browser activity
+   learning".
+
+Gaps between the design and this code are listed in SPEC §"Not implemented in
+this delivery".

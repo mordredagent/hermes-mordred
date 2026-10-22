@@ -635,3 +635,82 @@ C11 integration follow-up (R-C11-5/R-C11-6):
   source and sdist-derived wheel environments; retain the real Telegram
   account and Windows 11 acceptance gates. Wizard setup completion wording
   remains a separate wizard slice; C10c changes no wizard user flow.
+
+## Browser activity learning
+
+Shipped contract: [`SPEC.md`](./SPEC.md) §"Browser activity and conditional
+learning (2026-10-20)"; module map: [`PLAN.md`](./PLAN.md) §"Browser activity
+learning implementation".
+
+- [ ] Raw-history administrative viewer: authenticated, separate from the
+  collector credential and from agent tools; CLI status keeps printing
+  identifiers and counts only.
+- [ ] Encrypted client outbox for complete offline delivery, with reviewed key
+  custody, rotation and deletion; the extension never receives Hermes's
+  database or memory key.
+- [ ] Human DOM observation (clicks and typing made directly on the page),
+  with the same exclusions as operator events.
+- [ ] Windows checked-storage port of `<home>/extension/activity_peers.json`
+  and `activity_pending.json`: explicit per-file bounds in
+  `extension/_windows_storage.py` and Windows tests. The store itself stays
+  refused off macOS (`unsupported_platform`).
+- [ ] Pilot benchmark of at least 30 tasks (10 related to a prior correction,
+  10 unrelated, 10 conflicting/stale/adversarial; three runs each; feature
+  off, recording only, admitted recall) and an opt-in, budgeted live provider
+  evaluation of review. Missing runs are not passing evidence.
+- [ ] Selective context insertion of admitted lessons, only after the pilot
+  shows benefit and prompt-cache stability holds.
+- [ ] Reviewed, explicitly approved export of a lesson to memory or a skill,
+  activated in a later session.
+- [x] The 2026-10-20 integration runs (live SQLCipher check on a throwaway
+  home; end-to-end operator pairing and batch delivery to the receiver) are
+  recorded in [`CI.md`](./CI.md) §"Manual live-device validation log".
+- [x] Repeat the live SQLCipher check (store and backup unreadable to the
+  stdlib `sqlite3`, no fixture bytes in the file) after any change to
+  `activity/_gate.py`, `activity/store.py` backup/restore or the dbcrypt shim,
+  and record it in [`CI.md`](./CI.md). Done 2026-10-21 after the correction
+  re-homing change to `activity/store.py` (live end-to-end run in
+  [`CI.md`](./CI.md) §"Manual live-device validation log").
+- [ ] Live-verify one explicit `hermes-mordred activity review` provider call
+  on the host task route and one on the `review_provider`/`review_model`
+  override route (the `route_mismatch` check compares the host's recorded
+  canonical model id with the configured string by prefix), opt-in and
+  budgeted; record the result in [`CI.md`](./CI.md).
+- [ ] Cross-repo (operator collector `mordred-browser-os-oparator`): record a
+  correction in the episode of the attempt it references instead of a fresh
+  post-task episode. The receiver already re-homes such corrections
+  ([`SPEC.md`](./SPEC.md) §"Event contract"), so this is cleanup, not a fix.
+- [ ] Optional index on `activity_events.attempt_id` for the correction
+  re-homing lookup; it is a schema DDL change for existing stores.
+- [ ] Live-verify the extension-relay path (`--browser extension`,
+  `activityObserved` navigation observations) in a real Chrome and record it
+  in [`CI.md`](./CI.md).
+- [ ] Separate PR (`dbcrypt`, not part of this branch): `databases encrypt
+  --dry-run` must not traceback when the Keychain vault anchor exists but the
+  vault directory is missing; the `VaultError` should become the "run
+  `encryption enable memory` first" message.
+
+### Operator collector (other repository, not changed here)
+
+Follow-ups in `mordred-browser-os-oparator` for the 2026-10-22 capture policy;
+the receiver side is [`SPEC.md`](./SPEC.md) §"Event contract".
+
+- [ ] Send `text` for `type`/`search` operations when the field is not
+  sensitive, and keep sending `args.field_kind`.
+- [ ] Send `route` with its query and fragment (or the full URL) and let the
+  receiver scrub credentials.
+- [ ] Send `page_title` and `page_text` (at most 8000 characters of visible
+  text) on `observed` events after navigation and at task boundaries.
+- [ ] Raise the client-side per-event limit to 16 KiB to match the receiver's
+  `MAX_EVENT_BYTES`.
+- [ ] Make `--activity` default on.
+
+### Hermes-side use of the history (next design)
+
+- [ ] Inject admitted or raw history for the current host before browser tool
+  calls via `pre_tool_call`.
+- [ ] A bounded raw-history recall tool for Hermes; the admitted-lessons-only
+  rule of the recall tools is to be revisited.
+- [ ] Record Hermes's own browser tool calls as `source: hermes` events via
+  `post_tool_call`.
+- [ ] Accept `訂正:` / `correct:` corrections typed in Hermes chat.
