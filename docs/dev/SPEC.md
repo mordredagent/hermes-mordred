@@ -4480,23 +4480,29 @@ per-process state.
     turn ends: `post_llm_call` (hermes-agent fires it once per turn that has
     a final response and was not interrupted; a `turn_id` naming another turn
     leaves the text for its own turn), else the session's next `pre_llm_call`.
-    Only then is it written, after every real secret the session's
-    `browser_type` calls typed (at least 4 characters; the session's last 32,
-    kept in memory only, never stored) is replaced with `redacted` in the
-    text (`contracts.redact_values`: as a whole word, that is with no ASCII
-    letter or digit right before or after it, compared without case, never
-    inside a URL's scheme or host; exclusion `text_secrets_redacted`). A real
-    secret is a value typed into a field that a fresh snapshot names as
-    secret, a value the turn's message names as a secret (below), or one that
-    `looks_like_secret`; never a value withheld only because the snapshot was
-    stale after a click or key press (live B2 re-run, N1: "Open
-    …/notes.html, press Enter, then type Fabrikam into the Note box" was
-    stored as "…/redacteds.html … type redacted into the redacted box"). This
-    is independent of phrasing: "log in on 127.0.0.1 as demo-user, then
+    Only then is it written, after every value the session's `browser_type`
+    calls typed that may be a secret (at least 4 characters; the session's
+    last 32, kept in memory only, never stored) is replaced with `redacted`
+    in the text (`contracts.redact_values`: as a whole word, that is with no
+    ASCII letter or digit right before or after it, compared without case,
+    also inside a URL, whose userinfo, host or path is not exempt; exclusion
+    `text_secrets_redacted`). A typed value may be a secret unless the most
+    recent snapshot that listed its field, stale or not, names it as a field
+    that is no secret (`textbox "Note"`, kind `text`): a field named as
+    secret, one never listed and one naming nothing fail closed, and a value
+    the turn's message names as a secret (below) or one that
+    `looks_like_secret` always counts. The kind of each ref is remembered
+    from every snapshot (at most 1024 refs per session). So "Open
+    …/notes.html, press Enter, then type Fabrikam into the Note box" stays
+    intact (live B2 re-run, N1: a raw-substring scrub of every value typed
+    while the snapshot was stale had stored it as "…/redacteds.html … type
+    redacted into the redacted box"), while a plain password typed after a
+    click into a field last seen as a password field is scrubbed. This is
+    independent of phrasing: "log in on 127.0.0.1 as demo-user, then
     swordfish" is stored as "... then redacted" once Hermes types `swordfish`
     into the password field. While Hermes's capture is off (corrections still
-    on), only a value typed during a held correction's turn that looks like a
-    secret counts, since its field cannot be classified. A value the turn's
+    on), every value typed during a held correction's turn counts, since no
+    field can be classified. A value the turn's
     message names as a secret (the values the free-text redaction replaces in
     it, `contracts.secret_values`: "type Zebra-77-fake as the password") is
     withheld from the store when Hermes types it into any field, also one

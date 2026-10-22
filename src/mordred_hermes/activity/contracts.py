@@ -484,8 +484,6 @@ _VALUE_UNITS: Final = frozenset(
 _CLAUSE_MARKS: Final = frozenset(".,;:!?")
 #: A run of ASCII without whitespace (a token of the user's own words, :func:`redact_secret_shaped_tokens`).
 _ASCII_TOKEN_RE: Final = re.compile(r"[^\s\x80-\U0010ffff]+")
-#: Where a URL's host ends.
-_URL_PATH_START_RE: Final = re.compile(r"[/?#]")
 #: A run of 13-19 digits, optionally grouped by single spaces or dashes (a payment card number candidate).
 _CARD_RE: Final = re.compile(r"(?<![0-9])[0-9](?:[ -]?[0-9]){12,18}(?![0-9])")
 #: Minimum length of a whole-value token that counts as secret-shaped (rule 3 of :func:`looks_like_secret`).
@@ -1535,34 +1533,21 @@ def secret_values(text: str) -> list[str]:
     return [value for value in dict.fromkeys(values) if value and value != REDACTED]
 
 
-def _url_heads(text: str) -> list[tuple[int, int]]:
-    """The scheme and host (``scheme://host:port``) of every URL in ``text``."""
-    heads = []
-    for url in _URL_IN_TEXT_RE.finditer(text):
-        authority = text.index("://", url.start(), url.end()) + 3
-        path = _URL_PATH_START_RE.search(text, authority, url.end())
-        heads.append((url.start(), path.start() if path else url.end()))
-    return heads
-
-
 def redact_values(text: str, values: Iterable[str]) -> tuple[str, bool]:
     """``(text with every occurrence of`` ``values`` ``replaced by`` :data:`REDACTED` ``, anything replaced)``.
 
     Compared without case, the longest value first, only as a whole word (no ASCII letter or digit right before
-    or after it) and never inside a URL's scheme or host; independent of any phrasing (Hermes's own capture:
-    the values it typed into secret fields)."""
+    or after it), also inside a URL (its userinfo, host or path: no part is exempt); independent of any
+    phrasing (Hermes's own capture: the values it typed into fields that may be secret)."""
     ordered = sorted({value for value in values if value}, key=len, reverse=True)
     if not ordered:
         return text, False
     pattern = re.compile(
         r"(?<![A-Za-z0-9])(?:" + "|".join(map(re.escape, ordered)) + r")(?![A-Za-z0-9])", re.IGNORECASE
     )
-    heads = _url_heads(text)
     parts: list[str] = []
     cursor = 0
     for match in pattern.finditer(text):
-        if any(start < match.end() and match.start() < end for start, end in heads):
-            continue
         parts += [text[cursor : match.start()], REDACTED]
         cursor = match.end()
     if not parts:

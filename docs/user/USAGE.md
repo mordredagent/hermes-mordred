@@ -878,8 +878,9 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > `history_enabled`): every `browser_*` call Hermes makes becomes an event in
 > the same encrypted store, one episode per turn, with your message for that
 > turn as the task. Your message (and a `correct: …` message) is stored when
-> the turn ends, and anything Hermes typed into a password or other secret
-> field during it is replaced by `redacted` in that message as a whole word,
+> the turn ends, and anything Hermes typed during it into a password or other
+> secret field, or into a field it could not identify as an ordinary one, is
+> replaced by `redacted` in that message as a whole word,
 > however you worded it (a message of an earlier turn that is already stored
 > is not changed). A value your message calls a password is not stored as
 > typed text either, whichever field Hermes types it into. Elements are named by their label, never their

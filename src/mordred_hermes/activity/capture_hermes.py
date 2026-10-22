@@ -56,20 +56,23 @@ otherwise start an episode without a task start.
 
 The turn's own text (its task start or correction) is held in memory until
 the turn ends (``post_llm_call``, else the session's next ``pre_llm_call``) and
-only then written, after the turn's calls. Before it is written, every real
-secret the session's ``browser_type`` calls typed is replaced with ``redacted``
-(:func:`.contracts.redact_values`: as a whole word, compared without case, never
-in a URL's scheme or host; exclusion ``text_secrets_redacted``), whatever the
-phrasing: a password the message named in words the free-text redactor cannot
-read never reaches the store. A real secret is a value typed into a field a
-fresh snapshot names as secret, a value the turn's message names as a secret,
-or one that :func:`.contracts.looks_like_secret`; never a value withheld only
-because the snapshot was stale, which is usually a search term or a note (live
-B2 re-run, N1). Values of at least :data:`MIN_SCRUBBED_CHARS` characters count;
-the session keeps the last :data:`MAX_WITHHELD_VALUES` in memory only, never
-stored. While Hermes's capture is off, only a value typed during a held
-correction's turn that looks like a secret counts (its field cannot be
-classified). A value the turn's message names as a secret
+only then written, after the turn's calls. Before it is written, every value
+the session's ``browser_type`` calls typed that may be a secret is replaced
+with ``redacted`` (:func:`.contracts.redact_values`: as a whole word, compared
+without case, also inside a URL; exclusion ``text_secrets_redacted``), whatever
+the phrasing: a password the message named in words the free-text redactor
+cannot read never reaches the store. A typed value may be a secret unless the
+most recent snapshot that listed its field, stale or not, names it as a field
+that is no secret (``textbox "Note"``; :func:`_learns`): a field named as
+secret, one never listed or one naming nothing fails closed, and a value the
+turn's message names as a secret or one that
+:func:`.contracts.looks_like_secret` always counts. So a note typed after Enter
+into a field last seen as ``textbox "Note"`` leaves the message intact (live B2
+re-run, N1), while a plain password typed after a click into a field last seen
+as a password field is scrubbed. Values of at least :data:`MIN_SCRUBBED_CHARS`
+characters count; the session keeps the last :data:`MAX_WITHHELD_VALUES` in
+memory only, never stored. While Hermes's capture is off, every value typed
+during a held correction's turn counts (no field can be classified). A value the turn's message names as a secret
 (:func:`.contracts.secret_values`, "type X as the password") is also withheld
 from the store when Hermes types it into any field, ``typed_text_dropped``
 (N5). A held text is dropped when its turn never ends (an interrupted
@@ -145,7 +148,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
-from ._browser_results import PAGE_TEXT_CHARS, element_label, field_kind, page_text, ref_line
+from ._browser_results import PAGE_TEXT_CHARS, element_label, field_kind, page_text, ref_kinds, ref_line, ref_token
 from ._browser_results import json_object as _json_object
 from ._browser_results import page_location as _page
 from ._browser_results import reported_url as _reported_url
@@ -223,6 +226,10 @@ MAX_OWN_EPISODES: Final = 64
 MIN_SCRUBBED_CHARS: Final = 4
 #: Withheld typed values a session remembers, in memory only, for :func:`_scrubbed` (oldest forgotten first).
 MAX_WITHHELD_VALUES: Final = 32
+#: Refs whose last known field kind a session remembers (oldest forgotten first).
+MAX_REF_KINDS: Final = 1024
+#: The field kind of a named field that is no secret (:func:`._browser_results.field_kind`).
+_PLAIN_FIELD_KIND: Final = "text"
 #: Characters of the ``tool_call_id`` part of an attempt id (:func:`occurrence_id` adds ``-`` and 12 hex).
 _ATTEMPT_PREFIX_CHARS: Final = 51
 #: Browser tools that never leave the open page (a ``browser_type`` whose text has a line break may submit a form).
@@ -308,6 +315,8 @@ class _Session:
     #: The values the current turn's message names as secrets (:func:`.contracts.secret_values`): typed into any
     #: field they are withheld. Memory only.
     turn_secrets: tuple[str, ...] = ()
+    #: The field kind of each ref in the most recent snapshot that listed it, stale or not (:func:`_learns`).
+    ref_kinds: dict[str, str] = field(default_factory=dict)
     slow: int = 0
     suspended: bool = False
 
@@ -498,11 +507,7 @@ def _type(call: _Call, state: _Session) -> _Mapped:
     base = _on_page("type", state, target=element_label(line), args={"field_kind": kind})
     # A value the turn's message names as a secret ("type X as the password") is withheld from any field.
     named = typed is not None and redact_values(typed, state.turn_secrets)[1]
-    # Only a real secret is scrubbed from the turn's texts: one typed into a field a fresh snapshot names as
-    # secret, one the message names, or one that looks like a secret; never a value withheld only because the
-    # snapshot is stale (it is usually a search term or a note).
-    secret_field = not state.snapshot_stale and field_kind(line) == SENSITIVE_FIELD_KIND
-    learned = typed if typed and (secret_field or named or looks_like_secret(typed)) else None
+    learned = typed if typed and _learns(state, call.args.get("ref"), typed, named) else None
     if kind != SENSITIVE_FIELD_KIND:
         if named:
             return replace(base, exclusions=(EXCLUSION_TYPED_TEXT,), withheld=learned)
@@ -511,6 +516,26 @@ def _type(call: _Call, state: _Session) -> _Mapped:
     # What is typed into a secret field (or a field the stale snapshot cannot name) is never sent.
     marks = (COLLECTOR_SENSITIVE_MARK, EXCLUSION_TYPED_TEXT) if typed else (COLLECTOR_SENSITIVE_MARK,)
     return replace(base, exclusions=marks, withheld=learned)
+
+
+def _learns(state: _Session, ref: Any, typed: str, named: bool) -> bool:
+    """Whether a typed value is scrubbed from the turn's texts: unless the most recent snapshot that listed its
+    field (stale or not) names it as a field that is no secret (``textbox "Note"``), it may be a password, so it
+    is; a field never seen or named nothing fails closed. A value the message names as a secret, or one that
+    looks like a secret, always is."""
+    if named or looks_like_secret(typed):
+        return True
+    token = ref_token(ref)
+    return token is None or state.ref_kinds.get(token) != _PLAIN_FIELD_KIND
+
+
+def _note_kinds(state: _Session) -> None:
+    """Remember the field kind of every ref of the snapshot just taken (:func:`_learns`), newest last."""
+    for ref, kind in ref_kinds(state.snapshot).items():
+        state.ref_kinds.pop(ref, None)
+        state.ref_kinds[ref] = kind
+    while len(state.ref_kinds) > MAX_REF_KINDS:
+        del state.ref_kinds[next(iter(state.ref_kinds))]
 
 
 def _press(call: _Call, state: _Session) -> _Mapped:
@@ -590,11 +615,13 @@ def _observe(call: _Call, state: _Session) -> None:
     if call.tool == "browser_snapshot" and payload is not None:
         # The same page read again: a fresh snapshot, and its URL only when the result reports one.
         state.snapshot, state.snapshot_stale = (snapshot[:MAX_SNAPSHOT_CHARS] if snapshot else None), False
+        _note_kinds(state)
         if reported is not None:
             state.page_known, state.page_url = _page(reported)
         return
     state.page_known, state.page_url = _page(reported)
     state.snapshot, state.snapshot_stale = (snapshot[:MAX_SNAPSHOT_CHARS], False) if snapshot else (None, True)
+    _note_kinds(state)
 
 
 def _envelope(episode: str, refs: Mapping[str, str | None], *, phase: str, at: float) -> dict[str, Any]:
@@ -848,15 +875,14 @@ def _drop_held(key: _Key) -> None:
 
 
 def _remember_unrecorded(key: _Key, args: Any) -> None:
-    """A ``browser_type`` while Hermes's capture is off cannot be classified: a value that looks like a secret is
-    remembered while a correction is held, so the correction never keeps it."""
+    """A ``browser_type`` while Hermes's capture is off cannot be classified: its value is remembered while a
+    correction is held, so the correction never keeps it (fail closed)."""
     state = _existing_session(key)
     if state is None or not isinstance(args, Mapping):
         return
-    typed = args.get("text")
     with state.lock:
-        if state.held is not None and isinstance(typed, str) and looks_like_secret(typed):
-            _remember(state, typed)
+        if state.held is not None:
+            _remember(state, args.get("text"))
 
 
 # --------------------------------------------------------------------------- #

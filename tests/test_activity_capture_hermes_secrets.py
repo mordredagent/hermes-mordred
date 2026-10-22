@@ -241,7 +241,7 @@ def test_a_secret_looking_value_typed_into_an_unknown_field_is_still_scrubbed(ca
     assert start.text == "log in on 127.0.0.1 and paste redacted"
 
 
-def test_a_secret_is_scrubbed_as_a_whole_word_and_never_from_a_url_host(capture_home) -> None:
+def test_a_secret_is_scrubbed_as_a_whole_word_also_inside_a_url(capture_home) -> None:
     _home, store = capture_home
     message = "sign in at http://example.com/example with example, not xexample or example2 or EXAMPLE"
     turn(message)
@@ -249,7 +249,58 @@ def test_a_secret_is_scrubbed_as_a_whole_word_and_never_from_a_url_host(capture_
     call("browser_type", {"ref": "@e3", "text": "example"}, ok(element="@e3"))  # a real password field
     end_turn()
     [start] = _starts(store)
-    assert start.text == ("sign in at http://example.com/redacted with redacted, not xexample or example2 or redacted")
+    assert start.text == ("sign in at http://redacted.com/redacted with redacted, not xexample or example2 or redacted")
+
+
+def test_a_secret_in_a_url_authority_is_scrubbed(capture_home) -> None:
+    """Security review of the N1 fix: an exemption for a URL's scheme and host let a value the regex took for the
+    host survive (userinfo, a host label)."""
+    _home, store = capture_home
+    turn("open http://Swordfish-9@127.0.0.1/a and https://Swordfish-9.example.com/b")
+    call("browser_navigate", {"url": LOGIN}, nav_result(LOGIN, snapshot=LOGIN_SNAPSHOT))
+    call("browser_type", {"ref": "@e3", "text": "Swordfish-9"}, ok(element="@e3"))
+    end_turn()
+    [start] = _starts(store)
+    assert "Swordfish-9" not in (start.text or "") and "swordfish-9" not in _whole_store(store).lower()
+
+
+# --- a value typed while the snapshot is stale: the field's last known kind decides (security review of N1) ----
+
+
+def test_a_plain_password_typed_after_a_click_into_a_field_last_seen_as_secret_is_scrubbed(capture_home) -> None:
+    _home, store = capture_home
+    turn("log in on 127.0.0.1 as demo-user with swordfish")
+    _navigate()
+    call("browser_click", {"ref": "@e4"}, ok(clicked="@e4"))  # the snapshot is stale now
+    call("browser_type", {"ref": "@e3", "text": "swordfish"}, ok(element="@e3"))  # last seen: textbox "Password"
+    end_turn()
+    [start] = _starts(store)
+    assert start.text == "log in on 127.0.0.1 as demo-user with redacted"
+
+
+def test_a_value_typed_into_a_field_no_snapshot_listed_is_scrubbed(capture_home) -> None:
+    """Fail closed: a field Hermes never saw has no known kind."""
+    _home, store = capture_home
+    turn("log in on 127.0.0.1 with swordfish")
+    _navigate()
+    call("browser_click", {"ref": "@e4"}, ok(clicked="@e4"))
+    call("browser_type", {"ref": "@e42", "text": "swordfish"}, ok(element="@e42"))
+    end_turn()
+    [start] = _starts(store)
+    assert start.text == "log in on 127.0.0.1 with redacted"
+
+
+def test_a_field_named_in_an_older_snapshot_keeps_its_kind(capture_home) -> None:
+    """The most recent snapshot that listed the ref decides, also when a newer snapshot does not list it."""
+    _home, store = capture_home
+    turn("open the notes on 127.0.0.1 and write Fabrikam")
+    call("browser_navigate", {"url": NOTES}, nav_result(NOTES, title="Notes", snapshot=NOTES_SNAPSHOT))
+    call("browser_snapshot", {}, ok(snapshot='- heading "Other" [ref=e9]'))  # e2 not listed any more
+    call("browser_click", {"ref": "@e9"}, ok(clicked="@e9"))
+    call("browser_type", {"ref": "@e2", "text": "Fabrikam"}, ok(element="@e2"))  # last listed: textbox "Note"
+    end_turn()
+    [start] = _starts(store)
+    assert start.text == "open the notes on 127.0.0.1 and write Fabrikam"
 
 
 # --- a value the message calls a secret is withheld when typed (live B2 re-run, N5) ------------------------------
@@ -455,9 +506,9 @@ def test_a_correction_is_scrubbed_of_a_value_typed_in_an_earlier_turn(capture_ho
     assert "Spring-2026-y" not in _whole_store(store)
 
 
-def test_with_capture_off_a_correction_drops_only_secret_looking_typed_values(capture_home) -> None:
-    """Without capture the field cannot be classified, so only a value that looks like a secret is scrubbed
-    (live B2 re-run, N1: an unclassified field is no secret field)."""
+def test_with_capture_off_a_correction_drops_every_value_typed_in_its_turn(capture_home) -> None:
+    """Without capture no field can be classified, so every value typed during the correction's turn is
+    scrubbed from it (fail closed; security review of the N1 fix)."""
     home, store = capture_home
     turn("open the login page on 127.0.0.1", turn_id=T1)
     _navigate(T1)
@@ -470,7 +521,7 @@ def test_with_capture_off_a_correction_drops_only_secret_looking_typed_values(ca
     end_turn(turn_id=T2)
 
     [correction] = _corrections(store)
-    assert correction.text == "try the account Fabrikam-2 with redacted"
+    assert correction.text == "try the account redacted with redacted"
     assert [event.op for event in calls(store) if event.phase == "dispatched"] == ["navigate"]  # no type
 
 

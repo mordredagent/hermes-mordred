@@ -33,7 +33,9 @@ __all__ = [
     "json_object",
     "page_location",
     "page_text",
+    "ref_kinds",
     "ref_line",
+    "ref_token",
     "reported_url",
     "text_field",
 ]
@@ -55,6 +57,10 @@ _SENSITIVE_FIELD_RE: Final = re.compile(
 )
 #: A tool's ``ref`` argument (``@e5`` or ``e5``).
 _REF_TOKEN_RE: Final = re.compile(r"@?([A-Za-z][A-Za-z0-9_-]{0,31})")
+#: A ref on a snapshot line: ``ref=e5`` (agent-browser), not the prefix of a longer ref, or ``[e5]``.
+_LINE_REF_RE: Final = re.compile(
+    r"ref=([A-Za-z][A-Za-z0-9_-]{0,31})(?![A-Za-z0-9_-])|\[([A-Za-z][A-Za-z0-9_-]{0,31})\]"
+)
 #: An accessibility line's role and quoted accessible name (``- textbox "Email" [ref=e3]: value``).
 _NAMED_LINE_RE: Final = re.compile(r'^[\s*-]*(?P<role>[A-Za-z][\w-]{0,40})\s+"(?P<name>(?:[^"\\\n]|\\.){1,300})"')
 _ANNOTATION_RE: Final = re.compile(r"\[[^\]\n]{0,200}\]")
@@ -108,6 +114,27 @@ def _ref_position(snapshot: str, token: str) -> tuple[int, int] | None:
 def _continues(text: str, index: int) -> bool:
     """``text[index]`` would make a ``ref=…`` match part of a longer word (``xref=e4``, ``ref=e40``)."""
     return 0 <= index < len(text) and (text[index].isalnum() or text[index] in "_-")
+
+
+def ref_token(ref: Any) -> str | None:
+    """A tool's ``ref`` argument (``@e5`` / ``e5``) as the ref a snapshot names (``e5``), else ``None``."""
+    if not isinstance(ref, str):
+        return None
+    match = _REF_TOKEN_RE.fullmatch(ref.strip())
+    return match.group(1) if match else None
+
+
+def ref_kinds(snapshot: str | None) -> dict[str, str]:
+    """The field kind (:func:`field_kind`) of the line of every ref a snapshot lists (the first line naming it,
+    as :func:`ref_line` finds it)."""
+    kinds: dict[str, str] = {}
+    for line in (snapshot or "").splitlines():
+        refs = [named or bracketed for named, bracketed in _LINE_REF_RE.findall(line)]
+        if refs:
+            kind = field_kind(line.strip()[:MAX_REF_LINE_CHARS])
+            for ref in refs:
+                kinds.setdefault(ref, kind)
+    return kinds
 
 
 def ref_line(snapshot: str | None, ref: Any) -> str | None:

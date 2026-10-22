@@ -1266,10 +1266,15 @@ def test_secret_values_are_the_values_the_redactor_replaces() -> None:
     assert contracts.secret_values("pin the tab to the left") == []
 
 
-def test_given_values_are_replaced_as_whole_words_never_in_a_url_host() -> None:
+def test_given_values_are_replaced_as_whole_words_also_inside_urls() -> None:
     text = "sign in at https://example.com/example?u=example with example, not xexample or example2 or EXAMPLE."
     assert contracts.redact_values(text, ["example"]) == (
-        "sign in at https://example.com/redacted?u=redacted with redacted, not xexample or example2 or redacted.",
+        "sign in at https://redacted.com/redacted?u=redacted with redacted, not xexample or example2 or redacted.",
+        True,
+    )
+    # no part of a URL is exempt: userinfo, host labels
+    assert contracts.redact_values("http://Swordfish-9@h/ https://Swordfish-9.example.com", ["swordfish-9"]) == (
+        "http://redacted@h/ https://redacted.example.com",
         True,
     )
     assert contracts.redact_values("nothing here", ["example"]) == ("nothing here", False)
