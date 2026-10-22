@@ -4000,7 +4000,9 @@ The library lives in `src/mordred_hermes/imports/` (no plugin component).
 ### Record contract
 
 All tables use the `import_` prefix and a separate `import_meta` key/value table
-with `schema_version=1`. A newer version is refused (`schema_newer`).
+with `schema_version=2` (a v1 store is upgraded in place when it is opened: v2
+adds `import_mail_refs` and an index on `import_messages.message_id`). A newer
+version is refused (`schema_newer`).
 
 | Table | Purpose |
 |---|---|
@@ -4011,6 +4013,7 @@ with `schema_version=1`. A newer version is refused (`schema_newer`).
 | `import_parts_fts` | FTS5 external-content index over `import_parts.text` (`trigram` tokenizer so unspaced Japanese matches; terms shorter than three characters fall back to an escaped `LIKE`; FTS `secure-delete` on) kept in sync by triggers; `import_parts.id INTEGER PRIMARY KEY` anchors it so `VACUUM` cannot renumber rows |
 | `import_runs` | durable staging journal: `run_id`, `source`, `started_at`, `finished_at`, `state` (`open`, `dry_run`, `committed`, `failed`), `counts_json`; `import_messages.run_id` links each row to its run and readers expose committed runs only; a dry run performs the same writes and rolls them back, so its counts are exact |
 | `import_accounts` | per-account `own_addresses_json` for mail; owner addresses live here (encrypted file), never in `config.yaml` |
+| `import_mail_refs` | `source_uid`, `ref_message_id` (primary key both; indexed by `ref_message_id`): the normalised Message-IDs a mail message names in `In-Reply-To` and `References`, written by the IMAP sync's `write_batch` so a parent fetched after its replies merges their conversations; deleted with the account's rows |
 
 Identifiers (`source_uid`, namespaced and idempotent):
 
@@ -4571,7 +4574,15 @@ part of this delivery ([`TODO.md`](./TODO.md)).
   or newer, SNI the sealed host; no STARTTLS, no referrals. The host must be a
   DNS name. Authentication is `LOGIN` inside that TLS connection and nothing
   else (no `AUTHENTICATE`, so no mechanism negotiation can downgrade it;
-  `LOGINDISABLED` is `imap_auth_failed`).
+  `LOGINDISABLED` is `imap_auth_failed`). Connection establishment runs under
+  the session's deadline and cancellation (`imap.Link`, armed before the
+  route is resolved): `getaddrinfo` runs in a helper daemon thread waited for
+  only until the hard deadline or a cancellation (a stalled resolver is
+  abandoned), the TCP connect is non-blocking and polled, and the SOCKS5
+  method selection, authentication and `CONNECT` reply and the TLS handshake
+  read from a socket the watchdog and a cancellation shut down. A connection
+  not open (greeting included) by the hard deadline is `imap_unreachable`; a
+  cancellation is `partial_reason: cancelled`.
 - **Read-only protocol.** The client refuses, before sending, every command
   outside `CAPABILITY`, `LOGIN`, `LIST` (`"" "*"` only), `EXAMINE` (one quoted
   name), `UID SEARCH` (UID sets, `SINCE`, `BEFORE`), `UID FETCH` with only
@@ -4643,20 +4654,37 @@ part of this delivery ([`TODO.md`](./TODO.md)).
   concurrent reader sees the state before or after a batch, never between. A
   crash re-fetches at most one batch; a fetch first marks `open` mail runs
   left by a crash `failed`.
+- **Thread reconciliation.** The planning step above only finds parents that
+  are already stored. So the batch also writes each message's referenced ids
+  (`In-Reply-To`, `References`, normalised) to `import_mail_refs`, and in the
+  same transaction, for every message M of the batch, merges M's conversation
+  with those of the stored messages M references and of the stored messages
+  that reference M (replies fetched earlier) (`ImportStore.merge_conversations`:
+  message rows repointed, participants unioned, `last_message_at` the
+  maximum, `message_count` recounted, the emptied rows dropped). The survivor
+  is the conversation holding the earliest-dated message (unknown dates last,
+  then the smaller `conv_uid`). A conversation keyed by a Gmail thread id is
+  authoritative: never folded into another, and the survivor when one is
+  involved. A chain A←B←C fetched as C, then B, then A (each naming only its
+  parent) is one conversation of three messages; threads that never reference
+  each other stay apart.
 - **Budgets.** `max_messages` 1 to 2000 (default 2000) across the mailboxes
   of one call; at most 1 GiB of announced mail per call (`max_bytes`); a 30 s
   socket timeout per operation; a time budget, 600 s for the CLI and 60 s for
   the tool, checked before every IMAP command (and between batches), with a
   hard deadline at most 30 s later after which a watchdog shuts the socket
-  down, so a server that keeps trickling bytes cannot hold a command open.
+  down, so a server that keeps trickling bytes cannot hold a command open. The
+  hard deadline also bounds connection establishment (DNS, TCP, SOCKS5, TLS,
+  greeting; see Transport).
   Stopping early is `partial: true` with `partial_reason` `time_budget`,
   `max_messages`, `max_bytes`, `cancelled` or `error`, and the next call
   continues from the committed cursor.
 - **Output.** `FetchResult` is the only output, serialized through a fixed
   allowlist: integers `inserted`, `duplicates`, `revised`, `conflicts`,
   `fetched`, `skipped`, `skipped_oversize`, `batches`, `mailboxes`,
-  `excluded_history`; booleans `gmail`, `cursor_reset`, `partial`, `dry_run`;
-  `partial_reason` and `error` from closed enums. Error codes:
+  `excluded_history`; booleans `gmail`, `cursor_reset`, `partial`, `dry_run`,
+  `abandoned` (set only by the tool, below); `partial_reason` and `error`
+  from closed enums. Error codes:
   `unsupported_platform`, `mail_not_configured`, `memory_encryption_required`,
   `custody_busy`, the gate codes above, `import_store_unavailable`,
   `sync_in_progress`, `store_path_unsafe`, `tee_unavailable`,
@@ -4693,6 +4721,14 @@ nothing is deleted (`credentials_changed`). Rows and cursors always go before
 the credentials, so a failed forget can be retried; once the credentials are
 gone, `forget [--rows] --yes --account LABEL` deletes that label's rows and
 cursors (`account_mismatch` when the label differs from the sealed one).
+`--rows` also deletes the account's `import_mail_refs` rows. The sealed file,
+`credentials.meta.json` and the Enclave key are deleted whatever the flags
+say: when the flags are missing or corrupt (a setup or forget interrupted
+between the two files) the credentials are still deleted and the unknown label
+is reported (`account_unknown`, exit 1: the rows and cursors need `--account
+LABEL`); forget never reports success while a sealed or flags file remains
+(`credentials_left`, exit 1), and an Enclave key it could not delete is
+`key_left` (exit 1; running forget again deletes it).
 `mail status` adds the account label, the path and scope, the last
 fetch and the cursor positions.
 
@@ -4706,10 +4742,17 @@ Hermes tool `mordred_mail_sync` (toolset `mordred_telegram`, beside
   model again (a Venice model must be `private`; `hermes_model_not_allowed`,
   `hermes_model_not_private`) and the fetch repeats every gate above.
 - Result: the serialized `FetchResult` plus a fixed `note`; errors before the
-  fetch are `{error, note}`. The fetch runs in one worker thread that has
-  finished before the result is returned; a cancelled call cancels the fetch
-  (its IMAP socket is shut down at once) and waits for the worker before the
-  cancellation completes, so no fetch continues in the background.
+  fetch are `{error, note}`. The fetch runs in one daemon worker thread that
+  normally has finished before the result is returned. A cancelled call
+  cancels the fetch (its IMAP socket is shut down and a resolver wait woken at
+  once) and waits for the worker at most the remaining budget plus 30 s;
+  repeated cancellations are absorbed only until then, and the cancellation
+  then completes. A worker still running 40 s after the budget (something the
+  session's bounds cannot interrupt) is cancelled and abandoned: the call
+  returns `partial: true`, `partial_reason: "cancelled"`, `abandoned: true`
+  and zero counts. An abandoned worker stops at its next check (a batch
+  already being written commits atomically with its cursor), so the next call
+  continues from the committed cursor.
 - Not a reader tool and not a taint source. It is in
   `privacy_check.egress.READER_ALLOWED` (allowed in a reader session) and in
   `FIRST_PARTY_TOOLS` (its destination is fixed, so it also runs under
@@ -4740,6 +4783,13 @@ Where the code differs from the design record:
   48 MiB of announced sizes so that the 64 MiB limit applies to the literals
   actually received; the port is fixed to 993; `AUTHENTICATE` left the
   allowlist.
+- After the Codex second-pass review (2026-10-22): the hard deadline and the
+  cancellation cover connection establishment; the tool's waits for its
+  worker are bounded and a stuck worker is abandoned (`abandoned`, a result
+  field beyond the record); `import_mail_refs` (schema v2) and the merge of
+  conversations when a missing parent arrives; `mail forget` deletes sealed
+  credentials whose flags are missing or corrupt (codes `account_unknown`,
+  `credentials_left`, `key_left`, CLI only).
 
 ## Imported-message provenance evaluation (2026-10-22)
 

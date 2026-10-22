@@ -38,6 +38,13 @@ Bounds (:class:`IoLimits`, enforced inside imaplib's own ``read``/``readline``):
   thread that shuts the socket down, so a server trickling bytes cannot keep a
   read alive, and a socket timeout per operation that never reaches past it;
 - a :class:`CancelToken` that shuts the socket down at once (``"cancelled"``);
+- connection establishment runs under the same bounds (:class:`Link`, armed
+  before the route is resolved): ``getaddrinfo`` runs in a helper daemon thread
+  that is waited for only until the hard deadline or a cancellation (a stalled
+  resolver is abandoned), the TCP connect is non-blocking and polled, and the
+  SOCKS5 exchange and the TLS handshake read from a socket the watchdog and a
+  cancellation shut down. A connection that is not open by the hard deadline
+  is ``imap_unreachable``; a cancellation is ``ImapStopped("cancelled")``;
 - a literal's announced size is checked BEFORE anything is read: a literal over
   the room left in the command's literal budget (:data:`MAX_BATCH_LITERAL_BYTES`
   for a body fetch) or in the session's byte budget aborts the connection
@@ -55,8 +62,10 @@ Errors are :class:`ImapError` codes: ``imap_unreachable``, ``imap_auth_failed``,
 from __future__ import annotations
 
 import contextlib
+import errno
 import imaplib
 import re
+import selectors
 import socket
 import ssl
 import threading
@@ -93,6 +102,7 @@ __all__ = [
     "ImapSession",
     "ImapStopped",
     "IoLimits",
+    "Link",
     "MailboxStatus",
     "connect",
     "open_route_socket",
@@ -109,7 +119,15 @@ SESSION_BUDGET_S: Final = 120.0
 #: Grace after the soft deadline before the watchdog cuts an in-flight command.
 HARD_GRACE_S: Final = 30.0
 LOGOUT_GRACE_S: Final = 5.0
+WATCHDOG_NAME: Final = "mordred-imap-watchdog"
+RESOLVER_NAME: Final = "mordred-imap-resolver"
 _WATCHDOG_SLACK_S: Final = 0.25
+#: How often a pending TCP connect looks at the cancellation and the deadline.
+_CONNECT_POLL_S: Final = 0.05
+#: ``connect_ex`` results of a non-blocking connect that is still under way (or already done).
+_CONNECTING: Final = frozenset(
+    {0, errno.EINPROGRESS, errno.EALREADY, errno.EWOULDBLOCK, getattr(errno, "WSAEWOULDBLOCK", errno.EWOULDBLOCK)}
+)
 _MIB: Final = 1024 * 1024
 #: The largest literal kept (a message over it is skipped; equals ``source.MAX_MESSAGE_BYTES``).
 MAX_LITERAL_BYTES: Final = 25 * _MIB
@@ -255,6 +273,193 @@ def _no_deadline() -> float:
     return SOCKET_TIMEOUT_S
 
 
+def _getaddrinfo(host: str, port: int) -> list[Any]:
+    """The system resolver (a seam: tests replace it with one that never answers)."""
+    return socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+
+
+def _new_selector() -> selectors.BaseSelector:
+    return selectors.DefaultSelector()
+
+
+def _shutdown(sock: socket.socket) -> None:
+    """Shut ``sock`` down so that a blocked read or handshake returns at once (never a TLS goodbye)."""
+    with contextlib.suppress(OSError, ValueError):
+        socket.socket.shutdown(sock, socket.SHUT_RDWR)
+
+
+class Link:
+    """The bounds of one connection, from the route lookup to ``LOGOUT``.
+
+    :meth:`arm` starts the watchdog (the hard deadline) and hooks the cancellation
+    BEFORE anything touches the network. Either one then shuts down the socket the
+    link holds (:meth:`hold`) and wakes a resolver wait, so DNS, the TCP connect,
+    the SOCKS5 exchange, the TLS handshake and every command end by the absolute
+    deadline. During establishment a deadline is ``imap_unreachable`` and a
+    cancellation ``ImapStopped("cancelled")`` (:meth:`failure`).
+    """
+
+    def __init__(self, limits: IoLimits) -> None:
+        self.limits = limits
+        self._lock = threading.Lock()
+        self._sock: socket.socket | None = None
+        self._wake: threading.Event | None = None
+        self._fired = False
+        self._watchdog: threading.Timer | None = None
+        self._hooked = False
+
+    # -- watchdog and cancellation ----------------------------------------------------------
+
+    def arm(self) -> None:
+        """(Re)start the watchdog at the hard deadline; hook the cancellation (once)."""
+        self.disarm()
+        timer = threading.Timer(max(self.limits.remaining(), 0.0) + _WATCHDOG_SLACK_S, self.interrupt)
+        timer.name, timer.daemon = WATCHDOG_NAME, True
+        self._watchdog = timer
+        timer.start()
+        cancel = self.limits.cancel
+        if cancel is not None and not self._hooked:
+            self._hooked = True
+            cancel.add_hook(self.interrupt)  # runs at once when already cancelled
+
+    def disarm(self) -> None:
+        timer, self._watchdog = self._watchdog, None
+        if timer is not None:
+            timer.cancel()
+            if timer is not threading.current_thread():
+                timer.join()
+
+    def release(self) -> None:
+        """Stop the watchdog and drop the cancellation hook (the connection is over)."""
+        self.disarm()
+        cancel = self.limits.cancel
+        if cancel is not None and self._hooked:
+            self._hooked = False
+            cancel.remove_hook(self.interrupt)
+
+    def interrupt(self) -> None:
+        """Shut the held socket down and wake a resolver wait (the watchdog or a cancellation; any thread)."""
+        with self._lock:
+            self._fired = True
+            sock, wake = self._sock, self._wake
+        if wake is not None:
+            wake.set()
+        if sock is not None:
+            _shutdown(sock)
+
+    # -- the socket ---------------------------------------------------------------------------
+
+    @property
+    def holding(self) -> bool:
+        return self._sock is not None
+
+    def hold(self, sock: socket.socket) -> None:
+        """``sock`` is the connection now: an interrupt shuts it down (at once when one already fired)."""
+        with self._lock:
+            self._sock = sock
+            fired = self._fired
+        if fired:
+            _shutdown(sock)
+
+    def drop(self, sock: socket.socket | None = None) -> None:
+        """Close ``sock`` (a failed attempt; default: the held socket) and stop holding it."""
+        with self._lock:
+            target = self._sock if sock is None else sock
+            if self._sock is target:
+                self._sock = None
+        if target is not None:
+            with contextlib.suppress(OSError):
+                target.close()
+
+    # -- bounds -------------------------------------------------------------------------------
+
+    def remaining(self) -> float:
+        return self.limits.remaining()
+
+    def timeout(self) -> float:
+        return self.limits.io_timeout()
+
+    def cancelled(self) -> bool:
+        cancel = self.limits.cancel
+        return cancel is not None and cancel.cancelled
+
+    def failure(self) -> ImapError:
+        """What an interrupted or failed establishment step is: a cancellation, else ``imap_unreachable``."""
+        return ImapStopped("cancelled") if self.cancelled() else ImapError("imap_unreachable")
+
+    def check(self) -> None:
+        """Raise :meth:`failure` once cancelled, interrupted or past the hard deadline."""
+        if self.cancelled() or self._fired or self.remaining() <= 0:
+            raise self.failure()
+
+    # -- establishment ------------------------------------------------------------------------
+
+    def resolve(self, host: str, port: int) -> list[Any]:
+        """``getaddrinfo`` in a daemon helper thread, waited for until the deadline or a cancellation.
+
+        A resolver that has not answered by then is abandoned (its thread ends whenever
+        the system call returns) and the attempt is :meth:`failure`.
+        """
+        self.check()
+        wake = threading.Event()
+        box: dict[str, list[Any]] = {}
+
+        def work() -> None:
+            try:
+                box["found"] = list(_getaddrinfo(host, port))
+            except Exception:  # a failed lookup is reported as a code, never stringified
+                pass
+            finally:
+                wake.set()
+
+        with self._lock:
+            fired, self._wake = self._fired, wake
+        try:
+            if not fired:
+                threading.Thread(target=work, name=RESOLVER_NAME, daemon=True).start()
+                wake.wait(max(self.remaining(), 0.0))
+        finally:
+            with self._lock:
+                self._wake = None
+        self.check()
+        found = box.get("found")
+        if not found:
+            raise ImapError("imap_unreachable")
+        return found
+
+    def connect_tcp(self, host: str, port: int) -> socket.socket:
+        """A TCP connection to the first address of ``host`` that answers before the deadline."""
+        for family, kind, proto, _name, address in self.resolve(host, port):
+            self.check()
+            with contextlib.suppress(OSError):  # refused or unreachable: the next address
+                return self._connect_one(family, kind, proto, address)
+        self.check()
+        raise ImapError("imap_unreachable")
+
+    def _connect_one(self, family: int, kind: int, proto: int, address: Any) -> socket.socket:
+        """A non-blocking connect, polled so that the deadline and a cancellation end it."""
+        sock = socket.socket(family, kind, proto)
+        try:
+            self.hold(sock)
+            sock.setblocking(False)
+            code = sock.connect_ex(address)
+            if code not in _CONNECTING:
+                raise OSError(code, "connect")
+            with _new_selector() as selector:
+                selector.register(sock, selectors.EVENT_WRITE)
+                while not selector.select(min(_CONNECT_POLL_S, max(self.remaining(), 0.0))):
+                    self.check()
+            self.check()
+            code = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            if code:
+                raise OSError(code, "connect")
+            sock.settimeout(self.timeout())
+        except BaseException:
+            self.drop(sock)
+            raise
+        return sock
+
+
 def _recv_exact(sock: socket.socket, size: int, remaining: Remaining = _no_deadline) -> bytes:
     """``size`` bytes; no ``recv`` waits past the deadline (``remaining()`` seconds away)."""
     data = bytearray()
@@ -318,16 +523,24 @@ def socks5_handshake(
     _socks_bound_address(sock, atyp, remaining)
 
 
-def socks5_connect(
-    proxy: Any, host: str, port: int, timeout: float, remaining: Remaining = _no_deadline
-) -> socket.socket:
-    """A TCP connection to ``host:port`` through the SOCKS5 ``proxy`` (an :class:`~...extension.egress.SocksProxy`)."""
-    sock = socket.create_connection((proxy.host, proxy.port), timeout)
+def socks5_connect(proxy: Any, host: str, port: int, link: Link) -> socket.socket:
+    """A TCP connection to ``host:port`` through the SOCKS5 ``proxy`` (an :class:`~...extension.egress.SocksProxy`).
+
+    The proxy connection is held by ``link``, so the method selection, the
+    authentication and the ``CONNECT`` reply are cut by the deadline and by a
+    cancellation like any other read.
+    """
+    sock = link.connect_tcp(proxy.host, proxy.port)
     try:
-        socks5_handshake(sock, host, port, proxy.username, proxy.password, remaining)
-        sock.settimeout(timeout)
-    except BaseException:
-        sock.close()
+        socks5_handshake(sock, host, port, proxy.username, proxy.password, link.remaining)
+        link.check()
+        sock.settimeout(link.timeout())
+    except BaseException as exc:
+        link.drop(sock)
+        if isinstance(exc, Exception) and link.cancelled():
+            raise ImapStopped("cancelled") from None
+        if isinstance(exc, OSError):
+            raise link.failure() from None
         raise
     return sock
 
@@ -341,18 +554,19 @@ def _default_route(host: str) -> Any:
 def open_route_socket(
     host: str,
     port: int,
-    timeout: float,
+    link: Link,
     *,
     route_resolver: Callable[[str], Any] = _default_route,
-    remaining: Remaining = _no_deadline,
 ) -> socket.socket:
-    """A connected TCP socket to ``host:port`` over the route the network policy selects."""
+    """A connected TCP socket to ``host:port`` over the route the network policy selects, bounded by ``link``."""
     from ...extension.egress import EgressError, socks_proxy
 
+    link.check()
     try:
         route = route_resolver(host)
     except EgressError:
         raise ImapError("routing_unavailable") from None
+    link.check()
     if route.http_proxy_url is not None:
         raise ImapError("egress_unsupported")
     try:
@@ -364,10 +578,10 @@ def open_route_socket(
                 proxy = socks_proxy(url)
             except EgressError:
                 raise ImapError("egress_unsupported") from None
-            return socks5_connect(proxy, host, port, timeout, remaining)
-        return socket.create_connection((host, port), timeout)
+            return socks5_connect(proxy, host, port, link)
+        return link.connect_tcp(host, port)
     except OSError:
-        raise ImapError("imap_unreachable") from None
+        raise link.failure() from None
 
 
 # --- guarded imaplib ------------------------------------------------------------------------------
@@ -432,16 +646,14 @@ class _CommandGuard:
     _line_used: int
     _next_literal_cap: int | None
     _poisoned: bool
-    _live_sock: socket.socket | None
-    _watchdog: threading.Timer | None
+    _link: Link
 
     def _guard_setup(self, limits: IoLimits | None) -> None:
         self._limits = limits if limits is not None else IoLimits.for_budget(SESSION_BUDGET_S)
         self._literal_cap, self._literal_used, self._line_used = MAX_COMMAND_LITERAL_BYTES, 0, 0
         self._next_literal_cap = None
         self._poisoned = False
-        self._live_sock = None
-        self._watchdog = None
+        self._link = Link(self._limits)
 
     @property
     def limits(self) -> IoLimits:
@@ -559,52 +771,38 @@ class _CommandGuard:
             left -= len(chunk)
             self._count(len(chunk), literal=True)
 
-    # -- watchdog and cancellation ----------------------------------------------------------
-
-    def _attach(self, sock: socket.socket) -> None:
-        """``sock`` is the live connection: the watchdog and a cancellation can shut it down."""
-        self._live_sock = sock
-        self._arm_watchdog()
-        if self._limits.cancel is not None:
-            self._limits.cancel.add_hook(self._interrupt)
-
-    def _interrupt(self) -> None:
-        """Shut the TCP connection down so that any blocked read returns at once."""
-        sock = self._live_sock
-        if sock is not None:
-            with contextlib.suppress(OSError, ValueError):
-                socket.socket.shutdown(sock, socket.SHUT_RDWR)
-
-    def _arm_watchdog(self) -> None:
-        self._disarm_watchdog()
-        delay = max(self._limits.remaining(), 0.0) + _WATCHDOG_SLACK_S
-        timer = threading.Timer(delay, self._interrupt)
-        timer.name, timer.daemon = "mordred-imap-watchdog", True
-        self._watchdog = timer
-        timer.start()
-
-    def _disarm_watchdog(self) -> None:
-        timer, self._watchdog = self._watchdog, None
-        if timer is not None:
-            timer.cancel()
-            if timer is not threading.current_thread():
-                timer.join()
+    # -- watchdog, cancellation and establishment -----------------------------------------------
 
     def grace(self, seconds: float) -> None:
         """A short new window for a polite ``LOGOUT`` after a stop."""
         self._limits.extend(seconds)
-        if self._live_sock is not None:
-            self._arm_watchdog()
+        if self._link.holding:
+            self._link.arm()
 
     def release(self) -> None:
         """Stop the watchdog and drop the cancellation hook (the connection is over)."""
-        self._disarm_watchdog()
-        if self._limits.cancel is not None:
-            self._limits.cancel.remove_hook(self._interrupt)
+        self._link.release()
 
-    def _stopped_or(self, error: BaseException) -> BaseException:
-        reason = self._limits.stop_reason(hard=True)
-        return ImapStopped(reason) if reason is not None else error
+    def _establish(self, open_socket: Callable[[Link], socket.socket]) -> socket.socket:
+        """``open_socket(link)`` with the watchdog and the cancellation armed BEFORE it touches the network."""
+        link = self._link
+        link.arm()
+        try:
+            sock = open_socket(link)
+            link.check()
+        except BaseException as exc:
+            self.release()
+            link.drop()
+            raise self._establish_failure(exc) from None
+        return sock
+
+    def _establish_failure(self, exc: BaseException) -> BaseException:
+        """A cancellation stays ``cancelled``; a deadline, a reset or a TLS failure is ``imap_unreachable``."""
+        if isinstance(exc, ImapStopped) or not isinstance(exc, Exception):
+            return exc
+        if self._link.cancelled():
+            return ImapStopped("cancelled")
+        return exc if isinstance(exc, ImapError) else ImapError("imap_unreachable")
 
     def shutdown(self) -> None:
         try:
@@ -614,14 +812,14 @@ class _CommandGuard:
 
 
 class GuardedIMAP4(_CommandGuard, imaplib.IMAP4):
-    """Plain IMAP over an already connected socket (tests; the TLS variant is :class:`GuardedIMAP4SSL`)."""
+    """Plain IMAP over the socket ``raw_socket(link)`` opens (tests; the TLS variant is :class:`GuardedIMAP4SSL`)."""
 
     def __init__(
         self,
         host: str,
         port: int,
         *,
-        raw_socket: Callable[[float | None], socket.socket],
+        raw_socket: Callable[[Link], socket.socket],
         timeout: float,
         limits: IoLimits | None = None,
     ):
@@ -630,20 +828,23 @@ class GuardedIMAP4(_CommandGuard, imaplib.IMAP4):
         super().__init__(host, port, timeout=timeout)
 
     def _create_socket(self, timeout: float | None) -> socket.socket:
-        sock = self._raw_socket(timeout)
-        self._attach(sock)
-        return sock
+        def open_socket(link: Link) -> socket.socket:
+            sock = self._raw_socket(link)
+            link.hold(sock)
+            return sock
+
+        return self._establish(open_socket)
 
 
 class GuardedIMAP4SSL(_CommandGuard, imaplib.IMAP4_SSL):
-    """Implicit-TLS IMAP whose TCP socket comes from the egress route (direct or SOCKS5)."""
+    """Implicit-TLS IMAP whose TCP socket ``raw_socket(link)`` opens over the egress route (direct or SOCKS5)."""
 
     def __init__(
         self,
         host: str,
         port: int,
         *,
-        raw_socket: Callable[[float | None], socket.socket],
+        raw_socket: Callable[[Link], socket.socket],
         ssl_context: ssl.SSLContext,
         timeout: float,
         limits: IoLimits | None = None,
@@ -653,24 +854,27 @@ class GuardedIMAP4SSL(_CommandGuard, imaplib.IMAP4_SSL):
         super().__init__(host, port, ssl_context=ssl_context, timeout=timeout)
 
     def _create_socket(self, timeout: float | None) -> socket.socket:
+        return self._establish(self._tls_socket)
+
+    def _tls_socket(self, link: Link) -> socket.socket:
+        """The route socket wrapped in TLS; the handshake reads from a socket the link can shut down."""
         context: ssl.SSLContext = self.ssl_context
-        raw = self._raw_socket(timeout)
+        raw = self._raw_socket(link)
+        link.hold(raw)
         try:
             wrapped = context.wrap_socket(raw, server_hostname=self.host, do_handshake_on_connect=False)
         except BaseException:
-            raw.close()
+            link.drop(raw)
             raise
-        self._attach(wrapped)  # the handshake below runs under the watchdog and the cancellation too
+        link.hold(wrapped)  # the raw socket object is detached now: interrupts reach the TLS socket
         try:
             handshake = getattr(wrapped, "do_handshake", None)
             if handshake is not None:
-                wrapped.settimeout(self._limits.io_timeout())
+                wrapped.settimeout(link.timeout())
                 handshake()
-        except BaseException as exc:
-            self.release()
-            with contextlib.suppress(OSError):
-                wrapped.close()
-            raise self._stopped_or(exc) from None
+        except BaseException:
+            link.drop(wrapped)
+            raise
         return wrapped
 
 
@@ -883,20 +1087,27 @@ def connect(
     limits: IoLimits | None = None,
     route_resolver: Callable[[str], Any] = _default_route,
 ) -> ImapSession:
-    """Open the implicit-TLS connection (port 993 only) over the egress route; failures are :class:`ImapError`."""
+    """Open the implicit-TLS connection (port 993 only) over the egress route; failures are :class:`ImapError`.
+
+    Everything up to the server greeting (route, DNS, TCP, SOCKS5, TLS, greeting)
+    runs under ``limits``: a connection that is not open by the hard deadline is
+    ``imap_unreachable``, a cancellation ``ImapStopped("cancelled")``.
+    """
     if not valid_host(host) or port != IMAPS_PORT:
         raise ImapError("imap_unreachable")
     bounds = limits if limits is not None else IoLimits.for_budget(SESSION_BUDGET_S)
 
-    def raw(_timeout: float | None) -> socket.socket:
-        return open_route_socket(
-            host, port, bounds.io_timeout(), route_resolver=route_resolver, remaining=bounds.remaining
-        )
+    def raw(link: Link) -> socket.socket:
+        return open_route_socket(host, port, link, route_resolver=route_resolver)
 
     try:
         conn = GuardedIMAP4SSL(
             host, port, raw_socket=raw, ssl_context=tls_context(), timeout=bounds.op_timeout, limits=bounds
         )
+    except ImapStopped as stopped:
+        if stopped.reason == "cancelled":
+            raise
+        raise ImapError("imap_unreachable") from None  # the deadline passed before the session was open
     except ImapError:
         raise
     except ssl.SSLError:

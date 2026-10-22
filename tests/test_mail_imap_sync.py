@@ -638,3 +638,102 @@ def test_a_failed_batch_keeps_the_published_revision(
     assert any("FIRST-REVISION" in text for text in texts)  # the published revision is still readable
     assert rows(store, "SELECT message_count, last_message_at, participants_json FROM import_conversations") == before
     assert forward_cursor(store, creds, "INBOX").uid == 1  # type: ignore[union-attr]
+
+
+# --- thread reconciliation when missing parents arrive later ------------------------------------------
+
+_DATES = {
+    1: "Thu, 01 Oct 2026 10:00:00 +0900",
+    2: "Fri, 02 Oct 2026 10:00:00 +0900",
+    3: "Sat, 03 Oct 2026 10:00:00 +0900",
+}
+
+
+def _chain_message(n: int, parent: int | None, *, offset: int = 0) -> FakeMessage:
+    """Message ``offset + n`` replying to ``offset + parent`` only (``In-Reply-To`` and ``References``)."""
+    references = None if parent is None else f"msg{offset + parent}@example.net"
+    sender = ("Taro Tanaka <taro@example.net>", "Hanako <hanako@example.org>", "Jiro <jiro@example.com>")[n - 1]
+    return FakeMessage(mail(offset + n, references=references, sender=sender, date=_DATES[n]))
+
+
+def _fetch_one_by_one(home: Path, store: ImportStore, order: list[tuple[int, FakeMessage]]) -> None:
+    """Each message arrives in its own fetch (its own batch), in ``order``."""
+    box = FakeMailbox(uidvalidity=2)
+    env = make_env(home, store, FakeImapServer({"INBOX": box}), FakeSecrets(generic_creds(sent=False)))
+    for uid, (_n, message) in enumerate(order, start=1):
+        box.messages[uid] = message
+        result = run_fetch(FetchOptions(), env)
+        assert (result.error, result.inserted) == (None, 1)
+
+
+def _threads_of(store: ImportStore) -> dict[str, list[str]]:
+    """conv_uid → its committed message ids, and every conversation row's count matches."""
+    found: dict[str, list[str]] = {}
+    for conv, message_id in rows(store, "SELECT conv_uid, message_id FROM import_messages ORDER BY message_id"):
+        found.setdefault(conv, []).append(message_id)
+    counts = dict(rows(store, "SELECT conv_uid, message_count FROM import_conversations"))
+    assert counts == {conv: len(ids) for conv, ids in found.items()}  # no empty or stale row is left
+    return found
+
+
+@pytest.mark.parametrize("arrival", [(3, 2, 1), (1, 3, 2), (2, 3, 1), (3, 1, 2)])
+def test_a_chain_fetched_in_any_order_ends_as_one_conversation(
+    home: Path, store: ImportStore, arrival: tuple[int, int, int]
+) -> None:
+    chain = {1: _chain_message(1, None), 2: _chain_message(2, 1), 3: _chain_message(3, 2)}  # C names only B
+    _fetch_one_by_one(home, store, [(n, chain[n]) for n in arrival])
+    [(conv, ids)] = _threads_of(store).items()
+    assert ids == ["msg1@example.net", "msg2@example.net", "msg3@example.net"]
+    [(people, last)] = rows(store, "SELECT participants_json, last_message_at FROM import_conversations")
+    assert all(who in people for who in ("taro@example.net", "hanako@example.org", "jiro@example.com"))
+    assert last == max(item.message.sent_at or 0 for item in store.find_messages("mail", "mail"))
+    hits = {hit.conv_uid for hit in store.search("BODYCANARY")}
+    assert hits == {conv}  # readers see one conversation
+
+
+def test_two_independent_threads_stay_separate_whatever_the_order(home: Path, store: ImportStore) -> None:
+    x = {n: _chain_message(n, None if n == 1 else n - 1) for n in (1, 2)}
+    y = {n: _chain_message(n, None if n == 1 else n - 1, offset=10) for n in (1, 2)}
+    _fetch_one_by_one(home, store, [(2, x[2]), (2, y[2]), (1, y[1]), (1, x[1])])
+    threads = sorted(_threads_of(store).values())
+    assert threads == [["msg11@example.net", "msg12@example.net"], ["msg1@example.net", "msg2@example.net"]]
+
+
+def test_references_are_kept_per_message_and_deleted_with_the_rows(home: Path, store: ImportStore) -> None:
+    _fetch_one_by_one(home, store, [(3, _chain_message(3, 2)), (1, _chain_message(1, None))])
+    assert rows(store, "SELECT source_uid, ref_message_id FROM import_mail_refs") == [
+        ("mail:mail:msg3@example.net", "msg2@example.net")
+    ]
+    assert len(_threads_of(store)) == 2  # B is still missing: nothing connects A and C yet
+    store.delete_source("mail", "mail")
+    assert rows(store, "SELECT count(*) FROM import_mail_refs") == [(0,)]
+
+
+def test_a_failed_batch_rolls_its_merge_back(home: Path, store: ImportStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    box = FakeMailbox(uidvalidity=2)
+    env = make_env(home, store, FakeImapServer({"INBOX": box}), FakeSecrets(generic_creds(sent=False)))
+    for uid, n in enumerate((3, 1), start=1):
+        box.messages[uid] = _chain_message(n, None if n == 1 else n - 1)
+        run_fetch(FetchOptions(), env)
+    before = _threads_of(store)
+    box.messages[3] = _chain_message(2, 1)  # B joins A and C ...
+
+    def broken(*_args: Any, **_kwargs: Any) -> None:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(ImportStore, "_recount", staticmethod(broken))  # ... but the batch fails
+    assert run_fetch(FetchOptions(), env).error == "run_failed"
+    assert _threads_of(store) == before and len(before) == 2
+    assert rows(store, "SELECT count(*) FROM import_mail_refs WHERE source_uid = 'mail:mail:msg2@example.net'") == [
+        (0,)
+    ]
+
+
+def test_gmail_thread_ids_stay_authoritative_across_batches(home: Path, store: ImportStore) -> None:
+    box = FakeMailbox(uidvalidity=2, attributes=("\\All",))
+    env = make_env(home, store, FakeImapServer({"[Gmail]/All Mail": box}, gmail=True), FakeSecrets(gmail_creds()))
+    box.messages[1] = FakeMessage(mail(2, references="msg1@example.net", date=_DATES[2]), thread_id=200)
+    run_fetch(FetchOptions(), env)
+    box.messages[2] = FakeMessage(mail(1, date=_DATES[1]), thread_id=100)  # Gmail split the thread: 100 and 200
+    run_fetch(FetchOptions(), env)
+    assert sorted(_threads_of(store)) == ["mail:mail:t:g.100", "mail:mail:t:g.200"]

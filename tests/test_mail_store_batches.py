@@ -289,3 +289,74 @@ def test_a_changed_received_copy_never_replaces_a_sent_record(store: ImportStore
 def test_the_store_rank_mirrors_the_mail_sent_evidence() -> None:
     assert set(SENT_EVIDENCE_RANK) == set(SENT_EVIDENCE)
     assert SENT_EVIDENCE_RANK["gmail_label_sent"] > SENT_EVIDENCE_RANK["imap_sent_folder"] > 0
+
+
+# --- merge_conversations and import_mail_refs ------------------------------------------------------
+
+
+def _committed(store: ImportStore, *messages: bytes, account: str = "mail"):  # type: ignore[no-untyped-def]
+    plan = plan_import([EmlBytes(list(messages))], account=account, own_addresses=["owner@example.com"])
+    [thread] = plan.threads
+    run_id = store.run_begin("mail")
+    store.write_batch(run_id, [thread.messages], conversations=[thread.conversation], meta_updates={}, refs=plan.refs)
+    return thread
+
+
+def test_merge_conversations_folds_rows_people_and_dates_into_the_survivor(store: ImportStore) -> None:
+    first = _committed(store, mail(1, date="Thu, 01 Oct 2026 10:00:00 +0900"))
+    second = _committed(store, mail(2, sender="Hanako <hanako@example.org>", date="Sat, 03 Oct 2026 10:00:00 +0900"))
+    survivor, other = first.conversation.conv_uid, second.conversation.conv_uid
+    assert survivor != other
+
+    assert store.merge_conversations(survivor, [other, survivor]) == 1
+
+    [(conv, count, last, people, title)] = rows(
+        store, "SELECT conv_uid, message_count, last_message_at, participants_json, title FROM import_conversations"
+    )
+    assert (conv, count, last) == (survivor, 2, second.conversation.last_message_at)
+    assert "taro@example.net" in people and "hanako@example.org" in people
+    assert title == first.conversation.title
+    assert rows(store, "SELECT DISTINCT conv_uid FROM import_messages") == [(survivor,)]
+    assert store.merge_conversations(survivor, []) == 0
+
+
+def test_merge_conversations_refuses_unknown_and_foreign_conversations(store: ImportStore) -> None:
+    mine = _committed(store, mail(1)).conversation.conv_uid
+    theirs = _committed(store, mail(2), account="work").conversation.conv_uid
+    with pytest.raises(RecordError) as unknown:
+        store.merge_conversations(mine, ["mail:mail:t:r.missing"])
+    assert unknown.value.code == "unknown_conversation"
+    with pytest.raises(ImportRefused) as foreign:
+        store.merge_conversations(mine, [theirs])
+    assert foreign.value.code == "conflict"
+    assert len(rows(store, "SELECT conv_uid FROM import_conversations")) == 2  # nothing moved
+
+
+@pytest.mark.parametrize(
+    "refs",
+    [
+        {"mail:mail:msg9@example.net": ["msg1@example.net"]},  # not a message of the batch
+        {"mail:mail:msg2@example.net": "msg1@example.net"},  # a string, not a list of ids
+        {"mail:mail:msg2@example.net": ["bad\nid"]},
+        {"mail:mail:msg2@example.net": [""]},
+    ],
+)
+def test_bad_references_publish_nothing(store: ImportStore, refs: dict[str, Any]) -> None:
+    thread = _thread(store, mail(2, references="msg1@example.net"))
+    run_id = store.run_begin("mail")
+    with pytest.raises(RecordError) as raised:
+        store.write_batch(run_id, [thread.messages], conversations=[thread.conversation], meta_updates={}, refs=refs)
+    assert raised.value.code == "bad_refs"
+    assert rows(store, "SELECT count(*) FROM import_messages") == [(0,)]
+    assert rows(store, "SELECT count(*) FROM import_mail_refs") == [(0,)]
+
+
+def test_a_reply_stored_before_its_parent_is_merged_when_the_parent_arrives(store: ImportStore) -> None:
+    late_reply = _committed(store, mail(3, sender="Jiro <jiro@example.com>", references="msg2@example.net"))
+    root = _committed(store, mail(1, date="Wed, 30 Sep 2026 10:00:00 +0900"))
+    assert rows(store, "SELECT ref_message_id FROM import_mail_refs") == [("msg2@example.net",)]
+    assert len(rows(store, "SELECT conv_uid FROM import_conversations")) == 2
+    middle = _committed(store, mail(2, sender="Hanako <hanako@example.org>", references="msg1@example.net"))
+    assert len({late_reply.conversation.conv_uid, root.conversation.conv_uid, middle.conversation.conv_uid}) == 2
+    [(conv, count)] = rows(store, "SELECT conv_uid, message_count FROM import_conversations")
+    assert (conv, count) == (root.conversation.conv_uid, 3)  # the conversation of the earliest message survives

@@ -19,7 +19,10 @@ records) to build:
   thread joins the stored conversation of a committed message it contains or
   references (``Message-ID``, ``In-Reply-To``, ``References``), so a reply
   chain A→B→C split across batches stays one conversation; threads of the
-  plan that resolve to the same stored conversation are merged.
+  plan that resolve to the same stored conversation are merged. That only
+  sees parents already stored; :attr:`ImportPlan.refs` (every planned
+  message's referenced ids) lets the store merge the conversations of
+  replies fetched BEFORE their parent (``ImportStore.write_batch(refs=...)``).
 
 Pass 2 reads the sources again and normalises the chosen copies into
 :class:`PlannedThread` objects (one :class:`~..records.ImportConversation`
@@ -85,6 +88,8 @@ class ImportPlan:
     account: str
     threads: tuple[PlannedThread, ...]
     report: DryRunReport
+    #: source uid → the normalised Message-IDs it references (``In-Reply-To``, then ``References``).
+    refs: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def __repr__(self) -> str:
         return f"ImportPlan(threads={len(self.threads)}, messages={self.report.parsed})"
@@ -371,6 +376,17 @@ def plan_import(
     return _assemble(account, threads, normalized, indexer, stats, source_stats)
 
 
+def _references(indexer: _Indexer, planned: Iterable[str]) -> dict[str, tuple[str, ...]]:
+    """The referenced ids of every planned message that has any."""
+    refs: dict[str, tuple[str, ...]] = {}
+    for uid in planned:
+        thread = indexer.copies[uid].thread
+        ids = tuple(dict.fromkeys((*thread.in_reply_to, *thread.references)))
+        if ids:
+            refs[uid] = ids
+    return refs
+
+
 def _assemble(
     account: str,
     threads: Sequence[Thread],
@@ -409,4 +425,5 @@ def _assemble(
         sent_from_not_own=indexer.sent_from_not_own,
         scalars=tally.scalars,
     )
-    return ImportPlan(account, tuple(planned), report)
+    planned_uids = [msg.source_uid for thread in planned for msg in thread.messages]
+    return ImportPlan(account, tuple(planned), report, _references(indexer, planned_uids))

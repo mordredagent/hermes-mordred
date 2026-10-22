@@ -39,10 +39,15 @@ Per mailbox (Gmail: All Mail; other servers: INBOX, then the sent folder chosen 
   store-backed quote linker and the store's thread keys for referenced
   messages (so a reply chain split across batches stays one conversation),
   and written AND published in ONE transaction with the cursor and the
-  conversation merge by :meth:`~..store.ImportStore.write_batch`.
+  conversation merge by :meth:`~..store.ImportStore.write_batch`, which also
+  keeps every message's referenced ids and merges the conversations of
+  replies fetched before their parent (C, then B, then A ends as one
+  conversation).
 - Deadlines: the session (:class:`~.imap.IoLimits`) refuses to start a command
-  after ``budget_s`` and cuts an in-flight one at the hard deadline; the run
-  also checks between batches, and stops at a :class:`~.imap.CancelToken`.
+  after ``budget_s`` and cuts an in-flight one at the hard deadline, connection
+  establishment included (DNS, TCP, SOCKS5, TLS: a connection not open by then
+  is ``imap_unreachable``); the run also checks between batches, and stops at a
+  :class:`~.imap.CancelToken`.
   Stopping early returns ``partial`` with the cursor at the last committed
   batch; at most :data:`RUN_BYTES` of mail is read per run (``max_bytes``).
 
@@ -167,6 +172,9 @@ class FetchResult:
     cursor_reset: bool = False
     partial: bool = False
     dry_run: bool = False
+    #: Set by the Hermes tool only: its worker did not end within the call's bound, so it was cancelled and
+    #: left behind (a daemon thread that stops at its next check); the counts are then unknown and reported as 0.
+    abandoned: bool = False
     partial_reason: str | None = None
     error: str | None = None
 
@@ -189,7 +197,7 @@ _INT_FIELDS: Final = frozenset(
         "excluded_history",
     }
 )
-_BOOL_FIELDS: Final = frozenset({"gmail", "cursor_reset", "partial", "dry_run"})
+_BOOL_FIELDS: Final = frozenset({"gmail", "cursor_reset", "partial", "dry_run", "abandoned"})
 RESULT_FIELDS: Final = _INT_FIELDS | _BOOL_FIELDS | {"partial_reason", "error"}
 
 
@@ -597,6 +605,7 @@ class _Run:
                 conversations=[thread.conversation for thread in plan.threads],
                 counts=counts,
                 meta_updates=updates,
+                refs=plan.refs,
             )
         except BaseException as exc:
             with contextlib.suppress(Exception):

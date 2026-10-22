@@ -131,7 +131,35 @@ def test_forget_removes_the_files_and_the_key(tmp_path: Path, enclave: FakeEncla
     store.forget()
     assert not store.sealed_path.exists() and not store.meta_path.exists()
     assert KEY_ID not in enclave.keys
-    store.forget()  # absent is fine
+    assert store.forget() is True  # absent is fine
+
+
+@pytest.mark.parametrize("damage", ["corrupt", "missing", "symlink"])
+def test_forget_and_residue_ignore_unreadable_flags(tmp_path: Path, enclave: FakeEnclave, damage: str) -> None:
+    store = sealed_store(tmp_path / "mail", enclave)
+    store.ensure_key()
+    store.store(gmail_creds())
+    store.meta_path.unlink()
+    if damage == "corrupt":
+        store.meta_path.write_text("{not json")
+    elif damage == "symlink":
+        store.meta_path.symlink_to(tmp_path / "elsewhere.json")
+    assert store.flags() is None and store.residue()  # unreadable flags, credentials still on disk
+    assert store.forget() is True
+    assert not store.residue() and not store.sealed_path.exists() and KEY_ID not in enclave.keys
+
+
+def test_forget_reports_a_key_it_could_not_delete(tmp_path: Path, enclave: FakeEnclave) -> None:
+    store = sealed_store(tmp_path / "mail", enclave)
+    store.ensure_key()
+    store.store(gmail_creds())
+
+    def broken(_key_id: str) -> None:
+        raise OSError("keychain unavailable")
+
+    enclave.delete_enclave_key = broken  # type: ignore[method-assign]
+    assert store.forget() is False
+    assert not store.residue()  # the files are gone either way
 
 
 def test_decode_refuses_malformed_payloads() -> None:

@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from mordred_hermes.imports.mail.imap import ImapSession, IoLimits
 from mordred_hermes.imports.mail.imap_sync import FetchEnv, fetch_lock
 from mordred_hermes.imports.mail.secrets import MailCredentials
 from mordred_hermes.imports.store import ImportStore
@@ -62,6 +63,9 @@ class FakeSecrets:
         self.loads += 1
         return self.creds
 
+    def residue(self) -> bool:
+        return self.creds is not None
+
 
 class Clock:
     def __init__(self) -> None:
@@ -89,12 +93,13 @@ def make_env(
     memory_guard: Callable[[Path], None] | None = None,
     open_store: Callable[[Path], Any] | None = None,
     lock: Callable[[Path], contextlib.AbstractContextManager[None]] = fetch_lock,
+    connect: Callable[[MailCredentials, IoLimits], ImapSession] | None = None,
 ) -> FetchEnv:
     sink: list[Mapping[str, Any]] = audits if audits is not None else []
     return FetchEnv(
         home=home,
         secret_store=secrets,
-        connect=lambda _creds, limits: server.session(limits),
+        connect=connect or (lambda _creds, limits: server.session(limits)),
         open_store=open_store or (lambda _home: store),
         memory_guard=memory_guard or (lambda _home: None),
         audit=sink.append,

@@ -485,8 +485,11 @@ migrate-store`, `mail import`) and read by `telegram_ask` and
   (including `recipients_json` for mail `to:` names and `run_id`, the run that
   last wrote the row), `import_parts` (with a stable `id` that anchors the FTS5
   index `import_parts_fts`, a trigram index), `import_runs` (staging journal;
-  only committed runs are readable) and `import_accounts` (the owner's mail
-  addresses per account label; they are never written to `config.yaml`).
+  only committed runs are readable), `import_accounts` (the owner's mail
+  addresses per account label; they are never written to `config.yaml`) and
+  `import_mail_refs` (schema v2: the Message-IDs each IMAP-synced mail
+  message references, so a parent fetched after its replies merges their
+  conversations; deleted with the account's rows).
 - Readers go through `ImportStore` (`search`, `parts_for`, `neighbors`,
   `find_messages` for the mail quote linker); every read sees committed runs
   only.
@@ -503,7 +506,7 @@ migrate-store`, `mail import`) and read by `telegram_ask` and
   `--since` backfill), JSON `{base, epoch, low, mailbox_digest, role, uid,
   uidvalidity}`, and `mail_imap.<account>.last` (`{at, error, gmail,
   partial}`). `mail forget` deletes them; `mail forget --rows` also deletes the
-  account's mail rows.
+  account's mail rows and their `import_mail_refs` rows.
 
 ## `<home>/mordred/mail/`
 
@@ -521,9 +524,10 @@ Owned by the IMAP mail sync (`mordred_hermes.imports.mail.secrets` and
   the address, host or password.
 - `.lock` — the per-home mail writer lock (`flock`, non-blocking).
 
-`mail forget --yes` deletes both credential files and the Enclave key. No
-fetched mail is ever written here or to a temporary file: messages go only into
-`<home>/plugin-data/mordred/mordred.db`.
+`mail forget --yes` deletes both credential files and the Enclave key, also
+when `credentials.meta.json` is missing or corrupt (the label is then reported
+as unknown). No fetched mail is ever written here or to a temporary file:
+messages go only into `<home>/plugin-data/mordred/mordred.db`.
 
 ## `<home>/mordred/reader_sessions.json`
 

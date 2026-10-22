@@ -31,7 +31,13 @@
   undone. Rows and cursors go first and the credentials last, so a failed
   forget is retried; ``--account LABEL`` deletes a label's rows and cursors
   when its credentials are already gone (``account_mismatch`` when it names
-  another label than the sealed one).
+  another label than the sealed one). The sealed file, the flags and the
+  Enclave key are deleted whatever the flags say: credentials whose flags are
+  missing or corrupt (a setup or forget interrupted between its two files) are
+  still deleted, their label is reported as unknown (``account_unknown``, exit
+  1: rows and cursors need ``--account LABEL``), and forget never reports
+  success while a sealed file remains (``credentials_left``) or when the
+  Enclave key could not be deleted (``key_left``, exit 1; a retry deletes it).
 
 Nothing here prints a subject, name, address, label or body.
 """
@@ -47,6 +53,7 @@ import logging
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -507,40 +514,55 @@ def _forget_store(account: str, rows: bool) -> tuple[int, int, str | None]:
     return deleted, len(keys), None
 
 
-def _identity(flags: Mapping[str, Any] | None) -> tuple[str, str] | None:
-    """Which setup the sealed credentials are: (account label, setup id)."""
-    if not flags:
-        return None
-    return str(flags.get("account")), str(flags.get("setup_id", ""))
+#: The identity of sealed credentials whose flags are missing or unreadable: present, label unknown.
+_UNIDENTIFIED: Final = ("", "")
+
+
+def _identity(secrets_store: Any) -> tuple[str, str] | None:
+    """Which setup the sealed credentials are: (account label, setup id); :data:`_UNIDENTIFIED`; or ``None``."""
+    flags = secrets_store.flags()
+    if flags:
+        return str(flags.get("account")), str(flags.get("setup_id", ""))
+    return _UNIDENTIFIED if secrets_store.residue() else None
 
 
 def _forget_target(args: argparse.Namespace, sealed: tuple[str, str] | None) -> str | None:
-    """The label whose rows and cursors are deleted: the sealed one, or ``--account`` once they are gone."""
+    """The label whose rows and cursors are deleted: the sealed one, or ``--account`` once it cannot be read."""
     from ..imports.mail.secrets import ACCOUNT_RE
 
     named = getattr(args, "account", None)
     if named is not None and not ACCOUNT_RE.fullmatch(str(named)):
         raise _Usage("--account must be 1-32 lowercase letters, digits or '_', starting with a letter")
-    if sealed is not None:
+    if sealed is not None and sealed[0]:
         if named is not None and str(named) != sealed[0]:
             raise _Refused("account_mismatch")  # the sealed credentials belong to another label
         return sealed[0]
     return None if named is None else str(named)
 
 
-def _locked_forget(
-    secrets_store: Any, args: argparse.Namespace, resolved: tuple[str, str] | None
-) -> tuple[str | None, int, int, str | None, bool]:
-    """Under the lock: re-check the setup, delete rows and cursors, then the credentials (last)."""
-    sealed = _identity(secrets_store.flags())
+@dataclass(frozen=True)
+class _Forgotten:
+    account: str | None
+    deleted: int
+    cursors: int
+    left: str | None  # the store code that left the cursors behind
+    had_credentials: bool
+    unidentified: bool  # credentials were present but their label could not be read
+    key_gone: bool
+
+
+def _locked_forget(secrets_store: Any, args: argparse.Namespace, resolved: tuple[str, str] | None) -> _Forgotten:
+    """Under the lock: re-check the setup, delete rows and cursors, then the credentials (last, unconditionally)."""
+    sealed = _identity(secrets_store)
     if sealed != resolved:
         raise _Refused("credentials_changed")  # a setup ran since this forget started: touch nothing
     account = _forget_target(args, sealed)
     rows = bool(getattr(args, "rows", False))
     deleted, cursors, left = _forget_store(account, rows) if account else (0, 0, None)
-    if sealed is not None:
-        secrets_store.forget()
-    return account, deleted, cursors, left, sealed is not None
+    key_gone = secrets_store.forget() is not False  # the sealed file, the flags and the Enclave key, whatever is left
+    if secrets_store.residue():
+        raise _Refused("credentials_left")  # never report success while a sealed file remains
+    return _Forgotten(account, deleted, cursors, left, sealed is not None, sealed == _UNIDENTIFIED, key_gone)
 
 
 def cmd_forget(args: argparse.Namespace) -> int:
@@ -554,11 +576,11 @@ def cmd_forget(args: argparse.Namespace) -> int:
     if _platform() != "darwin":
         return _refused("unsupported_platform")
     secrets_store = _secret_store()
-    resolved = _identity(secrets_store.flags())  # the target, decided before waiting for the lock
     try:
+        resolved = _identity(secrets_store)  # the target, decided before waiting for the lock
         _forget_target(args, resolved)
         with _lock(_home()):
-            account, deleted, cursors, left, had_credentials = _locked_forget(secrets_store, args, resolved)
+            done = _locked_forget(secrets_store, args, resolved)
     except _Usage as exc:
         _term.emit_error(str(exc))
         return 2
@@ -570,15 +592,43 @@ def cmd_forget(args: argparse.Namespace) -> int:
         return _refused(_code(exc, "store_path_unsafe"))
     except Exception as exc:
         return _refused(_code(exc, "fetch_failed"))
-    _audit({"event": "mail.forget", "decision": "allow", "reason": None, "rows": rows, "messages_deleted": deleted})
-    print("Mail credentials removed." if had_credentials else "No mail credentials were set up.")
-    if rows and account:
-        print(f"Deleted {deleted} imported mail message(s) of account '{account}'.")
-    if left is not None:
-        _term.emit_error(f"the mail cursors were left in the store ({left}); retry with --account {account}")
+    _audit(
+        {
+            "event": "mail.forget",
+            "decision": "allow",
+            "reason": None,
+            "rows": rows,
+            "messages_deleted": done.deleted,
+            "unidentified": done.unidentified,
+        }
+    )
+    return _report_forget(done, rows)
+
+
+def _report_forget(done: _Forgotten, rows: bool) -> int:
+    """What forget did and what it could not do (exit 1 whenever something the operator asked for remains)."""
+    print("Mail credentials removed." if done.had_credentials else "No mail credentials were set up.")
+    status = 0
+    if done.had_credentials and not done.key_gone:
+        _term.emit_error(
+            "the Enclave key could not be deleted (key_left); run `hermes-mordred mail forget --yes` again"
+        )
+        status = 1
+    if done.unidentified and done.account is None:
+        what = "rows and cursors were" if rows else "cursors were"
+        _term.emit_error(
+            f"the account label of the removed credentials could not be read (account_unknown); its {what} "
+            "kept: run `hermes-mordred mail forget" + (" --rows" if rows else "") + " --yes --account LABEL`"
+        )
         return 1
-    print(f"Removed {cursors} cursor record(s).")
-    return 0
+    if rows and done.account:
+        print(f"Deleted {done.deleted} imported mail message(s) of account '{done.account}'.")
+    if done.left is not None:
+        _term.emit_error(f"the mail cursors were left in the store ({done.left}); retry with --account {done.account}")
+        return 1
+    if done.account:
+        print(f"Removed {done.cursors} cursor record(s).")
+    return status
 
 
 # --------------------------------------------------------------------------- #

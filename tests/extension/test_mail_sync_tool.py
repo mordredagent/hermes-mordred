@@ -287,3 +287,128 @@ def test_a_cancelled_call_stops_the_fetch_and_joins_the_worker(
 def rows_of(store: ImportStore) -> int:
     with store.connection() as conn:
         return int(conn.execute("SELECT count(*) FROM import_messages").fetchone()[0])
+
+
+# -- bounded waits: a worker stuck where the session's bounds cannot reach -----------------------
+
+
+def _stalled_resolver(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+    """``getaddrinfo`` never answers (until the returned event is set)."""
+    from mordred_hermes.imports.mail import imap
+
+    release = threading.Event()
+
+    def never(_host: str, _port: int) -> list[Any]:
+        release.wait(30)
+        return []
+
+    monkeypatch.setattr(imap, "_getaddrinfo", never)
+    return release
+
+
+def _resolver_threads() -> list[threading.Thread]:
+    from mordred_hermes.imports.mail.imap import RESOLVER_NAME
+
+    return [thread for thread in threading.enumerate() if thread.name == RESOLVER_NAME]
+
+
+def test_a_cancellation_during_a_stalled_resolver_completes_at_once(
+    tmp_path: Path, store: ImportStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mordred_hermes.extension.egress import EgressRoute
+    from mordred_hermes.imports.mail import imap
+
+    release = _stalled_resolver(monkeypatch)
+
+    def connect(creds: Any, limits: Any) -> Any:
+        direct = EgressRoute(None, None)
+        return imap.connect(creds.imap_host, creds.imap_port, limits=limits, route_resolver=lambda _h: direct)
+
+    env = make_env(tmp_path, store, gmail_server(), FakeSecrets(gmail_creds()), clock=time.monotonic, connect=connect)
+    _use_env(monkeypatch, env)
+
+    async def scenario() -> float:
+        task = asyncio.create_task(mail_tool.mordred_mail_sync({}, parent_agent=_LOCAL, session_id="s-1"))
+        for _ in range(200):  # until the worker waits for the resolver
+            await asyncio.sleep(0.02)
+            if _resolver_threads():
+                break
+        assert _resolver_threads() and "mordred-mail-sync" in _fetch_threads()
+        started = time.monotonic()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return time.monotonic() - started
+
+    try:
+        elapsed = asyncio.run(scenario())
+        assert elapsed < 1.0  # the resolver wait answers the cancellation; nothing waits for the budget
+        assert _fetch_threads() == []  # the worker and the watchdog have ended
+        assert all(thread.daemon for thread in _resolver_threads())  # the stalled lookup is abandoned
+        assert rows_of(store) == 0
+    finally:
+        release.set()
+        for thread in _resolver_threads():
+            thread.join(5)
+
+
+@pytest.fixture
+def stuck_fetch(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """``_fetch`` stuck somewhere that ignores the cancel token; short budget and graces."""
+    release = threading.Event()
+    tokens: list[Any] = []
+
+    def stuck(_max_messages: int, cancel: Any = None) -> dict[str, Any]:
+        tokens.append(cancel)
+        release.wait(30)
+        return dict(FetchResult(inserted=7).as_dict())
+
+    monkeypatch.setattr(mail_tool, "_fetch", stuck)
+    monkeypatch.setattr(imap_sync, "TOOL_BUDGET_S", 0.2)
+    monkeypatch.setattr(mail_tool, "CANCEL_GRACE_S", 0.3)
+    monkeypatch.setattr(mail_tool, "ABANDON_GRACE_S", 0.3)
+    yield SimpleNamespace(release=release, tokens=tokens)
+    release.set()
+    for thread in _worker_threads():
+        thread.join(5)  # the abandoned worker ends once released: nothing leaks into later tests
+
+
+def _worker_threads() -> list[threading.Thread]:
+    return [thread for thread in threading.enumerate() if thread.name == mail_tool.WORKER_NAME]
+
+
+def test_repeated_cancellations_complete_within_the_bound_and_abandon_the_worker(stuck_fetch: Any) -> None:
+    async def scenario() -> float:
+        task = asyncio.create_task(mail_tool.mordred_mail_sync({}, parent_agent=_LOCAL, session_id="s-1"))
+        await asyncio.sleep(0.05)
+        started = time.monotonic()
+        for _ in range(40):  # cancelled again and again: absorbed only until the bound
+            task.cancel()
+            await asyncio.sleep(0.02)
+            if task.done():
+                break
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return time.monotonic() - started
+
+    elapsed = asyncio.run(scenario())
+    assert elapsed < 1.5  # remaining budget (0.15 s) + grace (0.3 s), not the worker's 30 s
+    [token] = stuck_fetch.tokens
+    assert token.cancelled
+    assert all(thread.daemon for thread in _worker_threads()) and _worker_threads()  # abandoned, a daemon
+
+
+def test_a_worker_past_the_bound_is_abandoned_with_a_counts_only_result(stuck_fetch: Any) -> None:
+    started = time.monotonic()
+    result = _call({})
+    assert time.monotonic() - started < 1.5
+    assert set(result) == RESULT_FIELDS | {"note"}
+    assert (result["partial"], result["partial_reason"], result["abandoned"]) == (True, "cancelled", True)
+    assert (result["inserted"], result["error"]) == (0, None)
+    [token] = stuck_fetch.tokens
+    assert token.cancelled  # told to stop: it writes nothing more once it notices
+    assert all(thread.daemon for thread in _worker_threads())
+
+
+def test_a_normal_result_is_never_abandoned(fetches: list[int]) -> None:
+    assert _call({})["abandoned"] is False

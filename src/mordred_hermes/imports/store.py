@@ -1,4 +1,4 @@
-"""``ImportStore``: imported conversations, messages and parts in ``mordred.db`` (``import_*`` v1).
+"""``ImportStore``: imported conversations, messages and parts in ``mordred.db`` (``import_*`` v2).
 
 Mirrors :class:`mordred_hermes.activity.store.ActivityStore`: :func:`open_import_store`
 runs the activity protection gate and passes the gate's keyed opener; tests pass
@@ -49,7 +49,24 @@ ONE ``BEGIN IMMEDIATE`` transaction. A failed batch therefore leaves every
 published row, revision and conversation field exactly as it was, and a
 concurrent reader sees the state before or after the batch, never between.
 A crashed writer's ``open`` runs are reclaimed with
-:meth:`ImportStore.fail_open_runs`. The lower-level pieces stay available:
+:meth:`ImportStore.fail_open_runs`.
+
+Mail thread reconciliation (``write_batch(..., refs=...)``): the batch's
+referenced Message-IDs (``In-Reply-To``, ``References``) are kept in
+``import_mail_refs``. For every message M of the batch, the conversations of
+the stored messages M references (its parents) and of the stored messages
+that reference M (replies fetched before it) are merged with M's own into ONE
+survivor, in the batch's transaction (:meth:`ImportStore.merge_conversations`:
+message rows repointed, participants unioned, ``last_message_at`` the maximum,
+``message_count`` recounted, the emptied rows dropped). The survivor is the
+conversation holding the earliest-dated message (unknown dates last, then the
+smaller ``conv_uid``). A conversation keyed by a Gmail thread id (``g.``, see
+``mail.threading.default_thread_key``) is authoritative: it is never folded
+into another, and when one is involved it is the survivor. So a reply chain
+fetched in any order (C, then B, then A) ends in one conversation, and two
+threads that never reference each other stay apart.
+
+The lower-level pieces stay available:
 :meth:`ImportStore.commit_batch` publishes a run already written with
 :meth:`ImportStore.write_thread` together with a cursor, and
 ``write_thread(..., merge_conversation=True)`` merges a conversation row, but
@@ -135,6 +152,15 @@ _META_KEY_RE: Final = re.compile(r"[a-z][a-z0-9_]{0,31}(?:\.[a-z][a-z0-9_]{0,31}
 _MAX_META_VALUE: Final = 256
 #: Upper bound on participants kept on a merged conversation row.
 _MAX_MERGED_PARTICIPANTS: Final = 256
+#: A mail conversation keyed by a Gmail thread id (``mail.threading.default_thread_key``) is never folded away.
+_GMAIL_THREAD_PREFIX: Final = "g."
+_MAX_REF_CHARS: Final = 1024
+#: Joins of message ``m`` onto its run ``r`` and conversation ``c``, and the scope a reconciliation looks in:
+#: rows of committed runs or of the run being written, of one source and account.
+_RUN_AND_CONV: Final = (
+    "JOIN import_runs r ON r.run_id = m.run_id JOIN import_conversations c ON c.conv_uid = m.conv_uid"
+)
+_IN_SCOPE: Final = "(r.state = 'committed' OR m.run_id = ?) AND c.source = ? AND c.source_account = ?"
 #: Owner evidence of a sent copy, by strength ("Sent evidence wins", rule 4 above): Gmail's
 #: ``\Sent`` system label (the server vouches for authorship) over a generic server's sent
 #: folder (it names its purpose); every other evidence ranks 0. Mirrors ``mail.owner.SENT_EVIDENCE``.
@@ -382,6 +408,24 @@ def _participant_key(participant: Participant) -> tuple[str, str]:
 def _meta_updates(updates: Mapping[str, str | None]) -> dict[str, str | None]:
     """Validated cursor updates for one transaction (``None`` deletes the key)."""
     return {_meta_key(key): None if value is None else _meta_value(value) for key, value in updates.items()}
+
+
+def _checked_refs(
+    refs: Mapping[str, Sequence[str]] | None, messages: Sequence[ImportMessage]
+) -> dict[str, tuple[str, ...]] | None:
+    """Referenced Message-IDs per message of the batch: printable, bounded, de-duplicated; else ``bad_refs``."""
+    if refs is None:
+        return None
+    batch = {msg.source_uid for msg in messages}
+    checked: dict[str, tuple[str, ...]] = {}
+    for uid, ids in refs.items():
+        if uid not in batch or isinstance(ids, str):
+            raise RecordError("bad_refs")
+        values = tuple(dict.fromkeys(ids))
+        if not all(isinstance(v, str) and 0 < len(v) <= _MAX_REF_CHARS and v.isprintable() for v in values):
+            raise RecordError("bad_refs")
+        checked[uid] = values
+    return checked
 
 
 def _counts_json(counts: Mapping[str, int]) -> str:
@@ -656,6 +700,7 @@ class ImportStore:
         conversations: Sequence[ImportConversation],
         meta_updates: Mapping[str, str | None],
         counts: Mapping[str, int] | None = None,
+        refs: Mapping[str, Sequence[str]] | None = None,
     ) -> BatchResult:
         """Write ``threads``, merge ``conversations``, commit ``run_id`` and apply ``meta_updates`` in ONE transaction.
 
@@ -663,11 +708,15 @@ class ImportStore:
         message is decided by the idempotency rules of the module docstring, the
         run is committed with ``counts`` plus the write counts, every touched
         conversation's ``message_count`` is recounted from committed rows, and the
-        cursor keys in ``meta_updates`` are set (``None`` deletes). All records and
-        keys are validated before the transaction starts. Any failure rolls all of
-        it back: a revised row keeps its published revision, no participant, date
-        or count of the batch becomes visible, and the cursor does not move. A
-        dry run (or a closed run) is refused with ``run_not_open``.
+        cursor keys in ``meta_updates`` are set (``None`` deletes). With ``refs``
+        (source uid → the Message-IDs it references; the mail collector) the
+        references are stored in ``import_mail_refs`` and the conversations they
+        connect are merged (the module docstring's thread reconciliation). All
+        records and keys are validated before the transaction starts. Any failure
+        rolls all of it back: a revised row keeps its published revision, no
+        participant, date, count, reference or merge of the batch becomes
+        visible, and the cursor does not move. A dry run (or a closed run) is
+        refused with ``run_not_open``.
         """
         convs = list(conversations)
         for conv in convs:
@@ -675,10 +724,10 @@ class ImportStore:
         messages = [msg for thread in threads for msg in thread]
         for msg in messages:
             validate_message(msg)
+        links = _checked_refs(refs, messages)
         updates = _meta_updates(meta_updates)
         extra = dict(counts or {})
         _counts_json(extra)
-        tally: Counter[str] = Counter()
         with self._transaction() as conn:
             source, state = self._open_run(conn, run_id)
             if state != "open":
@@ -688,14 +737,10 @@ class ImportStore:
                 if Source(conv.source).value != source:
                     raise RecordError("source_mismatch")
                 self._upsert_conversation(conn, self._merged(conn, conv))
-            for msg in messages:
-                self._check_target(conn, msg, source)
-                outcome = self._outcome(conn, run_id, msg)
-                if outcome in _WRITES:
-                    touched.update(self._stored_conversations(conn, msg.source_uid))
-                    self._store_message(conn, run_id, msg)
-                touched.add(msg.conv_uid)
-                tally[outcome] += 1
+            tally = self._write_messages(conn, run_id, source, messages, links, touched)
+            if links is not None:
+                survivors, dropped = self._reconcile(conn, run_id, messages, links)
+                touched = (touched - dropped) | survivors
             result = BatchResult(tally["inserted"], tally["duplicates"], tally["revised"], tally["conflicts"])
             self._publish(conn, run_id, _counts_json({**extra, **result.counts()}))
             for conv_uid in sorted(touched):
@@ -721,6 +766,168 @@ class ImportStore:
                     "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
                     (key, value),
                 )
+
+    def _write_messages(
+        self,
+        conn: sqlite3.Connection,
+        run_id: str,
+        source: str,
+        messages: Sequence[ImportMessage],
+        links: Mapping[str, Sequence[str]] | None,
+        touched: set[str],
+    ) -> Counter[str]:
+        """Decide and write each message (and keep its references); ``touched`` gains every affected conversation."""
+        tally: Counter[str] = Counter()
+        for msg in messages:
+            self._check_target(conn, msg, source)
+            outcome = self._outcome(conn, run_id, msg)
+            if outcome in _WRITES:
+                touched.update(self._stored_conversations(conn, msg.source_uid))
+                self._store_message(conn, run_id, msg)
+            if links is not None:
+                self._store_refs(conn, msg.source_uid, links.get(msg.source_uid, ()), replace=outcome in _WRITES)
+            touched.add(msg.conv_uid)
+            tally[outcome] += 1
+        return tally
+
+    @staticmethod
+    def _store_refs(conn: sqlite3.Connection, source_uid: str, ids: Sequence[str], *, replace: bool) -> None:
+        """Keep ``source_uid``'s referenced ids: replaced when its row was (re)written, else only added to."""
+        if replace:
+            conn.execute("DELETE FROM import_mail_refs WHERE source_uid = ?", (source_uid,))
+        conn.executemany(
+            "INSERT OR IGNORE INTO import_mail_refs (source_uid, ref_message_id) VALUES (?, ?)",
+            [(source_uid, ref) for ref in ids],
+        )
+
+    def _reconcile(
+        self,
+        conn: sqlite3.Connection,
+        run_id: str,
+        messages: Sequence[ImportMessage],
+        links: Mapping[str, Sequence[str]],
+    ) -> tuple[set[str], set[str]]:
+        """Merge the conversations the batch's reference edges connect; (survivors, dropped conv uids)."""
+        survivors: set[str] = set()
+        dropped: set[str] = set()
+        for msg in messages:
+            involved = self._linked_conversations(conn, run_id, msg.source_uid, links.get(msg.source_uid, ()))
+            if len(involved) < 2:
+                continue
+            survivor, others = self._fold_plan(conn, run_id, involved)
+            if others:
+                self._merge_into(conn, run_id, survivor, others)
+                dropped.update(others)
+                survivors.difference_update(others)
+                survivors.add(survivor)
+        return survivors, dropped
+
+    @staticmethod
+    def _linked_conversations(
+        conn: sqlite3.Connection, run_id: str, source_uid: str, parents: Sequence[str]
+    ) -> set[str]:
+        """``source_uid``'s conversation, its parents' and those of the stored replies that reference it."""
+        row = conn.execute(
+            "SELECT m.conv_uid, m.message_id, c.source, c.source_account FROM import_messages m "
+            "JOIN import_conversations c ON c.conv_uid = m.conv_uid WHERE m.source_uid = ?",
+            (source_uid,),
+        ).fetchone()
+        if row is None:
+            return set()
+        conv_uid, message_id, source, account = (str(value) for value in row)
+        scope = (run_id, source, account)
+        involved = {conv_uid}
+        if parents:
+            involved.update(
+                str(found[0])
+                for found in conn.execute(
+                    f"SELECT DISTINCT m.conv_uid FROM import_messages m {_RUN_AND_CONV} "
+                    f"WHERE {_IN_SCOPE} AND m.message_id IN ({_marks(len(parents))})",
+                    (*scope, *parents),
+                )
+            )
+        involved.update(
+            str(found[0])
+            for found in conn.execute(
+                f"SELECT DISTINCT m.conv_uid FROM import_mail_refs f "
+                f"JOIN import_messages m ON m.source_uid = f.source_uid {_RUN_AND_CONV} "
+                f"WHERE f.ref_message_id = ? AND {_IN_SCOPE}",
+                (message_id, *scope),
+            )
+        )
+        return involved
+
+    @staticmethod
+    def _fold_plan(conn: sqlite3.Connection, run_id: str, involved: set[str]) -> tuple[str, list[str]]:
+        """(the survivor, the conversations folded into it): see the module docstring's reconciliation."""
+        age: dict[str, tuple[bool, int, str]] = {}
+        gmail: set[str] = set()
+        for conv_uid in involved:
+            earliest = conn.execute(
+                "SELECT min(m.sent_at) FROM import_messages m JOIN import_runs r ON r.run_id = m.run_id "
+                "WHERE m.conv_uid = ? AND (r.state = 'committed' OR m.run_id = ?)",
+                (conv_uid, run_id),
+            ).fetchone()[0]
+            age[conv_uid] = (earliest is None, int(earliest or 0), conv_uid)
+            key = conn.execute("SELECT conversation_id FROM import_conversations WHERE conv_uid = ?", (conv_uid,))
+            if str(key.fetchone()[0]).startswith(_GMAIL_THREAD_PREFIX):
+                gmail.add(conv_uid)
+        survivor = min(gmail or involved, key=age.__getitem__)
+        return survivor, sorted(uid for uid in involved if uid != survivor and uid not in gmail)
+
+    def merge_conversations(self, survivor: str, others: Iterable[str]) -> int:
+        """Fold ``others`` into ``survivor`` in ONE transaction; returns how many message rows moved.
+
+        Every message row of ``others`` (whatever its run) is repointed to
+        ``survivor``, the participants are unioned, ``last_message_at`` is the
+        maximum, the survivor's title is kept (else the first non-empty one),
+        ``message_count`` is recounted from committed rows and the emptied rows
+        are dropped. :meth:`write_batch` runs the same merge inside its own
+        transaction. An unknown conversation raises :class:`RecordError`; one of
+        another source or account is a ``conflict``.
+        """
+        folded = [uid for uid in dict.fromkeys(others) if uid != survivor]
+        if not folded:
+            return 0
+        with self._transaction() as conn:
+            return self._merge_into(conn, "", survivor, folded)
+
+    @classmethod
+    def _merge_into(cls, conn: sqlite3.Connection, run_id: str, survivor: str, others: Sequence[str]) -> int:
+        rows = {
+            str(row[0]): ImportConversation(**_decoded(_CONV_FIELDS, row))
+            for row in _select_in(
+                conn, f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE conv_uid IN", [survivor, *others]
+            )
+        }
+        target = rows.get(survivor)
+        if target is None or any(uid not in rows for uid in others):
+            raise RecordError("unknown_conversation")
+        folded = [rows[uid] for uid in others]
+        if any((conv.source, conv.source_account) != (target.source, target.source_account) for conv in folded):
+            raise ImportRefused("conflict")
+        people: dict[tuple[str, str], Participant] = {}
+        for participant in (*target.participants, *(p for conv in folded for p in conv.participants)):
+            people.setdefault(_participant_key(participant), participant)
+        dates = [conv.last_message_at for conv in (target, *folded) if conv.last_message_at is not None]
+        cursors = [conv.sync_cursor for conv in (target, *folded) if conv.sync_cursor is not None]
+        merged = replace(
+            target,
+            title=target.title or next((conv.title for conv in folded if conv.title), ""),
+            participants=tuple(people.values())[:_MAX_MERGED_PARTICIPANTS],
+            last_message_at=max(dates) if dates else None,
+            sync_cursor=cursors[0] if cursors else None,
+        )
+        moved = 0
+        for start in range(0, len(others), _CHUNK):
+            chunk = list(others[start : start + _CHUNK])
+            moved += conn.execute(
+                f"UPDATE import_messages SET conv_uid = ? WHERE conv_uid IN ({_marks(len(chunk))})", (survivor, *chunk)
+            ).rowcount
+            conn.execute(f"DELETE FROM import_conversations WHERE conv_uid IN ({_marks(len(chunk))})", chunk)
+        cls._upsert_conversation(conn, merged)
+        cls._recount(conn, run_id, survivor)
+        return int(moved)
 
     @staticmethod
     def _stored_conversations(conn: sqlite3.Connection, source_uid: str) -> set[str]:
@@ -884,21 +1091,27 @@ class ImportStore:
         conn.executemany(f"INSERT INTO import_parts ({_PART_COLUMNS}) VALUES ({_marks(len(rows[0]))})", rows)
 
     def delete_source(self, source: Source | str, source_account: str) -> int:
-        """Delete one account's conversations, messages, parts and own addresses; returns messages deleted.
+        """Delete one account's conversations, messages, parts, references and own addresses; returns messages deleted.
 
         Runs with ``PRAGMA secure_delete = ON`` and the FTS index's
         ``secure-delete`` option, so freed pages are zeroed and no index tokens remain.
+        ``import_mail_refs`` rows of the deleted messages go too (and any left
+        without a message), so no referenced Message-ID survives.
         """
         value = _source_value(source)
         convs = "SELECT conv_uid FROM import_conversations WHERE source = ? AND source_account = ?"
         key = (value, source_account)
         with self._transaction(secure_delete=True) as conn:
-            conn.execute(
-                f"DELETE FROM import_parts WHERE source_uid IN "
-                f"(SELECT source_uid FROM import_messages WHERE conv_uid IN ({convs}))",
-                key,
-            )
+            for table in ("import_parts", "import_mail_refs"):
+                conn.execute(
+                    f"DELETE FROM {table} WHERE source_uid IN "
+                    f"(SELECT source_uid FROM import_messages WHERE conv_uid IN ({convs}))",
+                    key,
+                )
             deleted = conn.execute(f"DELETE FROM import_messages WHERE conv_uid IN ({convs})", key).rowcount
+            conn.execute(
+                "DELETE FROM import_mail_refs WHERE source_uid NOT IN (SELECT source_uid FROM import_messages)"
+            )
             conn.execute("DELETE FROM import_conversations WHERE source = ? AND source_account = ?", key)
             conn.execute("DELETE FROM import_accounts WHERE source = ? AND account = ?", key)
         return int(deleted)

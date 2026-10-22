@@ -21,6 +21,9 @@ Gmail path, mailbox roles, presence, and a random ``setup_id`` naming this
 setup) so status and the Hermes tool's availability check never touch the
 Enclave and never see the address; ``mail forget`` uses ``setup_id`` to tell
 the credentials it resolved from ones a concurrent ``mail setup`` installed.
+:meth:`MailSecretStore.forget` deletes the sealed file, the flags and the
+Enclave key whatever the flags say, and :meth:`MailSecretStore.residue` sees
+a sealed file whose flags are missing or corrupt (``flags()`` is ``None``).
 
 The sealed payload is validated on every load: port 993 only (implicit TLS),
 a DNS host name, mailbox names that are printable ASCII without control
@@ -32,7 +35,6 @@ Other platforms refuse with ``unsupported_platform`` before any filesystem use
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import re
@@ -373,14 +375,41 @@ class MailSecretStore:
             return None
         return value
 
-    def forget(self) -> None:
-        """Delete the sealed file, the flags and the Enclave key (absent is fine)."""
+    def residue(self) -> bool:
+        """True while a sealed file or a flags file exists in any form (valid, corrupt or a symlink).
+
+        Unlike :meth:`flags` this never depends on the flags being readable, so
+        ``mail forget`` can tell "nothing was set up" from "credentials whose
+        flags are missing or corrupt". Never touches the Enclave.
+        """
+        try:
+            paths = (self.sealed_path, self.meta_path)
+        except MailSecretsError:
+            return False
+        for path in paths:
+            try:
+                os.lstat(path)
+            except FileNotFoundError:
+                continue
+            return True
+        return False
+
+    def forget(self) -> bool:
+        """Delete the sealed file, the flags and the Enclave key, whatever the flags say (absent is fine).
+
+        Returns ``False`` when the Enclave key could not be deleted (no helper, a
+        Keychain error): the sealed file is gone already, so the key unwraps
+        nothing, and a retry deletes it. A file that cannot be removed raises.
+        """
         from ...keyvault import wrap
 
         for path in (self.sealed_path, self.meta_path):
             path.unlink(missing_ok=True)
-        with contextlib.suppress(Exception):  # no key, or no helper: the sealed file is already gone
-            wrap.delete_wrapping_key(KEY_ID, backend=self._backend_factory())
+        try:
+            wrap.delete_wrapping_key(KEY_ID, backend=self._backend_factory())  # idempotent: no key is fine
+        except Exception:
+            return False
+        return True
 
 
 def own_address_list(address: str, extra: Sequence[str]) -> tuple[str, ...]:

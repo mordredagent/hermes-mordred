@@ -277,7 +277,22 @@ store. Each batch is planned with the store's thread keys for the message ids
 it contains or references, so a reply chain split across batches stays one
 conversation, and the store lets Sent evidence win: a stronger sent-copy
 evidence revises a stored record even with identical bytes, a weaker copy
-never replaces a stored sent record.
+never replaces a stored sent record. Planning only finds parents that are
+already stored, so a parent fetched after its replies needs the store too (the
+second-pass review's failing case: C, then B, then A, each naming only its
+parent, left two conversations). The store therefore keeps every synced
+message's referenced ids in `import_mail_refs(source_uid, ref_message_id)`
+(indexed by `ref_message_id`; schema v2, a v1 store is upgraded in place by
+`ImportStore.initialize`), and `write_batch` merges, in the batch's
+transaction, the conversations connected to each new message M: those of the
+stored messages M references and those of the stored messages that reference
+M. `ImportStore.merge_conversations(survivor, others)` repoints the message
+rows, unions the participants, keeps the maximum `last_message_at`, recounts
+`message_count` and drops the emptied rows; the survivor is the conversation
+holding the earliest-dated message (then the smaller `conv_uid`), and a
+conversation keyed by a Gmail thread id is never folded into another (Gmail's
+thread ids stay authoritative, as in `threading.build_threads`). Two threads
+that never reference each other stay apart.
 
 ### Counts-only output, enforced by a fixed serializer
 
@@ -285,7 +300,9 @@ Neither the tool nor `mail fetch --json` reuse `DryRunReport.as_text/as_json`,
 which list addresses. A dedicated `FetchResult` serializer with an allowlist of
 integer and boolean fields is the only output path: `{inserted, duplicates,
 revised, conflicts, skipped_oversize, batches, mailboxes, gmail, cursor_reset,
-partial, partial_reason, excluded_history, error}`. `error` and
+partial, partial_reason, excluded_history, error}` (the implementation adds
+`fetched`, `skipped`, `dry_run` and, after the second-pass review, `abandoned`:
+the tool gave up waiting for its worker, see below). `error` and
 `partial_reason` are drawn from a closed enum. `imaplib.Debug` stays 0;
 exceptions are mapped to codes and never stringified into results, logs or
 audit.
@@ -317,7 +334,14 @@ guarantee zeroization of immutable strings, and the design does not claim it.
 Rows and cursors are deleted first and the credentials last, under the writer
 lock that `mail setup` also takes; the target label is re-checked under the
 lock (a credentials `setup_id`), so a concurrent setup is never undone, and
-`--account LABEL` retries the deletion once the credentials are gone.
+`--account LABEL` retries the deletion once the credentials are gone. The
+credentials are deleted whatever their flags say: `credentials.meta.json`
+missing or corrupt (a setup or forget interrupted between the two files) no
+longer hides a sealed file from forget. The sealed file, the flags and the
+Enclave key are deleted, the unknown label is reported (`account_unknown`,
+exit 1; rows and cursors need `--account LABEL`), forget never reports
+success while a credential file remains (`credentials_left`), and an Enclave
+key it could not delete is reported (`key_left`) and deleted by a retry.
 
 ### Tool hardening
 
@@ -341,10 +365,21 @@ progress, so the next call continues. The deadline is absolute: it is checked
 before every IMAP command (and between batches), and an in-flight command is
 cut at a hard deadline at most 30 seconds later by a watchdog that shuts the
 socket down, because a socket timeout alone resets on every byte a trickling
-server sends. A cancelled tool call cancels the fetch (the socket is shut
-down at once) and waits for the worker; the worker thread is joined before
-the result is returned or the cancellation completes, so no fetch continues
-in the background. The CLI keeps a 10 minute budget.
+server sends. The same bounds cover connection establishment, armed before
+the route is resolved: `getaddrinfo` runs in a daemon helper thread that is
+waited for only until the hard deadline or a cancellation (a stalled resolver
+is abandoned), the TCP connect is non-blocking and polled, and the SOCKS5
+exchange and the TLS handshake read from a socket the watchdog and a
+cancellation shut down; a connection not open by the hard deadline is
+`imap_unreachable`. A cancelled tool call cancels the fetch (the socket is
+shut down and a resolver wait woken at once) and waits for the worker at most
+the remaining budget plus 30 seconds, absorbing repeated cancellations only
+until then, so a cancellation always completes. A worker still running 40
+seconds after the budget (stuck where the session's bounds cannot reach) is
+cancelled and abandoned as a daemon thread; the call returns `partial: true`,
+`partial_reason: "cancelled"` and `abandoned: true` with zero counts, and
+the abandoned worker stops at its next check (a batch already being written
+commits atomically with its cursor). The CLI keeps a 10 minute budget.
 
 ### Open questions, decided
 
@@ -365,4 +400,15 @@ the cursor at the last committed batch); `UID n:*` self-inclusion filtered;
 conversation merge semantics; fixed serializer rejects any unknown field; route
 resolution to direct and SOCKS5h and refusal of other proxies; TLS context
 settings; command allowlist violations; time-budget partial return with the
-worker joined; `mail forget` with and without `--rows`.
+worker joined; `mail forget` with and without `--rows`. After the second-pass
+review: a resolver that never answers, a TCP connect that never completes, a
+proxy that never answers the method selection and a TLS peer that never
+answers the handshake, each ending at a 0.2 s budget's hard deadline
+(`imap_unreachable`) and at once on a cancellation, with no watchdog or
+non-daemon thread left; a cancellation during a stalled resolver, repeated
+cancellations of a worker that ignores them, and an abandoned worker's
+counts-only result; chains fetched in reverse and mixed orders ending as one
+conversation, independent threads staying apart, Gmail thread ids staying
+authoritative, a failed batch rolling its merge back; the v1 to v2 upgrade;
+`mail forget` with corrupt or missing flags, after a partial deletion, with a
+sealed file it could not remove and with an Enclave key it could not delete.

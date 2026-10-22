@@ -35,6 +35,7 @@ from mordred_hermes.imports.mail.imap import (
     ImapSession,
     ImapStopped,
     IoLimits,
+    Link,
 )
 from tests._fake_imap import FakeImapServer, FakeMailbox, FakeMessage, mail
 
@@ -147,16 +148,50 @@ def test_the_ssl_client_wraps_the_route_socket_with_sni_of_the_sealed_host() -> 
     assert [name for _sock, name in wrapped] == ["imap.example.com"]
 
 
+@contextlib.contextmanager
+def _armed(budget: float = 5.0, cancel: CancelToken | None = None) -> Any:
+    """A link armed as the guarded client arms it (watchdog and cancellation hook), released afterwards."""
+    link = Link(IoLimits.for_budget(budget, cancel=cancel))
+    link.arm()
+    try:
+        yield link
+    finally:
+        link.release()
+        link.drop()
+
+
+def _listener() -> tuple[socket.socket, tuple[str, int]]:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(4)
+    return listener, listener.getsockname()
+
+
+def _resolving_to(address: tuple[str, int], seen: list[tuple[str, int]] | None = None) -> Any:
+    def resolve(host: str, port: int) -> list[Any]:
+        if seen is not None:
+            seen.append((host, port))
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", address)]
+
+    return resolve
+
+
 def test_direct_route_connects_to_the_host(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[Any, float]] = []
-
-    def fake_connect(address: Any, timeout: float) -> str:
-        calls.append((address, timeout))
-        return "sock"
-
-    monkeypatch.setattr(imap.socket, "create_connection", fake_connect)
-    sock = imap.open_route_socket("imap.example.com", 993, 7.0, route_resolver=lambda _h: EgressRoute(None, None))
-    assert sock == "sock" and calls == [(("imap.example.com", 993), 7.0)]
+    listener, address = _listener()
+    seen: list[tuple[str, int]] = []
+    monkeypatch.setattr(imap, "_getaddrinfo", _resolving_to(address, seen))
+    try:
+        with _armed() as link:
+            sock = imap.open_route_socket(
+                "imap.example.com", 993, link, route_resolver=lambda _h: EgressRoute(None, None)
+            )
+            accepted, _ = listener.accept()
+            sock.sendall(b"ping")
+            assert accepted.recv(4) == b"ping"
+            accepted.close()
+    finally:
+        listener.close()
+    assert seen == [("imap.example.com", 993)]  # resolved in the helper thread, by name
 
 
 @pytest.mark.parametrize(
@@ -167,8 +202,8 @@ def test_direct_route_connects_to_the_host(monkeypatch: pytest.MonkeyPatch) -> N
     ],
 )
 def test_other_proxy_kinds_are_refused(route: EgressRoute, code: str) -> None:
-    with pytest.raises(ImapError) as raised:
-        imap.open_route_socket("imap.example.com", 993, 5.0, route_resolver=lambda _h: route)
+    with _armed() as link, pytest.raises(ImapError) as raised:
+        imap.open_route_socket("imap.example.com", 993, link, route_resolver=lambda _h: route)
     assert raised.value.code == code
 
 
@@ -176,8 +211,8 @@ def test_a_routing_refusal_is_routing_unavailable() -> None:
     def refuse(_host: str) -> EgressRoute:
         raise EgressError()
 
-    with pytest.raises(ImapError) as raised:
-        imap.open_route_socket("imap.example.com", 993, 5.0, route_resolver=refuse)
+    with _armed() as link, pytest.raises(ImapError) as raised:
+        imap.open_route_socket("imap.example.com", 993, link, route_resolver=refuse)
     assert raised.value.code == "routing_unavailable"
 
 
@@ -211,13 +246,14 @@ def test_socks5_route_sends_the_hostname_for_remote_dns(auth: bool, scheme: str)
     thread.start()
     credentials = "iso%20user:token@" if auth else ""
     route = EgressRoute(f"{scheme}://{credentials}127.0.0.1:{port}", None)
-    sock = imap.open_route_socket("imap.example.com", 993, 5.0, route_resolver=lambda _h: route)
-    try:
-        assert sock.recv(64) == b"* OK ready\r\n"
-    finally:
-        sock.close()
-        thread.join(5)
-        listener.close()
+    with _armed() as link:
+        sock = imap.open_route_socket("imap.example.com", 993, link, route_resolver=lambda _h: route)
+        try:
+            assert sock.recv(64) == b"* OK ready\r\n"
+        finally:
+            sock.close()
+            thread.join(5)
+            listener.close()
     name = b"imap.example.com"
     assert seen[-1] == b"\x05\x01\x00\x03" + bytes([len(name)]) + name + (993).to_bytes(2, "big")
     if auth:
@@ -362,8 +398,8 @@ def test_a_proxy_that_drops_the_configured_authentication_is_refused() -> None:
     thread.start()
     route = EgressRoute(f"socks5://iso:token@127.0.0.1:{port}", None)
     try:
-        with pytest.raises(ImapError) as raised:
-            imap.open_route_socket("imap.example.com", 993, 5.0, route_resolver=lambda _h: route)
+        with _armed() as link, pytest.raises(ImapError) as raised:
+            imap.open_route_socket("imap.example.com", 993, link, route_resolver=lambda _h: route)
     finally:
         thread.join(5)
         listener.close()
@@ -484,3 +520,126 @@ def test_the_soft_deadline_stops_before_the_next_command_and_logout_stays_polite
     assert raised.value.reason == "time_budget" and server.commands == before  # nothing was sent
     session.logout()
     assert server.verbs[-1] == "LOGOUT"
+
+
+# --- the deadline and cancellation cover connection establishment ------------------------------------
+#
+# Each stage stalls for ever: a resolver that never returns, a TCP connect that never completes, a
+# SOCKS5 proxy that never answers the method selection, a TLS peer that never answers the ClientHello.
+# With a 0.2 s budget (hard deadline 0.4 s) the attempt is imap_unreachable well within a second; a
+# cancellation is ImapStopped("cancelled") at once. No watchdog and no non-daemon thread survives.
+
+_STAGES = ("dns", "tcp", "socks", "tls")
+
+
+class _NeverReady:
+    """A selector whose socket never becomes writable: a TCP connect that never completes."""
+
+    def __enter__(self) -> _NeverReady:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def register(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def select(self, timeout: float | None = None) -> list[Any]:
+        time.sleep(timeout or 0.0)
+        return []
+
+
+def _silent_peer(listener: socket.socket, release: threading.Event) -> None:
+    """Accept every connection, read what arrives and never answer (until the test releases it)."""
+    listener.settimeout(0.05)
+    held: list[socket.socket] = []
+    while not release.is_set():
+        try:
+            conn, _ = listener.accept()
+        except OSError:
+            continue
+        conn.settimeout(0.05)
+        held.append(conn)
+        with contextlib.suppress(OSError):
+            conn.recv(1024)  # the SOCKS greeting or the ClientHello: read, never answered
+    for conn in held:
+        conn.close()
+
+
+@contextlib.contextmanager
+def _stalled(stage: str, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Route resolver for ``imap.connect`` with ``stage`` stalled; everything is released afterwards."""
+    release = threading.Event()
+    listener, address = _listener()
+    peer = threading.Thread(target=_silent_peer, args=(listener, release), daemon=True)
+    peer.start()
+    route = EgressRoute(None, None)
+    if stage == "dns":
+
+        def never(_host: str, _port: int) -> list[Any]:
+            release.wait(30)
+            return []
+
+        monkeypatch.setattr(imap, "_getaddrinfo", never)
+    elif stage == "socks":
+        route = EgressRoute(f"socks5://127.0.0.1:{address[1]}", None)
+    else:
+        monkeypatch.setattr(imap, "_getaddrinfo", _resolving_to(address))
+        if stage == "tcp":
+            monkeypatch.setattr(imap, "_new_selector", _NeverReady)
+    try:
+        yield lambda _host: route
+    finally:
+        release.set()
+        peer.join(5)
+        listener.close()
+
+
+def _non_daemon_threads() -> set[threading.Thread]:
+    return {thread for thread in threading.enumerate() if not thread.daemon}
+
+
+@pytest.mark.parametrize("stage", _STAGES)
+def test_a_stalled_connection_stage_ends_at_the_deadline(stage: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    before = _non_daemon_threads()
+    with _stalled(stage, monkeypatch) as route:
+        started = time.monotonic()
+        with pytest.raises(ImapError) as raised:
+            imap.connect("imap.example.com", 993, limits=IoLimits.for_budget(0.2), route_resolver=route)
+        elapsed = time.monotonic() - started
+    assert not isinstance(raised.value, ImapStopped) and raised.value.code == "imap_unreachable"
+    assert elapsed < 1.0
+    assert _guard_threads() == [] and _non_daemon_threads() == before
+    assert all(t.daemon for t in threading.enumerate() if t.name == imap.RESOLVER_NAME)  # abandoned, never joined
+
+
+@pytest.mark.parametrize("stage", _STAGES)
+def test_a_cancellation_ends_a_stalled_connection_stage_at_once(stage: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    before = _non_daemon_threads()
+    cancel = CancelToken()
+    with _stalled(stage, monkeypatch) as route:
+        timer = threading.Timer(0.15, cancel.cancel)
+        timer.start()
+        started = time.monotonic()
+        with pytest.raises(ImapStopped) as raised:
+            imap.connect("imap.example.com", 993, limits=IoLimits.for_budget(60.0, cancel=cancel), route_resolver=route)
+        elapsed = time.monotonic() - started
+        timer.join()
+    assert raised.value.reason == "cancelled" and elapsed < 1.0
+    assert _guard_threads() == [] and _non_daemon_threads() == before
+
+
+def test_a_connection_cancelled_before_it_starts_never_touches_the_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    lookups: list[tuple[str, int]] = []
+    routes: list[str] = []
+    monkeypatch.setattr(imap, "_getaddrinfo", _resolving_to(("127.0.0.1", 9), lookups))
+    cancel = CancelToken()
+    cancel.cancel()
+
+    def route(host: str) -> EgressRoute:
+        routes.append(host)
+        return EgressRoute(None, None)
+
+    with pytest.raises(ImapStopped) as raised:
+        imap.connect("imap.example.com", 993, limits=IoLimits.for_budget(60.0, cancel=cancel), route_resolver=route)
+    assert raised.value.reason == "cancelled" and lookups == [] and routes == [] and _guard_threads() == []

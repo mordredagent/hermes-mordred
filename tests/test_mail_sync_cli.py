@@ -494,3 +494,115 @@ def test_forget_waits_for_no_one_while_a_fetch_runs(
     assert code == 1 and "sync_in_progress" in err
     assert forget_env["secrets"].creds is not None
     assert int(store.status()["sources"]["mail"]["messages"]) == 3
+
+
+# --- forget whatever the flags say -------------------------------------------------------------------
+
+
+@pytest.fixture
+def sealed_forget_env(
+    tmp_path: Path, home: Path, store: ImportStore, fetch_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> dict[str, Any]:
+    """Rows and cursors of account ``mail`` and REAL sealed credentials (fake Enclave) for that label."""
+    from mordred_hermes.imports.mail.imap_sync import FetchOptions, run_fetch
+    from mordred_hermes.imports.mail.secrets import KEY_ID
+    from tests._platform_test_helpers import require_posix_tee
+
+    require_posix_tee()
+    assert run_fetch(FetchOptions(), fetch_env["env"]).inserted == 3
+    enclave = FakeEnclave()
+    secret_store = sealed_store(tmp_path / "sealed", enclave)
+    secret_store.ensure_key()
+    secret_store.store(gmail_creds())
+    monkeypatch.setattr(mail_sync_cli, "_secret_store", lambda: secret_store)
+    assert KEY_ID in enclave.keys and store.meta_items("mail_imap.mail.")
+    return {"store": secret_store, "enclave": enclave}
+
+
+def _gone(env: dict[str, Any]) -> bool:
+    from mordred_hermes.imports.mail.secrets import KEY_ID
+
+    secret_store = env["store"]
+    return not secret_store.sealed_path.exists() and not secret_store.residue() and KEY_ID not in env["enclave"].keys
+
+
+def test_forget_deletes_credentials_whose_flags_are_corrupt(
+    sealed_forget_env: dict[str, Any], store: ImportStore, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sealed_forget_env["store"].meta_path.write_text("{corrupt")
+    code, out, err = run(["mail", "forget", "--yes"], capsys)
+    assert code == 1 and "Mail credentials removed." in out and "account_unknown" in err
+    assert _gone(sealed_forget_env)  # the sealed file, the flags and the Enclave key, whatever the flags said
+    assert store.meta_items("mail_imap.mail.")  # the label could not be read: cursors are kept, and said so
+    code, out, err = run(["mail", "forget", "--yes", "--account", "mail"], capsys)
+    assert code == 0, err
+    assert "Removed 2 cursor record(s)." in out and store.meta_items("mail_imap.mail.") == {}
+
+
+def test_forget_with_missing_flags_and_a_label_deletes_everything(
+    sealed_forget_env: dict[str, Any], store: ImportStore, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sealed_forget_env["store"].meta_path.unlink()  # a setup interrupted between its two files
+    assert sealed_forget_env["store"].flags() is None
+    code, out, err = run(["mail", "forget", "--rows", "--yes", "--account", "mail"], capsys)
+    assert code == 0, err
+    assert "Mail credentials removed." in out and "Deleted 3 imported mail message(s)" in out
+    assert _gone(sealed_forget_env)
+    assert rows(store, "SELECT count(*) FROM import_messages") == [(0,)] and store.meta_items("mail_imap.mail.") == {}
+    assert rows(store, "SELECT count(*) FROM import_mail_refs") == [(0,)]
+
+
+def test_forget_is_retried_after_a_partial_deletion(
+    sealed_forget_env: dict[str, Any],
+    store: ImportStore,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret_store = sealed_forget_env["store"]
+    real_unlink = Path.unlink
+
+    def flaky(path: Path, missing_ok: bool = False) -> None:
+        if path == secret_store.meta_path:
+            raise PermissionError("flags file busy")
+        real_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", flaky)
+    code, out, err = run(["mail", "forget", "--yes"], capsys)
+    assert code == 1 and "removed" not in out  # the sealed file went, the flags did not: no success reported
+    assert not secret_store.sealed_path.exists() and secret_store.residue() and secret_store.flags() is None
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    code, out, err = run(["mail", "forget", "--yes", "--account", "mail"], capsys)  # the retry finishes the job
+    assert code == 0, err
+    assert "Mail credentials removed." in out and _gone(sealed_forget_env)
+    assert store.meta_items("mail_imap.mail.") == {}
+
+
+def test_forget_never_reports_success_while_a_sealed_file_remains(
+    sealed_forget_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secret_store = sealed_forget_env["store"]
+    monkeypatch.setattr(secret_store, "forget", lambda: True)  # claims success, deletes nothing
+    code, out, err = run(["mail", "forget", "--yes"], capsys)
+    assert code == 1 and "credentials_left" in err and "removed" not in out
+    assert secret_store.sealed_path.exists()
+
+
+def test_forget_reports_an_enclave_key_it_could_not_delete(
+    sealed_forget_env: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mordred_hermes.imports.mail.secrets import KEY_ID
+
+    enclave = sealed_forget_env["enclave"]
+    real_delete = enclave.delete_enclave_key
+
+    def broken(_key_id: str) -> None:
+        raise OSError("keychain unavailable")
+
+    enclave.delete_enclave_key = broken
+    code, _out, err = run(["mail", "forget", "--yes"], capsys)
+    assert code == 1 and "key_left" in err and KEY_ID in enclave.keys
+    assert not sealed_forget_env["store"].sealed_path.exists()
+    enclave.delete_enclave_key = real_delete
+    code, _out, err = run(["mail", "forget", "--yes"], capsys)  # nothing left on disk: the retry deletes the key
+    assert code == 0, err
+    assert KEY_ID not in enclave.keys

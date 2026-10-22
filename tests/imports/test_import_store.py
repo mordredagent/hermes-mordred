@@ -94,9 +94,9 @@ def test_initialize_creates_only_import_tables_bound_to_the_profile(tmp_path: Pa
 
     meta = store.initialize(tmp_path)
 
-    assert (meta.schema_version, meta.profile_home) == (1, str(tmp_path.resolve()))
+    assert (meta.schema_version, meta.profile_home) == (2, str(tmp_path.resolve()))
     names = {name for (name,) in rows(store, "SELECT name FROM sqlite_master WHERE type IN ('table', 'trigger')")}
-    assert set(_schema.TABLES) | {"import_parts_fts"} <= names
+    assert set(_schema.TABLES) | {"import_parts_fts"} <= names and "import_mail_refs" in names
     assert {"import_parts_fts_insert", "import_parts_fts_delete", "import_parts_fts_update"} <= names
     assert not any(name.startswith("activity_") for name in names)
     assert store.initialize(tmp_path) == meta == store.meta()
@@ -128,13 +128,13 @@ def test_a_store_bound_to_another_home_is_refused(tmp_path: Path) -> None:
 def test_a_newer_schema_is_refused_not_recreated(tmp_path: Path) -> None:
     store = make_store(tmp_path)
     with store.connection() as conn:
-        conn.execute("UPDATE import_meta SET value = '2' WHERE key = 'schema_version'")
+        conn.execute("UPDATE import_meta SET value = '3' WHERE key = 'schema_version'")
 
     for call in (lambda: store.initialize(tmp_path), store.meta, store.status):
         with pytest.raises(ImportRefused) as caught:
             call()
         assert caught.value.code == "schema_newer"
-    assert rows(store, "SELECT value FROM import_meta WHERE key = 'schema_version'") == [("2",)]
+    assert rows(store, "SELECT value FROM import_meta WHERE key = 'schema_version'") == [("3",)]
 
 
 def test_a_store_without_a_schema_version_is_unavailable(tmp_path: Path) -> None:
@@ -149,22 +149,46 @@ def test_a_store_without_a_schema_version_is_unavailable(tmp_path: Path) -> None
 
 def test_an_older_schema_is_upgraded_through_migrations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = make_store(tmp_path)
-    monkeypatch.setattr(store_module, "SUPPORTED_SCHEMA_VERSION", 2)
-    monkeypatch.setattr(_schema, "MIGRATIONS", {1: ("ALTER TABLE import_runs ADD COLUMN note TEXT",)})
+    monkeypatch.setattr(store_module, "SUPPORTED_SCHEMA_VERSION", 3)
+    monkeypatch.setattr(
+        _schema, "MIGRATIONS", {**_schema.MIGRATIONS, 2: ("ALTER TABLE import_runs ADD COLUMN note TEXT",)}
+    )
 
-    assert store.initialize(tmp_path).schema_version == 2
-    assert rows(store, "SELECT value FROM import_meta WHERE key = 'schema_version'") == [("2",)]
+    assert store.initialize(tmp_path).schema_version == 3
+    assert rows(store, "SELECT value FROM import_meta WHERE key = 'schema_version'") == [("3",)]
     assert "note" in {row[1] for row in rows(store, "PRAGMA table_info(import_runs)")}
+
+
+def _as_v1(store: ImportStore) -> None:
+    """Turn a fresh store back into a schema-v1 one (no ``import_mail_refs``, no message-id index)."""
+    with store.connection() as conn:
+        conn.execute("DROP TABLE import_mail_refs")
+        conn.execute("DROP INDEX import_messages_message_id")
+        conn.execute("UPDATE import_meta SET value = '1' WHERE key = 'schema_version'")
+
+
+def test_a_v1_store_is_upgraded_in_place_to_v2(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    commit(store, mail_conv(), [mail_message("m1@example.com", "kept across the upgrade")])
+    _as_v1(store)
+
+    assert ImportStore(tmp_path / "mordred.db", plain_opener).initialize(tmp_path).schema_version == 2
+
+    assert rows(store, "SELECT value FROM import_meta WHERE key = 'schema_version'") == [("2",)]
+    names = {name for (name,) in rows(store, "SELECT name FROM sqlite_master WHERE type IN ('table', 'index')")}
+    assert {"import_mail_refs", "import_mail_refs_ref", "import_messages_message_id"} <= names
+    assert rows(store, "SELECT count(*) FROM import_mail_refs") == [(0,)]
+    assert store.contains([mail_uid("m1@example.com")]) == {mail_uid("m1@example.com")}  # rows untouched
 
 
 def test_a_missing_migration_step_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = make_store(tmp_path)
-    monkeypatch.setattr(store_module, "SUPPORTED_SCHEMA_VERSION", 2)
+    monkeypatch.setattr(store_module, "SUPPORTED_SCHEMA_VERSION", 3)
 
     with pytest.raises(ImportRefused) as caught:
         store.initialize(tmp_path)
     assert caught.value.code == "store_unavailable"
-    assert rows(store, "SELECT value FROM import_meta WHERE key = 'schema_version'") == [("1",)]
+    assert rows(store, "SELECT value FROM import_meta WHERE key = 'schema_version'") == [("2",)]
 
 
 # --- write_thread: idempotency and revisions --------------------------------------------------------
@@ -484,7 +508,7 @@ def test_status_reports_counts_and_the_latest_run_only(tmp_path: Path) -> None:
 
     status = store.status()
 
-    assert status["schema_version"] == 1
+    assert status["schema_version"] == 2
     assert status["sources"] == {
         "telegram": {"conversations": 1, "messages": 2, "parts": 2, "uncommitted_messages": 0},
         "mail": {"conversations": 1, "messages": 0, "parts": 0, "uncommitted_messages": 1},
@@ -499,7 +523,7 @@ def test_status_reports_counts_and_the_latest_run_only(tmp_path: Path) -> None:
 
 
 def test_an_empty_store_has_no_runs(tmp_path: Path) -> None:
-    assert make_store(tmp_path).status() == {"schema_version": 1, "sources": {}, "runs": {}, "last_run": None}
+    assert make_store(tmp_path).status() == {"schema_version": 2, "sources": {}, "runs": {}, "last_run": None}
 
 
 def test_sources_count_committed_messages_only(tmp_path: Path) -> None:
@@ -528,8 +552,8 @@ def test_meta_markers_round_trip(tmp_path: Path) -> None:
     store.delete_meta(key)
     store.delete_meta(key)  # absent is fine
     assert store.get_meta(key) is None
-    assert store.get_meta("schema_version") == "1"  # reserved keys stay readable
-    assert store.meta() == store_module.ImportMeta(1, str(tmp_path.resolve()))
+    assert store.get_meta("schema_version") == "2"  # reserved keys stay readable
+    assert store.meta() == store_module.ImportMeta(2, str(tmp_path.resolve()))
 
 
 @pytest.mark.parametrize("key", sorted(store_module.RESERVED_META_KEYS))
@@ -541,7 +565,7 @@ def test_reserved_meta_keys_are_never_settable(tmp_path: Path, key: str) -> None
             change()
         assert raised.value.code == "reserved_meta_key"
     assert rows(store, "SELECT key, value FROM import_meta ORDER BY key") == before
-    assert store.meta().schema_version == 1
+    assert store.meta().schema_version == 2
 
 
 @pytest.mark.parametrize(

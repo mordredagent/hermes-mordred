@@ -147,7 +147,8 @@ class FakeImapServer:
 
     # -- client side ------------------------------------------------------------------------
 
-    def connect(self, _timeout: float | None = None) -> socket.socket:
+    def connect(self, _link: object = None) -> socket.socket:
+        """A connected client socket (the ``raw_socket`` of the guarded client; its link is unused)."""
         client, server = socket.socketpair()
         thread = threading.Thread(target=self._serve, args=(server,), daemon=True)
         thread.start()

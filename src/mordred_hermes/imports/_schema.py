@@ -1,4 +1,4 @@
-"""Schema v1 of the ``import_*`` tables in ``mordred.db`` (the activity store's encrypted file).
+"""Schema v2 of the ``import_*`` tables in ``mordred.db`` (the activity store's encrypted file).
 
 The import tables share the file with the activity tables but never their
 metadata: :data:`STATEMENTS` create everything below, including the separate
@@ -20,6 +20,12 @@ sentence as one token and a name inside it would never match. FTS5
 ``secure-delete`` is enabled so deleted parts leave no tokens behind in the
 index. Both are available in the stdlib SQLite and in the bundled SQLCipher.
 
+``import_mail_refs`` (v2) keeps, per stored mail message, the normalised
+Message-IDs it references (``In-Reply-To`` and ``References``), indexed by the
+referenced id, so a batch that brings in a missing parent finds the replies
+fetched before it and merges their conversations (``ImportStore.write_batch``);
+v2 also indexes ``import_messages.message_id`` for that lookup.
+
 :data:`MIGRATIONS` has the shape of the activity schema's: ``MIGRATIONS[n]``
 upgrades ``n`` to ``n + 1`` inside the transaction that opens the store.
 """
@@ -29,7 +35,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Final
 
-SCHEMA_VERSION: Final = 1
+SCHEMA_VERSION: Final = 2
 
 TABLES: Final = (
     "import_meta",
@@ -38,12 +44,13 @@ TABLES: Final = (
     "import_parts",
     "import_runs",
     "import_accounts",
+    "import_mail_refs",
 )
 
 #: Run states. ``open`` is a run in progress; ``dry_run`` rows never persist message data.
 RUN_STATES: Final = ("open", "dry_run", "committed", "failed")
 
-STATEMENTS: Final = (
+_V1_STATEMENTS: Final = (
     """
     CREATE TABLE import_meta (
         key TEXT PRIMARY KEY,
@@ -152,5 +159,21 @@ STATEMENTS: Final = (
     """,
 )
 
-#: ``MIGRATIONS[n]`` upgrades a store from schema ``n`` to ``n + 1`` (none yet).
-MIGRATIONS: Final[Mapping[int, tuple[str, ...]]] = {}
+#: v2: the referenced ids of mail messages (cross-batch thread reconciliation).
+_MAIL_REFS: Final = (
+    """
+    CREATE TABLE import_mail_refs (
+        source_uid TEXT NOT NULL,
+        ref_message_id TEXT NOT NULL,
+        PRIMARY KEY (source_uid, ref_message_id)
+    )
+    """,
+    "CREATE INDEX import_mail_refs_ref ON import_mail_refs (ref_message_id)",
+    # The reconciliation looks referenced ids up among stored messages.
+    "CREATE INDEX import_messages_message_id ON import_messages (message_id)",
+)
+
+STATEMENTS: Final = (*_V1_STATEMENTS, *_MAIL_REFS)
+
+#: ``MIGRATIONS[n]`` upgrades a store from schema ``n`` to ``n + 1``.
+MIGRATIONS: Final[Mapping[int, tuple[str, ...]]] = {1: _MAIL_REFS}
