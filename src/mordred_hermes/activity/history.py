@@ -142,6 +142,11 @@ _WORD_SEGMENT_RE: Final = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,23}$")
 _URL_RE: Final = re.compile(r"(?i)\b[a-z][a-z0-9+.-]{0,31}://[^\s<>\"']+")
 #: A bare host in prose (``app.example.com``); not the domain of an e-mail address.
 _BARE_HOST_RE: Final = re.compile(r"(?i)(?<![\w@.-])((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24})(?![\w-])")
+#: A bare IPv4 address or ``localhost``, optionally with a port ("on 127.0.0.1 earlier", "localhost:3000").
+_BARE_ADDRESS_RE: Final = re.compile(
+    r"(?i)(?<![\w@.:/-])((?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)|localhost)"
+    r"(?::\d{1,5})?(?![\w-]|\.\w)"
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -310,13 +315,16 @@ def host_of(value: Any) -> str | None:
 
 
 def hosts_in(text: str, limit: int = 3) -> tuple[str, ...]:
-    """Hosts the text names, as URLs or bare host names, in order of appearance (at most ``limit``)."""
+    """Hosts the text names, as URLs, bare host names, IPv4 addresses or ``localhost``, in order of appearance
+    (at most ``limit``)."""
     found: dict[str, None] = {}
     for match in _URL_RE.finditer(text):
         host = host_of(match.group(0))
         if host:
             found.setdefault(host)
-    for match in _BARE_HOST_RE.finditer(_URL_RE.sub(" ", text)):
+    stripped = _URL_RE.sub(" ", text)
+    bare = sorted([*_BARE_HOST_RE.finditer(stripped), *_BARE_ADDRESS_RE.finditer(stripped)], key=lambda m: m.start())
+    for match in bare:
         host = host_of(match.group(1))
         if host:
             found.setdefault(host)

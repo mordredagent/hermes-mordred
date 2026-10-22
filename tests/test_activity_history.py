@@ -266,6 +266,13 @@ def test_hosts_in_finds_urls_and_bare_hosts_not_mail_domains() -> None:
     assert len(history.hosts_in("a.com b.com c.com d.com")) == 3
 
 
+def test_hosts_in_finds_bare_ipv4_addresses_and_localhost() -> None:
+    assert history.hosts_in("What did I search for on 127.0.0.1 earlier?") == ("127.0.0.1",)
+    assert history.hosts_in("check localhost:3000, then 10.0.0.5:8080.") == ("localhost", "10.0.0.5")
+    assert history.hosts_in("see example.org and 192.168.1.20") == ("example.org", "192.168.1.20")
+    assert history.hosts_in("version 999.1.1.1, release 1.2.3, build 1.2.3.4.5") == ()
+
+
 @pytest.mark.parametrize(
     ("value", "host"),
     [
