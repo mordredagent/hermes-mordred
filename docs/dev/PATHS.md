@@ -39,6 +39,8 @@ the optional workspace target has user-home paths of its own.
 | `<db>.mordred-enc` | database conversion | the verified converted copy (encrypted, or plain when decrypting), renamed over `<db>` |
 | `<home>/mordred/memory-vault.optout` | encryption CLI | pauses the memory hook (paused by operator) |
 | `<home>/mordred/telegram/` | extension (Telegram importer) | encrypted read-only Telegram archive |
+| `<home>/plugin-data/mordred/mordred.db` | activity and imports (macOS, SQLCipher) | activity tables and `import_*` imported-message tables |
+| `<home>/mordred/reader_sessions.json` | privacy_check reader mode | durable record (SHA-256 digests) of sessions that used a reader tool |
 | `<home>/mordred/uninstall/` | `uninstall` | `.env` lines (`HERMES_MEMORY_KEY`, `MORDRED_*`) moved out of `.env`, mode `0600` |
 | `<home>/extension/` | extension and keyvault signer | pairing, E2E, WebAuthn, history, wallet config |
 | `<home>/extension/activity_pending.json` | `activity pair-operator` / extension server | pending activity pair codes (SHA-256 of the code only), `0600` |
@@ -455,6 +457,47 @@ key. The directory is mode `0700`; files are mode `0600`.
 Every directory here carries a `.gitignore` of `*` (rewritten if changed), so
 not even the ciphertext can be committed if `HERMES_HOME` sits inside a git
 working tree.
+
+Imported-message provenance bumps the index: `index.enc` version 2 carries
+`retired_to: mordred.db` after `telegram migrate-store --commit`, and an older
+Mordred refuses a version-2 index instead of diverging. The `.enc` files remain
+until `--finalize --yes`. See
+[SPEC.md](SPEC.md#imported-message-provenance-2026-10-22).
+
+## `<home>/plugin-data/mordred/mordred.db`
+
+The SQLCipher-protected Mordred store, opened only through the activity
+protection gate (macOS; `conversion_pending`, `not_armed`,
+`unprotected_process` and `no_key` refuse). It is the activity component's file
+and also holds the imported-message tables below. See
+[SPEC.md](SPEC.md#imported-message-provenance-2026-10-22). Private mode `0600`
+beneath a mode-`0700` directory.
+
+### Imported message tables
+
+Written by the `mordred_hermes.imports` library (Telegram sync, `telegram
+migrate-store`, `mail import`) and read by `telegram_ask` and
+`mordred_history_search`:
+
+- `import_meta` (`schema_version`), `import_conversations`, `import_messages`,
+  `import_parts` with the FTS5 index `import_parts_fts`, `import_runs` (staging
+  journal; only committed runs are readable) and `import_accounts` (owner mail
+  addresses).
+- `activity status` and activity retention ignore every `import_*` table, and
+  the import code never touches `activity_*` tables.
+- `ActivityStore.backup` / `restore` copy the whole file, so a restore also
+  rewinds imported history; there is no per-table backup.
+- Telegram deletion: `telegram logout --forget` removes the Telegram `import_*`
+  rows (with `secure_delete=ON`).
+
+## `<home>/mordred/reader_sessions.json`
+
+Durable record of Hermes sessions that have used a reader tool
+(`telegram_ask`, `telegram_chats`, `mordred_history_search`), owned by
+`privacy_check/_reader_sessions.py`. Mode `0600`, replaced atomically, bounded
+in size. Session ids are stored as SHA-256 digests, never raw. A missing or
+unwritable record blocks reader tools (`egress.reader_unrecorded`). On Windows
+the file uses the checked private-storage path. It carries no message content.
 
 ## `<home>/desktop-plugins/mordred/` and `<home>/plugins/mordred/`
 

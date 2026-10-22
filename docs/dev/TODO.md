@@ -714,3 +714,37 @@ the receiver side is [`SPEC.md`](./SPEC.md) §"Event contract".
 - [ ] Record Hermes's own browser tool calls as `source: hermes` events via
   `post_tool_call`.
 - [ ] Accept `訂正:` / `correct:` corrections typed in Hermes chat.
+||||||| parent of 0564de847 (docs: specify imported-message provenance on mordred.db)
+## Imported message provenance
+
+Spec: [SPEC.md](SPEC.md#imported-message-provenance-2026-10-22); plan:
+[PLAN.md](PLAN.md#imported-message-provenance-implementation). Nothing below is
+implemented unless checked.
+
+- [ ] Precondition: commit the activity code on `feat/browser-activity-learning`
+  and reconcile SPEC activity schema v2 versus code v1; create the
+  `feat/imported-message-provenance` worktree from it.
+- [ ] PR 1: documentation (this change).
+- [ ] PR 2: `imports/` records, render, evidence.
+- [ ] PR 3: `ImportStore`, schema, legacy `.enc` adapter, public `keyed_opener`.
+- [ ] PR 4: Telegram `convert_message`, sync sink, `index.enc` version 2.
+- [ ] PR 5: `telegram migrate-store` (dry run, `--commit`, `--finalize --yes`).
+- [ ] PR 6: ask rendering, evidence validation, `telegram_ask_evidence` frame.
+- [ ] PR 7: reader mode and durable `reader_sessions.json` (before PR 8).
+- [ ] PR 8: `mordred_history_search` tool, skill section and prompt.
+- [ ] PR 9: mail collector library and fixtures.
+- [ ] PR 10: `mail import` / `mail status` CLI.
+- [ ] PR 11: evaluation generator, scorer and conformance tests.
+- [ ] PR 12: evaluation drivers, gated live test, then a docs PR recording live
+  results in [CI.md](CI.md#manual-live-device-validation-log).
+- [ ] Live-gated validation: `telegram migrate-store` dry run and commit on a
+  throwaway `HERMES_HOME`; `mail import --dry-run` on fixtures; owner counts-only
+  dry run on real Takeout mail; `provenance_eval --tier smoke` on both drivers;
+  end-to-end reader-mode refusal after a Hermes restart.
+
+Later (not scheduled):
+
+- [ ] Gmail API collector feeding the same normalization path.
+- [ ] Header-language decision (`label_language` default) after the evaluation.
+- [ ] Linux and Windows `mordred.db` stores (today those platforms keep the
+  `.enc` archive and `telegram_ask`).

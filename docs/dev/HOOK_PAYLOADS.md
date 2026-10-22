@@ -167,6 +167,35 @@ stable contract. Review only the concrete spawn paths touched by a change and
 verify their explicit `env`, timeout, and cleanup behavior against the current
 Hermes source.
 
+## 9. Reader-mode audit reasons
+
+Status: implemented for reader mode (`privacy_check/_audit_reasons.py`,
+`tools/hook_payload_contract.json`, which now lists `args`, `session_id` and
+`tool_name` for `pre_tool_call`); the handler codes land with the tool PRs. Mordred still reads only `tool_name` from `pre_tool_call`; reader mode
+additionally uses the `session_id` that Hermes passes to tool handlers and
+hooks. A missing `session_id` is a refusal, not a guess.
+
+Reader-mode refusals are `rule` values (`_audit_reasons.py::EgressRule`) carried
+under the existing reason `policy.egress.tool_blocked`, like every other
+`egress.*` rule; `policy.egress.reader_mode` is the one new `ReasonCode` and is
+written once per session when reader mode is entered (counts only, no args).
+
+| Code | Kind | Emitted when | Effect |
+|---|---|---|---|
+| `policy.egress.reader_mode` | reason | a reader tool was allowed and the durable record was written; the session is now in reader mode | audit entry only |
+| `egress.reader_unrecorded` | rule | a reader tool is about to run but the durable session record could not be written | tool call blocked |
+| `egress.reader_no_session` | rule | a reader tool is called without a usable `session_id` | tool call blocked |
+| `egress.reader_locked` | rule | a reader session calls a tool outside the reader allowlist (writes, exec, messaging, scheduling, delegation, payments, MCP, unknown tools) at any privacy level, including `off` | tool call blocked |
+| `egress.reader_web` | rule | a reader session calls a web search or URL-loading tool | approval prompt at every level; blocklisted domains stay refused |
+| `reader_mode_unavailable` | handler code | a reader-tool handler cannot confirm `egress.reader_mode_established(session_id)` (plugin disabled, bridge path, or a session that cannot inherit its record after restart or compaction) | handler refuses; no data returned |
+| `import_store_unavailable` | handler code | the `mordred.db` gate or open refused after `telegram migrate-store --commit` | read or sync refuses; no fallback to `.enc` |
+| `account_mismatch` | handler code | `get_me().id` differs from `ArchiveIndex.account_id` during Telegram conversion | conversion and sync refuse |
+
+Audit records for these codes follow the existing rules: bounded fields, no
+message text, no raw session id (the record stores SHA-256 digests), no addresses or chat titles.
+The behavior of the reader allowlist and blocklist is specified in
+[`SPEC.md`](./SPEC.md#imported-message-provenance-2026-10-22).
+
 ## Cross-cutting findings → SPEC.md updates
 
 - No `origin_skill`: install-time per-skill policy plus generic runtime guard.

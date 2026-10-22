@@ -311,6 +311,54 @@ in the manual log below; until then native acceptance remains not run. Source
 or editable unit evidence must be distinguished from installed-wheel runtime
 and actual-device evidence.
 
+## Provenance evaluation runs
+
+Specification: [Imported-message provenance evaluation](SPEC.md#imported-message-provenance-2026-10-22).
+CI runs only the model-free tests (`tests/test_provenance_eval_generator.py`,
+`_score.py`, `_conformance.py`). Live runs are explicit and never automatic.
+
+Gate and configuration for `tests/integration/test_provenance_eval.py` and
+`python -m tools.provenance_eval`:
+
+- `MORDRED_PROVENANCE_EVAL=1` is required; without it the integration test is
+  skipped.
+- Endpoint and model are supplied through environment variables, one set per
+  driver (exact names are fixed in the PR that adds the drivers and recorded
+  here then): the privacy-LLM driver (Venice `deepseek-v4-flash` or a loopback
+  OpenAI-compatible endpoint) and the Hermes driver. A Hermes model that is
+  neither Venice nor loopback reports `unavailable`. API keys come from the
+  environment or the sealed store, never from arguments or the repository.
+- Runs use a throwaway `HERMES_HOME` with a synthetic SQLCipher setup; output
+  JSONL goes to `--out` outside the repository.
+
+Tiers: `--tier smoke` (a few threads, one repetition, to prove wiring on both
+drivers), `--tier standard` (full question set, `--reps 3` on the privacy
+driver), `--tier full` (header A/B across `ja`/`en` and placement, top two
+styles repeated through the Hermes driver). Use `--plan` for the call and token
+estimate and `--max-calls` / `--budget-usd` as hard limits. A missing cell makes
+the result `UNAVAILABLE`; thresholds are in the SPEC section. A live result
+describes the recorded model, prompt digest and Hermes version only.
+
+Log-entry template for the Manual live-device validation log (append, do not
+replace earlier entries):
+
+```
+- **YYYY-MM-DD — Provenance evaluation (<tier>).**
+  Source candidate `<commit>` on <OS/arch>, Python <ver>, Hermes <ver>.
+  Privacy driver: <provider/model id>, catalog metadata <...>, temperature,
+  max_tokens, thinking <...>. Hermes driver: <model id or unavailable>.
+  Seed <n>, truth version <n>, prompt digest <hash>, header style <id>,
+  repetitions <n>. Calls <n>, estimated cost <...>.
+  Results with Wilson 95% intervals: critical swaps <n/N>; other/other and
+  same-name merges <n/N>; quote/forward misattribution <n/N>; unsupported
+  claims <n/N>; citation validity <n/N>; grounded-correct <n/N>; correct
+  abstention <n/N>; over-abstention <n/N>; forbidden calls attempted <n>,
+  executed <n>.
+  Threshold outcome: PASS / FAIL / UNAVAILABLE per cell. Header A/B outcome and
+  any `label_language` decision. Not claimed: other models, other prompts,
+  Windows/Linux stores, whole-product acceptance.
+```
+
 ## `upstream-check.yml` details
 
 Monday 03:00 UTC and manual dispatch retain independent PyPI/main AST hook
