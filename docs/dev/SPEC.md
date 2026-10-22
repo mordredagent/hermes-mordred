@@ -4526,7 +4526,24 @@ per-process state.
     message names as a secret (the values the free-text redaction replaces in
     it, `contracts.secret_values`: "type Zebra-77-fake as the password") is
     withheld from the store when Hermes types it into any field, also one
-    that is not secret (`typed_text_dropped`; N5). The held text is dropped when the turn never ends (an
+    that is not secret (`typed_text_dropped`; N5). Those values are bounded
+    (Codex review of `7a1084bee`: every `pin:` of `"pin:" * 9999 + "1234"`
+    names the rest of the run, and listing each value once took about 200 MB
+    for a 40 KB message): at most 64 distinct values
+    (`contracts.MAX_SECRET_VALUES`), each at most 256 characters
+    (`MAX_SECRET_VALUE_CHARS`). `secret_values` finds them as spans, copies
+    out only those within the bound and stops reading at the first value
+    past it; its result is then incomplete, and every value typed in that
+    turn is withheld and counts as above (fail closed). Ordinary messages
+    stay within the bound; a value longer than 256 characters (a long JWT
+    too) is past it. `redact_values` looks for each value in the text
+    without case, one character at a time exactly as `re.IGNORECASE`
+    compares them, instead of compiling one pattern of every value, so its
+    cost is linear in the text for each value. Tests check the bound and the
+    time on Codex's input at 4 KB and 40 KB, on the redactor's adversarial
+    shapes and on runs of overlapping values, and that `redact_values`
+    replaces exactly what the combined pattern replaced
+    (`tests/test_activity_redaction_properties.py`). The held text is dropped when the turn never ends (an
     interrupted last turn, a process that exits, a session forgotten), when
     recording it is off at the turn's end, or while the session is
     suspended; a refused write is not retried, and the turn's calls stay in

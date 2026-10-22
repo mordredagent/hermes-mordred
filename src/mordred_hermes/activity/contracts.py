@@ -1361,7 +1361,7 @@ def _readings(text: str, keyword: re.Match[str]) -> list[re.Match[str]]:
     return [keyword, first] if first is not None else [keyword]
 
 
-def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+def _merged(spans: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
     """``spans`` in order, overlapping or touching ones joined."""
     merged: list[tuple[int, int]] = []
     for start, end in sorted(spans):
@@ -1377,8 +1377,9 @@ def _secret_spans(text: str) -> list[tuple[int, int]]:
     return _merged(_found_spans(text))
 
 
-def _found_spans(text: str, *, every_keyword: bool = False) -> list[tuple[int, int]]:
-    """Every value span any form finds for any reading of any keyword, before merging.
+def _found_spans(text: str, *, every_keyword: bool = False) -> Iterator[tuple[int, int]]:
+    """Every value span any form finds for any reading of any keyword, before merging, as it is found (so
+    :func:`secret_values` can stop reading where its bound is passed).
 
     With ``every_keyword`` also the keywords inside a closed value (:func:`_closed_part`), whose values lie
     inside it and change nothing in the redaction, but are each a value of their own (:func:`secret_values`).
@@ -1389,7 +1390,6 @@ def _found_spans(text: str, *, every_keyword: bool = False) -> list[tuple[int, i
     # A keyword inside a URL is a parameter name or a path word: the URL scrubber's business.
     urls = [match.span() for match in _URL_IN_TEXT_RE.finditer(text)]
     index = _TextIndex(text)
-    spans: list[tuple[int, int]] = []
     closed = (0, 0)  # the furthest part of a value whose keywords name nothing outside it (_closed_part)
     pos = url = 0
     while (keyword := _SECRET_KEYWORD_RE.search(text, pos)) is not None:
@@ -1403,13 +1403,12 @@ def _found_spans(text: str, *, every_keyword: bool = False) -> list[tuple[int, i
             continue
         for reading in _readings(text, keyword):
             # A value named before the keyword is never inside a URL.
-            spans += [span for span in _values_before(index, reading) if not (url and urls[url - 1][1] > span[0])]
+            yield from [span for span in _values_before(index, reading) if not (url and urls[url - 1][1] > span[0])]
             for span in _values_after(index, reading):
-                spans.append(span)
+                yield span
                 part = _closed_part(index, span) if span[1] > closed[1] else None
                 if part is not None and part[1] > closed[1]:
                     closed = part
-    return spans
 
 
 def _redact_keyword_values(text: str) -> tuple[str, bool]:
@@ -1531,17 +1530,120 @@ def redact_secret_shaped_tokens(text: str) -> tuple[str, bool]:
     return _ASCII_TOKEN_RE.sub(one, text), replaced
 
 
-def secret_values(text: str) -> list[str]:
+#: Most distinct values :func:`secret_values` lists for one text. Each keyword's value is listed on its own, and the
+#: values of the keywords of one unquoted run overlap: every ``pin:`` of ``"pin:" * 9999 + "1234"`` names the rest
+#: of the run (Codex review of 7a1084bee).
+MAX_SECRET_VALUES: Final = 64
+
+
+@dataclass(frozen=True, slots=True)
+class SecretValues:
+    """The values a text names as secrets (:func:`secret_values`). Memory only: never logged or stored."""
+
+    values: tuple[str, ...]
+    #: False when the text names more than is listed (:func:`secret_values`): a caller that withholds what matches
+    #: these values must then withhold everything it would have compared with them (fail closed).
+    complete: bool
+
+
+def secret_values(text: str) -> SecretValues:
     """The values :func:`redact_text_secrets` replaces in ``text`` (JWTs, key-prefixed tokens, PEM armour lines,
     the values its keywords name), once each, in order; for a caller that must withhold the same values
     elsewhere (Hermes's typed text). Each value any form finds for any keyword is listed on its own, besides
-    the merged span the redaction replaces ("PIN code=1234": ``code=1234`` and ``1234``). Callers keep them in
-    memory only: never log or store them."""
-    values = [match.group(0) for pattern in (_JWT_RE, _KEY_PREFIX_RE, _PEM_RE) for match in pattern.finditer(text)]
+    the merged span the redaction replaces ("PIN code=1234": ``code=1234`` and ``1234``).
+
+    Bounded: at most :data:`MAX_SECRET_VALUES` distinct values, each at most :data:`MAX_SECRET_VALUE_CHARS`
+    characters long. Values are found as spans and only those within the bound are copied out; reading stops at
+    the first value past it (one more distinct value, or a longer one: a long unquoted run is redacted to its end,
+    and every keyword inside it names a suffix of it). The values found until then are listed and ``complete`` is
+    false, so a caller fails closed instead of comparing with a partial list. Ordinary text stays within the bound
+    (the phrase corpus of ``tests/test_activity_redaction_properties.py``); the cost is that of the redaction."""
+    found: dict[str, tuple[int, int, int]] = {}  # value -> (source, start, end) where it was first found
+
+    def listed(source: int, within: str, span: tuple[int, int]) -> bool:
+        """List the value at ``span`` of ``within``; ``False`` once it passes the bound."""
+        start, end = span
+        if end - start > MAX_SECRET_VALUE_CHARS:
+            return False
+        value = within[start:end]
+        if value and value != REDACTED and value not in found:
+            if len(found) == MAX_SECRET_VALUES:
+                return False
+            found[value] = (source, start, end)
+        return True
+
+    def result(complete: bool) -> SecretValues:
+        return SecretValues(tuple(sorted(found, key=found.__getitem__)), complete)
+
+    for pattern in (_JWT_RE, _KEY_PREFIX_RE, _PEM_RE):
+        if not all(listed(0, text, match.span()) for match in pattern.finditer(text)):
+            return result(False)
     clean = redact_secret_tokens(text)
-    found = _found_spans(clean, every_keyword=True)
-    values += [clean[start:end] for start, end in [*sorted(found), *_merged(found)]]
-    return [value for value in dict.fromkeys(values) if value and value != REDACTED]
+    spans: list[tuple[int, int]] = []
+    for span in _found_spans(clean, every_keyword=True):
+        if not listed(1, clean, span):
+            return result(False)
+        spans.append(span)
+    return result(all(listed(1, clean, span) for span in _merged(spans)))
+
+
+#: An ASCII letter or digit, the characters a whole word of :func:`redact_values` must not touch.
+_ASCII_ALNUM: Final = frozenset("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+#: Characters :mod:`re` compares without case although neither one's upper case gives the other's lower case.
+_CASE_KEY_FIXES: Final[Mapping[str, str]] = {"\u1fd3": "\u0390", "\u1fe3": "\u03b0", "\ufb05": "\ufb06"}
+#: Keys :class:`_CaseKeys` remembers; past this many distinct characters a key is worked out each time.
+_MAX_CASE_KEYS: Final = 4096
+
+
+def _case_key(char: str) -> str:
+    """One character that stands for ``char`` without case: two characters get the same key exactly when
+    ``re.IGNORECASE`` compares them equal, and a key is an ASCII letter or digit exactly when ``(?i)[A-Za-z0-9]``
+    matches ``char`` (checked for every code point by the tests). The lower case of the upper case (the long s,
+    the Kelvin sign and the dotless i become ``s``, ``k`` and ``i``); where either changes the length (``ß``, the
+    dotted capital I), the first character of the lower case."""
+    upper = char.upper()
+    lower = upper.lower() if len(upper) == 1 else ""
+    if len(lower) != 1:
+        lower = char.lower()[:1]
+    return _CASE_KEY_FIXES.get(lower, lower)
+
+
+class _CaseKeys(dict[int, str]):
+    """A :meth:`str.translate` table of :func:`_case_key`, filled as characters are met (at most
+    :data:`_MAX_CASE_KEYS` remembered)."""
+
+    def __missing__(self, code: int) -> str:
+        key = _case_key(chr(code))
+        if len(self) < _MAX_CASE_KEYS:
+            self[code] = key
+        return key
+
+
+_CASE_KEYS: Final = _CaseKeys()
+
+
+def _without_case(text: str) -> str:
+    """``text`` with each character replaced by its :func:`_case_key`: as long as ``text``, so positions agree."""
+    return text.lower() if text.isascii() else text.translate(_CASE_KEYS)
+
+
+def _whole_words(folded: str, key: str) -> Iterator[int]:
+    """Where ``key`` starts in ``folded`` with no ASCII letter or digit right before or after it, each place once,
+    also where two places overlap. Past a place with a letter or digit right before it, the search goes on from the
+    next place ``key``'s first character stands with none right before it, so each such place is visited once."""
+    word_start = re.compile(r"(?<![A-Za-z0-9])" + re.escape(key[0]))
+    start = folded.find(key)
+    while start >= 0:
+        if start and folded[start - 1] in _ASCII_ALNUM:
+            after = word_start.search(folded, start + 1)
+            if after is None:
+                return
+            start = folded.find(key, after.start())
+            continue
+        end = start + len(key)
+        if end == len(folded) or folded[end] not in _ASCII_ALNUM:
+            yield start
+        start = folded.find(key, start + 1)
 
 
 def redact_values(text: str, values: Iterable[str]) -> tuple[str, bool]:
@@ -1549,20 +1651,28 @@ def redact_values(text: str, values: Iterable[str]) -> tuple[str, bool]:
 
     Compared without case, the longest value first, only as a whole word (no ASCII letter or digit right before
     or after it), also inside a URL (its userinfo, host or path: no part is exempt); independent of any
-    phrasing (Hermes's own capture: the values it typed into fields that may be secret)."""
-    ordered = sorted({value for value in values if value}, key=len, reverse=True)
-    if not ordered:
+    phrasing (Hermes's own capture: the values it typed into fields that may be secret). Exactly what one
+    ``re.IGNORECASE`` pattern of every value, the longest first, between those boundaries replaces, but found
+    without one: each value is looked for in the text without case (:func:`_without_case`, :func:`_whole_words`),
+    and of the places found the leftmost is replaced, by its longest value, then the leftmost after it, and so on.
+    The text is searched once for each distinct value, and each place a value could start a whole word in is
+    checked at most once."""
+    keys = {_without_case(value) for value in values if value}
+    if not keys:
         return text, False
-    pattern = re.compile(
-        r"(?<![A-Za-z0-9])(?:" + "|".join(map(re.escape, ordered)) + r")(?![A-Za-z0-9])", re.IGNORECASE
-    )
+    folded = _without_case(text)
+    ends: dict[int, int] = {}  # where a value starts -> where the longest value found there ends
+    for key in keys:
+        for start in _whole_words(folded, key):
+            ends[start] = max(ends.get(start, 0), start + len(key))
+    if not ends:
+        return text, False
     parts: list[str] = []
     cursor = 0
-    for match in pattern.finditer(text):
-        parts += [text[cursor : match.start()], REDACTED]
-        cursor = match.end()
-    if not parts:
-        return text, False
+    for start in sorted(ends):
+        if start >= cursor:
+            parts += [text[cursor:start], REDACTED]
+            cursor = ends[start]
     parts.append(text[cursor:])
     return "".join(parts), True
 

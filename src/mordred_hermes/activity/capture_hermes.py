@@ -75,7 +75,10 @@ memory only, never stored. While Hermes's capture is off, every value typed
 during a held correction's turn counts (no field can be classified). A value the turn's message names as a secret
 (:func:`.contracts.secret_values`, "type X as the password") is also withheld
 from the store when Hermes types it into any field, ``typed_text_dropped``
-(N5). A held text is dropped when its turn never ends (an interrupted
+(N5). Those values are bounded (at most :data:`.contracts.MAX_SECRET_VALUES`,
+each at most :data:`.contracts.MAX_SECRET_VALUE_CHARS` characters); a message
+that names more fails closed: every value typed in its turn is withheld and
+counts. A held text is dropped when its turn never ends (an interrupted
 last turn, a process that exits, a session forgotten), when recording it is off
 at the turn's end, or when the session is suspended, and a refused write is not
 retried; the turn's calls then stay in their episode without it. The store is
@@ -175,6 +178,7 @@ from .contracts import (
     SENSITIVE_FIELD_KIND,
     ContractError,
     PeerPrincipal,
+    SecretValues,
     canonical_json,
     check_batch_envelope,
     event_size,
@@ -240,6 +244,8 @@ MAX_OWN_EPISODES: Final = 64
 MIN_SCRUBBED_CHARS: Final = 4
 #: Withheld typed values a session remembers, in memory only, for :func:`_scrubbed` (oldest forgotten first).
 MAX_WITHHELD_VALUES: Final = 32
+#: A turn whose message names no secret (or that has no message).
+_NO_SECRETS: Final = SecretValues((), complete=True)
 #: Refs whose last known field kind a session remembers (oldest forgotten first).
 MAX_REF_KINDS: Final = 1024
 #: The field kind of a named field that is no secret (:func:`._browser_results.field_kind`).
@@ -327,8 +333,8 @@ class _Session:
     #: secret); replaced in the session's turn texts before they are written (:func:`_scrubbed`). Memory only.
     withheld: collections.deque[str] = field(default_factory=lambda: collections.deque(maxlen=MAX_WITHHELD_VALUES))
     #: The values the current turn's message names as secrets (:func:`.contracts.secret_values`): typed into any
-    #: field they are withheld. Memory only.
-    turn_secrets: tuple[str, ...] = ()
+    #: field they are withheld; while the list is incomplete, every value typed in the turn is. Memory only.
+    turn_secrets: SecretValues = _NO_SECRETS
     #: The field kind of each ref in the most recent snapshot that listed it, stale or not (:func:`_learns`).
     ref_kinds: dict[str, str] = field(default_factory=dict)
     slow: int = 0
@@ -530,8 +536,10 @@ def _type(call: _Call, state: _Session) -> _Mapped:
     typed = call.args.get("text")
     typed = typed if isinstance(typed, str) and typed else None
     base = _on_page("type", state, target=element_label(line), args={"field_kind": kind})
-    # A value the turn's message names as a secret ("type X as the password") is withheld from any field.
-    named = typed is not None and redact_values(typed, state.turn_secrets)[1]
+    # A value the turn's message names as a secret ("type X as the password") is withheld from any field, and so is
+    # every value typed in a turn whose message names more values than are listed (fail closed).
+    secrets = state.turn_secrets
+    named = typed is not None and (not secrets.complete or redact_values(typed, secrets.values)[1])
     learned = typed if typed and _learns(state, call.args.get("ref"), typed, named) else None
     if kind != SENSITIVE_FIELD_KIND:
         if named:
@@ -1071,7 +1079,7 @@ def _record_turn(user_message: Any, session_id: Any, task_id: Any, turn_id: Any,
         body = correction_text(user_message) if human else None
         # A correction is never the turn's task: its browser calls get no task start (:func:`_episode_for`).
         _begin_turn(state, None if body is not None else user_message, turn_id, human)
-        state.turn_secrets = tuple(secret_values(user_message)) if isinstance(user_message, str) else ()
+        state.turn_secrets = secret_values(user_message) if isinstance(user_message, str) else _NO_SECRETS
         if body is None or not _correcting(config) or state.suspended:
             return
         attempt = state.last or _stored_last(home, config, state, session_id)

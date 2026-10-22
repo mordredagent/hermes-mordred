@@ -400,6 +400,54 @@ def test_a_value_the_message_calls_a_password_is_withheld_from_any_field(capture
     assert "Zebra-77-fake" not in _whole_store(store)
 
 
+def test_a_message_naming_more_values_than_are_listed_withholds_every_value_typed_in_its_turn(capture_home) -> None:
+    """Codex review of 7a1084bee: each "pin:" of a run names the rest of it, so the values a message names are
+    bounded (``contracts.secret_values``); past the bound the list is incomplete and every value typed in that turn
+    is withheld and scrubbed from its task start (fail closed). The next turn's message is read afresh."""
+    _home, store = capture_home
+    turn("Open http://127.0.0.1:8499/notes.html and type Contoso into the Note box. " + "pin:" * 1000 + "1234")
+    call("browser_navigate", {"url": NOTES}, nav_result(NOTES, title="Notes", snapshot=NOTES_SNAPSHOT))
+    call("browser_type", {"ref": "@e2", "text": "Contoso"}, ok(element="@e2"))  # a text field
+    end_turn()
+    turn("Open http://127.0.0.1:8499/notes.html and type Fabrikam into the Note box", turn_id=T2)
+    call("browser_type", {"ref": "@e2", "text": "Fabrikam"}, ok(element="@e2"), turn_id=T2)
+    end_turn(turn_id=T2)
+    typed = [event for event in calls(store) if event.op == "type"]
+    assert [event.text for event in typed] == [None, "Fabrikam"]
+    assert "typed_text_dropped" in typed[0].exclusions
+    assert "Contoso" not in _whole_store(store)
+    [first, _second] = _starts(store)
+    assert first.text is not None and first.text.startswith("Open http://127.0.0.1:8499/notes.html and type redacted ")
+
+
+def _turn_and_type_seconds(size: int, runs: int = 3) -> tuple[float, float]:
+    """The best time of ``pre_llm_call`` with Codex's message of ``size`` characters, and of one ``browser_type``
+    of ordinary text in that turn."""
+    message = "pin:" * (size // 4) + "1234"
+    best_turn = best_type = float("inf")
+    for run in range(runs):
+        turn_id = f"s1:t{size}:{run}"
+        started = time.perf_counter()
+        turn(message, turn_id=turn_id)
+        best_turn = min(best_turn, time.perf_counter() - started)
+        started = time.perf_counter()
+        call("browser_type", {"ref": "@e2", "text": "ordinary typed text"}, ok(element="@e2"), turn_id=turn_id)
+        best_type = min(best_type, time.perf_counter() - started)
+        end_turn(turn_id=turn_id)
+    return best_turn, best_type
+
+
+def test_a_turn_naming_overlapping_values_and_its_typing_take_linear_time(capture_home) -> None:
+    """Codex review of 7a1084bee: the 4 KB message once took 1.3 s to check ordinary typed text (2 ms before)."""
+    turn("Open http://127.0.0.1:8499/notes.html")
+    call("browser_navigate", {"url": NOTES}, nav_result(NOTES, title="Notes", snapshot=NOTES_SNAPSHOT))
+    end_turn()
+    small = _turn_and_type_seconds(10_000)
+    large = _turn_and_type_seconds(40_000)
+    assert max(large) < 0.05, (small, large)
+    assert all(slow < 6 * max(fast, 0.002) for fast, slow in zip(small, large, strict=True)), (small, large)
+
+
 # --- a secret-shaped token in the user's own words (live B2 re-run, N4) -------------------------------------------
 
 

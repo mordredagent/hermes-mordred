@@ -6,6 +6,9 @@ tests check the two guarantees directly instead of example by example:
 - it only adds redactions: every value the base revision ``efe9bb27d`` replaced is still replaced, and every
   value a phrase loses on its own it still loses next to, or nested in, other phrases;
 - it stays near-linear: for each adversarial shape, 40 KB costs well under 16 times 10 KB.
+
+The values a text names (``contracts.secret_values``) stay bounded and near-linear too, and given values are found
+(``contracts.redact_values``) exactly as the combined pattern they replaced found them.
 """
 
 from __future__ import annotations
@@ -13,7 +16,9 @@ from __future__ import annotations
 import itertools
 import random
 import re
+import sys
 import time
+import tracemalloc
 from collections.abc import Callable, Iterable
 
 import pytest
@@ -294,10 +299,11 @@ def test_every_value_a_form_finds_is_a_named_secret(separator: str) -> None:
     failures = []
     for text in [*PHRASES, *(separator.join(parts) for parts in [*_pairs(), *_triples(200)])]:
         clean = contracts.redact_secret_tokens(text)
-        named = set(contracts.secret_values(text))
+        found = contracts.secret_values(text)
+        named = set(found.values)
         missing = [clean[start:end] for start, end in _each_form(text) if clean[start:end] not in named]
-        if missing:
-            failures.append((text, missing))
+        if missing or not found.complete:  # the bound never bites on ordinary text
+            failures.append((text, missing, found.complete))
     assert not failures, failures[:5]
 
 
@@ -364,3 +370,173 @@ def test_each_adversarial_shape_stays_near_linear(shape: str) -> None:
     assert large < 2.0, (shape, small, large)
     # Linear work is 4x; quadratic would be 16x. Tiny times are mostly timer noise, so a floor applies.
     assert large < 6 * max(small, 0.002), (shape, small, large)
+
+
+# --- the values a text names stay bounded (Codex review of 7a1084bee) -------------------------------------------
+
+
+def _suffixes(size: int) -> str:
+    """Codex's input: each ``pin:`` names the rest of the run, so listing every value once materialised every
+    suffix (about 200 MB for 40 KB) and compiled them all into one pattern."""
+    return "pin:" * (size // 4) + "1234"
+
+
+def _runs(size: int) -> str:
+    """Runs whose values are all short enough to list, but each run's keywords name 63 overlapping ones."""
+    return ("pin=" * 63 + "1 ") * (size // 254)
+
+
+#: Each adversarial shape of the redactor, and two whose values overlap, for :func:`contracts.secret_values`.
+NAMED_SHAPES: dict[str, Callable[[int], str]] = {**SHAPES, "suffixes": _suffixes, "runs": _runs}
+
+
+@pytest.mark.parametrize("size", [4_000, 40_000])
+def test_overlapping_values_stay_bounded_and_mark_the_list_incomplete(size: int) -> None:
+    text = _suffixes(size)
+    tracemalloc.start()
+    try:
+        found = contracts.secret_values(text)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert not found.complete  # the caller withholds everything instead (fail closed)
+    assert len(found.values) <= contracts.MAX_SECRET_VALUES
+    assert all(len(value) <= contracts.MAX_SECRET_VALUE_CHARS for value in found.values)
+    assert peak < 64 * len(text) + 1_000_000, peak  # linear; the listed values once took about 200 MB at 40 KB
+
+
+def test_the_bound_counts_distinct_values_and_their_length() -> None:
+    def pins(count: int) -> str:
+        return "; ".join(f"PIN={1000 + number}" for number in range(count))
+
+    bound = contracts.MAX_SECRET_VALUES
+    assert contracts.secret_values(pins(bound)) == contracts.SecretValues(
+        tuple(str(1000 + number) for number in range(bound)), complete=True
+    )
+    assert contracts.secret_values(pins(bound) + "; " + pins(bound)).complete  # a repeated value counts once
+    over = contracts.secret_values(pins(bound + 1))
+    assert not over.complete and len(over.values) == bound
+    longest = ("x1" * contracts.MAX_SECRET_VALUE_CHARS)[: contracts.MAX_SECRET_VALUE_CHARS]
+    assert contracts.secret_values(f"password: {longest}") == contracts.SecretValues((longest,), complete=True)
+    too_long = contracts.secret_values(f"PIN=4821, password: {longest}9")
+    assert not too_long.complete and f"{longest}9" not in too_long.values
+
+
+def _named_seconds(text: str, runs: int = 2) -> float:
+    best = float("inf")
+    for _ in range(runs):
+        started = time.perf_counter()
+        contracts.secret_values(text)
+        best = min(best, time.perf_counter() - started)
+    return best
+
+
+@pytest.mark.parametrize("shape", NAMED_SHAPES)
+def test_each_adversarial_shape_names_its_values_in_near_linear_time(shape: str) -> None:
+    small = _named_seconds(NAMED_SHAPES[shape](10_000))
+    large = _named_seconds(NAMED_SHAPES[shape](40_000))
+    assert large < 2.0, (shape, small, large)
+    assert large < 6 * max(small, 0.002), (shape, small, large)
+
+
+def test_codex_input_is_named_fast() -> None:
+    assert _named_seconds(_suffixes(40_000)) < 0.05
+
+
+# --- given values are found as the combined pattern found them, without one ------------------------------------
+
+
+def _alternation(text: str, values: Iterable[str]) -> tuple[str, bool]:
+    """``contracts.redact_values`` of 7a1084bee: one pattern of every value, the longest first."""
+    ordered = sorted({value for value in values if value}, key=len, reverse=True)
+    if not ordered:
+        return text, False
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9])(?:" + "|".join(map(re.escape, ordered)) + r")(?![A-Za-z0-9])", re.IGNORECASE
+    )
+    return pattern.subn(contracts.REDACTED, text)[0], bool(pattern.search(text))
+
+
+#: Pieces of generated values and texts: word joiners and boundaries, and characters whose case ``re`` pairs.
+VALUE_PIECES = [
+    *("a", "A", "b", "B", "1", "9", "-", "+", ".", "@", " ", "\n", "\xa0", "\u3000", "ab", "a-b", "1a", "x" * 70),
+    *("\u00e9", "\u00c9", "\u03c3", "\u03a3", "\u03c2", "\u212a", "k", "K", "\u017f", "s", "S", "\u0131", "i"),
+    *("I", "\u0130", "\u00df", "\u1e9e", "\u0390", "\u1fd3", "\ufb05", "\ufb06", "\u01c5", "\u01c4", "\u01c6"),
+    *("\u30d1", "\U0001f642", "\U00010400", "\U00010428"),
+]
+
+
+def _pieces(chooser: random.Random, most: int) -> str:
+    return "".join(chooser.choice(VALUE_PIECES) for _ in range(chooser.randint(1, most)))
+
+
+def test_given_values_are_found_exactly_as_the_combined_pattern_found_them() -> None:
+    chooser = random.Random(20261023)  # fixed: the same sample on every run
+    failures = []
+    for _ in range(3000):
+        values = [_pieces(chooser, 3) for _ in range(chooser.randint(1, 6))]
+        text = " ".join([_pieces(chooser, 12), *(chooser.choice(values) for _ in range(3)), _pieces(chooser, 12)])
+        text = "".join(chooser.sample(text, len(text))) if chooser.random() < 0.2 else text
+        if contracts.redact_values(text, values) != _alternation(text, values):
+            failures.append((text, values))
+    assert not failures, failures[:5]
+
+
+def _codes() -> list[int]:
+    """Every BMP code point, every one beyond with a case mapping, and a sample of the rest."""
+    beyond = range(0x10000, sys.maxunicode + 1)
+    cased = [code for code in beyond if chr(code).lower() != chr(code) or chr(code).upper() != chr(code)]
+    return sorted({*range(0x10000), *cased, *beyond[::997]})
+
+
+def test_each_character_is_compared_without_case_as_re_ignorecase_compares_it() -> None:
+    """One key per character (``contracts._case_key``), of one character, so positions agree; two characters share a
+    key exactly when ``re.IGNORECASE`` matches one against the other, and a key is an ASCII letter or digit exactly
+    when ``(?i)[A-Za-z0-9]`` matches the character (the whole-word boundary)."""
+    boundary = re.compile(r"(?i)[A-Za-z0-9]")
+    keys: dict[str, list[str]] = {}
+    for code in _codes():
+        char = chr(code)
+        key = contracts._case_key(char)
+        assert len(key) == 1, hex(code)
+        assert bool(boundary.match(char)) == (key.isascii() and key.isalnum()), hex(code)
+        keys.setdefault(key, []).append(char)
+        for other in {char.lower(), char.upper(), char.title(), char.casefold(), char.swapcase()}:
+            if len(other) == 1 and re.fullmatch(re.escape(char), other, re.IGNORECASE):
+                assert contracts._case_key(other) == key, (hex(code), hex(ord(other)))
+    for key, chars in keys.items():
+        for char in chars:  # every character of a key is the key's own under re.IGNORECASE, both ways
+            assert re.fullmatch(re.escape(char), key, re.IGNORECASE), (hex(ord(char)), hex(ord(key)))
+            assert re.fullmatch(re.escape(key), char, re.IGNORECASE), (hex(ord(char)), hex(ord(key)))
+
+
+def _redact_seconds(text: str, values: list[str], runs: int = 3) -> float:
+    best = float("inf")
+    for _ in range(runs):
+        started = time.perf_counter()
+        contracts.redact_values(text, values)
+        best = min(best, time.perf_counter() - started)
+    return best
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        lambda size: "ordinary typed text " * (size // 20),
+        lambda size: "a" * size,
+        lambda size: "a-" * (size // 2),
+        lambda size: "-" * size,
+        lambda size: "\u00e9\u212a\u017f " * (size // 4),
+    ],
+    ids=["words", "letters", "joined-letters", "joiners", "non-ascii"],
+)
+def test_given_values_are_found_in_near_linear_time(text: Callable[[int], str]) -> None:
+    """The values a long message names (the bound's worth, each as long as listed) against long typed text."""
+    longest = contracts.MAX_SECRET_VALUE_CHARS
+    values = [*("a" * length for length in range(1, 33)), *(("a-" * longest)[:length] for length in range(1, 33))]
+    values += [("-a" * longest)[:length] for length in range(1, 33)]
+    values += ["-" * 4, "\u00e9" * 4, "x" * longest]
+    small = _redact_seconds(text(10_000), values)
+    large = _redact_seconds(text(40_000), values)
+    assert large < 2.0, (small, large)
+    assert large < 6 * max(small, 0.002), (small, large)
