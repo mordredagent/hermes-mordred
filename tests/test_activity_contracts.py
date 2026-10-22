@@ -1264,6 +1264,10 @@ def test_secret_values_are_the_values_the_redactor_replaces() -> None:
     assert {"Zebra-77-fake", "4821", "sk-proj-Ab3dEf6hIj9kLm", JWT} <= set(values)
     assert contracts.REDACTED not in values
     assert contracts.secret_values("pin the tab to the left") == []
+    # each reading's value, not only the merged span (Codex review of 6da5ccad2)
+    assert {"code=1234", "1234"} <= set(contracts.secret_values("PIN code=1234"))
+    # also a value inside another value, which the redaction itself need not read again
+    assert {"abcdefgh-pin:4821", "4821"} <= set(contracts.secret_values("password: abcdefgh-pin:4821"))
 
 
 def test_given_values_are_replaced_as_whole_words_also_inside_urls() -> None:

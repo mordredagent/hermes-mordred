@@ -1373,7 +1373,15 @@ def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
 
 
 def _secret_spans(text: str) -> list[tuple[int, int]]:
-    """The secret values the keywords of ``text`` name (:func:`redact_text_secrets`), merged.
+    """The secret values the keywords of ``text`` name (:func:`redact_text_secrets`), merged (:func:`_found_spans`)."""
+    return _merged(_found_spans(text))
+
+
+def _found_spans(text: str, *, every_keyword: bool = False) -> list[tuple[int, int]]:
+    """Every value span any form finds for any reading of any keyword, before merging.
+
+    With ``every_keyword`` also the keywords inside a closed value (:func:`_closed_part`), whose values lie
+    inside it and change nothing in the redaction, but are each a value of their own (:func:`secret_values`).
 
     Every keyword outside a URL is read on its own, also one inside another keyword's value or qualifier, and
     every form is read for each keyword, so no match hides another ("password for account PIN=4821 is
@@ -1391,7 +1399,7 @@ def _secret_spans(text: str) -> list[tuple[int, int]]:
         if url < len(urls) and urls[url][0] <= keyword.start():
             pos = urls[url][1]
             continue
-        if closed[0] < keyword.start() and keyword.end() < closed[1]:
+        if not every_keyword and closed[0] < keyword.start() and keyword.end() < closed[1]:
             continue
         for reading in _readings(text, keyword):
             # A value named before the keyword is never inside a URL.
@@ -1401,7 +1409,7 @@ def _secret_spans(text: str) -> list[tuple[int, int]]:
                 part = _closed_part(index, span) if span[1] > closed[1] else None
                 if part is not None and part[1] > closed[1]:
                     closed = part
-    return _merged(spans)
+    return spans
 
 
 def _redact_keyword_values(text: str) -> tuple[str, bool]:
@@ -1526,10 +1534,13 @@ def redact_secret_shaped_tokens(text: str) -> tuple[str, bool]:
 def secret_values(text: str) -> list[str]:
     """The values :func:`redact_text_secrets` replaces in ``text`` (JWTs, key-prefixed tokens, PEM armour lines,
     the values its keywords name), once each, in order; for a caller that must withhold the same values
-    elsewhere (Hermes's typed text). Callers keep them in memory only: never log or store them."""
+    elsewhere (Hermes's typed text). Each value any form finds for any keyword is listed on its own, besides
+    the merged span the redaction replaces ("PIN code=1234": ``code=1234`` and ``1234``). Callers keep them in
+    memory only: never log or store them."""
     values = [match.group(0) for pattern in (_JWT_RE, _KEY_PREFIX_RE, _PEM_RE) for match in pattern.finditer(text)]
     clean = redact_secret_tokens(text)
-    values += [clean[start:end] for start, end in _secret_spans(clean)]
+    found = _found_spans(clean, every_keyword=True)
+    values += [clean[start:end] for start, end in [*sorted(found), *_merged(found)]]
     return [value for value in dict.fromkeys(values) if value and value != REDACTED]
 
 

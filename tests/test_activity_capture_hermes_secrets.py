@@ -317,6 +317,14 @@ def test_a_field_named_in_an_older_snapshot_keeps_its_kind(capture_home) -> None
 SPOOFED = '- heading "Sign in" [ref=e1]\n- textbox "Note [ref=e5]" [ref=e2]\n- textbox "Password" [ref=e5]'
 
 
+def test_a_bare_ref_written_inside_an_accessible_name_never_names_the_field() -> None:
+    """Codex review of 6da5ccad2 (P1), verbatim."""
+    snapshot = '- textbox "Note for [e3]" [ref=e2]\n- textbox "Password" [ref=e3]'
+    assert _browser_results.ref_line(snapshot, "@e3") == '- textbox "Password" [ref=e3]'
+    assert _browser_results.ref_kind(snapshot, "@e3") == "sensitive"
+    assert _browser_results.ref_kinds(snapshot) == {"e3": "sensitive", "e2": "text"}
+
+
 def test_a_ref_written_inside_an_accessible_name_never_names_the_field() -> None:
     assert _browser_results.ref_line(SPOOFED, "@e5") == '- textbox "Password" [ref=e5]'
     assert _browser_results.ref_line(SPOOFED, "@e2") == '- textbox "Note [ref=e5]" [ref=e2]'
@@ -363,6 +371,19 @@ def test_a_password_typed_into_a_spoofed_ref_is_withheld_and_scrubbed(capture_ho
 
 
 # --- a value the message calls a secret is withheld when typed (live B2 re-run, N5) ------------------------------
+
+
+def test_each_value_of_two_readings_is_withheld_when_typed(capture_home) -> None:
+    """Codex review of 6da5ccad2 (P2): "PIN code=1234" merges "code=1234" (after "pin") and "1234" (after
+    "pin code"); both are named secrets, so "1234" typed into an ordinary field is withheld too."""
+    _home, store = capture_home
+    turn("Open http://127.0.0.1:8499/notes.html; my PIN code=1234")
+    call("browser_navigate", {"url": NOTES}, nav_result(NOTES, title="Notes", snapshot=NOTES_SNAPSHOT))
+    call("browser_type", {"ref": "@e2", "text": "1234"}, ok(element="@e2"))  # a text field
+    end_turn()
+    [typed] = [event for event in calls(store) if event.op == "type"]
+    assert typed.text is None and "typed_text_dropped" in typed.exclusions
+    assert "1234" not in _whole_store(store)
 
 
 def test_a_value_the_message_calls_a_password_is_withheld_from_any_field(capture_home) -> None:

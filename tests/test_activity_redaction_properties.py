@@ -287,6 +287,20 @@ def test_no_form_hides_another(separator: str) -> None:
     assert not failures, failures[:5]
 
 
+@pytest.mark.parametrize("separator", [". ", " "], ids=repr)
+def test_every_value_a_form_finds_is_a_named_secret(separator: str) -> None:
+    """``secret_values`` lists each value any single form finds for any keyword, not only the merged spans
+    (Codex review of 6da5ccad2: "PIN code=1234" once listed only "code=1234", not "1234")."""
+    failures = []
+    for text in [*PHRASES, *(separator.join(parts) for parts in [*_pairs(), *_triples(200)])]:
+        clean = contracts.redact_secret_tokens(text)
+        named = set(contracts.secret_values(text))
+        missing = [clean[start:end] for start, end in _each_form(text) if clean[start:end] not in named]
+        if missing:
+            failures.append((text, missing))
+    assert not failures, failures[:5]
+
+
 @pytest.mark.parametrize("frame", FRAMES)
 def test_a_phrase_loses_its_values_nested_in_another_form(frame: str) -> None:
     before = frame.index("{}")
