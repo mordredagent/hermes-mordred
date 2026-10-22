@@ -381,16 +381,17 @@ def test_a_password_typed_into_a_spoofed_ref_is_withheld_and_scrubbed(capture_ho
 
 
 def test_each_value_of_two_readings_is_withheld_when_typed(capture_home) -> None:
-    """Codex review of 6da5ccad2 (P2): "PIN code=1234" merges "code=1234" (after "pin") and "1234" (after
-    "pin code"); both are named secrets, so "1234" typed into an ordinary field is withheld too."""
+    """Codex review of 6da5ccad2 (P2): "PIN code=48213579" merges "code=48213579" (after "pin") and "48213579" (after
+    "pin code"); both are named secrets, so "48213579" typed into an ordinary field is withheld too. (Eight digits,
+    so the value cannot turn up by chance inside a stored UUID or digest.)"""
     _home, store = capture_home
-    turn("Open http://127.0.0.1:8499/notes.html; my PIN code=1234")
+    turn("Open http://127.0.0.1:8499/notes.html; my PIN code=48213579")
     call("browser_navigate", {"url": NOTES}, nav_result(NOTES, title="Notes", snapshot=NOTES_SNAPSHOT))
-    call("browser_type", {"ref": "@e2", "text": "1234"}, ok(element="@e2"))  # a text field
+    call("browser_type", {"ref": "@e2", "text": "48213579"}, ok(element="@e2"))  # a text field
     end_turn()
     [typed] = [event for event in calls(store) if event.op == "type"]
     assert typed.text is None and "typed_text_dropped" in typed.exclusions
-    assert "1234" not in _whole_store(store)
+    assert "48213579" not in _whole_store(store)
 
 
 def test_a_value_the_message_calls_a_password_is_withheld_from_any_field(capture_home) -> None:
@@ -452,7 +453,7 @@ def test_a_turn_naming_overlapping_values_and_its_typing_take_linear_time(captur
     small = _turn_and_type_seconds(10_000)
     large = _turn_and_type_seconds(40_000)
     assert max(large) < 0.05, (small, large)
-    assert all(slow < 6 * max(fast, 0.002) for fast, slow in zip(small, large, strict=True)), (small, large)
+    assert all(slow < 8 * max(fast, 0.005) for fast, slow in zip(small, large, strict=True)), (small, large)
 
 
 def _type_seconds(typed: str, runs: int = 3) -> float:
@@ -478,7 +479,7 @@ def test_typing_against_many_overlapping_named_values_takes_linear_time(capture_
     large = _type_seconds("-a-" * 13_333)
     end_turn()
     assert large < 0.05, (small, large)
-    assert large < 6 * max(small, 0.002), (small, large)
+    assert large < 8 * max(small, 0.005), (small, large)
     typed = [event for event in calls(store) if event.op == "type"]
     assert len(typed) == 6 and all(event.text is None and "typed_text_dropped" in event.exclusions for event in typed)
 

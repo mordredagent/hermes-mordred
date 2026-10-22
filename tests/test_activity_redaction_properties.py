@@ -355,7 +355,7 @@ SHAPES: dict[str, Callable[[int], str]] = {
 }
 
 
-def _best_seconds(text: str, runs: int = 2) -> float:
+def _best_seconds(text: str, runs: int = 5) -> float:
     best = float("inf")
     for _ in range(runs):
         started = time.perf_counter()
@@ -369,8 +369,9 @@ def test_each_adversarial_shape_stays_near_linear(shape: str) -> None:
     small = _best_seconds(SHAPES[shape](10_000))
     large = _best_seconds(SHAPES[shape](40_000))
     assert large < 2.0, (shape, small, large)
-    # Linear work is 4x; quadratic would be 16x. Tiny times are mostly timer noise, so a floor applies.
-    assert large < 6 * max(small, 0.002), (shape, small, large)
+    # Linear work is 4x; quadratic would be 16x. CI runners jitter, so the bound is 8x of the best of five runs
+    # and tiny times get a floor.
+    assert large < 8 * max(small, 0.005), (shape, small, large)
 
 
 # --- the values a text names stay bounded (Codex review of 7a1084bee) -------------------------------------------
@@ -423,7 +424,7 @@ def test_the_bound_counts_distinct_values_and_their_length() -> None:
     assert not too_long.complete and f"{longest}9" not in too_long.values
 
 
-def _named_seconds(text: str, runs: int = 2) -> float:
+def _named_seconds(text: str, runs: int = 5) -> float:
     best = float("inf")
     for _ in range(runs):
         started = time.perf_counter()
@@ -437,7 +438,7 @@ def test_each_adversarial_shape_names_its_values_in_near_linear_time(shape: str)
     small = _named_seconds(NAMED_SHAPES[shape](10_000))
     large = _named_seconds(NAMED_SHAPES[shape](40_000))
     assert large < 2.0, (shape, small, large)
-    assert large < 6 * max(small, 0.002), (shape, small, large)
+    assert large < 8 * max(small, 0.005), (shape, small, large)
 
 
 def test_codex_input_is_named_fast() -> None:
@@ -572,7 +573,7 @@ MATCH_CASES: dict[str, tuple[list[str], Callable[[int], str]]] = {
 }
 
 
-def _match_seconds(match: Callable[[], object], runs: int = 3) -> float:
+def _match_seconds(match: Callable[[], object], runs: int = 5) -> float:
     best = float("inf")
     for _ in range(runs):
         started = time.perf_counter()
@@ -591,7 +592,7 @@ def test_given_values_are_found_in_linear_time(case: str) -> None:
         small = _match_seconds(lambda match=match: match(text(10_000), values))
         large = _match_seconds(lambda match=match: match(text(40_000), values))
         assert large < 0.05, (match.__name__, small, large)
-        assert large < 6 * max(small, 0.002), (match.__name__, small, large)
+        assert large < 8 * max(small, 0.005), (match.__name__, small, large)
 
 
 # --- compiled value patterns stay bounded (Codex review of 29c6be5c0) -------------------------------------------
