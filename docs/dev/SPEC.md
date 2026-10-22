@@ -4679,7 +4679,15 @@ part of this delivery ([`TODO.md`](./TODO.md)).
   authoritative: never folded into another, and the survivor when one is
   involved. A chain A←B←C fetched as C, then B, then A (each naming only its
   parent, each reply addressed to its parent's sender) is one conversation of
-  three messages; threads that never reference each other stay apart.
+  three messages; threads that never reference each other stay apart. The same
+  guards (one function, `imports/mail/merge_guard.py`) decide the grouping of
+  a batch before it is written, so messages fetched together are held to them
+  too; a copy the store will not write (a duplicate or a rejected copy of a
+  stored message, per `ImportStore.classify_incoming`) takes no part in that
+  grouping. A store created before import schema v2 has no stored references
+  for the messages it already holds, so a parent that arrives later cannot join
+  them until those children are fetched again (`mail fetch --since <date>`
+  re-fetches identical copies, which attach their references).
 - **Budgets.** `max_messages` 1 to 2000 (default 2000) across the mailboxes
   of one call; at most 1 GiB of announced mail per call (`max_bytes`); a 30 s
   socket timeout per operation; a time budget, 600 s for the CLI and 60 s for
@@ -4695,7 +4703,7 @@ part of this delivery ([`TODO.md`](./TODO.md)).
   allowlist: integers `inserted`, `duplicates`, `revised`, `conflicts`,
   `fetched`, `skipped`, `skipped_oversize`, `batches`, `mailboxes`,
   `excluded_history`, `merge_skipped`; booleans `gmail`, `cursor_reset`, `partial`, `dry_run`,
-  `abandoned` (set only by the tool, below); `partial_reason` and `error`
+  `abandoned` and `lock_retained` (set only by the tool, below); `partial_reason` and `error`
   from closed enums. Error codes:
   `unsupported_platform`, `mail_not_configured`, `memory_encryption_required`,
   `custody_busy`, the gate codes above, `import_store_unavailable`,
@@ -4763,13 +4771,18 @@ Hermes tool `mordred_mail_sync` (toolset `mordred_telegram`, beside
   then completes. A worker still running 40 s after the budget (something the
   session's bounds cannot interrupt) is cancelled and abandoned: the call
   returns `partial: true`, `partial_reason: "cancelled"`, `abandoned: true`
-  and zero counts. Before the handler returns (or re-raises a cancellation
-  whose worker still runs) it abandons the fetch (`imap_sync.FetchLease`): the
-  worker's open run is marked `failed` with counts `{"abandoned": 1}`, so
-  `write_batch` refuses its late batch inside the transaction, every later
-  store write of the worker is refused, and the writer lock is released, so
-  the next call proceeds at once. A batch committed before that keeps its
-  cursor, so the next call continues from it.
+  and zero counts. The last 5 s of either bound is kept for abandoning the
+  fetch (`imap_sync.FetchLease`, in its own daemon thread that the handler
+  never waits for past the bound, however often it is cancelled): every later
+  store write of the worker is refused inside its transaction (the lease's
+  revocation flag), its open run is marked `failed` with counts
+  `{"abandoned": 1}` (so `write_batch` also refuses a late batch by the run
+  state), and the writer lock is released, so the next call proceeds at once.
+  When that cannot complete in time (a write of the worker still in flight, or
+  the store busy so the run cannot be failed), the lock stays with the
+  abandoned worker until it exits: the result says `lock_retained: true` and a
+  call meanwhile is `sync_in_progress`. A batch committed before that keeps
+  its cursor, so the next call continues from it.
 - Not a reader tool and not a taint source. It is in
   `privacy_check.egress.READER_ALLOWED` (allowed in a reader session) and in
   `FIRST_PARTY_TOOLS` (its destination is fixed, so it also runs under
@@ -4815,6 +4828,12 @@ Where the code differs from the design record:
   guarded against forged `References` (last 10 ids, a shared participant, at
   most one existing multi-message conversation; result field
   `merge_skipped`); `key_left` is reported whenever the key remains.
+- After the Codex fourth-pass review (2026-10-22): the merge guards are one
+  function applied to a batch's grouping as well as to the store's
+  reconciliation; copies the store will not write take no part in a batch's
+  grouping; an abandonment that cannot fail the worker's run in time keeps
+  the writer lock with the worker (result field `lock_retained`), and the
+  tool's cleanup is bounded by the call's grace.
 
 ## Imported-message provenance evaluation (2026-10-22)
 

@@ -14,7 +14,7 @@ from mordred_hermes.imports.mail import EmlBytes, TrustedBytes, TrustedMeta, pla
 from mordred_hermes.imports.mail._imap_codec import system_label
 from mordred_hermes.imports.mail.owner import SENT_EVIDENCE
 from mordred_hermes.imports.records import RecordError
-from mordred_hermes.imports.store import SENT_EVIDENCE_RANK, BatchResult, ImportRefused, ImportStore
+from mordred_hermes.imports.store import SENT_EVIDENCE_RANK, BatchResult, ImportRefused, ImportStore, IncomingCopy
 from tests._fake_imap import mail
 from tests._mail_sync_helpers import rows
 
@@ -24,6 +24,10 @@ def store(tmp_path: Path) -> ImportStore:
     db = ImportStore(tmp_path / "mordred.db", sqlite3.connect)
     db.initialize(tmp_path)
     return db
+
+
+#: A reply in one batch is addressed to its parent's sender, so the merge guard lets it join (``merge_guard``).
+_TARO_TO = "Taro Tanaka <taro@example.net>"
 
 
 def _thread(store: ImportStore, *messages: bytes):  # type: ignore[no-untyped-def]
@@ -170,6 +174,7 @@ def test_a_failed_batch_keeps_the_published_revision_and_the_conversation(
         mail(
             2,
             sender="Hanako <hanako@example.org>",
+            to=f"{_TARO_TO}, Owner <owner@example.com>",  # a reply shares a participant (the merge guard)
             references="msg1@example.net",
             date="Sat, 03 Oct 2026 10:00:00 +0900",
         ),
@@ -201,7 +206,12 @@ def test_a_concurrent_reader_sees_the_old_or_the_new_state_never_between(
     batch = _thread(
         store,
         mail(1, body="SECOND-REVISION"),
-        mail(2, sender="Hanako <hanako@example.org>", references="msg1@example.net"),
+        mail(
+            2,
+            sender="Hanako <hanako@example.org>",
+            to=f"{_TARO_TO}, Owner <owner@example.com>",
+            references="msg1@example.net",
+        ),
     )
     inside, release = threading.Event(), threading.Event()
     real = ImportStore._store_message
@@ -483,3 +493,65 @@ def test_a_late_parent_with_a_shared_participant_still_merges(store: ImportStore
     result = _synced(store, _reply(2, _ALICE, _TARO, 1))
     assert result.merge_skipped == 0
     assert _conversations(store) == [["msg2@example.net", "msg3@example.net"]]
+
+
+# --- the store's decisions told beforehand, and the lease guard inside the transaction -------------
+
+
+def _copies(data: bytes, *, role: str = "inbox", sent_label: bool = False) -> list[IncomingCopy]:
+    """What the importer knows of ``data`` before normalising it (revision, evidence and quality)."""
+    labels = (system_label("\\Sent"),) if sent_label else ()
+    trusted = TrustedMeta(labels=tuple(label for label in labels if label), folder_role=role)
+    plan = plan_import([TrustedBytes([(data, trusted)])], account="mail", own_addresses=["owner@example.com"])
+    return [
+        IncomingCopy(msg.source_uid, msg.source_revision, str(msg.provenance_quality), msg.owner_evidence)
+        for msg in plan.messages()
+    ]
+
+
+def test_classify_incoming_tells_the_write_decisions_beforehand(store: ImportStore) -> None:
+    _synced(store, mail(1, sender=_OWNER, to=_TARO, body="AS SENT"), role="all", sent_label=True)
+    _synced(store, mail(2, sender=_TARO, to=_OWNER))
+    cases = {
+        "identical": (mail(2, sender=_TARO, to=_OWNER), "duplicates"),
+        "weaker different copy": (mail(1, sender=_OWNER, to=_TARO, body="AS RELAYED"), "duplicates"),
+        "changed bytes": (mail(2, sender=_TARO, to=_OWNER, body="EDITED"), "revised"),
+        "new": (mail(3), "inserted"),
+    }
+    for name, (data, expected) in cases.items():
+        [copy] = _copies(data)
+        assert store.classify_incoming([copy]) == {copy.source_uid: expected}, name
+    open_run = store.run_begin("mail")  # rows of a run that never committed are reclaimed: inserted
+    [copy] = _copies(mail(4))
+    thread = _thread(store, mail(4))
+    store.write_thread(open_run, thread.messages, conversation=thread.conversation)
+    assert store.classify_incoming([copy]) == {copy.source_uid: "inserted"}
+    assert store.classify_incoming([]) == {}
+
+
+def test_a_write_guard_runs_inside_the_transaction(store: ImportStore, tmp_path: Path) -> None:
+    class Revoked(Exception):
+        pass
+
+    def revoked() -> None:
+        other = sqlite3.connect(tmp_path / "mordred.db", timeout=0)
+        try:
+            with pytest.raises(sqlite3.OperationalError):
+                other.execute("BEGIN IMMEDIATE")  # the guarded call already holds the write lock
+        finally:
+            other.close()
+        raise Revoked
+
+    run_id = store.run_begin("mail")
+    key = "mail_imap.mail.mabc"
+    calls = [
+        lambda: store.set_meta(key, "1", guard=revoked),
+        lambda: store.fail_open_runs("mail", guard=revoked),
+        lambda: store.run_begin("mail", guard=revoked),
+        lambda: store.write_batch(run_id, [], conversations=[], meta_updates={key: "1"}, guard=revoked),
+    ]
+    for call in calls:
+        with pytest.raises(Revoked):
+            call()
+    assert store.get_meta(key) is None
+    assert rows(store, "SELECT run_id, state FROM import_runs") == [(run_id, "open")]  # nothing was written

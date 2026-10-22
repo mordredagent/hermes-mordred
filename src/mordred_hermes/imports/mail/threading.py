@@ -1,16 +1,33 @@
-"""Mail threading: Gmail thread ids, then reference union-find, then a guarded subject heuristic.
+"""Mail threading: Gmail thread ids, then a guarded reference union-find, then a guarded subject heuristic.
 
-- ``X-GM-THRID`` groups first (method ``gmail_thrid``). A message without one
-  joins the Gmail thread of a message it references.
+- ``X-GM-THRID`` groups first (method ``gmail_thrid``); its references are not
+  followed. A message without one joins the Gmail thread of a message it
+  references.
 - Otherwise messages are joined by union-find over ``Message-ID``,
   ``In-Reply-To`` and ``References`` (method ``references``, or ``single``).
+  Those headers are typed by the sender, so every join is decided by
+  :func:`.merge_guard.fold_plan`, the same guard the store applies across
+  batches: only the last ``MAX_MERGE_REFS`` referenced ids are followed, a
+  group joins only when it shares a participant other than the account owner
+  (``own``), at most one group that already holds several messages takes part
+  in a merge, and a Gmail thread is never folded into another. Each message's
+  edges are decided together, messages with fewer referenced ids first (then
+  oldest first), so established reply chains form before a message naming
+  many of them is weighed. A message a guard held back counts once as
+  ``merge_skipped`` in ``stats``.
+- ``excluded`` messages (copies the store will not write: duplicates and
+  rejected copies of stored rows) take no part: their references are not
+  followed and an id they carry is not a join point (another message naming it
+  joins the stored conversation through the importer's resolver instead).
 - Subject-only grouping joins single messages without any reference header
   only when the normalised subject AND the participant address set match and
   each message is within 30 days of the previous one (method ``heuristic``).
 - A thread whose messages reference an id that is not in the import is
   *partial*.
 
-Thread keys are content-free (Gmail ids are digits; everything else is a hash)
+Thread keys are content-free (Gmail ids are digits; everything else is a hash),
+distinct per thread (a guard can keep apart two groups naming the same root: the
+group holding the root message keeps its key, the other takes its own root's)
 and stable when later imports add replies.
 """
 
@@ -20,9 +37,11 @@ import hashlib
 import re
 import unicodedata
 from collections import Counter
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Collection, Container, Iterator, Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Final
+
+from .merge_guard import GroupFacts, fold_plan, followed_refs
 
 __all__ = [
     "HEURISTIC_WINDOW_SECONDS",
@@ -126,49 +145,80 @@ def _referenced(item: ThreadInput) -> tuple[str, ...]:
     return (*item.in_reply_to, *reversed(item.references))
 
 
-def _components(items: Sequence[ThreadInput]) -> dict[str, list[ThreadInput]]:
-    """Group messages: Gmail thread ids first, reference union-find for the rest."""
-    by_id = {item.message_id: item for item in items if item.message_id}
-    uf = _UnionFind()
-    for item in items:
-        uf.find(f"k:{item.key}")
+#: The facts of a node no message has reached yet (the placeholder of an absent id).
+_PLACEHOLDER: Final = GroupFacts(age=(True, 0, ""), gmail=False, messages=0, people=frozenset())
+
+
+class _Groups:
+    """Union-find over message keys, Message-ID and Gmail thread nodes, with each group's merge facts."""
+
+    def __init__(self) -> None:
+        self._uf = _UnionFind()
+        self._facts: dict[str, GroupFacts] = {}
+        self.skipped = 0
+
+    def root(self, node: str) -> str:
+        return self._uf.find(node)
+
+    def facts(self, root: str) -> GroupFacts:
+        return self._facts.get(root, _PLACEHOLDER)
+
+    def add(self, item: ThreadInput, people: frozenset[str], *, linked: bool) -> None:
+        node = f"k:{item.key}"
+        self._facts[self.root(node)] = GroupFacts(
+            age=(item.sent_at is None, item.sent_at or 0, node),
+            gmail=bool(item.gm_thread_id),
+            messages=1,
+            people=people,
+        )
         if item.gm_thread_id:
-            uf.union(f"k:{item.key}", f"g:{item.gm_thread_id}")
-            continue
-        if item.message_id:
-            uf.union(f"k:{item.key}", f"m:{item.message_id}")
-        for ref in _referenced(item):
-            target = by_id.get(ref)
-            if target is not None and target.gm_thread_id:
-                continue  # attached to that Gmail thread below
-            uf.union(f"k:{item.key}", f"m:{ref}")
-    groups: dict[str, list[ThreadInput]] = {}
+            self._union(node, f"g:{item.gm_thread_id}")  # the server's thread id: authoritative, never guarded
+        if linked and item.message_id:
+            self._union(node, f"m:{item.message_id}")
+
+    def follow(self, item: ThreadInput) -> None:
+        """Join ``item``'s group with the groups its followed references name, as the merge guard allows."""
+        home = self.root(f"k:{item.key}")
+        refs = followed_refs(item.in_reply_to, item.references)
+        involved = {home, *(self.root(f"m:{ref}") for ref in refs)}
+        if len(involved) < 2:
+            return
+        survivor, others, guarded = fold_plan(home, {root: self.facts(root) for root in involved})
+        for other in others:
+            self._union(survivor, other)
+        self.skipped += guarded
+
+    def _union(self, left: str, right: str) -> None:
+        a, b = self.root(left), self.root(right)
+        if a == b:
+            return
+        root, child = min(a, b), max(a, b)
+        self._uf.parent[child] = root
+        merged = self.facts(root).joined([self.facts(child)])
+        self._facts[root] = replace(merged, age=(*merged.age[:2], root))
+        self._facts.pop(child, None)
+
+
+def _edge_order(item: ThreadInput) -> tuple[int, bool, int, str]:
+    """Fewer followed references first, then oldest first: chains form before a message naming many is weighed."""
+    return (len(followed_refs(item.in_reply_to, item.references)), item.sent_at is None, item.sent_at or 0, item.key)
+
+
+def _components(
+    items: Sequence[ThreadInput], own: Container[str], excluded: Collection[str]
+) -> tuple[dict[str, list[ThreadInput]], int]:
+    """Group messages (Gmail thread ids, then guarded reference edges); (groups, messages a guard held back)."""
+    groups = _Groups()
     for item in items:
-        groups.setdefault(uf.find(f"k:{item.key}"), []).append(item)
-    return _attach_to_gmail(groups, by_id)
-
-
-def _attach_to_gmail(
-    groups: dict[str, list[ThreadInput]], by_id: dict[str, ThreadInput]
-) -> dict[str, list[ThreadInput]]:
-    gmail_root = {item.gm_thread_id: root for root, members in groups.items() for item in members if item.gm_thread_id}
-    for root in sorted(groups):
-        members = groups[root]
-        if any(item.gm_thread_id for item in members):
-            continue
-        target = _gmail_target(members, by_id)
-        if target is not None and gmail_root.get(target) in groups:
-            groups[gmail_root[target]].extend(groups.pop(root))
-    return groups
-
-
-def _gmail_target(members: Iterable[ThreadInput], by_id: dict[str, ThreadInput]) -> str | None:
-    for item in sorted(members, key=_sort_key):
-        for ref in _referenced(item):
-            target = by_id.get(ref)
-            if target is not None and target.gm_thread_id:
-                return target.gm_thread_id
-    return None
+        people = frozenset(address for address in item.participants if address not in own)
+        groups.add(item, people, linked=item.key not in excluded)
+    for item in sorted(items, key=_edge_order):
+        if item.key not in excluded and not item.gm_thread_id:
+            groups.follow(item)
+    found: dict[str, list[ThreadInput]] = {}
+    for item in items:
+        found.setdefault(groups.root(f"k:{item.key}"), []).append(item)
+    return found, groups.skipped
 
 
 def _heuristic_groups(singles: list[ThreadInput]) -> list[list[ThreadInput]]:
@@ -226,19 +276,77 @@ def _thread(members: list[ThreadInput], method: str, known_ids: set[str]) -> Thr
     return Thread(key, method, tuple(item.key for item in ordered), partial)
 
 
-def build_threads(items: Sequence[ThreadInput]) -> list[Thread]:
-    """Group messages into threads (see the module docstring)."""
+def _holds_root(thread: Thread, inputs: Mapping[str, ThreadInput]) -> bool:
+    """True when the thread's key is the hash of one of its own members' Message-ID (it holds the root)."""
+    return any(
+        (mid := inputs[uid].message_id) is not None and f"r.{_digest(mid)}" == thread.thread_key
+        for uid in thread.members
+    )
+
+
+def _dated(inputs: Mapping[str, ThreadInput], uid: str) -> tuple[bool, int, str]:
+    """Oldest first, unknown dates last, then the source uid: independent of the input order."""
+    return (inputs[uid].sent_at is None, inputs[uid].sent_at or 0, uid)
+
+
+def _earliest(thread: Thread, inputs: Mapping[str, ThreadInput]) -> tuple[bool, int, str]:
+    return min(_dated(inputs, uid) for uid in thread.members)
+
+
+def _fallback_keys(thread: Thread, inputs: Mapping[str, ThreadInput]) -> Iterator[str]:
+    """Keys for a thread whose own is taken: its members' own roots, oldest first, then hashes of its members."""
+    for uid in sorted(thread.members, key=lambda uid: _dated(inputs, uid)):
+        yield f"r.{_digest(inputs[uid].message_id or uid)}"
+    members = "\n".join(sorted(thread.members))
+    attempt = 0
+    while True:
+        attempt += 1
+        yield "r." + _digest(str(attempt) + "\n" + members)
+
+
+def _distinct_keys(threads: Sequence[Thread], inputs: Mapping[str, ThreadInput]) -> list[Thread]:
+    """Threads with distinct keys: a contested key stays with the thread holding its root, else the earliest."""
+    taken: set[str] = set()
+    result: list[Thread] = []
+    for thread in sorted(threads, key=lambda t: (not _holds_root(t, inputs), _earliest(t, inputs))):
+        key = thread.thread_key
+        if key in taken:
+            key = next(candidate for candidate in _fallback_keys(thread, inputs) if candidate not in taken)
+        taken.add(key)
+        result.append(thread if key == thread.thread_key else replace(thread, thread_key=key))
+    return result
+
+
+def build_threads(
+    items: Sequence[ThreadInput],
+    *,
+    own: Container[str] = frozenset(),
+    excluded: Collection[str] = frozenset(),
+    stats: Counter[str] | None = None,
+) -> list[Thread]:
+    """Group messages into threads (see the module docstring).
+
+    ``own`` holds the account owner's addresses (never a shared participant),
+    ``excluded`` the keys of messages that take no part in reference grouping, and
+    ``stats["merge_skipped"]`` gains the messages a merge guard held back.
+    """
     known_ids = {item.message_id for item in items if item.message_id}
+    components, skipped = _components(items, own, excluded)
+    if stats is not None and skipped:
+        stats["merge_skipped"] += skipped
     threads: list[Thread] = []
     singles: list[ThreadInput] = []
-    for members in _components(items).values():
+    for members in components.values():
         if any(item.gm_thread_id for item in members):
             threads.append(_thread(members, "gmail_thrid", known_ids))
         elif _is_bare_single(members):
-            singles.append(members[0])
+            if members[0].key in excluded:
+                threads.append(_thread(members, "single", known_ids))  # never grouped by subject either
+            else:
+                singles.append(members[0])
         else:
             threads.append(_thread(members, "references", known_ids))
     for group in _heuristic_groups(singles):
         threads.append(_thread(group, "heuristic" if len(group) > 1 else "single", known_ids))
-    threads.sort(key=lambda thread: thread.thread_key)
-    return threads
+    inputs = {item.key: item for item in items}
+    return sorted(_distinct_keys(threads, inputs), key=lambda thread: thread.thread_key)

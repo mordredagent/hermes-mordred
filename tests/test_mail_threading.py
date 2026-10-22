@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import random
+from collections import Counter
 
 import pytest
 
+from mordred_hermes.imports.mail.merge_guard import followed_refs
 from mordred_hermes.imports.mail.threading import (
     HEURISTIC_WINDOW_SECONDS,
     ThreadInput,
@@ -133,3 +135,89 @@ def test_thread_keys_are_content_free() -> None:
     (thread,) = build_threads([item("k1", mid="secret-subject-id@example.org")])
     assert thread.thread_key.startswith("r.")
     assert "secret" not in thread.thread_key
+
+
+# --- the merge guard in a batch (the same guard as the store's reconciliation) -------------------
+
+ALICE, MALLORY, OWNER = "alice@example.org", "mallory@example.com", "owner@example.com"
+
+
+def _five_threads_and_a_crafted_message(crafted_at: int) -> list[ThreadInput]:
+    """Five two-message threads with Alice and one message from Mallory naming all five roots."""
+    items: list[ThreadInput] = []
+    for n in range(5):
+        pair = frozenset({ALICE, OWNER})
+        items.append(item(f"r{n}", mid=f"root{n}", people=pair, at=1_000 + n))
+        items.append(item(f"p{n}", mid=f"reply{n}", irt=(f"root{n}",), refs=(f"root{n}",), people=pair, at=2_000 + n))
+    roots = tuple(f"root{n}" for n in range(5))
+    items.append(item("x", mid="crafted", refs=roots, people=frozenset({MALLORY, ALICE, OWNER}), at=crafted_at))
+    return items
+
+
+@pytest.mark.parametrize("crafted_at", [500, 1_500, 3_000])  # before, between and after the threads
+def test_a_message_naming_five_threads_in_one_batch_joins_none_of_them(crafted_at: int) -> None:
+    items = _five_threads_and_a_crafted_message(crafted_at)
+    for seed in range(3):
+        shuffled = items[:]
+        random.Random(seed).shuffle(shuffled)
+        stats: Counter[str] = Counter()
+        threads = build_threads(shuffled, own={OWNER}, stats=stats)
+        assert sorted(thread.members for thread in threads) == [
+            ("r0", "p0"), ("r1", "p1"), ("r2", "p2"), ("r3", "p3"), ("r4", "p4"), ("x",)
+        ]  # fmt: skip
+        assert stats["merge_skipped"] == 1
+        assert len({thread.thread_key for thread in threads}) == 6  # it names root0 first, yet keeps its own key
+        keys = {thread.members: thread.thread_key for thread in threads}
+        assert keys[("r0", "p0")] == default_thread_key(items[0])  # the thread holding the root keeps its key
+
+
+def test_a_reply_chain_in_one_batch_still_groups_whatever_the_order() -> None:
+    taro, hanako = "taro@example.net", "hanako@example.org"
+    chain = [
+        item("a", mid="A", people=frozenset({taro, OWNER}), at=100),
+        item("b", mid="B", irt=("A",), refs=("A",), people=frozenset({hanako, taro, OWNER}), at=200),
+        item("c", mid="C", irt=("B",), refs=("A", "B"), people=frozenset({OWNER, hanako}), at=300),
+        item("d", mid="D", irt=("C",), refs=("A", "B", "C"), people=frozenset({taro, OWNER, hanako}), at=None),
+    ]
+    for seed in range(5):
+        shuffled = chain[:]
+        random.Random(seed).shuffle(shuffled)
+        stats: Counter[str] = Counter()
+        (thread,) = build_threads(shuffled, own={OWNER}, stats=stats)
+        assert (thread.members, thread.method, stats["merge_skipped"]) == (("a", "b", "c", "d"), "references", 0)
+        assert thread.thread_key == default_thread_key(chain[0])
+
+
+def test_the_owner_is_never_the_shared_participant() -> None:
+    root = item("a", mid="A", people=frozenset({ALICE, OWNER}))
+    stray = item("b", mid="B", irt=("A",), refs=("A",), people=frozenset({MALLORY, OWNER}), order=1)
+    stats: Counter[str] = Counter()
+    assert len(build_threads([root, stray], own={OWNER}, stats=stats)) == 2 and stats["merge_skipped"] == 1
+    assert len(build_threads([root, stray])) == 1  # without the owner's addresses it would count
+
+
+def test_siblings_of_an_absent_parent_still_group() -> None:
+    first = item("b", mid="B", irt=("A",), refs=("A",), at=200)
+    second = item("c", mid="C", irt=("A",), refs=("A",), at=300, order=1)
+    (thread,) = build_threads([first, second], own={OWNER})  # the absent parent's placeholder brings nobody
+    assert thread.members == ("b", "c") and thread.partial
+
+
+def test_excluded_copies_take_no_part_in_reference_grouping() -> None:
+    forged = item("m1", mid="M1", irt=("M2",), refs=("M2",))  # a rejected copy of a stored message
+    new = item("m2", mid="M2", order=1)
+    reply = item("m3", mid="M3", irt=("M1",), refs=("M1",), order=2)  # names the excluded copy's id
+    threads = build_threads([forged, new, reply], own={OWNER}, excluded={"m1"})
+    assert sorted(thread.members for thread in threads) == [("m1",), ("m2",), ("m3",)]
+    assert len(build_threads([forged, new, reply], own={OWNER})) == 1  # what it would have connected
+
+
+def test_only_the_last_ten_references_are_followed_and_the_parent_is_kept() -> None:
+    ancestors = tuple(f"anc{n}" for n in range(12))
+    assert followed_refs(("parent",), (*ancestors, "parent")) == (*ancestors[-9:], "parent")
+    far = item("far", mid="anc0")
+    near = item("near", mid="parent", order=1)
+    reply = item("reply", mid="R", irt=("parent",), refs=(*ancestors, "parent"), order=2)
+    threads = {thread.members: thread for thread in build_threads([far, near, reply], own={OWNER})}
+    assert set(threads) == {("far",), ("near", "reply")}  # anc0 is beyond the followed ids
+    assert threads[("near", "reply")].partial  # but still marks the thread partial

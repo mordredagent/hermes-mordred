@@ -302,7 +302,15 @@ threads. Because `References` is attacker-controlled the merge is guarded:
 only the last 10 referenced ids count, a conversation is folded only when it
 shares a participant with the new message's (the account owner never
 counts), and nothing is merged for a message whose fold would take more than
-one conversation that already holds several messages (`merge_skipped`).
+one conversation that already holds several messages (`merge_skipped`). After
+the fourth-pass review the same guard function (`imports/mail/merge_guard.py`)
+also decides the grouping of each batch before it is written, and copies the
+store will not write (duplicates and rejected copies, told beforehand by
+`ImportStore.classify_incoming`) take no part in it. A store created before
+import schema v2 has no stored references for the messages it already holds,
+so a later-arriving parent cannot join them until those children are fetched
+again (`mail fetch --since <date>` re-fetches identical copies, which attach
+their references); this limitation is kept.
 
 ### Counts-only output, enforced by a fixed serializer
 
@@ -313,7 +321,9 @@ revised, conflicts, skipped_oversize, batches, mailboxes, gmail, cursor_reset,
 partial, partial_reason, excluded_history, error}` (the implementation adds
 `fetched`, `skipped`, `dry_run` and, after the second-pass review, `abandoned`:
 the tool gave up waiting for its worker, see below; after the third-pass
-review, `merge_skipped`: messages whose reference merge a guard held back).
+review, `merge_skipped`: messages whose reference merge a guard held back;
+after the fourth-pass review, `lock_retained`: the abandoned worker keeps the
+writer lock).
 `error` and
 `partial_reason` are drawn from a closed enum. `imaplib.Debug` stays 0;
 exceptions are mapped to codes and never stringified into results, logs or
@@ -388,14 +398,19 @@ cancellation shut down; a connection not open by the hard deadline is
 `imap_unreachable`. A cancelled tool call cancels the fetch (the socket is
 shut down and a resolver wait woken at once) and waits for the worker at most
 the remaining budget plus 30 seconds, absorbing repeated cancellations only
-until then, so a cancellation always completes. A worker still running 40
+until then, so a cancellation always completes; after the fourth-pass review
+that bound includes abandoning the fetch. A worker still running 40
 seconds after the budget (stuck where the session's bounds cannot reach) is
 cancelled and abandoned as a daemon thread; the call returns `partial: true`,
 `partial_reason: "cancelled"` and `abandoned: true` with zero counts. Before
 returning, the handler fails the worker's open run (counts `{"abandoned": 1}`;
 `write_batch` refuses a late batch inside its transaction), refuses its later
 store writes and releases the writer lock it held, so the next call proceeds
-while the abandoned worker is still blocked. The CLI keeps a 10 minute budget.
+while the abandoned worker is still blocked. After the fourth-pass review the
+later writes are refused inside their transactions, and when the run cannot be
+failed in time (the store busy) or a write is still in flight, the lock is kept
+by the abandoned worker until it exits (`lock_retained: true`; a call meanwhile
+is `sync_in_progress`). The CLI keeps a 10 minute budget.
 
 ### Open questions, decided
 

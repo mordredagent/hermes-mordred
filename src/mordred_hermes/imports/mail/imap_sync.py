@@ -10,9 +10,13 @@ encryption armed, the ``mordred.db`` protection gate, the per-home fetch lock
 (``sync_in_progress``), then ONE Enclave unseal and the IMAP login. A crashed
 fetch's ``open`` mail runs are marked failed under the lock. A caller running
 the fetch in a worker thread (the Hermes tool) passes a :class:`FetchLease`:
-when it abandons a stuck worker, the worker's open run is failed
-(``{"abandoned": 1}``, so ``write_batch`` refuses its late batch), its later
-store writes are refused and the writer lock is released at once.
+when it abandons a stuck worker, every later store write of the worker is
+refused inside its transaction (the lease's revocation flag), its open run is
+failed (``{"abandoned": 1}``, so ``write_batch`` also refuses a late batch by
+the run state) and the writer lock is released, all within the caller's bound.
+When a write is still in flight or the run cannot be failed in time (the store
+busy), the lock is NOT released: it stays with the abandoned worker until it
+exits (``lock_retained``; a fetch meanwhile is ``sync_in_progress``).
 
 Per mailbox (Gmail: All Mail; other servers: INBOX, then the sent folder chosen at
 ``mail setup``):
@@ -47,7 +51,11 @@ Per mailbox (Gmail: All Mail; other servers: INBOX, then the sent folder chosen 
   keeps every message's referenced ids and merges the conversations of
   replies fetched before their parent (C, then B, then A ends as one
   conversation), within its guards against forged ``References``
-  (``merge_skipped`` counts the messages a guard held back).
+  (:mod:`.merge_guard`, applied to the batch's grouping too; copies the store
+  will not write, per :meth:`~..store.ImportStore.classify_incoming`, take no
+  part in it). ``merge_skipped`` counts the messages a guard held back (the
+  store's count for a written batch, which re-weighs every edge; the
+  grouping's for a dry run).
 - Deadlines: the session (:class:`~.imap.IoLimits`) refuses to start a command
   after ``budget_s`` and cuts an in-flight one at the hard deadline, connection
   establishment included (route lookup, DNS, TCP, SOCKS5, TLS: a connection not
@@ -75,7 +83,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
-from typing import Any, Final, Protocol
+from typing import Any, Final, Protocol, TypeAlias
 
 from .imap import CancelToken, ImapError, ImapSession, ImapStopped, IoLimits
 from .secrets import MailCredentials, MailSecretsError, ensure_private_dir, mail_dir
@@ -88,6 +96,7 @@ __all__ = [
     "ERROR_CODES",
     "MAX_MAX_MESSAGES",
     "PARTIAL_REASONS",
+    "REVOKE_GRACE_S",
     "TOOL_BUDGET_S",
     "Cursor",
     "FetchEnv",
@@ -192,6 +201,10 @@ class FetchResult:
     #: Set by the Hermes tool only: its worker did not end within the call's bound, so it was cancelled and
     #: left behind (a daemon thread that stops at its next check); the counts are then unknown and reported as 0.
     abandoned: bool = False
+    #: Set by the Hermes tool only, with ``abandoned``: the worker's revocation did not complete in time (a write in
+    #: flight, or its run could not be failed), so the writer lock stays with the worker until it exits; a fetch
+    #: meanwhile is ``sync_in_progress``.
+    lock_retained: bool = False
     partial_reason: str | None = None
     error: str | None = None
 
@@ -215,7 +228,7 @@ _INT_FIELDS: Final = frozenset(
         "merge_skipped",
     }
 )
-_BOOL_FIELDS: Final = frozenset({"gmail", "cursor_reset", "partial", "dry_run", "abandoned"})
+_BOOL_FIELDS: Final = frozenset({"gmail", "cursor_reset", "partial", "dry_run", "abandoned", "lock_retained"})
 RESULT_FIELDS: Final = _INT_FIELDS | _BOOL_FIELDS | {"partial_reason", "error"}
 
 
@@ -337,10 +350,33 @@ def imap_date(day: _dt.date) -> str:
 
 # --- lock and lease -------------------------------------------------------------------------------
 
-#: How often :meth:`FetchLease.abandon` tries to mark an open run failed while the store is busy.
+#: How many times :meth:`FetchLease.abandon` tries to mark an open run failed while the store is busy.
 _ABANDON_ATTEMPTS: Final = 3
+#: The default bound of :meth:`FetchLease.abandon` (seconds): two store busy timeouts and a margin.
+REVOKE_GRACE_S: Final = 5.0
 #: The counts-only reason an abandoned run is failed with (``import_runs.counts_json``).
 ABANDONED_COUNTS: Final[Mapping[str, int]] = {"abandoned": 1}
+
+
+class _LockRelease:
+    """An idempotent, thread-safe ``flock`` release of ``fd`` (the descriptor itself stays open)."""
+
+    def __init__(self, fd: int) -> None:
+        self._fd = fd
+        self._guard = threading.Lock()
+        self._held = True
+
+    @property
+    def held(self) -> bool:
+        return self._held
+
+    def __call__(self) -> None:
+        import fcntl  # POSIX only
+
+        with self._guard:
+            if self._held:
+                self._held = False
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
 
 
 class FetchLease:
@@ -348,89 +384,137 @@ class FetchLease:
 
     The Hermes tool creates one per call (:attr:`FetchOptions.lease`). The fetch
     registers with it the writer lock it holds (:func:`fetch_lock`) and every
-    ``import_runs`` row it opens, and makes every other store write (the crash
-    recovery of open runs, the own addresses, a cursor-only move, the last-fetch
-    record) through :meth:`write`. :meth:`abandon`, called when the tool stops
-    waiting for its worker, then in this order: refuses every later registration
-    and write (a write in flight finishes first), marks the open run ``failed``
-    with the counts-only reason :data:`ABANDONED_COUNTS` (so
-    ``ImportStore.write_batch`` refuses a late batch inside its transaction) and
-    releases the writer lock, so the next fetch proceeds while the abandoned
-    worker is still blocked. The worker stops at its next registration, write or
-    check (:class:`_Abandoned`, ``partial_reason: cancelled``).
+    ``import_runs`` row it opens, and passes :meth:`check` as the ``guard`` of
+    every store write, which the store runs INSIDE the write transaction. A write
+    that cannot take a guard (the own-address record) and the other writes
+    outside a batch go through :meth:`writing`, which counts them while in flight.
+
+    :meth:`abandon` (the tool, when it stops waiting for its worker), within its
+    bound: sets the revocation flag (every later write is refused, in its
+    transaction or before it starts), waits for the writes in flight, marks the
+    open runs ``failed`` with the counts-only reason :data:`ABANDONED_COUNTS` (so
+    ``ImportStore.write_batch`` also refuses a late batch by the run state) and
+    then releases the writer lock, so the next fetch proceeds while the
+    abandoned worker is still blocked. When a write is still in flight or a run
+    cannot be failed by the bound (the store busy: a write holds it), the lock is
+    NOT released: it stays with the abandoned worker, which releases it when it
+    exits (or the process ends), and :meth:`settle` reports it retained. The
+    mutex is only ever held to read or flip these flags, never across a store
+    write. The worker stops at its next registration, write or check
+    (:class:`_Abandoned`, ``partial_reason: cancelled``).
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._mutex = threading.Lock()
+        self._idle = threading.Condition(self._mutex)
         self._abandoned = False
-        self._release: Callable[[], None] | None = None
+        self._settled = False
+        self._writes = 0
+        self._release: _LockRelease | None = None
         self._runs: dict[str, Any] = {}
 
     @property
     def abandoned(self) -> bool:
         return self._abandoned
 
-    def hold_lock(self, release: Callable[[], None]) -> bool:
+    @property
+    def lock_retained(self) -> bool:
+        """True once abandoned while the writer lock is still held for the abandoned worker."""
+        with self._mutex:
+            return self._abandoned and self._release is not None and self._release.held
+
+    def check(self) -> None:
+        """The store write guard: :class:`_Abandoned` once abandoned (the store calls it inside the transaction)."""
+        if self._abandoned:
+            raise _Abandoned()
+
+    def hold_lock(self, release: _LockRelease) -> bool:
         """Register the writer lock's release; ``False`` (the caller releases it) once abandoned."""
-        with self._lock:
+        with self._mutex:
             if self._abandoned:
                 return False
             self._release = release
             return True
 
     def opened(self, store: Any, run_id: str) -> bool:
-        """Register an open run; ``False`` (the caller fails it and stops) once abandoned."""
-        with self._lock:
-            if self._abandoned:
-                return False
+        """Register an open run; ``False`` once abandoned (the caller fails it and stops; it is revoked too)."""
+        with self._mutex:
             self._runs[run_id] = store
-            return True
+            return not self._abandoned
 
     def closed(self, run_id: str) -> None:
         """The run was committed or failed by the fetch itself."""
-        with self._lock:
+        with self._mutex:
             self._runs.pop(run_id, None)
 
-    def write(self, action: Callable[[], object]) -> None:
-        """Run the store write ``action`` unless abandoned (:class:`_Abandoned`); :meth:`abandon` waits for it."""
-        with self._lock:
+    @contextlib.contextmanager
+    def writing(self) -> Iterator[None]:
+        """One store write of the fetch: :class:`_Abandoned` once abandoned; :meth:`abandon` waits for it (bounded)."""
+        with self._mutex:
             if self._abandoned:
                 raise _Abandoned()
-            action()
+            self._writes += 1
+        try:
+            yield
+        finally:
+            with self._idle:
+                self._writes -= 1
+                self._idle.notify_all()
 
-    def abandon(self) -> None:
-        """Refuse every later write, fail the open run (``abandoned``), release the writer lock. Never raises."""
-        with self._lock:
+    def abandon(self, until: float | None = None) -> bool:
+        """Revoke the fetch by the monotonic time ``until`` (default: :data:`REVOKE_GRACE_S` from now). Never raises.
+
+        Returns True when the writer lock is released (or none is held), False when it
+        is retained by the abandoned worker (see the class docstring).
+        """
+        deadline = time.monotonic() + REVOKE_GRACE_S if until is None else until
+        with self._mutex:
             self._abandoned = True
-            runs, self._runs = dict(self._runs), {}
-            release, self._release = self._release, None
-        for run_id, store in runs.items():
-            for _attempt in range(_ABANDON_ATTEMPTS):
-                try:
-                    store.run_fail(run_id, ABANDONED_COUNTS)
-                except Exception as exc:  # run_not_open: the batch committed first; busy: try again
-                    if getattr(exc, "code", None) == "busy":
-                        continue
-                break
-        if release is not None:
-            with contextlib.suppress(Exception):
-                release()
+        drained = self._drained(deadline)
+        with self._mutex:
+            runs = dict(self._runs)  # after the drain: a run opened by a write in flight is included
+        revoked = drained and all(
+            [self._revoke(store, run_id, deadline) for run_id, store in runs.items()]
+        )  # each tried
+        with self._mutex:
+            release = self._release
+            if release is None or not release.held:
+                return True  # never taken, or released by the worker on its way out
+            if not revoked or self._settled:
+                return False
+            release()
+            return True
 
+    def settle(self) -> bool:
+        """End the abandonment: nothing is released after this. Returns whether the writer lock is retained."""
+        with self._mutex:
+            self._settled = True
+            return self._release is not None and self._release.held
 
-def _unlocker(fd: int) -> Callable[[], None]:
-    """An idempotent, thread-safe ``flock`` release of ``fd`` (the descriptor itself stays open)."""
-    import fcntl  # POSIX only
+    def _drained(self, deadline: float) -> bool:
+        with self._idle:
+            while self._writes:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                self._idle.wait(left)
+            return True
 
-    guard = threading.Lock()
-    held = [True]
-
-    def release() -> None:
-        with guard:
-            if held[0]:
-                held[0] = False
-                fcntl.flock(fd, fcntl.LOCK_UN)
-
-    return release
+    @staticmethod
+    def _revoke(store: Any, run_id: str, deadline: float) -> bool:
+        """Mark ``run_id`` failed (abandoned); True once it is closed (failed now, or committed/failed before)."""
+        for _attempt in range(_ABANDON_ATTEMPTS):
+            if time.monotonic() >= deadline:
+                return False
+            try:
+                store.run_fail(run_id, ABANDONED_COUNTS)
+            except Exception as exc:
+                code = getattr(exc, "code", None)
+                if code == "busy":
+                    continue  # a write holds the store: try again while the bound allows
+                return code == "run_not_open"  # closed already: nothing more can be written under it
+            return True
+        return False
 
 
 class WriterLock(Protocol):
@@ -444,8 +528,8 @@ def fetch_lock(home: Path, lease: FetchLease | None = None) -> Iterator[None]:
     """The per-home mail writer lock (``<home>/mordred/mail/.lock``); held elsewhere → ``sync_in_progress``.
 
     With a ``lease`` the lock's release is registered with it, so a caller that
-    abandons the fetch releases the lock at once; a lease already abandoned
-    releases it before anything runs under it (:class:`_Abandoned`).
+    abandons the fetch can release the lock once the fetch is revoked; a lease
+    already abandoned releases it before anything runs under it (:class:`_Abandoned`).
     """
     if sys.platform == "win32":  # no mordred.db on Windows: nothing to serialize
         yield
@@ -471,7 +555,7 @@ def fetch_lock(home: Path, lease: FetchLease | None = None) -> Iterator[None]:
             if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
                 raise FetchStop("sync_in_progress") from None
             raise FetchStop("store_path_unsafe") from None
-        release = _unlocker(fd)
+        release = _LockRelease(fd)
         try:
             if lease is not None and not lease.hold_lock(release):
                 raise _Abandoned()
@@ -586,12 +670,18 @@ def _chunks(items: Sequence[int], size: int) -> Iterator[list[int]]:
 Commit = Callable[[list[int]], Mapping[str, str]]
 
 
-def _leased(options: FetchOptions, action: Callable[[], object]) -> None:
-    """A store write outside a batch: under the lease when there is one (:class:`_Abandoned` once abandoned)."""
-    if options.lease is None:
-        action()
-    else:
-        options.lease.write(action)
+#: The store write guard passed to a leased write (``None`` without a lease).
+Guard: TypeAlias = Callable[[], None] | None
+
+
+def _leased(options: FetchOptions, action: Callable[[Guard], object]) -> None:
+    """A store write outside a batch: counted by the lease and given its guard (:class:`_Abandoned` once abandoned)."""
+    lease = options.lease
+    if lease is None:
+        action(None)
+        return
+    with lease.writing():
+        action(lease.check)
 
 
 @dataclass
@@ -620,7 +710,7 @@ class _Run:
     def save(self, key: str, cursor: Cursor) -> None:
         """A cursor move that publishes no row (nothing new below it, or an empty mailbox)."""
         if not self.options.dry_run:
-            _leased(self.options, lambda: self.store.set_meta(key, cursor.to_json()))
+            _leased(self.options, lambda guard: self.store.set_meta(key, cursor.to_json(), guard=guard))
 
     # -- UID discovery ----------------------------------------------------------------------
 
@@ -699,9 +789,9 @@ class _Run:
         if not messages:
             if not self.options.dry_run:
 
-                def move() -> None:
+                def move(guard: Guard) -> None:
                     for key, value in updates.items():
-                        self.store.set_meta(key, value)
+                        self.store.set_meta(key, value, guard=guard)
 
                 _leased(self.options, move)
             return
@@ -715,20 +805,33 @@ class _Run:
             raise FetchStop("run_failed") from None
         return {item.message.message_id: item.conversation.conversation_id for item in found}
 
+    def stored_copies(self, copies: Sequence[Any]) -> Mapping[str, str]:
+        """The store's decision for each copy of the batch (the copies it will not write group with nothing)."""
+        try:
+            return dict(self.store.classify_incoming(copies))
+        except Exception:
+            raise FetchStop("run_failed") from None
+
     def open_run(self) -> str:
         """A new ``open`` mail run, registered with the lease (:class:`_Abandoned` once the caller gave up)."""
         lease = self.options.lease
-        if lease is not None and lease.abandoned:
-            raise _Abandoned()  # not even a run row: the caller has given this fetch up
-        try:
-            run_id = str(self.store.run_begin("mail"))
-        except Exception:
-            raise FetchStop("run_failed") from None
-        if lease is not None and not lease.opened(self.store, run_id):
-            with contextlib.suppress(Exception):
-                self.store.run_fail(run_id, ABANDONED_COUNTS)
-            raise _Abandoned()
-        return run_id
+        if lease is None:
+            try:
+                return str(self.store.run_begin("mail"))
+            except Exception:
+                raise FetchStop("run_failed") from None
+        with lease.writing():  # not even a run row once the caller has given this fetch up
+            try:
+                run_id = str(self.store.run_begin("mail", guard=lease.check))
+            except _Abandoned:
+                raise
+            except Exception:
+                raise FetchStop("run_failed") from None
+            if lease.opened(self.store, run_id):
+                return run_id
+        with contextlib.suppress(Exception):
+            self.store.run_fail(run_id, ABANDONED_COUNTS)  # failing is always safe; the lease revokes it too
+        raise _Abandoned()
 
     def publish(self, messages: list[tuple[bytes, TrustedMeta]], updates: Mapping[str, str]) -> None:
         from .importer import plan_import
@@ -741,6 +844,7 @@ class _Run:
             own_addresses=self.own,
             linker=linker,
             thread_resolver=self.stored_threads,
+            copy_check=self.stored_copies,
         )
         if linker.error is not None:
             raise FetchStop("run_failed")  # never publish weaker attributions after a store failure
@@ -748,6 +852,7 @@ class _Run:
         self.result.skipped += skipped
         if self.options.dry_run:
             self.result.batches += 1  # planned, never written
+            self.result.merge_skipped += plan.merge_skipped
             return
         counts: dict[str, int] = {"fetched": len(messages), "parsed": plan.report.parsed, "skipped": skipped}
         run_id = self.open_run()
@@ -760,6 +865,7 @@ class _Run:
                 counts=counts,
                 meta_updates=updates,
                 refs=plan.refs,
+                guard=None if lease is None else lease.check,  # the revocation flag, inside the transaction
             )
         except BaseException as exc:
             with contextlib.suppress(Exception):
@@ -903,7 +1009,7 @@ def _sync(store: Any, creds: MailCredentials, options: FetchOptions, env: FetchE
     try:
         own = tuple(sorted(set(creds.own_addresses) | stored_own_addresses(store, creds.account)))
         if not options.dry_run:
-            _leased(options, lambda: remember_own_addresses(store, creds.account, creds.own_addresses))
+            _leased(options, lambda _guard: remember_own_addresses(store, creds.account, creds.own_addresses))
     except _Abandoned:
         raise
     except Exception as exc:
@@ -958,7 +1064,7 @@ def _unseal(env: FetchEnv) -> MailCredentials:
 def _locked_fetch(store: Any, options: FetchOptions, env: FetchEnv, result: FetchResult) -> None:
     if not options.dry_run:
         try:
-            _leased(options, lambda: store.fail_open_runs("mail"))
+            _leased(options, lambda guard: store.fail_open_runs("mail", guard=guard))
         except _Abandoned:
             raise
         except Exception as exc:
@@ -970,7 +1076,10 @@ def _locked_fetch(store: Any, options: FetchOptions, env: FetchEnv, result: Fetc
         del creds
     if not options.dry_run:
         with contextlib.suppress(Exception):  # an abandoned fetch (_Abandoned) records nothing either
-            _leased(options, lambda: store.set_meta(last_fetch_key(_account_of(env)), _last_json(result, env)))
+            _leased(
+                options,
+                lambda guard: store.set_meta(last_fetch_key(_account_of(env)), _last_json(result, env), guard=guard),
+            )
 
 
 def _account_of(env: FetchEnv) -> str:

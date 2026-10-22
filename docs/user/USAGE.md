@@ -935,7 +935,10 @@ hermes-mordred mail forget --rows --yes                 # ... and the account's 
 5. **Older mail.** The first sync takes your newest 2000 messages and reports
    how many older ones it left out (`excluded_history`). To fetch older mail,
    run `hermes-mordred mail fetch --since 2025-01-01` (repeat while it reports
-   `partial`).
+   `partial`). Mail synced by a Mordred older than import schema v2 kept no
+   reply references, so a parent message arriving later cannot join those
+   replies' conversation until they are fetched again: `mail fetch --since
+   <date>` re-fetches them unchanged and attaches their references.
 
 `mail fetch` does the same as the tool from a terminal, with up to 10 minutes
 per run; `--dry-run` fetches and counts but writes nothing. It exits 0 when it

@@ -53,31 +53,44 @@ A crashed writer's ``open`` runs are reclaimed with
 
 Mail thread reconciliation (``write_batch(..., refs=...)``): the batch's
 referenced Message-IDs (``In-Reply-To``, ``References``; at most the last
-:data:`MAX_MERGE_REFS`, the nearest ancestors) are kept in ``import_mail_refs``.
+``mail.merge_guard.MAX_MERGE_REFS``, the nearest ancestors) are kept in ``import_mail_refs``.
 They are taken from a copy that is written (they replace the stored ones) and
 from an identical copy of a stored message (same ``source_revision`` and
 ``content_digest``, so the same headers), which records them only when the
 stored message has none yet (a row written before schema v2: a re-fetch, e.g.
 ``--since``, attaches them). A rejected different copy (a weaker duplicate, a
-conflict) contributes no reference at all, so it can connect nothing. For
-every message M of the batch, the conversations of the stored messages M
-references (its parents) and of the stored messages that reference M (replies
-fetched before it) are merged with M's own into ONE survivor, in the batch's
-transaction (:meth:`ImportStore.merge_conversations`: message rows repointed,
-participants unioned, ``last_message_at`` the maximum, ``message_count``
-recounted, the emptied rows dropped). ``References`` is attacker-controlled,
-so the merge is guarded: a conversation is folded only when it shares a
-participant with M's (a sender id or a recipient address; the account owner,
-marked or recorded in ``import_accounts``, never counts), and when more than
-one of the conversations to fold already holds several messages nothing is
-merged for M. Each message a guard held back counts once in
-``BatchResult.merge_skipped``. The survivor is the conversation holding the
-earliest-dated message (unknown dates last, then the smaller ``conv_uid``). A
-conversation keyed by a Gmail thread id (``g.``, see
-``mail.threading.default_thread_key``) is authoritative: it is never folded
-into another, and when one is involved it is the survivor. So a reply chain
-fetched in any order (C, then B, then A) ends in one conversation, and two
-threads that never reference each other stay apart.
+conflict) contributes no reference at all, so it can connect nothing
+(:meth:`ImportStore.classify_incoming` tells the importer the same decisions
+beforehand, so such a copy does not join anything while a batch is grouped
+either). For every message M of the batch, the conversations of the stored
+messages M references (its parents, committed or of this batch) and of the
+committed messages that reference M (replies fetched in an earlier batch) are
+merged with M's own into ONE survivor, in the batch's transaction
+(:meth:`ImportStore.merge_conversations`: message rows repointed, participants
+unioned, ``last_message_at`` the maximum, ``message_count`` recounted, the
+emptied rows dropped). The batch's own reply edges were weighed by its grouping
+under the same guard, and are weighed again here from the replying message's
+side only. ``References`` is attacker-controlled, so the merge is guarded by
+``mail.merge_guard.fold_plan`` (the same function guards a batch's grouping): a
+conversation is folded only when it shares a participant with M's (a sender id
+or a recipient address; the account owner, marked or recorded in
+``import_accounts``, never counts), and when more than one of the
+conversations to fold already holds several messages nothing is merged for M.
+Each message a guard held back counts once in ``BatchResult.merge_skipped``.
+The survivor is the conversation holding the earliest-dated message (unknown
+dates last, then the smaller ``conv_uid``). A conversation keyed by a Gmail
+thread id (``g.``, see ``mail.threading.default_thread_key``) is
+authoritative: it is never folded into another, and when one is involved it is
+the survivor. So a reply chain fetched in any order (C, then B, then A) ends in
+one conversation, and two threads that never reference each other stay apart.
+
+Lease guards (the IMAP fetch's worker): :meth:`ImportStore.write_batch`,
+:meth:`ImportStore.set_meta`, :meth:`ImportStore.run_begin` and
+:meth:`ImportStore.fail_open_runs` take a ``guard`` that runs INSIDE the write
+transaction, right after ``BEGIN IMMEDIATE`` (and, for ``write_batch``, before
+the run state is checked): what it raises rolls the transaction back. A fetch
+whose caller revoked it is thus refused by the revocation flag even while its
+run is still open, and by the run state once the run is marked failed.
 
 The lower-level pieces stay available:
 :meth:`ImportStore.commit_batch` publishes a run already written with
@@ -102,7 +115,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, Final, NamedTuple
+from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 from ..activity._gate import (
     ActivityRefused,
@@ -131,6 +144,9 @@ from .records import (
     validate_message,
 )
 
+if TYPE_CHECKING:  # the mail package imports this module; the guard is imported where it is used
+    from .mail.merge_guard import GroupFacts
+
 __all__ = [
     "MAX_NEIGHBORS",
     "MAX_SEARCH_LIMIT",
@@ -142,8 +158,10 @@ __all__ = [
     "ImportMeta",
     "ImportRefused",
     "ImportStore",
+    "IncomingCopy",
     "SearchHit",
     "StoredPart",
+    "WriteGuard",
     "WriteResult",
     "open_import_store",
 ]
@@ -168,14 +186,16 @@ _MAX_MERGED_PARTICIPANTS: Final = 256
 #: A mail conversation keyed by a Gmail thread id (``mail.threading.default_thread_key``) is never folded away.
 _GMAIL_THREAD_PREFIX: Final = "g."
 _MAX_REF_CHARS: Final = 1024
-#: Referenced ids kept and followed per message: the nearest ancestors (``In-Reply-To`` last, see the importer).
-MAX_MERGE_REFS: Final = 10
-#: Joins of message ``m`` onto its run ``r`` and conversation ``c``, and the scope a reconciliation looks in:
-#: rows of committed runs or of the run being written, of one source and account.
+#: Joins of message ``m`` onto its run ``r`` and conversation ``c``, and the scopes a reconciliation looks in:
+#: parents among rows of committed runs or of the run being written, replies among committed rows (a reply
+#: of the batch itself is weighed from its own side), of one source and account.
 _RUN_AND_CONV: Final = (
     "JOIN import_runs r ON r.run_id = m.run_id JOIN import_conversations c ON c.conv_uid = m.conv_uid"
 )
+#: What :func:`_decision` weighs of a stored row ``m`` (then: written by the same run, and its run's state ``r``).
+_DECISION_COLUMNS: Final = "m.source_revision, m.content_digest, m.provenance_quality, m.owner_evidence"
 _IN_SCOPE: Final = "(r.state = 'committed' OR m.run_id = ?) AND c.source = ? AND c.source_account = ?"
+_COMMITTED_SCOPE: Final = "r.state = 'committed' AND c.source = ? AND c.source_account = ?"
 #: Owner evidence of a sent copy, by strength ("Sent evidence wins", rule 4 above): Gmail's
 #: ``\Sent`` system label (the server vouches for authorship) over a generic server's sent
 #: folder (it names its purpose); every other evidence ranks 0. Mirrors ``mail.owner.SENT_EVIDENCE``.
@@ -289,24 +309,18 @@ class BatchResult:
         }
 
 
-@dataclass(frozen=True)
-class _ConvFacts:
-    """What a merge decision needs to know about one conversation (see :meth:`ImportStore._fold_plan`)."""
+class IncomingCopy(NamedTuple):
+    """What :meth:`ImportStore.classify_incoming` needs to know about a copy before it is normalised."""
 
-    age: tuple[bool, int, str]  # unknown dates last, then the earliest date, then the smaller conv_uid
-    gmail: bool  # keyed by a Gmail thread id: never folded into another
-    messages: int  # committed rows plus the batch's own
-    people: frozenset[str]  # sender ids and recipient addresses, the account owner's excluded
+    source_uid: str
+    source_revision: str | None
+    provenance_quality: str
+    owner_evidence: str
+    content_digest: str | None = None  # unknown before normalisation: an unchanged revision is then a duplicate
 
-    def joined(self, others: Sequence[_ConvFacts]) -> _ConvFacts:
-        """The facts of this conversation after ``others`` were folded into it."""
-        earliest = min((self.age[:2], *(other.age[:2] for other in others)))
-        return _ConvFacts(
-            age=(*earliest, self.age[2]),
-            gmail=self.gmail,
-            messages=self.messages + sum(other.messages for other in others),
-            people=self.people.union(*(other.people for other in others)),
-        )
+
+#: A write guard: called inside a write transaction (right after ``BEGIN IMMEDIATE``); what it raises rolls back.
+WriteGuard = Callable[[], None]
 
 
 @dataclass(frozen=True)
@@ -448,6 +462,31 @@ def _meta_updates(updates: Mapping[str, str | None]) -> dict[str, str | None]:
     return {_meta_key(key): None if value is None else _meta_value(value) for key, value in updates.items()}
 
 
+def _decision(stored: Sequence[Any] | None, incoming: IncomingCopy) -> str:
+    """``inserted`` / ``duplicates`` / ``revised`` / ``conflicts`` (the module docstring's idempotency rules).
+
+    ``stored`` is ``(source_revision, content_digest, provenance_quality, owner_evidence,
+    written by the same run, run state)`` of the stored row, or ``None``.
+    """
+    if stored is None:
+        return "inserted"
+    revision, digest, quality, evidence, same_run, state = stored
+    if not same_run and state != "committed":
+        return "inserted"  # left behind by an open, failed or vanished run: reclaim it
+    stored_legacy = quality == ProvenanceQuality.LEGACY.value
+    incoming_legacy = ProvenanceQuality(incoming.provenance_quality) is ProvenanceQuality.LEGACY
+    if incoming_legacy != stored_legacy:
+        return "duplicates" if incoming_legacy else "revised"
+    incoming_rank = SENT_EVIDENCE_RANK.get(incoming.owner_evidence, 0)
+    stored_rank = SENT_EVIDENCE_RANK.get(str(evidence), 0)
+    if incoming_rank != stored_rank:  # Sent evidence wins, in both directions
+        return "revised" if incoming_rank > stored_rank else "duplicates"
+    if revision == incoming.source_revision:
+        unchanged = incoming.content_digest is None or digest == incoming.content_digest
+        return "duplicates" if unchanged else "conflicts"
+    return "revised"
+
+
 def _checked_refs(
     refs: Mapping[str, Sequence[str]] | None, messages: Sequence[ImportMessage]
 ) -> dict[str, tuple[str, ...]] | None:
@@ -569,13 +608,20 @@ class ImportStore:
                 conn.close()
 
     @contextlib.contextmanager
-    def _transaction(self, *, write: bool = True, secure_delete: bool = False) -> Iterator[sqlite3.Connection]:
-        """One transaction; a body that already ended it (a dry run's ROLLBACK) is not committed."""
+    def _transaction(
+        self, *, write: bool = True, secure_delete: bool = False, guard: WriteGuard | None = None
+    ) -> Iterator[sqlite3.Connection]:
+        """One transaction; a body that already ended it (a dry run's ROLLBACK) is not committed.
+
+        ``guard`` runs first inside the transaction (module docstring, "Lease guards").
+        """
         with self.connection() as conn:
             if secure_delete:
                 conn.execute("PRAGMA secure_delete = ON")
             conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             try:
+                if guard is not None:
+                    guard()
                 yield conn
             except BaseException:
                 if conn.in_transaction:
@@ -645,11 +691,11 @@ class ImportStore:
             row = conn.execute("SELECT value FROM import_meta WHERE key = ?", (key,)).fetchone()
         return None if row is None else str(row[0])
 
-    def set_meta(self, key: str, value: str) -> None:
+    def set_meta(self, key: str, value: str, *, guard: WriteGuard | None = None) -> None:
         """Set a content-free marker; reserved keys and malformed keys or values raise :class:`RecordError`."""
         _meta_key(key)
         _meta_value(value)
-        with self._transaction() as conn:
+        with self._transaction(guard=guard) as conn:
             conn.execute(
                 "INSERT INTO import_meta (key, value) VALUES (?, ?) "
                 "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
@@ -695,11 +741,11 @@ class ImportStore:
 
     # --- runs ----------------------------------------------------------------------------
 
-    def run_begin(self, source: Source | str, *, dry_run: bool = False) -> str:
+    def run_begin(self, source: Source | str, *, dry_run: bool = False, guard: WriteGuard | None = None) -> str:
         """Open a run; rows written under it stay invisible to readers until :meth:`run_commit`."""
         value = _source_value(source)
         run_id = secrets.token_hex(16)
-        with self._transaction() as conn:
+        with self._transaction(guard=guard) as conn:
             conn.execute(
                 "INSERT INTO import_runs (run_id, source, started_at, finished_at, state, counts_json) "
                 "VALUES (?, ?, ?, NULL, ?, '{}')",
@@ -739,6 +785,7 @@ class ImportStore:
         meta_updates: Mapping[str, str | None],
         counts: Mapping[str, int] | None = None,
         refs: Mapping[str, Sequence[str]] | None = None,
+        guard: WriteGuard | None = None,
     ) -> BatchResult:
         """Write ``threads``, merge ``conversations``, commit ``run_id`` and apply ``meta_updates`` in ONE transaction.
 
@@ -754,7 +801,8 @@ class ImportStore:
         rolls all of it back: a revised row keeps its published revision, no
         participant, date, count, reference or merge of the batch becomes
         visible, and the cursor does not move. A dry run (or a closed run) is
-        refused with ``run_not_open``.
+        refused with ``run_not_open``; ``guard`` runs inside the transaction
+        before the run state is checked (module docstring, "Lease guards").
         """
         convs = list(conversations)
         for conv in convs:
@@ -766,7 +814,7 @@ class ImportStore:
         updates = _meta_updates(meta_updates)
         extra = dict(counts or {})
         _counts_json(extra)
-        with self._transaction() as conn:
+        with self._transaction(guard=guard) as conn:
             source, state = self._open_run(conn, run_id)
             if state != "open":
                 raise ImportRefused("run_not_open")
@@ -818,12 +866,14 @@ class ImportStore:
         """Decide and write each message and its references; (outcome tally, the references accepted per message).
 
         ``touched`` gains every affected conversation. References (at most the last
-        :data:`MAX_MERGE_REFS`) are accepted from a written copy (they replace the
+        ``mail.merge_guard.MAX_MERGE_REFS``) are accepted from a written copy (they replace the
         stored ones) and from an identical copy (same ``source_revision`` and
         ``content_digest``: the same bytes, so the same headers), which records them
         when the stored message has none yet (a row written before schema v2). A
         rejected different copy (a weaker duplicate, a conflict) contributes none.
         """
+        from .mail.merge_guard import nearest_refs
+
         tally: Counter[str] = Counter()
         accepted: dict[str, tuple[str, ...]] = {}
         for msg in messages:
@@ -834,7 +884,7 @@ class ImportStore:
                 touched.update(self._stored_conversations(conn, msg.source_uid))
                 self._store_message(conn, run_id, msg)
             if links is not None and (outcome in _WRITES or identical):
-                ids = tuple(links.get(msg.source_uid, ()))[-MAX_MERGE_REFS:]
+                ids = nearest_refs(links.get(msg.source_uid, ()))
                 self._store_refs(conn, msg.source_uid, ids, replace=outcome in _WRITES)
                 accepted[msg.source_uid] = ids
             touched.add(msg.conv_uid)
@@ -872,10 +922,12 @@ class ImportStore:
         links: Mapping[str, Sequence[str]],
     ) -> tuple[set[str], set[str], int]:
         """Merge the conversations the batch's reference edges connect; (survivors, dropped conv uids, skipped)."""
+        from .mail.merge_guard import fold_plan
+
         survivors: set[str] = set()
         dropped: set[str] = set()
         skipped = 0
-        facts: dict[str, _ConvFacts] = {}  # per batch: a conversation changes here only by a merge
+        facts: dict[str, GroupFacts] = {}  # per batch: a conversation changes here only by a merge
         owners: dict[tuple[str, str], frozenset[str]] = {}
         for msg in messages:
             linked = self._linked_conversations(conn, run_id, msg.source_uid, links.get(msg.source_uid, ()))
@@ -886,7 +938,7 @@ class ImportStore:
                 owners[scope] = self._own_addresses(conn, *scope)
             for conv_uid in involved - facts.keys():
                 facts[conv_uid] = self._conv_facts(conn, run_id, conv_uid, owners[scope])
-            survivor, others, guarded = self._fold_plan(home, {uid: facts[uid] for uid in involved})
+            survivor, others, guarded = fold_plan(home, {uid: facts[uid] for uid in involved})
             skipped += guarded
             if others:
                 self._merge_into(conn, run_id, survivor, others)
@@ -911,8 +963,10 @@ class ImportStore:
         return frozenset(item.casefold() for item in value if isinstance(item, str))
 
     @staticmethod
-    def _conv_facts(conn: sqlite3.Connection, run_id: str, conv_uid: str, own: frozenset[str]) -> _ConvFacts:
+    def _conv_facts(conn: sqlite3.Connection, run_id: str, conv_uid: str, own: frozenset[str]) -> GroupFacts:
         """Age, Gmail key, message count and non-owner participants of ``conv_uid`` (committed rows and the run's)."""
+        from .mail.merge_guard import GroupFacts
+
         key = conn.execute("SELECT conversation_id FROM import_conversations WHERE conv_uid = ?", (conv_uid,))
         gmail = str(key.fetchone()[0]).startswith(_GMAIL_THREAD_PREFIX)
         rows = conn.execute(
@@ -932,7 +986,7 @@ class ImportStore:
                 for item in _participants(str(recipients))
                 if item.stable_id and item.owner_class is not OwnerClass.ACCOUNT_OWNER
             )
-        return _ConvFacts(
+        return GroupFacts(
             age=(not dates, min(dates) if dates else 0, conv_uid),
             gmail=gmail,
             messages=len(rows),
@@ -943,7 +997,7 @@ class ImportStore:
     def _linked_conversations(
         conn: sqlite3.Connection, run_id: str, source_uid: str, parents: Sequence[str]
     ) -> tuple[str, set[str], tuple[str, str]] | None:
-        """(``source_uid``'s conversation, it with its parents' and the stored replies', (source, account))."""
+        """(``source_uid``'s conversation, it with its parents' and the committed replies', (source, account))."""
         row = conn.execute(
             "SELECT m.conv_uid, m.message_id, c.source, c.source_account FROM import_messages m "
             "JOIN import_conversations c ON c.conv_uid = m.conv_uid WHERE m.source_uid = ?",
@@ -968,32 +1022,11 @@ class ImportStore:
             for found in conn.execute(
                 f"SELECT DISTINCT m.conv_uid FROM import_mail_refs f "
                 f"JOIN import_messages m ON m.source_uid = f.source_uid {_RUN_AND_CONV} "
-                f"WHERE f.ref_message_id = ? AND {_IN_SCOPE}",
-                (message_id, *scope),
+                f"WHERE f.ref_message_id = ? AND {_COMMITTED_SCOPE}",
+                (message_id, source, account),
             )
         )
         return conv_uid, involved, (source, account)
-
-    @staticmethod
-    def _fold_plan(home: str, involved: Mapping[str, _ConvFacts]) -> tuple[str, list[str], bool]:
-        """(the survivor, the conversations folded into it, whether a guard held a merge back).
-
-        ``home`` is the conversation of the message whose edges connect ``involved``.
-        A conversation sharing no participant with ``home`` (sender ids and recipient
-        addresses, the account owner's never counting) is left alone. When more than
-        one of the rest already holds several messages, nothing is merged. A Gmail
-        thread conversation is never folded; one is the survivor when involved, else
-        the earliest-dated conversation.
-        """
-        mine = involved[home].people
-        joined = {uid for uid, facts in involved.items() if uid == home or facts.people & mine}
-        gmail = {uid for uid in joined if involved[uid].gmail}
-        survivor = min(gmail or joined, key=lambda uid: involved[uid].age)
-        others = sorted(uid for uid in joined if uid != survivor and uid not in gmail)
-        guarded = len(joined) < len(involved)
-        if sum(involved[uid].messages > 1 for uid in (survivor, *others)) > 1:
-            return survivor, [], True  # a fold may take at most one conversation that already holds a thread
-        return survivor, others, guarded
 
     def merge_conversations(self, survivor: str, others: Iterable[str]) -> int:
         """Fold ``others`` into ``survivor`` in ONE transaction; returns how many message rows moved.
@@ -1055,14 +1088,14 @@ class ImportStore:
         rows = conn.execute("SELECT conv_uid FROM import_messages WHERE source_uid = ?", (source_uid,)).fetchall()
         return {str(row[0]) for row in rows}
 
-    def fail_open_runs(self, source: Source | str) -> int:
+    def fail_open_runs(self, source: Source | str, *, guard: WriteGuard | None = None) -> int:
         """Mark every ``open`` run of ``source`` failed (left by a crashed writer); returns how many.
 
         Call it only while holding the source's writer lock. The failed runs' rows stay
         invisible and the next write of the same ``source_uid`` reclaims them.
         """
         value = _source_value(source)
-        with self._transaction() as conn:
+        with self._transaction(guard=guard) as conn:
             cursor = conn.execute(
                 "UPDATE import_runs SET state = 'failed', finished_at = ? "
                 "WHERE source = ? AND state = 'open' AND finished_at IS NULL",
@@ -1178,26 +1211,14 @@ class ImportStore:
     def _outcome(conn: sqlite3.Connection, run_id: str, msg: ImportMessage) -> str:
         """``inserted`` / ``duplicates`` / ``revised`` / ``conflicts`` (see the module docstring)."""
         row = conn.execute(
-            "SELECT m.source_revision, m.content_digest, m.provenance_quality, m.owner_evidence, m.run_id = ?, "
-            "r.state FROM import_messages m LEFT JOIN import_runs r ON r.run_id = m.run_id WHERE m.source_uid = ?",
+            f"SELECT {_DECISION_COLUMNS}, m.run_id = ?, r.state FROM import_messages m "
+            "LEFT JOIN import_runs r ON r.run_id = m.run_id WHERE m.source_uid = ?",
             (run_id, msg.source_uid),
         ).fetchone()
-        if row is None:
-            return "inserted"
-        revision, digest, quality, evidence, same_run, state = row
-        if not same_run and state != "committed":
-            return "inserted"  # left behind by an open, failed or vanished run: reclaim it
-        stored_legacy = quality == ProvenanceQuality.LEGACY.value
-        incoming_legacy = ProvenanceQuality(msg.provenance_quality) is ProvenanceQuality.LEGACY
-        if incoming_legacy != stored_legacy:
-            return "duplicates" if incoming_legacy else "revised"
-        incoming_rank = SENT_EVIDENCE_RANK.get(msg.owner_evidence, 0)
-        stored_rank = SENT_EVIDENCE_RANK.get(str(evidence), 0)
-        if incoming_rank != stored_rank:  # Sent evidence wins, in both directions
-            return "revised" if incoming_rank > stored_rank else "duplicates"
-        if revision == msg.source_revision:
-            return "duplicates" if digest == msg.content_digest else "conflicts"
-        return "revised"
+        incoming = IncomingCopy(
+            msg.source_uid, msg.source_revision, str(msg.provenance_quality), msg.owner_evidence, msg.content_digest
+        )
+        return _decision(row, incoming)
 
     @staticmethod
     def _store_message(conn: sqlite3.Connection, run_id: str, msg: ImportMessage) -> None:
@@ -1244,6 +1265,25 @@ class ImportStore:
         with self._transaction(write=False) as conn:
             rows = _select_in(conn, f"SELECT m.source_uid FROM {_COMMITTED_MESSAGES} WHERE m.source_uid IN", uids)
         return {str(row[0]) for row in rows}
+
+    def classify_incoming(self, copies: Iterable[IncomingCopy]) -> dict[str, str]:
+        """What a new run's write would decide for each copy now, by source uid (read-only).
+
+        ``inserted`` / ``duplicates`` / ``revised`` / ``conflicts`` by the module docstring's
+        idempotency rules. A copy without ``content_digest`` (not normalised yet) whose
+        revision is unchanged is ``duplicates`` (it is not written either way). The mail
+        importer keeps the copies that are not written out of its reference grouping.
+        """
+        incoming = {copy.source_uid: copy for copy in copies}
+        with self._transaction(write=False) as conn:
+            rows = _select_in(
+                conn,
+                f"SELECT m.source_uid, {_DECISION_COLUMNS}, 0, r.state FROM import_messages m "
+                "LEFT JOIN import_runs r ON r.run_id = m.run_id WHERE m.source_uid IN",
+                list(incoming),
+            )
+        stored = {str(row[0]): tuple(row)[1:] for row in rows}
+        return {uid: _decision(stored.get(uid), copy) for uid, copy in incoming.items()}
 
     def find_messages(
         self,

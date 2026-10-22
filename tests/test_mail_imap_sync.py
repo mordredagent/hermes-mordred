@@ -448,8 +448,10 @@ def test_an_abandoned_lease_fails_its_open_run_and_refuses_later_writes(store: I
         store.write_batch(run_id, [], conversations=[], meta_updates={"mail_imap.mail.mabc": "1"})
     assert refused.value.code == "run_not_open" and store.get_meta("mail_imap.mail.mabc") is None
     assert not lease.opened(store, store.run_begin("mail"))
-    with pytest.raises(imap_sync._Abandoned):
-        lease.write(lambda: store.set_meta("mail_imap.mail.mabc", "1"))
+    with pytest.raises(imap_sync._Abandoned), lease.writing():
+        store.set_meta("mail_imap.mail.mabc", "1")
+    with pytest.raises(imap_sync._Abandoned):  # refused inside the transaction too
+        store.set_meta("mail_imap.mail.mabc", "1", guard=lease.check)
     assert store.get_meta("mail_imap.mail.mabc") is None
 
 
@@ -801,3 +803,145 @@ def test_gmail_thread_ids_stay_authoritative_across_batches(home: Path, store: I
     box.messages[2] = FakeMessage(mail(1, date=_DATES[1]), thread_id=100)  # Gmail split the thread: 100 and 200
     run_fetch(FetchOptions(), env)
     assert sorted(_threads_of(store)) == ["mail:mail:t:g.100", "mail:mail:t:g.200"]
+
+
+# --- the merge guard inside one batch, and copies the store will not write ---------------------------
+
+_ALICE, _MALLORY = "Alice <alice@example.org>", "Mallory <mallory@example.com>"
+
+
+@pytest.mark.parametrize("crafted_date", [_DATES[1], _DATES[3]])  # dated before or after the threads
+def test_five_threads_and_a_message_naming_them_in_one_batch_stay_six_conversations(
+    home: Path, store: ImportStore, crafted_date: str
+) -> None:
+    messages: dict[int, FakeMessage] = {}
+    for thread in range(5):  # five two-message threads with the same correspondent
+        root, reply = 10 * thread + 10, 10 * thread + 11
+        messages[root] = FakeMessage(mail(root, sender=_ALICE, to=f"Owner <{ADDRESS}>", date=_DATES[2]))
+        messages[reply] = FakeMessage(
+            mail(reply, sender=f"Owner <{ADDRESS}>", to=_ALICE, references=f"msg{root}@example.net", date=_DATES[2])
+        )
+    roots = " ".join(f"<msg{10 * thread + 10}@example.net>" for thread in range(5))
+    crafted = mail(
+        99,
+        sender=_MALLORY,
+        to=f"Owner <{ADDRESS}>, {_ALICE}",
+        extra_headers=f"References: {roots}\r\n",
+        date=crafted_date,
+    )
+    messages[1] = FakeMessage(crafted)
+    box = FakeMailbox(uidvalidity=2, messages=messages)
+    env = make_env(home, store, FakeImapServer({"INBOX": box}), FakeSecrets(generic_creds(sent=False)))
+    planned = run_fetch(FetchOptions(dry_run=True), env)
+    assert (planned.batches, planned.merge_skipped) == (1, 1)  # the batch's grouping held it back
+    result = run_fetch(FetchOptions(), env)
+    assert (result.error, result.batches, result.inserted) == (None, 1, 11)  # one batch
+    assert result.merge_skipped > 0  # and the store, weighing the same edges, did too
+    threads = sorted(_threads_of(store).values())
+    assert len(threads) == 6 and ["msg99@example.net"] in threads
+
+
+def test_a_reply_chain_in_one_batch_is_one_conversation(home: Path, store: ImportStore) -> None:
+    chain = {1: _chain_message(1, None), 2: _chain_message(2, 1), 3: _chain_message(3, 2)}
+    box = FakeMailbox(uidvalidity=2, messages={1: chain[3], 2: chain[1], 3: chain[2]})  # out of order
+    env = make_env(home, store, FakeImapServer({"INBOX": box}), FakeSecrets(generic_creds(sent=False)))
+    result = run_fetch(FetchOptions(), env)
+    assert (result.batches, result.inserted, result.merge_skipped) == (1, 3, 0)
+    assert list(_threads_of(store).values()) == [["msg1@example.net", "msg2@example.net", "msg3@example.net"]]
+
+
+def test_a_rejected_copy_fetched_with_a_new_message_connects_nothing(home: Path, store: ImportStore) -> None:
+    inbox = FakeMailbox(uidvalidity=11)
+    sent_copy = mail(1, sender=f"Owner <{ADDRESS}>", to="Taro Tanaka <taro@example.net>", body="AS SENT")
+    sent = FakeMailbox(uidvalidity=12, attributes=("\\Sent",), messages={1: FakeMessage(sent_copy)})
+    env = make_env(home, store, FakeImapServer({"INBOX": inbox, "Sent Items": sent}), FakeSecrets(generic_creds()))
+    assert run_fetch(FetchOptions(), env).inserted == 1  # the authoritative Sent copy of M1
+    forged = mail(
+        1, sender=f"Owner <{ADDRESS}>", to="Taro Tanaka <taro@example.net>", body="AS RELAYED",
+        references="msg2@example.net",
+    )  # fmt: skip
+    inbox.messages[1] = FakeMessage(forged)  # a weaker, different copy of M1 naming M2 ...
+    inbox.messages[2] = FakeMessage(mail(2))  # ... and M2, new and unrelated, in the same batch
+    result = run_fetch(FetchOptions(), env)
+    assert (result.batches, result.inserted, result.duplicates) == (1, 1, 1)
+    assert sorted(_threads_of(store).values()) == [["msg1@example.net"], ["msg2@example.net"]]
+    assert rows(store, "SELECT count(*) FROM import_mail_refs") == [(0,)]
+
+
+# --- a revocation that cannot complete keeps the writer lock ----------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX flock")
+def test_a_failed_revocation_keeps_the_lock_and_a_late_batch_is_still_refused(
+    tmp_path: Path, home: Path, store: ImportStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mordred_hermes.imports import store as store_module
+
+    monkeypatch.setattr(store_module, "BUSY_TIMEOUT_S", 0.02)
+    key = "mail_imap.mail.mabc"
+    lease = imap_sync.FetchLease()
+    inside, leave = threading.Event(), threading.Event()
+    opened: list[str] = []
+
+    def worker() -> None:
+        with imap_sync.fetch_lock(home, lease):
+            run_id = store.run_begin("mail", guard=lease.check)
+            assert lease.opened(store, run_id)
+            opened.append(run_id)
+            inside.set()
+            leave.wait(10)  # blocked where its caller cannot reach it, its run open
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    env = make_env(home, store, gmail_server(), FakeSecrets(gmail_creds()))
+    blocker = sqlite3.connect(tmp_path / "mordred.db")
+    try:
+        assert inside.wait(5)
+        blocker.execute("BEGIN IMMEDIATE")  # another writer holds the store: the revocation sees SQLite busy
+        assert lease.abandon(time.monotonic() + 0.5) is False  # its run could not be failed: the lock is kept
+        assert lease.settle() is True and lease.lock_retained
+        assert rows(store, "SELECT state FROM import_runs") == [("open",)]
+        assert run_fetch(FetchOptions(), env).error == "sync_in_progress"  # in that window
+        blocker.rollback()
+        [run_id] = opened
+        with pytest.raises(imap_sync._Abandoned):  # a late batch: refused by the revocation flag in its transaction
+            store.write_batch(run_id, [], conversations=[], meta_updates={key: "1"}, guard=lease.check)
+        store.run_fail(run_id, imap_sync.ABANDONED_COUNTS)  # the mark succeeds later (the worker's own exit path)
+        with pytest.raises(ImportRefused) as refused:  # and the run state refuses it even without the flag
+            store.write_batch(run_id, [], conversations=[], meta_updates={key: "1"})
+        assert refused.value.code == "run_not_open" and store.get_meta(key) is None
+    finally:
+        blocker.close()
+        leave.set()
+        thread.join(5)
+    assert not lease.lock_retained  # released when the worker exited
+    result = run_fetch(FetchOptions(), env)
+    assert (result.error, result.inserted) == (None, 3)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX flock")
+def test_a_write_in_flight_keeps_the_lock_until_its_worker_exits(home: Path) -> None:
+    lease = imap_sync.FetchLease()
+    inside, leave = threading.Event(), threading.Event()
+
+    def worker() -> None:
+        with imap_sync.fetch_lock(home, lease), lease.writing():
+            inside.set()
+            leave.wait(10)  # a store write stalled in flight
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    try:
+        assert inside.wait(5)
+        started = time.monotonic()
+        assert lease.abandon(started + 0.2) is False and time.monotonic() - started < 1.0  # bounded
+        with pytest.raises(imap_sync._Abandoned), lease.writing():
+            pytest.fail("no write starts once abandoned")
+        with pytest.raises(imap_sync.FetchStop) as busy, imap_sync.fetch_lock(home):
+            pass
+        assert busy.value.code == "sync_in_progress"
+    finally:
+        leave.set()
+        thread.join(5)
+    with imap_sync.fetch_lock(home):  # the worker took it with it
+        pass

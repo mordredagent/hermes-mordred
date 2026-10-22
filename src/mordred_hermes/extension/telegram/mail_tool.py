@@ -25,20 +25,25 @@ the conversation, ``state.db`` or a log.
 - **Worker**: the fetch runs in one named daemon thread (:data:`WORKER_NAME`).
   The handler normally returns only after that thread has ended. A cancelled
   call sets the fetch's :class:`CancelToken` (which shuts the IMAP socket down
-  at once and wakes a resolver wait), then waits for the worker at most the
-  remaining budget plus :data:`CANCEL_GRACE_S` (repeated cancellations are
-  absorbed only until then) and re-raises. A worker still running after the
-  budget plus :data:`ABANDON_GRACE_S` (something the session's bounds cannot
-  interrupt) is cancelled and abandoned: the call returns ``partial: true``,
-  ``partial_reason: "cancelled"`` and ``abandoned: true`` with zero counts.
-  Before the handler returns (or re-raises a cancellation whose worker is still
-  running) it abandons the fetch's :class:`~...imports.mail.imap_sync.FetchLease`:
-  the worker's open run is marked ``failed`` with the counts-only reason
-  ``abandoned`` (``ImportStore.write_batch`` refuses a late batch inside its
-  transaction), every later store write of the worker is refused, and the
-  writer lock is released, so the next call proceeds while the abandoned worker
-  is still blocked. A batch that committed before that keeps its cursor, so the
-  next call continues.
+  at once and wakes a resolver wait), then everything it does ends by the
+  remaining budget plus :data:`CANCEL_GRACE_S`, however often it is cancelled
+  again (cancellations are absorbed only until then), and it re-raises. A
+  worker still running after the budget plus :data:`ABANDON_GRACE_S` (something
+  the session's bounds cannot interrupt) is cancelled and abandoned by then: the
+  call returns ``partial: true``, ``partial_reason: "cancelled"`` and
+  ``abandoned: true`` with zero counts. The last :data:`REVOKE_GRACE_S` of
+  either bound is kept for abandoning the fetch's
+  :class:`~...imports.mail.imap_sync.FetchLease` (in its own daemon thread, never
+  waited for past the bound): every later store write of the worker is refused
+  inside its transaction, its open run is marked ``failed`` with the
+  counts-only reason ``abandoned`` (``ImportStore.write_batch`` refuses a late
+  batch by the run state too), and the writer lock is released, so the next
+  call proceeds while the abandoned worker is still blocked. When that cannot
+  complete in time (a write of the worker stalled in flight, or the store busy
+  so the run cannot be failed), the lock stays with the abandoned worker until
+  it exits: the result says ``lock_retained: true`` and a call meanwhile is
+  ``sync_in_progress``. A batch that committed before that keeps its cursor,
+  so the next call continues.
 - **Reader mode**: not a reader tool (nothing private is returned), allowed in a
   reader session and never a taint source (``privacy_check.egress.MAIL_SYNC_TOOL``).
 """
@@ -46,6 +51,7 @@ the conversation, ``state.db`` or a log.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sys
 import threading
@@ -60,11 +66,16 @@ TOOL_NAME: Final = "mordred_mail_sync"
 WORKER_NAME: Final = "mordred-mail-sync"
 _MAX: Final = 2000
 _POLL_S: Final = 0.05
-#: After a cancellation the worker is waited for until the budget's end plus this (the session's hard grace).
+#: After a cancellation the handler ends by the budget's end plus this (the session's hard grace), however
+#: often it is cancelled again; a worker still running by then minus :data:`REVOKE_GRACE_S` is abandoned.
 CANCEL_GRACE_S: Final = 30.0
-#: Without a cancellation the worker is waited for until the budget's end plus this: the session's hard
-#: grace (30 s), its polite LOGOUT (5 s) and a margin. A worker still running then is abandoned.
+#: Without a cancellation the handler ends by the budget's end plus this: the session's hard grace (30 s),
+#: its polite LOGOUT (5 s) and a margin. A worker still running by then minus :data:`REVOKE_GRACE_S` is abandoned.
 ABANDON_GRACE_S: Final = 40.0
+#: The end of each grace kept for abandoning the fetch (``FetchLease.abandon``: writes in flight, failing its run).
+REVOKE_GRACE_S: Final = 5.0
+#: The name of the daemon thread that abandons a fetch (never waited for past the call's bound).
+ABANDON_NAME: Final = "mordred-mail-sync-abandon"
 NOTE: Final = (
     "Mordred fetched the user's new mail into its encrypted store; only counts are reported here. "
     "partial=true means more remains: call this tool again to continue. To read or quote messages use "
@@ -172,24 +183,32 @@ async def _joined_after_cancel(worker: threading.Thread, until: float) -> bool:
     return True
 
 
-def _abandoned() -> dict[str, Any]:
+def _abandoned(lock_retained: bool) -> dict[str, Any]:
     from ...imports.mail.imap_sync import FetchResult
 
-    return dict(FetchResult(partial=True, partial_reason="cancelled", abandoned=True).as_dict())
+    result = FetchResult(partial=True, partial_reason="cancelled", abandoned=True, lock_retained=lock_retained)
+    return dict(result.as_dict())
 
 
-async def _abandon(lease: FetchLease) -> None:
-    """``lease.abandon()`` off the event loop, waited for to the end (cancellations absorbed).
+async def _abandon(lease: FetchLease, until: float) -> bool:
+    """Abandon ``lease`` in a daemon thread, waited for until the monotonic ``until`` at most; True if the lock is kept.
 
-    It is bounded: a few short store transactions (the store's busy timeout each) and an
-    ``flock`` release; it never raises.
+    Cancellations meanwhile are absorbed until ``until`` and re-raised after it. Past
+    ``until`` the abandonment is settled: whatever has not completed by then keeps
+    the writer lock with the abandoned worker (``FetchLease.settle``).
     """
-    done = asyncio.ensure_future(asyncio.to_thread(lease.abandon))
-    while not done.done():
+    revoker = threading.Thread(target=lease.abandon, args=(until,), name=ABANDON_NAME, daemon=True)
+    revoker.start()
+    cancelled = False
+    while revoker.is_alive() and _left(until) > 0:
         try:
-            await asyncio.shield(done)
+            await asyncio.sleep(min(_POLL_S, max(_left(until), 0.0)))
         except asyncio.CancelledError:
-            continue  # the run must be failed and the lock released before the handler ends
+            cancelled = True  # the revocation is bounded: the cancellation completes at ``until`` at the latest
+    retained = lease.settle()
+    if cancelled:
+        raise asyncio.CancelledError
+    return retained
 
 
 async def _run_worker(max_messages: int) -> dict[str, Any] | None:
@@ -211,16 +230,17 @@ async def _run_worker(max_messages: int) -> dict[str, Any] | None:
     budget_end = time.monotonic() + imap_sync.TOOL_BUDGET_S
     worker.start()
     try:
-        ended = await _joined(worker, budget_end + ABANDON_GRACE_S)
+        ended = await _joined(worker, budget_end + ABANDON_GRACE_S - REVOKE_GRACE_S)
     except asyncio.CancelledError:
         cancel.cancel()  # the fetch stops at once: its IMAP socket is shut down, a resolver wait woken
-        if not await _joined_after_cancel(worker, max(budget_end, time.monotonic()) + CANCEL_GRACE_S):
-            await _abandon(lease)  # its run failed, its writes refused, the writer lock released
+        bound = max(budget_end, time.monotonic()) + CANCEL_GRACE_S  # fixed now: later cancellations never move it
+        if not await _joined_after_cancel(worker, bound - REVOKE_GRACE_S):
+            with contextlib.suppress(asyncio.CancelledError):
+                await _abandon(lease, bound)  # its writes refused, its run failed, the writer lock released or kept
         raise  # an abandoned worker is a daemon that has been told to stop
     if not ended:
         cancel.cancel()
-        await _abandon(lease)
-        return _abandoned()
+        return _abandoned(await _abandon(lease, budget_end + ABANDON_GRACE_S))
     return box.get("result")
 
 

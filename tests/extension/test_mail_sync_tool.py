@@ -352,6 +352,14 @@ def test_a_cancellation_during_a_stalled_resolver_completes_at_once(
             thread.join(5)
 
 
+def _short_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Budget 0.2 s; each grace 0.6 s, the last 0.3 s of it kept for revoking the fetch."""
+    monkeypatch.setattr(imap_sync, "TOOL_BUDGET_S", 0.2)
+    monkeypatch.setattr(mail_tool, "CANCEL_GRACE_S", 0.6)
+    monkeypatch.setattr(mail_tool, "ABANDON_GRACE_S", 0.6)
+    monkeypatch.setattr(mail_tool, "REVOKE_GRACE_S", 0.3)
+
+
 @pytest.fixture
 def stuck_fetch(monkeypatch: pytest.MonkeyPatch) -> Any:
     """``_fetch`` stuck somewhere that ignores the cancel token; short budget and graces."""
@@ -366,9 +374,7 @@ def stuck_fetch(monkeypatch: pytest.MonkeyPatch) -> Any:
         return dict(FetchResult(inserted=7).as_dict())
 
     monkeypatch.setattr(mail_tool, "_fetch", stuck)
-    monkeypatch.setattr(imap_sync, "TOOL_BUDGET_S", 0.2)
-    monkeypatch.setattr(mail_tool, "CANCEL_GRACE_S", 0.3)
-    monkeypatch.setattr(mail_tool, "ABANDON_GRACE_S", 0.3)
+    _short_bounds(monkeypatch)
     yield SimpleNamespace(release=release, tokens=tokens, leases=leases)
     release.set()
     for thread in _worker_threads():
@@ -394,7 +400,7 @@ def test_repeated_cancellations_complete_within_the_bound_and_abandon_the_worker
         return time.monotonic() - started
 
     elapsed = asyncio.run(scenario())
-    assert elapsed < 1.5  # remaining budget (0.15 s) + grace (0.3 s), not the worker's 30 s
+    assert elapsed < 1.5  # remaining budget (0.15 s) + grace (0.6 s), not the worker's 30 s
     [token] = stuck_fetch.tokens
     assert token.cancelled
     assert all(thread.daemon for thread in _worker_threads()) and _worker_threads()  # abandoned, a daemon
@@ -421,12 +427,6 @@ def test_a_normal_result_is_never_abandoned(fetches: list[int]) -> None:
 
 
 # -- an abandoned worker holds no lock and writes nothing later ------------------------------------
-
-
-def _short_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(imap_sync, "TOOL_BUDGET_S", 0.2)
-    monkeypatch.setattr(mail_tool, "CANCEL_GRACE_S", 0.3)
-    monkeypatch.setattr(mail_tool, "ABANDON_GRACE_S", 0.3)
 
 
 def _join_workers() -> None:
@@ -498,8 +498,8 @@ def test_an_abandoned_workers_late_batch_is_refused(
             release.wait(30)  # the run is open; the handler gives up meanwhile
         try:
             written = real(*args, **kwargs)
-        except ImportRefused as exc:
-            outcomes.append(exc.code)
+        except (ImportRefused, imap_sync._Abandoned) as exc:
+            outcomes.append(exc.code if isinstance(exc, ImportRefused) else "abandoned")
             raise
         outcomes.append("written")
         return written
@@ -507,12 +507,106 @@ def test_an_abandoned_workers_late_batch_is_refused(
     monkeypatch.setattr(store, "write_batch", late)
     try:
         result = _call({})
-        assert entered.is_set() and result["abandoned"] is True
+        assert entered.is_set() and result["abandoned"] is True and result["lock_retained"] is False
         assert _runs(store) == [("failed", '{"abandoned":1}')]  # failed BEFORE the handler returned
     finally:
         release.set()
         _join_workers()
-    assert outcomes == ["run_not_open"]  # the late batch was refused inside its transaction
+    assert outcomes == ["abandoned"]  # the late batch was refused by the lease inside its transaction ...
+    with store.connection() as conn:
+        [(run_id,)] = conn.execute("SELECT run_id FROM import_runs").fetchall()
+    with pytest.raises(ImportRefused) as refused:  # ... and is refused by the failed run without it too
+        real(run_id, [], conversations=[], meta_updates={"mail_imap.mail.mabc": "1"})
+    assert refused.value.code == "run_not_open"
     assert rows_of(store) == 0 and store.meta_items("mail_imap.mail.") == {}
     again = _call({})
     assert (again["error"], again["inserted"]) == (None, 3) and outcomes[-1] == "written"
+
+
+# -- a write stalled inside its transaction: the handler still returns within its bound ---------------
+
+
+def _stalled_write(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """The first ``write_batch`` stalls INSIDE its transaction (holding the store); revocations see busy at once."""
+    from mordred_hermes.imports import store as store_module
+
+    monkeypatch.setattr(store_module, "BUSY_TIMEOUT_S", 0.02)
+    real = ImportStore._apply_meta
+    inside, release = threading.Event(), threading.Event()
+
+    def stalled(conn: sqlite3.Connection, updates: Any) -> None:
+        if not inside.is_set():
+            inside.set()
+            release.wait(30)
+        real(conn, updates)
+
+    monkeypatch.setattr(ImportStore, "_apply_meta", staticmethod(stalled))
+    leases: list[Any] = []
+
+    class Recorded(imap_sync.FetchLease):
+        def __init__(self) -> None:
+            super().__init__()
+            leases.append(self)
+
+    monkeypatch.setattr(imap_sync, "FetchLease", Recorded)
+    return SimpleNamespace(inside=inside, release=release, leases=leases)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX flock")
+def test_a_write_stalled_during_cancellation_ends_within_the_bound(
+    tmp_path: Path, store: ImportStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = make_env(tmp_path, store, gmail_server(), FakeSecrets(gmail_creds()))
+    _use_env(monkeypatch, env)
+    _short_bounds(monkeypatch)
+    stall = _stalled_write(monkeypatch)
+
+    async def scenario() -> float:
+        task = asyncio.create_task(mail_tool.mordred_mail_sync({}, parent_agent=_LOCAL, session_id="s-1"))
+        for _ in range(250):
+            await asyncio.sleep(0.02)
+            if stall.inside.is_set():
+                break
+        assert stall.inside.is_set()
+        started = time.monotonic()
+        for _ in range(200):  # cancelled again and again, also while the fetch is being abandoned
+            task.cancel()
+            await asyncio.sleep(0.01)
+            if task.done():
+                break
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return time.monotonic() - started
+
+    try:
+        elapsed = asyncio.run(scenario())
+        assert elapsed < 1.5  # remaining budget + grace (0.6 s), never the stalled write's 30 s
+        [lease] = stall.leases
+        assert lease.abandoned and lease.lock_retained  # the run could not be failed: the lock stays with it
+        assert _call({})["error"] == "sync_in_progress"  # in that window
+    finally:
+        stall.release.set()
+        _join_workers()
+    assert not lease.lock_retained  # the worker took the lock with it when it ended
+    assert _call({})["error"] is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX flock")
+def test_a_stalled_write_past_the_bound_is_abandoned_with_the_lock_retained(
+    tmp_path: Path, store: ImportStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = make_env(tmp_path, store, gmail_server(), FakeSecrets(gmail_creds()))
+    _use_env(monkeypatch, env)
+    _short_bounds(monkeypatch)
+    stall = _stalled_write(monkeypatch)
+    try:
+        started = time.monotonic()
+        result = _call({})
+        assert time.monotonic() - started < 1.5  # budget (0.2 s) + grace (0.6 s)
+        assert stall.inside.is_set() and set(result) == RESULT_FIELDS | {"note"}
+        assert (result["abandoned"], result["lock_retained"], result["partial_reason"]) == (True, True, "cancelled")
+        assert _call({})["error"] == "sync_in_progress"
+    finally:
+        stall.release.set()
+        _join_workers()
+    assert _call({})["error"] is None

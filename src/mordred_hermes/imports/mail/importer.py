@@ -14,14 +14,20 @@ records) to build:
   that appears later in the file. An ``own_address`` or ``list_rewrite``
   record is the owner for display but never anchors a quote link: its
   ``From``/``X-Original-From`` is a header anyone can type;
-- the threads (:func:`.threading.build_threads`). With a ``thread_resolver``
+- the threads (:func:`.threading.build_threads`, its reference edges decided
+  by the merge guard :mod:`.merge_guard` that the store applies too; the
+  messages a guard held back are :attr:`ImportPlan.merge_skipped`). With a
+  ``copy_check`` (the IMAP fetch: ``ImportStore.classify_incoming``) a copy
+  the store will not write (a duplicate or a rejected copy of a stored row)
+  takes no part in that grouping, so its references can connect nothing
+  (the store ignores them for the same reason). With a ``thread_resolver``
   (the IMAP fetch plans one batch at a time) a thread that is not a Gmail
   thread joins the stored conversation of a committed message it contains or
   references (``Message-ID``, ``In-Reply-To``, ``References``), so a reply
   chain A→B→C split across batches stays one conversation; threads of the
   plan that resolve to the same stored conversation are merged. That only
   sees parents already stored; :attr:`ImportPlan.refs` (every planned
-  message's referenced ids) lets the store merge the conversations of
+  message's followed ids) lets the store merge the conversations of
   replies fetched BEFORE their parent (``ImportStore.write_batch(refs=...)``).
 
 Pass 2 reads the sources again and normalises the chosen copies into
@@ -35,7 +41,7 @@ from __future__ import annotations
 import hashlib
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 from ..records import (
@@ -50,9 +56,11 @@ from ..records import (
     validate_conversation,
 )
 from ..render import conversation_label, render_part
+from ..store import IncomingCopy
 from ._text import clean_line, link_key
 from .headers import MailHeaders, parse_headers
 from .link import ANCHOR_EVIDENCE, IndexEntry, Linker, MetadataIndex, chain_linkers
+from .merge_guard import followed_refs
 from .normalize import (
     NormalizeContext,
     NormalizedMessage,
@@ -69,10 +77,14 @@ from .report import DryRunReport
 from .source import MailSource, RawMessage, iter_raw
 from .threading import Thread, ThreadInput, build_threads, normalize_subject
 
-__all__ = ["ImportPlan", "PlannedThread", "ThreadResolver", "plan_import"]
+__all__ = ["CopyCheck", "ImportPlan", "PlannedThread", "ThreadResolver", "plan_import"]
 
 #: Message ids → the thread key (conversation id) of the committed message with that id.
 ThreadResolver = Callable[[Sequence[str]], Mapping[str, str]]
+#: The copies of a plan → the store's decision for each by source uid (``ImportStore.classify_incoming``).
+CopyCheck = Callable[[Sequence[IncomingCopy]], Mapping[str, str]]
+#: Store decisions under which a copy is not written: it takes no part in reference grouping.
+_NOT_WRITTEN = frozenset({"duplicates", "conflicts"})
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -89,8 +101,10 @@ class ImportPlan:
     threads: tuple[PlannedThread, ...]
     report: DryRunReport
     #: source uid → the normalised Message-IDs it references, nearest last: ``References`` in header order
-    #: (root first), then ``In-Reply-To`` (the store follows only the last ``store.MAX_MERGE_REFS``).
+    #: (root first), then ``In-Reply-To``; only the last ``merge_guard.MAX_MERGE_REFS`` (the followed ones).
     refs: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    #: Messages whose reference edges a merge guard held back while grouping the plan (``merge_guard``).
+    merge_skipped: int = 0
 
     def __repr__(self) -> str:
         return f"ImportPlan(threads={len(self.threads)}, messages={self.report.parsed})"
@@ -121,6 +135,7 @@ class _Copy:
     thread: ThreadInput
     entry: IndexEntry | None
     owner_name: str
+    cls: Classification
 
 
 @dataclass
@@ -172,7 +187,7 @@ class _Indexer:
             if cls.evidence_code not in ANCHOR_EVIDENCE:
                 entry = None  # owner for display only: a header claim never anchors a quote link
         self.copies[uid] = _Copy(
-            (source_index, raw.origin_index), digest, sent, thread_input(headers, uid, self.order), entry, name
+            (source_index, raw.origin_index), digest, sent, thread_input(headers, uid, self.order), entry, name, cls
         )
 
     def _owner_entry(self, raw: RawMessage, headers: MailHeaders, cls: Classification) -> tuple[IndexEntry | None, str]:
@@ -293,19 +308,25 @@ def _normalize_pass(
     return normalized
 
 
-def _thread_ids(thread: Thread, inputs: Mapping[str, ThreadInput]) -> tuple[list[str], list[str]]:
-    """(the members' own message ids, the ids they reference)."""
+def _thread_ids(
+    thread: Thread, inputs: Mapping[str, ThreadInput], excluded: Collection[str]
+) -> tuple[list[str], list[str]]:
+    """(the members' own message ids, the ids they reference; an excluded copy's references are ignored)."""
     items = [inputs[uid] for uid in thread.members if uid in inputs]
     own = [item.message_id for item in items if item.message_id]
-    refs = [ref for item in items for ref in (*item.in_reply_to, *item.references)]
+    refs = [ref for item in items if item.key not in excluded for ref in (*item.in_reply_to, *item.references)]
     return own, refs
 
 
-def _join_stored(threads: list[Thread], indexer: _Indexer, resolver: ThreadResolver) -> list[Thread]:
+def _join_stored(
+    threads: list[Thread], indexer: _Indexer, resolver: ThreadResolver, excluded: Collection[str]
+) -> list[Thread]:
     """Threads re-keyed onto the stored conversation they continue (see the module docstring)."""
     inputs = {copy.thread.key: copy.thread for copy in indexer.copies.values()}
     open_threads = [thread for thread in threads if thread.method != "gmail_thrid"]
-    wanted = sorted({ident for thread in open_threads for ids in _thread_ids(thread, inputs) for ident in ids})
+    wanted = sorted(
+        {ident for thread in open_threads for ids in _thread_ids(thread, inputs, excluded) for ident in ids}
+    )
     stored = resolver(wanted) if wanted else {}
     if not stored:
         return threads
@@ -313,7 +334,7 @@ def _join_stored(threads: list[Thread], indexer: _Indexer, resolver: ThreadResol
     for thread in threads:
         key = thread.thread_key
         if thread.method != "gmail_thrid":
-            own, refs = _thread_ids(thread, inputs)
+            own, refs = _thread_ids(thread, inputs, excluded)
             found = sorted({stored[i] for i in own if i in stored}) or sorted({stored[r] for r in refs if r in stored})
             key = found[0] if found else key
         grouped.setdefault(key, []).append(thread)
@@ -339,13 +360,16 @@ def plan_import(
     linker: Linker | None = None,
     imported_at: int | None = None,
     thread_resolver: ThreadResolver | None = None,
+    copy_check: CopyCheck | None = None,
 ) -> ImportPlan:
     """Plan an import of ``sources`` (read twice, never written).
 
     ``linker`` (e.g. the store-backed linker of the CLI) is consulted after the
     in-plan index for quotes that do not link to a record of this import.
     ``thread_resolver`` (the IMAP fetch's store lookup) attaches threads to the
-    stored conversations they continue; what it raises propagates.
+    stored conversations they continue; ``copy_check`` (the store's decision per
+    copy) keeps the copies it will not write out of reference grouping. What
+    either raises propagates.
     Raises :class:`~.source.SourceError` for an unreadable source,
     :class:`~..records.RecordError` (``bad_account``) for an invalid account
     label and ``ValueError("bad_own_address")`` for an invalid own address.
@@ -359,9 +383,13 @@ def plan_import(
     for source_index, source in enumerate(source_list):
         for raw in iter_raw(source, source_stats):
             indexer.add(raw, source_index)
-    threads = build_threads([copy.thread for copy in indexer.copies.values()])
+    excluded = _not_written(indexer, copy_check) if copy_check is not None else frozenset()
+    thread_stats: Counter[str] = Counter()
+    threads = build_threads(
+        [copy.thread for copy in indexer.copies.values()], own=own, excluded=excluded, stats=thread_stats
+    )
     if thread_resolver is not None:
-        threads = _join_stored(threads, indexer, thread_resolver)
+        threads = _join_stored(threads, indexer, thread_resolver, excluded)
     stats: Counter[str] = Counter()
     ctx = NormalizeContext(
         account=account,
@@ -374,16 +402,31 @@ def plan_import(
         stats=stats,
     )
     normalized = _normalize_pass(source_list, indexer, ctx)
-    return _assemble(account, threads, normalized, indexer, stats, source_stats)
+    plan = _assemble(account, threads, normalized, indexer, stats, source_stats)
+    return replace(plan, merge_skipped=thread_stats["merge_skipped"])
+
+
+def _not_written(indexer: _Indexer, copy_check: CopyCheck) -> frozenset[str]:
+    """The source uids of chosen copies the store will not write (duplicates and rejected copies of stored rows)."""
+    copies = [
+        IncomingCopy(
+            source_uid=uid,
+            source_revision=copy.raw_digest,  # the mail record's revision is the SHA-256 of its raw bytes
+            provenance_quality=str(copy.cls.provenance_quality),
+            owner_evidence=copy.cls.evidence_code,
+        )
+        for uid, copy in indexer.copies.items()
+    ]
+    decided = copy_check(copies) if copies else {}
+    return frozenset(uid for uid, outcome in decided.items() if outcome in _NOT_WRITTEN)
 
 
 def _references(indexer: _Indexer, planned: Iterable[str]) -> dict[str, tuple[str, ...]]:
-    """The referenced ids of every planned message that has any, nearest last (``In-Reply-To`` at the end)."""
+    """The followed ids of every planned message that has any, nearest last (``In-Reply-To`` at the end)."""
     refs: dict[str, tuple[str, ...]] = {}
     for uid in planned:
         thread = indexer.copies[uid].thread
-        parents = set(thread.in_reply_to)
-        ids = tuple(dict.fromkeys((*(ref for ref in thread.references if ref not in parents), *thread.in_reply_to)))
+        ids = followed_refs(thread.in_reply_to, thread.references)
         if ids:
             refs[uid] = ids
     return refs
