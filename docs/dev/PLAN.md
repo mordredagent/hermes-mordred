@@ -26,7 +26,7 @@ names, which survive as config section names (`plugins.mordred_network`, ...);
 | `mordred_network` | `network/` | Process-wide Tor/VPN/clearnet route |
 | `mordred_keyvault` | `keyvault/` | Vault, hardware key, backup, and signing |
 | `mordred_e2e` | `extension/gateway_plugin.py` | Slack/Discord E2E gateway hook, Telegram tools |
-| (none) | `activity/` | Encrypted browser-activity store, lessons, recall tools, review |
+| (none) | `activity/` | Encrypted browser-activity capture, store and corrections |
 
 Shared policy, path, audit, YAML, provider, and terminal boundaries live at the
 package root. The extension package also contains the standalone localhost
@@ -2302,37 +2302,38 @@ implementation plan:
 |---|---|
 | Operator and extension collectors | operator repository (`src/mordred/activity.py`, `activity_cli.py`, `docs/activity.md`); no collector code in this repository |
 | Authenticated receiver | `activity/peers.py` (peer credentials), `extension/activity_api.py` (frames, principal revalidation), `activity/contracts.py` (normalization, `PeerPrincipal`), `activity/ingest.py` (`build_receiver`, hourly bounded retention after append), `activity/_capture_audit.py` (`activity.capture_refused`, once per process and code) |
-| Activity store | `activity/_paths.py`, `activity/_gate.py` (protection gate, keyed opener), `activity/_schema.py` (schema v2, in-place v1→v2 migration), `activity/store.py` (append, episodes, status, backup/restore, `plan_retention`/`apply_retention`) |
-| Boundary coordinator | `activity/boundary.py` (`register_hooks`: the three session hooks and the auxiliary review task; bounded hook registry, launch permits, one worker per home); permit consumer in `extension/api.py` around `chat_end` |
-| Review worker | `activity/review.py` (facade) over `_review_snapshot.py` (bounded snapshots, eligibility), `_review_output.py` (instructions, schema and semantic output checks), `_review_jobs.py` (jobs, leases, attempt reservations, budget, attempt audit) and `_review_run.py` (routing and the review run) |
-| Adoption service | `activity/corrections.py` (deterministic candidates), `activity/lessons.py` (revisions, states, digest-bound adoption) |
-| Retrieval adapter | `activity/retrieval.py` (admitted-only search/get, bounds, use records), `activity/tools.py` (tool registration, `check_fn`) |
-| Skills | `activity/skills/activity-recall/SKILL.md`, `activity/skills/activity-review/SKILL.md` |
-| Commands | `wizard/activity_cli.py` (`status`, `pair-operator`, `peers`), `wizard/activity_lessons_cli.py` (`correct`, `candidates` (`list`, `show`, `build`), `validate`, `adopt`, `reject`, `lessons`), `wizard/activity_review_cli.py` (`review`, `jobs list`), `wizard/activity_store_cli.py` (`backup`, `restore`, `retention`) |
+| Activity store | `activity/_paths.py`, `activity/_gate.py` (protection gate, keyed opener), `activity/_schema.py` (schema v3, in-place v1→v2→v3 migration), `activity/store.py` (append, episodes, status, backup/restore, `plan_retention`/`apply_retention`) |
+| Corrections | `activity/corrections.py` (record-only: one `user_correction` event appended to an existing episode; nothing derived) |
+| Term matching helpers | `activity/matching.py` (`terms` with CJK bigrams, `SessionBudget`; kept for the Hermes-side history phase) |
+| Commands | `wizard/activity_cli.py` (`status`, `pair-operator`, `peers`, `correct`), `wizard/activity_store_cli.py` (`backup`, `restore`, `retention`) |
 | Configuration | `activity/config.py` (`plugins.mordred_activity`) |
 
-`plugin.py` registers `activity` after `e2e` and before `wizard`, with
-`on_session_start`, `on_session_end` and `on_session_finalize` as its
-required hooks. Tests use an explicit plain-SQLite
-opener passed to `ActivityStore`; production code only uses the opener built
-by `_gate.open_store` after the gate passed.
+`plugin.py` wires `activity` after `e2e` and before `wizard`, but its
+`register()` registers nothing (no hooks, tools, skills or auxiliary task).
+Tests use an explicit plain-SQLite opener passed to `ActivityStore`;
+production code only uses the opener built by `_gate.open_store` after the
+gate passed.
+
+The lesson pipeline (candidate lessons, validation and adoption, the LLM
+review, the recall tools and skills) was removed on 2026-10-22 before any
+release; the deleted modules are `lessons.py`, `review.py`,
+`_review_jobs.py`, `_review_output.py`, `_review_run.py`,
+`_review_snapshot.py`, `boundary.py`, `tools.py`, `retrieval.py`, `skills/`,
+`wizard/activity_lessons_cli.py` and `wizard/activity_review_cli.py`. Schema
+v3 drops their tables.
 
 Delivery as shipped:
 
 1. **Contracts and recording** — gate, store, receiver, peer credentials, WS
-   frames, `status`/`pair-operator`/`peers` CLI, operator collector. No review
-   LLM call.
-2. **One correction loop** — `correct`, deterministic candidates, validation,
-   digest-bound adoption, the two recall tools and the two skills.
-3. **Conditional review** — durable jobs, attempt reservation and budget,
-   explicit routing, tool-free review with Mordred-side output validation,
-   launch permits for `task_boundary`, and the four `activity.*` audit reason
-   codes ([`POLICY.md`](./POLICY.md) rows 34–37).
-4. **Measured expansion (deferred)** — selective context insertion, more
-   collectors (including human DOM observation), an encrypted client outbox,
-   a raw-history administrative viewer, and skill/memory export. Each waits
-   for measured benefit; see [`TODO.md`](./TODO.md) §"Browser activity
-   learning".
+   frames, `status`/`pair-operator`/`peers` CLI, operator collector.
+2. **Corrections as raw events** — `activity correct` and operator-sent
+   corrections are stored as events; retention, backup and restore.
+3. **Hermes-side use of the history (next phase)** — designed in
+   [`2026-10-22-browser-history-for-hermes-design.md`](../superpowers/specs/2026-10-22-browser-history-for-hermes-design.md);
+   see [`TODO.md`](./TODO.md) §"Browser activity learning".
+4. **Measured expansion (deferred)** — more collectors (including human DOM
+   observation), an encrypted client outbox and a raw-history administrative
+   viewer. Each waits for measured benefit.
 
 Gaps between the design and this code are listed in SPEC §"Not implemented in
 this delivery".

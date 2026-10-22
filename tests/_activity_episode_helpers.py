@@ -1,4 +1,4 @@
-"""Shared fixtures for the activity correction-loop tests (plain SQLite through the opener seam)."""
+"""Shared fixtures for activity store, correction and CLI tests (plain SQLite through the opener seam)."""
 
 from __future__ import annotations
 
@@ -8,9 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from mordred_hermes.activity import corrections, lessons
 from mordred_hermes.activity.contracts import DEFAULT_EXCLUDED_SITES, NormalizedEvent, normalize_event
-from mordred_hermes.activity.lessons import LessonRevision
 from mordred_hermes.activity.store import ActivityStore
 
 PEER = "operator:peer-a"
@@ -86,22 +84,6 @@ def seed_episode(
     )
     store.append_batch(PEER, PRODUCER, [start, *attempt])
     return Episode(episode, attempt_id, start, attempt)
-
-
-def corrected_candidate(
-    store: ActivityStore, *, text: str = CORRECTION_TEXT, **episode_kw: Any
-) -> tuple[Episode, NormalizedEvent, LessonRevision]:
-    seeded = seed_episode(store, **episode_kw)
-    correction = corrections.record_correction(
-        store, episode_id=seeded.episode_id, text=text, attempt_id=seeded.attempt_id
-    )
-    return seeded, correction, corrections.deterministic_candidate(store, correction.event_id)
-
-
-def admitted(store: ActivityStore, lesson: LessonRevision, *, now: float = 5000.0) -> LessonRevision:
-    lessons.validate(store, lesson.lesson_id, lesson.revision, method="fixture", note="fixture replay")
-    assert lesson.evidence_digest is not None
-    return lessons.adopt(store, lesson.lesson_id, lesson.revision, confirmation=lesson.evidence_digest, now=now)
 
 
 def rows(store: ActivityStore, sql: str, *params: Any) -> list[tuple[Any, ...]]:

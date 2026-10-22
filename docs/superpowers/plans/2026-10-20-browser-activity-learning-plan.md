@@ -1,5 +1,13 @@
 # Browser activity and conditional learning — implementation plan
 
+> **Note (2026-10-22):** the lesson pipeline this plan builds (correction
+> candidates, validation and adoption, the LLM review with its jobs, budget
+> and launch permits, the recall tools and the two skills) was removed before
+> any release; see the design's "Decision log" entry "lesson pipeline removed"
+> and [browser history for Hermes](../specs/2026-10-22-browser-history-for-hermes-design.md).
+> Capture, the encrypted store, corrections as raw events, retention, backup
+> and restore remain. This plan is a historical record and is not updated.
+
 Status: implementation plan for the design in
 `../specs/2026-10-19-browser-activity-learning-design.md` (revised after the
 Fable review of 2026-10-19). This plan does not change the design; where the

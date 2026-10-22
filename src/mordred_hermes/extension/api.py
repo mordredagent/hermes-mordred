@@ -254,7 +254,6 @@ class ExtensionAPIServer:
         keepalive_interval: float = DEFAULT_KEEPALIVE_INTERVAL,
         activity_receiver: Any = None,
         activity_max_batch_bytes: int = activity_api.DEFAULT_MAX_BATCH_BYTES,
-        activity_llm: Any = None,
     ) -> None:
         if not _is_loopback_host(host):
             raise ValueError(f"extension API host must be loopback-only (got {host!r})")
@@ -269,9 +268,6 @@ class ExtensionAPIServer:
         # ``None`` → every activity_batch answers ``activity_refused: store_unavailable``.
         self.activity_receiver = activity_receiver
         self.activity_max_batch_bytes = activity_max_batch_bytes
-        # Host LLM facade for automatic activity review after delivery; ``None``
-        # (the standalone server) leaves automatic review unavailable.
-        self.activity_llm = activity_llm
         self._runner: web.AppRunner | None = None
         # Per-process page principal. It is printed only as a URL fragment by
         # the foreground launcher; fragments never cross the HTTP boundary.
@@ -376,7 +372,6 @@ class ExtensionAPIServer:
             client_origin=origin,
             activity_receiver=self.activity_receiver,
             activity_max_batch_bytes=self.activity_max_batch_bytes,
-            server=self,
         )
         await conn.send_challenge()
         keepalive = asyncio.create_task(conn.keepalive(self.keepalive_interval))
@@ -406,7 +401,6 @@ class _Connection:
         client_origin: str | None = None,
         activity_receiver: Any = None,
         activity_max_batch_bytes: int = activity_api.DEFAULT_MAX_BATCH_BYTES,
-        server: Any = None,
     ) -> None:
         self.ws = ws
         self.chat_handler = chat_handler
@@ -427,8 +421,6 @@ class _Connection:
         self._activity_generation: bytes | None = None
         self.activity_receiver = activity_receiver
         self.activity_max_batch_bytes = activity_max_batch_bytes
-        # The owning ExtensionAPIServer (launch-permit consumer); ``None`` in direct tests.
-        self.server = server
         self._frame_bytes = 0
         self._nonce = b""
         self._pending_sign: dict[str, dict[str, Any]] = {}
@@ -837,7 +829,6 @@ class _Connection:
                 return
         kid = key_id(ek) if ek is not None else ""
 
-        activity_api.before_foreground_input(self.server)
         gen = self.chat_handler(content, context)
         try:
             async for chunk in gen:
@@ -847,8 +838,7 @@ class _Connection:
                     # (finally below) lets the chat layer detach the running
                     # turn instead of streaming into the void.
                     return
-            if await self._send({"id": mid, "type": "chat_end"}):
-                await activity_api.after_foreground_delivery(self.server, mid if isinstance(mid, str) else None)
+            await self._send({"id": mid, "type": "chat_end"})
         except Exception as exc:
             # An injected chat handler's exception text is not ours to publish
             # (agent internals, provider URLs, file paths): reply with a code.

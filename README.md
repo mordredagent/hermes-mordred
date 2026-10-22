@@ -32,7 +32,7 @@ The package registers one Hermes plugin, `mordred` (a single
 | `privacy_check` | Skill-metadata policy enforcement and audit logging |
 | `dbcrypt` | SQLCipher encryption of Hermes's SQLite databases (macOS) |
 | `e2e` | Encrypted Slack and Discord gateway commands and replies |
-| `activity` | Encrypted browser-activity record and adopted-lesson recall (preview) |
+| `activity` | Encrypted record of browser activity for Hermes (preview) |
 | `wizard` | The `hermes-mordred` CLI |
 
 Hermes (and Hermes Desktop) lists it as one plugin, `mordred`; enabling or
@@ -106,15 +106,14 @@ Once Hermes 0.19.0+ is configured and the plugins are enabled,
 `hermes mordred <command>` exposes the same command tree. On older Hermes
 versions, or before the first `configure`, keep using `hermes-mordred`.
 
-### Learn from corrected browser work (preview)
+### Record browser work (preview)
 
 With the browser operator paired, Mordred records its actions in an encrypted
 store (`<home>/plugin-data/mordred/mordred.db`; requires macOS database
 encryption, off by default under `plugins.mordred_activity`). Your explicit
-corrections become candidate lessons; only lessons you validate and adopt are
-offered to Hermes, through two bounded recall tools. Nothing is written to
-memory or skills. Commands: `hermes-mordred activity
-status|pair-operator|peers|correct|candidates|validate|adopt|reject|lessons|review|jobs|backup|restore|retention`
+corrections are kept as events next to the actions they concern. Hermes does
+not read this history yet; nothing is written to memory or skills. Commands:
+`hermes-mordred activity status|pair-operator|peers|correct|backup|restore|retention`
 ([usage](docs/user/USAGE.md)).
 
 ### Verify discovery

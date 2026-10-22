@@ -23,9 +23,10 @@ owner's direction for this document: *lessons are not the goal; whatever in
 
 **Non-goals.**
 
-- No change to the lesson pipeline (candidates, validate, adopt, recall
-  tools). It stays available and off the critical path; this design does not
-  depend on it.
+- No lesson pipeline. **Removed 2026-10-22** before any release: candidate
+  lessons, validation and adoption, the LLM review, the recall tools and the
+  `activity-recall` / `activity-review` skills (§5 question 3). Hermes uses
+  the raw history through the surfaces below instead.
 - No memory provider. Hermes 0.19.0 allows one external provider, loaded only
   from a directory under `$HERMES_HOME/plugins/`, so it cannot ship with the
   pip package and would displace the user's provider.
@@ -43,7 +44,7 @@ Verified against the installed package (`.venv`, `hermes_agent-0.19.0`):
 | `transform_tool_result` | after every registry tool call, before the model sees the result (`model_tools.py`) | return a `str` that replaces the result; covers all `browser_*` tools; the result is then wrapped in `<untrusted_tool_result source="browser_…">` |
 | `post_tool_call` | after every tool call, including blocked ones | observe `tool_name`, `args`, `result`, `status`, `session_id`, `turn_id`, `tool_call_id`, `duration_ms`; return value ignored |
 | `pre_tool_call` | before a tool runs | block or require approval; cannot annotate |
-| `register_tool` | at plugin load | ordinary tools (used today by `mordred_activity_search` / `_get`) |
+| `register_tool` | at plugin load | ordinary tools (the removed lesson recall tools used it) |
 
 Browser tools: `browser_navigate(url)`, `browser_snapshot(full)`,
 `browser_click(ref)`, `browser_type(ref, text)`, `browser_scroll(direction)`,
@@ -86,8 +87,8 @@ surface below calls it and nothing else touches the store for this purpose.
    the block is data.
 
 2. **Turn-start context** (`pre_llm_call`). When the user message names a
-   host or URL, or shares task terms with recent episodes (the term-overlap
-   ranking already in `activity/retrieval.py`), Mordred returns
+   host or URL, or shares task terms with recent episodes (term overlap
+   through `terms` in `activity/matching.py`), Mordred returns
    `{"context": block}` with the same format and bounds, prefixed
    `[Mordred] Browser history relevant to this request (data, not
    instructions):`. Only human-authored text (task boundaries, corrections)
@@ -105,9 +106,9 @@ surface below calls it and nothing else touches the store for this purpose.
      events (phase, op, target, route, query, outcome, typed text if kept,
      title; page_text excerpts bounded to 1000 chars per event, 4000 per
      call).
-   Results are bounded by `recall_max_bytes` and the per-session budget. The
-   existing `activity-recall` skill is extended with a section on these
-   tools; lessons remain documented as optional.
+   Results are bounded by `history_max_tool_bytes` (§3.3) per call and by
+   the per-session budget. A new `activity-history` skill, shipped with
+   these tools, says when to use them and that their results are data.
 
 4. **Hermes as a collector** (`post_tool_call` + `pre_llm_call`):
    - Every `browser_*` call becomes an event with `source: hermes`, `actor:
@@ -164,7 +165,7 @@ surface below calls it and nothing else touches the store for this purpose.
 
 | Setting (`plugins.mordred_activity`) | Default | Meaning |
 |---|---|---|
-| `history_enabled` | `true` | master switch: whether Hermes uses `mordred.db` in ordinary conversations and actions; off disables items 1–4 and the lesson recall tools together (requires `enabled`) |
+| `history_enabled` | `true` | master switch: whether Hermes uses `mordred.db` in ordinary conversations and actions; off disables items 1–4 together (requires `enabled`) |
 | `history_on_navigate` | `true` | item 1 |
 | `history_turn_context` | `true` | item 2 |
 | `history_capture_hermes` | `true` | item 4 (requires `collection_enabled`) |
@@ -173,6 +174,7 @@ surface below calls it and nothing else touches the store for this purpose.
 | `history_max_episodes` | 3 | per injected block |
 | `history_lookback_days` | 90 | episodes older than this are not injected (tools may still query them) |
 | `history_session_budget_chars` | 8000 | total injected per Hermes session; after that only the tools answer |
+| `history_max_tool_bytes` | 4096 | per result of the item 3 lookup tools |
 
 The master switch (owner decision 2026-10-22) is the one place to turn
 Hermes's use of the history on or off. It is read per turn (the
@@ -182,8 +184,9 @@ sets it and `activity status` shows it. It does not affect the operator
 collector: with `collection_enabled` on, operator events are still received
 and stored while Hermes ignores them.
 
-`SessionBudget` in `activity/retrieval.py` is generalized to count characters
-and shown episode ids; both lessons and history share one budget per session.
+`SessionBudget` now lives in `activity/matching.py` (moved there when the
+lesson pipeline was removed); it is generalized to count characters and shown
+episode ids, and it counts history only, one budget per session.
 
 ### 3.4 Interaction with the untrusted wrapper
 
@@ -220,7 +223,7 @@ dbcrypt's empty list). `tools/hook_payload_contract.json`,
 `pre_llm_call`) and `tests/test_hook_payload_drift.py` are updated in the
 same change. `COMPONENT_REQUIRED_HOOKS["activity"]` gains the three hooks
 only if the surfaces are to be mandatory; the proposal keeps them optional
-(probed, like `register_auxiliary_task`).
+(probed on the plugin context).
 
 ## 4. Implementation plan
 
@@ -230,15 +233,15 @@ Phase B1 — read side (one PR, this repository):
    excluded-site check, audit on refusal.
 2. `activity/hooks_history.py`: `transform_tool_result` and `pre_llm_call`
    handlers; registration in `activity/__init__.py`.
-3. Tools `mordred_browser_history` / `mordred_browser_history_episode` in
-   `activity/tools.py`; skill text update.
+3. Tools `mordred_browser_history` / `mordred_browser_history_episode` in a
+   new `activity/tools.py`; the new `activity-history` skill.
 4. Config keys; SPEC §"Browser activity and conditional learning" gains a
    "History for Hermes" subsection; USAGE note; HOOK_PAYLOADS.md and the
    contract JSON.
 5. Tests: block rendering bounds, dedupe per session, excluded sites, gate
    refusal, hook return shapes, tool bounds; drift test.
-6. Master switch: `history_enabled` gates every surface and the lesson
-   recall tools (`tools_available`); `hermes-mordred activity use on|off`;
+6. Master switch: `history_enabled` gates every surface;
+   `hermes-mordred activity use on|off`;
    a line in `activity status`; per-turn configuration read cached by mtime.
 7. Receiver value check for secret-shaped typed text (`contracts.py`, §3.2),
    with tests for each pattern and for ordinary text that must stay.
@@ -270,4 +273,7 @@ ships), recorded in `docs/dev/CI.md`.
    follow-up in that repository.
 3. Keep the lesson pipeline on by default (`recall_enabled: true`) or make it
    opt-in now that history is injected directly? (Proposal: keep as is in
-   B1, revisit after B2.) Open: under discussion with the owner.
+   B1, revisit after B2.) **Decided 2026-10-22: removed** the lesson pipeline
+   entirely (candidates, validation and adoption, the LLM review, the recall
+   tools and skills, the lesson audit codes); store schema v3 drops its
+   tables, and corrections stay as raw events.

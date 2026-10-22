@@ -616,3 +616,17 @@ The shipped contract is [`SPEC.md`](../../dev/SPEC.md)
   unclassified fields (`typed_text_dropped`); credential parameter values;
   screenshots and the DOM; events from hosts the operator lists in
   `excluded_sites`.
+
+**2026-10-22 — lesson pipeline removed.** The owner removed the whole lesson
+pipeline before any release: deterministic candidates from corrections,
+validation and digest-bound adoption, the LLM review (jobs, attempts, budget,
+launch permits and the auxiliary task), the recall tools
+`mordred_activity_search` / `mordred_activity_get`, the `activity-recall` /
+`activity-review` skills and the lesson audit codes. Hermes is to use the raw
+browser history in `mordred.db` directly instead, as designed in
+[browser history for Hermes](./2026-10-22-browser-history-for-hermes-design.md),
+so the candidate, validate, adopt and recall ceremony and the model review
+that proposed candidates are no longer wanted. Capture, the encrypted store,
+corrections (kept as raw events only), retention, backup and restore stay;
+store schema v3 drops the lesson, review, use and budget tables. The sections
+above on review, candidate adoption and retrieval are historical.

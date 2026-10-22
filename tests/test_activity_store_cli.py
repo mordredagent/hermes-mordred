@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 import time
 from pathlib import Path
 from typing import Any
@@ -15,9 +14,9 @@ from mordred_hermes.activity._gate import ActivityRefused
 from mordred_hermes.activity.config import ActivityConfig
 from mordred_hermes.activity.store import ActivityStore
 from mordred_hermes.wizard import activity_store_cli, cli
-from tests._activity_lesson_helpers import RAW_SECRET, make_store, plain_opener, rows, seed_episode
+from tests._activity_episode_helpers import RAW_SECRET, make_store, plain_opener, rows, seed_episode
 
-#: Older than the default raw-event retention (365 days) and the candidate retention (90 days).
+#: Older than the default raw-event retention (365 days).
 OLD = 400 * 86400
 
 
@@ -88,12 +87,6 @@ def test_restore_with_yes_round_trips_rows_and_bumps_the_generation(
     store: ActivityStore, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     seed_episode(store)
-    with store.connection() as conn:
-        conn.execute(
-            "INSERT INTO activity_review_jobs (job_id, episode_id, input_revision, reviewer_version, state, "
-            "lease_owner, lease_expires_at, created_at, updated_at) VALUES ('job-1', 'ep-1', 1, 'v1', 'leased', "
-            "'w', 9e9, 0, 0)"
-        )
     backed_up = _events(store)
     dest = tmp_path / "snapshot.db"
     store.backup(dest)
@@ -106,10 +99,9 @@ def test_restore_with_yes_round_trips_rows_and_bumps_the_generation(
     new_generation = store.meta().store_generation
     assert new_generation != generation
     assert new_generation in out
-    assert "jobs_returned_to_pending: 1" in out
-    assert "No review job, model call or browser action was started." in out
+    assert "session references in the restored history are marked unavailable" in out
+    assert "review" not in out
     assert _events(store) == backed_up
-    assert rows(store, "SELECT state FROM activity_review_jobs") == [("pending",)]
 
 
 def test_restore_refuses_another_profiles_copy(
@@ -169,6 +161,7 @@ def test_retention_text_output_names_counts_only(store: ActivityStore, capsys: p
     out = capsys.readouterr().out
     assert "raw events 365 days" in out
     assert "events would remove:" in out
+    assert "candidates" not in out and "lessons" not in out
     assert RAW_SECRET not in out
 
 
@@ -191,36 +184,30 @@ def test_raw_retention_zero_keeps_every_raw_event(
     assert _events(store) == before
 
 
-def _lesson(conn: sqlite3.Connection, lesson_id: str, state: str, created_at: float, evidence: list[str]) -> None:
-    conn.execute(
-        "INSERT INTO activity_lessons (lesson_id, revision, state, origin, episode_id, created_at) "
-        "VALUES (?, 1, ?, 'correction', 'ep-1', ?)",
-        (lesson_id, state, created_at),
-    )
-    conn.executemany(
-        "INSERT INTO activity_lesson_evidence (lesson_id, revision, event_id, pinned) VALUES (?, 1, ?, ?)",
-        [(lesson_id, event_id, int(state == "admitted")) for event_id in evidence],
-    )
-
-
-@pytest.mark.parametrize("with_admitted", [True, False])
-def test_plan_retention_predicts_the_pass(store: ActivityStore, with_admitted: bool) -> None:
-    seeded = seed_episode(store)
+def test_plan_retention_predicts_the_pass(store: ActivityStore) -> None:
+    seed_episode(store)
     seed_episode(store, episode="ep-recent", seq0=10)
     now = time.time()
-    pinned, candidate_evidence = seeded.attempt[0].event_id, seeded.attempt[1].event_id
     with store.connection() as conn:
         conn.execute("UPDATE activity_events SET received_at = ? WHERE episode_id = 'ep-1'", (now - OLD,))
-        if with_admitted:
-            _lesson(conn, "kept", "admitted", now - OLD, [pinned])
-        _lesson(conn, "orphan", "admitted", now - OLD, ["event-that-is-gone"])
-        _lesson(conn, "stale-candidate", "candidate", now - OLD, [candidate_evidence])
     before = _events(store)
 
-    planned = store.plan_retention(now, raw_days=30, candidate_days=90)
+    planned = store.plan_retention(now, raw_days=30)
 
     assert _events(store) == before
-    assert planned == store.apply_retention(now, raw_days=30, candidate_days=90)
+    assert planned == store.apply_retention(now, raw_days=30)
+    assert (planned.events_deleted, planned.episodes_deleted) == (4, 1)
+
+
+def test_retention_json_has_only_raw_event_fields(store: ActivityStore, capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(["activity", "retention", "--dry-run", "--json"]) == 0
+    assert set(json.loads(capsys.readouterr().out)) == {
+        "dry_run",
+        "raw_days",
+        "events_deleted",
+        "episodes_deleted",
+        "complete",
+    }
 
 
 def test_gate_refusal_prints_only_the_code(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

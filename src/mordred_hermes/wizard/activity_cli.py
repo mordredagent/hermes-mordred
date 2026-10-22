@@ -1,19 +1,18 @@
-"""``hermes-mordred activity …`` — browser activity learning administration.
+"""``hermes-mordred activity …`` — browser activity history administration.
 
 - ``status [--json]``                         — feature / collection switches, protection gate
-  result, store identifiers, counts and states, and activity peers. Never event content.
+  result, store identifiers and row counts, and activity peers. Never event content.
 - ``pair-operator [--label L] [--timeout S]`` — mint a single-use activity pair code for the
   operator collector and wait until it is used (exit 0 paired, 1 failed/expired/cancelled,
   2 pairing storage unavailable).
 - ``peers list [--json]`` / ``peers revoke <peer_id>`` — activity peer credentials (revoke is
   idempotent).
 
-- ``correct``, ``candidates``, ``validate``, ``adopt``, ``reject``, ``lessons`` — the correction loop
-  (``activity_lessons_cli``).
+- ``correct --episode ID --text TEXT [--attempt ID]`` — record an explicit correction as a raw
+  ``correction`` event of an existing episode and print its event id. Nothing is derived from it.
 - ``backup``, ``restore``, ``retention`` — store maintenance (``activity_store_cli``).
 
-Raw history is never printed here; it belongs to the authenticated
-administrative viewer (design: Retrieval and interaction with native learning).
+Raw history is never printed here.
 """
 
 from __future__ import annotations
@@ -25,9 +24,13 @@ import sys
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .. import _term
+
+if TYPE_CHECKING:
+    from ..activity.config import ActivityConfig
+    from ..activity.store import ActivityStore
 
 _POLL_SECONDS = 1.0
 _HEARTBEAT_SECONDS = 30.0
@@ -73,6 +76,13 @@ def _store_status(home: Path) -> Mapping[str, Any]:
     from ..activity._gate import open_store
 
     return dataclasses.asdict(open_store(home).status())
+
+
+def _open(home: Path) -> tuple[ActivityStore, ActivityConfig]:
+    from ..activity._gate import open_store
+    from ..activity.config import ActivityConfig
+
+    return open_store(home), ActivityConfig.load(home)
 
 
 def _peer_rows() -> list[dict[str, Any]]:
@@ -144,7 +154,7 @@ def _print_peers(rows: list[dict[str, Any]]) -> None:
 
 def _print_status(report: Mapping[str, Any]) -> None:
     color = _term.should_color(sys.stdout)
-    print(_term.heading("Mordred activity learning", enabled=color))
+    print(_term.heading("Mordred activity history", enabled=color))
     if not report["config_available"]:
         _term.emit_warn("activity configuration could not be read; collection is refused")
     print(f"  feature:     {'enabled' if report['feature_enabled'] else 'disabled'}")
@@ -284,12 +294,40 @@ def cmd_pair_operator(args: argparse.Namespace) -> int:
     return _finish_pairing(state, reason, code)
 
 
-# The correction-loop subcommands (correct, candidates, validate, adopt, reject,
-# lessons) live in ``activity_lessons_cli``; phase 3 ``review`` registers its
-# handler here and its parser in ``_cli_parsers._add_activity``.
+# --------------------------------------------------------------------------- #
+# correct
+# --------------------------------------------------------------------------- #
+
+
+def cmd_correct(args: argparse.Namespace) -> int:
+    """Append one correction event; the store refusal code is all that is printed on failure."""
+    from ..activity import corrections
+    from ..activity._gate import ActivityRefused
+
+    try:
+        store, config = _open(_home())
+        if not config.enabled:
+            _term.emit_error("refused (feature_disabled)")
+            return 1
+        event = corrections.record_correction(
+            store,
+            episode_id=str(args.episode),
+            text=str(args.text),
+            attempt_id=args.attempt,
+            excluded_sites=config.excluded_sites,
+        )
+    except ActivityRefused as exc:
+        _term.emit_error(f"refused ({_display(exc.code, 64)})")
+        return 1
+    print(f"Recorded correction {event.event_id} in episode {_display(event.episode_id, 64)}.")
+    return 0
+
+
+# The store-maintenance subcommands (backup, restore, retention) live in ``activity_store_cli``.
 _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "status": cmd_status,
     "pair-operator": cmd_pair_operator,
+    "correct": cmd_correct,
 }
 _PEER_COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "list": cmd_peers_list,
@@ -298,13 +336,11 @@ _PEER_COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
 
 
 def cli_activity(args: argparse.Namespace) -> int:
-    from . import activity_lessons_cli, activity_store_cli
+    from . import activity_store_cli
 
     command = getattr(args, "activity_command", None)
     if command == "peers":
         return _PEER_COMMANDS[str(args.activity_peers_command)](args)
-    if command in activity_lessons_cli.COMMANDS:
-        return activity_lessons_cli.dispatch(str(command), args)
     if command in activity_store_cli.COMMANDS:
         return activity_store_cli.dispatch(str(command), args)
     handler = _COMMANDS.get(str(command))

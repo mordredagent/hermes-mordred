@@ -654,14 +654,9 @@ learning implementation".
   and `activity_pending.json`: explicit per-file bounds in
   `extension/_windows_storage.py` and Windows tests. The store itself stays
   refused off macOS (`unsupported_platform`).
-- [ ] Pilot benchmark of at least 30 tasks (10 related to a prior correction,
-  10 unrelated, 10 conflicting/stale/adversarial; three runs each; feature
-  off, recording only, admitted recall) and an opt-in, budgeted live provider
-  evaluation of review. Missing runs are not passing evidence.
-- [ ] Selective context insertion of admitted lessons, only after the pilot
-  shows benefit and prompt-cache stability holds.
-- [ ] Reviewed, explicitly approved export of a lesson to memory or a skill,
-  activated in a later session.
+- [x] The 2026-10-22 removal of the lesson pipeline (candidates, adoption, LLM
+  review, recall tools and skills) is done; Hermes is to use the raw history
+  instead (see "Hermes-side use of the history" below).
 - [x] The 2026-10-20 integration runs (live SQLCipher check on a throwaway
   home; end-to-end operator pairing and batch delivery to the receiver) are
   recorded in [`CI.md`](./CI.md) §"Manual live-device validation log".
@@ -671,11 +666,6 @@ learning implementation".
   and record it in [`CI.md`](./CI.md). Done 2026-10-21 after the correction
   re-homing change to `activity/store.py` (live end-to-end run in
   [`CI.md`](./CI.md) §"Manual live-device validation log").
-- [ ] Live-verify one explicit `hermes-mordred activity review` provider call
-  on the host task route and one on the `review_provider`/`review_model`
-  override route (the `route_mismatch` check compares the host's recorded
-  canonical model id with the configured string by prefix), opt-in and
-  budgeted; record the result in [`CI.md`](./CI.md).
 - [ ] Cross-repo (operator collector `mordred-browser-os-oparator`): record a
   correction in the episode of the attempt it references instead of a fresh
   post-task episode. The receiver already re-homes such corrections

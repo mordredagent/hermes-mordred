@@ -190,29 +190,36 @@ def test_production_receiver_refuses_without_protection(tmp_path: Path) -> None:
     assert not (tmp_path / "plugin-data").exists()
 
 
-def test_session_start_hook_records_bounded_ids_and_opens_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import mordred_hermes.activity as activity
-    from mordred_hermes.activity import boundary
+def test_an_operator_correction_is_stored_as_a_raw_event_and_nothing_else(tmp_path: Path) -> None:
+    write_config(tmp_path, ENABLED)
+    store = plain_store(tmp_path)
+    attempt = [raw_event(1, phase="intended", attempt_id="att-1"), raw_event(2, attempt_id="att-1")]
+    correction = raw_event(3, phase="correction", actor="human", attempt_id="att-1", text="Select Finance first")
+    sent = batch(*attempt, correction)
 
-    hooks: list[tuple[str, Any]] = []
+    first = receiver(tmp_path, lambda _home: store).ingest(OPERATOR, sent)
+    replay = receiver(tmp_path, lambda _home: store).ingest(OPERATOR, sent)
+
+    assert (first["accepted"], replay["duplicates"]) == (3, 3)
+    stored = store.events_for_episode("ep-1")
+    assert [(event.phase, event.text) for event in stored][-1] == ("correction", "Select Finance first")
+    assert store.status().counts == {"activity_events": 3, "activity_episodes": 1}
+    episode = store.episode("ep-1")
+    assert episode is not None and episode.has_correction is True
+
+
+def test_activity_register_is_a_documented_no_op(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import mordred_hermes.activity as activity
+
+    calls: list[str] = []
 
     class Ctx:
-        def register_hook(self, name: str, callback: Any) -> None:
-            hooks.append((name, callback))
+        def __getattr__(self, name: str) -> Any:
+            calls.append(name)
+            return lambda *args, **kwargs: None
 
-    activity.register(Ctx())
-    assert [name for name, _ in hooks] == ["on_session_start", "on_session_end", "on_session_finalize"]
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    monkeypatch.setattr(boundary, "_events", type(boundary._events)(maxlen=64))
-    callback = hooks[0][1]
+    activity.register(Ctx())
 
-    for index in range(70):
-        callback(session_id=f"s-{index}", platform="cli")
-    callback(session_id=None)
-
-    recorded = boundary.recent_events()
-    assert len(recorded) == 64
-    assert any(entry[1] == "s-69" for entry in recorded)
+    assert calls == []
     assert not (tmp_path / "plugin-data").exists()

@@ -20,8 +20,8 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 - ``vault {init,add,status,cat,migrate,...}``    — at-rest secrets/env vault
 - ``plugins list``                               — show the Mordred plugin and its components
 - ``plugins migrate``                            — switch config.yaml to the single ``mordred`` plugin
-- ``activity {status,pair-operator,peers,correct,candidates,validate,adopt,reject,lessons,
-  review,jobs,backup,restore,retention}`` — browser activity learning administration
+- ``activity {status,pair-operator,peers,correct,backup,restore,retention}`` — browser activity
+  history administration
 - ``uninstall [--dry-run|--yes|--purge-data|--remove-helper]`` — remove Mordred, restore Hermes's files
 """
 
@@ -138,7 +138,7 @@ def _add_databases(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
 
 
 def _add_activity(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    p = sub.add_parser("activity", help="Browser activity learning: status, pairing, peers, corrections and lessons")
+    p = sub.add_parser("activity", help="Browser activity history: status, pairing, peers, corrections and maintenance")
     asub = p.add_subparsers(dest="activity_command", required=True, metavar="COMMAND")
     p_status = asub.add_parser("status", help="Show switches, protection gate, store counts and peers (no content)")
     p_status.add_argument("--json", action="store_true", help="Print one JSON object")
@@ -155,15 +155,14 @@ def _add_activity(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     p_revoke = psub.add_parser("revoke", help="Revoke an activity peer (idempotent)")
     p_revoke.add_argument("peer_id", help="Peer id, e.g. operator:0123456789ab")
     p_revoke.set_defaults(func=_handle_activity)
-    from .activity_lessons_cli import add_parsers as _add_lesson_parsers
-
-    _add_lesson_parsers(asub, _handle_activity)
+    p_correct = asub.add_parser("correct", help="Record an explicit correction of an episode as a raw event")
+    p_correct.add_argument("--episode", required=True, help="Episode id the correction refers to")
+    p_correct.add_argument("--text", required=True, help="What should have been done")
+    p_correct.add_argument("--attempt", default=None, help="Attempt id within the episode it refers to")
+    p_correct.set_defaults(func=_handle_activity)
     from .activity_store_cli import add_parsers as _add_store_parsers
 
     _add_store_parsers(asub, _handle_activity)
-    from .activity_review_cli import add_parsers as _add_review_parsers
-
-    _add_review_parsers(asub)
 
 
 def _add_egress(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:

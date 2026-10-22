@@ -580,9 +580,9 @@ def test_rejections_carry_codes_not_content() -> None:
 def test_config_defaults_are_off_and_bad_values_fall_back() -> None:
     assert ActivityConfig().collecting is False
     config = ActivityConfig.from_mapping(
-        {"enabled": "yes", "max_batch_events": 1000, "review_mode": "task_boundary", "mystery": 1}
+        {"enabled": "yes", "max_batch_events": 1000, "collection_enabled": True, "mystery": 1}
     )
     assert config.enabled is False
     assert config.max_batch_events == 100
-    assert config.review_mode == "task_boundary"
+    assert config.collection_enabled is True
     assert config.warnings == ("invalid value for enabled", "invalid value for max_batch_events", "unknown key mystery")
