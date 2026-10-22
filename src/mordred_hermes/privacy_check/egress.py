@@ -508,6 +508,21 @@ def _prompt_host(url: str) -> str:
     return host or _UNPARSEABLE
 
 
+def _url_rule_key(tool: str, urls: list[str]) -> str:
+    """The approval key of a URL call: the parsed hosts, and for an address with no parseable host a
+    digest of that address, so approving one unparseable address never approves another (and the key
+    never holds the address itself)."""
+    parts = sorted(
+        {
+            host
+            if (host := _prompt_host(u)) != _UNPARSEABLE
+            else "unparseable-" + hashlib.sha256(u.encode()).hexdigest()[:12]
+            for u in urls
+        }
+    )
+    return f"mordred.egress:{tool}:{','.join(parts)}"
+
+
 def _unparseable_as_length(tool: str, args: dict[str, Any]) -> dict[str, Any]:
     """``args`` with every URL argument whose host cannot be parsed shown by its length only."""
     names = URL_ARGS.get(tool, ())
@@ -596,7 +611,7 @@ def _decide_ask(tool: str, args: dict[str, Any], policy: EgressPolicy, *, tainte
     if urls:
         hosts = sorted({_prompt_host(u) for u in urls})
         shown = _unparseable_as_length(tool, args)
-        return _ask(tool, ", ".join(hosts), shown, f"mordred.egress:{tool}:{','.join(hosts)}", tainted=tainted)
+        return _ask(tool, ", ".join(hosts), shown, _url_rule_key(tool, urls), tainted=tainted)
     return _ask(tool, "an external service", args, f"mordred.egress:{tool}", tainted=tainted)
 
 

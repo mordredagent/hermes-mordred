@@ -331,6 +331,18 @@ def test_ask_never_quotes_typed_text_into_the_prompt():
     assert PASSWORD not in decision.rule_key
 
 
+def test_each_unparseable_address_gets_its_own_approval_key() -> None:
+    first = _ask("browser_navigate", {"url": "first@"})
+    second = _ask("browser_navigate", {"url": "second@"})
+    assert first.approve and second.approve
+    assert first.rule_key != second.rule_key
+    assert first.rule_key == _ask("browser_navigate", {"url": "first@"}).rule_key
+    assert (
+        _ask("browser_navigate", {"url": "https://example.com/x"}).rule_key
+        == "mordred.egress:browser_navigate:example.com"
+    )
+
+
 @pytest.mark.parametrize("url", [f"https://[{PASSWORD}", f"https://:{PASSWORD}@/x", f"{PASSWORD}@"])
 def test_an_unparseable_address_is_never_quoted_into_the_prompt(url: str) -> None:
     decision = _ask("browser_navigate", {"url": url})
