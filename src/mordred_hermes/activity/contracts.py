@@ -57,15 +57,17 @@ Rejections carry a code only. Nothing here logs or echoes event content.
 from __future__ import annotations
 
 import bisect
-import functools
 import hashlib
+import importlib
 import json
 import math
 import re
+import threading
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from itertools import groupby, pairwise
-from typing import Any, Final, NamedTuple
+from typing import Any, Final, NamedTuple, cast
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
 SCHEMA_VERSION: Final = 1
@@ -1628,8 +1630,11 @@ def _without_case(text: str) -> str:
     return text.lower() if text.isascii() else text.translate(_CASE_KEYS)
 
 
-#: Value sets whose pattern :func:`_values_pattern` keeps compiled (a session's withheld values, a turn's named ones).
+#: Compiled value patterns :data:`_VALUE_PATTERNS` keeps (a session's withheld values, a turn's named ones), and the
+#: characters of their patterns and values it keeps in all (a few MiB once compiled); a larger set is compiled for
+#: each call and never kept.
 _MAX_VALUE_PATTERNS: Final = 8
+_MAX_VALUE_PATTERN_CHARS: Final = 1 << 18
 
 
 def _shared_end(first: str, last: str, depth: int) -> int:
@@ -1657,12 +1662,69 @@ def _rest_pattern(keys: Sequence[str], depth: int) -> str:
     return f"(?:{body})?" if ends else body
 
 
-@functools.lru_cache(maxsize=_MAX_VALUE_PATTERNS)
-def _values_pattern(keys: frozenset[str]) -> re.Pattern[str]:
-    """One pattern of ``keys`` (values without case, :func:`_without_case`) as a tree of the characters they share
-    (:func:`_rest_pattern`), between the whole-word boundaries: at each place it follows one path of at most the
-    longest key's length, and it matches the longest key that stands there as a whole word. Kept in memory only."""
-    return re.compile(r"(?<![A-Za-z0-9])" + _rest_pattern(sorted(keys), 0) + r"(?![A-Za-z0-9])")
+def _uncached_compiler() -> Callable[[str, int], re.Pattern[str]] | None:
+    """``re._compiler.compile`` (CPython 3.11 and later): what ``re.compile`` runs, without the module's own cache,
+    which would keep each value set's pattern alive after :data:`_VALUE_PATTERNS` dropped it (Codex review of
+    29c6be5c0: 96 patterns, about 98 MiB). Private API, pinned by a test; ``None`` where it is missing."""
+    try:
+        module = importlib.import_module("re._compiler")
+    except ImportError:
+        return None
+    compiler = getattr(module, "compile", None)
+    return cast("Callable[[str, int], re.Pattern[str]]", compiler) if callable(compiler) else None
+
+
+_COMPILE_UNCACHED: Final = _uncached_compiler()
+
+
+def _compile_uncached(source: str) -> re.Pattern[str]:
+    """``source`` compiled, never kept by the :mod:`re` module's cache: without :func:`_uncached_compiler` the
+    module's cache is emptied after compiling (a correct, slower fallback for the other patterns it held)."""
+    if _COMPILE_UNCACHED is not None:
+        return _COMPILE_UNCACHED(source, 0)
+    pattern = re.compile(source)
+    re.purge()
+    return pattern
+
+
+class _ValuePatterns:
+    """The compiled patterns of the value sets used last (:func:`_rest_pattern`), at most
+    :data:`_MAX_VALUE_PATTERNS` and :data:`_MAX_VALUE_PATTERN_CHARS` characters of pattern and values in all, the
+    least recently used dropped first. Each is compiled outside the :mod:`re` module's cache
+    (:func:`_compile_uncached`), so what this drops is freed. Memory only."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._patterns: OrderedDict[frozenset[str], tuple[re.Pattern[str], int]] = OrderedDict()
+        self.chars = 0
+
+    def get(self, keys: frozenset[str]) -> re.Pattern[str]:
+        """The pattern of ``keys`` (values without case, :func:`_without_case`) between the whole-word boundaries:
+        at each place it follows one path of at most the longest key's length and matches the longest key that
+        stands there as a whole word."""
+        with self._lock:
+            kept = self._patterns.get(keys)
+            if kept is not None:
+                self._patterns.move_to_end(keys)
+                return kept[0]
+        source = r"(?<![A-Za-z0-9])" + _rest_pattern(sorted(keys), 0) + r"(?![A-Za-z0-9])"
+        pattern = _compile_uncached(source)
+        chars = len(source) + sum(map(len, keys))
+        with self._lock:
+            if keys not in self._patterns and chars <= _MAX_VALUE_PATTERN_CHARS:
+                self._patterns[keys] = (pattern, chars)
+                self.chars += chars
+                while len(self._patterns) > _MAX_VALUE_PATTERNS or self.chars > _MAX_VALUE_PATTERN_CHARS:
+                    self.chars -= self._patterns.popitem(last=False)[1][1]
+        return pattern
+
+    def clear(self) -> None:
+        with self._lock:
+            self._patterns.clear()
+            self.chars = 0
+
+
+_VALUE_PATTERNS: Final = _ValuePatterns()
 
 
 def _value_keys(values: Iterable[str]) -> frozenset[str]:
@@ -1673,7 +1735,7 @@ def contains_values(text: str, values: Iterable[str]) -> bool:
     """Whether :func:`redact_values` would replace anything in ``text``: it stops at the first whole word found
     (Hermes's typed text against the values the turn's message names, :func:`secret_values`)."""
     keys = _value_keys(values)
-    return bool(keys) and _values_pattern(keys).search(_without_case(text)) is not None
+    return bool(keys) and _VALUE_PATTERNS.get(keys).search(_without_case(text)) is not None
 
 
 def redact_values(text: str, values: Iterable[str]) -> tuple[str, bool]:
@@ -1685,14 +1747,14 @@ def redact_values(text: str, values: Iterable[str]) -> tuple[str, bool]:
     ``re.IGNORECASE`` alternation of every value, the longest first, between those boundaries replaces: from left
     to right, the leftmost place a value stands as a whole word, by the longest value there, then on after it. The
     text is compared without case (:func:`_without_case`) against one pattern that shares the values' common
-    characters (:func:`_values_pattern`), so each place costs at most the longest value's length, whatever the
+    characters (:class:`_ValuePatterns`), so each place costs at most the longest value's length, whatever the
     number of values or how often they overlap."""
     keys = _value_keys(values)
     if not keys:
         return text, False
     parts: list[str] = []
     cursor = 0
-    for match in _values_pattern(keys).finditer(_without_case(text)):
+    for match in _VALUE_PATTERNS.get(keys).finditer(_without_case(text)):
         parts += [text[cursor : match.start()], REDACTED]
         cursor = match.end()
     if not parts:

@@ -9,10 +9,15 @@ the turn's task start and correction, which are written only when the turn ends.
 
 from __future__ import annotations
 
+import gc
 import json
+import re
 import sqlite3
+import sys
 import time
+import tracemalloc
 import uuid
+import weakref
 from typing import Any
 
 import pytest
@@ -474,6 +479,48 @@ def test_typing_against_many_overlapping_named_values_takes_linear_time(capture_
     assert large < 6 * max(small, 0.002), (small, large)
     typed = [event for event in calls(store) if event.op == "type"]
     assert len(typed) == 6 and all(event.text is None and "typed_text_dropped" in event.exclusions for event in typed)
+
+
+def _codex_withheld_values(count: int = 96) -> list[str]:
+    """Valid withheld values of 4,000 characters (``capture_hermes._remember``); they share a beginning so the
+    patterns of their sets compile quickly, which changes nothing in what a pattern keeps alive."""
+    return [("w" * 3_980) + f"-{number:019d}" for number in range(count)]
+
+
+def test_patterns_of_withheld_values_are_freed_when_evicted(monkeypatch) -> None:
+    """Codex review of 29c6be5c0: learning 96 values of 4,000 characters and scrubbing after each kept 96 compiled
+    patterns (about 98 MiB) in the ``re`` module's own cache. Each pattern is now kept only by this module's bounded
+    cache: what it evicts is freed, and the module cache gains nothing."""
+    compiled: list[weakref.ref[re.Pattern[str]]] = []
+    compile_uncached = contracts._compile_uncached
+
+    def recorded(source: str) -> re.Pattern[str]:
+        pattern = compile_uncached(source)
+        compiled.append(weakref.ref(pattern))
+        return pattern
+
+    monkeypatch.setattr(contracts, "_compile_uncached", recorded)
+    contracts._VALUE_PATTERNS.clear()
+    module_cache = {key for name in ("_cache", "_cache2") for key in getattr(re, name, {})}
+    state = capture_hermes._Session()
+    values = _codex_withheld_values()
+    text = "held text naming " + values[-1] + " once"
+    for number, value in enumerate(values):
+        capture_hermes._remember(state, value)
+        if number == len(values) - 16:  # the last 16 steps under tracemalloc: what they keep alive at the end
+            gc.collect()
+            tracemalloc.start()
+        capture_hermes._scrubbed(text, state.withheld)
+    gc.collect()
+    kept = tracemalloc.get_traced_memory()[0]
+    tracemalloc.stop()
+    alive = [pattern for ref in compiled if (pattern := ref()) is not None]
+    assert len(compiled) == len(values) and len(alive) <= contracts._MAX_VALUE_PATTERNS
+    assert sum(sys.getsizeof(pattern) + len(pattern.pattern) for pattern in alive) < 1_000_000
+    assert kept < 512 * 1024, kept  # 16 patterns of 32 such values took about 16 MiB
+    assert {key for name in ("_cache", "_cache2") for key in getattr(re, name, {})} <= module_cache
+    assert capture_hermes._scrubbed(text, state.withheld) == ("held text naming redacted once", True)
+    contracts._VALUE_PATTERNS.clear()
 
 
 # --- a secret-shaped token in the user's own words (live B2 re-run, N4) -------------------------------------------

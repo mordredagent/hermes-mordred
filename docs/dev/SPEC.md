@@ -4545,6 +4545,12 @@ per-process state.
     each place in the text costs at most the longest value's length however
     many values overlap there (Codex review of `f435dfc10`: listing every
     place `"-a-" * i`, i = 1..64, stands in `"-a-" * 13333` took 1.4 s).
+    The compiled patterns of the value sets used last are kept in memory,
+    at most 8 sets and 2^18 characters of patterns and values in all; each
+    is compiled outside the `re` module's own cache (`re._compiler.compile`,
+    pinned by a test; without it that cache is emptied after compiling), so
+    what is dropped is freed (Codex review of `29c6be5c0`: 96 values of
+    4,000 characters, learned one by one, kept 96 patterns, about 98 MiB).
     Tests check the bound and the time on Codex's inputs at 10 KB and
     40 KB, on the redactor's adversarial shapes and on runs of overlapping
     values, and that both replace and find exactly what the combined pattern

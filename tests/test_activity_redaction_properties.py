@@ -19,6 +19,7 @@ import re
 import sys
 import time
 import tracemalloc
+import weakref
 from collections.abc import Callable, Iterable
 
 import pytest
@@ -567,3 +568,57 @@ def test_given_values_are_found_in_linear_time(case: str) -> None:
         large = _match_seconds(lambda match=match: match(text(40_000), values))
         assert large < 0.05, (match.__name__, small, large)
         assert large < 6 * max(small, 0.002), (match.__name__, small, large)
+
+
+# --- compiled value patterns stay bounded (Codex review of 29c6be5c0) -------------------------------------------
+
+
+def _module_cache_keys() -> set[object]:
+    """What the :mod:`re` module's own caches hold (``_cache``; also ``_cache2`` from Python 3.12)."""
+    return {key for name in ("_cache", "_cache2") for key in getattr(re, name, {})}
+
+
+def test_value_patterns_are_compiled_outside_the_module_cache() -> None:
+    """``re.compile`` keeps every pattern in the module's cache after this module's own cache dropped it (about 1 MiB
+    for 32 withheld values of 4,000 characters); ``re._compiler.compile`` does not. It is private API: this test
+    fails loudly if Python drops it (``contracts._compile_uncached`` then purges the module cache instead)."""
+    assert contracts._COMPILE_UNCACHED is re._compiler.compile  # type: ignore[attr-defined]
+    marker = f"marker-{random.Random().getrandbits(64):x}"
+    before = _module_cache_keys()
+    assert contracts.contains_values(f"a {marker} b", [marker, f"{marker}-2"])
+    assert contracts.redact_values(f"a {marker} b", [marker]) == ("a redacted b", True)
+    after = _module_cache_keys()
+    assert after <= before and not any(marker in str(key) for key in after)
+
+
+def test_without_the_private_compiler_the_module_cache_is_purged(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(contracts, "_COMPILE_UNCACHED", None)
+    contracts._VALUE_PATTERNS.clear()
+    marker = f"marker-{random.Random().getrandbits(64):x}"
+    assert contracts.redact_values(f"a {marker} b", [marker]) == ("a redacted b", True)
+    assert not any(marker in str(key) for key in _module_cache_keys())
+    contracts._VALUE_PATTERNS.clear()
+
+
+def test_the_value_pattern_cache_frees_what_it_evicts(monkeypatch: pytest.MonkeyPatch) -> None:
+    compiled: list[weakref.ref[re.Pattern[str]]] = []
+    compile_uncached = contracts._compile_uncached
+
+    def recorded(source: str) -> re.Pattern[str]:
+        pattern = compile_uncached(source)
+        compiled.append(weakref.ref(pattern))
+        return pattern
+
+    monkeypatch.setattr(contracts, "_compile_uncached", recorded)
+    contracts._VALUE_PATTERNS.clear()
+    for number in range(40):
+        assert contracts.contains_values(f"x value-{number} y", [f"value-{number}", "other"])
+    assert len(compiled) == 40
+    alive = [pattern for ref in compiled if (pattern := ref()) is not None]
+    assert len(alive) == contracts._MAX_VALUE_PATTERNS
+    # a set larger than the character budget is compiled for the call, never kept
+    huge = ["x" * 3_996 + f"{number:04d}" for number in range(70)]
+    assert contracts.contains_values("x " + huge[3] + " y", huge)
+    assert compiled[-1]() is None
+    assert contracts._VALUE_PATTERNS.chars <= contracts._MAX_VALUE_PATTERN_CHARS
+    contracts._VALUE_PATTERNS.clear()
