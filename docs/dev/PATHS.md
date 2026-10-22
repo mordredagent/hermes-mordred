@@ -39,13 +39,12 @@ the optional workspace target has user-home paths of its own.
 | `<db>.mordred-enc` | database conversion | the verified converted copy (encrypted, or plain when decrypting), renamed over `<db>` |
 | `<home>/mordred/memory-vault.optout` | encryption CLI | pauses the memory hook (paused by operator) |
 | `<home>/mordred/telegram/` | extension (Telegram importer) | encrypted read-only Telegram archive |
-| `<home>/plugin-data/mordred/mordred.db` | activity and imports (macOS, SQLCipher) | activity tables and `import_*` imported-message tables |
 | `<home>/mordred/reader_sessions.json` | privacy_check reader mode | durable record (SHA-256 digests) of sessions that used a reader tool |
 | `<home>/mordred/uninstall/` | `uninstall` | `.env` lines (`HERMES_MEMORY_KEY`, `MORDRED_*`) moved out of `.env`, mode `0600` |
 | `<home>/extension/` | extension and keyvault signer | pairing, E2E, WebAuthn, history, wallet config |
 | `<home>/extension/activity_pending.json` | `activity pair-operator` / extension server | pending activity pair codes (SHA-256 of the code only), `0600` |
 | `<home>/extension/activity_peers.json` | extension server (`activity_pair_init`) / `activity peers revoke` | activity peer credentials (token SHA-256 only), `0600` |
-| `<home>/plugin-data/mordred/mordred.db` | `activity` component (SQLCipher only) | browser activity events, episodes, lessons, review jobs and budget |
+| `<home>/plugin-data/mordred/mordred.db` | `activity` component and `imports` library (SQLCipher only) | browser activity events, episodes, lessons, review jobs and budget; `import_*` imported-message tables |
 | `<home>/.env` | Hermes + Mordred writers | plaintext runtime secrets when present |
 | `<home>/config.yaml` | Hermes + Mordred writers | Hermes config and Mordred plugin sections |
 | `<home>/config.yaml.mordred-uninstall-<ts>.bak` | `uninstall` | copy of `config.yaml` taken before Mordred's entries are removed |
@@ -463,15 +462,6 @@ Imported-message provenance bumps the index: `index.enc` version 2 carries
 Mordred refuses a version-2 index instead of diverging. The `.enc` files remain
 until `--finalize --yes`. See
 [SPEC.md](SPEC.md#imported-message-provenance-2026-10-22).
-
-## `<home>/plugin-data/mordred/mordred.db`
-
-The SQLCipher-protected Mordred store, opened only through the activity
-protection gate (macOS; `conversion_pending`, `not_armed`,
-`unprotected_process` and `no_key` refuse). It is the activity component's file
-and also holds the imported-message tables below. See
-[SPEC.md](SPEC.md#imported-message-provenance-2026-10-22). Private mode `0600`
-beneath a mode-`0700` directory.
 
 ### Imported message tables
 

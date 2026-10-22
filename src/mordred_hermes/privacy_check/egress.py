@@ -37,6 +37,17 @@ Rules that hold at every restricted level:
   to disk (files, skills, memory, kanban) are refused so private data stays in
   memory only.
 
+**Reader mode** holds at every level, ``off`` included. Once a session has
+read imported private history (:data:`READER_TOOLS`), text from that history
+must never trigger an action: only the read-only tools in
+:data:`READER_ALLOWED` keep running (under the level's normal rules), web
+access (:data:`READER_WEB_TOOLS`) always asks the user, and every other tool
+(writes, commands, messaging, scheduling, delegation, payments, MCP tools,
+unknown tools) is refused until a new session. The pre-tool hook records the
+session durably (:mod:`._reader_sessions`) before the first read runs, so a
+restarted Hermes keeps the restriction; a reader tool without a session id,
+or whose record cannot be written, is refused.
+
 Configuration (``config.yaml``)::
 
     plugins:
@@ -59,10 +70,12 @@ import json
 import os
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
+
+from ._audit_reasons import EgressRule
 
 _platform = os.name
 
@@ -101,10 +114,14 @@ LOCAL_TOOLS = frozenset(
         "desktop_project",
     }
 )
-# Mordred's own tools: the destination is fixed in code (Venice or loopback).
-FIRST_PARTY_TOOLS = frozenset({"telegram_ask", "telegram_chats"})
+# Tools that read imported private history (Telegram, the imported-message
+# store) into the session. Calling one puts the session into reader mode.
+READER_TOOLS = frozenset({"telegram_ask", "telegram_chats", "mordred_history_search"})
+# Mordred's own tools: the destination is fixed in code (Venice, loopback or
+# the local store).
+FIRST_PARTY_TOOLS = READER_TOOLS
 # Reading any of these puts private data into the session (taint source).
-TAINT_SOURCES = FIRST_PARTY_TOOLS
+TAINT_SOURCES = READER_TOOLS
 SEARCH_TOOLS = frozenset({"web_search"})
 # Tools that write to disk in plaintext. A tainted session may not use them:
 # imported private data must exist in plaintext only in memory.
@@ -124,6 +141,29 @@ URL_ARGS: dict[str, tuple[str, ...]] = {
 }
 # Free-form code: destinations cannot be inspected.
 EXEC_TOOLS = frozenset({"terminal", "execute_code", "browser_console", "browser_exec", "browser_cdp"})
+# Reader mode: tools that only read or plan locally and so may keep running
+# once the session has read imported history.
+READER_ALLOWED = READER_TOOLS | frozenset(
+    {
+        "read_file",
+        "search_files",
+        "session_search",
+        "skill_view",
+        "skills_list",
+        "tool_search",
+        "tool_describe",
+        "todo",
+        "todo_list",
+        "clarify",
+    }
+)
+# URL-carrying tools that act rather than fetch (generate, attach, call an agent).
+_URL_ACTION_TOOLS = frozenset({"video_generate", "kanban_attach_url", "a2a_call"})
+# Reader mode: tools that search or load a web address. They always ask the
+# user in a reader session (a query or URL can carry imported text out).
+READER_WEB_TOOLS = (
+    SEARCH_TOOLS | (frozenset(URL_ARGS) - _URL_ACTION_TOOLS) | frozenset({"fetch_url", "fetch", "browser_back"})
+)
 # Hermes's Tool Search bridge: deferred tools (Mordred's Telegram tools among
 # them) are invoked as `tool_call {calls: [{name, arguments}]}`, and the agent
 # loop fires pre_tool_call with the bridge name. Decide on the tools inside.
@@ -174,17 +214,22 @@ class EgressPolicy:
 @dataclass(frozen=True)
 class Decision:
     allow: bool
-    reason: str = ""
+    reason: EgressRule | Literal[""] = ""
     message: str = ""
     taints: bool = False
     #: Ask the user (Hermes's approval prompt) instead of deciding here.
     approve: bool = False
     rule_key: str = ""
+    #: The call runs a reader tool: the caller must durably record the
+    #: session as a reader session before letting it run (allow or approve).
+    reader: bool = False
 
 
 @dataclass
 class _Sessions:
     tainted: set[str] = field(default_factory=set)
+    #: Sessions whose reader mode was durably recorded by this process's hook.
+    reader: set[str] = field(default_factory=set)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -202,6 +247,47 @@ def is_tainted(session_id: str | None) -> bool:
         return False
     with _SESSIONS.lock:
         return session_id in _SESSIONS.tainted
+
+
+def mark_reader(session_id: str) -> None:
+    """Enter reader mode in this process; call only after the durable record."""
+    with _SESSIONS.lock:
+        _SESSIONS.reader.add(session_id)
+        _SESSIONS.tainted.add(session_id)
+
+
+def reader_mode_established(session_id: str | None) -> bool:
+    """Whether this process's pre-tool hook put ``session_id`` into reader mode.
+
+    The check reader-tool handlers make before returning imported text. It
+    answers from the in-process set only, which the hook fills after the
+    durable record succeeded: if the hook did not run in this process (plugin
+    disabled, a call path that skips ``pre_tool_call``), nothing guards the
+    session's later tool calls, so the handler must refuse even when an
+    earlier process left a durable record.
+    """
+    if not session_id:
+        return False
+    with _SESSIONS.lock:
+        return session_id in _SESSIONS.reader
+
+
+def is_reader_session(session_id: str | None, *, home: Path | None = None) -> bool:
+    """Whether the reader guard applies: this process's set or the durable record.
+
+    ``home`` is the Hermes home holding ``mordred/reader_sessions.json``; without
+    it only the in-process set is consulted. An unreadable record raises
+    :class:`._reader_sessions.ReaderRecordError` (callers fail closed).
+    """
+    if not session_id:
+        return False
+    if reader_mode_established(session_id):
+        return True
+    if home is None:
+        return False
+    from . import _reader_sessions
+
+    return _reader_sessions.contains(home, session_id)
 
 
 # -- policy loading -------------------------------------------------------------------
@@ -340,7 +426,7 @@ def _is_local(tool: str) -> bool:
     return tool.startswith(_LOCAL_PREFIXES) and tool not in _LOCAL_EXCEPTIONS
 
 
-def _block(level: str, reason: str, detail: str) -> Decision:
+def _block(level: str, reason: EgressRule, detail: str) -> Decision:
     return Decision(
         allow=False,
         reason=reason,
@@ -499,8 +585,15 @@ def _bridge_entry(item: Any) -> tuple[str, dict[str, Any]] | None:
     return name, arguments
 
 
-def _decide_bridge(args: dict[str, Any], session_id: str | None, policy: EgressPolicy) -> Decision | None:
-    """Decide a ``tool_call`` by its inner calls; ``None`` if it is malformed."""
+def _decide_bridge(
+    args: dict[str, Any], session_id: str | None, policy: EgressPolicy, home: Path | None
+) -> Decision | None:
+    """Decide a ``tool_call`` by its inner calls; ``None`` if it is malformed.
+
+    A refusal of any entry refuses the batch, also after an entry that only
+    asks. A batch that reads imported history runs every entry under the
+    reader guard, so ``[telegram_ask, terminal]`` is refused as a whole.
+    """
     entries = _bridge_entries(args)
     if entries is None:
         # Hermes cannot run a malformed bridge either. Say what is wrong with
@@ -515,38 +608,108 @@ def _decide_bridge(args: dict[str, Any], session_id: str | None, policy: EgressP
                 "Fix the call and try again."
             ),
         )
+    reader_batch = any(name in READER_TOOLS for name, _ in entries)
     taints = False
+    pending: Decision | None = None
     for name, arguments in entries:
-        inner = decide(name, arguments, session_id, policy)
-        if not inner.allow:
+        inner = _decide_tool(name, arguments, session_id, policy, home=home, reader_batch=reader_batch)
+        if not inner.allow and not inner.approve:
             return inner
+        if inner.approve and pending is None:
+            pending = inner
         taints = taints or inner.taints
-    return Decision(allow=True, taints=taints)
+    if pending is not None:
+        return replace(pending, taints=taints, reader=reader_batch)
+    return Decision(allow=True, taints=taints, reader=reader_batch)
 
 
-def decide(tool: str, args: dict[str, Any] | None, session_id: str | None, policy: EgressPolicy) -> Decision:
-    """Allow or block one tool call. Pure apart from reading the taint set."""
+def decide(
+    tool: str,
+    args: dict[str, Any] | None,
+    session_id: str | None,
+    policy: EgressPolicy,
+    *,
+    home: Path | None = None,
+) -> Decision:
+    """Allow or block one tool call.
+
+    Pure apart from reading the taint/reader sets and, when ``home`` is given,
+    the durable reader record (:func:`is_reader_session`).
+    """
     args = args if isinstance(args, dict) else {}
     if tool == BRIDGE_CALL_TOOL:
-        bridged = _decide_bridge(args, session_id, policy)
+        bridged = _decide_bridge(args, session_id, policy, home)
         if bridged is not None:
             return bridged
-    return _decide_tool(tool, args, session_id, policy)
+    return _decide_tool(tool, args, session_id, policy, home=home)
 
 
-def _decide_tool(tool: str, args: dict[str, Any], session_id: str | None, policy: EgressPolicy) -> Decision:
+def _decide_tool(
+    tool: str,
+    args: dict[str, Any],
+    session_id: str | None,
+    policy: EgressPolicy,
+    *,
+    home: Path | None = None,
+    reader_batch: bool = False,
+) -> Decision:
+    level = policy.level
+    # The operator's tool blocklist wins first; at level "off" it still
+    # covers the reader tools (an operator may switch imports off entirely).
+    if tool in policy.blocked_tools and (level != "off" or tool in READER_TOOLS):
+        return _block(level, "egress.blocked_tool", f"the tool {tool} is blocklisted.")
+    if tool in READER_TOOLS:
+        if session_id is None:
+            return _block(
+                level, "egress.reader_no_session", f"{tool} reads imported history and needs a session identity."
+            )
+        return Decision(allow=True, taints=True, reader=True)
+    web = False
+    if reader_batch or is_reader_session(session_id, home=home):
+        if tool not in READER_ALLOWED and tool not in READER_WEB_TOOLS:
+            return _block(
+                "lockdown",
+                "egress.reader_locked",
+                f"this session has read imported history; {tool} is disabled until a new session.",
+            )
+        web = tool in READER_WEB_TOOLS
+    decision = _decide_level(tool, args, session_id, policy)
+    if web and (decision.allow or decision.approve):
+        # Stricter level rules (a block) win; otherwise the user decides.
+        return _reader_web(tool, args, policy)
+    return decision
+
+
+def _reader_web(tool: str, args: dict[str, Any], policy: EgressPolicy) -> Decision:
+    """Ask before a reader session searches or loads a web address, at every level."""
+    hard = _decide_blocklist(tool, args, policy)
+    if not hard.allow:
+        return hard
+    urls = _urls(tool, args)
+    where = ", ".join(sorted({(urlsplit(u if "://" in u else f"https://{u}").hostname or u) for u in urls}))
+    digest = hashlib.sha256(json.dumps(args, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:12]
+    return Decision(
+        allow=False,
+        approve=True,
+        reason="egress.reader_web",
+        rule_key=f"mordred.egress.reader_web:{tool}:{digest}",
+        message=(
+            "This chat has read imported private history. "
+            f"Mordred: {tool} wants to use the internet ({where or 'a web search'}). It will send: {_preview(args)}"
+        ),
+    )
+
+
+def _decide_level(tool: str, args: dict[str, Any], session_id: str | None, policy: EgressPolicy) -> Decision:
+    """The configured level's rules (reader tools and the reader guard come first)."""
     level = policy.level
     if level == "off":
         return Decision(allow=True)
-    if tool in policy.blocked_tools:
-        return _block(level, "egress.blocked_tool", f"the tool {tool} is blocklisted.")
     tainted = policy.taint and is_tainted(session_id)
     # Under "ask" a tainted session keeps asking (the prompt says the chat has
     # read private data); the stricter levels still lock it down.
     lock = tainted and (level != "ask" or policy.lockdown_after_private_data)
     effective = "lockdown" if lock else level
-    if tool in FIRST_PARTY_TOOLS:
-        return Decision(allow=True, taints=tool in TAINT_SOURCES)
     guard = _session_guard(tool, tainted, effective)
     if guard is not None:
         return guard

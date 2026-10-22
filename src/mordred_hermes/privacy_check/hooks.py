@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import sys
+from pathlib import Path
 from typing import Any, NoReturn, cast
 
 from .._audit_support import safe_audit_append
@@ -252,19 +253,103 @@ def on_session_start(**kwargs: Any) -> None:
             _refuse_unrecorded(state, "Mordred could not record its Windows session audit entry; session refused.")
 
 
+def _reader_home(state: Any) -> Path:
+    """The Hermes home holding ``mordred/reader_sessions.json``.
+
+    The directory holding ``config.yaml``, as for the keyvault (see
+    :func:`._runtime._load_state`); the default home when the state has none.
+    """
+    config_path = getattr(state, "config_path", None)
+    return Path(config_path).parent if config_path is not None else _runtime.DEFAULT_HERMES_CONFIG_PATH.parent
+
+
+def _enter_reader_mode(
+    state: Any, tool_name: str, session_id: str | None, home: Path | None, level: str
+) -> dict[str, Any] | None:
+    """Durably record reader mode before a reader tool runs; refuse when that fails.
+
+    The durable record comes first: a session must never read imported history
+    unless a restarted Hermes would still know it did. Only then is the session
+    marked in this process (reader + taint, whatever ``taint`` says). The first
+    entry per session and process is audited (no arguments).
+    """
+    from . import _reader_sessions, egress
+
+    if session_id is None or home is None:
+        return _reader_unrecorded(state, tool_name, level, "no_session" if session_id is None else "no_home")
+    try:
+        _reader_sessions.record(home, session_id)
+    except Exception as exc:
+        code = exc.code if isinstance(exc, _reader_sessions.ReaderRecordError) else "unexpected"
+        return _reader_unrecorded(state, tool_name, level, code)
+    if not egress.reader_mode_established(session_id):
+        recorded = _record(
+            state,
+            {
+                "event": "pre_tool_call",
+                "decision": "allow",
+                "reason": "policy.egress.reader_mode",
+                "level": level,
+                "tool_name": tool_name,
+            },
+        )
+        if not recorded:
+            # Windows: the durable record stands (the session stays guarded);
+            # this read is refused and the next one retries the audit entry.
+            return {"action": "block", "message": "Mordred could not record reader mode in its audit log."}
+    egress.mark_reader(session_id)
+    return None
+
+
+def _reader_unrecorded(state: Any, tool_name: str, level: str, code: str) -> dict[str, Any]:
+    """Refuse a reader tool whose session could not be recorded (``code`` is content-free)."""
+    from . import egress
+
+    _LOG.error("reader-session record failed (%s); blocking %s", code, tool_name)
+    _record(
+        state,
+        {
+            "event": "pre_tool_call",
+            "decision": "block",
+            "reason": "policy.egress.tool_blocked",
+            "rule": "egress.reader_unrecorded",
+            "level": level,
+            "tool_name": tool_name,
+        },
+    )
+    refusal = egress._block(
+        level,
+        "egress.reader_unrecorded",
+        f"Mordred could not record that this session reads imported history ({code}), so {tool_name} may not run.",
+    )
+    return {"action": "block", "message": refusal.message}
+
+
 def _check_tool_egress(state: Any, tool_name: str, kwargs: dict[str, Any]) -> dict[str, Any] | None:
     """Apply the tool-egress level (see :mod:`.egress`); fail closed on errors."""
     from . import egress
 
     session_id = str(kwargs.get("session_id") or "") or None
+    home: Path | None = None
     try:
+        home = _reader_home(state)
         checked = getattr(state, "checked", None)
         policy = checked.egress if checked is not None else egress.load_policy()
-        decision = egress.decide(tool_name, kwargs.get("args"), session_id, policy)
+        decision = egress.decide(tool_name, kwargs.get("args"), session_id, policy, home=home)
     except Exception:
         _LOG.exception("tool-egress evaluation failed; blocking %s", tool_name)
         policy = egress.EgressPolicy(level="lockdown")
         decision = egress._block("lockdown", "egress.evaluation_failed", "the egress check itself failed.")
+    if decision.reader and (decision.allow or decision.approve):
+        # Hermes logs and ignores a hook exception and then runs the tool, so
+        # nothing may escape between this point and the durable record.
+        try:
+            refused = _enter_reader_mode(state, tool_name, session_id, home, policy.level)
+        except Exception:
+            _LOG.exception("reader-mode entry failed; blocking %s", tool_name)
+            refused = {"action": "block", "message": "Mordred could not enter reader mode for this session."}
+        if refused is not None:
+            return refused
     if decision.allow:
         if decision.taints and policy.taint:
             egress.mark_tainted(session_id)

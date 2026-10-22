@@ -14,6 +14,14 @@ from mordred_hermes.privacy_check import egress
 _session = itertools.count()
 
 
+@pytest.fixture(autouse=True)
+def _reader_record_in_tmp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Hook tests that read Telegram record reader mode under tmp_path, not the shared test home."""
+    from mordred_hermes.privacy_check import hooks
+
+    monkeypatch.setattr(hooks, "_reader_home", lambda state: tmp_path)
+
+
 def _decide(level: str, tool: str, args: dict[str, Any] | None = None, session: str | None = None, **kw: Any):
     return egress.decide(tool, args or {}, session or f"s{next(_session)}", egress.EgressPolicy(level=level, **kw))
 

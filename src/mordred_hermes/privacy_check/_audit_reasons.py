@@ -2,7 +2,7 @@
 
 ``ReasonCode`` is deliberately a ``Literal`` so mypy catches drift between
 emit sites and consumers. ``docs/dev/POLICY.md`` owns the current meaning and
-live/reserved status of all 37 values. Existing strings are compatibility
+live/reserved status of every value. Existing strings are compatibility
 surfaces: add or retire behavior without renaming an established code.
 
 Two values are reserved and have no current emit site:
@@ -15,6 +15,12 @@ Two values are reserved and have no current emit site:
 ``policy.strict.unconditional_override`` is also a legacy name, but it remains
 live for an unresolved-provider refusal. Its name must not be read as evidence
 that an override occurred.
+
+``EgressRule`` is the closed vocabulary of the ``rule`` field that tool-egress
+audit entries carry next to their ``reason`` (``policy.egress.tool_blocked``
+for a refusal or an approval prompt). The ``egress.reader_*`` rules belong to
+reader mode: a session that has read imported private history may no longer
+act on it (see :mod:`.egress`).
 """
 
 from typing import Literal
@@ -57,4 +63,25 @@ ReasonCode = Literal[
     "activity.lesson_adopted",
     "activity.lesson_suspended",
     "activity.review_attempt",
+    "policy.egress.reader_mode",
+]
+
+EgressRule = Literal[
+    "egress.ask",
+    "egress.blocked_tool",
+    "egress.blocklisted_domain",
+    "egress.delegate_tainted",
+    "egress.evaluation_failed",
+    "egress.lockdown",
+    "egress.malformed_bridge",
+    "egress.outbound_tool",
+    "egress.schedule",
+    "egress.tainted_persist",
+    "egress.tainted_session",
+    "egress.uninspectable_exec",
+    "egress.url_fetch",
+    "egress.reader_no_session",
+    "egress.reader_unrecorded",
+    "egress.reader_locked",
+    "egress.reader_web",
 ]
