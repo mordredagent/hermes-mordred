@@ -23,7 +23,7 @@ from mordred_hermes.extension.telegram import hardening, migrate, secrets, store
 from mordred_hermes.imports import store as store_module
 from mordred_hermes.imports.records import OwnerClass
 from mordred_hermes.imports.store import ImportRefused, ImportStore
-from mordred_hermes.wizard import cli, telegram_cli
+from mordred_hermes.wizard import cli, telegram_cli, telegram_migrate_cli
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="mordred.db (and so migrate-store) is macOS-only; Windows keeps the .enc archive"
@@ -429,7 +429,8 @@ def test_cli_commit_and_finalize_are_mutually_exclusive(sealed: _Secrets, capsys
         cli.main(["telegram", "migrate-store", "--commit", "--finalize", "--yes"])
     assert raised.value.code == 2 and sealed.loads == 0
     capsys.readouterr()
-    assert telegram_cli.telegram_migrate_store(commit=True, finalize=True, yes=True) == 2
+    assert telegram_migrate_cli.telegram_migrate_store(commit=True, finalize=True, yes=True) == 2
+    assert telegram_cli.telegram_migrate_store is telegram_migrate_cli.telegram_migrate_store  # still importable
 
 
 def test_cli_finalize_before_commit_is_not_migrated(
@@ -532,8 +533,23 @@ class _Revocable:
         return None
 
 
-def _logout(held: _Secrets, client: _Revocable) -> int:
-    return telegram_cli.telegram_logout(forget=True, store=held, client_factory=lambda *_a, **_k: client)
+def _logout(held: _Secrets, client: _Revocable, *, force: bool = False) -> int:
+    return telegram_cli.telegram_logout(forget=True, force=force, store=held, client_factory=lambda *_a, **_k: client)
+
+
+_FORGOTTEN = "Deleted the API credentials, the archive key, the hardware key, and the local archive"
+_ROWS_NOT_DELETED = (
+    "error: import rows NOT deleted (import_store_unavailable); nothing else was removed. Fix the store (for "
+    "example run databases encrypt or check the mordred.db gate) and retry, or pass --force to forget the "
+    "credentials anyway and leave the rows.\n"
+)
+
+
+def _refuse_the_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refused(_home: Path) -> ImportStore:
+        raise ImportRefused("not_armed")
+
+    monkeypatch.setattr(store_module, "open_import_store", refused)
 
 
 def test_logout_forget_deletes_the_accounts_import_rows_before_the_key(
@@ -547,11 +563,15 @@ def test_logout_forget_deletes_the_accounts_import_rows_before_the_key(
     assert imports.status()["sources"] == {}
     assert held.value is None and client.logged_out and held.loads == 1
     assert not list(archive._root.rglob("*.enc"))
-    assert "Telegram rows in mordred.db" in out and "NOT deleted" not in err
+    assert out.splitlines() == [
+        "Revoked the session at Telegram.",
+        f"{_FORGOTTEN}, and this account's Telegram rows in mordred.db (if any).",
+    ]
+    assert err == ""
     _no_canaries(out, err)
 
 
-def test_logout_forget_reports_rows_it_could_not_delete_and_exits_1(
+def test_logout_forget_stops_before_anything_else_when_the_rows_cannot_be_deleted(
     archive: store.ArchiveStore,
     imports: ImportStore,
     key: bytes,
@@ -559,21 +579,57 @@ def test_logout_forget_reports_rows_it_could_not_delete_and_exits_1(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     migrate.run_migration(archive, imports, commit=True)
-
-    def refused(_home: Path) -> ImportStore:
-        raise ImportRefused("not_armed")
-
-    monkeypatch.setattr(store_module, "open_import_store", refused)
+    _refuse_the_store(monkeypatch)
     held, client = _Secrets(key, session="S"), _Revocable()
+    before = sorted(archive._root.rglob("*.enc"))
     assert _logout(held, client) == 1
     out, err = capsys.readouterr()
-    assert "import_rows_not_deleted:import_store_unavailable" in err
-    assert "Deleted the API credentials, the archive key, the hardware key, and the local archive." in out
+    assert (out, err) == ("", _ROWS_NOT_DELETED)
+    assert held.value is not None and held.value.store_key == key and held.value.session == "S"  # credentials kept
+    assert not client.logged_out  # the session was not revoked either
+    assert sorted(archive._root.rglob("*.enc")) == before and archive.load_index().retired_to == "mordred.db"
+    assert imports.status()["sources"]["telegram"]["messages"] == 6
+    _no_canaries(out, err)
+
+
+def test_logout_forget_force_forgets_the_rest_and_reports_the_rows_left_behind(
+    archive: store.ArchiveStore,
+    imports: ImportStore,
+    key: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    migrate.run_migration(archive, imports, commit=True)
+    _refuse_the_store(monkeypatch)
+    held, client = _Secrets(key, session="S"), _Revocable()
+    assert _logout(held, client, force=True) == 1
+    out, err = capsys.readouterr()
+    assert out.splitlines() == ["Revoked the session at Telegram.", f"{_FORGOTTEN} (--force)."]
+    assert "import_rows_not_deleted:import_store_unavailable" in err and "left them behind" in err
     assert "mordred.db" not in out  # never claims the rows went
     assert imports.status()["sources"]["telegram"]["messages"] == 6
-    assert held.value is None and client.logged_out  # the rest of --forget still ran
+    assert held.value is None and client.logged_out  # the rest of --forget ran
     assert not list(archive._root.rglob("*.enc"))
     _no_canaries(out, err)
+
+
+def test_cli_logout_forget_needs_force_to_leave_rows_behind(
+    archive: store.ArchiveStore,
+    imports: ImportStore,
+    sealed: _Secrets,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    migrate.run_migration(archive, imports, commit=True)
+    _refuse_the_store(monkeypatch)
+    assert _run(["telegram", "logout", "--force"], capsys)[0] == 0  # without --forget, --force changes nothing
+    assert sealed.value is not None and list(archive._root.rglob("*.enc"))
+    assert _run(["telegram", "logout", "--forget"], capsys) == (1, "", _ROWS_NOT_DELETED)
+    assert sealed.value is not None and list(archive._root.rglob("*.enc"))
+    code, out, err = _run(["telegram", "logout", "--forget", "--force"], capsys)
+    assert code == 1 and f"{_FORGOTTEN} (--force)." in out and "import_rows_not_deleted" in err
+    assert sealed.value is None and not list(archive._root.rglob("*.enc"))
+    assert imports.status()["sources"]["telegram"]["messages"] == 6
 
 
 def test_logout_forget_of_an_unmigrated_archive_never_opens_the_store(

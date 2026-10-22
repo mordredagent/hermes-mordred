@@ -66,7 +66,14 @@ from ...imports.records import (
 )
 from ...imports.store import ImportRefused, ImportStore
 from .ask import AskRecords, AskRequest, candidate_window
-from .client import PartAuthor, convert_dialog, convert_import_message, convert_message, dialog_kind
+from .client import (
+    PartAuthor,
+    ResolvedAuthor,
+    convert_dialog,
+    convert_import_message,
+    convert_message,
+    dialog_kind,
+)
 from .store import RETIRED_TO_IMPORT_STORE, ArchiveIndex, ArchiveStore, DialogInfo, StoredMessage, StoreError
 
 __all__ = [
@@ -88,7 +95,7 @@ _log = logging.getLogger(__name__)
 _SOURCE: Final = Source.TELEGRAM.value
 #: Participants kept per conversation ("seen in archive"; never a complete roster).
 _MAX_PARTICIPANTS: Final = 256
-#: Authors of recently converted messages kept per dialog for same-run quote resolution.
+#: Authors (and texts) of recently converted messages kept per dialog for same-run quote resolution.
 _MAX_REPLY_AUTHORS: Final = 4096
 _CHUNK: Final = 500  # bound on ``IN (...)`` parameters per statement
 _CONV_COLUMNS: Final = (
@@ -234,7 +241,7 @@ class _ImportDialog:
     cursor: int  # committed cursor at the start of the run
     seen: int
     participants: dict[tuple[str, str], Participant] = field(default_factory=dict)
-    authors: dict[int, PartAuthor] = field(default_factory=dict)
+    authors: dict[int, ResolvedAuthor] = field(default_factory=dict)
 
 
 class ImportSink:
@@ -318,7 +325,7 @@ class ImportSink:
         return record
 
     def _remember(self, handle: _ImportDialog, record: ImportMessage) -> None:
-        handle.authors[int(record.message_id)] = PartAuthor.of(record.parts[0])
+        handle.authors[int(record.message_id)] = ResolvedAuthor.of(record.parts[0])  # the text, too
         if len(handle.authors) > _MAX_REPLY_AUTHORS:
             del handle.authors[next(iter(handle.authors))]  # oldest first: ids arrive ascending
         if record.owner_class is OwnerClass.UNKNOWN or len(handle.participants) >= _MAX_PARTICIPANTS:
@@ -349,7 +356,12 @@ class ImportSink:
         handle.seen = max(handle.seen, seen)
         return handle.seen
 
-    def resolve_reply(self, conv_uid: str, msg_id: int) -> PartAuthor | None:
+    def resolve_reply(self, conv_uid: str, msg_id: int) -> ResolvedAuthor | None:
+        """Author and text of the replied-to ``#a`` / ``#f1`` part: this run's cache first, then the store.
+
+        The text is what :func:`~.client.convert_import_message` checks a quote
+        against before crediting it to this author.
+        """
         handle = self._dialogs.get(conv_uid)
         if handle is not None and msg_id in handle.authors:
             return handle.authors[msg_id]
@@ -361,7 +373,7 @@ class ImportSink:
             found = self.store.parts_for(uids)
         for uid in uids:
             if uid in found:
-                return PartAuthor.of(found[uid].part)
+                return ResolvedAuthor.of(found[uid].part)
         return None
 
     def checkpoint(self, index: ArchiveIndex) -> None:

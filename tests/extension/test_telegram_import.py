@@ -993,10 +993,22 @@ def test_forward_with_only_a_name_is_source_claimed_else_unknown():
     assert [p.part_uid for p in hidden.parts] == ["tg:11:16#f1"]
 
 
-def test_quote_is_authored_by_the_replied_to_message_when_resolved():
-    owner = client.PartAuthor(
-        SenderKind.USER, "7", "", OwnerClass.ACCOUNT_OWNER, "api_out", ProvenanceQuality.API_IDENTITY
+def _owner_row(text: str | None) -> client.ResolvedAuthor:
+    """What ``resolve_reply`` returns for a stored message the account owner sent."""
+    return client.ResolvedAuthor(
+        SenderKind.USER, "7", "", OwnerClass.ACCOUNT_OWNER, "api_out", ProvenanceQuality.API_IDENTITY, text=text
     )
+
+
+def _quoted(quote_text: str, resolved: client.ResolvedAuthor | None, msg_id: int = 30) -> Any:
+    reply = SimpleNamespace(reply_to_msg_id=2, quote=True, quote_text=quote_text)
+    record = _convert(_TgMessage(msg_id, "ok!", sender_id=11, reply_to=reply), resolve=lambda _id: resolved)
+    assert record.reply_to_uid == "tg:11:2"
+    return record.parts[1]
+
+
+def test_quote_is_authored_by_the_replied_to_message_when_resolved():
+    owner = _owner_row("ok, see you at 5 then")
     asked: list[int] = []
 
     def resolve(msg_id: int):
@@ -1015,6 +1027,64 @@ def test_quote_is_authored_by_the_replied_to_message_when_resolved():
         "reply_quote_resolved",
     )
     assert quoted.original_ref == "tg:11:2" and asked == [2]
+
+
+@pytest.mark.parametrize(
+    ("stored", "quote_text"),
+    [
+        ("Meet at the\n  station   at 5", "the station at 5"),  # whitespace runs folded on both sides
+        ("Price: \uff21\uff22\uff23\u3000\uff11\uff12\uff13 yen", "ABC 123"),  # NFKC: full-width ABC, space, 123
+        ("exact", "exact"),
+    ],
+)
+def test_quote_contained_in_the_replied_to_text_keeps_the_resolved_author(stored, quote_text):
+    quoted = _quoted(quote_text, _owner_row(stored))
+    assert (quoted.author_owner_class, quoted.author_id, quoted.author_evidence, quoted.provenance_quality) == (
+        OwnerClass.ACCOUNT_OWNER,
+        "7",
+        "reply_quote_resolved",
+        ProvenanceQuality.API_IDENTITY,
+    )
+    assert quoted.text == quote_text  # the quote is stored as sent, only compared folded
+
+
+@pytest.mark.parametrize(
+    "quote_text",
+    [
+        "see you at 6",  # altered
+        "see you at 5 and bring the keys",  # extended past the replied-to text
+        "SEE YOU AT 5",  # NFKC does not fold case
+        "you at 5 then. Also",
+    ],
+)
+def test_altered_quote_is_unverified_even_against_the_owners_message(quote_text):
+    quoted = _quoted(quote_text, _owner_row("ok, see you at 5 then"))
+    assert (quoted.author_kind, quoted.author_id, quoted.author_name) == (SenderKind.UNKNOWN, None, "")
+    assert (quoted.author_owner_class, quoted.author_evidence, quoted.provenance_quality) == (
+        OwnerClass.UNKNOWN,
+        "reply_quote_unverified",
+        ProvenanceQuality.UNKNOWN,
+    )
+    assert quoted.text == quote_text
+
+
+@pytest.mark.parametrize("stored", [None, "", "   "])
+def test_resolved_row_without_text_leaves_the_quote_unverified(stored):
+    quoted = _quoted("see you at 5", _owner_row(stored))
+    assert (quoted.author_owner_class, quoted.author_evidence, quoted.provenance_quality) == (
+        OwnerClass.UNKNOWN,
+        "reply_quote_unverified",
+        ProvenanceQuality.UNKNOWN,
+    )
+
+
+def test_resolved_author_of_a_part_carries_its_text():
+    record = _convert(_TgMessage(31, "the words", out=True))
+    resolved = client.ResolvedAuthor.of(record.parts[0])
+    assert resolved.text == "the words" and resolved.owner_class is OwnerClass.ACCOUNT_OWNER
+    assert client.PartAuthor.of(record.parts[0]) == client.PartAuthor(
+        resolved.kind, resolved.author_id, resolved.name, resolved.owner_class, resolved.evidence, resolved.quality
+    )
 
 
 def test_quote_without_a_known_target_is_unknown():

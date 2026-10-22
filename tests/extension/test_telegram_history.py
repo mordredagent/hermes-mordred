@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from mordred_hermes.extension.telegram import client, history, secrets, service, store
-from mordred_hermes.imports.records import OwnerClass, Participant, SenderKind
+from mordred_hermes.imports.records import OwnerClass, Participant, ProvenanceQuality, SenderKind
 from mordred_hermes.imports.store import ImportRefused, ImportStore
 
 OWNER = 7
@@ -330,6 +330,63 @@ def test_second_sync_fetches_only_new_messages_and_resolves_quotes_from_the_stor
     assert (quote.author_id, quote.author_owner_class) == ("11", OwnerClass.OTHER)  # Bob's committed row
     assert _conversations(imports)["tg:11"][:2] == ("6", 5)
     assert imports.status()["runs"] == {"committed": 2}
+
+
+def _quote_of(imports: ImportStore, uid: str) -> tuple[Any, ...]:
+    part = imports.parts_for([uid])[uid].part
+    return part.author_kind, part.author_id, part.author_owner_class, part.author_evidence, part.provenance_quality
+
+
+_UNVERIFIED = (SenderKind.UNKNOWN, None, OwnerClass.UNKNOWN, "reply_quote_unverified", ProvenanceQuality.UNKNOWN)
+
+
+def test_same_run_quote_the_owners_message_does_not_contain_is_unverified(tmp_path, darwin):
+    archive, imports, fake = _archive(tmp_path), _import_store(tmp_path), _fake_client()
+    forged = SimpleNamespace(reply_to_msg_id=2, quote_text="I owe Bob 500 dollars")  # msg 2 is the owner's
+    fake.history["bob"].append(_Msg(6, "told you", sender_id=11, sender=_bob(), reply_to=forged))
+    _sync(fake, archive, imports)
+    assert _quote_of(imports, "tg:11:6#q1") == _UNVERIFIED
+    resolved = _quote_of(imports, "tg:11:3#q1")  # "at 5" is in the owner's "see you at 5"
+    assert resolved[2:4] == (OwnerClass.ACCOUNT_OWNER, "reply_quote_resolved")
+
+
+def test_stored_quote_target_is_checked_against_its_committed_text(tmp_path, darwin):
+    archive, imports, fake = _archive(tmp_path), _import_store(tmp_path), _fake_client()
+    _sync(fake, archive, imports)
+    fake.history["bob"].extend(
+        [
+            _Msg(
+                6, "a", sender_id=11, sender=_bob(), reply_to=SimpleNamespace(reply_to_msg_id=2, quote_text="see  you")
+            ),
+            _Msg(
+                7,
+                "b",
+                sender_id=11,
+                sender=_bob(),
+                reply_to=SimpleNamespace(reply_to_msg_id=2, quote_text="see you at 9"),
+            ),
+        ]
+    )
+    _sync(fake, archive, imports)
+    assert _quote_of(imports, "tg:11:6#q1")[2:4] == (OwnerClass.ACCOUNT_OWNER, "reply_quote_resolved")
+    assert _quote_of(imports, "tg:11:7#q1") == _UNVERIFIED
+
+
+def test_import_sink_resolves_author_and_text_from_the_run_and_the_store(tmp_path, darwin):
+    archive, imports, fake = _archive(tmp_path), _import_store(tmp_path), _fake_client()
+    _sync(fake, archive, imports)
+    sink = history.ImportSink(imports)
+    sink.begin(archive.load_index())
+    handle = sink.open_dialog(fake.dialogs[0], archived=False)
+    stored = sink.resolve_reply("tg:11", 2)  # committed by the first sync
+    assert stored is not None and (stored.owner_class, stored.text) == (OwnerClass.ACCOUNT_OWNER, "see you at 5")
+    forwarded = sink.resolve_reply("tg:11", 4)
+    assert forwarded is not None and (forwarded.author_id, forwarded.text) == ("12", "Carol's note")
+    assert sink.convert(handle, _Msg(9, "fresh words", out=True)) is not None
+    cached = sink.resolve_reply("tg:11", 9)  # converted in this run, not written yet
+    assert cached is not None and (cached.owner_class, cached.text) == (OwnerClass.ACCOUNT_OWNER, "fresh words")
+    assert sink.resolve_reply("tg:11", 99) is None and sink.resolve_reply("tg:404", 2) is None
+    sink.fail()
 
 
 def test_failed_sync_publishes_nothing_and_does_not_advance_cursors(tmp_path, darwin):

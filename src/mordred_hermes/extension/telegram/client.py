@@ -27,6 +27,13 @@ forward or a quote becomes its own part with its own author. Both read only
 what the history response already carries (``message.forward`` entities
 included), so no new MTProto request type is needed. Where the records go is a
 :class:`~.history.SyncSink`'s business.
+
+A quote (``#q1``) is credited to the replied-to message's author only when the
+quoted text, NFKC- and whitespace-folded, is found in that message's text
+(``reply_quote_resolved``). ``quote_text`` is whatever the replying client sent,
+so a quote the replied-to text does not contain, or a target whose text is not
+known, gets an unknown author (``reply_quote_unverified``): words are never
+attributed to the account owner (or anyone else) on the reply link alone.
 """
 
 from __future__ import annotations
@@ -35,6 +42,7 @@ import asyncio
 import datetime
 import json
 import time
+import unicodedata
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
@@ -290,8 +298,10 @@ EVIDENCE_FWD_SELF: Final = "api_fwd_from_id_eq_self"
 EVIDENCE_FWD_IDENTITY: Final = "api_fwd_from_id"
 EVIDENCE_FWD_NAME: Final = "fwd_from_name"  # only the name the original sender chose to show
 EVIDENCE_FWD_HIDDEN: Final = "fwd_hidden"
-EVIDENCE_QUOTE_RESOLVED: Final = "reply_quote_resolved"  # author of the replied-to message
-EVIDENCE_QUOTE_UNRESOLVED: Final = "reply_quote_unresolved"
+EVIDENCE_QUOTE_RESOLVED: Final = "reply_quote_resolved"  # author of the replied-to message, text contained
+EVIDENCE_QUOTE_UNRESOLVED: Final = "reply_quote_unresolved"  # the replied-to message is not known
+#: The replied-to message is known, but its text is not, or does not contain the quote.
+EVIDENCE_QUOTE_UNVERIFIED: Final = "reply_quote_unverified"
 
 #: Telethon's marked id of a channel is ``-(10**12 + channel_id)``.
 _CHANNEL_ID_OFFSET: Final = 1_000_000_000_000
@@ -328,11 +338,35 @@ class PartAuthor:
         )
 
 
-#: ``resolve_reply(reply_to_msg_id)``: the author of a same-chat message, or ``None`` when unknown.
-ReplyResolver = Callable[[int], PartAuthor | None]
+@dataclass(frozen=True)
+class ResolvedAuthor(PartAuthor):
+    """A replied-to message's author plus its text (``None``: unknown), which a quote must be taken from."""
+
+    text: str | None
+
+    @classmethod
+    def of(cls, part: ImportPart) -> ResolvedAuthor:
+        """The author and the text of a stored or just-converted ``#a`` / ``#f1`` part."""
+        author = PartAuthor.of(part)
+        return cls(
+            kind=author.kind,
+            author_id=author.author_id,
+            name=author.name,
+            owner_class=author.owner_class,
+            evidence=author.evidence,
+            quality=author.quality,
+            text=part.text,
+        )
+
+
+#: ``resolve_reply(reply_to_msg_id)``: author and text of a same-chat message, or ``None`` when unknown.
+ReplyResolver = Callable[[int], ResolvedAuthor | None]
 
 _UNKNOWN_AUTHOR: Final = PartAuthor(
     SenderKind.UNKNOWN, None, "", OwnerClass.UNKNOWN, EVIDENCE_QUOTE_UNRESOLVED, ProvenanceQuality.UNKNOWN
+)
+_UNVERIFIED_AUTHOR: Final = PartAuthor(
+    SenderKind.UNKNOWN, None, "", OwnerClass.UNKNOWN, EVIDENCE_QUOTE_UNVERIFIED, ProvenanceQuality.UNKNOWN
 )
 
 
@@ -534,10 +568,32 @@ def _part(source_uid: str, kind: PartKind, ordinal: int, author: PartAuthor, tex
     )
 
 
+def _folded(text: str) -> str:
+    """NFKC with every whitespace run folded to one space: the form a quote is compared in."""
+    return " ".join(unicodedata.normalize("NFKC", text).split())
+
+
+def _quote_author(quote_text: str, resolved: ResolvedAuthor | None) -> PartAuthor:
+    """The replied-to message's author, only when its text verifiably contains the quote; else unknown."""
+    if resolved is None:
+        return _UNKNOWN_AUTHOR
+    quote = _folded(quote_text)
+    if not quote or resolved.text is None or quote not in _folded(resolved.text):
+        return _UNVERIFIED_AUTHOR
+    return PartAuthor(
+        resolved.kind,
+        resolved.author_id,
+        resolved.name,
+        resolved.owner_class,
+        EVIDENCE_QUOTE_RESOLVED,
+        resolved.quality,
+    )
+
+
 def _quote(
     message: Any, source_uid: str, chat_id: int, resolve_reply: ReplyResolver | None
 ) -> tuple[str | None, ImportPart | None]:
-    """``(reply_to_uid, #q1 part)``; the quote's author is the replied-to message's, else unknown."""
+    """``(reply_to_uid, #q1 part)``; the quote's author is the replied-to message's when verified, else unknown."""
     reply = getattr(message, "reply_to", None)
     if reply is None:
         return None, None
@@ -551,17 +607,7 @@ def _quote(
     resolved = None
     if resolve_reply is not None and target is not None and same_chat:
         resolved = resolve_reply(target)
-    if resolved is None:
-        author = _UNKNOWN_AUTHOR
-    else:
-        author = PartAuthor(
-            resolved.kind,
-            resolved.author_id,
-            resolved.name,
-            resolved.owner_class,
-            EVIDENCE_QUOTE_RESOLVED,
-            resolved.quality,
-        )
+    author = _quote_author(quote_text, resolved)
     return reply_uid, _part(source_uid, PartKind.QUOTED, 1, author, quote_text, original_ref=reply_uid)
 
 
@@ -597,7 +643,9 @@ def convert_import_message(
     Parts: the sender's own words ``#a``; for a forward ONLY ``#f1`` (Telegram
     forwards carry no comment of their own, so the message text is the
     forwarded text and the message's sender is the forwarder); a quoted reply
-    adds ``#q1``. Empty text is kept only when media is present.
+    adds ``#q1``, credited to the replied-to author only when that message's
+    text contains the quote (see the module docstring). Empty text is kept
+    only when media is present.
     """
     if type(message).__name__ != "Message":
         return None

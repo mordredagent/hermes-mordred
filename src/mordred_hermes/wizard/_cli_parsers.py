@@ -276,6 +276,11 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
         action="store_true",
         help="Also delete the API credentials, the archive key and the local archive",
     )
+    p_logout.add_argument(
+        "--force",
+        action="store_true",
+        help="With --forget: go on even when this account's mordred.db rows could not be deleted (left behind)",
+    )
     p_logout.set_defaults(func=_handle_telegram)
     p_venice = tsub.add_parser("venice", help="Store the Venice.ai API key and model used for questions")
     p_venice.add_argument("--model", default=None, help="Venice model id (must be labelled 'private')")
@@ -290,35 +295,9 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     )
     local_auth.add_argument("--clear-api-key", action="store_true", help="Remove the stored local API key")
     p_local.set_defaults(func=_handle_telegram)
-    p_migrate = tsub.add_parser("migrate-tee", help="Move vault-stored credentials into the Secure Enclave seal")
-    p_migrate.add_argument(
-        "--no-touch-id",
-        action="store_true",
-        help="Create the Enclave key without a per-use Touch ID / passcode requirement",
-    )
-    p_migrate.set_defaults(func=_handle_telegram)
-    _add_telegram_migrate_store(tsub)
+    from .telegram_migrate_cli import add_parsers as _add_migrate_parsers  # migrate-tee, migrate-store
 
-
-def _add_telegram_migrate_store(tsub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    p_store = tsub.add_parser(
-        "migrate-store",
-        help="Move the encrypted .enc archive into mordred.db (dry run by default; counts only)",
-    )
-    store_mode = p_store.add_mutually_exclusive_group()
-    store_mode.add_argument(
-        "--commit",
-        action="store_true",
-        help="Write the archive into mordred.db under one import run and retire index.enc (version 2)",
-    )
-    store_mode.add_argument(
-        "--finalize",
-        action="store_true",
-        help="After --commit: verify every archived message is in mordred.db, then delete the .enc message files",
-    )
-    p_store.add_argument("--yes", action="store_true", help="Confirm --finalize")
-    p_store.add_argument("--json", action="store_true", help="Print one JSON object (counts and codes only)")
-    p_store.set_defaults(func=_handle_telegram)
+    _add_migrate_parsers(tsub, _handle_telegram)
 
 
 def _add_extension(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
