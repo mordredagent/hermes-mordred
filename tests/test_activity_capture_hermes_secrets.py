@@ -448,6 +448,34 @@ def test_a_turn_naming_overlapping_values_and_its_typing_take_linear_time(captur
     assert all(slow < 6 * max(fast, 0.002) for fast, slow in zip(small, large, strict=True)), (small, large)
 
 
+def _type_seconds(typed: str, runs: int = 3) -> float:
+    best = float("inf")
+    for _ in range(runs):
+        started = time.perf_counter()
+        call("browser_type", {"ref": "@e2", "text": typed}, ok(element="@e2"))
+        best = min(best, time.perf_counter() - started)
+    return best
+
+
+def test_typing_against_many_overlapping_named_values_takes_linear_time(capture_home) -> None:
+    """Codex review of f435dfc10: a message names ``"-a-" * i`` as passwords (i = 1..64, within the bound), then
+    ``"-a-" * 13333`` is typed; listing every place a value stands in it took 1.4-1.8 s (under 10 ms before)."""
+    _home, store = capture_home
+    message = "Open http://127.0.0.1:8499/notes.html; " + "; ".join(
+        f"password: {'-a-' * count}" for count in range(1, 65)
+    )
+    assert contracts.secret_values(message).complete  # the values are compared, not withheld wholesale
+    turn(message)
+    call("browser_navigate", {"url": NOTES}, nav_result(NOTES, title="Notes", snapshot=NOTES_SNAPSHOT))
+    small = _type_seconds("-a-" * 3_333)
+    large = _type_seconds("-a-" * 13_333)
+    end_turn()
+    assert large < 0.05, (small, large)
+    assert large < 6 * max(small, 0.002), (small, large)
+    typed = [event for event in calls(store) if event.op == "type"]
+    assert len(typed) == 6 and all(event.text is None and "typed_text_dropped" in event.exclusions for event in typed)
+
+
 # --- a secret-shaped token in the user's own words (live B2 re-run, N4) -------------------------------------------
 
 

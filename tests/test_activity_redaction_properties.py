@@ -477,9 +477,20 @@ def test_given_values_are_found_exactly_as_the_combined_pattern_found_them() -> 
         values = [_pieces(chooser, 3) for _ in range(chooser.randint(1, 6))]
         text = " ".join([_pieces(chooser, 12), *(chooser.choice(values) for _ in range(3)), _pieces(chooser, 12)])
         text = "".join(chooser.sample(text, len(text))) if chooser.random() < 0.2 else text
-        if contracts.redact_values(text, values) != _alternation(text, values):
+        expected = _alternation(text, values)
+        if contracts.redact_values(text, values) != expected or contracts.contains_values(text, values) != expected[1]:
             failures.append((text, values))
     assert not failures, failures[:5]
+
+
+@pytest.mark.parametrize("case", ["codex-overlaps", "swallowed", "shared-beginnings", "letters", "joined-letters"])
+def test_hard_value_sets_are_found_exactly_as_the_combined_pattern_found_them(case: str) -> None:
+    values, text = MATCH_CASES[case]
+    for size in (0, 1, 2, 3, 7, 50, 301, 1000):
+        for typed in (text(size), "x" + text(size), text(size) + "x", "-" + text(size) + "Z"):
+            expected = _alternation(typed, values)
+            assert contracts.redact_values(typed, values) == expected, (case, typed)
+            assert contracts.contains_values(typed, values) == expected[1], (case, typed)
 
 
 def _codes() -> list[int]:
@@ -510,33 +521,49 @@ def test_each_character_is_compared_without_case_as_re_ignorecase_compares_it() 
             assert re.fullmatch(re.escape(key), char, re.IGNORECASE), (hex(ord(char)), hex(ord(key)))
 
 
-def _redact_seconds(text: str, values: list[str], runs: int = 3) -> float:
+#: Sets of named values (the bound's worth) and typed texts of ``size`` characters, each hard for one way of matching
+#: (Codex review of f435dfc10: listing every overlapping place of ``"-a-" * i`` in ``"-a-" * 13333`` took 1.4 s).
+MATCH_CASES: dict[str, tuple[list[str], Callable[[int], str]]] = {
+    # every value a whole word at every third character
+    "codex-overlaps": (["-a-" * count for count in range(1, 65)], lambda size: "-a-" * (size // 3)),
+    # the values of every second place swallowed by a short one just before it
+    "swallowed": (["+a", *("a" + "-+a" * count for count in range(63))], lambda size: "-+a" * (size // 3)),
+    # long shared beginnings that fail at their last character
+    "shared-beginnings": (
+        [("a-+" * 85)[: 3 * count] + "Z" for count in range(1, 65)],
+        lambda size: "a-+" * (size // 3),
+    ),
+    "letters": (["a" * count for count in range(1, 65)], lambda size: "a" * size),
+    "joined-letters": ([("a-" * 128)[:count] for count in range(1, 65)], lambda size: "a-" * (size // 2)),
+    "joiners": (["-" * count for count in range(4, 68)], lambda size: "-" * size),
+    "words": (
+        [f"{word}-{number}" for word in ("ordinary", "typed", "text", "hunter") for number in range(16)],
+        lambda size: "ordinary typed text " * (size // 20),
+    ),
+    "non-ascii": (
+        ["\u00e9" * count for count in range(1, 33)] + ["\u212a\u017f" * count for count in range(1, 33)],
+        lambda size: "\u00e9\u212a\u017f " * (size // 4),
+    ),
+}
+
+
+def _match_seconds(match: Callable[[], object], runs: int = 3) -> float:
     best = float("inf")
     for _ in range(runs):
         started = time.perf_counter()
-        contracts.redact_values(text, values)
+        match()
         best = min(best, time.perf_counter() - started)
     return best
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        lambda size: "ordinary typed text " * (size // 20),
-        lambda size: "a" * size,
-        lambda size: "a-" * (size // 2),
-        lambda size: "-" * size,
-        lambda size: "\u00e9\u212a\u017f " * (size // 4),
-    ],
-    ids=["words", "letters", "joined-letters", "joiners", "non-ascii"],
-)
-def test_given_values_are_found_in_near_linear_time(text: Callable[[int], str]) -> None:
-    """The values a long message names (the bound's worth, each as long as listed) against long typed text."""
-    longest = contracts.MAX_SECRET_VALUE_CHARS
-    values = [*("a" * length for length in range(1, 33)), *(("a-" * longest)[:length] for length in range(1, 33))]
-    values += [("-a" * longest)[:length] for length in range(1, 33)]
-    values += ["-" * 4, "\u00e9" * 4, "x" * longest]
-    small = _redact_seconds(text(10_000), values)
-    large = _redact_seconds(text(40_000), values)
-    assert large < 2.0, (small, large)
-    assert large < 6 * max(small, 0.002), (small, large)
+@pytest.mark.parametrize("case", MATCH_CASES)
+def test_given_values_are_found_in_linear_time(case: str) -> None:
+    """Whether typed text holds a named value (``contains_values``) and replacing them (``redact_values``) each
+    take under 50 ms for 40 KB, and 40 KB under 6 times 10 KB."""
+    values, text = MATCH_CASES[case]
+    assert len(values) <= contracts.MAX_SECRET_VALUES
+    for match in (contracts.contains_values, contracts.redact_values):
+        small = _match_seconds(lambda match=match: match(text(10_000), values))
+        large = _match_seconds(lambda match=match: match(text(40_000), values))
+        assert large < 0.05, (match.__name__, small, large)
+        assert large < 6 * max(small, 0.002), (match.__name__, small, large)

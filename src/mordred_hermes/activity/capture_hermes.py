@@ -181,6 +181,7 @@ from .contracts import (
     SecretValues,
     canonical_json,
     check_batch_envelope,
+    contains_values,
     event_size,
     looks_like_secret,
     normalize_event,
@@ -539,7 +540,7 @@ def _type(call: _Call, state: _Session) -> _Mapped:
     # A value the turn's message names as a secret ("type X as the password") is withheld from any field, and so is
     # every value typed in a turn whose message names more values than are listed (fail closed).
     secrets = state.turn_secrets
-    named = typed is not None and (not secrets.complete or redact_values(typed, secrets.values)[1])
+    named = typed is not None and (not secrets.complete or contains_values(typed, secrets.values))
     learned = typed if typed and _learns(state, call.args.get("ref"), typed, named) else None
     if kind != SENSITIVE_FIELD_KIND:
         if named:

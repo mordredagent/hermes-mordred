@@ -4536,14 +4536,19 @@ per-process state.
     past it; its result is then incomplete, and every value typed in that
     turn is withheld and counts as above (fail closed). Ordinary messages
     stay within the bound; a value longer than 256 characters (a long JWT
-    too) is past it. `redact_values` looks for each value in the text
-    without case, one character at a time exactly as `re.IGNORECASE`
-    compares them, instead of compiling one pattern of every value, so its
-    cost is linear in the text for each value. Tests check the bound and the
-    time on Codex's input at 4 KB and 40 KB, on the redactor's adversarial
-    shapes and on runs of overlapping values, and that `redact_values`
-    replaces exactly what the combined pattern replaced
-    (`tests/test_activity_redaction_properties.py`). The held text is dropped when the turn never ends (an
+    too) is past it. A typed value is compared with them by
+    `contracts.contains_values`, which stops at the first whole word found;
+    `redact_values` replaces from left to right the leftmost whole word, by
+    its longest value. Both compare the text without case, one character at
+    a time exactly as `re.IGNORECASE` compares them, against one pattern
+    that writes the characters the values share once (a tree of them), so
+    each place in the text costs at most the longest value's length however
+    many values overlap there (Codex review of `f435dfc10`: listing every
+    place `"-a-" * i`, i = 1..64, stands in `"-a-" * 13333` took 1.4 s).
+    Tests check the bound and the time on Codex's inputs at 10 KB and
+    40 KB, on the redactor's adversarial shapes and on runs of overlapping
+    values, and that both replace and find exactly what the combined pattern
+    of every value did (`tests/test_activity_redaction_properties.py`). The held text is dropped when the turn never ends (an
     interrupted last turn, a process that exits, a session forgotten), when
     recording it is off at the turn's end, or while the session is
     suspended; a refused write is not retried, and the turn's calls stay in

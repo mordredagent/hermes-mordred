@@ -57,13 +57,14 @@ Rejections carry a code only. Nothing here logs or echoes event content.
 from __future__ import annotations
 
 import bisect
+import functools
 import hashlib
 import json
 import math
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
-from itertools import pairwise
+from itertools import groupby, pairwise
 from typing import Any, Final, NamedTuple
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
@@ -1627,23 +1628,52 @@ def _without_case(text: str) -> str:
     return text.lower() if text.isascii() else text.translate(_CASE_KEYS)
 
 
-def _whole_words(folded: str, key: str) -> Iterator[int]:
-    """Where ``key`` starts in ``folded`` with no ASCII letter or digit right before or after it, each place once,
-    also where two places overlap. Past a place with a letter or digit right before it, the search goes on from the
-    next place ``key``'s first character stands with none right before it, so each such place is visited once."""
-    word_start = re.compile(r"(?<![A-Za-z0-9])" + re.escape(key[0]))
-    start = folded.find(key)
-    while start >= 0:
-        if start and folded[start - 1] in _ASCII_ALNUM:
-            after = word_start.search(folded, start + 1)
-            if after is None:
-                return
-            start = folded.find(key, after.start())
-            continue
-        end = start + len(key)
-        if end == len(folded) or folded[end] not in _ASCII_ALNUM:
-            yield start
-        start = folded.find(key, start + 1)
+#: Value sets whose pattern :func:`_values_pattern` keeps compiled (a session's withheld values, a turn's named ones).
+_MAX_VALUE_PATTERNS: Final = 8
+
+
+def _shared_end(first: str, last: str, depth: int) -> int:
+    """Where ``first`` and ``last`` part, from ``depth`` on (they agree before it)."""
+    pos, end = depth, min(len(first), len(last))
+    while pos < end and first[pos] == last[pos]:
+        pos += 1
+    return pos
+
+
+def _rest_pattern(keys: Sequence[str], depth: int) -> str:
+    """The pattern of ``keys`` (sorted, distinct, agreeing on their first ``depth`` characters) from ``depth`` on:
+    the stretch a group of them shares is written once, a group per next character (so at most one alternative
+    goes on at any character), and where a key ends the rest is optional and tried first (the longest key first).
+    One level per place keys part or end, so at most two per key."""
+    ends = len(keys[0]) == depth
+    alternatives = []
+    for _char, members in groupby(keys[1:] if ends else keys, key=lambda key: key[depth]):
+        group = list(members)
+        shared = _shared_end(group[0], group[-1], depth)
+        alternatives.append(re.escape(group[0][depth:shared]) + _rest_pattern(group, shared))
+    if not alternatives:
+        return ""
+    body = alternatives[0] if len(alternatives) == 1 else "(?:" + "|".join(alternatives) + ")"
+    return f"(?:{body})?" if ends else body
+
+
+@functools.lru_cache(maxsize=_MAX_VALUE_PATTERNS)
+def _values_pattern(keys: frozenset[str]) -> re.Pattern[str]:
+    """One pattern of ``keys`` (values without case, :func:`_without_case`) as a tree of the characters they share
+    (:func:`_rest_pattern`), between the whole-word boundaries: at each place it follows one path of at most the
+    longest key's length, and it matches the longest key that stands there as a whole word. Kept in memory only."""
+    return re.compile(r"(?<![A-Za-z0-9])" + _rest_pattern(sorted(keys), 0) + r"(?![A-Za-z0-9])")
+
+
+def _value_keys(values: Iterable[str]) -> frozenset[str]:
+    return frozenset(_without_case(value) for value in values if value)
+
+
+def contains_values(text: str, values: Iterable[str]) -> bool:
+    """Whether :func:`redact_values` would replace anything in ``text``: it stops at the first whole word found
+    (Hermes's typed text against the values the turn's message names, :func:`secret_values`)."""
+    keys = _value_keys(values)
+    return bool(keys) and _values_pattern(keys).search(_without_case(text)) is not None
 
 
 def redact_values(text: str, values: Iterable[str]) -> tuple[str, bool]:
@@ -1652,27 +1682,21 @@ def redact_values(text: str, values: Iterable[str]) -> tuple[str, bool]:
     Compared without case, the longest value first, only as a whole word (no ASCII letter or digit right before
     or after it), also inside a URL (its userinfo, host or path: no part is exempt); independent of any
     phrasing (Hermes's own capture: the values it typed into fields that may be secret). Exactly what one
-    ``re.IGNORECASE`` pattern of every value, the longest first, between those boundaries replaces, but found
-    without one: each value is looked for in the text without case (:func:`_without_case`, :func:`_whole_words`),
-    and of the places found the leftmost is replaced, by its longest value, then the leftmost after it, and so on.
-    The text is searched once for each distinct value, and each place a value could start a whole word in is
-    checked at most once."""
-    keys = {_without_case(value) for value in values if value}
+    ``re.IGNORECASE`` alternation of every value, the longest first, between those boundaries replaces: from left
+    to right, the leftmost place a value stands as a whole word, by the longest value there, then on after it. The
+    text is compared without case (:func:`_without_case`) against one pattern that shares the values' common
+    characters (:func:`_values_pattern`), so each place costs at most the longest value's length, whatever the
+    number of values or how often they overlap."""
+    keys = _value_keys(values)
     if not keys:
-        return text, False
-    folded = _without_case(text)
-    ends: dict[int, int] = {}  # where a value starts -> where the longest value found there ends
-    for key in keys:
-        for start in _whole_words(folded, key):
-            ends[start] = max(ends.get(start, 0), start + len(key))
-    if not ends:
         return text, False
     parts: list[str] = []
     cursor = 0
-    for start in sorted(ends):
-        if start >= cursor:
-            parts += [text[cursor:start], REDACTED]
-            cursor = ends[start]
+    for match in _values_pattern(keys).finditer(_without_case(text)):
+        parts += [text[cursor : match.start()], REDACTED]
+        cursor = match.end()
+    if not parts:
+        return text, False
     parts.append(text[cursor:])
     return "".join(parts), True
 
