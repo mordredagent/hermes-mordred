@@ -206,3 +206,133 @@ re-fetches at most one batch.
 4. Run budget 10 min inside a Hermes tool call: is that acceptable UX, or
    should the tool return early with `partial: true` after 60 s and let the
    next call continue from the cursor? Leaning to the latter.
+
+## Revision after the Codex design review (2026-10-22)
+
+Codex (`gpt-6-astra`, read-only run) reviewed the sections above against the
+code. The findings below are adopted and override the earlier text where they
+differ. The full review is kept with the session notes; this section records
+the decisions.
+
+### Trusted collector metadata, never injected headers
+
+The collector does not modify the raw message bytes (so `source_revision`
+digests stay comparable with Takeout imports) and does not inject
+`X-Gmail-Labels`/`X-GM-THRID` headers, because `headers.py` trusts the first
+embedded occurrence and an attacker-supplied header would win. Instead
+`RawMessage` carries an optional `trusted: TrustedMeta(labels, thread_id,
+folder_role)` filled only by the IMAP collector. When present, `normalize` and
+`owner.classify` use it and ignore the embedded label/thread headers entirely.
+Gmail system labels arrive as `\Sent`, `\Draft`, `\Spam`, `\Trash`,
+`\Inbox`, `\Important`, `\Starred` and custom labels in modified UTF-7; the
+collector decodes them and maps system labels explicitly, so `gmail_label_sent`
+is emitted only for the real `\Sent` system label.
+
+### Conservative evidence for generic servers
+
+A generic server's sent folder (special-use `\Sent` per RFC 6154, chosen at
+setup time, never guessed at fetch time) identifies folder purpose, not
+verified authorship. Messages from it get evidence `imap_sent_folder` with
+quality `source_claimed`, they are owner for display, and they are NOT quote
+anchors (`link.ANCHOR_EVIDENCE` stays Sent-label only). `XLIST` is not used.
+If the server offers no special-use folder, `mail setup` lists the folders
+and asks the operator to pick one (or none); the choice is sealed with the
+credentials. Folders other than the chosen ones are not fetched in this
+version; `status` reports that scope.
+
+### Atomic publication and cursor
+
+Readers expose only committed runs, so the fetch uses one `import_runs` row
+per batch (at most 200 messages, at most 64 MiB of literals). Each batch is
+one store transaction: threads written, the batch's run committed, and the
+cursor (`uidvalidity`, `uid`) updated together through a new
+`ImportStore.commit_batch(run_id, counts, meta_updates)`. A crash therefore
+re-fetches at most one batch and never advances the cursor past unpublished
+rows. Cursor keys fit the store's key grammar (at most four lowercase dotted
+components): `mail_imap.<account>.<sha256(mailbox)[:12]>` with a JSON value
+`{"mailbox_digest", "uidvalidity", "uid", "epoch"}`. A changed `UIDVALIDITY`
+starts a new epoch in the same transaction. The forward cursor and the
+historical backfill (`--since`) are separate state; backfill never moves the
+forward cursor. `UID SEARCH UID <last+1>:*` can return the last UID itself;
+the collector filters it out. Sizes are checked with a preliminary `UID FETCH
+(RFC822.SIZE)` so oversize messages are skipped before any literal is
+downloaded. At fetch start, an `open` run for source `mail` left by a crash is
+marked `failed` and its rows are reclaimed by the store's existing rule.
+`upsert_conversation` merges rather than replaces: `last_message_at` is the
+maximum, participants are unioned, `message_count` is recomputed from the
+store.
+
+### Counts-only output, enforced by a fixed serializer
+
+Neither the tool nor `mail fetch --json` reuse `DryRunReport.as_text/as_json`,
+which list addresses. A dedicated `FetchResult` serializer with an allowlist of
+integer and boolean fields is the only output path: `{inserted, duplicates,
+revised, conflicts, skipped_oversize, batches, mailboxes, gmail, cursor_reset,
+partial, partial_reason, excluded_history, error}`. `error` and
+`partial_reason` are drawn from a closed enum. `imaplib.Debug` stays 0;
+exceptions are mapped to codes and never stringified into results, logs or
+audit.
+
+### Transport and egress
+
+`extension/egress.py` resolves a route (direct or proxy), it does not provide
+sockets. The collector resolves the route for the sealed host and then builds
+its own connection: direct TCP, or SOCKS5 with remote DNS (`socks5h`) and
+proxy authentication from the route; any other proxy kind refuses with
+`egress_unsupported`. TLS is implicit on port 993 with
+`ssl.create_default_context()`, certificate verification on and SNI set to
+the sealed hostname; STARTTLS and referrals are never followed. A VPN drop or
+reset surfaces as `imap_unreachable` and the run fails cleanly.
+
+### Credential custody
+
+Credentials use the same hardware-only custody boundary as the production
+Telegram path (`extension/telegram/tee.py`), not the cached vault store. The
+unsealed secret lives in one scope for the duration of a fetch; Python cannot
+guarantee zeroization of immutable strings, and the design does not claim it.
+`mail forget --yes` removes the sealed credentials and cursors; `mail forget
+--rows --yes` additionally deletes the account's rows via `delete_source`.
+
+### Tool hardening
+
+`mordred_mail_sync` validates its single argument strictly (integer 1-2000,
+booleans and unknown keys rejected with `invalid_request`) and repeats every
+gate inside the handler. It is added to `privacy_check.egress.FIRST_PARTY_TOOLS`
+(fixed destination in code) as well as `READER_ALLOWED`, because
+`READER_ALLOWED` alone still runs the level rules that block unknown tools
+under lockdown; it is not a reader tool and does not taint. The IMAP client
+wrapper enforces a runtime command allowlist: `CAPABILITY`, `LOGIN`/
+`AUTHENTICATE`, `LIST`, `EXAMINE`, `UID SEARCH`, `UID FETCH` with `BODY.PEEK`
+and metadata items only, `NOOP`, `LOGOUT`; anything else raises before it is
+sent. The scope promise is "the sync path never puts mail text into Hermes";
+`mordred_history_search` returns text by design.
+
+### Partial returns and cancellation
+
+The tool stops after about 60 seconds at a batch boundary and returns
+`partial: true` with `partial_reason: "time_budget"`; the cursor already
+holds the committed progress, so the next call continues. The deadline is
+checked between batches and enforced by the socket timeout inside one; the
+worker thread is joined before the result is returned, so no fetch continues
+in the background. The CLI keeps a 10 minute budget.
+
+### Open questions, decided
+
+1. Newest 2000 by UID on the first run; `excluded_history` reports how many
+   older UIDs were skipped and `--since` backfills on request.
+2. `[Gmail]/All Mail` includes archived mail and excludes Spam and Trash;
+   docs say exactly that.
+3. No process-wide denial for concurrent reader sessions.
+4. About 60 seconds with `partial` for the tool; the CLI keeps the long budget.
+
+### Added tests
+
+Forged embedded `X-Gmail-Labels`/`X-GM-THRID` headers ignored when trusted
+metadata exists; modified UTF-7 and system-label decoding; special-use
+discovery and setup-time selection; preliminary size fetch skips oversize
+without a literal; per-batch atomic publication (crash between batches leaves
+the cursor at the last committed batch); `UID n:*` self-inclusion filtered;
+conversation merge semantics; fixed serializer rejects any unknown field; route
+resolution to direct and SOCKS5h and refusal of other proxies; TLS context
+settings; command allowlist violations; time-budget partial return with the
+worker joined; `mail forget` with and without `--rows`.
