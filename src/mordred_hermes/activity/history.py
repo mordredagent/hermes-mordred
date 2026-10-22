@@ -50,7 +50,9 @@ its task start still holds the user's instruction for that host.
 The automatic blocks (``require_work``) also skip an episode with no site and
 no successfully dispatched call (:func:`_with_work`: every call refused,
 cancelled, timed out or failed on a page nobody can name); the lookup tools
-still return it.
+still return it. They never show a Hermes session its own work either: the
+episodes its capture recorded in this process (``omit``) and, through the
+store, in any process (``session``, :func:`_not_own`).
 
 :func:`last_hermes_call` is the one read for Hermes's own capture: the newest
 browser call Hermes recorded for a session, which a chat correction in a new
@@ -97,6 +99,7 @@ __all__ = [
     "EpisodeDetail",
     "EpisodeEvent",
     "EpisodeSummary",
+    "HermesSession",
     "Hop",
     "LastCall",
     "Matches",
@@ -283,6 +286,15 @@ class LastCall:
     site: str | None
     #: The stored route path with its stored (already scrubbed) query, or ``None``.
     route: str | None
+
+
+@dataclass(frozen=True)
+class HermesSession:
+    """A Hermes session as its capture records it (:mod:`.capture_hermes`): the profile's principal ``peer_id``
+    (``hermes:<profile>``) and the ``hermes_session_id`` on every event that capture writes for the session."""
+
+    peer_id: str
+    session_id: str
 
 
 @dataclass(frozen=True)
@@ -645,6 +657,29 @@ def _with_work(conn: sqlite3.Connection, heads: list[_Head], sites: Mapping[str,
     return [head for head in heads if sites.get(head.episode_id) or head.episode_id in worked]
 
 
+def _not_own(conn: sqlite3.Connection, heads: list[_Head], session: HermesSession | None) -> list[_Head]:
+    """``heads`` without the episodes ``session`` recorded, in order: those holding an event of its principal
+    with its session id, so a new process (``--resume``, ``-c``, a restart) knows them as the session's own too.
+
+    Only the principal's own events count (a paired collector can send any ``hermes_session_id``, and an episode
+    belongs to the peer that first wrote to it), and only while the episode's session reference is ``bound``: a
+    restore marks every reference ``unavailable``, since the restored conversation may no longer hold that work.
+    One query, over the episodes with a session reference only (an episode keeps the first one its events
+    carried); each is looked up through the episode index.
+    """
+    ids = [head.episode_id for head in heads]
+    if session is None or not ids:
+        return heads
+    rows = conn.execute(
+        f"SELECT p.episode_id FROM activity_episodes p WHERE p.episode_id IN ({_in(ids)}) "
+        "AND p.hermes_session_id IS NOT NULL AND p.session_ref_state = 'bound' AND EXISTS (SELECT 1 "
+        "FROM activity_events e WHERE e.episode_id = p.episode_id AND +e.peer_id = ? AND e.hermes_session_id = ?)",
+        (*ids, session.peer_id, session.session_id),
+    )
+    own = {str(row[0]) for row in rows}
+    return [head for head in heads if head.episode_id not in own]
+
+
 def episodes_for_sites(
     store: ActivityStore,
     sites: Sequence[str],
@@ -658,13 +693,14 @@ def episodes_for_sites(
     require_human_text: bool = False,
     omit: frozenset[str] = frozenset(),
     require_work: bool = False,
+    session: HermesSession | None = None,
 ) -> Matches:
     """Newest episodes that touched any of ``sites`` (with ``subdomains``, also their subdomains).
 
-    ``shown`` episodes, the ``omit`` episode ids (a session's own work), episodes that touched an excluded host
-    (:func:`_hidden`), with ``require_human_text`` episodes without a task start or correction in the user's
-    own words and with ``require_work`` episodes without a site and a successfully dispatched call
-    (:func:`_with_work`) are skipped.
+    ``shown`` episodes, the ``omit`` episode ids and the episodes ``session`` recorded (a session's own work,
+    :func:`_not_own`), episodes that touched an excluded host (:func:`_hidden`), with ``require_human_text``
+    episodes without a task start or correction in the user's own words and with ``require_work`` episodes
+    without a site and a successfully dispatched call (:func:`_with_work`) are skipped.
     """
     wanted = [site for site in sites if not site_excluded(site, excluded_sites)]
     if not wanted:
@@ -683,7 +719,7 @@ def episodes_for_sites(
             and head.episode_id not in omit
             and (not require_human_text or head.episode_id in scan.texts)
         ]
-        matched = _visible(conn, matched, scan, excluded_sites)
+        matched = _visible(conn, _not_own(conn, matched, session), scan, excluded_sites)
         if require_work:
             matched = _with_work(conn, matched, scan.sites)
         chosen = [_summary(conn, head, scan.sites.get(head.episode_id, ())) for head in matched[: max(0, limit)]]
@@ -711,6 +747,7 @@ def episodes_for_terms(
     newest_if_none: bool = False,
     omit: frozenset[str] = frozenset(),
     require_work: bool = False,
+    session: HermesSession | None = None,
 ) -> Matches:
     """Episodes sharing at least ``min_shared`` terms with ``wanted``, best match first, then newest.
 
@@ -718,9 +755,10 @@ def episodes_for_terms(
     ``host_labels`` adds the labels of their hosts (``github`` of ``github.com``) and ``page_fields`` (lookup
     tools only) page titles, routes and query strings. With ``site`` only episodes on that host count.
     ``newest_if_none`` returns the newest admissible episodes when nothing shares a term (a lookup by site
-    or period whose words match nothing). The ``omit`` episode ids (a session's own work) are skipped, and so
-    are episodes that touched an excluded host (:func:`_hidden`; only the matching ones are checked) and, with
-    ``require_work``, episodes without a site and a successfully dispatched call (:func:`_with_work`).
+    or period whose words match nothing). The ``omit`` episode ids and the episodes ``session`` recorded (a
+    session's own work, :func:`_not_own`) are skipped, and so are episodes that touched an excluded host
+    (:func:`_hidden`; only the matching ones are checked) and, with ``require_work``, episodes without a site
+    and a successfully dispatched call (:func:`_with_work`).
     """
     if site is not None and site_excluded(site, excluded_sites):
         return Matches((), 0)
@@ -741,11 +779,11 @@ def episodes_for_terms(
             shared = len(wanted & own)
             if wanted and shared >= max(1, min_shared):
                 scored.append((shared, head))
-        visible = _visible(conn, [head for _score, head in scored], scan, excluded_sites)
+        visible = _visible(conn, _not_own(conn, [head for _score, head in scored], session), scan, excluded_sites)
         kept = set(_with_work(conn, visible, scan.sites) if require_work else visible)
         scored = [(score, head) for score, head in scored if head in kept]
         if not scored and newest_if_none:
-            newest = _visible(conn, candidates, scan, excluded_sites)
+            newest = _visible(conn, _not_own(conn, candidates, session), scan, excluded_sites)
             scored = [(0, head) for head in (_with_work(conn, newest, scan.sites) if require_work else newest)]
         scored.sort(key=lambda pair: (-pair[0], -pair[1].last_event_at))
         chosen = [_summary(conn, head, scan.sites.get(head.episode_id, ())) for _score, head in scored[: max(0, limit)]]

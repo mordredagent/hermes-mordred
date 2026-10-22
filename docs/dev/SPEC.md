@@ -4301,7 +4301,16 @@ per-process state.
   session's blocks: they are its own work, already in its conversation, and
   Hermes calls `post_tool_call` before `transform_tool_result`, so the episode
   a navigation has just recorded would otherwise take the newest slot and be
-  shown again on every later navigation.
+  shown again on every later navigation. That memory is per process and the
+  history hooks run before the capture's, so the same reads also leave out,
+  in one more bounded query, every episode holding an event of this profile's
+  Hermes principal (`hermes:<profile>`) with the session's
+  `hermes_session_id` (`capture_hermes.own_session`; B2 live check N3: after
+  `hermes chat --resume` the first turn's block showed the session's own
+  episode). Only the principal's events count, since a paired collector can
+  send any `hermes_session_id`, and only while the episode's session reference
+  is `bound` (a restore marks it `unavailable`: the restored conversation may
+  no longer hold that work).
 - **Lookup tools** (toolset `mordred_activity`, `check_fn`: the feature and
   the master switch on and the gate passing). `mordred_browser_history(query,
   site, since, until, limit ≤ 10)` returns episodes (id, sites, start and last

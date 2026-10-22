@@ -1,11 +1,14 @@
 """Hermes's own capture after the B2 live check (2026-10-22): a correction turn is never a task, a correction in a
-new process finds the session's last call in the store, an episode of refused calls is no work to show, and the
-two findings fixed before (the session's own episode, the route after a click or Enter) stay fixed."""
+new process finds the session's last call in the store, an episode of refused calls is no work to show, a session's
+stored episodes stay its own in a new process (N3), and the two findings fixed before (the session's own episode,
+the route after a click or Enter) stay fixed."""
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
+import sqlite3
 import time
 import uuid
 from pathlib import Path
@@ -349,6 +352,123 @@ def test_refused_calls_on_a_named_site_are_still_shown(capture_home) -> None:
         task_id="t7",
     )
     assert result is not None and TASK in json.loads(result)[hooks_history.RESULT_KEY]
+
+
+# --- 4. a session's stored episodes stay its own in a new process (B2 live check N3) ---------------------------
+
+AGAIN = f"the invoices on {SITE} again"
+PEER_TASK = "export the invoices on shop.example.com"
+
+
+def _navigation_block(session: str, turn_id: str) -> str | None:
+    """A navigation as Hermes runs it: the capture records the call (``post_tool_call``), then the block is read."""
+    url = f"https://{SITE}/"
+    navigate(url, session=session, turn_id=turn_id)
+    out = hooks_history.transform_tool_result(
+        tool_name="browser_navigate", args={"url": url}, result=nav_result(url), session_id=session, task_id="t1"
+    )
+    return None if out is None else str(json.loads(out)[hooks_history.RESULT_KEY])
+
+
+def _recorded_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Session ``s1`` records a task on ``SITE``; then a new process starts (``--resume``, ``-c``, a restart)."""
+    turn(TASK, turn_id="s1:t1:aa11")
+    navigate(turn_id="s1:t1:aa11")
+    end_turn(turn_id="s1:t1:aa11")
+    _new_process(monkeypatch)
+
+
+def test_a_resumed_session_never_gets_its_own_stored_episode_back(capture_home, monkeypatch) -> None:
+    """N3: the history hooks run before the capture's (``activity/__init__.py``) and the capture keeps the
+    session's own episodes in memory only, so a resumed session's first turn was shown its own episode."""
+    home, _store = capture_home
+    _recorded_session(monkeypatch)
+    assert capture_hermes.own_episodes(home, "s1", "t1") == frozenset()
+    assert _turn_block(AGAIN, session="s1") is None  # by host, read before the capture's pre_llm_call
+    assert _turn_block("open the invoices again", session="s1") is None  # by terms
+    turn(AGAIN, turn_id="s1:t2:bb22")
+    assert _navigation_block("s1", "s1:t2:bb22") is None
+    # Every other session still gets it.
+    by_host = _turn_block(AGAIN, session="s2")
+    by_terms = _turn_block("open the invoices again", session="s3")
+    assert by_host is not None and TASK in by_host and by_terms is not None and TASK in by_terms
+    assert TASK in (_navigation_block("s4", "s4:t:1") or "")
+
+
+def test_a_peers_episode_naming_the_session_is_still_shown_to_it(capture_home, monkeypatch) -> None:
+    """A paired collector can send any ``hermes_session_id``: only the profile's Hermes principal makes an episode
+    the session's own, so a forged reference never hides the user's own history from Hermes."""
+    home, store = capture_home
+    receiver = StoreReceiver(home, config_loader=_history_access.config, store_factory=lambda _home: store)
+    now = time.time()
+    common = {"source": "operator", "session_ref": {"hermes_session_id": "s1"}}
+    forged = [
+        {
+            **common,
+            "event_id": str(uuid.uuid4()),
+            "seq": 1,
+            "episode_id": "op-episode",
+            "actor": "human",
+            "observed_at": now - 2,
+            "phase": "boundary",
+            "action": {"op": "task_start", "site": SITE},
+            "text": PEER_TASK,
+        },
+        {
+            **common,
+            "event_id": str(uuid.uuid4()),
+            "seq": 2,
+            "episode_id": "op-episode",
+            "attempt_id": "op-attempt",
+            "actor": "agent",
+            "observed_at": now - 1,
+            "phase": "dispatched",
+            "action": {"op": "navigate", "site": SITE, "route": "/invoices"},
+        },
+    ]
+    batch = {"schema_version": 1, "producer_id": "prod-op", "producer_kind": "operator", "events": forged}
+    assert receiver.ingest(PeerPrincipal("operator:peer-a", "operator"), batch)["type"] == "activity_ack"
+    [record] = store.list_episodes()
+    assert record.hermes_session_id == "s1"
+    block = _turn_block(AGAIN, session="s1")
+    assert block is not None and PEER_TASK in block
+    monkeypatch.setattr(_history_access, "BUDGET", type(_history_access.BUDGET)())  # forget it was shown
+    assert PEER_TASK in (_navigation_block("s1", "s1:t:1") or "")
+
+
+def test_after_a_restore_stored_episodes_are_no_longer_the_sessions_own(capture_home, monkeypatch) -> None:
+    """A restore marks every session reference ``unavailable`` (:meth:`.store.ActivityStore.restore`): the
+    restored conversation may no longer hold that work, so the episode is shown to the session again."""
+    _home, store = capture_home
+    _recorded_session(monkeypatch)
+    with contextlib.closing(sqlite3.connect(store.path)) as conn, conn:
+        conn.execute(
+            "UPDATE activity_episodes SET session_ref_state = 'unavailable' WHERE hermes_session_id IS NOT NULL"
+        )
+    block = _turn_block(AGAIN, session="s1")
+    assert block is not None and TASK in block
+
+
+def test_the_sessions_stored_episodes_are_left_out_of_the_reads_themselves(capture_home, monkeypatch) -> None:
+    """The store-side check runs inside the reads, before the limit: the session's own episodes neither take a slot
+    nor count as ``more``, and another session id or another peer's principal hides nothing."""
+    home, store = capture_home
+    turn("open the archive on shop.example.com", session="s2", turn_id="s2:t:1")
+    navigate(session="s2", turn_id="s2:t:1")
+    end_turn(session="s2", turn_id="s2:t:1")
+    _recorded_session(monkeypatch)
+    own = history.HermesSession(capture_hermes.principal(home).peer_id, "s1")
+    by_site = history.episodes_for_site(store, SITE, excluded_sites=frozenset(), limit=1, session=own)
+    by_terms = history.episodes_for_terms(
+        store, {"open", "invoices", "archive"}, excluded_sites=frozenset(), limit=1, session=own
+    )
+    for matches in (by_site, by_terms):
+        assert [episode.tasks for episode in matches.episodes] == [("open the archive on shop.example.com",)]
+        assert matches.more == 0
+    other = history.HermesSession(own.peer_id, "s9")
+    assert history.episodes_for_site(store, SITE, excluded_sites=frozenset(), limit=1, session=other).more == 1
+    peer = history.HermesSession("operator:peer-a", "s1")
+    assert history.episodes_for_site(store, SITE, excluded_sites=frozenset(), limit=1, session=peer).more == 1
 
 
 # --- (a) and (b), fixed before the live check's report: they stay fixed --------------------------------------

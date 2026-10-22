@@ -24,9 +24,13 @@ call. Both fail open and fast: a refused or unavailable store, a malformed
 result or any other ``Exception`` leaves the result or the turn unchanged,
 and a store problem is audited once per process and code. Episodes already
 shown to a session are not repeated until they change, the episodes Hermes's
-own capture recorded for the session (:func:`.capture_hermes.own_episodes`:
-its own work, already in its conversation) are never shown to it, and the
-injected characters of a session are capped (:data:`._history_access.BUDGET`).
+own capture recorded for the session (its own work, already in its
+conversation) are never shown to it, and the injected characters of a session
+are capped (:data:`._history_access.BUDGET`). The session's own episodes come
+from the capture's memory (:func:`.capture_hermes.own_episodes`) and, in the
+same bounded read, from the store (:func:`.capture_hermes.own_session`): these
+hooks run before the capture's, and a new process (``--resume``, ``-c``, a
+restart) starts with nothing in memory.
 Neither block shows an episode with no site and no successfully dispatched call
 (every call refused, cancelled, timed out or failed); the lookup tools still
 return it.
@@ -40,11 +44,11 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 if TYPE_CHECKING:
     from .config import ActivityConfig
-    from .history import EpisodeSummary, Matches
+    from .history import EpisodeSummary, HermesSession, Matches
     from .store import ActivityStore
 
 __all__ = [
@@ -127,14 +131,22 @@ def _charge(key: str, block: str, shown: tuple[EpisodeSummary, ...]) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _own(home: Path, session_id: Any, task_id: Any) -> frozenset[str]:
-    """The episodes Hermes's own capture recorded for this session: never shown back to it."""
-    from .capture_hermes import own_episodes
+class _Own(NamedTuple):
+    """What Hermes's own capture recorded for a session: its own work, never shown back to it (:func:`_own`)."""
 
-    return own_episodes(home, session_id, task_id)
+    #: The episodes recorded in this process (:func:`.capture_hermes.own_episodes`, memory only).
+    episodes: frozenset[str] = frozenset()
+    #: The session as the store knows it: the episodes it recorded in any process (``--resume``, ``-c``, a restart).
+    session: HermesSession | None = None
 
 
-def _site_block(home: Path, config: ActivityConfig, host: str, key: str, omit: frozenset[str]) -> str | None:
+def _own(home: Path, session_id: Any, task_id: Any) -> _Own:
+    from .capture_hermes import own_episodes, own_session
+
+    return _Own(own_episodes(home, session_id, task_id), own_session(home, session_id))
+
+
+def _site_block(home: Path, config: ActivityConfig, host: str, key: str, own: _Own) -> str | None:
     from . import _history_access as access
     from . import history
 
@@ -151,8 +163,9 @@ def _site_block(home: Path, config: ActivityConfig, host: str, key: str, omit: f
             limit=config.history_max_episodes,
             shown=shown,
             subdomains=False,  # this host only (``www.`` ignored): no public-suffix guesswork
-            omit=omit,
+            omit=own.episodes,
             require_work=True,
+            session=own.session,
         )
     except access.NoHistory:
         return None
@@ -224,7 +237,7 @@ def _turn_matches(
     config: ActivityConfig,
     text: str,
     shown: frozenset[tuple[str, int]],
-    omit: frozenset[str] = frozenset(),
+    own: _Own,
 ) -> Matches:
     """Episodes with the user's own words on the hosts the message names, then episodes whose task or
     correction text in the user's words shares its terms; newest first.
@@ -232,7 +245,7 @@ def _turn_matches(
     Episodes without a task start or correction attributed to the user (:func:`.history.speaks_for_user`)
     never qualify, and host labels are not matched: the turn-start block must stand on what the user wrote.
     Neither does an episode without a site and a successfully dispatched call (every call refused or failed):
-    it is no work to pick up (``require_work``).
+    it is no work to pick up (``require_work``), nor the session's own work (``own``, :func:`_own`).
     """
     from . import history
     from .matching import terms
@@ -247,8 +260,9 @@ def _turn_matches(
         limit=limit,
         shown=shown,
         require_human_text=True,
-        omit=omit,
+        omit=own.episodes,
         require_work=True,
+        session=own.session,
     )
     found = {episode.episode_id: episode for episode in by_host.episodes}
     more = by_host.more
@@ -263,8 +277,9 @@ def _turn_matches(
             min_shared=min(2, len(wanted)),
             host_labels=False,
             shown=shown | {episode.key for episode in found.values()},
-            omit=omit,
+            omit=own.episodes,
             require_work=True,
+            session=own.session,
         )
         found.update((episode.episode_id, episode) for episode in by_terms.episodes)
         more = max(more, by_terms.more)  # the two counts overlap; report the larger, never their sum
@@ -288,8 +303,8 @@ def _turn_block(user_message: Any, session_id: Any, task_id: Any) -> str | None:
         return None
     try:
         store = access.reader(home)
-        omit = _own(home, session_id, task_id)
-        matches = _turn_matches(store, config, user_message[:MAX_MESSAGE_CHARS], shown, omit)
+        own = _own(home, session_id, task_id)
+        matches = _turn_matches(store, config, user_message[:MAX_MESSAGE_CHARS], shown, own)
     except access.NoHistory:
         return None
     except Exception as exc:

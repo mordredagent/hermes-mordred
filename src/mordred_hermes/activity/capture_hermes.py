@@ -82,7 +82,10 @@ retried; the turn's calls then stay in their episode without it. The store is
 append-only: a text already stored is never rewritten, so a value withheld only
 in a later turn is not scrubbed from an earlier turn's stored text.
 The episodes a session recorded are its own work, already in its conversation:
-the history hooks leave them out of their blocks (:func:`own_episodes`).
+the history hooks leave them out of their blocks, those of this process from
+memory (:func:`own_episodes`) and those of any process (``--resume``, ``-c``,
+a restart) from the store, by the principal and the session id on their
+events (:func:`own_session`).
 
 Typed text (:func:`field_kind`): a ref line naming a password (English or
 Japanese), secret, token, card, one-time code or PIN is ``sensitive`` and its
@@ -174,6 +177,7 @@ from .contracts import (
 
 if TYPE_CHECKING:
     from .config import ActivityConfig
+    from .history import HermesSession
     from .store import ActivityStore
 
 __all__ = [
@@ -193,6 +197,7 @@ __all__ = [
     "field_kind",
     "occurrence_id",
     "own_episodes",
+    "own_session",
     "page_text",
     "post_llm_call",
     "post_tool_call",
@@ -358,6 +363,17 @@ def own_episodes(home: Path, session_id: Any = None, task_id: Any = None) -> fro
         return frozenset()
     with state.lock:
         return frozenset(state.episodes)
+
+
+def own_session(home: Path, session_id: Any = None) -> HermesSession | None:
+    """This Hermes session of ``home`` as the store knows it: the profile's principal and the session id this
+    capture writes on its events, so the history hooks leave out the episodes the session recorded in any
+    process (:func:`.history.episodes_for_sites` ``session``), not only those :func:`own_episodes` remembers;
+    ``None`` without a session id the capture would record."""
+    from .history import HermesSession
+
+    session = _ref(session_id)
+    return None if session is None else HermesSession(principal(home).peer_id, session)
 
 
 # --------------------------------------------------------------------------- #
