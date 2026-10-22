@@ -80,8 +80,9 @@ Each message a guard held back counts once in ``BatchResult.merge_skipped``.
 The survivor is the conversation holding the earliest-dated message (unknown
 dates last, then the smaller ``conv_uid``). A conversation keyed by a Gmail
 thread id (``g.``, see ``mail.threading.default_thread_key``) is
-authoritative: it is never folded into another, and when one is involved it is
-the survivor. So a reply chain fetched in any order (C, then B, then A) ends in
+authoritative and counts as established: it is never folded into another, two
+of them never merge, and when it is the only established conversation involved
+it is the survivor. So a reply chain fetched in any order (C, then B, then A) ends in
 one conversation, and two threads that never reference each other stay apart.
 
 Lease guards (the IMAP fetch's worker): :meth:`ImportStore.write_batch`,

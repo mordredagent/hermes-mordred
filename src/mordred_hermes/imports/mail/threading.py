@@ -2,44 +2,56 @@
 
 - ``X-GM-THRID`` groups first (method ``gmail_thrid``); its references are not
   followed. A message without one joins the Gmail thread of a message it
-  references.
+  references under the rules below.
 - Otherwise messages are joined over ``Message-ID``, ``In-Reply-To`` and
   ``References`` (method ``references``, or ``single``). Those headers are typed
   by the sender, so the grouping is a pure function of the SET of messages, never
   of their order or the dates senders typed, under the rules of
   :mod:`.merge_guard` (``own`` holds the account owner's addresses, which never
-  count as a shared participant):
+  count as a shared participant). An id is *present* when a message of the
+  import holds it; copies holding one id are one message only when their
+  content digests are identical. An id held by differing copies is *contested*:
+  it names no message (the copies count as ``untrusted_id``), and a message
+  holding or following one is *untrusted*.
 
-  1. Strong components, by union-find over strong edges only: one Gmail thread
-     id; one Message-ID; a message and its direct parent (its last
-     ``In-Reply-To`` id, else, as RFC 5322 says, its last ``References`` id)
-     when the parent is in the import and the two share a participant; and the
-     children of one absent parent whose (non-empty) participant sets are equal.
-     A strong edge attaches a message to its one parent, so no message bridges
-     two components through strong edges. A component of several messages, or
-     keyed by a Gmail thread id, is *established*.
-  2. Weak clusters: the messages left alone in their component join by
-     union-find over their weak edges with each other. A weak edge is a
-     followed id (the last ``MAX_MERGE_REFS``) naming a message of the import,
-     the two messages sharing a participant; ids no message of the import holds
-     are ignored.
-  3. Attachment: each cluster (a lone message too) joins the established
-     component that its members' weak edges reach, or whose members' weak edges
-     reach it, when there is exactly one; when there are several it joins none
-     and counts once as ``merge_skipped``; when there is none it stays a
-     conversation of its own. Established components are never joined with
-     each other by weak edges, whatever the references say.
+  1. Strong forest. Each message takes AT MOST ONE strong attachment: its Gmail
+     thread; else its direct parent (its last ``In-Reply-To`` id, else, as RFC
+     5322 says, its last ``References`` id) when present and sharing a
+     participant; else, when that parent is absent, the other children of the
+     absent parent with the same (non-empty) participant set. A contested
+     parent gives none. Strong components are trees of single attachments, so
+     no message bridges two of them. A component of several messages, or keyed
+     by a Gmail thread id, is *established*; an untrusted message alone in its
+     component is *pinned*: established for every guard, but never joined.
+  2. Tier 1. A message's weak references are its followed ids (the last
+     ``MAX_MERGE_REFS``) naming a present message of another strong component
+     that shares a participant with it. A message with exactly ONE such
+     component adds that edge. Edges between two messages alone in their strong
+     components form weak clusters; a cluster of several messages is
+     established. A message alone in its cluster joins the established
+     component its edges touch (in either direction) when there is exactly one,
+     and none when they touch several or a pinned one. Established components
+     and clusters never join each other. A pinned message's references touch
+     their targets without joining them.
+  3. Tier 2. A message whose weak references reach two or more components is
+     weighed against the tier-1 result only (so the decisions commute): its own
+     group when established, the groups that touched it in tier 1 and the
+     established (or pinned) groups it references; exactly one (not pinned) →
+     it joins it, several → none; none at all → it forms a cluster with the
+     messages it references that tier 1 left alone and untouched (never another
+     tier-2 message).
 
-  A message also counts once as ``merge_skipped`` when one of its followed ids
-  names a message that ends in another conversation because the two share no
-  participant, or because both are in established components.
+  A message counts once as ``merge_skipped`` when one of its followed ids names
+  a present message that ends in another conversation.
 - ``excluded`` messages (copies the store will not write: duplicates and
   rejected copies of stored rows) take no part: their references are not
   followed and an id they carry is not a join point (another message naming it
   joins the stored conversation through the importer's resolver instead).
 - Subject-only grouping joins single messages without any reference header
   only when the normalised subject AND the participant address set match and
-  each message is within 30 days of the previous one (method ``heuristic``).
+  each message is within 30 days of the previous one (method ``heuristic``),
+  ordered by date, then source uid. Excluded copies and copies of a contested
+  id are never grouped by subject.
 - A thread whose messages reference an id that is not in the import is
   *partial*.
 
@@ -63,7 +75,7 @@ from collections.abc import Collection, Container, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Final
 
-from .merge_guard import attach_target, counted_people, established, followed_refs, share_participant
+from .merge_guard import attach_target, counted_people, established, followed_refs, same_message, share_participant
 
 __all__ = [
     "HEURISTIC_WINDOW_SECONDS",
@@ -96,13 +108,14 @@ class ThreadInput:
     participants: frozenset[str]
     sent_at: int | None
     order: int
+    digest: str | None = None  # the copy's content digest; None (unknown) never proves two copies identical
 
 
 @dataclass(frozen=True)
 class Thread:
     thread_key: str
     method: str  # gmail_thrid | references | single | heuristic
-    members: tuple[str, ...]  # source uids, oldest first (unknown dates last)
+    members: tuple[str, ...]  # source uids, oldest first (unknown dates last), then by source uid
     partial: bool
 
 
@@ -143,8 +156,11 @@ def default_thread_key(item: ThreadInput) -> str:
 class _UnionFind:
     """Union-find over message keys: the partition it ends with never depends on the order of the unions."""
 
-    def __init__(self) -> None:
-        self.parent: dict[str, str] = {}
+    def __init__(self, parent: Mapping[str, str] | None = None) -> None:
+        self.parent: dict[str, str] = dict(parent or {})
+
+    def copy(self) -> _UnionFind:
+        return _UnionFind(self.parent)
 
     def find(self, node: str) -> str:
         self.parent.setdefault(node, node)
@@ -161,8 +177,9 @@ class _UnionFind:
             self.parent[max(a, b)] = min(a, b)
 
 
-def _sort_key(item: ThreadInput) -> tuple[int, int, int]:
-    return (item.sent_at is None, item.sent_at or 0, item.order)
+def _sort_key(item: ThreadInput) -> tuple[bool, int, str]:
+    """Oldest first, unknown dates last, then the source uid: independent of the input order."""
+    return (item.sent_at is None, item.sent_at or 0, item.key)
 
 
 def _direct_parent(item: ThreadInput) -> str | None:
@@ -172,49 +189,70 @@ def _direct_parent(item: ThreadInput) -> str | None:
     return item.references[-1] if item.references else None
 
 
+def _named(item: ThreadInput) -> set[str]:
+    """The ids a message's edges may follow: its followed references and its direct parent."""
+    parent = _direct_parent(item)
+    return {*followed_refs(item.in_reply_to, item.references), *((parent,) if parent else ())}
+
+
 def _referenced(item: ThreadInput) -> tuple[str, ...]:
     return (*item.in_reply_to, *reversed(item.references))
 
 
-def _dated_order(item: ThreadInput) -> tuple[bool, int, str]:
-    """Oldest first, unknown dates last, then the source uid: independent of the input order."""
-    return (item.sent_at is None, item.sent_at or 0, item.key)
-
-
-@dataclass(frozen=True)
-class _Edge:
-    """A weak edge: ``source`` follows an id that ``target`` (in another strong component) holds."""
-
-    source: str
-    target: str
-    shared: bool  # the two messages share a participant (rule 2 of :mod:`.merge_guard`)
-
-
 @dataclass(frozen=True)
 class _Batch:
-    """The facts the grouping reads: the messages, their counted participants and the ids' holders."""
+    """The facts the grouping reads: the messages, their counted participants and who holds which id."""
 
     items: Sequence[ThreadInput]
     followers: Sequence[ThreadInput]  # the messages whose references are followed (not excluded, no Gmail id)
     people: Mapping[str, frozenset[str]]  # source uid → participants, the owner's addresses left out
-    holders: Mapping[str, Sequence[str]]  # Message-ID → the source uids of the linked messages holding it
+    holders: Mapping[str, tuple[str, ...]]  # present Message-ID → its copies (one message: identical digests)
+    contested: Mapping[str, tuple[str, ...]]  # Message-ID held by differing copies → those copies
+    untrusted: frozenset[str]  # source uids holding or following a contested id
 
 
-def _batch(items: Sequence[ThreadInput], own: Container[str], excluded: Collection[str]) -> _Batch:
-    holders: dict[str, list[str]] = {}
-    for item in items:
-        if item.message_id and item.key not in excluded:  # an excluded copy's id is no join point
-            holders.setdefault(item.message_id, []).append(item.key)
-    return _Batch(
-        items=items,
-        followers=[item for item in items if item.key not in excluded and not item.gm_thread_id],
-        people={item.key: counted_people(item.participants, own) for item in items},
-        holders=holders,
+def _one_message(copies: Sequence[ThreadInput]) -> bool:
+    """Copies sharing a Message-ID are one message: a single copy, or identical content (rule 5)."""
+    return len(copies) == 1 or (
+        same_message([copy.digest for copy in copies]) and len({copy.gm_thread_id for copy in copies}) == 1
     )
 
 
+def _batch(items: Sequence[ThreadInput], own: Container[str], excluded: Collection[str]) -> _Batch:
+    copies: dict[str, list[ThreadInput]] = {}
+    for item in items:
+        if item.message_id and item.key not in excluded:  # an excluded copy's id is no join point
+            copies.setdefault(item.message_id, []).append(item)
+    holders: dict[str, tuple[str, ...]] = {}
+    contested: dict[str, tuple[str, ...]] = {}
+    for message_id, group in copies.items():
+        (holders if _one_message(group) else contested)[message_id] = tuple(copy.key for copy in group)
+    followers = [item for item in items if item.key not in excluded and not item.gm_thread_id]
+    untrusted = {key for keys in contested.values() for key in keys}
+    untrusted.update(item.key for item in followers if not contested.keys().isdisjoint(_named(item)))
+    return _Batch(
+        items=items,
+        followers=followers,
+        people={item.key: counted_people(item.participants, own) for item in items},
+        holders=holders,
+        contested=contested,
+        untrusted=frozenset(untrusted),
+    )
+
+
+def _attachment(batch: _Batch, item: ThreadInput) -> str | tuple[str, frozenset[str]] | None:
+    """Step 1: a followed message's one strong attachment (a holder's uid, an absent parent's sibling node, none)."""
+    parent, mine = _direct_parent(item), batch.people[item.key]
+    if parent is None or parent in batch.contested:
+        return None  # a contested id names no message: neither copy is the parent
+    if parent in batch.holders:
+        holder = batch.holders[parent][0]
+        return holder if share_participant(mine, batch.people[holder]) else None
+    return (parent, mine) if mine else None  # the children of one absent parent with the same correspondents
+
+
 def _strong_components(batch: _Batch) -> _UnionFind:
-    """Step 1 (module docstring): Gmail ids, Message-IDs, direct parents in the import, equal siblings."""
+    """Step 1 (module docstring): one Gmail thread, one message's copies, one attachment per message."""
     strong = _UnionFind()
     gmail: dict[str, str] = {}
     for item in batch.items:
@@ -223,124 +261,159 @@ def _strong_components(batch: _Batch) -> _UnionFind:
             strong.union(item.key, gmail.setdefault(item.gm_thread_id, item.key))
     for keys in batch.holders.values():
         for key in keys[1:]:
-            strong.union(keys[0], key)
-    _parent_edges(batch, strong)
+            strong.union(keys[0], key)  # identical copies are one message
+    siblings: dict[tuple[str, frozenset[str]], str] = {}
+    for item in batch.followers:
+        target = _attachment(batch, item)
+        if isinstance(target, str):
+            strong.union(item.key, target)
+        elif target is not None:
+            strong.union(item.key, siblings.setdefault(target, item.key))
     return strong
 
 
-def _parent_edges(batch: _Batch, strong: _UnionFind) -> None:
-    """Each followed message with its direct parent (sharing a participant), or its equal siblings when it is absent."""
-    siblings: dict[tuple[str, frozenset[str]], str] = {}
-    for item in batch.followers:
-        parent, mine = _direct_parent(item), batch.people[item.key]
-        if parent is None:
-            continue
-        if parent in batch.holders:
-            for holder in batch.holders[parent]:
-                if share_participant(mine, batch.people[holder]):
-                    strong.union(item.key, holder)
-        elif mine:  # children of one absent parent with the same correspondents
-            strong.union(item.key, siblings.setdefault((parent, mine), item.key))
+@dataclass(frozen=True)
+class _Forest:
+    """Step 1's result as the weak tiers read it."""
+
+    strong: _UnionFind
+    anchors: frozenset[str]  # roots of the established strong components (several messages, or a Gmail id)
+    pinned: frozenset[str]  # untrusted messages alone in their component: established, never joined
+    free: frozenset[str]  # the other messages alone in their component
+    targets: Mapping[str, frozenset[str]]  # followed uid → the strong roots its weak references reach
 
 
-def _established(batch: _Batch, strong: _UnionFind) -> set[str]:
-    """The roots of the established strong components (several messages, or a Gmail thread id)."""
+def _targets(batch: _Batch, strong: _UnionFind, item: ThreadInput) -> frozenset[str]:
+    """The other strong components ``item``'s followed ids name, sharing a participant (rule 2)."""
+    own, mine = strong.find(item.key), batch.people[item.key]
+    found: set[str] = set()
+    for ref in followed_refs(item.in_reply_to, item.references):
+        keys = batch.holders.get(ref)
+        if keys and share_participant(mine, batch.people[keys[0]]) and strong.find(keys[0]) != own:
+            found.add(strong.find(keys[0]))
+    return frozenset(found)
+
+
+def _forest(batch: _Batch) -> _Forest:
+    strong = _strong_components(batch)
     sizes = Counter(strong.find(item.key) for item in batch.items)
     gmail = {strong.find(item.key) for item in batch.items if item.gm_thread_id}
-    return {root for root, size in sizes.items() if established(size, gmail=root in gmail)}
+    anchors = frozenset(root for root, size in sizes.items() if established(size, gmail=root in gmail))
+    alone = sizes.keys() - anchors  # a message alone in its component is that component's root
+    targets = {item.key: _targets(batch, strong, item) for item in batch.followers}
+    return _Forest(
+        strong=strong,
+        anchors=anchors,
+        pinned=frozenset(alone & batch.untrusted),
+        free=frozenset(alone - batch.untrusted),
+        targets={key: roots for key, roots in targets.items() if roots},
+    )
 
 
-def _weak_edges(batch: _Batch, strong: _UnionFind) -> list[_Edge]:
-    """Each followed id held by a message of another strong component (absent ids are ignored)."""
-    edges: list[_Edge] = []
-    for item in batch.followers:
-        for ref in followed_refs(item.in_reply_to, item.references):
-            for holder in batch.holders.get(ref, ()):
-                if strong.find(holder) != strong.find(item.key):
-                    shared = share_participant(batch.people[item.key], batch.people[holder])
-                    edges.append(_Edge(item.key, holder, shared))
+@dataclass(frozen=True)
+class _TierOne:
+    """Step 2's result: the groups tier 2 weighs its messages against."""
+
+    groups: _UnionFind  # strong components, weak clusters and the single messages joined to one
+    established: frozenset[str]  # group roots holding an established component or a cluster of several
+    touches: Mapping[str, frozenset[str]]  # single message → established or pinned roots its edges touch
+    untouched: frozenset[str]  # single messages left alone that no tier-1 edge touches
+
+
+def _tier_one_edges(forest: _Forest) -> list[tuple[str, str, bool]]:
+    """(source root, target root, may form a cluster): one-reference messages' edges, then pinned claims."""
+    edges: list[tuple[str, str, bool]] = []
+    for key, roots in forest.targets.items():
+        source = forest.strong.find(key)
+        if source in forest.pinned:
+            edges.extend((source, root, False) for root in roots)  # touches its targets, joins none
+        elif len(roots) == 1:
+            edges.extend((source, root, True) for root in roots)
     return edges
 
 
-def _clusters(batch: _Batch, strong: _UnionFind, anchors: Container[str], edges: Sequence[_Edge]) -> _UnionFind:
-    """Step 2: the messages alone in their strong component, joined by their weak edges with each other."""
+def _tier_one(forest: _Forest) -> _TierOne:
+    """Step 2 (module docstring): weak clusters, then each message alone joins at most one established group."""
     clusters = _UnionFind()
-    for item in batch.items:
-        if strong.find(item.key) not in anchors:
-            clusters.find(item.key)
-    for edge in edges:
-        if edge.shared and strong.find(edge.source) not in anchors and strong.find(edge.target) not in anchors:
-            clusters.union(edge.source, edge.target)
-    return clusters
-
-
-def _reached(
-    strong: _UnionFind, anchors: Container[str], clusters: _UnionFind, edges: Sequence[_Edge]
-) -> dict[str, set[str]]:
-    """Cluster root → the established components its weak edges reach, in either direction."""
-    reached: dict[str, set[str]] = {}
-    for edge in edges:
-        if not edge.shared:
+    touches: dict[str, set[str]] = {}
+    for source, target, joins in _tier_one_edges(forest):
+        if joins and source in forest.free and target in forest.free:
+            clusters.union(source, target)
             continue
-        source, target = strong.find(edge.source), strong.find(edge.target)
-        if source in anchors and target not in anchors:
-            reached.setdefault(clusters.find(edge.target), set()).add(source)
-        elif target in anchors and source not in anchors:
-            reached.setdefault(clusters.find(edge.source), set()).add(target)
-    return reached
+        for single, other in ((source, target), (target, source)):
+            if single in forest.free and other not in forest.free:
+                touches.setdefault(single, set()).add(other)
+    sizes = Counter(clusters.find(key) for key in forest.free)
+    groups = forest.strong.copy()
+    several = {root for root, size in sizes.items() if size > 1}
+    untouched: set[str] = set()
+    for key in forest.free:
+        if clusters.find(key) in several:
+            groups.union(key, clusters.find(key))
+            continue
+        joined, _held = attach_target(touches.get(key, set()), pinned=forest.pinned)
+        if joined is not None:
+            groups.union(key, joined)
+        elif key not in touches:
+            untouched.add(key)
+    return _TierOne(
+        groups=groups,
+        established=frozenset(groups.find(root) for root in (*forest.anchors, *several)),
+        touches={key: frozenset(found) for key, found in touches.items()},
+        untouched=frozenset(untouched),
+    )
 
 
-def _components(
-    items: Sequence[ThreadInput], own: Container[str], excluded: Collection[str]
-) -> tuple[dict[str, list[ThreadInput]], int]:
-    """Group messages (strong components, weak clusters, attachment); (groups, ``merge_skipped``)."""
-    batch = _batch(items, own, excluded)
-    strong = _strong_components(batch)
-    anchors = _established(batch, strong)
-    edges = _weak_edges(batch, strong)
-    clusters = _clusters(batch, strong, anchors, edges)
-    reached = _reached(strong, anchors, clusters, edges)
-    final = _UnionFind()
-    by_cluster: dict[str, set[str]] = {}  # cluster root → its messages (step 3 weighs each cluster once)
-    for item in items:
-        root = strong.find(item.key)
-        final.union(item.key, root)
-        if root not in anchors:
-            by_cluster.setdefault(clusters.find(item.key), set()).add(item.key)
-    held_clusters: list[set[str]] = []
-    for root, cluster in by_cluster.items():
-        for key in cluster:
-            final.union(key, root)
-        target, held = attach_target(reached.get(root, set()))
+def _tier_two(forest: _Forest, one: _TierOne) -> list[tuple[str, str]]:
+    """Step 3: the joins of the messages reaching several components, each weighed against tier 1 only."""
+    several = {key for key, roots in forest.targets.items() if len(roots) > 1 and key not in forest.pinned}
+    loose = one.untouched - several
+    joins: list[tuple[str, str]] = []
+    for key in sorted(several):
+        own = one.groups.find(key)
+        reach = {own} if own in one.established else set()
+        reach.update(one.groups.find(root) for root in one.touches.get(key, ()))
+        named = {one.groups.find(root) for root in forest.targets[key]} - {own}
+        reach.update(group for group in named if group in one.established or group in forest.pinned)
+        target, _held = attach_target(reach, pinned=forest.pinned)
         if target is not None:
-            final.union(root, target)
-        elif held:
-            held_clusters.append(cluster)
-    return _final_groups(items, final), _skipped(edges, strong, anchors, final, held_clusters)
+            joins.append((key, target))
+        elif not reach:
+            joins.extend((key, root) for root in forest.targets[key] if root in loose)
+    return joins
 
 
-def _final_groups(items: Sequence[ThreadInput], final: _UnionFind) -> dict[str, list[ThreadInput]]:
+def _skipped(batch: _Batch, groups: _UnionFind) -> int:
+    """``merge_skipped``: the messages one of whose followed ids names a present message of another conversation."""
+    count = 0
+    for item in batch.followers:
+        mine = groups.find(item.key)
+        named = (keys for ref in followed_refs(item.in_reply_to, item.references) if (keys := batch.holders.get(ref)))
+        count += any(groups.find(keys[0]) != mine for keys in named)
+    return count
+
+
+@dataclass(frozen=True)
+class _Grouping:
+    groups: list[list[ThreadInput]]
+    counts: Counter[str]  # merge_skipped, untrusted_id (zero counts left out)
+    contested: frozenset[str]  # source uids holding a contested Message-ID
+
+
+def _components(items: Sequence[ThreadInput], own: Container[str], excluded: Collection[str]) -> _Grouping:
+    """Group messages (strong forest, tier 1, tier 2) as the module docstring says."""
+    batch = _batch(items, own, excluded)
+    forest = _forest(batch)
+    one = _tier_one(forest)
+    final = one.groups
+    for left, right in _tier_two(forest, one):  # every decision is taken before any is applied
+        final.union(left, right)
     found: dict[str, list[ThreadInput]] = {}
     for item in items:
         found.setdefault(final.find(item.key), []).append(item)
-    return found
-
-
-def _skipped(
-    edges: Sequence[_Edge],
-    strong: _UnionFind,
-    anchors: Container[str],
-    final: _UnionFind,
-    held_clusters: Sequence[set[str]],
-) -> int:
-    """``merge_skipped``: messages whose edge a guard refused, then held clusters none of whose members counted."""
-    held: set[str] = set()
-    for edge in edges:
-        if final.find(edge.source) == final.find(edge.target):
-            continue
-        if not edge.shared or (strong.find(edge.source) in anchors and strong.find(edge.target) in anchors):
-            held.add(edge.source)  # rule 2, or two established components (rule 3)
-    return len(held) + sum(not cluster & held for cluster in held_clusters)
+    holding = frozenset(key for keys in batch.contested.values() for key in keys)
+    counts = Counter(merge_skipped=_skipped(batch, final), untrusted_id=len(holding))
+    return _Grouping(list(found.values()), +counts, holding)
 
 
 def _heuristic_groups(singles: list[ThreadInput]) -> list[list[ThreadInput]]:
@@ -393,7 +466,7 @@ def _thread(members: list[ThreadInput], method: str, known_ids: set[str], *, hel
     elif method == "references":
         root = _thread_root(ordered)
         if held_keys and all(item.message_id != root for item in ordered):
-            oldest = min(ordered, key=_dated_order)  # a referenced id never names the conversation
+            oldest = ordered[0]  # a referenced id never names the conversation
             root = oldest.message_id or oldest.key
         key = f"r.{_digest(root)}"
     else:
@@ -410,18 +483,13 @@ def _holds_root(thread: Thread, inputs: Mapping[str, ThreadInput]) -> bool:
     )
 
 
-def _dated(inputs: Mapping[str, ThreadInput], uid: str) -> tuple[bool, int, str]:
-    """Oldest first, unknown dates last, then the source uid: independent of the input order."""
-    return (inputs[uid].sent_at is None, inputs[uid].sent_at or 0, uid)
-
-
 def _earliest(thread: Thread, inputs: Mapping[str, ThreadInput]) -> tuple[bool, int, str]:
-    return min(_dated(inputs, uid) for uid in thread.members)
+    return min(_sort_key(inputs[uid]) for uid in thread.members)
 
 
 def _fallback_keys(thread: Thread, inputs: Mapping[str, ThreadInput]) -> Iterator[str]:
     """Keys for a thread whose own is taken: its members' own roots, oldest first, then hashes of its members."""
-    for uid in sorted(thread.members, key=lambda uid: _dated(inputs, uid)):
+    for uid in sorted(thread.members, key=lambda uid: _sort_key(inputs[uid])):
         yield f"r.{_digest(inputs[uid].message_id or uid)}"
     members = "\n".join(sorted(thread.members))
     attempt = 0
@@ -455,20 +523,21 @@ def build_threads(
 
     ``own`` holds the account owner's addresses (never a shared participant),
     ``excluded`` the keys of messages that take no part in reference grouping,
-    ``stats["merge_skipped"]`` gains the messages a merge guard held back, and
+    ``stats["merge_skipped"]`` gains the messages a merge guard held back and
+    ``stats["untrusted_id"]`` the copies of contested Message-IDs, and
     ``held_keys`` keys a thread only by ids its own messages hold.
     """
     known_ids = {item.message_id for item in items if item.message_id}
-    components, skipped = _components(items, own, excluded)
-    if stats is not None and skipped:
-        stats["merge_skipped"] += skipped
+    grouping = _components(items, own, excluded)
+    if stats is not None:
+        stats.update(grouping.counts)
     threads: list[Thread] = []
     singles: list[ThreadInput] = []
-    for members in components.values():
+    for members in grouping.groups:
         if any(item.gm_thread_id for item in members):
             threads.append(_thread(members, "gmail_thrid", known_ids))
         elif _is_bare_single(members):
-            if members[0].key in excluded:
+            if members[0].key in excluded or members[0].key in grouping.contested:
                 threads.append(_thread(members, "single", known_ids))  # never grouped by subject either
             else:
                 singles.append(members[0])

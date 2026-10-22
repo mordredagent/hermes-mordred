@@ -342,6 +342,26 @@ So the 2+2 input is one conversation {A, B, D, X}, its extension with C is
 one conversation for every date of C, and the eighth-pass pairs joined only by
 weak edges form one conversation with the message naming both, whatever its
 date; threads formed by strong edges stay apart.
+After the tenth-pass review (a message could take two strong attachments, a
+reused Message-ID being unioned unguarded besides its own parent edge; and a
+message naming several clusters of single-reference messages merged them)
+each message takes at most one strong attachment, so strong components are
+trees; copies holding one Message-ID are one message only with identical
+content digests, and an id held by differing copies names no message (a
+message holding or naming one, alone in its component, is pinned:
+established, never joined). Weak references are then weighed in two tiers.
+Tier 1, messages with exactly one: clusters of single messages, a cluster of
+several being established, and a single message joining the one established
+group its edges touch. Tier 2, messages with several, each against the tier-1
+result only (its own group counting), joining one established group or none.
+So the eighth-pass pairs are two established clusters again: a message naming
+both joins at most the one its direct parent belongs to; the 2+2 input keeps A
+and B apart from {D, X} (D, inside an established group, pulls no single
+message, else two such groups naming one message would be bridged); and a
+property test adds 0 to 3 crafted messages to 300 seeded batches of
+legitimate threads and finds no conversation holding two established
+components of the legitimate messages alone. The store's guard counts a
+Gmail-keyed conversation as established too.
 A store created before
 import schema v2 has no stored references for the messages it already holds,
 so a later-arriving parent cannot join them until those children are fetched

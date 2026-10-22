@@ -4672,8 +4672,9 @@ part of this delivery ([`TODO.md`](./TODO.md)).
   Because `References` is attacker-controlled, a conversation is folded only
   when it shares a participant with M's (a sender id or recipient address;
   the account owner never counts), and nothing is merged for M when more
-  than one of the conversations to fold already holds several messages; each
-  message held back counts in `merge_skipped`. The survivor
+  than one of the conversations to fold is established (holds several
+  messages, or is keyed by a Gmail thread id); each message held back counts
+  in `merge_skipped`. The survivor
   is the conversation holding the earliest-dated message (unknown dates last,
   then the smaller `conv_uid`). A conversation keyed by a Gmail thread id is
   authoritative: never folded into another, and the survivor when one is
@@ -4683,23 +4684,33 @@ part of this delivery ([`TODO.md`](./TODO.md)).
   rules (one module, `imports/mail/merge_guard.py`) decide the grouping of
   a batch before it is written, so messages fetched together are held to them
   too, and that grouping is a pure function of the batch's set of messages
-  (neither their order nor a forged date changes it). First, strong
-  components: messages of one Gmail thread id or one Message-ID, a message
-  and its direct parent in the batch (the last `In-Reply-To` id, else the
-  last `References` id) when the two share a participant, and siblings under
-  an absent parent with equal participant sets; a strong edge attaches a
-  message to its one parent, so none bridges two components. A component of
-  several messages (or keyed by a Gmail thread id) is established. Then the
-  messages left alone form clusters over their weak edges with each other
-  (one of the last 10 referenced ids naming a message of the batch, the two
-  sharing a participant; absent ids are ignored), and each cluster joins the
-  established component its weak edges reach, in either direction, when
-  there is exactly one, and none when there are several (counted once in
-  `merge_skipped`). Established components never join each other through
-  weak edges; a message whose reference is refused for lack of a shared
-  participant, or because it would join two established components, counts
-  in `merge_skipped` too. A copy the store will not write (a duplicate or a
-  rejected copy of a stored message, per `ImportStore.classify_incoming`)
+  (neither their order nor a forged date changes it). Copies holding one
+  Message-ID are one message only when their content digests are identical;
+  an id held by differing copies names no message (either copy could be the
+  impostor), and a message holding or naming such an id, when alone in its
+  component, is pinned: it counts as established but is never joined.
+  First, a strong forest: each message takes at most one strong attachment,
+  its Gmail thread, else its direct parent in the batch (the last
+  `In-Reply-To` id, else the last `References` id) when the two share a
+  participant, else, the direct parent absent, the siblings under that parent
+  with an equal participant set; so no message bridges two strong components.
+  A component of several messages (or keyed by a Gmail thread id) is
+  established. Then tier 1: a message whose weak references (one of the last
+  10 referenced ids naming a message of another component of the batch, the
+  two sharing a participant; absent ids are ignored) reach exactly one
+  component adds that edge; such edges between single messages form
+  clusters, and a cluster of several messages is established too; a single
+  message joins the one established group its edges touch, in either
+  direction, and none when they touch several. Then tier 2: a message whose
+  weak references reach several components is weighed against the tier-1
+  result only: it joins the one established group it reaches (its own
+  counting), none when it reaches several, and, reaching none, forms a
+  cluster with the single messages it names that tier 1 left untouched.
+  Established groups never join each other through weak edges; a message
+  whose reference is refused (no shared participant, or a guard above)
+  counts once in `merge_skipped`. A copy the store will not write (a
+  duplicate or a rejected copy of a stored message, per
+  `ImportStore.classify_incoming`)
   takes no part in that grouping. A store created before import schema v2 has no stored references
   for the messages it already holds, so a parent that arrives later cannot join
   them until those children are fetched again (`mail fetch --since <date>`
