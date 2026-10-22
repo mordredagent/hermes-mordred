@@ -40,7 +40,9 @@ Phase B2 of the browser-history design. Two hooks:
 Episodes: one per ``(session, turn)`` with browser calls. Its first recorded
 call is preceded by a ``boundary`` / ``task_start`` holding the turn's message,
 ``actor`` ``human`` for a person's message (:func:`.history.speaks_for_user`
-then counts it as the user's words) and ``agent`` otherwise. A correction joins
+then counts it as the user's words) and ``agent`` otherwise. A task start names
+no page, so while ``excluded_sites`` is configured the receiver stores an
+``agent`` one without its text (``page_host_unknown``, :mod:`.contracts`). A correction joins
 the episode of the call it corrects, as ``user_correction`` / ``human`` /
 ``correction``. A person's correction message is never a task start: the
 browser calls of its turn join the corrected episode while that is still the

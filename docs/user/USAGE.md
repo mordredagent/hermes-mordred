@@ -815,7 +815,16 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > Discord, Slack, Gmail, Outlook and others) are recorded too, including what
 > you type there. To keep a site out, list its host in
 > `plugins.mordred_activity.excluded_sites`; events from that host and its
-> subdomains are then refused. If one entry of that list names no host, the
+> subdomains are then refused. While any site is excluded, an event that names
+> no page host (a collector's task start or end, for example) is kept without
+> the page's title, text, labels and query and without any text other than
+> the instruction or correction you typed (`page_host_unknown`), since it
+> could come from an excluded page; an episode in which the collector marked
+> a batch as refused for an excluded host (`source_excluded`) is never shown
+> to Hermes, also after you remove the exclusion. Your own instruction is still stored, so do not name the
+> excluded site's private details in it. Also exclude the host in the
+> collector itself when it can (the operator's `--activity-exclude-site`):
+> then nothing from that host leaves the collector. If one entry of that list names no host, the
 > other entries still apply but every batch is refused
 > (`excluded_sites_invalid`; `activity status` shows `collection: refused`)
 > until you fix it, so a typo never records a site you excluded. Raw events are kept

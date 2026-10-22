@@ -1034,6 +1034,89 @@ def test_a_site_contradicting_an_excluded_url_never_passes() -> None:
     assert caught.value.code == "malformed"
 
 
+#: What an event without a page host carries about the page it may have been on.
+PAGE_CONTENT: dict[str, Any] = {
+    "page_title": "Acme Portal Home",
+    "page_text": "HOME-PAGE-TEXT-7731 Search invoices; the password: Hunter2-fake-pw",
+    "query": "?q=Contoso",
+}
+#: (phase, op, source, actor, the text is the user's own words): the attribution rule of the history surfaces.
+HOSTLESS_TEXTS = [
+    ("boundary", "task_start", "operator", "human", True),
+    ("boundary", "task_start", "hermes", "agent", False),
+    ("boundary", "task_end", "operator", "agent", False),
+    ("boundary", "task_end", "operator", "human", False),
+    ("correction", "other", "user_correction", "human", True),
+    ("correction", "other", "operator", "human", False),
+    ("correction", "other", "user_correction", "unknown", False),
+]
+
+
+def _hostless(phase: str, op: str, source: str, actor: str) -> dict[str, Any]:
+    """A boundary or correction event as an operator sends it for the page a task started or ended on: no site,
+    no route, the page's title and text (D1 of the 2026-10-22 live check)."""
+    action = {"op": op, "target": "link Invoice INV-1001", "site": None, "route": None, "args": {}}
+    return raw_event(phase=phase, source=source, actor=actor, action=action, text="Search for Contoso", **PAGE_CONTENT)
+
+
+@pytest.mark.parametrize(("phase", "op", "source", "actor", "own"), HOSTLESS_TEXTS)
+def test_an_event_without_a_page_host_keeps_only_the_users_words_while_sites_are_excluded(
+    phase: str, op: str, source: str, actor: str, own: bool
+) -> None:
+    event = normalize_event(_hostless(phase, op, source, actor), excluded_sites=PRIVATE_SITES)
+
+    assert contracts.EXCLUSION_PAGE_HOST_UNKNOWN == "page_host_unknown"
+    assert (event.page_title, event.page_text, event.query, event.target) == (None, None, None, None)
+    assert event.text == ("Search for Contoso" if own else None)
+    # Only the drop is marked: nothing that was dropped leaves a redaction or truncation mark behind.
+    assert event.exclusions == ("page_host_unknown",)
+    assert not event.truncated
+    assert (event.phase, event.op, event.site, event.route) == (phase, op, None, None)  # the boundary itself stays
+
+
+def test_without_exclusions_an_event_without_a_page_host_keeps_its_content() -> None:
+    event = normalize_event(_hostless("boundary", "task_end", "operator", "agent"), excluded_sites=SITES)
+
+    assert (event.page_title, event.query, event.target, event.text) == (
+        "Acme Portal Home",
+        "?q=Contoso",
+        "link Invoice INV-1001",
+        "Search for Contoso",
+    )
+    assert event.page_text is not None and "HOME-PAGE-TEXT-7731" in event.page_text
+    assert "page_host_unknown" not in event.exclusions
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        {"op": "task_end", "site": "example.com"},
+        {"op": "task_end", "route": "https://example.com/search?q=Contoso"},
+    ],
+    ids=["site", "full-url-route"],
+)
+def test_an_event_on_a_known_host_keeps_its_content_while_other_sites_are_excluded(action: dict[str, Any]) -> None:
+    raw = raw_event(phase="boundary", action=action, text="I searched for Contoso", page_title="Invoice Search Results")
+
+    event = normalize_event(raw, excluded_sites=PRIVATE_SITES)
+
+    assert (event.site, event.text, event.page_title) == (
+        "example.com",
+        "I searched for Contoso",
+        "Invoice Search Results",
+    )
+    assert "page_host_unknown" not in event.exclusions
+
+
+def test_an_event_without_a_page_host_and_without_content_is_not_marked() -> None:
+    gap = raw_event(phase="gap", action={"op": "other", "args": {"reason": "source_excluded"}})
+
+    event = normalize_event(gap, excluded_sites=PRIVATE_SITES)
+
+    assert event.exclusions == ()
+    assert json.loads(event.args_json) == {"reason": "source_excluded"}
+
+
 def test_hosts_named_by_an_event() -> None:
     hosts = contracts.event_hosts(
         {"site": "a.example", "route": "/x?next=https%3A%2F%2Fb.example%2F", "target": "see https://c.example/p"},

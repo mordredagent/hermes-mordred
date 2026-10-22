@@ -2,6 +2,8 @@
 
 - Read-time exclusion looks at every host an episode names: its events' sites and the URLs in their route,
   query and target label, so a host added to ``excluded_sites`` after capture hides the episode everywhere.
+- An episode holding a ``source_excluded`` refusal marker (a batch the receiver refused as an excluded host's) is
+  hidden everywhere, whatever ``excluded_sites`` holds at read time (live check 2026-10-22, D1).
 - Only text the collector attributes to the user is shown as the user's task or correction.
 - Rows stored before a URL rule existed are scrubbed again when shown.
 - A writer's lock refuses a read within the read bound, opening included.
@@ -123,12 +125,33 @@ def test_an_exclusion_added_after_capture_hides_an_episode_naming_the_host_anywh
     )
 
 
-def test_the_host_check_reads_nothing_without_exclusions() -> None:
-    class NoReads:
-        def execute(self, *_args: Any) -> Any:
-            raise AssertionError("no query without exclusions")
+class _Recorder:
+    """A connection that records its queries and finds nothing."""
 
-    assert history._hidden(NoReads(), ["ep-1"], {"ep-1": ["bank.example"]}, frozenset()) == set()  # type: ignore[arg-type]
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    def execute(self, sql: str, *_args: Any) -> Any:
+        self.queries.append(sql)
+        return iter(())
+
+
+def test_without_exclusions_the_check_reads_only_refusal_markers() -> None:
+    conn = _Recorder()
+    assert history._hidden(conn, ["ep-1"], {"ep-1": ["bank.example"]}, frozenset()) == set()  # type: ignore[arg-type]
+    [query] = conn.queries  # one query, for the refusal markers: no URL is read
+    assert history._URL_FIELDS_SQL not in query and history.REFUSED_SQL in query
+    nothing = _Recorder()
+    assert history._hidden(nothing, [], {}, frozenset({"bank.example"})) == set()  # type: ignore[arg-type]
+    assert nothing.queries == []
+
+
+def test_with_exclusions_the_check_is_one_query() -> None:
+    conn = _Recorder()
+    ids = [f"ep-{index}" for index in range(50)]
+    assert history._hidden(conn, ids, {}, frozenset({"bank.example"})) == set()  # type: ignore[arg-type]
+    [query] = conn.queries
+    assert history._URL_FIELDS_SQL in query and history.REFUSED_SQL in query
 
 
 def test_excluded_sites_are_checked_on_site_rows_without_reading_urls(history_home) -> None:
@@ -138,6 +161,98 @@ def test_excluded_sites_are_checked_on_site_rows_without_reading_urls(history_ho
         assert history._hidden(conn, ["ep-bank"], {"ep-bank": ["bank.example"]}, frozenset({"bank.example"})) == {
             "ep-bank"
         }
+
+
+# --- an episode the receiver refused part of as an excluded host's ---------------------------------------
+
+OPERATOR = PeerPrincipal(peer_id="operator:0123456789ab", kind="operator")
+
+
+def _operator_batch(*events: dict[str, Any]) -> dict[str, Any]:
+    return {"schema_version": 1, "producer_id": "prod-op", "producer_kind": "operator", "events": list(events)}
+
+
+def _unplaced(seq: int, episode: str, op: str, *, actor: str, text: str) -> dict[str, Any]:
+    """A task boundary as the operator sent it in the live check (D1): no site or route, the page's content."""
+    marker = episode.upper()
+    raw = _operator_event(seq, episode, "boundary", op, source="operator", actor=actor, text=f"{text} {marker}")
+    raw["action"] = {"op": op, "target": None, "site": None, "route": None, "args": {}}
+    raw.update(page_title=f"{marker} Acme Portal", page_text=f"{marker} HOME-PAGE-TEXT-7731 Search invoices")
+    return raw
+
+
+def _pre_fix(store: Any, raw: dict[str, Any]) -> None:
+    """``raw`` stored as a receiver stored it before the page-host rule existed (it checked named hosts only)."""
+    store.append_batch(OPERATOR.peer_id, "prod-op", [contracts.normalize_event(raw, excluded_sites=frozenset())])
+
+
+def _operator_episode(store: Any, receiver: StoreReceiver, episode: str, seq0: int, *, refused: bool) -> None:
+    """An operator task: its start and end without a page host (stored before the page-host rule), a navigation
+    on example.com through the receiver and, with ``refused``, an action on the excluded ``localhost`` (refused)
+    and the gap marker the operator records for that refused batch."""
+    _pre_fix(store, _unplaced(seq0, episode, "task_start", actor="human", text="settle the utility bill"))
+    navigation = _operator_event(
+        seq0 + 1,
+        episode,
+        "observed",
+        "navigate",
+        source="operator",
+        actor="agent",
+        attempt_id=f"{episode}-a1",
+        status="claimed_success",
+        page_title="Billing overview",
+        page_text=f"{episode.upper()} the invoice table",
+    )
+    assert receiver.ingest(OPERATOR, _operator_batch(navigation))["type"] == "activity_ack"
+    if refused:
+        click = _operator_event(seq0 + 2, episode, "dispatched", "click", source="operator", actor="agent")
+        click["action"].update(site="localhost", route="/index.html")
+        assert receiver.ingest(OPERATOR, _operator_batch(click)) == {
+            "type": "activity_refused",
+            "reason": "source_excluded",
+        }
+        gap = _operator_event(seq0 + 3, episode, "gap", "other", source="operator", actor="unknown")
+        gap["action"] = {"op": "other", "site": None, "route": None, "args": {"reason": "source_excluded"}}
+        gap["quality"]["coverage"] = "gap"
+        assert receiver.ingest(OPERATOR, _operator_batch(gap))["type"] == "activity_ack"
+    _pre_fix(store, _unplaced(seq0 + 9, episode, "task_end", actor="agent", text="I settled the bill on the portal"))
+
+
+def _every_surface(tag: str) -> dict[str, str]:
+    nav = _navigate(f"{tag}-nav")
+    turn = _turn("settle the utility bill on example.com again", f"{tag}-turn")
+    return {
+        "navigation": json.loads(nav)[RESULT_KEY] if nav else "",
+        "turn": turn["context"] if turn else "",
+        "lookup": json.dumps(_lookup(f"{tag}-lookup", query="", site="example.com")),
+        "lookup_terms": json.dumps(_lookup(f"{tag}-terms", query="settle the utility bill")),
+        "episode_refused": _episode("ep-refused", f"{tag}-episode"),
+        "episode_kept": _episode("ep-kept", f"{tag}-kept"),
+    }
+
+
+@pytest.mark.parametrize("excluded", [["localhost"], []], ids=["still-excluded", "exclusion-removed"])
+def test_an_episode_with_a_refused_excluded_batch_is_hidden_from_every_surface(history_home, excluded) -> None:
+    home, store = history_home
+    write_config(home, {**ENABLED, "collection_enabled": True, "excluded_sites": ["localhost"]})
+    receiver = StoreReceiver(home, config_loader=ActivityConfig.load, store_factory=lambda _home: store)
+    _operator_episode(store, receiver, "ep-kept", 1, refused=False)
+    _operator_episode(store, receiver, "ep-refused", 20, refused=True)
+    with store.connection() as conn:  # the excluded pages' content is in the store, as in the live check
+        leaked = conn.execute(
+            "SELECT COUNT(*) FROM activity_events WHERE site IS NULL AND page_text LIKE '%EP-REFUSED%'"
+        ).fetchone()
+    assert leaked == (2,)
+
+    write_config(home, {**ENABLED, "excluded_sites": excluded})
+    shown = _every_surface("refused")
+
+    for surface, text in shown.items():
+        assert "EP-KEPT" in text or surface == "episode_refused", surface  # without a marker: unaffected
+        assert "EP-REFUSED" not in text, surface
+    assert json.loads(shown["episode_refused"]) == {"status": "not_found"}
+    assert history.episode_detail(store, "ep-refused", excluded_sites=frozenset()) is None
+    assert history.latest_page_text(store, ["ep-refused"], "example.com", 600, excluded_sites=frozenset()) == {}
 
 
 # --- which text speaks for the user -----------------------------------------------------------------------

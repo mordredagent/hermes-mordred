@@ -170,6 +170,23 @@ def test_an_about_page_is_known_and_has_no_route(capture_home) -> None:
     assert [(event.op, event.site) for event in calls(store)] == [("navigate", None), ("scroll", None)]
 
 
+def test_with_exclusions_a_task_start_keeps_only_a_persons_words(capture_home) -> None:
+    """A task start names no page, so while sites are excluded the receiver keeps only the user's own words."""
+    home, store = capture_home
+    write_config(home, EXCLUDING)
+    turn()
+    navigate()
+    turn("check the order page", session="s2", turn_id="s2:t1:bb22", platform="telegram")  # not a person's words
+    navigate(session="s2", turn_id="s2:t1:bb22")
+    starts = {event.actor: event for event in events(store) if event.op == "task_start"}
+    person, agent = starts["human"], starts["agent"]
+    assert (person.actor, person.text, person.exclusions) == ("human", MESSAGE, ())
+    assert (agent.actor, agent.text, agent.exclusions) == ("agent", None, ("page_host_unknown",))
+    for event in calls(store):  # a call on a known page keeps its page content
+        assert (event.site, event.page_title) == (SITE, "Sign in — Shop") and event.page_text
+        assert "page_host_unknown" not in event.exclusions
+
+
 # --- a stale snapshot never names a field (security review 2026-10-22, finding 2) ------------------------------
 
 

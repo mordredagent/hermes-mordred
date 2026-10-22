@@ -3969,7 +3969,23 @@ and revocable on its own:
   top-level `query` and the target label, redirect targets included
   (parameter values decoded up to four levels deep). Unless the operator excludes a messaging or
   mail site, what the user types there (in fields the collector classifies
-  as non-sensitive) and any page text the collector sends are recorded. An
+  as non-sensitive) and any page text the collector sends are recorded.
+  **Events without a page host (2026-10-22).** While `excluded_sites` is
+  non-empty, an event whose page host is unknown (no `site` and no
+  full-URL `route`: a task start or end, a correction, a gap marker, an
+  action on a page the collector did not name) could be an excluded host's,
+  which the receiver cannot check. It is stored (an episode keeps its
+  boundaries) without its site-controlled content: `target`, `query`,
+  `page_title`, `page_text`, and `text` unless the text is the user's own
+  words (`contracts.speaks_for_user`, the rule of §"History for Hermes": a
+  `task_start` whose `actor` is `human`, or a `correction` whose `source` is
+  `user_correction` and whose `actor` is `human`). Anything dropped adds the
+  exclusion `page_host_unknown`; the route path, `args` and the event's
+  metadata stay. So a receiver-only exclusion keeps the title, text and
+  completion summary of an excluded page out of the store even when a
+  collector (an older operator) names no host on its task boundaries. A
+  host named only in free text (a task instruction naming the excluded
+  site) is not checked. Without exclusions nothing changes. An
   invalid `excluded_sites` (not a list, or an entry that names no host) never
   means "exclude less": the entries that name a host stay in effect for every
   reader, and the receiver refuses every batch as `excluded_sites_invalid`
@@ -4093,9 +4109,17 @@ per-process state.
   its `site`, and the hosts of URLs in its stored route, query and target
   label (parameter values decoded), so a host added to `excluded_sites`
   after capture hides earlier episodes that only linked or redirected to it.
-  The URL check runs only while `excluded_sites` is non-empty, as one query
-  over the candidate episodes' distinct rows that can hold a URL. A
-  lookup or navigation naming an excluded host gets nothing. Hosts are
+  An episode holding a refusal marker, an event whose `args.reason` is
+  `source_excluded` (the `gap` the operator records for a batch the receiver
+  refused as an excluded host's), is hidden the same way whatever
+  `excluded_sites` holds at read time (`history.REFUSED_SQL`): it touched an
+  excluded host the marker does not name, and a receiver older than the rule
+  for events without a page host (§"Event contract") kept the page content
+  of its host-less task boundaries. Hermes's own capture never records such
+  a marker (a call on an unknown page is dropped, not marked). One query over
+  the candidate episodes' distinct rows checks both: the rows holding a
+  marker and, only while `excluded_sites` is non-empty, the rows that can
+  hold a URL. A lookup or navigation naming an excluded host gets nothing. Hosts are
   compared without case or a trailing dot. Configured entries are normalized
   to bare hosts (`https://Bank.example/x`, `*.bank.example`, `bank.example.`
   and `bank.example:443` all mean `bank.example`; IDNA for non-ASCII); one
@@ -4296,7 +4320,10 @@ per-process state.
     `whatsapp`, `signal`, `matrix` or `email`; the TUI resuming a gateway
     session takes that session's), `api_server`, `webhook`, `acp`, `webui`,
     `subagent`, `cron`, `curator`, an unknown value and a missing or empty
-    one. A turn without a text message gets no task start. A task start the
+    one. A turn without a text message gets no task start. A task start
+    names no page, so while `excluded_sites` is non-empty the receiver keeps
+    its text only when its `actor` is `human` (an `agent` task start is
+    stored without text, `page_host_unknown`; §"Event contract"). A task start the
     receiver refused (busy store, excluded host) is sent again with the next
     call of the turn. An event too large for `max_batch_bytes` on its own is
     shortened first (page text, then text, then title; marked truncated).
@@ -4361,7 +4388,7 @@ ignored.
 | `collection_enabled` | `false` | Accept batches (requires `enabled`) |
 | `max_batch_events` / `max_event_bytes` / `max_batch_bytes` | 100 / 16384 / 262144 | Wire limits; may only be lowered |
 | `retention_raw_days` | 365 | Raw events older than this are deleted; `0` keeps everything forever |
-| `excluded_sites` | empty | Hosts (and their subdomains; entries normalized to bare hosts) whose events refuse the batch as `source_excluded` and are never read back for Hermes (any host an episode's events name); no site is excluded by default; an invalid value keeps the entries that name a host, refuses every batch as `excluded_sites_invalid` and switches Hermes's use of the history off |
+| `excluded_sites` | empty | Hosts (and their subdomains; entries normalized to bare hosts) whose events refuse the batch as `source_excluded` and are never read back for Hermes (any host an episode's events name; an episode with a `source_excluded` refusal marker is never read back either); while non-empty, an event without a page host is stored without its page content (`page_host_unknown`); no site is excluded by default; an invalid value keeps the entries that name a host, refuses every batch as `excluded_sites_invalid` and switches Hermes's use of the history off |
 | `history_enabled` | `true` | Master switch for Hermes's use of the history, recording Hermes's own browser calls included (needs `enabled`); `activity use on\|off` sets it |
 | `history_on_navigate` | `true` | Navigation block in browser results |
 | `history_turn_context` | `true` | Turn-start context |

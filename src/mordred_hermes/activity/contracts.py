@@ -32,7 +32,8 @@ raw event to bounded, allowlisted fields before anything is stored:
   does a typed value that looks like a secret whatever the field kind
   (:func:`looks_like_secret`). Other operations drop free text outside those
   phases (``text_dropped``).
-* Page title and page text are kept for every event, whitespace-normalized.
+* Page title and page text are kept for every event (but see the page-host
+  rule below), whitespace-normalized.
 * A collector may claim, never verify: ``verified_*`` becomes ``claimed_*``
   with the exclusion ``verification_claim_dropped``.
 * Unknown enum values are ``malformed``; an event naming a site excluded by
@@ -41,6 +42,14 @@ raw event to bounded, allowlisted fields before anything is stored:
   in the route's query, the top-level ``query`` and the target label); an
   event whose normalized form exceeds the per-event limit is
   ``event_too_large``. Each refuses the whole batch upstream.
+* While any site is excluded, an event whose page host is unknown (no
+  ``site`` and no full-URL ``route``: a task boundary, a correction, a gap
+  marker, an action on a page the collector did not name) could be an
+  excluded host's, which the receiver cannot check. It is kept without its
+  site-controlled content: ``target``, ``query``, ``page_title``,
+  ``page_text`` and ``text`` unless the text is the user's own words
+  (:func:`speaks_for_user`); anything dropped adds the exclusion
+  ``page_host_unknown``.
 
 Rejections carry a code only. Nothing here logs or echoes event content.
 """
@@ -147,6 +156,9 @@ EXCLUSION_URL_PARAMS: Final = "url_params_redacted"
 #: A secret inside free text (task or correction text, a target label, the page title or text) was
 #: replaced with :data:`REDACTED` (:func:`redact_text_secrets`).
 EXCLUSION_TEXT_SECRETS: Final = "text_secrets_redacted"
+#: While sites are excluded, the site-controlled content of an event whose page host is unknown (no ``site``,
+#: no full-URL ``route``) was dropped: it could be an excluded host's page (:func:`normalize_event`).
+EXCLUSION_PAGE_HOST_UNKNOWN: Final = "page_host_unknown"
 #: A collector's own quality exclusion marking a sensitive field; its typed text is withheld too.
 COLLECTOR_SENSITIVE_MARK: Final = "sensitive_field"
 
@@ -1250,6 +1262,35 @@ def _session_ref(raw: Mapping[str, Any]) -> dict[str, Any]:
     return {key: _ident(raw.get(key), pattern=_REF_RE) for key in ("hermes_session_id", "turn_id", "run_id")}
 
 
+def speaks_for_user(phase: str, op: str, source: str, actor: str) -> bool:
+    """The event's text is the user's own words, by the collector's attribution: a task start whose ``actor`` is
+    ``human``, or a correction whose ``source`` is ``user_correction`` and whose ``actor`` is ``human``. Text
+    labelled ``agent`` or ``unknown`` never is. The SQL form is :data:`.history.USER_TEXT_SQL`."""
+    if actor != "human":
+        return False
+    return (phase == "boundary" and op == "task_start") or (phase == "correction" and source == "user_correction")
+
+
+class _Content(NamedTuple):
+    """An event's site-controlled fields and its free text: what an event without a page host loses."""
+
+    target: _Text
+    text: _Text
+    query: _Text
+    page_title: _Text
+    page_text: _Text
+
+
+def _placed(content: _Content, *, unplaced: bool, user_words: bool) -> tuple[_Content, tuple[str, ...]]:
+    """``(content kept, exclusions)``: an ``unplaced`` event (no page host while sites are excluded) keeps only
+    the user's own words, with :data:`EXCLUSION_PAGE_HOST_UNKNOWN` when anything was dropped."""
+    if not unplaced:
+        return content, ()
+    kept = _Content(_Text(), content.text if user_words else _Text(), _Text(), _Text(), _Text())
+    dropped = any(old.value is not None and new.value is None for old, new in zip(content, kept, strict=True))
+    return kept, ((EXCLUSION_PAGE_HOST_UNKNOWN,) if dropped else ())
+
+
 def event_size(event: NormalizedEvent) -> int:
     """UTF-8 size of the normalized event (non-ASCII text is not inflated by escapes)."""
     return len(canonical_json(_canonical_fields(event), ascii_only=False).encode("utf-8"))
@@ -1273,12 +1314,17 @@ def normalize_event(
         hosts = {action.site, action.location.host, *event_hosts(_group(raw, "action"), raw.get("query"))}
         if any(site_excluded(host, excluded_sites) for host in hosts):
             raise EventRejected("source_excluded")
-    texts = (action.target, text, query, page_title, page_text)
-    redacted = action.location.redacted or any(field.redacted for field in texts)
+    content, unplaced_exclusions = _placed(
+        _Content(action.target, text, query, page_title, page_text),
+        # ``action.site`` is the explicit site or else the host of a full-URL route: the page's host.
+        unplaced=bool(excluded_sites) and action.site is None,
+        user_words=speaks_for_user(identity["phase"], action.op, identity["source"], identity["actor"]),
+    )
+    redacted = action.location.redacted or any(field.redacted for field in content)
     event = NormalizedEvent(
         **identity,
         op=action.op,
-        target=action.target.value,
+        target=content.target.value,
         site=action.site,
         route=action.location.route,
         args_json=action.args_json,
@@ -1292,18 +1338,19 @@ def normalize_event(
                 *result.exclusions,
                 *action.exclusions,
                 *text_exclusions,
+                *unplaced_exclusions,
                 *((EXCLUSION_URL_PARAMS,) if redacted else ()),
-                *((EXCLUSION_TEXT_SECRETS,) if any(field.secrets for field in texts) else ()),
+                *((EXCLUSION_TEXT_SECRETS,) if any(field.secrets for field in content) else ()),
             )
         ),
-        truncated=quality["truncated"] or action.location.truncated or any(field.cut for field in texts),
+        truncated=quality["truncated"] or action.location.truncated or any(field.cut for field in content),
         page_sig_before=quality["page_sig_before"],
         page_sig_after=quality["page_sig_after"],
         **_session_ref(_group(raw, "session_ref")),
-        text=text.value,
-        query=query.value,
-        page_title=page_title.value,
-        page_text=page_text.value,
+        text=content.text.value,
+        query=content.query.value,
+        page_title=content.page_title.value,
+        page_text=content.page_text.value,
     )
     if event_size(event) > max_event_bytes:
         raise EventRejected("event_too_large")

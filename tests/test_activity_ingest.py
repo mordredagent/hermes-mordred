@@ -160,6 +160,68 @@ def test_no_site_is_excluded_by_default(tmp_path: Path) -> None:
     assert [event.site for event in plain_store(tmp_path).events_for_episode("ep-1")] == ["mail.google.com"]
 
 
+def _boundary(seq: int, op: str, actor: str, text: str) -> dict[str, Any]:
+    """A task boundary as the operator sends it: no site or route, but the title and text of the page the task
+    started or ended on (D1 of the 2026-10-22 live check)."""
+    return raw_event(
+        seq,
+        phase="boundary",
+        actor=actor,
+        action={"op": op, "site": None, "route": None, "args": {}},
+        text=text,
+        page_title="Acme Portal Home",
+        page_text="HOME-PAGE-TEXT-7731 Search invoices",
+    )
+
+
+def _task_on_an_excluded_host(tmp_path: Path) -> list[dict[str, Any]]:
+    """The operator's batches for a task on ``localhost``: the task start, an action there, the gap marker it
+    records for a refused batch and the task end; returns the replies."""
+    gap = raw_event(
+        3,
+        phase="gap",
+        actor="unknown",
+        action={"op": "other", "args": {"reason": "source_excluded"}},
+        quality={"coverage": "gap"},
+    )
+    sent = [
+        batch(_boundary(1, "task_start", "human", "Search for Contoso")),
+        batch(raw_event(2, action={"op": "click", "site": "localhost", "route": "/index.html"})),
+        batch(gap, _boundary(4, "task_end", "agent", "I searched for Contoso on the Acme portal")),
+    ]
+    return [receiver(tmp_path).ingest(OPERATOR, each) for each in sent]
+
+
+def test_a_receiver_only_exclusion_keeps_no_page_content_of_events_without_a_page_host(tmp_path: Path) -> None:
+    write_config(tmp_path, {**ENABLED, "excluded_sites": ["localhost"]})
+
+    replies = _task_on_an_excluded_host(tmp_path)
+
+    assert [reply["type"] for reply in replies] == ["activity_ack", "activity_refused", "activity_ack"]
+    assert replies[1]["reason"] == "source_excluded"
+    stored = plain_store(tmp_path).events_for_episode("ep-1")
+    assert [(e.op, e.text, e.page_title, e.page_text, e.exclusions) for e in stored] == [
+        ("task_start", "Search for Contoso", None, None, ("page_host_unknown",)),  # the user's words stay
+        ("other", None, None, None, ()),
+        ("task_end", None, None, None, ("page_host_unknown",)),
+    ]
+    with plain_store(tmp_path).connection() as conn:
+        dump = repr(conn.execute("SELECT * FROM activity_events").fetchall())
+    assert "HOME-PAGE-TEXT-7731" not in dump and "Acme" not in dump
+
+
+def test_without_exclusions_events_without_a_page_host_keep_their_page_content(tmp_path: Path) -> None:
+    write_config(tmp_path, ENABLED)
+
+    replies = _task_on_an_excluded_host(tmp_path)
+
+    assert [reply["type"] for reply in replies] == ["activity_ack"] * 3
+    start, _click, _gap, end = plain_store(tmp_path).events_for_episode("ep-1")
+    for event in (start, end):
+        assert (event.page_title, event.page_text) == ("Acme Portal Home", "HOME-PAGE-TEXT-7731 Search invoices")
+        assert event.text and "page_host_unknown" not in event.exclusions
+
+
 @pytest.mark.parametrize(
     ("code", "reason"),
     [
