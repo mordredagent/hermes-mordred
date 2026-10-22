@@ -3,25 +3,32 @@
 Phase B2 of the browser-history design. Two hooks:
 
 - ``pre_llm_call`` (:func:`pre_llm_call`) remembers the turn per Hermes
-  session: its id (Hermes's ``turn_id``; hermes-agent 0.13.0 passes none, so a
-  local id is made for every call), when it started, the user message (at most
+  session of a profile (state is keyed by the profile home's real path and the
+  session, so one process serving several profiles never mixes them): its id
+  (Hermes's ``turn_id``; hermes-agent 0.13.0 passes none, so a local id is
+  made for every call), when it started, the user message (at most
   :data:`.contracts.MAX_TEXT_CHARS` characters) and whether that message is a
-  person's words: a turn whose ``platform`` is ``subagent`` (a delegated
-  task) or ``cron`` (a scheduled job) carries an agent's or a job's prompt
-  instead. A person's message starting with ``correct:`` or ``訂正:`` (also
-  with a full-width colon; the operator's convention, any case) also records
-  a correction of the session's last recorded browser call. The hook returns
-  ``None``: the message reaches the model unchanged.
+  person's words: only a turn whose ``platform`` is one of
+  ``history_human_platforms`` (default the local interactive surfaces ``cli``,
+  ``tui`` and ``desktop``); any other platform, a missing one included, is an
+  agent's, a job's or an unknown sender's prompt. A person's message starting
+  with ``correct:`` or ``訂正:`` (also with a full-width colon; the operator's
+  convention, any case) also records a correction of the session's last
+  recorded browser call. The hook returns ``None``: the message reaches the
+  model unchanged.
 - ``post_tool_call`` (:func:`post_tool_call`) turns every ``browser_*`` call
   into one event with ``source`` ``hermes``, ``actor`` ``agent``, the Hermes
-  session and turn ids and ``attempt_id`` derived from ``tool_call_id``
-  (:func:`attempt_id`). ``browser_navigate`` → ``navigate`` (route from the
-  final URL; ``page_title`` from the result; ``page_text`` = the first
-  :data:`PAGE_TEXT_CHARS` characters of its ``snapshot``), ``browser_click``
+  session and turn ids and an ``attempt_id`` of its own: the
+  ``tool_call_id`` (:func:`attempt_id`) and a random suffix
+  (:func:`occurrence_id`), because a provider may repeat a ``tool_call_id``
+  across turns and sessions. ``browser_navigate`` → ``navigate`` (route from
+  the final URL; ``page_title`` from the result; ``page_text`` = the first
+  :data:`PAGE_TEXT_CHARS` characters of its ``snapshot`` with the values of
+  secret fields removed, :func:`page_text`), ``browser_click``
   → ``click``, ``browser_type`` → ``type``, ``browser_press`` → ``key``,
   ``browser_scroll`` → ``scroll``, ``browser_back`` → ``back``; any other
   browser tool → ``other`` with the tool name as its target. A click or type
-  names its element by the ref's line in the session's last snapshot
+  names its element by the ref's line in the snapshot of the page now open
   (:func:`element_label`: role and accessible name, never the field's value).
   ``status`` ``ok`` (or no status, as in 0.13.0) is ``dispatched`` /
   ``claimed_success`` unless the result reports an error, ``error`` is
@@ -33,14 +40,32 @@ call is preceded by a ``boundary`` / ``task_start`` holding the turn's message,
 ``actor`` ``human`` for a person's message (:func:`.history.speaks_for_user`
 then counts it as the user's words) and ``agent`` otherwise. A correction joins
 the episode of the call it corrects, as ``user_correction`` / ``human`` /
-``correction``.
+``correction``. The episodes a session recorded are its own work, already in
+its conversation: the history hooks leave them out of their blocks
+(:func:`own_episodes`).
 
 Typed text (:func:`field_kind`): a ref line naming a password (English or
 Japanese), secret, token, card, one-time code or PIN is ``sensitive`` and its
 text is never sent; a missing line, or one naming nothing, is ``other`` and a
-named field ``text``, both kept (owner decision 2026-10-22). The receiver's
-value check still withholds anything that :func:`.contracts.looks_like_secret`.
-A single character pressed with ``browser_press`` is typing too and is not kept.
+named field ``text``, both kept (owner decision 2026-10-22). While the
+snapshot is stale (below) the field is ``sensitive``: its line may describe
+another page. The receiver's value check still withholds anything that
+:func:`.contracts.looks_like_secret`. A single character pressed with
+``browser_press`` is typing too and is not kept.
+
+The open page (:func:`_observe`): a navigate or back result sets its URL (an
+``about:`` page has none; a missing URL or one outside the receiver's host
+rules leaves it unknown) and its snapshot; a successful ``browser_snapshot``
+refreshes the snapshot (and the URL when it reports one). Any call that may
+leave the page (a click, a key press, a type with a line break, console, CDP,
+dialog, any other browser tool; a failed or cancelled call too, except one
+Hermes blocked before it ran) makes the URL unknown and the snapshot stale
+unless its result reports them; in hermes-agent 0.19.0 only the Camofox
+backend's click result carries a URL and none carries a snapshot. A call on a
+page whose URL is unknown is not recorded while any ``excluded_sites`` is
+configured (it could be an excluded host's page; ``source_excluded``, like the
+receiver), and is recorded without a route otherwise. A session starts with
+the URL unknown and no snapshot.
 
 Writes go through the receiver (:class:`.ingest.StoreReceiver`) as the
 in-process principal ``hermes:<profile>`` (producer kind ``hermes``, trust
@@ -52,7 +77,8 @@ and ``history_capture_hermes`` (corrections: ``history_chat_corrections``);
 an invalid ``excluded_sites`` is refused by the receiver as usual.
 
 Failure behavior: neither hook ever raises ``Exception`` or changes the call or
-the turn. Work per call is bounded (one receiver call of one or two events; the
+the turn. Work per call is bounded (one receiver call of one or two events, or
+two calls when ``max_batch_events`` or ``max_batch_bytes`` cannot hold both; the
 snapshot kept for ref lookup is capped at :data:`MAX_SNAPSHOT_CHARS`; at most
 :data:`MAX_SESSIONS` sessions are remembered). A write waits at most
 :data:`WRITE_BUSY_S` for another writer's lock (the extension gateway's
@@ -60,10 +86,6 @@ receiver writes the same store) and is then refused as ``busy`` and dropped. A
 write that takes longer than :data:`SLOW_APPEND_S` counts as slow; after
 :data:`SLOW_APPENDS_TO_SUSPEND` slow writes recording stops for that session
 and ``activity.capture_suspended`` is audited.
-
-Known limit: the page host of a click, type or key is the last one Hermes saw
-(a navigate or back result, or a snapshot that reports its URL); a page that a
-click reached is attributed to the previous host until then.
 """
 
 from __future__ import annotations
@@ -82,8 +104,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
-from urllib.parse import urlsplit
 
+from ._browser_results import PAGE_TEXT_CHARS, element_label, field_kind, page_text, ref_line
+from ._browser_results import json_object as _json_object
+from ._browser_results import page_location as _page
+from ._browser_results import reported_url as _reported_url
+from ._browser_results import text_field as _text_field
 from .contracts import (
     COLLECTOR_SENSITIVE_MARK,
     EXCLUSION_TYPED_TEXT,
@@ -114,11 +140,15 @@ __all__ = [
     "correction_text",
     "element_label",
     "field_kind",
+    "occurrence_id",
+    "own_episodes",
+    "page_text",
     "post_tool_call",
     "pre_llm_call",
     "principal",
     "ref_line",
     "register_hooks",
+    "speaks_as_user",
 ]
 
 _LOG = logging.getLogger(__name__)
@@ -133,39 +163,28 @@ SLOW_APPENDS_TO_SUSPEND: Final = 3
 #: How long a capture write waits for another writer's lock, opening included (the bound of Hermes-side reads,
 #: :data:`.history.READ_BUSY_MS`).
 WRITE_BUSY_S: Final = 0.25
-#: Characters of a navigation's snapshot stored as its page text (:data:`.contracts.MAX_PAGE_TEXT_CHARS`).
-PAGE_TEXT_CHARS: Final = 8000
 #: Characters of the session's last snapshot kept for ref lookup.
 MAX_SNAPSHOT_CHARS: Final = 60_000
 #: Hermes sessions remembered (oldest forgotten first).
 MAX_SESSIONS: Final = 128
-MAX_REF_LINE_CHARS: Final = 400
-MAX_URL_CHARS: Final = 4096
-#: Results larger than this are not parsed (:data:`.hooks_history.MAX_RESULT_CHARS`).
-MAX_RESULT_CHARS: Final = 1_000_000
-#: Hermes platforms whose "user message" is not a person's words.
-NON_HUMAN_PLATFORMS: Final = frozenset({"subagent", "cron"})
+#: Episodes remembered per session as its own (:func:`own_episodes`).
+MAX_OWN_EPISODES: Final = 64
+#: Characters of the ``tool_call_id`` part of an attempt id (:func:`occurrence_id` adds ``-`` and 12 hex).
+_ATTEMPT_PREFIX_CHARS: Final = 51
+#: What a batch envelope adds to its events' size (generous: the receiver measures its canonical form).
+_BATCH_OVERHEAD: Final = 512
+#: Browser tools that never leave the open page (a ``browser_type`` whose text has a line break may submit a form).
+_STAYS_ON_PAGE: Final = frozenset({"browser_type", "browser_scroll", "browser_vision", "browser_get_images"})
+#: Browser tools whose successful result's ``url`` and ``snapshot`` describe the page open after the call.
+_REPORTS_PAGE: Final = frozenset(
+    {"browser_navigate", "browser_back", "browser_click", "browser_press", "browser_snapshot"}
+)
 #: ``correct: …`` / ``訂正: …`` (also with a full-width colon; the operator's convention, ``mordred/app.py``),
 #: any case.
 CORRECTION_RE: Final = re.compile(r"^\s*(?:訂正\s*[:\uff1a]|correct\s*:)\s*(.*)$", re.IGNORECASE | re.DOTALL)
-#: A ref line naming a secret field: password (also German ``Passwort``), passcode, passphrase, passkey, PIN,
-#: one-time code, OTP, 2FA/MFA, secret, token, card, card security code, verification or authentication code,
-#: and the Japanese words for these.
-_SENSITIVE_FIELD_RE: Final = re.compile(
-    r"(?i)pass(?:w|code|phrase|key)|(?<![a-z])(?:pwd|otp|pin|cvc|cvv|csc|2fa|mfa)(?![a-z])"
-    r"|(?<![a-z])(?:secret|token|card)|one[\s_-]?time|security[\s_-]?code|verification[\s_-]?code"
-    r"|auth(?:entication|orization)?[\s_-]?code"
-    r"|パスワード|暗証番号|パスコード|ワンタイム|認証コード|確認コード|セキュリティコード|カード|秘密|トークン"
-)
-#: A tool's ``ref`` argument (``@e5`` or ``e5``).
-_REF_TOKEN_RE: Final = re.compile(r"@?([A-Za-z][A-Za-z0-9_-]{0,31})")
-#: An accessibility line's role and quoted accessible name (``- textbox "Email" [ref=e3]: value``).
-_NAMED_LINE_RE: Final = re.compile(r'^[\s*-]*(?P<role>[A-Za-z][\w-]{0,40})\s+"(?P<name>(?:[^"\\\n]|\\.){1,300})"')
-_ANNOTATION_RE: Final = re.compile(r"\[[^\]\n]{0,200}\]")
-#: The receiver's identifier rules (``contracts._ID_RE`` / ``contracts._REF_RE`` / ``contracts._HOST_RE``).
+#: The receiver's identifier rules (``contracts._ID_RE`` / ``contracts._REF_RE``).
 _ID_RE: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}")
 _SESSION_REF_RE: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
-_HOST_RE: Final = re.compile(r"[a-z0-9.:-]{1,253}")
 _PROFILE_RE: Final = re.compile(r"[^A-Za-z0-9_.-]")
 #: Below this raw size an event is sent as is; above, it is fitted to the receiver's per-event limit first.
 _FIT_MARGIN: Final = 2048
@@ -193,23 +212,40 @@ class _Session:
     turn_at: float = 0.0
     message: str | None = None
     message_cut: bool = False
-    human: bool = True
+    #: The turn's message is the user's own words (:func:`speaks_as_user`).
+    human: bool = False
     episode: str | None = None
     episode_turn: str | None = None
     task_recorded: bool = False
     #: The last browser call that was recorded: what a chat correction refers to.
     last: _Attempt | None = None
+    #: The open page's URL (``None`` for an ``about:`` page) when ``page_known``; unknown after a call that may
+    #: have left the page without reporting where it is.
     page_url: str | None = None
+    page_known: bool = False
+    #: The open page's snapshot (refs point into it); ``snapshot_stale`` when the page may have changed since the
+    #: last one, which is then dropped.
     snapshot: str | None = None
+    snapshot_stale: bool = False
+    #: The episodes this session recorded into (newest last; :func:`own_episodes`).
+    episodes: collections.deque[str] = field(default_factory=lambda: collections.deque(maxlen=MAX_OWN_EPISODES))
     slow: int = 0
     suspended: bool = False
 
 
+#: A session's state key: the profile home's real path and Hermes's session (:func:`._history_access.session_key`).
+_Key = tuple[str, str]
 _sessions_lock = threading.Lock()
-_sessions: collections.OrderedDict[str, _Session] = collections.OrderedDict()
+_sessions: collections.OrderedDict[_Key, _Session] = collections.OrderedDict()
 
 
-def _session(key: str) -> _Session:
+def _state_key(home: Path, session_id: Any, task_id: Any) -> _Key:
+    from . import _history_access as access
+
+    return os.path.realpath(home), access.session_key(session_id, task_id)
+
+
+def _session(key: _Key) -> _Session:
     with _sessions_lock:
         state = _sessions.get(key)
         if state is None:
@@ -218,6 +254,17 @@ def _session(key: str) -> _Session:
         while len(_sessions) > MAX_SESSIONS:
             _sessions.popitem(last=False)
         return state
+
+
+def own_episodes(home: Path, session_id: Any = None, task_id: Any = None) -> frozenset[str]:
+    """The episodes this Hermes session of ``home`` recorded (at most :data:`MAX_OWN_EPISODES`): its own work,
+    which the history hooks never show back to it. Never creates a session's state."""
+    with _sessions_lock:
+        state = _sessions.get(_state_key(home, session_id, task_id))
+    if state is None:
+        return frozenset()
+    with state.lock:
+        return frozenset(state.episodes)
 
 
 # --------------------------------------------------------------------------- #
@@ -279,24 +326,15 @@ def attempt_id(tool_call_id: Any) -> str:
     return "tc-" + hashlib.sha256(tool_call_id.encode("utf-8", "replace")).hexdigest()[:32]
 
 
+def occurrence_id(base: str) -> str:
+    """An attempt id for one call: ``base`` (:func:`attempt_id`, cut to fit) and ``-`` with 12 random hex, so a
+    ``tool_call_id`` a provider repeats never makes two calls (or a correction) share an attempt."""
+    return f"{base[:_ATTEMPT_PREFIX_CHARS]}-{uuid.uuid4().hex[:12]}"
+
+
 def _ref(value: Any) -> str | None:
     """A Hermes session or turn id as the receiver accepts it, else ``None`` (never a made-up id)."""
     return value if isinstance(value, str) and _SESSION_REF_RE.fullmatch(value) else None
-
-
-def _url(value: Any) -> str | None:
-    """An ``http(s)`` URL with an ASCII host, else ``None`` (``about:blank``, ``file:``, ``chrome:`` pages)."""
-    if not isinstance(value, str) or not value.strip() or len(value) > MAX_URL_CHARS:
-        return None
-    text = value.strip()
-    try:
-        parts = urlsplit(text)
-        host = parts.hostname
-    except ValueError:
-        return None
-    if parts.scheme.lower() not in ("http", "https") or not host or not _HOST_RE.fullmatch(host):
-        return None
-    return text
 
 
 def correction_text(message: Any) -> str | None:
@@ -306,83 +344,6 @@ def correction_text(message: Any) -> str | None:
     match = CORRECTION_RE.match(message)
     body = match.group(1).strip() if match else ""
     return body[:MAX_TEXT_CHARS] or None
-
-
-def _line_at(snapshot: str, start: int, end: int) -> str:
-    first = snapshot.rfind("\n", 0, start) + 1
-    last = snapshot.find("\n", end)
-    return snapshot[first : len(snapshot) if last == -1 else last].strip()[:MAX_REF_LINE_CHARS]
-
-
-def _ref_position(snapshot: str, token: str) -> tuple[int, int] | None:
-    """Where ``ref=<token>`` (agent-browser) or ``[<token>]`` stands, not as a prefix of a longer ref."""
-    for needle in (f"ref={token}", f"[{token}]"):
-        start = 0
-        while (pos := snapshot.find(needle, start)) != -1:
-            end = pos + len(needle)
-            if needle.startswith("[") or not (_continues(snapshot, end) or _continues(snapshot, pos - 1)):
-                return pos, end
-            start = end
-    return None
-
-
-def _continues(text: str, index: int) -> bool:
-    """``text[index]`` would make a ``ref=…`` match part of a longer word (``xref=e4``, ``ref=e40``)."""
-    return 0 <= index < len(text) and (text[index].isalnum() or text[index] in "_-")
-
-
-def ref_line(snapshot: str | None, ref: Any) -> str | None:
-    """The snapshot line of element ``ref`` (``@e5`` / ``e5``), stripped and bounded; ``None`` when absent."""
-    if not snapshot or not isinstance(ref, str):
-        return None
-    match = _REF_TOKEN_RE.fullmatch(ref.strip())
-    if match is None:
-        return None
-    found = _ref_position(snapshot, match.group(1))
-    return None if found is None else _line_at(snapshot, *found) or None
-
-
-def _label_parts(line: str) -> tuple[str, bool]:
-    """``(label, names something)``: role and quoted name, else the line before its value without annotations."""
-    named = _NAMED_LINE_RE.match(line)
-    if named is not None:
-        return f'{named.group("role")} "{named.group("name")}"', True
-    head = " ".join(_ANNOTATION_RE.sub(" ", line).split(":", 1)[0].split()).strip(" *-")
-    words = [word for word in head.split() if any(char.isalnum() for char in word)]
-    return head, len(words) > 1
-
-
-def element_label(line: str | None) -> str | None:
-    """How an event names an element: its role and accessible name (``textbox "Email"``), never its value."""
-    if not line:
-        return None
-    label = _label_parts(line)[0]
-    return label[:MAX_TARGET_CHARS] or None
-
-
-def field_kind(line: str | None) -> str:
-    """``sensitive`` when the ref line names a secret field, ``other`` when it is missing or names nothing,
-    else ``text``."""
-    if not line:
-        return "other"
-    if _SENSITIVE_FIELD_RE.search(line):
-        return SENSITIVE_FIELD_KIND
-    return "text" if _label_parts(line)[1] else "other"
-
-
-def _json_object(result: Any) -> dict[str, Any] | None:
-    if not isinstance(result, str) or len(result) > MAX_RESULT_CHARS:
-        return None
-    try:
-        payload = json.loads(result)
-    except ValueError:
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _text_field(payload: Mapping[str, Any] | None, key: str) -> str | None:
-    value = payload.get(key) if payload is not None else None
-    return value if isinstance(value, str) and value else None
 
 
 # --------------------------------------------------------------------------- #
@@ -413,31 +374,42 @@ class _Mapped:
     page_title: str | None = None
     page_text: str | None = None
     exclusions: tuple[str, ...] = ()
+    #: Whether ``route`` is the page's (``None`` for an ``about:`` page) or the page is unknown.
+    page_known: bool = True
 
 
 def _navigate(call: _Call, state: _Session) -> _Mapped:
     del state
     if not call.succeeded:  # nothing opened: the URL that was asked for, no page fields
-        return _Mapped("navigate", route=_url(call.args.get("url")))
+        known, route = _page(call.args.get("url"))
+        return _Mapped("navigate", route=route, page_known=known)
+    known, route = _page(_reported_url(call.payload))
     snapshot = _text_field(call.payload, "snapshot")
     return _Mapped(
         "navigate",
-        route=_url(_text_field(call.payload, "url")) or _url(call.args.get("url")),
+        route=route,
+        page_known=known,
         page_title=_text_field(call.payload, "title"),
-        page_text=snapshot[:PAGE_TEXT_CHARS] if snapshot else None,
+        page_text=page_text(snapshot) if snapshot else None,
     )
 
 
+def _on_page(op: str, state: _Session, **fields: Any) -> _Mapped:
+    """An event on the open page: its URL, or none while the page is unknown."""
+    return _Mapped(op, route=state.page_url if state.page_known else None, page_known=state.page_known, **fields)
+
+
 def _click(call: _Call, state: _Session) -> _Mapped:
-    return _Mapped("click", route=state.page_url, target=element_label(ref_line(state.snapshot, call.args.get("ref"))))
+    return _on_page("click", state, target=element_label(ref_line(state.snapshot, call.args.get("ref"))))
 
 
 def _type(call: _Call, state: _Session) -> _Mapped:
     line = ref_line(state.snapshot, call.args.get("ref"))
-    kind = field_kind(line)
+    # A stale snapshot's line may describe another page's field: treated as a secret one.
+    kind = SENSITIVE_FIELD_KIND if state.snapshot_stale else field_kind(line)
     typed = call.args.get("text")
     typed = typed if isinstance(typed, str) and typed else None
-    base = _Mapped("type", route=state.page_url, target=element_label(line), args={"field_kind": kind})
+    base = _on_page("type", state, target=element_label(line), args={"field_kind": kind})
     if kind != SENSITIVE_FIELD_KIND:
         return replace(base, text=typed)
     # What is typed into a secret field never leaves this function.
@@ -448,25 +420,35 @@ def _type(call: _Call, state: _Session) -> _Mapped:
 def _press(call: _Call, state: _Session) -> _Mapped:
     key = call.args.get("key")
     if isinstance(key, str) and 1 < len(key) <= 32:  # Enter, Tab, Control+a: named keys are kept
-        return _Mapped("key", route=state.page_url, args={"keys": [key]})
+        return _on_page("key", state, args={"keys": [key]})
     # A single character pressed is typing into a field Hermes cannot classify here.
     marks = (EXCLUSION_TYPED_TEXT,) if isinstance(key, str) and key else ()
-    return _Mapped("key", route=state.page_url, exclusions=marks)
+    return _on_page("key", state, exclusions=marks)
 
 
 def _scroll(call: _Call, state: _Session) -> _Mapped:
     direction = call.args.get("direction")
     args = {"direction": direction} if isinstance(direction, str) and 0 < len(direction) <= 16 else {}
-    return _Mapped("scroll", route=state.page_url, args=args)
+    return _on_page("scroll", state, args=args)
 
 
 def _back(call: _Call, state: _Session) -> _Mapped:
-    landed = _url(_text_field(call.payload, "url")) if call.succeeded else None
-    return _Mapped("back", route=landed or state.page_url)
+    if not call.succeeded:  # the page it was called on
+        return _on_page("back", state)
+    known, route = _page(_reported_url(call.payload))
+    return _Mapped("back", route=route, page_known=known)
+
+
+def _snapshot(call: _Call, state: _Session) -> _Mapped:
+    reported = _reported_url(call.payload) if call.succeeded else None
+    if reported is None:
+        return _other(call, state)
+    known, route = _page(reported)  # the page it read (a snapshot never navigates)
+    return _Mapped("other", route=route, page_known=known, target=call.tool[:MAX_TARGET_CHARS])
 
 
 def _other(call: _Call, state: _Session) -> _Mapped:
-    return _Mapped("other", route=state.page_url, target=call.tool[:MAX_TARGET_CHARS])
+    return _on_page("other", state, target=call.tool[:MAX_TARGET_CHARS])
 
 
 _MAPPERS: Final[Mapping[str, Callable[[_Call, _Session], _Mapped]]] = {
@@ -476,6 +458,7 @@ _MAPPERS: Final[Mapping[str, Callable[[_Call, _Session], _Mapped]]] = {
     "browser_press": _press,
     "browser_scroll": _scroll,
     "browser_back": _back,
+    "browser_snapshot": _snapshot,
 }
 
 
@@ -490,24 +473,32 @@ def _outcome(call: _Call) -> tuple[str, str, str | None]:
     return "dispatched", "claimed_failure" if failed else "claimed_success", None
 
 
+def _stays_on_page(call: _Call) -> bool:
+    """The call cannot have left the open page: Hermes blocked it before it ran, or the tool never navigates."""
+    if call.status == "blocked":
+        return True
+    if call.tool not in _STAYS_ON_PAGE:
+        return False
+    text = call.args.get("text") if call.tool == "browser_type" else None
+    return not (isinstance(text, str) and ("\n" in text or "\r" in text))
+
+
 def _observe(call: _Call, state: _Session) -> None:
-    """What the call tells about the page now open: its URL and the snapshot refs point into."""
-    if not call.succeeded or call.payload is None:
+    """What the call tells about the page open after it: its URL and the snapshot refs point into (module
+    docstring, "The open page")."""
+    if _stays_on_page(call):
         return
-    if call.tool in ("browser_navigate", "browser_snapshot"):
-        snapshot = _text_field(call.payload, "snapshot")
-        state.snapshot = snapshot[:MAX_SNAPSHOT_CHARS] if snapshot else None
-    elif call.tool == "browser_back":
-        state.snapshot = None  # the previous page's refs are gone
-    url = _url(call.payload.get("url")) or _frame_url(call.payload)
-    if url and call.tool in ("browser_navigate", "browser_snapshot", "browser_back"):
-        state.page_url = url
-
-
-def _frame_url(payload: Mapping[str, Any]) -> str | None:
-    frames = payload.get("frame_tree")
-    top = frames.get("top") if isinstance(frames, dict) else None
-    return _url(top.get("url")) if isinstance(top, dict) else None
+    payload = call.payload if call.succeeded and call.tool in _REPORTS_PAGE else None
+    reported = _reported_url(payload)
+    snapshot = _text_field(payload, "snapshot")
+    if call.tool == "browser_snapshot" and payload is not None:
+        # The same page read again: a fresh snapshot, and its URL only when the result reports one.
+        state.snapshot, state.snapshot_stale = (snapshot[:MAX_SNAPSHOT_CHARS] if snapshot else None), False
+        if reported is not None:
+            state.page_known, state.page_url = _page(reported)
+        return
+    state.page_known, state.page_url = _page(reported)
+    state.snapshot, state.snapshot_stale = (snapshot[:MAX_SNAPSHOT_CHARS], False) if snapshot else (None, True)
 
 
 def _envelope(episode: str, refs: Mapping[str, str | None], *, phase: str, at: float) -> dict[str, Any]:
@@ -609,13 +600,37 @@ def _fit(event: dict[str, Any], limit: int) -> dict[str, Any]:
     return event
 
 
-def _submit(home: Path, config: ActivityConfig, events: list[dict[str, Any]]) -> bool:
+def _batches(config: ActivityConfig, events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """``events`` in order, in as few batches as ``max_batch_events`` and ``max_batch_bytes`` hold."""
+    batches: list[list[dict[str, Any]]] = []
+    size = 0
+    for event in events:
+        grows = _raw_size(event) + 1
+        fits = size + grows + _BATCH_OVERHEAD <= config.max_batch_bytes
+        if batches and len(batches[-1]) < config.max_batch_events and fits:
+            batches[-1].append(event)
+            size += grows
+        else:
+            batches.append([event])
+            size = grows
+    return batches
+
+
+def _acceptable(config: ActivityConfig, events: list[dict[str, Any]]) -> bool:
+    """Every event passes the receiver's contract (excluded sites and size included)."""
+    try:
+        for event in events:
+            normalize_event(event, excluded_sites=config.excluded_sites, max_event_bytes=config.max_event_bytes)
+    except ContractError:
+        return False
+    return True
+
+
+def _submit(home: Path, events: list[dict[str, Any]]) -> bool:
     """One batch through the receiver; ``True`` when it was acknowledged."""
     from . import _history_access as access
     from .ingest import StoreReceiver
 
-    if config.collection_refusal is None:
-        events = [_fit(event, config.max_event_bytes) for event in events]
     batch = {
         "schema_version": SCHEMA_VERSION,
         "producer_id": _PRODUCER_ID,
@@ -630,14 +645,28 @@ def _submit(home: Path, config: ActivityConfig, events: list[dict[str, Any]]) ->
     return True
 
 
-def _write(state: _Session, home: Path, config: ActivityConfig, events: list[dict[str, Any]]) -> bool:
-    """Submit and time one write; slow writes count towards suspending the session. Never raises."""
+def _write(state: _Session, home: Path, config: ActivityConfig, events: list[dict[str, Any]]) -> int:
+    """Submit ``events`` in order and time it; how many were acknowledged (a refused batch stops the rest).
+
+    The events go as one batch unless the configured limits cannot hold them; then each batch goes alone, and
+    only when the receiver would accept every event, so a task start is never stored without its call. Slow
+    writes count towards suspending the session. Never raises."""
     started = time.monotonic()
     try:
-        return _submit(home, config, events)
+        if config.collection_refusal is None:
+            events = [_fit(event, config.max_event_bytes) for event in events]
+        batches = _batches(config, events)
+        if len(batches) > 1 and not _acceptable(config, events):
+            return 0
+        done = 0
+        for batch in batches:
+            if not _submit(home, batch):
+                break
+            done += len(batch)
+        return done
     except Exception as exc:  # recording must never break the call or the turn
         _LOG.debug("mordred activity capture: write failed (%s)", type(exc).__name__)
-        return False
+        return 0
     finally:
         _note_duration(state, home, time.monotonic() - started)
 
@@ -686,7 +715,7 @@ def _record_call(
     config = access.config(home)
     if not _capturing(config):
         return
-    state = _session(access.session_key(session_id, task_id))
+    state = _session(_state_key(home, session_id, task_id))
     with state.lock:
         if state.suspended:
             return
@@ -695,18 +724,30 @@ def _record_call(
             args if isinstance(args, Mapping) else {},
             _json_object(result),
             status if isinstance(status, str) else None,
-            attempt_id(tool_call_id),
+            occurrence_id(attempt_id(tool_call_id)),
         )
         turn, turn_ref = _turn_of(state, turn_id)
         episode, pending = _episode_for(state, turn)
         refs = _refs(session_id, turn_ref)
         mapped = _MAPPERS.get(tool_name, _other)(call, state)
+        _observe(call, state)
+        if _unplaced(config, mapped):
+            _LOG.debug("mordred activity capture: call dropped (source_excluded: the page is unknown)")
+            return
         events = [_task_start(state, episode, refs)] if pending else []
         events.append(_call_event(call, mapped, episode, refs))
-        _observe(call, state)
-        if _write(state, home, config, events):
-            state.task_recorded = state.task_recorded or pending
+        done = _write(state, home, config, events)
+        if done and episode not in state.episodes:
+            state.episodes.append(episode)
+        state.task_recorded = state.task_recorded or (pending and done > 0)
+        if done == len(events):
             state.last = _Attempt(call.attempt_id, episode, mapped.route)
+
+
+def _unplaced(config: ActivityConfig, mapped: _Mapped) -> bool:
+    """A call on an unknown page while sites are excluded: it could be an excluded host's, so nothing is sent
+    (the task start waits for the next call). A refused collection still goes to the receiver, which audits it."""
+    return not mapped.page_known and bool(config.excluded_sites) and config.collection_refusal is None
 
 
 def post_tool_call(
@@ -730,15 +771,21 @@ def post_tool_call(
         _LOG.debug("mordred activity capture: call skipped (%s)", type(exc).__name__)
 
 
-def _begin_turn(state: _Session, user_message: Any, turn_id: Any, platform: Any) -> None:
+def _begin_turn(state: _Session, user_message: Any, turn_id: Any, human: bool) -> None:
     hermes_turn = turn_id if isinstance(turn_id, str) and turn_id else None
     state.turn = hermes_turn or f"local-{next(_LOCAL_TURNS)}"
     state.turn_ref = _ref(hermes_turn)
     state.turn_at = time.time()
-    state.human = not (isinstance(platform, str) and platform in NON_HUMAN_PLATFORMS)
+    state.human = human
     text = user_message.strip() if isinstance(user_message, str) else ""
     state.message = text[:MAX_TEXT_CHARS] or None
     state.message_cut = len(text) > MAX_TEXT_CHARS
+
+
+def speaks_as_user(config: ActivityConfig, platform: Any) -> bool:
+    """Whether a turn's message is the user's own words: its ``platform`` is one of
+    ``history_human_platforms``; a missing or unknown platform never is."""
+    return isinstance(platform, str) and platform.strip().lower() in config.history_human_platforms
 
 
 def _record_turn(user_message: Any, session_id: Any, task_id: Any, turn_id: Any, platform: Any) -> None:
@@ -748,9 +795,9 @@ def _record_turn(user_message: Any, session_id: Any, task_id: Any, turn_id: Any,
     config = access.config(home)
     if not (_capturing(config) or _correcting(config)):
         return
-    state = _session(access.session_key(session_id, task_id))
+    state = _session(_state_key(home, session_id, task_id))
     with state.lock:
-        _begin_turn(state, user_message, turn_id, platform)
+        _begin_turn(state, user_message, turn_id, speaks_as_user(config, platform))
         body = correction_text(user_message) if _correcting(config) and state.human else None
         if body is None or state.last is None or state.suspended:
             return

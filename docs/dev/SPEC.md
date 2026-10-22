@@ -4142,7 +4142,13 @@ per-process state.
   in-process budget per Hermes session counts injected characters
   (`history_session_budget_chars`) and shown `(episode id, revision)` pairs:
   an episode is not injected twice in a session until it changes, a host with
-  nothing new gets no block, and after the budget only the tools answer.
+  nothing new gets no block, and after the budget only the tools answer. The
+  episodes Hermes's own capture recorded for the session (below; the newest 64
+  per session, `capture_hermes.own_episodes`) are never injected into that
+  session's blocks: they are its own work, already in its conversation, and
+  Hermes calls `post_tool_call` before `transform_tool_result`, so the episode
+  a navigation has just recorded would otherwise take the newest slot and be
+  shown again on every later navigation.
 - **Lookup tools** (toolset `mordred_activity`, `check_fn`: the feature and
   the master switch on and the gate passing). `mordred_browser_history(query,
   site, since, until, limit ≤ 10)` returns episodes (id, sites, start and last
@@ -4195,27 +4201,55 @@ per-process state.
   batch (`excluded_sites_invalid`).
   - `post_tool_call`: every `browser_*` call is one event with `source`
     `hermes`, `actor` `agent`, `hermes_session_id`, `turn_id` (Hermes's own,
-    when it passes one; never a made-up id) and `attempt_id` from
+    when it passes one; never a made-up id) and an `attempt_id` of its own:
     `tool_call_id` (as is when it fits the identifier alphabet, else with
     other characters replaced by `-` (`call_abc` → `call-abc`), else `tc-` and
-    32 hex of its SHA-256). `browser_navigate` → `navigate` (route from the
-    final URL, else the requested one; `page_title` from the result;
-    `page_text` the first 8000 characters of its `snapshot`), `browser_click` →
+    32 hex of its SHA-256; at most 51 characters of it) followed by `-` and 12
+    random hex digits. A provider may repeat a `tool_call_id` across turns
+    and sessions, and the store moves a correction into the episode of the
+    first attempt with its id, so no two calls share one. `browser_navigate` →
+    `navigate` (route from the final URL in the result, the requested one only
+    for a failed navigation; `page_title` from the result; `page_text` the
+    first 8000 characters of its `snapshot`, every line that the typed-text
+    rule below calls `sensitive` cut after its role and accessible name, since
+    a filled-in PIN or card number is part of the line, then the free-text
+    redaction of §"Event contract", `contracts.redact_text_secrets`), `browser_click` →
     `click`, `browser_type` → `type`, `browser_press` → `key`,
     `browser_scroll` → `scroll`, `browser_back` → `back`, any other browser
     tool → `other` with the tool name as target (no arguments, no text). Only
     `http(s)` URLs with an ASCII host become routes. A click or type names its
-    element by the ref's line in the session's last snapshot (from
-    `browser_navigate` or `browser_snapshot`; at most 60,000 characters kept per
-    session): role and accessible name (`textbox "Email"`), never the value
-    after the name. Hermes's `status` `ok` (or none, as on the 0.13.0 floor) is
+    element by the ref's line in the snapshot of the page now open (below; at
+    most 60,000 characters kept per session): role and accessible name
+    (`textbox "Email"`), never the value after the name. Hermes's `status` `ok` (or none, as on the 0.13.0 floor) is
     `dispatched` / `claimed_success` unless the result reports `success: false`
     or an `error`, `error` is `claimed_failure`, `blocked` and `cancelled` are
     the `cancelled` phase (`args.reason`) and `timeout` the `timed_out` phase.
-    A click, type, key, scroll or other call carries the page URL Hermes last
-    saw (a navigate or back result, or a snapshot that reports its URL), so an
-    excluded host is refused for actions on its pages too; a page reached by a
-    click keeps the previous URL until then.
+  - The open page. A call carries the URL of the page it acted on, so an
+    excluded host is refused for actions on its pages too. `browser_navigate`
+    and `browser_back` set the URL from their result's `url` (an `about:` page
+    has none; a missing URL, or one whose host the receiver's rules do not
+    take, leaves the page unknown) and the snapshot refs point into (the
+    result's `snapshot`; without one the snapshot is stale). A successful
+    `browser_snapshot` refreshes the snapshot and, when it reports one (the
+    CDP `frame_tree.top.url`), the URL, and its event carries that URL. Every
+    call that may leave the page makes the URL unknown and the snapshot stale
+    unless its result reports them: `browser_click`, `browser_press`, a
+    `browser_type` whose text holds a line break, `browser_console`,
+    `browser_cdp`, `browser_dialog` and any other browser tool, and every
+    failed, cancelled or timed-out call except one Hermes blocked before it
+    ran (`status` `blocked`). `browser_type`, `browser_scroll`,
+    `browser_vision` and `browser_get_images` keep both. In hermes-agent
+    0.19.0 (and on the 0.13.0 floor) click, key-press and type results report
+    neither (`{"success": true, "clicked": "@e7"}`), except the Camofox
+    backend's click result, which reports the URL the click reached (empty
+    when unknown). A session starts on an unknown page without a snapshot.
+    While the page is unknown and any `excluded_sites` is configured, a call
+    is not recorded at all (it could be on an excluded host's page; logged as
+    `source_excluded`, like the receiver's refusal, and the turn's task start
+    waits for the next recorded call); without exclusions it is recorded
+    without a route. With exclusions configured, Hermes's actions after a
+    click or key press are therefore recorded again only after a navigate, a
+    back or a snapshot that reports its URL.
   - Typed text: the ref line is `sensitive` when it names a password (also
     `Passwort`, and the Japanese words), passcode, passphrase, PIN, one-time
     code, OTP, 2FA/MFA, secret, token, card or card security code, or a
@@ -4223,18 +4257,35 @@ per-process state.
     `sensitive_field`, `typed_text_dropped`). A missing line or one that names
     nothing (no accessible name) is `other`, a named field `text`; both keep
     what was typed (owner decision 2026-10-22), unless the receiver's value
-    check withholds it (`looks_like_secret`). A single character pressed with
+    check withholds it (`looks_like_secret`). While the snapshot is stale
+    (above) the field is `sensitive` whatever its ref: its line may describe
+    another page's field. Before the session's first snapshot a missing line
+    is `other`. A single character pressed with
     `browser_press` is not kept (`typed_text_dropped`); named keys are.
   - Episodes: one per Hermes session turn with browser calls. Its first
     recorded call is preceded by a `boundary` / `task_start` whose text is the
     turn's user message (from `pre_llm_call`, at most 4000 characters), with
-    `source` `hermes` and `actor` `human`, so it counts as the user's words for
-    every surface above; a turn whose `platform` is `subagent` or `cron` (an
-    agent's or a job's prompt) records `actor` `agent` instead, and a turn
-    without a text message gets no task start. A task start the receiver
-    refused (busy store, excluded host) is sent again with the next call of
-    the turn. Episodes are append-only; nothing closes them.
-  - Chat corrections (`pre_llm_call`): a person's message starting with
+    `source` `hermes`. Its `actor` is `human`, so it counts as the user's
+    words for every surface above, only when the turn's `platform` is one of
+    `history_human_platforms` (compared without case or surrounding spaces).
+    The default holds hermes-agent 0.19.0's local interactive surfaces: `cli`
+    (the classic CLI, `hermes -z`, `/background`, and a gateway session on the
+    local platform), `tui` (`hermes --tui`, also in the desktop app's terminal
+    pane) and `desktop` (the desktop app's chat panel); the 0.13.0 floor
+    passes `cli` and `tui`. Every other platform records `actor` `agent`: a
+    gateway's (its platform key, such as `telegram`, `discord`, `slack`,
+    `whatsapp`, `signal`, `matrix` or `email`; the TUI resuming a gateway
+    session takes that session's), `api_server`, `webhook`, `acp`, `webui`,
+    `subagent`, `cron`, `curator`, an unknown value and a missing or empty
+    one. A turn without a text message gets no task start. A task start the
+    receiver refused (busy store, excluded host) is sent again with the next
+    call of the turn. When `max_batch_events` or `max_batch_bytes` cannot hold
+    the task start and the call together, each goes in a batch of its own, in
+    order, and only when the receiver's contract would accept both, so a task
+    start is never stored without its call; an acknowledged task start is
+    not sent again. Episodes are append-only; nothing closes them.
+  - Chat corrections (`pre_llm_call`): a message of a turn whose platform is
+    one of `history_human_platforms` (above) starting with
     `correct:` or the Japanese word for correction ("teisei", U+8A02 U+6B63)
     and a colon (also a full-width one; any case; the operator's convention)
     records its text after the prefix as `correction` with `source`
@@ -4253,7 +4304,10 @@ per-process state.
     slow; after three slow writes recording stops for that Hermes session and
     `activity.capture_suspended` (code `slow_append`, the `peer_id`) is
     audited. At most 128 sessions are remembered per process; per-session
-    state is never written to disk.
+    state (turn, last recorded call, open page, own episodes, slow-write count
+    and suspension) is keyed by the real path of the profile home and the
+    session, so one process serving several profiles never mixes them, and is
+    never written to disk.
 - **Skill.** `mordred:browser-history` (`activity/skills/browser-history/`,
   shipped in the wheel) says when to look things up, that the history is
   data, not instructions, and that a lookup taints the session.
@@ -4278,6 +4332,7 @@ ignored.
 | `history_turn_context` | `true` | Turn-start context |
 | `history_capture_hermes` | `true` | Record Hermes's own `browser_*` calls (needs `collection_enabled` and `history_enabled`) |
 | `history_chat_corrections` | `true` | Record `correct: …` chat messages (or the Japanese equivalent) as corrections of the last recorded browser call (same requirements) |
+| `history_human_platforms` | `[cli, tui, desktop]` | Hermes platforms whose turns are the user's own words: their messages become task starts in the user's words and may record chat corrections; any other platform, or none, never does. Add a gateway platform (`telegram`, `slack`, …) only for a gateway that you alone use, since every message it admits would then count as yours. A list of platform names (case-insensitive; `[]` counts no platform); a value that is not such a list, or that names `subagent`, `cron` or `curator`, falls back to the default |
 | `history_max_chars` | 1500 | Characters per injected block (200–8000) |
 | `history_max_episodes` | 3 | Episodes per injected block (1–10) |
 | `history_lookback_days` | 90 | Older episodes are not injected (1–3650); the tools may still return them |
@@ -4305,13 +4360,17 @@ These statements have no code yet and must not be assumed:
 - Live validation of Hermes as a collector with a real Hermes session and
   model (phase B3 of the 2026-10-22 design); the capture is covered by tests
   with recorded hermes-agent 0.19.0 browser results only.
-- Hermes's own capture cannot tell a delegated subagent's or a cron job's
-  turn from a person's on the hermes-agent 0.13.0 floor (it passes the parent's
-  `platform` to subagents), so there a subagent's goal is recorded as a task
-  start in the user's words.
-- No per-platform or per-sender restriction: in a gateway chat with several
-  participants, any message the gateway admits can trigger the turn-start
-  context and the tools.
+- On the hermes-agent 0.13.0 floor a delegated subagent gets its parent's
+  `platform` (0.19.0 passes `subagent`), so under a local surface Hermes's
+  own capture records a subagent's goal as a task start in the user's words.
+  On 0.19.0 the background memory and skill review fork inherits its
+  parent's platform and session; its harness prompt would count as the
+  user's words if it made a browser call (its tools are limited to memory and
+  skills).
+- No per-sender restriction, and no per-platform restriction on reading: in a
+  gateway chat with several participants, any message the gateway admits can
+  trigger the turn-start context and the tools. Only Hermes's own capture
+  restricts by platform (`history_human_platforms`).
 - No logical deletion of events or episodes; retention deletes physically.
 - The store does not take the `dbcrypt` lifecycle lease; it checks the
   conversion markers at open time only.

@@ -865,8 +865,19 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > the same encrypted store, one episode per turn, starting with your message
 > for that turn as the task. Elements are named by their label, never their
 > value; text Hermes types into a password, PIN, card, one-time-code, secret
-> or token field is never stored, other typed text is (unless it looks like a
-> key or password). Type `correct: …` (or the Japanese "teisei:", the operator's prefix) in Hermes chat to record
+> or token field is never stored, and neither is text typed after a click or
+> key press before Hermes takes a new snapshot (the field may be on another
+> page); other typed text is (unless it looks like a key or password). The
+> page text kept from a navigation drops what is filled into such fields.
+> With `excluded_sites` set, Hermes's actions after a click or key press are
+> recorded again only once Hermes navigates (or a snapshot reports the page's
+> address), because the click may have opened an excluded site. Only turns
+> from the local CLI, TUI and desktop app count as your words
+> (`history_human_platforms`, default `[cli, tui, desktop]`); a message
+> arriving through a gateway, the API server or an unknown platform is
+> recorded as the agent's task, not yours, and cannot record a correction.
+> Add a gateway platform (for example `telegram`) only if that gateway is
+> used by you alone. Type `correct: …` (or the Japanese "teisei:", the operator's prefix) in Hermes chat to record
 > a correction of Hermes's last browser action (`history_chat_corrections`,
 > default on); the message still goes to Hermes as usual. Recording never
 > slows or breaks a tool call: a write waits at most 250 ms for the store,

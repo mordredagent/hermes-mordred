@@ -583,11 +583,13 @@ def episodes_for_sites(
     shown: frozenset[tuple[str, int]] = frozenset(),
     subdomains: bool = True,
     require_human_text: bool = False,
+    omit: frozenset[str] = frozenset(),
 ) -> Matches:
     """Newest episodes that touched any of ``sites`` (with ``subdomains``, also their subdomains).
 
-    ``shown`` episodes, episodes that touched an excluded host (:func:`_hidden`) and, with
-    ``require_human_text``, episodes without a task start or correction in the user's own words are skipped.
+    ``shown`` episodes, the ``omit`` episode ids (a session's own work), episodes that touched an excluded host
+    (:func:`_hidden`) and, with ``require_human_text``, episodes without a task start or correction in the user's
+    own words are skipped.
     """
     wanted = [site for site in sites if not site_excluded(site, excluded_sites)]
     if not wanted:
@@ -603,6 +605,7 @@ def episodes_for_sites(
                 for s in scan.sites.get(head.episode_id, ())
             )
             and head.key not in shown
+            and head.episode_id not in omit
             and (not require_human_text or head.episode_id in scan.texts)
         ]
         matched = _visible(conn, matched, scan, excluded_sites)
@@ -629,6 +632,7 @@ def episodes_for_terms(
     host_labels: bool = True,
     shown: frozenset[tuple[str, int]] = frozenset(),
     newest_if_none: bool = False,
+    omit: frozenset[str] = frozenset(),
 ) -> Matches:
     """Episodes sharing at least ``min_shared`` terms with ``wanted``, best match first, then newest.
 
@@ -636,8 +640,8 @@ def episodes_for_terms(
     ``host_labels`` adds the labels of their hosts (``github`` of ``github.com``) and ``page_fields`` (lookup
     tools only) page titles, routes and query strings. With ``site`` only episodes on that host count.
     ``newest_if_none`` returns the newest admissible episodes when nothing shares a term (a lookup by site
-    or period whose words match nothing). Episodes that touched an excluded host (:func:`_hidden`) are
-    skipped; only the matching ones are checked.
+    or period whose words match nothing). The ``omit`` episode ids (a session's own work) are skipped, and so
+    are episodes that touched an excluded host (:func:`_hidden`; only the matching ones are checked).
     """
     if site is not None and site_excluded(site, excluded_sites):
         return Matches((), 0)
@@ -647,6 +651,7 @@ def episodes_for_terms(
             head
             for head in scan.heads
             if head.key not in shown
+            and head.episode_id not in omit
             and (site is None or any(site_matches(site, s) for s in scan.sites.get(head.episode_id, ())))
         ]
         scored: list[tuple[int, _Head]] = []

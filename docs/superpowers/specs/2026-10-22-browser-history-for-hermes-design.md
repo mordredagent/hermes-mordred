@@ -134,6 +134,12 @@ surface below calls it and nothing else touches the store for this purpose.
      whose text is the turn's user message (captured at `pre_llm_call`, kept
      in a bounded per-session map); `post_llm_call` is not needed because the
      next turn's first event closes nothing — episodes are append-only.
+     The task start is the user's words only for a turn whose `platform` is
+     in `history_human_platforms` (default the local surfaces `cli`, `tui`,
+     `desktop`; security review 2026-10-22: a gateway, an API client or an
+     unknown platform is not assumed to be the owner). The shipped rules for
+     the open page, stale snapshots, page-text secrets, attempt ids, batch
+     limits and per-profile state are in SPEC.md §"History for Hermes".
    - Corrections in chat: a user message starting with `correct:` or its
      Japanese equivalent (the operator's convention) records a `correction`
      event with `source: user_correction`, `actor: human`, `attempt_id` = the
@@ -192,6 +198,7 @@ surface below calls it and nothing else touches the store for this purpose.
 | `history_turn_context` | `true` | item 2 |
 | `history_capture_hermes` | `true` | item 4 (requires `collection_enabled`) |
 | `history_chat_corrections` | `true` | `correct:` (or its Japanese equivalent) in chat |
+| `history_human_platforms` | `[cli, tui, desktop]` | item 4: Hermes platforms whose turns are the user's own words (task starts in the user's words, chat corrections); any other or a missing platform never is. Add a gateway platform (`telegram`, `slack`, …) only for a single-user gateway (security review 2026-10-22) |
 | `history_max_chars` | 1500 | per injected block |
 | `history_max_episodes` | 3 | per injected block |
 | `history_lookback_days` | 90 | episodes older than this are not injected (tools may still query them) |

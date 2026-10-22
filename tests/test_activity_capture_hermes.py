@@ -6,163 +6,37 @@ import json
 import sqlite3
 import threading
 import time
-import types
 import uuid
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from mordred_hermes.activity import _capture_audit, _gate, _history_access, capture_hermes, history, hooks_history
+from mordred_hermes.activity import _gate, _history_access, capture_hermes, history, hooks_history
 from mordred_hermes.activity._gate import ActivityRefused, refusal
-from mordred_hermes.activity.contracts import NormalizedEvent
 from mordred_hermes.activity.ingest import PeerPrincipal, StoreReceiver
 from mordred_hermes.activity.store import ActivityStore
-from mordred_hermes.privacy_check import _runtime
-from tests._activity_episode_helpers import plain_opener
-from tests._activity_history_helpers import write_config
-
-SITE = "shop.example.com"
-LOGIN_URL = f"https://{SITE}/login?next=%2Faccount"
-MESSAGE = "open my order history on shop.example.com"
-#: An agent-browser accessibility snapshot as ``browser_navigate`` / ``browser_snapshot`` return it.
-SNAPSHOT = "\n".join(
-    [
-        '- heading "Sign in" [ref=e1] [level=1]',
-        '- textbox "Email" [ref=e2]',
-        '- textbox "Password" [ref=e3]',
-        '- textbox "パスワード\uff08確認\uff09" [ref=e4]',
-        "- textbox [ref=e5]",
-        '- textbox "Search orders" [ref=e6]: last month',
-        '- button "Sign in" [ref=e7]',
-        '- link "Forgot your PIN?" [ref=e8]',
-        '- textbox "カード番号" [ref=e9]',
-        '- textbox "One-time code" [ref=e10]',
-        '- textbox "氏名" [ref=e11]',
-    ]
+from tests._activity_capture_helpers import (
+    CAPTURING,
+    LOGIN_URL,
+    MESSAGE,
+    SITE,
+    SNAPSHOT,
+    audit_entries,
+    call,
+    calls,
+    capture_home,
+    events,
+    failed,
+    nav_result,
+    navigate,
+    ok,
+    stored_text,
+    turn,
+    write_config,
 )
-CAPTURING: dict[str, Any] = {"enabled": True, "collection_enabled": True}
-
-
-# --- recorded hermes-agent 0.19.0 browser tool results (tools/browser_tool.py) -------------------------------
-
-
-def nav_result(url: str = LOGIN_URL, *, title: str = "Sign in — Shop", snapshot: str = SNAPSHOT) -> str:
-    return json.dumps(
-        {"success": True, "url": url, "title": title, "snapshot": snapshot, "element_count": 11}, ensure_ascii=False
-    )
-
-
-def ok(**fields: Any) -> str:
-    return json.dumps({"success": True, **fields}, ensure_ascii=False)
-
-
-def failed(error: str) -> str:
-    return json.dumps({"success": False, "error": error}, ensure_ascii=False)
-
-
-# --- fixtures ----------------------------------------------------------------------------------------------
-
-
-@pytest.fixture
-def capture_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Path, ActivityStore]]:
-    """A profile home with a plain-SQLite store behind the capture's store seam and the history reader."""
-    home = tmp_path / "home"
-    home.mkdir()
-    store = ActivityStore(home / "mordred.db", plain_opener, busy_timeout_s=capture_hermes.WRITE_BUSY_S)
-    store.initialize(home)
-    write_config(home, CAPTURING)
-    monkeypatch.setattr(_history_access, "home", lambda: home)
-    monkeypatch.setattr(_history_access, "reader", lambda _home: store)
-    monkeypatch.setattr(_history_access, "_configs", {})
-    monkeypatch.setattr(_history_access, "_retry", {})
-    monkeypatch.setattr(_history_access, "BUDGET", type(_history_access.BUDGET)())
-    monkeypatch.setattr(hooks_history, "_last_hosts", type(hooks_history._last_hosts)())
-    monkeypatch.setattr(capture_hermes, "STORE_FACTORY", lambda _home: store)
-    monkeypatch.setattr(capture_hermes, "_sessions", type(capture_hermes._sessions)())
-    yield home, store
-
-
-@pytest.fixture
-def audit_entries(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    monkeypatch.setattr(_capture_audit, "_EMITTED", set())
-    monkeypatch.setattr(_capture_audit, "_HISTORY_EMITTED", set())
-    monkeypatch.setattr(_capture_audit, "_SUSPENDED", [0])
-    entries: list[dict[str, Any]] = []
-    monkeypatch.setattr(_runtime, "ensure_state", lambda: types.SimpleNamespace(audit=object()))
-    monkeypatch.setattr(
-        _capture_audit, "safe_audit_append", lambda audit, entry, *, logger: entries.append(dict(entry))
-    )
-    return entries
-
 
 pytestmark = pytest.mark.usefixtures(capture_home.__name__, audit_entries.__name__)
-
-
-def turn(message: Any = MESSAGE, *, session: str = "s1", turn_id: str = "s1:t1:aa11", **extra: Any) -> Any:
-    """``pre_llm_call`` with the hermes-agent 0.19.0 payload (``agent/turn_context.py``)."""
-    payload: dict[str, Any] = {
-        "session_id": session,
-        "task_id": "t1",
-        "turn_id": turn_id,
-        "user_message": message,
-        "conversation_history": [],
-        "is_first_turn": True,
-        "model": "m",
-        "platform": "cli",
-        "sender_id": "",
-        "telemetry_schema_version": 1,
-    }
-    payload.update(extra)
-    return capture_hermes.pre_llm_call(**payload)
-
-
-def call(
-    tool: str,
-    args: dict[str, Any] | None = None,
-    result: Any = None,
-    *,
-    session: str = "s1",
-    turn_id: str = "s1:t1:aa11",
-    call_id: str | None = None,
-    status: str | None = "ok",
-) -> Any:
-    """``post_tool_call`` with the hermes-agent 0.19.0 payload (``model_tools._emit_post_tool_call_hook``)."""
-    return capture_hermes.post_tool_call(
-        tool_name=tool,
-        args=args or {},
-        result=result if result is not None else ok(),
-        task_id="t1",
-        session_id=session,
-        tool_call_id=call_id or f"call_{uuid.uuid4().hex[:8]}",
-        turn_id=turn_id,
-        api_request_id="req-1",
-        duration_ms=12,
-        status=status,
-        error_type=None,
-        error_message=None,
-        middleware_trace=[],
-        telemetry_schema_version=1,
-    )
-
-
-def events(store: ActivityStore) -> list[NormalizedEvent]:
-    return [event for record in store.list_episodes(100)[::-1] for event in store.events_for_episode(record.episode_id)]
-
-
-def calls(store: ActivityStore) -> list[NormalizedEvent]:
-    return [event for event in events(store) if event.phase != "boundary"]
-
-
-def stored_text(store: ActivityStore) -> str:
-    with sqlite3.connect(store.path) as conn:
-        rows = conn.execute("SELECT * FROM activity_events").fetchall()
-    return json.dumps(rows, ensure_ascii=False, default=str)
-
-
-def navigate(url: str = LOGIN_URL, **kwargs: Any) -> Any:
-    return call("browser_navigate", {"url": url}, nav_result(url), **kwargs)
 
 
 # --- mapping -----------------------------------------------------------------------------------------------
@@ -186,8 +60,10 @@ def test_navigate_records_the_task_start_then_route_title_and_page_text(capture_
     assert nav.result_status == "claimed_success"
     assert (nav.site, nav.route, nav.query) == (SITE, "/login", "?next=%2Faccount")
     assert nav.page_title == "Sign in — Shop"
-    assert nav.page_text == " ".join(SNAPSHOT.split())
-    assert nav.attempt_id == "call-nav1"  # the tool_call_id, in the receiver's identifier alphabet
+    assert nav.page_text == " ".join(capture_hermes.page_text(SNAPSHOT).split())
+    assert nav.page_text and 'textbox "Search orders" [ref=e6]: last month' in nav.page_text
+    # The tool_call_id in the receiver's identifier alphabet, made unique for this call.
+    assert nav.attempt_id and nav.attempt_id.startswith("call-nav1-") and len(nav.attempt_id) == len("call-nav1-") + 12
     assert nav.episode_id == start.episode_id
     assert (nav.hermes_session_id, nav.turn_id) == ("s1", "s1:t1:aa11")
     [record] = store.list_episodes()
@@ -198,8 +74,8 @@ def test_each_browser_tool_maps_to_its_operation(capture_home) -> None:
     _home, store = capture_home
     turn()
     navigate()
-    call("browser_click", {"ref": "@e7"}, ok(clicked="@e7"))
     call("browser_type", {"ref": "@e2", "text": "alice@example.com"}, ok(typed="alice@example.com", element="@e2"))
+    call("browser_click", {"ref": "@e7"}, ok(clicked="@e7"))
     call("browser_press", {"key": "Enter"}, ok(pressed="Enter"))
     call("browser_scroll", {"direction": "down"}, ok(scrolled="down"))
     call("browser_back", {}, ok(url=f"https://{SITE}/"))
@@ -208,10 +84,11 @@ def test_each_browser_tool_maps_to_its_operation(capture_home) -> None:
     call("web_search", {"query": "not a browser tool"})  # not recorded
 
     recorded = calls(store)
-    assert [event.op for event in recorded] == ["navigate", "click", "type", "key", "scroll", "back", "other", "other"]
+    assert [event.op for event in recorded] == ["navigate", "type", "click", "key", "scroll", "back", "other", "other"]
     assert len({event.episode_id for event in events(store)}) == 1
-    assert all(event.site == SITE for event in recorded)
-    click, typed, key, scroll, back, snapshot, vision = recorded[1:]
+    # A click result carries no URL (agent-browser): the page after it is unknown until the back result.
+    assert [event.site for event in recorded] == [SITE, SITE, SITE, None, None, SITE, SITE, SITE]
+    typed, click, key, scroll, back, snapshot, vision = recorded[1:]
     assert click.target == 'button "Sign in"'
     assert (typed.target, json.loads(typed.args_json), typed.text) == (
         'textbox "Email"',
@@ -494,7 +371,7 @@ def test_a_chat_correction_links_the_last_browser_call(capture_home, message: st
         "other",
         body,
     )
-    assert correction.attempt_id == "call-click" == click.attempt_id
+    assert correction.attempt_id == click.attempt_id and (click.attempt_id or "").startswith("call-click-")
     assert correction.episode_id == click.episode_id
     assert (correction.site, correction.turn_id) == (SITE, "s1:t1:dd44")
     assert history.speaks_for_user(correction.phase, correction.op, correction.source, correction.actor)

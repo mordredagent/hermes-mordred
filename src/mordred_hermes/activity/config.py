@@ -22,6 +22,11 @@ The ``history_*`` keys govern Hermes's use of the stored history
 ``history_capture_hermes`` and ``history_chat_corrections`` switch recording
 Hermes's own browser calls and the user's chat corrections
 (:mod:`.capture_hermes`), which also needs ``collection_enabled``.
+``history_human_platforms`` names the Hermes platforms whose turns are the
+user's own words (task starts in the user's words, chat corrections); it
+defaults to the local interactive surfaces (:data:`DEFAULT_HUMAN_PLATFORMS`).
+A value that is not a list of platform names, or that names one of
+:data:`NEVER_HUMAN_PLATFORMS`, is invalid and falls back to the default.
 """
 
 from __future__ import annotations
@@ -44,6 +49,16 @@ HISTORY_MAX_EPISODES: Final = 3
 HISTORY_LOOKBACK_DAYS: Final = 90
 HISTORY_SESSION_BUDGET_CHARS: Final = 8000
 HISTORY_MAX_TOOL_BYTES: Final = 4096
+#: Hermes platforms (the ``platform`` of ``pre_llm_call``) whose turns are the user's own words by default: the
+#: local interactive surfaces. ``cli`` is the classic CLI, ``hermes -z``, ``/background`` and a gateway session on
+#: the local platform; ``tui`` is ``hermes --tui`` (also inside the desktop app's terminal pane); ``desktop`` is
+#: the desktop app's chat panel (hermes-agent 0.19.0; the 0.13.0 floor has ``cli`` and ``tui`` only).
+DEFAULT_HUMAN_PLATFORMS: Final[frozenset[str]] = frozenset({"cli", "tui", "desktop"})
+#: Platforms Hermes gives turns that are never a person's message: a delegated task, a scheduled job, the skill
+#: curator. ``history_human_platforms`` may not name them.
+NEVER_HUMAN_PLATFORMS: Final[frozenset[str]] = frozenset({"subagent", "cron", "curator"})
+_PLATFORM_RE: Final = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
+_MAX_PLATFORMS: Final = 64
 
 
 @dataclass(frozen=True)
@@ -70,6 +85,9 @@ class ActivityConfig:
     history_capture_hermes: bool = True
     #: Record ``correct:`` / ``訂正:`` messages typed in Hermes chat as corrections of the last recorded call.
     history_chat_corrections: bool = True
+    #: Hermes platforms whose turns are the user's own words; any other (or a missing) platform never is. Add a
+    #: gateway platform (``telegram``, ``slack``, ...) only when that gateway is used by the owner alone.
+    history_human_platforms: frozenset[str] = DEFAULT_HUMAN_PLATFORMS
     #: Characters per injected block.
     history_max_chars: int = HISTORY_MAX_CHARS
     #: Episodes per injected block.
@@ -174,6 +192,17 @@ def _int_range(low: int, high: int) -> Callable[[Any], Any]:
     return parse
 
 
+def _platforms(raw: Any) -> Any:
+    """A list of Hermes platform names, lower-cased; an empty list (no platform is the user's) is valid. An entry
+    that is no platform name, or one of :data:`NEVER_HUMAN_PLATFORMS`, makes the whole value invalid."""
+    if not isinstance(raw, list) or len(raw) > _MAX_PLATFORMS:
+        return _INVALID
+    names = [entry.strip().lower() if isinstance(entry, str) else "" for entry in raw]
+    if any(not _PLATFORM_RE.fullmatch(name) or name in NEVER_HUMAN_PLATFORMS for name in names):
+        return _INVALID
+    return frozenset(names)
+
+
 def _site(entry: Any) -> str | None:
     """One exclusion as a bare lower-case host: ``https://Bank.example/x``, ``*.bank.example``,
     ``bank.example.`` and ``bank.example:443`` all become ``bank.example``; ``None`` when it names no host."""
@@ -212,6 +241,7 @@ _PARSERS: Final[Mapping[str, Callable[[Any], Any]]] = {
     "history_turn_context": _bool,
     "history_capture_hermes": _bool,
     "history_chat_corrections": _bool,
+    "history_human_platforms": _platforms,
     # Hermes spills a hook context above 10,000 characters to a file; a block stays below that.
     "history_max_chars": _int_range(200, 8000),
     "history_max_episodes": _int_range(1, 10),

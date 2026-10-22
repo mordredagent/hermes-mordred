@@ -23,8 +23,10 @@ time), so ``history_enabled`` and the per-surface switches apply from the next
 call. Both fail open and fast: a refused or unavailable store, a malformed
 result or any other ``Exception`` leaves the result or the turn unchanged,
 and a store problem is audited once per process and code. Episodes already
-shown to a session are not repeated until they change, and the injected
-characters of a session are capped (:data:`._history_access.BUDGET`).
+shown to a session are not repeated until they change, the episodes Hermes's
+own capture recorded for the session (:func:`.capture_hermes.own_episodes`:
+its own work, already in its conversation) are never shown to it, and the
+injected characters of a session are capped (:data:`._history_access.BUDGET`).
 """
 
 from __future__ import annotations
@@ -122,7 +124,14 @@ def _charge(key: str, block: str, shown: tuple[EpisodeSummary, ...]) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _site_block(home: Path, config: ActivityConfig, host: str, key: str) -> str | None:
+def _own(home: Path, session_id: Any, task_id: Any) -> frozenset[str]:
+    """The episodes Hermes's own capture recorded for this session: never shown back to it."""
+    from .capture_hermes import own_episodes
+
+    return own_episodes(home, session_id, task_id)
+
+
+def _site_block(home: Path, config: ActivityConfig, host: str, key: str, omit: frozenset[str]) -> str | None:
     from . import _history_access as access
     from . import history
 
@@ -139,6 +148,7 @@ def _site_block(home: Path, config: ActivityConfig, host: str, key: str) -> str 
             limit=config.history_max_episodes,
             shown=shown,
             subdomains=False,  # this host only (``www.`` ignored): no public-suffix guesswork
+            omit=omit,
         )
     except access.NoHistory:
         return None
@@ -175,7 +185,7 @@ def _navigation_result(tool_name: str, args: Any, result: Any, session_id: Any, 
         return None
     if site_excluded(host, config.excluded_sites):
         return None
-    block = _site_block(home, config, host, key)
+    block = _site_block(home, config, host, key, _own(home, session_id, task_id))
     if not block:
         return None
     payload[RESULT_KEY] = block
@@ -206,7 +216,11 @@ def transform_tool_result(
 
 
 def _turn_matches(
-    store: ActivityStore, config: ActivityConfig, text: str, shown: frozenset[tuple[str, int]]
+    store: ActivityStore,
+    config: ActivityConfig,
+    text: str,
+    shown: frozenset[tuple[str, int]],
+    omit: frozenset[str] = frozenset(),
 ) -> Matches:
     """Episodes with the user's own words on the hosts the message names, then episodes whose task or
     correction text in the user's words shares its terms; newest first.
@@ -227,6 +241,7 @@ def _turn_matches(
         limit=limit,
         shown=shown,
         require_human_text=True,
+        omit=omit,
     )
     found = {episode.episode_id: episode for episode in by_host.episodes}
     more = by_host.more
@@ -241,6 +256,7 @@ def _turn_matches(
             min_shared=min(2, len(wanted)),
             host_labels=False,
             shown=shown | {episode.key for episode in found.values()},
+            omit=omit,
         )
         found.update((episode.episode_id, episode) for episode in by_terms.episodes)
         more = max(more, by_terms.more)  # the two counts overlap; report the larger, never their sum
@@ -264,7 +280,8 @@ def _turn_block(user_message: Any, session_id: Any, task_id: Any) -> str | None:
         return None
     try:
         store = access.reader(home)
-        matches = _turn_matches(store, config, user_message[:MAX_MESSAGE_CHARS], shown)
+        omit = _own(home, session_id, task_id)
+        matches = _turn_matches(store, config, user_message[:MAX_MESSAGE_CHARS], shown, omit)
     except access.NoHistory:
         return None
     except Exception as exc:

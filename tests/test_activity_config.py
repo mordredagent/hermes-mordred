@@ -96,6 +96,7 @@ HISTORY_DEFAULTS = {
     "history_turn_context": True,
     "history_capture_hermes": True,
     "history_chat_corrections": True,
+    "history_human_platforms": frozenset({"cli", "tui", "desktop"}),
     "history_max_chars": 1500,
     "history_max_episodes": 3,
     "history_lookback_days": 90,
@@ -145,6 +146,14 @@ def test_history_keys_parse_valid_values_without_warnings() -> None:
         ("history_max_tool_bytes", 1023),
         ("history_max_tool_bytes", True),
         ("history_max_tool_bytes", 4096.0),
+        ("history_human_platforms", "telegram"),
+        ("history_human_platforms", ["cli", 3]),
+        ("history_human_platforms", ["cli", ""]),
+        ("history_human_platforms", ["cli", "two words"]),
+        ("history_human_platforms", ["cli", "subagent"]),
+        ("history_human_platforms", ["cron"]),
+        ("history_human_platforms", ["Curator"]),
+        ("history_human_platforms", ["p"] * 65),
     ],
 )
 def test_invalid_history_values_fall_back_with_a_warning(key: str, raw: Any) -> None:
@@ -172,3 +181,22 @@ def test_an_invalid_exclusion_list_switches_the_history_off(raw: Any) -> None:
     config = ActivityConfig.from_mapping({"enabled": True, "excluded_sites": raw})
     assert config.excluded_sites_valid is False
     assert config.history_active is False
+
+
+def test_human_platforms_default_to_the_local_surfaces() -> None:
+    assert ActivityConfig().history_human_platforms == frozenset({"cli", "tui", "desktop"})
+    assert "telegram" not in ActivityConfig.from_mapping({}).history_human_platforms
+
+
+@pytest.mark.parametrize(
+    ("raw", "parsed"),
+    [
+        (["cli", " Telegram ", "slack"], {"cli", "telegram", "slack"}),
+        (["desktop"], {"desktop"}),
+        ([], set()),  # no platform's turns are the user's words
+        (["whatsapp_cloud", "my-gateway.v2"], {"whatsapp_cloud", "my-gateway.v2"}),
+    ],
+)
+def test_human_platforms_parse_a_list_of_platform_names(raw: Any, parsed: set[str]) -> None:
+    config = ActivityConfig.from_mapping({"history_human_platforms": raw})
+    assert (config.history_human_platforms, config.warnings) == (frozenset(parsed), ())

@@ -113,8 +113,10 @@ callback's context; a `BaseException` aborts the turn. The history callback
 reads `user_message`, `session_id` and, when present, `task_id` (hermes-agent
 0.13.0 does not pass it), catches every `Exception`
 and returns `None` or `{"context": block}` (SPEC §"History for Hermes"). The
-capture callback reads `user_message`, `session_id`, `platform` (a `subagent`
-or `cron` turn is not a person's message) and, when present, `task_id` and
+capture callback reads `user_message`, `session_id`, `platform` (Hermes passes
+the agent's platform or `""`; only a turn whose platform is in
+`history_human_platforms`, by default `cli`, `tui` and `desktop`, is a
+person's message) and, when present, `task_id` and
 `turn_id` (0.13.0 passes neither; each call then starts a local turn), records a
 `correct:` message (or its Japanese equivalent) as a correction, catches every `Exception` and
 always returns `None`. Verified against the hermes-agent 0.13.0 floor
