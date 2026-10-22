@@ -29,6 +29,7 @@ __all__ = [
     "call",
     "calls",
     "capture_home",
+    "end_turn",
     "events",
     "failed",
     "nav_result",
@@ -129,6 +130,20 @@ def turn(message: Any = MESSAGE, *, session: str = "s1", turn_id: str = "s1:t1:a
     }
     payload.update(extra)
     return capture_hermes.pre_llm_call(**payload)
+
+
+def end_turn(*, session: str = "s1", turn_id: str | None = "s1:t1:aa11", message: Any = MESSAGE) -> Any:
+    """``post_llm_call`` with the hermes-agent 0.19.0 payload (``agent/turn_finalizer.py``): the turn is over."""
+    return capture_hermes.post_llm_call(
+        session_id=session,
+        task_id="t1",
+        turn_id=turn_id,
+        user_message=message,
+        assistant_response="done",
+        conversation_history=[],
+        model="m",
+        platform="cli",
+    )
 
 
 def call(

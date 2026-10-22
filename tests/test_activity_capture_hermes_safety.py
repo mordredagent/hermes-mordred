@@ -22,6 +22,7 @@ from tests._activity_capture_helpers import (
     call,
     calls,
     capture_home,
+    end_turn,
     events,
     failed,
     nav_result,
@@ -158,7 +159,8 @@ def test_a_session_starts_on_an_unknown_page(capture_home) -> None:
     turn()
     call("browser_scroll", {"direction": "down"}, ok(scrolled="down"))  # whatever an earlier session left open
     navigate()
-    assert [event.op for event in events(store)] == ["task_start", "navigate"]
+    end_turn()
+    assert [event.op for event in events(store)] == ["navigate", "task_start"]
 
 
 def test_an_about_page_is_known_and_has_no_route(capture_home) -> None:
@@ -261,6 +263,7 @@ def test_the_local_surfaces_are_the_users_words(capture_home, platform: str) -> 
     turn(platform=platform)
     navigate()
     turn("correct: use the account menu", platform=platform, turn_id="s1:t1:zz99")
+    end_turn(turn_id="s1:t1:zz99")
     [start] = [event for event in events(store) if event.op == "task_start"]
     assert start.actor == "human"
     assert [event.text for event in events(store) if event.phase == "correction"] == ["use the account menu"]
@@ -299,6 +302,7 @@ def test_any_other_platform_is_not_the_users_words(capture_home, platform: Any) 
     _home, store = capture_home
     turn("goal written by someone else on shop.example.com", platform=platform)
     navigate()
+    end_turn()
     [start] = [event for event in events(store) if event.op == "task_start"]
     assert start.actor == "agent" and start.text == "goal written by someone else on shop.example.com"
     assert not history.speaks_for_user(start.phase, start.op, start.source, start.actor)
@@ -312,7 +316,7 @@ def test_a_turn_without_a_platform_is_not_the_users_words(capture_home) -> None:
     capture_hermes.pre_llm_call(session_id="s1", task_id="t1", turn_id="s1:t1:aa11", user_message=MESSAGE)
     navigate()
     capture_hermes.pre_llm_call(session_id="s1", task_id="t1", turn_id="s1:t1:bb22", user_message="correct: x")
-    assert [(event.op, event.actor) for event in events(store)] == [("task_start", "agent"), ("navigate", "agent")]
+    assert [(event.op, event.actor) for event in events(store)] == [("navigate", "agent"), ("task_start", "agent")]
 
 
 def test_a_configured_gateway_platform_is_the_users_words(capture_home) -> None:
@@ -321,8 +325,10 @@ def test_a_configured_gateway_platform_is_the_users_words(capture_home) -> None:
     turn("check my orders on shop.example.com", platform="telegram")
     navigate()
     turn("correct: the orders are under the account menu", platform="telegram", turn_id="s1:t1:bb22")
+    end_turn(turn_id="s1:t1:bb22")
     turn("a TUI turn is no longer the user's", platform="tui", turn_id="s1:t1:cc33", session="s2")
     navigate(session="s2", turn_id="s1:t1:cc33")
+    end_turn(session="s2", turn_id="s1:t1:cc33")
     starts = {event.hermes_session_id: event.actor for event in events(store) if event.op == "task_start"}
     assert starts == {"s1": "human", "s2": "agent"}
     assert [event.text for event in events(store) if event.phase == "correction"] == [
@@ -420,6 +426,7 @@ def test_a_repeated_tool_call_id_keeps_attempts_and_corrections_apart(capture_ho
     navigate(turn_id="s1:t1:bb22", call_id="acp_call_1")  # the Copilot ACP fallback repeats its ids
     navigate(session="s2", turn_id="s2:t:1", call_id="acp_call_1")
     turn("correct: the second one was wrong", turn_id="s1:t1:cc33")
+    end_turn(turn_id="s1:t1:cc33")
 
     by_turn = {event.turn_id: event for event in calls(store) if event.op == "navigate"}
     first, second, other = by_turn["s1:t1:aa11"], by_turn["s1:t1:bb22"], by_turn["s2:t:1"]
@@ -445,6 +452,7 @@ def test_the_navigation_block_never_shows_the_sessions_own_episode(capture_home)
     write_config(home, {**CAPTURING, "history_max_episodes": 1})
     turn("earlier task on shop.example.com", session="s0", turn_id="s0:t:1")
     navigate(session="s0", turn_id="s0:t:1")
+    end_turn(session="s0", turn_id="s0:t:1")
 
     def navigation_block(session: str, turn_id: str) -> str | None:
         result = nav_result()
@@ -477,7 +485,8 @@ def test_a_one_event_batch_limit_still_records_the_whole_turn(capture_home) -> N
     navigate()
     call("browser_click", {"ref": "@e7"}, ok(clicked="@e7"))
     turn("correct: use the account menu", turn_id="s1:t1:bb22")
-    assert [event.op for event in events(store)] == ["task_start", "navigate", "click", "other"]
+    end_turn(turn_id="s1:t1:bb22")
+    assert [event.op for event in events(store)] == ["navigate", "click", "task_start", "other"]
     assert len([event for event in events(store) if event.op == "task_start"]) == 1
 
 
@@ -487,8 +496,10 @@ def test_a_split_batch_sends_nothing_when_its_call_would_be_refused(capture_home
     turn("pay the bill, then check shop.example.com")
     call("browser_navigate", {"url": BANK}, nav_result(BANK))
     assert events(store) == []  # no task start without its call
+    end_turn(turn_id="s1:t1:other")
     navigate()
-    assert [event.op for event in events(store)] == ["task_start", "navigate"]
+    end_turn()
+    assert [event.op for event in events(store)] == ["navigate", "task_start"]
 
 
 def test_batches_follow_the_count_and_byte_limits() -> None:
@@ -508,7 +519,8 @@ def test_a_page_text_too_large_for_the_batch_limit_is_shortened_not_split_off(ca
     write_config(home, {**CAPTURING, "max_batch_bytes": 2000})
     turn()
     call("browser_navigate", {"url": LOGIN_URL}, nav_result(snapshot="- text: " + "x" * 6000))
-    start, nav = events(store)
+    end_turn()
+    nav, start = events(store)
     assert (start.op, nav.op, nav.site) == ("task_start", "navigate", SITE)
     assert nav.truncated and nav.page_text and 0 < len(nav.page_text) < 2000
 
@@ -519,22 +531,25 @@ def test_a_call_that_cannot_fit_the_batch_limit_records_no_task_start_alone(capt
     turn("go")
     long_url = f"https://{SITE}/" + "a" * 1500
     call("browser_navigate", {"url": long_url}, json.dumps({"success": True, "url": long_url}))
+    end_turn()
     assert events(store) == []
 
 
-def test_an_acknowledged_task_start_is_not_sent_again_after_a_failed_call_batch(capture_home, monkeypatch) -> None:
-    home, store = capture_home
-    write_config(home, {**CAPTURING, "max_batch_events": 1})
+def test_the_task_start_follows_the_first_acknowledged_call_and_is_written_once(capture_home, monkeypatch) -> None:
+    _home, store = capture_home
     opened: list[int] = []
 
-    def second_open_fails(_home: Path) -> ActivityStore:
+    def first_open_fails(_home: Path) -> ActivityStore:
         opened.append(1)
-        if len(opened) == 2:
+        if len(opened) == 1:
             raise OSError("store unavailable")
         return store
 
-    monkeypatch.setattr(capture_hermes, "STORE_FACTORY", second_open_fails)
+    monkeypatch.setattr(capture_hermes, "STORE_FACTORY", first_open_fails)
     turn()
-    navigate()  # task start acknowledged, the navigation's batch fails
+    navigate()  # its write fails: no call of the episode is stored yet
     call("browser_scroll", {"direction": "down"}, ok(scrolled="down"))
-    assert [event.op for event in events(store)] == ["task_start", "scroll"]
+    call("browser_scroll", {"direction": "down"}, ok(scrolled="down"))
+    end_turn()
+    end_turn()
+    assert [event.op for event in events(store)] == ["scroll", "scroll", "task_start"]

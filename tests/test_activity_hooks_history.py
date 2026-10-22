@@ -444,6 +444,7 @@ def test_register_wires_hooks_tools_and_skill_without_reading_anything(monkeypat
         ("pre_llm_call", pre_llm_call),
         ("post_tool_call", capture_hermes.post_tool_call),
         ("pre_llm_call", capture_hermes.pre_llm_call),
+        ("post_llm_call", capture_hermes.post_llm_call),
     ]
     assert [tool["name"] for tool in ctx.tools] == ["mordred_browser_history", "mordred_browser_history_episode"]
     assert {tool["toolset"] for tool in ctx.tools} == {"mordred_activity"}

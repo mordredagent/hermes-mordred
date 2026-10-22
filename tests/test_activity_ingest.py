@@ -302,12 +302,13 @@ def test_activity_register_only_wires_the_history_and_capture_surfaces(
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     activity.register(Ctx())
 
-    # The history hooks, the two lookup tools, the skill, then the capture hooks; no store is created.
+    # The history hooks, the two lookup tools, the skill, then the three capture hooks; no store is created.
     assert calls == [
         "register_hook",
         "register_hook",
         "register_tool",
         "register_skill",
+        "register_hook",
         "register_hook",
         "register_hook",
     ]

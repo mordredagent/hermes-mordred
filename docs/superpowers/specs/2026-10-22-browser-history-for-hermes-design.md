@@ -134,6 +134,10 @@ surface below calls it and nothing else touches the store for this purpose.
      whose text is the turn's user message (captured at `pre_llm_call`, kept
      in a bounded per-session map); `post_llm_call` is not needed because the
      next turn's first event closes nothing — episodes are append-only.
+     (Amended after the B2 live check, 2026-10-22, D1: the task start and a
+     chat correction are now held until the turn ends, `post_llm_call` or
+     the next `pre_llm_call`, and written with every value Hermes typed into
+     a secret field replaced by `redacted`; SPEC.md §"History for Hermes".)
      The task start is the user's words only for a turn whose `platform` is
      in `history_human_platforms` (default the local surfaces `cli`, `tui`,
      `desktop`; security review 2026-10-22: a gateway, an API client or an
@@ -167,7 +171,8 @@ surface below calls it and nothing else touches the store for this purpose.
   operator task text "Log in with the username demo-user and the password
   ..." was stored verbatim and would have reached the turn-start block,
   Hermes's `state.db` and the provider). The receiver replaces the value
-  after a password-like keyword (password, passcode, PIN, one-time code,
+  after (and, since the B2 live check, before: "Hunter2-x as the password")
+  a password-like keyword (password, passcode, PIN, one-time code,
   secret, API key, access token, token, and the Japanese words for password,
   PIN, passcode, one-time password and verification code) with `redacted`
   in task and correction text, target labels, page titles and page text,

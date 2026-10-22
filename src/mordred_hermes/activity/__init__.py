@@ -10,9 +10,10 @@ history directly (:mod:`.history`): :func:`register` wires
   texts (with metadata) to a turn;
 - the ``mordred_browser_history`` / ``mordred_browser_history_episode`` lookup
   tools and the ``browser-history`` skill (:func:`.tools.register_tools`);
-- the ``post_tool_call`` and a second ``pre_llm_call`` hook
-  (:func:`.capture_hermes.register_hooks`), which record Hermes's own browser
-  calls and the user's ``correct:`` messages through the receiver. They are
+- the ``post_tool_call``, a second ``pre_llm_call`` and the ``post_llm_call``
+  hook (:func:`.capture_hermes.register_hooks`), which record Hermes's own
+  browser calls and the user's ``correct:`` messages through the receiver (a
+  turn's task start or correction is written when the turn ends). They are
   registered after the history hooks, so a turn's history block is read before
   that turn's correction is stored.
 

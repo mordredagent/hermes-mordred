@@ -24,6 +24,7 @@ Current contract:
 | `pre_api_request` | `provider`, `base_url` | LLM and network egress policy |
 | `pre_gateway_dispatch` | `event`, `gateway` | Mandatory gateway E2E |
 | `pre_llm_call` | `user_message`, `session_id`, `platform` (`task_id` and `turn_id` only when present; hermes-agent 0.13.0 passes neither) | Turn-start browser history and the turn record for capture and chat corrections (activity); dbcrypt's per-turn database check reads nothing |
+| `post_llm_call` | `session_id` (`task_id` and `turn_id` only when present; hermes-agent 0.13.0 passes neither) | The end of a turn: Hermes's capture writes the turn's held task start or correction (activity) |
 | `transform_tool_result` | `tool_name`, `args`, `result`, `session_id`, `task_id` | Browser history block in navigation results (activity) |
 
 Callbacks may accept additional keyword arguments for compatibility, but policy
@@ -178,6 +179,23 @@ nothing for a blocked call. The contract therefore lists `tool_name`, `args`,
 are read only when present (without `status` the outcome comes from the
 result's `success` / `error`). The callback ignores every tool not named
 `browser_*`, catches every `Exception` and returns `None`.
+
+### 5.3 `post_llm_call` payload
+
+The activity component registers `post_llm_call` as the end of a turn: Hermes's
+capture writes the turn's task start or correction, which it holds until then
+so that a value typed into a secret field later in the turn is scrubbed from it
+(`activity/capture_hermes.py`, SPEC §"History for Hermes"). Verified against
+the installed Hermes 0.19.0 (`agent/turn_finalizer.py`): fired once per turn
+after the tool-calling loop, only when there is a final response and the turn
+was not interrupted, with `session_id`, `task_id`, `turn_id`, `user_message`,
+`assistant_response`, `conversation_history`, `model` and `platform`. The
+hermes-agent 0.13.0 floor (`run_agent.py`) fires it under the same condition
+without `task_id` and `turn_id`. The contract therefore lists `session_id`;
+`task_id` and `turn_id` are read only when present (a `turn_id` naming another
+turn than the held text's leaves it for that turn). A turn that gets no
+`post_llm_call` has its text written by the session's next `pre_llm_call`. The
+callback catches every `Exception` and returns `None`.
 
 ## 6. `pre_gateway_dispatch` payload and return action shape
 

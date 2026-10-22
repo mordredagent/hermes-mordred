@@ -24,6 +24,7 @@ from tests._activity_capture_helpers import (
     call,
     calls,
     capture_home,
+    end_turn,
     events,
     nav_result,
     navigate,
@@ -77,6 +78,7 @@ def test_a_correction_turns_calls_join_the_corrected_episode(capture_home, messa
     turn(message, turn_id="s1:t1:bb22")
     navigate(turn_id="s1:t1:bb22")
     call("browser_click", {"ref": "@e8"}, ok(clicked="@e8"), turn_id="s1:t1:bb22")
+    end_turn(turn_id="s1:t1:bb22")
 
     [record] = store.list_episodes()
     starts = [event for event in events(store) if event.op == "task_start"]
@@ -97,11 +99,12 @@ def test_a_correction_turns_calls_join_the_corrected_episode(capture_home, messa
     assert (found["task"], found["corrections"]) == (TASK, [BODY])
 
 
-def test_a_correction_turn_after_a_newer_episode_starts_one_without_a_task_start(capture_home, monkeypatch) -> None:
-    """The corrected call's episode is no longer the session's last one: the correction turn's calls start a new
-    episode, without the correction as its task."""
-    home, store = capture_home
-    write_config(home, {**CAPTURING, "max_batch_events": 1})
+def test_a_correction_refused_at_the_turns_end_leaves_its_calls_in_the_corrected_episode(
+    capture_home, monkeypatch
+) -> None:
+    """The correction is written when its turn ends (like a task start); a refused write loses it, never its
+    turn's calls, which already joined the corrected episode."""
+    _home, store = capture_home
     opened: list[int] = []
 
     def fourth_open_fails(_home: Path) -> ActivityStore:
@@ -112,20 +115,16 @@ def test_a_correction_turn_after_a_newer_episode_starts_one_without_a_task_start
 
     monkeypatch.setattr(capture_hermes, "STORE_FACTORY", fourth_open_fails)
     turn(TASK, turn_id="s1:t1:aa11")
-    navigate(turn_id="s1:t1:aa11")  # opens 1 and 2: the first episode, its call is the last recorded one
-    turn("now the receipts on shop.example.com", turn_id="s1:t1:bb22")
-    navigate(turn_id="s1:t1:bb22")  # open 3: a second episode's task start; open 4 (its call) fails
+    navigate(turn_id="s1:t1:aa11")  # open 1
+    end_turn(turn_id="s1:t1:aa11")  # open 2: the task start
     turn(CORRECTION, turn_id="s1:t1:cc33")
-    navigate(turn_id="s1:t1:cc33")
+    navigate(turn_id="s1:t1:cc33")  # open 3: joins the corrected episode
+    end_turn(turn_id="s1:t1:cc33")  # open 4 fails: the correction is lost
 
-    starts = {event.text: event.episode_id for event in events(store) if event.op == "task_start"}
-    first, second = starts[TASK], starts["now the receipts on shop.example.com"]
-    [correction] = _corrections(store)
-    assert correction.episode_id == first  # the last recorded call's episode
-    [later] = [event for event in calls(store) if event.turn_id == "s1:t1:cc33" and event.op == "navigate"]
-    assert later.episode_id not in (first, second)
-    assert [event.op for event in store.events_for_episode(later.episode_id)] == ["navigate"]
-    assert CORRECTION not in stored_text(store)
+    [record] = store.list_episodes()
+    assert [event.op for event in store.events_for_episode(record.episode_id)] == ["navigate", "task_start", "navigate"]
+    assert _corrections(store) == []
+    assert BODY not in stored_text(store)
 
 
 def test_a_correction_with_nothing_to_correct_starts_an_episode_without_user_text(capture_home) -> None:
@@ -157,11 +156,16 @@ def test_a_correction_in_a_new_process_links_the_stored_last_call(capture_home, 
     turn(TASK, turn_id="s1:t1:aa11")
     navigate(turn_id="s1:t1:aa11")
     call("browser_scroll", {"direction": "down"}, ok(scrolled="down"), turn_id="s1:t1:aa11", call_id="call_last")
+    end_turn(turn_id="s1:t1:aa11")
     _new_process(monkeypatch)
     assert capture_hermes.own_episodes(home, "s1", "t1") == frozenset()
 
     assert turn(CORRECTION, turn_id="s1:t2:bb22") is None
-    scroll = calls(store)[-1]
+    scroll = [event for event in calls(store) if event.op == "scroll"][-1]
+    assert capture_hermes.own_episodes(home, "s1", "t1") == {scroll.episode_id}
+    # The correction turn's own calls join the corrected episode; the correction is written when the turn ends.
+    navigate(turn_id="s1:t2:bb22")
+    end_turn(turn_id="s1:t2:bb22")
     [correction] = _corrections(store)
     assert (correction.attempt_id, correction.episode_id) == (scroll.attempt_id, scroll.episode_id)
     assert (scroll.attempt_id or "").startswith("call-last-")
@@ -172,9 +176,6 @@ def test_a_correction_in_a_new_process_links_the_stored_last_call(capture_home, 
         BODY,
         "s1:t2:bb22",
     )
-    assert capture_hermes.own_episodes(home, "s1", "t1") == {scroll.episode_id}
-    # The correction turn's own calls join the corrected episode, and a second correction finds the same call.
-    navigate(turn_id="s1:t2:bb22")
     assert len(store.list_episodes()) == 1
     assert [event.text for event in events(store) if event.op == "task_start"] == [TASK]
     [summary] = history.episodes_for_sites(store, [SITE], excluded_sites=frozenset()).episodes
@@ -191,6 +192,7 @@ def test_the_newest_stored_call_of_the_session_is_the_one_corrected(capture_home
     navigate(session="s2", turn_id="s2:t:1")  # another session, recorded later
     _new_process(monkeypatch)
     turn(CORRECTION, turn_id="s1:t2:cc33")
+    end_turn(turn_id="s1:t2:cc33")
     [correction] = _corrections(store)
     newest = next(event for event in calls(store) if (event.attempt_id or "").startswith("call-newest-"))
     assert (correction.attempt_id, correction.episode_id) == (newest.attempt_id, newest.episode_id)
@@ -252,6 +254,7 @@ def test_the_stored_lookup_fails_open(capture_home, monkeypatch, audit_entries, 
     _home, store = capture_home
     turn(TASK, turn_id="s1:t1:aa11")
     navigate(turn_id="s1:t1:aa11")
+    end_turn(turn_id="s1:t1:aa11")
     _new_process(monkeypatch)
 
     def refused(_home: Path) -> ActivityStore:
@@ -262,6 +265,7 @@ def test_the_stored_lookup_fails_open(capture_home, monkeypatch, audit_entries, 
     assert _corrections(store) == []
     assert [(entry["reason"], entry["code"]) for entry in audit_entries] == [("activity.history_unavailable", code)]
     navigate(turn_id="s1:t2:bb22")  # the turn's calls still record, without the correction as a task
+    end_turn(turn_id="s1:t2:bb22")
     assert [event.text for event in events(store) if event.op == "task_start"] == [TASK]
 
 
@@ -278,6 +282,7 @@ def test_the_stored_lookup_is_bounded_to_the_newest_episodes(capture_home, monke
     assert _corrections(store) == []
     monkeypatch.setattr(history, "LAST_CALL_SCAN_EPISODES", 3)
     turn(CORRECTION, turn_id="s1:t2:cc33")
+    end_turn(turn_id="s1:t2:cc33")
     assert len(_corrections(store)) == 1
 
 
@@ -295,6 +300,7 @@ def _refused_episode(session: str = "s1") -> None:
             turn_id=f"{session}:t:1",
             status="blocked",
         )
+    end_turn(session=session, turn_id=f"{session}:t:1")
 
 
 def test_an_episode_of_refused_calls_stays_out_of_the_turn_start_block(capture_home) -> None:
@@ -314,6 +320,7 @@ def test_a_failed_call_without_a_site_is_no_work_and_a_successful_one_is(capture
     _home, store = capture_home
     turn("open the quarterly report and export it", turn_id="s1:t:1")
     call("browser_scroll", {"direction": "down"}, json.dumps({"success": False, "error": "x"}), turn_id="s1:t:1")
+    end_turn(turn_id="s1:t:1")
     assert _turn_block("open the quarterly report again") is None
     call("browser_scroll", {"direction": "down"}, ok(scrolled="down"), turn_id="s1:t:1")  # ran, on an unknown page
     block = _turn_block("open the quarterly report again", session="s7")
@@ -331,6 +338,7 @@ def test_refused_calls_on_a_named_site_are_still_shown(capture_home) -> None:
         turn_id="s1:t:1",
         status="blocked",
     )
+    end_turn(turn_id="s1:t:1")
     block = _turn_block(f"the invoices on {SITE} again")
     assert block is not None and f'task "{TASK}" → cancelled' in block
     result = hooks_history.transform_tool_result(

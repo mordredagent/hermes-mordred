@@ -26,6 +26,7 @@ from tests._activity_capture_helpers import (
     call,
     calls,
     capture_home,
+    end_turn,
     events,
     failed,
     nav_result,
@@ -42,12 +43,14 @@ pytestmark = pytest.mark.usefixtures(capture_home.__name__, audit_entries.__name
 # --- mapping -----------------------------------------------------------------------------------------------
 
 
-def test_navigate_records_the_task_start_then_route_title_and_page_text(capture_home) -> None:
+def test_navigate_records_route_title_and_page_text_and_the_turn_end_the_task_start(capture_home) -> None:
     _home, store = capture_home
     assert turn() is None
     assert navigate(call_id="call_nav1") is None
+    assert [event.op for event in events(store)] == ["navigate"]  # the task start waits for the turn's end
+    assert end_turn() is None
 
-    start, nav = events(store)
+    nav, start = events(store)
     assert (start.phase, start.op, start.source, start.actor, start.text) == (
         "boundary",
         "task_start",
@@ -266,6 +269,7 @@ def test_one_episode_per_turn_with_browser_calls(capture_home) -> None:
     call("web_search", {"query": "x"}, turn_id="s1:t1:bb22")
     turn("second task on shop.example.com", turn_id="s1:t1:cc33")
     navigate(turn_id="s1:t1:cc33")
+    end_turn(turn_id="s1:t1:cc33")
 
     records = store.list_episodes()
     assert len(records) == 2
@@ -300,6 +304,7 @@ def test_the_hermes_0_13_payload_still_gives_one_episode_per_turn(capture_home) 
     call_013("browser_navigate", {"url": LOGIN_URL}, nav_result())
     turn_013("second on shop.example.com")
     call_013("browser_click", {"ref": "@e7"}, failed("Failed to click @e7"))
+    capture_hermes.post_llm_call(session_id="s1", user_message="second on shop.example.com", assistant_response="ok")
 
     assert len(store.list_episodes()) == 2
     starts = [event for event in events(store) if event.op == "task_start"]
@@ -312,6 +317,7 @@ def test_the_task_start_is_the_users_words_in_the_history(capture_home) -> None:
     _home, store = capture_home
     turn()
     navigate()
+    end_turn()
     [start] = [event for event in events(store) if event.op == "task_start"]
     assert history.speaks_for_user(start.phase, start.op, start.source, start.actor)
 
@@ -328,6 +334,7 @@ def test_a_subagent_or_cron_prompt_is_not_the_users_words(capture_home, platform
     _home, store = capture_home
     turn("delegated goal written by the parent agent", platform=platform)
     navigate()
+    end_turn()
     [start] = [event for event in events(store) if event.op == "task_start"]
     assert start.actor == "agent"
     assert not history.speaks_for_user(start.phase, start.op, start.source, start.actor)
@@ -362,6 +369,7 @@ def test_a_chat_correction_links_the_last_browser_call(capture_home, message: st
     navigate(call_id="call_nav")
     call("browser_click", {"ref": "@e7"}, call_id="call_click")
     assert turn(message, turn_id="s1:t1:dd44") is None  # the message reaches the model unchanged
+    end_turn(turn_id="s1:t1:dd44")
 
     [correction] = [event for event in events(store) if event.phase == "correction"]
     click = calls(store)[1]
@@ -428,7 +436,8 @@ def test_chat_corrections_off_keeps_recording_calls(capture_home) -> None:
     turn()
     navigate()
     turn("correct: not recorded", turn_id="s1:t1:hh88")
-    assert [event.op for event in events(store)] == ["task_start", "navigate"]
+    end_turn(turn_id="s1:t1:hh88")
+    assert [event.op for event in events(store)] == ["navigate", "task_start"]
 
 
 def test_an_invalid_excluded_sites_refuses_like_the_receiver(capture_home, audit_entries) -> None:
@@ -451,7 +460,8 @@ def test_an_excluded_site_is_never_recorded(capture_home) -> None:
     call("browser_type", {"ref": "@e2", "text": "transfer 500 to Alice"}, ok(element="@e2"))
     assert events(store) == []  # the page host is still the bank's, so the type is refused too
     navigate()
-    assert [event.op for event in events(store)] == ["task_start", "navigate"]  # the task start is retried
+    end_turn()
+    assert [event.op for event in events(store)] == ["navigate", "task_start"]  # its first recorded call
     assert "bank.example" not in stored_text(store) and "Alice" not in stored_text(store)
 
 
@@ -546,8 +556,8 @@ def test_three_slow_writes_suspend_the_session(capture_home, monkeypatch, audit_
     assert len(opened) == 3
     call("browser_click", {"ref": "@e7"})
     turn("correct: not recorded while suspended", turn_id="s1:t1:ii99")
-    assert len(opened) == 3  # suspended: nothing more is attempted for this session
-    assert [event.op for event in events(store)] == ["task_start", "navigate", "click", "click"]
+    assert len(opened) == 3  # suspended: nothing more is attempted for this session (the held task start too)
+    assert [event.op for event in events(store)] == ["navigate", "click", "click"]
     [entry] = audit_entries
     assert entry == {
         "event": "activity_capture",
@@ -575,7 +585,8 @@ def test_a_write_blocked_by_another_writer_is_dropped_quickly(capture_home) -> N
     assert elapsed < 1.5  # bounded by WRITE_BUSY_S, not the store's 2 s default
     assert events(store) == []
     call("browser_click", {"ref": "@e7"})
-    assert [event.op for event in events(store)] == ["task_start", "click"]  # the task start is written later
+    end_turn()
+    assert [event.op for event in events(store)] == ["click", "task_start"]  # the first recorded call's episode
 
 
 def test_capture_and_the_gateway_receiver_write_concurrently(capture_home) -> None:
@@ -637,4 +648,5 @@ def test_registration_never_reads_configuration(monkeypatch) -> None:
     assert ctx.hooks == [
         ("post_tool_call", capture_hermes.post_tool_call),
         ("pre_llm_call", capture_hermes.pre_llm_call),
+        ("post_llm_call", capture_hermes.post_llm_call),
     ]

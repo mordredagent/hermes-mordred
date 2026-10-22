@@ -1,6 +1,6 @@
 """Hermes as a collector: its own browser tool calls and the user's chat corrections, recorded into ``mordred.db``.
 
-Phase B2 of the browser-history design. Two hooks:
+Phase B2 of the browser-history design. Three hooks:
 
 - ``pre_llm_call`` (:func:`pre_llm_call`) remembers the turn per Hermes
   session of a profile (state is keyed by the profile home's real path and the
@@ -17,7 +17,9 @@ Phase B2 of the browser-history design. Two hooks:
   recorded browser call: the one this process recorded, else (``--resume``,
   ``-c``, a restart: a new process) the newest one the store holds for the
   session (:func:`.history.last_hermes_call`, through the gated reader). The
-  hook returns ``None``: the message reaches the model unchanged.
+  hook first writes the previous turn's held text (below) when that turn got no
+  ``post_llm_call``, and returns ``None``: the message reaches the model
+  unchanged.
 - ``post_tool_call`` (:func:`post_tool_call`) turns every ``browser_*`` call
   into one event with ``source`` ``hermes``, ``actor`` ``agent``, the Hermes
   session and turn ids and an ``attempt_id`` of its own: the
@@ -36,17 +38,39 @@ Phase B2 of the browser-history design. Two hooks:
   ``claimed_success`` unless the result reports an error, ``error`` is
   ``claimed_failure``, ``blocked`` and ``cancelled`` are the ``cancelled``
   phase and ``timeout`` the ``timed_out`` phase.
+- ``post_llm_call`` (:func:`post_llm_call`) ends the turn: it writes the turn's
+  held text (below). Hermes fires it once per turn with a final response, not
+  for an interrupted turn.
 
-Episodes: one per ``(session, turn)`` with browser calls. Its first recorded
-call is preceded by a ``boundary`` / ``task_start`` holding the turn's message,
-``actor`` ``human`` for a person's message (:func:`.history.speaks_for_user`
-then counts it as the user's words) and ``agent`` otherwise. A task start names
-no page, so while ``excluded_sites`` is configured the receiver stores an
-``agent`` one without its text (``page_host_unknown``, :mod:`.contracts`). A correction joins
-the episode of the call it corrects, as ``user_correction`` / ``human`` /
-``correction``. A person's correction message is never a task start: the
-browser calls of its turn join the corrected episode while that is still the
-session's last episode, and otherwise start an episode without a task start.
+Episodes: one per ``(session, turn)`` with browser calls. Once its first call is
+recorded, the turn's message becomes the episode's ``boundary`` /
+``task_start`` (time: the turn's start), ``actor`` ``human`` for a person's
+message (:func:`.history.speaks_for_user` then counts it as the user's words)
+and ``agent`` otherwise. A task start names no page, so while
+``excluded_sites`` is configured the receiver stores an ``agent`` one without
+its text (``page_host_unknown``, :mod:`.contracts`). A correction joins the episode of the call it
+corrects, as ``user_correction`` / ``human`` / ``correction``. A person's
+correction message is never a task start: the browser calls of its turn join
+the corrected episode while that is still the session's last episode, and
+otherwise start an episode without a task start.
+
+The turn's own text (its task start or correction) is held in memory until
+the turn ends (``post_llm_call``, else the session's next ``pre_llm_call``) and
+only then written, after the turn's calls. Before it is written, every value
+the session's ``browser_type`` calls withheld (typed into a ``sensitive`` field,
+or one that :func:`.contracts.looks_like_secret`; at least
+:data:`MIN_SCRUBBED_CHARS` characters; the last :data:`MAX_WITHHELD_VALUES`,
+kept in memory only, never stored) is replaced with ``redacted`` wherever it
+occurs, compared without case (exclusion ``text_secrets_redacted``), whatever
+the phrasing: a password the message named in words the free-text redactor
+cannot read never reaches the store. While Hermes's capture is off, every value
+typed during a held correction's turn counts as withheld (its field cannot be
+classified). A held text is dropped when its turn never ends (an interrupted
+last turn, a process that exits, a session forgotten), when recording it is off
+at the turn's end, or when the session is suspended, and a refused write is not
+retried; the turn's calls then stay in their episode without it. The store is
+append-only: a text already stored is never rewritten, so a value withheld only
+in a later turn is not scrubbed from an earlier turn's stored text.
 The episodes a session recorded are its own work, already in its conversation:
 the history hooks leave them out of their blocks (:func:`own_episodes`).
 
@@ -56,7 +80,8 @@ text is never sent; a missing line, or one naming nothing, is ``other`` and a
 named field ``text``, both kept (owner decision 2026-10-22). While the
 snapshot is stale (below) the field is ``sensitive``: its line may describe
 another page. The receiver's value check still withholds anything that
-:func:`.contracts.looks_like_secret`. A single character pressed with
+:func:`.contracts.looks_like_secret`. Either way the withheld value is scrubbed
+from the turn's text (above). A single character pressed with
 ``browser_press`` is typing too and is not kept.
 
 The open page (:func:`_observe`): a navigate or back result sets its URL (an
@@ -82,14 +107,13 @@ needs ``enabled``, ``collection_enabled``, the master switch ``history_enabled``
 and ``history_capture_hermes`` (corrections: ``history_chat_corrections``);
 an invalid ``excluded_sites`` is refused by the receiver as usual.
 
-Failure behavior: neither hook ever raises ``Exception`` or changes the call or
-the turn. Work per call is bounded (one receiver call of one or two events, or
-two calls when ``max_batch_events`` or ``max_batch_bytes`` cannot hold both; a
-correction without a call this process recorded first reads the store once,
-:func:`.history.last_hermes_call`, and goes on without it when that read is
-refused or fails; the snapshot kept for ref lookup is capped at
-:data:`MAX_SNAPSHOT_CHARS`; at most :data:`MAX_SESSIONS` sessions are
-remembered). A write waits at most
+Failure behavior: no hook ever raises ``Exception`` or changes the call or the
+turn. Work per call is bounded (one receiver call of one event; a turn's end
+writes at most one more event; a correction without a call this process
+recorded first reads the store once, :func:`.history.last_hermes_call`, and goes
+on without it when that read is refused or fails; the snapshot kept for ref
+lookup is capped at :data:`MAX_SNAPSHOT_CHARS`; at most :data:`MAX_SESSIONS`
+sessions are remembered). A write waits at most
 :data:`WRITE_BUSY_S` for another writer's lock (the extension gateway's
 receiver writes the same store) and is then refused as ``busy`` and dropped. A
 write that takes longer than :data:`SLOW_APPEND_S` counts as slow; after
@@ -109,7 +133,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -121,9 +145,11 @@ from ._browser_results import reported_url as _reported_url
 from ._browser_results import text_field as _text_field
 from .contracts import (
     COLLECTOR_SENSITIVE_MARK,
+    EXCLUSION_TEXT_SECRETS,
     EXCLUSION_TYPED_TEXT,
     MAX_TARGET_CHARS,
     MAX_TEXT_CHARS,
+    REDACTED,
     SCHEMA_VERSION,
     SENSITIVE_FIELD_KIND,
     ContractError,
@@ -131,6 +157,7 @@ from .contracts import (
     canonical_json,
     check_batch_envelope,
     event_size,
+    looks_like_secret,
     normalize_event,
 )
 
@@ -141,6 +168,8 @@ if TYPE_CHECKING:
 __all__ = [
     "MAX_SESSIONS",
     "MAX_SNAPSHOT_CHARS",
+    "MAX_WITHHELD_VALUES",
+    "MIN_SCRUBBED_CHARS",
     "PAGE_TEXT_CHARS",
     "PRODUCER_KIND",
     "SLOW_APPENDS_TO_SUSPEND",
@@ -154,6 +183,7 @@ __all__ = [
     "occurrence_id",
     "own_episodes",
     "page_text",
+    "post_llm_call",
     "post_tool_call",
     "pre_llm_call",
     "principal",
@@ -180,6 +210,11 @@ MAX_SNAPSHOT_CHARS: Final = 60_000
 MAX_SESSIONS: Final = 128
 #: Episodes remembered per session as its own (:func:`own_episodes`).
 MAX_OWN_EPISODES: Final = 64
+#: A typed value the store did not keep is replaced in the turn's texts from this many characters on (a
+#: shorter one would replace parts of ordinary words; :func:`_scrubbed`).
+MIN_SCRUBBED_CHARS: Final = 4
+#: Withheld typed values a session remembers, in memory only, for :func:`_scrubbed` (oldest forgotten first).
+MAX_WITHHELD_VALUES: Final = 32
 #: Characters of the ``tool_call_id`` part of an attempt id (:func:`occurrence_id` adds ``-`` and 12 hex).
 _ATTEMPT_PREFIX_CHARS: Final = 51
 #: Browser tools that never leave the open page (a ``browser_type`` whose text has a line break may submit a form).
@@ -214,6 +249,21 @@ class _Attempt:
     site: str | None = None
 
 
+@dataclass(frozen=True)
+class _Held:
+    """A turn's own text, kept in memory until the turn ends (:func:`_flush`): its task start, or (``attempt``
+    set) its correction of that call."""
+
+    turn: str | None
+    episode: str
+    refs: Mapping[str, str | None]
+    text: str
+    at: float
+    human: bool = False
+    cut: bool = False
+    attempt: _Attempt | None = None
+
+
 @dataclass
 class _Session:
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -242,6 +292,11 @@ class _Session:
     snapshot_stale: bool = False
     #: The episodes this session recorded into (newest last; :func:`own_episodes`).
     episodes: collections.deque[str] = field(default_factory=lambda: collections.deque(maxlen=MAX_OWN_EPISODES))
+    #: The current turn's task start or correction, written when the turn ends (:func:`_flush`).
+    held: _Held | None = None
+    #: Values typed in this session that the store did not keep (a secret field, or a value that looks like a
+    #: secret); replaced in the session's turn texts before they are written (:func:`_scrubbed`). Memory only.
+    withheld: collections.deque[str] = field(default_factory=lambda: collections.deque(maxlen=MAX_WITHHELD_VALUES))
     slow: int = 0
     suspended: bool = False
 
@@ -256,6 +311,11 @@ def _state_key(home: Path, session_id: Any, task_id: Any) -> _Key:
     from . import _history_access as access
 
     return os.path.realpath(home), access.session_key(session_id, task_id)
+
+
+def _existing_session(key: _Key) -> _Session | None:
+    with _sessions_lock:
+        return _sessions.get(key)
 
 
 def _session(key: _Key) -> _Session:
@@ -389,6 +449,8 @@ class _Mapped:
     exclusions: tuple[str, ...] = ()
     #: Whether ``route`` is the page's (``None`` for an ``about:`` page) or the page is unknown.
     page_known: bool = True
+    #: What was typed when the store will not keep it: scrubbed from the session's turn texts (:func:`_scrubbed`).
+    withheld: str | None = None
 
 
 def _navigate(call: _Call, state: _Session) -> _Mapped:
@@ -424,10 +486,11 @@ def _type(call: _Call, state: _Session) -> _Mapped:
     typed = typed if isinstance(typed, str) and typed else None
     base = _on_page("type", state, target=element_label(line), args={"field_kind": kind})
     if kind != SENSITIVE_FIELD_KIND:
-        return replace(base, text=typed)
-    # What is typed into a secret field never leaves this function.
+        # The receiver withholds a value that looks like a secret whatever the field; so does the text scrub.
+        return replace(base, text=typed, withheld=typed if typed and looks_like_secret(typed) else None)
+    # What is typed into a secret field is never sent; it is only remembered to scrub the turn's texts.
     marks = (COLLECTOR_SENSITIVE_MARK, EXCLUSION_TYPED_TEXT) if typed else (COLLECTOR_SENSITIVE_MARK,)
-    return replace(base, exclusions=marks)
+    return replace(base, exclusions=marks, withheld=typed)
 
 
 def _press(call: _Call, state: _Session) -> _Mapped:
@@ -533,10 +596,16 @@ def _refs(session_id: Any, turn_ref: str | None) -> dict[str, str | None]:
     return {"hermes_session_id": _ref(session_id), "turn_id": turn_ref}
 
 
-def _task_start(state: _Session, episode: str, refs: Mapping[str, str | None]) -> dict[str, Any]:
-    event = _envelope(episode, refs, phase="boundary", at=state.turn_at or time.time())
-    event.update(actor="human" if state.human else "agent", action={"op": "task_start"}, text=state.message)
-    event["quality"]["truncated"] = state.message_cut
+def _held_event(held: _Held, text: str, scrubbed: bool) -> dict[str, Any]:
+    """The task start of ``held``'s episode, or (``held.attempt`` set) its correction, holding ``text``."""
+    if held.attempt is None:
+        event = _envelope(held.episode, held.refs, phase="boundary", at=held.at)
+        event.update(actor="human" if held.human else "agent", action={"op": "task_start"}, text=text)
+        event["quality"]["truncated"] = held.cut
+    else:
+        event = _correction_event(held.attempt, text, held.refs, at=held.at)
+    if scrubbed:
+        event["quality"]["exclusions"] = [EXCLUSION_TEXT_SECRETS]
     return event
 
 
@@ -555,8 +624,8 @@ def _call_event(call: _Call, mapped: _Mapped, episode: str, refs: Mapping[str, s
     return event
 
 
-def _correction_event(attempt: _Attempt, body: str, refs: Mapping[str, str | None]) -> dict[str, Any]:
-    event = _envelope(attempt.episode_id, refs, phase="correction", at=time.time())
+def _correction_event(attempt: _Attempt, body: str, refs: Mapping[str, str | None], *, at: float) -> dict[str, Any]:
+    event = _envelope(attempt.episode_id, refs, phase="correction", at=at)
     action: dict[str, Any] = {"op": "other", "route": attempt.url}
     if attempt.site is not None:
         action["site"] = attempt.site
@@ -687,7 +756,7 @@ def _write(state: _Session, home: Path, config: ActivityConfig, events: list[dic
 
     Each event is first shortened to the per-event and per-batch limits. The events go as one batch unless the
     configured limits cannot hold them; then each batch goes alone, and only when the receiver would accept
-    every batch and every event, so a task start is never stored without its call. A failure part-way returns
+    every batch and every event. A failure part-way returns
     what was acknowledged before it. Slow writes count towards suspending the session. Never raises."""
     started = time.monotonic()
     done = 0
@@ -720,6 +789,59 @@ def _note_duration(state: _Session, home: Path, elapsed: float) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# A turn's own text: held until the turn ends, scrubbed of withheld values
+# --------------------------------------------------------------------------- #
+
+
+def _remember(state: _Session, value: str | None) -> None:
+    """Keep a typed value the store will not keep (stripped) to scrub it from the session's turn texts."""
+    value = value.strip() if isinstance(value, str) else ""
+    if MIN_SCRUBBED_CHARS <= len(value) <= MAX_TEXT_CHARS and value not in state.withheld:
+        state.withheld.append(value)
+
+
+def _scrubbed(text: str, values: Iterable[str]) -> tuple[str, bool]:
+    """``(text with every withheld value replaced by`` :data:`.contracts.REDACTED` ``, anything replaced)``:
+    exact occurrences compared without case, longest value first, independent of any phrasing."""
+    ordered = sorted(set(values), key=len, reverse=True)
+    if not ordered:
+        return text, False
+    clean, count = re.compile("|".join(map(re.escape, ordered)), re.IGNORECASE).subn(REDACTED, text)
+    return clean, count > 0
+
+
+def _flush(state: _Session, home: Path, config: ActivityConfig) -> None:
+    """The turn ended: write its held task start or correction, scrubbed of the session's withheld values
+    (exclusion ``text_secrets_redacted`` when one was found). Dropped while recording it is off or the session is
+    suspended; never retried."""
+    held, state.held = state.held, None
+    if held is None or state.suspended:
+        return
+    if not (_correcting(config) if held.attempt is not None else _capturing(config)):
+        return
+    text, scrubbed = _scrubbed(held.text, state.withheld)
+    _write(state, home, config, [_held_event(held, text, scrubbed)])
+
+
+def _drop_held(key: _Key) -> None:
+    state = _existing_session(key)
+    if state is not None:
+        with state.lock:
+            state.held = None
+
+
+def _remember_unrecorded(key: _Key, args: Any) -> None:
+    """A ``browser_type`` while Hermes's capture is off cannot be classified: its value is remembered while a
+    correction is held, so the correction never keeps it."""
+    state = _existing_session(key)
+    if state is None or not isinstance(args, Mapping):
+        return
+    with state.lock:
+        if state.held is not None:
+            _remember(state, args.get("text"))
+
+
+# --------------------------------------------------------------------------- #
 # Hooks
 # --------------------------------------------------------------------------- #
 
@@ -735,11 +857,11 @@ def _turn_of(state: _Session, turn_id: Any) -> tuple[str, str | None]:
 
 
 def _episode_for(state: _Session, turn: str) -> tuple[str, bool]:
-    """``(episode id, whether its task start is still to be written)`` for a browser call of ``turn``; the
-    task start needs the turn's message, so a call of a turn whose ``pre_llm_call`` was not seen gets none.
+    """``(episode id, whether its task start is still to be held)`` for a browser call of ``turn``; the task
+    start needs the turn's message, so a call of a turn whose ``pre_llm_call`` was not seen gets none.
 
     A correction turn's calls join the corrected episode while it is still the session's last one (it has its
-    task start); otherwise, or after a correction that was not recorded, they start an episode without one (the
+    task start); otherwise, or when no correction is held for the turn, they start an episode without one (the
     turn has no message: :func:`_record_turn`)."""
     if state.episode is None or state.episode_turn != turn:
         joined = state.joins if state.turn == turn and state.episodes and state.episodes[-1] == state.joins else None
@@ -756,6 +878,8 @@ def _record_call(
     home = access.home()
     config = access.config(home)
     if not _capturing(config):
+        if _correcting(config) and tool_name == "browser_type":
+            _remember_unrecorded(_state_key(home, session_id, task_id), args)
         return
     state = _session(_state_key(home, session_id, task_id))
     with state.lock:
@@ -773,17 +897,21 @@ def _record_call(
         refs = _refs(session_id, turn_ref)
         mapped = _MAPPERS.get(tool_name, _other)(call, state)
         _observe(call, state)
+        _remember(state, mapped.withheld)
         if _unplaced(config, mapped):
             _LOG.debug("mordred activity capture: call dropped (source_excluded: the page is unknown)")
             return
-        events = [_task_start(state, episode, refs)] if pending else []
-        events.append(_call_event(call, mapped, episode, refs))
-        done = _write(state, home, config, events)
-        if done and episode not in state.episodes:
+        if not _write(state, home, config, [_call_event(call, mapped, episode, refs)]):
+            return
+        if episode not in state.episodes:
             state.episodes.append(episode)
-        state.task_recorded = state.task_recorded or (pending and done > 0)
-        if done == len(events):
-            state.last = _Attempt(call.attempt_id, episode, mapped.route)
+        state.last = _Attempt(call.attempt_id, episode, mapped.route)
+        if pending and state.message is not None:
+            # The episode has its call: the task start waits for the turn's end (:func:`_flush`).
+            state.task_recorded = True
+            state.held = _Held(
+                turn, episode, refs, state.message, state.turn_at, human=state.human, cut=state.message_cut
+            )
 
 
 def _unplaced(config: ActivityConfig, mapped: _Mapped) -> bool:
@@ -863,10 +991,13 @@ def _record_turn(user_message: Any, session_id: Any, task_id: Any, turn_id: Any,
 
     home = access.home()
     config = access.config(home)
+    key = _state_key(home, session_id, task_id)
     if not (_capturing(config) or _correcting(config)):
+        _drop_held(key)
         return
-    state = _session(_state_key(home, session_id, task_id))
+    state = _session(key)
     with state.lock:
+        _flush(state, home, config)  # the previous turn is over (an interrupted turn gets no post_llm_call)
         human = speaks_as_user(config, platform)
         body = correction_text(user_message) if human else None
         # A correction is never the turn's task: its browser calls get no task start (:func:`_episode_for`).
@@ -876,9 +1007,10 @@ def _record_turn(user_message: Any, session_id: Any, task_id: Any, turn_id: Any,
         attempt = state.last or _stored_last(home, config, state, session_id)
         if attempt is None:
             return
-        event = _correction_event(attempt, body, _refs(session_id, state.turn_ref))
-        if _write(state, home, config, [event]) == 1:
-            state.joins = attempt.episode_id
+        # Written when the turn ends, like a task start; the turn's browser calls join the corrected episode.
+        refs = _refs(session_id, state.turn_ref)
+        state.held = _Held(state.turn, attempt.episode_id, refs, body, state.turn_at, attempt=attempt)
+        state.joins = attempt.episode_id
 
 
 def pre_llm_call(
@@ -898,7 +1030,33 @@ def pre_llm_call(
         _LOG.debug("mordred activity capture: turn skipped (%s)", type(exc).__name__)
 
 
+def _end_turn(session_id: Any, task_id: Any, turn_id: Any) -> None:
+    from . import _history_access as access
+
+    home = access.home()
+    state = _existing_session(_state_key(home, session_id, task_id))
+    if state is None:
+        return
+    config = access.config(home)
+    with state.lock:
+        held = state.held
+        # Another turn's end (Hermes's turn id differs) leaves the text for its own turn's end.
+        if held is None or (isinstance(turn_id, str) and turn_id and held.turn != turn_id):
+            return
+        _flush(state, home, config)
+
+
+def post_llm_call(session_id: Any = None, task_id: Any = None, turn_id: Any = None, **_kwargs: Any) -> None:
+    """The turn is over: write its held task start or correction (:func:`_flush`; ``task_id`` and ``turn_id``
+    are read when Hermes passes them, 0.13.0 passes neither); never raises ``Exception`` and returns nothing."""
+    try:
+        _end_turn(session_id, task_id, turn_id)
+    except Exception as exc:  # recording must never break the turn
+        _LOG.debug("mordred activity capture: turn end skipped (%s)", type(exc).__name__)
+
+
 def register_hooks(ctx: Any) -> None:
-    """Register both hooks; registration never reads configuration or opens the store."""
+    """Register the three hooks; registration never reads configuration or opens the store."""
     ctx.register_hook("post_tool_call", post_tool_call)
     ctx.register_hook("pre_llm_call", pre_llm_call)
+    ctx.register_hook("post_llm_call", post_llm_call)

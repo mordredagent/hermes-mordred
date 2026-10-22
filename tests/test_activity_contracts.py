@@ -878,6 +878,154 @@ def test_a_long_unquoted_value_is_redacted_to_its_end(cut: int) -> None:
     assert contracts.redact_text_secrets(f"api key: {blob}. end") == ("api key: redacted. end", True)
 
 
+# --- a value named before its keyword (B2 live check 2026-10-22, D1) --------------------------------------
+
+#: Hermes's user message that the B2 live check found stored verbatim in a task start and shown to later sessions.
+B2_LIVE_MESSAGE = (
+    "Open http://127.0.0.1:8499/login.html, type demo-user as the username and Hunter2-fake-pw as the password, "
+    "then log in."
+)
+
+VALUE_FIRST_TEXTS = [
+    pytest.param(
+        B2_LIVE_MESSAGE,
+        "Open http://127.0.0.1:8499/login.html, type demo-user as the username and redacted as the password, "
+        "then log in.",
+        id="b2-live",
+    ),
+    pytest.param("use Hunter2-fake-pw for the password", "use redacted for the password", id="for-the"),
+    pytest.param("Hunter2-fake-pw as my password", "redacted as my password", id="as-my-no-verb"),
+    pytest.param("enter 4821 for the PIN", "enter redacted for the PIN", id="pin-after-a-verb"),
+    pytest.param("type Hunter2-fake-pw into the password field", "type redacted into the password field", id="into"),
+    pytest.param("put Winter-2026 in the passcode box.", "put redacted in the passcode box.", id="in-box"),
+    pytest.param("use swordfish as the password", "use redacted as the password", id="plain-word-after-a-verb"),
+    pytest.param(
+        "I used Spring-2026 for my password, then logged in",
+        "I used redacted for my password, then logged in",
+        id="past-tense",
+    ),
+    pytest.param("enter 482913 for the one-time code.", "enter redacted for the one-time code.", id="one-time-code"),
+    pytest.param(
+        "fill in 'correct horse battery' as the passphrase",
+        "fill in 'redacted' as the passphrase",
+        id="quoted-with-spaces",
+    ),
+    pytest.param('paste "s3cr3t!" into the API key field', 'paste "redacted" into the API key field', id="api-key"),
+    pytest.param("(Hunter2) as the password", "(redacted) as the password", id="bracketed"),
+    pytest.param(
+        "type X9-ab into the field for the password",
+        "type redacted into the field for the password",
+        id="field-for-the",
+    ),
+    pytest.param("enter gh0st-7 for the token", "enter redacted for the token", id="token-after-a-verb"),
+    pytest.param("Hunter2-fake-pwをパスワードに入力して", "redactedをパスワードに入力して", id="ja-object-target"),
+    pytest.param("Hunter2 を パスワード欄に入力", "redacted を パスワード欄に入力", id="ja-object-field-spaces"),
+    pytest.param("abc123をパスワードとして使う", "redactedをパスワードとして使う", id="ja-object-as"),
+    pytest.param(
+        "ログイン画面でHunter2をパスワードに入れる", "ログイン画面でredactedをパスワードに入れる", id="ja-ascii-run"
+    ),
+    pytest.param("Hunter2というパスワード", "redactedというパスワード", id="ja-called"),
+    pytest.param("「Hunter2 x」というパスコードで", "「redacted」というパスコードで", id="ja-called-quoted"),
+    pytest.param("パスワードにHunter2を入力", "パスワードにredactedを入力", id="ja-keyword-target-object"),
+    pytest.param("パスワード欄にHunter2-xを入れて", "パスワード欄にredactedを入れて", id="ja-field-target-object"),
+    pytest.param("暗証番号に「1234」を入力", "暗証番号に「redacted」を入力", id="ja-target-quoted"),
+    pytest.param("次にパスワードとしてHunter2を入力", "次にパスワードとしてredactedを入力", id="ja-keyword-as-object"),
+    pytest.param("1234をPINに入力", "redactedをPINに入力", id="ja-ascii-keyword-value-first"),
+    pytest.param("PIN欄に「0000」を入力", "PIN欄に「redacted」を入力", id="ja-ascii-keyword-target-object"),
+]
+
+VALUE_FIRST_KEPT = [
+    pytest.param("I forgot my password", id="forgot-my"),
+    pytest.param("reset the password for my account", id="reset-for"),
+    pytest.param("click Forgot password", id="click-forgot"),
+    pytest.param("the password field is empty", id="field-empty"),
+    pytest.param("change your password", id="change-your"),
+    pytest.param("use the search box for the query", id="no-keyword"),
+    pytest.param("type demo-user as the username", id="username"),
+    pytest.param("pin the tab", id="pin-verb"),
+    pytest.param("the token count", id="token-count"),
+    pytest.param("log in as admin with the password redacted", id="already-redacted"),
+    pytest.param("use swordfish as the token", id="plain-word-ambiguous-keyword"),
+    pytest.param("add v2 to the token list", id="token-list"),
+    pytest.param("Add 2FA to the password manager", id="password-manager"),
+    pytest.param("set up 2FA in the password settings", id="password-settings"),
+    pytest.param("same as the password", id="same-as"),
+    pytest.param("type it into the password field", id="pronoun"),
+    pytest.param("type something into the password field", id="something"),
+    pytest.param("click in the password field", id="click-in"),
+    pytest.param("type a value into the password field", id="a-value"),
+    pytest.param("Welcome to the password reset page", id="welcome-to"),
+    pytest.param("Type your password into the password field", id="your-password-into"),
+    pytest.param("open https://example.com/a?b=1 as the password page", id="url"),
+    pytest.param("Use Face-ID as the password alternative", id="password-alternative"),
+    pytest.param("Add Bob-2 to the password sharing group", id="password-sharing-group"),
+    pytest.param("After you log in, as the password expires, change it", id="clause-before-as"),
+    pytest.param("ログインしてパスワードを変更する", id="ja-change"),
+    pytest.param("メールアドレスをパスワードに含めない", id="ja-japanese-value"),
+    pytest.param("パスワードに関する設定", id="ja-about"),
+    pytest.param("名前というパスワード", id="ja-called-japanese-word"),
+    pytest.param("パスワードリセット画面を開く", id="ja-reset-screen"),
+    pytest.param("abcをtokenに変換", id="ja-ambiguous-ascii-keyword-plain-value"),
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), VALUE_FIRST_TEXTS)
+def test_a_value_named_before_its_keyword_is_replaced(text: str, expected: str) -> None:
+    assert contracts.redact_text_secrets(text) == (expected, True)
+    event = _task_start(text)
+    assert event.text == expected
+    assert "text_secrets_redacted" in event.exclusions
+
+
+@pytest.mark.parametrize("text", VALUE_FIRST_KEPT)
+def test_ordinary_text_with_a_keyword_after_a_word_is_untouched(text: str) -> None:
+    assert contracts.redact_text_secrets(text) == (text, False)
+    assert "text_secrets_redacted" not in _task_start(text).exclusions
+
+
+def test_the_b2_live_message_keeps_the_username_and_drops_the_password() -> None:
+    event = _task_start(B2_LIVE_MESSAGE)
+    assert event.text is not None and "demo-user" in event.text
+    assert LIVE_SECRET not in json.dumps(dataclasses.asdict(event))
+    assert event.content_digest == canonical_digest(event)
+
+
+@pytest.mark.parametrize(
+    "value", ["Hunter2-fake-pw as the password", "use swordfish for my password", "Hunter2をパスワードに"]
+)
+def test_typed_value_first_secrets_are_withheld(value: str) -> None:
+    assert contracts.looks_like_secret(value)
+    event = normalize(action={"op": "type", "args": {"field_kind": "text"}}, text=value)
+    assert event.text is None and "typed_text_dropped" in event.exclusions
+
+
+def test_both_values_around_one_keyword_are_replaced() -> None:
+    text = "use Hunter2-x as the password, not the password Hunter3-y"
+    assert contracts.redact_text_secrets(text) == ("use redacted as the password, not the password redacted", True)
+    assert contracts.redact_text_secrets("password Hunter2-x as the password") == (
+        "password redacted as the password",
+        True,
+    )
+
+
+def test_value_first_redaction_is_linear_on_hostile_input() -> None:
+    started = time.monotonic()
+    for text in (
+        "x as the password " * 20_000,
+        "a" * 250_000 + " as the password",
+        "as " * 100_000 + "password",
+        "type '" + "a " * 100_000 + "' as the password",
+        '"' * 100_000 + " as the password",
+        "aをパスワードに" * 40_000,
+        "a" * 250_000 + "をパスワードに",
+        "パスワードにa" * 40_000,
+        "パスワードに" + "a" * 250_000 + "を",
+        "」というパスワード" * 30_000,
+    ):
+        contracts.redact_text_secrets(text)
+    assert time.monotonic() - started < 5.0
+
+
 # --- credential parameters and userinfo ------------------------------------------------------------------
 
 
