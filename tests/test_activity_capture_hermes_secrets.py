@@ -303,17 +303,19 @@ def test_a_value_typed_into_a_field_no_snapshot_listed_is_scrubbed(capture_home)
     assert start.text == "log in on 127.0.0.1 with redacted"
 
 
-def test_a_field_named_in_an_older_snapshot_keeps_its_kind(capture_home) -> None:
-    """The most recent snapshot that listed the ref decides, also when a newer snapshot does not list it."""
+def test_a_field_only_an_older_snapshot_named_fails_closed(capture_home) -> None:
+    """The session's most recent snapshot decides: a ref it does not list is a possible secret field, whatever an
+    older snapshot listed, since refs are numbered per snapshot and Hermes cuts a long snapshot while the refs past
+    the cut still work (security review of the resume fix, finding 1; this test kept the older kind before)."""
     _home, store = capture_home
     turn("open the notes on 127.0.0.1 and write Fabrikam")
     call("browser_navigate", {"url": NOTES}, nav_result(NOTES, title="Notes", snapshot=NOTES_SNAPSHOT))
     call("browser_snapshot", {}, ok(snapshot='- heading "Other" [ref=e9]'))  # e2 not listed any more
     call("browser_click", {"ref": "@e9"}, ok(clicked="@e9"))
-    call("browser_type", {"ref": "@e2", "text": "Fabrikam"}, ok(element="@e2"))  # last listed: textbox "Note"
+    call("browser_type", {"ref": "@e2", "text": "Fabrikam"}, ok(element="@e2"))  # listed only by the older one
     end_turn()
     [start] = _starts(store)
-    assert start.text == "open the notes on 127.0.0.1 and write Fabrikam"
+    assert start.text == "open the notes on 127.0.0.1 and write redacted"
 
 
 # --- a ref is read from its element's own annotation, never from text the page writes (security review) --------

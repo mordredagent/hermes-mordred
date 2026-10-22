@@ -13,9 +13,11 @@ Pure helpers for :mod:`.capture_hermes` (no state, no configuration, no store):
   parser (:func:`_snapshot_refs`) reads a ref only from its element's own
   annotation, never from the accessible name or the value, which the page
   writes; a ref also written anywhere else, or claimed by several lines,
-  takes the most sensitive kind.
+  takes the most sensitive kind (:func:`most_sensitive_kind`).
 - :func:`page_text`: a navigation snapshot as stored page text, without the
   values of secret fields.
+- :func:`transcript_result`: a browser result as a resumed session's
+  transcript holds it (hermes-agent 0.19.0 wraps it as untrusted data).
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ __all__ = [
     "field_kind",
     "http_url",
     "json_object",
+    "most_sensitive_kind",
     "page_location",
     "page_text",
     "ref_kind",
@@ -44,6 +47,7 @@ __all__ = [
     "ref_token",
     "reported_url",
     "text_field",
+    "transcript_result",
 ]
 
 #: Characters of a navigation's snapshot stored as its page text (:data:`.contracts.MAX_PAGE_TEXT_CHARS`).
@@ -83,6 +87,14 @@ _NAMED_LINE_RE: Final = re.compile(r'^[\s*-]*(?P<role>[A-Za-z][\w-]{0,40})\s+"(?
 _ANNOTATION_RE: Final = re.compile(r"\[[^\]\n]{0,200}\]")
 #: The receiver's host rule (``contracts._HOST_RE``).
 _HOST_RE: Final = re.compile(r"[a-z0-9.:-]{1,253}")
+#: hermes-agent 0.19.0's untrusted-data wrapper around a browser result (``agent/tool_dispatch_helpers``
+#: ``_maybe_wrap_untrusted``): the opening tag and a note without ``{``, the result, then the closing tag, which
+#: the result cannot hold (Hermes defangs it there); Hermes may append a ``/steer`` message after it.
+_WRAPPER_OPENING: Final = "<untrusted_tool_result"
+_WRAPPER_CLOSING: Final = "</untrusted_tool_result>"
+#: Characters the wrapper may add to a result of :data:`MAX_RESULT_CHARS` (checked before the result is parsed).
+_WRAPPER_CHARS: Final = 1024
+_DECODER: Final = json.JSONDecoder()
 
 
 def http_url(value: Any) -> str | None:
@@ -185,6 +197,13 @@ def ref_kind(snapshot: str | None, ref: Any) -> str:
     return found[0] if found else field_kind(None)
 
 
+def most_sensitive_kind(first: str, second: str) -> str:
+    """The more sensitive of two field kinds (``sensitive`` > ``other`` > ``text``; an unknown one is
+    ``sensitive``)."""
+    rank = _KIND_RANK[SENSITIVE_FIELD_KIND]
+    return max((first, second), key=lambda kind: _KIND_RANK.get(kind, rank))
+
+
 def ref_line(snapshot: str | None, ref: Any) -> str | None:
     """The snapshot line of element ``ref`` (``@e5`` / ``e5``), stripped and bounded: the line whose own element
     annotation names it (:func:`_snapshot_refs`); ``None`` when there is none."""
@@ -245,6 +264,25 @@ def json_object(result: Any) -> dict[str, Any] | None:
     except ValueError:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def transcript_result(content: Any) -> dict[str, Any] | None:
+    """A browser result's JSON object as a transcript (``conversation_history``) holds it: the result itself
+    (the 0.13.0 floor), or the whole of what hermes-agent 0.19.0's ``<untrusted_tool_result>`` wrapper holds
+    (the first ``{`` after its opening tag up to its closing tag; text after the closing tag is Hermes's, such
+    as a ``/steer`` message). ``None`` for anything else (a result cut short, replaced or marked, as Hermes does
+    with an oversized or corrupted one) or one above :data:`MAX_RESULT_CHARS`."""
+    if not isinstance(content, str) or not content.startswith(_WRAPPER_OPENING):
+        return json_object(content)
+    start = content.find("{")
+    if start < 0 or len(content) > MAX_RESULT_CHARS + _WRAPPER_CHARS:
+        return None
+    try:
+        payload, end = _DECODER.raw_decode(content, start)
+    except ValueError:
+        return None
+    whole = content[end:].lstrip().startswith(_WRAPPER_CLOSING) and end - start <= MAX_RESULT_CHARS
+    return payload if whole and isinstance(payload, dict) else None
 
 
 def text_field(payload: Mapping[str, Any] | None, key: str) -> str | None:

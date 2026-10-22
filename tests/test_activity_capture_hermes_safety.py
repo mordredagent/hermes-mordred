@@ -223,8 +223,9 @@ def test_after_a_fresh_snapshot_an_unnamed_field_keeps_its_text(capture_home) ->
     call("browser_type", {"ref": "@e99", "text": "missing ref words"}, ok(element="@e99"))
     call("browser_type", {"ref": "@e2", "text": "alice@example.com"}, ok(element="@e2"))
     typed = [event for event in calls(store) if event.op == "type"]
-    assert [json.loads(event.args_json)["field_kind"] for event in typed] == ["other", "other", "text"]
-    assert [event.text for event in typed] == ["unnamed field words", "missing ref words", "alice@example.com"]
+    # A ref no snapshot listed is a possible secret field (B2 final live check, M2).
+    assert [json.loads(event.args_json)["field_kind"] for event in typed] == ["other", "sensitive", "text"]
+    assert [event.text for event in typed] == ["unnamed field words", None, "alice@example.com"]
 
 
 def test_after_a_fresh_snapshot_a_password_line_withholds_the_text(capture_home) -> None:

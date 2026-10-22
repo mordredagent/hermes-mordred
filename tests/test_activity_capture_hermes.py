@@ -175,7 +175,9 @@ def test_text_typed_into_a_sensitive_field_is_withheld(capture_home) -> None:
     assert "hunter2-plain" not in dump and "確認用ひみつ" not in dump
 
 
-def test_text_typed_into_an_unnamed_or_unknown_field_is_kept(capture_home) -> None:
+def test_text_typed_into_an_unnamed_field_is_kept_and_into_an_unknown_ref_withheld(capture_home) -> None:
+    """An unnamed field keeps what was typed (owner decision 2026-10-22); a ref no snapshot listed, before the first
+    snapshot too, is a possible secret field (B2 final live check, M2)."""
     _home, store = capture_home
     turn()
     call("browser_type", {"ref": "@e5", "text": "before any snapshot"}, ok(element="@e5"))
@@ -183,9 +185,10 @@ def test_text_typed_into_an_unnamed_or_unknown_field_is_kept(capture_home) -> No
     call("browser_type", {"ref": "@e5", "text": "unnamed field words"}, ok(element="@e5"))
     call("browser_type", {"ref": "@e99", "text": "missing ref words"}, ok(element="@e99"))
     typed = [event for event in calls(store) if event.op == "type"]
-    assert [json.loads(event.args_json)["field_kind"] for event in typed] == ["other", "other", "other"]
-    assert [event.text for event in typed] == ["before any snapshot", "unnamed field words", "missing ref words"]
+    assert [json.loads(event.args_json)["field_kind"] for event in typed] == ["sensitive", "other", "sensitive"]
+    assert [event.text for event in typed] == [None, "unnamed field words", None]
     assert typed[1].target == "textbox"
+    assert "before any snapshot" not in stored_text(store) and "missing ref words" not in stored_text(store)
 
 
 @pytest.mark.parametrize("ref", ["@e2", "@e5", "@e99"])
