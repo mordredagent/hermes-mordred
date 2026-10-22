@@ -4437,12 +4437,12 @@ per-process state.
     typed (owner decision 2026-10-22), unless the receiver's value check
     withholds it (`looks_like_secret`). While the snapshot is stale (above)
     the field is `sensitive` whatever its ref: its line may describe another
-    page's field. A ref that the session's most recent snapshot does not
-    write (before its first snapshot too) is `sensitive`, as for the scrub
-    below, like a target that is no ref (`browser_type` takes only a snapshot
-    ref, required in hermes-agent 0.19.0 and on the 0.13.0 floor; there is no
-    selector form).
-    This fails closed like the scrub below (B2 final live check 2026-10-22,
+    page's field. A ref that the session's most recent snapshot in this
+    process does not write (before its first snapshot too; an empty snapshot
+    writes none) is `sensitive`, as for the scrub below, like a target that is
+    no ref (`browser_type` takes only a snapshot ref, required in hermes-agent
+    0.19.0 and on the 0.13.0 floor; there is no selector form). This fails
+    closed like the scrub below (B2 final live check 2026-10-22,
     M2: after `hermes chat --resume` Hermes typed a keyword-less password into
     the transcript's password-field ref before any snapshot, and it was stored
     as `other` typed text next to the scrubbed task text). A fresh session
@@ -4516,9 +4516,9 @@ per-process state.
     ASCII letter or digit right before or after it, compared without case,
     also inside a URL, whose userinfo, host or path is not exempt; exclusion
     `text_secrets_redacted`). A typed value may be a secret unless the
-    session's most recent snapshot, stale or not, names its field as one
-    that is no secret (`textbox "Note"`, kind `text`): a field named as
-    secret, one naming nothing and one that snapshot does not list fail
+    session's most recent snapshot in this process, stale or not, names its
+    field as one that is no secret (`textbox "Note"`, kind `text`): a field
+    named as secret, one naming nothing and one that snapshot does not list fail
     closed, and a value the turn's message names as a secret (below) or one
     that `looks_like_secret` always counts. A ref only an older snapshot
     listed fails closed too: refs are numbered per snapshot, and Hermes cuts
@@ -4534,35 +4534,17 @@ per-process state.
     click into a field last seen as a password field is scrubbed. This is
     independent of phrasing: "log in on 127.0.0.1 as demo-user, then
     swordfish" is stored as "... then redacted" once Hermes types `swordfish`
-    into the password field. A new process (`--resume`, `-c`, a restart) has no
-    snapshot while the transcript hands Hermes the old page's refs (B2 final
-    live check 2026-10-22, M1: values Hermes typed into the transcript's text
-    boxes, such as `Contoso Ltd`, were scrubbed from the user's corrections and
-    task starts while the store kept them as typed text). So while the session
-    has no snapshot in this process, every `pre_llm_call` reads
-    `conversation_history` when Hermes passes it (hermes-agent 0.19.0 and the
-    0.13.0 floor do) from its end: the successful results of
-    `browser_navigate`, `browser_back`, `browser_click`, `browser_press` and
-    `browser_snapshot` (the tools and field read live; the tool named by the
-    row's `tool_name` or `name`, else by the assistant's tool call with its
-    id, since the 0.13.0 floor stores no name on a tool row), for the newest
-    one that is successful and carries a `snapshot`. A 0.19.0 result is read
-    inside its `<untrusted_tool_result>` wrapper (the text after its closing
-    tag, such as a `/steer` message, is Hermes's). A newer one without a
-    snapshot (a click, a failed call) is passed over, as live; a newer one
-    that cannot be read (Hermes replaced it with `<persisted-output>`, marked
-    it as corrupted, or cut it short) ends the search with nothing, since the
-    page it reported is unknown. It reads at most the last 256 messages and
-    2,000,000 characters of such results, cuts the snapshot to 60,000
-    characters like a live one and reads it through the parser of a live
-    snapshot, so a ref spoofed inside a name or value is `sensitive`. Its
-    kinds, and no other, are the session's (a ref it does not list fails
-    closed); none lowers a kind the session already knows. They are stale:
-    they never stand for the open page or name an element, and the first
-    snapshot this process takes replaces them and ends the reading. After a resume, a value typed into a ref the transcript lists as
-    `textbox "Search"` is kept as typed text and stays in the user's words, one
-    typed into its password field is withheld and scrubbed, and one typed into
-    a ref it never lists (or without a transcript) is withheld and scrubbed.
+    into the password field. A new process (`--resume`, `-c`, a restart)
+    knows no field until it takes its first snapshot, although the transcript
+    hands Hermes the old page's refs, so a value Hermes types before that, a
+    password or an ordinary one, is withheld and scrubbed from the user's
+    words. This is an accepted trade-off (B2 final live check 2026-10-22, M1:
+    after a resume `Contoso Ltd` and `Northwind`, typed into the transcript's
+    text boxes before any snapshot, were scrubbed from the user's corrections
+    and task starts): it is privacy-safe, and the model normally takes a
+    snapshot first. The transcript (`conversation_history`) is never read for
+    field kinds: reading untrusted transcripts for them was dropped after two
+    reviews of `efac92a92` found four ways it could misclassify a field.
     While Hermes's capture is off (corrections still
     on), every value typed during a held correction's turn counts, since no
     field can be classified. A value the turn's

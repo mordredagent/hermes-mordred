@@ -118,10 +118,7 @@ capture callback reads `user_message`, `session_id`, `platform` (Hermes passes
 the agent's platform or `""`; only a turn whose platform is in
 `history_human_platforms`, by default `cli`, `tui` and `desktop`, is a
 person's message) and, when present, `task_id` and
-`turn_id` (0.13.0 passes neither; each call then starts a local turn) and
-`conversation_history` (both versions pass it; while the session has no
-browser snapshot in this process, the field kinds of the newest snapshot in
-it are read, bounded, SPEC §"History for Hermes"), records a
+`turn_id` (0.13.0 passes neither; each call then starts a local turn), records a
 `correct:` message (or its Japanese equivalent) as a correction, catches every `Exception` and
 always returns `None`. Verified against the hermes-agent 0.13.0 floor
 (`run_agent.py`): its single dispatch site passes `session_id`,

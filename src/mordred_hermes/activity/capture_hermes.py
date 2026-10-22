@@ -16,12 +16,10 @@ Phase B2 of the browser-history design. Three hooks:
   convention, any case) also records a correction of the session's last
   recorded browser call: the one this process recorded, else (``--resume``,
   ``-c``, a restart: a new process) the newest one the store holds for the
-  session (:func:`.history.last_hermes_call`, through the gated reader). While
-  the session has no snapshot in this process, it also takes the field kinds of
-  the newest browser snapshot in ``conversation_history`` (:func:`_seed_kinds`,
-  below). The hook first writes the previous turn's held text (below) when that
-  turn got no ``post_llm_call``, and returns ``None``: the message reaches the
-  model unchanged.
+  session (:func:`.history.last_hermes_call`, through the gated reader). The
+  hook first writes the previous turn's held text (below) when that turn got no
+  ``post_llm_call``, and returns ``None``: the message reaches the model
+  unchanged.
 - ``post_tool_call`` (:func:`post_tool_call`) turns every ``browser_*`` call
   into one event with ``source`` ``hermes``, ``actor`` ``agent``, the Hermes
   session and turn ids and an ``attempt_id`` of its own: the
@@ -64,23 +62,21 @@ with ``redacted`` (:func:`.contracts.redact_values`: as a whole word, compared
 without case, also inside a URL; exclusion ``text_secrets_redacted``), whatever
 the phrasing: a password the message named in words the free-text redactor
 cannot read never reaches the store. A typed value may be a secret unless the
-session's most recent snapshot, stale or not, names its field as one that is no
-secret (``textbox "Note"``; :func:`_known_kind`): a field named as secret, one
-naming nothing and one that snapshot does not list (refs are numbered per
-snapshot, so an older page's kind says nothing) fail closed, and a value the
-turn's message names as a secret or one that
+session's most recent snapshot in this process, stale or not, names its field
+as one that is no secret (``textbox "Note"``; :func:`_known_kind`): a field
+named as secret, one naming nothing and one that snapshot does not list (refs
+are numbered per snapshot, so an older page's kind says nothing) fail closed,
+and a value the turn's message names as a secret or one that
 :func:`.contracts.looks_like_secret` always counts. So a note typed after Enter
 into a field last seen as ``textbox "Note"`` leaves the message intact (live B2
 re-run, N1), while a plain password typed after a click into a field last seen
 as a password field is scrubbed. A new process (``--resume``, ``-c``, a restart)
-has no snapshot while the transcript hands Hermes the old page's refs (B2 final
-live check, M1 and M2): until its first snapshot, each turn's start takes the
-kinds of the newest snapshot in the transcript (:func:`_seed_kinds`; never
-lowering a kind the session knows), so a value typed into the transcript's
-``searchbox "Search"`` stays in the user's words and a password typed into its
-password field does not. Values of at least :data:`MIN_SCRUBBED_CHARS`
-characters count; the session keeps the last :data:`MAX_WITHHELD_VALUES` in
-memory only, never stored. While Hermes's capture is off, every value typed
+knows no field until its first snapshot, although the transcript hands Hermes
+the old page's refs (B2 final live check, M1 and M2): a value typed before it,
+a password or an ordinary one, is withheld and scrubbed (an accepted trade-off;
+the transcript is never read for field kinds). Values of at least
+:data:`MIN_SCRUBBED_CHARS` characters count; the session keeps the last
+:data:`MAX_WITHHELD_VALUES` in memory only, never stored. While Hermes's capture is off, every value typed
 during a held correction's turn counts (no field can be classified). A value the turn's message names as a secret
 (:func:`.contracts.secret_values`, "type X as the password") is also withheld
 from the store when Hermes types it into any field, ``typed_text_dropped``
@@ -141,10 +137,8 @@ turn. Work per call is bounded (one receiver call of one event; a turn's end
 writes at most one more event; a correction without a call this process
 recorded first reads the store once, :func:`.history.last_hermes_call`, and goes
 on without it when that read is refused or fails; the snapshot kept for ref
-lookup is capped at :data:`MAX_SNAPSHOT_CHARS`; a turn's start reads at most the
-last :data:`MAX_SEED_MESSAGES` messages of the transcript and :data:`MAX_SEED_CHARS`
-characters of browser results in them; at most
-:data:`MAX_SESSIONS` sessions are remembered). A write waits at most
+lookup is capped at :data:`MAX_SNAPSHOT_CHARS`; at most :data:`MAX_SESSIONS`
+sessions are remembered). A write waits at most
 :data:`WRITE_BUSY_S` for another writer's lock (the extension gateway's
 receiver writes the same store) and is then refused as ``busy`` and dropped. A
 write that takes longer than :data:`SLOW_APPEND_S` counts as slow; after
@@ -173,12 +167,10 @@ from ._browser_results import (
     PAGE_TEXT_CHARS,
     element_label,
     field_kind,
-    most_sensitive_kind,
     page_text,
     ref_kinds,
     ref_line,
     ref_token,
-    transcript_result,
 )
 from ._browser_results import json_object as _json_object
 from ._browser_results import page_location as _page
@@ -211,8 +203,6 @@ if TYPE_CHECKING:
     from .store import ActivityStore
 
 __all__ = [
-    "MAX_SEED_CHARS",
-    "MAX_SEED_MESSAGES",
     "MAX_SESSIONS",
     "MAX_SNAPSHOT_CHARS",
     "MAX_WITHHELD_VALUES",
@@ -267,11 +257,6 @@ MAX_WITHHELD_VALUES: Final = 32
 _NO_SECRETS: Final = SecretValues((), complete=True)
 #: Refs of the session's most recent snapshot whose field kind it remembers (the first ones forgotten first).
 MAX_REF_KINDS: Final = 1024
-#: A session without a snapshot in this process reads its transcript (``conversation_history``) from the end for
-#: the field kinds of its refs (:func:`_seed_kinds`): at most this many messages (and as many tool calls of each)
-MAX_SEED_MESSAGES: Final = 256
-#: and this many characters of the browser results among them (two of :data:`._browser_results.MAX_RESULT_CHARS`).
-MAX_SEED_CHARS: Final = 2_000_000
 #: The field kind of a named field that is no secret (:func:`._browser_results.field_kind`).
 _PLAIN_FIELD_KIND: Final = "text"
 #: Characters of the ``tool_call_id`` part of an attempt id (:func:`occurrence_id` adds ``-`` and 12 hex).
@@ -359,11 +344,9 @@ class _Session:
     #: The values the current turn's message names as secrets (:func:`.contracts.secret_values`): typed into any
     #: field they are withheld; while the list is incomplete, every value typed in the turn is. Memory only.
     turn_secrets: SecretValues = _NO_SECRETS
-    #: The field kind of each ref of the session's most recent snapshot, stale or not (:func:`_known_kind`); in a
-    #: new process, first those of the transcript's (:func:`_seed_kinds`).
+    #: The field kind of each ref of the session's most recent snapshot in this process, stale or not
+    #: (:func:`_known_kind`).
     ref_kinds: dict[str, str] = field(default_factory=dict)
-    #: A snapshot taken in this process set the kinds: the transcript is no longer read for them.
-    snapshot_seen: bool = False
     slow: int = 0
     suspended: bool = False
 
@@ -557,11 +540,11 @@ def _click(call: _Call, state: _Session) -> _Mapped:
 
 
 def _known_kind(state: _Session, ref: Any) -> str:
-    """The kind of ``ref``'s field in the session's most recent snapshot, stale or not (in a new process, first
-    the transcript's: :func:`_seed_kinds`), shared by the typed text (:func:`_typed_kind`) and the scrub
-    (:func:`_learns`). A ref that snapshot does not list (before the session's first snapshot too, one an older
-    page listed, or one past a snapshot Hermes cut short) and a target that is no ref are ``sensitive``: fail
-    closed (B2 final live check, M2)."""
+    """The kind of ``ref``'s field in the session's most recent snapshot in this process, stale or not, shared by
+    the typed text (:func:`_typed_kind`) and the scrub (:func:`_learns`). A ref that snapshot does not list (before
+    the session's first snapshot in this process too, as after ``--resume``; one an older page listed; one past a
+    snapshot Hermes cut short) and a target that is no ref are ``sensitive``: fail closed (B2 final live check,
+    M2)."""
     token = ref_token(ref)  # ``browser_type`` takes only a snapshot ref (0.13.0 and 0.19.0 require one)
     return state.ref_kinds.get(token, SENSITIVE_FIELD_KIND) if token is not None else SENSITIVE_FIELD_KIND
 
@@ -603,86 +586,13 @@ def _learns(state: _Session, ref: Any, typed: str, named: bool) -> bool:
     return _known_kind(state, ref) != _PLAIN_FIELD_KIND
 
 
-def _note_kinds(state: _Session) -> None:
-    """The snapshot just taken gives the field kinds (:func:`_known_kind`): those of every ref it writes, and no
-    other (refs are numbered per snapshot, so an older page's kind says nothing about this page's field). It
-    replaces what the transcript gave (:func:`_seed_kinds`), which is no longer read. Without a snapshot (the
-    page may have changed) the kinds stay those of the last one, now stale."""
-    if state.snapshot is None:
-        return
-    state.snapshot_seen = True
-    state.ref_kinds = dict(ref_kinds(state.snapshot))
-    _forget_kinds(state)
-
-
-def _forget_kinds(state: _Session) -> None:
+def _note_kinds(state: _Session, snapshot: str | None) -> None:
+    """The snapshot just read gives the field kinds (:func:`_known_kind`): those of every ref it writes, and no
+    other (refs are numbered per snapshot, so an older page's kind says nothing about this page's field; an empty
+    snapshot gives none)."""
+    state.ref_kinds = dict(ref_kinds(snapshot))
     while len(state.ref_kinds) > MAX_REF_KINDS:
         del state.ref_kinds[next(iter(state.ref_kinds))]
-
-
-def _row_tool(row: Mapping[str, Any], names: Mapping[str, str]) -> str | None:
-    """The tool of a transcript's tool row: its ``tool_name`` (0.19.0, also from ``state.db``) or ``name`` (a
-    live message), else the assistant's tool call with its id (``names``, :func:`_tool_names`; the 0.13.0 floor
-    stores no name on a tool row)."""
-    for key in ("tool_name", "name"):
-        value = row.get(key)
-        if isinstance(value, str) and value:
-            return value
-    call_id = row.get("tool_call_id")
-    return names.get(call_id) if isinstance(call_id, str) else None
-
-
-def _tool_names(window: list[Any]) -> dict[str, str]:
-    """``tool_call_id -> tool name`` of the assistant's tool calls in ``window``, the newest call of an id."""
-    names: dict[str, str] = {}
-    for message in window:
-        tool_calls = message.get("tool_calls") if isinstance(message, Mapping) else None
-        for tool_call in tool_calls[:MAX_SEED_MESSAGES] if isinstance(tool_calls, list) else ():
-            function = tool_call.get("function") if isinstance(tool_call, Mapping) else None
-            name = function.get("name") if isinstance(function, Mapping) else None
-            if isinstance(name, str) and isinstance(tool_call.get("id"), str):
-                names[tool_call["id"]] = name
-    return names
-
-
-def _transcript_snapshot(history: Any) -> str | None:
-    """The snapshot of the newest successful page-reporting browser result in a transcript (the tools and the
-    ``snapshot`` field :func:`_observe` reads), cut to :data:`MAX_SNAPSHOT_CHARS` like a live one; ``None`` when
-    none is found in the last :data:`MAX_SEED_MESSAGES` messages within :data:`MAX_SEED_CHARS` characters of
-    page-reporting results. A newer result that reports no snapshot (a click, a failed call) is passed over, as
-    live; one that cannot be read (replaced, marked or cut short by Hermes) ends the search: the page it reported
-    is unknown, so no older snapshot stands for it."""
-    if not isinstance(history, list | tuple):
-        return None
-    window = list(history[max(0, len(history) - MAX_SEED_MESSAGES) :])
-    names = _tool_names(window)
-    budget = MAX_SEED_CHARS
-    for row in reversed(window):
-        if not isinstance(row, Mapping) or row.get("role") != "tool" or _row_tool(row, names) not in _REPORTS_PAGE:
-            continue
-        content = row.get("content")
-        budget -= len(content) if isinstance(content, str) else 0
-        payload = transcript_result(content)
-        if payload is None or budget < 0:
-            return None
-        snapshot = _text_field(payload, "snapshot") if payload.get("success") is True else None
-        if snapshot:
-            return snapshot[:MAX_SNAPSHOT_CHARS]
-    return None
-
-
-def _seed_kinds(state: _Session, history: Any) -> None:
-    """A session without a snapshot in this process (``--resume``, ``-c``, a restart, while the transcript hands
-    Hermes the old page's refs; B2 final live check, M1 and M2) takes the field kinds of the newest snapshot in
-    its transcript (:func:`_transcript_snapshot`), read by the parser of a live snapshot
-    (:func:`._browser_results.ref_kinds`: a ref spoofed inside a name or value is ``sensitive``), and no other: a
-    ref it does not list, or every ref without one, fails closed. A kind never lowers the one the session already
-    knows for the ref. The kinds are stale: they never stand for the open page or name an element, and the first
-    snapshot this process takes replaces them (:func:`_note_kinds`)."""
-    known = state.ref_kinds
-    seeded = ref_kinds(_transcript_snapshot(history))
-    state.ref_kinds = {ref: most_sensitive_kind(known.get(ref, kind), kind) for ref, kind in seeded.items()}
-    _forget_kinds(state)
 
 
 def _press(call: _Call, state: _Session) -> _Mapped:
@@ -759,16 +669,19 @@ def _observe(call: _Call, state: _Session) -> None:
     payload = call.payload if call.succeeded and call.tool in _REPORTS_PAGE else None
     reported = _reported_url(payload)
     snapshot = _text_field(payload, "snapshot")
+    snapshot = snapshot[:MAX_SNAPSHOT_CHARS] if snapshot else None
     if call.tool == "browser_snapshot" and payload is not None:
-        # The same page read again: a fresh snapshot, and its URL only when the result reports one.
-        state.snapshot, state.snapshot_stale = (snapshot[:MAX_SNAPSHOT_CHARS] if snapshot else None), False
-        _note_kinds(state)
+        # The same page read again: a fresh snapshot (an empty one names no field), and its URL only when the
+        # result reports one.
+        state.snapshot, state.snapshot_stale = snapshot, False
+        _note_kinds(state, snapshot)
         if reported is not None:
             state.page_known, state.page_url = _page(reported)
         return
     state.page_known, state.page_url = _page(reported)
-    state.snapshot, state.snapshot_stale = (snapshot[:MAX_SNAPSHOT_CHARS], False) if snapshot else (None, True)
-    _note_kinds(state)
+    state.snapshot, state.snapshot_stale = snapshot, snapshot is None
+    if snapshot is not None:  # without one the kinds stay the last snapshot's, now stale (:func:`_learns`, N1)
+        _note_kinds(state, snapshot)
 
 
 def _envelope(episode: str, refs: Mapping[str, str | None], *, phase: str, at: float) -> dict[str, Any]:
@@ -1177,9 +1090,7 @@ def _stored_last(home: Path, config: ActivityConfig, state: _Session, session_id
     return state.last
 
 
-def _record_turn(
-    user_message: Any, session_id: Any, task_id: Any, turn_id: Any, platform: Any, history: Any = None
-) -> None:
+def _record_turn(user_message: Any, session_id: Any, task_id: Any, turn_id: Any, platform: Any) -> None:
     from . import _history_access as access
 
     home = access.home()
@@ -1191,11 +1102,6 @@ def _record_turn(
     state = _session(key)
     with state.lock:
         _flush(state, home, config)  # the previous turn is over (an interrupted turn gets no post_llm_call)
-        if _capturing(config) and not state.snapshot_seen:
-            try:
-                _seed_kinds(state, history)
-            except Exception as exc:  # an unreadable transcript gives no kinds: its refs fail closed
-                _LOG.debug("mordred activity capture: transcript kinds skipped (%s)", type(exc).__name__)
         human = speaks_as_user(config, platform)
         body = correction_text(user_message) if human else None
         # A correction is never the turn's task: its browser calls get no task start (:func:`_episode_for`).
@@ -1218,15 +1124,13 @@ def pre_llm_call(
     task_id: Any = None,
     turn_id: Any = None,
     platform: Any = None,
-    conversation_history: Any = None,
     **_kwargs: Any,
 ) -> None:
     """Remember the turn and record a chat correction (``task_id``, ``turn_id`` and ``platform`` are read when
-    Hermes passes them); while the session has no snapshot in this process, take the field kinds of the newest
-    snapshot in ``conversation_history`` when Hermes passes it (:func:`_seed_kinds`). Always returns ``None``
-    (the message goes to the model unchanged), never raises ``Exception``."""
+    Hermes passes them); always returns ``None`` (the message goes to the model unchanged), never raises
+    ``Exception``."""
     try:
-        _record_turn(user_message, session_id, task_id, turn_id, platform, conversation_history)
+        _record_turn(user_message, session_id, task_id, turn_id, platform)
     except Exception as exc:  # recording must never abort the turn
         _LOG.debug("mordred activity capture: turn skipped (%s)", type(exc).__name__)
 
