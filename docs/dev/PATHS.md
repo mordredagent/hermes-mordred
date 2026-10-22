@@ -484,10 +484,16 @@ migrate-store`, `mail import`) and read by `telegram_ask` and
 
 Durable record of Hermes sessions that have used a reader tool
 (`telegram_ask`, `telegram_chats`, `mordred_history_search`), owned by
-`privacy_check/_reader_sessions.py`. Mode `0600`, replaced atomically, bounded
-in size. Session ids are stored as SHA-256 digests, never raw. A missing or
-unwritable record blocks reader tools (`egress.reader_unrecorded`). On Windows
-the file uses the checked private-storage path. It carries no message content.
+`privacy_check/_reader_sessions.py`. Mode `0600`, replaced atomically. It
+holds at most 4096 digests (read bounded to 512 KiB) and never evicts one,
+because dropping a digest would lift the restriction from that session when it
+is resumed; when it is full, reader tools are refused for sessions not yet
+recorded (`egress.reader_unrecorded`) until the operator prunes the file (a
+pruning CLI is future work). Session ids are stored as SHA-256 digests, never
+raw. An unwritable record blocks reader tools (`egress.reader_unrecorded`); a
+missing record reads as empty and is recreated at the next reader-tool call.
+On Windows the file uses the checked private-storage path. It carries no
+message content.
 
 ## `<home>/desktop-plugins/mordred/` and `<home>/plugins/mordred/`
 

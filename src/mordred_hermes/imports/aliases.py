@@ -15,6 +15,9 @@ Security contract:
   and format characters are removed, the length is bounded, and a name that
   collides with a reserved role label (``account owner``, ``me``, ``assistant``,
   ...) is rendered as ``<name> (contact)``. Only code ever emits the owner label.
+  The collision check ignores zero-width characters and combining marks and
+  reads Cyrillic, Greek and Armenian look-alike letters as Latin, so a
+  homoglyph spelling of a label is caught too (:func:`_skeleton`).
 
 Behaviour of :meth:`IdentityAliases.scrub_text` and
 :meth:`IdentityAliases.dealias_stream` mirrors ``extension/telegram/ask.py``
@@ -84,19 +87,102 @@ def _fold(text: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
 
 
-def _is_reserved(name: str) -> bool:
-    folded = _fold(name)
-    for label in RESERVED_LABELS:
-        if folded == label:
-            return True
-        if not folded.startswith(label):
+# Reserved-label comparison only (display text is never changed): letters of
+# other scripts that look like Latin ones, written as escapes because the
+# letters themselves are confusable. Upper case maps straight to lower case.
+_CONFUSABLES: Final = str.maketrans(
+    {
+        # Cyrillic a e o p c x y i j s h d q w l
+        "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0441": "c", "\u0445": "x",
+        "\u0443": "y", "\u0456": "i", "\u0458": "j", "\u0455": "s", "\u04bb": "h", "\u0501": "d",
+        "\u051b": "q", "\u051d": "w", "\u04cf": "l",
+        # Cyrillic A B E K M H O P C T X Y I J S H D Q W l
+        "\u0410": "a", "\u0412": "b", "\u0415": "e", "\u041a": "k", "\u041c": "m", "\u041d": "h",
+        "\u041e": "o", "\u0420": "p", "\u0421": "c", "\u0422": "t", "\u0425": "x", "\u0423": "y",
+        "\u0406": "i", "\u0408": "j", "\u0405": "s", "\u04ba": "h", "\u0500": "d", "\u051a": "q",
+        "\u051c": "w", "\u04c0": "l",
+        # Greek a o p v i k t u
+        "\u03b1": "a", "\u03bf": "o", "\u03c1": "p", "\u03bd": "v", "\u03b9": "i", "\u03ba": "k",
+        "\u03c4": "t", "\u03c5": "u",
+        # Greek A B E Z H I K M N O P T Y X
+        "\u0391": "a", "\u0392": "b", "\u0395": "e", "\u0396": "z", "\u0397": "h", "\u0399": "i",
+        "\u039a": "k", "\u039c": "m", "\u039d": "n", "\u039f": "o", "\u03a1": "p", "\u03a4": "t",
+        "\u03a5": "y", "\u03a7": "x",
+        # Armenian n u o h; Latin script g, dotless i, alpha
+        "\u0578": "n", "\u057d": "u", "\u0585": "o", "\u0570": "h", "\u0261": "g", "\u0131": "i",
+        "\u0251": "a",
+    }
+)  # fmt: skip
+# Letters that render as blank space (Hangul fillers, braille blank).
+_BLANKS: Final = frozenset("\u115f\u1160\u3164\uffa0\u2800")
+# Dropped from the comparison form: format (zero-width) characters, combining
+# marks, private-use characters and lone surrogates.
+_SKELETON_DROPPED: Final = frozenset({"Cf", "Mn", "Me", "Co", "Cs"})
+_SKELETON_SPACE: Final = frozenset({"Cc", "Zs", "Zl", "Zp"})
+_LOOKALIKE_SCRIPTS: Final = frozenset({"CYRILLIC", "GREEK", "ARMENIAN"})
+# Stands for an unmapped look-alike letter. Private use, so a name can never
+# carry one into the comparison form (``Co`` is dropped first).
+_WILDCARD: Final = "\ue000"
+
+
+def _script(char: str) -> str:
+    """First word of a letter's Unicode name (``LATIN``, ``CYRILLIC``, ...); ``""`` otherwise."""
+    return unicodedata.name(char, "").partition(" ")[0] if char.isalpha() else ""
+
+
+def _word_skeleton(word: str) -> str:
+    """Map look-alike letters to Latin.
+
+    In a word that mixes Latin with Cyrillic, Greek or Armenian letters, every
+    such letter left unmapped becomes :data:`_WILDCARD`, so a look-alike this
+    table does not know (``a<Greek lunate sigma>count``) still collides. A
+    word in a single script keeps its letters, so a Cyrillic name never holds
+    a wildcard.
+    """
+    scripts = {_script(char) for char in word}
+    mapped = word.translate(_CONFUSABLES)
+    if "LATIN" not in scripts or not scripts & _LOOKALIKE_SCRIPTS:
+        return mapped
+    return "".join(_WILDCARD if _script(char) in _LOOKALIKE_SCRIPTS else char for char in mapped)
+
+
+def _skeleton(text: str) -> str:
+    """The form compared against reserved labels.
+
+    Compatibility decomposition, then format characters (zero-width ones
+    included), combining marks and private-use characters are dropped and
+    blank-looking letters become spaces; look-alike letters are mapped per
+    word (:func:`_word_skeleton`); finally NFKC, case folding and whitespace
+    collapsing.
+    """
+    kept: list[str] = []
+    for char in unicodedata.normalize("NFKD", text):
+        category = unicodedata.category(char)
+        if category in _SKELETON_DROPPED:
             continue
-        if not label.isascii():
-            return True
-        rest = folded[len(label) :]
-        if not _ASCII_WORD.match(rest[0]):
-            return True
-    return False
+        kept.append(" " if category in _SKELETON_SPACE or char in _BLANKS else char)
+    words = " ".join(_word_skeleton(word) for word in "".join(kept).split())
+    return " ".join(unicodedata.normalize("NFKC", words).casefold().translate(_CONFUSABLES).split())
+
+
+_RESERVED_SKELETONS: Final = tuple(sorted({_skeleton(label) for label in RESERVED_LABELS}))
+
+
+def _collides(skeleton: str, label: str) -> bool:
+    """``skeleton`` is ``label`` or starts with it as a word; a wildcard matches any letter."""
+    if len(skeleton) < len(label):
+        return False
+    if any(
+        char != want and not (char == _WILDCARD and want.isalpha()) for char, want in zip(skeleton, label, strict=False)
+    ):
+        return False
+    rest = skeleton[len(label) :]
+    return not rest or not label.isascii() or not _ASCII_WORD.match(rest[0])
+
+
+def _is_reserved(name: str) -> bool:
+    skeleton = _skeleton(name)
+    return any(_collides(skeleton, label) for label in _RESERVED_SKELETONS)
 
 
 def safe_display(name: str | None, *, lang: str = "en") -> str:

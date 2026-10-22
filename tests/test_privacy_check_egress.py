@@ -286,6 +286,48 @@ def test_malformed_bridge_explains_the_call_format():
         assert '"name"' in decision.message and "not a Mordred privacy block" in decision.message
 
 
+def test_bridge_batch_asks_once_for_every_entry_that_needs_approval():
+    # Under "ask" web_search runs without a prompt, so the hosts come from URL fetches.
+    policy = egress.EgressPolicy(level="ask")
+    a = {"name": "web_extract", "arguments": {"urls": ["https://a.example/x"]}}
+    b = {"name": "web_extract", "arguments": {"urls": ["https://b.example/y"]}}
+    single_a = egress.decide("tool_call", {"calls": [a]}, "batch-1", policy)
+    single_b = egress.decide("tool_call", {"calls": [b]}, "batch-1", policy)
+    assert single_a.rule_key == "mordred.egress:web_extract:a.example"
+    both = egress.decide("tool_call", {"calls": [a, b]}, "batch-1", policy)
+    assert both.approve and not both.allow and both.reason == "egress.ask"
+    assert "a.example" in both.message and "b.example" in both.message
+    assert "\n1. " in both.message and "\n2. " in both.message
+    assert both.rule_key.startswith("mordred.egress.batch:")
+    assert both.rule_key not in {single_a.rule_key, single_b.rule_key}
+    # The key names the set of entries: the order does not matter, another set differs.
+    assert egress.decide("tool_call", {"calls": [b, a]}, "batch-1", policy).rule_key == both.rule_key
+    c = {"name": "web_extract", "arguments": {"urls": ["https://c.example/"]}}
+    assert egress.decide("tool_call", {"calls": [a, c]}, "batch-1", policy).rule_key != both.rule_key
+    # Entries that run without asking are not listed.
+    mixed = egress.decide("tool_call", {"calls": [a, {"name": "read_file", "arguments": {}}, b]}, "batch-1", policy)
+    assert mixed.rule_key == both.rule_key and "read_file" not in mixed.message
+    # A refusal anywhere in the batch still wins over every approval.
+    paste = {"name": "web_extract", "arguments": {"urls": ["https://pastebin.com/raw/x"]}}
+    refused = egress.decide("tool_call", {"calls": [a, b, paste]}, "batch-1", policy)
+    assert not refused.allow and not refused.approve and refused.reason == "egress.blocklisted_domain"
+
+
+def test_hook_returns_one_approval_for_a_whole_bridge_batch(monkeypatch):
+    from mordred_hermes.privacy_check import hooks
+
+    monkeypatch.setattr(egress, "load_policy", lambda *a, **k: egress.EgressPolicy(level="ask"))
+    monkeypatch.setattr(hooks, "safe_audit_append", lambda *a, **k: None)
+    calls = [
+        {"name": "web_extract", "arguments": {"urls": ["https://a.example/"]}},
+        {"name": "terminal", "arguments": {"command": "curl https://b.example/upload"}},
+    ]
+    directive = hooks._check_tool_egress(SimpleNamespace(audit=None), "tool_call", {"args": {"calls": calls}})
+    assert directive is not None and directive["action"] == "approve"
+    assert "a.example" in directive["message"] and "curl https://b.example/upload" in directive["message"]
+    assert directive["rule_key"].startswith("mordred.egress.batch:")
+
+
 def test_blocklist_level_refuses_bare_ip_addresses_but_not_loopback():
     policy = egress.EgressPolicy(level="blocklist")
     assert not egress.decide("web_extract", {"urls": ["http://203.0.113.7/x"]}, "ip-1", policy).allow

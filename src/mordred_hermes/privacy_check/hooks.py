@@ -315,6 +315,8 @@ def _reader_unrecorded(state: Any, tool_name: str, level: str, code: str) -> dic
             "rule": "egress.reader_unrecorded",
             "level": level,
             "tool_name": tool_name,
+            # Content-free ReaderRecordError code (e.g. "record_full").
+            "detail": code,
         },
     )
     refusal = egress._block(

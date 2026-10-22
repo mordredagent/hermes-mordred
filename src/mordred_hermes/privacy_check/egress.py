@@ -591,8 +591,11 @@ def _decide_bridge(
     """Decide a ``tool_call`` by its inner calls; ``None`` if it is malformed.
 
     A refusal of any entry refuses the batch, also after an entry that only
-    asks. A batch that reads imported history runs every entry under the
-    reader guard, so ``[telegram_ask, terminal]`` is refused as a whole.
+    asks. Entries that ask are combined into one prompt that lists every one
+    of them (:func:`_combine_approvals`), so approving the batch never runs an
+    entry the user was not shown. A batch that reads imported history runs
+    every entry under the reader guard, so ``[telegram_ask, terminal]`` is
+    refused as a whole.
     """
     entries = _bridge_entries(args)
     if entries is None:
@@ -610,17 +613,37 @@ def _decide_bridge(
         )
     reader_batch = any(name in READER_TOOLS for name, _ in entries)
     taints = False
-    pending: Decision | None = None
+    approvals: list[Decision] = []
     for name, arguments in entries:
         inner = _decide_tool(name, arguments, session_id, policy, home=home, reader_batch=reader_batch)
         if not inner.allow and not inner.approve:
             return inner
-        if inner.approve and pending is None:
-            pending = inner
+        if inner.approve:
+            approvals.append(inner)
         taints = taints or inner.taints
-    if pending is not None:
-        return replace(pending, taints=taints, reader=reader_batch)
+    if approvals:
+        return replace(_combine_approvals(approvals), taints=taints, reader=reader_batch)
     return Decision(allow=True, taints=taints, reader=reader_batch)
+
+
+def _combine_approvals(approvals: list[Decision]) -> Decision:
+    """One approval prompt for every entry of a ``tool_call`` batch that asks.
+
+    Hermes asks once for the whole bridge call, so the prompt must show each
+    entry that needs approval. The ``rule_key`` covers exactly this set of
+    entries: answering "always" for a batch never pre-approves a different
+    batch or one of its entries on its own.
+    """
+    if len(approvals) == 1:
+        return approvals[0]
+    keys = "\n".join(sorted(decision.rule_key for decision in approvals))
+    digest = hashlib.sha256(keys.encode("utf-8")).hexdigest()[:12]
+    listed = "\n".join(f"{number}. {decision.message}" for number, decision in enumerate(approvals, start=1))
+    return replace(
+        approvals[0],
+        rule_key=f"mordred.egress.batch:{digest}",
+        message=f"Mordred: this tool_call batch has {len(approvals)} calls that need your approval:\n{listed}",
+    )
 
 
 def decide(

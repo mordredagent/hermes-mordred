@@ -4236,7 +4236,11 @@ ignored for them).
 - Web and URL tools resolve to `ask` even at privacy level `off`.
 
 Taint survives restart and compaction through the durable
-`<home>/mordred/reader_sessions.json` (see [`PATHS.md`](./PATHS.md)).
+`<home>/mordred/reader_sessions.json` (see [`PATHS.md`](./PATHS.md)), which
+holds at most 4096 session digests and never evicts one; when it is full,
+reader tools are refused for sessions not yet recorded
+(`egress.reader_unrecorded`) until the operator prunes the file (a pruning CLI
+is future work).
 `hooks._check_tool_egress` records the session before allowing a reader tool; a
 missing session id or a failed write blocks the call
 (`egress.reader_no_session`, `egress.reader_unrecorded`). A session that cannot

@@ -11,8 +11,17 @@ File: ``<home>/mordred/reader_sessions.json``::
     {"version": 1, "sessions": ["<sha256(session_id) hex>", ...]}
 
 - Only SHA-256 digests of session ids are stored, never the ids themselves.
-- At most :data:`MAX_ENTRIES` digests, oldest first; recording a new session
-  evicts the oldest ones.
+- At most :data:`MAX_ENTRIES` digests, oldest first, and none is ever
+  evicted: dropping an old digest would silently lift the restriction from
+  that session the next time it is resumed. When the record is full,
+  :func:`record` raises ``ReaderRecordError("record_full")`` and the hook
+  refuses every reader tool for a session not yet recorded
+  (``egress.reader_unrecorded``) until the operator prunes the file (a
+  pruning CLI is future work). Sessions already recorded keep working.
+- A missing file reads as an empty record. The file lives in the operator's
+  own Hermes home, which Mordred trusts like the rest of its configuration;
+  deleting it is an operator action, and each affected session is recorded
+  again (back in reader mode) at its next reader-tool call.
 - Written through the checked private-storage helpers
   (:mod:`mordred_hermes._private_fs`) on every platform: a ``0700`` directory,
   a ``0600`` file, an atomic replace under the directory's private lock, and
@@ -45,9 +54,11 @@ _platform = os.name
 DIR_NAME: Final = "mordred"
 FILE_NAME: Final = "reader_sessions.json"
 VERSION: Final = 1
-MAX_ENTRIES: Final = 512
-#: 512 digests take about 34 KiB; anything larger was not written by us.
-MAX_BYTES: Final = 64 * 1024
+MAX_ENTRIES: Final = 4096
+#: A full record is 274,459 bytes as written (66 bytes per quoted digest plus a
+#: comma, ~30 bytes of framing); 512 KiB leaves room for a hand-formatted file.
+#: Anything larger was not written by us.
+MAX_BYTES: Final = 512 * 1024
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 
 #: ``record_path -> ((dev, ino, size, mtime_ns), digests)``
@@ -83,7 +94,12 @@ def record_path(home: Path) -> Path:
 
 
 def record(home: Path, session_id: str) -> None:
-    """Durably add ``session_id`` to the reader record; raise on any failure."""
+    """Durably add ``session_id`` to the reader record; raise on any failure.
+
+    A session already recorded is a no-op, also when the record is full. A
+    new session in a full record raises ``ReaderRecordError("record_full")``;
+    nothing is evicted.
+    """
     if not session_id:
         raise ReaderRecordError("no_session")
     with _translated():
@@ -99,7 +115,9 @@ def record(home: Path, session_id: str) -> None:
                 current, exists = [], False
             if entry in current:
                 return
-            data = _encode([*current, entry][-MAX_ENTRIES:])
+            if len(current) >= MAX_ENTRIES:
+                raise ReaderRecordError("record_full")
+            data = _encode([*current, entry])
             if exists:
                 tx.replace_bytes(FILE_NAME, data)
             else:

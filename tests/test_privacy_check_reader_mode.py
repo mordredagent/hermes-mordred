@@ -327,6 +327,28 @@ def test_bridge_batch_that_asks_still_records_reader_mode_first(hook: _Hook) -> 
     assert not refused.allow and not refused.approve and refused.reason == "egress.reader_locked"
 
 
+def test_bridge_batch_in_a_reader_session_lists_every_web_call(hook: _Hook) -> None:
+    session = _sid()
+    assert hook("telegram_ask", {"question": "q"}, session) is None
+    searches = _bridge(("web_search", {"query": "alpha-query"}), ("web_search", {"query": "beta-query"}))
+    single = egress.decide("tool_call", _bridge(("web_search", {"query": "alpha-query"})), session, hook.policy)
+    result = hook("tool_call", searches, session)
+    assert result is not None and result["action"] == "approve"
+    assert "alpha-query" in result["message"] and "beta-query" in result["message"]
+    assert result["rule_key"].startswith("mordred.egress.batch:") and result["rule_key"] != single.rule_key
+    assert hook.rules()[-1] == "egress.reader_web"
+    fetches = _bridge(
+        ("web_extract", {"urls": ["https://a.example/"]}), ("web_extract", {"urls": ["https://b.example/"]})
+    )
+    fetched = hook("tool_call", fetches, session)
+    assert fetched is not None and fetched["action"] == "approve"
+    assert "a.example" in fetched["message"] and "b.example" in fetched["message"]
+    # An action next to a web call is refused outright, not asked about.
+    mixed = hook("tool_call", _bridge(("web_search", {"query": "x"}), ("terminal", {"command": "ls"})), session)
+    assert mixed is not None and mixed["action"] == "block"
+    assert hook.rules()[-1] == "egress.reader_locked"
+
+
 # -- durable record ------------------------------------------------------------------------
 
 
@@ -346,15 +368,40 @@ def test_missing_record_reads_as_empty(tmp_path: Path) -> None:
     assert not (tmp_path / "mordred").exists()
 
 
-def test_eviction_keeps_at_most_512_newest_entries(tmp_path: Path) -> None:
-    full = [_reader_sessions.digest(f"old-{i}") for i in range(_reader_sessions.MAX_ENTRIES)]
-    _seed_record(tmp_path, _reader_sessions._encode(full))
-    assert _reader_sessions.contains(tmp_path, "old-0")
-    _reader_sessions.record(tmp_path, "newest")
-    stored = _reader_sessions.load(tmp_path)
-    assert len(stored) == _reader_sessions.MAX_ENTRIES
-    assert stored[-1] == _reader_sessions.digest("newest") and stored[0] == full[1]
-    assert not _reader_sessions.contains(tmp_path, "old-0")
+def test_full_record_refuses_new_sessions_and_evicts_nothing(tmp_path: Path) -> None:
+    assert _reader_sessions.MAX_ENTRIES == 4096
+    ids = [_sid() for _ in range(_reader_sessions.MAX_ENTRIES)]
+    _seed_record(tmp_path, _reader_sessions._encode([_reader_sessions.digest(i) for i in ids[:-1]]))
+    _reader_sessions.record(tmp_path, ids[-1])  # the last slot still fits
+    full = tuple(_reader_sessions.digest(i) for i in ids)
+    assert _reader_sessions.load(tmp_path) == full
+    assert len(_reader_sessions.record_path(tmp_path).read_bytes()) <= _reader_sessions.MAX_BYTES
+    with pytest.raises(_reader_sessions.ReaderRecordError) as err:
+        _reader_sessions.record(tmp_path, "one-more")
+    assert err.value.code == "record_full"
+    assert _reader_sessions.load(tmp_path) == full
+    assert _reader_sessions.contains(tmp_path, ids[0]) and not _reader_sessions.contains(tmp_path, "one-more")
+    _reader_sessions.record(tmp_path, ids[0])  # an already recorded session is still a no-op
+    assert _reader_sessions.load(tmp_path) == full
+
+
+def test_full_record_blocks_new_reader_sessions_in_the_hook(hook: _Hook) -> None:
+    ids = [_sid() for _ in range(_reader_sessions.MAX_ENTRIES)]
+    full = tuple(_reader_sessions.digest(i) for i in ids)
+    _seed_record(hook.home, _reader_sessions._encode(list(full)))
+    session = _sid()
+    result = hook("telegram_ask", {"question": "secret question"}, session)
+    assert result is not None and result["action"] == "block" and "record_full" in result["message"]
+    assert hook.rules()[-1] == "egress.reader_unrecorded"
+    assert hook.audit[-1]["detail"] == "record_full" and "secret" not in repr(hook.audit)
+    assert not egress.is_tainted(session) and not egress.reader_mode_established(session)
+    # Nothing was evicted: every recorded session is still restricted after a restart ...
+    assert _reader_sessions.load(hook.home) == full
+    assert all(egress.is_reader_session(i, home=hook.home) for i in (ids[0], ids[1], ids[-1]))
+    locked = hook("write_file", {"path": "/tmp/x"}, ids[0])
+    assert locked is not None and hook.rules()[-1] == "egress.reader_locked"
+    # ... and may keep reading imported history.
+    assert hook("telegram_ask", {"question": "q"}, ids[0]) is None
 
 
 @pytest.mark.parametrize(
