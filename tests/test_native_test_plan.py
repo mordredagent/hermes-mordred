@@ -21,19 +21,23 @@ def planner():
     return module
 
 
-def test_reviewed_native_inventory_is_balanced_without_losing_modules():
+@pytest.mark.parametrize("tier", ["routine", "full"])
+@pytest.mark.parametrize("count", [2, 4])
+def test_reviewed_native_inventory_is_balanced_without_losing_modules(tier, count):
     plan = planner()
     durations = json.loads((ROOT / "tools/native_test_durations.json").read_text())
     modules = list(durations["seconds"])
-    shards = [plan.plan_native_modules(modules, tier="routine", shard=i, count=2) for i in (1, 2)]
+    shards = [plan.plan_native_modules(modules, tier=tier, shard=i, count=count) for i in range(1, count + 1)]
     assert len(modules) == 84
-    assert set(shards[0]).isdisjoint(shards[1])
-    assert set(shards[0] + shards[1]) == set(modules)
-    weights = [sum(durations["routine_seconds"][m] for m in shard) for shard in shards]
+    assigned = [module for shard in shards for module in shard]
+    assert len(assigned) == len(set(assigned)) == len(modules)
+    assert set(assigned) == set(modules)
+    measured = durations["routine_seconds" if tier == "routine" else "seconds"]
+    weights = [sum(measured[m] for m in shard) for shard in shards]
     weights[0] += durations["support_seconds"]
-    assert max(weights) < 1400
-    assert abs(weights[0] - weights[1]) < 1
-    assert shards == [plan.plan_native_modules(modules, tier="routine", shard=i, count=2) for i in (1, 2)]
+    # Compare allocation imbalance, not a promised hosted-runner duration.
+    assert max(weights) - min(weights) < 1
+    assert shards == [plan.plan_native_modules(modules, tier=tier, shard=i, count=count) for i in range(1, count + 1)]
     assert all(shard == [m for m in modules if m in shard] for shard in shards)
 
 
