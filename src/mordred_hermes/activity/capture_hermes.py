@@ -151,7 +151,16 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
-from ._browser_results import PAGE_TEXT_CHARS, element_label, field_kind, page_text, ref_kinds, ref_line, ref_token
+from ._browser_results import (
+    PAGE_TEXT_CHARS,
+    element_label,
+    field_kind,
+    page_text,
+    ref_kind,
+    ref_kinds,
+    ref_line,
+    ref_token,
+)
 from ._browser_results import json_object as _json_object
 from ._browser_results import page_location as _page
 from ._browser_results import reported_url as _reported_url
@@ -517,7 +526,7 @@ def _click(call: _Call, state: _Session) -> _Mapped:
 def _type(call: _Call, state: _Session) -> _Mapped:
     line = ref_line(state.snapshot, call.args.get("ref"))
     # A stale snapshot's line may describe another page's field: treated as a secret one.
-    kind = SENSITIVE_FIELD_KIND if state.snapshot_stale else field_kind(line)
+    kind = SENSITIVE_FIELD_KIND if state.snapshot_stale else ref_kind(state.snapshot, call.args.get("ref"))
     typed = call.args.get("text")
     typed = typed if isinstance(typed, str) and typed else None
     base = _on_page("type", state, target=element_label(line), args={"field_kind": kind})

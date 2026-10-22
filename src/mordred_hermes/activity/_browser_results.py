@@ -6,16 +6,21 @@ Pure helpers for :mod:`.capture_hermes` (no state, no configuration, no store):
   result reports. Only an ``http(s)`` URL whose host fits the receiver's host
   rule is a known page; an ``about:`` page is known to have no URL; anything
   else is unknown, so it can never stand for an excluded host's page.
-- :func:`ref_line` / :func:`element_label` / :func:`field_kind`: an element's
-  line in an accessibility snapshot, its label (role and accessible name,
-  never the value) and whether a field is ``sensitive``, ``text`` or
-  ``other``.
+- :func:`ref_line` / :func:`ref_kind` / :func:`ref_kinds` /
+  :func:`element_label` / :func:`field_kind`: an element's line in an
+  accessibility snapshot, its label (role and accessible name, never the
+  value) and whether a field is ``sensitive``, ``text`` or ``other``. One
+  parser (:func:`_snapshot_refs`) reads a ref only from its element's own
+  annotation, never from the accessible name or the value, which the page
+  writes; a ref also written anywhere else, or claimed by several lines,
+  takes the most sensitive kind.
 - :func:`page_text`: a navigation snapshot as stored page text, without the
   values of secret fields.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 from collections.abc import Mapping
@@ -33,6 +38,7 @@ __all__ = [
     "json_object",
     "page_location",
     "page_text",
+    "ref_kind",
     "ref_kinds",
     "ref_line",
     "ref_token",
@@ -57,10 +63,21 @@ _SENSITIVE_FIELD_RE: Final = re.compile(
 )
 #: A tool's ``ref`` argument (``@e5`` or ``e5``).
 _REF_TOKEN_RE: Final = re.compile(r"@?([A-Za-z][A-Za-z0-9_-]{0,31})")
-#: A ref on a snapshot line: ``ref=e5`` (agent-browser), not the prefix of a longer ref, or ``[e5]``.
-_LINE_REF_RE: Final = re.compile(
-    r"ref=([A-Za-z][A-Za-z0-9_-]{0,31})(?![A-Za-z0-9_-])|\[([A-Za-z][A-Za-z0-9_-]{0,31})\]"
+#: A snapshot line's own parts: its leading marks, an annotation group (``[ref=e5]``, ``[level=1]``, ``[e3]``),
+#: its role and its quoted accessible name (:func:`_own_annotations`).
+_LINE_LEAD_RE: Final = re.compile(r"[\s*-]*")
+_ANNOTATION_GROUP_RE: Final = re.compile(r"\s*\[([^\[\]\n]{0,200})\]")
+_ROLE_RE: Final = re.compile(r"\s*[A-Za-z][\w-]{0,40}")
+_QUOTED_NAME_RE: Final = re.compile(r'\s*"(?:[^"\\\n]|\\.)*"')
+#: A ref in an annotation: ``ref=e5`` (agent-browser), else a bare ``e5``.
+_ANNOTATED_REF_RE: Final = re.compile(r"(?<![A-Za-z0-9_-])ref=([A-Za-z][A-Za-z0-9_-]{0,31})(?![A-Za-z0-9_-])")
+_BARE_REF_RE: Final = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,31}")
+#: A ref written anywhere in a snapshot, inside names and values too (:func:`_snapshot_refs`).
+_ANY_REF_RE: Final = re.compile(
+    r"(?<![A-Za-z0-9_-])ref=([A-Za-z][A-Za-z0-9_-]{0,31})(?![A-Za-z0-9_-])|\[([A-Za-z][A-Za-z0-9_-]{0,31})\]"
 )
+#: How sensitive each field kind is: a ref several lines claim takes the most sensitive one.
+_KIND_RANK: Final[Mapping[str, int]] = {"text": 0, "other": 1, SENSITIVE_FIELD_KIND: 2}
 #: An accessibility line's role and quoted accessible name (``- textbox "Email" [ref=e3]: value``).
 _NAMED_LINE_RE: Final = re.compile(r'^[\s*-]*(?P<role>[A-Za-z][\w-]{0,40})\s+"(?P<name>(?:[^"\\\n]|\\.){1,300})"')
 _ANNOTATION_RE: Final = re.compile(r"\[[^\]\n]{0,200}\]")
@@ -93,27 +110,58 @@ def page_location(value: Any) -> tuple[bool, str | None]:
     return isinstance(value, str) and value.strip().lower().startswith("about:"), None
 
 
-def _line_at(snapshot: str, start: int, end: int) -> str:
-    first = snapshot.rfind("\n", 0, start) + 1
-    last = snapshot.find("\n", end)
-    return snapshot[first : len(snapshot) if last == -1 else last].strip()[:MAX_REF_LINE_CHARS]
+def _own_annotations(line: str) -> list[str]:
+    """The annotation groups of the element a snapshot line describes: before its role (``[e3] textbox``) or after
+    its role and quoted accessible name, up to its value (``- textbox "Email" [ref=e2] [level=1]: value``).
+    Never text inside the name or the value: the page writes those."""
+    found: list[str] = []
+    lead = _LINE_LEAD_RE.match(line)
+    pos = lead.end() if lead else 0
+    for part in (_ANNOTATION_GROUP_RE, _ROLE_RE, _QUOTED_NAME_RE, _ANNOTATION_GROUP_RE):
+        if part is _ANNOTATION_GROUP_RE:
+            while (group := part.match(line, pos)) is not None:
+                found.append(group.group(1))
+                pos = group.end()
+        elif (match := part.match(line, pos)) is not None:
+            pos = match.end()
+    return found
 
 
-def _ref_position(snapshot: str, token: str) -> tuple[int, int] | None:
-    """Where ``ref=<token>`` (agent-browser) or ``[<token>]`` stands, not as a prefix of a longer ref."""
-    for needle in (f"ref={token}", f"[{token}]"):
-        start = 0
-        while (pos := snapshot.find(needle, start)) != -1:
-            end = pos + len(needle)
-            if needle.startswith("[") or not (_continues(snapshot, end) or _continues(snapshot, pos - 1)):
-                return pos, end
-            start = end
-    return None
+def _line_refs(line: str) -> list[str]:
+    """The refs of a line's own element: its ``ref=`` annotations, else its bare ``[e3]`` ones."""
+    groups = _own_annotations(line)
+    annotated = [match.group(1) for group in groups for match in _ANNOTATED_REF_RE.finditer(group)]
+    return annotated or [group for group in groups if _BARE_REF_RE.fullmatch(group)]
 
 
-def _continues(text: str, index: int) -> bool:
-    """``text[index]`` would make a ``ref=…`` match part of a longer word (``xref=e4``, ``ref=e40``)."""
-    return 0 <= index < len(text) and (text[index].isalnum() or text[index] in "_-")
+def _most_sensitive(lines: list[str]) -> str | None:
+    return max(lines, key=lambda line: _KIND_RANK[field_kind(line)], default=None)
+
+
+@functools.lru_cache(maxsize=8)
+def _snapshot_refs(snapshot: str) -> Mapping[str, tuple[str, str | None]]:
+    """``ref -> (field kind, line)`` for every ref a snapshot writes, from one reading shared by :func:`ref_line`,
+    :func:`ref_kind` and :func:`ref_kinds`.
+
+    The line is the one whose own element annotation names the ref (:func:`_own_annotations`); when several do,
+    the most sensitive one (``sensitive`` > ``other`` > ``text``). A ref also written anywhere else (inside an
+    accessible name or a value) could be the page's spoof, so its kind is ``sensitive``; one written only there
+    has no line."""
+    own: dict[str, list[str]] = {}
+    for raw in snapshot.splitlines():
+        for ref in _line_refs(raw):
+            own.setdefault(ref, []).append(raw.strip()[:MAX_REF_LINE_CHARS])
+    written: dict[str, int] = {}
+    for annotated, bare in _ANY_REF_RE.findall(snapshot):
+        written[annotated or bare] = written.get(annotated or bare, 0) + 1
+    refs: dict[str, tuple[str, str | None]] = {}
+    for ref in dict.fromkeys([*written, *own]):
+        lines = own.get(ref, [])
+        best = _most_sensitive(lines)
+        kind = field_kind(best) if best is not None else SENSITIVE_FIELD_KIND
+        # An own annotation the wide pattern cannot see (``[ref=e1, nth=2]``) is no second writing.
+        refs[ref] = (SENSITIVE_FIELD_KIND if written.get(ref, 0) > len(lines) else kind, best)
+    return refs
 
 
 def ref_token(ref: Any) -> str | None:
@@ -125,27 +173,24 @@ def ref_token(ref: Any) -> str | None:
 
 
 def ref_kinds(snapshot: str | None) -> dict[str, str]:
-    """The field kind (:func:`field_kind`) of the line of every ref a snapshot lists (the first line naming it,
-    as :func:`ref_line` finds it)."""
-    kinds: dict[str, str] = {}
-    for line in (snapshot or "").splitlines():
-        refs = [named or bracketed for named, bracketed in _LINE_REF_RE.findall(line)]
-        if refs:
-            kind = field_kind(line.strip()[:MAX_REF_LINE_CHARS])
-            for ref in refs:
-                kinds.setdefault(ref, kind)
-    return kinds
+    """The field kind of every ref a snapshot writes (:func:`_snapshot_refs`)."""
+    return {ref: kind for ref, (kind, _line) in _snapshot_refs(snapshot or "").items()}
+
+
+def ref_kind(snapshot: str | None, ref: Any) -> str:
+    """The field kind of element ``ref`` (``@e5`` / ``e5``) in a snapshot (:func:`_snapshot_refs`); ``other``
+    when the snapshot does not write it."""
+    token = ref_token(ref)
+    found = _snapshot_refs(snapshot or "").get(token) if token else None
+    return found[0] if found else field_kind(None)
 
 
 def ref_line(snapshot: str | None, ref: Any) -> str | None:
-    """The snapshot line of element ``ref`` (``@e5`` / ``e5``), stripped and bounded; ``None`` when absent."""
-    if not snapshot or not isinstance(ref, str):
-        return None
-    match = _REF_TOKEN_RE.fullmatch(ref.strip())
-    if match is None:
-        return None
-    found = _ref_position(snapshot, match.group(1))
-    return None if found is None else _line_at(snapshot, *found) or None
+    """The snapshot line of element ``ref`` (``@e5`` / ``e5``), stripped and bounded: the line whose own element
+    annotation names it (:func:`_snapshot_refs`); ``None`` when there is none."""
+    token = ref_token(ref)
+    found = _snapshot_refs(snapshot or "").get(token) if token else None
+    return found[1] if found else None
 
 
 def _label_parts(line: str) -> tuple[str, bool]:

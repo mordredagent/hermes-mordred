@@ -17,7 +17,15 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.activity import _history_access, capture_hermes, contracts, history, hooks_history, tools
+from mordred_hermes.activity import (
+    _browser_results,
+    _history_access,
+    capture_hermes,
+    contracts,
+    history,
+    hooks_history,
+    tools,
+)
 from mordred_hermes.activity.ingest import StoreReceiver
 from mordred_hermes.activity.store import ActivityStore
 from tests._activity_capture_helpers import (
@@ -301,6 +309,57 @@ def test_a_field_named_in_an_older_snapshot_keeps_its_kind(capture_home) -> None
     end_turn()
     [start] = _starts(store)
     assert start.text == "open the notes on 127.0.0.1 and write Fabrikam"
+
+
+# --- a ref is read from its element's own annotation, never from text the page writes (security review) --------
+
+#: A page can write "[ref=e5]" into another element's accessible name.
+SPOOFED = '- heading "Sign in" [ref=e1]\n- textbox "Note [ref=e5]" [ref=e2]\n- textbox "Password" [ref=e5]'
+
+
+def test_a_ref_written_inside_an_accessible_name_never_names_the_field() -> None:
+    assert _browser_results.ref_line(SPOOFED, "@e5") == '- textbox "Password" [ref=e5]'
+    assert _browser_results.ref_line(SPOOFED, "@e2") == '- textbox "Note [ref=e5]" [ref=e2]'
+    kinds = _browser_results.ref_kinds(SPOOFED)
+    assert (kinds["e5"], kinds["e2"], kinds["e1"]) == ("sensitive", "text", "text")
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        '- textbox "Note" [ref=e5]\n- textbox "Password" [ref=e5]',
+        '- textbox "Password" [ref=e5]\n- textbox "Note" [ref=e5]',
+        '- textbox "Note" [ref=e5]\n- link "x [ref=e5]" [ref=e6]',  # also written inside a name: ambiguous
+        '- textbox "Note" [ref=e2]: see [ref=e5]\n- textbox "Name" [ref=e5]',  # also written inside a value
+    ],
+)
+def test_a_ref_on_several_lines_or_also_in_page_text_takes_the_most_sensitive_kind(snapshot: str) -> None:
+    assert _browser_results.ref_kinds(snapshot)["e5"] == "sensitive"
+    assert _browser_results.ref_kind(snapshot, "@e5") == "sensitive"
+
+
+def test_a_ref_written_only_in_page_text_is_treated_as_secret() -> None:
+    snapshot = '- textbox "Note" [ref=e2]: see [ref=e7] and "[e8]"'
+    assert _browser_results.ref_line(snapshot, "@e7") is None
+    assert _browser_results.ref_kind(snapshot, "@e7") == "sensitive"
+    assert _browser_results.ref_kind(snapshot, "@e8") == "sensitive"
+    assert _browser_results.ref_kind(snapshot, "@e9") == "other"  # nowhere: unknown
+
+
+def test_a_password_typed_into_a_spoofed_ref_is_withheld_and_scrubbed(capture_home) -> None:
+    _home, store = capture_home
+    turn("log in on 127.0.0.1 with swordfish")
+    call("browser_navigate", {"url": LOGIN}, nav_result(LOGIN, snapshot=SPOOFED))
+    call("browser_type", {"ref": "@e5", "text": "swordfish"}, ok(element="@e5"))  # fresh snapshot
+    call("browser_click", {"ref": "@e1"}, ok(clicked="@e1"))
+    call("browser_type", {"ref": "@e5", "text": "swordfish"}, ok(element="@e5"))  # stale: its last known kind
+    end_turn()
+    typed = [event for event in calls(store) if event.op == "type"]
+    assert [event.text for event in typed] == [None, None]
+    assert typed[0].target == 'textbox "Password"'
+    [start] = _starts(store)
+    assert start.text == "log in on 127.0.0.1 with redacted"
+    assert "swordfish" not in _whole_store(store)
 
 
 # --- a value the message calls a secret is withheld when typed (live B2 re-run, N5) ------------------------------

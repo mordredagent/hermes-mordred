@@ -4387,7 +4387,14 @@ per-process state.
     `http(s)` URLs with an ASCII host become routes. A click or type names its
     element by the ref's line in the snapshot of the page now open (below; at
     most 60,000 characters kept per session): role and accessible name
-    (`textbox "Email"`), never the value after the name. Hermes's `status` `ok` (or none, as on the 0.13.0 floor) is
+    (`textbox "Email"`), never the value after the name. A ref is read only
+    from its element's own annotation (`[ref=e5]` after the role and quoted
+    name, or a leading `[e5]`), never from text inside an accessible name or
+    a value, which the page writes; a ref that several lines claim, or that
+    is also written anywhere else in the snapshot (a page could spoof it),
+    takes the most sensitive kind (`sensitive` > `other` > `text`;
+    `_browser_results._snapshot_refs`, shared by the line lookup and the
+    remembered kinds below). Hermes's `status` `ok` (or none, as on the 0.13.0 floor) is
     `dispatched` / `claimed_success` unless the result reports `success: false`
     or an `error`, `error` is `claimed_failure`, `blocked` and `cancelled` are
     the `cancelled` phase (`args.reason`) and `timeout` the `timed_out` phase.
