@@ -214,7 +214,7 @@ in its encrypted history. You receive **counts only** (`inserted`,
 `duplicates`, `fetched`, `skipped`, `partial`, `error`, ...), never subjects,
 names, addresses or text; then use `mordred_history_search` to read mail.
 
-- `partial: true` with `partial_reason: "time_budget"` or `"max_messages"`:
+- `partial: true` with `partial_reason: "time_budget"`, `"max_messages"`, `"max_bytes"` or `"cancelled"`:
   more mail is waiting; call `mordred_mail_sync` again (each call works about a
   minute and continues where the last one stopped). Do not loop more than a
   few times without telling the user.
