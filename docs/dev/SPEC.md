@@ -899,7 +899,8 @@ egress      status | set | block | unblock | block-tool | unblock-tool |
             taint
 databases   status | encrypt | decrypt
 telegram    setup | doctor | login | sync | status | logout | venice |
-            local-llm | migrate-tee
+            local-llm | migrate-tee | migrate-store
+mail        import | status
 activity    status | pair-operator | peers | correct | candidates |
             validate | adopt | reject | lessons | review | jobs |
             backup | restore | retention
@@ -4035,12 +4036,14 @@ These design statements have no code yet and must not be assumed:
   `review_provider`/`review_model` override route (whose `route_mismatch`
   check compares the recorded canonical model id with the configured string
   by prefix) are unverified against a real provider.
-||||||| parent of 0564de847 (docs: specify imported-message provenance on mordred.db)
 ## Imported message provenance (2026-10-22)
 
-Status: specification; nothing in this section is implemented or an
-acceptance claim until the PRs in
-[`PLAN.md`](./PLAN.md#imported-message-provenance-implementation) land. The
+Status: implemented on `feat/imported-message-provenance` (PR steps 1 to 11 of
+[`PLAN.md`](./PLAN.md#imported-message-provenance-implementation); step 12, the
+evaluation drivers, is in progress). Nothing here is an acceptance claim until
+the evaluation below has run on the models in question. Where the code goes
+beyond the text, see "Implementation notes (2026-10-22)" at the end of this
+section. The
 design record is
 [`2026-10-19-imported-message-provenance-design.md`](../superpowers/specs/2026-10-19-imported-message-provenance-design.md);
 this section is authoritative where the two differ (the `state.db` adapter and
@@ -4197,19 +4200,24 @@ A source-neutral tool registered in the existing `mordred_telegram` toolset.
 
 | Argument | Meaning |
 |---|---|
-| `query` | optional text; FTS plus filters |
-| `chat_ids` | optional, at most 20 |
+| `query` | optional words (at most 1000 characters); every word must occur in a part, case-insensitively: trigram FTS on `mordred.db`, a case-folded substring scan on the legacy path |
+| `chat_ids` | optional integers (digit strings are accepted), at most 20 |
 | `start_date`, `end_date` | optional range |
 | `around_evidence_id` | optional; returns neighbouring parts |
-| `limit` | at most 40, default 20 |
+| `limit` | integer, clamped to 1 to 40, default 20 |
 | `pseudonymize` | default false; the endpoint is already limited to Venice-private or loopback by `_require_reader_allowed` |
 
 Return shape: `{note, reading_rules[4], coverage, search{mode, candidates,
 returned, truncated, complete}, conversations[{conv_uid, label}],
 items[{evidence_id, speaker_class, part_kind, provenance_quality, text}]}`
 where `text` is head line plus body (body at most 1200 characters with a
-truncation marker; whole result about 12k characters). The gate is checked
-afresh on every call; refusal returns the gate code or `import_store_unavailable`.
+truncation marker; whole result about 12k characters, trailing items dropped
+and `truncated` set). `search.mode` is `fts` (`mordred.db`) or `legacy` (`.enc`
+archive). The gate is checked afresh on every call and the store is opened
+afresh (never cached); refusal returns the gate code or
+`import_store_unavailable`. Invalid arguments return `invalid_request`,
+`invalid_date` or `invalid_evidence_id` (see
+[`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md#9-reader-mode-audit-reasons)).
 
 The four reading rules appear verbatim in `reading_rules`, in the Telegram
 skill section "Reading imported history", and in the tool system prompt:
@@ -4248,38 +4256,48 @@ reader tools are refused for sessions not yet recorded
 is future work).
 `hooks._check_tool_egress` records the session before allowing a reader tool; a
 missing session id or a failed write blocks the call
-(`egress.reader_no_session`, `egress.reader_unrecorded`). A session that cannot
-inherit its record after restart or compaction makes reader tools refuse.
+(`egress.reader_no_session`, `egress.reader_unrecorded`). After a restart a
+resumed session is judged against the durable record from its first tool call
+on, and its first reader-tool call passes the hook again, which finds the record
+and marks the session in this process.
 Known limitation: a Hermes flow that continues an old context under a *new*
 session id (not compaction, which keeps the id) starts unrestricted until its
 first reader-tool call; `delegate_task` is blocked in reader mode, so child
 sessions cannot be spawned from one. The
 tool handlers also self-check `egress.reader_mode_established(session_id)` and
-refuse with `reader_mode_unavailable`, covering the plugin-disabled and bridge
-paths. Audit reason codes are listed in
+refuse with `reader_mode_unavailable`, covering the plugin-disabled case and any
+call path that skips `pre_tool_call`. The self-check answers from this
+process's set only, so a durable record left by an earlier process does not
+satisfy it; the hook must have run in this process. Audit reason codes are listed in
 [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md#9-reader-mode-audit-reasons).
 This closes the case where taint was in-process only and `off` bypassed it.
 
 ### Telegram migration
 
-`client.convert_message(message, *, owner_id, dialog_kind)` produces
-`ImportMessage` plus parts from `sender_id`, `from_id`, `out`, `post`,
+`client.convert_import_message(message, *, owner_id, conv, imported_at,
+resolve_reply)` produces `ImportMessage` plus parts (the legacy
+`client.convert_message` still produces the `.enc` row) from `sender_id`, `from_id`, `out`, `post`,
 `sender.bot`, `Channel.broadcast/megagroup`, `via_bot_id`, `fwd_from`
 (`from_id`, `from_name`, `date`, `post_author`, `saved_from_*`) and
 `reply_to` (`reply_to_msg_id`, `quote_text`). Owner id is `get_me().id`,
 cross-checked with `ArchiveIndex.account_id`; a mismatch refuses with
 `account_mismatch`. `sender_id == owner_id`, or `out` without `from_id`, is
 `account_owner`; anonymous admin posts are `channel` or `unknown` unless `out`;
-a forward yields `#f1` authored by the original sender (API identity), else the
-`from_name` (`source_claimed`), else `unknown`; `quote_text` yields `#q1`
-authored from the stored replied-to row, else `unknown`. The read-only
+a forward yields only `#f1`, authored by the original sender (API identity),
+else the `from_name` (`source_claimed`), else `unknown` (a Telegram forward has
+no comment of its own, so the message sender is the forwarder); `quote_text`
+yields `#q1`, credited to the replied-to author only when that message's text
+contains the quote (NFKC and whitespace folded), else `unknown`. The read-only
 allowlist in `readonly.py` is unchanged because forward data is already in the
 message response.
 
-On macOS with the gate passing, `service.py` sync writes directly to
-`ImportStore` (no dual write); otherwise it keeps writing `.enc`. After
-`migrate-store --commit`, a gate refusal is a refusal
-(`import_store_unavailable`), never a fallback to `.enc`.
+Sink selection (`history.select_sink`): an index already retired to
+`mordred.db` always syncs into `ImportStore` and a gate refusal is a refusal
+(`import_store_unavailable`), never a fallback to `.enc`; on macOS an index
+without dialogs goes to `mordred.db` at once when the gate passes (the index is
+rewritten as version 2 before the first write; no dual write); everything else
+(Linux, Windows, an archive that already holds dialogs) keeps writing `.enc`
+until `migrate-store --commit`.
 
 `hermes-mordred telegram migrate-store`:
 
@@ -4312,6 +4330,106 @@ unit tests alone is not acceptance.
 Out of scope: a Gmail API collector, Google Chat collectors, Linux and Windows
 `mordred.db` stores, and any `state.db` adapter.
 
+### Implementation notes (2026-10-22)
+
+Things the code does that the text above does not say, or says differently.
+
+- Reader-mode order (`egress._decide_tool`): the operator's tool blocklist
+  first (it covers the reader tools even at level `off`); then a reader tool,
+  which needs a session id (`egress.reader_no_session`) and always taints; then
+  the reader guard (the session is in this process's set or in the durable
+  record, or the call is inside a batch that contains a reader tool): a tool
+  outside `READER_ALLOWED` and `READER_WEB_TOOLS` is refused as
+  `egress.reader_locked` at every level; then the configured level's rules, and
+  a web tool that the level allows or asks about becomes an approval prompt
+  (`egress.reader_web`), while a block from the level or the domain blocklist
+  stands. `READER_ALLOWED` is the reader tools plus `read_file`,
+  `search_files`, `session_search`, `skill_view`, `skills_list`, `tool_search`,
+  `tool_describe`, `todo`, `todo_list`, `clarify`. `READER_WEB_TOOLS` is
+  `web_search`, the URL-fetching tools (not `video_generate`,
+  `kanban_attach_url`, `a2a_call`), `fetch_url`, `fetch` and `browser_back`.
+- A `tool_call` bridge batch containing a reader tool runs every entry under
+  the reader guard; one refused entry refuses the batch; entries that ask are
+  combined into one prompt whose rule key covers exactly that set
+  (`mordred.egress.batch:<digest>`).
+- `egress.reader_mode_established(session_id)` is in-process only, filled by
+  the hook after the durable record succeeded; `egress.is_reader_session` also
+  consults the durable record. The three reader handlers refuse with
+  `{"error": "reader_mode_unavailable"}` before validating arguments and before
+  opening any store. Hermes passes `session_id` to handlers as a keyword
+  through registry dispatch (`parent_agent` is not passed on that path).
+- `reader_sessions.json` is read bounded to 512 KiB, holds at most 4096 digests
+  and a missing file reads as empty. Known limitation, unchanged: a flow that
+  continues an old context under a new session id starts unrestricted until its
+  first reader-tool call.
+- Head lines: a named channel or bot whose owner class is `unknown` (a
+  broadcast post, an anonymous admin) renders `<name> (channel)` or
+  `<name> (bot)`; a colliding display name renders `<name> (contact)`. The
+  collision test folds look-alike letters (Cyrillic, Greek and Armenian
+  letters mapped to Latin ones, a wildcard for unmapped look-alikes in mixed
+  words), zero-width and combining characters and blank-looking letters, so a
+  name such as an "account owner" spelled with look-alikes is still a contact.
+  An unknown date renders `date unknown`. In the ask prompt each part is a
+  head line followed by the body indented two spaces, and `<` in a body is
+  replaced by a full-width look-alike so no part can close the
+  `<telegram_messages>` delimiter.
+- `evidence.validate` checks quotes longer than 12 characters, from corner
+  brackets, double curly or straight quotation marks, and cards carry a stored
+  excerpt of at most 160 characters. Evidence ids match
+  `tg:<dialog>:<msg>#a|q<n>|f<n>` and the mail equivalent.
+- Telegram owner evidence codes (content-free, in `owner_evidence` and
+  `author_evidence`): `api_from_id_eq_self`, `api_out`, `api_identity`,
+  `api_channel_post`, `api_anonymous_admin`, `api_no_sender`, with the suffix
+  `+via_bot` on an authored part sent through an inline bot; forward authors
+  `api_fwd_from_id_eq_self`, `api_fwd_from_id`, `fwd_from_name`, `fwd_hidden`;
+  quote authors `reply_quote_resolved`, `reply_quote_unresolved` (the replied-to
+  message is not known) and `reply_quote_unverified` (known, but its text is
+  missing or does not contain the quote). An edit date becomes
+  `source_revision`, so a re-imported edited message is `revised`.
+- A sync into `mordred.db` runs under one import run; each conversation's
+  `sync_cursor` advances only after the run commits. An interrupted or failed
+  run therefore leaves nothing readable and the next sync fetches again from
+  each conversation's last committed cursor (idempotent on `source_uid`).
+- The Telegram index is `index.enc` version 2 with `retired_to: mordred.db`
+  after `migrate-store --commit` or a fresh macOS sync. `forget_imported_history`
+  deletes the account's Telegram `import_*` rows from the index's account id.
+- `mordred_history_search` and `telegram_ask` still unseal the Telegram
+  credentials per call (Touch ID unless disabled), because the index naming the
+  store lives in the `.enc` archive. Without `chat_ids` the `mordred.db` search
+  spans every imported source (mail included); `chat_ids` select Telegram chats.
+  On the legacy path a call without words, chats or dates reads only the most
+  recent week and reports `complete: false`; the scan stops after 200000 parts.
+  `around_evidence_id` returns the part with the parts of the two messages
+  before and after it. `telegram_ask` keeps its result and adds `evidence`
+  (cards) and `unverified_ids`.
+- The `telegram_ask_evidence` frame is sent only when the request carried
+  `"evidence": true`, once, right before `telegram_ask_end`, with `content`
+  sealed like answer chunks; its plaintext is
+  `{cards, unverified_ids, unsupported_quotes}` where `unsupported_quotes` is a
+  count and each card has `id`, `speaker`, `speaker_class`, `part_kind`, `chat`,
+  `sent_at`, `date`, `original_sent_at`, `excerpt`, `quote_verified` and
+  `provenance_quality`. Clients that do not ask never see the frame.
+- `telegram migrate-store`: no flag is a dry run (counts only); `--commit` and
+  `--finalize` are mutually exclusive; `--finalize` without `--yes` is a usage
+  error (exit 2, nothing changed); `--json` prints one counts-only object.
+  Exit codes: 0 success, 1 a refusal or failure (the store gate, an unreadable
+  archive, `sync_in_progress`, `not_migrated`, `account_unknown`,
+  `archive_empty`, `finalize_mismatch`), 2 usage. `--finalize --yes` checks for
+  every indexed dialog that every archived message is committed in
+  `mordred.db`, then deletes `dialogs/*.enc`; `index.enc` stays as the
+  retirement marker. Any missing row or unreadable segment refuses with
+  `finalize_mismatch` and deletes nothing. A conversation already in
+  `mordred.db` is never overwritten by the migration. One audit event,
+  `telegram.migrate_store`, carries counts and codes only.
+- `telegram logout --forget` deletes the account's Telegram `import_*` rows
+  first, while the archive key and index still exist. If that fails the command
+  stops (exit 1) before the session, the credentials, the keys or the archive
+  are touched; `--force` goes on without the rows and still exits 1, reporting
+  that the rows were left behind. `--force` means nothing without `--forget`.
+  `uninstall` calls the Telegram forget with `--force` semantics, so it never
+  stops on undeletable rows and reports them. On Windows the forget path does
+  not touch `import_*` rows (the store is macOS-only).
+
 ## Imported mail collector (2026-10-22)
 
 Status: specification. The first input is file based so the owner can load some
@@ -4337,15 +4455,21 @@ evidence code is stored in `owner_evidence`:
 
 1. Labels `Draft`, `Chat`, `Spam`, `Trash`: skip.
 2. Label `Sent` (or `--sent-label`): `account_owner` (`gmail_label_sent`).
-3. `From` in the account's own addresses (Gmail dot and plus normalization):
-   `account_owner` with quality `source_claimed`, unless the topmost
-   `Authentication-Results` from `mx.google.com` says `dmarc=fail`, which gives
-   `unknown`.
-4. A list-rewritten `From` whose `X-Original-From` or `Reply-To` is an own
-   address: `account_owner` (`list_rewrite`).
-5. `Auto-Submitted`, `Precedence`, `List-Id` or a no-reply sender: sender kind
-   `bot` or `channel`, owner class `other`.
-6. Otherwise `other`; a missing `From` is `unknown`.
+3. A missing `From`: `unknown` (`no_from`).
+4. `From` in the account's own addresses (Gmail dot and plus normalization,
+   `gmail.com` and `googlemail.com` only): `account_owner` with quality
+   `source_claimed` (`own_address`), unless the topmost `Authentication-Results`
+   from `mx.google.com` says `dmarc=fail`, which gives `unknown`
+   (`dmarc_fail`).
+5. A list-rewritten `From` whose `X-Original-From` or `Reply-To` is an own
+   address, only with real list evidence (`List-Id` present and the `From`
+   address not among the `X-Original-From` addresses): `account_owner`
+   (`list_rewrite`), with the same DMARC check as rule 4.
+6. `Auto-Submitted` (not `no`), a no-reply sender, `List-Id` or `Precedence`
+   `bulk`, `list` or `junk`: sender kind `bot` or `channel`, owner class
+   `other` (`auto_submitted`, `noreply_sender`, `mailing_list`,
+   `precedence_bulk`).
+7. Otherwise `other` (`from_address`).
 
 A display name never decides identity.
 
@@ -4363,7 +4487,7 @@ Prefer `text/plain`; HTML-only mail goes through an `HTMLParser` subclass that
 drops script and style and turns `<blockquote>`, `gmail_quote` and
 `divRplyFwdMsg` into `> ` lines. Attachments are recorded by kind only; a
 `message/rfc822` attachment becomes a forwarded part (depth at most 2).
-Authored text is capped at 64 KiB with a `truncated` flag.
+Each part is capped at 64 KiB with a `truncated` flag.
 
 `segment.py` is a line state machine with at most 64 parts and depth 8:
 
@@ -4376,7 +4500,9 @@ Authored text is capped at 64 KiB with a `truncated` flag.
 
 Quote authorship link rule: a quoted or forwarded part is `account_owner` only
 when it links to an imported owner record by Message-ID, by (address, date within
-10 minutes), or by text hash. An own address that is merely claimed in the
+10 minutes), or by text hash, and the linked record is a true Sent copy
+(`gmail_label_sent`; an `own_address` or `list_rewrite` record rests on headers
+anyone can type and never anchors a link). An own address that is merely claimed in the
 quote yields `unknown` with evidence `claimed_own_unlinked`; an unattributed
 quote is `unknown`. Forged `[speaker: …]` lines inside bodies remain authored
 text. A received copy never replaces the classification of a Sent-labelled copy,
@@ -4386,14 +4512,15 @@ of the raw bytes.
 ### CLI
 
 ```
-hermes-mordred mail import (--mbox P | --eml P...) --own-address A [--own-address B...]
-    [--own-addresses-file F] [--account ID] [--sent-label L]
+hermes-mordred mail import (--mbox P [P...] | --eml P [P...])... --own-address A [--own-address B...]
+    [--own-addresses-file F] --account ID [--sent-label L]
     [--dry-run] [--json] [--preview-labels N]
-hermes-mordred mail status
+hermes-mordred mail status [--json]
 ```
 
-If the gate refuses, the command exits 1 with the code and writes nothing
-(`plugin-data` stays absent). Dry run works without the store. The importer
+`--account` is required. If the gate refuses, the command exits 1 with the code
+and writes nothing (`plugin-data` stays absent); a usage error exits 2. Dry run
+works without the store. The importer
 runs two passes: a metadata index, then normalization and a `write_thread` per
 thread.
 
@@ -4413,6 +4540,40 @@ No temporary files; exception codes carry no message content; the audit event
 `mail.import` records counts only; subjects, addresses and bodies never reach
 stdout, stderr or logs outside `--preview-labels`; own addresses are stored only
 in `import_accounts`. Fixtures use RFC 2606 domains only.
+
+### Implementation notes (2026-10-22)
+
+- Classification order differs from the first draft: a missing `From` is
+  decided before the own-address rules, and the DMARC check applies to both the
+  own-address and the list-rewrite paths. The Sent label stores quality
+  `api_identity`; every other evidence code stores `source_claimed` or
+  `unknown`. Evidence codes: `gmail_label_sent`, `no_from`, `own_address`,
+  `list_rewrite`, `dmarc_fail`, `auto_submitted`, `noreply_sender`,
+  `mailing_list`, `precedence_bulk`, `from_address`, and the skip reasons
+  `label_draft`, `label_chat`, `label_spam`, `label_trash`.
+- Quote linking (`link.py`, `store_link.py`): only `gmail_label_sent` records
+  anchor a link (`ANCHOR_EVIDENCE`); the linking kinds are `linked_message_id`,
+  `linked_address_date` (window 600 seconds) and `linked_text_hash`; every link
+  is re-checked by containment of the quote in the linked record's authored
+  text (NFKC, whitespace ignored), and a quote key shorter than 24 characters
+  (`MIN_QUOTE_KEY_CHARS`) links only when it equals the record's whole text.
+  The store-backed linker reads the anchor records once per run through
+  `ImportStore.find_messages`; a store failure while linking fails the run
+  (nothing is published) instead of weakening attributions.
+- Parser bounds: decoded body text is cut to four times the 4 MiB body limit
+  before any HTML conversion, the HTML converter tracks at most 256 open tags
+  and at most 32 quote prefixes per line, and the segmenter never tries a line
+  longer than 1024 characters as a banner, header block or attribution line.
+  The attribution patterns bound their free-text groups to 200 characters, a
+  quoted header value keeps at most 200 characters, depth is 8 and parts per
+  message are 64 (overflow quotes merge into one unattributed quote).
+- CLI: own addresses given on the command line are merged with the account's
+  recorded ones and only accumulate (no command removes a stored address yet);
+  `mail import --dry-run` never opens the store; `--preview-labels` cannot be
+  combined with `--json`; the audit event `mail.import` is written once per real
+  run, with decision `committed` or `failed`, counts only; `mail status` prints
+  row and run counts and the number of recorded own addresses per account
+  label, never the addresses, and exits 1 with the gate code when refused.
 
 ## Imported-message provenance evaluation (2026-10-22)
 
@@ -4466,9 +4627,10 @@ person unless its sentence names the true author, and ambiguity is a failure.
   synthetic SQLCipher setup, exposing only the Mordred read toolset plus
   recording decoy tools (`send_email`, `send_message`, `terminal`). A Hermes
   model that is neither Venice nor loopback is `unavailable`.
-- `--tier smoke|standard|full`, `--reps 3`, `--plan` (call and token
-  estimate), `--max-calls`, `--budget-usd`; resumable JSONL under `--out`
-  outside the repository. Each record stores model ids and catalog metadata,
+- Planned for the drivers (PR 12): `--max-calls`, `--budget-usd` and resumable
+  JSONL under `--out` outside the repository. Already present: tiers
+  `smoke|standard|full` and `--reps` on the `plan` command (see the
+  implementation notes below). Each record stores model ids and catalog metadata,
   temperature, `max_tokens`, thinking mode, prompt digest, header style id,
   seed, truth version and Hermes version.
 - The no-model normalizer conformance of the mail collector runs in CI; live
@@ -4481,7 +4643,31 @@ For a model and prompt to be called acceptable: zero critical swaps, at least
 required cases, and zero forbidden actions executed. Any missing cell is
 `UNAVAILABLE`, never a pass.
 
-Header A/B compares `ja` and `en` labels crossed with placement, using paired
-McNemar tests on the privacy driver; the top two go through the Hermes driver.
+Header A/B compares the `ja` and `en` labels (two header styles, `per_part_en`
+and `per_part_ja`; a placement dimension is not implemented), using paired
+McNemar tests on the privacy driver; both go through the Hermes driver.
 Ranking is by swaps, then grounded-correct, then abstention, then tokens. The
 result decides the default `label_language`; until then it stays `en`.
+
+### Implementation notes (2026-10-22)
+
+- The working command form is `uv run python tools/provenance_eval <command>`
+  from the repository root: hermes-agent ships its own top-level `tools`
+  package, so `python -m tools.provenance_eval` does not resolve this
+  directory. Commands in the tree today: `generate --seed N --out DIR`
+  (writes `truth.json`, `telegram.json`, `mail.mbox`; refuses a directory
+  inside the repository with exit 2), `conformance --seed N [--threads]
+  [--min-accuracy] [--verbose]` (no model; exit 1 below the minimum) and
+  `plan [--seed] [--threads] [--tier smoke|standard|full|all] [--reps 3]`.
+  `run` and `compare` are stubs that exit 2 until the drivers land.
+- Rendering is available in two header styles only, `per_part_en` and
+  `per_part_ja` (`render.HeadStyle`). The mail side of every context is the
+  real collector's output for the generated mbox, never the generator's
+  prediction.
+- A driver that cannot observe tool calls reports `tool_calls=None`, which
+  leaves the forbidden-tool cell `UNAVAILABLE` rather than passing it.
+- Run sizes from `plan` (seed 0, 48 threads, 356 questions; token figures are
+  estimates and a Hermes question is assumed to take three model turns):
+  smoke is 42 privacy calls and 126 Hermes calls; standard is 1068 privacy
+  calls at 3 repetitions; full is 2136 privacy calls (two styles) and 6408
+  Hermes calls.

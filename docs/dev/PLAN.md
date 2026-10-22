@@ -2336,14 +2336,15 @@ Delivery as shipped:
 
 Gaps between the design and this code are listed in SPEC §"Not implemented in
 this delivery".
-||||||| parent of 0564de847 (docs: specify imported-message provenance on mordred.db)
 ## Imported message provenance implementation
 
 **Spec:** [Imported message provenance](SPEC.md#imported-message-provenance-2026-10-22).
 Design record:
 [`2026-10-19-imported-message-provenance-design.md`](../superpowers/specs/2026-10-19-imported-message-provenance-design.md).
-Status: planned. One component per PR, docs first; security-sensitive PRs
-(3, 4, 7, 8, 10) run their complete containing test modules.
+Status: steps 1 to 11 have landed on `feat/imported-message-provenance` (see
+"Landed steps" below); step 12 is in progress. One component per PR, docs first;
+security-sensitive PRs (3, 4, 7, 8, 10) run their complete containing test
+modules.
 
 **Architecture:** a library package `src/mordred_hermes/imports/` holds the
 record contract, store, renderer and evidence validator. Telegram sync, the mail
@@ -2358,7 +2359,7 @@ collector and the Hermes tool are thin consumers. Everything lives in
 | 1 | Docs | SPEC, PLAN, TODO, PATHS, HOOK_PAYLOADS, CI, design-doc revision note | existing doc-contract tests |
 | 2 | Records, render, evidence | `imports/records.py`, `imports/render.py`, `imports/evidence.py` | `tests/imports/test_records.py`, `test_render.py`, `test_evidence.py` |
 | 3 | Store | `imports/store.py`, `imports/_schema.py`, `imports/legacy_enc.py`; `activity/_gate.py` renames `_keyed_opener` to public `keyed_opener` | `tests/imports/test_import_store.py` (plain-sqlite seam) |
-| 4 | Telegram conversion and sync | `extension/telegram/client.py` (`convert_message`), `service.py` sink, `store.py` index version 2 | extend `tests/extension/test_telegram_import.py`, `tests/test_windows_telegram_archive.py` |
+| 4 | Telegram conversion and sync | `extension/telegram/client.py` (`convert_import_message`), `history.py` sinks, `service.py`, `store.py` index version 2 | extend `tests/extension/test_telegram_import.py`, `tests/test_windows_telegram_archive.py` |
 | 5 | `telegram migrate-store` | `wizard/` migrate-store command and parser | `tests/extension/test_telegram_migrate_store.py` |
 | 6 | Ask rendering and evidence | `extension/telegram/ask.py`, `service.py` (`on_evidence`), `api.py` (`telegram_ask_evidence` frame) | extend `test_telegram_local_llm.py`, `test_telegram_api.py`, `test_telegram_hermes_tools.py`, `tests/integration/test_telegram_local_llm.py` |
 | 7 | Reader mode | `privacy_check/egress.py`, `privacy_check/_reader_sessions.py`, `hooks.py`, `_audit_reasons.py`, `tools/hook_payload_contract.json` | full `tests/test_privacy_check_egress.py`, new `tests/test_privacy_check_reader_mode.py`; lands before 8 |
@@ -2370,6 +2371,32 @@ collector and the Hermes tool are thin consumers. Everything lives in
 
 Step 11 may start in parallel with step 9. Steps 4 and 6 are end-to-end changes
 and must keep the Linux and Windows `.enc` paths unchanged.
+
+### Landed steps (2026-10-22)
+
+Commits on `feat/imported-message-provenance` since
+`feat/browser-activity-learning` (`git log --oneline
+feat/browser-activity-learning..HEAD`), grouped by step:
+
+| Step | Commit subjects |
+|---|---|
+| 1 | `docs: specify imported-message provenance on mordred.db` |
+| 2 | `feat: add imports library with records, aliases, renderer and evidence` |
+| 7 | `feat: add reader mode to privacy_check tool egress`; `fix: close three provenance security-review findings` |
+| 3 | `feat: add ImportStore on mordred.db and the legacy .enc adapter`; `docs: reconcile store schema details and the reader-mode reason code` |
+| 9 | `feat: add the file-based mail collector library`; `fix: harden mail owner classification, quote linking and parser limits` |
+| 4 | `feat: convert Telegram messages with provenance and sync into mordred.db` |
+| 10 | `feat: add hermes-mordred mail import and mail status` |
+| 5 | `feat: add telegram migrate-store and delete import rows on logout --forget` |
+| 6 | `feat: render attributed head lines and validated evidence in telegram ask` |
+| 11 | `feat: add the provenance evaluation harness without model drivers` |
+| 5, 6 fixes | `fix: verify Telegram quote containment and stop logout --forget on undeleted rows`; `fix: uninstall forces the Telegram forget and documents the stop-unless-force rule` |
+| 8 | `feat: add mordred_history_search and the reader-mode self-check` |
+
+Step 12 (`tools/provenance_eval/drivers.py`, the gated integration test, then a
+docs PR with live results and the header-language decision) is in progress.
+Follow-ups that the landed code leaves open are in
+[`TODO.md`](./TODO.md#imported-message-provenance).
 
 ### Per-PR verification
 
@@ -2412,9 +2439,12 @@ Delivered in PRs 9 (library) and 10 (CLI) of the sequence above.
 **Spec:** [Imported-message provenance evaluation](SPEC.md#imported-message-provenance-evaluation-2026-10-22).
 Delivered in PRs 11 and 12.
 
-- Modules in `tools/provenance_eval/`: `scenarios.py`, `generate.py`,
-  `truth.py`, `questions.py`, `drivers.py`, `score.py`, `report.py`,
-  `__main__.py`; covered by `mypy --strict`, excluded from the wheel.
+- Modules in `tools/provenance_eval/` (landed in PR 11): `scenarios.py`,
+  `generate.py`, `truth.py`, `questions.py`, `encode_mail.py`,
+  `encode_telegram.py`, `context.py`, `conformance.py`, `plan.py`, `score.py`,
+  `metrics.py`, `report.py`, `cli.py`, `__main__.py` and small helpers; `drivers.py` is PR 12
+  (in progress). Covered by `mypy --strict`, excluded from the wheel. Run it as
+  `uv run python tools/provenance_eval <command>`.
 - CI tests run without a model: `tests/test_provenance_eval_generator.py`,
   `test_provenance_eval_score.py` (includes a refuse-everything model that must
   fail the thresholds) and `test_provenance_eval_conformance.py` (mail

@@ -317,8 +317,31 @@ Specification: [Imported-message provenance evaluation](SPEC.md#imported-message
 CI runs only the model-free tests (`tests/test_provenance_eval_generator.py`,
 `_score.py`, `_conformance.py`). Live runs are explicit and never automatic.
 
+Command form: from the repository root, `uv run python tools/provenance_eval
+<command>` (`generate`, `conformance`, `plan`; `run` and `compare` arrive with
+the drivers). `python -m tools.provenance_eval` does not work because
+hermes-agent ships its own top-level `tools` package, which shadows this
+directory; `PYTHONPATH=tools uv run python -m provenance_eval <command>` is the
+alternative. `conformance --seed N` is the no-model check of the mail collector
+and the Telegram records against the generated truth.
+
+Always-on test modules of the imported-message provenance work (they carry no
+`integration` marker and need no network, model, Secure Enclave or real
+SQLCipher; the store tests inject a plain `sqlite3.connect` opener):
+`tests/imports/` (records, render, aliases, evidence, import store, legacy
+`.enc` adapter), the mail collector modules `tests/test_mail_source.py`,
+`_headers`, `_owner`, `_threading`, `_segment`, `_body`, `_normalize`,
+`_importer`, `_store_link` and `tests/test_mail_import_cli.py`,
+`tests/test_privacy_check_reader_mode.py` (reader-mode egress, the durable
+record and the hook), `tests/extension/test_telegram_history.py`,
+`test_telegram_import.py`, `test_telegram_migrate_store.py`,
+`test_telegram_ask_render.py`, `test_history_search_tool.py` and
+`test_telegram_hermes_tools.py`, and `tests/test_provenance_eval_generator.py`,
+`_score.py`, `_conformance.py`. Security-sensitive edits to these areas run the
+complete containing modules, not only the critical preset.
+
 Gate and configuration for `tests/integration/test_provenance_eval.py` and
-`python -m tools.provenance_eval`:
+`uv run python tools/provenance_eval run`:
 
 - `MORDRED_PROVENANCE_EVAL=1` is required; without it the integration test is
   skipped.
@@ -333,9 +356,10 @@ Gate and configuration for `tests/integration/test_provenance_eval.py` and
 
 Tiers: `--tier smoke` (a few threads, one repetition, to prove wiring on both
 drivers), `--tier standard` (full question set, `--reps 3` on the privacy
-driver), `--tier full` (header A/B across `ja`/`en` and placement, top two
-styles repeated through the Hermes driver). Use `--plan` for the call and token
-estimate and `--max-calls` / `--budget-usd` as hard limits. A missing cell makes
+driver), `--tier full` (header A/B across the two styles `per_part_en` and
+`per_part_ja`, both repeated through the Hermes driver). Use the `plan` command
+(`uv run python tools/provenance_eval plan --tier all`) for the call and token
+estimate; `--max-calls` / `--budget-usd` as hard limits arrive with the drivers. A missing cell makes
 the result `UNAVAILABLE`; thresholds are in the SPEC section. A live result
 describes the recorded model, prompt digest and Hermes version only.
 

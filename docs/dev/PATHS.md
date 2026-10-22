@@ -458,9 +458,15 @@ not even the ciphertext can be committed if `HERMES_HOME` sits inside a git
 working tree.
 
 Imported-message provenance bumps the index: `index.enc` version 2 carries
-`retired_to: mordred.db` after `telegram migrate-store --commit`, and an older
-Mordred refuses a version-2 index instead of diverging. The `.enc` files remain
-until `--finalize --yes`. See
+`retired_to: mordred.db`, written by `telegram migrate-store --commit` or by the
+first macOS sync of an account with no dialogs yet, and an older Mordred
+refuses a version-2 index (`store_undecryptable`) instead of diverging. Version
+1 stays the write version of every archive that is not retired (Linux, Windows,
+macOS archives not yet migrated). Once the index is retired there is no `.enc`
+fallback: a refusal of the `mordred.db` gate is `import_store_unavailable` for
+sync, ask and history search alike. The `dialogs/*.enc` files remain until
+`telegram migrate-store --finalize --yes` verifies every archived message in
+`mordred.db` and deletes them; `index.enc` stays as the retirement marker. See
 [SPEC.md](SPEC.md#imported-message-provenance-2026-10-22).
 
 ### Imported message tables
@@ -469,10 +475,15 @@ Written by the `mordred_hermes.imports` library (Telegram sync, `telegram
 migrate-store`, `mail import`) and read by `telegram_ask` and
 `mordred_history_search`:
 
-- `import_meta` (`schema_version`), `import_conversations`, `import_messages`,
-  `import_parts` with the FTS5 index `import_parts_fts`, `import_runs` (staging
-  journal; only committed runs are readable) and `import_accounts` (owner mail
-  addresses).
+- `import_meta` (`schema_version`), `import_conversations`, `import_messages`
+  (including `recipients_json` for mail `to:` names and `run_id`, the run that
+  last wrote the row), `import_parts` (with a stable `id` that anchors the FTS5
+  index `import_parts_fts`, a trigram index), `import_runs` (staging journal;
+  only committed runs are readable) and `import_accounts` (the owner's mail
+  addresses per account label; they are never written to `config.yaml`).
+- Readers go through `ImportStore` (`search`, `parts_for`, `neighbors`,
+  `find_messages` for the mail quote linker); every read sees committed runs
+  only.
 - `activity status` and activity retention ignore every `import_*` table, and
   the import code never touches `activity_*` tables.
 - `ActivityStore.backup` / `restore` copy the whole file, so a restore also
@@ -485,13 +496,16 @@ migrate-store`, `mail import`) and read by `telegram_ask` and
 Durable record of Hermes sessions that have used a reader tool
 (`telegram_ask`, `telegram_chats`, `mordred_history_search`), owned by
 `privacy_check/_reader_sessions.py`. Mode `0600`, replaced atomically. It
-holds at most 4096 digests (read bounded to 512 KiB) and never evicts one,
+holds at most 4096 digests (read bounded to 512 KiB, a full record is about
+268 KiB) and never evicts one,
 because dropping a digest would lift the restriction from that session when it
 is resumed; when it is full, reader tools are refused for sessions not yet
 recorded (`egress.reader_unrecorded`) until the operator prunes the file (a
 pruning CLI is future work). Session ids are stored as SHA-256 digests, never
-raw. An unwritable record blocks reader tools (`egress.reader_unrecorded`); a
-missing record reads as empty and is recreated at the next reader-tool call.
+raw. The directory `<home>/mordred` must be private (`0700`): a wider-mode
+directory makes the record refuse (`storage_unsafe`). An unwritable record
+blocks reader tools (`egress.reader_unrecorded`); a missing record reads as
+empty and is recreated at the next reader-tool call.
 On Windows the file uses the checked private-storage path. It carries no
 message content.
 

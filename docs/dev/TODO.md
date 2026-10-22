@@ -713,28 +713,29 @@ the receiver side is [`SPEC.md`](./SPEC.md) §"Event contract".
   rule of the recall tools is to be revisited.
 - [ ] Record Hermes's own browser tool calls as `source: hermes` events via
   `post_tool_call`.
-- [ ] Accept `訂正:` / `correct:` corrections typed in Hermes chat.
-||||||| parent of 0564de847 (docs: specify imported-message provenance on mordred.db)
+- [ ] Accept corrections typed in Hermes chat, with the Japanese correction
+  prefix (the two-character word for "correction") or `correct:`.
 ## Imported message provenance
 
 Spec: [SPEC.md](SPEC.md#imported-message-provenance-2026-10-22); plan:
 [PLAN.md](PLAN.md#imported-message-provenance-implementation). Nothing below is
-implemented unless checked.
+implemented unless checked. Steps 1 to 11 landed on
+`feat/imported-message-provenance` (2026-10-22).
 
-- [ ] Precondition: commit the activity code on `feat/browser-activity-learning`
+- [x] Precondition: commit the activity code on `feat/browser-activity-learning`
   and reconcile SPEC activity schema v2 versus code v1; create the
   `feat/imported-message-provenance` worktree from it.
-- [ ] PR 1: documentation (this change).
-- [ ] PR 2: `imports/` records, render, evidence.
-- [ ] PR 3: `ImportStore`, schema, legacy `.enc` adapter, public `keyed_opener`.
-- [ ] PR 4: Telegram `convert_message`, sync sink, `index.enc` version 2.
-- [ ] PR 5: `telegram migrate-store` (dry run, `--commit`, `--finalize --yes`).
-- [ ] PR 6: ask rendering, evidence validation, `telegram_ask_evidence` frame.
-- [ ] PR 7: reader mode and durable `reader_sessions.json` (before PR 8).
-- [ ] PR 8: `mordred_history_search` tool, skill section and prompt.
-- [ ] PR 9: mail collector library and fixtures.
-- [ ] PR 10: `mail import` / `mail status` CLI.
-- [ ] PR 11: evaluation generator, scorer and conformance tests.
+- [x] PR 1: documentation (this change).
+- [x] PR 2: `imports/` records, render, evidence.
+- [x] PR 3: `ImportStore`, schema, legacy `.enc` adapter, public `keyed_opener`.
+- [x] PR 4: Telegram `convert_import_message`, sync sink, `index.enc` version 2.
+- [x] PR 5: `telegram migrate-store` (dry run, `--commit`, `--finalize --yes`).
+- [x] PR 6: ask rendering, evidence validation, `telegram_ask_evidence` frame.
+- [x] PR 7: reader mode and durable `reader_sessions.json` (before PR 8).
+- [x] PR 8: `mordred_history_search` tool, skill section and prompt.
+- [x] PR 9: mail collector library and fixtures.
+- [x] PR 10: `mail import` / `mail status` CLI.
+- [x] PR 11: evaluation generator, scorer and conformance tests.
 - [ ] PR 12: evaluation drivers, gated live test, then a docs PR recording live
   results in [CI.md](CI.md#manual-live-device-validation-log).
 - [ ] Live-gated validation: `telegram migrate-store` dry run and commit on a
@@ -742,9 +743,36 @@ implemented unless checked.
   dry run on real Takeout mail; `provenance_eval --tier smoke` on both drivers;
   end-to-end reader-mode refusal after a Hermes restart.
 
+Follow-ups left by the landed code:
+
+- [ ] A command to remove a stored own mail address (`mail import` only
+  accumulates addresses in `import_accounts`).
+- [ ] An `ImportStore` API for conversations and sync cursors, so
+  `extension/telegram/history.py` and `search.py` stop querying through
+  `connection()` and private service members.
+- [ ] Interrupted `mordred.db` Telegram sync: the cursor advances only after the
+  run commits, so an interrupted first sync fetches again from the start;
+  decide whether a long sync should commit in chunks.
+- [ ] `ActivityStore.restore` rebinds only `activity_meta`; after a restore the
+  import tables refuse with `profile_mismatch`. Rebind `import_meta` too (or
+  refuse the restore explicitly).
+- [ ] dbcrypt `arm` may create `<home>/mordred` with mode 0755, which makes the
+  reader record refuse (`storage_unsafe`) and so blocks every reader tool; create
+  it `0700`.
+- [ ] A `reader_sessions.json` prune command (the record never evicts; at 4096
+  digests new sessions cannot use reader tools).
+- [ ] The evaluation's Telegram encoder lacks the unverified-quote scenario
+  (`reply_quote_unverified`).
+- [ ] FTS-backed keyword mode for `telegram_ask` (today it selects by substring
+  over the loaded window; `mordred_history_search` already uses the trigram
+  index).
+- [ ] Reader-mode inheritance for a new session id that continues an old
+  context (today such a flow is unrestricted until its first reader-tool call).
+
 Later (not scheduled):
 
 - [ ] Gmail API collector feeding the same normalization path.
-- [ ] Header-language decision (`label_language` default) after the evaluation.
+- [ ] Label-language decision (`label_language` default `en` or `ja`) after the
+  evaluation.
 - [ ] Linux and Windows `mordred.db` stores (today those platforms keep the
   `.enc` archive and `telegram_ask`).

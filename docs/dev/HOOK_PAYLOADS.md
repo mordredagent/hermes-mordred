@@ -171,7 +171,8 @@ Hermes source.
 
 Status: implemented for reader mode (`privacy_check/_audit_reasons.py`,
 `tools/hook_payload_contract.json`, which now lists `args`, `session_id` and
-`tool_name` for `pre_tool_call`); the handler codes land with the tool PRs. Mordred still reads only `tool_name` from `pre_tool_call`; reader mode
+`tool_name` for `pre_tool_call`); the handler codes below are returned by the
+reader-tool handlers and the Telegram sync. Mordred still reads only `tool_name` from `pre_tool_call`; reader mode
 additionally uses the `session_id` that Hermes passes to tool handlers and
 hooks. A missing `session_id` is a refusal, not a guess.
 
@@ -187,9 +188,19 @@ written once per session when reader mode is entered (counts only, no args).
 | `egress.reader_no_session` | rule | a reader tool is called without a usable `session_id` | tool call blocked |
 | `egress.reader_locked` | rule | a reader session calls a tool outside the reader allowlist (writes, exec, messaging, scheduling, delegation, payments, MCP, unknown tools) at any privacy level, including `off` | tool call blocked |
 | `egress.reader_web` | rule | a reader session calls a web search or URL-loading tool | approval prompt at every level; blocklisted domains stay refused |
-| `reader_mode_unavailable` | handler code | a reader-tool handler cannot confirm `egress.reader_mode_established(session_id)` (plugin disabled, bridge path, or a session that cannot inherit its record after restart or compaction) | handler refuses; no data returned |
+| `reader_mode_unavailable` | handler code | a reader-tool handler cannot confirm `egress.reader_mode_established(session_id)`, which answers from this process's set only: no `session_id`, the privacy_check component disabled, or a call path that skips `pre_tool_call` | handler refuses before validating arguments or opening a store; no data returned |
+| `invalid_request` | handler code | `mordred_history_search` (and `telegram_ask`) arguments are malformed: a non-string or over-long `query`, `chat_ids` that is not a list of at most 20 chat ids, a non-integer `limit`, a non-boolean `pseudonymize`, an empty question | handler returns the code; nothing is read |
+| `invalid_date` | handler code | `start_date` or `end_date` is not a `YYYY-MM-DD` string or the range is invalid | handler returns the code; nothing is read |
+| `invalid_evidence_id` | handler code | `around_evidence_id` is not a well-formed part id (for example `tg:-100123:4567#a`) | handler returns the code; nothing is read |
+| `import_record_invalid` | handler code | a Telegram record failed the import contract while writing to the import store (a `RecordError`) | the sync refuses; the code carries no message content |
 | `import_store_unavailable` | handler code | the `mordred.db` gate or open refused after `telegram migrate-store --commit` | read or sync refuses; no fallback to `.enc` |
 | `account_mismatch` | handler code | `get_me().id` differs from `ArchiveIndex.account_id` during Telegram conversion | conversion and sync refuse |
+
+Handler codes are the `error` value of a tool result (or the content-free code
+of a refused sync); they are not `ReasonCode` or `EgressRule` values and write no
+audit entry of their own. The reasons and rules above are audit values; the
+distinction is kept so `tools/hook_payload_contract.json` and
+`_audit_reasons.py` do not need entries for handler codes.
 
 Audit records for these codes follow the existing rules: bounded fields, no
 message text, no raw session id (the record stores SHA-256 digests), no addresses or chat titles.
