@@ -810,7 +810,9 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > page title and a visible-text excerpt when the collector sends them. A
 > password, PIN, one-time code or key written into a task, a correction, a
 > label or a page ("the password Hunter2-x", "PIN: 4821", "use Hunter2-x as
-> the password") is replaced by `redacted` before it is stored.
+> the password") is replaced by `redacted` before it is stored; in your own
+> task and correction texts, so is a long password-like token without any
+> keyword (20 or more characters mixing letters with digits or symbols).
 > No site is excluded by default: messaging and mail sites (Telegram, WhatsApp,
 > Discord, Slack, Gmail, Outlook and others) are recorded too, including what
 > you type there. To keep a site out, list its host in
@@ -877,9 +879,10 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > the same encrypted store, one episode per turn, with your message for that
 > turn as the task. Your message (and a `correct: …` message) is stored when
 > the turn ends, and anything Hermes typed into a password or other secret
-> field during it is replaced by `redacted` in that message, however you
-> worded it (a message of an earlier turn that is already stored is not
-> changed). Elements are named by their label, never their
+> field during it is replaced by `redacted` in that message as a whole word,
+> however you worded it (a message of an earlier turn that is already stored
+> is not changed). A value your message calls a password is not stored as
+> typed text either, whichever field Hermes types it into. Elements are named by their label, never their
 > value; text Hermes types into a password, PIN, card, one-time-code, secret
 > or token field is never stored, and neither is text typed after a click or
 > key press before Hermes takes a new snapshot (the field may be on another

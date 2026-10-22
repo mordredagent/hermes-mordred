@@ -1179,6 +1179,76 @@ def test_nested_keyword_redaction_is_linear_on_hostile_input() -> None:
     assert time.monotonic() - started < 5.0
 
 
+# --- the user's own words: secret-shaped tokens without a keyword (live B2 re-run, N4) ----------------------
+
+USER_WORDS_REDACTED = [
+    pytest.param(
+        "log in as demo-user with Kx9-Hunter2-fake-pw-77 please",
+        "log in as demo-user with redacted please",
+        id="no-keyword",
+    ),
+    pytest.param("(use Kx9Hunter2fakepw77xyz!)", "(use redacted!)", id="marks-kept"),
+    pytest.param("トークンはAbC123dEf456GhI789jKl0です", "トークンはredactedです", id="ja-ascii-run"),
+    # the trade-off, as for typed text: a long identifier mixing letters and digits is redacted too
+    pytest.param("find order-2026-000123-final", "find redacted", id="identifier"),
+]
+
+USER_WORDS_KEPT = [
+    pytest.param("log in as demo-user at http://127.0.0.1:8499/login.html", id="username-and-url"),
+    pytest.param("send the report to alice.smith@example-corp.com tomorrow", id="email"),
+    pytest.param("open /Users/me/Documents/report-2026-final.pdf", id="path"),
+    pytest.param("meet on 2026-10-22T10:00:00+09:00", id="date-time"),
+    pytest.param("the project-management-dashboard-overview page", id="hyphenated-words"),
+    pytest.param("check www.example.com/reports?id=1234 again", id="host-path"),
+    pytest.param("Hunter2-fake-pw is short", id="under-twenty-characters"),
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), USER_WORDS_REDACTED)
+def test_a_secret_shaped_token_in_the_users_words_is_redacted(text: str, expected: str) -> None:
+    assert contracts.redact_secret_shaped_tokens(text) == (expected, True)
+    event = _task_start(text)
+    assert event.text == expected and "text_secrets_redacted" in event.exclusions
+    correction = normalize(
+        phase="correction", source="user_correction", actor="human", action={"op": "other"}, text=text
+    )
+    assert correction.text == expected
+
+
+@pytest.mark.parametrize("text", USER_WORDS_KEPT)
+def test_ordinary_tokens_in_the_users_words_are_kept(text: str) -> None:
+    assert contracts.redact_secret_shaped_tokens(text) == (text, False)
+    assert _task_start(text).text == text
+
+
+def test_secret_shaped_tokens_are_kept_outside_the_users_words() -> None:
+    text = "log in as demo-user with Kx9-Hunter2-fake-pw-77 please"
+    agent = normalize(phase="boundary", actor="agent", action={"op": "task_start", "site": "example.com"}, text=text)
+    page = normalize(action={"op": "navigate", "site": "example.com"}, page_text=text)
+    assert agent.text == text and page.page_text == text
+
+
+# --- the values the redactor replaces, and replacing given values (live B2 re-run, N1 / N5) -------------------
+
+
+def test_secret_values_are_the_values_the_redactor_replaces() -> None:
+    text = f"type Zebra-77-fake as the password, PIN: 4821, key sk-proj-Ab3dEf6hIj9kLm and {JWT}"
+    values = contracts.secret_values(text)
+    assert {"Zebra-77-fake", "4821", "sk-proj-Ab3dEf6hIj9kLm", JWT} <= set(values)
+    assert contracts.REDACTED not in values
+    assert contracts.secret_values("pin the tab to the left") == []
+
+
+def test_given_values_are_replaced_as_whole_words_never_in_a_url_host() -> None:
+    text = "sign in at https://example.com/example?u=example with example, not xexample or example2 or EXAMPLE."
+    assert contracts.redact_values(text, ["example"]) == (
+        "sign in at https://example.com/redacted?u=redacted with redacted, not xexample or example2 or redacted.",
+        True,
+    )
+    assert contracts.redact_values("nothing here", ["example"]) == ("nothing here", False)
+    assert contracts.redact_values("a-b+c", ["b+c", "a-b+c"]) == ("redacted", True)  # the longest first
+
+
 # --- credential parameters and userinfo ------------------------------------------------------------------
 
 

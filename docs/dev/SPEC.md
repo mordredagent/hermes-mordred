@@ -4002,12 +4002,29 @@ and revocable on its own:
   …"), a value before its keyword that is joined to it by other words ("log
   in with Hunter2-x, that is the password") or is a plain word without such
   a verb ("admin for the password"), plural keywords, card numbers and
-  secrets without a keyword in free text are kept. Hermes's own
+  secrets without a keyword in free text are kept, except long secret-shaped
+  tokens in the user's own words (below). Hermes's own
   capture additionally replaces, whatever the phrasing, every value it typed
   into a secret field in its turn's task start and correction
   (§"History for Hermes").
   Events stored earlier are not rewritten; every Hermes surface applies the
   same redaction when it reads them (§"History for Hermes").
+- **Secret-shaped tokens in the user's own words (live B2 re-run, N4).** In a
+  task start or correction that is the user's own words
+  (`contracts.speaks_for_user`), each run of ASCII without whitespace whose
+  core (opening and closing marks left out) is a secret-shaped token of at
+  least 20 characters (rule 5 of the typed-text check below: a letter and a
+  digit or a symbol other than `-`, `_`, `.`; not a URL, host, e-mail
+  address, file path or date) is also replaced by `redacted`
+  (`contracts.redact_secret_shaped_tokens`, exclusion
+  `text_secrets_redacted`), at ingest and whenever a surface shows the
+  user's words, so a password without a keyword ("my login is demo-user /
+  Kx9-Hunter2-fake-pw-77") is not kept. Usernames such as `demo-user`, URLs,
+  dates and ordinary words are kept. The trade-off is that of typed text: a
+  long identifier mixing letters and digits in the user's words
+  (`order-2026-000123-final`) is replaced too. Known gap: a keyword-less
+  password shorter than 20 characters (the live check's `Hunter2-fake-pw`,
+  15) is kept unless Hermes types it into a secret field in the same turn.
 - **Typed text (2026-10-22).** A `type` or `search` operation keeps its text
   when the collector classifies the field (`args.field_kind`) as anything
   other than `sensitive`; a `type` event that sends the text under
@@ -4460,17 +4477,27 @@ per-process state.
     turn ends: `post_llm_call` (hermes-agent fires it once per turn that has
     a final response and was not interrupted; a `turn_id` naming another turn
     leaves the text for its own turn), else the session's next `pre_llm_call`.
-    Only then is it written, after every value the session's `browser_type`
-    calls withheld (typed into a `sensitive` field, or one that
-    `looks_like_secret`; at least 4 characters; the session's last 32, kept
-    in memory only, never stored) is replaced with `redacted` wherever it
-    occurs in the text, compared without case (exclusion
-    `text_secrets_redacted`). This is independent of phrasing: "log in on
-    127.0.0.1 as demo-user, then swordfish" is stored as "... then redacted"
-    once Hermes types `swordfish` into the password field. While Hermes's
-    capture is off (corrections still on), every value typed during a held
-    correction's turn counts as withheld, since its field cannot be
-    classified. The held text is dropped when the turn never ends (an
+    Only then is it written, after every real secret the session's
+    `browser_type` calls typed (at least 4 characters; the session's last 32,
+    kept in memory only, never stored) is replaced with `redacted` in the
+    text (`contracts.redact_values`: as a whole word, that is with no ASCII
+    letter or digit right before or after it, compared without case, never
+    inside a URL's scheme or host; exclusion `text_secrets_redacted`). A real
+    secret is a value typed into a field that a fresh snapshot names as
+    secret, a value the turn's message names as a secret (below), or one that
+    `looks_like_secret`; never a value withheld only because the snapshot was
+    stale after a click or key press (live B2 re-run, N1: "Open
+    …/notes.html, press Enter, then type Fabrikam into the Note box" was
+    stored as "…/redacteds.html … type redacted into the redacted box"). This
+    is independent of phrasing: "log in on 127.0.0.1 as demo-user, then
+    swordfish" is stored as "... then redacted" once Hermes types `swordfish`
+    into the password field. While Hermes's capture is off (corrections still
+    on), only a value typed during a held correction's turn that looks like a
+    secret counts, since its field cannot be classified. A value the turn's
+    message names as a secret (the values the free-text redaction replaces in
+    it, `contracts.secret_values`: "type Zebra-77-fake as the password") is
+    withheld from the store when Hermes types it into any field, also one
+    that is not secret (`typed_text_dropped`; N5). The held text is dropped when the turn never ends (an
     interrupted last turn, a process that exits, a session forgotten), when
     recording it is off at the turn's end, or while the session is
     suspended; a refused write is not retried, and the turn's calls stay in

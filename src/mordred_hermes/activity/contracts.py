@@ -481,6 +481,10 @@ _VALUE_UNITS: Final = frozenset(
     }
 )
 _CLAUSE_MARKS: Final = frozenset(".,;:!?")
+#: A run of ASCII without whitespace (a token of the user's own words, :func:`redact_secret_shaped_tokens`).
+_ASCII_TOKEN_RE: Final = re.compile(r"[^\s\x80-\U0010ffff]+")
+#: Where a URL's host ends.
+_URL_PATH_START_RE: Final = re.compile(r"[/?#]")
 #: A run of 13-19 digits, optionally grouped by single spaces or dashes (a payment card number candidate).
 _CARD_RE: Final = re.compile(r"(?<![0-9])[0-9](?:[ -]?[0-9]){12,18}(?![0-9])")
 #: Minimum length of a whole-value token that counts as secret-shaped (rule 3 of :func:`looks_like_secret`).
@@ -1477,6 +1481,82 @@ def redact_text_secrets(text: str) -> tuple[str, bool]:
     return clean, bool(jwts or keys or pems or values)
 
 
+def redact_secret_shaped_tokens(text: str) -> tuple[str, bool]:
+    """``(text with its secret-shaped tokens replaced by`` :data:`REDACTED` ``, anything replaced)``; for the
+    user's own words (:func:`speaks_for_user`), where a password often has no keyword ("my login is demo-user /
+    ...").
+
+    The exact rule: each run of ASCII without whitespace, its opening and closing marks left out, that is a
+    secret-shaped token of at least :data:`SECRET_INNER_TOKEN_MIN_CHARS` characters (rule 5 of
+    :func:`looks_like_secret` inside a longer text: a letter and a digit or a symbol other than ``-``, ``_``
+    and ``.``; not a URL, host, e-mail address, file path or date) is replaced; the marks stay. Usernames such
+    as ``demo-user``, URLs, dates and ordinary words are kept; a long identifier that mixes letters and digits
+    (``order-2026-000123-final``) is replaced too, as typed text is withheld."""
+    replaced = False
+
+    def one(match: re.Match[str]) -> str:
+        nonlocal replaced
+        token = match.group(0)
+        start, end = 0, len(token)
+        while start < end and token[start] in _VALUE_QUOTES:
+            start += 1
+        while end > start and token[end - 1] in _TRAILING_MARKS:
+            end -= 1
+        core = token[start:end]
+        if len(core) < SECRET_INNER_TOKEN_MIN_CHARS or not _secret_shaped_token(core):
+            return token
+        replaced = True
+        return token[:start] + REDACTED + token[end:]
+
+    return _ASCII_TOKEN_RE.sub(one, text), replaced
+
+
+def secret_values(text: str) -> list[str]:
+    """The values :func:`redact_text_secrets` replaces in ``text`` (JWTs, key-prefixed tokens, PEM armour lines,
+    the values its keywords name), once each, in order; for a caller that must withhold the same values
+    elsewhere (Hermes's typed text). Callers keep them in memory only: never log or store them."""
+    values = [match.group(0) for pattern in (_JWT_RE, _KEY_PREFIX_RE, _PEM_RE) for match in pattern.finditer(text)]
+    clean = redact_secret_tokens(text)
+    values += [clean[start:end] for start, end in _secret_spans(clean)]
+    return [value for value in dict.fromkeys(values) if value and value != REDACTED]
+
+
+def _url_heads(text: str) -> list[tuple[int, int]]:
+    """The scheme and host (``scheme://host:port``) of every URL in ``text``."""
+    heads = []
+    for url in _URL_IN_TEXT_RE.finditer(text):
+        authority = text.index("://", url.start(), url.end()) + 3
+        path = _URL_PATH_START_RE.search(text, authority, url.end())
+        heads.append((url.start(), path.start() if path else url.end()))
+    return heads
+
+
+def redact_values(text: str, values: Iterable[str]) -> tuple[str, bool]:
+    """``(text with every occurrence of`` ``values`` ``replaced by`` :data:`REDACTED` ``, anything replaced)``.
+
+    Compared without case, the longest value first, only as a whole word (no ASCII letter or digit right before
+    or after it) and never inside a URL's scheme or host; independent of any phrasing (Hermes's own capture:
+    the values it typed into secret fields)."""
+    ordered = sorted({value for value in values if value}, key=len, reverse=True)
+    if not ordered:
+        return text, False
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9])(?:" + "|".join(map(re.escape, ordered)) + r")(?![A-Za-z0-9])", re.IGNORECASE
+    )
+    heads = _url_heads(text)
+    parts: list[str] = []
+    cursor = 0
+    for match in pattern.finditer(text):
+        if any(start < match.end() and match.start() < end for start, end in heads):
+            continue
+        parts += [text[cursor : match.start()], REDACTED]
+        cursor = match.end()
+    if not parts:
+        return text, False
+    parts.append(text[cursor:])
+    return "".join(parts), True
+
+
 def looks_like_secret(text: str) -> bool:
     """Typed text that must not be stored, whatever field it was typed into.
 
@@ -1524,21 +1604,30 @@ class _Text(NamedTuple):
 
 
 def _bounded(
-    text: str, limit: int, scrub: Callable[[str], tuple[str, bool]] = _scrub, *, free_text: bool = True
+    text: str,
+    limit: int,
+    scrub: Callable[[str], tuple[str, bool]] = _scrub,
+    *,
+    free_text: bool = True,
+    user: bool = False,
 ) -> _Text:
-    """URL-scrubbed, then (``free_text``) secret-redacted, then bounded: nothing is cut before it is checked."""
+    """URL-scrubbed, then (``free_text``) secret-redacted (the user's own words, ``user``, also their
+    secret-shaped tokens), then bounded: nothing is cut before it is checked."""
     clean, redacted = scrub(text)
     clean, secrets = redact_text_secrets(clean) if free_text else (clean, False)
+    if user:
+        clean, shaped = redact_secret_shaped_tokens(clean)
+        secrets = secrets or shaped
     cut = len(clean) > limit
     return _Text(clean[:limit] if cut else clean, cut, redacted, secrets)
 
 
-def _bounded_text(value: Any, limit: int, *, free_text: bool = True) -> _Text:
+def _bounded_text(value: Any, limit: int, *, free_text: bool = True, user: bool = False) -> _Text:
     if value is None:
         return _Text()
     if not isinstance(value, str):
         raise _malformed()
-    return _bounded(value, limit, free_text=free_text)
+    return _bounded(value, limit, free_text=free_text, user=user)
 
 
 def _page_field(value: Any, limit: int) -> _Text:
@@ -1770,15 +1859,18 @@ def _action(raw: Mapping[str, Any]) -> _Action:
     return _Action(op, target, site, location, args_json, exclusions, field_kind, typed_arg)
 
 
-def _text(raw: Mapping[str, Any], phase: str, action: _Action, sensitive: bool) -> tuple[_Text, tuple[str, ...]]:
-    """``(text, exclusions)`` under the free-text rules in the module docstring."""
+def _text(
+    raw: Mapping[str, Any], phase: str, action: _Action, sensitive: bool, *, user: bool = False
+) -> tuple[_Text, tuple[str, ...]]:
+    """``(text, exclusions)`` under the free-text rules in the module docstring; ``user``: the text is the user's
+    own words (:func:`speaks_for_user`)."""
     value = raw.get("text")
     if action.op not in TYPED_OPS:
         if value is None:
             return _Text(), ()
         if phase not in TEXT_PHASES:
             return _Text(), (EXCLUSION_TEXT,)
-        return _bounded_text(value, MAX_TEXT_CHARS), ()
+        return _bounded_text(value, MAX_TEXT_CHARS, user=user), ()
     if value is None:
         value = action.typed_arg
     if value is None:
@@ -1874,7 +1966,8 @@ def normalize_event(
     action = _action(_group(raw, "action"))
     result = _result(_group(raw, "result"))
     quality = _quality(_group(raw, "quality"))
-    text, text_exclusions = _text(raw, identity["phase"], action, _sensitive(action, quality["exclusions"]))
+    user = speaks_for_user(identity["phase"], action.op, identity["source"], identity["actor"])
+    text, text_exclusions = _text(raw, identity["phase"], action, _sensitive(action, quality["exclusions"]), user=user)
     query = _query(raw.get("query"), action.location.query)
     page_title = _page_field(raw.get("page_title"), MAX_PAGE_TITLE_CHARS)
     page_text = _page_field(raw.get("page_text"), MAX_PAGE_TEXT_CHARS)

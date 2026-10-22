@@ -74,6 +74,7 @@ from .contracts import (
     TYPED_OPS,
     event_hosts,
     looks_like_secret,
+    redact_secret_shaped_tokens,
     redact_text_secrets,
     scrub_query,
     scrub_urls,
@@ -577,8 +578,9 @@ def _summary(conn: sqlite3.Connection, head: _Head, sites: Sequence[str]) -> Epi
         f"AND {USER_TEXT_SQL} ORDER BY receipt DESC LIMIT ?) ORDER BY 1, 3",
         (head.episode_id, MAX_TASKS, head.episode_id, MAX_CORRECTIONS),
     ).fetchall()
-    tasks = [str(text) for kind, text, _receipt in words if kind == 0]
-    corrections = [str(text) for kind, text, _receipt in words if kind == 1]
+    # Shown with the secret-shaped tokens of the user's words replaced, as the receiver stores them now.
+    tasks = [redact_secret_shaped_tokens(str(text))[0] for kind, text, _receipt in words if kind == 0]
+    corrections = [redact_secret_shaped_tokens(str(text))[0] for kind, text, _receipt in words if kind == 1]
     steps_row = conn.execute(
         "SELECT COUNT(DISTINCT attempt_id), COALESCE(SUM(attempt_id IS NULL), 0) FROM activity_events "
         f"WHERE episode_id = ? AND phase IN ({', '.join('?' * len(_STEP_PHASES))})",
@@ -833,7 +835,7 @@ def episode_detail(
             query=r[5],
             target=r[6],
             result=str(r[7]),
-            text=_shown_text(str(r[2]), r[8]),
+            text=_shown_text(str(r[2]), r[8], user=speaks_for_user(str(r[1]), str(r[2]), str(r[11]), str(r[12]))),
             title=r[9],
             page_text=r[10] or None,
             from_user=bool(r[8]) and speaks_for_user(str(r[1]), str(r[2]), str(r[11]), str(r[12])),
@@ -843,13 +845,14 @@ def episode_detail(
     return EpisodeDetail(summary, events, max(0, total - len(events)))
 
 
-def _shown_text(op: str, text: Any) -> str | None:
-    """Stored text as shown; typed text that looks like a secret is withheld (an earlier receiver kept it)."""
+def _shown_text(op: str, text: Any, *, user: bool = False) -> str | None:
+    """Stored text as shown; typed text that looks like a secret is withheld and, in the user's own words
+    (``user``), secret-shaped tokens are replaced (an earlier receiver kept them)."""
     if not isinstance(text, str) or not text:
         return None
     if op in TYPED_OPS and looks_like_secret(text):
         return WITHHELD_TEXT
-    return text
+    return redact_secret_shaped_tokens(text)[0] if user else text
 
 
 def latest_page_text(

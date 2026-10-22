@@ -56,16 +56,23 @@ otherwise start an episode without a task start.
 
 The turn's own text (its task start or correction) is held in memory until
 the turn ends (``post_llm_call``, else the session's next ``pre_llm_call``) and
-only then written, after the turn's calls. Before it is written, every value
-the session's ``browser_type`` calls withheld (typed into a ``sensitive`` field,
-or one that :func:`.contracts.looks_like_secret`; at least
-:data:`MIN_SCRUBBED_CHARS` characters; the last :data:`MAX_WITHHELD_VALUES`,
-kept in memory only, never stored) is replaced with ``redacted`` wherever it
-occurs, compared without case (exclusion ``text_secrets_redacted``), whatever
-the phrasing: a password the message named in words the free-text redactor
-cannot read never reaches the store. While Hermes's capture is off, every value
-typed during a held correction's turn counts as withheld (its field cannot be
-classified). A held text is dropped when its turn never ends (an interrupted
+only then written, after the turn's calls. Before it is written, every real
+secret the session's ``browser_type`` calls typed is replaced with ``redacted``
+(:func:`.contracts.redact_values`: as a whole word, compared without case, never
+in a URL's scheme or host; exclusion ``text_secrets_redacted``), whatever the
+phrasing: a password the message named in words the free-text redactor cannot
+read never reaches the store. A real secret is a value typed into a field a
+fresh snapshot names as secret, a value the turn's message names as a secret,
+or one that :func:`.contracts.looks_like_secret`; never a value withheld only
+because the snapshot was stale, which is usually a search term or a note (live
+B2 re-run, N1). Values of at least :data:`MIN_SCRUBBED_CHARS` characters count;
+the session keeps the last :data:`MAX_WITHHELD_VALUES` in memory only, never
+stored. While Hermes's capture is off, only a value typed during a held
+correction's turn that looks like a secret counts (its field cannot be
+classified). A value the turn's message names as a secret
+(:func:`.contracts.secret_values`, "type X as the password") is also withheld
+from the store when Hermes types it into any field, ``typed_text_dropped``
+(N5). A held text is dropped when its turn never ends (an interrupted
 last turn, a process that exits, a session forgotten), when recording it is off
 at the turn's end, or when the session is suspended, and a refused write is not
 retried; the turn's calls then stay in their episode without it. The store is
@@ -149,7 +156,6 @@ from .contracts import (
     EXCLUSION_TYPED_TEXT,
     MAX_TARGET_CHARS,
     MAX_TEXT_CHARS,
-    REDACTED,
     SCHEMA_VERSION,
     SENSITIVE_FIELD_KIND,
     ContractError,
@@ -159,6 +165,8 @@ from .contracts import (
     event_size,
     looks_like_secret,
     normalize_event,
+    redact_values,
+    secret_values,
 )
 
 if TYPE_CHECKING:
@@ -297,6 +305,9 @@ class _Session:
     #: Values typed in this session that the store did not keep (a secret field, or a value that looks like a
     #: secret); replaced in the session's turn texts before they are written (:func:`_scrubbed`). Memory only.
     withheld: collections.deque[str] = field(default_factory=lambda: collections.deque(maxlen=MAX_WITHHELD_VALUES))
+    #: The values the current turn's message names as secrets (:func:`.contracts.secret_values`): typed into any
+    #: field they are withheld. Memory only.
+    turn_secrets: tuple[str, ...] = ()
     slow: int = 0
     suspended: bool = False
 
@@ -485,12 +496,21 @@ def _type(call: _Call, state: _Session) -> _Mapped:
     typed = call.args.get("text")
     typed = typed if isinstance(typed, str) and typed else None
     base = _on_page("type", state, target=element_label(line), args={"field_kind": kind})
+    # A value the turn's message names as a secret ("type X as the password") is withheld from any field.
+    named = typed is not None and redact_values(typed, state.turn_secrets)[1]
+    # Only a real secret is scrubbed from the turn's texts: one typed into a field a fresh snapshot names as
+    # secret, one the message names, or one that looks like a secret; never a value withheld only because the
+    # snapshot is stale (it is usually a search term or a note).
+    secret_field = not state.snapshot_stale and field_kind(line) == SENSITIVE_FIELD_KIND
+    learned = typed if typed and (secret_field or named or looks_like_secret(typed)) else None
     if kind != SENSITIVE_FIELD_KIND:
-        # The receiver withholds a value that looks like a secret whatever the field; so does the text scrub.
-        return replace(base, text=typed, withheld=typed if typed and looks_like_secret(typed) else None)
-    # What is typed into a secret field is never sent; it is only remembered to scrub the turn's texts.
+        if named:
+            return replace(base, exclusions=(EXCLUSION_TYPED_TEXT,), withheld=learned)
+        # The receiver withholds a value that looks like a secret whatever the field.
+        return replace(base, text=typed, withheld=learned)
+    # What is typed into a secret field (or a field the stale snapshot cannot name) is never sent.
     marks = (COLLECTOR_SENSITIVE_MARK, EXCLUSION_TYPED_TEXT) if typed else (COLLECTOR_SENSITIVE_MARK,)
-    return replace(base, exclusions=marks, withheld=typed)
+    return replace(base, exclusions=marks, withheld=learned)
 
 
 def _press(call: _Call, state: _Session) -> _Mapped:
@@ -802,12 +822,9 @@ def _remember(state: _Session, value: str | None) -> None:
 
 def _scrubbed(text: str, values: Iterable[str]) -> tuple[str, bool]:
     """``(text with every withheld value replaced by`` :data:`.contracts.REDACTED` ``, anything replaced)``:
-    exact occurrences compared without case, longest value first, independent of any phrasing."""
-    ordered = sorted(set(values), key=len, reverse=True)
-    if not ordered:
-        return text, False
-    clean, count = re.compile("|".join(map(re.escape, ordered)), re.IGNORECASE).subn(REDACTED, text)
-    return clean, count > 0
+    whole words compared without case, longest value first, never inside a URL's scheme or host, independent
+    of any phrasing (:func:`.contracts.redact_values`)."""
+    return redact_values(text, values)
 
 
 def _flush(state: _Session, home: Path, config: ActivityConfig) -> None:
@@ -831,14 +848,15 @@ def _drop_held(key: _Key) -> None:
 
 
 def _remember_unrecorded(key: _Key, args: Any) -> None:
-    """A ``browser_type`` while Hermes's capture is off cannot be classified: its value is remembered while a
-    correction is held, so the correction never keeps it."""
+    """A ``browser_type`` while Hermes's capture is off cannot be classified: a value that looks like a secret is
+    remembered while a correction is held, so the correction never keeps it."""
     state = _existing_session(key)
     if state is None or not isinstance(args, Mapping):
         return
+    typed = args.get("text")
     with state.lock:
-        if state.held is not None:
-            _remember(state, args.get("text"))
+        if state.held is not None and isinstance(typed, str) and looks_like_secret(typed):
+            _remember(state, typed)
 
 
 # --------------------------------------------------------------------------- #
@@ -1002,6 +1020,7 @@ def _record_turn(user_message: Any, session_id: Any, task_id: Any, turn_id: Any,
         body = correction_text(user_message) if human else None
         # A correction is never the turn's task: its browser calls get no task start (:func:`_episode_for`).
         _begin_turn(state, None if body is not None else user_message, turn_id, human)
+        state.turn_secrets = tuple(secret_values(user_message)) if isinstance(user_message, str) else ()
         if body is None or not _correcting(config) or state.suspended:
             return
         attempt = state.last or _stored_last(home, config, state, session_id)

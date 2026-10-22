@@ -91,7 +91,7 @@ def _whole_store(store: ActivityStore) -> str:
     return json.dumps(rows, ensure_ascii=False, default=str)
 
 
-def _shown_to_later_sessions(store: ActivityStore) -> list[str]:
+def _shown_to_later_sessions(store: ActivityStore, task_words: str = "as the password") -> list[str]:
     """What later sessions get from the history: the turn-start block, the navigation block and both tools."""
     block = hooks_history.pre_llm_call(
         user_message="What did you do in the browser on 127.0.0.1 earlier?", session_id="s5", turn_id="s5:t:1"
@@ -108,7 +108,7 @@ def _shown_to_later_sessions(store: ActivityStore) -> list[str]:
     detail = tools.browser_history_episode({"episode_id": record.episode_id}, session_id="s7", task_id="t7")
     assert block is not None and navigation is not None
     shown = [str(block["context"]), navigation, lookup, detail]
-    assert all("as the password" in text for text in shown), shown  # every surface shows the task
+    assert all(task_words in text for text in shown), shown  # every surface shows the task
     return shown
 
 
@@ -201,6 +201,126 @@ def test_text_kept_in_an_ordinary_field_is_not_scrubbed(capture_home) -> None:
     end_turn()
     [start] = _starts(store)
     assert start.text == "search 127.0.0.1 for Contoso invoices"
+
+
+# --- only a real secret is scrubbed, as a whole word (live B2 re-run, N1) --------------------------------------
+
+NOTES = "http://127.0.0.1:8499/notes.html"
+NOTES_SNAPSHOT = '- heading "Notes" [ref=e1] [level=1]\n- textbox "Note" [ref=e2]\n- button "Save" [ref=e3]'
+
+
+def test_a_value_typed_after_enter_is_withheld_but_never_scrubbed_from_the_users_words(capture_home) -> None:
+    """After Enter the snapshot is stale, so the field counts as secret for the typed text, but it is no secret
+    field: its value must not rewrite the task ("notes.html" once became "redacteds.html")."""
+    _home, store = capture_home
+    message = "Open http://127.0.0.1:8499/notes.html, press Enter, then type Fabrikam into the Note box."
+    turn(message)
+    call("browser_navigate", {"url": NOTES}, nav_result(NOTES, title="Notes", snapshot=NOTES_SNAPSHOT))
+    call("browser_press", {"key": "Enter"}, ok(pressed="Enter"))
+    call("browser_type", {"ref": "@e2", "text": "Fabrikam"}, ok(element="@e2"))
+    call("browser_type", {"ref": "@e2", "text": "Note"}, ok(element="@e2"))
+    end_turn()
+    [start] = _starts(store)
+    assert start.text == message and "text_secrets_redacted" not in start.exclusions
+    typed = [event for event in calls(store) if event.op == "type"]
+    assert [event.text for event in typed] == [None, None]  # the stale field still withholds what was typed
+    turn("correct: the note should say Fabrikam Inc", turn_id=T2)  # nothing learned for later turns either
+    end_turn(turn_id=T2)
+    assert [event.text for event in events(store) if event.phase == "correction"] == [
+        "the note should say Fabrikam Inc"
+    ]
+
+
+def test_a_secret_looking_value_typed_into_an_unknown_field_is_still_scrubbed(capture_home) -> None:
+    _home, store = capture_home
+    turn("log in on 127.0.0.1 and paste Xk9#mQ2$vL7pR4wZ")
+    call("browser_type", {"ref": "@e9", "text": "Xk9#mQ2$vL7pR4wZ"}, ok(element="@e9"))  # before any snapshot
+    _navigate()
+    end_turn()
+    [start] = _starts(store)
+    assert start.text == "log in on 127.0.0.1 and paste redacted"
+
+
+def test_a_secret_is_scrubbed_as_a_whole_word_and_never_from_a_url_host(capture_home) -> None:
+    _home, store = capture_home
+    message = "sign in at http://example.com/example with example, not xexample or example2 or EXAMPLE"
+    turn(message)
+    call("browser_navigate", {"url": LOGIN}, nav_result(LOGIN, snapshot=LOGIN_SNAPSHOT))
+    call("browser_type", {"ref": "@e3", "text": "example"}, ok(element="@e3"))  # a real password field
+    end_turn()
+    [start] = _starts(store)
+    assert start.text == ("sign in at http://example.com/redacted with redacted, not xexample or example2 or redacted")
+
+
+# --- a value the message calls a secret is withheld when typed (live B2 re-run, N5) ------------------------------
+
+
+def test_a_value_the_message_calls_a_password_is_withheld_from_any_field(capture_home) -> None:
+    _home, store = capture_home
+    turn("Open http://127.0.0.1:8499/notes.html and type Zebra-77-fake as the password into the Note box")
+    call("browser_navigate", {"url": NOTES}, nav_result(NOTES, title="Notes", snapshot=NOTES_SNAPSHOT))
+    call("browser_type", {"ref": "@e2", "text": "Zebra-77-fake"}, ok(element="@e2"))  # a text field
+    call("browser_type", {"ref": "@e2", "text": "remember Zebra-77-fake"}, ok(element="@e2"))
+    call("browser_type", {"ref": "@e2", "text": "Contoso"}, ok(element="@e2"))
+    end_turn()
+    typed = [event for event in calls(store) if event.op == "type"]
+    assert [event.text for event in typed] == [None, None, "Contoso"]
+    assert all("typed_text_dropped" in event.exclusions for event in typed[:2])
+    assert "Zebra-77-fake" not in _whole_store(store)
+
+
+# --- a secret-shaped token in the user's own words (live B2 re-run, N4) -------------------------------------------
+
+
+def test_a_secret_shaped_token_in_the_users_words_is_redacted_without_a_keyword(capture_home) -> None:
+    _home, store = capture_home
+    message = "My login for http://127.0.0.1:8499/login.html is demo-user / Kx9-Hunter2-fake-pw-77 — please sign in."
+    turn(message)
+    _navigate()
+    end_turn()
+    [start] = _starts(store)
+    assert start.text == ("My login for http://127.0.0.1:8499/login.html is demo-user / redacted — please sign in.")
+    assert "text_secrets_redacted" in start.exclusions
+
+
+def test_a_secret_shaped_token_stored_before_the_rule_is_hidden_on_every_surface(capture_home, monkeypatch) -> None:
+    home, store = capture_home
+    token = "Kx9-Hunter2-fake-pw-77"
+    message = f"My login for http://127.0.0.1:8499/login.html is demo-user / {token} - please sign in"
+    receiver = StoreReceiver(home, config_loader=_history_access.config, store_factory=lambda _home: store)
+    base = {"episode_id": "ep-old", "source": "hermes", "quality": {"coverage": "selected_tab"}}
+    old = [
+        {
+            **base,
+            "event_id": str(uuid.uuid4()),
+            "seq": 1,
+            "actor": "human",
+            "observed_at": time.time() - 120,
+            "phase": "boundary",
+            "action": {"op": "task_start"},
+            "text": message,
+        },
+        {
+            **base,
+            "event_id": str(uuid.uuid4()),
+            "seq": 2,
+            "actor": "agent",
+            "observed_at": time.time() - 100,
+            "phase": "dispatched",
+            "attempt_id": "call-old-1",
+            "action": {"op": "navigate", "site": "127.0.0.1", "route": "/login.html"},
+            "result": {"status": "claimed_success"},
+        },
+    ]
+    batch: dict[str, Any] = {"schema_version": 1, "producer_id": "prod-old", "producer_kind": "hermes", "events": old}
+    with monkeypatch.context() as patch:  # a receiver before either rule existed
+        patch.setattr(contracts, "redact_text_secrets", lambda text: (text, False))
+        patch.setattr(contracts, "redact_secret_shaped_tokens", lambda text: (text, False))
+        assert receiver.ingest(capture_hermes.principal(home), batch)["type"] == "activity_ack"
+    assert token in _whole_store(store)
+
+    for shown in _shown_to_later_sessions(store, task_words="demo-user / "):
+        assert token not in shown and "demo-user / redacted" in shown
 
 
 # --- a turn's text is written when the turn ends ---------------------------------------------------------------
@@ -335,20 +455,22 @@ def test_a_correction_is_scrubbed_of_a_value_typed_in_an_earlier_turn(capture_ho
     assert "Spring-2026-y" not in _whole_store(store)
 
 
-def test_with_capture_off_a_correction_drops_every_value_typed_in_its_turn(capture_home) -> None:
-    """Without capture the field cannot be classified: every value typed in the correction's turn is scrubbed."""
+def test_with_capture_off_a_correction_drops_only_secret_looking_typed_values(capture_home) -> None:
+    """Without capture the field cannot be classified, so only a value that looks like a secret is scrubbed
+    (live B2 re-run, N1: an unclassified field is no secret field)."""
     home, store = capture_home
     turn("open the login page on 127.0.0.1", turn_id=T1)
     _navigate(T1)
     end_turn(turn_id=T1)
     write_config(home, {**CAPTURING, "history_capture_hermes": False})
 
-    turn("correct: try the account Fabrikam-2", turn_id=T2)
+    turn("correct: try the account Fabrikam-2 with Xk9#mQ2$vL7pR4wZ", turn_id=T2)
     call("browser_type", {"ref": "@e2", "text": "Fabrikam-2"}, ok(element="@e2"), turn_id=T2)
+    call("browser_type", {"ref": "@e3", "text": "Xk9#mQ2$vL7pR4wZ"}, ok(element="@e3"), turn_id=T2)
     end_turn(turn_id=T2)
 
     [correction] = _corrections(store)
-    assert correction.text == "try the account redacted"
+    assert correction.text == "try the account Fabrikam-2 with redacted"
     assert [event.op for event in calls(store) if event.phase == "dispatched"] == ["navigate"]  # no type
 
 
