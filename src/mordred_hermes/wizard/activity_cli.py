@@ -4,8 +4,10 @@
   history (``history_enabled``), protection gate result, store identifiers and row counts, and
   activity peers. Never event content.
 - ``use on|off``                              — set ``plugins.mordred_activity.history_enabled`` (the
-  master switch for Hermes's use of the history) in the profile's ``config.yaml``; every other
-  key, comment and section is preserved. Hermes picks it up from the next turn.
+  master switch for Hermes's use of the history, Hermes's own capture of its browser calls and the
+  user's chat corrections included; operator collection is not affected) in the profile's
+  ``config.yaml``; every other key, comment and section is preserved. Hermes picks it up from the
+  next turn.
 - ``pair-operator [--label L] [--timeout S]`` — mint a single-use activity pair code for the
   operator collector and wait until it is used (exit 0 paired, 1 failed/expired/cancelled,
   2 pairing storage unavailable).
@@ -457,7 +459,7 @@ def _edit_posix(config_path: Path, edit: Callable[[Any], None]) -> None:
 
 
 def cmd_use(args: argparse.Namespace) -> int:
-    """``activity use on|off``: the master switch for Hermes's use of the browser history."""
+    """``activity use on|off``: the master switch for Hermes's use of the browser history and its own capture."""
     value = str(args.state) == "on"
     home = _home()
     try:
@@ -471,14 +473,21 @@ def cmd_use(args: argparse.Namespace) -> int:
     switches = _history_switches(home)
     feature = switches[0] if switches is not None else False
     if value:
-        print("Hermes's use of the browser history: on (navigation blocks, turn context, lookup tools).")
+        print(
+            "Hermes's use of the browser history: on (navigation blocks, turn context, lookup tools). "
+            "Hermes's own capture (its browser calls and your chat corrections) restarts with it while "
+            "collection_enabled is on; operator collection is not affected."
+        )
         if not feature:
             _term.emit_warn(
                 "the activity feature is disabled (plugins.mordred_activity.enabled: false); "
                 "Hermes uses the history only once it is enabled"
             )
     else:
-        print("Hermes's use of the browser history: off. Recording by the collectors is not affected.")
+        print(
+            "Hermes's use of the browser history: off. Hermes's own capture (its browser calls and your "
+            "chat corrections) stops with it; operator collection is not affected."
+        )
     print(
         "Applies from the next turn without a restart; an open session keeps listing the lookup tools, "
         "but they refuse while the switch is off."

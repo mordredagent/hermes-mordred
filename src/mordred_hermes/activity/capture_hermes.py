@@ -14,8 +14,10 @@ Phase B2 of the browser-history design. Two hooks:
   agent's, a job's or an unknown sender's prompt. A person's message starting
   with ``correct:`` or ``訂正:`` (also with a full-width colon; the operator's
   convention, any case) also records a correction of the session's last
-  recorded browser call. The hook returns ``None``: the message reaches the
-  model unchanged.
+  recorded browser call: the one this process recorded, else (``--resume``,
+  ``-c``, a restart: a new process) the newest one the store holds for the
+  session (:func:`.history.last_hermes_call`, through the gated reader). The
+  hook returns ``None``: the message reaches the model unchanged.
 - ``post_tool_call`` (:func:`post_tool_call`) turns every ``browser_*`` call
   into one event with ``source`` ``hermes``, ``actor`` ``agent``, the Hermes
   session and turn ids and an ``attempt_id`` of its own: the
@@ -40,9 +42,11 @@ call is preceded by a ``boundary`` / ``task_start`` holding the turn's message,
 ``actor`` ``human`` for a person's message (:func:`.history.speaks_for_user`
 then counts it as the user's words) and ``agent`` otherwise. A correction joins
 the episode of the call it corrects, as ``user_correction`` / ``human`` /
-``correction``. The episodes a session recorded are its own work, already in
-its conversation: the history hooks leave them out of their blocks
-(:func:`own_episodes`).
+``correction``. A person's correction message is never a task start: the
+browser calls of its turn join the corrected episode while that is still the
+session's last episode, and otherwise start an episode without a task start.
+The episodes a session recorded are its own work, already in its conversation:
+the history hooks leave them out of their blocks (:func:`own_episodes`).
 
 Typed text (:func:`field_kind`): a ref line naming a password (English or
 Japanese), secret, token, card, one-time code or PIN is ``sensitive`` and its
@@ -78,9 +82,12 @@ an invalid ``excluded_sites`` is refused by the receiver as usual.
 
 Failure behavior: neither hook ever raises ``Exception`` or changes the call or
 the turn. Work per call is bounded (one receiver call of one or two events, or
-two calls when ``max_batch_events`` or ``max_batch_bytes`` cannot hold both; the
-snapshot kept for ref lookup is capped at :data:`MAX_SNAPSHOT_CHARS`; at most
-:data:`MAX_SESSIONS` sessions are remembered). A write waits at most
+two calls when ``max_batch_events`` or ``max_batch_bytes`` cannot hold both; a
+correction without a call this process recorded first reads the store once,
+:func:`.history.last_hermes_call`, and goes on without it when that read is
+refused or fails; the snapshot kept for ref lookup is capped at
+:data:`MAX_SNAPSHOT_CHARS`; at most :data:`MAX_SESSIONS` sessions are
+remembered). A write waits at most
 :data:`WRITE_BUSY_S` for another writer's lock (the extension gateway's
 receiver writes the same store) and is then refused as ``busy`` and dropped. A
 write that takes longer than :data:`SLOW_APPEND_S` counts as slow; after
@@ -200,7 +207,9 @@ _LOCAL_TURNS = itertools.count(1)
 class _Attempt:
     attempt_id: str
     episode_id: str
+    #: The page the call acted on: its URL, or (``site`` set) the stored route path and query.
     url: str | None
+    site: str | None = None
 
 
 @dataclass
@@ -217,6 +226,8 @@ class _Session:
     episode: str | None = None
     episode_turn: str | None = None
     task_recorded: bool = False
+    #: The episode the current turn's correction was recorded into: the turn's browser calls join it.
+    joins: str | None = None
     #: The last browser call that was recorded: what a chat correction refers to.
     last: _Attempt | None = None
     #: The open page's URL (``None`` for an ``about:`` page) when ``page_known``; unknown after a call that may
@@ -544,13 +555,10 @@ def _call_event(call: _Call, mapped: _Mapped, episode: str, refs: Mapping[str, s
 
 def _correction_event(attempt: _Attempt, body: str, refs: Mapping[str, str | None]) -> dict[str, Any]:
     event = _envelope(attempt.episode_id, refs, phase="correction", at=time.time())
-    event.update(
-        attempt_id=attempt.attempt_id,
-        source="user_correction",
-        actor="human",
-        action={"op": "other", "route": attempt.url},
-        text=body,
-    )
+    action: dict[str, Any] = {"op": "other", "route": attempt.url}
+    if attempt.site is not None:
+        action["site"] = attempt.site
+    event.update(attempt_id=attempt.attempt_id, source="user_correction", actor="human", action=action, text=body)
     return event
 
 
@@ -726,9 +734,14 @@ def _turn_of(state: _Session, turn_id: Any) -> tuple[str, str | None]:
 
 def _episode_for(state: _Session, turn: str) -> tuple[str, bool]:
     """``(episode id, whether its task start is still to be written)`` for a browser call of ``turn``; the
-    task start needs the turn's message, so a call of a turn whose ``pre_llm_call`` was not seen gets none."""
+    task start needs the turn's message, so a call of a turn whose ``pre_llm_call`` was not seen gets none.
+
+    A correction turn's calls join the corrected episode while it is still the session's last one (it has its
+    task start); otherwise, or after a correction that was not recorded, they start an episode without one (the
+    turn has no message: :func:`_record_turn`)."""
     if state.episode is None or state.episode_turn != turn:
-        state.episode, state.episode_turn, state.task_recorded = str(uuid.uuid4()), turn, False
+        joined = state.joins if state.turn == turn and state.episodes and state.episodes[-1] == state.joins else None
+        state.episode, state.episode_turn, state.task_recorded = joined or str(uuid.uuid4()), turn, joined is not None
     pending = not state.task_recorded and state.turn == turn and state.message is not None
     return state.episode, pending
 
@@ -804,6 +817,7 @@ def _begin_turn(state: _Session, user_message: Any, turn_id: Any, human: bool) -
     state.turn_ref = _ref(hermes_turn)
     state.turn_at = time.time()
     state.human = human
+    state.joins = None
     text = user_message.strip() if isinstance(user_message, str) else ""
     state.message = text[:MAX_TEXT_CHARS] or None
     state.message_cut = len(text) > MAX_TEXT_CHARS
@@ -815,6 +829,33 @@ def speaks_as_user(config: ActivityConfig, platform: Any) -> bool:
     return isinstance(platform, str) and platform.strip().lower() in config.history_human_platforms
 
 
+def _stored_last(home: Path, config: ActivityConfig, state: _Session, session_id: Any) -> _Attempt | None:
+    """The session's last browser call recorded by another process (``--resume``, ``-c``, a restart), from the
+    store through the gated reader (:func:`.history.last_hermes_call`: same principal, ``source`` ``hermes``,
+    this ``hermes_session_id``, newest receipt, bounded); it becomes the session's last call and its episode one
+    of the session's own. ``None`` without one, while the history is off, or when the read fails (fail open,
+    reported like any history surface: :func:`._history_access.unavailable`)."""
+    from . import _history_access as access
+    from .history import last_hermes_call
+
+    session = _ref(session_id)
+    if session is None or not config.history_active:
+        return None
+    try:
+        found = last_hermes_call(access.reader(home), peer_id=principal(home).peer_id, session_id=session)
+    except access.NoHistory:
+        return None
+    except Exception as exc:
+        access.unavailable(home, exc)
+        return None
+    if found is None:
+        return None
+    state.last = _Attempt(found.attempt_id, found.episode_id, found.route, found.site)
+    if found.episode_id not in state.episodes and len(state.episodes) < MAX_OWN_EPISODES:
+        state.episodes.appendleft(found.episode_id)  # older than any episode this process recorded into
+    return state.last
+
+
 def _record_turn(user_message: Any, session_id: Any, task_id: Any, turn_id: Any, platform: Any) -> None:
     from . import _history_access as access
 
@@ -824,11 +865,18 @@ def _record_turn(user_message: Any, session_id: Any, task_id: Any, turn_id: Any,
         return
     state = _session(_state_key(home, session_id, task_id))
     with state.lock:
-        _begin_turn(state, user_message, turn_id, speaks_as_user(config, platform))
-        body = correction_text(user_message) if _correcting(config) and state.human else None
-        if body is None or state.last is None or state.suspended:
+        human = speaks_as_user(config, platform)
+        body = correction_text(user_message) if human else None
+        # A correction is never the turn's task: its browser calls get no task start (:func:`_episode_for`).
+        _begin_turn(state, None if body is not None else user_message, turn_id, human)
+        if body is None or not _correcting(config) or state.suspended:
             return
-        _write(state, home, config, [_correction_event(state.last, body, _refs(session_id, state.turn_ref))])
+        attempt = state.last or _stored_last(home, config, state, session_id)
+        if attempt is None:
+            return
+        event = _correction_event(attempt, body, _refs(session_id, state.turn_ref))
+        if _write(state, home, config, [event]) == 1:
+            state.joins = attempt.episode_id
 
 
 def pre_llm_call(

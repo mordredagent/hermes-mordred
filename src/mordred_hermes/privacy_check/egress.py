@@ -17,8 +17,10 @@ internet at the configured level:
                usual; every other call that may reach the internet (URL
                fetch, browser, remote API, a command that uses the network,
                an unknown tool) asks the user first through Hermes's approval
-               prompt, showing where it goes and what it sends. Blocklisted
-               domains and bare IP addresses are refused outright.
+               prompt, showing where it goes and what it sends (typed and
+               other free text only as its length: see "Prompt text").
+               Blocklisted domains and bare IP addresses are refused
+               outright.
 ``blocklist``  Everything except blocklisted domains and tools; URL
                arguments are checked against the domain blocklist.
 ``off``        Mordred does not restrict tools.
@@ -51,6 +53,22 @@ Configuration (``config.yaml``)::
 
 A missing section means ``search``; an unreadable or invalid one fails closed
 to ``lockdown``.
+
+Prompt text. Hermes writes an approval prompt, and the denial that quotes it
+when no one can approve, to its plaintext ``logs/agent.log``. So the prompt
+never holds typed or other free text: an argument whose name has a word such
+as ``text``, ``value``, ``password``, ``secret``, ``token``, ``content``,
+``message`` or ``prompt`` (:func:`free_text_argument`; ``browser_type``'s
+``text`` among them) is shown as ``<N characters>``, also inside nested
+objects and lists. Other values are shown with every URL scrubbed of
+credentials (credential parameters, secret-shaped values, userinfo) and every
+secret the free-text redaction finds replaced by ``redacted``, the rules the
+activity receiver applies (:func:`mordred_hermes.activity.contracts.scrub_urls`,
+:func:`~mordred_hermes.activity.contracts.redact_text_secrets`); a command
+that uses the network is shown that way too, since approving it means reading
+it. A denial names the tool, the rule and at most a blocklisted destination or
+a bare IP address, never another argument; audit entries name the tool, rule
+and level only.
 """
 
 from __future__ import annotations
@@ -417,10 +435,106 @@ _NETWORK_COMMAND = re.compile(
     re.IGNORECASE,
 )
 _PREVIEW_CHARS = 600
+#: Words of an argument name whose value is typed or free text (module docstring, "Prompt text").
+FREE_TEXT_WORDS = frozenset(
+    {
+        "answer",
+        "auth",
+        "authorization",
+        "body",
+        "caption",
+        "comment",
+        "comments",
+        "content",
+        "contents",
+        "cookie",
+        "cookies",
+        "credential",
+        "credentials",
+        "data",
+        "description",
+        "html",
+        "input",
+        "key",
+        "keys",
+        "markdown",
+        "message",
+        "messages",
+        "msg",
+        "note",
+        "notes",
+        "otp",
+        "passcode",
+        "passphrase",
+        "passwd",
+        "password",
+        "payload",
+        "pin",
+        "prompt",
+        "pwd",
+        "query",
+        "question",
+        "reply",
+        "secret",
+        "secrets",
+        "subject",
+        "summary",
+        "text",
+        "token",
+        "tokens",
+        "value",
+        "values",
+    }
+)
+_NAME_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+_MAX_PREVIEW_DEPTH = 6
+
+
+def free_text_argument(name: str) -> bool:
+    """Whether a tool argument of this name holds typed or free text: one of its words (split at ``_``, ``-``,
+    ``.``, digits and camel case; ``userPassword``, ``api_key``) is in :data:`FREE_TEXT_WORDS`."""
+    return any(word.lower() in FREE_TEXT_WORDS for word in _NAME_WORD.findall(name))
+
+
+def _scrubbed(text: str) -> str:
+    """``text`` with URL credentials scrubbed and free-text secrets redacted (the activity receiver's rules)."""
+    from ..activity.contracts import redact_text_secrets, scrub_urls
+
+    return redact_text_secrets(scrub_urls(text))[0]
+
+
+def _length(value: Any) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    return f"<{len(text)} characters>"
+
+
+def _shown(value: Any, *, free: bool, depth: int = 0) -> Any:
+    """``value`` as a prompt may show it: free text as its length, other strings scrubbed (module docstring)."""
+    if isinstance(value, dict):
+        if depth >= _MAX_PREVIEW_DEPTH:
+            return _length(value)
+        return {
+            str(key): _shown(item, free=free or free_text_argument(str(key)), depth=depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple):
+        if depth >= _MAX_PREVIEW_DEPTH:
+            return _length(value)
+        return [_shown(item, free=free, depth=depth + 1) for item in value]
+    if value is None or isinstance(value, bool):
+        return value
+    if free:
+        return _length(value)
+    if isinstance(value, str):
+        return _scrubbed(value)
+    return value if isinstance(value, int | float) else _scrubbed(str(value))
 
 
 def _preview(value: Any) -> str:
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    """What a prompt says the call sends: a command scrubbed, arguments by :func:`_shown`; at most
+    :data:`_PREVIEW_CHARS` characters."""
+    shown = _shown(value, free=False)
+    text = shown if isinstance(shown, str) else json.dumps(shown, ensure_ascii=False, default=str)
     return text if len(text) <= _PREVIEW_CHARS else text[:_PREVIEW_CHARS] + " …"
 
 

@@ -27,6 +27,9 @@ shown to a session are not repeated until they change, the episodes Hermes's
 own capture recorded for the session (:func:`.capture_hermes.own_episodes`:
 its own work, already in its conversation) are never shown to it, and the
 injected characters of a session are capped (:data:`._history_access.BUDGET`).
+Neither block shows an episode with no site and no successfully dispatched call
+(every call refused, cancelled, timed out or failed); the lookup tools still
+return it.
 """
 
 from __future__ import annotations
@@ -149,6 +152,7 @@ def _site_block(home: Path, config: ActivityConfig, host: str, key: str, omit: f
             shown=shown,
             subdomains=False,  # this host only (``www.`` ignored): no public-suffix guesswork
             omit=omit,
+            require_work=True,
         )
     except access.NoHistory:
         return None
@@ -227,6 +231,8 @@ def _turn_matches(
 
     Episodes without a task start or correction attributed to the user (:func:`.history.speaks_for_user`)
     never qualify, and host labels are not matched: the turn-start block must stand on what the user wrote.
+    Neither does an episode without a site and a successfully dispatched call (every call refused or failed):
+    it is no work to pick up (``require_work``).
     """
     from . import history
     from .matching import terms
@@ -242,6 +248,7 @@ def _turn_matches(
         shown=shown,
         require_human_text=True,
         omit=omit,
+        require_work=True,
     )
     found = {episode.episode_id: episode for episode in by_host.episodes}
     more = by_host.more
@@ -257,6 +264,7 @@ def _turn_matches(
             host_labels=False,
             shown=shown | {episode.key for episode in found.values()},
             omit=omit,
+            require_work=True,
         )
         found.update((episode.episode_id, episode) for episode in by_terms.episodes)
         more = max(more, by_terms.more)  # the two counts overlap; report the larger, never their sum

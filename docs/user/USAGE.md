@@ -696,7 +696,7 @@ hermes-mordred egress taint on               # no plaintext writes after a sessi
 > |---|---|
 > | `lockdown` | Never. Local tools and Mordred's own Telegram and browser-history tools only. |
 > | `search` | Web search only. No URL fetching, browsing, remote APIs, scheduling, or arbitrary commands. |
-> | `ask` (default) | Tools work. Web search and local commands run as usual; any other internet use (a URL, browser, remote API, a command that uses the network, an unknown tool) shows Hermes's approval prompt with where it goes and what it sends. Blocklisted domains and bare IP addresses are refused outright. |
+> | `ask` (default) | Tools work. Web search and local commands run as usual; any other internet use (a URL, browser, remote API, a command that uses the network, an unknown tool) shows Hermes's approval prompt with where it goes and what it sends (typed text, messages, passwords and other free-text arguments only as `<N characters>`, since Hermes also writes the prompt to `logs/agent.log`). Blocklisted domains and bare IP addresses are refused outright. |
 > | `blocklist` | Everything except blocklisted domains/tools (paste sites, webhooks and tunnels are built in). |
 > | `off` | No restriction from Mordred. |
 >
@@ -792,7 +792,7 @@ hermes-mordred telegram logout --forget     # also delete the API credentials, a
 
 ```sh
 hermes-mordred activity status                # switches, protection gate, counts, peers (no content)
-hermes-mordred activity use off               # Hermes stops using the history (on: uses it again); next turn
+hermes-mordred activity use off               # Hermes stops using the history and recording its own browser work (on: both again); next turn
 hermes-mordred activity pair-operator         # single-use code for the browser operator's collector
 hermes-mordred activity peers list            # peers revoke <peer_id> stops a collector at once
 hermes-mordred activity correct --episode ID --text "Open the official site instead"   # stores one correction event; prints its id
@@ -833,8 +833,9 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 >
 > **Hermes uses this history** while the feature is enabled (master switch
 > `history_enabled`, default on; `activity use off` turns it off from the next
-> turn, without a restart; the collectors keep recording, only Hermes's own
-> browser calls stop being recorded). After Hermes opens a
+> turn, without a restart, and `activity use on` back on; operator collection
+> is not affected, while Hermes's own capture of its browser calls and your
+> chat corrections stops and restarts with the switch). After Hermes opens a
 > site with `browser_navigate`, the browser result carries a short block of
 > your earlier work there (tasks, routes, outcomes, page titles, your
 > corrections; never page text or typed text). When your message names a site

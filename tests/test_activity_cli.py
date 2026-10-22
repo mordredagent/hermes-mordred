@@ -288,12 +288,19 @@ def test_use_off_changes_only_history_enabled(_home, capsys):
     )
     config = ActivityConfig.load(_home)
     assert (config.enabled, config.history_enabled, config.excluded_sites) == (True, False, {"bank.example"})
-    assert "off" in capsys.readouterr().out
+    off = " ".join(capsys.readouterr().out.split())
+    assert "Hermes's use of the browser history: off." in off
+    assert "Hermes's own capture (its browser calls and your chat corrections) stops with it" in off
+    assert "operator collection is not affected" in off and "Recording by the collectors" not in off
 
     assert cli.main(["activity", "use", "on"]) == 0
     assert path.read_text(encoding="utf-8") == CONFIG_WITH_COMMENTS.replace(
         "      - bank.example\n", "      - bank.example\n    history_enabled: true\n"
     )
+    on = " ".join(capsys.readouterr().out.split())
+    assert "Hermes's use of the browser history: on (navigation blocks, turn context, lookup tools)." in on
+    assert "Hermes's own capture (its browser calls and your chat corrections) restarts with it" in on
+    assert "operator collection is not affected" in on
 
 
 def test_use_on_without_a_config_creates_the_key_and_warns_the_feature_is_off(_home, capsys):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -316,6 +317,95 @@ def test_ask_prompts_with_destination_and_content_for_internet_use():
     assert _ask("terminal", {"command": "pip install requests"}).approve
     assert _ask("execute_code", {"code": "import requests; requests.get('x')"}).approve
     assert _ask("some_unknown_tool", {"x": 1}).approve
+
+
+PASSWORD = "Hunter2-fake-pw"
+
+
+def test_ask_never_quotes_typed_text_into_the_prompt():
+    """B2 live check: a denied browser_type into a password field put the start of the password into the
+    approval text, which Hermes writes to the plaintext logs/agent.log."""
+    decision = _ask("browser_type", {"ref": "e3", "text": PASSWORD})
+    assert decision.approve and PASSWORD not in decision.message and "Hunter" not in decision.message
+    assert decision.message.endswith('It will send: {"ref": "e3", "text": "<15 characters>"}')
+    assert PASSWORD not in decision.rule_key
+
+
+def test_free_text_arguments_are_shown_by_length_only_wherever_they_are():
+    args = {
+        "chat_id": "12345",
+        "userPassword": PASSWORD,
+        "pin": 4821,
+        "options": {"api_key": "sk-proj-AbCdEf0123456789xyz", "note": "call me", "retries": 2, "dry_run": True},
+        "values": ["first value", "second"],
+        "message": {"subject": "Q3", "html": "<p>private</p>"},
+    }
+    decision = _ask("some_unknown_tool", args)
+    for secret in (PASSWORD, "4821", "sk-proj", "call me", "first value", "second", "Q3", "private"):
+        assert secret not in decision.message
+    sent = decision.message.split("It will send: ", 1)[1]
+    assert json.loads(sent) == {
+        "chat_id": "12345",
+        "userPassword": "<15 characters>",
+        "pin": "<4 characters>",
+        "options": {"api_key": "<27 characters>", "note": "<7 characters>", "retries": 2, "dry_run": True},
+        "values": ["<11 characters>", "<6 characters>"],
+        "message": {"subject": "<2 characters>", "html": "<14 characters>"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("name", "free"),
+    [
+        ("text", True),
+        ("value", True),
+        ("password", True),
+        ("userPassword", True),
+        ("new-passwd", True),
+        ("client_secret", True),
+        ("API_KEY", True),
+        ("accessToken", True),
+        ("content", True),
+        ("message", True),
+        ("prompt", True),
+        ("ref", False),
+        ("url", False),
+        ("direction", False),
+        ("chat_id", False),
+        ("keyboard", False),
+    ],
+)
+def test_free_text_argument_names(name, free):
+    assert egress.free_text_argument(name) is free
+
+
+def test_prompt_urls_and_commands_are_scrubbed_of_credentials():
+    navigate = _ask("browser_navigate", {"url": f"https://shop.example.com/cb?token={PASSWORD}&page=2"})
+    assert "shop.example.com" in navigate.message and "page=2" in navigate.message
+    assert PASSWORD not in navigate.message and "token=redacted" in navigate.message
+    login = _ask("browser_navigate", {"url": f"https://alice:{PASSWORD}@shop.example.com/"})
+    assert PASSWORD not in login.message and "alice:redacted@shop.example.com" in login.message
+    curl = _ask("terminal", {"command": f"curl https://admin:{PASSWORD}@api.example.com/x -d 'password={PASSWORD}'"})
+    assert (
+        curl.approve and PASSWORD not in curl.message and "curl https://admin:redacted@api.example.com" in curl.message
+    )
+
+
+def test_denials_name_the_tool_and_rule_never_an_argument(monkeypatch):
+    from mordred_hermes.privacy_check import hooks
+
+    blocked = _ask("browser_navigate", {"url": f"https://pastebin.com/?password={PASSWORD}"})
+    assert not blocked.allow and not blocked.approve and PASSWORD not in blocked.message
+    locked = egress.decide("browser_type", {"ref": "e3", "text": PASSWORD}, "deny-s", egress.EgressPolicy("lockdown"))
+    assert not locked.allow and PASSWORD not in locked.message
+    entries: list[dict[str, Any]] = []
+    monkeypatch.setattr(egress, "load_policy", lambda *a, **k: egress.EgressPolicy(level="ask"))
+    monkeypatch.setattr(hooks, "safe_audit_append", lambda _audit, entry, **_k: entries.append(dict(entry)) or True)
+    directive = hooks._check_tool_egress(
+        SimpleNamespace(audit=object()), "browser_type", {"args": {"ref": "e3", "text": PASSWORD}}
+    )
+    assert directive is not None and directive["action"] == "approve" and PASSWORD not in json.dumps(directive)
+    assert PASSWORD not in json.dumps(entries)
 
 
 def test_ask_still_refuses_blocklisted_and_bare_ip_destinations():

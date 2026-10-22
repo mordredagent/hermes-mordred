@@ -119,7 +119,14 @@ Current defenses include:
   enforced in `privacy_check`'s `pre_tool_call`: free-form code tools are
   refused below `blocklist` except exact first-party read-only commands,
   unknown tools count as internet-capable, and a session that read private
-  data is locked down (taint).
+  data is locked down (taint). The `ask` approval prompt, which Hermes also
+  writes to its plaintext `logs/agent.log` (and quotes in the denial when no
+  one can approve), shows an argument whose name has a free-text word
+  (`text`, `value`, `password`, `secret`, `token`, `content`, `message`,
+  `prompt`, … : `egress.free_text_argument`) only as `<N characters>`, and
+  every other value and a network command with URL credentials scrubbed and
+  free-text secrets redacted (the activity receiver's
+  `contracts.scrub_urls` / `contracts.redact_text_secrets`).
 
 Accepted limitations include:
 
@@ -4037,7 +4044,9 @@ per-process state.
   anchor is refused; the lock is the policy writer's in `<home>/mordred`) and
   `activity status` shows it. The switch does not affect the collectors: with
   `collection_enabled` on, their batches are still received and stored; only
-  Hermes's own capture (below) stops with it.
+  Hermes's own capture (below: its browser calls and the user's chat
+  corrections) stops with it and restarts when it is set again, as `use off`
+  and `use on` say.
 - **Store access** (`_history_access.reader`, on every call, nothing
   cached): `_gate.check_protection`, a plaintext check of the file, the keyed
   opener (`_gate._keyed_opener` refuses an unkeyed connection) and a read-only
@@ -4112,7 +4121,12 @@ per-process state.
   mordred_browser_history)` when more matched. Page text and typed text are
   never included.
 - **Turn-start context** (`pre_llm_call`). Only episodes with a task start
-  or correction in the user's own words qualify. When the user message names a host or
+  or correction in the user's own words qualify, and never one without a site
+  and without a successfully dispatched call (an event in phase `dispatched`
+  or `observed` whose result is not a failure): every call refused,
+  cancelled, timed out or failed on a page nobody can name is no work to
+  pick up (`history._with_work`; the navigation block, which needs a site,
+  never shows one either; the lookup tools still return it). When the user message names a host or
   URL (episodes on it or its subdomains), or shares at least two match terms
   (one for a one-term message) with an episode's task or correction text
   (host labels are not matched here), the hook
@@ -4186,7 +4200,12 @@ per-process state.
   The navigation block and the turn-start context do not taint: they are not
   tool calls, and by construction they carry no typed text and no page text
   (only the user's own words, page titles inside Hermes's untrusted wrapper,
-  routes, outcomes and times).
+  routes, outcomes and times). Under `ask` the approval prompt for a browser
+  call, and the denial quoting it that Hermes writes to the plaintext
+  `logs/agent.log`, show typed text only as its length
+  (`"text": "<N characters>"`), so a denied `browser_type` into a password
+  field leaks nothing (`egress.free_text_argument`, §"Threat Model &
+  Accepted Limitations").
 - **Hermes as a collector** (phase B2, `activity/capture_hermes.py`).
   Hermes's own browser tool calls and the user's chat corrections are
   recorded through the receiver (`ingest.StoreReceiver`, the same path as a
@@ -4286,13 +4305,27 @@ per-process state.
     when the receiver would accept every batch (count and size) and every
     event, so a task start is never stored without its call; an acknowledged
     task start is not sent again, also when a later batch fails. Episodes are append-only; nothing closes them.
+    A turn whose message is a chat correction (below) has no task start, so
+    a correction never counts as a task in the user's words: the turn's
+    browser calls join the corrected episode while it is still the session's
+    last episode (the last one it recorded into), and otherwise (also when the
+    correction was not recorded) start an episode without a task start.
   - Chat corrections (`pre_llm_call`): a message of a turn whose platform is
     one of `history_human_platforms` (above) starting with
     `correct:` or the Japanese word for correction ("teisei", U+8A02 U+6B63)
     and a colon (also a full-width one; any case; the operator's convention)
     records its text after the prefix as `correction` with `source`
     `user_correction`, `actor` `human`, `attempt_id` and episode of the
-    session's last recorded browser call and that call's URL. Without
+    session's last recorded browser call and that call's URL. That call is
+    the one this process recorded for the session, else (a new process:
+    `hermes chat --resume <id>`, `-c`, a restart) the newest event in the
+    store with `source` `hermes`, the principal's peer id, an attempt id and
+    this `hermes_session_id` (`history.last_hermes_call`, through the gated
+    reader `_history_access.reader`; bounded to the session's newest 8
+    episodes among the newest 300; its episode becomes one of the session's
+    own). The store is read only while corrections are recorded and the
+    history is active, and a refusal or error records nothing and is reported
+    like any history surface (`activity.history_unavailable`). Without
     such a call, or with an empty text, nothing is recorded. The hook returns
     `None`, so the message reaches the model unchanged; it is registered after
     the history hook, so that turn's block is read before the correction is

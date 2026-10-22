@@ -366,6 +366,7 @@ def test_profiles_never_share_a_sessions_state(capture_home, tmp_path: Path, mon
     active = [home_a]
     monkeypatch.setattr(_history_access, "home", lambda: active[0])
     monkeypatch.setattr(capture_hermes, "STORE_FACTORY", lambda home: stores[home])
+    monkeypatch.setattr(_history_access, "reader", lambda home: stores[home])  # each profile reads its own store
 
     turn()
     navigate()  # profile A, session s1

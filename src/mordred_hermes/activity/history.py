@@ -34,6 +34,15 @@ dropped whole, wherever it appears: on any event's ``site``, or named by a URL
 in any event's route, query or target label (:func:`.contracts.event_hosts`,
 the extraction the receiver applies at ingest), so an exclusion added after
 capture hides earlier episodes too.
+
+The automatic blocks (``require_work``) also skip an episode with no site and
+no successfully dispatched call (:func:`_with_work`: every call refused,
+cancelled, timed out or failed on a page nobody can name); the lookup tools
+still return it.
+
+:func:`last_hermes_call` is the one read for Hermes's own capture: the newest
+browser call Hermes recorded for a session, which a chat correction in a new
+process (``--resume``, ``-c``, a restart) refers to.
 """
 
 from __future__ import annotations
@@ -72,6 +81,7 @@ __all__ = [
     "EpisodeEvent",
     "EpisodeSummary",
     "Hop",
+    "LastCall",
     "Matches",
     "clean",
     "clean_query",
@@ -81,6 +91,7 @@ __all__ = [
     "episodes_for_terms",
     "host_of",
     "hosts_in",
+    "last_hermes_call",
     "latest_page_text",
     "read_meta",
     "render_block",
@@ -91,6 +102,13 @@ __all__ = [
 
 #: Newest episodes considered by one query (inside its time window).
 SCAN_EPISODES: Final = 300
+#: :func:`last_hermes_call` looks at the newest this many episodes, and among them at the session's newest
+#: :data:`LAST_CALL_SESSION_EPISODES`.
+LAST_CALL_SCAN_EPISODES: Final = SCAN_EPISODES
+LAST_CALL_SESSION_EPISODES: Final = 8
+#: Phases of a call that ran, and the results that say it failed (:func:`_with_work`).
+_RAN_PHASES: Final = ("dispatched", "observed")
+_FAILED_RESULTS: Final = ("claimed_failure", "verified_failure")
 #: Events read to summarize one episode (task, routes, titles, outcome).
 MAX_SUMMARY_EVENTS: Final = 400
 #: Events read for :func:`episode_detail`: task starts, corrections and other boundaries first, then the newest.
@@ -225,6 +243,17 @@ class EpisodeDetail:
     events: tuple[EpisodeEvent, ...]
     #: Events beyond :data:`MAX_DETAIL_EVENTS` that were not read.
     unread: int
+
+
+@dataclass(frozen=True)
+class LastCall:
+    """A browser call Hermes recorded (:func:`last_hermes_call`): what a chat correction refers to."""
+
+    attempt_id: str
+    episode_id: str
+    site: str | None
+    #: The stored route path with its stored (already scrubbed) query, or ``None``.
+    route: str | None
 
 
 @dataclass(frozen=True)
@@ -572,6 +601,25 @@ def _visible(conn: sqlite3.Connection, heads: list[_Head], scan: _Scan, excluded
     return [head for head in heads if head.episode_id not in hidden]
 
 
+def _with_work(conn: sqlite3.Connection, heads: list[_Head], sites: Mapping[str, Sequence[str]]) -> list[_Head]:
+    """``heads`` without the episodes that have no site and no successfully dispatched call, in order.
+
+    Such an episode holds only calls that were refused, cancelled, timed out or failed on a page nobody can
+    name (and boundaries): no work the user could pick up again. A call counts when its phase is ``dispatched``
+    or ``observed`` and its result is not a failure. One query, over the episodes without a site only.
+    """
+    siteless = [head.episode_id for head in heads if not sites.get(head.episode_id)]
+    if not siteless:
+        return heads
+    rows = conn.execute(
+        f"SELECT DISTINCT episode_id FROM activity_events WHERE episode_id IN ({_in(siteless)}) "
+        f"AND phase IN ({_in(_RAN_PHASES)}) AND result_status NOT IN ({_in(_FAILED_RESULTS)})",
+        (*siteless, *_RAN_PHASES, *_FAILED_RESULTS),
+    )
+    worked = {str(row[0]) for row in rows}
+    return [head for head in heads if sites.get(head.episode_id) or head.episode_id in worked]
+
+
 def episodes_for_sites(
     store: ActivityStore,
     sites: Sequence[str],
@@ -584,12 +632,14 @@ def episodes_for_sites(
     subdomains: bool = True,
     require_human_text: bool = False,
     omit: frozenset[str] = frozenset(),
+    require_work: bool = False,
 ) -> Matches:
     """Newest episodes that touched any of ``sites`` (with ``subdomains``, also their subdomains).
 
     ``shown`` episodes, the ``omit`` episode ids (a session's own work), episodes that touched an excluded host
-    (:func:`_hidden`) and, with ``require_human_text``, episodes without a task start or correction in the user's
-    own words are skipped.
+    (:func:`_hidden`), with ``require_human_text`` episodes without a task start or correction in the user's
+    own words and with ``require_work`` episodes without a site and a successfully dispatched call
+    (:func:`_with_work`) are skipped.
     """
     wanted = [site for site in sites if not site_excluded(site, excluded_sites)]
     if not wanted:
@@ -609,6 +659,8 @@ def episodes_for_sites(
             and (not require_human_text or head.episode_id in scan.texts)
         ]
         matched = _visible(conn, matched, scan, excluded_sites)
+        if require_work:
+            matched = _with_work(conn, matched, scan.sites)
         chosen = [_summary(conn, head, scan.sites.get(head.episode_id, ())) for head in matched[: max(0, limit)]]
     return Matches(tuple(chosen), len(matched) - len(chosen))
 
@@ -633,6 +685,7 @@ def episodes_for_terms(
     shown: frozenset[tuple[str, int]] = frozenset(),
     newest_if_none: bool = False,
     omit: frozenset[str] = frozenset(),
+    require_work: bool = False,
 ) -> Matches:
     """Episodes sharing at least ``min_shared`` terms with ``wanted``, best match first, then newest.
 
@@ -641,7 +694,8 @@ def episodes_for_terms(
     tools only) page titles, routes and query strings. With ``site`` only episodes on that host count.
     ``newest_if_none`` returns the newest admissible episodes when nothing shares a term (a lookup by site
     or period whose words match nothing). The ``omit`` episode ids (a session's own work) are skipped, and so
-    are episodes that touched an excluded host (:func:`_hidden`; only the matching ones are checked).
+    are episodes that touched an excluded host (:func:`_hidden`; only the matching ones are checked) and, with
+    ``require_work``, episodes without a site and a successfully dispatched call (:func:`_with_work`).
     """
     if site is not None and site_excluded(site, excluded_sites):
         return Matches((), 0)
@@ -662,13 +716,40 @@ def episodes_for_terms(
             shared = len(wanted & own)
             if wanted and shared >= max(1, min_shared):
                 scored.append((shared, head))
-        visible = set(_visible(conn, [head for _score, head in scored], scan, excluded_sites))
-        scored = [(score, head) for score, head in scored if head in visible]
+        visible = _visible(conn, [head for _score, head in scored], scan, excluded_sites)
+        kept = set(_with_work(conn, visible, scan.sites) if require_work else visible)
+        scored = [(score, head) for score, head in scored if head in kept]
         if not scored and newest_if_none:
-            scored = [(0, head) for head in _visible(conn, candidates, scan, excluded_sites)]
+            newest = _visible(conn, candidates, scan, excluded_sites)
+            scored = [(0, head) for head in (_with_work(conn, newest, scan.sites) if require_work else newest)]
         scored.sort(key=lambda pair: (-pair[0], -pair[1].last_event_at))
         chosen = [_summary(conn, head, scan.sites.get(head.episode_id, ())) for _score, head in scored[: max(0, limit)]]
     return Matches(tuple(chosen), len(scored) - len(chosen))
+
+
+def last_hermes_call(store: ActivityStore, *, peer_id: str, session_id: str) -> LastCall | None:
+    """The newest browser call Hermes recorded as ``peer_id`` for the Hermes session ``session_id``: an event with
+    ``source`` ``hermes``, that ``hermes_session_id`` and an attempt id, newest receipt first; ``None`` without one.
+
+    Bounded: only the session's newest :data:`LAST_CALL_SESSION_EPISODES` episodes among the newest
+    :data:`LAST_CALL_SCAN_EPISODES` (by last event) are read, through the episode index (the unary ``+`` keeps
+    SQLite from walking all of the peer's events by ``activity_events_producer_seq`` or the whole table in
+    receipt order instead).
+    """
+    with _reading(store) as conn:
+        row = conn.execute(
+            "SELECT attempt_id, episode_id, site, route, query FROM activity_events WHERE episode_id IN ("
+            "SELECT episode_id FROM (SELECT episode_id, hermes_session_id, last_event_at FROM activity_episodes "
+            "ORDER BY last_event_at DESC LIMIT ?) WHERE hermes_session_id = ? ORDER BY last_event_at DESC LIMIT ?) "
+            "AND +peer_id = ? AND source = 'hermes' AND hermes_session_id = ? AND attempt_id IS NOT NULL "
+            "ORDER BY +receipt DESC LIMIT 1",
+            (LAST_CALL_SCAN_EPISODES, session_id, LAST_CALL_SESSION_EPISODES, peer_id, session_id),
+        ).fetchone()
+    if row is None:
+        return None
+    attempt, episode, site, route, query = row
+    path = f"{route}{query or ''}" if route else None
+    return LastCall(str(attempt), str(episode), str(site) if site else None, path)
 
 
 def read_meta(store: ActivityStore) -> dict[str, str]:
