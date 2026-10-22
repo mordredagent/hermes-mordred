@@ -63,3 +63,89 @@ def test_keys_of_the_removed_lesson_pipeline_are_unknown(key: str) -> None:
     assert config.enabled is True
     assert config.warnings == (f"unknown key {key}",)
     assert not hasattr(config, key)
+
+
+# --- history_* keys ---------------------------------------------------------------------------------------
+
+HISTORY_DEFAULTS = {
+    "history_enabled": True,
+    "history_on_navigate": True,
+    "history_turn_context": True,
+    "history_capture_hermes": True,
+    "history_chat_corrections": True,
+    "history_max_chars": 1500,
+    "history_max_episodes": 3,
+    "history_lookback_days": 90,
+    "history_session_budget_chars": 8000,
+    "history_max_tool_bytes": 4096,
+}
+
+
+def test_history_keys_default_to_on_but_the_feature_stays_off() -> None:
+    config = ActivityConfig.from_mapping({})
+    assert {key: getattr(config, key) for key in HISTORY_DEFAULTS} == HISTORY_DEFAULTS
+    assert config.enabled is False
+    assert config.history_active is False
+    assert ActivityConfig.from_mapping({"enabled": True}).history_active is True
+    assert ActivityConfig.from_mapping({"enabled": True, "history_enabled": False}).history_active is False
+
+
+def test_history_keys_parse_valid_values_without_warnings() -> None:
+    section = {
+        "history_enabled": False,
+        "history_on_navigate": False,
+        "history_turn_context": False,
+        "history_capture_hermes": False,
+        "history_chat_corrections": False,
+        "history_max_chars": 800,
+        "history_max_episodes": 10,
+        "history_lookback_days": 7,
+        "history_session_budget_chars": 0,
+        "history_max_tool_bytes": 65536,
+    }
+    config = ActivityConfig.from_mapping(section)
+    assert {key: getattr(config, key) for key in section} == section
+    assert config.warnings == ()
+
+
+@pytest.mark.parametrize(
+    ("key", "raw"),
+    [
+        ("history_enabled", "yes"),
+        ("history_turn_context", 1),
+        ("history_max_chars", 199),
+        ("history_max_chars", 8001),
+        ("history_max_episodes", 0),
+        ("history_max_episodes", 11),
+        ("history_lookback_days", 0),
+        ("history_session_budget_chars", -1),
+        ("history_max_tool_bytes", 1023),
+        ("history_max_tool_bytes", True),
+        ("history_max_tool_bytes", 4096.0),
+    ],
+)
+def test_invalid_history_values_fall_back_with_a_warning(key: str, raw: Any) -> None:
+    config = ActivityConfig.from_mapping({key: raw})
+    assert getattr(config, key) == HISTORY_DEFAULTS[key]
+    assert config.warnings == (f"invalid value for {key}",)
+
+
+def test_excluded_sites_are_normalized_to_bare_hosts() -> None:
+    raw = ["https://Bank.example.com/login", "*.mail.example", "shop.example.", "pay.example:443", "bücher.example"]
+    config = ActivityConfig.from_mapping({"enabled": True, "excluded_sites": raw})
+    assert config.excluded_sites == {
+        "bank.example.com",
+        "mail.example",
+        "shop.example",
+        "pay.example",
+        "xn--bcher-kva.example",
+    }
+    assert config.warnings == ()
+    assert config.history_active is True
+
+
+@pytest.mark.parametrize("raw", ["bank.example", ["ok.example", ""], ["ok.example", "not a host"], [None]])
+def test_an_invalid_exclusion_list_switches_the_history_off(raw: Any) -> None:
+    config = ActivityConfig.from_mapping({"enabled": True, "excluded_sites": raw})
+    assert config.excluded_sites_valid is False
+    assert config.history_active is False

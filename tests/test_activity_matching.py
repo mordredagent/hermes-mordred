@@ -33,7 +33,7 @@ def test_a_single_cjk_character_is_one_term() -> None:
     assert terms("表 report") == {"表", "report"}
 
 
-def test_session_budget_charges_tokens_and_shown_items_per_session() -> None:
+def test_session_budget_charges_chars_and_shown_items_per_session() -> None:
     budget = SessionBudget()
     assert budget.snapshot("s1") == (0, frozenset())
 

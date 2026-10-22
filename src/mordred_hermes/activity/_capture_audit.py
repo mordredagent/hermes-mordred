@@ -1,10 +1,15 @@
-"""``activity.capture_refused``: one audit entry per process and refusal code.
+"""Activity audit entries, each emitted once per process and code.
 
-The receiver calls it when collection is disabled or the store refuses a
-batch; the dedupe keeps a gate that keeps refusing from flooding the audit log. Entries carry the refusal
-code and, when known, the peer id; never batch or event content.
-The audit write can never break the caller (same wrapping as
-``dbcrypt._hooks._audit``).
+- ``activity.capture_refused``: the receiver refused a batch because collection
+  is disabled or the store refused it;
+- ``activity.history_unavailable``: a Hermes-side history surface (navigation
+  block, turn-start context, lookup tool) could not read the store and went on
+  without history.
+
+The dedupe keeps a gate that keeps refusing from flooding the audit log.
+Entries carry the refusal code and, for capture, the peer id when known; never
+batch, event or history content. The audit write can never break the caller
+(same wrapping as ``dbcrypt._hooks._audit``).
 """
 
 from __future__ import annotations
@@ -16,26 +21,34 @@ from typing import Final
 
 from .._audit_support import safe_audit_append
 
-__all__ = ["audit_capture_refused"]
+__all__ = ["audit_capture_refused", "audit_history_unavailable"]
 
 _LOG = logging.getLogger(__name__)
 #: Refusal codes come from small fixed sets; the cap only bounds a misbehaving caller.
 _MAX_CODES: Final = 32
 _EMITTED: set[str] = set()
+_HISTORY_EMITTED: set[str] = set()
 _LOCK = threading.Lock()
 
 
-def _first_time(code: str) -> bool:
+def _first_time(code: str, emitted: set[str]) -> bool:
     with _LOCK:
-        if code in _EMITTED or len(_EMITTED) >= _MAX_CODES:
+        if code in emitted or len(emitted) >= _MAX_CODES:
             return False
-        _EMITTED.add(code)
+        emitted.add(code)
         return True
+
+
+def _append(entry: dict[str, str]) -> None:
+    with contextlib.suppress(Exception):
+        from ..privacy_check import _runtime
+
+        safe_audit_append(_runtime.ensure_state().audit, entry, logger=_LOG)
 
 
 def audit_capture_refused(code: str, *, peer_id: str | None = None) -> None:
     """Audit the first refusal of ``code`` in this process; later ones are silent."""
-    if not _first_time(code):
+    if not _first_time(code, _EMITTED):
         return
     entry: dict[str, str] = {
         "event": "activity_capture",
@@ -45,7 +58,18 @@ def audit_capture_refused(code: str, *, peer_id: str | None = None) -> None:
     }
     if peer_id is not None:
         entry["peer_id"] = peer_id
-    with contextlib.suppress(Exception):
-        from ..privacy_check import _runtime
+    _append(entry)
 
-        safe_audit_append(_runtime.ensure_state().audit, entry, logger=_LOG)
+
+def audit_history_unavailable(code: str) -> None:
+    """Audit the first time a history surface went on without the store for ``code``; later ones are silent."""
+    if not _first_time(code, _HISTORY_EMITTED):
+        return
+    _append(
+        {
+            "event": "activity_history",
+            "decision": "refuse",
+            "reason": "activity.history_unavailable",
+            "code": code,
+        }
+    )

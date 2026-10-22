@@ -59,7 +59,8 @@ def test_total_freeze_size_after_transport_gate_followup() -> None:
     binding follow-up (policy.strict.cloud_endpoint_mismatch) + 1 tool-egress
     levels (policy.egress.tool_blocked) + 1 database-encryption monitor
     (mordred.db_encryption.violation) + 1 browser-activity capture
-    (activity.capture_refused) = 34.
+    (activity.capture_refused) + 1 browser-history read side
+    (activity.history_unavailable) = 35.
 
     The §4.1 codes graduated into the freeze because their emit site —
     ``install_wrapper.run``'s ``requires_keyvault`` enforcement — exists.
@@ -73,7 +74,7 @@ def test_total_freeze_size_after_transport_gate_followup() -> None:
     """
     from mordred_hermes.privacy_check._audit_reasons import ReasonCode
 
-    assert len(get_args(ReasonCode)) == 34
+    assert len(get_args(ReasonCode)) == 35
 
 
 def test_no_underscore_typo_legacy_name() -> None:

@@ -2304,12 +2304,15 @@ implementation plan:
 | Authenticated receiver | `activity/peers.py` (peer credentials), `extension/activity_api.py` (frames, principal revalidation), `activity/contracts.py` (normalization, `PeerPrincipal`), `activity/ingest.py` (`build_receiver`, hourly bounded retention after append), `activity/_capture_audit.py` (`activity.capture_refused`, once per process and code) |
 | Activity store | `activity/_paths.py`, `activity/_gate.py` (protection gate, keyed opener), `activity/_schema.py` (schema v3, in-place v1→v2→v3 migration), `activity/store.py` (append, episodes, status, backup/restore, `plan_retention`/`apply_retention`) |
 | Corrections | `activity/corrections.py` (record-only: one `user_correction` event appended to an existing episode; nothing derived) |
-| Term matching helpers | `activity/matching.py` (`terms` with CJK bigrams, `SessionBudget`; kept for the Hermes-side history phase) |
-| Commands | `wizard/activity_cli.py` (`status`, `pair-operator`, `peers`, `correct`), `wizard/activity_store_cli.py` (`backup`, `restore`, `retention`) |
+| Term matching helpers | `activity/matching.py` (`terms` with CJK bigrams, `SessionBudget` counting characters and shown episodes per session) |
+| History for Hermes (B1) | `activity/history.py` (bounded queries `episodes_for_site` / `episodes_for_terms` / `episode_detail`, `render_block`), `activity/_history_access.py` (configuration cached by mtime, gated store reader, session budget, `activity.history_unavailable` audit), `activity/hooks_history.py` (`transform_tool_result`, `pre_llm_call`), `activity/tools.py` (`mordred_browser_history`, `mordred_browser_history_episode`, skill registration), `activity/skills/browser-history/SKILL.md` |
+| Commands | `wizard/activity_cli.py` (`status`, `use on\|off`, `pair-operator`, `peers`, `correct`), `wizard/activity_store_cli.py` (`backup`, `restore`, `retention`) |
 | Configuration | `activity/config.py` (`plugins.mordred_activity`) |
 
-`plugin.py` wires `activity` after `e2e` and before `wizard`, but its
-`register()` registers nothing (no hooks, tools, skills or auxiliary task).
+`plugin.py` wires `activity` after `e2e` and before `wizard`; its
+`register()` adds the two history hooks, the two lookup tools and the
+`browser-history` skill (no auxiliary task), reading no configuration and
+opening no store at registration.
 Tests use an explicit plain-SQLite opener passed to `ActivityStore`;
 production code only uses the opener built by `_gate.open_store` after the
 gate passed.
@@ -2328,9 +2331,12 @@ Delivery as shipped:
    frames, `status`/`pair-operator`/`peers` CLI, operator collector.
 2. **Corrections as raw events** — `activity correct` and operator-sent
    corrections are stored as events; retention, backup and restore.
-3. **Hermes-side use of the history (next phase)** — designed in
-   [`2026-10-22-browser-history-for-hermes-design.md`](../superpowers/specs/2026-10-22-browser-history-for-hermes-design.md);
-   see [`TODO.md`](./TODO.md) §"Browser activity learning".
+3. **Hermes-side use of the history** — designed in
+   [`2026-10-22-browser-history-for-hermes-design.md`](../superpowers/specs/2026-10-22-browser-history-for-hermes-design.md).
+   B1 (read side: navigation block, turn-start context, lookup tools, master
+   switch, secret-shaped typed-text check) is shipped; B2 (Hermes as a
+   collector) and B3 (live validation) remain, see [`TODO.md`](./TODO.md)
+   §"Browser activity learning".
 4. **Measured expansion (deferred)** — more collectors (including human DOM
    observation), an encrypted client outbox and a raw-history administrative
    viewer. Each waits for measured benefit.

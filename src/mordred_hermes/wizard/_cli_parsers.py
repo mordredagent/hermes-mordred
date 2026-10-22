@@ -20,8 +20,8 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 - ``vault {init,add,status,cat,migrate,...}``    — at-rest secrets/env vault
 - ``plugins list``                               — show the Mordred plugin and its components
 - ``plugins migrate``                            — switch config.yaml to the single ``mordred`` plugin
-- ``activity {status,pair-operator,peers,correct,backup,restore,retention}`` — browser activity
-  history administration
+- ``activity {status,use,pair-operator,peers,correct,backup,restore,retention}`` — browser activity
+  history administration (``use on|off``: Hermes's use of the history)
 - ``uninstall [--dry-run|--yes|--purge-data|--remove-helper]`` — remove Mordred, restore Hermes's files
 """
 
@@ -143,6 +143,9 @@ def _add_activity(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     p_status = asub.add_parser("status", help="Show switches, protection gate, store counts and peers (no content)")
     p_status.add_argument("--json", action="store_true", help="Print one JSON object")
     p_status.set_defaults(func=_handle_activity)
+    p_use = asub.add_parser("use", help="Turn Hermes's use of the browser history on or off (history_enabled)")
+    p_use.add_argument("state", choices=("on", "off"), help="on: navigation blocks, turn context and lookup tools")
+    p_use.set_defaults(func=_handle_activity)
     p_pair = asub.add_parser("pair-operator", help="Generate a single-use pair code for the operator collector")
     p_pair.add_argument("--label", default="operator", help="Label recorded for the new peer (default: operator)")
     p_pair.add_argument("--timeout", type=float, default=600.0, help="Seconds to wait (default: 600)")

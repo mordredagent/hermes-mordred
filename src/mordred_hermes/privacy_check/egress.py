@@ -99,6 +99,9 @@ LOCAL_TOOLS = frozenset(
         "show_tip",
         "react_to_message",
         "desktop_project",
+        # Mordred's browser history: reads the local encrypted mordred.db only.
+        "mordred_browser_history",
+        "mordred_browser_history_episode",
     }
 )
 # Mordred's own tools: the destination is fixed in code (Venice or loopback).

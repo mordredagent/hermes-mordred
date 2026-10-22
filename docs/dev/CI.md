@@ -496,6 +496,31 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 
 ## Manual live-device validation log
 
+- **2026-10-22 — Browser history for Hermes (B1 read side) on live SQLCipher, without a model.**
+  Source: the uncommitted working tree of branch `feat/browser-history-b1`
+  (base `55289b849`), macOS 27.0.1 arm64, the worktree's dev venv (Python
+  3.12.14, `sqlcipher3-wheels` 0.5.7, SQLite 3.51.1, hermes-agent 0.19.0). A
+  throwaway `HERMES_HOME` with `plugins.enabled: [mordred]` and
+  `plugins.mordred_activity.enabled: true`, the SQLCipher marker written by
+  hand and a synthetic `HERMES_MEMORY_KEY` (`hex:` form); the script called
+  `dbcrypt.install()` first, opened the store with `open_store`, appended one
+  synthetic six-event episode and then loaded the plugin through Hermes's own
+  `PluginManager.discover_and_load`. Results: the tools' `check_fn` was true;
+  `invoke_hook("transform_tool_result", …)` for a `browser_navigate` result
+  added the site block (task, outcome, route with `?…`, title, correction; no
+  page or typed text); `invoke_hook("pre_llm_call", …)` for a message naming
+  the host returned the turn block without titles; `mordred_browser_history`
+  and `mordred_browser_history_episode` answered through `registry.dispatch`
+  inside the `<untrusted_tool_result>` frame (episode result 1,821 bytes); a
+  typed `sk-live-…` value was withheld (`typed_text_dropped`); the stdlib
+  `sqlite3` refused the store and no fixture string appeared in its bytes.
+  The final run used the read-only reader (keyed opener plus the
+  `activity_meta` binding check; the Hermes side never calls `open_store`)
+  and audited nothing. An earlier attempt whose script replaced the shim in
+  `sys.modules` was refused `unprotected_process` by every surface and
+  audited once (`activity.history_unavailable`). Not covered: a real LLM session, the
+  operator's extended capture (B3) and Hermes Desktop.
+
 - **2026-10-21 — Browser activity end to end through the shipped surfaces with the real operator and Fara.**
   Source: the pre-commit working tree of branch `feat/browser-activity-
   learning` (no SHA yet), the same host and dev venv as the 2026-10-20 entry

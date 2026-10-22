@@ -791,6 +791,7 @@ hermes-mordred telegram logout --forget     # also delete the API credentials, a
 
 ```sh
 hermes-mordred activity status                # switches, protection gate, counts, peers (no content)
+hermes-mordred activity use off               # Hermes stops using the history (on: uses it again); next turn
 hermes-mordred activity pair-operator         # single-use code for the browser operator's collector
 hermes-mordred activity peers list            # peers revoke <peer_id> stops a collector at once
 hermes-mordred activity correct --episode ID --text "Open the official site instead"   # stores one correction event; prints its id
@@ -805,7 +806,10 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > Everything the collector reports is recorded except secrets: operations,
 > typed text except in password or sensitive fields, URLs with credential
 > parameters (tokens, keys, session ids, codes) replaced by `redacted`, and the
-> page title and a visible-text excerpt when the collector sends them.
+> page title and a visible-text excerpt when the collector sends them. A
+> password, PIN, one-time code or key written into a task, a correction, a
+> label or a page ("the password Hunter2-x", "PIN: 4821") is replaced by
+> `redacted` before it is stored.
 > No site is excluded by default: messaging and mail sites (Telegram, WhatsApp,
 > Discord, Slack, Gmail, Outlook and others) are recorded too, including what
 > you type there. To keep a site out, list its host in
@@ -821,11 +825,31 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > `activity restore` without `--yes` prints the backup's schema version,
 > generation and row counts and exits 2; with it, the content is replaced and
 > Hermes session references are marked unavailable. Stop `extension serve` and
-> Hermes sessions before restoring. Hermes does not read this history yet;
-> that is designed in
-> [browser history for Hermes](../superpowers/specs/2026-10-22-browser-history-for-hermes-design.md).
+> Hermes sessions before restoring.
+>
+> **Hermes uses this history** while the feature is enabled (master switch
+> `history_enabled`, default on; `activity use off` turns it off from the next
+> turn, without a restart, and does not stop recording). After Hermes opens a
+> site with `browser_navigate`, the browser result carries a short block of
+> your earlier work there (tasks, routes, outcomes, page titles, your
+> corrections; never page text or typed text). When your message names a site
+> or matches an earlier task, the turn gets a block with only your own task
+> texts and corrections plus sites, routes, outcomes and times. Hermes can
+> also look things up with `mordred_browser_history` and
+> `mordred_browser_history_episode` (skill `mordred:browser-history`). Blocks
+> are bounded (`history_max_chars` 1500, `history_max_episodes` 3,
+> `history_lookback_days` 90, `history_session_budget_chars` 8000 per session;
+> tool results `history_max_tool_bytes` 4096), an episode is shown once per
+> session, and nothing from an `excluded_sites` host is ever shown (an
+> invalid `excluded_sites` value switches Hermes's use of the history off;
+> `activity status` says so). At the default tool-egress level `ask`, Mordred
+> asks before Hermes calls the two lookup tools. Typed text that looks like a
+> key, password or card number (JWTs, `sk-`, `ghp_`, `AKIA`, `xoxb-` style
+> keys, `password: …`, Luhn-valid card numbers, long random tokens) is never
+> stored.
 > Contract:
-> [SPEC](../dev/SPEC.md#browser-activity-and-conditional-learning-2026-10-20).
+> [SPEC](../dev/SPEC.md#browser-activity-and-conditional-learning-2026-10-20)
+> (§"History for Hermes").
 
 ---
 

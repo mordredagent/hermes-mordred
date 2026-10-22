@@ -25,7 +25,7 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``, now the ``mordred`` plugi
 - ``vault {init,add,status,cat,migrate,...}``    — at-rest secrets/env vault
 - ``plugins list``                               — show the Mordred plugin and its components
 - ``plugins migrate``                            — switch config.yaml to the single ``mordred`` plugin
-- ``activity {status,pair-operator,peers,correct,backup,restore,retention}`` — browser activity
+- ``activity {status,use,pair-operator,peers,correct,backup,restore,retention}`` — browser activity
   history administration
 """
 

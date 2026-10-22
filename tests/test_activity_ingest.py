@@ -208,7 +208,7 @@ def test_an_operator_correction_is_stored_as_a_raw_event_and_nothing_else(tmp_pa
     assert episode is not None and episode.has_correction is True
 
 
-def test_activity_register_is_a_documented_no_op(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_activity_register_only_wires_the_history_surfaces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import mordred_hermes.activity as activity
 
     calls: list[str] = []
@@ -221,5 +221,6 @@ def test_activity_register_is_a_documented_no_op(tmp_path: Path, monkeypatch: py
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     activity.register(Ctx())
 
-    assert calls == []
+    # The history hooks, the two lookup tools and the skill; no store is created at registration.
+    assert calls == ["register_hook", "register_hook", "register_tool", "register_skill"]
     assert not (tmp_path / "plugin-data").exists()

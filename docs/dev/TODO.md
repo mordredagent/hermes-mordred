@@ -701,12 +701,21 @@ Design: `docs/superpowers/specs/2026-10-22-browser-history-for-hermes-design.md`
 (2026-10-22; `pre_tool_call` cannot annotate in Hermes 0.19.0, so the
 injection channels are `transform_tool_result` and `pre_llm_call`).
 
-- [ ] B1: `activity/history.py` reader and summarizer; site block appended to
+- [x] B1: `activity/history.py` reader and summarizer; site block added to
   `browser_navigate` results via `transform_tool_result`; turn-start context
   via `pre_llm_call` when the user message names a host or shares task terms;
-  tools `mordred_browser_history` / `mordred_browser_history_episode`; config
-  keys `history_*`; hook payload contract, HOOK_PAYLOADS.md (§5 is stale about
-  `pre_llm_call`), SPEC and USAGE.
+  tools `mordred_browser_history` / `mordred_browser_history_episode` and the
+  `browser-history` skill; config keys `history_*` and `activity use on|off`;
+  the secret-shaped typed-text check; hook payload contract, HOOK_PAYLOADS.md,
+  SPEC §"History for Hermes" and USAGE.
+- [ ] Separate PR (`privacy_check`): classify `mordred_browser_history` and
+  `mordred_browser_history_episode` in the tool-egress policy (they read the
+  local encrypted store only; today the default level `ask` asks before each
+  call like any unknown tool) and decide whether reading them taints the
+  session like the Telegram tools.
+- [ ] Live LLM check of B1 with a real Hermes session on a throwaway home
+  (navigation block, turn-start context, both tools), recorded in
+  [`CI.md`](./CI.md) §"Manual live-device validation log".
 - [ ] B2: record Hermes's own browser tool calls as `source: hermes` events via
   `post_tool_call` (episode per session turn, task text from `pre_llm_call`,
   field kind from the ref's snapshot line); accept `correct:` (or its

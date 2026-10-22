@@ -429,6 +429,11 @@ The operator keeps the matching plaintext token in its own
   kept for Hermes's benefit. One bounded pass runs after a successful batch
   append at most once per hour per store, and on demand through
   `activity retention` (`--dry-run` only counts).
+- **Hermes reads:** the history hooks and lookup tools read this file in the
+  Hermes process through the same gate (never creating it when it is absent)
+  and keep no copy on disk; what they inject is bounded text inside the turn
+  or tool result (SPEC §"History for Hermes"). The master switch is
+  `plugins.mordred_activity.history_enabled` in the profile's `config.yaml`.
 
 ## `<home>/mordred/telegram/`
 

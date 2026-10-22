@@ -1,16 +1,16 @@
-"""Term matching and a per-session budget, kept for Hermes-side use of the browser history.
+"""Term matching and a per-session budget for Hermes-side use of the browser history.
 
-Both helpers come from the removed lesson recall (2026-10-22) and are kept
-unchanged in behaviour because the next phase reuses them
-(``docs/superpowers/specs/2026-10-22-browser-history-for-hermes-design.md``):
+Both helpers come from the removed lesson recall (2026-10-22); the history
+surfaces (:mod:`.history`, :mod:`.hooks_history`, :mod:`.tools`) use them:
 
 - :func:`terms` folds a text into match terms: words of at least three
   characters (or all digits) outside a small stopword list, and each CJK run
   as overlapping character bigrams (a single CJK character stays one term), so
   scripts without spaces still match;
 - :class:`SessionBudget` is an in-process, bounded per-session ledger of
-  tokens spent and items already shown, so a session is charged once per item
-  and the oldest session is forgotten past ``max_sessions``.
+  characters injected and items already shown (``(episode id, revision)``
+  pairs), so an episode is shown once per session until it changes, and the
+  oldest session is forgotten past ``max_sessions``.
 
 Nothing here opens the store or reads configuration.
 """
@@ -51,14 +51,15 @@ def terms(text: str) -> set[str]:
 
 @dataclass
 class _SessionState:
-    tokens: int = 0
+    chars: int = 0
     shown: set[tuple[str, int]] = field(default_factory=set)
 
 
 class SessionBudget:
     """In-process per-session budget; the oldest session is forgotten past ``max_sessions``.
 
-    ``shown`` holds ``(item id, revision)`` pairs already returned to the session.
+    ``chars`` counts what was injected into the session; ``shown`` holds the
+    ``(item id, revision)`` pairs already given to it.
     """
 
     def __init__(self, max_sessions: int = MAX_SESSIONS) -> None:
@@ -78,10 +79,10 @@ class SessionBudget:
     def snapshot(self, key: str) -> tuple[int, frozenset[tuple[str, int]]]:
         with self._lock:
             state = self._state(key)
-            return state.tokens, frozenset(state.shown)
+            return state.chars, frozenset(state.shown)
 
-    def charge(self, key: str, tokens: int, shown: Iterable[tuple[str, int]]) -> None:
+    def charge(self, key: str, chars: int, shown: Iterable[tuple[str, int]]) -> None:
         with self._lock:
             state = self._state(key)
-            state.tokens += tokens
+            state.chars += chars
             state.shown.update(shown)

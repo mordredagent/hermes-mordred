@@ -27,6 +27,8 @@ def _decide(level: str, tool: str, args: dict[str, Any] | None = None, session: 
         ("read_file", {"path": "/tmp/x"}, True, True, True, True),
         ("memory", {}, True, True, True, True),
         ("apply_layout", {}, True, True, True, True),
+        ("mordred_browser_history", {"query": "invoice"}, True, True, True, True),
+        ("mordred_browser_history_episode", {"episode_id": "e1"}, True, True, True, True),
         ("telegram_ask", {"question": "q"}, True, True, True, True),
         ("web_search", {"query": "weather"}, False, True, True, True),
         ("web_extract", {"urls": ["https://example.com"]}, False, False, True, True),
@@ -345,3 +347,11 @@ def test_pre_tool_call_returns_an_approval_directive(monkeypatch):
     directive = hooks._check_tool_egress(state, "web_extract", {"args": {"urls": ["https://example.com"]}})
     assert directive["action"] == "approve" and "example.com" in directive["message"]
     assert directive["rule_key"].startswith("mordred.egress:web_extract")
+
+
+@pytest.mark.parametrize("tool", ["mordred_browser_history", "mordred_browser_history_episode"])
+def test_browser_history_tools_are_local_and_never_prompt_or_taint(tool: str) -> None:
+    decision = egress.decide(tool, {}, "history-1", egress.EgressPolicy(level="ask"))
+    assert decision.allow
+    assert not decision.taints
+    assert not egress.is_tainted("history-1")

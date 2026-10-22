@@ -22,6 +22,8 @@ Current contract:
 | `pre_tool_call` | `tool_name` | Privacy and network generic tool guards |
 | `pre_api_request` | `provider`, `base_url` | LLM and network egress policy |
 | `pre_gateway_dispatch` | `event`, `gateway` | Mandatory gateway E2E |
+| `pre_llm_call` | `user_message`, `session_id`, `task_id` | Turn-start browser history (activity); dbcrypt's per-turn database check reads nothing |
+| `transform_tool_result` | `tool_name`, `args`, `result`, `session_id`, `task_id` | Browser history block in navigation results (activity) |
 
 Callbacks may accept additional keyword arguments for compatibility, but policy
 must not silently start depending on a new field until the JSON contract and
@@ -89,9 +91,28 @@ tests explicitly adopt it.
 
 ## 5. `pre_llm_call` payload and override return shape
 
-Mordred does not register `pre_llm_call`. Its return channel is unsuitable for
-rewriting the resolved provider, so policy is split across boundaries that
-observe the real client/request:
+Two components register `pre_llm_call`, in wiring order: `dbcrypt` (the
+per-turn database-encryption check; it reads no field, returns a warning
+context under lenient policy and raises `DatabaseEncryptionRefused`, a
+`BaseException`, under strict policy) and `activity` (the turn-start browser
+history). Verified against the installed Hermes 0.19.0
+(`agent/turn_context.py`): the hook fires once per user turn with
+`session_id`, `task_id`, `turn_id`, `user_message`, `conversation_history`,
+`is_first_turn`, `model`, `platform` and `sender_id` (plus
+`telemetry_schema_version` from the plugin manager). Each callback may return
+`{"context": str}` or a non-empty string; Hermes spills a piece above its
+spill threshold (10,000 characters by default) to a file, joins the pieces
+with a blank line in registration order, and appends them after the user's
+text in the API copy of the user message only (`api_content`, persisted in
+`state.db`; the stored `content` stays clean). A turn whose user content is
+not a string (multimodal) gets no plugin context. `PluginManager.invoke_hook`
+catches `Exception` per callback, so an ordinary exception only drops that
+callback's context; a `BaseException` aborts the turn. The activity callback
+reads `user_message`, `session_id` and `task_id`, catches every `Exception`
+and returns `None` or `{"context": block}` (SPEC §"History for Hermes").
+
+The return channel is unsuitable for rewriting the resolved provider, so
+policy is split across boundaries that observe the real client/request:
 
 1. Session-start checks catch invalid disk configuration and prohibited agent
    harnesses early.
@@ -105,6 +126,23 @@ observe the real client/request:
 Strict mode is refuse-only at these boundaries; it does not promise to replace
 a cloud provider with `mordred-local` automatically. Any future auto-swap needs
 a pre-client-construction integration point or an optional vendored layer.
+
+### 5.1 `transform_tool_result` payload and return shape
+
+The activity component registers `transform_tool_result`. Verified against the
+installed Hermes 0.19.0 (`model_tools.handle_function_call`): it fires after
+every registry tool call, after the observational `post_tool_call`, with
+`tool_name`, `args`, `result` (the tool's result string), `task_id`,
+`session_id`, `tool_call_id`, `turn_id`, `api_request_id`, `duration_ms`,
+`status`, `error_type` and `error_message`. The first callback returning a
+`str` replaces the result (later string returns are ignored, so callbacks do
+not chain); non-string returns and exceptions leave it unchanged. The result
+is then wrapped as untrusted data for `browser_*`, `mcp_*`, `web_extract` and
+`web_search` (`agent/tool_dispatch_helpers.make_tool_result_message`). The
+activity callback reads `tool_name`, `args`, `result`, `session_id` and
+`task_id`; for a successful `browser_navigate` (or a `browser_snapshot` /
+`browser_back` on a new host) it returns the same JSON object with one added
+field, `mordred_browser_history`, and otherwise `None`.
 
 ## 6. `pre_gateway_dispatch` payload and return action shape
 
