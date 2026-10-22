@@ -9,8 +9,12 @@ Subcommands:
 - ``sync``   — import every dialog's new messages into the encrypted archive.
 - ``status`` — show login state and archive counts.
 - ``logout`` — revoke the session at Telegram and drop it from the vault;
-  ``--forget`` also deletes the API credentials, the archive key, and the
-  archive files.
+  ``--forget`` also deletes the API credentials, the archive key, the
+  archive files, and the account's Telegram rows in ``mordred.db``.
+- ``migrate-store`` — move the ``.enc`` archive into ``mordred.db``: a dry run
+  by default, ``--commit`` writes it and retires ``index.enc`` (version 2),
+  ``--finalize --yes`` deletes the ``.enc`` message files once verified
+  (:mod:`mordred_hermes.extension.telegram.migrate`).
 - ``venice`` — store the Venice.ai API key (read with ``getpass``) and the
   model used for questions.
 
@@ -34,6 +38,7 @@ import argparse
 import asyncio
 import contextlib
 import getpass
+import json
 import os
 import sys
 from collections.abc import Callable
@@ -126,6 +131,13 @@ def _report(code: str) -> int:
         "no_legacy_credentials": "there are no vault-stored Telegram credentials to migrate.",
         "telegram_already_logged_in": "a Telegram session is already stored. Run `hermes-mordred telegram logout` "
         "first so the old session is revoked instead of being left behind.",
+        "not_migrated": "the archive has not been migrated yet (not_migrated). Run "
+        "`hermes-mordred telegram migrate-store --commit` first; nothing was deleted.",
+        "finalize_mismatch": "mordred.db does not hold every archived message (finalize_mismatch; see the counts "
+        "above), so nothing was deleted. Run `hermes-mordred telegram migrate-store --commit` again, then retry.",
+        "account_unknown": "the archive does not record its Telegram account yet (account_unknown). Run "
+        "`hermes-mordred telegram sync` once, then migrate.",
+        "archive_empty": "there is no Telegram archive to migrate (archive_empty).",
     }
     _term.emit_error(messages.get(code, f"telegram operation failed ({code})."))
     return 1
@@ -484,6 +496,8 @@ def telegram_logout(
     if current is None:
         print("Telegram is not configured; nothing to do.")
         return 0
+    # Before the store key and the archive index go: the index names the account whose rows to delete.
+    rows_kept = _forget_imported_rows(current) if forget else None
     _revoke_stored(current, client_factory)
     try:
         # One unseal for the whole command: the write reuses the value read above.
@@ -493,16 +507,46 @@ def telegram_logout(
             _write_back(secrets_store, snapshot, lambda old: replace(old, session=None) if old is not None else None)
     except TelegramSecretsError as exc:
         return _report(exc.code)
-    if forget:
-        wipe_archive()
-        delete_key = getattr(secrets_store, "delete_key", None)
-        if delete_key is not None:
-            with contextlib.suppress(Exception):
-                delete_key()
-        print("Deleted the API credentials, the archive key, the hardware key, and the local archive.")
-    else:
+    if not forget:
         print("Logged out. The encrypted archive is kept (use --forget to delete it).")
-    return 0
+        return 0
+    wipe_archive()
+    delete_key = getattr(secrets_store, "delete_key", None)
+    if delete_key is not None:
+        with contextlib.suppress(Exception):
+            delete_key()
+    return _forgotten(rows_kept)
+
+
+def _forget_imported_rows(current: Any) -> str | None:
+    """Delete the account's Telegram ``import_*`` rows in ``mordred.db``; ``None`` or a content-free code.
+
+    Only an index retired to ``mordred.db`` names rows to delete (see
+    :func:`~mordred_hermes.extension.telegram.history.forget_imported_history`).
+    """
+    from .._home import hermes_home
+    from ..extension.telegram.history import forget_imported_history
+    from ..extension.telegram.store import ArchiveStore, StoreError
+
+    try:
+        archive = ArchiveStore(current.store_key)
+    except StoreError as exc:
+        return exc.code
+    return forget_imported_history(archive, home=hermes_home())
+
+
+def _forgotten(rows_kept: str | None) -> int:
+    """Report ``logout --forget``; a failed ``mordred.db`` deletion is a failure, never a success line."""
+    deleted = "the API credentials, the archive key, the hardware key, and the local archive"
+    if rows_kept is None:
+        print(f"Deleted {deleted}, and this account's Telegram rows in mordred.db (if any).")
+        return 0
+    print(f"Deleted {deleted}.")
+    _term.emit_error(
+        f"this account's Telegram rows in mordred.db were NOT deleted (import_rows_not_deleted:{rows_kept}); "
+        "they stay in the encrypted mordred.db."
+    )
+    return 1
 
 
 def _windows_logout(*, forget: bool, store: Any, client_factory: Callable[..., Any] | None, input_fn: InputFn) -> int:
@@ -735,6 +779,53 @@ def telegram_migrate_tee(*, require_presence: bool = True, store: Any = None, le
     return 0
 
 
+# -- migrate-store ---------------------------------------------------------------------
+
+
+def telegram_migrate_store(
+    *, commit: bool = False, finalize: bool = False, yes: bool = False, as_json: bool = False, store: Any = None
+) -> int:
+    """Move the ``.enc`` archive into ``mordred.db``: dry run, ``--commit``, or ``--finalize --yes``.
+
+    Usage errors exit 2 before anything is opened. The import store gate runs
+    first (a refusal exits 1 with its code, before any unseal); then the
+    credentials are unsealed once, exactly like ``telegram sync``. Output and
+    the one ``telegram.migrate_store`` audit event carry counts and codes only.
+    """
+    from .._home import hermes_home
+    from ..extension.telegram import migrate
+    from ..extension.telegram.secrets import TelegramSecretsError
+    from ..extension.telegram.store import ArchiveStore, StoreError
+
+    if commit and finalize:
+        _term.emit_error("choose one of --commit and --finalize.")
+        return 2
+    if finalize and not yes:
+        _term.emit_error("--finalize deletes the archive's .enc message files; add --yes to confirm. Nothing changed.")
+        return 2
+    try:
+        imports = migrate.open_store(hermes_home())
+    except Exception as exc:
+        _term.emit_error(f"mordred.db refused ({migrate.error_code(exc)}); nothing was read or written.")
+        return 1
+    secrets_store = store if store is not None else _secret_store()
+    try:
+        value = secrets_store.load(fresh=True)  # one unseal, like `telegram sync`
+        if value is None:
+            return _report("telegram_not_configured")
+        archive = ArchiveStore(value.store_key)
+    except (TelegramSecretsError, StoreError) as exc:
+        return _report(exc.code)
+    del value
+    outcome = migrate.execute("finalize" if finalize else "commit" if commit else "dry_run", archive, imports)
+    if as_json:
+        print(json.dumps(outcome.as_dict(), sort_keys=True))
+    else:
+        for line in outcome.lines():
+            print(line)
+    return 0 if outcome.error is None else _report(outcome.error)
+
+
 # -- argparse ------------------------------------------------------------------------
 
 
@@ -781,8 +872,16 @@ def cli_telegram(args: argparse.Namespace) -> int:
         )
     if command == "migrate-tee":
         return telegram_migrate_tee(require_presence=not getattr(args, "no_touch_id", False))
+    if command == "migrate-store":
+        return telegram_migrate_store(
+            commit=bool(getattr(args, "commit", False)),
+            finalize=bool(getattr(args, "finalize", False)),
+            yes=bool(getattr(args, "yes", False)),
+            as_json=bool(getattr(args, "json", False)),
+        )
     print(
-        "usage: hermes-mordred telegram {setup,doctor,login,sync,status,logout,venice,local-llm,migrate-tee}",
+        "usage: hermes-mordred telegram "
+        "{setup,doctor,login,sync,status,logout,venice,local-llm,migrate-tee,migrate-store}",
         file=sys.stderr,
     )
     return 2
@@ -793,6 +892,7 @@ __all__ = [
     "telegram_local_llm",
     "telegram_login",
     "telegram_logout",
+    "telegram_migrate_store",
     "telegram_migrate_tee",
     "telegram_status",
     "telegram_sync",

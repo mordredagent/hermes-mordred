@@ -297,6 +297,28 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
         help="Create the Enclave key without a per-use Touch ID / passcode requirement",
     )
     p_migrate.set_defaults(func=_handle_telegram)
+    _add_telegram_migrate_store(tsub)
+
+
+def _add_telegram_migrate_store(tsub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p_store = tsub.add_parser(
+        "migrate-store",
+        help="Move the encrypted .enc archive into mordred.db (dry run by default; counts only)",
+    )
+    store_mode = p_store.add_mutually_exclusive_group()
+    store_mode.add_argument(
+        "--commit",
+        action="store_true",
+        help="Write the archive into mordred.db under one import run and retire index.enc (version 2)",
+    )
+    store_mode.add_argument(
+        "--finalize",
+        action="store_true",
+        help="After --commit: verify every archived message is in mordred.db, then delete the .enc message files",
+    )
+    p_store.add_argument("--yes", action="store_true", help="Confirm --finalize")
+    p_store.add_argument("--json", action="store_true", help="Print one JSON object (counts and codes only)")
+    p_store.set_defaults(func=_handle_telegram)
 
 
 def _add_extension(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
