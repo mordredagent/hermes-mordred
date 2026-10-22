@@ -5,6 +5,11 @@ task, exposes a status snapshot, the dialog list, and question answering. All
 failures surface as stable codes (``TelegramServiceError.code``) so no message
 text, name, or credential can reach a client or a log line through an
 exception string.
+
+Where a sync writes is decided per sync by :func:`.history.select_sink`: the
+``.enc`` archive, or ``mordred.db`` once ``index.enc`` is retired to it (macOS
+only; a fresh macOS account whose import-store gate passes starts there). The
+dialog list and the status counts read whichever store the index names.
 """
 
 from __future__ import annotations
@@ -43,11 +48,21 @@ from .client import (
     sync_archive,
     telethon_available,
 )
+from .history import (
+    ArchiveSink,
+    ImportSink,
+    ImportStoreOpener,
+    dialog_rows,
+    list_conversations,
+    open_history_store,
+    select_sink,
+)
+from .history import summary as import_summary
 from .llm import DEFAULT_LOCAL_CONTEXT_TOKENS, LlmConfigError, LlmTarget, resolve_target
 from .memory_guard import MemoryEncryptionRequired
 from .readonly import ReadOnlyViolation, RequestPolicy
 from .secrets import TelegramSecrets, TelegramSecretsError
-from .store import ArchiveStore, StoreError
+from .store import ArchiveIndex, ArchiveStore, StoreError
 from .tee import default_secret_store
 
 _log = logging.getLogger(__name__)
@@ -229,6 +244,8 @@ class TelegramService:
         policy_check: Callable[[str, str], None] = check_llm_policy,
         installed: Callable[[], bool] = telethon_available,
         memory_guard: Callable[[], None] | None = None,
+        import_store_opener: ImportStoreOpener | None = None,
+        home: Path | None = None,
     ) -> None:
         # Hardware-sealed (Enclave/TPM, or the Windows custody telegram role);
         # every load() is a fresh native unwrap.
@@ -243,6 +260,9 @@ class TelegramService:
         self._route_resolver = route_resolver
         self._policy_check = policy_check
         self._installed = installed
+        # ``open_import_store``-shaped seam (tests inject a plain-SQLite store).
+        self._import_store_opener = import_store_opener
+        self._home = home
         if memory_guard is None:
             from .memory_guard import require_memory_encryption
 
@@ -261,6 +281,17 @@ class TelegramService:
 
     def _archive(self, value: TelegramSecrets) -> ArchiveStore:
         return ArchiveStore(value.store_key, self._archive_root)
+
+    def _profile_home(self) -> Path:
+        if self._home is not None:
+            return self._home
+        from ..._home import hermes_home
+
+        return hermes_home()
+
+    def _select_sink(self, store: ArchiveStore, index: ArchiveIndex) -> ArchiveSink | ImportSink:
+        """``ImportSink`` iff the index is retired to ``mordred.db``, or it is fresh on macOS and the gate passes."""
+        return select_sink(store, index, home=self._profile_home(), opener=self._import_store_opener)
 
     @property
     def syncing(self) -> bool:
@@ -312,6 +343,13 @@ class TelegramService:
             "account_label": index.account_label,
         }
 
+    def _imported_dialogs(self, index: ArchiveIndex, store: Any = None) -> list[dict[str, Any]]:
+        """The dialog list from ``mordred.db`` (retired index); remembers the counts for status."""
+        imports = store if store is not None else open_history_store(self._profile_home(), self._import_store_opener)
+        convs = list_conversations(imports, index)
+        self._summary = import_summary(convs, index)
+        return dialog_rows(convs[:_MAX_DIALOGS_LISTED])
+
     async def dialogs(self) -> list[dict[str, Any]]:
         await asyncio.to_thread(self._memory_guard)
         value = await self._load_secrets()
@@ -319,6 +357,8 @@ class TelegramService:
             raise TelegramServiceError("telegram_not_configured")
         index = await asyncio.to_thread(self._archive(value).load_index)
         del value
+        if index.retired_to is not None:
+            return await asyncio.to_thread(self._imported_dialogs, index)
         self._remember_summary(index)
         ordered = sorted(index.dialogs.values(), key=lambda d: d.last_date, reverse=True)
         return [
@@ -395,18 +435,16 @@ class TelegramService:
     async def _run_sync(self, value: TelegramSecrets, store: ArchiveStore, lock: Any, options: SyncOptions) -> None:
         client: Any = None
         try:
+            # Chosen before connecting: a retired index whose store refuses never reaches Telegram.
+            index = await asyncio.to_thread(store.load_index)
+            sink = await asyncio.to_thread(self._select_sink, store, index)
             # Built on the loop thread: Telethon binds a client to its loop.
             client = self._client_factory(value.api_id, value.api_hash, value.session, policy=RequestPolicy())
             await client.connect()
             if not await client.is_user_authorized():
                 raise TelegramServiceError("telegram_session_revoked")
 
-            def on_progress(state: SyncProgress) -> None:
-                self._progress = state
-
-            result = await sync_archive(client, store, options=options, progress=on_progress)
-            self._progress = result
-            self._remember_summary(await asyncio.to_thread(store.load_index))
+            result = await self._sync_into(client, store, sink, options)
             _audit(
                 "telegram.sync",
                 "allow",
@@ -437,6 +475,25 @@ class TelegramService:
                 self._last_error = self._last_error or exc.code
             finally:
                 self._progress.finished_at = int(time.time())
+
+    async def _sync_into(
+        self, client: Any, store: ArchiveStore, sink: ArchiveSink | ImportSink, options: SyncOptions
+    ) -> SyncProgress:
+        def on_progress(state: SyncProgress) -> None:
+            self._progress = state
+
+        if isinstance(sink, ImportSink):
+            result = await sync_archive(client, store, options=options, progress=on_progress, sink=sink)
+        else:
+            # The archive path keeps today's exact call (sync_archive builds its own ArchiveSink).
+            result = await sync_archive(client, store, options=options, progress=on_progress)
+        self._progress = result
+        index = await asyncio.to_thread(store.load_index)
+        if isinstance(sink, ImportSink):
+            await asyncio.to_thread(self._imported_dialogs, index, sink.store)
+        else:
+            self._remember_summary(index)
+        return result
 
     async def _forget_revoked_session(self) -> None:
         """Telegram ended this login: drop the dead session so setup asks to log in again.
@@ -500,6 +557,10 @@ class TelegramService:
             else:
                 context_tokens = DEFAULT_LOCAL_CONTEXT_TOKENS
             index = await asyncio.to_thread(store.load_index)
+            # TODO(PR 6, ask rendering): when ``index.retired_to`` is set the history lives in
+            # mordred.db (ImportStore); select context from there instead of the ``.enc`` archive.
+            # Until then a retired index answers from whatever ``.enc`` dialogs remain (none for an
+            # account that started on mordred.db, which reports ``archive_empty``).
             if not index.dialogs:
                 raise TelegramServiceError("archive_empty")
             aliases = Aliases(enabled=request.pseudonymize)

@@ -14,6 +14,12 @@ Every file is ``MTG1 || nonce(12) || AES-256-GCM(ciphertext)``. The AAD binds
 each blob to its logical name, so swapping two segment files, or renaming one
 onto the index, fails authentication instead of silently mixing chats.
 
+``index.enc`` version 1 is the archive index. Version 2 (written only when
+``ArchiveIndex.retired_to`` is set) means the account's history now lives in
+``mordred.db`` (``retired_to: "mordred.db"``): a Mordred that only knows
+version 1 refuses the file (``store_undecryptable``) instead of syncing new
+messages into ``.enc`` and silently diverging from the import store.
+
 Two subkeys are derived from the vault-held ``store_key`` with HKDF-SHA256:
 one encrypts, the other names files — ``HMAC(name_key, "dialog:<id>:<n>")`` —
 so the directory listing does not reveal which chats exist. File count and
@@ -52,7 +58,10 @@ _NONCE_LEN = 12
 _AAD_PREFIX = b"mordred-telegram-store-v1|"
 _HKDF_SALT = b"mordred-telegram-store-v1"
 _INDEX_NAME = "index"
-_INDEX_VERSION = 1
+_INDEX_VERSION = 1  # the archive (``.enc``) index write version
+_RETIRED_INDEX_VERSION = 2  # the index of an account whose history moved to ``mordred.db``
+#: The only ``retired_to`` target a version-2 index may name.
+RETIRED_TO_IMPORT_STORE = "mordred.db"
 SEGMENT_SIZE = 2000
 _T = TypeVar("_T")
 
@@ -123,6 +132,8 @@ class ArchiveIndex:
     account_id: int = 0
     last_sync: int = 0
     dialogs: dict[int, DialogInfo] = field(default_factory=dict)
+    #: ``"mordred.db"`` once the history moved to the import store (index version 2), else ``None``.
+    retired_to: str | None = None
 
 
 def telegram_dir() -> Path:
@@ -254,10 +265,19 @@ class ArchiveStore:
     # -- index ----------------------------------------------------------------
 
     def load_index(self) -> ArchiveIndex:
+        """The index (version 1, or version 2 naming ``mordred.db``); anything else is undecryptable."""
         payload = self._read(f"{_INDEX_NAME}.enc", _INDEX_NAME)
         if payload is None:
             return ArchiveIndex()
-        if not isinstance(payload, dict) or payload.get("version") != _INDEX_VERSION:
+        if not isinstance(payload, dict):
+            raise StoreError("store_undecryptable")
+        version = payload.get("version")
+        retired_to: str | None = None
+        if version == _RETIRED_INDEX_VERSION:
+            retired_to = payload.get("retired_to")
+            if retired_to != RETIRED_TO_IMPORT_STORE:
+                raise StoreError("store_undecryptable")
+        elif version != _INDEX_VERSION:
             raise StoreError("store_undecryptable")
         dialogs: dict[int, DialogInfo] = {}
         for raw in payload.get("dialogs", []):
@@ -271,20 +291,25 @@ class ArchiveStore:
             account_id=int(payload.get("account_id", 0)),
             last_sync=int(payload.get("last_sync", 0)),
             dialogs=dialogs,
+            retired_to=retired_to,
         )
 
     def save_index(self, index: ArchiveIndex) -> None:
-        self._write(
-            f"{_INDEX_NAME}.enc",
-            _INDEX_NAME,
+        """Write version 1, or version 2 with ``retired_to`` once the history moved to ``mordred.db``."""
+        payload: dict[str, Any] = {"version": _INDEX_VERSION}
+        if index.retired_to is not None:
+            if index.retired_to != RETIRED_TO_IMPORT_STORE:
+                raise StoreError("store_index_invalid")
+            payload = {"version": _RETIRED_INDEX_VERSION, "retired_to": index.retired_to}
+        payload.update(
             {
-                "version": _INDEX_VERSION,
                 "account_label": index.account_label,
                 "account_id": index.account_id,
                 "last_sync": index.last_sync,
                 "dialogs": [asdict(d) for d in index.dialogs.values()],
-            },
+            }
         )
+        self._write(f"{_INDEX_NAME}.enc", _INDEX_NAME, payload)
 
     # -- dialogs --------------------------------------------------------------
 
