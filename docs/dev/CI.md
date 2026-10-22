@@ -592,7 +592,6 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
   block; `activity use on` restored `config.yaml` byte for byte.
   `Hunter2-fake-pw` had 0 hits in the decrypted `state.db` and the audit
   log; the raw store still holds it in one event.
-||||||| parent of 81ea91abf (fix: address the B2 live check of Hermes's own capture)
 
 - **2026-10-22 — Browser history for Hermes (B1) end to end: the real operator records, a local-LLM Hermes session reads.**
   Source: branch `feat/browser-history-b1` at `778e5ca52` (hermes-mordred
