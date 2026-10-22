@@ -4429,6 +4429,30 @@ Things the code does that the text above does not say, or says differently.
   `uninstall` calls the Telegram forget with `--force` semantics, so it never
   stops on undeletable rows and reports them. On Windows the forget path does
   not touch `import_*` rows (the store is macOS-only).
+- History source selection (`extension/telegram/search.py`, `history.
+  load_ask_records`): `mordred_history_search` first opens `mordred.db`
+  through the protection gate with no Telegram unseal. If the store opens and
+  either the marker `import_meta.telegram.retired_account` is set or no
+  `index.enc` exists, it searches the store only (`search.mode = "fts"`, every
+  source). If the store is refused and no `index.enc` exists it answers
+  `no_history` (for `not_armed`/`unsupported_platform`) or
+  `import_store_unavailable`. Otherwise it unseals and reads the index: retired
+  means store only (a refusing store is `import_store_unavailable`, never
+  `.enc`); not retired means the legacy archive, merged with any store history
+  as mode `fts+legacy` so an unmigrated archive is not hidden. The marker is
+  written by `ImportSink.begin` and by `telegram migrate-store --commit`
+  (after `index.enc` is rewritten) and cleared by `logout --forget`.
+- `telegram_ask` keeps one Telegram unseal (Touch ID) per question on both
+  paths, because the privacy LLM's key and endpoint are sealed in the same
+  credentials; only `mordred_history_search` reads the store without it.
+- Availability: `mordred_history_search` uses its own `history_search_available`
+  check (store gate passes and the Hermes model is Venice-private or loopback,
+  or the Telegram availability holds), so a mail-only macOS home with database
+  encryption armed is offered the tool without Telethon or a Telegram login.
+- A plain `telegram logout` (without `--forget`) leaves the account's rows in
+  `mordred.db` searchable, exactly like imported mail, which has no login;
+  `logout --forget` deletes them. This follows the owner's SQLCipher-only
+  protection decision and is deliberate.
 
 ## Imported mail collector (2026-10-22)
 
