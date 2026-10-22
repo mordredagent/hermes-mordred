@@ -167,6 +167,7 @@ terminal (`hermes-mordred` may need its full venv path):
 | `hermes_model_not_allowed`, `hermes_model_not_private` | This chat's model may not read Telegram text | Switch this chat to a Venice `private` model or a local model |
 | `reader_mode_unavailable` | Mordred's privacy check did not put this session into reader mode, so nothing was read | Tell the user the `mordred` plugin's privacy check must be enabled; call the tool directly (not from a delegated or scripted path) |
 | `import_store_unavailable` | Mordred's encrypted store (`mordred.db`) could not be opened, e.g. database encryption is not armed or its key is unavailable | Tell the user to run `hermes-mordred status`; nothing was read, do not retry in a loop |
+| `no_history` | `mordred_history_search` found no imported history at all: nothing was imported into `mordred.db` and there is no Telegram archive (or database encryption is not set up on this home) | Say nothing has been imported yet; the user imports Telegram from the "Mordred" page and mail with `hermes-mordred mail import`. Do not retry in a loop |
 | `invalid_evidence_id` | `around_evidence_id` is not an evidence id | Copy the id exactly from an earlier head line |
 | `venice_model_not_private` | The importer's Venice model is `anonymized` | Pick a private model: `hermes-mordred telegram venice --model <id>` |
 | `telegram_session_revoked` | Telegram ended this login | Ask the user to log in again on the "Mordred" page (step 4); imported messages are kept |

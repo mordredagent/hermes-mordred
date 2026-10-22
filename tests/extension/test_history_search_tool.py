@@ -8,6 +8,7 @@ store is a plain-SQLite :class:`ImportStore` injected through the service's
 from __future__ import annotations
 
 import asyncio
+import builtins
 import datetime as dt
 import json
 import re
@@ -20,6 +21,7 @@ from typing import Any
 
 import pytest
 
+from mordred_hermes.activity import _gate
 from mordred_hermes.extension.telegram import hermes_tools, search, secrets, service, store
 from mordred_hermes.imports.records import (
     ConversationKind,
@@ -247,7 +249,8 @@ def test_registered_in_the_telegram_toolset_with_its_schema() -> None:
     tool = next(c for c in calls if c["name"] == "mordred_history_search")
     assert tool["toolset"] == hermes_tools.TOOLSET == "mordred_telegram"
     assert tool["handler"] is hermes_tools.mordred_history_search
-    assert tool["check_fn"] is hermes_tools.tools_available and tool["is_async"] is True
+    assert tool["check_fn"] is hermes_tools.history_search_available and tool["is_async"] is True
+    assert "mail" in tool["description"].casefold() and "[Mail <evidence id>]" in tool["description"]
     params = tool["schema"]["parameters"]
     assert set(params["properties"]) == {
         "query",
@@ -277,6 +280,54 @@ def test_reading_rules_appear_in_the_note_prompt_and_skill() -> None:
     assert "mordred_history_search" in hermes_tools.SYSTEM_PROMPT
     assert len(hermes_tools.SYSTEM_PROMPT) <= 4000
     assert "send messages, schedule or delegate" in skill
+
+
+# -- visibility ----------------------------------------------------------------------------------
+
+
+def _hermes_model(home: Path, base_url: str) -> None:
+    (home / "config.yaml").write_text(f"model:\n  default: m\n  base_url: {base_url}\n", encoding="utf-8")
+
+
+@pytest.fixture
+def telethon_imports(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every attempt to import Telethon, each refused as if it were not installed."""
+    attempts: list[str] = []
+    real_import = builtins.__import__
+
+    def guarded(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "telethon" or name.startswith("telethon."):
+            attempts.append(name)
+            raise ImportError("telethon is not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded)
+    return attempts
+
+
+def test_offered_on_a_mail_only_home_without_telethon_or_a_telegram_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session: str, telethon_imports: list[str]
+) -> None:
+    _hermes_model(tmp_path, "http://127.0.0.1:11434/v1")
+    monkeypatch.setattr(_gate, "check_protection", lambda _home: None)  # database encryption armed
+    assert hermes_tools.history_search_available() is True
+    _use(monkeypatch, tmp_path, _Opener(_mail_store(tmp_path)), _Secrets(configured=False, forbidden=True))
+    assert _ids(_search({"query": "見積もり"}, session)) == ["mail:work:m1@example.com#a"]
+    assert telethon_imports == []  # neither the check nor the search touched Telethon
+    assert hermes_tools.tools_available() is False  # telegram_ask / telegram_chats stay hidden
+
+
+def test_not_offered_when_the_gate_refuses_and_telegram_is_unconfigured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _hermes_model(tmp_path, "http://127.0.0.1:11434/v1")
+    monkeypatch.setattr(_gate, "check_protection", lambda _home: _gate.refusal("not_armed"))
+    assert hermes_tools.history_search_available() is False  # no credentials in this home
+    monkeypatch.setattr(hermes_tools, "tools_available", lambda: True)  # Telegram logged in after all
+    assert hermes_tools.history_search_available() is True
+    monkeypatch.setattr(_gate, "check_protection", lambda _home: None)
+    _hermes_model(tmp_path, "https://api.openai.com/v1")  # never offered to a model that may not read it
+    assert hermes_tools.history_search_available() is False
 
 
 # -- mordred.db (index retired) ------------------------------------------------------------------
