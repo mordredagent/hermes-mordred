@@ -480,6 +480,43 @@ def test_batches_follow_the_count_and_byte_limits() -> None:
     large = {"text": "b" * 5000}
     by_count = ActivityConfig.from_mapping({"max_batch_events": 2})
     assert [len(batch) for batch in capture_hermes._batches(by_count, [small, small, small])] == [2, 1]
-    by_bytes = ActivityConfig.from_mapping({"max_batch_bytes": 5700})
+    by_bytes = ActivityConfig.from_mapping({"max_batch_bytes": capture_hermes._batch_size([small, large])})
     assert [len(batch) for batch in capture_hermes._batches(by_bytes, [small, large, small, large])] == [2, 2]
     assert [len(batch) for batch in capture_hermes._batches(ActivityConfig(), [small, large])] == [2]
+
+
+def test_a_page_text_too_large_for_the_batch_limit_is_shortened_not_split_off(capture_home) -> None:
+    home, store = capture_home
+    write_config(home, {**CAPTURING, "max_batch_bytes": 2000})
+    turn()
+    call("browser_navigate", {"url": LOGIN_URL}, nav_result(snapshot="- text: " + "x" * 6000))
+    start, nav = events(store)
+    assert (start.op, nav.op, nav.site) == ("task_start", "navigate", SITE)
+    assert nav.truncated and nav.page_text and 0 < len(nav.page_text) < 2000
+
+
+def test_a_call_that_cannot_fit_the_batch_limit_records_no_task_start_alone(capture_home) -> None:
+    home, store = capture_home
+    write_config(home, {**CAPTURING, "max_batch_bytes": 700})  # the task start fits, the call cannot
+    turn("go")
+    long_url = f"https://{SITE}/" + "a" * 1500
+    call("browser_navigate", {"url": long_url}, json.dumps({"success": True, "url": long_url}))
+    assert events(store) == []
+
+
+def test_an_acknowledged_task_start_is_not_sent_again_after_a_failed_call_batch(capture_home, monkeypatch) -> None:
+    home, store = capture_home
+    write_config(home, {**CAPTURING, "max_batch_events": 1})
+    opened: list[int] = []
+
+    def second_open_fails(_home: Path) -> ActivityStore:
+        opened.append(1)
+        if len(opened) == 2:
+            raise OSError("store unavailable")
+        return store
+
+    monkeypatch.setattr(capture_hermes, "STORE_FACTORY", second_open_fails)
+    turn()
+    navigate()  # task start acknowledged, the navigation's batch fails
+    call("browser_scroll", {"direction": "down"}, ok(scrolled="down"))
+    assert [event.op for event in events(store)] == ["task_start", "scroll"]

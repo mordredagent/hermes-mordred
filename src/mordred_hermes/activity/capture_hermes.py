@@ -119,6 +119,8 @@ from .contracts import (
     SENSITIVE_FIELD_KIND,
     ContractError,
     PeerPrincipal,
+    canonical_json,
+    check_batch_envelope,
     event_size,
     normalize_event,
 )
@@ -171,8 +173,6 @@ MAX_SESSIONS: Final = 128
 MAX_OWN_EPISODES: Final = 64
 #: Characters of the ``tool_call_id`` part of an attempt id (:func:`occurrence_id` adds ``-`` and 12 hex).
 _ATTEMPT_PREFIX_CHARS: Final = 51
-#: What a batch envelope adds to its events' size (generous: the receiver measures its canonical form).
-_BATCH_OVERHEAD: Final = 512
 #: Browser tools that never leave the open page (a ``browser_type`` whose text has a line break may submit a form).
 _STAYS_ON_PAGE: Final = frozenset({"browser_type", "browser_scroll", "browser_vision", "browser_get_images"})
 #: Browser tools whose successful result's ``url`` and ``snapshot`` describe the page open after the call.
@@ -600,27 +600,59 @@ def _fit(event: dict[str, Any], limit: int) -> dict[str, Any]:
     return event
 
 
+def _batch(events: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "producer_id": _PRODUCER_ID,
+        "producer_kind": PRODUCER_KIND,
+        "events": events,
+    }
+
+
+def _batch_size(events: list[dict[str, Any]]) -> int:
+    """The size the receiver measures for a batch of ``events`` (:func:`.contracts.check_batch_envelope`)."""
+    return len(canonical_json(_batch(events), ascii_only=False).encode("utf-8"))
+
+
+def _fit_batch(event: dict[str, Any], limit: int) -> dict[str, Any]:
+    """``event`` shortened (page text, then text, then title) until a batch of it alone fits ``limit`` bytes."""
+    for _ in range(len(_SHRINK_ORDER) + 2):
+        over = _batch_size([event]) - limit
+        if over <= 0:
+            return event
+        smaller = _shrunk(event, over + 64)
+        if smaller is None:
+            return event  # the receiver refuses it as batch_too_large
+        event = smaller
+    return event
+
+
 def _batches(config: ActivityConfig, events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     """``events`` in order, in as few batches as ``max_batch_events`` and ``max_batch_bytes`` hold."""
     batches: list[list[dict[str, Any]]] = []
-    size = 0
     for event in events:
-        grows = _raw_size(event) + 1
-        fits = size + grows + _BATCH_OVERHEAD <= config.max_batch_bytes
-        if batches and len(batches[-1]) < config.max_batch_events and fits:
-            batches[-1].append(event)
-            size += grows
+        last = batches[-1] if batches else None
+        if (
+            last is not None
+            and len(last) < config.max_batch_events
+            and _batch_size([*last, event]) <= (config.max_batch_bytes)
+        ):
+            last.append(event)
         else:
             batches.append([event])
-            size = grows
     return batches
 
 
-def _acceptable(config: ActivityConfig, events: list[dict[str, Any]]) -> bool:
-    """Every event passes the receiver's contract (excluded sites and size included)."""
+def _acceptable(config: ActivityConfig, batches: list[list[dict[str, Any]]]) -> bool:
+    """Every batch passes the receiver's envelope limits and every event its contract (excluded sites and size
+    included)."""
     try:
-        for event in events:
-            normalize_event(event, excluded_sites=config.excluded_sites, max_event_bytes=config.max_event_bytes)
+        for batch in batches:
+            check_batch_envelope(
+                _batch(batch), max_events=config.max_batch_events, max_bytes_raw=config.max_batch_bytes
+            )
+            for event in batch:
+                normalize_event(event, excluded_sites=config.excluded_sites, max_event_bytes=config.max_event_bytes)
     except ContractError:
         return False
     return True
@@ -631,12 +663,7 @@ def _submit(home: Path, events: list[dict[str, Any]]) -> bool:
     from . import _history_access as access
     from .ingest import StoreReceiver
 
-    batch = {
-        "schema_version": SCHEMA_VERSION,
-        "producer_id": _PRODUCER_ID,
-        "producer_kind": PRODUCER_KIND,
-        "events": events,
-    }
+    batch = _batch(events)
     receiver = StoreReceiver(home, config_loader=access.config, store_factory=_open)
     reply = receiver.ingest(principal(home), batch)
     if reply.get("type") != "activity_ack":
@@ -648,27 +675,27 @@ def _submit(home: Path, events: list[dict[str, Any]]) -> bool:
 def _write(state: _Session, home: Path, config: ActivityConfig, events: list[dict[str, Any]]) -> int:
     """Submit ``events`` in order and time it; how many were acknowledged (a refused batch stops the rest).
 
-    The events go as one batch unless the configured limits cannot hold them; then each batch goes alone, and
-    only when the receiver would accept every event, so a task start is never stored without its call. Slow
-    writes count towards suspending the session. Never raises."""
+    Each event is first shortened to the per-event and per-batch limits. The events go as one batch unless the
+    configured limits cannot hold them; then each batch goes alone, and only when the receiver would accept
+    every batch and every event, so a task start is never stored without its call. A failure part-way returns
+    what was acknowledged before it. Slow writes count towards suspending the session. Never raises."""
     started = time.monotonic()
+    done = 0
     try:
         if config.collection_refusal is None:
-            events = [_fit(event, config.max_event_bytes) for event in events]
+            events = [_fit_batch(_fit(event, config.max_event_bytes), config.max_batch_bytes) for event in events]
         batches = _batches(config, events)
-        if len(batches) > 1 and not _acceptable(config, events):
+        if len(batches) > 1 and not _acceptable(config, batches):
             return 0
-        done = 0
         for batch in batches:
             if not _submit(home, batch):
                 break
             done += len(batch)
-        return done
     except Exception as exc:  # recording must never break the call or the turn
         _LOG.debug("mordred activity capture: write failed (%s)", type(exc).__name__)
-        return 0
     finally:
         _note_duration(state, home, time.monotonic() - started)
+    return done
 
 
 def _note_duration(state: _Session, home: Path, elapsed: float) -> None:

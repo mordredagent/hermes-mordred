@@ -4279,11 +4279,13 @@ per-process state.
     `subagent`, `cron`, `curator`, an unknown value and a missing or empty
     one. A turn without a text message gets no task start. A task start the
     receiver refused (busy store, excluded host) is sent again with the next
-    call of the turn. When `max_batch_events` or `max_batch_bytes` cannot hold
-    the task start and the call together, each goes in a batch of its own, in
-    order, and only when the receiver's contract would accept both, so a task
-    start is never stored without its call; an acknowledged task start is
-    not sent again. Episodes are append-only; nothing closes them.
+    call of the turn. An event too large for `max_batch_bytes` on its own is
+    shortened first (page text, then text, then title; marked truncated).
+    When `max_batch_events` or `max_batch_bytes` cannot hold the task start
+    and the call together, each goes in a batch of its own, in order, and only
+    when the receiver would accept every batch (count and size) and every
+    event, so a task start is never stored without its call; an acknowledged
+    task start is not sent again, also when a later batch fails. Episodes are append-only; nothing closes them.
   - Chat corrections (`pre_llm_call`): a message of a turn whose platform is
     one of `history_human_platforms` (above) starting with
     `correct:` or the Japanese word for correction ("teisei", U+8A02 U+6B63)
