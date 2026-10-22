@@ -1,8 +1,8 @@
 """``activity.capture_refused``: one audit entry per process and refusal code.
 
-The receiver (recording) and the recall tools (reading) share the dedupe, so
-a gate that keeps refusing does not flood the audit log. Entries carry the
-refusal code and, for recording, the peer id; never batch or event content.
+The receiver calls it when collection is disabled or the store refuses a
+batch; the dedupe keeps a gate that keeps refusing from flooding the audit log. Entries carry the refusal
+code and, when known, the peer id; never batch or event content.
 The audit write can never break the caller (same wrapping as
 ``dbcrypt._hooks._audit``).
 """

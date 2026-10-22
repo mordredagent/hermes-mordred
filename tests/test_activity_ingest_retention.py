@@ -1,4 +1,4 @@
-"""Ingestion-triggered retention and the ``activity.capture_refused`` audit (receiver and recall tools)."""
+"""Ingestion-triggered retention and the receiver's ``activity.capture_refused`` audit."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.activity import _capture_audit, _gate, ingest, tools
+from mordred_hermes.activity import _capture_audit, ingest
 from mordred_hermes.activity._gate import ActivityRefused, refusal
 from mordred_hermes.activity.config import ActivityConfig
 from mordred_hermes.activity.ingest import PeerPrincipal, StoreReceiver
@@ -28,11 +28,11 @@ class CountingStore(ActivityStore):
         self.retention_calls: list[dict[str, Any]] = []
         self._failure = failure
 
-    def apply_retention(self, now: float, *, raw_days: int, candidate_days: int, limit: int = 500) -> RetentionReport:
-        self.retention_calls.append({"raw_days": raw_days, "candidate_days": candidate_days, "limit": limit})
+    def apply_retention(self, now: float, *, raw_days: int, limit: int = 500) -> RetentionReport:
+        self.retention_calls.append({"raw_days": raw_days, "limit": limit})
         if self._failure is not None:
             raise self._failure
-        return super().apply_retention(now, raw_days=raw_days, candidate_days=candidate_days, limit=limit)
+        return super().apply_retention(now, raw_days=raw_days, limit=limit)
 
 
 @pytest.fixture(autouse=True)
@@ -79,7 +79,7 @@ def receiver(home: Path, store: ActivityStore, interval: float = 3600.0) -> Stor
 
 
 def test_retention_runs_once_per_interval_with_the_configured_windows(tmp_path: Path) -> None:
-    write_config(tmp_path, {**ENABLED, "retention_raw_days": 7, "retention_candidate_days": 14})
+    write_config(tmp_path, {**ENABLED, "retention_raw_days": 7})
     store = CountingStore(tmp_path / "mordred.db")
     hourly = receiver(tmp_path, store)
 
@@ -88,7 +88,7 @@ def test_retention_runs_once_per_interval_with_the_configured_windows(tmp_path: 
     # Another receiver in the same process shares the per-store-path clock.
     receiver(tmp_path, store).ingest(OPERATOR, batch(3))
 
-    assert store.retention_calls == [{"raw_days": 7, "candidate_days": 14, "limit": 200}]
+    assert store.retention_calls == [{"raw_days": 7, "limit": 200}]
 
 
 def test_retention_runs_again_once_the_interval_has_passed(tmp_path: Path) -> None:
@@ -185,23 +185,3 @@ def test_an_audit_failure_never_breaks_ingestion(tmp_path: Path, monkeypatch: py
         "type": "activity_refused",
         "reason": "collection_disabled",
     }
-
-
-def test_recall_gate_refusal_is_audited_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fresh_process_state: list[dict[str, Any]]
-) -> None:
-    write_config(tmp_path, {"enabled": True, "recall_enabled": True})
-    monkeypatch.setattr(tools, "_home", lambda: tmp_path)
-
-    def refuse(home: Path, **_: Any) -> ActivityStore:
-        raise ActivityRefused(refusal("not_armed"))
-
-    monkeypatch.setattr(_gate, "open_store", refuse)
-
-    for _ in range(2):
-        reply = json.loads(tools.activity_search({"task": "export the report"}))
-        assert reply == {"status": "unavailable", "reason": "not_armed"}
-
-    assert fresh_process_state == [
-        {"event": "activity_capture", "decision": "refuse", "reason": "activity.capture_refused", "code": "not_armed"}
-    ]

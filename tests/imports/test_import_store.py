@@ -108,7 +108,7 @@ def test_import_and_activity_tables_coexist_in_one_file(tmp_path: Path) -> None:
     store = make_store(tmp_path)
     commit(store, tg_conv(), [authored(1)])
 
-    assert activity.initialize(tmp_path).schema_version == 2
+    assert activity.initialize(tmp_path).schema_version >= 2
     assert "import_messages" not in activity.status().counts
     assert rows(store, "SELECT key FROM activity_meta WHERE key = 'schema_version'") == [("schema_version",)]
     assert store.contains([tg_uid(1)]) == {tg_uid(1)}

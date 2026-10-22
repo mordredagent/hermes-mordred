@@ -14,11 +14,11 @@ module's :func:`register` wires every component in a fixed order:
 5. ``dbcrypt``       — the database-encryption monitor and status line.
 6. ``e2e``           — encrypted gateway dispatch, outbound re-encryption and
                         the read-only Telegram tools.
-7. ``activity``      — browser activity learning; registers the session
-                        start/end/finalize observation hooks, the
-                        ``mordred_activity_review`` auxiliary task when the host
-                        offers it, the two recall tools and the two skills (the
-                        store is never opened at registration).
+7. ``activity``      — browser activity history; its ``register`` is a
+                        documented no-op for now (no hooks, tools or skills;
+                        capture runs in the extension server's receiver), and
+                        Hermes-side use of the history arrives in a later
+                        phase.
 8. ``wizard``        — the ``hermes mordred`` CLI subcommand.
 
 Components 1-4 and 8 keep the relative order they had as separate plugins
@@ -76,7 +76,8 @@ COMPONENTS: Final[tuple[tuple[str, str], ...]] = (
 
 #: Minimum hook surface each component promises. The integrity gate checks it
 #: per component (recorded here) and, as a union, against Hermes's own ledger
-#: for the ``mordred`` plugin. The wizard is CLI-only.
+#: for the ``mordred`` plugin. The wizard is CLI-only; ``activity`` registers
+#: nothing yet (capture runs in the extension server, not in Hermes hooks).
 COMPONENT_REQUIRED_HOOKS: Final[dict[str, frozenset[str]]] = {
     "keyvault": frozenset({"on_session_start", "on_session_end"}),
     "llm_guard": frozenset({"on_session_start", "pre_api_request"}),
@@ -84,7 +85,7 @@ COMPONENT_REQUIRED_HOOKS: Final[dict[str, frozenset[str]]] = {
     "privacy_check": frozenset({"on_session_start", "pre_tool_call"}),
     "dbcrypt": frozenset({"on_session_start", "pre_llm_call"}),
     "e2e": frozenset({"on_session_start", "pre_gateway_dispatch"}),
-    "activity": frozenset({"on_session_start", "on_session_end", "on_session_finalize"}),
+    "activity": frozenset(),
     "wizard": frozenset(),
 }
 

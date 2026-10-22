@@ -47,7 +47,7 @@ the optional workspace target has user-home paths of its own.
 | `<home>/extension/` | extension and keyvault signer | pairing, E2E, WebAuthn, history, wallet config |
 | `<home>/extension/activity_pending.json` | `activity pair-operator` / extension server | pending activity pair codes (SHA-256 of the code only), `0600` |
 | `<home>/extension/activity_peers.json` | extension server (`activity_pair_init`) / `activity peers revoke` | activity peer credentials (token SHA-256 only), `0600` |
-| `<home>/plugin-data/mordred/mordred.db` | `activity` component and `imports` library (SQLCipher only) | browser activity events, episodes, lessons, review jobs and budget; `import_*` imported-message tables |
+| `<home>/plugin-data/mordred/mordred.db` | `activity` component and `imports` library (SQLCipher only) | browser activity events and episodes (schema v3: `activity_meta`, `activity_events`, `activity_episodes`); `import_*` imported-message tables |
 | `<home>/.env` | Hermes + Mordred writers | plaintext runtime secrets when present |
 | `<home>/config.yaml` | Hermes + Mordred writers | Hermes config and Mordred plugin sections |
 | `<home>/config.yaml.mordred-uninstall-<ts>.bak` | `uninstall` | copy of `config.yaml` taken before Mordred's entries are removed |
@@ -415,19 +415,22 @@ The operator keeps the matching plaintext token in its own
   There is no plaintext fallback; on Linux and Windows the store is refused.
 - **Backup and restore:** `ActivityStore.backup` / `restore` take consistent
   SQLite-backup-API snapshots (a new `0600` file, keyed by the shim, refused if
-  plaintext); restore keeps the profile binding and resets leases. Operators
+  plaintext); restore keeps the profile binding, issues a new store
+  generation and marks Hermes session references `unavailable`. Operators
   use `hermes-mordred activity backup --output PATH` (refuses an existing or
   unwritable destination) and `activity restore --input PATH --yes` (without
   `--yes` it only previews; a backup bound to another profile is refused with
   `profile_mismatch`). The backup is encrypted with this profile's database
   key. `sessions recover` is not the activity recovery command, and Hermes
   state recovery does not copy this file.
-- **Retention:** raw events not pinned by lesson evidence are kept for
-  `retention_raw_days` (default 365; `0` never ages out raw events or
-  episodes) and unadopted candidates for `retention_candidate_days` (90), both
-  under `plugins.mordred_activity`; since 2026-10-22 raw history is kept for
-  Hermes's benefit, not only as lesson evidence. Lessons whose pinned evidence
-  is missing are suspended. One bounded pass runs after a successful batch
+- **Schema:** version 3 holds `activity_meta`, `activity_events` and
+  `activity_episodes` only. Older stores upgrade in place on open and on
+  restore (v2 → v3 drops the removed lesson and review tables); a newer schema
+  is refused.
+- **Retention:** raw events older than `retention_raw_days` (default 365; `0`
+  keeps everything forever) are deleted together with episodes left without
+  events, under `plugins.mordred_activity`; since 2026-10-22 raw history is
+  kept for Hermes's benefit. One bounded pass runs after a successful batch
   append at most once per hour per store, and on demand through
   `activity retention` (`--dry-run` only counts).
 

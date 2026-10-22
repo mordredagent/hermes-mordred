@@ -8,7 +8,10 @@ import json
 import pytest
 
 from mordred_hermes.activity import peers
+from mordred_hermes.activity._gate import ActivityRefused, refusal
+from mordred_hermes.activity.config import ActivityConfig
 from mordred_hermes.wizard import activity_cli, cli
+from tests._activity_episode_helpers import CORRECTION_TEXT, RAW_SECRET, make_store, rows, seed_episode
 
 
 @pytest.fixture(autouse=True)
@@ -30,9 +33,19 @@ def test_parser_wires_every_activity_subcommand():
         ["activity", "pair-operator", "--label", "x", "--timeout", "5"],
         ["activity", "peers", "list"],
         ["activity", "peers", "revoke", "operator:000000000000"],
+        ["activity", "correct", "--episode", "e", "--text", "t", "--attempt", "a"],
     ):
         ns = parser.parse_args(argv)
         assert ns.func is cli._handle_activity
+
+
+@pytest.mark.parametrize("removed", ["candidates", "validate", "adopt", "reject", "lessons", "review", "jobs"])
+def test_lesson_pipeline_subcommands_are_gone(removed, capsys):
+    parser = argparse.ArgumentParser()
+    cli._setup_subparser(parser)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["activity", removed])
+    assert "invalid choice" in capsys.readouterr().err
 
 
 def test_status_json_with_store(monkeypatch, capsys):
@@ -162,3 +175,69 @@ def test_pair_operator_storage_failure_exits_2(monkeypatch, capsys):
     monkeypatch.setattr(peers, "generate_peer_code", broken)
     assert cli.main(["activity", "pair-operator"]) == 2
     assert "unsafe directory" not in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# correct
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def store(monkeypatch, tmp_path):
+    activity_store = make_store(tmp_path)
+    config = ActivityConfig.from_mapping({"enabled": True})
+    monkeypatch.setattr(activity_cli, "_open", lambda home: (activity_store, config))
+    return activity_store
+
+
+def test_correct_records_one_raw_correction_event(store, capsys):
+    seeded = seed_episode(store)
+
+    code = cli.main(
+        [
+            "activity",
+            "correct",
+            "--episode",
+            seeded.episode_id,
+            "--text",
+            CORRECTION_TEXT,
+            "--attempt",
+            seeded.attempt_id,
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert code == 0
+    stored = store.events_for_episode(seeded.episode_id)[-1]
+    assert (stored.phase, stored.attempt_id, stored.text) == ("correction", seeded.attempt_id, CORRECTION_TEXT)
+    assert f"Recorded correction {stored.event_id} in episode {seeded.episode_id}." in out
+    assert "andidate" not in out and "esson" not in out
+    assert CORRECTION_TEXT not in out and RAW_SECRET not in out
+    assert store.status().counts == {"activity_events": 5, "activity_episodes": 1}
+
+
+def test_correct_unknown_episode_prints_only_the_code(store, capsys):
+    assert cli.main(["activity", "correct", "--episode", "missing", "--text", "secret words"]) == 1
+    captured = capsys.readouterr()
+    assert "refused (episode_unknown)" in captured.err
+    assert "secret words" not in captured.out + captured.err
+    assert rows(store, "SELECT count(*) FROM activity_events") == [(0,)]
+
+
+def test_correct_is_refused_while_the_feature_is_disabled(store, monkeypatch, capsys):
+    seeded = seed_episode(store)
+    monkeypatch.setattr(activity_cli, "_open", lambda home: (store, ActivityConfig()))
+
+    assert cli.main(["activity", "correct", "--episode", seeded.episode_id, "--text", "x"]) == 1
+    assert "refused (feature_disabled)" in capsys.readouterr().err
+    assert rows(store, "SELECT count(*) FROM activity_events WHERE phase = 'correction'") == [(0,)]
+
+
+def test_correct_gate_refusal_exits_one_with_the_code(monkeypatch, capsys):
+    def refuse(home):
+        raise ActivityRefused(refusal("not_armed"))
+
+    monkeypatch.setattr(activity_cli, "_open", refuse)
+
+    assert cli.main(["activity", "correct", "--episode", "e", "--text", "t"]) == 1
+    assert "refused (not_armed)" in capsys.readouterr().err

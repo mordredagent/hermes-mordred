@@ -3,10 +3,10 @@
 - ``backup --output PATH`` — a consistent encrypted snapshot to a new ``0600`` file (refuses an
   existing destination).
 - ``restore --input PATH [--yes]`` — without ``--yes`` print what the restore would do and exit 2;
-  with it replace the store's content, reset leases and classify uncertain review work. A copy
-  bound to another profile is refused. No review job, model call or browser action is started.
-- ``retention [--dry-run] [--json]`` — one bounded retention pass with the configured windows;
-  ``--dry-run`` reports the same counts from read-only queries.
+  with it replace the store's content (new store generation, Hermes session references marked
+  unavailable). A copy bound to another profile is refused.
+- ``retention [--dry-run] [--json]`` — one bounded retention pass with the configured raw-event
+  window; ``--dry-run`` reports the same counts from read-only queries.
 
 Every command opens the store through the protection gate and prints only the refusal code when
 it refuses (exit 1). Identifiers and counts only; event content is never printed.
@@ -113,16 +113,6 @@ def _source_status(store: ActivityStore, src: Path) -> StoreStatus:
     return source.status()
 
 
-def _classification(source: StoreStatus) -> dict[str, int]:
-    """What ``ActivityStore.restore`` does to the copy's in-flight review work."""
-    return {
-        "jobs_returned_to_pending": source.job_states.get("leased", 0),
-        "jobs_marked_uncertain": source.job_states.get("calling", 0),
-        "attempts_marked_uncertain": source.attempt_states.get("submitted", 0),
-        "reserved_attempts_failed": source.attempt_states.get("reserved", 0),
-    }
-
-
 def _print_counts(title: str, values: Mapping[str, int]) -> None:
     print(title)
     for key, value in values.items():
@@ -132,20 +122,17 @@ def _print_counts(title: str, values: Mapping[str, int]) -> None:
 def _restore(args: argparse.Namespace, store: ActivityStore, config: ActivityConfig) -> int:
     src = _path(args.input)
     source = _source_status(store, src)
-    classification = _classification(source)
     if not args.yes:
         print(f"Restore from {_display(src)} would replace the current activity store content.")
         print(f"  backup schema version: {source.schema_version}")
         print(f"  backup generation:     {_display(source.store_generation, 64)}")
         _print_counts("  backup rows:", source.counts)
-        _print_counts("  in-flight review work:", classification)
         print("Nothing changed. Run again with --yes to restore.")
         return 2
     meta = store.restore(src)
     print(f"Restored the activity store from {_display(src)}")
     print(f"  new store generation: {_display(meta.store_generation, 64)}")
-    _print_counts("  in-flight review work:", classification)
-    print("No review job, model call or browser action was started.")
+    print("Hermes session references in the restored history are marked unavailable.")
     return 0
 
 
@@ -155,21 +142,19 @@ def _restore(args: argparse.Namespace, store: ActivityStore, config: ActivityCon
 
 
 def _retention(args: argparse.Namespace, store: ActivityStore, config: ActivityConfig) -> int:
-    windows = {"raw_days": config.retention_raw_days, "candidate_days": config.retention_candidate_days}
+    raw_days = config.retention_raw_days
     run = store.plan_retention if args.dry_run else store.apply_retention
-    report = run(time.time(), **windows)
-    body: dict[str, Any] = {"dry_run": bool(args.dry_run), **windows, **dataclasses.asdict(report)}
+    report = run(time.time(), raw_days=raw_days)
+    body: dict[str, Any] = {"dry_run": bool(args.dry_run), "raw_days": raw_days, **dataclasses.asdict(report)}
     if args.json:
         print(json.dumps(body, sort_keys=True))
         return 0
     verb = "would remove" if args.dry_run else "removed"
     mode = "dry run" if args.dry_run else "one pass"
-    raw = f"{windows['raw_days']} days" if windows["raw_days"] > 0 else "kept forever"
-    print(f"Retention ({mode}; raw events {raw}, candidates {windows['candidate_days']} days):")
-    print(f"  events {verb}:        {report.events_deleted}")
-    print(f"  candidates {verb}:    {report.candidates_deleted}")
-    print(f"  episodes {verb}:      {report.episodes_deleted}")
-    print(f"  lessons {'to suspend' if args.dry_run else 'suspended'}:  {report.lessons_suspended}")
+    raw = f"{raw_days} days" if raw_days > 0 else "kept forever"
+    print(f"Retention ({mode}; raw events {raw}):")
+    print(f"  events {verb}:    {report.events_deleted}")
+    print(f"  episodes {verb}:  {report.episodes_deleted}")
     if not report.complete:
         print("A step hit its per-pass limit; run `hermes-mordred activity retention` again.")
     return 0

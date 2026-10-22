@@ -60,9 +60,6 @@ ReasonCode = Literal[
     "policy.egress.tool_blocked",
     "mordred.db_encryption.violation",
     "activity.capture_refused",
-    "activity.lesson_adopted",
-    "activity.lesson_suspended",
-    "activity.review_attempt",
     "policy.egress.reader_mode",
 ]
 

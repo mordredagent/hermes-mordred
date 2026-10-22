@@ -1,11 +1,18 @@
-"""Schema v2 of ``mordred.db`` (all activity tables live in this one encrypted file).
+"""Schema v3 of ``mordred.db`` (all activity tables live in this one encrypted file).
 
-:data:`STATEMENTS` create a new store at the current version. v2 adds the
-nullable ``query``, ``page_title`` and ``page_text`` columns to
-``activity_events`` (the capture policy that keeps everything but secrets);
+:data:`STATEMENTS` create a new store at the current version;
 :data:`MIGRATIONS` upgrades an older store in place, one version per step,
-inside the transaction that opens it. The review, lesson, use and budget
-tables keep the design's uniqueness keys.
+inside the transaction that opens it:
+
+- v2 added the nullable ``query``, ``page_title`` and ``page_text`` columns to
+  ``activity_events`` (the capture policy that keeps everything but secrets);
+- v3 dropped the tables of the removed lesson pipeline (review jobs and
+  attempts, lessons and their evidence, recall uses, the review budget;
+  2026-10-22). ``activity_episodes.reviewed_revision`` stays as a dormant
+  column (always ``0``) in new stores too, so a new store and an upgraded one
+  have the same tables, columns and indexes without ``ALTER TABLE DROP COLUMN``.
+  Columns that v2 added to an upgraded store sit after ``content_digest``;
+  every reader and writer names its columns.
 """
 
 from __future__ import annotations
@@ -13,18 +20,29 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Final
 
-SCHEMA_VERSION: Final = 2
+SCHEMA_VERSION: Final = 3
 
 TABLES: Final = (
     "activity_meta",
     "activity_events",
     "activity_episodes",
-    "activity_review_jobs",
+)
+
+#: Tables of the lesson pipeline that schema v3 dropped, children before their parents.
+DROPPED_TABLES: Final = (
     "activity_review_attempts",
-    "activity_lessons",
+    "activity_review_jobs",
     "activity_lesson_evidence",
+    "activity_lessons",
     "activity_uses",
     "activity_budget",
+)
+#: Their explicit indexes (``DROP TABLE`` removes them too; listed so the step reads complete).
+DROPPED_INDEXES: Final = (
+    "activity_review_attempts_job",
+    "activity_lessons_state",
+    "activity_lesson_evidence_event",
+    "activity_uses_lesson",
 )
 
 STATEMENTS: Final = (
@@ -99,107 +117,6 @@ STATEMENTS: Final = (
     )
     """,
     "CREATE INDEX activity_episodes_last_event ON activity_episodes (last_event_at)",
-    """
-    CREATE TABLE activity_review_jobs (
-        job_id TEXT PRIMARY KEY,
-        episode_id TEXT NOT NULL,
-        input_revision INTEGER NOT NULL,
-        reviewer_version TEXT NOT NULL,
-        state TEXT NOT NULL CHECK (state IN
-            ('pending', 'leased', 'calling', 'completed', 'deferred', 'failed', 'uncertain')),
-        lease_owner TEXT,
-        lease_expires_at REAL,
-        snapshot_digest TEXT,
-        created_at REAL NOT NULL,
-        updated_at REAL NOT NULL,
-        failure_code TEXT,
-        UNIQUE (episode_id, input_revision, reviewer_version)
-    )
-    """,
-    """
-    CREATE TABLE activity_review_attempts (
-        attempt_id TEXT PRIMARY KEY,
-        job_id TEXT NOT NULL REFERENCES activity_review_jobs (job_id),
-        request_id TEXT NOT NULL UNIQUE,
-        provider TEXT,
-        model TEXT,
-        reserved_input_tokens INTEGER NOT NULL DEFAULT 0,
-        reserved_output_tokens INTEGER NOT NULL DEFAULT 0,
-        reserved_cost_usd REAL NOT NULL DEFAULT 0,
-        usage_input_tokens INTEGER,
-        usage_output_tokens INTEGER,
-        cost_usd_estimate REAL,
-        state TEXT NOT NULL CHECK (state IN ('reserved', 'submitted', 'completed', 'failed', 'uncertain')),
-        failure_code TEXT,
-        started_at REAL NOT NULL,
-        finished_at REAL
-    )
-    """,
-    "CREATE INDEX activity_review_attempts_job ON activity_review_attempts (job_id)",
-    """
-    CREATE TABLE activity_lessons (
-        lesson_id TEXT NOT NULL,
-        revision INTEGER NOT NULL,
-        state TEXT NOT NULL CHECK (state IN
-            ('candidate', 'validated', 'admitted', 'suspended', 'rejected', 'retired')),
-        origin TEXT NOT NULL CHECK (origin IN ('correction', 'review')),
-        episode_id TEXT,
-        scope_site TEXT,
-        scope_route TEXT,
-        scope_task TEXT,
-        applies_when TEXT,
-        does_not_apply TEXT,
-        check_before_use TEXT,
-        guidance TEXT,
-        success_measure TEXT,
-        evidence_digest TEXT,
-        validation_method TEXT,
-        validation_note TEXT,
-        validated_at REAL,
-        adopted_at REAL,
-        adoption_digest TEXT,
-        suspended_reason TEXT,
-        created_at REAL NOT NULL,
-        superseded_by TEXT,
-        PRIMARY KEY (lesson_id, revision)
-    )
-    """,
-    "CREATE INDEX activity_lessons_state ON activity_lessons (state, scope_site)",
-    """
-    CREATE TABLE activity_lesson_evidence (
-        lesson_id TEXT NOT NULL,
-        revision INTEGER NOT NULL,
-        event_id TEXT NOT NULL,
-        episode_revision INTEGER,
-        pinned INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (lesson_id, revision, event_id),
-        FOREIGN KEY (lesson_id, revision) REFERENCES activity_lessons (lesson_id, revision)
-    )
-    """,
-    "CREATE INDEX activity_lesson_evidence_event ON activity_lesson_evidence (event_id)",
-    """
-    CREATE TABLE activity_uses (
-        use_id TEXT PRIMARY KEY,
-        lesson_id TEXT NOT NULL,
-        revision INTEGER NOT NULL,
-        hermes_session_id TEXT,
-        task_ref TEXT,
-        retrieved_at REAL NOT NULL,
-        applied INTEGER,
-        outcome TEXT,
-        outcome_at REAL
-    )
-    """,
-    "CREATE INDEX activity_uses_lesson ON activity_uses (lesson_id, revision)",
-    """
-    CREATE TABLE activity_budget (
-        window_start REAL PRIMARY KEY,
-        window_end REAL NOT NULL,
-        reserved_cost_usd REAL NOT NULL DEFAULT 0,
-        used_cost_usd REAL NOT NULL DEFAULT 0,
-        attempts INTEGER NOT NULL DEFAULT 0
-    )
-    """,
 )
 
 #: ``MIGRATIONS[n]`` upgrades a store from schema ``n`` to ``n + 1``.
@@ -208,5 +125,9 @@ MIGRATIONS: Final[Mapping[int, tuple[str, ...]]] = {
         "ALTER TABLE activity_events ADD COLUMN query TEXT",
         "ALTER TABLE activity_events ADD COLUMN page_title TEXT",
         "ALTER TABLE activity_events ADD COLUMN page_text TEXT",
+    ),
+    2: (
+        *(f"DROP INDEX IF EXISTS {name}" for name in DROPPED_INDEXES),
+        *(f"DROP TABLE IF EXISTS {name}" for name in DROPPED_TABLES),
     ),
 }

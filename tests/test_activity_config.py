@@ -1,4 +1,4 @@
-"""``plugins.mordred_activity`` parsing: site exclusions and raw-event retention."""
+"""``plugins.mordred_activity`` parsing: site exclusions, raw-event retention and unknown keys."""
 
 from __future__ import annotations
 
@@ -55,7 +55,11 @@ def test_invalid_raw_retention_falls_back_with_a_warning(raw: Any) -> None:
     assert config.warnings == ("invalid value for retention_raw_days",)
 
 
-def test_candidate_retention_must_stay_positive() -> None:
-    config = ActivityConfig.from_mapping({"retention_candidate_days": 0})
-    assert config.retention_candidate_days == 90
-    assert config.warnings == ("invalid value for retention_candidate_days",)
+@pytest.mark.parametrize(
+    "key", ["review_mode", "recall_enabled", "review_provider", "recall_max_bytes", "retention_candidate_days"]
+)
+def test_keys_of_the_removed_lesson_pipeline_are_unknown(key: str) -> None:
+    config = ActivityConfig.from_mapping({"enabled": True, key: 1})
+    assert config.enabled is True
+    assert config.warnings == (f"unknown key {key}",)
+    assert not hasattr(config, key)

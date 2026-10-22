@@ -14,11 +14,6 @@ here; this module keeps their logic out of the already large ``api.py``:
   ``activity_refused``. No receiver means ``store_unavailable``.
 - ``activity_status`` — content-free collection state.
 
-It also holds the launch-permit consumer for automatic review
-(:mod:`mordred_hermes.activity.boundary`): :func:`before_foreground_input`
-runs before the chat handler sees new input, :func:`after_foreground_delivery`
-after ``chat_end`` was delivered.
-
 Logs and replies carry identifiers, counts and reason codes only — never batch
 content, tokens or codes.
 """
@@ -28,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -224,51 +218,3 @@ async def on_activity_status(conn: _Connection, msg: dict[str, Any]) -> None:
         state = await _in_executor(collection_status, hermes_home())
     collection, reason = state
     await conn._send({"id": msg.get("id"), "type": "activity_status", "collection": collection, "reason": reason})
-
-
-# --------------------------------------------------------------------------- #
-# Foreground boundary (launch permits for automatic review)
-# --------------------------------------------------------------------------- #
-
-
-def before_foreground_input(server: Any) -> None:
-    """New foreground input revokes unused launch permits of this profile (memory only, no I/O)."""
-    del server  # permits are per profile home, not per server
-    try:
-        from .._home import hermes_home
-        from ..activity import boundary
-
-        boundary.revoke_permits(hermes_home(), "foreground_input")
-    except Exception as exc:  # the chat turn must never depend on the activity core
-        _log.debug("activity launch permits not revoked (%s)", type(exc).__name__)
-
-
-def _admit_after_delivery(home: Path, llm: Any, request_id: str | None) -> bool:
-    try:
-        from ..activity import boundary
-
-        now = time.time()
-        boundary.grant_launch_permit(home, request_id, now)
-        if llm is None:
-            return False
-        return boundary.try_automatic_review(home, llm=llm, now=now)
-    except Exception as exc:
-        _log.warning("automatic activity review not admitted (%s)", type(exc).__name__)
-        return False
-
-
-async def after_foreground_delivery(server: Any, request_id: str | None) -> bool:
-    """Grant this profile's single-use launch permit and consider one automatic review.
-
-    Called only after ``chat_end`` was delivered. ``request_id`` is the
-    extension chat frame id that grants the permit (``None`` when absent). ``server.activity_llm`` is
-    the host LLM facade (``ctx.llm``); the standalone ``extension serve``
-    process has no plugin context and leaves it ``None``, so automatic review
-    is unavailable there by construction (capture and the explicit
-    ``activity review`` command still work). The review itself runs on its own
-    daemon thread; this returns as soon as admission is decided.
-    """
-    from .._home import hermes_home
-
-    llm = getattr(server, "activity_llm", None)
-    return await _in_executor(_admit_after_delivery, hermes_home(), llm, request_id)

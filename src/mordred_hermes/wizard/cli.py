@@ -25,9 +25,9 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``, now the ``mordred`` plugi
 - ``vault {init,add,status,cat,migrate,...}``    — at-rest secrets/env vault
 - ``plugins list``                               — show the Mordred plugin and its components
 - ``plugins migrate``                            — switch config.yaml to the single ``mordred`` plugin
-- ``activity {status,pair-operator,peers,correct,candidates,validate,adopt,reject,lessons,
-  review,jobs,backup,restore,retention}`` — browser activity learning administration
-- ``mail {import,status}``                       — file-based mail import (mbox / .eml) into ``mordred.db``
+- ``activity {status,pair-operator,peers,correct,backup,restore,retention}`` — browser activity
+  history administration
+- ``mail {import,status,setup,fetch,forget}``    — mail import (mbox / .eml) and IMAP sync into ``mordred.db``
 """
 
 from __future__ import annotations
