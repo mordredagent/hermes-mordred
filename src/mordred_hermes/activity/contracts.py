@@ -311,14 +311,15 @@ _KEY_PREFIX_RE: Final = re.compile(
 _PEM_RE: Final = re.compile(r"-----BEGIN [A-Z0-9 ]{0,40}(?:PRIVATE KEY|KEY BLOCK)-----")
 #: A labelled secret in free text: ``password: …``, ``pin=…``, ``api key: …``.
 _LABELLED_SECRET_RE: Final = re.compile(
-    r"(?i)\b(?:pass(?:word|wd|phrase|code)?|pwd|pin|secret|token|api[ _-]?key)\s*[:=]\s*\S"
+    r"(?i)\b(?:pass(?:word|wd|phrase|code)?|pwd|pin|secret|token|api(?:[^\S\r\n]{1,32}|[_-])?key)\s*[:=]\s*\S"
 )
 #: Keywords naming a secret in free text (case-insensitive). An ASCII keyword must not touch an ASCII letter
 #: or digit on either side (``pinned``, ``tokens`` and ``password2`` are no keywords); ``pin code`` is tried
 #: before ``pin``.
+_KEYWORD_JOINER: Final = r"(?:[^\S\r\n]{1,32}|[_-])?"  # the words of a two-word keyword: same-line spaces, _ or -
 _ASCII_SECRET_KEYWORDS: Final = (
-    r"pin[ -]?code|one[- ]?time[- ]?code|api[ _-]?(?:key|token)|access[ _-]?token"
-    r"|pass(?:word|wd|phrase|code)|pwd|otp|pin|secret|token"
+    f"pin{_KEYWORD_JOINER}code|one{_KEYWORD_JOINER}time{_KEYWORD_JOINER}code|api{_KEYWORD_JOINER}(?:key|token)"
+    f"|access{_KEYWORD_JOINER}token|pass(?:word|wd|phrase|code)|pwd|otp|pin|secret|token"
 )
 #: The Japanese words for one-time password, password, PIN, passcode and verification code; written without
 #: spaces, so they need no word boundary.
@@ -1352,6 +1353,16 @@ def _values_after(index: _TextIndex, keyword: re.Match[str]) -> list[tuple[int, 
     return [span for span in found if span is not None]
 
 
+def _readings(text: str, keyword: re.Match[str]) -> list[re.Match[str]]:
+    """``keyword`` and, for a two-word keyword whose first word is a keyword too ("pin  code"), that word on
+    its own: "pin  code=1234" names "code=1234" after "pin" as well, so neither reading hides the other."""
+    space = _WHITESPACE_RE.search(keyword.group(0))
+    if space is None:
+        return [keyword]
+    first = _SECRET_KEYWORD_RE.match(text, keyword.start(), keyword.start() + space.start())
+    return [keyword, first] if first is not None else [keyword]
+
+
 def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """``spans`` in order, overlapping or touching ones joined."""
     merged: list[tuple[int, int]] = []
@@ -1384,13 +1395,14 @@ def _secret_spans(text: str) -> list[tuple[int, int]]:
             continue
         if closed[0] < keyword.start() and keyword.end() < closed[1]:
             continue
-        # A value named before the keyword is never inside a URL.
-        spans += [span for span in _values_before(index, keyword) if not (url and urls[url - 1][1] > span[0])]
-        for span in _values_after(index, keyword):
-            spans.append(span)
-            part = _closed_part(index, span) if span[1] > closed[1] else None
-            if part is not None and part[1] > closed[1]:
-                closed = part
+        for reading in _readings(text, keyword):
+            # A value named before the keyword is never inside a URL.
+            spans += [span for span in _values_before(index, reading) if not (url and urls[url - 1][1] > span[0])]
+            for span in _values_after(index, reading):
+                spans.append(span)
+                part = _closed_part(index, span) if span[1] > closed[1] else None
+                if part is not None and part[1] > closed[1]:
+                    closed = part
     return _merged(spans)
 
 
@@ -1414,7 +1426,9 @@ def redact_text_secrets(text: str) -> tuple[str, bool]:
     :func:`redact_secret_tokens`), and the value named after or before a secret keyword. Keywords, without
     case: ``password``, ``passwd``, ``passphrase``, ``passcode``, ``pwd``, ``pin``, ``pin code``, ``otp``,
     ``one-time code``, ``secret``, ``api key``, ``api token``, ``access token``, ``token`` (an ASCII keyword
-    must not touch an ASCII letter or digit) and :data:`JAPANESE_SECRET_KEYWORDS`. A keyword inside a URL is
+    must not touch an ASCII letter or digit; the words of a two-word keyword are joined by up to 32 same-line
+    whitespace characters, ``_`` or ``-``, and its first word, when a keyword itself, is read on its own too) and
+    :data:`JAPANESE_SECRET_KEYWORDS`. A keyword inside a URL is
     left to URL scrubbing. Every other keyword is read on its own, also one inside another keyword's value
     or qualifier, every form below is read for it, and all the values found are merged before they are
     replaced, so no form hides another ("password for account PIN=4821 is Hunter2-x" and "change the

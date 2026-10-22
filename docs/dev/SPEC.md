@@ -3896,7 +3896,10 @@ and revocable on its own:
   value after a secret keyword. Keywords (without case; an ASCII keyword must
   not touch an ASCII letter or digit): `password`, `passwd`, `passphrase`,
   `passcode`, `pwd`, `pin`, `pin code`, `otp`, `one-time code`, `secret`,
-  `api key`, `api token`, `access token`, `token`, and the Japanese words for
+  `api key`, `api token`, `access token`, `token` (the words of a two-word
+  keyword joined by up to 32 same-line whitespace characters, `_` or `-`,
+  never across a line break; its first word, when a keyword itself, is read
+  on its own too), and the Japanese words for
   password, PIN, passcode, one-time password and verification code. Between
   keyword and value come at least one connector (none is needed after a
   Japanese keyword or before a double or CJK quote): whitespace, `:` or `=`

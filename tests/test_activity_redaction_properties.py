@@ -66,6 +66,12 @@ PHRASES = [
     "Hunter2-x\u200b as the password",
     "пароль Hunter2-x as the password \U0001f642",
     "the password is \u0397unter2-x",
+    "\u30d1\u30b9\u30ef\u30fc\u30c9\u306bHun\x01ter2-x\u3092\u5165\u529b",
+    "api  key: abc123def",
+    "api\xa0key: abc123def",
+    "access\ttoken = abcdef",
+    "pin\u3000code 0000",
+    "pin  code=1234",
 ]
 #: Separators that end a phrase: what one phrase loses it must still lose next to another.
 CLAUSE_SEPARATORS = [". ", "; ", ", ", "\n"]
@@ -122,13 +128,14 @@ def _each_form(text: str) -> list[tuple[int, int]]:
     index = contracts._TextIndex(clean)
     urls = [match.span() for match in contracts._URL_IN_TEXT_RE.finditer(clean)]
     spans = []
-    for keyword in contracts._SECRET_KEYWORD_RE.finditer(clean):
-        if any(lo <= keyword.start() < hi for lo, hi in urls):
+    for match in contracts._SECRET_KEYWORD_RE.finditer(clean):
+        if any(lo <= match.start() < hi for lo, hi in urls):
             continue
-        for form, ascii_only in FORMS:
-            span = None if ascii_only and not keyword.group(0).isascii() else form(index, keyword)
-            if span is not None and not any(lo < span[0] < hi or lo < span[1] < hi for lo, hi in urls):
-                spans.append(span)
+        for keyword in contracts._readings(clean, match):
+            for form, ascii_only in FORMS:
+                span = None if ascii_only and not keyword.group(0).isascii() else form(index, keyword)
+                if span is not None and not any(lo < span[0] < hi or lo < span[1] < hi for lo, hi in urls):
+                    spans.append(span)
     return spans
 
 

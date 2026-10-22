@@ -1228,6 +1228,33 @@ def test_secret_shaped_tokens_are_kept_outside_the_users_words() -> None:
     assert agent.text == text and page.page_text == text
 
 
+# --- a two-word keyword joined by any same-line whitespace (operator parity, 2026-10-22) -------------------
+
+SPACED_KEYWORD_TEXTS = [
+    pytest.param("api key: abc123def", "api key: redacted", id="one-space"),
+    pytest.param("api  key: abc123def", "api  key: redacted", id="two-spaces"),
+    pytest.param("api\tkey: abc123def", "api\tkey: redacted", id="tab"),
+    pytest.param("api\xa0key: abc123def", "api\xa0key: redacted", id="nbsp"),
+    pytest.param("api\u3000key: abc123def", "api\u3000key: redacted", id="ideographic-space"),
+    pytest.param("access\t\ttoken = abcdef", "access\t\ttoken = redacted", id="access-token"),
+    pytest.param("one time  code 482913", "one time  code redacted", id="one-time-code"),
+    pytest.param("pin  code 0000", "pin  code redacted", id="pin-code"),
+    # the first word read on its own too: the base revision read "code=1234" as the value after "pin"
+    pytest.param("pin  code=1234", "pin  redacted", id="pin-reading-kept"),
+    pytest.param("パスワードにHun\x01ter2-xを入力", "パスワードにredactedを入力", id="ja-forward-control-character"),
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), SPACED_KEYWORD_TEXTS)
+def test_a_two_word_keyword_is_joined_by_any_same_line_whitespace(text: str, expected: str) -> None:
+    assert contracts.redact_text_secrets(text) == (expected, True)
+    assert contracts.looks_like_secret(text)
+
+
+def test_a_keyword_never_spans_a_line_break() -> None:
+    assert contracts.redact_text_secrets("api\nkey: abc123def") == ("api\nkey: abc123def", False)
+
+
 # --- the values the redactor replaces, and replacing given values (live B2 re-run, N1 / N5) -------------------
 
 
