@@ -22,13 +22,16 @@ records) to build:
   takes no part in that grouping, so its references can connect nothing
   (the store ignores them for the same reason). With a ``thread_resolver``
   (the IMAP fetch plans one batch at a time) a thread that is not a Gmail
-  thread joins the stored conversation of a committed message it contains or
-  references (``Message-ID``, ``In-Reply-To``, ``References``), so a reply
-  chain A→B→C split across batches stays one conversation; threads of the
-  plan that resolve to the same stored conversation are merged. That only
-  sees parents already stored; :attr:`ImportPlan.refs` (every planned
-  message's followed ids) lets the store merge the conversations of
-  replies fetched BEFORE their parent (``ImportStore.write_batch(refs=...)``).
+  thread is re-keyed onto the stored conversation of a committed message it
+  CONTAINS (a copy of a stored message, by ``Message-ID``); threads of the plan
+  that resolve to the same stored conversation are merged. Ids a thread only
+  references never choose its conversation, and its key comes from ids its own
+  messages hold (``build_threads(held_keys=True)``), so a crafted
+  ``In-Reply-To``/``References`` cannot land a message in a stored
+  conversation. Joining stored conversations is left to the store's guarded
+  reconciliation: :attr:`ImportPlan.refs` (every planned message's followed
+  ids) lets ``ImportStore.write_batch(refs=...)`` merge a reply chain A→B→C
+  split across batches, fetched in any order, under the merge guard.
 
 Pass 2 reads the sources again and normalises the chosen copies into
 :class:`PlannedThread` objects (one :class:`~..records.ImportConversation`
@@ -41,7 +44,7 @@ from __future__ import annotations
 import hashlib
 import time
 from collections import Counter
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 from ..records import (
@@ -308,25 +311,16 @@ def _normalize_pass(
     return normalized
 
 
-def _thread_ids(
-    thread: Thread, inputs: Mapping[str, ThreadInput], excluded: Collection[str]
-) -> tuple[list[str], list[str]]:
-    """(the members' own message ids, the ids they reference; an excluded copy's references are ignored)."""
-    items = [inputs[uid] for uid in thread.members if uid in inputs]
-    own = [item.message_id for item in items if item.message_id]
-    refs = [ref for item in items if item.key not in excluded for ref in (*item.in_reply_to, *item.references)]
-    return own, refs
+def _own_ids(thread: Thread, inputs: Mapping[str, ThreadInput]) -> list[str]:
+    """The Message-IDs the thread's own messages hold (never the ids they reference)."""
+    return [mid for uid in thread.members if uid in inputs and (mid := inputs[uid].message_id)]
 
 
-def _join_stored(
-    threads: list[Thread], indexer: _Indexer, resolver: ThreadResolver, excluded: Collection[str]
-) -> list[Thread]:
-    """Threads re-keyed onto the stored conversation they continue (see the module docstring)."""
+def _join_stored(threads: list[Thread], indexer: _Indexer, resolver: ThreadResolver) -> list[Thread]:
+    """Threads re-keyed onto the stored conversation already holding one of their messages (module docstring)."""
     inputs = {copy.thread.key: copy.thread for copy in indexer.copies.values()}
     open_threads = [thread for thread in threads if thread.method != "gmail_thrid"]
-    wanted = sorted(
-        {ident for thread in open_threads for ids in _thread_ids(thread, inputs, excluded) for ident in ids}
-    )
+    wanted = sorted({ident for thread in open_threads for ident in _own_ids(thread, inputs)})
     stored = resolver(wanted) if wanted else {}
     if not stored:
         return threads
@@ -334,8 +328,7 @@ def _join_stored(
     for thread in threads:
         key = thread.thread_key
         if thread.method != "gmail_thrid":
-            own, refs = _thread_ids(thread, inputs, excluded)
-            found = sorted({stored[i] for i in own if i in stored}) or sorted({stored[r] for r in refs if r in stored})
+            found = sorted({stored[ident] for ident in _own_ids(thread, inputs) if ident in stored})
             key = found[0] if found else key
         grouped.setdefault(key, []).append(thread)
     joined: list[Thread] = []
@@ -366,8 +359,8 @@ def plan_import(
 
     ``linker`` (e.g. the store-backed linker of the CLI) is consulted after the
     in-plan index for quotes that do not link to a record of this import.
-    ``thread_resolver`` (the IMAP fetch's store lookup) attaches threads to the
-    stored conversations they continue; ``copy_check`` (the store's decision per
+    ``thread_resolver`` (the IMAP fetch's store lookup) re-keys threads onto the
+    stored conversations holding their own messages; ``copy_check`` (the store's decision per
     copy) keeps the copies it will not write out of reference grouping. What
     either raises propagates.
     Raises :class:`~.source.SourceError` for an unreadable source,
@@ -386,10 +379,14 @@ def plan_import(
     excluded = _not_written(indexer, copy_check) if copy_check is not None else frozenset()
     thread_stats: Counter[str] = Counter()
     threads = build_threads(
-        [copy.thread for copy in indexer.copies.values()], own=own, excluded=excluded, stats=thread_stats
+        [copy.thread for copy in indexer.copies.values()],
+        own=own,
+        excluded=excluded,
+        stats=thread_stats,
+        held_keys=thread_resolver is not None,
     )
     if thread_resolver is not None:
-        threads = _join_stored(threads, indexer, thread_resolver, excluded)
+        threads = _join_stored(threads, indexer, thread_resolver)
     stats: Counter[str] = Counter()
     ctx = NormalizeContext(
         account=account,

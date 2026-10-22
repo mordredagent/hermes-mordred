@@ -273,12 +273,12 @@ announced sizes) or the run's byte budget the connection is aborted. At fetch st
 marked `failed` and its rows are reclaimed by the store's existing rule.
 `upsert_conversation` merges rather than replaces: `last_message_at` is the
 maximum, participants are unioned, `message_count` is recomputed from the
-store. Each batch is planned with the store's thread keys for the message ids
-it contains or references, so a reply chain split across batches stays one
-conversation, and the store lets Sent evidence win: a stronger sent-copy
-evidence revises a stored record even with identical bytes, a weaker copy
-never replaces a stored sent record. Planning only finds parents that are
-already stored, so a parent fetched after its replies needs the store too (the
+store. Each batch is planned with the store's thread keys for stored copies
+of the messages it contains (never for ids it only references), and the store
+lets Sent evidence win: a stronger sent-copy evidence revises a stored record
+even with identical bytes, a weaker copy never replaces a stored sent record.
+Planning joins no stored conversation by reference, so replies and parents
+split across batches need the store (the
 second-pass review's failing case: C, then B, then A, each naming only its
 parent, left two conversations). The store therefore keeps every synced
 message's referenced ids in `import_mail_refs(source_uid, ref_message_id)`
@@ -306,7 +306,12 @@ one conversation that already holds several messages (`merge_skipped`). After
 the fourth-pass review the same guard function (`imports/mail/merge_guard.py`)
 also decides the grouping of each batch before it is written, and copies the
 store will not write (duplicates and rejected copies, told beforehand by
-`ImportStore.classify_incoming`) take no part in it. A store created before
+`ImportStore.classify_incoming`) take no part in it. After the fifth-pass
+review that grouping has two phases, so a crafted message cannot be weighed
+before the reply chains it names have formed: each message first joins its
+direct parent in the batch (or its siblings under an absent parent) when the
+two share a participant, then its other references are weighed by the guard
+in date order against those groups. A store created before
 import schema v2 has no stored references for the messages it already holds,
 so a later-arriving parent cannot join them until those children are fetched
 again (`mail fetch --since <date>` re-fetches identical copies, which attach

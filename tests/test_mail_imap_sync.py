@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import random
 import sqlite3
 import sys
 import threading
@@ -611,9 +612,11 @@ def test_a_reply_chain_split_across_batches_stays_one_conversation(home: Path, s
     env = make_env(home, store, server, FakeSecrets(creds))
     run_fetch(FetchOptions(), env)
     in_reply_only = "In-Reply-To: <msg{}@example.net>\r\n"
-    box.messages[2] = FakeMessage(mail(2, extra_headers=in_reply_only.format(1), sender="Hanako <hanako@example.org>"))
+    hanako, taro = "Hanako <hanako@example.org>", "Taro Tanaka <taro@example.net>"
+    reply = mail(2, extra_headers=in_reply_only.format(1), sender=hanako, to=f"{taro}, Owner <{ADDRESS}>")
+    box.messages[2] = FakeMessage(reply)  # addressed to its parent's sender: the store's guard joins it
     run_fetch(FetchOptions(), env)
-    box.messages[3] = FakeMessage(mail(3, extra_headers=in_reply_only.format(2)))  # C names only B
+    box.messages[3] = FakeMessage(mail(3, extra_headers=in_reply_only.format(2), to=hanako))  # C names only B
     run_fetch(FetchOptions(), env)
     convs = rows(store, "SELECT conv_uid, message_count FROM import_conversations")
     assert len(convs) == 1 and convs[0][1] == 3
@@ -765,6 +768,26 @@ def test_a_strangers_message_naming_a_late_parent_stays_apart_and_is_reported(ho
     assert sorted(_threads_of(store).values()) == [["msg2@example.net", "msg3@example.net"], ["msg9@example.net"]]
 
 
+def test_a_message_naming_a_stored_conversation_it_shares_no_one_with_stays_apart(
+    home: Path, store: ImportStore
+) -> None:
+    """Planning never re-keys a batch thread onto a stored conversation it only references (nor keys it by that
+    id): stored conversations are joined only by the store's guarded reconciliation."""
+    box = FakeMailbox(uidvalidity=2, messages={1: _chain_message(1, None), 2: _chain_message(2, 1)})
+    env = make_env(home, store, FakeImapServer({"INBOX": box}), FakeSecrets(generic_creds(sent=False)))
+    assert run_fetch(FetchOptions(), env).inserted == 2  # A and B: one stored conversation, keyed by A
+    stray = mail(9, sender="Mallory <mallory@example.com>", references="msg1@example.net", date=_DATES[3])
+    box.messages[3] = FakeMessage(stray)  # names the stored root A, and shares no participant with A or B
+    result = run_fetch(FetchOptions(), env)
+    assert (result.inserted, result.merge_skipped) == (1, 1)
+    assert sorted(_threads_of(store).values()) == [["msg1@example.net", "msg2@example.net"], ["msg9@example.net"]]
+    box.messages[4] = _chain_message(3, 2)  # a real reply to B, fetched later, still joins through the guard
+    assert run_fetch(FetchOptions(), env).merge_skipped == 0
+    assert sorted(_threads_of(store).values()) == [
+        ["msg1@example.net", "msg2@example.net", "msg3@example.net"], ["msg9@example.net"]
+    ]  # fmt: skip
+
+
 def test_references_are_kept_per_message_and_deleted_with_the_rows(home: Path, store: ImportStore) -> None:
     _fetch_one_by_one(home, store, [(3, _chain_message(3, 2)), (1, _chain_message(1, None))])
     assert rows(store, "SELECT source_uid, ref_message_id FROM import_mail_refs") == [
@@ -839,6 +862,52 @@ def test_five_threads_and_a_message_naming_them_in_one_batch_stay_six_conversati
     assert result.merge_skipped > 0  # and the store, weighing the same edges, did too
     threads = sorted(_threads_of(store).values())
     assert len(threads) == 6 and ["msg99@example.net"] in threads
+
+
+def _threads_with_absent_ancestors(crafted_date: str) -> list[FakeMessage]:
+    """The fifth-pass review's batch: five two-message threads whose replies also name five older absent
+    ancestors (six referenced ids), and Mallory's message naming only the five roots (five)."""
+    messages: list[FakeMessage] = []
+    for thread in range(5):
+        root, reply = 10 * thread + 10, 10 * thread + 11
+        ancestors = " ".join(f"<old{thread}.{k}@example.net>" for k in range(5))
+        parent = f"<msg{root}@example.net>"
+        headers = f"References: {ancestors} {parent}\r\nIn-Reply-To: {parent}\r\n"
+        messages.append(FakeMessage(mail(root, sender=_ALICE, to=f"Owner <{ADDRESS}>", date=_DATES[2])))
+        owner = f"Owner <{ADDRESS}>"
+        messages.append(FakeMessage(mail(reply, sender=owner, to=_ALICE, extra_headers=headers, date=_DATES[2])))
+    roots = " ".join(f"<msg{10 * thread + 10}@example.net>" for thread in range(5))
+    crafted = mail(
+        99,
+        sender=_MALLORY,
+        to=f"Owner <{ADDRESS}>, {_ALICE}",
+        extra_headers=f"References: {roots}\r\n",
+        date=crafted_date,
+    )
+    return [*messages, FakeMessage(crafted)]
+
+
+@pytest.mark.parametrize("crafted_date", [_DATES[1], _DATES[3]])  # dated before or after the threads
+def test_replies_naming_absent_ancestors_and_a_crafted_message_stay_six_conversations_in_any_order(
+    tmp_path: Path, crafted_date: str
+) -> None:
+    messages = _threads_with_absent_ancestors(crafted_date)
+    orders = [messages, messages[::-1], random.Random(20261022).sample(messages, len(messages))]
+    outcomes = set()
+    for run, order in enumerate(orders):  # the batch's order is the mailbox's UID order
+        home, place = tmp_path / f"home{run}", tmp_path / f"store{run}"
+        home.mkdir()
+        place.mkdir()
+        store = make_store(place, home)
+        box = FakeMailbox(uidvalidity=2, messages=dict(enumerate(order, start=1)))
+        env = make_env(home, store, FakeImapServer({"INBOX": box}), FakeSecrets(generic_creds(sent=False)))
+        result = run_fetch(FetchOptions(), env)
+        assert (result.error, result.batches, result.inserted) == (None, 1, 11)  # one batch
+        assert result.merge_skipped > 0
+        threads = _threads_of(store)
+        assert len(threads) == 6 and ["msg99@example.net"] in threads.values()
+        outcomes.add(tuple(sorted((conv, tuple(ids)) for conv, ids in threads.items())))
+    assert len(outcomes) == 1  # the same conversations whatever the order
 
 
 def test_a_reply_chain_in_one_batch_is_one_conversation(home: Path, store: ImportStore) -> None:

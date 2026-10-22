@@ -5,7 +5,9 @@ following them blindly lets one crafted message pull unrelated threads into one
 conversation. ONE implementation decides it for both places mail threads are
 joined:
 
-- the grouping of one batch (:func:`.threading.build_threads`, a guarded union-find);
+- the grouping of one batch (:func:`.threading.build_threads`: a message and its direct
+  parent, or its siblings under an absent parent, by rule 2 between the two messages;
+  every other reference edge by :func:`fold_plan`, after those reply chains formed);
 - the store's reconciliation across batches (``ImportStore.write_batch(..., refs=...)``).
 
 The rules (:func:`followed_refs`, :func:`fold_plan`):
@@ -14,8 +16,7 @@ The rules (:func:`followed_refs`, :func:`fold_plan`):
    ``References`` in header order, then ``In-Reply-To`` (so the parent is always kept).
 2. A group joins the group of the message whose edges connect them only when the two
    share a participant (sender and recipient addresses; the account owner's never
-   count). A group that holds no message yet (in a batch: the placeholder of a
-   referenced id that is not in it) joins freely: it brings nobody in.
+   count). A group that holds no message joins freely: it brings nobody in.
 3. At most one of the groups merged may already hold several messages; otherwise
    nothing is merged for that message.
 4. A group keyed by a Gmail thread id is authoritative: it is never folded into

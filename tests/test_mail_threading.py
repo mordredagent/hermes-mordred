@@ -171,6 +171,62 @@ def test_a_message_naming_five_threads_in_one_batch_joins_none_of_them(crafted_a
         assert keys[("r0", "p0")] == default_thread_key(items[0])  # the thread holding the root keeps its key
 
 
+def _orders(items: list[ThreadInput]) -> list[list[ThreadInput]]:
+    """The batch as built, reversed and shuffled with a fixed seed."""
+    return [items, items[::-1], random.Random(20261022).sample(items, len(items))]
+
+
+@pytest.mark.parametrize("shared_ancestors", [False, True])
+@pytest.mark.parametrize("crafted_at", [500, 1_500, 3_000])  # before, between and after the threads
+def test_replies_naming_absent_ancestors_form_their_threads_before_a_crafted_message_is_weighed(
+    crafted_at: int, shared_ancestors: bool
+) -> None:
+    """The fifth-pass review: each reply names five older absent ancestors and its parent (six followed ids),
+    the crafted message names only the five roots (five), so it used to be weighed first and joined them all."""
+    pair = frozenset({ALICE, OWNER})
+    items: list[ThreadInput] = []
+    for n in range(5):
+        ancestors = tuple(f"old{k}" if shared_ancestors else f"old{n}.{k}" for k in range(5))
+        items.append(item(f"r{n}", mid=f"root{n}", people=pair, at=1_000 + n))
+        items.append(
+            item(f"p{n}", mid=f"reply{n}", irt=(f"root{n}",), refs=(*ancestors, f"root{n}"), people=pair, at=2_000 + n)
+        )
+    roots = tuple(f"root{n}" for n in range(5))
+    items.append(item("x", mid="crafted", refs=roots, people=frozenset({MALLORY, ALICE, OWNER}), at=crafted_at))
+    results = set()
+    for order in _orders(items):
+        stats: Counter[str] = Counter()
+        threads = build_threads(order, own={OWNER}, stats=stats)
+        assert sorted(thread.members for thread in threads) == [
+            ("r0", "p0"), ("r1", "p1"), ("r2", "p2"), ("r3", "p3"), ("r4", "p4"), ("x",)
+        ]  # fmt: skip
+        assert stats["merge_skipped"] > 0
+        results.add(tuple((thread.thread_key, thread.members, thread.partial) for thread in threads))
+    assert len(results) == 1  # the same threads and keys whatever the order of the batch
+
+
+@pytest.mark.parametrize("stranger_at", [100, 900])  # dated before or after the children
+def test_a_stranger_among_the_children_of_an_absent_parent_is_held_back_once(stranger_at: int) -> None:
+    children = [item(f"c{n}", mid=f"C{n}", irt=("A",), refs=("A",), at=200 + n) for n in range(3)]
+    stranger = item("s", mid="S", irt=("A",), refs=("A",), people=frozenset({MALLORY, OWNER}), at=stranger_at)
+    for order in _orders([*children, stranger]):
+        stats: Counter[str] = Counter()
+        threads = build_threads(order, own={OWNER}, stats=stats)
+        assert sorted(thread.members for thread in threads) == [("c0", "c1", "c2"), ("s",)]
+        assert stats["merge_skipped"] == 1
+
+
+def test_held_keys_never_name_a_thread_by_an_id_it_only_references() -> None:
+    root = item("a", mid="A", at=100)
+    reply = item("b", mid="B", irt=("A",), refs=("A",), at=200)
+    (legacy,) = build_threads([reply])
+    assert legacy.thread_key == default_thread_key(reply)  # the absent root's hash: file imports keep it
+    (held,) = build_threads([reply], held_keys=True)
+    assert held.thread_key == default_thread_key(item("b", mid="B"))  # its own id instead
+    (whole,) = build_threads([reply, root], held_keys=True)
+    assert whole.thread_key == default_thread_key(root)  # a thread holding its root keeps the root's key
+
+
 def test_a_reply_chain_in_one_batch_still_groups_whatever_the_order() -> None:
     taro, hanako = "taro@example.net", "hanako@example.org"
     chain = [

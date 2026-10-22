@@ -4645,8 +4645,8 @@ part of this delivery ([`TODO.md`](./TODO.md)).
   it as `skipped_oversize`, and aborts the connection (`imap_protocol`) without
   reading when a literal would take one response over 64 MiB of literals or
   the session over its byte budget. Each batch is planned (quote linker, and
-  the store's thread keys for the messages it contains or references, so a
-  reply chain split across batches stays one conversation) and then written
+  the store's thread key for a stored copy of a message it contains; an id
+  it only references never chooses a conversation) and then written
   and published by `ImportStore.write_batch` in ONE transaction under ONE
   `import_runs` row (`source = mail`): the messages, the merge of the
   conversation rows (stored participants are kept, `last_message_at` is the
@@ -4656,8 +4656,8 @@ part of this delivery ([`TODO.md`](./TODO.md)).
   concurrent reader sees the state before or after a batch, never between. A
   crash re-fetches at most one batch; a fetch first marks `open` mail runs
   left by a crash `failed`.
-- **Thread reconciliation.** The planning step above only finds parents that
-  are already stored. So the batch also writes each message's referenced ids
+- **Thread reconciliation.** The planning step above joins no stored
+  conversation by reference. So the batch also writes each message's referenced ids
   (`In-Reply-To`, `References`, normalised; the last 10 only, nearest
   ancestors with `In-Reply-To` last) to `import_mail_refs`, and in the
   same transaction, for every message M of the batch, merges M's conversation
@@ -4682,7 +4682,11 @@ part of this delivery ([`TODO.md`](./TODO.md)).
   three messages; threads that never reference each other stay apart. The same
   guards (one function, `imports/mail/merge_guard.py`) decide the grouping of
   a batch before it is written, so messages fetched together are held to them
-  too; a copy the store will not write (a duplicate or a rejected copy of a
+  too: a message first joins its direct parent (`In-Reply-To`) in the batch,
+  or its siblings under an absent parent, when the two share a participant,
+  and only then, in date order, are its other references weighed by the guard
+  against those groups, so the result does not depend on the batch's order;
+  a copy the store will not write (a duplicate or a rejected copy of a
   stored message, per `ImportStore.classify_incoming`) takes no part in that
   grouping. A store created before import schema v2 has no stored references
   for the messages it already holds, so a parent that arrives later cannot join

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -193,6 +194,32 @@ def test_identical_copies_are_duplicates() -> None:
     raw = b"Message-ID: <same@example.com>\nFrom: a@example.net\nSubject: s\n\nhello\n"
     result = plan(mbox(raw, raw))
     assert (result.report.duplicates, result.report.conflicts, result.report.parsed) == (1, 0, 1)
+
+
+def test_a_resolver_rekeys_only_threads_holding_a_stored_message() -> None:
+    """With a resolver (the IMAP fetch) ids a thread merely references never choose its conversation."""
+    stored = {"a1@example.net": "r.stored"}
+    asked: list[list[str]] = []
+
+    def resolver(ids: Sequence[str]) -> dict[str, str]:
+        asked.append(sorted(ids))
+        return {ident: stored[ident] for ident in ids if ident in stored}
+
+    copy = b"Message-ID: <a1@example.net>\nFrom: taro@example.net\nTo: owner@example.com\nSubject: s\n\nhello\n"
+    reply = (
+        b"Message-ID: <b1@example.net>\nIn-Reply-To: <a1@example.net>\nReferences: <a1@example.net>\n"
+        b"From: mallory@example.com\nTo: owner@example.com\nSubject: Re: s\n\nhi\n"
+    )
+    (rekeyed,) = plan(mbox(copy), thread_resolver=resolver).threads
+    assert rekeyed.conversation.conversation_id == "r.stored"  # a copy of a stored message
+    replying = plan(mbox(reply), thread_resolver=resolver)
+    (kept,) = replying.threads
+    assert asked[-1] == ["b1@example.net"]  # its own id only, never the id it references
+    assert kept.conversation.conversation_id not in {
+        "r.stored",
+        plan(mbox(reply)).threads[0].conversation.conversation_id,
+    }
+    assert replying.refs == {"mail:work:b1@example.net": ("a1@example.net",)}  # left to the store's guarded merge
 
 
 def test_full_plan_validates_and_is_idempotent() -> None:
