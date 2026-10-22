@@ -3971,15 +3971,24 @@ and revocable on its own:
   ("change the password to 12 characters"). The Japanese "password, object
   particle, value, target particle, set/change" order is covered by the
   particle rule above. Every keyword outside a URL is read on its own, also
-  one inside another keyword's value or qualifier, and the values found are
-  merged before they are replaced, so no form hides another: "password for
-  account PIN=4821 is Hunter2-x" loses both values (Codex review). A keyword
-  inside a found value that is one unquoted run, holds no opening quote or
-  bracket and no first character of a Japanese form, and is followed only by
-  closing marks cannot name anything outside it and is not read again (this
-  keeps the rule linear; `contracts._closed_part`). A test checks that every
-  value the redactor of `efe9bb27d` replaced in the contracts corpus is still
-  replaced (`tests/_activity_redaction_baseline.py`).
+  one inside another keyword's value or qualifier; every form is read for
+  each keyword, and all the values found are merged before they are
+  replaced, so no form hides another: "password for account PIN=4821 is
+  Hunter2-x" and "change the password for bank is Hunter2-x to OtherPw-3"
+  lose both values (Codex reviews). A keyword inside a found value that is
+  one unquoted run, holds no opening quote or bracket and no first character
+  of a Japanese form, and is followed only by closing marks cannot name
+  anything outside it and is not read again (`contracts._closed_part`). The
+  word that makes a keyword a modifier or a number a length is looked for on
+  the same line only. Each per-keyword question about the text (where a run,
+  a token or a run of marks ends) is answered by bisecting positions found
+  once per text (`contracts._TextIndex`), so a text costs O(n log n) at
+  worst. Tests check that every value the redactor of `efe9bb27d` replaced
+  is still replaced (a frozen copy of it in
+  `tests/_activity_redaction_baseline.py`), that whatever one form finds for
+  one keyword alone is replaced, also in generated pairs, triples and nested
+  phrasings (`tests/test_activity_redaction_properties.py`), and that 28
+  adversarial shapes stay near-linear between 10 KB and 40 KB.
   Keywords inside a URL are left to URL scrubbing. Known gaps: a plain word
   after whitespace alone ("password swordfish"), a plain word after `to` or
   after a qualifier ("set the password to swordfish", "the password for the

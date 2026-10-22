@@ -1,11 +1,287 @@
-"""Value spans the base revision's free-text redactor replaced, for the "only adds redactions" test.
+"""The free-text redactor of the base revision ``efe9bb27d``, frozen, as the oracle of the "only adds
+redactions" tests, and the value spans it replaced in the contracts corpus.
 
-Generated from ``efe9bb27d``'s ``contracts.redact_text_secrets`` (keyword values found after JWTs, key-prefixed
-tokens and PEM lines were replaced, :func:`.contracts.redact_secret_tokens`) over the contracts test corpus,
-phrasings with a credential inside another phrasing, and pairs of the redacted corpus. Only texts in which the
-base replaced something are listed; positions index the token-redacted text."""
+The definitions between the markers are copied from ``efe9bb27d``'s
+``src/mordred_hermes/activity/contracts.py`` (the keyword-value part of ``redact_text_secrets`` and
+``redact_secret_tokens``), unchanged but for formatting; :func:`base_spans` is that revision's
+``_redact_keyword_values`` loop returning
+spans instead of text. ``BASE_SPANS`` was produced by running that revision's own module, so a test can check
+that this copy still matches it. Positions index the text after :func:`redact_secret_tokens`.
+"""
 
 from __future__ import annotations
+
+import re
+from collections.abc import Mapping
+from typing import Final, NamedTuple
+
+# --- copied from efe9bb27d ------------------------------------------------------------------------------
+
+#: Replacement for a credential value inside a URL.
+REDACTED: Final = "redacted"
+
+#: A URL in free text. The scheme is bounded so that scanning stays linear on hostile input.
+_URL_IN_TEXT_RE: Final = re.compile(r"(?i)\b[a-z][a-z0-9+.-]{0,31}://\S+")
+
+#: ``eyJ`` (base64url of ``{"``) followed by three dot-separated base64url segments (the last may be
+#: empty), starting a base64url run (the lookbehind keeps scanning linear).
+_JWT_RE: Final = re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*")
+
+#: Well-known credential prefixes starting a token, followed by at least 8 key characters: OpenAI-style
+#: ``sk-``, Stripe ``sk_live_`` / ``sk_test_`` / ``rk_live_`` / ``rk_test_``, GitHub ``ghp_`` / ``gho_`` /
+#: ``ghs_`` / ``ghu_`` / ``github_pat_``, GitLab ``glpat-``, AWS ``AKIA`` / ``ASIA``, Google ``AIza`` /
+#: ``ya29.``, Slack ``xoxb-`` / ``xoxp-`` / ``xoxa-`` / ``xoxe-`` / ``xoxr-`` / ``xoxs-`` / ``xapp-``, npm
+#: ``npm_`` and Hugging Face ``hf_``.
+KEY_PREFIXES: Final = (
+    "sk-",
+    "sk_live_",
+    "sk_test_",
+    "rk_live_",
+    "rk_test_",
+    "ghp_",
+    "gho_",
+    "ghs_",
+    "ghu_",
+    "github_pat_",
+    "glpat-",
+    "AKIA",
+    "ASIA",
+    "AIza",
+    "ya29.",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "xoxe-",
+    "xoxr-",
+    "xoxs-",
+    "xapp-",
+    "npm_",
+    "hf_",
+)
+
+_KEY_PREFIX_RE: Final = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:" + "|".join(re.escape(prefix) for prefix in KEY_PREFIXES) + r")[A-Za-z0-9_-]{8,}"
+)
+
+#: The armour line of a PEM private key or certificate request (``-----BEGIN RSA PRIVATE KEY-----``).
+_PEM_RE: Final = re.compile(r"-----BEGIN [A-Z0-9 ]{0,40}(?:PRIVATE KEY|KEY BLOCK)-----")
+
+#: Keywords naming a secret in free text (case-insensitive). An ASCII keyword must not touch an ASCII letter
+#: or digit on either side (``pinned``, ``tokens`` and ``password2`` are no keywords); ``pin code`` is tried
+#: before ``pin``.
+_ASCII_SECRET_KEYWORDS: Final = (
+    r"pin[ -]?code|one[- ]?time[- ]?code|api[ _-]?(?:key|token)|access[ _-]?token"
+    r"|pass(?:word|wd|phrase|code)|pwd|otp|pin|secret|token"
+)
+
+#: The Japanese words for one-time password, password, PIN, passcode and verification code; written without
+#: spaces, so they need no word boundary.
+JAPANESE_SECRET_KEYWORDS: Final = (
+    "ワンタイムパスワード",
+    "パスワード",
+    "暗証番号",
+    "パスコード",
+    "認証コード",
+)
+
+_SECRET_KEYWORD_RE: Final = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:" + _ASCII_SECRET_KEYWORDS + r")(?![A-Za-z0-9])|" + "|".join(JAPANESE_SECRET_KEYWORDS)
+)
+
+#: Keywords that are ordinary English words too ("pin the tab", "the secret is out", "token count"): unless
+#: labelled (``:`` / ``=``) or quoted, their value must be credential-shaped (:func:`_credential_shaped`).
+AMBIGUOUS_SECRET_KEYWORDS: Final = frozenset({"pin", "secret", "token"})
+
+#: Values after a keyword that are interface or function words, not secrets ("the password field",
+#: "reset password page", "the password is incorrect"); compared without case.
+SECRET_VALUE_STOP_WORDS: Final = frozenset(
+    {
+        # interface words
+        *("field", "fields", "box", "boxes", "input", "inputs", "form", "forms", "reset", "manager", "managers"),
+        *("page", "pages", "button", "buttons", "prompt", "prompts", "dialog", "dialogs", "hint", "hints"),
+        *("policy", "policies", "strength", "requirement", "requirements", "rule", "rules", "length", "screen"),
+        *("settings", "setting", "link", "menu", "entry", "label", "change", "changes", "changed", "recovery"),
+        *("generator", "protected", "protection", "expired", "expires", "expiry", "incorrect", "invalid", "wrong"),
+        *("mismatch", "error", "sent", "verification", "confirmation", "confirm", "required", "optional", "login"),
+        *("sign", "show", "hide", "forgot", "remember", "cancel", "submit", "continue", "next", "back", "ok"),
+        *("enter", "type", "create", "new", "current", "old", "repeat", "edit", "update", "updated", "save"),
+        *("saved", "set", "use", "used", "here", "below", "above", "none", "empty", "weak", "strong", "valid"),
+        # function words
+        *("a", "an", "the", "and", "or", "but", "nor", "to", "for", "of", "in", "on", "at", "by", "with", "from"),
+        *("into", "is", "was", "are", "were", "be", "been", "it", "its", "this", "that", "these", "those", "my"),
+        *("your", "our", "their", "his", "her", "not", "no", "if", "as", "so", "too", "there", "then", "when"),
+        *("will", "would", "can", "could", "should", "must", "may", "has", "have", "had", "do", "does", "did"),
+        "please",
+        # the Japanese words for field, input field, field (katakana), reset, change, screen, input, setting,
+        # resetting and confirmation
+        *("欄", "入力欄", "フィールド", "リセット"),
+        *("変更", "画面", "入力", "設定", "再設定", "確認"),
+    }
+)
+
+#: Connectors between a keyword and its value: labels (``:``, ``=``, full-width too), the Japanese particles
+#: of topic, object and subject, and the words ``is``, ``was`` and ``of`` after whitespace.
+_LABEL_MARKS: Final = frozenset(":=\uff1a\uff1d")  # full-width colon and equals sign
+
+_PARTICLES: Final = frozenset("はをが")
+
+_WORD_CONNECTOR_RE: Final = re.compile(r"(?i)(?:is|was|of)(?=[\s:=\uff1a\uff1d\"'\u201c\u2018「『])")
+
+_SPACE_RE: Final = re.compile(r"\s{1,32}")
+
+_MAX_CONNECTORS: Final = 4
+
+#: Quotes and brackets around a value (kept in the text) and the mark that closes each: straight, curly and
+#: corner quotes, ASCII and full-width brackets. Inside quotes (not brackets) a value may hold spaces.
+_VALUE_QUOTES: Final[Mapping[str, str]] = dict(
+    zip("\"'\u201c\u2018「『([<\uff08【", "\"'\u201d\u2019」』)]>\uff09】", strict=True)
+)
+
+_SPACED_QUOTES: Final = frozenset("\"'\u201c\u2018「『")
+
+#: Quotes that may follow a keyword directly (``password"x"``, the Japanese corner brackets).
+_DIRECT_QUOTES: Final = frozenset('"\u201c「『')
+
+#: Longest secret value inspected; a longer unquoted run is redacted to its end when it is accepted.
+MAX_SECRET_VALUE_CHARS: Final = 256
+
+#: An unquoted value: no whitespace, hiragana (a particle or verb ending), CJK punctuation or full-width
+#: punctuation.
+_VALUE_CHARS: Final = r"[^\s\u3040-\u309f\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]"
+
+_BARE_VALUE_RE: Final = re.compile(_VALUE_CHARS + f"{{1,{MAX_SECRET_VALUE_CHARS}}}")
+
+_VALUE_TAIL_RE: Final = re.compile(_VALUE_CHARS + "*")
+
+#: Punctuation that ends a sentence or closes a bracket after an unquoted value; kept outside the replacement.
+_TRAILING_MARKS: Final = frozenset(".,;:!?)]}>\"'\u201d\u2019")
+
+
+def redact_secret_tokens(text: str) -> str:
+    """``text`` with JWTs, key-prefixed tokens and PEM armour lines replaced by :data:`REDACTED`."""
+    return _PEM_RE.sub(REDACTED, _KEY_PREFIX_RE.sub(REDACTED, _JWT_RE.sub(REDACTED, text)))
+
+
+class _Connection(NamedTuple):
+    """What joins a keyword to its value: where the value starts and which connectors were seen."""
+
+    start: int
+    joined: bool  # any connector, whitespace included
+    labelled: bool  # ``:`` or ``=``
+    linked: bool  # ``is`` / ``was`` / ``of`` or a Japanese particle
+
+
+def _connection(text: str, pos: int) -> _Connection:
+    """Up to :data:`_MAX_CONNECTORS` connectors after a keyword: whitespace, labels, particles and words."""
+    joined = labelled = linked = False
+    for _ in range(_MAX_CONNECTORS):
+        space = _SPACE_RE.match(text, pos)
+        if space:
+            pos, joined = space.end(), True
+        char = text[pos : pos + 1]
+        word = _WORD_CONNECTOR_RE.match(text, pos) if space else None
+        if char and char in _LABEL_MARKS:
+            pos, joined, labelled = pos + 1, True, True
+        elif char and char in _PARTICLES:
+            pos, joined, linked = pos + 1, True, True
+        elif word:
+            pos, linked = word.end(), True
+        else:
+            break
+    return _Connection(pos, joined, labelled, linked)
+
+
+def _quoted_value(text: str, pos: int) -> tuple[int, int] | None:
+    """``(start, end)`` of a value inside the quote or bracket at ``pos``, without the marks."""
+    closer = _VALUE_QUOTES.get(text[pos : pos + 1])
+    if closer is None:
+        return None
+    close = text.find(closer, pos + 1, pos + 2 + MAX_SECRET_VALUE_CHARS)
+    inner = text[pos + 1 : close] if close > pos + 1 else ""
+    if not inner or inner != inner.strip() or "\n" in inner:
+        return None  # a quote that closes the keyword's own quotation (``"password" or "pin"``)
+    if text[pos] not in _SPACED_QUOTES and any(char.isspace() for char in inner):
+        return None
+    return pos + 1, close
+
+
+def _without_closing_marks(text: str, start: int, end: int) -> int:
+    while end > start and text[end - 1] in _TRAILING_MARKS:
+        end -= 1
+    return end
+
+
+def _bare_value(text: str, pos: int) -> tuple[tuple[int, int] | None, bool]:
+    """``((start, end) or None, capped)`` of an unquoted value: one token, closing punctuation left out;
+    ``capped`` when the token runs past :data:`MAX_SECRET_VALUE_CHARS` (only that much was inspected)."""
+    run = _BARE_VALUE_RE.match(text, pos)
+    if run is None:
+        return None, False
+    end = _without_closing_marks(text, pos, run.end())
+    capped = run.end() - pos == MAX_SECRET_VALUE_CHARS
+    return ((pos, end) if end > pos else None), capped
+
+
+def _credential_shaped(value: str) -> bool:
+    """A digit, a non-alphanumeric character or an upper-case letter after the first one."""
+    return any(char.isdigit() or not char.isalnum() for char in value) or any(char.isupper() for char in value[1:])
+
+
+def _plausible_value(value: str, keyword: str, connection: _Connection, quoted: bool) -> bool:
+    """A value that may be a secret, not an interface word, a URL or a masked placeholder."""
+    if value == REDACTED or "://" in value or not any(char.isascii() and char.isalnum() for char in value):
+        return False
+    if value.lower() in SECRET_VALUE_STOP_WORDS or _SECRET_KEYWORD_RE.fullmatch(value):
+        return False
+    if connection.labelled or quoted:
+        return True
+    if connection.linked and keyword.lower() not in AMBIGUOUS_SECRET_KEYWORDS:
+        return True
+    return _credential_shaped(value)
+
+
+def _secret_value(text: str, keyword: re.Match[str]) -> tuple[int, int] | None:
+    """``(start, end)`` of the secret value following ``keyword``, or ``None``."""
+    connection = _connection(text, keyword.end())
+    pos = connection.start
+    direct = text[pos : pos + 1] in _DIRECT_QUOTES
+    if not (connection.joined or direct or not keyword.group(0).isascii()):
+        return None  # ``password_reset``, ``password?``
+    span = _quoted_value(text, pos)
+    quoted, capped = span is not None, False
+    if span is None:
+        span, capped = _bare_value(text, pos + 1 if text[pos : pos + 1] in _VALUE_QUOTES else pos)
+    if span is None or not _plausible_value(text[span[0] : span[1]], keyword.group(0), connection, quoted):
+        return None
+    if capped:  # a long run is redacted to its end, never left half visible
+        tail = _VALUE_TAIL_RE.match(text, span[0])
+        return span[0], _without_closing_marks(text, span[0], tail.end() if tail else span[1])
+    return span
+
+
+# --- end of the copy ------------------------------------------------------------------------------
+
+
+def base_spans(text: str) -> tuple[tuple[int, int], ...]:
+    """The value spans ``efe9bb27d``'s ``redact_text_secrets`` replaced in ``redact_secret_tokens(text)``."""
+    clean = redact_secret_tokens(text)
+    urls = [match.span() for match in _URL_IN_TEXT_RE.finditer(clean)]
+    spans: list[tuple[int, int]] = []
+    pos = index = 0
+    while (keyword := _SECRET_KEYWORD_RE.search(clean, pos)) is not None:
+        while index < len(urls) and urls[index][1] <= keyword.start():
+            index += 1
+        if index < len(urls) and urls[index][0] <= keyword.start():
+            pos = urls[index][1]
+            continue
+        span = _secret_value(clean, keyword)
+        if span is None:
+            pos = keyword.end()
+            continue
+        spans.append(span)
+        pos = span[1]
+    return tuple(spans)
+
 
 BASE_SPANS: dict[str, tuple[tuple[int, int], ...]] = {
     "Log in with the username demo-user and the password Hunter2-fake-pw": ((52, 67),),
