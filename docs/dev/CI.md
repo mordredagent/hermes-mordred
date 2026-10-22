@@ -496,6 +496,67 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 
 ## Manual live-device validation log
 
+- **2026-10-22 — Browser history for Hermes (B1) end to end: the real operator records, a local-LLM Hermes session reads.**
+  Source: branch `feat/browser-history-b1` at `778e5ca52` (hermes-mordred
+  0.3.0a4), macOS 27.0.1 arm64, the worktree's dev venv (Python 3.12.14,
+  `sqlcipher3-wheels` 0.5.7, SQLite 3.51.1, hermes-agent 0.19.0). Operator:
+  worktree `mordred-browser-os-oparator-capture`, branch
+  `feat/activity-capture-extended` at `62d914b` plus its uncommitted capture
+  changes, `mordred --text --headless`, Fara1.5-4B Q4_K_M on llama-server
+  b10087. Model: Ollama 0.40.3's `qwen2.5:7b` GGUF served by llama-server
+  with `-c 65536` on 127.0.0.1 (`provider: custom`, no API key). Home: the
+  armed throwaway home of the previous operator run (schema 3 store with 58
+  events, one of them a `task_start` stored before free-text redaction that
+  holds the fake password `Hunter2-fake-pw`) and its synthetic `hex:` key.
+  `activity status`: protection ok, schema 3, `hermes use: on`, no config
+  warnings. Capture through `extension serve --port 7799`: a Fara search task
+  (typed `Contoso`, observed `/search.html` with query `?q=Contoso`) and a
+  Fara login task whose instruction held the password; 22 new events in 2
+  episodes. The new `task_start` text reads `… and the password redacted`
+  with exclusion `text_secrets_redacted`; a case-insensitive grep of every
+  column of every table found the password only in the pre-fix row. Hermes
+  sessions (`hermes -z` from an empty directory, toolsets
+  `mordred_activity,skills,memory,session_search,todo,clarify`; the offline
+  tool list held both history tools, 9 tools in all, and 29 in the default
+  CLI set): (a) "What did I search for on 127.0.0.1 earlier, and which pages
+  did I visit?" got no turn block and made one `mordred_browser_history` call;
+  the answer listed the search and login episodes with titles and attributed
+  one page-text excerpt to the wrong episode. The same question naming
+  `http://127.0.0.1:8099/` got the turn block (persisted in
+  `messages.api_content`) and was answered without a tool. (b) The explicit
+  two-tool request called `mordred_browser_history`, then
+  `mordred_browser_history_episode` on the search episode rather than the
+  newest one; the answer gave its titles and the typed text `Contoso`. (c)
+  "What password did I use to log in on 127.0.0.1?" got a turn block with
+  both login episodes, made one lookup call and answered that the password was
+  redacted; a follow-up that opened the pre-fix episode with
+  `mordred_browser_history_episode` returned its task as `… the password
+  redacted`. The password appeared in no answer, tool result or injected
+  block, in no row of the decrypted `state.db` (21 tables) and in no file
+  under the home (logs included). `activity use off` added only
+  `history_enabled: false` to `config.yaml`; the history tools left the tool
+  list and both question forms got no block (one called `session_search`).
+  `activity use on` brought the tools and the block back. Nothing was audited
+  as `activity.history_unavailable`. Found: `hosts_in` does not recognize a
+  bare IP literal or a bare `localhost`, only inside a URL, so question (a)
+  fell back to term matching, which shared one term; the operator console log
+  still prints the typed password (operator repository). Not covered: the
+  navigation block in a live Hermes browser session (Hermes's `agent-browser`
+  CLI is not installed); called offline with a synthetic `browser_navigate`
+  result, the hook added the 127.0.0.1 block with titles and the pre-fix task
+  redacted, showed only unseen episodes on each repeat and nothing once all
+  were shown. Gateway chats were not exercised.
+  Re-check after the review fixes (`579947409`, same home, store and local
+  model): "What did I search for on 127.0.0.1 earlier, and which pages did I
+  visit?" now gets the turn-start block (the bare IP is recognized; three
+  episodes, the login task shown as "the password redacted"), the model also
+  called `mordred_browser_history`, whose result arrived framed as
+  `<untrusted_tool_result source="mordred_browser_history">`, and the answer
+  listed the login and search episodes. `Hunter2-fake-pw` had 0 hits in the
+  answer, the decrypted `state.db` (21 tables) and the home's files.
+  `activity use off` / `on` changed exactly the `history_enabled` line and
+  restored the file.
+
 - **2026-10-22 — Browser history for Hermes (B1 read side) on live SQLCipher, without a model.**
   Source: the uncommitted working tree of branch `feat/browser-history-b1`
   (base `55289b849`), macOS 27.0.1 arm64, the worktree's dev venv (Python
