@@ -56,6 +56,7 @@ Rejections carry a code only. Nothing here logs or echoes event content.
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import math
@@ -354,13 +355,19 @@ SECRET_VALUE_STOP_WORDS: Final = frozenset(
         *("your", "our", "their", "his", "her", "not", "no", "if", "as", "so", "too", "there", "then", "when"),
         *("will", "would", "can", "could", "should", "must", "may", "has", "have", "had", "do", "does", "did"),
         "please",
-        # placeholders that name no value ("type something into the password field")
-        *("something", "anything", "nothing", "everything", "whatever", "same", "value", "values", "text"),
-        *("case-sensitive", "case-insensitive"),
         # the Japanese words for field, input field, field (katakana), reset, change, screen, input, setting,
         # resetting and confirmation
         *("欄", "入力欄", "フィールド", "リセット"),
         *("変更", "画面", "入力", "設定", "再設定", "確認"),
+    }
+)
+#: Words the newer forms (a value before its keyword, after ``to``, after a qualifier) never take as a value:
+#: placeholders ("type something into the password field") and properties ("is case-sensitive"). The rule
+#: after a keyword keeps :data:`SECRET_VALUE_STOP_WORDS` only, so it replaces no less than it did before.
+_PLACEHOLDER_WORDS: Final = frozenset(
+    {
+        *("something", "anything", "nothing", "everything", "whatever", "same", "value", "values", "text"),
+        *("case-sensitive", "case-insensitive"),
     }
 )
 #: Connectors between a keyword and its value: labels (``:``, ``=``, full-width too), the Japanese particles
@@ -382,7 +389,9 @@ _DIRECT_QUOTES: Final = frozenset('"\u201c「『')
 MAX_SECRET_VALUE_CHARS: Final = 256
 #: An unquoted value: no whitespace, hiragana (a particle or verb ending), CJK punctuation or full-width
 #: punctuation.
-_VALUE_CHARS: Final = r"[^\s\u3040-\u309f\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]"
+_NOT_VALUE_CHARS: Final = r"\s\u3040-\u309f\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65"
+_VALUE_CHARS: Final = "[^" + _NOT_VALUE_CHARS + "]"
+_NOT_VALUE_RE: Final = re.compile("[" + _NOT_VALUE_CHARS + "]")
 _BARE_VALUE_RE: Final = re.compile(_VALUE_CHARS + f"{{1,{MAX_SECRET_VALUE_CHARS}}}")
 _VALUE_TAIL_RE: Final = re.compile(_VALUE_CHARS + "*")
 #: Punctuation that ends a sentence or closes a bracket after an unquoted value; kept outside the replacement.
@@ -426,8 +435,21 @@ _JA_TARGETS: Final = ("\u3068\u3057\u3066", "\u306b")
 #: The Japanese words for input field, field and field (katakana), longest first.
 _JA_FIELDS: Final = ("\u5165\u529b\u6b04", "\u6b04", "\u30d5\u30a3\u30fc\u30eb\u30c9")
 _JA_SLOTS: Final = ("\u3068\u3057\u3066", "\u306b", "\u3078")
+#: What may stand right before or after a keyword in the Japanese forms (whitespace too): a cheap first check.
+_JA_BEFORE_KEYWORD: Final = frozenset({_JA_OBJECT, _JA_CALLED[-1]})
+_JA_AFTER_KEYWORD: Final = frozenset(word[0] for word in (*_JA_FIELDS, *_JA_TARGETS))
+#: Characters inside a value that let a keyword in it name something outside it (:func:`_closed_part`): an
+#: opening quote or bracket, and the first characters of the Japanese forms after a keyword.
+_REGION_BREAKERS_RE: Final = re.compile(
+    "[" + "".join(re.escape(char) for char in sorted({*_VALUE_QUOTES, *_JA_AFTER_KEYWORD})) + "]"
+)
+#: Shorter values are not worth a check: a keyword with its connector does not fit in them.
+_MIN_CLOSED_VALUE_CHARS: Final = 8
+#: Closing marks after a closed value are looked at up to this many.
+_MAX_CLOSING_TAIL: Final = 64
 #: The opening mark of each closing quote or bracket (:data:`_VALUE_QUOTES` reversed).
 _OPENER_OF: Final[Mapping[str, str]] = {closer: opener for opener, closer in _VALUE_QUOTES.items()}
+_ASCII_ALNUM_RE: Final = re.compile(r"[A-Za-z0-9]")
 #: A run of printable ASCII (a Japanese sentence's unquoted value).
 _ASCII_RUN_RE: Final = re.compile(r"[\x21-\x7e]+")
 #: "set the password to X" (:func:`_value_after_to`): the keyword, ``to``, the value, and a verb that sets it at
@@ -895,9 +917,14 @@ def _credential_shaped(value: str) -> bool:
 
 def _value_like(value: str) -> bool:
     """Not an interface or function word, a URL, a masked placeholder, ``redacted`` or a keyword."""
-    if value == REDACTED or "://" in value or not any(char.isascii() and char.isalnum() for char in value):
+    if value == REDACTED or "://" in value or not _ASCII_ALNUM_RE.search(value):
         return False
     return value.lower() not in SECRET_VALUE_STOP_WORDS and not _SECRET_KEYWORD_RE.fullmatch(value)
+
+
+def _named_value(value: str) -> bool:
+    """:func:`_value_like` and not a placeholder (:data:`_PLACEHOLDER_WORDS`): a value of the newer forms."""
+    return _value_like(value) and value.lower() not in _PLACEHOLDER_WORDS
 
 
 def _plausible_value(value: str, keyword: str, connection: _Connection, quoted: bool) -> bool:
@@ -921,12 +948,57 @@ def _value_at(text: str, pos: int) -> tuple[tuple[int, int] | None, bool, bool]:
     return span, False, capped
 
 
-def _to_its_end(text: str, span: tuple[int, int], capped: bool) -> tuple[int, int]:
-    """A long run is redacted to its end, never left half visible."""
+RunEnd = Callable[[int], int]
+
+
+def _next_match(text: str, pattern: re.Pattern[str]) -> RunEnd:
+    """The first position at or after a given one where ``pattern`` matches one character (``len(text)``
+    without one). The positions are found once, on first use, so many questions about one text stay linear."""
+    found: list[int] = []
+    scanned = [False]
+
+    def first(pos: int) -> int:
+        if not scanned[0]:
+            found.extend(match.start() for match in pattern.finditer(text))
+            scanned[0] = True
+        index = bisect.bisect_left(found, pos)
+        return found[index] if index < len(found) else len(text)
+
+    return first
+
+
+def _run_ends(text: str) -> RunEnd:
+    """The end of the unquoted run (:data:`_VALUE_CHARS`) that goes on from a position."""
+    return _next_match(text, _NOT_VALUE_RE)
+
+
+def _closed_part(text: str, span: tuple[int, int], run_end: RunEnd, breaker: RunEnd) -> tuple[int, int] | None:
+    """The part of the value ``span`` in which every keyword names nothing outside the value, so it need not be
+    read; ``None`` when there is none.
+
+    The value is one unquoted run (:data:`_VALUE_CHARS`: no whitespace, hiragana or CJK punctuation) with no
+    opening quote or bracket and no first character of a Japanese form after a keyword
+    (:data:`_REGION_BREAKERS_RE`), and only closing marks follow it before the run ends. A keyword inside it
+    has no whitespace, particle or field word before or after it, so the only value it can name follows ``:``
+    / ``=`` and ends where the run ends, inside ``span``. The part leaves out the label marks the value ends
+    in: a keyword before them could reach past the value."""
+    start, end = span
+    if end - start < _MIN_CLOSED_VALUE_CHARS or run_end(start) < end or breaker(start) < end:
+        return None
+    tail = run_end(end)
+    if tail - end > _MAX_CLOSING_TAIL or _without_closing_marks(text, end, tail) != end:
+        return None
+    labels = 0
+    while labels <= _MAX_CONNECTORS and text[end - labels - 1] in _LABEL_MARKS:
+        labels += 1
+    return start, end - labels
+
+
+def _to_its_end(text: str, span: tuple[int, int], capped: bool, run_end: RunEnd) -> tuple[int, int]:
+    """A long run is redacted to its end, never left half visible (``run_end``: :func:`_run_ends`)."""
     if not capped:
         return span
-    tail = _VALUE_TAIL_RE.match(text, span[0])
-    return span[0], _without_closing_marks(text, span[0], tail.end() if tail else span[1])
+    return span[0], _without_closing_marks(text, span[0], max(run_end(span[0]), span[1]))
 
 
 def _counted(text: str, end: int) -> bool:
@@ -935,7 +1007,7 @@ def _counted(text: str, end: int) -> bool:
     return unit is not None and unit.group(1).lower() in _VALUE_UNITS
 
 
-def _secret_value(text: str, keyword: re.Match[str]) -> tuple[int, int] | None:
+def _secret_value(text: str, keyword: re.Match[str], run_end: RunEnd) -> tuple[int, int] | None:
     """``(start, end)`` of the secret value following ``keyword``, or ``None``."""
     connection = _connection(text, keyword.end())
     pos = connection.start
@@ -945,7 +1017,7 @@ def _secret_value(text: str, keyword: re.Match[str]) -> tuple[int, int] | None:
     span, quoted, capped = _value_at(text, pos)
     if span is None or not _plausible_value(text[span[0] : span[1]], keyword.group(0), connection, quoted):
         return None
-    return _to_its_end(text, span, capped)
+    return _to_its_end(text, span, capped, run_end)
 
 
 def _set_verb_before(text: str, start: int) -> bool:
@@ -961,13 +1033,39 @@ def _set_verb_before(text: str, start: int) -> bool:
     return False
 
 
-def _value_after_to(text: str, keyword: re.Match[str]) -> tuple[int, int] | None:
-    """``(start, end)`` of the value in "set the password to X" (:func:`redact_text_secrets`)."""
-    to = _TO_RE.match(text, keyword.end())
+def _to_end(text: str, pos: int) -> int | None:
+    """The end of `` to `` at ``pos``."""
+    to = _TO_RE.match(text, pos)
+    return to.end() if to else None
+
+
+def _qualified(text: str, pos: int, link: Callable[[str, int], int | None]) -> int | None:
+    """After a keyword ending at ``pos``: one of :data:`_QUALIFIER_LINKS` and one to three more words (none
+    ending in ``.,;!?``), then ``link``; where the link ends, or ``None``."""
+    first = _WORD_AFTER_RE.match(text, pos)
+    if first is None or first.group(1).lower() not in _QUALIFIER_LINKS:
+        return None
+    pos = first.end()
+    for _ in range(_MAX_QUALIFIER_WORDS - 1):
+        word = _WORD_AFTER_RE.match(text, pos)
+        if word is None or word.group(1)[-1] in _CLAUSE_MARKS:
+            return None
+        pos = word.end()
+        end = link(text, pos)
+        if end is not None:
+            return end
+    return None
+
+
+def _value_after_to(text: str, keyword: re.Match[str], run_end: RunEnd) -> tuple[int, int] | None:
+    """``(start, end)`` of the value in "set the password (for the bank) to X" (:func:`redact_text_secrets`)."""
+    to = _to_end(text, keyword.end())
+    if to is None:
+        to = _qualified(text, keyword.end(), _to_end)
     if to is None or not _set_verb_before(text, keyword.start()):
         return None
-    span, quoted, capped = _value_at(text, to.end())
-    if span is None or not _value_like(value := text[span[0] : span[1]]) or (not quoted and _counted(text, span[1])):
+    span, quoted, capped = _value_at(text, to)
+    if span is None or not _named_value(value := text[span[0] : span[1]]) or (not quoted and _counted(text, span[1])):
         return None
     name = keyword.group(0).lower()
     if quoted:
@@ -978,7 +1076,7 @@ def _value_after_to(text: str, keyword: re.Match[str]) -> tuple[int, int] | None
         plausible = _credential_shaped(value) and len(value) >= 8
     else:
         plausible = _credential_shaped(value)
-    return _to_its_end(text, span, capped) if plausible else None
+    return _to_its_end(text, span, capped, run_end) if plausible else None
 
 
 def _link_end(text: str, pos: int) -> int | None:
@@ -991,32 +1089,19 @@ def _link_end(text: str, pos: int) -> int | None:
     return word.end() if word else None
 
 
-def _qualified_value(text: str, keyword: re.Match[str]) -> tuple[int, int] | None:
+def _qualified_value(text: str, keyword: re.Match[str], run_end: RunEnd) -> tuple[int, int] | None:
     """``(start, end)`` of the value in "the password for the bank is X" (:func:`redact_text_secrets`)."""
-    first = _WORD_AFTER_RE.match(text, keyword.end())
-    if first is None or first.group(1).lower() not in _QUALIFIER_LINKS:
-        return None
-    pos, link = first.end(), None
-    for words in range(1, _MAX_QUALIFIER_WORDS + 1):
-        link = _link_end(text, pos) if words > 1 else None
-        if link is not None:
-            break
-        token = _WORD_AFTER_RE.match(text, pos)
-        if token is None or token.group(1)[-1] in _CLAUSE_MARKS:
-            return None
-        pos = token.end()
-    else:
-        link = _link_end(text, pos)
+    link = _qualified(text, keyword.end(), _link_end)
     if link is None:
         return None
     span, quoted, capped = _value_at(text, _connection(text, link).start)
-    if span is None or not _value_like(value := text[span[0] : span[1]]) or (not quoted and _counted(text, span[1])):
+    if span is None or not _named_value(value := text[span[0] : span[1]]) or (not quoted and _counted(text, span[1])):
         return None
     if keyword.group(0).lower() in AMBIGUOUS_SECRET_KEYWORDS:  # "the PIN for the map is A1"
         plausible = quoted or (any(char.isdigit() for char in value) and len(value) >= 4)
     else:
         plausible = quoted or _credential_shaped(value)
-    return _to_its_end(text, span, capped) if plausible else None
+    return _to_its_end(text, span, capped, run_end) if plausible else None
 
 
 def _space_before(text: str, end: int) -> int:
@@ -1087,6 +1172,8 @@ def _after_a_verb(text: str, start: int) -> bool:
 
 def _english_value_before(text: str, keyword: re.Match[str]) -> tuple[int, int] | None:
     """``(start, end)`` of a value before an ASCII ``keyword`` (:func:`redact_text_secrets`, value first)."""
+    if not text[keyword.start() - 1 : keyword.start()].isspace():
+        return None  # a connector word always stands before the keyword
     head = _NEXT_WORD_RE.match(text, keyword.end())
     if head and head.group(1).lower() in _KEYWORD_HEADS:
         return None
@@ -1107,7 +1194,7 @@ def _english_value_before(text: str, keyword: re.Match[str]) -> tuple[int, int] 
         return None  # "After you log in, as the password ...": the value ends a clause, not this phrase
     else:
         span, quoted = _unquoted_value(text, token[0], token[1]), False
-    if span is None or not _value_like(value := text[span[0] : span[1]]):
+    if span is None or not _named_value(value := text[span[0] : span[1]]):
         return None
     verb = _after_a_verb(text, span[0] - 1 if quoted else token[0])
     if keyword.group(0).lower() in AMBIGUOUS_SECRET_KEYWORDS:
@@ -1124,7 +1211,7 @@ def _japanese_slot_follows(text: str, pos: int) -> bool:
 def _japanese_value(text: str, span: tuple[int, int] | None, keyword: re.Match[str], quoted: bool) -> bool:
     """A value in a Japanese sentence: after :data:`AMBIGUOUS_SECRET_KEYWORDS` (``PIN`` in Japanese text) it must
     also be quoted or credential-shaped."""
-    if span is None or not _value_like(value := text[span[0] : span[1]]):
+    if span is None or not _named_value(value := text[span[0] : span[1]]):
         return False
     return quoted or keyword.group(0).lower() not in AMBIGUOUS_SECRET_KEYWORDS or _credential_shaped(value)
 
@@ -1132,6 +1219,9 @@ def _japanese_value(text: str, span: tuple[int, int] | None, keyword: re.Match[s
 def _japanese_value_before(text: str, keyword: re.Match[str]) -> tuple[int, int] | None:
     """``(start, end)`` of a quoted or ASCII value before the object particle (the keyword then followed by
     :func:`_japanese_slot_follows`) or before the word for "called"."""
+    before = text[keyword.start() - 1 : keyword.start()]
+    if not (before in _JA_BEFORE_KEYWORD or before.isspace()):
+        return None
     pos = _space_before(text, keyword.start())
     if text.endswith(_JA_CALLED, 0, pos):
         pos -= len(_JA_CALLED)
@@ -1155,6 +1245,9 @@ def _japanese_value_after(text: str, keyword: re.Match[str]) -> tuple[int, int] 
     """``(start, end)`` of a quoted or ASCII value between the target particle or the word for "as" after a
     ``keyword`` in a Japanese sentence (an optional field word between) and the object particle."""
     pos = keyword.end()
+    after = text[pos : pos + 1]
+    if not (after in _JA_AFTER_KEYWORD or after.isspace()):
+        return None
     pos = _space_after(text, pos + next((len(word) for word in _JA_FIELDS if text.startswith(word, pos)), 0))
     target = next((word for word in _JA_TARGETS if text.startswith(word, pos)), None)
     if target is None:
@@ -1176,37 +1269,61 @@ def _value_before(text: str, keyword: re.Match[str]) -> tuple[int, int] | None:
     return span if span is not None else _japanese_value_before(text, keyword)
 
 
-def _value_after(text: str, keyword: re.Match[str]) -> tuple[int, int] | None:
+def _value_after(text: str, keyword: re.Match[str], run_end: RunEnd) -> tuple[int, int] | None:
     """``(start, end)`` of a secret value named after ``keyword``, or ``None``."""
-    for find in (_secret_value, _value_after_to, _qualified_value, _japanese_value_after):
-        span = find(text, keyword)
-        if span is not None:
-            return span
-    return None
+    span = _secret_value(text, keyword, run_end)
+    if span is None and text[keyword.end() : keyword.end() + 1].isspace():  # "to" and qualifiers follow a space
+        span = _value_after_to(text, keyword, run_end)
+        if span is None:
+            span = _qualified_value(text, keyword, run_end)
+    return span if span is not None else _japanese_value_after(text, keyword)
 
 
-def _redact_keyword_values(text: str) -> tuple[str, bool]:
+def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """``spans`` in order, overlapping or touching ones joined."""
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _secret_spans(text: str) -> list[tuple[int, int]]:
+    """The secret values the keywords of ``text`` name (:func:`redact_text_secrets`), merged.
+
+    Every keyword outside a URL is read on its own, also one inside another keyword's value or qualifier, so no
+    match hides another ("password for account PIN=4821 is Hunter2-x" loses both values)."""
     # A keyword inside a URL is a parameter name or a path word: the URL scrubber's business.
     urls = [match.span() for match in _URL_IN_TEXT_RE.finditer(text)]
+    run_end, breaker = _run_ends(text), _next_match(text, _REGION_BREAKERS_RE)
     spans: list[tuple[int, int]] = []
+    closed = (0, 0)  # the furthest part of a value whose keywords name nothing outside it (_closed_part)
     pos = index = 0
     while (keyword := _SECRET_KEYWORD_RE.search(text, pos)) is not None:
+        pos = keyword.end()
         while index < len(urls) and urls[index][1] <= keyword.start():
             index += 1
         if index < len(urls) and urls[index][0] <= keyword.start():
             pos = urls[index][1]
             continue
-        before = _value_before(text, keyword)
-        # Not inside the last replacement or the last URL before the keyword.
-        floor = max(spans[-1][1] if spans else 0, urls[index - 1][1] if index else 0)
-        if before is not None and before[0] >= floor:
-            spans.append(before)
-        after = _value_after(text, keyword)
-        if after is None:
-            pos = keyword.end()
+        if closed[0] < keyword.start() and keyword.end() < closed[1]:
             continue
-        spans.append(after)
-        pos = after[1]
+        before = _value_before(text, keyword)
+        if before is not None and not (index and urls[index - 1][1] > before[0]):  # never inside a URL
+            spans.append(before)
+        after = _value_after(text, keyword, run_end)
+        if after is not None:
+            spans.append(after)
+            part = _closed_part(text, after, run_end, breaker) if after[1] > closed[1] else None
+            if part is not None:
+                closed = part
+    return _merged(spans)
+
+
+def _redact_keyword_values(text: str) -> tuple[str, bool]:
+    spans = _secret_spans(text)
     if not spans:
         return text, False
     parts: list[str] = []
@@ -1226,7 +1343,10 @@ def redact_text_secrets(text: str) -> tuple[str, bool]:
     case: ``password``, ``passwd``, ``passphrase``, ``passcode``, ``pwd``, ``pin``, ``pin code``, ``otp``,
     ``one-time code``, ``secret``, ``api key``, ``api token``, ``access token``, ``token`` (an ASCII keyword
     must not touch an ASCII letter or digit) and :data:`JAPANESE_SECRET_KEYWORDS`. A keyword inside a URL is
-    left to URL scrubbing.
+    left to URL scrubbing. Every other keyword is read on its own, also one inside another keyword's value
+    or qualifier, and the values found are merged before they are replaced, so no form hides another
+    ("password for account PIN=4821 is Hunter2-x" loses both values; :func:`_secret_spans`). A keyword
+    inside a found value that can name nothing outside it is not read again (:func:`_closed_part`).
 
     The value after a keyword:
 
@@ -1239,9 +1359,10 @@ def redact_text_secrets(text: str) -> tuple[str, bool]:
     * after a Japanese keyword (and an optional field word) also the target particle or the word for "as",
       then the value (quoted, or one run of ASCII characters), then the object particle
       (:func:`_japanese_value_after`);
-    * "set the password to X" (:func:`_value_after_to`): the keyword, ``to``, the value, with a verb that sets
-      it (``set``, ``change``, ``update``, ``reset``, ``modify`` and their inflections) at most
-      :data:`_MAX_SET_VERB_DISTANCE` words before the keyword and no sentence punctuation between. The value
+    * "set the password (for the bank) to X" (:func:`_value_after_to`): the keyword, optionally a qualifier
+      (as in the next form), ``to``, the value, with a verb that sets it (``set``, ``change``, ``update``,
+      ``reset``, ``modify`` and their inflections) at most :data:`_MAX_SET_VERB_DISTANCE` words before the
+      keyword and no sentence punctuation between. The value
       is quoted or credential-shaped; after ``pin`` an unquoted value is 4-12 digits, after ``token`` and
       ``secret`` it is credential-shaped and at least 8 characters long;
     * "the password for the bank is X" (:func:`_qualified_value`): the keyword, one of ``for``, ``on``,
@@ -1267,7 +1388,8 @@ def redact_text_secrets(text: str) -> tuple[str, bool]:
       before or after :data:`AMBIGUOUS_SECRET_KEYWORDS` the value must then be quoted or credential-shaped.
 
     Nothing is replaced when the value holds no ASCII letter or digit (masked dots, Japanese words), is a
-    URL, ``redacted`` or a keyword, or is in :data:`SECRET_VALUE_STOP_WORDS` ("the password field"). After a
+    URL, ``redacted`` or a keyword, or is in :data:`SECRET_VALUE_STOP_WORDS` ("the password field"); the forms
+    other than the first one after a keyword also never take :data:`_PLACEHOLDER_WORDS`. After a
     keyword, after only whitespace, and after :data:`AMBIGUOUS_SECRET_KEYWORDS` unless labelled or quoted,
     the value must also be credential-shaped (a digit, a symbol or an inner capital): "password Hunter2-x"
     is replaced, "pin the tab" and "the token count" are not. Before an English keyword the value must be

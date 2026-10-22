@@ -3945,12 +3945,14 @@ and revocable on its own:
   and the object particle is replaced as well. These Japanese forms hold
   for an ASCII keyword in a Japanese sentence too ("PIN"); with `pin`,
   `secret` or `token` the value must then be quoted or credential-shaped.
-  The stop words also hold
-  placeholders (`something`, `anything`, `nothing`, `everything`,
-  `whatever`, `same`, `value`, `values`, `text`) and `case-sensitive`,
-  `case-insensitive`.
-  Two more forms name the value after its keyword. "Set the password to
-  Hunter2-x": the keyword, `to`, the value, with a verb that sets it (`set`,
+  These newer forms (and the two below) never take a placeholder as the
+  value (`something`, `anything`, `nothing`, `everything`, `whatever`,
+  `same`, `value`, `values`, `text`, `case-sensitive`, `case-insensitive`;
+  `contracts._PLACEHOLDER_WORDS`); the rule after a keyword keeps its own
+  stop words only, so it replaces no less than before.
+  Two more forms name the value after its keyword. "Set the password (for
+  the bank) to Hunter2-x": the keyword, optionally a qualifier as in the
+  next form, `to`, the value, with a verb that sets it (`set`,
   `change`, `update`, `reset`, `modify` and their inflections) at most three
   words before the keyword and no sentence punctuation between; the value is
   quoted or credential-shaped, after `pin` an unquoted value must be 4-12
@@ -3968,7 +3970,16 @@ and revocable on its own:
   a unit word (`characters`, `digits`, `days` ...) is a length, not a secret
   ("change the password to 12 characters"). The Japanese "password, object
   particle, value, target particle, set/change" order is covered by the
-  particle rule above.
+  particle rule above. Every keyword outside a URL is read on its own, also
+  one inside another keyword's value or qualifier, and the values found are
+  merged before they are replaced, so no form hides another: "password for
+  account PIN=4821 is Hunter2-x" loses both values (Codex review). A keyword
+  inside a found value that is one unquoted run, holds no opening quote or
+  bracket and no first character of a Japanese form, and is followed only by
+  closing marks cannot name anything outside it and is not read again (this
+  keeps the rule linear; `contracts._closed_part`). A test checks that every
+  value the redactor of `efe9bb27d` replaced in the contracts corpus is still
+  replaced (`tests/_activity_redaction_baseline.py`).
   Keywords inside a URL are left to URL scrubbing. Known gaps: a plain word
   after whitespace alone ("password swordfish"), a plain word after `to` or
   after a qualifier ("set the password to swordfish", "the password for the

@@ -25,6 +25,7 @@ from mordred_hermes.activity.contracts import (
     normalize_event,
     scrub_urls,
 )
+from tests._activity_redaction_baseline import BASE_SPANS
 
 SITES = DEFAULT_EXCLUDED_SITES
 #: A JWT-shaped value (header ``{"alg":"HS256"}``, payload ``{"sub":"1"}``).
@@ -1102,6 +1103,77 @@ def test_qualified_redaction_is_linear_on_hostile_input() -> None:
         "set " + "a" * 250_000 + " password to x1",
         "password for: " * 30_000,
         "update the PIN to " + "1" * 250_000,
+    ):
+        contracts.redact_text_secrets(text)
+    assert time.monotonic() - started < 5.0
+
+
+# --- every keyword is read on its own: no match hides another (Codex review P1) ------------------------------
+
+NESTED_TEXTS = [
+    pytest.param(
+        "password for account PIN=4821 is Hunter2-x",
+        "password for account PIN=redacted is redacted",
+        id="qualifier-holds-a-pin",
+    ),
+    pytest.param(
+        "set the password for PIN=4821 to Hunter2-x",
+        "set the password for PIN=redacted to redacted",
+        id="to-form-qualifier-holds-a-pin",
+    ),
+    pytest.param(
+        "type Hunter2-x as the password for token=abcd1234efgh",
+        "type redacted as the password for token=redacted",
+        id="value-first-then-a-token",
+    ),
+    pytest.param(
+        "set the password for the bank to Hunter2-x", "set the password for the bank to redacted", id="to-qualified"
+    ),
+    pytest.param("update the PIN for my card to 4821", "update the PIN for my card to redacted", id="to-qualified-pin"),
+    pytest.param(
+        "password: pin=4821 token=x9y8z7w6", "password: redacted token=redacted", id="keywords-inside-a-value"
+    ),
+    # A keyword inside a long value is skipped only when it cannot name anything outside the value; each way out
+    # is still read: an opening quote, a Japanese field word, a label mark the value ends in.
+    pytest.param('password: abcdefgh-token"x y" end', 'password: redacted" end', id="inner-quote-with-a-space"),
+    pytest.param(
+        "password: abcdefgh-パスワード欄にxyz12を入力", "password: redactedにredactedを入力", id="inner-japanese-field"
+    ),
+    pytest.param("password: abcdefgh-pin= 4821 end", "password: redacted redacted end", id="inner-label-at-the-end"),
+    pytest.param("password: abcdefgh-pin:4821-token:abcd end", "password: redacted end", id="inner-closed"),
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), NESTED_TEXTS)
+def test_a_credential_inside_another_match_is_redacted_too(text: str, expected: str) -> None:
+    assert contracts.redact_text_secrets(text) == (expected, True)
+    assert _task_start(text).text == expected
+
+
+@pytest.mark.parametrize(
+    "text", ["set the password for 30 days to expire", "change the password for your account to something stronger"]
+)
+def test_a_qualified_to_form_needs_a_secret_value(text: str) -> None:
+    assert contracts.redact_text_secrets(text) == (text, False)
+
+
+@pytest.mark.parametrize(("text", "spans"), sorted(BASE_SPANS.items()))
+def test_every_value_the_base_revision_redacted_stays_redacted(text: str, spans: tuple[tuple[int, int], ...]) -> None:
+    """A newer rule only adds redactions: each value span the base revision (efe9bb27d) replaced lies inside a
+    span replaced now (spans of the text after JWTs, key-prefixed tokens and PEM lines are replaced)."""
+    clean = contracts.redact_secret_tokens(text)
+    now = contracts._secret_spans(clean)
+    for start, end in spans:
+        assert any(lo <= start and end <= hi for lo, hi in now), (clean[start:end], now)
+
+
+def test_nested_keyword_redaction_is_linear_on_hostile_input() -> None:
+    started = time.monotonic()
+    for text in (  # "pin:" * 60_000 (every keyword inside one long value) is in the test above
+        "password for a pin=1 is " * 10_000,
+        "set the password for a pin=1 to " * 7_500,
+        "token=" * 40_000,
+        "password: " + "x" * 300 + "-pin:" * 40_000,
     ):
         contracts.redact_text_secrets(text)
     assert time.monotonic() - started < 5.0
