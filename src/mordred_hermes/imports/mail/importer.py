@@ -54,8 +54,9 @@ from .normalize import (
     normalize,
     parse_mail,
     thread_input,
+    with_trusted,
 )
-from .owner import Classification, OwnAddresses, classify
+from .owner import SENT_EVIDENCE, Classification, OwnAddresses, classify
 from .report import DryRunReport
 from .source import MailSource, RawMessage, iter_raw
 from .threading import Thread, ThreadInput, build_threads, normalize_subject
@@ -128,16 +129,16 @@ class _Indexer:
     def add(self, raw: RawMessage, source_index: int) -> None:
         self.order += 1
         try:
-            headers = parse_headers(parse_mail(raw.data, headers_only=True), self.scratch)
+            headers = with_trusted(parse_headers(parse_mail(raw.data, headers_only=True), self.scratch), raw.trusted)
         except Exception:  # untrusted input; counted, never logged
             self.skipped["parse_error"] += 1
             return
         self.labels.update(headers.labels)
-        cls = classify(headers, self.own, sent_label=self.sent_label)
+        cls = classify(headers, self.own, sent_label=self.sent_label, trusted=raw.trusted)
         if cls.skip_reason is not None:
             self.skipped[cls.skip_reason] += 1
             return
-        sent = cls.evidence_code == "gmail_label_sent"
+        sent = cls.evidence_code in SENT_EVIDENCE
         sender = headers.sender
         if sent and sender is not None and sender.address not in self.own:
             self.sent_from_not_own.add(sender.address)

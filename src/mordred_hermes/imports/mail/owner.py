@@ -26,6 +26,20 @@ evidence code is stored as ``owner_evidence``:
 
 A display name never decides identity: only addresses are compared. Gmail dot
 and plus normalisation applies to ``gmail.com``/``googlemail.com`` only.
+
+Fetched mail (``trusted`` is the IMAP collector's :class:`~.source.TrustedMeta`)
+replaces rules 1 and 2, and the embedded ``X-Gmail-Labels`` header is ignored:
+
+1. The Gmail system labels ``\\Draft``, ``\\Spam``, ``\\Trash`` → skipped
+   (custom labels never skip).
+2. The Gmail system label ``\\Sent`` → ``gmail_label_sent`` (``api_identity``);
+   a custom label named "Sent" is not the system label.
+2b. The generic server's sent folder chosen at ``mail setup`` (folder role
+    ``sent``) → ``account_owner`` (``imap_sent_folder``, ``source_claimed``):
+    the folder names its purpose, it does not verify authorship, so such a
+    record is the owner for display only and never anchors a quote link.
+
+Rules 3 to 7 then apply unchanged.
 """
 
 from __future__ import annotations
@@ -37,9 +51,13 @@ from typing import Final
 
 from ..records import OwnerClass, ProvenanceQuality, SenderKind
 from .headers import Address, MailHeaders
+from .source import TrustedMeta
 
 __all__ = [
+    "IMAP_SENT_FOLDER",
+    "SENT_EVIDENCE",
     "SKIP_LABELS",
+    "SYSTEM_SKIP_LABELS",
     "Classification",
     "OwnAddresses",
     "canonical_address",
@@ -57,6 +75,13 @@ SKIP_LABELS: Final = {
     "spam": "label_spam",
     "trash": "label_trash",
 }
+#: Gmail system labels (``X-GM-LABELS``, case-folded) whose messages are never imported.
+SYSTEM_SKIP_LABELS: Final = {"\\draft": "label_draft", "\\spam": "label_spam", "\\trash": "label_trash"}
+_SYSTEM_SENT: Final = "\\sent"
+#: Evidence code of a generic server's sent folder (owner for display; never a quote anchor).
+IMAP_SENT_FOLDER: Final = "imap_sent_folder"
+#: Evidence codes of a sent copy: it wins over a received copy of the same Message-ID.
+SENT_EVIDENCE: Final = frozenset({"gmail_label_sent", IMAP_SENT_FOLDER})
 _GMAIL_DOMAINS: Final = frozenset({"gmail.com", "googlemail.com"})
 _GOOGLE_AUTHSERV: Final = "mx.google.com"
 _DMARC_FAIL_RE: Final = re.compile(r"(?:^|[\s;])dmarc\s*=\s*fail\b", re.IGNORECASE)
@@ -177,19 +202,53 @@ def _result(owner: OwnerClass, kind: SenderKind, quality: ProvenanceQuality, cod
     return Classification(owner_class=owner, sender_kind=kind, provenance_quality=quality, evidence_code=code)
 
 
-def classify(headers: MailHeaders, own_addresses: OwnAddresses, *, sent_label: str = "Sent") -> Classification:
-    """Classify the sender of one message (see the module docstring for the rule order)."""
+def _skipped(reason: str) -> Classification:
+    return Classification(
+        owner_class=OwnerClass.UNKNOWN,
+        sender_kind=SenderKind.UNKNOWN,
+        provenance_quality=ProvenanceQuality.UNKNOWN,
+        evidence_code=reason,
+        skip_reason=reason,
+    )
+
+
+def _trusted_rules(trusted: TrustedMeta) -> Classification | None:
+    """Rules 1, 2 and 2b for fetched mail: the server's labels and folder role only."""
+    folded = {label.strip().casefold() for label in trusted.labels}
+    for label, reason in SYSTEM_SKIP_LABELS.items():
+        if label in folded:
+            return _skipped(reason)
+    if _SYSTEM_SENT in folded:
+        return _result(OwnerClass.ACCOUNT_OWNER, SenderKind.USER, ProvenanceQuality.API_IDENTITY, "gmail_label_sent")
+    if trusted.folder_role == "sent":
+        return _result(OwnerClass.ACCOUNT_OWNER, SenderKind.USER, ProvenanceQuality.SOURCE_CLAIMED, IMAP_SENT_FOLDER)
+    return None
+
+
+def _label_rules(headers: MailHeaders, sent_label: str) -> Classification | None:
+    """Rules 1 and 2 for file imports: the ``X-Gmail-Labels`` header Takeout writes."""
     skip = _skip(headers.labels)
     if skip is not None:
-        return Classification(
-            owner_class=OwnerClass.UNKNOWN,
-            sender_kind=SenderKind.UNKNOWN,
-            provenance_quality=ProvenanceQuality.UNKNOWN,
-            evidence_code=skip,
-            skip_reason=skip,
-        )
+        return _skipped(skip)
     if _has_label(headers.labels, sent_label):
         return _result(OwnerClass.ACCOUNT_OWNER, SenderKind.USER, ProvenanceQuality.API_IDENTITY, "gmail_label_sent")
+    return None
+
+
+def classify(
+    headers: MailHeaders,
+    own_addresses: OwnAddresses,
+    *,
+    sent_label: str = "Sent",
+    trusted: TrustedMeta | None = None,
+) -> Classification:
+    """Classify the sender of one message (see the module docstring for the rule order).
+
+    With ``trusted`` (fetched mail) the embedded labels are ignored and ``sent_label`` is unused.
+    """
+    early = _label_rules(headers, sent_label) if trusted is None else _trusted_rules(trusted)
+    if early is not None:
+        return early
     sender = headers.sender
     if sender is None:
         return _result(OwnerClass.UNKNOWN, SenderKind.UNKNOWN, ProvenanceQuality.UNKNOWN, "no_from")

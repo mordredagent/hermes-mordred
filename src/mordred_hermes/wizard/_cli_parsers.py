@@ -22,7 +22,7 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 - ``plugins migrate``                            — switch config.yaml to the single ``mordred`` plugin
 - ``activity {status,pair-operator,peers,correct,candidates,validate,adopt,reject,lessons,
   review,jobs,backup,restore,retention}`` — browser activity learning administration
-- ``mail {import,status}``                       — file-based mail import (mbox / .eml) into ``mordred.db``
+- ``mail {import,status,setup,fetch,forget}``    — mail import (mbox / .eml) and IMAP sync into ``mordred.db``
 - ``uninstall [--dry-run|--yes|--purge-data|--remove-helper]`` — remove Mordred, restore Hermes's files
 """
 
@@ -169,7 +169,7 @@ def _add_activity(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
 
 
 def _add_mail(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    p = sub.add_parser("mail", help="File-based mail import (Gmail Takeout mbox / .eml) into the encrypted store")
+    p = sub.add_parser("mail", help="Mail import (Takeout mbox / .eml) and IMAP sync into the encrypted store")
     msub = p.add_subparsers(dest="mail_command", required=True, metavar="COMMAND")
     from .mail_cli import add_parsers as _add_mail_parsers
 

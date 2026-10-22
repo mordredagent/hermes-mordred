@@ -6,6 +6,7 @@
         --own-address ADDR [--own-address ADDR ...] [--own-addresses-file FILE]
         --account LABEL [--sent-label LABEL] [--dry-run] [--json] [--preview-labels N]
     hermes-mordred mail status [--json]
+    hermes-mordred mail setup|fetch|forget ...   (IMAP sync: :mod:`.mail_sync_cli`)
 
 - ``--account`` is a short opaque label (``work``), never an address: ``@``, ``:`` and
   whitespace are refused. At least one own address (``--own-address`` or one per line in
@@ -19,7 +20,10 @@
 - ``--preview-labels N`` prints up to N conversation labels and part head lines (names
   and subjects, escaped; never bodies). It is refused together with ``--json``.
 - ``mail status`` prints mail row and run counts and the NUMBER of recorded own
-  addresses per account label — never the addresses.
+  addresses per account label — never the addresses — and the IMAP sync state
+  (account label, path, last fetch, cursor positions).
+- A real import holds the per-home mail writer lock that ``mail fetch`` uses, so a
+  fetch never marks a running import's run as crashed (``sync_in_progress``).
 
 Privacy: subjects, names, addresses and bodies never reach stdout, stderr or logs
 outside ``--preview-labels`` (the dry-run report's ``sent_from_not_own`` lists only
@@ -89,6 +93,13 @@ def _open_store(home: Path) -> ImportStore:
     from ..imports import store as store_module
 
     return store_module.open_import_store(home)
+
+
+def _writer_lock(home: Path) -> contextlib.AbstractContextManager[None]:
+    """The per-home mail writer lock shared with ``mail fetch`` (``sync_in_progress`` when held)."""
+    from ..imports.mail.imap_sync import fetch_lock
+
+    return fetch_lock(home)
 
 
 def _audit(entry: Mapping[str, Any]) -> None:
@@ -379,10 +390,25 @@ def _write_plan(store: ImportStore, run_id: str, request: _Request, own: Sequenc
 
 
 def _real_import(request: _Request) -> int:
+    try:
+        store = _open_store(_home())
+    except Exception as exc:
+        return _refused(_code(exc))
+    lock = _writer_lock(_home())
+    try:
+        lock.__enter__()
+    except Exception as exc:
+        return _refused(_code(exc))
+    try:
+        return _locked_import(store, request)
+    finally:
+        lock.__exit__(None, None, None)
+
+
+def _locked_import(store: ImportStore, request: _Request) -> int:
     from ..imports.mail import stored_own_addresses
 
     try:
-        store = _open_store(_home())
         own = tuple(sorted(set(request.own) | stored_own_addresses(store, request.account)))
         run_id = store.run_begin("mail")
     except Exception as exc:
@@ -440,17 +466,31 @@ def _print_status(report: Mapping[str, Any]) -> None:
         print(f"    {_display(label, 64)}: {_display(info.get('own_addresses'), 20)} own address(es)")
 
 
+def _imap_flags() -> Mapping[str, Any] | None:
+    try:
+        from ..imports.mail.secrets import MailSecretStore
+
+        flags: Mapping[str, Any] | None = MailSecretStore().flags()
+        return flags
+    except Exception:
+        return None
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     from ..imports.mail import mail_store_status
+    from .mail_sync_cli import imap_status, print_imap_status
 
     try:
-        report = mail_store_status(_open_store(_home()))
+        store = _open_store(_home())
+        report = mail_store_status(store)
+        report["imap"] = imap_status(store, _imap_flags())
     except Exception as exc:
         return _refused(_code(exc))
     if getattr(args, "json", False):
         print(json.dumps(report, sort_keys=True))
     else:
         _print_status(report)
+        print_imap_status(report["imap"])
     return 0
 
 
@@ -458,7 +498,24 @@ def cmd_status(args: argparse.Namespace) -> int:
 # Dispatch and parsers (called from ``_cli_parsers._add_mail``)
 # --------------------------------------------------------------------------- #
 
-_COMMANDS: Mapping[str, Callable[[argparse.Namespace], int]] = {"import": cmd_import, "status": cmd_status}
+
+def _sync_command(name: str) -> Callable[[argparse.Namespace], int]:
+    def run(args: argparse.Namespace) -> int:
+        from . import mail_sync_cli
+
+        handler: Callable[[argparse.Namespace], int] = getattr(mail_sync_cli, f"cmd_{name}")
+        return handler(args)
+
+    return run
+
+
+_COMMANDS: Mapping[str, Callable[[argparse.Namespace], int]] = {
+    "import": cmd_import,
+    "status": cmd_status,
+    "setup": _sync_command("setup"),
+    "fetch": _sync_command("fetch"),
+    "forget": _sync_command("forget"),
+}
 
 
 def cli_mail(args: argparse.Namespace) -> int:
@@ -527,3 +584,6 @@ def add_parsers(msub: Any, handler: Callable[[argparse.Namespace], int]) -> None
     p_status = msub.add_parser("status", help="Show mail row and run counts and own-address counts (no content)")
     p_status.add_argument("--json", action="store_true", help="Print one JSON object")
     p_status.set_defaults(func=handler)
+    from .mail_sync_cli import add_parsers as add_sync_parsers
+
+    add_sync_parsers(msub, handler)

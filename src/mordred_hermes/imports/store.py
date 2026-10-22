@@ -34,6 +34,14 @@ Backup and restore: ``ActivityStore.backup`` / ``restore`` copy the whole
 settable that way. :data:`TELEGRAM_RETIRED_ACCOUNT` names the Telegram account whose
 history lives here, so a reader can choose ``mordred.db`` without unsealing the Telegram
 credentials to read ``index.enc``.
+
+Batched collectors (the IMAP mail sync) publish each batch with
+:meth:`ImportStore.commit_batch`, which commits the run and moves the
+collector's ``import_meta`` cursor in ONE transaction, reclaim a crashed
+writer's ``open`` runs with :meth:`ImportStore.fail_open_runs`, and write threads
+with ``merge_conversation=True`` so a later batch never shrinks a conversation row
+(participants are unioned, ``last_message_at`` is the maximum and
+``message_count`` is recounted from the store).
 """
 
 from __future__ import annotations
@@ -110,6 +118,8 @@ RESERVED_META_KEYS: Final = frozenset({"schema_version", "profile_home", "store_
 TELEGRAM_RETIRED_ACCOUNT: Final = "telegram.retired_account"
 _META_KEY_RE: Final = re.compile(r"[a-z][a-z0-9_]{0,31}(?:\.[a-z][a-z0-9_]{0,31}){0,3}")
 _MAX_META_VALUE: Final = 256
+#: Upper bound on participants kept on a merged conversation row.
+_MAX_MERGED_PARTICIPANTS: Final = 256
 
 Opener = Callable[[Path], sqlite3.Connection]
 CopyCheck = Callable[[Path], Refusal | None]
@@ -321,6 +331,17 @@ def _meta_key(key: str) -> str:
     return key
 
 
+def _meta_value(value: object) -> str:
+    """A settable ``import_meta`` value: printable text of at most :data:`_MAX_META_VALUE` characters."""
+    if not isinstance(value, str) or len(value) > _MAX_META_VALUE or not value.isprintable():
+        raise RecordError("bad_meta")
+    return value
+
+
+def _participant_key(participant: Participant) -> tuple[str, str]:
+    return (str(participant.owner_class), participant.stable_id or f"name:{participant.display_name}")
+
+
 def _counts_json(counts: Mapping[str, int]) -> str:
     """Content-free run counters only: short lowercase keys, non-negative integers."""
     for key, value in counts.items():
@@ -503,14 +524,24 @@ class ImportStore:
     def set_meta(self, key: str, value: str) -> None:
         """Set a content-free marker; reserved keys and malformed keys or values raise :class:`RecordError`."""
         _meta_key(key)
-        if not isinstance(value, str) or len(value) > _MAX_META_VALUE or not value.isprintable():
-            raise RecordError("bad_meta")
+        _meta_value(value)
         with self._transaction() as conn:
             conn.execute(
                 "INSERT INTO import_meta (key, value) VALUES (?, ?) "
                 "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
+
+    def meta_items(self, prefix: str) -> dict[str, str]:
+        """Every ``import_meta`` marker whose key starts with ``prefix`` (``a.b.`` form), in key order."""
+        if not isinstance(prefix, str) or not prefix.endswith("."):
+            raise RecordError("bad_meta")
+        _meta_key(prefix[:-1])
+        with self._transaction(write=False) as conn:
+            rows = conn.execute(
+                "SELECT key, value FROM import_meta WHERE substr(key, 1, ?) = ? ORDER BY key", (len(prefix), prefix)
+            ).fetchall()
+        return {str(key): str(value) for key, value in rows if key not in RESERVED_META_KEYS}
 
     def delete_meta(self, key: str) -> None:
         """Remove a marker set with :meth:`set_meta` (absent is fine); reserved keys raise :class:`RecordError`."""
@@ -560,6 +591,47 @@ class ImportStore:
         """Close the run without publishing; a later run reclaims its rows."""
         self._finish(run_id, counts, failed=True)
 
+    def commit_batch(self, run_id: str, counts: Mapping[str, int], meta_updates: Mapping[str, str | None]) -> None:
+        """Publish ``run_id`` and apply ``meta_updates`` (``None`` deletes a key) in ONE transaction.
+
+        A collector's cursor therefore never moves past rows that are not published,
+        and never stays behind rows that are. A dry run is refused (``run_not_open``).
+        """
+        payload = _counts_json(counts)
+        updates = {_meta_key(key): None if value is None else _meta_value(value) for key, value in meta_updates.items()}
+        with self._transaction() as conn:
+            _, state = self._open_run(conn, run_id)
+            if state != "open":
+                raise ImportRefused("run_not_open")
+            conn.execute(
+                "UPDATE import_runs SET state = 'committed', finished_at = ?, counts_json = ? WHERE run_id = ?",
+                (time.time(), payload, run_id),
+            )
+            for key, value in updates.items():
+                if value is None:
+                    conn.execute("DELETE FROM import_meta WHERE key = ?", (key,))
+                else:
+                    conn.execute(
+                        "INSERT INTO import_meta (key, value) VALUES (?, ?) "
+                        "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                        (key, value),
+                    )
+
+    def fail_open_runs(self, source: Source | str) -> int:
+        """Mark every ``open`` run of ``source`` failed (left by a crashed writer); returns how many.
+
+        Call it only while holding the source's writer lock. The failed runs' rows stay
+        invisible and the next write of the same ``source_uid`` reclaims them.
+        """
+        value = _source_value(source)
+        with self._transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE import_runs SET state = 'failed', finished_at = ? "
+                "WHERE source = ? AND state = 'open' AND finished_at IS NULL",
+                (time.time(), value),
+            )
+            return int(cursor.rowcount)
+
     def _finish(self, run_id: str, counts: Mapping[str, int], *, failed: bool) -> None:
         payload = _counts_json(counts)
         with self._transaction() as conn:
@@ -589,12 +661,15 @@ class ImportStore:
         messages: Sequence[ImportMessage],
         *,
         conversation: ImportConversation | None = None,
+        merge_conversation: bool = False,
     ) -> WriteResult:
         """Write ``messages`` (and optionally their ``conversation``) under ``run_id`` in ONE transaction.
 
         Every record is validated before the transaction starts; each
         message's conversation must exist (or be passed as ``conversation``).
-        A dry run returns the same counts and keeps nothing.
+        A dry run returns the same counts and keeps nothing. With
+        ``merge_conversation`` a stored row is merged instead of replaced
+        (:meth:`_merged`) and its ``message_count`` is recounted after the write.
         """
         if conversation is not None:
             validate_conversation(conversation)
@@ -606,16 +681,51 @@ class ImportStore:
             if conversation is not None:
                 if Source(conversation.source).value != source:
                     raise RecordError("source_mismatch")
-                self._upsert_conversation(conn, conversation)
+                merged = self._merged(conn, conversation) if merge_conversation else conversation
+                self._upsert_conversation(conn, merged)
             for msg in messages:
                 self._check_target(conn, msg, source)
                 outcome = self._outcome(conn, run_id, msg)
                 if outcome in _WRITES:
                     self._store_message(conn, run_id, msg)
                 counts[outcome] += 1
+            if merge_conversation:
+                for conv_uid in sorted({msg.conv_uid for msg in messages}):
+                    self._recount(conn, run_id, conv_uid)
             if state == "dry_run":
                 conn.execute("ROLLBACK")
         return WriteResult(counts["inserted"], counts["duplicates"], counts["revised"], counts["conflicts"])
+
+    @staticmethod
+    def _merged(conn: sqlite3.Connection, conv: ImportConversation) -> ImportConversation:
+        """``conv`` merged with its stored row: participants unioned, newest date, the stored title kept."""
+        row = conn.execute(
+            f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE conv_uid = ?", (conv.conv_uid,)
+        ).fetchone()
+        if row is None:
+            return conv
+        stored = ImportConversation(**_decoded(_CONV_FIELDS, row))
+        people: dict[tuple[str, str], Participant] = {}
+        for participant in (*stored.participants, *conv.participants):
+            people.setdefault(_participant_key(participant), participant)
+        dates = [value for value in (stored.last_message_at, conv.last_message_at) if value is not None]
+        return replace(
+            conv,
+            title=stored.title or conv.title,
+            participants=tuple(people.values())[:_MAX_MERGED_PARTICIPANTS],
+            last_message_at=max(dates) if dates else None,
+            sync_cursor=conv.sync_cursor if conv.sync_cursor is not None else stored.sync_cursor,
+        )
+
+    @staticmethod
+    def _recount(conn: sqlite3.Connection, run_id: str, conv_uid: str) -> None:
+        """``message_count`` = the conversation's committed messages plus this run's."""
+        conn.execute(
+            "UPDATE import_conversations SET message_count = ("
+            "SELECT count(*) FROM import_messages m LEFT JOIN import_runs r ON r.run_id = m.run_id "
+            "WHERE m.conv_uid = ? AND (m.run_id = ? OR r.state = 'committed')) WHERE conv_uid = ?",
+            (conv_uid, run_id, conv_uid),
+        )
 
     @staticmethod
     def _check_target(conn: sqlite3.Connection, msg: ImportMessage, source: str) -> None:

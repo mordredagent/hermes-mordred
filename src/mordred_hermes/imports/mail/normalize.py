@@ -11,6 +11,9 @@
   usable Message-ID gets the fallback uid ``mail:<account>:h:<32 hex>`` over its
   Date, From, To, Subject and raw body.
 - ``sent_at`` is the ``Date`` header or ``None``; never the import time.
+- Fetched mail (``raw.trusted``) takes its labels and Gmail thread id from the
+  collector's :class:`~.source.TrustedMeta` only (:func:`with_trusted`); the
+  embedded ``X-Gmail-Labels``/``X-GM-THRID`` headers are ignored.
 - Every produced record passes :func:`~..records.validate_message`. Failures
   become :class:`Skipped` with content-free reason codes; nothing is logged.
 """
@@ -21,7 +24,7 @@ import hashlib
 import unicodedata
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from email import policy
 from email.message import Message
 from email.parser import BytesParser
@@ -49,7 +52,7 @@ from .headers import Address, MailHeaders, parse_headers
 from .link import Linker, QuoteClaim, text_digest
 from .owner import Classification, OwnAddresses, classify, is_noreply
 from .segment import MAX_PARTS, Attribution, Segment, segment_body
-from .source import RawMessage
+from .source import RawMessage, TrustedMeta
 from .threading import ThreadInput, default_thread_key, subject_key
 
 __all__ = [
@@ -61,6 +64,7 @@ __all__ = [
     "normalize",
     "parse_mail",
     "thread_input",
+    "with_trusted",
 ]
 
 _PARSER: Final = BytesParser(policy=policy.default)
@@ -117,6 +121,13 @@ def fold_name(name: str) -> str:
 def parse_mail(data: bytes, *, headers_only: bool = False) -> Message:
     """Parse with ``policy.default`` (headers keep their raw values for :mod:`.headers`)."""
     return _PARSER.parsebytes(data, headersonly=headers_only)
+
+
+def with_trusted(headers: MailHeaders, trusted: TrustedMeta | None) -> MailHeaders:
+    """``headers`` with the collector's labels and thread id in place of the embedded (forgeable) ones."""
+    if trusted is None:
+        return headers
+    return replace(headers, labels=trusted.labels, gm_thread_id=trusted.thread_id)
 
 
 def _raw_body(data: bytes) -> bytes:
@@ -389,8 +400,8 @@ def _record_stats(normalized: NormalizedMessage, stats: Counter[str]) -> None:
 
 def _build(raw: RawMessage, ctx: NormalizeContext) -> NormalizedMessage | Skipped:
     msg = parse_mail(raw.data)
-    headers = parse_headers(msg, ctx.stats)
-    cls = classify(headers, ctx.own_addresses, sent_label=ctx.sent_label)
+    headers = with_trusted(parse_headers(msg, ctx.stats), raw.trusted)
+    cls = classify(headers, ctx.own_addresses, sent_label=ctx.sent_label, trusted=raw.trusted)
     if cls.skip_reason is not None:
         return Skipped(cls.skip_reason, raw.origin_index)
     source_uid, message_id = message_identity(headers, ctx.account, raw.data)

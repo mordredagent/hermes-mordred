@@ -12,6 +12,11 @@ Security contract:
   :data:`MAX_MESSAGE_BYTES` is dropped while reading and counted as
   ``skipped_oversize``. No temporary files are written.
 - Errors carry content-free codes only.
+- :class:`TrustedBytes` carries messages fetched by the IMAP collector
+  (:mod:`.imap_sync`) together with :class:`TrustedMeta`: the server's labels,
+  thread id and folder role. Only the collector fills it; the bytes are never
+  modified, and when it is present the embedded ``X-Gmail-Labels`` and
+  ``X-GM-THRID`` headers are ignored (an attacker can type those).
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from pathlib import Path
 from typing import IO, Final
 
 __all__ = [
+    "FOLDER_ROLES",
     "MAX_MESSAGE_BYTES",
     "EmlBytes",
     "EmlSource",
@@ -35,6 +41,8 @@ __all__ = [
     "MboxSource",
     "RawMessage",
     "SourceError",
+    "TrustedBytes",
+    "TrustedMeta",
     "iter_raw",
     "split_mbox",
 ]
@@ -56,12 +64,46 @@ class SourceError(Exception):
         self.code = code
 
 
+#: Folder roles the IMAP collector reports: Gmail's All Mail, a generic INBOX, a generic sent folder.
+FOLDER_ROLES: Final = frozenset({"all", "inbox", "sent"})
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedMeta:
+    """Server-side facts about one fetched message, set by the IMAP collector only.
+
+    ``labels`` holds Gmail system labels in their protocol form (``\\Sent``,
+    ``\\Draft``, ...) and custom labels decoded from modified UTF-7;
+    ``thread_id`` is Gmail's ``X-GM-THRID`` (decimal digits) or ``None``;
+    ``folder_role`` is one of :data:`FOLDER_ROLES`.
+    """
+
+    labels: tuple[str, ...] = ()
+    thread_id: str | None = None
+    folder_role: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.folder_role is not None and self.folder_role not in FOLDER_ROLES:
+            raise ValueError("bad_folder_role")
+        thread = self.thread_id
+        if thread is not None and not (thread.isascii() and thread.isdigit() and len(thread) <= 32):
+            raise ValueError("bad_thread_id")
+
+    def __repr__(self) -> str:
+        thread = self.thread_id is not None
+        return f"TrustedMeta(labels={len(self.labels)}, thread_id={thread}, role={self.folder_role})"
+
+
 @dataclass(frozen=True, slots=True)
 class RawMessage:
-    """One message's raw bytes and its position within its source."""
+    """One message's raw bytes, its position within its source and, for fetched mail, the server's facts."""
 
     data: bytes
     origin_index: int
+    trusted: TrustedMeta | None = None
+
+    def __repr__(self) -> str:
+        return f"RawMessage(bytes={len(self.data)}, index={self.origin_index}, trusted={self.trusted is not None})"
 
 
 @dataclass(frozen=True)
@@ -90,7 +132,17 @@ class EmlBytes:
     messages: Sequence[bytes]
 
 
-MailSource = MboxSource | EmlSource | MboxBytes | EmlBytes
+@dataclass(frozen=True)
+class TrustedBytes:
+    """Messages fetched from a mail server, each with the collector's :class:`TrustedMeta`."""
+
+    messages: Sequence[tuple[bytes, TrustedMeta]]
+
+    def __repr__(self) -> str:
+        return f"TrustedBytes(messages={len(self.messages)})"
+
+
+MailSource = MboxSource | EmlSource | MboxBytes | EmlBytes | TrustedBytes
 
 _OPEN_FLAGS: Final = (
     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
@@ -253,6 +305,14 @@ def _iter_eml_bytes(messages: Sequence[bytes], stats: Counter[str]) -> Iterator[
         yield RawMessage(bytes(data), index)
 
 
+def _iter_trusted(messages: Sequence[tuple[bytes, TrustedMeta]], stats: Counter[str]) -> Iterator[RawMessage]:
+    for index, (data, trusted) in enumerate(messages):
+        if len(data) > MAX_MESSAGE_BYTES:
+            stats["skipped_oversize"] += 1
+            continue
+        yield RawMessage(bytes(data), index, trusted)
+
+
 def iter_raw(source: MailSource, stats: Counter[str]) -> Iterator[RawMessage]:
     """Raw messages of ``source`` in source order. Raises :class:`SourceError` for an unreadable source."""
     if isinstance(source, MboxSource):
@@ -262,5 +322,7 @@ def iter_raw(source: MailSource, stats: Counter[str]) -> Iterator[RawMessage]:
         yield from split_mbox(io.BytesIO(source.data), stats)
     elif isinstance(source, EmlSource):
         yield from _iter_eml(source.path, stats)
+    elif isinstance(source, TrustedBytes):
+        yield from _iter_trusted(source.messages, stats)
     else:
         yield from _iter_eml_bytes(source.messages, stats)

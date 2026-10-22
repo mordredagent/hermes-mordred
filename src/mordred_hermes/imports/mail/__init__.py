@@ -13,6 +13,9 @@ Reads Gmail Takeout mbox files, single ``.eml`` files and directories of
 - :mod:`.importer` — :func:`plan_import` (two passes) and :class:`ImportPlan`.
 - :mod:`.store_link` — :class:`StoreLinker` (quote links to committed records) and the
   account's own addresses in ``import_accounts``; used by ``hermes-mordred mail import``.
+- :mod:`.imap` / :mod:`.imap_sync` / :mod:`.secrets` — the read-only IMAP collector
+  (``hermes-mordred mail setup|fetch`` and the Hermes tool ``mordred_mail_sync``);
+  imported on use only (macOS, POSIX locking), never from this package's namespace.
 
 Only :mod:`.store_link` touches the store (reads, and the own-address row). Nothing here
 logs content or creates temporary files.
@@ -25,7 +28,17 @@ from .link import IndexEntry, LinkedAuthor, Linker, MetadataIndex, QuoteClaim, c
 from .normalize import NormalizeContext, NormalizedMessage, Skipped, normalize
 from .owner import Classification, OwnAddresses, classify
 from .report import DryRunReport
-from .source import EmlBytes, EmlSource, MailSource, MboxBytes, MboxSource, RawMessage, SourceError
+from .source import (
+    EmlBytes,
+    EmlSource,
+    MailSource,
+    MboxBytes,
+    MboxSource,
+    RawMessage,
+    SourceError,
+    TrustedBytes,
+    TrustedMeta,
+)
 from .store_link import StoreLinker, mail_store_status, remember_own_addresses, stored_own_addresses
 
 __all__ = [
@@ -50,6 +63,8 @@ __all__ = [
     "Skipped",
     "SourceError",
     "StoreLinker",
+    "TrustedBytes",
+    "TrustedMeta",
     "chain_linkers",
     "classify",
     "mail_store_status",
