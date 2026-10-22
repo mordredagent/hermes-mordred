@@ -4088,8 +4088,8 @@ with `schema_version=1`. A newer version is refused (`schema_newer`).
 | `import_conversations` | one row per chat or mail thread: `conv_uid` (PK), `source`, `source_account`, `conversation_id`, `kind`, `title`, `participants_json`, `last_message_at`, `message_count`, `archived`, `sync_cursor`, `record_version` |
 | `import_messages` | one row per source message: `source_uid` (PK), `conv_uid`, `message_id`, `sent_at` (nullable, never import time), `imported_at`, `sender_kind`, `sender_id`, `sender_name`, `owner_class`, `owner_evidence`, `recipients_json` (mail `to:` names, empty elsewhere), `reply_to_uid`, `media`, `provenance_quality`, `source_revision`, `record_version`, `content_digest` |
 | `import_parts` | authored, quoted and forwarded parts of a message: `part_uid` (PK), `source_uid`, `ordinal`, `part_kind`, `author_kind`, `author_id`, `author_name`, `author_owner_class`, `author_evidence`, `original_sent_at`, `original_ref`, `text`, `provenance_quality` |
-| `import_parts_fts` | FTS5 external-content index over `import_parts.text` with sync triggers |
-| `import_runs` | durable staging journal: `run_id`, `source`, `started_at`, `finished_at`, `state` (`dry_run`, `committed`, `failed`), `counts_json`; the reader exposes committed runs only |
+| `import_parts_fts` | FTS5 external-content index over `import_parts.text` (`trigram` tokenizer so unspaced Japanese matches; terms shorter than three characters fall back to an escaped `LIKE`; FTS `secure-delete` on) kept in sync by triggers; `import_parts.id INTEGER PRIMARY KEY` anchors it so `VACUUM` cannot renumber rows |
+| `import_runs` | durable staging journal: `run_id`, `source`, `started_at`, `finished_at`, `state` (`open`, `dry_run`, `committed`, `failed`), `counts_json`; `import_messages.run_id` links each row to its run and readers expose committed runs only; a dry run performs the same writes and rolls them back, so its counts are exact |
 | `import_accounts` | per-account `own_addresses_json` for mail; owner addresses live here (encrypted file), never in `config.yaml` |
 
 Identifiers (`source_uid`, namespaced and idempotent):
@@ -4127,7 +4127,12 @@ never `api_identity`.
 `ImportStore(path, opener)` shares the constructor seam of `ActivityStore`
 (tests inject `sqlite3.connect`). Writes use `BEGIN IMMEDIATE`, one transaction
 per thread, idempotent on `source_uid`, revision-aware; the result reports
-`inserted`, `duplicates`, `revised` and `conflicts`. Refusal codes are `busy`,
+`inserted`, `duplicates`, `revised` and `conflicts`. Per message, in order: a
+row left by a run that never committed is reclaimed; a `legacy` record never
+replaces a non-legacy one (duplicate); a non-legacy record upgrades a `legacy`
+row (revised); same revision and digest is a duplicate; a different revision
+replaces the message and all its parts (revised); same revision with a
+different digest is a conflict and nothing is overwritten. Refusal codes are `busy`,
 `disk_full`, `store_unavailable` plus the gate's. Deleting a source uses
 `secure_delete=ON`.
 

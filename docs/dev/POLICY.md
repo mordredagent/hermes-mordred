@@ -11,7 +11,7 @@ audit vocabulary. Typed implementation remains authoritative:
 
 ## Audit log `reason` enum (frozen)
 
-`ReasonCode` is a closed `Literal` with 37 stable values. “Reserved” means the
+`ReasonCode` is a closed `Literal` with 38 stable values. “Reserved” means the
 string remains valid for compatibility but current code deliberately has no
 emit site. A reserved value is not evidence that the feature exists.
 
@@ -54,6 +54,7 @@ emit site. A reserved value is not evidence that the feature exists.
 | 35 | `activity.lesson_adopted` | live | An authenticated user adopted a browser-activity lesson revision (`lesson_id`, `revision`, `adoption_digest`); only this operation makes a lesson retrievable. |
 | 36 | `activity.lesson_suspended` | live | A browser-activity lesson revision was suspended, rejected or retired (`lesson_id`, `revision`, `state`, `reason` code). |
 | 37 | `activity.review_attempt` | live | A browser-activity review attempt changed state (`job_id`, `attempt_id`, `state`, `failure_code`, provider/model identifiers, token counts). Never carries evidence content or model text. |
+| 38 | `policy.egress.reader_mode` | live | A session entered reader mode: a reader tool (`telegram_ask`, `telegram_chats`, `mordred_history_search`) was allowed and the durable `reader_sessions.json` record was written first. Emitted once per session; counts only, no arguments. Reader refusals use `rule` values `egress.reader_*` under reason 32 (`HOOK_PAYLOADS.md` §9). |
 
 Existing reason strings are not renamed. Adding one requires the typed Literal,
 an emit site or explicit reserved rationale, focused tests, and this table in
