@@ -897,6 +897,72 @@ hermes-mordred mail status [--json]             # row and run counts, number of 
 > `mordred_history_search` (without `chat_ids`) once the Telegram archive lives
 > in `mordred.db`.
 
+#### Sync new mail over IMAP (`mail setup`, `mail fetch`, `mail forget`)
+
+```sh
+hermes-mordred mail setup                               # type the address and app password here; sealed by the Secure Enclave
+hermes-mordred mail setup --account work --no-touch-id  # an unattended key, for cron
+hermes-mordred mail fetch [--max N] [--mailbox all|inbox|sent] [--since YYYY-MM-DD] [--dry-run] [--json]
+hermes-mordred mail status                              # adds the account label, last fetch and cursors
+hermes-mordred mail forget --yes                        # delete the sealed credentials and the cursors
+hermes-mordred mail forget --rows --yes                 # ... and the account's imported mail
+```
+
+1. **Prerequisites:** macOS, `hermes-mordred databases encrypt` done,
+   `hermes-mordred encryption enable memory`, and the Secure Enclave helper
+   (`hermes-mordred keyvault enable-se`).
+2. **Create an app password.** Gmail: turn on 2-Step Verification, then create
+   one under Google Account, Security, App passwords
+   (<https://myaccount.google.com/apppasswords>). Other providers call it an
+   app-specific password. Mordred never needs your account password, and you
+   can revoke the app password at any time.
+3. **Run `hermes-mordred mail setup` in a terminal.** It asks for your address,
+   the IMAP server (Gmail addresses use `imap.gmail.com`; give `--imap-host`
+   to skip the question), any other addresses that are yours, and the app
+   password (hidden). It logs in once, read-only, and chooses what to fetch:
+   Gmail's All Mail with its labels (so your sent mail is recognised as yours),
+   or `INBOX` plus the server's Sent folder (it lists the folders and asks if
+   the server does not mark one). Nothing else is fetched. It never prints your
+   address. Reuse the `--account` label of an earlier `mail import` of the same
+   mailbox and the two merge instead of duplicating.
+4. **In a Hermes chat, say "sync my mail".** Hermes calls the Mordred tool
+   `mordred_mail_sync` and sees only counts (`inserted`, `duplicates`,
+   `partial`, ...), never a subject, name, address or text; then ask about your
+   mail as usual. The tool is offered only when the chat's model is a Venice
+   `private` model or a local one, and each call may show a Touch ID prompt.
+   One call works for about a minute; if the answer says `partial`, ask again
+   and it continues where it stopped.
+5. **Older mail.** The first sync takes your newest 2000 messages and reports
+   how many older ones it left out (`excluded_history`). To fetch older mail,
+   run `hermes-mordred mail fetch --since 2025-01-01` (repeat while it reports
+   `partial`).
+
+`mail fetch` does the same as the tool from a terminal, with up to 10 minutes
+per run; `--dry-run` fetches and counts but writes nothing. It exits 0 when it
+worked (also when partial), 1 with a code such as `imap_auth_failed` (the app
+password was revoked: run `mail setup` again), `mail_not_configured`,
+`not_armed` or `sync_in_progress`, and 2 for bad arguments.
+
+**Cron.** Cron cannot answer Touch ID, so set up with `--no-touch-id`, then run
+the command once by hand from a non-interactive shell to see that nothing
+prompts. Use the full path of the `hermes-mordred` in your Hermes venv:
+
+```
+*/30 * * * * HERMES_HOME=$HOME/.hermes /path/to/venv/bin/hermes-mordred mail fetch --max 500 >/dev/null 2>&1
+```
+
+The network path applies: with Tor selected the connection goes through Tor's
+SOCKS proxy; with the VPN path a standalone `mail fetch` (cron included)
+refuses with `routing_unavailable` because it cannot verify the tunnel, while
+the tool inside a running Hermes can. An HTTP proxy is refused
+(`egress_unsupported`).
+
+> The fetch is read-only on the server: nothing is marked read, moved, deleted
+> or sent, and only implicit TLS with certificate checks is used. Mail is kept
+> in memory until it is written to the encrypted `mordred.db`; no temporary
+> file is written. One `mail.fetch` audit entry with counts is written per run.
+> Details: [SPEC](../dev/SPEC.md#imap-sync-2026-10-22).
+
 ### `activity` — learn from corrected browser work (preview, macOS)
 
 ```sh

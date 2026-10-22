@@ -172,7 +172,9 @@ Hermes source.
 Status: implemented for reader mode (`privacy_check/_audit_reasons.py`,
 `tools/hook_payload_contract.json`, which now lists `args`, `session_id` and
 `tool_name` for `pre_tool_call`); the handler codes below are returned by the
-reader-tool handlers and the Telegram sync. Mordred still reads only `tool_name` from `pre_tool_call`; reader mode
+reader-tool handlers, the Telegram sync and the mail sync tool
+`mordred_mail_sync` (not a reader tool: it is in the reader allowlist and never
+taints). Mordred still reads only `tool_name` from `pre_tool_call`; reader mode
 additionally uses the `session_id` that Hermes passes to tool handlers and
 hooks. A missing `session_id` is a refusal, not a guess.
 
@@ -189,12 +191,22 @@ written once per session when reader mode is entered (counts only, no args).
 | `egress.reader_locked` | rule | a reader session calls a tool outside the reader allowlist (writes, exec, messaging, scheduling, delegation, payments, MCP, unknown tools) at any privacy level, including `off` | tool call blocked |
 | `egress.reader_web` | rule | a reader session calls a web search or URL-loading tool | approval prompt at every level; blocklisted domains stay refused |
 | `reader_mode_unavailable` | handler code | a reader-tool handler cannot confirm `egress.reader_mode_established(session_id)`, which answers from this process's set only: no `session_id`, the privacy_check component disabled, or a call path that skips `pre_tool_call` | handler refuses before validating arguments or opening a store; no data returned |
-| `invalid_request` | handler code | `mordred_history_search` (and `telegram_ask`) arguments are malformed: a non-string or over-long `query`, `chat_ids` that is not a list of at most 20 chat ids, a non-integer `limit`, a non-boolean `pseudonymize`, an empty question | handler returns the code; nothing is read |
+| `invalid_request` | handler code | `mordred_history_search` (and `telegram_ask`) arguments are malformed: a non-string or over-long `query`, `chat_ids` that is not a list of at most 20 chat ids, a non-integer `limit`, a non-boolean `pseudonymize`, an empty question; or `mordred_mail_sync` gets anything but an optional integer `max_messages` from 1 to 2000 (another key, a boolean, a float, a string) | handler returns the code; nothing is read or fetched |
 | `invalid_date` | handler code | `start_date` or `end_date` is not a `YYYY-MM-DD` string or the range is invalid | handler returns the code; nothing is read |
 | `invalid_evidence_id` | handler code | `around_evidence_id` is not a well-formed part id (for example `tg:-100123:4567#a`) | handler returns the code; nothing is read |
 | `import_record_invalid` | handler code | a Telegram record failed the import contract while writing to the import store (a `RecordError`) | the sync refuses; the code carries no message content |
 | `import_store_unavailable` | handler code | the `mordred.db` gate or open refused after `telegram migrate-store --commit` | read or sync refuses; no fallback to `.enc` |
 | `account_mismatch` | handler code | `get_me().id` differs from `ArchiveIndex.account_id` during Telegram conversion | conversion and sync refuse |
+| `mail_not_configured` | handler code | `mordred_mail_sync` or `mail fetch` finds no sealed mail credentials | refuses before any unseal; the user runs `hermes-mordred mail setup` |
+| `memory_encryption_required` | handler code | memory encryption is not armed (the Telegram guard) when the mail sync starts | refuses before the store or the credentials are opened |
+| `sync_in_progress` | handler code | another mail fetch, `mail import` or `mail forget` holds `<home>/mordred/mail/.lock` | refuses; nothing is fetched |
+| `imap_auth_failed` | handler code | the IMAP server refused the sealed address and app password | refuses; nothing is written |
+| `imap_unreachable` | handler code | DNS, TCP, SOCKS, TLS (including certificate verification) or the connection failed, or the server hung up | refuses, or stops after the batches already committed (`partial_reason: error`) |
+| `imap_protocol` | handler code | the server's response had an unexpected shape | as `imap_unreachable` |
+| `imap_command_refused` | handler code | the client was asked to send a command outside the read-only allowlist (a bug guard; never expected) | nothing is sent |
+| `egress_unsupported` | handler code | the egress route for the IMAP host is an HTTP or other non-SOCKS5 proxy | refuses before connecting |
+| `run_failed` | handler code | a store write or the quote linker failed during a mail batch | that batch's run is marked failed and its cursor does not move; earlier batches stay committed |
+| `fetch_failed` | handler code | an unexpected error in the mail sync (the class name is not kept) | as `run_failed` |
 
 Handler codes are the `error` value of a tool result (or the content-free code
 of a refused sync); they are not `ReasonCode` or `EgressRule` values and write no

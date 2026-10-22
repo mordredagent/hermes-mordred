@@ -900,7 +900,7 @@ egress      status | set | block | unblock | block-tool | unblock-tool |
 databases   status | encrypt | decrypt
 telegram    setup | doctor | login | sync | status | logout | venice |
             local-llm | migrate-tee | migrate-store
-mail        import | status
+mail        import | status | setup | fetch | forget
 activity    status | pair-operator | peers | correct | candidates |
             validate | adopt | reject | lessons | review | jobs |
             backup | restore | retention
@@ -4242,7 +4242,7 @@ ignored for them).
 
 - Allowlist in a tainted session: reader tools, `read_file`, `search_files`,
   `session_search`, `skill_view`, `skills_list`, `tool_search`, `tool_describe`,
-  `todo*`, `clarify`.
+  `todo*`, `clarify`, and `mordred_mail_sync` (counts only; not a reader tool).
 - Blocklist: file writes and `PERSIST_TOOLS`, `EXEC_TOOLS`, messaging and send
   tools, `cronjob_manage`, `delegate_task`, wallet and payment tools, `mcp_*`,
   and any unknown tool.
@@ -4345,7 +4345,8 @@ Things the code does that the text above does not say, or says differently.
   (`egress.reader_web`), while a block from the level or the domain blocklist
   stands. `READER_ALLOWED` is the reader tools plus `read_file`,
   `search_files`, `session_search`, `skill_view`, `skills_list`, `tool_search`,
-  `tool_describe`, `todo`, `todo_list`, `clarify`. `READER_WEB_TOOLS` is
+  `tool_describe`, `todo`, `todo_list`, `clarify` and `mordred_mail_sync` (not a
+  reader tool; see [IMAP sync](#imap-sync-2026-10-22)). `READER_WEB_TOOLS` is
   `web_search`, the URL-fetching tools (not `video_generate`,
   `kanban_attach_url`, `a2a_call`), `fetch_url`, `fetch` and `browser_back`.
 - A `tool_call` bridge batch containing a reader tool runs every entry under
@@ -4458,7 +4459,8 @@ Things the code does that the text above does not say, or says differently.
 
 Status: specification. The first input is file based so the owner can load some
 mail and test; a Gmail API collector can plug in later through the same
-`ImportStore` write path. It uses the standard library only (`email` with
+`ImportStore` write path. Day-to-day mail arrives through the IMAP sync below
+(implemented); the files stay the bulk and offline path. It uses the standard library only (`email` with
 `policy.default` and regex tables); no `talon` or `mail-parser-reply`.
 
 ### Input
@@ -4573,8 +4575,9 @@ in `import_accounts`. Fixtures use RFC 2606 domains only.
   `api_identity`; every other evidence code stores `source_claimed` or
   `unknown`. Evidence codes: `gmail_label_sent`, `no_from`, `own_address`,
   `list_rewrite`, `dmarc_fail`, `auto_submitted`, `noreply_sender`,
-  `mailing_list`, `precedence_bulk`, `from_address`, and the skip reasons
-  `label_draft`, `label_chat`, `label_spam`, `label_trash`.
+  `mailing_list`, `precedence_bulk`, `from_address`, `imap_sent_folder` (IMAP
+  sync only, see below), and the skip reasons `label_draft`, `label_chat`,
+  `label_spam`, `label_trash`.
 - Quote linking (`link.py`, `store_link.py`): only `gmail_label_sent` records
   anchor a link (`ANCHOR_EVIDENCE`); the linking kinds are `linked_message_id`,
   `linked_address_date` (window 600 seconds) and `linked_text_hash`; every link
@@ -4598,6 +4601,173 @@ in `import_accounts`. Fixtures use RFC 2606 domains only.
   run, with decision `committed` or `failed`, counts only; `mail status` prints
   row and run counts and the number of recorded own addresses per account
   label, never the addresses, and exits 1 with the gate code when refused.
+
+### IMAP sync (2026-10-22)
+
+Status: implemented on `feat/imported-message-provenance`; one live fetch is
+still to be recorded (see [`CI.md`](./CI.md#provenance-evaluation-runs)). The
+design record, including the Codex review revision that overrides its earlier
+text, is
+[`2026-10-22-mail-imap-sync-design.md`](../superpowers/specs/2026-10-22-mail-imap-sync-design.md).
+This subsection summarizes the delivered behaviour and lists where the code
+differs from that record.
+
+The owner says "sync my mail" in a Hermes chat. Hermes calls
+`mordred_mail_sync`; Mordred fetches new mail over IMAP and writes it through
+the collector above (`plan_import`, the store-backed quote linker,
+`write_thread`); Hermes receives counts only. `hermes-mordred mail fetch` runs
+the same function (`imports/mail/imap_sync.run_fetch`). macOS only: other
+platforms refuse with `unsupported_platform`. OAuth and the Gmail API are not
+part of this delivery ([`TODO.md`](./TODO.md)).
+
+- **Credentials.** `mail setup` reads the address and an app password on a
+  TTY (never argv or the environment; `tty_required` otherwise), logs in once
+  read-only, chooses the mailboxes and seals `{address, app_password,
+  imap_host, imap_port, own_addresses, account, gmail, mailboxes}` in
+  `<home>/mordred/mail/credentials.sealed` under the Secure Enclave role
+  `mordred-hermes.mail.credentials.v1`, through the hardware-only backend of
+  the Telegram credentials (`extension/telegram/tee.py`). Every fetch unseals
+  afresh (Touch ID unless the key was created with `--no-touch-id`, which
+  cron needs). Status reads only `credentials.meta.json` (account label, Gmail
+  path, roles, Touch ID); the address never appears there or in any output.
+  The account label is one lowercase key component (`[a-z][a-z0-9_]{0,31}`,
+  default `mail`) and namespaces the uids as in `mail import`.
+- **Gates**, in order: macOS, sealed credentials present, memory encryption
+  (`memory_encryption_required`, the Telegram guard), the `mordred.db` gate
+  (its codes `not_armed`, `conversion_pending`, `unprotected_process`,
+  `no_key` pass through, any other store refusal is
+  `import_store_unavailable`), the per-home writer lock
+  `<home>/mordred/mail/.lock` (`sync_in_progress`; `mail import` holds it
+  too), then the unseal and the login. A refusal before the unseal never asks
+  for Touch ID.
+- **Transport.** The route comes from `extension/egress.resolve_route` for the
+  sealed host (Tor needs a loopback SOCKS proxy; VPN needs the live network
+  runtime, so a standalone CLI with the VPN path refuses; no proxy variable is
+  read elsewhere). The collector builds the socket: direct TCP, or SOCKS5 with
+  the hostname sent to the proxy (remote DNS) and the route's credentials (the
+  Tor isolation token). An HTTP or any other proxy refuses with
+  `egress_unsupported`; a routing refusal is `routing_unavailable`. TLS is
+  implicit (port 993 by default) with `ssl.create_default_context()`,
+  certificate and hostname checks on, TLS 1.2 or newer, SNI the sealed host;
+  no STARTTLS, no referrals. The host must be a DNS name.
+- **Read-only protocol.** The client refuses, before sending, every command
+  outside `CAPABILITY`, `LOGIN`/`AUTHENTICATE`, `LIST`, `EXAMINE`,
+  `UID SEARCH` (UID sets, `SINCE`) and `UID FETCH` with only `UID`,
+  `RFC822.SIZE`, `BODY.PEEK[]`, `X-GM-LABELS`, `X-GM-THRID` and `X-GM-MSGID`
+  (`imap_command_refused`), so nothing is selected read-write, flagged,
+  copied, expunged or appended and nothing is marked read. imaplib's debug
+  output and command log are disabled.
+- **Mailboxes.** Gmail (`X-GM-EXT-1`): the `\All` special-use mailbox
+  (`[Gmail]/All Mail` or `[Google Mail]/All Mail` as fallback, else the
+  operator picks), which holds archived mail and not Spam or Trash, fetched
+  with Gmail's labels and thread ids. Other servers: `INBOX`, then the `\Sent`
+  special-use folder chosen at setup (or the operator's pick, or none);
+  `XLIST` is not used and no other folder is fetched in this version.
+- **Trusted metadata.** The raw bytes are never modified. `RawMessage` carries
+  `trusted: TrustedMeta(labels, thread_id, folder_role)`, filled only by the
+  collector; when present, the embedded `X-Gmail-Labels` and `X-GM-THRID`
+  headers are ignored. Gmail system labels are matched in their protocol form
+  (custom labels are decoded from modified UTF-7 and never classify): `\Sent`
+  gives `gmail_label_sent` (`api_identity`, a quote anchor); `\Draft`,
+  `\Spam` and `\Trash` are skipped. A generic sent folder gives
+  `imap_sent_folder`: owner for display, quality `source_claimed`, never a
+  quote anchor (`link.ANCHOR_EVIDENCE` is unchanged); as a sent copy it still
+  wins over a received copy of the same Message-ID inside one plan.
+- **Cursors.** Per mailbox, the `import_meta` key `mail_imap.<account>.m<12 hex>`
+  (SHA-256 of host, port, address and mailbox name) holds JSON `{base, epoch,
+  low, mailbox_digest, role, uid, uidvalidity}`. A changed `UIDVALIDITY`
+  starts a new epoch (`cursor_reset`; the re-fetch is idempotent). The first
+  run of an epoch takes the newest `max_messages` UIDs and reports the rest as
+  `excluded_history`; later runs fetch UIDs above `uid`. `--since YYYY-MM-DD`
+  backfills older mail (server date on or after the day, newest first) with
+  its own state `<key>.back` (`low`) and never moves the forward cursor.
+  UIDs come from windowed `UID SEARCH` (at most 100000 UIDs per window), and a
+  UID at or below the cursor (`UID n:*` returns the last message) is dropped.
+  `mail_imap.<account>.last` records `{at, error, gmail, partial}`.
+- **Batches.** Groups of at most 200 UIDs are size-checked with `UID FETCH
+  (UID RFC822.SIZE)`; a message over 25 MiB is counted as `skipped_oversize`
+  and never downloaded. Batches of at most 64 MiB of literals are fetched with
+  `BODY.PEEK[]`, planned, written thread by thread under ONE `import_runs` row
+  (`source = mail`) with `write_thread(..., merge_conversation=True)` (stored
+  participants are kept, `last_message_at` is the maximum, the stored title is
+  kept, `message_count` is recounted), and published together with the cursor
+  by `ImportStore.commit_batch` in one transaction. A crash re-fetches at most
+  one batch; a fetch first marks `open` mail runs left by a crash `failed`.
+- **Budgets.** `max_messages` 1 to 2000 (default 2000) across the mailboxes
+  of one call; a 30 s socket timeout; a time budget checked between batches,
+  600 s for the CLI and 60 s for the tool. Stopping early is `partial: true`
+  with `partial_reason` `time_budget`, `max_messages` or `error`, and the next
+  call continues from the committed cursor.
+- **Output.** `FetchResult` is the only output, serialized through a fixed
+  allowlist: integers `inserted`, `duplicates`, `revised`, `conflicts`,
+  `fetched`, `skipped`, `skipped_oversize`, `batches`, `mailboxes`,
+  `excluded_history`; booleans `gmail`, `cursor_reset`, `partial`, `dry_run`;
+  `partial_reason` and `error` from closed enums. Error codes:
+  `unsupported_platform`, `mail_not_configured`, `memory_encryption_required`,
+  `custody_busy`, the gate codes above, `import_store_unavailable`,
+  `sync_in_progress`, `store_path_unsafe`, `tee_unavailable`,
+  `tee_auth_cancelled`, `secrets_corrupt`, `routing_unavailable`,
+  `egress_unsupported`, `imap_unreachable`, `imap_auth_failed`,
+  `imap_protocol`, `imap_command_refused`, `run_failed`, `invalid_request`,
+  `fetch_failed`. Exceptions are mapped to codes and never stringified. One
+  audit event `mail.fetch` per real fetch carries `decision`
+  (`committed`/`partial`/`failed`), `via` (`cli`/`tool`) and the result
+  fields only.
+
+CLI:
+
+```
+hermes-mordred mail setup [--imap-host H] [--imap-port P] [--account LABEL] [--no-touch-id]
+hermes-mordred mail fetch [--max N] [--mailbox all|inbox|sent] [--since YYYY-MM-DD] [--dry-run] [--json]
+hermes-mordred mail forget [--rows] --yes
+hermes-mordred mail status [--json]
+```
+
+`setup` defaults the host to `imap.gmail.com` for Gmail addresses and asks
+for it otherwise. `fetch` exits 0 on success (a partial fetch included), 1 on
+a refusal or failure, 2 on bad arguments; `--json` prints exactly the
+serialized `FetchResult`; `--dry-run` fetches and plans but writes no rows,
+runs, cursors or audit entry. `forget --yes` deletes the sealed credentials,
+the Enclave key and the account's cursors (a store refusal leaves the cursors
+and exits 1); `--rows` first deletes the account's mail rows
+(`delete_source`) and stops with exit 1, touching nothing, when the store
+refuses. `mail status` adds the account label, the path and scope, the last
+fetch and the cursor positions.
+
+Hermes tool `mordred_mail_sync` (toolset `mordred_telegram`, beside
+`mordred_history_search`):
+
+- Argument `max_messages` only (integer 1 to 2000); any other key, a boolean,
+  a float or a string is `invalid_request`.
+- `check_fn`: macOS, the Hermes model is Venice or loopback, the store gate
+  passes and mail credentials are sealed. The handler checks the running
+  model again (a Venice model must be `private`; `hermes_model_not_allowed`,
+  `hermes_model_not_private`) and the fetch repeats every gate above.
+- Result: the serialized `FetchResult` plus a fixed `note`; errors before the
+  fetch are `{error, note}`. The fetch runs in a worker thread that has
+  finished before the result is returned.
+- Not a reader tool and not a taint source. It is in
+  `privacy_check.egress.READER_ALLOWED` (allowed in a reader session) and in
+  `FIRST_PARTY_TOOLS` (its destination is fixed, so it also runs under
+  `lockdown` and `search`); the operator's tool blocklist covers it at every
+  level. The Telegram skill says when to call it.
+
+Where the code differs from the design record:
+
+- The cursor key component is `m` plus 12 hex characters (a key component
+  must start with a letter), and the digest covers host, port and address as
+  well as the mailbox name, so a later setup of another account under the same
+  label never reuses a cursor. The value adds `role`, `base` and `low`.
+- Conversation merging is the `merge_conversation=True` option of
+  `write_thread`, used by the fetch only; `upsert_conversation` and the other
+  callers are unchanged.
+- `--mailbox` takes a role (`all`, `inbox`, `sent`) among the configured ones,
+  not a folder name.
+- A dry run opens the store (to read the cursor and link quotes) but takes no
+  lock and writes nothing.
+- Codes added beyond the record: `routing_unavailable`,
+  `imap_command_refused`, `fetch_failed`, `tty_required` (CLI only) and the
+  gate codes; result fields added: `fetched`, `skipped`, `dry_run`.
 
 ## Imported-message provenance evaluation (2026-10-22)
 

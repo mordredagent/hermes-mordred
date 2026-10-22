@@ -2434,6 +2434,57 @@ Delivered in PRs 9 (library) and 10 (CLI) of the sequence above.
 - Later, outside this plan: a Gmail API collector that feeds the same
   normalization and `write_thread` path.
 
+### IMAP sync (2026-10-22)
+
+**Spec:** [IMAP sync](SPEC.md#imap-sync-2026-10-22); design record
+[`2026-10-22-mail-imap-sync-design.md`](../superpowers/specs/2026-10-22-mail-imap-sync-design.md)
+(the Codex review revision at its end overrides its earlier text). Delivered
+in three stages that are committed separately:
+
+1. Documentation: this subsection, the SPEC subsection, PATHS rows for
+   `<home>/mordred/mail/` and the `mail_imap.*` cursor keys, the
+   `mordred_mail_sync` handler codes in HOOK_PAYLOADS section 9, the USAGE
+   steps, the CI note and the TODO entries.
+2. Library and CLI:
+   - `imports/mail/source.py`: `TrustedMeta` and `TrustedBytes`; `RawMessage`
+     gains `trusted`. `owner.py` (`classify(..., trusted=)`, the evidence code
+     `imap_sent_folder`, `SENT_EVIDENCE`), `normalize.py` (`with_trusted`) and
+     `importer.py` read labels and thread ids from it and ignore the embedded
+     headers.
+   - `imports/mail/_imap_codec.py` (modified UTF-7, tokenizer, FETCH, LIST,
+     SEARCH and `X-GM-LABELS` parsing), `imap.py` (egress route, SOCKS5 with
+     remote DNS, TLS context, the command allowlist, `ImapSession`),
+     `secrets.py` (Enclave-sealed credentials, role
+     `mordred-hermes.mail.credentials.v1`) and `imap_sync.py` (`run_fetch`,
+     cursors, batches, `FetchResult`, the writer lock).
+   - `imports/store.py`: `commit_batch`, `fail_open_runs`, `meta_items` and
+     `write_thread(merge_conversation=True)`.
+   - `wizard/mail_sync_cli.py` (`mail setup|fetch|forget`, the IMAP part of
+     `mail status`); `wizard/mail_cli.py` dispatches to it, prints the IMAP
+     status and takes the writer lock in `mail import`.
+3. Hermes tool: `extension/telegram/mail_tool.py` (`mordred_mail_sync`),
+   registered in `hermes_tools.register_tools`; `privacy_check/egress.py`
+   (`MAIL_SYNC_TOOL` in `FIRST_PARTY_TOOLS` and `READER_ALLOWED`, never in
+   `READER_TOOLS`/`TAINT_SOURCES`); the Telegram skill section "Syncing mail".
+
+Tests (offline, no network): `tests/_fake_imap.py` is a scripted IMAP server
+driven by the real `imaplib` client over a socket pair; it records every
+command and reports `SELECT`, `STORE`, `COPY`, `EXPUNGE`, `APPEND` or a body
+fetch without `.PEEK` as a violation. `tests/test_mail_imap_sync.py` (Gmail
+labels and thread ids, forged headers ignored, the generic two-folder path,
+cursors, `UID n:*` self-inclusion, `UIDVALIDITY` epochs, newest-N and
+`excluded_history`, `--since` backfill, 200-UID groups and 64 MiB batches,
+oversize skipped before any literal, a failed batch leaving the cursor at the
+last committed one, a server hang-up, the time budget, reclaim, merge, dry
+run, the gate matrix and canaries), `test_mail_imap_client.py` (codec, route
+to direct and SOCKS5, refused proxy kinds, TLS context, SNI, the command
+allowlist, silenced debug output), `test_mail_trusted_meta.py`,
+`test_mail_store_batches.py`, `test_mail_secrets.py` (with a fake Enclave),
+`test_mail_sync_cli.py` and `tests/extension/test_mail_sync_tool.py`
+(arguments, `check_fn` matrix, counts-only result, budget, lock); reader-mode
+cases in `tests/test_privacy_check_reader_mode.py`. A real fetch is
+live-gated ([CI.md](CI.md#provenance-evaluation-runs)).
+
 ## Imported-message provenance evaluation implementation
 
 **Spec:** [Imported-message provenance evaluation](SPEC.md#imported-message-provenance-evaluation-2026-10-22).

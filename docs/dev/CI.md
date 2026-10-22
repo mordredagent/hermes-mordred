@@ -336,8 +336,23 @@ record and the hook), `tests/extension/test_telegram_history.py`,
 `test_telegram_import.py`, `test_telegram_migrate_store.py`,
 `test_telegram_ask_render.py`, `test_history_search_tool.py` and
 `test_telegram_hermes_tools.py`, and `tests/test_provenance_eval_generator.py`,
-`_score.py`, `_conformance.py`. Security-sensitive edits to these areas run the
-complete containing modules, not only the critical preset.
+`_score.py`, `_conformance.py`. The IMAP sync adds `tests/test_mail_imap_sync.py`,
+`test_mail_imap_client.py`, `test_mail_trusted_meta.py`,
+`test_mail_store_batches.py`, `test_mail_secrets.py`, `test_mail_sync_cli.py`
+and `tests/extension/test_mail_sync_tool.py`; they talk to the scripted
+`tests/_fake_imap.py` server over a local socket pair (no network, no Secure
+Enclave). Security-sensitive edits to these areas run the complete containing
+modules, not only the critical preset.
+
+IMAP sync live check (manual, never in CI): on macOS with a throwaway
+`HERMES_HOME` (databases encrypted, memory encryption on, the Enclave helper
+enabled), run `hermes-mordred mail setup` against a real Gmail account with an
+app password, then `mail fetch --dry-run --max 20`, `mail fetch --max 20` and
+one `mordred_mail_sync` call from a Hermes chat on a loopback or
+Venice-private model. Record counts and codes only (never an address,
+subject or label) in the Manual live-device validation log, with the network
+path used and whether Touch ID was required; delete the app password and run
+`mail forget --rows --yes` afterwards.
 
 Gate and configuration for `tests/integration/test_provenance_eval.py` and
 `uv run python tools/provenance_eval run`:

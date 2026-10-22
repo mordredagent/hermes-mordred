@@ -39,6 +39,9 @@ the optional workspace target has user-home paths of its own.
 | `<db>.mordred-enc` | database conversion | the verified converted copy (encrypted, or plain when decrypting), renamed over `<db>` |
 | `<home>/mordred/memory-vault.optout` | encryption CLI | pauses the memory hook (paused by operator) |
 | `<home>/mordred/telegram/` | extension (Telegram importer) | encrypted read-only Telegram archive |
+| `<home>/mordred/mail/credentials.sealed` | `mail setup` | IMAP address, app password, host, port, own addresses and chosen mailboxes, sealed by the Secure Enclave role `mordred-hermes.mail.credentials.v1`; read by `mail fetch` and `mordred_mail_sync` |
+| `<home>/mordred/mail/credentials.meta.json` | `mail setup` | non-secret flags (account label, Gmail path, mailbox roles, Touch ID); read by `mail status` and the tool's `check_fn` |
+| `<home>/mordred/mail/.lock` | `mail fetch`, `mordred_mail_sync`, `mail import`, `mail forget` | non-blocking per-home mail writer lock (`sync_in_progress`) |
 | `<home>/mordred/reader_sessions.json` | privacy_check reader mode | durable record (SHA-256 digests) of sessions that used a reader tool |
 | `<home>/mordred/uninstall/` | `uninstall` | `.env` lines (`HERMES_MEMORY_KEY`, `MORDRED_*`) moved out of `.env`, mode `0600` |
 | `<home>/extension/` | extension and keyvault signer | pairing, E2E, WebAuthn, history, wallet config |
@@ -490,6 +493,34 @@ migrate-store`, `mail import`) and read by `telegram_ask` and
   rewinds imported history; there is no per-table backup.
 - Telegram deletion: `telegram logout --forget` removes the Telegram `import_*`
   rows (with `secure_delete=ON`).
+- IMAP sync cursors live in `import_meta` (content-free markers set through
+  `ImportStore.set_meta` / `commit_batch`): `mail_imap.<account>.m<12 hex>`
+  (forward cursor per mailbox; the hex is the start of SHA-256 over host, port,
+  address and mailbox name) and `mail_imap.<account>.m<12 hex>.back` (the
+  `--since` backfill), JSON `{base, epoch, low, mailbox_digest, role, uid,
+  uidvalidity}`, and `mail_imap.<account>.last` (`{at, error, gmail,
+  partial}`). `mail forget` deletes them; `mail forget --rows` also deletes the
+  account's mail rows.
+
+## `<home>/mordred/mail/`
+
+Owned by the IMAP mail sync (`mordred_hermes.imports.mail.secrets` and
+`imap_sync`; macOS only). The directory is mode `0700` with a `.gitignore` of
+`*`; files are mode `0600`, replaced atomically.
+
+- `credentials.sealed` — `MMC1 || u16 len || wrap_blob || nonce(12) ||
+  AES-256-GCM(json)` with AAD `mordred-mail-credentials-v1`; `wrap_blob` wraps
+  the data key under the Secure Enclave key `mordred-hermes.mail.credentials.v1`
+  (its opaque Enclave blob lives in `<home>/mordred/keyvault/sekey/`), through
+  the same hardware-only backend as the Telegram credentials. Every fetch
+  unseals it afresh; nothing decrypted is cached or written.
+- `credentials.meta.json` — `{version, account, gmail, roles, touch_id}`; never
+  the address, host or password.
+- `.lock` — the per-home mail writer lock (`flock`, non-blocking).
+
+`mail forget --yes` deletes both credential files and the Enclave key. No
+fetched mail is ever written here or to a temporary file: messages go only into
+`<home>/plugin-data/mordred/mordred.db`.
 
 ## `<home>/mordred/reader_sessions.json`
 

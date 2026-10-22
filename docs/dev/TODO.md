@@ -742,6 +742,11 @@ implemented unless checked. Steps 1 to 11 landed on
   throwaway `HERMES_HOME`; `mail import --dry-run` on fixtures; owner counts-only
   dry run on real Takeout mail; `provenance_eval --tier smoke` on both drivers;
   end-to-end reader-mode refusal after a Hermes restart.
+- [x] IMAP mail sync: `mail setup|fetch|forget` and the Hermes tool
+  `mordred_mail_sync` ([SPEC](SPEC.md#imap-sync-2026-10-22)).
+- [ ] Live-gated: one real Gmail app-password `mail fetch` and one
+  `mordred_mail_sync` call on a throwaway `HERMES_HOME`, counts only, recorded in
+  [CI.md](CI.md#manual-live-device-validation-log).
 
 Follow-ups left by the landed code:
 
@@ -768,10 +773,18 @@ Follow-ups left by the landed code:
   index).
 - [ ] Reader-mode inheritance for a new session id that continues an old
   context (today such a flow is unrestricted until its first reader-tool call).
+- [ ] `mail import` could write with `merge_conversation=True` like the IMAP
+  fetch, so a later file import never shrinks a stored thread's participants.
+- [ ] IMAP sync beyond the chosen mailboxes (other folders and labels' own
+  folders), IP-literal or loopback hosts (for example a local bridge), and a
+  way to change the Touch ID choice without `mail forget` and a new setup.
 
 Later (not scheduled):
 
 - [ ] Gmail API collector feeding the same normalization path.
+- [ ] OAuth 2.0 for mail instead of app passwords: `XOAUTH2` over the same IMAP
+  collector and/or the Gmail API (needs an OAuth client, consent flow and the
+  refresh token sealed with the mail credentials).
 - [ ] Label-language decision (`label_language` default `en` or `ja`) after the
   evaluation.
 - [ ] Linux and Windows `mordred.db` stores (today those platforms keep the
