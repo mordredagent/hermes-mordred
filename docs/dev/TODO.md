@@ -774,6 +774,14 @@ Follow-ups left by the landed code:
   context (today such a flow is unrestricted until its first reader-tool call).
 - [ ] `mail import` could write with `merge_conversation=True` like the IMAP
   fetch, so a later file import never shrinks a stored thread's participants.
+- [ ] Evaluation free-text scorer: the first smoke run (2026-10-22, privacy driver on
+  a loopback `qwen2.5:7b`, seed 0, `per_part_en`) flagged an answer that named "the
+  account owner" as the author as an owner/other swap, so the "sentence names the
+  true author" check misses role phrases; verify swap counts against the structured
+  claims before trusting free-text rates. The same run showed that model answering
+  Japanese questions in Chinese and citing evidence ids in 16 of 42 answers; rerun
+  on the production Venice private model before drawing conclusions about the
+  head-line format.
 - [ ] IMAP sync beyond the chosen mailboxes (other folders and labels' own
   folders), IP-literal or loopback hosts (for example a local bridge), and a
   way to change the Touch ID choice without `mail forget` and a new setup.
