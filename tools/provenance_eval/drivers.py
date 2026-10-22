@@ -118,6 +118,7 @@ ENV_LLM_API_KEY: Final = "MORDRED_EVAL_LLM_API_KEY"  # optional, a keyed loopbac
 ENV_HERMES_MODEL: Final = "MORDRED_EVAL_HERMES_MODEL"
 ENV_HERMES_BASE_URL: Final = "MORDRED_EVAL_HERMES_BASE_URL"
 ENV_HERMES_API_KEY: Final = "MORDRED_EVAL_HERMES_API_KEY"  # optional, a keyed loopback server
+ENV_HERMES_CONTEXT_LENGTH: Final = "MORDRED_EVAL_HERMES_CONTEXT_LENGTH"  # optional, declared model window
 
 DECOY_TOOLSET: Final = "provenance_eval_decoys"
 _HISTORY_TOOLSET: Final = "mordred_telegram"
@@ -712,8 +713,14 @@ def _read_stamp(home: Path) -> dict[str, Any] | None:
 
 def _write_config(home: Path, *, model: str, base_url: str, style: str) -> None:
     """config.yaml (JSON is YAML): the Hermes model Mordred's reader gate checks, the plugin, the label language."""
+    model_section: dict[str, object] = {"default": model, "provider": "custom", "base_url": base_url}
+    # Hermes refuses models whose server reports a window under 64K; a loopback server that
+    # serves a larger window than it advertises can state the real value here.
+    declared = os.environ.get(ENV_HERMES_CONTEXT_LENGTH, "").strip()
+    if declared:
+        model_section["context_length"] = max(int(declared), 0)
     config = {
-        "model": {"default": model, "provider": "custom", "base_url": base_url},
+        "model": model_section,
         "plugins": {"enabled": ["mordred"], "mordred_imports": {"label_language": HeadStyle(style).lang}},
     }
     _write_private(home / "config.yaml", json.dumps(config, indent=1) + "\n")

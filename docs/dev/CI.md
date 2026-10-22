@@ -415,7 +415,9 @@ Gate and configuration for `tests/integration/test_provenance_eval.py` and
   (Venice default `deepseek-v4-flash`), optional `MORDRED_EVAL_LLM_API_KEY`;
   Venice reads `VENICE_API_KEY` as elsewhere. Hermes driver:
   `MORDRED_EVAL_HERMES_MODEL`, `MORDRED_EVAL_HERMES_BASE_URL`, optional
-  `MORDRED_EVAL_HERMES_API_KEY`; a model that is neither Venice-private nor
+  `MORDRED_EVAL_HERMES_API_KEY`, optional `MORDRED_EVAL_HERMES_CONTEXT_LENGTH` (written
+  as `model.context_length` for a loopback server that serves a larger window than it
+  advertises, for example llama-server with `-c 65536`); a model that is neither Venice-private nor
   loopback, or has a context window under 64K tokens, reports `unavailable`.
   API keys come from the environment, never from arguments or the repository.
 - Example (loopback privacy driver, smoke tier):
