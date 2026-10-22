@@ -75,8 +75,9 @@ def _seed_archive(root, key: bytes = b"\x05" * 32) -> None:
 
 
 class _VeniceSession:
-    def __init__(self, privacy: str = "private") -> None:
+    def __init__(self, privacy: str = "private", answer: list[str] | None = None) -> None:
         self.privacy = privacy
+        self.answer = answer
         self.bodies: list[dict[str, Any]] = []
         self.closed = False
 
@@ -86,6 +87,9 @@ class _VeniceSession:
 
     def post(self, url: str, **kwargs: Any) -> Any:
         self.bodies.append(kwargs["json"])
+        if self.answer is not None:
+            deltas = [json.dumps({"choices": [{"delta": {"content": text}}]}) for text in self.answer]
+            return _Resp(chunks=[*(f"data: {d}\n".encode() for d in deltas), b"data: [DONE]\n"])
         return _Resp(
             chunks=[
                 b'data: {"choices":[{"delta":{"content":"\\u27e6P1\\u27e7 moved it to Monday in "}}]}\n',
@@ -126,8 +130,10 @@ def _clear_cache():
     venice._catalog_cache.clear()
 
 
-def _service(tmp_path, value=None, *, privacy="private", policy=None, installed=True) -> tuple[Any, _VeniceSession]:
-    session = _VeniceSession(privacy)
+def _service(
+    tmp_path, value=None, *, privacy="private", policy=None, installed=True, answer=None
+) -> tuple[Any, _VeniceSession]:
+    session = _VeniceSession(privacy, answer)
     svc = service.TelegramService(
         secret_store=_MemorySecrets(value),
         archive_root=tmp_path / "tg",
@@ -221,6 +227,35 @@ def test_ask_pseudonymizes_outbound_and_restores_inbound(tmp_path):
     assert "Carol" not in sent and "Finance team" not in sent
     assert "tools" not in session.bodies[0]
     assert session.closed
+    # Attributed head lines, never a bare "me"; no ids cited, so no cards.
+    assert "[Telegram tg:-5:2#a] speaker: account owner (legacy: forwards not distinguished)" in sent
+    assert '"from": "me"' not in sent
+    assert (meta[0].evidence, meta[0].unverified_ids, meta[0].unsupported_quotes) == ((), (), ())
+
+
+def test_ask_validates_cited_evidence_after_the_stream(tmp_path):
+    _seed_archive(tmp_path / "tg")
+    answer = ["⟦P1⟧ moved the review to Monday (tg:-5:", "1#a); unrelated (tg:-5:99#a)."]
+    svc, _ = _service(tmp_path, _value(), answer=answer)
+    reports: list[Any] = []
+    meta: list[Any] = []
+
+    async def run() -> list[str]:
+        return [
+            c async for c in svc.ask(AskRequest(question="budget review?"), meta.append, on_evidence=reports.append)
+        ]
+
+    assert "".join(asyncio.run(run())) == "Carol moved the review to Monday (tg:-5:1#a); unrelated (tg:-5:99#a)."
+    [report] = reports
+    [card] = report.cards
+    assert (card.evidence_id, card.speaker, card.chat, card.provenance_quality) == (
+        "tg:-5:1#a",
+        "Carol",
+        "Finance team",
+        "legacy",
+    )
+    assert report.unverified_ids == ("tg:-5:99#a",)
+    assert meta[0].evidence == report.cards and meta[0].unverified_ids == ("tg:-5:99#a",)
 
 
 def test_ask_refuses_anonymized_models(tmp_path):
@@ -355,9 +390,61 @@ def test_ws_ask_streams_sealed_chunks(tmp_path):
     frames = _dispatch(_conn(svc), {"id": "a", "type": "telegram_ask", "question": question, "dialog_ids": ["-5"]})
     types = [f["type"] for f in frames]
     assert types[0] == "telegram_ask_meta" and types[-1] == "telegram_ask_end"
+    assert "telegram_ask_evidence" not in types  # opt-in only
+    assert set(frames[0]) == {"id", "type", "model", "message_count", "dialog_count", "truncated"}
+    assert frames[-1] == {"id": "a", "type": "telegram_ask_end"}
     text = "".join(decrypt_message(_EK, f["content"]) for f in frames if f["type"] == "telegram_ask_chunk")
     assert text == "Carol moved it to Monday in Finance team."
     assert all("Carol" not in json.dumps(f) for f in frames)
+
+
+def test_ws_ask_evidence_frame_is_opt_in_sealed_and_before_end(tmp_path):
+    _seed_archive(tmp_path / "tg")
+    svc, _ = _service(tmp_path, _value(), answer=["Monday (tg:-5:1#a), see (tg:-7:1#a)."])
+    question = encrypt_message_v2(_EK, "budget review?", key_id(_EK))
+    body = {"id": "a", "type": "telegram_ask", "question": question, "dialog_ids": ["-5"], "evidence": True}
+    frames = _dispatch(_conn(svc), body)
+    types = [f["type"] for f in frames]
+    assert types == ["telegram_ask_meta", "telegram_ask_chunk", "telegram_ask_evidence", "telegram_ask_end"]
+    frame = frames[2]
+    assert set(frame) == {"id", "type", "content"} and frame["id"] == "a"
+    assert "Carol" not in json.dumps(frame) and "Budget" not in json.dumps(frame)
+    payload = json.loads(decrypt_message(_EK, frame["content"]))
+    assert payload["unverified_ids"] == ["tg:-7:1#a"] and payload["unsupported_quotes"] == 0
+    [card] = payload["cards"]
+    assert card == {
+        "id": "tg:-5:1#a",
+        "speaker": "Carol",
+        "speaker_class": "other",
+        "part_kind": "authored",
+        "chat": "Finance team",
+        "sent_at": 1_790_000_000,
+        "date": card["date"],
+        "original_sent_at": None,
+        "excerpt": "Budget review moved to Monday",
+        "quote_verified": False,
+        "provenance_quality": "legacy",
+    }
+    # Any value other than true keeps the old frame sequence.
+    svc, _ = _service(tmp_path, _value(), answer=["Monday (tg:-5:1#a)."])
+    frames = _dispatch(_conn(svc), {**body, "evidence": "yes"})
+    assert [f["type"] for f in frames] == ["telegram_ask_meta", "telegram_ask_chunk", "telegram_ask_end"]
+
+
+def test_ws_ask_evidence_frame_excerpt_is_bounded(tmp_path):
+    archive = store.ArchiveStore(b"\x05" * 32, tmp_path / "tg")
+    long_text = "Budget " + "x" * 500 + " TAIL-SECRET"
+    archive.append_messages(-5, [store.StoredMessage(id=1, date=1_790_000_000, sender="Carol", text=long_text)])
+    archive.save_index(store.ArchiveIndex(dialogs={-5: store.DialogInfo(-5, "group", "Finance team", last_date=1)}))
+    svc, _ = _service(tmp_path, _value(), answer=["See (tg:-5:1#a)."])
+    question = encrypt_message_v2(_EK, "budget?", key_id(_EK))
+    frames = _dispatch(
+        _conn(svc), {"id": "a", "type": "telegram_ask", "question": question, "dialog_ids": ["-5"], "evidence": True}
+    )
+    [frame] = [f for f in frames if f["type"] == "telegram_ask_evidence"]
+    sealed = decrypt_message(_EK, frame["content"])
+    assert "TAIL-SECRET" not in sealed
+    assert json.loads(sealed)["cards"][0]["excerpt"] == long_text[:160]
 
 
 @pytest.mark.parametrize(

@@ -28,6 +28,8 @@ LABELS: Final[dict[str, dict[str, str]]] = {
         "date_unknown": "date unknown",
         "unknown": "unknown",
         "contact": "contact",
+        "channel": "channel",
+        "bot": "bot",
     },
     "ja": {
         "owner": "アカウント所有者",
@@ -45,6 +47,8 @@ LABELS: Final[dict[str, dict[str, str]]] = {
         "date_unknown": "日時不明",
         "unknown": "不明",
         "contact": "連絡先",
+        "channel": "チャンネル",
+        "bot": "ボット",
     },
 }
 

@@ -23,6 +23,7 @@ from mordred_hermes.imports.records import (
     PartKind,
     ProvenanceQuality,
     RecordError,
+    SenderKind,
 )
 from mordred_hermes.imports.render import (
     LABELS,
@@ -80,6 +81,37 @@ def test_owner_other_unknown_heads() -> None:
     assert _render(authored(4567, OWNER)).head == f"[Telegram tg:-100123:4567#a] speaker: account owner {TAIL}"
     assert _render(authored(4568, TANAKA)).head == f"[Telegram tg:-100123:4568#a] speaker: 田中 太郎 {TAIL}"
     assert _render(authored(4570, None)).head == f"[Telegram tg:-100123:4570#a] speaker: unknown sender {TAIL}"
+
+
+def test_named_channel_or_bot_with_unknown_owner_keeps_its_name() -> None:
+    news = participant("Daily News", "-1009", OwnerClass.UNKNOWN, SenderKind.CHANNEL)
+    helper = participant("Helper", "77", OwnerClass.UNKNOWN, SenderKind.BOT)
+    assert _render(authored(4580, news)).head == f"[Telegram tg:-100123:4580#a] speaker: Daily News (channel) {TAIL}"
+    assert _render(authored(4581, helper)).head == f"[Telegram tg:-100123:4581#a] speaker: Helper (bot) {TAIL}"
+    assert "発言者: Daily News (チャンネル) →" in _render(authored(4580, news), lang="ja").head
+    assert "発言者: Helper (ボット) →" in _render(authored(4581, helper), lang="ja").head
+    # Truly unknown stays unknown: no name, or a kind that names nothing.
+    nameless = participant(" \u200b", "-1009", OwnerClass.UNKNOWN, SenderKind.CHANNEL)
+    anonymous_user = participant("Someone", None, OwnerClass.UNKNOWN, SenderKind.USER)
+    for who in (nameless, anonymous_user):
+        assert _render(authored(4582, who)).head == f"[Telegram tg:-100123:4582#a] speaker: unknown sender {TAIL}"
+    # A reserved-looking channel name is still marked; the qualifier is code, not data.
+    fake = participant("account owner", "-1010", OwnerClass.UNKNOWN, SenderKind.CHANNEL)
+    assert "speaker: account owner (contact) (channel) →" in _render(authored(4583, fake)).head
+
+
+def test_named_channel_alias_and_part_ref() -> None:
+    news = participant("Daily News", "-1009", OwnerClass.UNKNOWN, SenderKind.CHANNEL)
+    aliases = IdentityAliases()
+    msg = authored(4580, news)
+    assert _render(msg, aliases=aliases).head.startswith("[Telegram tg:-100123:4580#a] speaker: ⟦P1⟧ (channel) →")
+    ref = part_ref(CONV, msg, msg.parts[0], aliases=aliases)
+    assert (ref.speaker, ref.speaker_class) == ("Daily News (channel)", OwnerClass.UNKNOWN)
+    # The container of a forward is qualified the same way.
+    uid = tg_uid(4584)
+    fwd = part(uid, PartKind.FORWARDED, 1, author=TANAKA, text="x", original_sent_at=ORIGINAL_AT)
+    head = _render(message(uid, (fwd,), sender=news)).head
+    assert "forwarded by Daily News (channel))" in head
 
 
 def test_forwarded_head_names_original_author_date_and_forwarder() -> None:

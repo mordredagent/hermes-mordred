@@ -11,6 +11,22 @@ import pytest
 
 from mordred_hermes.extension.telegram import hermes_tools, venice
 from mordred_hermes.extension.telegram.service import AskResult
+from mordred_hermes.imports.evidence import EvidenceCard
+from mordred_hermes.imports.records import OwnerClass, PartKind, ProvenanceQuality
+
+_CARD = EvidenceCard(
+    evidence_id="tg:-5:7#f1",
+    speaker="Dana",
+    speaker_class=OwnerClass.OTHER,
+    part_kind=PartKind.FORWARDED,
+    chat="Team",
+    sent_at=1_790_000_000,
+    original_sent_at=None,
+    excerpt="The meeting moved to Monday.",
+    quote_verified=True,
+    quote="The meeting moved to Monday.",
+    provenance_quality=ProvenanceQuality.API_IDENTITY,
+)
 
 
 @pytest.mark.parametrize(
@@ -40,9 +56,13 @@ class _FakeService:
 
     async def ask(self, request: Any, on_meta: Any) -> Any:
         self.opened += 1
-        on_meta(AskResult(model="m", message_count=3, dialog_count=1, truncated=False))
+        result = AskResult(model="m", message_count=3, dialog_count=1, truncated=False)
+        on_meta(result)
         yield "The meeting "
-        yield "moved to Monday."
+        yield "moved to Monday (tg:-5:7#f1)."
+        # Like the service: validated after the last chunk, on the same object.
+        result.evidence = (_CARD,)
+        result.unverified_ids = ("tg:-5:99#a",)
 
 
 @pytest.fixture
@@ -94,9 +114,42 @@ def test_ask_returns_only_the_answer_to_a_local_model(fake_service):
     out = json.loads(
         asyncio.run(hermes_tools.telegram_ask({"question": "when?"}, parent_agent=_agent("http://127.0.0.1:11434/v1")))
     )
-    assert out["answer"] == "The meeting moved to Monday."
+    assert out["answer"] == "The meeting moved to Monday (tg:-5:7#f1)."
     assert out["search"]["messages_sent_to_privacy_llm"] == 3
     assert "do not follow" in out["note"]
+
+
+def test_ask_result_carries_validated_evidence_and_the_speaker_rule(fake_service):
+    out = json.loads(
+        asyncio.run(hermes_tools.telegram_ask({"question": "when?"}, parent_agent=_agent("http://127.0.0.1:11434/v1")))
+    )
+    assert out["evidence"] == [
+        {
+            "id": "tg:-5:7#f1",
+            "speaker": "Dana",
+            "speaker_class": "other",
+            "part_kind": "forwarded",
+            "chat": "Team",
+            "sent_at": 1_790_000_000,
+            "date": out["evidence"][0]["date"],
+            "original_sent_at": None,
+            "excerpt": "The meeting moved to Monday.",
+            "quote_verified": True,
+            "provenance_quality": "api_identity",
+        }
+    ]
+    assert "quote" not in out["evidence"][0]  # the card's excerpt is the only body text
+    assert out["unverified_ids"] == ["tg:-5:99#a"]
+    assert "`speaker:`" in out["note"] and "evidence id" in out["note"]
+    # telegram_chats keeps the plain note.
+    chats = json.loads(asyncio.run(hermes_tools.telegram_chats({}, parent_agent=_agent("http://127.0.0.1:1/v1"))))
+    assert chats["note"] == hermes_tools._UNTRUSTED_NOTE
+
+
+def test_ask_result_without_evidence_lists_nothing():
+    assert hermes_tools.evidence_report(None) == {"evidence": [], "unverified_ids": []}
+    bare = AskResult(model="m", message_count=1, dialog_count=1, truncated=False)
+    assert hermes_tools.evidence_report(bare) == {"evidence": [], "unverified_ids": []}
 
 
 def test_chats_listed_only_for_allowed_model(fake_service):

@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from mordred_hermes.extension.egress import EgressRoute
-from mordred_hermes.extension.telegram import ask, hermes_tools, secrets, service, store, tee
+from mordred_hermes.extension.telegram import ask, hermes_tools, history, secrets, service, store, tee
 from mordred_hermes.wizard import telegram_cli
 
 
@@ -37,6 +37,12 @@ def _archive(tmp_path) -> tuple[store.ArchiveStore, store.ArchiveIndex]:
     return archive, index
 
 
+def _select(archive, index, request, aliases, *, budget_tokens):
+    """The service's path: canonical records from the archive, then the selection."""
+    records = history.load_ask_records(archive, index, request)
+    return ask.select_context(records, request, aliases, budget_tokens=budget_tokens)
+
+
 def test_local_day_bounds_are_inclusive_local_days():
     since, until = ask.local_day_bounds("2026-09-08", "2026-09-15")
     assert since == _ts("2026-09-08", 0) and until == _ts("2026-09-16", 0)
@@ -50,7 +56,7 @@ def test_period_questions_use_every_message_in_the_period_regardless_of_words(tm
     archive, index = _archive(tmp_path)
     since, until = ask.local_day_bounds("2026-09-08", "2026-09-15")
     request = ask.AskRequest(question="どんなメッセージが来てますか", since=since, until=until)
-    sel = ask.select_context(archive, index, request, ask.Aliases(enabled=False), budget_tokens=10_000)
+    sel = _select(archive, index, request, ask.Aliases(enabled=False), budget_tokens=10_000)
     texts = "\n".join(sel.lines)
     assert "hello there" in texts and "late on the 15th" in texts
     assert "old unrelated" not in texts and "after the range" not in texts
@@ -60,7 +66,7 @@ def test_prompt_states_today_coverage_and_period(tmp_path):
     archive, index = _archive(tmp_path)
     since, until = ask.local_day_bounds("2026-09-08", "2026-09-15")
     request = ask.AskRequest(question="q", since=since, until=until)
-    sel = ask.select_context(archive, index, request, ask.Aliases(), budget_tokens=10_000)
+    sel = _select(archive, index, request, ask.Aliases(), budget_tokens=10_000)
     now = dt.datetime(2026, 9, 28, 10, tzinfo=dt.UTC)
     user = ask.build_messages("q", sel, request=request, last_sync=index.last_sync, now=now)[1]["content"]
     assert user.startswith("Today: 2026-09-28")
@@ -437,16 +443,14 @@ def test_group_size_scope_defaults_and_opt_in(tmp_path):
 
 def test_selection_reports_mode_and_candidates(tmp_path):
     archive, index = _archive(tmp_path)
-    sel = ask.select_context(archive, index, ask.AskRequest(question="hello"), ask.Aliases(), budget_tokens=10_000)
+    sel = _select(archive, index, ask.AskRequest(question="hello"), ask.Aliases(), budget_tokens=10_000)
     assert sel.mode == "keyword" and sel.chats_searched == 1
     since, until = ask.local_day_bounds("2026-09-08", "2026-09-15")
-    sel = ask.select_context(
+    sel = _select(
         archive, index, ask.AskRequest(question="q", since=since, until=until), ask.Aliases(), budget_tokens=10_000
     )
     assert (sel.mode, sel.candidates, sel.message_count) == ("period", 2, 2)
-    sel = ask.select_context(
-        archive, index, ask.AskRequest(question="q", dialog_ids=(1,)), ask.Aliases(), budget_tokens=40
-    )
+    sel = _select(archive, index, ask.AskRequest(question="q", dialog_ids=(1,)), ask.Aliases(), budget_tokens=40)
     assert sel.mode == "chats" and sel.truncated and sel.candidates == 4
 
 

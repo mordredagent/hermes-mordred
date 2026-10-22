@@ -11,8 +11,9 @@ Security contract:
   (one line in practice). The evidence id sits in the leading bracket, right
   after the source label, so it survives any truncation of the tail.
 - The speaker is ``account owner`` only when the part's author was classified
-  ``account_owner`` at import; ``unknown`` renders ``unknown sender``; anyone
-  else renders their display name through
+  ``account_owner`` at import; ``unknown`` renders ``unknown sender``, except a
+  named channel or bot, which renders ``<name> (channel)`` / ``<name> (bot)``;
+  anyone else renders their display name through
   :func:`~mordred_hermes.imports.aliases.safe_display`, which cannot produce a
   reserved label, a newline, or head-line grammar characters.
 - Quoted and forwarded parts always name their kind and the container's
@@ -45,6 +46,7 @@ from .records import (
     PartKind,
     ProvenanceQuality,
     RecordError,
+    SenderKind,
     Source,
     is_part_uid,
 )
@@ -73,6 +75,8 @@ BODY_INDENT: Final = "  "
 TRUNCATION_MARKER: Final = "…[truncated]"
 _MAX_LISTED_NAMES: Final = 3
 _MAX_MEDIA_CHARS: Final = 64
+#: Label key qualifying a named sender whose owner class is ``unknown``.
+_KIND_QUALIFIERS: Final = {SenderKind.CHANNEL: "channel", SenderKind.BOT: "bot"}
 # C0/C1 controls left after splitlines(); tab is kept.
 _BODY_CONTROL_RE: Final = re.compile(r"[\x00-\x08\x0e-\x1f\x7f-\x9f]")
 
@@ -155,13 +159,22 @@ class _Ctx:
         resolved = _resolve_lang(lang, style)
         return cls(Source(conv.source), aliases, resolved, labels_for(resolved))
 
-    def person(self, owner_class: OwnerClass, ident: str | None, name: str | None) -> str:
+    def person(
+        self, owner_class: OwnerClass, ident: str | None, name: str | None, kind: SenderKind | None = None
+    ) -> str:
         if owner_class == OwnerClass.ACCOUNT_OWNER:
             return self.labels["owner"]
-        if owner_class != OwnerClass.OTHER:
+        if owner_class == OwnerClass.OTHER:
+            # A mail sender without a display name is still identified by address.
+            return self._named(ident, name or (ident if self.source is Source.MAIL and ident else ""))
+        qualifier = None if kind is None else _KIND_QUALIFIERS.get(kind)
+        if qualifier is None or not clean_display(name):
             return self.labels["unknown_sender"]
-        # A mail sender without a display name is still identified by address.
-        raw = name or (ident if self.source is Source.MAIL and ident else "")
+        # A named channel or bot whose owner is unknown (a broadcast post, an
+        # anonymous admin) is still that channel or bot, never the owner.
+        return f"{self._named(ident, name)} ({self.labels[qualifier]})"
+
+    def _named(self, ident: str | None, raw: str | None) -> str:
         display = safe_display(raw, lang=self.lang)
         if self.aliases is None or not (clean_display(raw) or ident):
             return display
@@ -169,7 +182,7 @@ class _Ctx:
         return self.aliases.alias("P", key, display)
 
     def participant(self, participant: Participant) -> str:
-        return self.person(participant.owner_class, participant.stable_id, participant.display_name)
+        return self.person(participant.owner_class, participant.stable_id, participant.display_name, participant.kind)
 
     def listed(self, participants: Sequence[Participant]) -> str:
         """Up to three names, others first, the owner last, then ``(+N)``."""
@@ -194,7 +207,7 @@ def _qualifier(ctx: _Ctx, msg: ImportMessage, part: ImportPart, tz_offset_minute
     labels = ctx.labels
     items: list[str] = []
     if part.part_kind != PartKind.AUTHORED:
-        container = ctx.person(msg.owner_class, msg.sender_id, msg.sender_name)
+        container = ctx.person(msg.owner_class, msg.sender_id, msg.sender_name, msg.sender_kind)
         if part.part_kind == PartKind.FORWARDED:
             original = format_date(
                 part.original_sent_at, tz_offset_minutes=tz_offset_minutes, unknown=labels["unknown"]
@@ -255,7 +268,7 @@ def render_part(
     _check_part_uid(msg, part)
     ctx = _Ctx.create(conv, aliases, lang, style)
     labels = ctx.labels
-    speaker = ctx.person(part.author_owner_class, part.author_id, part.author_name)
+    speaker = ctx.person(part.author_owner_class, part.author_id, part.author_name, part.author_kind)
     qualifier = _qualifier(ctx, msg, part, tz_offset_minutes)
     if ctx.source is Source.MAIL:
         destination = f"{labels['to']}: {ctx.listed(msg.recipients)}"
@@ -282,7 +295,7 @@ def part_ref(
     """Stored facts for :func:`mordred_hermes.imports.evidence.validate` (real, de-aliased labels)."""
     _check_part_uid(msg, part)
     ctx = _Ctx.create(conv, aliases, lang, style)
-    speaker = ctx.person(part.author_owner_class, part.author_id, part.author_name)
+    speaker = ctx.person(part.author_owner_class, part.author_id, part.author_name, part.author_kind)
     chat = ctx.chat_title(conv)
     if aliases is not None:
         speaker, chat = aliases.dealias(speaker), aliases.dealias(chat)

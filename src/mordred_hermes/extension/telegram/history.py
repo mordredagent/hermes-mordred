@@ -28,6 +28,11 @@ Selection (:func:`select_sink`, called by the service before connecting):
 Every refusal becomes a content-free :class:`~.store.StoreError` code
 (``import_store_unavailable``, ``account_mismatch``, ``import_record_invalid``);
 the store's own code is logged, never message content.
+
+Questions read the same place (:func:`load_ask_records`): the committed
+``import_*`` rows when the index is retired, else the ``.enc`` archive mapped
+on the fly by :mod:`mordred_hermes.imports.legacy_enc` (quality ``legacy``,
+``out`` = account owner). A retired index never falls back to ``.enc``.
 """
 
 from __future__ import annotations
@@ -43,6 +48,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Final, Protocol, TypeVar
 
+from ...imports.legacy_enc import legacy_conversation, legacy_message
 from ...imports.records import (
     ConversationKind,
     ImportConversation,
@@ -59,6 +65,7 @@ from ...imports.records import (
     validate_message,
 )
 from ...imports.store import ImportRefused, ImportStore
+from .ask import AskRecords, AskRequest, candidate_window
 from .client import PartAuthor, convert_dialog, convert_import_message, convert_message, dialog_kind
 from .store import RETIRED_TO_IMPORT_STORE, ArchiveIndex, ArchiveStore, DialogInfo, StoredMessage, StoreError
 
@@ -70,6 +77,7 @@ __all__ = [
     "dialog_rows",
     "forget_imported_history",
     "list_conversations",
+    "load_ask_records",
     "open_history_store",
     "select_sink",
     "summary",
@@ -532,6 +540,108 @@ def summary(convs: Sequence[ImportConversation], index: ArchiveIndex) -> dict[st
         "message_count": sum(conv.message_count for conv in convs),
         "account_label": index.account_label,
     }
+
+
+# -- what a question reads -----------------------------------------------------------------------
+
+
+def _reading_order(msg: ImportMessage) -> tuple[bool, int, int, str]:
+    """``sent_at`` (unknown dates last), then the numeric message id: the store's reading order."""
+    numeric = int(msg.message_id) if msg.message_id.isdigit() else 0
+    return msg.sent_at is None, msg.sent_at or 0, numeric, msg.message_id
+
+
+def _committed_messages(
+    store: ImportStore, conv_uids: Sequence[str], since: int | None, until: int | None
+) -> dict[str, list[ImportMessage]]:
+    """Committed messages of ``conv_uids`` with ``since <= sent_at < until`` (either bound optional).
+
+    The ``ImportStore`` has no per-conversation read, so this selects one part
+    uid per committed message through :meth:`ImportStore.connection` and
+    hydrates the messages with the public :meth:`ImportStore.parts_for`.
+    """
+    bounds = [("m.sent_at >= ?", since), ("m.sent_at < ?", until)]
+    clauses = "".join(f" AND {clause}" for clause, value in bounds if value is not None)
+    values = [value for _clause, value in bounds if value is not None]
+    anchors: list[str] = []
+    with store.connection() as conn:
+        for start in range(0, len(conv_uids), _CHUNK):
+            chunk = list(conv_uids[start : start + _CHUNK])
+            sql = (
+                "SELECT min(p.part_uid) FROM import_messages m "
+                "JOIN import_runs r ON r.run_id = m.run_id AND r.state = 'committed' "
+                "JOIN import_parts p ON p.source_uid = m.source_uid "
+                f"WHERE m.conv_uid IN ({', '.join('?' * len(chunk))}){clauses} GROUP BY m.source_uid"
+            )
+            anchors.extend(str(row[0]) for row in conn.execute(sql, [*chunk, *values]))
+    messages = {found.message.source_uid: found.message for found in store.parts_for(anchors).values()}
+    by_conv: dict[str, list[ImportMessage]] = {}
+    for msg in sorted(messages.values(), key=_reading_order):
+        by_conv.setdefault(msg.conv_uid, []).append(msg)
+    return by_conv
+
+
+def _stored_ask_records(store: ImportStore, index: ArchiveIndex, request: AskRequest) -> AskRecords:
+    convs = list_conversations(store, index)
+    window = candidate_window(convs, request)
+    wanted = [conv.conv_uid for conv in convs if window.may_hold(conv)]
+    with _refused():
+        found = _committed_messages(store, wanted, window.since, window.until) if wanted else {}
+    return [(conv, found.get(conv.conv_uid, [])) for conv in convs]
+
+
+def _legacy_rows(info: DialogInfo, stored: Sequence[StoredMessage], imported_at: int) -> list[ImportMessage]:
+    rows: list[ImportMessage] = []
+    for message in stored:
+        try:
+            rows.append(legacy_message(info, message, imported_at=imported_at))
+        except RecordError as exc:
+            _log.warning("telegram archive row skipped (%s)", exc.code)
+    return rows
+
+
+def _legacy_ask_records(
+    archive: ArchiveStore, index: ArchiveIndex, request: AskRequest, *, imported_at: int
+) -> AskRecords:
+    dialogs: list[tuple[DialogInfo, ImportConversation]] = []
+    for info in index.dialogs.values():
+        try:
+            dialogs.append((info, legacy_conversation(info, index)))
+        except RecordError as exc:
+            _log.warning("telegram archive dialog skipped (%s)", exc.code)
+    window = candidate_window((conv for _info, conv in dialogs), request)
+    records: list[tuple[ImportConversation, Sequence[ImportMessage]]] = []
+    for info, conv in dialogs:
+        # A chat with nothing in range is listed but never decrypted.
+        stored = archive.load_messages(info.dialog_id) if window.may_hold(conv) else []
+        rows = _legacy_rows(info, stored, imported_at)
+        records.append((conv, [row for row in rows if window.contains(row.sent_at)]))
+    return records
+
+
+def load_ask_records(
+    archive: ArchiveStore,
+    index: ArchiveIndex,
+    request: AskRequest,
+    *,
+    home: Path | None = None,
+    opener: ImportStoreOpener | None = None,
+    clock: Callable[[], float] = time.time,
+) -> AskRecords:
+    """Every conversation a question may read, with the messages it can use, in reading order.
+
+    The source follows the index: ``mordred.db`` (committed runs only) when it
+    is retired there, which needs ``home`` and never falls back to ``.enc``;
+    otherwise the ``.enc`` archive, mapped to canonical records on the fly
+    (one ``#a`` part of quality ``legacy`` per row). Conversations outside
+    ``request.dialog_ids`` or the question's period come back without
+    messages, unloaded; :func:`.ask.select_context` applies the same window.
+    """
+    if index.retired_to is not None:
+        if home is None:
+            raise StoreError("import_store_unavailable")
+        return _stored_ask_records(open_history_store(home, opener), index, request)
+    return _legacy_ask_records(archive, index, request, imported_at=int(clock()))
 
 
 def forget_imported_history(

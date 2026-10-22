@@ -145,6 +145,7 @@
     "truncated": false
   },
   {"id": "telegram-ask", "type": "telegram_ask_chunk", "content": "🔒ENC:v2:a2lk:bm9uY2U:Y2lwaGVy"},
+  {"id": "telegram-ask", "type": "telegram_ask_evidence", "content": "🔒ENC:v2:a2lk:bm9uY2U:Y2lwaGVy"},
   {"id": "telegram-ask", "type": "telegram_ask_end"},
   {"id": "telegram-ask-fail", "type": "telegram_ask_error", "reason": "venice_model_not_private"},
   {

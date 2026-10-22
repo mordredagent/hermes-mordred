@@ -180,6 +180,33 @@ def test_success_still_returns_the_local_answer(ask_local):
         assert "venice_parameters" not in peer.requests[0]["body"]
         assert peer.requests[0]["authorization"] is None
     assert not any(event["event"] == "telegram.ask.failed" for event in events)
+    assert (result["evidence"], result["unverified_ids"]) == ([], [])  # nothing cited
+
+
+def _cite_first_head(body):
+    """A model that cites the first evidence id it was shown, plus one it was not."""
+    prompt = body["messages"][1]["content"]
+    first = prompt.split("[Telegram ", 1)[1].split("]", 1)[0]
+    answer = f"The budget moved ({first}); also (tg:-9:9#a)."
+    return f"data: {json.dumps({'choices': [{'delta': {'content': answer}}]})}\n\ndata: [DONE]\n\n".encode()
+
+
+def test_local_answer_returns_validated_evidence(ask_local):
+    with LocalLlmServer(response=_cite_first_head) as peer:
+        result, _ = ask_local(peer.endpoint)
+        prompt = peer.requests[0]["body"]["messages"][1]["content"]
+    assert "[Telegram tg:-5:1#a] speaker: ⟦P1⟧ (legacy: forwards not distinguished) → chat: ⟦C1⟧ /" in prompt
+    assert '"from"' not in prompt and "Carol" not in prompt
+    assert result["answer"] == "The budget moved (tg:-5:1#a); also (tg:-9:9#a)."
+    [card] = result["evidence"]
+    assert (card["id"], card["speaker"], card["chat"], card["provenance_quality"]) == (
+        "tg:-5:1#a",
+        "Carol",
+        "Finance",
+        "legacy",
+    )
+    assert card["excerpt"] == "PRIVATE-MESSAGE budget moved"
+    assert result["unverified_ids"] == ["tg:-9:9#a"]
 
 
 @pytest.mark.parametrize("windows_custody", [False, True])

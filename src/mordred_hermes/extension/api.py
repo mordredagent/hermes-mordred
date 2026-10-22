@@ -16,7 +16,9 @@ Message protocol: ``Mordred-Extension/SPEC.ja.md`` §6 and the extension's
 - ``sign_request`` → analyze + ``sign_prompt``; ``sign_approve`` → keyvault sign → ``sign_result``
 - ``telegram_status`` / ``telegram_sync`` / ``telegram_dialogs`` → read-only Telegram importer
 - ``telegram_ask`` → Venice private-model answer streamed as ``telegram_ask_meta`` +
-  ``telegram_ask_chunk*`` + ``telegram_ask_end`` (or ``telegram_ask_error``)
+  ``telegram_ask_chunk*`` + ``telegram_ask_end`` (or ``telegram_ask_error``); a request
+  carrying ``"evidence": true`` also gets one sealed ``telegram_ask_evidence`` frame
+  (validated source cards) right before ``telegram_ask_end``
 - ``activity_pair_init`` / ``activity_auth`` (pre-auth), ``activity_batch`` / ``activity_status``
   → :mod:`mordred_hermes.extension.activity_api`. An ``activity_auth`` socket is an
   activity principal limited to those two authed frames; the page principal never
@@ -1170,7 +1172,9 @@ class _Connection:
         if len(self._telegram_asks) >= _MAX_TELEGRAM_ASKS_PER_SOCKET:
             await self._send({"id": mid, "type": "telegram_ask_error", "reason": "too_many_requests"})
             return
-        task = asyncio.create_task(self._run_telegram_ask(mid, request, ek))
+        # Opt-in: clients whose strict frame decoder predates the frame never receive it.
+        evidence = msg.get("evidence") is True
+        task = asyncio.create_task(self._run_telegram_ask(mid, request, ek, evidence=evidence))
         self._telegram_asks[mid] = task
         task.add_done_callback(lambda _t: self._telegram_asks.pop(mid, None))
 
@@ -1181,11 +1185,27 @@ class _Connection:
         if task is not None:
             task.cancel()
 
-    async def _run_telegram_ask(self, mid: str, request: Any, ek: bytes) -> None:
+    def _telegram_evidence_frame(self, mid: str, ek: bytes, report: Any) -> dict[str, Any]:
+        """Source cards (stored facts plus the stored 160-character excerpt), sealed like the answer."""
+        from .telegram.service import card_json
+
+        payload = {
+            "cards": [card_json(card) for card in report.cards],
+            "unverified_ids": list(report.unverified_ids),
+            "unsupported_quotes": len(report.unsupported_quotes),
+        }
+        sealed = self._telegram_seal(ek, json.dumps(payload, ensure_ascii=False))
+        return {"id": mid, "type": "telegram_ask_evidence", "content": sealed}
+
+    async def _run_telegram_ask(self, mid: str, request: Any, ek: bytes, *, evidence: bool = False) -> None:
         from .telegram.service import AskResult, error_code
 
         meta: list[AskResult] = []
-        gen = self._telegram_ready().ask(request, meta.append)
+        reports: list[Any] = []
+        if evidence:
+            gen = self._telegram_ready().ask(request, meta.append, on_evidence=reports.append)
+        else:
+            gen = self._telegram_ready().ask(request, meta.append)
         sent_meta = False
         try:
             async for chunk in gen:
@@ -1204,6 +1224,8 @@ class _Connection:
                 sealed = self._telegram_seal(ek, chunk)
                 if not await self._send({"id": mid, "type": "telegram_ask_chunk", "content": sealed}):
                     return
+            if reports and not await self._send(self._telegram_evidence_frame(mid, ek, reports[-1])):
+                return
             await self._send({"id": mid, "type": "telegram_ask_end"})
         except asyncio.CancelledError:
             raise
