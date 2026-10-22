@@ -1,0 +1,16 @@
+Message-ID: <html1@example.net>
+Date: Mon, 05 Oct 2026 11:00:00 +0900
+From: Taro Yamada <taro@example.net>
+To: Hanako Suzuki <hanako@example.org>
+Subject: Re: Question
+MIME-Version: 1.0
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+<html><head><title>CANARY-HTML-TITLE</title><style>p { color: red } /* CANARY-HTML-STYLE */</style></head>
+<body><script>var leaked = "CANARY-HTML-SCRIPT";</script>
+<div dir="ltr">Here is my answer. CANARY-HTML-A<br>Second line &amp; more.</div><br>
+<div class="gmail_quote"><div dir="ltr" class="gmail_attr">On Mon, Oct 5, 2026 at 10:00 AM Hanako Suzuki &lt;<a href="mailto:hanako@example.org">hanako@example.org</a>&gt; wrote:<br></div>
+<blockquote class="gmail_quote" style="margin:0px 0px 0px 0.8ex">Original question. CANARY-HTML-Q<br>
+<blockquote>Deeper quote without attribution. CANARY-HTML-DEEP</blockquote></blockquote></div>
+</body></html>

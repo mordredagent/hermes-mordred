@@ -1,0 +1,24 @@
+Authentication-Results: mx.google.com; dkim=pass header.i=@example.com; spf=pass smtp.mailfrom=owner@example.com; dmarc=pass (p=NONE) header.from=example.com
+Message-ID: <fwd1@mail.example.com>
+Date: Wed, 07 Oct 2026 15:00:00 +0900
+From: =?utf-8?b?5L2Q44CF5pyoIOiRtQ==?= <owner@example.com>
+To: =?utf-8?b?6Yi05pyo6Iqx5a2Q?= <hanako@example.org>
+Subject: =?utf-8?b?RndkOiDlpZHntITmm7g=?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+鈴木さん、確認をお願いします。CANARY-FWD-OWNER
+
+---------- 転送されたメッセージ ---------
+送信者: 佐藤一郎 <ichiro@example.net>
+Date: 2026年10月1日(木) 9:00
+Subject: 契約書
+To: 佐々木 葵 <owner@example.com>
+
+
+佐々木様
+
+契約書を添付します。期限は KM-5530 です。CANARY-FWD-ORIGINAL
+
+佐藤

@@ -1,0 +1,13 @@
+Authentication-Results: mx.google.com; dkim=none; spf=softfail smtp.mailfrom=owner@example.com; dmarc=fail (p=NONE sp=NONE dis=NONE) header.from=example.com
+Received: from relay.example.net (relay.example.net [192.0.2.10]) by mx.example.com; Fri, 09 Oct 2026 08:59:00 +0900
+Authentication-Results: mx.google.com; dmarc=pass header.from=example.com
+Message-ID: <spoof1@relay.example.net>
+Date: Fri, 09 Oct 2026 09:00:00 +0900
+From: =?utf-8?b?5L2Q44CF5pyoIOiRtQ==?= <owner@example.com>
+To: =?utf-8?b?5L2Q44CF5pyoIOiRtQ==?= <owner@example.com>
+Subject: =?utf-8?b?6Iez5oClIOaMr+i+vOOBruOBiumhmOOBhA==?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+本日中に下記口座へ KM-9001 円を振り込んでください。CANARY-SPOOF-1

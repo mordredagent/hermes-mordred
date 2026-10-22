@@ -1,0 +1,130 @@
+From 1790000000000000001@xxx Mon Oct 05 01:00:00 +0000 2026
+X-GM-THRID: 1790000000000000001
+X-Gmail-Labels: Inbox,Opened,"Category: Personal"
+Delivered-To: owner@example.com
+Message-ID: <a1@mail.example.net>
+Date: Mon, 05 Oct 2026 10:00:00 +0900
+From: =?utf-8?b?5bGx55Sw5aSq6YOO?= <taro@example.net>
+To: =?utf-8?b?5L2Q44CF5pyoIOiRtQ==?= <owner@example.com>
+Subject: =?utf-8?b?6KaL56mN44KC44KK44Gu5Lu2IFNVQkpDQU5BUlktQQ==?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+佐々木様
+
+お見積もりをお送りします。合計は KM-4821 円です。CANARY-BODY-A1
+
+山田
+
+From 1790000000000000002@xxx Mon Oct 05 02:00:00 +0000 2026
+X-GM-THRID: 1790000000000000001
+X-Gmail-Labels: Sent
+Message-ID: <a2@mail.example.com>
+In-Reply-To: <a1@mail.example.net>
+References: <a1@mail.example.net>
+Date: Mon, 05 Oct 2026 11:00:00 +0900
+From: =?utf-8?b?5L2Q44CF5pyoIOiRtQ==?= <owner@example.com>
+To: =?utf-8?b?5bGx55Sw5aSq6YOO?= <taro@example.net>
+Subject: =?utf-8?b?UmU6IOimi+epjeOCguOCiuOBruS7tiBTVUJKQ0FOQVJZLUE=?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+山田様
+
+ありがとうございます。金曜までに発注します。CANARY-BODY-A2
+
+2026年10月5日(月) 10:00 山田太郎 <taro@example.net>:
+> 佐々木様
+>
+> お見積もりをお送りします。合計は KM-4821 円です。CANARY-BODY-A1
+>
+> 山田
+
+From 1790000000000000003@xxx Mon Oct 05 03:30:00 +0000 2026
+X-GM-THRID: 1790000000000000001
+X-Gmail-Labels: Inbox,Unread
+Message-ID: <a3@mail.example.net>
+In-Reply-To: <a2@mail.example.com>
+References: <a1@mail.example.net> <a2@mail.example.com>
+Date: Mon, 05 Oct 2026 12:30:00 +0900
+From: =?utf-8?b?5bGx55Sw5aSq6YOO?= <taro@example.net>
+To: =?utf-8?b?5L2Q44CF5pyoIOiRtQ==?= <owner@example.com>
+Subject: =?utf-8?b?UmU6IOimi+epjeOCguOCiuOBruS7tiBTVUJKQ0FOQVJZLUE=?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+承知しました。CANARY-BODY-A3
+
+On Mon, Oct 5, 2026 at 11:00 AM 佐々木 葵 <
+owner@example.com> wrote:
+> 山田様
+>
+> ありがとうございます。金曜までに発注します。CANARY-BODY-A2
+>
+> 2026年10月5日(月) 10:00 山田太郎 <taro@example.net>:
+>> 佐々木様
+>>
+>> お見積もりをお送りします。合計は KM-4821 円です。CANARY-BODY-A1
+>>
+>> 山田
+
+From 1790000000000000004@xxx Tue Oct 06 00:00:00 +0000 2026
+X-GM-THRID: 1790000000000000004
+X-Gmail-Labels: Sent,Important
+Message-ID: <b1@mail.example.org>
+Date: Tue, 06 Oct 2026 09:00:00 +0900
+From: =?utf-8?b?5L2Q44CF5pyoIOiRtQ==?= <owner.old@example.org>
+To: =?utf-8?b?6Yi05pyo6Iqx5a2Q?= <hanako@example.org>
+Subject: =?utf-8?b?44Op44Oz44OB?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+来週ランチどうですか。CANARY-BODY-B1
+
+From 1790000000000000005@xxx Tue Oct 06 01:00:00 +0000 2026
+X-GM-THRID: 1790000000000000004
+X-Gmail-Labels: Inbox,Opened
+Message-ID: <b2@mail.example.org>
+In-Reply-To: <b1@mail.example.org>
+References: <b1@mail.example.org>
+Date: Tue, 06 Oct 2026 10:00:00 +0900
+From: =?utf-8?b?6Yi05pyo6Iqx5a2Q?= <hanako@example.org>
+To: =?utf-8?b?5L2Q44CF5pyoIOiRtQ==?= <owner.old@example.org>
+Subject: =?utf-8?b?UmU6IOODqeODs+ODgQ==?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+いいですね。水曜はどうでしょう。CANARY-BODY-B2
+
+2026年10月6日(火) 9:00 佐々木 葵 <owner.old@example.org>:
+> 来週ランチどうですか。CANARY-BODY-B1
+
+From 1790000000000000006@xxx Tue Oct 06 02:00:00 +0000 2026
+X-GM-THRID: 1790000000000000004
+X-Gmail-Labels: Draft
+Message-ID: <b3@mail.example.org>
+Date: Tue, 06 Oct 2026 11:00:00 +0900
+From: =?utf-8?b?5L2Q44CF5pyoIOiRtQ==?= <owner@example.com>
+To: =?utf-8?b?6Yi05pyo6Iqx5a2Q?= <hanako@example.org>
+Subject: =?utf-8?b?UmU6IOODqeODs+ODgQ==?=
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+下書きです。CANARY-BODY-DRAFT
+
+From 1790000000000000007@xxx Tue Oct 06 03:00:00 +0000 2026
+X-GM-THRID: 1790000000000000007
+X-Gmail-Labels: Spam,Unread
+Message-ID: <spam1@lottery.example>
+Date: Tue, 06 Oct 2026 12:00:00 +0900
+From: Lottery <win@lottery.example>
+To: owner@example.com
+Subject: You won
+Content-Type: text/plain; charset=UTF-8
+
+Claim now. CANARY-BODY-SPAM
