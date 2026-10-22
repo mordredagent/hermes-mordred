@@ -1,0 +1,11 @@
+# Codex eleventh-pass review: mail IMAP sync (2026-10-22)
+
+Reviewer: Codex CLI 0.163.0, model `gpt-6-astra`, read-only sandbox, narrow scope (threading.py, merge_guard.py), run by the Fable session against commit ae6917c8e on pull request #259. Verdict: SHIP. Links were rewritten from absolute paths to repository-relative text.
+
+1. **Grouping:** Reference/Gmail membership is independent of batch order and dates. Strong attachments are fixed by message data (`src/mordred_hermes/imports/mail/threading.py:243` (threading.py:243)); tier-1 clusters become established (`src/mordred_hermes/imports/mail/threading.py:335` (threading.py:335)); tier-2 decisions use the completed tier-1 snapshot and are computed before unions (`src/mordred_hermes/imports/mail/threading.py:367` (threading.py:367)). Together with the one-target/pinning guard (`src/mordred_hermes/imports/mail/merge_guard.py:115` (merge_guard.py:115)), this preserves separation between legitimate established groups within the stated exclusions. No counterexample found; the A0/P0/A1/P1/X case now preserves both pairs and isolates X.
+
+   **Date qualification:** Full `build_threads` output remains date-dependent by design. Two bare messages with identical subject and participants group at timestamps `(0, 1)` but split at `(0, 2592001)` (`src/mordred_hermes/imports/mail/threading.py:419` (threading.py:419)). Dates also affect member ordering and some keys. Source UID resolves equal-date ties (`src/mordred_hermes/imports/mail/threading.py:180` (threading.py:180)).
+
+2. **New correctness defects, ranked:** None found. All 66 threading tests passed, including the injected-message property test. An additional 20,000 seeded batches with injected messages and randomized order/dates found no reference-membership or established-group separation violation. IMAP tests were inspected, not executed because their fixtures write files. Both accepted exceptions remain outside this verdict. No files changed.
+
+3. **SHIP** — the previous blocking bridge regression is fixed; no new blocker found.
