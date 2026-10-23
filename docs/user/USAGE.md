@@ -640,31 +640,36 @@ hermes-mordred desktop uninstall
 > available; Windows keeps its own page.
 >
 > **Database encryption from the page.** The step "Encrypt Hermes databases"
-> lists each Hermes database as plaintext, encrypted, encrypted or unreadable,
-> or missing, and warns when backup archives in the Hermes home may still hold
-> plaintext copies. Its **Encrypt databases** button schedules the conversion:
-> Hermes Desktop keeps its databases open, so the files are converted at the
-> next restart, before Hermes opens them, and the step offers **Restart now**.
-> The Telegram import and the mail step wait until the databases are encrypted,
-> because `mordred.db` only opens then. The step has three outcomes. Nothing to
-> convert: the databases are armed at once and nothing is scheduled. Plaintext
-> files while Hermes is running: the conversion is scheduled and runs at the next
-> restart. Plaintext files that appeared in a home that is already armed (a new or
-> restored file): the page does not schedule anything and tells you to quit Hermes
-> and run `hermes-mordred databases encrypt` in Terminal. The status line says
-> "on" only when encryption is armed and this Hermes process is protected, and
-> never counts databases as encrypted on its own.
+> lists the plaintext and unreadable (encrypted) database files it finds, and
+> warns when backup archives in the Hermes home may still hold plaintext copies.
+> The page never converts or arms anything itself: Hermes Desktop keeps its
+> databases open, so **Encrypt databases** only schedules the conversion, which
+> runs at the next restart before Hermes opens them, and the step offers
+> **Restart now**. The Telegram import and the mail step wait until the
+> databases are encrypted, because `mordred.db` only opens then. The outcomes
+> are: not armed yet, the conversion is scheduled (also when no file needs
+> converting, and asking again changes nothing); armed and no plaintext file, the
+> step is done and says "Database encryption: on"; armed but a plaintext file
+> appeared (a new or restored file), the page schedules nothing and tells you to
+> quit Hermes and run `hermes-mordred databases encrypt` in Terminal; a pending
+> conversion that did not run, a pending decryption or a leftover journal, the
+> page tells you to check `hermes-mordred databases status` in Terminal; armed but
+> this Hermes process not yet protected, the page asks you to restart Hermes
+> Desktop.
 >
-> The vault comes first. Its own step creates the file vault, moves `.env` into it
-> and shows the eight-word recovery passphrase once, with an "I have written it
-> down" checkbox; only after that does the next step encrypt Hermes's memory, and
-> if that second step fails you retry it without a new passphrase. The memory step
-> lets you choose "Ask for Touch ID every time Hermes unlocks the vault". It is off by
-> default, because Hermes Desktop starts its backend in the background and
-> cannot answer a prompt; your Telegram and mail keys keep their own Touch ID
-> setting. If an earlier vault was removed but its Keychain anchor was left
-> behind, the step shows the exact `security delete-generic-password` command to
-> run in Terminal and changes nothing itself.
+> The vault comes first. Its own step shows the eight-word recovery passphrase
+> BEFORE anything is created and asks you to tick "I have written it down"; only
+> then does it create the file vault with that passphrase and move `.env` into it.
+> The next step encrypts Hermes's memory, and if it fails you retry it without a
+> new passphrase. The vault step is also where you choose "Ask for Touch ID every
+> time Hermes unlocks the vault". It is off by default, because Hermes Desktop
+> starts its backend in the background and cannot answer a prompt; the page shows
+> the policy the key actually has, and your Telegram and mail keys keep their own
+> Touch ID setting. If an earlier vault was removed but its Keychain anchor was left
+> behind, the page shows the exact `security delete-generic-password` command to run
+> in Terminal only when that anchor is in the legacy Keychain item and the vault
+> folder is empty; in every other case it only says that an anchor remains and that
+> a later keyvault release will clear it. The page itself changes nothing.
 >
 > **Mail from the page.** The mail step does what `mail setup`, `mail fetch`
 > and `mail forget` do (see
