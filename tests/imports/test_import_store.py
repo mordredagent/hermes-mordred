@@ -6,7 +6,7 @@ import dataclasses
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -27,7 +27,13 @@ from mordred_hermes.imports.records import (
     RecordError,
     content_digest,
 )
-from mordred_hermes.imports.store import ImportRefused, ImportStore, WriteResult, open_import_store
+from mordred_hermes.imports.store import (
+    ImportRefused,
+    ImportStore,
+    WriteResult,
+    open_import_store,
+    open_import_store_readonly,
+)
 
 from ._factories import (
     MAIL_CONV_UID,
@@ -723,3 +729,236 @@ def test_open_refuses_an_unusable_data_directory(protected: Path) -> None:
     with pytest.raises(ImportRefused) as caught:
         open_import_store(protected)
     assert caught.value.code == "store_unavailable"
+
+
+# --- the read-only opener (status polling) ----------------------------------------------------------
+
+MEMORY_KEY = "hex:" + "11" * 32
+
+
+class _ReadOnlyModule:
+    """The process ``sqlite3`` as the shim would key it, recording every ``connect``."""
+
+    calls: ClassVar[list[tuple[str, dict[str, Any]]]] = []
+
+    @classmethod
+    def connect(cls, database: str, **kwargs: Any) -> sqlite3.Connection:
+        cls.calls.append((database, kwargs))
+        return sqlite3.connect(database, factory=_ClaimsKey, **kwargs)
+
+
+@pytest.fixture
+def readonly_home(protected: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A protected home whose key is already in the environment; no provider and no shared gate may run."""
+
+    def forbidden(*_args: object) -> object:
+        raise AssertionError("the read-only opener must never resolve the key or run the unlocking gate")
+
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", forbidden)
+    monkeypatch.setattr(store_module, "check_protection", forbidden)
+    monkeypatch.setenv("HERMES_MEMORY_KEY", MEMORY_KEY)
+    monkeypatch.setattr(_gate, "_process_sqlite", lambda: _ReadOnlyModule)
+    monkeypatch.setattr(_monitor, "is_plaintext", lambda _path: False)
+    _ReadOnlyModule.calls = []
+    return protected
+
+
+def data_dir(home: Path) -> Path:
+    return home / "plugin-data" / "mordred"
+
+
+def bound_store(home: Path) -> ImportStore:
+    """The import tables of ``home``'s store, created by a writer (as ``mail import`` would)."""
+    store = ImportStore(store_path(home), sqlite3.connect)
+    store.initialize(home)
+    return store
+
+
+def test_readonly_open_of_an_uninitialised_home_creates_nothing(readonly_home: Path) -> None:
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(readonly_home)
+    assert caught.value.code == "store_uninitialised"
+    assert not (readonly_home / "plugin-data").exists()  # not even the data directory
+    data_dir(readonly_home).mkdir(parents=True)
+    for prepare in (lambda: None, lambda: (data_dir(readonly_home) / "mordred.db").touch()):
+        prepare()
+        with pytest.raises(ImportRefused) as caught:
+            open_import_store_readonly(readonly_home)
+        assert caught.value.code == "store_uninitialised"
+    assert sorted(path.name for path in data_dir(readonly_home).iterdir()) == ["mordred.db"]
+    assert (data_dir(readonly_home) / "mordred.db").stat().st_size == 0 and _ReadOnlyModule.calls == []
+
+
+def test_readonly_open_of_a_store_without_import_tables_is_uninitialised(readonly_home: Path) -> None:
+    path = store_path(readonly_home)
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE activity_meta (key TEXT)")
+    conn.close()
+    before = path.stat().st_mtime_ns, path.stat().st_size
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(readonly_home)
+    assert caught.value.code == "store_uninitialised"
+    assert (path.stat().st_mtime_ns, path.stat().st_size) == before
+
+
+def test_readonly_open_reads_the_counts_through_a_read_only_uri(readonly_home: Path) -> None:
+    commit(bound_store(readonly_home), tg_conv(), [authored(1, text="SECRET one")])
+    status = open_import_store_readonly(readonly_home).status()
+    assert status["sources"]["telegram"] == {"conversations": 1, "messages": 1, "parts": 1, "uncommitted_messages": 0}
+    assert _ReadOnlyModule.calls and all(
+        database.startswith("file:") and database.endswith("?mode=ro") and kwargs.get("uri") is True
+        for database, kwargs in _ReadOnlyModule.calls
+    )
+
+
+def test_a_writer_holding_the_lock_does_not_block_readonly_status(
+    readonly_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commit(bound_store(readonly_home), tg_conv(), [authored(1, text="SECRET one")])
+    monkeypatch.setattr(store_module, "BUSY_TIMEOUT_S", 0.05)
+    holder = sqlite3.connect(store_path(readonly_home), isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")  # a fetch or an import writing a batch
+    try:
+        store = open_import_store_readonly(readonly_home)
+        assert store.status()["sources"]["telegram"]["messages"] == 1
+    finally:
+        holder.rollback()
+        holder.close()
+
+
+@pytest.mark.parametrize("value", [None, "", "not a key", "hex:" + "11" * 16, "hex:" + "zz" * 32])
+def test_readonly_open_without_valid_key_material_is_no_key(
+    readonly_home: Path, value: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if value is None:
+        monkeypatch.delenv("HERMES_MEMORY_KEY")
+    else:
+        monkeypatch.setenv("HERMES_MEMORY_KEY", value)
+    bound_store(readonly_home)
+    with pytest.raises(ImportRefused) as caught:  # the fixture's provider fails the test if it is ever called
+        open_import_store_readonly(readonly_home)
+    assert caught.value.code == "no_key" and _ReadOnlyModule.calls == []
+
+
+@pytest.mark.parametrize("marker", ["journal_path", "pending_path", "decrypt_pending_path"])
+def test_readonly_open_refuses_a_pending_conversion_in_either_direction(readonly_home: Path, marker: str) -> None:
+    from mordred_hermes.dbcrypt import _migrate
+
+    bound_store(readonly_home)
+    path = getattr(_migrate, marker)(readonly_home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}")
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(readonly_home)
+    assert caught.value.code == "conversion_pending"
+
+
+def test_readonly_open_keeps_every_gate_step(readonly_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bound_store(readonly_home)
+    monkeypatch.setattr(_shim, "is_installed", lambda: False)
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(readonly_home)
+    assert caught.value.code == "unprotected_process"
+    dbcrypt.marker_path(readonly_home).unlink()
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(readonly_home)
+    assert caught.value.code == "not_armed"
+    monkeypatch.setattr(sys, "platform", "linux")
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(readonly_home)
+    assert caught.value.code == "unsupported_platform"
+
+
+def test_readonly_open_keeps_the_binding_and_the_schema_bound(
+    readonly_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = readonly_home / "elsewhere"
+    other.mkdir()
+    ImportStore(store_path(readonly_home), sqlite3.connect).initialize(other)
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(readonly_home)
+    assert caught.value.code == "profile_mismatch"
+    with sqlite3.connect(store_path(readonly_home)) as conn:
+        conn.execute("UPDATE import_meta SET value = '99' WHERE key = 'schema_version'")
+    conn.close()
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(readonly_home)
+    assert caught.value.code == "schema_newer"
+    monkeypatch.setattr(_monitor, "is_plaintext", lambda _path: True)
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(readonly_home)
+    assert caught.value.code == "plaintext_store"
+
+
+def test_an_older_schema_is_read_without_upgrading(readonly_home: Path) -> None:
+    store = bound_store(readonly_home)
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("UPDATE import_meta SET value = '1' WHERE key = 'schema_version'")
+    conn.close()
+    assert open_import_store_readonly(readonly_home).status()["schema_version"] == 1
+    assert store.get_meta("schema_version") == "1"  # never upgraded by a status read
+
+
+def test_readonly_open_refuses_a_planted_data_directory(readonly_home: Path, tmp_path_factory: Any) -> None:
+    (readonly_home / "plugin-data").mkdir()
+    (readonly_home / "plugin-data" / "mordred").symlink_to(tmp_path_factory.mktemp("elsewhere"))
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(readonly_home)
+    assert caught.value.code == "store_unavailable"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        sqlite3.OperationalError("unable to open database file"),
+        sqlite3.OperationalError("database is locked"),
+        OSError(),
+    ],
+)
+def test_a_failed_read_only_open_is_store_unavailable(
+    readonly_home: Path, error: BaseException, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bound_store(readonly_home)
+
+    class Failing:
+        @staticmethod
+        def connect(_database: str, **_kwargs: Any) -> sqlite3.Connection:
+            raise error
+
+    monkeypatch.setattr(_gate, "_process_sqlite", lambda: Failing)
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(readonly_home)
+    assert caught.value.code == "store_unavailable"
+
+
+def test_readonly_open_refuses_an_unkeyed_connection(readonly_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bound_store(readonly_home)
+    monkeypatch.setattr(_gate, "_process_sqlite", lambda: sqlite3)  # the shim is not in place after all
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(readonly_home)
+    assert caught.value.code == "unkeyed_connection"
+
+
+def test_refusal_codes_are_closed() -> None:
+    assert {"disk_full", "busy", "store_unavailable", "store_uninitialised", "no_key"} <= store_module.REFUSAL_CODES
+    assert store_module.refusal_code(ImportRefused("disk_full")) == "disk_full"
+    assert store_module.refusal_code(ImportRefused("something new")) == "store_unavailable"
+    assert store_module.refusal_code(RuntimeError("free text")) == "store_unavailable"
+    assert ImportRefused("store_uninitialised").refusal.detail == "the import store has not been created yet"
+
+
+def test_the_writing_opener_still_resolves_the_key_through_the_provider(
+    protected: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[int] = []
+
+    def provider() -> object:
+        calls.append(1)
+        return object()
+
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", provider)
+    monkeypatch.delenv("HERMES_MEMORY_KEY", raising=False)
+    monkeypatch.setattr(_gate, "_process_sqlite", lambda: _ClaimsKeyModule)
+    monkeypatch.setattr(_monitor, "is_plaintext", lambda _path: False)
+    assert open_import_store(protected).status()["sources"] == {}
+    assert calls == [1]
