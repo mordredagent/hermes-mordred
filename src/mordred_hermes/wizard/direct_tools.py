@@ -156,6 +156,7 @@ def _valid(answer: Any) -> bool:
 def _spawn_reader(text: str, strict_empty: bool) -> dict[str, Any] | None:
     """The child's answer for ``text``; ``None`` when it could not answer (never cached)."""
     env = {key: value for key, value in os.environ.items() if key not in ("PYTHONPATH", "PYTHONHOME")}
+    env["MORDRED_CONFIG_DECRYPT"] = "0"  # a reader: never on the config.yaml materialize/reseal lifecycle
     try:
         done = subprocess.run(
             _reader_argv(strict_empty),

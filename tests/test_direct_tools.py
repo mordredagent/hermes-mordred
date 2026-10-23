@@ -676,6 +676,7 @@ def test_the_reader_child_gets_the_text_on_stdin_and_answers_one_json_line(
     assert call["input"] == b"tools:\n  tool_search:\n    enabled: off\n"  # the text, never a path
     assert str(home) not in " ".join(call["argv"])
     assert "PYTHONPATH" not in call["env"] and "PYTHONHOME" not in call["env"]
+    assert call["env"]["MORDRED_CONFIG_DECRYPT"] == "0"  # the reader never materializes or reseals config.yaml
     assert call["timeout"] == direct_tools.READER_TIMEOUT_S
 
 

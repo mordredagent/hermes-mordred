@@ -5410,7 +5410,8 @@ moved to a child process.
 - **A child process parses.** The Hermes process (Desktop's backend, the CLI) only
   reads the file: POSIX through the wizard's regular-file reader, Windows through the
   checked snapshot. It never parses YAML. It starts `python -I` (this interpreter;
-  `PYTHONPATH` and `PYTHONHOME` removed; no working directory set) running
+  `PYTHONPATH` and `PYTHONHOME` removed, `MORDRED_CONFIG_DECRYPT=0`; no working
+  directory set) running
   `mordred_hermes.wizard._direct_tools_yaml` as `__main__`, writes the config.yaml text
   to its stdin and reads exactly one JSON line from its stdout: `{"direct": bool,
   "source": "config" | "default", "existing": "absent" | "deferral" | "legacy" |
