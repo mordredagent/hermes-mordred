@@ -5421,8 +5421,9 @@ moved to a child process.
   Desktop, whose interpreter is the base one with Hermes's environment only on
   `sys.path`, the `site-packages` directories outside the interpreter's prefix are
   added back for the child (`site.addsitedir`). Answers are cached by the sha256 of
-  the text (the last 8), so the status poll starts no process while the file is
-  unchanged; a failed answer is never cached.
+  the text (the last 8): an unchanged file whose last answer succeeded starts no
+  process. A failed answer is never cached, so a file the child cannot answer is read
+  again, and waits for the child again, on every poll.
 - **No text escapes.** ruamel's errors and warnings (`ReusedAnchorWarning`,
   `MantissaNoDotYAML1_1Warning`) quote source lines, values included. They are raised
   only in the reader child, which records every warning and turns any error or warning
@@ -5461,9 +5462,10 @@ moved to a child process.
   `config_write_failed` (its type name only is logged).
 - **Status field.** `GET /status?client_version=4` carries `tools: {"direct": bool |
   null, "source": "config" | "default" | "unreadable"}` on every platform, Windows
-  included (the setting is Hermes-wide). It is a cheap read that creates no file or
-  directory and never waits (POSIX: no lock; Windows: the nonblocking checked
-  snapshot); the reader child runs only when the text changed since a cached answer.
+  included (the setting is Hermes-wide). It creates no file or directory and takes
+  no lock (POSIX: none; Windows: the nonblocking checked snapshot). A cached answer
+  (the text unchanged since a successful read) is immediate; a cache miss, or a file
+  whose last answer failed, waits for the reader child, up to its 20 s timeout.
   It never fails the status: an unreadable, busy or sealed-away config is
   `{"direct": null, "source": "unreadable"}`. Versions 1 to 3 do not carry it.
 - **Page.** The Maintenance group shows a "Tool calls" card between the update panel

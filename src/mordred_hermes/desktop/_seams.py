@@ -126,7 +126,8 @@ def fetch_env(home: Path) -> Any:
 
 
 def tools_mode(home: Path) -> dict[str, Any]:
-    """``wizard.direct_tools.read_mode``: read-only, never waits and never creates a file."""
+    """``wizard.direct_tools.read_mode``: read-only, takes no lock and creates no file; a cache miss waits
+    for the reader child (up to its timeout)."""
     return dict(library("..wizard.direct_tools", "read_mode")(home))
 
 

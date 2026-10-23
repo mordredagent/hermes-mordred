@@ -148,7 +148,9 @@ def _valid(answer: Any) -> bool:
     return (
         set(answer) == {"direct", "source", "existing"}
         and isinstance(answer["direct"], bool)
+        and isinstance(answer["source"], str)
         and answer["source"] in ("config", "default")
+        and isinstance(answer["existing"], str)  # checked before the membership test: a list would raise
         and answer["existing"] in EXISTING
     )
 
@@ -172,8 +174,10 @@ def _spawn_reader(text: str, strict_empty: bool) -> dict[str, Any] | None:
     if done.returncode != 0:
         return None
     lines = [line for line in done.stdout.decode("utf-8", "replace").splitlines() if line.strip()]
+    if len(lines) != 1:
+        return None  # exactly one line: a second answer, or any other output, is not an answer
     try:
-        answer = json.loads(lines[-1]) if lines else None
+        answer = json.loads(lines[0])
     except ValueError:
         return None
     return answer if _valid(answer) else None
@@ -206,9 +210,11 @@ def read_mode(home: Path) -> dict[str, Any]:
     """``{"direct": bool, "source": "config" | "default"}``, or ``{"direct": None, "source":
     "unreadable", "code": "config_unreadable" | "config_vault_managed"}``.
 
-    This process only reads the file (it never waits for a lock: POSIX takes
-    none, Windows reads the nonblocking checked snapshot, and nothing is
-    created); a child process parses the text (see :func:`_answer`).
+    This process only reads the file (no lock: POSIX takes none, Windows reads
+    the nonblocking checked snapshot, and nothing is created); a child process
+    parses the text (see :func:`_answer`). A cached answer is immediate; a
+    cache miss, or a file whose last answer failed, waits for the child, up to
+    :data:`READER_TIMEOUT_S`.
     """
     home = Path(home).absolute()
     try:

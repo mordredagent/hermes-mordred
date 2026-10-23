@@ -704,6 +704,9 @@ def test_an_unchanged_file_is_answered_from_the_cache(
     assert len(direct_tools._ANSWERS) == 8
 
 
+ONE_ANSWER = b'{"direct": true, "source": "config", "existing": "absent"}\n'
+
+
 @posix_only
 @pytest.mark.parametrize(
     "stdout,code",
@@ -714,6 +717,10 @@ def test_an_unchanged_file_is_answered_from_the_cache(
         (b'{"direct": true, "source": "config", "existing": "absent", "raw": "x"}\n', 0),
         (b'{"code": "something_else"}\n', 0),
         (b'{"direct": true, "source": "config", "existing": "absent"}\n', 1),
+        (b'{"direct": true, "source": "config", "existing": []}\n', 0),  # unhashable: no TypeError escapes
+        (b'{"direct": true, "source": "config", "existing": {}}\n', 0),
+        (ONE_ANSWER + ONE_ANSWER, 0),  # exactly one line, never the last of several
+        (b'{"code": "config_unreadable"}\n' + ONE_ANSWER, 0),
     ],
 )
 def test_a_reader_answer_that_does_not_conform_is_unreadable(
@@ -770,14 +777,38 @@ def test_a_shared_tools_or_tool_search_mapping_is_refused_before_hermes_runs(
         "base: &t\n  tool_search:\n    enabled: auto\ntools: *t\n",
         "base: &t\n  tool_search:\n    enabled: auto\ntools:\n  <<: *t\n  other: 1\n",
         "shared: &s\n  enabled: auto\nlist:\n  - *s\ntools:\n  tool_search: *s\n",
+        "other: !!pairs\n  - option: &s {enabled: auto}\ntools: {tool_search: *s}\n",
+        "other: !!omap\n  - option: &s {enabled: auto}\ntools: {tool_search: *s}\n",
     ],
-    ids=["tools-alias", "tool-search-through-a-merge", "alias-in-a-list"],
+    ids=[
+        "tools-alias",
+        "tool-search-through-a-merge",
+        "alias-in-a-list",
+        "alias-in-pairs-tuples",
+        "alias-in-omap-tuples",
+    ],
 )
 def test_every_shared_shape_is_refused(home: Path, hermes: FakeHermes, text: str) -> None:
     write(home, text)
     with pytest.raises(DirectToolsError) as error:
         set_direct(home, True)
     assert error.value.code == "config_unsupported_shape" and hermes.calls() == []
+
+
+PAIRS = "other: !!pairs\n  - option: &s {{enabled: {}}}\ntools: {{tool_search: *s}}\n"
+
+
+@posix_only
+@pytest.mark.parametrize("enabled,value", [(True, "auto"), (False, "'off'")])
+def test_a_mapping_shared_through_pairs_tuples_is_refused_both_ways(
+    home: Path, hermes: FakeHermes, enabled: bool, value: str
+) -> None:
+    """``!!pairs`` and ``!!omap`` load as lists of tuples; the shared-mapping walk looks inside them."""
+    config = write(home, PAIRS.format(value))
+    with pytest.raises(DirectToolsError) as error:
+        set_direct(home, enabled)
+    assert error.value.code == "config_unsupported_shape"
+    assert hermes.calls() == [] and config.read_text(encoding="utf-8") == PAIRS.format(value)
 
 
 @posix_only

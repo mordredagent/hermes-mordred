@@ -29,7 +29,7 @@ import sys
 import threading
 import warnings
 from collections import Counter
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any, Final, Literal
 
@@ -147,18 +147,24 @@ def _shared(data: Any) -> bool:
     """The ``tools`` or the ``tools.tool_search`` mapping is referenced from more than one place.
 
     Safe loading gives every alias (and every ``<<`` merge source) the same
-    object, so counting object ids over every mapping and sequence finds them.
-    Hermes's setter would change the other place too.
+    object, so counting object ids over every container finds them: mappings,
+    lists, the tuples ``!!pairs`` and ``!!omap`` load as, and sets. Hermes's
+    setter would change the other place too.
     """
     counts: Counter[int] = Counter()
     stack = [data]
     while stack:
         node = stack.pop()
-        if not isinstance(node, Mapping | list):
+        children: Iterable[Any]
+        if isinstance(node, Mapping):
+            children = node.values()
+        elif isinstance(node, list | tuple | set | frozenset):
+            children = node
+        else:
             continue
         counts[id(node)] += 1
         if counts[id(node)] == 1:
-            stack.extend(node.values() if isinstance(node, Mapping) else node)
+            stack.extend(children)
     tools = data.get("tools") if isinstance(data, Mapping) else None
     search = tools.get("tool_search") if isinstance(tools, Mapping) else None
     return any(isinstance(node, Mapping) and counts[id(node)] > 1 for node in (tools, search))

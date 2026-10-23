@@ -1,6 +1,6 @@
 # Codex third-pass review: direct tool calls option (PR #265, 2026-10-23)
 
-Response: every finding is fixed. Finding 2 is fixed in `8088e48e0`. Findings 1, 3, 4 and 5, plus the test for finding 2, are fixed in `ac037485b`. The SPEC section "Direct tool calls (2026-10-23)" describes the result.
+Response: every finding is fixed. Finding 2 is fixed in `8088e48e0`. Findings 1, 3, 4 and 5, plus the test for finding 2, are fixed in `ac037485b`. The fourth pass found that the `!!pairs` tuples escaped the shared-mapping walk of finding 3; that is closed in the commit named in [the fourth-pass record](2026-10-23-direct-tools-codex-review-pass4.md). The SPEC section "Direct tool calls (2026-10-23)" describes the result.
 
 Reviewer: Codex CLI 0.163.0, model `gpt-6-astra`, read-only sandbox.
 Commit reviewed: `81b0f6d5b` (PR #265, branch `feat/direct-tools-option`; only `ef73e65ec..81b0f6d5b`); absolute links flattened to `path:line` text.
