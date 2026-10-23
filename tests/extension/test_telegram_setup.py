@@ -32,7 +32,9 @@ def test_register_tools_registers_skill_and_section():
     ctx = SimpleNamespace(
         register_tool=lambda **kw: seen.setdefault("tools", []).append(kw["name"]),
         register_skill=lambda name, path, description="": seen.update(skill=(name, path)),
-        register_system_prompt_section=lambda sid, content, **kw: seen.setdefault("sections", []).append((sid, content)),
+        register_system_prompt_section=lambda sid, content, **kw: seen.setdefault("sections", []).append(
+            (sid, content)
+        ),
     )
     hermes_tools.register_tools(ctx)
     assert seen["skill"] == ("mordred-telegram", hermes_tools.SKILL_PATH)
