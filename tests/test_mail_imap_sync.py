@@ -402,16 +402,24 @@ def test_refusals_are_codes_and_write_nothing(
     assert [entry["error"] for entry in audits] == [code]
 
 
-def test_a_login_hint_rides_on_the_result_but_is_never_serialized(home: Path, store: ImportStore) -> None:
+def test_a_login_hint_reaches_only_the_callers_sink(home: Path, store: ImportStore) -> None:
     server = gmail_server(password="revoked", login_failure="NO [ALERT] ALERTCANARY https://support.example.com/x")
+    hints: list[str] = []
     audits: list[Any] = []
     env = make_env(home, store, server, FakeSecrets(gmail_creds()), audits=audits)
-    result = run_fetch(FetchOptions(), env)
-    assert (result.error, result.hint) == ("imap_auth_failed", "server_alert")
-    assert set(result.as_dict()) == RESULT_FIELDS  # the serializer stays closed: no hint field
+    result = run_fetch(FetchOptions(hint_sink=hints.append), env)
+    assert result.error == "imap_auth_failed" and hints == ["server_alert"]
+    assert (
+        set(result.as_dict()) == RESULT_FIELDS and set(vars(result)) == RESULT_FIELDS
+    )  # no field beyond the closed set
     recorded = json.dumps([result.as_dict(), audits, store.meta_items("mail_imap.")])
     assert "server_alert" not in recorded and "ALERTCANARY" not in recorded
-    assert "hint" not in repr(result)
+
+    def broken(_hint: str) -> None:
+        raise RuntimeError("sink failed")
+
+    assert run_fetch(FetchOptions(hint_sink=broken), env).error == "imap_auth_failed"  # a sink never breaks a fetch
+    assert run_fetch(FetchOptions(), env).error == "imap_auth_failed"
 
 
 # --- the last attempt and the last success ----------------------------------------------------------
