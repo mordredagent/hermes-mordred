@@ -19,9 +19,8 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.imports.mail import setup_flow
+from mordred_hermes.imports.mail import imap, setup_flow
 from mordred_hermes.imports.mail._imap_codec import encode_mutf7
-from mordred_hermes.imports.mail import imap
 from mordred_hermes.imports.mail.imap import ImapError, ImapStopped
 from mordred_hermes.imports.mail.imap_sync import fetch_lock
 from mordred_hermes.imports.mail.secrets import KEY_ID, MailSecretsError, MailSecretStore
