@@ -1079,3 +1079,114 @@ path above; (4) flows expire on every call, forget cancels them, residue has
 codes and a Remove action, leftover keys are recreated; (5) counts are
 labelled as store totals, the legacy archive is detected, chat sync is
 advertised only after the bridge validation.
+
+## Second revision (after the Codex second pass, 2026-10-23)
+
+Record: `docs/superpowers/reviews/2026-10-23-desktop-mail-ceremonies-codex-design-review-pass2.md`.
+Decisions (these win over everything above and are mirrored in SPEC):
+
+- **NF1/NF2 — vault ceremony as prepare → acknowledge → commit.**
+  `POST /vault/prepare {}` generates the eight-word passphrase in memory
+  (`VaultFlow`, TTL 600 s, one at a time) and returns `{flow_id, passphrase}`;
+  nothing on disk changes. The page shows the passphrase, the owner ticks "I
+  have written it down", then `POST /vault/{flow_id}/commit {unattended}`
+  creates the vault with THAT passphrase (the CLI's typed-passphrase path in
+  `_vault_lifecycle.init`), creates an empty 0600 `.env` when none exists, and
+  enrolls `.env`. A lost response after commit is harmless (the phrase was
+  delivered before commit); a backend restart between prepare and commit
+  answers `vault_flow_expired` and nothing was created. Vault states in
+  `/status.vault`: `{exists, env_enrolled, env_injecting, optout,
+  unattended}` (facts; `unattended` is the key's EFFECTIVE policy, read from
+  the key store, never the requested one). Commit on an existing vault with
+  `env_enrolled: false` enrolls `.env` without a new phrase (`passphrase_reused:
+  true` in the answer; the phrase shown at creation stays the only one);
+  `optout: true` answers `env_optout` (the owner restored a plaintext `.env`;
+  Terminal: `hermes-mordred encryption enable env`). `/memory/enable` requires
+  `env_enrolled && env_injecting` (`env_required` otherwise). The Touch ID
+  checkbox belongs to the vault step. Ceremonies run in a worker thread under
+  one module-level lock and are not cancelled when the HTTP request is
+  (`memory_operation_in_progress` for a concurrent call); the page re-reads
+  status afterwards.
+- **NF3 — databases: the Desktop route never converts or arms itself.** It
+  only schedules or reports. Total state table from `armed`,
+  `encrypt_pending`, `decrypt_pending`, `journal`, `plaintext` (any plaintext
+  file discovered) and `runtime_protected`:
+  | armed | plaintext | pending/journal | answer / step state |
+  |---|---|---|---|
+  | no | any (even none) | none | `schedule(home)` → `scheduled`, `restart_required` (startup converts what is plaintext and arms) |
+  | no | any | `encrypt_pending` already | `scheduled` (idempotent) |
+  | yes | none | none | done ("Database encryption: on") |
+  | yes | some | none | `attention: plaintext_in_armed_home` (Terminal, Hermes quit) |
+  | yes | any | `encrypt_pending` | `attention: stale_pending` (Terminal `databases status`) |
+  | any | any | `decrypt_pending` | `attention: decrypt_pending` |
+  | any | any | `journal` | `attention: journal` |
+  `runtime_protected` false while `armed` → the step says "restart Hermes
+  Desktop" (`needs_restart`). No `migrate()` call from the route; errors from
+  `schedule()` → `databases_failed` and the page re-reads status rather than
+  assuming "nothing changed".
+- **NF4/NF5 — a genuinely non-creating, non-unlocking status path.**
+  `open_import_store_readonly(home)`: resolves the path WITHOUT creating
+  directories (pure path function, not `store_path()`); `path.is_file()`
+  false → `store_uninitialised`; its own gate sequence (darwin, no pending
+  conversion either direction, `armed`, shim installed, key material VALID:
+  `HERMES_MEMORY_KEY` decodes to 32 bytes, else `no_key`) with no call into
+  any provider that could inject or unlock; connects with
+  `file:<path>?mode=ro` (`uri=True`) through the process `sqlite3` so the
+  shim keys it from the already-validated environment value; sidecar
+  failures → `store_unavailable`; verifies `mordred_key`, not plaintext,
+  profile binding and `schema_version <= code` with plain reads; never
+  `initialize()`, never upgrades. `/status.databases.runtime_protected` is
+  computed by the same non-unlocking checks, not by `check_protection`.
+  Tests: absent file not created; empty, malformed and valid keys with a
+  provider fake that fails the test if called.
+- **NF6 — anchor diagnosis.** Legacy read: `KeychainAnchorStore().read(id)`.
+  Helper read: `HelperAnchorStore(ops, legacy=None).read(id)` (no legacy
+  fallback → no migration); an old helper that cannot read answers
+  `anchor_store: "unknown"`. The deletion command is shown only when the
+  anchor is in the legacy store AND the vault directory is absent or contains
+  no `manifest.*.mvmf`, no `recovery.mrkv` and an empty or missing `blobs/`
+  (stronger than `artifacts_present`); otherwise the note is informational
+  ("an anchor remains; the keyvault reset of a later release handles it").
+- **NF7 — setup generation tombstone.** `<home>/mordred/mail/generation`
+  (0600, a random 16-byte hex token, non-secret) is rewritten under the
+  writer lock by every successful seal AND by every forget (and survives
+  forget). `start` records the current token (or "absent"); `finish`
+  re-reads it under the lock and refuses with `mail_setup_stale` when it
+  changed. The CLI uses the same library so both entry points agree.
+- **NF8 — one pending flow; key identity re-checked at sealing.** At most ONE
+  pending setup flow (`mail_setup_busy` for a second `start`; the page
+  offers Cancel). `start` records the effective key policy returned by
+  `ensure_key`; `finish` calls `ensure_key(require_presence=recorded)` again
+  under the lock and refuses with `touch_id_policy_mismatch` when the
+  effective policy differs. The vault key policy is never promised: the page
+  shows `/status.vault.unattended` (effective).
+- **NF9 — active expiry.** `MailSetupFlows.reap()` and `VaultFlows.reap()`
+  are public; the Desktop API runs a periodic task (every 30 s) that calls
+  them, and calls `cancel_all()` on shutdown. Tests drive the reaper with a
+  fake clock while no requests arrive.
+- **NF10 — operation lifecycle.** Telegram import state comes from `/sync`
+  (`syncing`, progress, `last_error`), as D3 implemented. A fetch job cut by
+  a backend shutdown resumes from the persisted cursors on the next run (the
+  IMAP sync is cursor-based and idempotent); the page says "a fetch may take
+  up to about 10 minutes and continues where it stopped if interrupted".
+- **NF11 — legacy archive.** `/status.telegram_archive` is `{"legacy":
+  null}` on a cold status (the index needs the sealed key). The Telegram
+  import step shows the `telegram migrate-store` hint whenever the account
+  is logged in and `imports.sources.telegram.messages` is 0; no polling ever
+  unwraps Telegram credentials.
+- **SPEC gaps.** Mail flow: one contract (`start` → `{step, question,
+  folders}`; `finish {selection}`; `cancel`), provisional credentials only.
+  `_require_memory()` applies to setup start/finish, fetch and `rows: true`
+  forget; cancel and credential-only forget are exempt. `rows` must be a
+  JSON boolean; `account` is in the forget body. Cancel routes accept an
+  empty body. The IMAP hint is parsed from `exc.args[0]` only; the hint is
+  carried OUTSIDE the `FetchResult` dataclass (a separate return value or an
+  attribute set after construction and excluded by the serializer's explicit
+  field list). Refusal mapping includes `disk_full`; unknown codes map to
+  `store_unavailable`. "Never reach storage" means plugin/browser storage
+  and unencrypted persistence; the sealed stores are the intended
+  destination. Folder labels (selection step) and the passphrase
+  (`/vault/prepare` answer) are the two explicit exceptions to counts and
+  codes only. PLAN: the Windows page test's `client_version` assertion is
+  updated deliberately. USAGE: databases outcomes and the vault step are
+  described per this revision; the anchor command is conditional.
