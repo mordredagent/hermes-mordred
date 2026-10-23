@@ -641,11 +641,14 @@ hermes-mordred desktop uninstall
 >
 > **Tool calls from the page.** The **Tool calls** card under Maintenance has
 > one checkbox, "Let Hermes call Mordred's tools directly (recommended with a
-> Venice private model)". Ticking it writes `tools.tool_search.enabled: "off"`
-> into Hermes's `config.yaml` and unticking removes it, exactly like
+> Venice private model)". Ticking it has Hermes's own `hermes config set` write
+> `tools.tool_search.enabled: "off"` into its `config.yaml`, and unticking runs
+> `hermes config unset`, exactly like
 > [`direct-tools on` / `off`](#direct-tools--let-hermes-call-tools-directly);
-> the card explains what it changes and what it costs. Hermes reads the setting when it starts, so after a change the
-> card offers **Restart Hermes Desktop**. When the chat model is a Venice
+> the card explains what it changes and what it costs, and shows the three lines
+> to add by hand (with a **Copy** button) in case the command fails. Hermes
+> reads the setting when it starts, so after a change the card offers
+> **Restart Hermes Desktop**. When the chat model is a Venice
 > private model and Hermes still defers its tools, the chat-model step (2.1)
 > adds "Recommended: turn on direct tool calls (Maintenance)" with a link to
 > the card. The page never changes the setting on its own. The card is on the
@@ -825,8 +828,8 @@ hermes-mordred egress taint on               # no plaintext writes after a sessi
 ### `direct-tools` — let Hermes call tools directly
 ```sh
 hermes-mordred direct-tools status   # direct tool calls: on|off (config|default)
-hermes-mordred direct-tools on       # writes tools.tool_search.enabled: "off" into config.yaml
-hermes-mordred direct-tools off      # removes it again (Hermes's default)
+hermes-mordred direct-tools on       # runs: hermes config set tools.tool_search.enabled off
+hermes-mordred direct-tools off      # runs: hermes config unset tools.tool_search.enabled
 ```
 > Hermes defers every plugin tool: the model sees Mordred's tools
 > (`mordred_mail_sync`, `mordred_history_search`, `telegram_ask`,
@@ -834,11 +837,14 @@ hermes-mordred direct-tools off      # removes it again (Hermes's default)
 > `tool_call` to call it. That is one more model round trip per use, and
 > smaller models sometimes break the bridge arguments, so nothing runs (for
 > example "sync my mail" never reaches `mordred_mail_sync`). `direct-tools on`
-> writes Hermes's own switch, `tools.tool_search.enabled: "off"`, into
-> `config.yaml`; every other key and comment stays as it was, and nothing is
-> written when the setting is already as asked. It is recommended with a
-> Venice private model. `on` followed by `off` gives back the file you had when
-> `enabled` was not set before.
+> turns on Hermes's own switch, `tools.tool_search.enabled: "off"`. It is
+> recommended with a Venice private model.
+>
+> Mordred does not edit `config.yaml` itself: it runs Hermes's own `hermes
+> config set` / `hermes config unset` (the `hermes` command of Hermes's
+> environment, with `HERMES_HOME` set to your Hermes home; its output is not
+> shown) and then checks with `hermes config get` that Hermes reads the setting
+> as asked. How the file looks afterwards is up to Hermes's writer.
 >
 > The trade-offs, because the setting is Hermes-wide and affects every plugin
 > tool, not only Mordred's:
@@ -853,23 +859,29 @@ hermes-mordred direct-tools off      # removes it again (Hermes's default)
 > reads the setting when it starts. `status` reads the file the way Hermes does
 > (YAML 1.1), so plain `off`, `no`, `n`, `false` and `0`, and quoted `"off"`,
 > `"no"` and `"false"`, all count as on; the old form `tool_search: false` too.
-> `on` replaces only a missing value or an explicit deferral (`auto`, `on`,
-> `true`, `yes`, `1`); `off` then removes the key instead of writing the old
-> value back (Hermes's default, `auto`, is the same). Any other value is refused
-> with `config_has_setting`, and a setting reached through a YAML alias, an
-> anchor used elsewhere or a merge key (`<<`) with `config_unsupported_shape`:
-> edit `config.yaml` by hand in both cases. `off` removes only what makes the
-> tools direct. Mordred never changes this setting unless you run `on` / `off`
-> or tick the **Tool calls** card on the Desktop page. If `config.yaml` is
-> vault-managed (`encryption enable config`) and its plaintext is sealed away,
-> the command refuses with `config_vault_managed`: run it from Hermes's own
-> environment (which opens `config.yaml` at start), use the Desktop page, or
-> turn the seal off with `encryption disable config`. A `config.yaml` that is
-> not valid YAML, or whose YAML warns (a reused anchor, for example), is refused
-> with `config_unreadable`. A failed write, a file that changed while it was
-> being edited, or a written file Hermes would not read as asked (the old bytes
-> are put back) is `config_write_failed`. Nothing is changed and no other value
-> is printed.
+> `on` runs only when the setting is missing or an explicit deferral (`auto`,
+> `on`, `true`, `yes`, `1`); any other value is refused with
+> `config_has_setting`: edit `config.yaml` by hand. `off` removes the setting
+> (Hermes's default, `auto`, then applies). Mordred never changes this setting
+> unless you run `on` / `off` or tick the **Tool calls** card on the Desktop
+> page. If Hermes's `hermes` command cannot be found the command refuses with
+> `hermes_cli_missing` and prints the lines to add to `config.yaml` by hand
+> (remove them again to turn direct calls off):
+>
+> ```yaml
+> tools:
+>   tool_search:
+>     enabled: "off"
+> ```
+>
+> If `config.yaml` is vault-managed (`encryption enable config`) and its
+> plaintext is sealed away, the command refuses with `config_vault_managed`:
+> start Hermes (or use the Desktop page while Hermes Desktop runs), or turn the
+> seal off with `encryption disable config`. A `config.yaml` that is not valid
+> YAML, or whose YAML warns (a reused anchor, for example), is refused with
+> `config_unreadable`; a `hermes config` command that fails, times out after 60
+> seconds or leaves the setting otherwise than asked is `config_write_failed`.
+> No other value of `config.yaml` is printed.
 
 ### `telegram` — read-only import of your own Telegram account (preview)
 

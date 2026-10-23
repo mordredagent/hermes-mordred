@@ -2580,32 +2580,34 @@ One component per PR, all targeting `dev`. Each PR runs
 - Component: `wizard` (library and CLI) and `desktop` (routes and page), one PR: the
   page and the CLI drive the same library. Spec:
   [Direct tool calls](SPEC.md#direct-tool-calls-2026-10-23); owner decision of
-  2026-10-23 (default deferred, explicit opt-in).
-- Files: `wizard/direct_tools.py` (`read_mode`, `set_direct`, `DirectToolsError` with
+  2026-10-23 (default deferred, explicit opt-in). After two Codex reviews (REVISE) the
+  write is delegated to Hermes: Mordred never edits config.yaml.
+- Files: `wizard/direct_tools.py` (`read_mode`, `set_direct` running Hermes's own
+  `hermes config set|unset|get` in Hermes's environment, `hermes_command`, closed codes
   `config_unreadable`, `config_vault_managed`, `config_write_failed`,
-  `config_unsupported_shape`, `config_has_setting`; the round-trip writer of
-  `policy_writer`, the checked `PolicyWriter` transaction on Windows; read-back
-  verification), `wizard/_direct_tools_yaml.py` (Hermes's YAML 1.1 reading, captured
-  warnings, alias/anchor/merge refusal, comment-keeping edits),
+  `config_has_setting`, `hermes_cli_missing`), `wizard/_direct_tools_yaml.py` (the read:
+  Hermes's YAML 1.1 C-first loader setup and rule, warnings captured),
   `wizard/direct_tools_cli.py` and `_cli_parsers.py` (`direct-tools on | off |
   status`), `desktop/_seams.py` (`tools_mode`, `set_direct_tools`),
   `desktop/_maintenance_routes.py` (`GET` / `POST /tools/direct`),
   `desktop/_status_v4.py` (`tools` on every platform), `plugin.js` (the Tool calls card
-  under Maintenance, step 2.1's recommendation, three `MESSAGES`); USAGE, SPEC, PLAN,
-  TODO and `tools/ci_scope_paths.json`.
-- Tests: `tests/test_direct_tools.py` (byte-for-byte round trips with comments, the
-  26-case Hermes parity table, YAML warnings captured, aliases/anchors/merges refused,
-  read-back verification, removal, unreadable and sealed-away configs including a
-  reseal between the read and the write, atomic replace, the Windows transaction on the
-  fake coordinator), `tests/test_direct_tools_cli.py`
-  (output, exit codes, a canary for other config values),
+  under Maintenance with the manual three-line snippet and Copy, step 2.1's
+  recommendation, five `MESSAGES`); USAGE, SPEC, PLAN, TODO and
+  `tools/ci_scope_paths.json`.
+- Tests: `tests/test_direct_tools.py` (the 26-case Hermes parity table and `%YAML 1.2`
+  directives, captured warnings, a fake `hermes` console script for set/unset/get,
+  a missing script, non-zero exits, a timeout, a verification mismatch, hidden output,
+  sealed-away and unreadable configs, the Windows read and delegation, and one real
+  `hermes config` round trip with the repo venv's hermes-agent),
+  `tests/test_direct_tools_cli.py` (output, exit codes, the snippet, canaries),
   `tests/extension/test_desktop_tools.py` (routes, strict boolean, closed codes, the
-  status field), `tests/test_desktop_page.py` (card, checkbox state, payload, restart
-  control, recommendation, `MESSAGES`), the version 4 key sets in
+  status field), `tests/test_desktop_page.py` (card, snippet and Copy, checkbox state,
+  payload, restart control, recommendation, `MESSAGES`), the version 4 key sets in
   `tests/extension/test_desktop_status_v4.py`, `/tools/direct` in
   `tests/extension/test_desktop_bodies.py`, and the unchanged Windows snapshot.
-- Depends on: D4. Codex review (REVISE) and its fixes:
-  [`2026-10-23-direct-tools-codex-review.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review.md).
+- Depends on: D4. Review records:
+  [`2026-10-23-direct-tools-codex-review.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review.md),
+  [`2026-10-23-direct-tools-codex-review-pass2.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review-pass2.md).
 
 ### K1: keyvault (reference)
 
