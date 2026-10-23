@@ -1019,27 +1019,36 @@ class ImapSession:
 
         A refusal is ``imap_auth_failed`` with the hint of its response code
         (:func:`_login_hint`). The failure is raised outside the handler, so the
-        imaplib error holding the server's text is not even its ``__context__``.
+        imaplib error holding the server's text is not even its ``__context__``,
+        and only after this frame dropped the address and the password: the
+        raised error's traceback holds neither.
         """
         if "LOGINDISABLED" in self.capabilities:
-            raise ImapError("imap_auth_failed", hint="login_disabled")
-        failure: ImapError | None = None
-        try:
-            self._conn.login(user, password)
-        except imaplib.IMAP4.abort:
-            failure = ImapError("imap_unreachable")
-        except imaplib.IMAP4.error as exc:
-            failure = ImapError("imap_auth_failed", hint=_login_hint(exc))
-        except (UnicodeError, ValueError):
-            failure = ImapError("imap_auth_failed")
-        except Exception as exc:  # the guard's own ImapError, or a socket failure
-            failure = _mapped_failure(exc)
-            if failure is None:
-                raise
+            failure: ImapError | None = ImapError("imap_auth_failed", hint="login_disabled")
+        else:
+            failure = self._login(user, password)
+        del user, password  # this frame stays in the traceback of whatever is raised below
         if failure is not None:
             self._scrub()
             raise sever_chain(failure)
         self._run(self._refresh_capabilities)
+
+    def _login(self, user: str, password: str) -> ImapError | None:
+        """``LOGIN``; the failure is returned, so no frame holding the password is ever in a traceback."""
+        try:
+            self._conn.login(user, password)
+        except imaplib.IMAP4.abort:
+            return ImapError("imap_unreachable")
+        except imaplib.IMAP4.error as exc:
+            return ImapError("imap_auth_failed", hint=_login_hint(exc))
+        except (UnicodeError, ValueError):
+            return ImapError("imap_auth_failed")
+        except Exception as exc:  # the guard's own ImapError, or a socket failure
+            failure = _mapped_failure(exc)
+            if failure is None:
+                raise
+            return failure
+        return None
 
     def _refresh_capabilities(self) -> None:
         """Refreshed after login: servers may advertise more (Gmail's X-GM-EXT-1) once authenticated."""

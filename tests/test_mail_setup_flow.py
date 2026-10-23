@@ -9,14 +9,13 @@ are canaries: they must never reach a ``repr``, an exception or a log line.
 from __future__ import annotations
 
 import contextlib
-import gc
 import logging
 import sys
 import threading
 import traceback
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 import pytest
 
@@ -27,7 +26,16 @@ from mordred_hermes.imports.mail.imap_sync import fetch_lock
 from mordred_hermes.imports.mail.secrets import KEY_ID, MailSecretsError, MailSecretStore
 from mordred_hermes.imports.mail.setup_flow import SETUP_ERROR_CODES, MailSetupError, MailSetupFlows
 from tests._fake_imap import FakeImapServer, FakeMailbox
-from tests._mail_sync_helpers import ADDRESS, PASSWORD, Clock, generic_creds, gmail_server
+from tests._mail_sync_helpers import (
+    ADDRESS,
+    PASSWORD,
+    Clock,
+    TrackedPassword,
+    generic_creds,
+    gmail_server,
+    password_released,
+    secrets_in_traceback,
+)
 from tests.test_mail_secrets import FakeEnclave, sealed_store
 
 FOLDER_CANARY = "FOLDERCANARY"
@@ -364,25 +372,9 @@ def test_reap_expires_flows_while_nothing_else_happens(secrets: MailSecretStore,
     assert pending(flows) == 0 and credential_files(secrets) == []
 
 
-class TrackedPassword(str):
-    """The app password as an object of its own: its finaliser records when nothing holds it any more."""
-
-    released: ClassVar[list[str]] = []
-
-    def __del__(self) -> None:
-        TrackedPassword.released.append("released")
-
-
-def password_released() -> bool:
-    gc.collect()
-    return TrackedPassword.released == ["released"]
-
-
 @pytest.fixture
-def tracked() -> Iterator[None]:
-    TrackedPassword.released = []
-    yield
-    TrackedPassword.released = []
+def tracked() -> None:
+    """Documents that the test follows a :class:`TrackedPassword` (tokens keep tests apart)."""
 
 
 @pytest.mark.parametrize("end", ["finish", "cancel", "cancel_all", "expiry"])
@@ -414,6 +406,51 @@ def test_the_password_object_is_released_after_a_failed_start(
     except MailSetupError as exc:
         assert exc.code == "imap_auth_failed"
     assert password_released() and pending(flows) == 0
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["login", "protocol", "invalid_host", "lock", "already_configured", "gmail_length"],
+)
+def test_a_kept_start_error_holds_no_secret_and_not_the_password(
+    failure: str, secrets: MailSecretStore, home: Path, tracked: None
+) -> None:
+    server = no_folder_server(
+        password="another" if failure == "login" else PASSWORD,
+        replies={"LIST": "{tag} BAD nope"} if failure == "protocol" else None,
+    )
+    host = {"invalid_host": "not a host", "gmail_length": "imap.gmail.com"}.get(failure, "imap.example.com")
+    if failure == "already_configured":
+        secrets.ensure_key()
+        secrets.store(generic_creds(account="first"))
+    flows = make_flows(secrets, home, Connector(server))
+    kept: MailSetupError | None = None
+    holder = contextlib.ExitStack()
+    if failure == "lock":
+        holder.enter_context(fetch_lock(home))
+    with holder:
+        try:  # called directly, the password built in the call: no test frame holds it
+            flows.start(address=ADDRESS, imap_host=host, app_password=TrackedPassword(PASSWORD))
+        except MailSetupError as exc:
+            kept = exc
+    assert kept is not None and kept.__traceback__ is not None  # the error stays alive below
+    assert secrets_in_traceback(kept, PASSWORD, ADDRESS, "imap.example.com") == []
+    assert password_released()  # nothing the kept error references holds the password object
+
+
+def test_a_kept_finish_error_holds_no_secret(
+    secrets: MailSecretStore, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flows = make_flows(secrets, home, Connector(no_folder_server()))
+    flow_id = start(flows).flow_id
+    monkeypatch.setattr(secrets, "store", lambda _value, *, require_presence=True: (_ for _ in ()).throw(OSError()))
+    kept: MailSetupError | None = None
+    try:
+        flows.finish(flow_id, selection=f"Gesendet-{FOLDER_CANARY}")
+    except MailSetupError as exc:
+        kept = exc
+    assert kept is not None and kept.code == "store_path_unsafe"
+    assert secrets_in_traceback(kept, PASSWORD, ADDRESS, FOLDER_CANARY) == []
 
 
 def test_a_failed_finish_keeps_the_password_only_until_the_flow_ends(

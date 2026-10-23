@@ -499,12 +499,19 @@ class MailSetupFlows:
         app_password: str,
         presence: bool = True,
     ) -> MailSetupFlow:
-        """Validate; under the writer lock: admission, a fresh key, one read-only login, then a seal or a question."""
+        """Validate; under the writer lock: admission, a fresh key, one read-only login, then a seal or a question.
+
+        A refusal is raised from this frame only (the inner traceback is cut), and
+        this frame has dropped what the owner typed by then: the error's traceback
+        holds no password, address or host.
+        """
         failure: MailSetupError
         try:
             return self._start(_validated(address, imap_host, account, extra_addresses, app_password, presence))
         except MailSetupError as exc:
             failure = exc
+        finally:
+            del address, imap_host, extra_addresses, app_password
         raise sever_chain(failure)
 
     def finish(self, flow_id: str, *, selection: str | None) -> MailSetupFlow:
@@ -514,6 +521,8 @@ class MailSetupFlows:
             return self._finish(flow_id, selection)
         except MailSetupError as exc:
             failure = exc
+        finally:
+            del selection  # a folder name: the raised error's traceback keeps none
         raise sever_chain(failure)
 
     def get(self, flow_id: str) -> MailSetupFlow:

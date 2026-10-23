@@ -476,6 +476,28 @@ def test_a_greeting_that_hangs_up_is_unreachable_without_its_text(monkeypatch: p
     assert exception_chain(raised.value) == [raised.value] and CHAIN_CANARY not in rendered_chain(raised.value)
 
 
+@pytest.mark.parametrize("case", ["refused", "login_disabled", "capability_failure"])
+def test_a_kept_login_error_holds_no_password(case: str) -> None:
+    from tests._mail_sync_helpers import TrackedPassword, password_released, secrets_in_traceback
+
+    knobs: dict[str, Any] = {"password": "PWCANARY-right"}
+    if case == "login_disabled":
+        knobs["capabilities"] = ("LOGINDISABLED",)
+    if case == "capability_failure":
+        knobs["replies"] = {"CAPABILITY": "{tag} BAD nope"}
+    server = FakeImapServer({"INBOX": FakeMailbox(1)}, **knobs)
+    session = server.session()
+    kept: ImapError | None = None
+    try:
+        session.login("owner@example.com", TrackedPassword("PWCANARY-right" if case != "refused" else "PWCANARY-x"))
+    except ImapError as exc:
+        kept = exc
+    session.logout()
+    assert kept is not None and kept.__traceback__ is not None
+    assert secrets_in_traceback(kept, "PWCANARY", "owner@example.com") == []
+    assert password_released()
+
+
 # --- framing, authentication, port ----------------------------------------------------------------
 
 
