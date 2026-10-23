@@ -2182,9 +2182,13 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
   const [busy, setBusy] = useState(null)
   const [failure, setFailure] = useState(null)
   const [note, setNote] = useState(null)
-  // The status's last attempt (`at`) that a fetch started here replaced: its failure is no
-  // longer the latest one, so it is not shown again until the status reports a newer one.
+  // A fetch started here replaces the status's last attempt ({at, error} at submit). Its
+  // own outcome outranks that attempt's failure only for the status read before the job
+  // ended (`settledOn`, by identity); any status read after it is shown as it is.
   const [replacedAttempt, setReplacedAttempt] = useState(null)
+  const [settledOn, setSettledOn] = useState(null)
+  const latestStatus = useRef(status)
+  latestStatus.current = status
   const mounted = useRef(true)
   const flowRef = useRef(null)
   const polling = useRef(null)
@@ -2200,9 +2204,19 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
     (job) => job && job.kind === 'mail_fetch' && (!job.state || job.state === 'running'),
   )
   const fetching = Boolean(fetchJob) || busy === 'fetch' || Boolean(statusJob)
-  const lastAttemptAt = mail.last_attempt && typeof mail.last_attempt.at === 'number' ? mail.last_attempt.at : null
-  // The status still names a failed attempt that a newer one (started here) has replaced.
-  const staleAttempt = code !== null && code !== 'credentials_left' && replacedAttempt !== null && lastAttemptAt === replacedAttempt
+  const lastAttempt = timed(mail.last_attempt)
+  const attemptPair = lastAttempt ? { at: lastAttempt.at, error: attemptError(lastAttempt.error) } : null
+  // The status, not read again since this page's own fetch ended, still names the attempt
+  // that fetch replaced (same `at` and error): the page's own result or failure stands.
+  const staleAttempt =
+    code !== null &&
+    code !== 'credentials_left' &&
+    settledOn !== null &&
+    status === settledOn &&
+    replacedAttempt !== null &&
+    attemptPair !== null &&
+    attemptPair.at === replacedAttempt.at &&
+    attemptPair.error === replacedAttempt.error
   const shown = state === 'blocked' ? state : busy || fetching ? 'running' : failure ? 'attention' : staleAttempt ? 'done' : state
   const clearForm = () => {
     setAddress('')
@@ -2255,6 +2269,8 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
     if (!mounted.current || polling.current !== jobId) return
     polling.current = null
     setFetchJob(null)
+    // The status read before this moment cannot know this job's outcome.
+    setSettledOn(latestStatus.current)
     const counts = end.progress && end.progress.result
     if (counts && typeof counts === 'object') setResult(counts)
     if (end.state === 'failed') setFailure(fetchError(end.error || 'fetch_failed'))
@@ -2351,7 +2367,8 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
     setResult(null)
     setNote(null)
     setForgotten(null)
-    setReplacedAttempt(lastAttemptAt)
+    setReplacedAttempt(attemptPair)
+    setSettledOn(null)
     const body = { max: Number(maxText) }
     if (older) body.since = since
     let jobId = null

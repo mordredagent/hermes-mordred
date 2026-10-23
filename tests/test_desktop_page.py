@@ -2222,9 +2222,11 @@ FAST = "globalThis.setTimeout = fn => {fn(); return 0}\nDate.now = () => NOW\ntr
 
 
 def mail_step(status: dict[str, Any], state: str = "next", code: str | None = None) -> str:
+    # One status object across renders, as the page passes it until it reads the status
+    # again; a script simulates that read by assigning globalThis.mailStatus.
     return (
         f"MailStep({{id: 'mail', n: '2.5', state: {json.dumps(state)}, code: {json.dumps(code)}, "
-        f"status: {json.dumps(status)}, refresh}})"
+        f"status: (globalThis.mailStatus ??= {json.dumps(status)}), refresh}})"
     )
 
 
@@ -2701,6 +2703,40 @@ def test_a_new_fetch_clears_the_previous_failure_and_result_while_it_runs(end, s
     if end["state"] == "done":
         # The status still names the replaced failed attempt until it is read again: not shown.
         assert "The fetch stopped" not in out["ended"]["text"]
+
+
+SAME_SECOND = NOW_MS // 1000 - 60
+FAILED_THEN = {**MAIL_SET_UP, "last_attempt": {"at": SAME_SECOND, "error": "imap_unreachable", "partial": False}}
+
+
+@pytest.mark.parametrize("error", ["imap_unreachable", "imap_auth_failed"], ids=["same-error", "other-error"])
+def test_a_failure_in_the_same_second_after_a_local_success_is_shown(error):
+    """`at` has one-second resolution: a re-read status that names a failure is shown, even
+    in the same second as the attempt this page's fetch replaced."""
+    done = {"ok": True, "state": "done", "progress": {"result": FETCHED}}
+    newer = mac(**v4(mail={**MAIL_SET_UP, "last_attempt": {"at": SAME_SECOND, "error": error, "partial": False}}))
+    script = (
+        FAST
+        + "await press(tree, 'Fetch new mail'); tree = view()\n"
+        + 'out.settled = {text: text(tree), alert: JSON.stringify(tree).includes(\'"role":"alert"\')}\n'
+        # The status is read again and reports a failed attempt in that same second.
+        + f"globalThis.mailStatus = {json.dumps(newer)}; globalThis.mailCode = {json.dumps(error)}; tree = view()\n"
+        + 'out.reread = {text: text(tree), alert: JSON.stringify(tree).includes(\'"role":"alert"\')}\n'
+    )
+    # The status and the code stepStates derives from it change together when it is read again.
+    step = mail_step(mac(**v4(mail=FAILED_THEN)), "attention").replace(
+        "code: null", "code: (globalThis.mailCode ??= 'imap_unreachable')"
+    )
+    result = component(step, [{"ok": True, "job_id": "j1"}, done], script)
+    settled, reread = result["out"]["settled"], result["out"]["reread"]
+    # Until the status is read again, this page's own success stands over the replaced failure.
+    assert settled["alert"] is False
+    assert "Result (counts only): inserted 37" in settled["text"]
+    # Read again, whatever it reports is shown: the same-second failure renders its alert.
+    assert reread["alert"] is True
+    assert "Needs attention" in reread["text"]
+    expected = "could not be reached" if error == "imap_unreachable" else "refused the login"
+    assert expected in reread["text"]
 
 
 def test_a_new_setup_attempt_clears_the_last_failure_while_it_runs():
