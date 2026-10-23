@@ -1343,7 +1343,7 @@ function MemoryStep({ id = null, n, state, blocker = null, goto = null, refresh,
     children: jsxs(Fragment, {
       children: [
         // The vault exists (this step is open only then): a retry runs the memory half alone.
-        split && failure ? jsx('p', { key: 'retry', children: `Vault created, memory encryption failed (${failure.code}); retry.` }) : null,
+        split && failure ? jsx('p', { key: 'retry', children: `Vault created, memory encryption failed (${safeCode(failure.code) || 'failed'}); retry.` }) : null,
         jsx('p', { key: 'body', children: linux ? linuxBody : split ? MEMORY_ONLY_BODY : MEMORY_BODY }),
         linux || split ? null : jsx(AskEveryTime, { key: 'ask', checked: askEveryTime, onChange: setAskEveryTime }),
         jsx(Row, {
