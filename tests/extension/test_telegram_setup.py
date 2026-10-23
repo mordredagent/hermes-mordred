@@ -32,11 +32,14 @@ def test_register_tools_registers_skill_and_section():
     ctx = SimpleNamespace(
         register_tool=lambda **kw: seen.setdefault("tools", []).append(kw["name"]),
         register_skill=lambda name, path, description="": seen.update(skill=(name, path)),
-        register_system_prompt_section=lambda sid, content, **kw: seen.update(section=(sid, content)),
+        register_system_prompt_section=lambda sid, content, **kw: seen.setdefault("sections", []).append((sid, content)),
     )
     hermes_tools.register_tools(ctx)
     assert seen["skill"] == ("mordred-telegram", hermes_tools.SKILL_PATH)
-    assert seen["section"] == ("mordred.telegram", hermes_tools.system_prompt_section)
+    assert seen["sections"] == [
+        ("mordred.telegram", hermes_tools.system_prompt_section),
+        ("mordred.mail", hermes_tools.mail_prompt_section),
+    ]
     assert sorted(seen["tools"]) == ["mordred_history_search", "mordred_mail_sync", "telegram_ask", "telegram_chats"]
 
 
