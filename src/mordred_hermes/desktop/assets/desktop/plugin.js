@@ -2182,6 +2182,9 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
   const [busy, setBusy] = useState(null)
   const [failure, setFailure] = useState(null)
   const [note, setNote] = useState(null)
+  // The status's last attempt (`at`) that a fetch started here replaced: its failure is no
+  // longer the latest one, so it is not shown again until the status reports a newer one.
+  const [replacedAttempt, setReplacedAttempt] = useState(null)
   const mounted = useRef(true)
   const flowRef = useRef(null)
   const polling = useRef(null)
@@ -2197,7 +2200,10 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
     (job) => job && job.kind === 'mail_fetch' && (!job.state || job.state === 'running'),
   )
   const fetching = Boolean(fetchJob) || busy === 'fetch' || Boolean(statusJob)
-  const shown = state === 'blocked' ? state : busy || fetching ? 'running' : failure ? 'attention' : state
+  const lastAttemptAt = mail.last_attempt && typeof mail.last_attempt.at === 'number' ? mail.last_attempt.at : null
+  // The status still names a failed attempt that a newer one (started here) has replaced.
+  const staleAttempt = code !== null && code !== 'credentials_left' && replacedAttempt !== null && lastAttemptAt === replacedAttempt
+  const shown = state === 'blocked' ? state : busy || fetching ? 'running' : failure ? 'attention' : staleAttempt ? 'done' : state
   const clearForm = () => {
     setAddress('')
     setOthers('')
@@ -2339,11 +2345,13 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
   }
   const fetchMail = async () => {
     if (!validMax(maxText) || (older && !validDate(since))) return
+    // A new attempt: the previous failure and result are gone at once, before the job id arrives.
     setBusy('fetch')
     setFailure(null)
     setResult(null)
     setNote(null)
     setForgotten(null)
+    setReplacedAttempt(lastAttemptAt)
     const body = { max: Number(maxText) }
     if (older) body.since = since
     let jobId = null
@@ -2531,7 +2539,10 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
   ]
   const children = flow ? folderChoice : configured ? setUpCard : residue ? [removeSection] : form
   const notice = forgotten ? jsx(ForgetOutcome, { outcome: forgotten, noticeRef }) : note ? jsx('p', { ref: noticeRef, tabIndex: -1, role: 'status', children: note }) : null
-  const statusFailure = code ? (code === 'credentials_left' ? mailError(new MordredError(code)) : fetchError(code)) : null
+  // The status's failure belongs to its last finished attempt: not shown while an attempt
+  // runs, nor once a newer attempt started here replaced it.
+  const statusFailure =
+    !code || shown === 'running' || staleAttempt ? null : code === 'credentials_left' ? mailError(new MordredError(code)) : fetchError(code)
   return jsx(Step, {
     id,
     n,

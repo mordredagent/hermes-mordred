@@ -2650,6 +2650,76 @@ def test_a_failed_or_lost_fetch_job_is_the_step_attention(end, phrase):
     assert '"role": "alert"' in json.dumps(result["tree"])
 
 
+@pytest.mark.parametrize(
+    "end,shows",
+    [
+        (
+            {"ok": True, "state": "failed", "error": "imap_unreachable", "progress": {}},
+            "The fetch stopped: the mail server could not be reached",
+        ),
+        ({"ok": True, "state": "done", "progress": {"result": FETCHED}}, "Result (counts only): inserted 37"),
+    ],
+    ids=["next-failure", "next-result"],
+)
+def test_a_new_fetch_clears_the_previous_failure_and_result_while_it_runs(end, shows):
+    """The last attempt failed (status) and an earlier fetch here left a result block."""
+    first = {"ok": True, "state": "done", "progress": {"result": {**FETCHED, "inserted": 5}}}
+    script = (
+        FAST
+        + "out.before = text(tree)\n"
+        # An earlier fetch on this page: its result block is shown.
+        + "await press(tree, 'Fetch new mail'); tree = view()\n"
+        + "out.firstResult = text(tree).includes('Result (counts only): inserted 5')\n"
+        # The new fetch, before its job id arrives, then while its job is polled.
+        + "const pending = press(tree, 'Fetch new mail'); tree = view()\n"
+        + 'out.submitted = {text: text(tree), alert: JSON.stringify(tree).includes(\'"role":"alert"\')}\n'
+        + "held.shift()({ok: true, job_id: 'j2'}); await new Promise(r => setImmediate(r)); tree = view()\n"
+        + 'out.polling = {text: text(tree), alert: JSON.stringify(tree).includes(\'"role":"alert"\')}\n'
+        + "held.shift()(END); await pending; tree = view()\n"
+        + 'out.ended = {text: text(tree), alert: JSON.stringify(tree).includes(\'"role":"alert"\')}\n'
+    ).replace("END", json.dumps(end))
+    status = mac(
+        **v4(
+            mail={
+                **MAIL_SET_UP,
+                "last_attempt": {"at": NOW_MS // 1000 - 60, "error": "imap_unreachable", "partial": False},
+            }
+        )
+    )
+    answers = [{"ok": True, "job_id": "j1"}, first, "HOLD", "HOLD"]
+    result = component(mail_step(status, "attention", "imap_unreachable"), answers, script)
+    out = result["out"]
+    assert "The fetch stopped: the mail server could not be reached" in out["before"]
+    assert out["firstResult"] is True
+    for phase in ("submitted", "polling"):
+        assert out[phase]["alert"] is False, phase
+        assert "The fetch stopped" not in out[phase]["text"] and "Result (counts only)" not in out[phase]["text"], phase
+        assert "Fetching new mail… this may take up to about 10 minutes" in out[phase]["text"], phase
+        assert "Running" in out[phase]["text"], phase
+    assert shows in out["ended"]["text"]
+    assert out["ended"]["alert"] is (end["state"] == "failed")
+    if end["state"] == "done":
+        # The status still names the replaced failed attempt until it is read again: not shown.
+        assert "The fetch stopped" not in out["ended"]["text"]
+
+
+def test_a_new_setup_attempt_clears_the_last_failure_while_it_runs():
+    script = (
+        FILL
+        + CONNECT
+        + 'out.failed = JSON.stringify(tree).includes(\'"role":"alert"\')\n'
+        + FILL
+        + "const pending = press(tree, 'Connect mailbox'); tree = view()\n"
+        + 'out.running = {text: text(tree), alert: JSON.stringify(tree).includes(\'"role":"alert"\')}\n'
+        + "held.shift()(DONE); await pending; tree = view()\n"
+    ).replace("DONE", json.dumps(DONE))
+    result = component(mail_step(MAIL_V4), [{"ok": False, "error": "imap_unreachable"}, "HOLD"], script)
+    assert result["out"]["failed"] is True
+    assert result["out"]["running"]["alert"] is False
+    assert "Connecting to the mail server" in result["out"]["running"]["text"]
+    assert "Mailbox connected (read-only)." in result["text"]
+
+
 def test_fetch_attaches_to_an_already_running_job():
     done = {"ok": True, "state": "done", "progress": {"result": {**FETCHED, "partial": False, "partial_reason": None}}}
     result = component(
