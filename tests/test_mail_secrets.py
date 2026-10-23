@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -238,7 +239,7 @@ def test_a_failure_between_the_two_writes_leaves_nothing(
         monkeypatch.setattr(secrets, "_sync_directory", sync)
     with pytest.raises(OSError):
         store.store(gmail_creds())
-    assert _files(tmp_path / "mail") == [".gitignore"]  # neither the sealed file, the flags nor a staged file
+    assert [name for name in _files(tmp_path / "mail") if "credentials" in name] == []  # nor a staged file
     assert store.flags() is None and not store.residue()
     assert [path.name.split(".")[2] for path in writes] == ["sealed", "meta"]  # both staged before any rename
 
@@ -259,7 +260,12 @@ def test_store_writes_through_staging_names_in_order(
     monkeypatch.setattr(os, "replace", replace)
     store.store(gmail_creds())
     assert [name for name in renamed if not name.startswith(".")] == ["credentials.sealed", "credentials.meta.json"]
-    assert _files(tmp_path / "mail") == [".gitignore", "credentials.meta.json", "credentials.sealed"]
+    assert _files(tmp_path / "mail") == [
+        ".gitignore",
+        "credentials.meta.json",
+        "credentials.sealed",
+        "enclave-key.json",
+    ]
 
 
 def test_a_sealed_file_without_flags_is_credentials_left_and_flags_alone_are_not_configured(
@@ -290,13 +296,58 @@ def test_forget_removes_staged_leftovers(tmp_path: Path, enclave: FakeEnclave) -
 # --- the Enclave key's Touch ID policy ------------------------------------------------------------------
 
 
-def test_ensure_key_returns_the_policy_it_is_sure_of(tmp_path: Path, enclave: FakeEnclave) -> None:
+def test_ensure_key_returns_the_effective_policy(tmp_path: Path, enclave: FakeEnclave) -> None:
     store = sealed_store(tmp_path / "mail", enclave)
     assert store.ensure_key(require_presence=False) is False and enclave.unattended == {KEY_ID: True}
-    assert store.ensure_key(require_presence=True) is None  # kept: its policy cannot be read back
+    assert store.ensure_key(require_presence=True) is False  # kept: its recorded policy, not the requested one
     assert enclave.unattended == {KEY_ID: True}
     assert store.ensure_key(require_presence=True, replace=True) is True
     assert enclave.unattended == {KEY_ID: False}  # a fresh key with the requested policy
+    record = json.loads(store.key_record_path.read_text("utf-8"))
+    assert set(record) == {"public_sha256", "touch_id"} and record["touch_id"] is True
+    assert (store.key_record_path.stat().st_mode & 0o777) == 0o600
+
+
+@pytest.mark.parametrize(
+    "record", ["{corrupt", '{"public_sha256": "00", "touch_id": true}', '{"touch_id": "yes"}', None]
+)
+def test_a_key_without_its_own_record_has_an_unknown_policy(
+    tmp_path: Path, enclave: FakeEnclave, record: str | None
+) -> None:
+    store = sealed_store(tmp_path / "mail", enclave)
+    store.ensure_key(require_presence=True)
+    if record is None:
+        store.key_record_path.unlink()
+    elif 'touch_id": "yes' in record:
+        value = json.loads(store.key_record_path.read_text("utf-8"))
+        store.key_record_path.write_text(json.dumps({**value, "touch_id": "yes"}))
+    else:
+        store.key_record_path.write_text(record)
+    assert store.ensure_key(require_presence=True) is None
+
+
+def test_forget_removes_the_key_record(tmp_path: Path, enclave: FakeEnclave) -> None:
+    store = sealed_store(tmp_path / "mail", enclave)
+    store.ensure_key()
+    assert store.key_record_path.exists()
+    assert store.forget() is True and not store.key_record_path.exists()
+
+
+def test_the_setup_generation_is_a_private_random_token(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    assert secrets.setup_generation(home) == secrets.GENERATION_ABSENT and not home.exists()
+    first = secrets.new_setup_generation(home)
+    path = home / "mordred" / "mail" / "generation"
+    assert secrets.setup_generation(home) == first and len(first) == 32
+    assert (path.stat().st_mode & 0o777) == 0o600 and (path.parent.stat().st_mode & 0o777) == 0o700
+    assert secrets.new_setup_generation(home) not in (first, secrets.setup_generation(home) + "x")
+    path.write_text("garbage")
+    assert secrets.setup_generation(home) == "unreadable"
+    path.unlink()
+    path.mkdir()
+    with pytest.raises(MailSecretsError) as raised:
+        secrets.setup_generation(home)
+    assert raised.value.code == "store_path_unsafe"
 
 
 def test_a_key_that_cannot_be_replaced_is_a_policy_mismatch(tmp_path: Path, enclave: FakeEnclave) -> None:
