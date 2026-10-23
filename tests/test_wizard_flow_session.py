@@ -397,6 +397,7 @@ class TestVaultUnlocks:
         pytest.importorskip("fastapi")
         from mordred_hermes.desktop import _vault
         from mordred_hermes.desktop import api as desktop_api
+        from mordred_hermes.keyvault._memory_hook import memory_marker_path
 
         _as_macos(monkeypatch)
         _stub_runtime_probes(monkeypatch)
@@ -422,7 +423,8 @@ class TestVaultUnlocks:
         with vault.recover_vault(root, flow.passphrase) as opened:
             assert ".env" in opened.list_files()
 
-        memory = _vault.enable_memory(home=home, root=root, platform="darwin", active=lambda: True)
+        armed = memory_marker_path(home).is_file  # memory_cli.enable writes the marker
+        memory = _vault.enable_memory(home=home, root=root, platform="darwin", active=armed)
         assert memory == {"ok": True, "restart_required": True}
         assert _unlocks(backend) == 1
 

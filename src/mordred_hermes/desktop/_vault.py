@@ -178,27 +178,40 @@ def _read(store: Any, identity: str) -> str:
         return "unknown"
 
 
-def diagnose_anchor(root: Path) -> dict[str, Any] | None:
+def _anchor_store(identity: str, *, require_present: bool) -> str | None:
+    """Where an anchor for ``identity`` is: ``helper``, ``legacy``, ``unknown``, or ``None`` (nowhere).
+
+    The helper store is read first (no prompt), WITHOUT a legacy fallback, so
+    nothing migrates. A legacy item next to a helper that could not be read
+    (an old helper, a failed read) is ``unknown``: the helper may hold one too,
+    and deleting the legacy item alone would not be the remedy. With
+    ``require_present``, ``unknown`` needs an anchor actually found.
+    """
+    helper = _helper_anchor_store()
+    helper_state = "none" if helper is None else _read(helper, identity)
+    if helper_state == "present":
+        return "helper"
+    legacy_state = _read(_legacy_anchor_store(), identity)
+    if legacy_state == "present":
+        return "unknown" if helper_state == "unknown" else "legacy"
+    if require_present or "unknown" not in (helper_state, legacy_state):
+        return None
+    return "unknown"
+
+
+def diagnose_anchor(root: Path, *, require_present: bool = False) -> dict[str, Any] | None:
     """``vault_anchor_stale`` when an anchor remains without a vault, else ``None``.
 
     Never ``default_anchor_store().read()`` (it can migrate the legacy item and
-    prompt): the helper store is read without a legacy fallback, then the
-    in-process legacy store. The ``security`` command is offered only for a
-    legacy anchor over a vault directory with no recoverable state.
+    prompt). The ``security`` command (``remedy``) is offered only for an anchor
+    known to be in the legacy store alone, over a vault directory with no
+    recoverable state; otherwise the answer is informational.
     """
     from ..keyvault._anchor_keychain import DEFAULT_SERVICE
     from ..keyvault._identity import vault_identity
 
     identity = vault_identity(root)
-    helper = _helper_anchor_store()
-    helper_state = "absent" if helper is None else _read(helper, identity)
-    store: str | None = "helper" if helper_state == "present" else None
-    if store is None:
-        legacy_state = _read(_legacy_anchor_store(), identity)
-        if legacy_state == "present":
-            store = "legacy"
-        elif "unknown" in (helper_state, legacy_state):
-            store = "unknown"
+    store = _anchor_store(identity, require_present=require_present)
     if store is None:
         return None
     answer: dict[str, Any] = {
@@ -288,6 +301,12 @@ def commit(
     if state["exists"] and state["env_enrolled"]:
         flows.discard(flow.flow_id)
         return {"ok": False, "error": "vault_exists"}
+    if vault_dir_clean(root):
+        # Before the wizard: its default_anchor_store().read() would MIGRATE a legacy anchor into
+        # the helper store (and delete the legacy item), turning the actionable case into a deferred one.
+        stale = diagnose_anchor(root, require_present=True)
+        if stale is not None:
+            return stale
     _ensure_env_file(home)
     session = _commit_session(unattended, flow.passphrase)
     try:
@@ -313,7 +332,9 @@ def commit(
 def enable_memory(*, home: Path, root: Path, platform: str, active: Callable[[], bool]) -> dict[str, Any]:
     """Memory encryption only, over an existing vault whose ``.env`` is enrolled and injecting.
 
-    The caller answers ``already`` first; ``active`` confirms the result. The
+    The prerequisites come first, then the idempotent answer: ``vault_required``
+    without a vault, ``env_required`` until ``.env`` is enrolled and injecting
+    (no opt-out), and only then ``already`` when memory encryption is on. The
     vault is opened on the hot path (one device-key unwrap: a Touch ID prompt
     when the vault key is attended); no passphrase can be asked for or created.
     """
@@ -323,8 +344,10 @@ def enable_memory(*, home: Path, root: Path, platform: str, active: Callable[[],
     state = facts(home, root, platform=platform)
     if not state["exists"]:
         return {"ok": False, "error": "vault_required"}
-    if not (state["env_enrolled"] and state["env_injecting"]):
+    if not (state["env_enrolled"] and state["env_injecting"] and not state["optout"]):
         return {"ok": False, "error": "env_required"}
+    if active():
+        return {"ok": True, "already": True}
     try:
         with FlowSession() as flow, captured_output():
             rc = memory_cli.enable(

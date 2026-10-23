@@ -119,7 +119,10 @@ def _flow_desktop_memory_enable(world: _World, monkeypatch: pytest.MonkeyPatch) 
         home=world.home, root=world.root, platform="darwin", flow=flow, flows=flows, unattended=None
     )
     assert committed == {"ok": True, "passphrase_reused": True}
-    memory = _vault.enable_memory(home=world.home, root=world.root, platform="darwin", active=lambda: True)
+    from mordred_hermes.keyvault._memory_hook import memory_marker_path
+
+    armed = memory_marker_path(world.home).is_file  # memory_cli.enable writes the marker
+    memory = _vault.enable_memory(home=world.home, root=world.root, platform="darwin", active=armed)
     assert memory == {"ok": True, "restart_required": True}
 
 

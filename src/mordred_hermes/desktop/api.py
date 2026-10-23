@@ -347,10 +347,11 @@ async def memory_enable(body: dict[str, Any] | None = None) -> Any:
     if sys.platform == "linux" and (body or {}).get("acknowledge_tpm_no_recovery") is not True:
         return _error("telegram_platform_unsupported")
 
-    if await asyncio.to_thread(_memory_active):
-        return {"ok": True, "already": True}
     if sys.platform == "linux":
+        if await asyncio.to_thread(_memory_active):
+            return {"ok": True, "already": True}
         return await _linux_memory_enable()
+    # macOS: the vault and the env target are checked BEFORE the idempotent answer.
     home, root, platform = _home(), _seams.vault_root(), sys.platform
     return await _seams.run_ceremony(
         lambda: _vault.enable_memory(home=home, root=root, platform=platform, active=_memory_active)

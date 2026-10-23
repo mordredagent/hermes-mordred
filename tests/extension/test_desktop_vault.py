@@ -269,8 +269,9 @@ def test_a_helper_anchor_is_read_without_legacy_fallback(ceremony: Any, anchors:
     assert anchors.legacy.reads == []  # the helper answered: the legacy item is not even read
 
 
-@pytest.mark.parametrize("legacy", [None, RuntimeError("keychain")])
+@pytest.mark.parametrize("legacy", [None, RuntimeError("keychain"), b"pin"])
 def test_an_unreadable_helper_is_unknown(ceremony: Any, anchors: Any, legacy: Any) -> None:
+    """Finding 4: with a legacy item next to an unreadable helper, the helper may hold one too: no remedy."""
     anchors.helper = _Anchors(RuntimeError("unknown cmd"))
     anchors.legacy = _Anchors(legacy)
     answer = _commit_failure(ceremony)
@@ -320,6 +321,21 @@ def test_memory_enable_needs_the_vault_then_the_env_target(ceremony: Any, monkey
     assert ceremony.state["env"] == []  # memory only: .env and the vault are not touched
     assert ceremony.state["memory"] == [{"prompt_password": ""}]
     assert ceremony.desktop.post("/memory/enable") == {"ok": True, "already": True}
+
+
+@pytest.mark.parametrize("state", ["no_vault", "not_enrolled", "optout"])
+def test_memory_on_never_hides_a_missing_prerequisite(ceremony: Any, state: str) -> None:
+    """Finding 5: ``already`` only after the vault and the env target are in place."""
+    ceremony.state["active"] = True  # memory encryption reports on
+    expected = "vault_required" if state == "no_vault" else "env_required"
+    if state != "no_vault":
+        ceremony.root.mkdir(parents=True)
+        (ceremony.root / "manifest.1.mvmf").write_bytes(b"m")
+    if state == "optout":
+        ceremony.state["enrolled"] = True
+        (ceremony.home / "mordred" / "env-vault.optout").write_text("opt-out\n", encoding="utf-8")
+    assert ceremony.desktop.post("/memory/enable") == {"ok": False, "error": expected}
+    assert ceremony.state["memory"] == []
 
 
 def test_memory_enable_failure(ceremony: Any) -> None:
@@ -548,3 +564,94 @@ def test_the_real_ceremony_creates_a_vault_that_the_prepared_phrase_recovers(
 def test_reaper_interval_is_thirty_seconds() -> None:
     assert _seams.REAP_INTERVAL_S == 30.0 and _vault.VAULT_TTL_S == 600.0
     assert time.monotonic() > 0
+
+
+# -- the stale anchor through the REAL wizard path (simulated Keychain and helper only) -----------
+
+
+@pytest.fixture
+def keychain(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Only the native boundaries are simulated: the Keychain (SimKeychain), the SE helper and the SE key."""
+    from mordred_hermes.keyvault import _anchor_keychain, _seckey_helper
+    from tests._keychain_sim import SimHelperRunner, SimKeychain, SimPyobjcOps
+    from tests._keyvault_fakes import FakeBackend
+    from tests.test_wizard_flow_session import _stub_runtime_probes
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    _stub_runtime_probes(monkeypatch)
+    kc = SimKeychain()
+    runner = SimHelperRunner(kc)
+    monkeypatch.setattr(_seckey_helper, "find_sekey_helper", lambda: "mordred-hermes-sekey")
+    monkeypatch.setattr(_seckey_helper, "_run_helper", runner)
+    monkeypatch.setattr(_anchor_keychain, "_PyobjcKeychainOps", lambda: SimPyobjcOps(kc, "python-hermes"))
+    backend = FakeBackend()
+    monkeypatch.setattr(env_decrypt_cli, "enable", functools.partial(env_decrypt_cli.enable, backend=backend))
+    root = desktop.home / "mordred" / "vault"
+    (desktop.home / ".env").write_text("A=1\n", encoding="utf-8")
+    return SimpleNamespace(
+        desktop=desktop, kc=kc, runner=runner, backend=backend, root=root, identity=_identity.vault_identity(root)
+    )
+
+
+def _real_commit(k: Any) -> dict[str, Any]:
+    prepared = k.desktop.post("/vault/prepare", {})
+    assert prepared["ok"] is True
+    return dict(k.desktop.post(f"/vault/{prepared['flow_id']}/commit", {"unattended": True}))
+
+
+def _no_migration(k: Any) -> None:
+    from mordred_hermes.keyvault._anchor_keychain import HELPER_SERVICE
+
+    assert not any(cmd in ("anchor_add", "anchor_set") for cmd in k.runner.calls)  # no helper.add / put
+    assert not any(op == "SecItemDelete" for _binary, op, _service in k.kc.ops)  # no legacy.discard
+    assert (HELPER_SERVICE, k.identity) not in k.kc.items
+
+
+def test_real_path_legacy_anchor_is_diagnosed_before_the_wizard_migrates_it(keychain: Any) -> None:
+    """Finding 2: the wizard's default_anchor_store().read() would move the item into the helper store."""
+    from mordred_hermes.keyvault._anchor_keychain import DEFAULT_SERVICE
+
+    keychain.kc.seed(DEFAULT_SERVICE, keychain.identity, b"pin", creator="python-dev")
+    answer = _real_commit(keychain)
+    assert answer == {
+        "ok": False,
+        "error": "vault_anchor_stale",
+        "anchor_store": "legacy",
+        "anchor_identity": keychain.identity,
+        "remedy": f"security delete-generic-password -s {DEFAULT_SERVICE} -a {keychain.identity}",
+    }
+    _no_migration(keychain)
+    assert (DEFAULT_SERVICE, keychain.identity) in keychain.kc.items  # the remedy still has its target
+    assert not keychain.root.exists() and keychain.backend.calls == []  # the wizard never ran
+    assert (keychain.desktop.home / ".env").read_text(encoding="utf-8") == "A=1\n"
+
+
+def test_real_path_helper_anchor_is_reported_without_a_remedy(keychain: Any) -> None:
+    from mordred_hermes.keyvault._anchor_keychain import HELPER_SERVICE
+
+    keychain.kc.seed(HELPER_SERVICE, keychain.identity, b"pin", creator="mordred-hermes-sekey")
+    answer = _real_commit(keychain)
+    assert answer["error"] == "vault_anchor_stale" and answer["anchor_store"] == "helper" and "remedy" not in answer
+    assert keychain.kc.ops == [("mordred-hermes-sekey", "SecItemCopyMatching", HELPER_SERVICE)]  # one read only
+
+
+def test_real_path_old_helper_with_a_legacy_item_is_unknown(keychain: Any) -> None:
+    """Finding 4 through the real path: an old helper cannot say, so no deletion command is offered."""
+    from mordred_hermes.keyvault._anchor_keychain import DEFAULT_SERVICE
+
+    keychain.runner.supports_anchor = False
+    keychain.kc.seed(DEFAULT_SERVICE, keychain.identity, b"pin", creator="python-dev")
+    answer = _real_commit(keychain)
+    assert answer["anchor_store"] == "unknown" and "remedy" not in answer
+    _no_migration(keychain)
+
+
+def test_real_path_without_any_anchor_creates_the_vault(keychain: Any) -> None:
+    from mordred_hermes.keyvault._anchor_keychain import DEFAULT_SERVICE, HELPER_SERVICE
+
+    answer = _real_commit(keychain)
+    assert answer == {"ok": True, "passphrase_reused": False}
+    assert kv_vault.artifacts_present(keychain.root)
+    assert (HELPER_SERVICE, keychain.identity) in keychain.kc.items  # the new anchor lives in the helper item
+    assert (DEFAULT_SERVICE, keychain.identity) not in keychain.kc.items
+    assert keychain.kc.dialog_count == 0
