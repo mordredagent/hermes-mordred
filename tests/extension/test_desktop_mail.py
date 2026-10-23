@@ -13,7 +13,8 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from mordred_hermes.desktop import _projections, api
+from mordred_hermes.desktop import _mail_routes, _projections, _seams, api
+from mordred_hermes.desktop._jobs import JobBusy
 from mordred_hermes.imports.mail.imap_sync import ERROR_CODES, FetchResult
 
 from ._desktop_support import (
@@ -28,7 +29,7 @@ from ._desktop_support import (
     FakeSetupError,
 )
 
-REAL_MAIL_AUDIT = api._mail_audit
+REAL_MAIL_AUDIT = _seams.mail_audit
 SETUP_CODES = sorted(_projections.MAIL_SETUP_CODES - {"invalid_body", "mail_setup_failed"})
 
 
@@ -168,14 +169,14 @@ def test_setup_needs_macos_and_memory_but_cancel_does_not(desktop: Any, monkeypa
 
 
 def test_cancel_is_idempotent_and_never_creates_the_flows(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(api, "_MAIL_FLOWS", None)
-    monkeypatch.setattr(api, "_mail_flows", lambda: pytest.fail("cancel must not create the flows"))
+    monkeypatch.setattr(_seams, "MAIL_FLOWS", None)
+    monkeypatch.setattr(_seams, "mail_flows", lambda: pytest.fail("cancel must not create the flows"))
     assert desktop.post("/mail/setup/x/cancel") == {"ok": True}
 
     def broken(flow_id: str) -> None:
         raise FakeSetupError("mail_setup_flow_expired")
 
-    monkeypatch.setattr(api, "_MAIL_FLOWS", SimpleNamespace(cancel=broken))
+    monkeypatch.setattr(_seams, "MAIL_FLOWS", SimpleNamespace(cancel=broken))
     assert desktop.post("/mail/setup/x/cancel") == {"ok": True}
 
 
@@ -197,8 +198,8 @@ def fetch(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
             raise seen["result"]
         return seen.get("result", result)
 
-    monkeypatch.setattr(api, "_run_fetch", run_fetch)
-    monkeypatch.setattr(api, "_fetch_env", lambda home: SimpleNamespace(home=home, address=ADDRESS))
+    monkeypatch.setattr(_seams, "run_fetch", run_fetch)
+    monkeypatch.setattr(_seams, "fetch_env", lambda home: SimpleNamespace(home=home, address=ADDRESS))
     return SimpleNamespace(desktop=desktop, seen=seen, gate=gate, result=result)
 
 
@@ -294,7 +295,7 @@ def test_fetch_gates(fetch: Any, monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_fetch_job_busy_is_a_code(fetch: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     def busy(kind: str, work: Any) -> Any:
-        raise api.JobBusy(kind)
+        raise JobBusy(kind)
 
     monkeypatch.setattr(api, "_start_job", busy)
     assert fetch.desktop.post("/mail/fetch", {}) == {"ok": False, "error": "mail_fetch_busy"}
@@ -323,15 +324,15 @@ def forget(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
             raise seen["result"]
         return seen.get("result", done)
 
-    monkeypatch.setattr(api, "_forget", run_forget)
-    monkeypatch.setattr(api, "_mail_audit", lambda result, rows: seen["audit"].append((result, rows)))
+    monkeypatch.setattr(_seams, "forget", run_forget)
+    monkeypatch.setattr(_seams, "mail_audit", lambda result, rows, home: seen["audit"].append((result, rows, home)))
     return SimpleNamespace(desktop=desktop, seen=seen, done=done)
 
 
 def test_forget_with_rows_needs_the_phrase_before_anything_is_read(
     forget: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(api, "_mail_secret_store", lambda: pytest.fail("nothing may be read before the phrase"))
+    monkeypatch.setattr(_seams, "mail_secret_store", lambda: pytest.fail("nothing may be read before the phrase"))
     for confirm in (None, "delete my data please", "DELETE MY DATA"):
         body = {"rows": True} if confirm is None else {"rows": True, "confirm": confirm}
         assert forget.desktop.post("/mail/forget", body) == {"ok": False, "error": "forget_confirm_mismatch"}
@@ -366,7 +367,7 @@ def test_forget_cancels_flows_first_and_answers_counts_only(forget: Any) -> None
     (call,) = forget.seen["calls"]
     assert call["rows"] is True and call["account"] is None and call["cancelled_first"] == 1
     assert call["home"] == forget.desktop.home
-    assert forget.seen["audit"] == [(forget.done, True)]
+    assert forget.seen["audit"] == [(forget.done, True, forget.desktop.home)]
     assert not forget.desktop.leaked(answer)
 
 
@@ -382,8 +383,8 @@ def test_credential_only_forget_needs_no_memory_but_rows_do(forget: Any, monkeyp
 
 
 def test_forget_without_flows_does_not_create_them(forget: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(api, "_MAIL_FLOWS", None)
-    monkeypatch.setattr(api, "_mail_flows", lambda: pytest.fail("forget must not create the flows"))
+    monkeypatch.setattr(_seams, "MAIL_FLOWS", None)
+    monkeypatch.setattr(_seams, "mail_flows", lambda: pytest.fail("forget must not create the flows"))
     assert forget.desktop.post("/mail/forget", {"rows": False})["ok"] is True
 
 
@@ -439,23 +440,23 @@ def test_library_seams_resolve_lazily(monkeypatch: pytest.MonkeyPatch, tmp_path:
             "open_import_store_readonly": lambda home: ("store", home),
         }[name]
 
-    monkeypatch.setattr(api, "_library", library)
-    monkeypatch.setattr(api, "_MAIL_FLOWS", None)
-    monkeypatch.setattr(api, "_mail_secret_store", lambda: "secret-store")
-    flows = api._mail_flows()
-    assert isinstance(flows, Flows) and flows.secret_store == "secret-store" and api._mail_flows() is flows
-    assert api._forget("s", tmp_path, account="work", rows=True) == ("forgot", tmp_path, "work", True)
-    assert api._open_store_readonly(tmp_path) == ("store", tmp_path)
+    monkeypatch.setattr(_seams, "library", library)
+    monkeypatch.setattr(_seams, "MAIL_FLOWS", None)
+    monkeypatch.setattr(_seams, "mail_secret_store", lambda: "secret-store")
+    flows = _seams.mail_flows()
+    assert isinstance(flows, Flows) and flows.secret_store == "secret-store" and _seams.mail_flows() is flows
+    assert _seams.forget("s", tmp_path, account="work", rows=True) == ("forgot", tmp_path, "work", True)
+    assert _seams.open_store_readonly(tmp_path) == ("store", tmp_path)
     assert calls == [
         ("..imports.mail.setup_flow", "MailSetupFlows"),
         ("..imports.mail.forget", "forget"),
         ("..imports.store", "open_import_store_readonly"),
     ]
-    monkeypatch.setattr(api, "_MAIL_FLOWS", None)
+    monkeypatch.setattr(_seams, "MAIL_FLOWS", None)
 
 
 def test_library_imports_relative_to_the_package() -> None:
-    assert api._library("..imports.store", "ImportStore").__name__ == "ImportStore"
+    assert _seams.library("..imports.store", "ImportStore").__name__ == "ImportStore"
 
 
 def test_fetch_and_status_seams_call_the_library(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -465,44 +466,43 @@ def test_fetch_and_status_seams_call_the_library(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(imap_sync, "run_fetch", lambda options, env: ("ran", options, env))
     monkeypatch.setattr(imap_sync, "default_env", lambda home: ("env", home))
     monkeypatch.setattr(mail_sync_cli, "imap_status", lambda store, flags: ("status", store, flags))
-    assert api._run_fetch("o", "e") == ("ran", "o", "e")
-    assert api._fetch_env(tmp_path) == ("env", tmp_path)
-    assert api._imap_status("s", {"account": "a"}) == ("status", "s", {"account": "a"})
-    assert type(api._mail_secret_store()).__name__ == "MailSecretStore"
+    assert _seams.run_fetch("o", "e") == ("ran", "o", "e")
+    assert _seams.fetch_env(tmp_path) == ("env", tmp_path)
+    assert _seams.imap_status("s", {"account": "a"}) == ("status", "s", {"account": "a"})
+    assert type(_seams.mail_secret_store()).__name__ == "MailSecretStore"
 
 
 def test_mail_audit_writes_the_shared_event(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     written: list[Any] = []
-    monkeypatch.setattr(api, "_home", lambda: tmp_path)
     monkeypatch.setattr(
-        api, "_library", lambda module, name: lambda done, *, rows: {"event": "mail.forget", "rows": rows}
+        _seams, "library", lambda module, name: lambda done, *, rows: {"event": "mail.forget", "rows": rows}
     )
     monkeypatch.setattr("mordred_hermes._audit_support.build_audit_writer", lambda path: ("writer", path))
     monkeypatch.setattr(
         "mordred_hermes._audit_support.safe_audit_append", lambda writer, entry, logger: written.append((writer, entry))
     )
-    REAL_MAIL_AUDIT(object(), rows=True)
+    REAL_MAIL_AUDIT(object(), rows=True, home=tmp_path)
     assert written == [(("writer", tmp_path / "mordred" / "audit.log"), {"event": "mail.forget", "rows": True})]
 
 
-def test_mail_audit_failures_are_logged(monkeypatch: pytest.MonkeyPatch, caplog: Any) -> None:
+def test_mail_audit_failures_are_logged(monkeypatch: pytest.MonkeyPatch, caplog: Any, tmp_path: Path) -> None:
     def missing(module: str, name: str) -> Any:
         raise ImportError(name)
 
-    monkeypatch.setattr(api, "_library", missing)
-    REAL_MAIL_AUDIT(object(), rows=False)
+    monkeypatch.setattr(_seams, "library", missing)
+    REAL_MAIL_AUDIT(object(), rows=False, home=tmp_path)
     assert "ImportError" in caplog.text
 
 
 def test_fetch_mail_rejects_a_non_dict_result(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(api, "_fetch_env", lambda home: None)
-    monkeypatch.setattr(api, "_run_fetch", lambda options, env: SimpleNamespace(as_dict=lambda: ["x"]))
+    monkeypatch.setattr(_seams, "fetch_env", lambda home: None)
+    monkeypatch.setattr(_seams, "run_fetch", lambda options, env: SimpleNamespace(as_dict=lambda: ["x"]))
     with pytest.raises(TypeError):
-        api._fetch_mail(object(), tmp_path)
+        _mail_routes.fetch_mail(object(), tmp_path)
 
 
 def test_flows_seam_in_status_is_untouched(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """Status never touches the setup flows (and so never a pending password)."""
-    monkeypatch.setattr(api, "_mail_flows", lambda: pytest.fail("status must not reach the flows"))
-    monkeypatch.setattr(api, "_mail_secret_store", lambda: FakeMailSecrets(None))
+    monkeypatch.setattr(_seams, "mail_flows", lambda: pytest.fail("status must not reach the flows"))
+    monkeypatch.setattr(_seams, "mail_secret_store", lambda: FakeMailSecrets(None))
     assert desktop.get("/status?client_version=4")["mail"] == {"configured": False}

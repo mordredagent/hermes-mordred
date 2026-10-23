@@ -112,12 +112,30 @@
       "extension",
       "macos"
     ],
+    "src/mordred_hermes/desktop/_ceremony_routes.py": [
+      "extension",
+      "macos"
+    ],
     "src/mordred_hermes/desktop/_databases.py": [
       "extension",
       "macos"
     ],
+    "src/mordred_hermes/desktop/_mail_routes.py": [
+      "extension"
+    ],
+    "src/mordred_hermes/desktop/_maintenance_routes.py": [
+      "extension"
+    ],
     "src/mordred_hermes/desktop/_projections.py": [
       "extension"
+    ],
+    "src/mordred_hermes/desktop/_seams.py": [
+      "extension",
+      "macos"
+    ],
+    "src/mordred_hermes/desktop/_status_v4.py": [
+      "extension",
+      "macos"
     ],
     "src/mordred_hermes/desktop/_vault.py": [
       "extension",

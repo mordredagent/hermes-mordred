@@ -14,7 +14,7 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from mordred_hermes.desktop import _projections, api
+from mordred_hermes.desktop import _projections, _seams, _status_v4, api
 
 from ._desktop_support import (
     ADDRESS,
@@ -26,7 +26,7 @@ from ._desktop_support import (
     store_status,
 )
 
-REAL_STORE_REFUSAL = api._store_refusal
+REAL_STORE_REFUSAL = _seams.store_refusal
 V4_KEYS = {"vault", "databases", "imports", "mail", "telegram_archive"}
 VALID_KEY = "hex:" + "11" * 32
 
@@ -78,24 +78,24 @@ def test_v3_keeps_its_keys_and_v4_adds_exactly_the_new_sections(desktop: Any) ->
 
 @pytest.mark.parametrize("code", sorted(_projections.IMPORT_STATE_CODES))
 def test_every_store_refusal_is_a_state(desktop: Any, monkeypatch: pytest.MonkeyPatch, code: str) -> None:
-    monkeypatch.setattr(api, "_store_refusal", REAL_STORE_REFUSAL)
+    monkeypatch.setattr(_seams, "store_refusal", REAL_STORE_REFUSAL)
 
     def refuse(home: Path) -> Any:
         raise FakeRefused(code)
 
-    monkeypatch.setattr(api, "_open_store_readonly", refuse)
+    monkeypatch.setattr(_seams, "open_store_readonly", refuse)
     status = desktop.get("/status?client_version=4")
     assert status["imports"] == {"available": False, "code": code, "sources": {}}
 
 
 @pytest.mark.parametrize("code", ["conflict", "run_not_open", "Some free text", None])
 def test_unknown_refusals_map_to_store_unavailable(desktop: Any, monkeypatch: pytest.MonkeyPatch, code: Any) -> None:
-    monkeypatch.setattr(api, "_store_refusal", REAL_STORE_REFUSAL)
+    monkeypatch.setattr(_seams, "store_refusal", REAL_STORE_REFUSAL)
 
     def refuse(home: Path) -> Any:
         raise FakeRefused(code) if code is not None else RuntimeError(ADDRESS)
 
-    monkeypatch.setattr(api, "_open_store_readonly", refuse)
+    monkeypatch.setattr(_seams, "open_store_readonly", refuse)
     imports = desktop.get("/imports/status")["imports"]
     assert imports == {"available": False, "code": "store_unavailable", "sources": {}}
 
@@ -107,7 +107,7 @@ def test_store_refusal_uses_the_store_mapping_when_present(monkeypatch: pytest.M
         calls.append(exc)
         return "disk_full"
 
-    monkeypatch.setattr(api, "_library", lambda module, name: refusal_code)
+    monkeypatch.setattr(_seams, "library", lambda module, name: refusal_code)
     assert REAL_STORE_REFUSAL(FakeRefused("x")) == "disk_full" and len(calls) == 1
 
 
@@ -117,9 +117,9 @@ def test_projections_drop_canary_fields_and_corrupt_values(desktop: Any, monkeyp
     status["sources"]["canary"] = {"conversations": 9, "note": EXTRA}
     status["sources"]["mail"]["messages"] = "lots"  # corrupt: not an int
     status["address"] = ADDRESS
-    monkeypatch.setattr(api, "_open_store_readonly", lambda home: FakeReadonlyStore(status))
+    monkeypatch.setattr(_seams, "open_store_readonly", lambda home: FakeReadonlyStore(status))
     flags = _flags(address=ADDRESS, gmail="yes", touch_id=None)
-    monkeypatch.setattr(api, "_mail_secret_store", lambda: FakeMailSecrets(flags))
+    monkeypatch.setattr(_seams, "mail_secret_store", lambda: FakeMailSecrets(flags))
 
     def imap_status(store: Any, seen: Any) -> Any:
         assert seen is flags
@@ -136,7 +136,7 @@ def test_projections_drop_canary_fields_and_corrupt_values(desktop: Any, monkeyp
             "folder": FOLDER,
         }
 
-    monkeypatch.setattr(api, "_imap_status", imap_status)
+    monkeypatch.setattr(_seams, "imap_status", imap_status)
     result = desktop.get("/imports/status")
     assert result == {
         "ok": True,
@@ -164,19 +164,19 @@ def test_projections_drop_canary_fields_and_corrupt_values(desktop: Any, monkeyp
 
 
 def test_last_fetch_is_the_last_attempt_and_last_success_is_kept(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(api, "_mail_secret_store", lambda: FakeMailSecrets(_flags()))
+    monkeypatch.setattr(_seams, "mail_secret_store", lambda: FakeMailSecrets(_flags()))
     attempt = {"at": 200, "error": "imap_auth_failed", "partial": False}
     monkeypatch.setattr(
-        api,
-        "_imap_status",
+        _seams,
+        "imap_status",
         lambda store, flags: {"configured": True, "last_fetch": attempt, "last_success": {"at": 100}, "cursors": {}},
     )
     mail = desktop.get("/status?client_version=4")["mail"]
     assert mail["last_attempt"] == attempt and mail["last_success"] == {"at": 100}
     # An imap_status of an older Mordred: one flat record, a success when it had no error.
     monkeypatch.setattr(
-        api,
-        "_imap_status",
+        _seams,
+        "imap_status",
         lambda store, flags: {"configured": True, "last_fetch": {"at": 50, "error": None, "partial": True}},
     )
     mail = desktop.get("/imports/status")["mail"]
@@ -190,9 +190,9 @@ def test_mail_from_flags_only_when_the_store_is_unavailable(desktop: Any, monkey
     def never(store: Any, flags: Any) -> Any:
         pytest.fail("imap_status needs the store")
 
-    monkeypatch.setattr(api, "_open_store_readonly", refuse)
-    monkeypatch.setattr(api, "_imap_status", never)
-    monkeypatch.setattr(api, "_mail_secret_store", lambda: FakeMailSecrets(_flags()))
+    monkeypatch.setattr(_seams, "open_store_readonly", refuse)
+    monkeypatch.setattr(_seams, "imap_status", never)
+    monkeypatch.setattr(_seams, "mail_secret_store", lambda: FakeMailSecrets(_flags()))
     result = desktop.get("/imports/status")
     assert result["imports"]["code"] == "no_key"
     assert result["mail"] == {"configured": True, "account": "work", "gmail": True, "scope": ["all"], "touch_id": True}
@@ -209,7 +209,7 @@ def test_mail_from_flags_only_when_the_store_is_unavailable(desktop: Any, monkey
 def test_residue_is_reported_as_credentials_left(
     desktop: Any, monkeypatch: pytest.MonkeyPatch, secret_store: Any
 ) -> None:
-    monkeypatch.setattr(api, "_mail_secret_store", lambda: secret_store)
+    monkeypatch.setattr(_seams, "mail_secret_store", lambda: secret_store)
     mail = desktop.get("/status?client_version=4")["mail"]
     assert mail == {"configured": False, "residue": "credentials_left"}
 
@@ -217,7 +217,7 @@ def test_residue_is_reported_as_credentials_left(
 def test_a_broken_flags_reader_is_not_configured_and_logs_no_text(
     desktop: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(api, "_mail_secret_store", lambda: FakeMailSecrets(raises=OSError(ADDRESS)))
+    monkeypatch.setattr(_seams, "mail_secret_store", lambda: FakeMailSecrets(raises=OSError(ADDRESS)))
     assert desktop.get("/imports/status")["mail"] == {"configured": False}
     assert not desktop.leaked()
 
@@ -274,7 +274,7 @@ def test_pending_work_means_not_runtime_protected(desktop: Any, monkeypatch: pyt
 
 
 def test_databases_status_discovers_without_a_key(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(api, "_sqlcipher_available", lambda: True)
+    monkeypatch.setattr(_seams, "sqlcipher_available", lambda: True)
     with sqlite3.connect(desktop.home / "state.db") as conn:
         conn.execute("CREATE TABLE t (x)")
     (desktop.home / "kanban.db").write_bytes(b"\x01" * 4096)  # ciphertext (or damage): unreadable without a key
@@ -326,7 +326,7 @@ def test_a_broken_vault_reader_reports_no_vault(desktop: Any, monkeypatch: pytes
 
 @pytest.mark.parametrize("platform", ["linux", "win32", "freebsd"])
 def test_other_platforms_get_fixed_unsupported_sections(platform: str) -> None:
-    sections = asyncio.run(api._sections_v4(platform))
+    sections = asyncio.run(_status_v4.sections(platform, Path("/nonexistent")))
     assert sections == {
         "vault": {"exists": False, "env_enrolled": False, "env_injecting": False, "optout": False, "unattended": None},
         "databases": {"supported": False},
@@ -334,7 +334,7 @@ def test_other_platforms_get_fixed_unsupported_sections(platform: str) -> None:
         "mail": {"configured": False},
         "telegram_archive": {"legacy": None},
     }
-    assert api._imports_sections(Path("/nonexistent"), platform)["imports"]["code"] == "unsupported_platform"
+    assert _status_v4.imports_sections(Path("/nonexistent"), platform)["imports"]["code"] == "unsupported_platform"
 
 
 def test_linux_status_v4_carries_the_unsupported_sections(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:

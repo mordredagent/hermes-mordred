@@ -14,7 +14,7 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from mordred_hermes._private_fs import open_private_directory  # noqa: E402
-from mordred_hermes.desktop import api, install  # noqa: E402
+from mordred_hermes.desktop import _maintenance_routes, _seams, api, install  # noqa: E402
 from mordred_hermes.extension.telegram import secrets  # noqa: E402
 from tests._private_files import write_private  # noqa: E402
 
@@ -285,7 +285,7 @@ def test_memory_enable_on_macos_is_memory_only(env, monkeypatch):
     """The vault and its passphrase come from /vault/prepare + commit (test_desktop_vault.py)."""
     calls: list[str] = []
     monkeypatch.setattr(api, "sys", SimpleNamespace(platform="darwin"))
-    monkeypatch.setattr(api, "_vault_root", lambda: env.tmp / "mordred" / "vault")
+    monkeypatch.setattr(_seams, "vault_root", lambda: env.tmp / "mordred" / "vault")
     monkeypatch.setattr(
         "mordred_hermes.extension.telegram.memory_guard.memory_encryption_active", lambda home=None: False
     )
@@ -491,7 +491,7 @@ def test_uninstall_plan_and_run_as_a_job(env, monkeypatch):
 
 
 def test_uninstall_answers_give_the_phrase_and_passphrase_only():
-    answers = api._UninstallAnswers("recovery words", "delete my data")
+    answers = _maintenance_routes._UninstallAnswers("recovery words", "delete my data")
     assert answers.ask_text("Type it") == "delete my data"
     assert answers.ask_password("Vault recovery passphrase") == "recovery words"
     assert answers.ask_bool("Uninstall?", False) is True

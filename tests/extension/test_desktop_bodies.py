@@ -10,7 +10,7 @@ pytest.importorskip("fastapi")
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
 
-from mordred_hermes.desktop import api
+from mordred_hermes.desktop import _ceremony_routes, _mail_routes, _maintenance_routes, api
 
 from ._desktop_support import PREFIX
 
@@ -59,7 +59,8 @@ def test_an_oversized_body_is_refused_unread(desktop: Any) -> None:
 
 
 def test_fastapi_never_validates_a_body_for_these_routes() -> None:
-    routes = {route.path: route for route in api.router.routes if isinstance(route, APIRoute)}
+    routers = (api.router, _ceremony_routes.router, _mail_routes.router, _maintenance_routes.router)
+    routes = {route.path: route for router in routers for route in router.routes if isinstance(route, APIRoute)}
     for path in SECRET_BEARING + ALSO_HAND_READ:
         template = path.replace("flow_ABCDEFGH1234", "{flow_id}")
         route = routes[template]

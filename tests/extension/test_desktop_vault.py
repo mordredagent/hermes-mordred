@@ -16,7 +16,7 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from mordred_hermes.desktop import _vault, api
+from mordred_hermes.desktop import _seams, _vault, api
 from mordred_hermes.keyvault import _identity
 from mordred_hermes.keyvault import vault as kv_vault
 from mordred_hermes.keyvault._memory_hook import memory_marker_path
@@ -83,7 +83,7 @@ def test_prepare_shows_a_passphrase_and_changes_nothing_on_disk(ceremony: Any, c
     elsewhere = json.dumps([ceremony.desktop.events, ceremony.desktop.get("/status?client_version=4")])
     assert phrase not in elsewhere and phrase not in "\n".join(ceremony.desktop.logs.lines)
     assert phrase not in capsys.readouterr().out
-    assert phrase not in repr(api._vault_flows()) + repr(api._vault_flows().get(prepared["flow_id"]))
+    assert phrase not in repr(_seams.vault_flows()) + repr(_seams.vault_flows().get(prepared["flow_id"]))
 
 
 def test_commit_creates_the_vault_with_the_prepared_passphrase(ceremony: Any, capsys: Any) -> None:
@@ -122,7 +122,7 @@ def test_an_unknown_or_expired_flow_creates_nothing(ceremony: Any, monkeypatch: 
     assert ceremony.desktop.post("/vault/unknown_flow_id/commit", {}) == {"ok": False, "error": "vault_flow_expired"}
     now = [1000.0]
     flows = _vault.VaultFlows(api.generate_recovery_passphrase, clock=lambda: now[0])
-    monkeypatch.setattr(api, "_VAULT_FLOWS", flows)
+    monkeypatch.setattr(_seams, "VAULT_FLOWS", flows)
     prepared = _prepare(ceremony)
     now[0] += 601
     assert ceremony.desktop.post(f"/vault/{prepared['flow_id']}/commit", {}) == {
@@ -169,11 +169,11 @@ def test_nothing_to_do_and_optout(ceremony: Any) -> None:
     (ceremony.root / "manifest.1.mvmf").write_bytes(b"m")
     ceremony.state["enrolled"] = True
     assert _prepare(ceremony) == {"ok": False, "error": "vault_exists"}
-    flow = api._vault_flows().prepare(reuse=True)
+    flow = _seams.vault_flows().prepare(reuse=True)
     assert ceremony.desktop.post(f"/vault/{flow.flow_id}/commit", {}) == {"ok": False, "error": "vault_exists"}
     (ceremony.home / "mordred" / "env-vault.optout").write_text("opt-out\n", encoding="utf-8")
     assert _prepare(ceremony) == {"ok": False, "error": "env_optout"}
-    flow = api._vault_flows().prepare(reuse=True)
+    flow = _seams.vault_flows().prepare(reuse=True)
     assert ceremony.desktop.post(f"/vault/{flow.flow_id}/commit", {}) == {"ok": False, "error": "env_optout"}
     assert ceremony.state["env"] == []
 
@@ -341,7 +341,7 @@ def test_a_crashing_ceremony_is_a_code(ceremony: Any, monkeypatch: pytest.Monkey
     monkeypatch.setattr(memory_cli, "enable", boom)
     monkeypatch.setattr(env_decrypt_cli, "enable", boom)
     assert ceremony.desktop.post("/memory/enable") == {"ok": False, "error": "memory_encryption_failed"}
-    flow = api._vault_flows().prepare(reuse=True)
+    flow = _seams.vault_flows().prepare(reuse=True)
     ceremony.state["enrolled"] = False
     assert ceremony.desktop.post(f"/vault/{flow.flow_id}/commit", {})["error"] == "memory_encryption_failed"
     assert "secret detail" not in "\n".join(ceremony.desktop.logs.lines)
@@ -380,7 +380,7 @@ def test_ceremonies_are_serialised(ceremony: Any, monkeypatch: pytest.MonkeyPatc
 
 
 def test_a_cancelled_request_does_not_cancel_the_ceremony(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(api, "_CEREMONY_LOCK", threading.Lock())
+    monkeypatch.setattr(_seams, "CEREMONY_LOCK", threading.Lock())
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
 
     def work() -> dict[str, Any]:
@@ -390,21 +390,21 @@ def test_a_cancelled_request_does_not_cancel_the_ceremony(monkeypatch: pytest.Mo
         return {"ok": True}
 
     async def scenario() -> None:
-        task = asyncio.ensure_future(api._run_ceremony(work))
+        task = asyncio.ensure_future(_seams.run_ceremony(work))
         await asyncio.to_thread(entered.wait, 5)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert api._CEREMONY_LOCK.locked()  # still held: the ceremony runs on
-        busy = await api._run_ceremony(lambda: {"ok": True})
+        assert _seams.CEREMONY_LOCK.locked()  # still held: the ceremony runs on
+        busy = await _seams.run_ceremony(lambda: {"ok": True})
         assert json.loads(busy.body) == {"ok": False, "error": "memory_operation_in_progress"}
         release.set()
         await asyncio.to_thread(finished.wait, 5)
         for _ in range(100):
-            if not api._CEREMONY_LOCK.locked():
+            if not _seams.CEREMONY_LOCK.locked():
                 break
             await asyncio.sleep(0.01)
-        assert not api._CEREMONY_LOCK.locked()
+        assert not _seams.CEREMONY_LOCK.locked()
 
     asyncio.run(scenario())
 
@@ -412,9 +412,9 @@ def test_a_cancelled_request_does_not_cancel_the_ceremony(monkeypatch: pytest.Mo
 def test_linux_memory_enable_runs_under_the_lock(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(api, "sys", SimpleNamespace(platform="linux"))
     monkeypatch.setattr(api, "_home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_vault_root", lambda: tmp_path / "v")
+    monkeypatch.setattr(_seams, "vault_root", lambda: tmp_path / "v")
     lock = threading.Lock()
-    monkeypatch.setattr(api, "_CEREMONY_LOCK", lock)
+    monkeypatch.setattr(_seams, "CEREMONY_LOCK", lock)
     armed: list[bool] = []
     monkeypatch.setattr(
         "mordred_hermes.extension.telegram.memory_guard.memory_encryption_active", lambda home=None: bool(armed)
@@ -443,13 +443,13 @@ def test_the_reaper_drops_expired_flows_without_requests(monkeypatch: pytest.Mon
     mail_flows = SimpleNamespace(reaped=0)
     mail_flows.reap = lambda: setattr(mail_flows, "reaped", mail_flows.reaped + 1)
     mail_flows.cancel_all = lambda: None
-    monkeypatch.setattr(api, "_VAULT_FLOWS", vault_flows)
-    monkeypatch.setattr(api, "_MAIL_FLOWS", mail_flows)
-    monkeypatch.setattr(api, "REAP_INTERVAL_S", 0.01)
+    monkeypatch.setattr(_seams, "VAULT_FLOWS", vault_flows)
+    monkeypatch.setattr(_seams, "MAIL_FLOWS", mail_flows)
+    monkeypatch.setattr(_seams, "REAP_INTERVAL_S", 0.01)
     flow = vault_flows.prepare(reuse=False)
 
     async def scenario() -> None:
-        task = asyncio.ensure_future(api._reaper())
+        task = asyncio.ensure_future(_seams.reaper())
         try:
             await asyncio.sleep(0.05)
             assert vault_flows.get(flow.flow_id) is flow  # within the TTL
@@ -469,10 +469,10 @@ def test_reap_and_cancel_failures_are_logged_not_raised(monkeypatch: pytest.Monk
     def boom() -> None:
         raise RuntimeError("x")
 
-    monkeypatch.setattr(api, "_MAIL_FLOWS", SimpleNamespace(reap=boom, cancel_all=boom))
-    monkeypatch.setattr(api, "_VAULT_FLOWS", None)
-    api._reap_once()
-    api._cancel_all_flows()
+    monkeypatch.setattr(_seams, "MAIL_FLOWS", SimpleNamespace(reap=boom, cancel_all=boom))
+    monkeypatch.setattr(_seams, "VAULT_FLOWS", None)
+    _seams.reap_once()
+    _seams.cancel_all_flows()
     assert "RuntimeError" in caplog.text
 
 
@@ -483,8 +483,8 @@ def test_shutdown_cancels_every_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     vault_flows = _vault.VaultFlows(lambda: "a b c d e f g h")
     calls: list[str] = []
     mail_flows = SimpleNamespace(reap=lambda: None, cancel_all=lambda: calls.append("mail"))
-    monkeypatch.setattr(api, "_VAULT_FLOWS", vault_flows)
-    monkeypatch.setattr(api, "_MAIL_FLOWS", mail_flows)
+    monkeypatch.setattr(_seams, "VAULT_FLOWS", vault_flows)
+    monkeypatch.setattr(_seams, "MAIL_FLOWS", mail_flows)
     app = FastAPI()
     app.include_router(api.router, prefix="/api/plugins/mordred")
     with TestClient(app):
@@ -518,7 +518,7 @@ def test_the_real_ceremony_creates_a_vault_that_the_prepared_phrase_recovers(
     home, root = desktop.home, tmp_path / "vault"
     _plaintext_home(home)
     backend, store = _RecordingBackend(), FakeAnchorStore()
-    monkeypatch.setattr(api, "_vault_root", lambda: root)
+    monkeypatch.setattr(_seams, "vault_root", lambda: root)
     monkeypatch.setattr(vault_cli, "_resolve_root", lambda _r: root)
     for module in (env_decrypt_cli, memory_cli):
         monkeypatch.setattr(module, "enable", functools.partial(module.enable, backend=backend, store=store))
@@ -546,5 +546,5 @@ def test_the_real_ceremony_creates_a_vault_that_the_prepared_phrase_recovers(
 
 
 def test_reaper_interval_is_thirty_seconds() -> None:
-    assert api.REAP_INTERVAL_S == 30.0 and _vault.VAULT_TTL_S == 600.0
+    assert _seams.REAP_INTERVAL_S == 30.0 and _vault.VAULT_TTL_S == 600.0
     assert time.monotonic() > 0

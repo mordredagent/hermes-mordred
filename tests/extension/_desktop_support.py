@@ -22,7 +22,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from mordred_hermes._private_fs import open_private_directory
-from mordred_hermes.desktop import api
+from mordred_hermes.desktop import _seams, api
 
 PREFIX = "/api/plugins/mordred"
 
@@ -202,17 +202,17 @@ def desktop_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[
     monkeypatch.setattr(api, "_home", lambda: home)
     monkeypatch.setattr(api, "_emit", lambda event, payload: events.append((event, payload)))
     monkeypatch.setattr(api, "_JOBS", api.JobRegistry(emit=lambda event, payload: api._emit(event, payload)))
-    monkeypatch.setattr(api, "_MAIL_FLOWS", flows)
-    monkeypatch.setattr(api, "_mail_flows", lambda: flows)
-    monkeypatch.setattr(api, "_VAULT_FLOWS", None)
-    monkeypatch.setattr(api, "_CEREMONY_LOCK", threading.Lock())
-    monkeypatch.setattr(api, "_mail_secret_store", lambda: FakeMailSecrets())
-    monkeypatch.setattr(api, "_open_store_readonly", lambda home: FakeReadonlyStore(store_status()))
-    monkeypatch.setattr(api, "_store_refusal", lambda exc: getattr(exc, "code", "store_unavailable"))
-    monkeypatch.setattr(api, "_mail_audit", lambda done, rows: None)
+    monkeypatch.setattr(_seams, "MAIL_FLOWS", flows)
+    monkeypatch.setattr(_seams, "mail_flows", lambda: flows)
+    monkeypatch.setattr(_seams, "VAULT_FLOWS", None)
+    monkeypatch.setattr(_seams, "CEREMONY_LOCK", threading.Lock())
+    monkeypatch.setattr(_seams, "mail_secret_store", lambda: FakeMailSecrets())
+    monkeypatch.setattr(_seams, "open_store_readonly", lambda home: FakeReadonlyStore(store_status()))
+    monkeypatch.setattr(_seams, "store_refusal", lambda exc: getattr(exc, "code", "store_unavailable"))
+    monkeypatch.setattr(_seams, "mail_audit", lambda done, rows, home: None)
     monkeypatch.setattr(api, "_store", lambda: SimpleNamespace(flags=lambda: None))
     monkeypatch.setattr("mordred_hermes.wizard.telegram_setup_cli.run_checks", lambda: [])
-    monkeypatch.setattr(api, "_vault_root", lambda: home / "mordred" / "vault")
+    monkeypatch.setattr(_seams, "vault_root", lambda: home / "mordred" / "vault")
 
     async def model_ok() -> dict[str, Any]:
         return {"model": "m", "kind": "venice", "private": True, "ok": True}

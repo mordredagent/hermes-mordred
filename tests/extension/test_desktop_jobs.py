@@ -62,6 +62,12 @@ def registry():
     return instance, events
 
 
+try:
+    from mordred_hermes.desktop import _maintenance_routes
+except ImportError:  # no fastapi: the API tests skip in the ``api`` fixture
+    _maintenance_routes = None  # type: ignore[assignment]
+
+
 @pytest.fixture
 def api(registry, monkeypatch):
     pytest.importorskip("fastapi")
@@ -306,8 +312,8 @@ async def test_real_api_callback_keeps_outcome_and_progress_after_cancellation(
     calls = []
     monkeypatch.setattr(api, "_emit", lambda *_: None)
     monkeypatch.setattr(api, "_home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_uninstall_context", lambda prompt: object())
-    monkeypatch.setattr(api, "_prepare_update", lambda target: (object(), tmp_path / "uv"))
+    monkeypatch.setattr(_maintenance_routes, "_uninstall_context", lambda prompt: object())
+    monkeypatch.setattr(_maintenance_routes, "_prepare_update", lambda target: (object(), tmp_path / "uv"))
     monkeypatch.setattr(api, "sys", SimpleNamespace(platform="linux" if kind == "hardware" else "darwin"))
 
     def blocking(*args, **kwargs):
@@ -335,8 +341,8 @@ async def test_real_api_callback_keeps_outcome_and_progress_after_cancellation(
         if kind == "enclave":
             return await api.enclave_build()
         if kind == "update":
-            return await api.update_apply({"version": "0.2.0a3"})
-        return await api._uninstall({})
+            return await _maintenance_routes.update_apply({"version": "0.2.0a3"})
+        return await _maintenance_routes._uninstall({})
 
     result = await start()
     job = jobs.get(result["job_id"])
@@ -397,8 +403,8 @@ async def test_update_checks_uninstall_started_during_preflight(api, registry, m
     async def work(job):
         await parked.wait()
 
-    monkeypatch.setattr(api, "_prepare_update", prepare)
-    request = asyncio.create_task(api.update_apply({"version": "0.2.0a3"}))
+    monkeypatch.setattr(_maintenance_routes, "_prepare_update", prepare)
+    request = asyncio.create_task(_maintenance_routes.update_apply({"version": "0.2.0a3"}))
     try:
         await asyncio.wait_for(entered.wait(), 5)
         uninstall = jobs.start("uninstall", work)
@@ -426,15 +432,15 @@ async def test_final_admission_conflict_keeps_http_error_and_confirmation_order(
         await parked.wait()
 
     active = jobs.start(conflict, work)
-    monkeypatch.setattr(api, "_running", lambda kind: False)
-    monkeypatch.setattr(api, "_prepare_update", lambda target: (object(), object()))
+    monkeypatch.setattr(_maintenance_routes, "_running", lambda kind: False)
+    monkeypatch.setattr(_maintenance_routes, "_prepare_update", lambda target: (object(), object()))
     try:
         if kind == "update":
-            result = await api.update_apply({"version": "0.2.0a3"})
+            result = await _maintenance_routes.update_apply({"version": "0.2.0a3"})
         else:
-            invalid = await api._uninstall({"purge_data": True})
+            invalid = await _maintenance_routes._uninstall({"purge_data": True})
             assert json.loads(invalid.body)["error"] == "uninstall_confirm_mismatch"
-            result = await api._uninstall({})
+            result = await _maintenance_routes._uninstall({})
         assert result.status_code == 200
         assert json.loads(result.body) == {"ok": False, "error": kind + "_busy"}
     finally:
