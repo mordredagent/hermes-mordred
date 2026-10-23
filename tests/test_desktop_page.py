@@ -121,6 +121,7 @@ PAGE_CODES = (
     "config_has_setting",
     "hermes_cli_missing",
     "config_unsupported_shape",
+    "hermes_cli_unsupported",
 )
 STEP_KEYS = (
     "enclave",

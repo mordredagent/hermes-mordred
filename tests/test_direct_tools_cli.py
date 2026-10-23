@@ -189,10 +189,24 @@ def test_hermes_runs_with_its_output_hidden(home: Path, hermes: FakeHermes, capf
     assert run("on") == 0
     assert run("off") == 0
     assert [call["argv"][:2] for call in hermes.calls()] == [
+        ["config", "get"],
         ["config", "set"],
+        ["config", "get"],
         ["config", "get"],
         ["config", "unset"],
         ["config", "get"],
     ]
     out, err = capfd.readouterr()
     assert HERMES_CANARY not in out + err
+
+
+def test_an_unsupported_hermes_prints_the_three_lines_to_add_by_hand(
+    home: Path, hermes: FakeHermes, capsys: pytest.CaptureFixture[str]
+) -> None:
+    hermes.plan(no_get=True)
+    before = (home / "config.yaml").read_text(encoding="utf-8")
+    assert run("on") == 1
+    out, err = capsys.readouterr()
+    assert out == "" and "direct-tools refused (hermes_cli_unsupported)" in err
+    assert "hermes-agent before 0.19" in err and err.endswith(SNIPPET)
+    assert (home / "config.yaml").read_text(encoding="utf-8") == before

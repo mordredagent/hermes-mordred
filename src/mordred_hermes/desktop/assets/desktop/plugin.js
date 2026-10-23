@@ -196,6 +196,7 @@ const MESSAGES = {
   config_has_setting: 'Hermes’s config.yaml already sets tools.tool_search to a value Mordred does not replace. Nothing was changed. Edit config.yaml by hand.',
   hermes_cli_missing: 'Hermes’s own hermes command was not found, so nothing was changed. Add the lines below to config.yaml by hand.',
   config_unsupported_shape: 'Hermes’s config.yaml shares the tools or tool_search mapping with another setting through a YAML anchor/alias, so changing it would change that setting too. Nothing was changed. Edit config.yaml by hand.',
+  hermes_cli_unsupported: 'This Hermes’s hermes config command has no get/unset (hermes-agent before 0.19), so nothing was changed. Such a Hermes may not defer tools at all (Hermes 0.21 is the release that defers every plugin tool); to set it anyway, add the lines below to config.yaml by hand.',
 }
 
 // `imap_auth_failed` refined by the server's response code (never its text).

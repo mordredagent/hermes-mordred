@@ -50,6 +50,7 @@ def test_post_true_runs_hermes_config_set_and_asks_for_a_restart(configured: Any
     answer = configured.post("/tools/direct", {"direct": True})
     assert answer == {"ok": True, "direct": True, "restart_required": True}
     assert [call["argv"] for call in hermes.calls()] == [
+        ["config", "get", "tools.tool_search.enabled"],
         ["config", "set", "tools.tool_search.enabled", "off"],
         ["config", "get", "tools.tool_search.enabled"],
     ]
@@ -61,7 +62,7 @@ def test_post_false_runs_hermes_config_unset(configured: Any, hermes: FakeHermes
     configured.post("/tools/direct", {"direct": True})
     answer = configured.post("/tools/direct", {"direct": False})
     assert answer == {"ok": True, "direct": False, "restart_required": True}
-    assert hermes.calls()[2]["argv"] == ["config", "unset", "tools.tool_search.enabled"]
+    assert hermes.calls()[4]["argv"] == ["config", "unset", "tools.tool_search.enabled"]
     assert configured.get("/status?client_version=4")["tools"] == {"direct": False, "source": "default"}
 
 
@@ -196,3 +197,9 @@ def test_a_yaml_warning_is_unreadable_and_quoted_nowhere(desktop: Any, capfd: py
     assert desktop.post("/tools/direct", {"direct": True}) == {"ok": False, "error": "config_unreadable"}
     out, err = capfd.readouterr()
     assert CANARY not in out + err and not any(CANARY in line for line in desktop.logs.lines)
+
+
+def test_a_hermes_without_config_get_is_hermes_cli_unsupported(configured: Any, hermes: FakeHermes) -> None:
+    hermes.plan(no_get=True)
+    assert configured.post("/tools/direct", {"direct": True}) == {"ok": False, "error": "hermes_cli_unsupported"}
+    assert config(configured).read_text(encoding="utf-8") == CONFIG

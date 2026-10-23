@@ -15,6 +15,7 @@ Mordred never edits config.yaml itself. :func:`read_mode` reads it the way
 Hermes does (:mod:`._direct_tools_yaml`); :func:`set_direct` asks Hermes's own
 writer through its CLI, in Hermes's environment::
 
+    hermes config get tools.tool_search.enabled         # the probe (exit 2: no get/unset, refused)
     hermes config set tools.tool_search.enabled off     # on (stored as the string 'off')
     hermes config unset tools.tool_search.enabled       # off (tools.tool_search for the legacy false)
     hermes config get tools.tool_search.enabled         # the check afterwards
@@ -66,6 +67,7 @@ ERROR_CODES: Final = (
     "config_has_setting",
     "hermes_cli_missing",
     "config_unsupported_shape",
+    "hermes_cli_unsupported",
 )
 #: What to add to config.yaml by hand when Hermes's CLI cannot do it.
 SNIPPET: Final = 'tools:\n  tool_search:\n    enabled: "off"\n'
@@ -268,11 +270,12 @@ def _run(command: Path, home: Path, *args: str) -> tuple[int, str]:
     return done.returncode, done.stdout or ""
 
 
-def _hermes_reads_direct(command: Path, home: Path) -> bool | None:
-    """``hermes config get tools.tool_search.enabled`` read with Hermes's rule; ``None``: no answer."""
-    code, out = _run(command, home, "get", KEY)
+def _get(command: Path, home: Path, key: str) -> tuple[int, bool | None]:
+    """``hermes config get <key>``: the exit code, and whether its last line reads as off under
+    Hermes's rule (``None``: no answer)."""
+    code, out = _run(command, home, "get", key)
     lines = [line.strip() for line in out.splitlines() if line.strip()]
-    return is_off(lines[-1]) if code == 0 and lines else None
+    return code, (is_off(lines[-1]) if code == 0 and lines else None)
 
 
 def set_direct(home: Path, enabled: bool) -> None:
@@ -281,8 +284,12 @@ def set_direct(home: Path, enabled: bool) -> None:
     Reads first: nothing runs when the setting already is as asked; a ``tools``
     or ``tool_search`` mapping shared through a YAML alias is refused
     (``config_unsupported_shape``), and ``on`` refuses a value other than an
-    absent one or an explicit deferral (``config_has_setting``). One request
-    runs at a time. Raises :class:`DirectToolsError` with one of
+    absent one or an explicit deferral (``config_has_setting``). Then
+    ``hermes config get`` probes the CLI: a Hermes without it is refused before
+    anything is written (``hermes_cli_unsupported``), and one that already reads
+    the setting as asked is left alone; otherwise ``set``/``unset`` runs and
+    ``get`` checks the result. One request runs at a time. Raises
+    :class:`DirectToolsError` with one of
     :data:`ERROR_CODES`. Hermes reads the setting at start: a change takes
     effect after a restart.
     """
@@ -299,7 +306,16 @@ def set_direct(home: Path, enabled: bool) -> None:
         command = hermes_command(home)
         if command is None:
             raise DirectToolsError("hermes_cli_missing")
-        args = ("set", KEY, "off") if enabled else ("unset", LEGACY_KEY if held == "legacy" else KEY)
-        code, _ = _run(command, home, *args)
-        if code != 0 or _hermes_reads_direct(command, home) is not enabled:
+        key = LEGACY_KEY if not enabled and held == "legacy" else KEY
+        # Probe first: a Hermes without `config get` (argparse exit 2; hermes-agent before 0.19)
+        # has no `config unset` either and cannot be checked, so nothing is written on it.
+        code, reads = _get(command, home, key)
+        if code == 2:
+            raise DirectToolsError("hermes_cli_unsupported")
+        if code != 0:
+            raise DirectToolsError("config_write_failed")
+        if reads is enabled:
+            return  # Hermes already reads it as asked
+        code, _ = _run(command, home, *(("set", KEY, "off") if enabled else ("unset", key)))
+        if code != 0 or _get(command, home, KEY)[1] is not enabled:
             raise DirectToolsError("config_write_failed")

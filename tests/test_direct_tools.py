@@ -236,10 +236,14 @@ with (here / "calls.jsonl").open("a", encoding="utf-8") as log:
         "pythonpath": "PYTHONPATH" in os.environ, "pythonhome": "PYTHONHOME" in os.environ,
         "decrypt": os.environ.get("MORDRED_CONFIG_DECRYPT"),
     }) + "\n")
+verb, key = args[1], args[2]
+if plan.get("no_get") and verb in ("get", "unset"):  # hermes-agent before 0.19: argparse refuses
+    print("usage: hermes config [-h] {show,edit,set,path,env-path,check,migrate} ...", file=sys.stderr)
+    print(f"hermes config: error: argument config_command: invalid choice: '{verb}'", file=sys.stderr)
+    sys.exit(2)
 print("CANARY-stdout")
 print("CANARY-stderr", file=sys.stderr)
 time.sleep(plan.get("sleep", 0))
-verb, key = args[1], args[2]
 config = Path(os.environ["HERMES_HOME"]) / "config.yaml"
 from ruamel.yaml import YAML
 yaml = YAML(typ="safe", pure=True)
@@ -249,6 +253,9 @@ parts = key.split(".")
 if verb == "get":
     node = data
     for part in parts:
+        if node is not None and not isinstance(node, dict):  # e.g. under the legacy tool_search: false
+            print("Config key not set", file=sys.stderr)
+            sys.exit(1)
         node = node.get(part) if isinstance(node, dict) else None
     value = plan.get("get", node if node is not None else "auto")
     print("false" if value is False else value)
@@ -312,13 +319,14 @@ def hermes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeHermes:
 SET = ["config", "set", KEY, "off"]
 UNSET = ["config", "unset", KEY]
 GET = ["config", "get", KEY]
+LEGACY_GET = ["config", "get", "tools.tool_search"]
 
 
 @posix_only
 def test_on_runs_hermes_config_set_then_checks_with_get(home: Path, hermes: FakeHermes) -> None:
     write(home, CONFIG)
     set_direct(home, True)
-    assert hermes.argv() == [SET, GET]
+    assert hermes.argv() == [GET, SET, GET]  # probe, write, check
     assert read_mode(home) == {"direct": True, "source": "config"}
     for call in hermes.calls():
         assert call["home"] == str(home) and Path(call["cwd"]).resolve() == home.resolve()
@@ -330,7 +338,7 @@ def test_on_runs_hermes_config_set_then_checks_with_get(home: Path, hermes: Fake
 def test_off_runs_hermes_config_unset_then_checks_with_get(home: Path, hermes: FakeHermes) -> None:
     write(home, CONFIG + "tools:\n  tool_search:\n    enabled: 'off'\n")
     set_direct(home, False)
-    assert hermes.argv() == [UNSET, GET]
+    assert hermes.argv() == [GET, UNSET, GET]
     assert read_mode(home) == {"direct": False, "source": "default"}
 
 
@@ -338,7 +346,7 @@ def test_off_runs_hermes_config_unset_then_checks_with_get(home: Path, hermes: F
 def test_off_unsets_the_legacy_boolean_itself(home: Path, hermes: FakeHermes) -> None:
     write(home, "tools:\n  tool_search: false\n  other: 1\n")
     set_direct(home, False)
-    assert hermes.argv() == [["config", "unset", "tools.tool_search"], GET]
+    assert hermes.argv() == [LEGACY_GET, ["config", "unset", "tools.tool_search"], GET]
     assert read_mode(home)["direct"] is False
 
 
@@ -359,7 +367,7 @@ def test_nothing_runs_when_the_setting_is_already_as_asked(
 def test_on_replaces_an_absent_value_or_an_explicit_deferral(home: Path, hermes: FakeHermes, value: str) -> None:
     write(home, f"tools:\n  tool_search:\n    enabled: {value}\n")
     set_direct(home, True)
-    assert hermes.argv() == [SET, GET]
+    assert hermes.argv() == [GET, SET, GET]
 
 
 @posix_only
@@ -484,7 +492,7 @@ def test_a_vault_managed_config_on_disk_is_changed_through_hermes(
     _manage(home)
     write(home, CONFIG)
     set_direct(home, True)
-    assert hermes.argv() == [SET, GET]
+    assert hermes.argv() == [GET, SET, GET]
 
 
 @posix_only
@@ -506,7 +514,68 @@ def test_error_codes_are_closed() -> None:
         "config_has_setting",
         "hermes_cli_missing",
         "config_unsupported_shape",
+        "hermes_cli_unsupported",
     )
+
+
+# -- the probe: a Hermes without `config get` / `config unset` --------------------------------------
+
+
+@posix_only
+@pytest.mark.parametrize(
+    "enabled,text",
+    [(True, CONFIG), (False, CONFIG + "tools:\n  tool_search:\n    enabled: 'off'\n")],
+    ids=["on", "off"],
+)
+def test_a_hermes_without_config_get_is_refused_before_anything_is_written(
+    home: Path, hermes: FakeHermes, enabled: bool, text: str
+) -> None:
+    """hermes-agent before 0.19: `config get` and `config unset` are argparse errors (exit 2)."""
+    config = write(home, text)
+    hermes.plan(no_get=True)
+    with pytest.raises(DirectToolsError) as error:
+        set_direct(home, enabled)
+    assert error.value.code == "hermes_cli_unsupported"
+    assert hermes.argv() == [GET]  # the probe only: no set, no unset, no check
+    assert config.read_text(encoding="utf-8") == text
+
+
+@posix_only
+def test_a_hermes_without_config_get_refuses_the_legacy_off_too(home: Path, hermes: FakeHermes) -> None:
+    config = write(home, "tools:\n  tool_search: false\n")
+    hermes.plan(no_get=True)
+    with pytest.raises(DirectToolsError) as error:
+        set_direct(home, False)
+    assert error.value.code == "hermes_cli_unsupported"
+    assert hermes.argv() == [LEGACY_GET] and config.read_text(encoding="utf-8") == "tools:\n  tool_search: false\n"
+
+
+@posix_only
+@pytest.mark.parametrize("enabled,answer", [(True, "off"), (False, "auto")])
+def test_a_probe_that_already_reads_as_asked_writes_nothing(
+    home: Path, hermes: FakeHermes, enabled: bool, answer: str
+) -> None:
+    """The file says otherwise, but Hermes (say a managed overlay) already reads it as asked."""
+    text = CONFIG if enabled else CONFIG + "tools:\n  tool_search:\n    enabled: 'off'\n"
+    config = write(home, text)
+    hermes.plan(get=answer)
+    set_direct(home, enabled)
+    assert hermes.argv() == [GET]
+    assert config.read_text(encoding="utf-8") == text
+
+
+@posix_only
+@pytest.mark.parametrize("plan", [{"exit_get": 1}, {"sleep": 5}], ids=["exit-1", "timeout"])
+def test_a_probe_that_fails_otherwise_is_config_write_failed(
+    home: Path, hermes: FakeHermes, monkeypatch: pytest.MonkeyPatch, plan: dict[str, Any]
+) -> None:
+    monkeypatch.setattr(direct_tools, "HERMES_TIMEOUT_S", 0.5)
+    config = write(home, CONFIG)
+    hermes.plan(**plan)
+    with pytest.raises(DirectToolsError) as error:
+        set_direct(home, True)
+    assert error.value.code == "config_write_failed"
+    assert hermes.argv() == [GET] and config.read_text(encoding="utf-8") == CONFIG
 
 
 def test_mordred_never_writes_config_yaml_itself() -> None:
@@ -548,7 +617,7 @@ def test_windows_delegates_to_hermes_exe_and_never_publishes_itself(windows, her
     paths.home.mkdir(parents=True, exist_ok=True)
     before = b.home.files.copy(), b.policy.files.copy()
     set_direct(paths.home, True)
-    assert hermes.argv() == [SET, GET]
+    assert hermes.argv() == [GET, SET, GET]
     assert (b.home.files, b.policy.files) == before  # no PolicyWriter transaction
     assert direct_tools.hermes_command(paths.home) == hermes.bin / "hermes.exe"
 
@@ -557,6 +626,12 @@ def test_windows_delegates_to_hermes_exe_and_never_publishes_itself(windows, her
 
 
 def _repo_hermes() -> Path | None:
+    """The real ``hermes`` to test against: ``MORDRED_TEST_HERMES_BIN`` (a venv's ``bin``, e.g. the
+    hermes-agent 0.13 floor venv) or this venv's; ``None`` when there is none."""
+    override = os.environ.get("MORDRED_TEST_HERMES_BIN")
+    if override:
+        candidate = Path(override) / ("hermes.exe" if sys.platform == "win32" else "hermes")
+        return candidate if candidate.is_file() else None
     candidate = Path(sys.executable).parent / ("hermes.exe" if sys.platform == "win32" else "hermes")
     try:
         import hermes_cli.config  # noqa: F401
@@ -565,12 +640,40 @@ def _repo_hermes() -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+def _real_hermes_has_get(command: Path, scratch: Path) -> bool:
+    """Run the real ``hermes config get`` once in a scratch home: exit 2 (argparse) means no get/unset."""
+    import subprocess
+
+    scratch.mkdir(parents=True, exist_ok=True)
+    env = {key: value for key, value in os.environ.items() if key not in ("PYTHONPATH", "PYTHONHOME")}
+    env.update(HERMES_HOME=str(scratch), MORDRED_CONFIG_DECRYPT="0")
+    done = subprocess.run(
+        [str(command), "config", "get", KEY], cwd=scratch, env=env, capture_output=True, timeout=120, check=False
+    )
+    return done.returncode != 2
+
+
+@pytest.fixture
+def real_hermes(monkeypatch: pytest.MonkeyPatch) -> Path:
+    command = _repo_hermes()
+    assert command is not None
+    monkeypatch.setenv("MORDRED_CONFIG_DECRYPT", "0")  # never the developer's vault, whatever the home
+    monkeypatch.setattr(direct_tools, "_python", lambda: str(command.parent / "python"))
+    return command
+
+
 @posix_only
 @pytest.mark.skipif(_repo_hermes() is None, reason="no hermes-agent (hermes console script) in this venv")
-def test_the_real_hermes_config_set_unset_get(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """hermes-agent 0.19 (the repo venv) has ``config set/unset/get``; 0.21 keeps the same commands."""
-    monkeypatch.setenv("MORDRED_CONFIG_DECRYPT", "0")  # never the developer's vault, whatever the home
+def test_the_real_hermes_config_set_unset_get(home: Path, tmp_path: Path, real_hermes: Path) -> None:
+    """hermes-agent 0.19 and 0.21 have ``config get/set/unset``: a round trip. hermes-agent 0.13 (the
+    Linux floor) has no ``get``/``unset``: refused before anything is written."""
     config = write(home, "model:\n  default: x\n")
+    if not _real_hermes_has_get(real_hermes, tmp_path / "probe-home"):
+        with pytest.raises(DirectToolsError) as error:
+            set_direct(home, True)
+        assert error.value.code == "hermes_cli_unsupported"
+        assert config.read_bytes() == b"model:\n  default: x\n"
+        return
     set_direct(home, True)
     assert read_mode(home) == {"direct": True, "source": "config"}
     assert "enabled: 'off'" in config.read_text(encoding="utf-8")  # Hermes stores the string 'off'
@@ -580,9 +683,8 @@ def test_the_real_hermes_config_set_unset_get(home: Path, monkeypatch: pytest.Mo
 
 @posix_only
 @pytest.mark.skipif(_repo_hermes() is None, reason="no hermes-agent (hermes console script) in this venv")
-def test_the_real_hermes_never_runs_for_a_shared_mapping(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_real_hermes_never_runs_for_a_shared_mapping(home: Path, real_hermes: Path) -> None:
     """Hermes's setter would change ``other.enabled`` too: Mordred refuses before running it."""
-    monkeypatch.setenv("MORDRED_CONFIG_DECRYPT", "0")
     config = write(home, SHARED.format("auto"))
     with pytest.raises(DirectToolsError) as error:
         set_direct(home, True)
@@ -821,7 +923,7 @@ def test_a_relative_home_is_made_absolute_for_the_child(
     monkeypatch.chdir(tmp_path)
     set_direct(Path("profile"), True)
     absolute = str(Path.cwd() / "profile")
-    assert [call["home"] for call in hermes.calls()] == [absolute, absolute]
+    assert [call["home"] for call in hermes.calls()] == [absolute, absolute, absolute]
     assert all(Path(call["cwd"]).resolve() == profile.resolve() for call in hermes.calls())
     assert read_mode(Path("profile")) == {"direct": True, "source": "config"}
     assert not (profile / "profile").exists()

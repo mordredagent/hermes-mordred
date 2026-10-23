@@ -59,6 +59,13 @@ REMEDIES = {
         "anchor/alias, so changing it would change that setting too; nothing was changed. Edit "
         "config.yaml by hand."
     ),
+    "hermes_cli_unsupported": (
+        "This Hermes's `hermes config` has no get/unset (hermes-agent before 0.19), so Mordred cannot "
+        "change or check the setting; nothing was changed. Such a Hermes may not defer tools at all "
+        "(hermes-agent 0.13 has no tool search; Hermes 0.21 is the release that defers every plugin "
+        "tool), so the setting may change nothing there. To set it anyway, add these lines to "
+        "config.yaml by hand (remove them to turn direct calls off again):"
+    ),
     "hermes_cli_missing": (
         "Hermes's own `hermes` command was not found (next to this Python, in "
         "<home>/hermes-agent/venv/bin or as Hermes Desktop's launcher); nothing was changed. "
@@ -82,7 +89,7 @@ def _refused(code: str) -> int:
 
     _term.emit_error(f"direct-tools refused ({code})")
     print(REMEDIES.get(code, REMEDIES["config_write_failed"]), file=sys.stderr)
-    if code == "hermes_cli_missing":
+    if code in ("hermes_cli_missing", "hermes_cli_unsupported"):
         print(SNIPPET, end="", file=sys.stderr)
     return 1
 
