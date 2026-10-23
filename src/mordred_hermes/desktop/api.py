@@ -22,6 +22,16 @@ Routes such as ``/sync`` and ``/jobs`` are shared. macOS and Linux never reach
 that module. Every captured wizard output goes through :mod:`._capture` (one
 capture per process at a time, only the capturing thread's text).
 
+Secret-bearing routes take the raw ``Request`` and read the body with
+:func:`._body.read_object` (``invalid_body``, never FastAPI's 422 echo). The
+macOS sections added for ``client_version >= 4`` (vault, databases, imports,
+mail) are built by the closed projections of :mod:`._projections` and never
+unlock anything; :mod:`._vault` holds the prepare/commit vault ceremony and
+:mod:`._databases` the schedule-or-report database step. The mail library
+(``imports.mail.setup_flow``, ``imports.mail.forget``) and the read-only
+import-store opener are reached only through the seams ``_mail_flows``,
+``_forget`` and ``_open_store_readonly``.
+
 Served by Hermes' dashboard server, which requires the per-process session
 token on every ``/api`` request and binds to loopback only.
 """
@@ -30,23 +40,48 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
+import datetime as _dt
+import importlib
 import logging
+import re
 import secrets
 import sys
+import threading
 import time
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from . import _databases, _projections, _vault
+from ._body import read_object
 from ._capture import captured_output
 from ._jobs import Job as _Job
 from ._jobs import JobBusy, JobRegistry, JobWork
 
 _log = logging.getLogger(__name__)
-router = APIRouter()
 PLUGIN_ID = "mordred"
+#: How often the flow reaper drops expired mail setup and vault flows (and their passwords).
+REAP_INTERVAL_S = 30.0
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app: Any) -> AsyncIterator[None]:
+    """Merged into the host app's lifespan by ``include_router``: the reaper runs while the app does."""
+    task = asyncio.get_running_loop().create_task(_reaper())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        _cancel_all_flows()
+
+
+router = APIRouter(lifespan=_lifespan)
 
 
 # -- helpers ------------------------------------------------------------------------
@@ -172,9 +207,14 @@ async def _require_hermes_model() -> JSONResponse | None:
 
 @router.get("/status")
 async def status(client_version: int = 1) -> dict[str, Any]:
-    """Setup progress from metadata only (no Touch ID, no secrets, no content)."""
+    """Setup progress from metadata only (no Touch ID, no secrets, no content).
+
+    ``client_version >= 4`` adds ``vault``, ``databases``, ``imports``, ``mail``
+    and ``telegram_archive`` (:func:`_sections_v4`); older clients get exactly
+    the keys they always got.
+    """
     if sys.platform == "win32" and client_version >= 3:
-        return await _windows_status()
+        return await _windows_status(client_version)
     platform_status = {
         "platform": sys.platform,
         "telegram_supported": sys.platform == "darwin" or (sys.platform == "linux" and client_version >= 2),
@@ -183,12 +223,17 @@ async def status(client_version: int = 1) -> dict[str, Any]:
         "user_presence_supported": sys.platform == "darwin",
     }
     jobs = [_job_view(j) for j in _JOBS.running()]
+    platform = sys.platform
     if not platform_status["telegram_supported"]:
-        return {"ok": True, **platform_status, "checks": {}, "jobs": jobs}
+        extra = await _sections_v4(platform) if client_version >= 4 else {}
+        return {"ok": True, **platform_status, "checks": {}, "jobs": jobs, **extra}
 
     from ..wizard.telegram_setup_cli import run_checks
 
-    checks = await asyncio.to_thread(run_checks)
+    async def sections() -> dict[str, Any]:
+        return await _sections_v4(platform) if client_version >= 4 else {}
+
+    checks, extra = await asyncio.gather(asyncio.to_thread(run_checks), sections())
     return {
         "ok": True,
         **platform_status,
@@ -197,10 +242,11 @@ async def status(client_version: int = 1) -> dict[str, Any]:
         "hermes_venice_key": _hermes_venice_key() is not None,
         "telegram_api": bool((await asyncio.to_thread(_store().flags) or {}).get("api_configured")),
         "jobs": jobs,
+        **extra,
     }
 
 
-async def _windows_status() -> dict[str, Any]:
+async def _windows_status(client_version: int = 3) -> dict[str, Any]:
     """Windows status for a compatible client: capabilities, helper, memory, Telegram; no unwrap or launch."""
     from . import _windows
 
@@ -209,7 +255,118 @@ async def _windows_status() -> dict[str, Any]:
     result: dict[str, Any] = {"ok": True, **payload, "hermes_model": await hermes_model_check(), "jobs": jobs}
     if payload["telegram_supported"]:
         result["hermes_venice_key"] = await asyncio.to_thread(_hermes_venice_key) is not None
+    if client_version >= 4:
+        result.update(await _sections_v4("win32"))
     return result
+
+
+# -- status sections for client_version >= 4 (macOS facts; fixed shapes elsewhere) -----------------
+
+#: ``telegram_archive`` on a cold status: the legacy ``index.enc`` (its version and dialogs) is
+#: AES-GCM ciphertext under a subkey of the sealed Telegram ``store_key``, and no status poll unwraps it.
+_TELEGRAM_ARCHIVE: dict[str, Any] = {"legacy": None}
+_UNSUPPORTED_VAULT: dict[str, Any] = {
+    "exists": False,
+    "env_enrolled": False,
+    "env_injecting": False,
+    "optout": False,
+    "unattended": None,
+}
+
+
+def _vault_root() -> Path:
+    from ..wizard.vault_cli import _resolve_root
+
+    return _resolve_root(None)
+
+
+def _sqlcipher_available() -> bool:
+    try:
+        import sqlcipher3  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+async def _sections_v4(platform: str) -> dict[str, Any]:
+    if platform != "darwin":
+        return {
+            "vault": dict(_UNSUPPORTED_VAULT),
+            "databases": {"supported": False},
+            "imports": _projections.imports_refused("unsupported_platform"),
+            "mail": {"configured": False},
+            "telegram_archive": dict(_TELEGRAM_ARCHIVE),
+        }
+    home = _home()
+    vault, databases, imports = await asyncio.gather(
+        asyncio.to_thread(_vault_facts_safe, home),
+        asyncio.to_thread(_databases_safe, home, platform),
+        asyncio.to_thread(_imports_sections, home, platform),
+    )
+    return {"vault": vault, "databases": databases, **imports}
+
+
+def _vault_facts_safe(home: Path) -> dict[str, Any]:
+    try:
+        return _vault.facts(home, _vault_root(), platform="darwin")
+    except Exception as exc:
+        _log.warning("mordred desktop vault facts unreadable (%s)", type(exc).__name__)
+        return dict(_UNSUPPORTED_VAULT)
+
+
+def _databases_safe(home: Path, platform: str) -> dict[str, Any]:
+    try:
+        return _databases.status_object(home, platform=platform, sqlcipher=_sqlcipher_available())
+    except Exception as exc:
+        _log.warning("mordred desktop database status unreadable (%s)", type(exc).__name__)
+        return {"supported": _sqlcipher_available(), "code": "databases_failed"}
+
+
+def _imports_sections(home: Path, platform: str) -> dict[str, Any]:
+    """``imports``, ``mail`` and ``telegram_archive``: read-only store, flags only, nothing unlocked."""
+    if platform != "darwin":
+        return {
+            "imports": _projections.imports_refused("unsupported_platform"),
+            "mail": {"configured": False},
+            "telegram_archive": dict(_TELEGRAM_ARCHIVE),
+        }
+    store: Any = None
+    try:
+        store = _open_store_readonly(home)
+        imports = _projections.imports_projection(store.status())
+    except Exception as exc:  # a gate or store refusal is a state (ImportRefused carries the code)
+        store = None
+        imports = _projections.imports_refused(_store_refusal(exc))
+    if not imports["available"]:
+        store = None
+    flags: Any = None
+    residue = False
+    try:
+        secret_store = _mail_secret_store()
+        flags = secret_store.flags()
+        residue = bool(secret_store.residue())  # counts only when the flags do not name a valid setup
+    except Exception as exc:  # flags() raises ``credentials_left`` for a sealed file without readable flags
+        residue = getattr(exc, "code", None) == "credentials_left"
+        if not residue:
+            _log.warning("mordred desktop mail flags unreadable (%s)", type(exc).__name__)
+    mail_status: Any = None
+    if store is not None and flags:
+        try:
+            mail_status = _imap_status(store, flags)
+        except Exception as exc:
+            _log.warning("mordred desktop mail status unreadable (%s)", type(exc).__name__)
+    return {
+        "imports": imports,
+        "mail": _projections.mail_projection(flags, mail_status, residue=residue),
+        "telegram_archive": dict(_TELEGRAM_ARCHIVE),
+    }
+
+
+@router.get("/imports/status")
+async def imports_status() -> Any:
+    """The ``imports``, ``mail`` and ``telegram_archive`` objects of ``/status`` (a light refresh)."""
+    sections = await asyncio.to_thread(_imports_sections, _home(), sys.platform)
+    return {"ok": True, **sections}
 
 
 @router.get("/health")
@@ -322,19 +479,47 @@ class _FixedPassphrase:
         return tuple(default)
 
 
+# One vault or memory ceremony at a time in this process. A ``threading.Lock`` (not an
+# asyncio one): the worker thread releases it when the ceremony really ends, so a
+# cancelled HTTP request can neither cut the ceremony short nor let a second one start.
+_CEREMONY_LOCK = threading.Lock()
+
+
+async def _run_ceremony(work: Callable[[], dict[str, Any]]) -> Any:
+    """Run ``work`` in a worker thread under the ceremony lock; never cancelled with the request."""
+    if not _CEREMONY_LOCK.acquire(blocking=False):
+        return _error("memory_operation_in_progress")
+
+    def run() -> dict[str, Any]:
+        try:
+            return work()
+        finally:
+            _CEREMONY_LOCK.release()
+
+    try:
+        context = contextvars.copy_context()
+        future = asyncio.get_running_loop().run_in_executor(None, context.run, run)
+    except BaseException:
+        _CEREMONY_LOCK.release()
+        raise
+    result = await asyncio.shield(future)
+    return result if result.get("ok") else JSONResponse(result, status_code=200)
+
+
+def _memory_active() -> bool:
+    from ..extension.telegram.memory_guard import memory_encryption_active
+
+    return memory_encryption_active()
+
+
 @router.post("/memory/enable")
 async def memory_enable(body: dict[str, Any] | None = None) -> Any:
-    """Turn on sealed .env + sealed memory; create the vault if needed.
+    """Turn on sealed memory (macOS: memory only; the vault and ``.env`` come from ``/vault/*``).
 
-    If a vault is created here, its recovery passphrase is generated and
-    returned ONCE so the UI can show it. It is not stored anywhere else.
-
-    Optional body ``{"unattended": true|false}`` sets the policy of the vault's
-    device key if this call creates it. Absent, it matches ``hermes-mordred
-    setup``'s default: ``MORDRED_SEKEY_UNATTENDED=1`` makes it unattended,
-    otherwise it is attended (Touch ID / password on each use). Both steps run
-    in one flow, so the vault is unlocked at most once (not at all when it is
-    created here).
+    macOS answers ``vault_required`` without a vault and ``env_required`` until
+    ``.env`` is enrolled and injecting; it never creates a vault or a
+    passphrase, and it is idempotent (``already``). Linux and Windows keep
+    their flows (TPM, CNG behind explicit acknowledgements).
     """
     if sys.platform == "win32":
         return await _windows_memory_enable(body)
@@ -344,49 +529,90 @@ async def memory_enable(body: dict[str, Any] | None = None) -> Any:
     if sys.platform == "linux" and (body or {}).get("acknowledge_tpm_no_recovery") is not True:
         return _error("telegram_platform_unsupported")
 
-    from ..extension.telegram.memory_guard import memory_encryption_active
-    from ..wizard import env_decrypt_cli, memory_cli
-    from ..wizard._flow_session import FlowSession
-    from ..wizard.vault_cli import _resolve_root
-
-    if await asyncio.to_thread(memory_encryption_active):
+    if await asyncio.to_thread(_memory_active):
         return {"ok": True, "already": True}
     if sys.platform == "linux":
         return await _linux_memory_enable()
-    requested = (body or {}).get("unattended")
-    unattended = requested if isinstance(requested, bool) else None
-    prompt = _FixedPassphrase(generate_recovery_passphrase())
-    home, root, platform = _home(), _resolve_root(None), sys.platform
+    home, root, platform = _home(), _vault_root(), sys.platform
+    return await _run_ceremony(
+        lambda: _vault.enable_memory(home=home, root=root, platform=platform, active=_memory_active)
+    )
 
-    def enable() -> int:
-        with FlowSession(unattended=unattended) as flow, captured_output():
-            rc = env_decrypt_cli.enable(home=home, root=root, platform=platform, prompt_io=prompt, flow_session=flow)
-            if rc == 0:
-                rc = memory_cli.enable(home=home, root=root, platform=platform, prompt_io=prompt, flow_session=flow)
-        return rc
 
-    rc = await asyncio.to_thread(enable)
-    if rc != 0 or not await asyncio.to_thread(memory_encryption_active):
-        return _error("memory_encryption_failed", 500)
-    result: dict[str, Any] = {"ok": True, "restart_required": True}
-    if prompt.used:
-        result["recovery_passphrase"] = prompt._passphrase  # shown once; never persisted by Mordred
-    return result
+_VAULT_FLOWS: _vault.VaultFlows | None = None
+
+
+def _vault_flows() -> _vault.VaultFlows:
+    global _VAULT_FLOWS
+    if _VAULT_FLOWS is None:
+        _VAULT_FLOWS = _vault.VaultFlows(lambda: generate_recovery_passphrase())
+    return _VAULT_FLOWS
+
+
+@router.post("/vault/prepare")
+async def vault_prepare(request: Request) -> Any:
+    """Body ``{}``. Generate the recovery passphrase in memory and show it BEFORE anything is created.
+
+    Answers ``{"ok": true, "flow_id", "passphrase": [8 words], "passphrase_reused": false}``;
+    nothing on disk changes. An existing vault whose ``.env`` is not enrolled
+    gets a flow without a passphrase (``passphrase: null, passphrase_reused:
+    true``): its phrase is the one shown at its creation. ``vault_exists`` when
+    there is nothing to do, ``env_optout`` when the owner restored a plaintext
+    ``.env``. One flow at a time (a new one replaces it), TTL 600 s.
+    """
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
+    if sys.platform != "darwin":
+        return _error("unsupported_platform")
+    state = await asyncio.to_thread(_vault.facts, _home(), _vault_root(), platform="darwin")
+    answer = _vault.prepare_answer(_vault_flows(), state)
+    return answer if answer["ok"] else JSONResponse(answer, status_code=200)
+
+
+@router.post("/vault/{flow_id}/commit")
+async def vault_commit(flow_id: str, request: Request) -> Any:
+    """Body ``{"unattended": bool}``. Create the vault with the prepared passphrase, enroll ``.env``.
+
+    ``{"ok": true, "passphrase_reused": bool}``; ``vault_flow_expired`` (TTL,
+    replaced, restart: nothing was created), ``vault_exists``, ``env_optout``,
+    ``vault_anchor_stale`` (with ``anchor_store``, ``anchor_identity`` and,
+    only for a legacy anchor over an empty vault directory, ``remedy``) or
+    ``memory_encryption_failed``. ``unattended`` applies only to a device key
+    created here (absent: the backend default, as ``setup``); an existing key
+    keeps its policy.
+    """
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
+    unattended = body.get("unattended")
+    if not (unattended is None or isinstance(unattended, bool)):
+        return _error("invalid_body")
+    if sys.platform != "darwin":
+        return _error("unsupported_platform")
+    flows = _vault_flows()
+    flow = flows.get(flow_id)
+    if flow is None:
+        return _error("vault_flow_expired")
+    home, root, platform = _home(), _vault_root(), sys.platform
+    return await _run_ceremony(
+        lambda: _vault.commit(home=home, root=root, platform=platform, flow=flow, flows=flows, unattended=unattended)
+    )
 
 
 async def _linux_memory_enable() -> Any:
-    from ..extension.telegram.memory_guard import memory_encryption_active
     from ..wizard import memory_cli
-    from ..wizard.vault_cli import _resolve_root
 
-    def enable_linux() -> int:
+    home, root = _home(), _vault_root()
+
+    def enable_linux() -> dict[str, Any]:
         with captured_output():
-            return memory_cli.enable(home=_home(), root=_resolve_root(None), platform="linux")
+            rc = memory_cli.enable(home=home, root=root, platform="linux")
+        if rc != 0 or not _memory_active():
+            return {"ok": False, "error": "memory_encryption_failed"}
+        return {"ok": True, "restart_required": True}
 
-    rc = await asyncio.to_thread(enable_linux)
-    if rc != 0 or not await asyncio.to_thread(memory_encryption_active):
-        return _error("memory_encryption_failed", 500)
-    return {"ok": True, "restart_required": True}
+    return await _run_ceremony(enable_linux)
 
 
 async def _windows_memory_enable(body: dict[str, Any] | None) -> Any:
@@ -462,8 +688,11 @@ async def _windows_telegram_refusal(body: Any) -> JSONResponse | None:
 
 
 @router.post("/telegram/login/start")
-async def telegram_login_start(body: dict[str, Any]) -> Any:
+async def telegram_login_start(request: Request) -> Any:
     """Body: {"phone", and on first setup "api_id", "api_hash"}; on Windows also "acknowledge_no_presence"."""
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
     blocked = await _require_memory() or await _require_hermes_model() or await _windows_telegram_refusal(body)
     if blocked is not None:
         return blocked
@@ -479,9 +708,12 @@ async def telegram_login_start(body: dict[str, Any]) -> Any:
 
 
 @router.post("/telegram/login/{flow_id}/code")
-async def telegram_login_code(flow_id: str, body: dict[str, Any]) -> Any:
+async def telegram_login_code(flow_id: str, request: Request) -> Any:
     from ..extension.telegram.login_flow import LoginError
 
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
     try:
         step = await _flows().submit_code(flow_id, body.get("code"))
     except LoginError as exc:
@@ -492,9 +724,12 @@ async def telegram_login_code(flow_id: str, body: dict[str, Any]) -> Any:
 
 
 @router.post("/telegram/login/{flow_id}/password")
-async def telegram_login_password(flow_id: str, body: dict[str, Any]) -> Any:
+async def telegram_login_password(flow_id: str, request: Request) -> Any:
     from ..extension.telegram.login_flow import LoginError
 
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
     try:
         step = await _flows().submit_password(flow_id, body.get("password"))
     except LoginError as exc:
@@ -556,8 +791,11 @@ def _set_venice(api_key: str, model: str | None) -> None:
 
 
 @router.post("/llm/venice")
-async def llm_venice(body: dict[str, Any]) -> Any:
+async def llm_venice(request: Request) -> Any:
     """Body: {"use_hermes_key": true} or {"api_key": "..."}; optional "model"; Windows: "acknowledge_no_presence"."""
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
     blocked = await _windows_telegram_refusal(body)
     if blocked is not None:
         return blocked
@@ -581,9 +819,12 @@ async def llm_venice(body: dict[str, Any]) -> Any:
 
 
 @router.post("/llm/local")
-async def llm_local(body: dict[str, Any]) -> Any:
+async def llm_local(request: Request) -> Any:
     from ..extension.telegram.llm import LlmConfigError, normalize_local_endpoint
 
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
     blocked = await _windows_telegram_refusal(body)
     if blocked is not None:
         return blocked
@@ -688,6 +929,380 @@ async def telegram_logout(body: dict[str, Any] | None = None) -> Any:
     if forget and str(body.get("confirm") or "").strip() != PURGE_PHRASE:
         return _error("forget_confirm_mismatch")
     return await windows_logout(_store(), forget=forget)
+
+
+# -- databases (macOS): schedule or report, never convert --------------------------------------
+
+
+@router.get("/databases/status")
+async def databases_status() -> Any:
+    """The ``databases`` object of ``/status`` alone (after the restart control, when status is too heavy)."""
+    return {"ok": True, **await asyncio.to_thread(_databases_safe, _home(), sys.platform)}
+
+
+@router.post("/databases/encrypt")
+async def databases_encrypt(request: Request) -> Any:
+    """Body ``{"dry_run": bool}``. Schedules the conversion for the next start, or reports why not.
+
+    ``{"ok": true, "action": "dry_run" | "scheduled" | "attention" | "needs_restart" | "done", …}``
+    (``restart_required`` with ``scheduled`` / ``needs_restart``, ``code`` with
+    ``attention``: ``journal``, ``decrypt_pending``, ``stale_pending``,
+    ``plaintext_in_armed_home``); ``databases_unsupported`` off macOS or without
+    SQLCipher; ``databases_failed`` when scheduling failed (re-read the status).
+    No key is needed and none is unwrapped: the conversion runs at startup.
+    """
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
+    dry_run = body.get("dry_run", False)
+    if not isinstance(dry_run, bool):
+        return _error("invalid_body")
+    if sys.platform != "darwin" or not await asyncio.to_thread(_sqlcipher_available):
+        return _error("databases_unsupported")
+    if dry_run:
+        return {"ok": True, "action": "dry_run"}
+    home = _home()
+
+    def decide() -> dict[str, Any]:
+        facts = _databases.status_object(home, platform="darwin", sqlcipher=True)
+        return _databases.encrypt_answer(home, facts)
+
+    try:
+        return await asyncio.to_thread(decide)
+    except Exception as exc:
+        _log.warning("mordred desktop database encryption not scheduled (%s)", type(exc).__name__)
+        return _error("databases_failed")
+
+
+# -- mail over IMAP (macOS) -----------------------------------------------------------------------
+#
+# Seams (the only places that name the mail library and the read-only store opener;
+# tests replace them with fakes): _mail_flows, _forget, _open_store_readonly,
+# _mail_secret_store, _imap_status, _run_fetch, _fetch_env.
+
+DESKTOP_BUDGET_S = 600.0
+_MAIL_ROLES = ("all", "inbox", "sent")
+_ACCOUNT_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
+_MAIL_FLOWS: Any = None
+
+
+def _library(module: str, name: str) -> Any:
+    """``module.name`` of the mail library, imported when first used (this module imports without it)."""
+    return getattr(importlib.import_module(module, __package__), name)
+
+
+def _mail_flows() -> Any:
+    """The process's ``MailSetupFlows`` (one pending flow; reaped every call and by the reaper)."""
+    global _MAIL_FLOWS
+    if _MAIL_FLOWS is None:
+        _MAIL_FLOWS = _library("..imports.mail.setup_flow", "MailSetupFlows")(_mail_secret_store())
+    return _MAIL_FLOWS
+
+
+def _forget(secret_store: Any, home: Path, *, account: str | None, rows: bool) -> Any:
+    return _library("..imports.mail.forget", "forget")(secret_store, home, account=account, rows=rows)
+
+
+def _open_store_readonly(home: Path) -> Any:
+    """The import store for counts: non-creating, non-unlocking, never initialised (raises ``ImportRefused``)."""
+    return _library("..imports.store", "open_import_store_readonly")(home)
+
+
+def _store_refusal(exc: BaseException) -> str:
+    """``imports.store.refusal_code``: the store's closed code for a refusal (unknown: ``store_unavailable``)."""
+    try:
+        refusal_code = _library("..imports.store", "refusal_code")
+    except (ImportError, AttributeError):  # an import store without the closed mapping: the code as it is
+        code = getattr(exc, "code", None)
+        return code if isinstance(code, str) else "store_unavailable"
+    return str(refusal_code(exc))
+
+
+def _mail_audit(done: Any, *, rows: bool) -> None:
+    """The CLI's ``mail.forget`` audit event (``imports.mail.forget.audit_entry``), to the same audit log."""
+    try:
+        from .._audit_support import build_audit_writer, safe_audit_append
+
+        entry = _library("..imports.mail.forget", "audit_entry")(done, rows=rows)
+        safe_audit_append(build_audit_writer(_home() / "mordred" / "audit.log"), entry, logger=_log)
+    except Exception as exc:
+        _log.warning("mordred desktop mail audit append failed (%s)", type(exc).__name__)
+
+
+def _mail_secret_store() -> Any:
+    from ..imports.mail.secrets import MailSecretStore
+
+    return MailSecretStore()
+
+
+def _imap_status(store: Any, flags: Any) -> Any:
+    from ..wizard.mail_sync_cli import imap_status
+
+    return imap_status(store, flags)
+
+
+def _run_fetch(options: Any, env: Any) -> Any:
+    from ..imports.mail.imap_sync import run_fetch
+
+    return run_fetch(options, env)
+
+
+def _fetch_env(home: Path) -> Any:
+    from ..imports.mail.imap_sync import default_env
+
+    return default_env(home)
+
+
+async def _call(work: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run a mail-library call in a thread; await it too if the library made it a coroutine."""
+    result = await asyncio.to_thread(work, *args, **kwargs)
+    if asyncio.iscoroutine(result):
+        result = await result
+    return result
+
+
+def _mail_error(exc: BaseException, allowed: frozenset[str], fallback: str) -> JSONResponse:
+    """A library refusal as ``{"ok": false, "error": code, "hint"?}``: closed codes and hints, no text."""
+    code = getattr(exc, "code", None)
+    if not (isinstance(code, str) and code in allowed):
+        _log.warning("mordred desktop mail call failed (%s)", type(exc).__name__)
+    answer: dict[str, Any] = {"ok": False, "error": _projections.closed(code, allowed, fallback)}
+    hint = _projections.hint_of(exc)
+    if hint is not None:
+        answer["hint"] = hint
+    return JSONResponse(answer, status_code=200)
+
+
+async def _mail_gate(*, memory: bool) -> JSONResponse | None:
+    if sys.platform != "darwin":
+        return _error("unsupported_platform")
+    return await _require_memory() if memory else None
+
+
+def _strings(value: Any) -> list[str] | None:
+    if value is None:
+        return []
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return list(value)
+    return None
+
+
+@router.post("/mail/setup/start")
+async def mail_setup_start(request: Request) -> Any:
+    """Body ``{"address", "imap_host"?, "account"?, "extra_addresses"?, "app_password", "touch_id"?}``.
+
+    ``{"ok": true, "flow_id", "step": "done" | "folders", "question", "gmail",
+    "account", "folders": [{"id", "display"}]}``; folder names appear only for
+    the ``folders`` step. Refusals pass ``MailSetupError`` codes and hints through.
+    """
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
+    address, password = body.get("address"), body.get("app_password")
+    host, account = body.get("imap_host"), body.get("account", "mail")
+    extra, touch_id = _strings(body.get("extra_addresses")), body.get("touch_id", True)
+    if (
+        not isinstance(address, str)
+        or not isinstance(password, str)
+        or not (host is None or isinstance(host, str))
+        or not isinstance(account, str)
+        or extra is None
+        or not isinstance(touch_id, bool)
+    ):
+        return _error("invalid_body")
+    blocked = await _mail_gate(memory=True)
+    if blocked is not None:
+        return blocked
+    try:
+        flow = await _call(
+            _mail_flows().start,
+            address=address,
+            imap_host=host,
+            account=account,
+            extra_addresses=extra,
+            app_password=password,
+            presence=touch_id,
+        )
+    except Exception as exc:
+        return _mail_error(exc, _projections.MAIL_SETUP_CODES, _projections.MAIL_SETUP_FALLBACK)
+    finally:
+        del password
+    return _projections.setup_flow_view(flow)
+
+
+@router.post("/mail/setup/{flow_id}/finish")
+async def mail_setup_finish(flow_id: str, request: Request) -> Any:
+    """Body ``{"selection": id | null}`` (the folder for the flow's ``question``). ``{"ok": true, "step": "done"}``."""
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
+    selection = body.get("selection")
+    if not (selection is None or isinstance(selection, str)):
+        return _error("invalid_body")
+    blocked = await _mail_gate(memory=True)
+    if blocked is not None:
+        return blocked
+    try:
+        await _call(_mail_flows().finish, flow_id, selection=selection)
+    except Exception as exc:
+        return _mail_error(exc, _projections.MAIL_SETUP_CODES, _projections.MAIL_SETUP_FALLBACK)
+    return {"ok": True, "step": "done"}
+
+
+@router.post("/mail/setup/{flow_id}/cancel")
+async def mail_setup_cancel(flow_id: str) -> Any:
+    """Drop a pending flow and its password (idempotent; no gate, so cleanup always works)."""
+    if _MAIL_FLOWS is not None:
+        try:
+            await _call(_MAIL_FLOWS.cancel, flow_id)
+        except Exception as exc:  # an unknown or expired flow is already gone
+            _log.info("mordred desktop mail setup cancel (%s)", type(exc).__name__)
+    return {"ok": True}
+
+
+def _fetch_options(body: dict[str, Any]) -> Any:
+    """``FetchOptions`` from a validated body, or ``None`` (``invalid_request``)."""
+    from ..imports.mail.imap_sync import FetchOptions
+
+    maximum, since = body.get("max", 2000), body.get("since")
+    mailbox, dry_run = body.get("mailbox"), body.get("dry_run")
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or not 1 <= maximum <= 2000:
+        return None
+    if not (mailbox is None or mailbox in _MAIL_ROLES) or not (dry_run is None or isinstance(dry_run, bool)):
+        return None
+    day: _dt.date | None = None
+    if since is not None:
+        if not isinstance(since, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", since):
+            return None
+        try:
+            day = _dt.date.fromisoformat(since)
+        except ValueError:
+            return None
+    return FetchOptions(
+        max_messages=maximum,
+        roles=None if mailbox is None else (mailbox,),
+        since=day,
+        dry_run=bool(dry_run),
+        budget_s=DESKTOP_BUDGET_S,
+        via="desktop",
+    )
+
+
+def _fetch_mail(options: Any, home: Path) -> dict[str, Any]:
+    """One fetch, as the closed ``FetchResult.as_dict()`` (``run_fetch`` never raises for a refusal)."""
+    result = _run_fetch(options, _fetch_env(home))
+    data = result.as_dict()
+    if not isinstance(data, dict):
+        raise TypeError("fetch result")
+    return data
+
+
+@router.post("/mail/fetch")
+async def mail_fetch(request: Request) -> Any:
+    """Body ``{"max"?: 1-2000, "since"?: "YYYY-MM-DD", "mailbox"?: "all"|"inbox"|"sent", "dry_run"?: bool}``.
+
+    Runs as the job ``mail_fetch``; a second request while it runs returns that
+    job with ``already_running: true``. On completion ``progress.result`` is
+    ``FetchResult.as_dict()``; a ``result.error`` fails the job with that code.
+    """
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
+    options = _fetch_options(body)
+    if options is None:
+        return _error("invalid_request")
+    blocked = await _mail_gate(memory=True)
+    if blocked is not None:
+        return blocked
+    for job in _JOBS.running():
+        if job.kind == "mail_fetch":
+            return {"ok": True, **_job_view(job), "already_running": True}
+    home = _home()
+
+    async def work(job: _Job) -> None:
+        job.progress = {"message": "Fetching new mail… up to 10 minutes"}
+        _emit("progress", {"job_id": job.job_id, **job.progress})
+        try:
+            data = await job.run_sync(_fetch_mail, options, home)
+        except Exception as exc:
+            _log.warning("mordred desktop mail fetch failed (%s)", type(exc).__name__)
+            raise _Fail(_projections.MAIL_FETCH_FALLBACK) from None
+        job.progress = {"result": data}
+        if data.get("error") is not None:
+            raise _Fail(_projections.closed(data["error"], _projections.MAIL_FETCH_CODES, "fetch_failed"))
+
+    try:
+        job = _start_job("mail_fetch", work)
+    except JobBusy as exc:
+        return _error(exc.code)
+    return {"ok": True, **_job_view(job), "already_running": False}
+
+
+@router.post("/mail/forget")
+async def mail_forget(request: Request) -> Any:
+    """Body ``{"rows": bool, "account"?: label, "confirm"?: "delete my data"}``.
+
+    Removes the sealed credentials, the flags and the Enclave key; ``rows``
+    also deletes every message imported under the account (Takeout imports
+    included) and needs the typed phrase, checked before anything is read.
+    Pending setup flows are cancelled first. Answers ``{"ok": true,
+    "had_credentials", "deleted_messages", "cursors_deleted", "warnings"}``.
+    """
+    from ..wizard.uninstall_cli import PURGE_PHRASE
+
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
+    rows, confirm, account = body.get("rows"), body.get("confirm"), body.get("account")
+    if not isinstance(rows, bool) or not (confirm is None or isinstance(confirm, str)):
+        return _error("invalid_body")
+    if rows and (confirm or "").strip() != PURGE_PHRASE:
+        return _error("forget_confirm_mismatch")
+    if not (account is None or isinstance(account, str)):
+        return _error("invalid_body")
+    if account is not None and not _ACCOUNT_RE.fullmatch(account):
+        return _error("invalid_account")
+    blocked = await _mail_gate(memory=rows)
+    if blocked is not None:
+        return blocked
+    if _MAIL_FLOWS is not None:
+        with contextlib.suppress(Exception):
+            await _call(_MAIL_FLOWS.cancel_all)
+    try:
+        done = await asyncio.to_thread(_forget, _mail_secret_store(), _home(), account=account, rows=rows)
+    except Exception as exc:
+        return _mail_error(exc, _projections.MAIL_FORGET_CODES, _projections.MAIL_FORGET_FALLBACK)
+    await asyncio.to_thread(_mail_audit, done, rows=rows)
+    return _projections.forgotten_projection(done)
+
+
+# -- flow lifetime ------------------------------------------------------------------------------
+
+
+def _reap_once() -> None:
+    """Drop expired mail setup and vault flows (with their passwords) while no request arrives."""
+    for flows in (_MAIL_FLOWS, _VAULT_FLOWS):
+        if flows is not None:
+            try:
+                flows.reap()
+            except Exception as exc:
+                _log.warning("mordred desktop flow reap failed (%s)", type(exc).__name__)
+
+
+async def _reaper() -> None:
+    while True:
+        await asyncio.sleep(REAP_INTERVAL_S)
+        _reap_once()
+
+
+def _cancel_all_flows() -> None:
+    """On shutdown: no prepared passphrase or app password outlives the backend."""
+    for flows in (_MAIL_FLOWS, _VAULT_FLOWS):
+        if flows is not None:
+            try:
+                flows.cancel_all()
+            except Exception as exc:
+                _log.warning("mordred desktop flow cancel failed (%s)", type(exc).__name__)
 
 
 # -- package updates ----------------------------------------------------------------------
@@ -915,7 +1530,7 @@ async def uninstall_plan() -> Any:
 
 
 @router.post("/uninstall")
-async def uninstall(body: dict[str, Any] | None = None) -> Any:
+async def uninstall(request: Request) -> Any:
     """Body: ``{"mode": "decrypt" | "erase", "purge_data": bool, "confirm": str, "recovery_passphrase"?: str}``.
 
     ``decrypt`` (default) restores every encrypted target to plaintext, removes
@@ -925,9 +1540,16 @@ async def uninstall(body: dict[str, Any] | None = None) -> Any:
     Deleting anything needs ``confirm`` = ``delete my data``. Runs as a job;
     ``progress.summary`` carries the report.
     """
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
+    return await _uninstall(body)
+
+
+async def _uninstall(body: dict[str, Any]) -> Any:
+    """:func:`uninstall` after the body was read (the route's logic; tests drive it directly)."""
     from ..wizard.uninstall_cli import PURGE_PHRASE, UninstallOptions, run_uninstall
 
-    body = body or {}
     erase = body.get("mode") == "erase"
     purge = erase or body.get("purge_data") is True
     phrase = str(body.get("confirm") or "")

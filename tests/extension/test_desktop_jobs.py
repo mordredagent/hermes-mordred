@@ -336,7 +336,7 @@ async def test_real_api_callback_keeps_outcome_and_progress_after_cancellation(
             return await api.enclave_build()
         if kind == "update":
             return await api.update_apply({"version": "0.2.0a3"})
-        return await api.uninstall({})
+        return await api._uninstall({})
 
     result = await start()
     job = jobs.get(result["job_id"])
@@ -432,9 +432,9 @@ async def test_final_admission_conflict_keeps_http_error_and_confirmation_order(
         if kind == "update":
             result = await api.update_apply({"version": "0.2.0a3"})
         else:
-            invalid = await api.uninstall({"purge_data": True})
+            invalid = await api._uninstall({"purge_data": True})
             assert json.loads(invalid.body)["error"] == "uninstall_confirm_mismatch"
-            result = await api.uninstall({})
+            result = await api._uninstall({})
         assert result.status_code == 200
         assert json.loads(result.body) == {"ok": False, "error": kind + "_busy"}
     finally:

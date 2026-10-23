@@ -21,7 +21,6 @@ state found on the reporting machine.
 
 from __future__ import annotations
 
-import asyncio
 import functools
 import sys
 from collections.abc import Callable
@@ -102,25 +101,26 @@ def _flow_telegram_setup_memory_step(world: _World) -> None:
 
 
 def _flow_desktop_memory_enable(world: _World, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Desktop ``POST /memory/enable`` with the vault already present."""
+    """Desktop with the vault already present: ``/vault/{flow}/commit`` (enrolls ``.env``, no new
+    phrase), then ``/memory/enable`` -- two ceremonies, each in its own flow."""
     pytest.importorskip("fastapi")
-    from mordred_hermes.desktop import api as desktop_api
+    from mordred_hermes.desktop import _vault
 
     monkeypatch.setattr(sys, "platform", "darwin")  # memory sealing is macOS-only; backends are fakes
-
-    monkeypatch.setattr(desktop_api, "_home", lambda: world.home)
-    monkeypatch.setattr(vault_cli, "_resolve_root", lambda _r: world.root)
-    answers = iter([False, True])
-    monkeypatch.setattr(
-        "mordred_hermes.extension.telegram.memory_guard.memory_encryption_active", lambda home=None: next(answers)
-    )
     for module in (env_decrypt_cli, memory_cli):
         monkeypatch.setattr(
             module,
             "enable",
             functools.partial(module.enable, backend=world.backend, store=world.store()),
         )
-    assert asyncio.run(desktop_api.memory_enable({}))["ok"] is True
+    flows = _vault.VaultFlows(lambda: "unused")
+    flow = flows.prepare(reuse=True)
+    committed = _vault.commit(
+        home=world.home, root=world.root, platform="darwin", flow=flow, flows=flows, unattended=None
+    )
+    assert committed == {"ok": True, "passphrase_reused": True}
+    memory = _vault.enable_memory(home=world.home, root=world.root, platform="darwin", active=lambda: True)
+    assert memory == {"ok": True, "restart_required": True}
 
 
 def _seal_env_and_config(world: _World) -> None:
@@ -200,10 +200,13 @@ def _measure_setup_fresh(
 #   setup on a fresh host ................. 11 accesses, 0 dialogs (created in-flow)
 # -----------------------------------------------------------------------------
 
+# The Desktop ceremony is two flows since the prepare/commit split (the recovery phrase is
+# shown before anything is created): the vault commit and the memory step each read the
+# anchor and open the vault once, hence two accesses more than one combined flow.
 _EXPECTED_HELPER = {
     "setup_existing": (6, 0),
     "telegram_setup": (6, 0),
-    "desktop_memory_enable": (6, 0),
+    "desktop_memory_enable": (8, 0),
     "hermes_start": (2, 0),
     "hermes_exit": (1, 0),
     "extension_serve": (1, 0),
@@ -214,7 +217,7 @@ _EXPECTED_HELPER = {
 _EXPECTED_LEGACY = {
     "setup_existing": (8, 6),
     "telegram_setup": (8, 6),
-    "desktop_memory_enable": (8, 6),
+    "desktop_memory_enable": (10, 8),
     "hermes_start": (2, 2),
     "hermes_exit": (1, 1),
     "extension_serve": (1, 1),

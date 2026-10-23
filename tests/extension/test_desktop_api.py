@@ -281,31 +281,41 @@ def test_question_model_update_uses_one_transaction_without_preliminary_load(env
         assert saved.venice_api_key == "new-venice-key" and saved.venice_model == "new-model"
 
 
-def test_memory_enable_returns_a_generated_passphrase_once(env, monkeypatch):
-    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="darwin"))
+def test_memory_enable_on_macos_is_memory_only(env, monkeypatch):
+    """The vault and its passphrase come from /vault/prepare + commit (test_desktop_vault.py)."""
     calls: list[str] = []
-    state = {"on": False}
-
-    def fake_enable(name: str):
-        def enable(**kwargs: Any) -> int:
-            calls.append(name)
-            if name == "env":
-                kwargs["prompt_io"].ask_password("Choose a vault recovery passphrase")
-            state["on"] = name == "memory"
-            return 0
-
-        return enable
-
+    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(api, "_vault_root", lambda: env.tmp / "mordred" / "vault")
     monkeypatch.setattr(
-        "mordred_hermes.extension.telegram.memory_guard.memory_encryption_active", lambda home=None: state["on"]
+        "mordred_hermes.extension.telegram.memory_guard.memory_encryption_active", lambda home=None: False
     )
-    monkeypatch.setattr("mordred_hermes.wizard.env_decrypt_cli.enable", fake_enable("env"))
-    monkeypatch.setattr("mordred_hermes.wizard.memory_cli.enable", fake_enable("memory"))
-    first = _post(env, "/memory/enable")
-    assert calls == ["env", "memory"] and first["ok"] and first["restart_required"]
-    words = first["recovery_passphrase"].split()
-    assert len(words) == 8 and len(set(words)) >= 6
-    assert _post(env, "/memory/enable") == {"ok": True, "already": True}
+    monkeypatch.setattr("mordred_hermes.wizard.env_decrypt_cli.enable", lambda **kw: calls.append("env") or 0)
+    monkeypatch.setattr("mordred_hermes.wizard.memory_cli.enable", lambda **kw: calls.append("memory") or 0)
+    result = _post(env, "/memory/enable", {"unattended": True})
+    assert result == {"ok": False, "error": "vault_required"} and calls == []
+    assert "recovery_passphrase" not in json.dumps(result)
+
+
+def test_secrets_never_reach_logs_events_or_other_answers(env, monkeypatch, caplog, capsys):
+    """api_hash, the login code, the 2FA password and the Venice key: only ever in the request that carried them."""
+    import logging
+
+    events: list[Any] = []
+    monkeypatch.setattr(api, "_emit", lambda event, payload: events.append((event, payload)))
+    caplog.set_level(logging.DEBUG)
+    answers = []
+    started = _post(env, "/telegram/login/start", {"phone": "+1000000", "api_id": "12345", "api_hash": SECRET_HASH})
+    answers.append(started)
+    answers.append(_post(env, f"/telegram/login/{started['flow_id']}/code", {"code": "000"}))
+    answers.append(_post(env, f"/telegram/login/{started['flow_id']}/code", {"code": SECRET_CODE}))
+    answers.append(_post(env, f"/telegram/login/{started['flow_id']}/password", {"password": "wrong"}))
+    answers.append(_post(env, f"/telegram/login/{started['flow_id']}/password", {"password": SECRET_PASSWORD}))
+    answers.append(_post(env, "/llm/venice", {"api_key": SECRET_VENICE}))
+    answers.append(_post(env, "/llm/venice", {"api_key": SECRET_VENICE, "model": 5}))
+    answers.append(env.http.get("/api/plugins/mordred/status?client_version=4").json())
+    everything = json.dumps([answers, events]) + caplog.text + "".join(capsys.readouterr())
+    for secret in (SECRET_HASH, SECRET_CODE, SECRET_PASSWORD, SECRET_VENICE):
+        assert secret not in everything
 
 
 def test_passphrases_are_random():
