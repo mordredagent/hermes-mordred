@@ -525,13 +525,14 @@ console.log(JSON.stringify(paths))
 
 
 @pytest.mark.parametrize("platform", ["darwin", "linux"])
-def test_backend_answers_version_4_like_version_3(monkeypatch, platform):
-    """The page may send 4 to this Mordred: `status` compares versions with >=, so 4 is treated as 3."""
+def test_backend_answers_version_4_like_version_3(monkeypatch, platform, tmp_path):
+    """Version 4 is version 3 plus the five page keys (vault, databases, imports, mail, telegram_archive)."""
     pytest.importorskip("fastapi")
     from mordred_hermes.desktop import api
     from mordred_hermes.wizard import telegram_setup_cli
 
     monkeypatch.setattr(api, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(api, "_home", lambda: tmp_path)
     monkeypatch.setattr(telegram_setup_cli, "run_checks", lambda: [telegram_setup_cli.Check("hardware", True, "ok")])
 
     async def model():
@@ -540,7 +541,11 @@ def test_backend_answers_version_4_like_version_3(monkeypatch, platform):
     monkeypatch.setattr(api, "hermes_model_check", model)
     monkeypatch.setattr(api, "_store", lambda: SimpleNamespace(flags=lambda: {}))
     monkeypatch.setattr(api, "_hermes_venice_key", lambda: None)
-    assert asyncio.run(api.status(client_version=4)) == asyncio.run(api.status(client_version=3))
+    v3 = asyncio.run(api.status(client_version=3))
+    v4 = asyncio.run(api.status(client_version=4))
+    page_keys = {"vault", "databases", "imports", "mail", "telegram_archive"}
+    assert set(v4) - set(v3) == page_keys
+    assert {key: value for key, value in v4.items() if key not in page_keys} == v3
 
 
 @pytest.mark.parametrize(
