@@ -206,14 +206,20 @@ def test_connection_diagnostics_reach_only_an_installed_sink_and_carry_no_conten
     listener.close()  # the port is now closed: every connect is refused
     seen: list[str] = []
     try:
-        with _armed(budget=5.0) as link, patch.object(imap, "_getaddrinfo", _resolving_to(address)):
-            with pytest.raises(imap.ImapError):
-                link.connect_tcp("imap.example.test", address[1])
+        with (
+            _armed(budget=5.0) as link,
+            patch.object(imap, "_getaddrinfo", _resolving_to(address)),
+            pytest.raises(imap.ImapError),
+        ):
+            link.connect_tcp("imap.example.test", address[1])
         assert seen == []  # no sink: silent
         imap.set_diagnostic_sink(seen.append)
-        with _armed(budget=5.0) as link, patch.object(imap, "_getaddrinfo", _resolving_to(address)):
-            with pytest.raises(imap.ImapError):
-                link.connect_tcp("imap.example.test", address[1])
+        with (
+            _armed(budget=5.0) as link,
+            patch.object(imap, "_getaddrinfo", _resolving_to(address)),
+            pytest.raises(imap.ImapError),
+        ):
+            link.connect_tcp("imap.example.test", address[1])
         assert seen and seen[0].startswith("mordred imap: TCP connect failed on every address (ipv4:")
         assert "example" not in seen[0] and str(address[1]) not in seen[0]
     finally:
