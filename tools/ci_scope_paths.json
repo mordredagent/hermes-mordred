@@ -105,7 +105,39 @@
     "src/mordred_hermes/desktop/__init__.py": [
       "extension"
     ],
+    "src/mordred_hermes/desktop/_body.py": [
+      "extension"
+    ],
     "src/mordred_hermes/desktop/_capture.py": [
+      "extension",
+      "macos"
+    ],
+    "src/mordred_hermes/desktop/_ceremony_routes.py": [
+      "extension",
+      "macos"
+    ],
+    "src/mordred_hermes/desktop/_databases.py": [
+      "extension",
+      "macos"
+    ],
+    "src/mordred_hermes/desktop/_mail_routes.py": [
+      "extension"
+    ],
+    "src/mordred_hermes/desktop/_maintenance_routes.py": [
+      "extension"
+    ],
+    "src/mordred_hermes/desktop/_projections.py": [
+      "extension"
+    ],
+    "src/mordred_hermes/desktop/_seams.py": [
+      "extension",
+      "macos"
+    ],
+    "src/mordred_hermes/desktop/_status_v4.py": [
+      "extension",
+      "macos"
+    ],
+    "src/mordred_hermes/desktop/_vault.py": [
       "extension",
       "macos"
     ],
@@ -188,6 +220,12 @@
     ],
     "src/mordred_hermes/extension/web/index.html": [
       "package"
+    ],
+    "src/mordred_hermes/imports/mail/forget.py": [
+      "macos"
+    ],
+    "src/mordred_hermes/imports/mail/setup_flow.py": [
+      "macos"
     ],
     "src/mordred_hermes/llm_guard/__init__.py": [],
     "src/mordred_hermes/llm_guard/_cloud_endpoint.py": [],
@@ -332,10 +370,37 @@
       "features"
     ],
     "src/mordred_hermes/wizard/policy_explainer.py": [],
+    "tests/_desktop_page.py": [
+      "extension"
+    ],
+    "tests/extension/_desktop_support.py": [
+      "extension"
+    ],
     "tests/extension/test_desktop_api.py": [
       "extension"
     ],
+    "tests/extension/test_desktop_bodies.py": [
+      "extension"
+    ],
+    "tests/extension/test_desktop_databases.py": [
+      "extension",
+      "macos"
+    ],
+    "tests/extension/test_desktop_mail.py": [
+      "extension"
+    ],
     "tests/extension/test_desktop_platform.py": [
+      "extension",
+      "macos"
+    ],
+    "tests/extension/test_desktop_status_e2e.py": [
+      "extension",
+      "macos"
+    ],
+    "tests/extension/test_desktop_status_v4.py": [
+      "extension"
+    ],
+    "tests/extension/test_desktop_vault.py": [
       "extension",
       "macos"
     ],
@@ -374,12 +439,21 @@
       "extension",
       "features"
     ],
+    "tests/fixtures/desktop/windows_page.json": [
+      "extension"
+    ],
+    "tests/fixtures/desktop/windows_scenarios.js": [
+      "extension"
+    ],
     "tests/test_audit.py": [],
     "tests/test_audit_reasons_phase3.py": [],
     "tests/test_audit_reasons_phase4.py": [],
     "tests/test_desktop_capture.py": [
       "extension",
       "macos"
+    ],
+    "tests/test_desktop_page.py": [
+      "extension"
     ],
     "tests/test_desktop_windows_api.py": [
       "extension"
@@ -423,6 +497,9 @@
     ],
     "tests/test_local_adapter.py": [
       "floor"
+    ],
+    "tests/test_mail_setup_flow.py": [
+      "macos"
     ],
     "tests/test_network_api.py": [
       "network",

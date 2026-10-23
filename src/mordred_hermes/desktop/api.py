@@ -22,6 +22,17 @@ Routes such as ``/sync`` and ``/jobs`` are shared. macOS and Linux never reach
 that module. Every captured wizard output goes through :mod:`._capture` (one
 capture per process at a time, only the capturing thread's text).
 
+Secret-bearing routes take the raw ``Request`` and read the body with
+:func:`._body.read_object` (``invalid_body``, never FastAPI's 422 echo). The
+macOS sections added for ``client_version >= 4`` (vault, databases, imports,
+mail) come from :mod:`._status_v4` and never unlock anything. The macOS
+routes of the new steps are sub-routers included at the end of this module:
+:mod:`._ceremony_routes` (``/vault/*``, ``/databases/*``) and
+:mod:`._mail_routes` (``/mail/*``, ``/imports/status``); package updates and
+uninstall are :mod:`._maintenance_routes`. The mail library, the
+read-only import-store opener, the flow registries, the ceremony lock and the
+router's lifespan (the flow reaper) live in :mod:`._seams`, read at call time.
+
 Served by Hermes' dashboard server, which requires the per-process session
 token on every ``/api`` request and binds to loopback only.
 """
@@ -37,16 +48,18 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from . import _seams, _status_v4, _vault
+from ._body import read_object
 from ._capture import captured_output
 from ._jobs import Job as _Job
-from ._jobs import JobBusy, JobRegistry, JobWork
+from ._jobs import JobRegistry, JobWork
 
 _log = logging.getLogger(__name__)
-router = APIRouter()
 PLUGIN_ID = "mordred"
+router = APIRouter(lifespan=_seams.lifespan)
 
 
 # -- helpers ------------------------------------------------------------------------
@@ -172,9 +185,14 @@ async def _require_hermes_model() -> JSONResponse | None:
 
 @router.get("/status")
 async def status(client_version: int = 1) -> dict[str, Any]:
-    """Setup progress from metadata only (no Touch ID, no secrets, no content)."""
+    """Setup progress from metadata only (no Touch ID, no secrets, no content).
+
+    ``client_version >= 4`` adds ``vault``, ``databases``, ``imports``, ``mail``
+    and ``telegram_archive`` (:func:`_sections_v4`); older clients get exactly
+    the keys they always got.
+    """
     if sys.platform == "win32" and client_version >= 3:
-        return await _windows_status()
+        return await _windows_status(client_version)
     platform_status = {
         "platform": sys.platform,
         "telegram_supported": sys.platform == "darwin" or (sys.platform == "linux" and client_version >= 2),
@@ -183,12 +201,17 @@ async def status(client_version: int = 1) -> dict[str, Any]:
         "user_presence_supported": sys.platform == "darwin",
     }
     jobs = [_job_view(j) for j in _JOBS.running()]
+    platform = sys.platform
     if not platform_status["telegram_supported"]:
-        return {"ok": True, **platform_status, "checks": {}, "jobs": jobs}
+        extra = await _status_v4.sections(platform, _home()) if client_version >= 4 else {}
+        return {"ok": True, **platform_status, "checks": {}, "jobs": jobs, **extra}
 
     from ..wizard.telegram_setup_cli import run_checks
 
-    checks = await asyncio.to_thread(run_checks)
+    async def sections() -> dict[str, Any]:
+        return await _status_v4.sections(platform, _home()) if client_version >= 4 else {}
+
+    checks, extra = await asyncio.gather(asyncio.to_thread(run_checks), sections())
     return {
         "ok": True,
         **platform_status,
@@ -197,10 +220,11 @@ async def status(client_version: int = 1) -> dict[str, Any]:
         "hermes_venice_key": _hermes_venice_key() is not None,
         "telegram_api": bool((await asyncio.to_thread(_store().flags) or {}).get("api_configured")),
         "jobs": jobs,
+        **extra,
     }
 
 
-async def _windows_status() -> dict[str, Any]:
+async def _windows_status(client_version: int = 3) -> dict[str, Any]:
     """Windows status for a compatible client: capabilities, helper, memory, Telegram; no unwrap or launch."""
     from . import _windows
 
@@ -209,6 +233,8 @@ async def _windows_status() -> dict[str, Any]:
     result: dict[str, Any] = {"ok": True, **payload, "hermes_model": await hermes_model_check(), "jobs": jobs}
     if payload["telegram_supported"]:
         result["hermes_venice_key"] = await asyncio.to_thread(_hermes_venice_key) is not None
+    if client_version >= 4:
+        result.update(await _status_v4.sections("win32", _home()))
     return result
 
 
@@ -298,43 +324,20 @@ def generate_recovery_passphrase(words: int = 8) -> str:
     return " ".join(secrets.choice(wordlist) for _ in range(words))
 
 
-class _FixedPassphrase:
-    """PromptIO that answers every passphrase prompt with one generated value."""
+def _memory_active() -> bool:
+    from ..extension.telegram.memory_guard import memory_encryption_active
 
-    def __init__(self, passphrase: str) -> None:
-        self._passphrase = passphrase
-        self.used = False
-
-    def ask_password(self, label: str, default: str = "", *, description: str | None = None) -> str:
-        self.used = True
-        return self._passphrase
-
-    def ask_bool(self, label: str, default: bool, *, description: str | None = None) -> bool:
-        return default
-
-    def ask_text(self, label: str, default: str = "", *, description: str | None = None) -> str:
-        return default
-
-    def ask_choice(self, label: str, choices: Any, default: Any = None, **_: Any) -> Any:
-        return default if default is not None else choices[0]
-
-    def ask_multi(self, label: str, choices: Any, default: Any = ()) -> tuple[str, ...]:
-        return tuple(default)
+    return memory_encryption_active()
 
 
 @router.post("/memory/enable")
 async def memory_enable(body: dict[str, Any] | None = None) -> Any:
-    """Turn on sealed .env + sealed memory; create the vault if needed.
+    """Turn on sealed memory (macOS: memory only; the vault and ``.env`` come from ``/vault/*``).
 
-    If a vault is created here, its recovery passphrase is generated and
-    returned ONCE so the UI can show it. It is not stored anywhere else.
-
-    Optional body ``{"unattended": true|false}`` sets the policy of the vault's
-    device key if this call creates it. Absent, it matches ``hermes-mordred
-    setup``'s default: ``MORDRED_SEKEY_UNATTENDED=1`` makes it unattended,
-    otherwise it is attended (Touch ID / password on each use). Both steps run
-    in one flow, so the vault is unlocked at most once (not at all when it is
-    created here).
+    macOS answers ``vault_required`` without a vault and ``env_required`` until
+    ``.env`` is enrolled and injecting; it never creates a vault or a
+    passphrase, and it is idempotent (``already``). Linux and Windows keep
+    their flows (TPM, CNG behind explicit acknowledgements).
     """
     if sys.platform == "win32":
         return await _windows_memory_enable(body)
@@ -344,49 +347,30 @@ async def memory_enable(body: dict[str, Any] | None = None) -> Any:
     if sys.platform == "linux" and (body or {}).get("acknowledge_tpm_no_recovery") is not True:
         return _error("telegram_platform_unsupported")
 
-    from ..extension.telegram.memory_guard import memory_encryption_active
-    from ..wizard import env_decrypt_cli, memory_cli
-    from ..wizard._flow_session import FlowSession
-    from ..wizard.vault_cli import _resolve_root
-
-    if await asyncio.to_thread(memory_encryption_active):
-        return {"ok": True, "already": True}
     if sys.platform == "linux":
+        if await asyncio.to_thread(_memory_active):
+            return {"ok": True, "already": True}
         return await _linux_memory_enable()
-    requested = (body or {}).get("unattended")
-    unattended = requested if isinstance(requested, bool) else None
-    prompt = _FixedPassphrase(generate_recovery_passphrase())
-    home, root, platform = _home(), _resolve_root(None), sys.platform
-
-    def enable() -> int:
-        with FlowSession(unattended=unattended) as flow, captured_output():
-            rc = env_decrypt_cli.enable(home=home, root=root, platform=platform, prompt_io=prompt, flow_session=flow)
-            if rc == 0:
-                rc = memory_cli.enable(home=home, root=root, platform=platform, prompt_io=prompt, flow_session=flow)
-        return rc
-
-    rc = await asyncio.to_thread(enable)
-    if rc != 0 or not await asyncio.to_thread(memory_encryption_active):
-        return _error("memory_encryption_failed", 500)
-    result: dict[str, Any] = {"ok": True, "restart_required": True}
-    if prompt.used:
-        result["recovery_passphrase"] = prompt._passphrase  # shown once; never persisted by Mordred
-    return result
+    # macOS: the vault and the env target are checked BEFORE the idempotent answer.
+    home, root, platform = _home(), _seams.vault_root(), sys.platform
+    return await _seams.run_ceremony(
+        lambda: _vault.enable_memory(home=home, root=root, platform=platform, active=_memory_active)
+    )
 
 
 async def _linux_memory_enable() -> Any:
-    from ..extension.telegram.memory_guard import memory_encryption_active
     from ..wizard import memory_cli
-    from ..wizard.vault_cli import _resolve_root
 
-    def enable_linux() -> int:
+    home, root = _home(), _seams.vault_root()
+
+    def enable_linux() -> dict[str, Any]:
         with captured_output():
-            return memory_cli.enable(home=_home(), root=_resolve_root(None), platform="linux")
+            rc = memory_cli.enable(home=home, root=root, platform="linux")
+        if rc != 0 or not _memory_active():
+            return {"ok": False, "error": "memory_encryption_failed"}
+        return {"ok": True, "restart_required": True}
 
-    rc = await asyncio.to_thread(enable_linux)
-    if rc != 0 or not await asyncio.to_thread(memory_encryption_active):
-        return _error("memory_encryption_failed", 500)
-    return {"ok": True, "restart_required": True}
+    return await _seams.run_ceremony(enable_linux)
 
 
 async def _windows_memory_enable(body: dict[str, Any] | None) -> Any:
@@ -462,8 +446,11 @@ async def _windows_telegram_refusal(body: Any) -> JSONResponse | None:
 
 
 @router.post("/telegram/login/start")
-async def telegram_login_start(body: dict[str, Any]) -> Any:
+async def telegram_login_start(request: Request) -> Any:
     """Body: {"phone", and on first setup "api_id", "api_hash"}; on Windows also "acknowledge_no_presence"."""
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
     blocked = await _require_memory() or await _require_hermes_model() or await _windows_telegram_refusal(body)
     if blocked is not None:
         return blocked
@@ -479,9 +466,12 @@ async def telegram_login_start(body: dict[str, Any]) -> Any:
 
 
 @router.post("/telegram/login/{flow_id}/code")
-async def telegram_login_code(flow_id: str, body: dict[str, Any]) -> Any:
+async def telegram_login_code(flow_id: str, request: Request) -> Any:
     from ..extension.telegram.login_flow import LoginError
 
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
     try:
         step = await _flows().submit_code(flow_id, body.get("code"))
     except LoginError as exc:
@@ -492,9 +482,12 @@ async def telegram_login_code(flow_id: str, body: dict[str, Any]) -> Any:
 
 
 @router.post("/telegram/login/{flow_id}/password")
-async def telegram_login_password(flow_id: str, body: dict[str, Any]) -> Any:
+async def telegram_login_password(flow_id: str, request: Request) -> Any:
     from ..extension.telegram.login_flow import LoginError
 
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
     try:
         step = await _flows().submit_password(flow_id, body.get("password"))
     except LoginError as exc:
@@ -556,8 +549,11 @@ def _set_venice(api_key: str, model: str | None) -> None:
 
 
 @router.post("/llm/venice")
-async def llm_venice(body: dict[str, Any]) -> Any:
+async def llm_venice(request: Request) -> Any:
     """Body: {"use_hermes_key": true} or {"api_key": "..."}; optional "model"; Windows: "acknowledge_no_presence"."""
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
     blocked = await _windows_telegram_refusal(body)
     if blocked is not None:
         return blocked
@@ -581,9 +577,12 @@ async def llm_venice(body: dict[str, Any]) -> Any:
 
 
 @router.post("/llm/local")
-async def llm_local(body: dict[str, Any]) -> Any:
+async def llm_local(request: Request) -> Any:
     from ..extension.telegram.llm import LlmConfigError, normalize_local_endpoint
 
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
     blocked = await _windows_telegram_refusal(body)
     if blocked is not None:
         return blocked
@@ -690,268 +689,10 @@ async def telegram_logout(body: dict[str, Any] | None = None) -> Any:
     return await windows_logout(_store(), forget=forget)
 
 
-# -- package updates ----------------------------------------------------------------------
+# -- the macOS steps' sub-routers (imported last: they read this module at call time) ------------
 
-_REFUSAL_CODES = {
-    "windows": "update_unsupported_windows",
-    "source-install": "update_source_install",
-    "no-uv": "update_no_uv",
-    "not-a-venv": "update_not_a_venv",
-    "foreign-source": "update_foreign_source",
-    "bad-version": "update_bad_version",
-    "hermes-too-old": "update_hermes_too_old",
-}
+from . import _ceremony_routes, _mail_routes, _maintenance_routes  # noqa: E402
 
-
-def _running(kind: str) -> bool:
-    return _JOBS.is_running(kind)
-
-
-def _update_view(result: Any, *, current: Any | None, error: str | None = None) -> dict[str, Any]:
-    """A :class:`.._self_update.CheckResult` for the page, plus whether an in-place update can run here.
-
-    ``running`` is this process's version and ``installed`` the one on disk;
-    they differ after an update until the gateway restarts
-    (``restart_required``), whatever the page remembers. When the running
-    package was imported from somewhere other than the installed distribution,
-    ``foreign_source`` names that place and no restart is offered: the two
-    versions will differ until that copy is removed. ``check_error`` is set
-    when an explicit check failed while ``check`` still shows the last valid
-    answer.
-    """
-    from .. import __version__
-    from .. import _self_update as core
-
-    view: dict[str, Any] = {"ok": True, "supported": True, "refusal": None, "running": __version__}
-    try:
-        if current is None:
-            raise RuntimeError("installed metadata unreadable")
-        view["installed"] = current.version
-        core.refuse_if_unsupported(current, uv=core.find_uv(_home()))
-    except core.UpdateRefused as exc:
-        view["supported"] = False
-        view["refusal"] = {"code": _REFUSAL_CODES.get(exc.code, "update_refused"), "message": exc.message}
-    except Exception as exc:  # metadata unreadable: say so instead of a 500
-        view["supported"] = False
-        view["refusal"] = {"code": "update_refused", "message": f"{type(exc).__name__}: {exc}"}
-    foreign = current.foreign_source if current is not None else None
-    view["foreign_source"] = foreign
-    view["restart_required"] = foreign is None and view.get("installed") not in (None, __version__)
-    view["check"] = result.to_json() if result is not None else None
-    view["check_error"] = error
-    return view
-
-
-@router.get("/update/check")
-async def update_check(refresh: int = 0) -> Any:
-    """Is a newer Mordred release available?
-
-    Without ``refresh`` this reuses Hermes's fresh plugin-check receipt or our
-    own day-old answer and asks PyPI at most once a day (never when
-    ``plugins.auto_update_check_hours`` is 0). ``refresh=1`` is the user's
-    **Check now**: one request, cached on success only; when it fails the
-    answer still shows the last valid one (``check``) and names the failure
-    (``check_error``). ``check`` is ``null`` when nothing is known and nothing
-    was asked.
-    """
-    from .. import _self_update as core
-
-    def work() -> dict[str, Any]:
-        home = _home()
-        try:
-            current = core.installed(home)
-        except Exception:
-            _log.warning("mordred installed metadata unreadable", exc_info=True)
-            current = None
-        result: core.CheckResult | None
-        error: str | None = None
-        if refresh and current is not None:
-            try:
-                result = core.check(current=current)
-                core.write_cache(result, home)
-            except core.UpdateCheckFailed as exc:
-                # Keep showing the last valid answer (no new request); name the failure.
-                error = f"check failed: {exc}"
-                result = core.hermes_receipt_check(home) or core.read_cache(home)
-                if result is not None and (result.failed or result.installed != current.version):
-                    result = None
-        elif current is not None:
-            result = core.cached_check(home, current=current)
-        else:
-            result = None
-        return _update_view(result, current=current, error=error)
-
-    try:
-        return await asyncio.to_thread(work)
-    except Exception as exc:
-        _log.warning("mordred update check failed (%s)", type(exc).__name__)
-        return _error("update_check_failed")
-
-
-def _prepare_update(target: str) -> tuple[Any, Any] | str:
-    """The install source and uv for an update to *target*, or the refusal code."""
-    from .. import _self_update as core
-
-    try:
-        current = core.installed(_home())
-        uv = core.find_uv(_home())
-        core.refuse_if_unsupported(current, uv=uv)
-    except core.UpdateRefused as exc:
-        return _REFUSAL_CODES.get(exc.code, "update_refused")
-    except Exception as exc:
-        _log.warning("mordred update refused (%s)", type(exc).__name__)
-        return "update_refused"
-    newer = core.is_newer(target, current.version)
-    if newer is None:
-        return "update_bad_version"
-    if not newer:
-        return "update_not_newer"
-    return current, uv
-
-
-@router.post("/update/apply")
-async def update_apply(body: dict[str, Any] | None = None) -> Any:
-    """Body: ``{"version": "<release>"}``. Runs ``hermes-mordred update --yes`` as a job.
-
-    The version must parse and be newer than the one on disk: this route
-    never downgrades (the CLI's ``--version`` is the explicit way). Refusals
-    answer before any job starts; an uninstall in progress is a refusal too.
-    ``progress.step`` / ``progress.output`` carry the failed step on error; on
-    success ``progress.report`` is the update report and the page offers the
-    gateway restart.
-    """
-    from .. import _self_update as core
-
-    body = body or {}
-    target = body.get("version")
-    if not isinstance(target, str) or not target.strip():
-        return _error("invalid_request")
-    target = target.strip()
-    if _running("uninstall"):
-        return _error("update_busy")
-    prepared = await asyncio.to_thread(_prepare_update, target)
-    if isinstance(prepared, str):
-        return _error(prepared)
-    current, uv = prepared
-    if _running("uninstall"):  # an uninstall may have started during the await
-        return _error("update_busy")
-
-    async def work(job: _Job) -> None:
-        job.progress = {"message": f"Installing hermes-mordred {target}…", "target": target}
-        _emit("progress", {"job_id": job.job_id, **job.progress})
-        try:
-            report = await job.run_sync(core.apply, target, current=current, uv=uv, home=_home())
-        except core.UpdateRefused as exc:
-            job.progress = {"target": target, "refusal": exc.message, "rolled_back": exc.rolled_back}
-            code = (
-                "update_rollback_failed" if exc.rolled_back is False else _REFUSAL_CODES.get(exc.code, "update_refused")
-            )
-            raise _Fail(code) from exc
-        except core.UpdateFailed as exc:
-            job.progress = {
-                "target": target,
-                "step": exc.step,
-                "output": exc.output,
-                "rolled_back": exc.rolled_back,
-                "rollback_output": exc.rollback_output,
-            }
-            raise _Fail("update_rollback_failed" if exc.rolled_back is False else "update_failed") from exc
-        job.progress = {"target": target, "report": report.to_json()}
-
-    try:
-        job = _start_job("update", work)
-    except JobBusy as exc:
-        return _error(exc.code)
-    return {"ok": True, **_job_view(job)}
-
-
-# -- uninstall ----------------------------------------------------------------------------
-
-
-class _UninstallAnswers(_FixedPassphrase):
-    """Answers ``hermes-mordred uninstall``'s prompts with what the page collected.
-
-    The page's own confirmation replaces the yes/no question; the typed
-    ``delete my data`` phrase (``--purge-data`` only) and the vault recovery
-    passphrase (only if the device key cannot open the vault) come from the
-    request body and are used once, in memory.
-    """
-
-    def __init__(self, recovery_passphrase: str, purge_phrase: str) -> None:
-        super().__init__(recovery_passphrase)
-        self._purge_phrase = purge_phrase
-
-    def ask_bool(self, label: str, default: bool, *, description: str | None = None) -> bool:
-        return True
-
-    def ask_text(self, label: str, default: str = "", *, description: str | None = None) -> str:
-        return self._purge_phrase
-
-
-def _uninstall_context(prompt: Any = None) -> Any:
-    from ..keyvault._identity import resolve_root
-    from ..wizard.uninstall_cli import UninstallContext
-
-    return UninstallContext(
-        home=_home(), vault_root=resolve_root(None), user_home=Path.home(), prompt_io=prompt, interactive=False
-    )
-
-
-@router.get("/uninstall/plan")
-async def uninstall_plan() -> Any:
-    """What uninstalling would do (the dry run), for the page to show before confirming."""
-    from ..wizard.uninstall_cli import UninstallOptions, run_uninstall
-
-    def plan(purge: bool, erase: bool = False) -> str:
-        # The three dry runs share one process-wide capture lock, so they run one after another.
-        with captured_output() as out:
-            run_uninstall(_uninstall_context(), UninstallOptions(dry_run=True, purge_data=purge, erase_encrypted=erase))
-        return out.getvalue()
-
-    keep, purge, erase = await asyncio.gather(
-        asyncio.to_thread(plan, False), asyncio.to_thread(plan, True), asyncio.to_thread(plan, True, True)
-    )
-    return {"ok": True, "plan": keep, "plan_purge": purge, "plan_erase": erase}
-
-
-@router.post("/uninstall")
-async def uninstall(body: dict[str, Any] | None = None) -> Any:
-    """Body: ``{"mode": "decrypt" | "erase", "purge_data": bool, "confirm": str, "recovery_passphrase"?: str}``.
-
-    ``decrypt`` (default) restores every encrypted target to plaintext, removes
-    Mordred from Hermes and uninstalls the package; ``purge_data`` also
-    deletes Mordred's data and keys. ``erase`` does not decrypt anything: the
-    encrypted data is deleted as it is, together with all Mordred data.
-    Deleting anything needs ``confirm`` = ``delete my data``. Runs as a job;
-    ``progress.summary`` carries the report.
-    """
-    from ..wizard.uninstall_cli import PURGE_PHRASE, UninstallOptions, run_uninstall
-
-    body = body or {}
-    erase = body.get("mode") == "erase"
-    purge = erase or body.get("purge_data") is True
-    phrase = str(body.get("confirm") or "")
-    if purge and phrase.strip() != PURGE_PHRASE:
-        return _error("uninstall_confirm_mismatch")
-    prompt = _UninstallAnswers(str(body.get("recovery_passphrase") or ""), phrase)
-    if _running("update"):
-        return _error("uninstall_busy")
-
-    async def work(job: _Job) -> None:
-        def run() -> tuple[int, str]:
-            with captured_output() as out:
-                rc = run_uninstall(
-                    _uninstall_context(prompt), UninstallOptions(yes=True, purge_data=purge, erase_encrypted=erase)
-                )
-            return rc, out.getvalue()
-
-        rc, summary = await job.run_sync(run)
-        job.progress = {"summary": summary}
-        if rc != 0:
-            raise _Fail("uninstall_failed")
-
-    try:
-        job = _start_job("uninstall", work)
-    except JobBusy as exc:
-        return _error(exc.code)
-    return {"ok": True, **_job_view(job)}
+router.include_router(_ceremony_routes.router)
+router.include_router(_mail_routes.router)
+router.include_router(_maintenance_routes.router)

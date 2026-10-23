@@ -58,7 +58,20 @@ Bounds (:class:`IoLimits`, enforced inside imaplib's own ``read``/``readline``):
 Errors are :class:`ImapError` codes: ``imap_unreachable``, ``imap_auth_failed``,
 ``imap_protocol``, ``imap_command_refused``, ``egress_unsupported``,
 ``routing_unavailable``; :class:`ImapStopped` (a deadline or a cancellation,
-``reason``) is not a server failure.
+``reason``) is not a server failure. A refused ``LOGIN`` also carries a
+``hint`` from :data:`IMAP_HINTS`, taken from the bracketed RFC 5530 response
+code only (``[AUTHENTICATIONFAILED]``, ``[ALERT]``) or the ``LOGINDISABLED``
+capability; the server's text after the code is never kept, logged or returned
+(Gmail's alert text holds a support URL and sometimes the account name).
+
+Every :class:`ImapError` leaving this module is raised outside any exception
+handler and :func:`sever_chain`-ed: no ``__cause__``, no ``__context__`` and no
+traceback from below (``raise ... from None`` only hides the context, the
+imaplib error with the server's bytes would still hang off it, and imaplib's
+frames hold the response lines in their locals). On every failure, and at
+logout, the session also drops what imaplib keeps of the server's responses
+(``untagged_responses``, ``tagged_commands``, the last regex match, the
+greeting).
 """
 
 from __future__ import annotations
@@ -66,13 +79,14 @@ from __future__ import annotations
 import contextlib
 import errno
 import imaplib
+import os
 import re
 import selectors
 import socket
 import ssl
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, TypeVar
 
@@ -95,6 +109,7 @@ __all__ = [
     "DEFAULT_PORT",
     "GMAIL_CAPABILITY",
     "IMAPS_PORT",
+    "IMAP_HINTS",
     "MAX_BATCH_LITERAL_BYTES",
     "MAX_LITERAL_BYTES",
     "MAX_RUN_BYTES",
@@ -108,6 +123,7 @@ __all__ = [
     "MailboxStatus",
     "connect",
     "open_route_socket",
+    "sever_chain",
     "socks5_connect",
     "tls_context",
 ]
@@ -123,6 +139,7 @@ HARD_GRACE_S: Final = 30.0
 LOGOUT_GRACE_S: Final = 5.0
 WATCHDOG_NAME: Final = "mordred-imap-watchdog"
 RESOLVER_NAME: Final = "mordred-imap-resolver"
+HANDSHAKE_NAME: Final = "mordred-imap-handshake"
 ROUTE_RESOLVER_NAME: Final = "mordred-imap-route"
 _WATCHDOG_SLACK_S: Final = 0.25
 #: How often a pending TCP connect looks at the cancellation and the deadline.
@@ -155,14 +172,36 @@ _HOST_LABEL: Final = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
 _HOST_RE: Final = re.compile(rf"(?=.{{1,253}}\Z){_HOST_LABEL}(?:\.{_HOST_LABEL})+")
 _IMAP_COMMAND: Final[Any] = getattr(imaplib.IMAP4, "_command")  # noqa: B009 - private, absent from typeshed
 _T = TypeVar("_T")
+_E = TypeVar("_E", bound=BaseException)
+
+#: Why a login was refused, for the owner's remediation text (closed: anything else is ``None``).
+IMAP_HINTS: Final = frozenset({"authentication_failed", "server_alert", "login_disabled", "gmail_app_password_length"})
+#: An RFC 5530 response code opening a tagged reply's text; only the code is ever read.
+_RESPONSE_CODE_RE: Final = re.compile(r"^\[([A-Z][A-Z0-9-]{1,30})\]")
+_RESPONSE_CODE_HINTS: Final = {"AUTHENTICATIONFAILED": "authentication_failed", "ALERT": "server_alert"}
 
 
 class ImapError(Exception):
-    """A content-free IMAP failure code (never server text)."""
+    """A content-free IMAP failure code (never server text), with an optional :data:`IMAP_HINTS` member."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, hint: str | None = None) -> None:
         super().__init__(code)
         self.code = code
+        self.hint = hint if hint in IMAP_HINTS else None
+
+
+def sever_chain(exc: _E) -> _E:
+    """``exc`` cut from everything that led to it: no cause, no context, no traceback from below.
+
+    Raise the result outside any ``except`` block (Python would set the context
+    again): the chain of an IMAP failure can lead to imaplib errors and frames
+    holding the server's own bytes.
+    """
+    exc.__cause__ = None
+    exc.__context__ = None
+    exc.__suppress_context__ = True
+    exc.__traceback__ = None
+    return exc
 
 
 class ImapStopped(ImapError):
@@ -271,6 +310,55 @@ def tls_context() -> ssl.SSLContext:
 
 
 Remaining = Callable[[], float]
+
+
+#: Receives content-free connection diagnostics (class names, errno, route kind, link state);
+#: ``None`` keeps the client silent. The mail package never imports ``logging`` (policy test):
+#: a host (the Desktop API, the CLI) installs a sink that writes where it wants.
+DiagnosticSink = Callable[[str], None]
+_DIAGNOSTIC_SINK: DiagnosticSink | None = None
+
+
+def set_diagnostic_sink(sink: DiagnosticSink | None) -> None:
+    """Install (or remove) the sink for content-free connection diagnostics."""
+    global _DIAGNOSTIC_SINK
+    _DIAGNOSTIC_SINK = sink
+
+
+def _emit(message: str) -> None:
+    sink = _DIAGNOSTIC_SINK
+    if sink is not None:
+        with contextlib.suppress(Exception):  # a sink never changes the connection's outcome
+            sink(message)
+
+
+def _family_name(family: int) -> str:
+    if family == socket.AF_INET:
+        return "ipv4"
+    if family == socket.AF_INET6:
+        return "ipv6"
+    return "other"
+
+
+def _diag(exc: BaseException) -> str:
+    """Content-free description of a connection failure: class name, errno and OpenSSL reason only.
+
+    Never the message text: an IMAP error carries the server's words and a resolver
+    error can carry the host name.
+    """
+    parts = [type(exc).__name__]
+    errno_value = getattr(exc, "errno", None)
+    if isinstance(errno_value, int):
+        parts.append(f"errno={errno_value}")
+    reason = getattr(exc, "reason", None) if isinstance(exc, ssl.SSLError) else None
+    if isinstance(reason, str) and reason.replace("_", "").isalnum() and reason.isupper():
+        parts.append(f"reason={reason}")
+    return " ".join(parts)
+
+
+#: Python 3.13+ ``imaplib.login`` re-reads the capabilities itself after a successful LOGIN;
+#: older versions leave that to the session, so one CAPABILITY follows LOGIN on every version.
+_IMAPLIB_REFRESHES_AFTER_LOGIN: Final = hasattr(imaplib.IMAP4, "_refresh_capabilities")
 
 
 def _no_deadline() -> float:
@@ -389,7 +477,13 @@ class Link:
 
     def failure(self) -> ImapError:
         """What an interrupted or failed establishment step is: a cancellation, else ``imap_unreachable``."""
-        return ImapStopped("cancelled") if self.cancelled() else ImapError("imap_unreachable")
+        if self.cancelled():
+            return ImapStopped("cancelled")
+        _emit(
+            f"mordred imap: establishment stopped (watchdog_fired={self._fired} "
+            f"remaining={self.remaining():.1f}s holding={self.holding})"
+        )
+        return ImapError("imap_unreachable")
 
     def check(self) -> None:
         """Raise :meth:`failure` once cancelled, interrupted or past the hard deadline."""
@@ -441,9 +535,11 @@ class Link:
             found = self.bounded(lambda: list(_getaddrinfo(host, port)), name=RESOLVER_NAME)
         except ImapError:
             raise
-        except Exception:  # a failed lookup is reported as a code, never stringified
+        except Exception as exc:  # a failed lookup is reported as a code, never stringified
+            _emit(f"mordred imap: name lookup failed ({_diag(exc)})")
             raise ImapError("imap_unreachable") from None
         if not found:
+            _emit("mordred imap: name lookup returned no address")
             raise ImapError("imap_unreachable")
         return found
 
@@ -453,11 +549,15 @@ class Link:
         Each address gets at most ``min(op_timeout, remaining)`` (:meth:`_connect_one`),
         so a stalled first address cannot use up the budget of the ones after it.
         """
+        failures: list[str] = []
         for family, kind, proto, _name, address in self.resolve(host, port):
             self.check()
-            with contextlib.suppress(OSError):  # refused, unreachable or timed out: the next address
+            try:  # refused, unreachable or timed out: the next address
                 return self._connect_one(family, kind, proto, address)
+            except OSError as exc:
+                failures.append(f"{_family_name(family)}:{_diag(exc)}")
         self.check()
+        _emit(f"mordred imap: TCP connect failed on every address ({', '.join(failures) or 'none'})")
         raise ImapError("imap_unreachable")
 
     def _connect_one(self, family: int, kind: int, proto: int, address: Any) -> socket.socket:
@@ -599,7 +699,9 @@ def open_route_socket(
     except EgressError:
         raise ImapError("routing_unavailable") from None
     if route.http_proxy_url is not None:
+        _emit("mordred imap: egress route is an HTTP proxy, which IMAP cannot use")
         raise ImapError("egress_unsupported")
+    _emit(f"mordred imap: egress route {'socks5' if route.socks_proxy_url is not None else 'direct'}")
     try:
         if route.socks_proxy_url is not None:
             url = str(route.socks_proxy_url)
@@ -833,6 +935,8 @@ class _CommandGuard:
             return exc
         if self._link.cancelled():
             return ImapStopped("cancelled")
+        if not isinstance(exc, ImapError):
+            _emit(f"mordred imap: connection setup interrupted ({_diag(exc)})")
         return exc if isinstance(exc, ImapError) else ImapError("imap_unreachable")
 
     def shutdown(self) -> None:
@@ -888,16 +992,75 @@ class GuardedIMAP4SSL(_CommandGuard, imaplib.IMAP4_SSL):
         return self._establish(self._tls_socket)
 
     def _tls_socket(self, link: Link) -> socket.socket:
-        """The route socket wrapped in TLS; the handshake reads from a socket the link can shut down."""
+        """The route socket wrapped in TLS.
+
+        With the standard library's context the handshake is run here, after the
+        link holds the TLS socket, so an interrupt (watchdog, cancellation) can
+        shut it down at once. A context whose ``wrap_socket`` is not the standard
+        one (a platform verifier such as ``truststore``, which Hermes injects
+        into every ``ssl.SSLContext`` of its process) verifies the peer chain
+        inside ``wrap_socket`` and therefore needs the handshake to happen there:
+        for those the handshake runs inside ``wrap_socket`` under the socket
+        timeout the link grants, while the link holds a duplicate descriptor of
+        the connection so that an interrupt still ends the handshake at once.
+        The in-wrap path is admitted against :data:`MAX_IN_FLIGHT_HANDSHAKES`
+        BEFORE any route, DNS or TCP work: a refusal costs nothing.
+        """
         context: ssl.SSLContext = self.ssl_context
+        inside = _handshakes_inside_wrap(context)
+        slot: _Slot | None = None
+        if inside:
+            if not _abandoned_handshakes.admit():
+                _emit("mordred imap: too many abandoned handshakes still running; refusing a new one")
+                raise ImapError("imap_unreachable")
+            slot = _Slot(_abandoned_handshakes)
+        try:
+            return self._wrap_route_socket(link, context, slot)
+        finally:
+            if slot is not None:
+                slot.forfeit()  # releases the slot when the worker never ran (an early failure)
+
+    def _wrap_route_socket(self, link: Link, context: ssl.SSLContext, slot: _Slot | None) -> socket.socket:
         raw = self._raw_socket(link)
         link.hold(raw)
         try:
-            wrapped = context.wrap_socket(raw, server_hostname=self.host, do_handshake_on_connect=False)
+            if slot is not None:
+                raw.settimeout(link.timeout())
+                # ``wrap_socket`` detaches ``raw``'s descriptor into the TLS socket, so an interrupt
+                # could no longer reach the handshake through ``raw``. A duplicate descriptor shares
+                # the connection: shutting it down ends the handshake at once, and closing it
+                # afterwards releases only the duplicate. The wrapper's own chain verification is
+                # native code no shutdown can interrupt, so the whole wrap runs under
+                # :meth:`Link.bounded`: past the hard deadline the attempt fails and a socket
+                # the late worker still produces is closed, never used.
+                mirror = socket.socket(fileno=os.dup(raw.fileno()))
+                link.hold(mirror)
+                handoff = _Handoff()
+                admitted = slot
+
+                def wrap() -> socket.socket:
+                    if not admitted.start():  # the waiter gave up before this thread ran: do nothing
+                        raise ImapError("imap_unreachable")
+                    try:
+                        return handoff.publish(context.wrap_socket(raw, server_hostname=self.host))
+                    finally:
+                        admitted.done()
+
+                try:
+                    wrapped = link.bounded(wrap, name=HANDSHAKE_NAME)
+                except BaseException:
+                    handoff.abandon()  # a socket the worker still produces is closed by whoever owns it last
+                    raise
+                finally:
+                    link.drop(mirror)
+            else:
+                wrapped = context.wrap_socket(raw, server_hostname=self.host, do_handshake_on_connect=False)
         except BaseException:
             link.drop(raw)
             raise
         link.hold(wrapped)  # the raw socket object is detached now: interrupts reach the TLS socket
+        if slot is not None:
+            return wrapped
         try:
             handshake = getattr(wrapped, "do_handshake", None)
             if handshake is not None:
@@ -907,6 +1070,109 @@ class GuardedIMAP4SSL(_CommandGuard, imaplib.IMAP4_SSL):
             link.drop(wrapped)
             raise
         return wrapped
+
+
+class _Handoff:
+    """Ownership of a socket a worker produces after its waiter may have given up.
+
+    ``publish`` (worker) and ``abandon`` (waiter) run under one lock: whichever
+    comes second closes the socket, so a late handshake result is never left open
+    and never used.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._abandoned = False
+        self._sock: socket.socket | None = None
+
+    def publish(self, sock: socket.socket) -> socket.socket:
+        with self._lock:
+            if not self._abandoned:
+                self._sock = sock
+                return sock
+        with contextlib.suppress(OSError):
+            sock.close()
+        raise ImapError("imap_unreachable")  # the waiter is gone; the worker ends here
+
+    def abandon(self) -> None:
+        with self._lock:
+            self._abandoned = True
+            sock, self._sock = self._sock, None
+        if sock is not None:
+            with contextlib.suppress(OSError):
+                sock.close()
+
+
+class _WorkerCap:
+    """At most ``limit`` in-wrap handshakes in flight per process: abandoned workers cannot pile up."""
+
+    def __init__(self, limit: int) -> None:
+        self._lock = threading.Lock()
+        self._limit = limit
+        self._active = 0
+
+    def admit(self) -> bool:
+        with self._lock:
+            if self._active >= self._limit:
+                return False
+            self._active += 1
+            return True
+
+    def release(self) -> None:
+        with self._lock:
+            self._active = max(0, self._active - 1)
+
+    @property
+    def active(self) -> int:
+        with self._lock:
+            return self._active
+
+
+class _Slot:
+    """One admitted handshake slot: released by the worker when it ran, by the waiter when it never did."""
+
+    def __init__(self, cap: _WorkerCap) -> None:
+        self._cap = cap
+        self._lock = threading.Lock()
+        self._state = "pending"  # pending -> running -> done, or pending -> void
+
+    def start(self) -> bool:
+        with self._lock:
+            if self._state != "pending":
+                return False
+            self._state = "running"
+            return True
+
+    def done(self) -> None:
+        with self._lock:
+            self._state = "done"
+        self._cap.release()
+
+    def forfeit(self) -> None:
+        with self._lock:
+            if self._state != "pending":
+                return
+            self._state = "void"
+        self._cap.release()
+
+
+#: A verifier that never returns keeps its worker thread and detached socket; this bounds how many.
+MAX_IN_FLIGHT_HANDSHAKES: Final = 4
+_abandoned_handshakes = _WorkerCap(MAX_IN_FLIGHT_HANDSHAKES)
+
+
+def _handshakes_inside_wrap(context: Any) -> bool:
+    """Whether ``context.wrap_socket`` must run the handshake itself.
+
+    True unless the context's ``wrap_socket`` is the standard library's own: a
+    wrapper (``truststore.SSLContext`` subclasses the original class and
+    overrides ``wrap_socket`` to verify the chain right after wrapping) cannot
+    verify a socket that has not handshaken yet.
+    """
+    stdlib = next((cls for cls in type(context).__mro__ if cls.__module__ == "ssl"), None)
+    if stdlib is None:
+        return True
+    return getattr(type(context), "wrap_socket", None) is not getattr(stdlib, "wrap_socket", None)
 
 
 # --- session --------------------------------------------------------------------------------------
@@ -940,23 +1206,23 @@ def _ok(result: tuple[str, list[Any]]) -> list[Any]:
     return data
 
 
-@contextlib.contextmanager
-def _mapped() -> Iterator[None]:
-    """imaplib and socket failures → content-free :class:`ImapError` codes."""
-    try:
-        yield
-    except ImapError:
-        raise
-    except ImapProtocolError:
-        raise ImapError("imap_protocol") from None
-    except imaplib.IMAP4.abort:
-        raise ImapError("imap_unreachable") from None
-    except imaplib.IMAP4.error:
-        raise ImapError("imap_protocol") from None
-    except (OSError, EOFError):
-        raise ImapError("imap_unreachable") from None
-    except (ValueError, TypeError, UnicodeError):
-        raise ImapError("imap_protocol") from None
+def _mapped_failure(exc: BaseException) -> ImapError | None:
+    """imaplib and socket failures → content-free :class:`ImapError` codes; ``None`` for anything else."""
+    if isinstance(exc, ImapError):
+        return exc
+    if isinstance(exc, ImapProtocolError):
+        return ImapError("imap_protocol")
+    if isinstance(exc, imaplib.IMAP4.abort):
+        _emit(f"mordred imap: connection aborted during a command ({_diag(exc)})")
+        return ImapError("imap_unreachable")
+    if isinstance(exc, imaplib.IMAP4.error):
+        return ImapError("imap_protocol")
+    if isinstance(exc, OSError | EOFError):
+        _emit(f"mordred imap: socket failure during a command ({_diag(exc)})")
+        return ImapError("imap_unreachable")
+    if isinstance(exc, ValueError | TypeError | UnicodeError):
+        return ImapError("imap_protocol")
+    return None
 
 
 class ImapSession:
@@ -980,39 +1246,87 @@ class ImapSession:
         return conn.limits.run_bytes if isinstance(conn, _CommandGuard) else 0
 
     def login(self, user: str, password: str) -> None:
-        """``LOGIN`` inside the implicit-TLS connection: the only mechanism, so nothing can downgrade it."""
+        """``LOGIN`` inside the implicit-TLS connection: the only mechanism, so nothing can downgrade it.
+
+        A refusal is ``imap_auth_failed`` with the hint of its response code
+        (:func:`_login_hint`). The failure is raised outside the handler, so the
+        imaplib error holding the server's text is not even its ``__context__``,
+        and only after this frame dropped the address and the password: the
+        raised error's traceback holds neither.
+        """
         if "LOGINDISABLED" in self.capabilities:
-            raise ImapError("imap_auth_failed")
+            failure: ImapError | None = ImapError("imap_auth_failed", hint="login_disabled")
+        else:
+            failure = self._login(user, password)
+        del user, password  # this frame stays in the traceback of whatever is raised below
+        if failure is not None:
+            self._scrub()
+            raise sever_chain(failure)
+        if not _IMAPLIB_REFRESHES_AFTER_LOGIN:
+            self._run(self._refresh_capabilities)
+
+    def _login(self, user: str, password: str) -> ImapError | None:
+        """``LOGIN``; the failure is returned, so no frame holding the password is ever in a traceback."""
         try:
             self._conn.login(user, password)
-        except ImapError:
-            raise
-        except imaplib.IMAP4.abort:
-            raise ImapError("imap_unreachable") from None
-        except imaplib.IMAP4.error:
-            raise ImapError("imap_auth_failed") from None
-        except OSError:
-            raise ImapError("imap_unreachable") from None
+        except imaplib.IMAP4.abort as exc:
+            _emit(f"mordred imap: connection aborted during LOGIN ({_diag(exc)})")
+            return ImapError("imap_unreachable")
+        except imaplib.IMAP4.error as exc:
+            if getattr(self._conn, "state", "") == "AUTH":  # LOGIN was accepted: a later command failed
+                return ImapError("imap_protocol")
+            return ImapError("imap_auth_failed", hint=_login_hint(exc))
         except (UnicodeError, ValueError):
-            raise ImapError("imap_auth_failed") from None
-        with _mapped():
-            # Refreshed after login: servers may advertise more (Gmail's X-GM-EXT-1) once authenticated.
-            words = _capability_words(_ok(self._conn.capability()))
-            if words:
-                self._conn.capabilities = tuple(words)
+            return ImapError("imap_auth_failed")
+        except Exception as exc:  # the guard's own ImapError, or a socket failure
+            failure = _mapped_failure(exc)
+            if failure is None:
+                raise
+            return failure
+        return None
+
+    def _refresh_capabilities(self) -> None:
+        """Refreshed after login: servers may advertise more (Gmail's X-GM-EXT-1) once authenticated."""
+        words = _capability_words(_ok(self._conn.capability()))
+        if words:
+            self._conn.capabilities = tuple(words)
+
+    def _run(self, action: Callable[[], _T]) -> _T:
+        """``action()``; a failure becomes a content-free code raised severed, after the buffers are dropped."""
+        failure: ImapError | None = None
+        try:
+            return action()
+        except Exception as exc:  # mapped below, outside this handler
+            failure = _mapped_failure(exc)
+            if failure is None:
+                raise
+        self._scrub()
+        raise sever_chain(failure)
+
+    def _scrub(self) -> None:
+        """Drop what imaplib keeps of the server's responses: their text can hold the address or folder names."""
+        conn = self._conn
+        for name in ("untagged_responses", "tagged_commands"):
+            buffer = getattr(conn, name, None)
+            if isinstance(buffer, dict):
+                buffer.clear()
+        for name, empty in (("mo", None), ("welcome", b""), ("continuation_response", "")):
+            if hasattr(conn, name):
+                setattr(conn, name, empty)
 
     def list_mailboxes(self) -> list[ListEntry]:
-        with _mapped():
-            return list_entries(_ok(self._conn.list('""', '"*"')))
+        return self._run(lambda: list_entries(_ok(self._conn.list('""', '"*"'))))
 
     def examine(self, name: str) -> MailboxStatus:
-        with _mapped():
-            data = [item for item in _ok(self._conn.select(quote_mailbox(name), readonly=True)) if item is not None]
-            exists = number(data[-1]) if data else 0
-            validity = self._response_number("UIDVALIDITY")
-            if validity is None or validity <= 0:
-                raise ImapError("imap_protocol")
-            return MailboxStatus(validity, self._response_number("UIDNEXT"), exists)
+        return self._run(lambda: self._examine(name))
+
+    def _examine(self, name: str) -> MailboxStatus:
+        data = [item for item in _ok(self._conn.select(quote_mailbox(name), readonly=True)) if item is not None]
+        exists = number(data[-1]) if data else 0
+        validity = self._response_number("UIDVALIDITY")
+        if validity is None or validity <= 0:
+            raise ImapError("imap_protocol")
+        return MailboxStatus(validity, self._response_number("UIDNEXT"), exists)
 
     def _response_number(self, code: str) -> int | None:
         _typ, data = self._conn.response(code)
@@ -1023,18 +1337,19 @@ class ImapSession:
         return number(text)
 
     def search(self, *criteria: str) -> list[int]:
-        with _mapped():
-            return search_uids(_ok(self._conn.uid("SEARCH", *criteria)))
+        return self._run(lambda: search_uids(_ok(self._conn.uid("SEARCH", *criteria))))
 
     def sizes(self, uids: Sequence[int]) -> dict[int, int]:
         """``UID FETCH (UID RFC822.SIZE)``: no literal is downloaded."""
         if not uids:
             return {}
+        return self._run(lambda: self._sizes(uids))
+
+    def _sizes(self, uids: Sequence[int]) -> dict[int, int]:
         result: dict[int, int] = {}
-        with _mapped():
-            for item in fetch_records(_ok(self._conn.uid("FETCH", _uid_set(uids), "(UID RFC822.SIZE)"))):
-                if "UID" in item and "RFC822.SIZE" in item:
-                    result[number(item["UID"])] = number(item["RFC822.SIZE"])
+        for item in fetch_records(_ok(self._conn.uid("FETCH", _uid_set(uids), "(UID RFC822.SIZE)"))):
+            if "UID" in item and "RFC822.SIZE" in item:
+                result[number(item["UID"])] = number(item["RFC822.SIZE"])
         return result
 
     def fetch(self, uids: Sequence[int], *, gmail: bool) -> list[Fetched]:
@@ -1045,22 +1360,24 @@ class ImapSession:
         """
         if not uids:
             return []
+        return self._run(lambda: self._fetch(uids, gmail))
+
+    def _fetch(self, uids: Sequence[int], gmail: bool) -> list[Fetched]:
         items = "(UID BODY.PEEK[] X-GM-LABELS X-GM-THRID X-GM-MSGID)" if gmail else "(UID BODY.PEEK[])"
         wanted = set(uids)
         found: list[Fetched] = []
-        with _mapped():
-            if isinstance(self._conn, _CommandGuard):
-                self._conn.expect_literals(MAX_BATCH_LITERAL_BYTES)
-            for item in fetch_records(_ok(self._conn.uid("FETCH", _uid_set(uids), items))):
-                if "UID" not in item or "BODY[]" not in item:
-                    continue  # an unsolicited FETCH (flags of another message)
-                uid = number(item["UID"])
-                if uid not in wanted:
-                    continue
-                if is_drained(item["BODY[]"]):
-                    found.append(Fetched(uid, b"", (), None, oversize=True))
-                    continue
-                found.append(Fetched(uid, body_bytes(item["BODY[]"]), *_gmail_facts(item, gmail)))
+        if isinstance(self._conn, _CommandGuard):
+            self._conn.expect_literals(MAX_BATCH_LITERAL_BYTES)
+        for item in fetch_records(_ok(self._conn.uid("FETCH", _uid_set(uids), items))):
+            if "UID" not in item or "BODY[]" not in item:
+                continue  # an unsolicited FETCH (flags of another message)
+            uid = number(item["UID"])
+            if uid not in wanted:
+                continue
+            if is_drained(item["BODY[]"]):
+                found.append(Fetched(uid, b"", (), None, oversize=True))
+                continue
+            found.append(Fetched(uid, body_bytes(item["BODY[]"]), *_gmail_facts(item, gmail)))
         return found
 
     def logout(self) -> None:
@@ -1078,6 +1395,25 @@ class ImapSession:
         finally:
             if isinstance(conn, _CommandGuard):
                 conn.release()
+            self._scrub()
+
+
+def _login_hint(exc: BaseException) -> str | None:
+    """The :data:`IMAP_HINTS` member for a refused ``LOGIN``, from its response code only.
+
+    imaplib raises ``error(<reply text>)`` with the tagged reply's bytes, so
+    ``str(exc)`` reads ``b'[ALERT] ...'``; the raw first argument is matched
+    instead. Only the bracketed code is read; nothing of the text is returned.
+    """
+    first = exc.args[0] if exc.args else None
+    if isinstance(first, bytes):
+        text = first[:34].decode("ascii", "replace")
+    elif isinstance(first, str):
+        text = first[:34]
+    else:
+        return None
+    match = _RESPONSE_CODE_RE.match(text)
+    return _RESPONSE_CODE_HINTS.get(match.group(1)) if match else None
 
 
 def _capability_words(data: Sequence[object]) -> list[str]:
@@ -1125,24 +1461,28 @@ def connect(
     ``imap_unreachable``, a cancellation ``ImapStopped("cancelled")``.
     """
     if not valid_host(host) or port != IMAPS_PORT:
+        _emit(f"mordred imap: refused host or port (port {port if isinstance(port, int) else '?'})")
         raise ImapError("imap_unreachable")
     bounds = limits if limits is not None else IoLimits.for_budget(SESSION_BUDGET_S)
 
     def raw(link: Link) -> socket.socket:
         return open_route_socket(host, port, link, route_resolver=route_resolver)
 
+    failure: ImapError
     try:
-        conn = GuardedIMAP4SSL(
-            host, port, raw_socket=raw, ssl_context=tls_context(), timeout=bounds.op_timeout, limits=bounds
+        return ImapSession(
+            GuardedIMAP4SSL(
+                host, port, raw_socket=raw, ssl_context=tls_context(), timeout=bounds.op_timeout, limits=bounds
+            )
         )
     except ImapStopped as stopped:
-        if stopped.reason == "cancelled":
-            raise
-        raise ImapError("imap_unreachable") from None  # the deadline passed before the session was open
-    except ImapError:
-        raise
-    except ssl.SSLError:
-        raise ImapError("imap_unreachable") from None
-    except (imaplib.IMAP4.error, OSError, EOFError):
-        raise ImapError("imap_unreachable") from None
-    return ImapSession(conn)
+        # A cancellation stays one; the deadline passing before the session was open is ``imap_unreachable``.
+        if stopped.reason != "cancelled":
+            _emit(f"mordred imap: connection setup stopped ({stopped.reason})")
+        failure = stopped if stopped.reason == "cancelled" else ImapError("imap_unreachable")
+    except ImapError as exc:
+        failure = exc
+    except (ssl.SSLError, imaplib.IMAP4.error, OSError, EOFError) as exc:  # a greeting's text never travels on
+        _emit(f"mordred imap: connection setup failed ({_diag(exc)})")
+        failure = ImapError("imap_unreachable")
+    raise sever_chain(failure)

@@ -158,3 +158,123 @@ def committed_messages(store: ImportStore) -> dict[str, tuple[str, str, str]]:
         "JOIN import_runs r ON r.run_id = m.run_id AND r.state = 'committed'",
     )
     return {uid: (owner, evidence, quality) for uid, owner, evidence, quality in found}
+
+
+def exception_chain(error: BaseException) -> list[BaseException]:
+    """``error`` and everything reachable through ``__cause__`` and ``__context__``, recursively."""
+    found: list[BaseException] = []
+    pending: list[BaseException | None] = [error]
+    while pending:
+        item = pending.pop()
+        if item is None or any(item is seen for seen in found):
+            continue
+        found.append(item)
+        pending.extend((item.__cause__, item.__context__))
+    return found
+
+
+def rendered_chain(error: BaseException) -> str:
+    """Every ``args``, ``str``, ``repr`` and formatted traceback of the chain, plus the locals of its library frames.
+
+    Frames of the tests themselves are left out: their locals hold the scripted canaries.
+    """
+    import traceback
+
+    parts: list[str] = []
+    for item in exception_chain(error):
+        parts += [repr(item.args), str(item), repr(item), repr(vars(item))]
+        parts.append("".join(traceback.format_exception(item)))
+        tb = item.__traceback__
+        while tb is not None:
+            if "mordred_hermes" in tb.tb_frame.f_code.co_filename:
+                parts.append(repr(tb.tb_frame.f_locals))
+            tb = tb.tb_next
+    return "\n".join(parts)
+
+
+def retained_buffers(session: ImapSession) -> str:
+    """What the imaplib connection behind ``session`` still holds of the server's responses."""
+    conn = session._conn
+    names = ("untagged_responses", "tagged_commands", "mo", "welcome", "continuation_response", "_cmd_log")
+    return "\n".join(repr(getattr(conn, name, None)) for name in names)
+
+
+class TrackedPassword(str):
+    """The app password as an object of its own: its finaliser records its token when nothing holds it any more.
+
+    Tokens are unique, so an object of an earlier test collected late cannot satisfy a later check.
+    """
+
+    created: list[int] = []  # noqa: RUF012 - process-wide registry of tokens
+    released: list[int] = []  # noqa: RUF012
+    token: int
+
+    def __new__(cls, value: str) -> TrackedPassword:
+        obj = super().__new__(cls, value)
+        obj.token = len(cls.created) + 1
+        cls.created.append(obj.token)
+        return obj
+
+    def __del__(self) -> None:
+        TrackedPassword.released.append(self.token)
+
+
+def password_released(token: int | None = None) -> bool:
+    """Whether the given (default: the last created) :class:`TrackedPassword` was finalised."""
+    import gc
+
+    gc.collect()
+    return (token if token is not None else TrackedPassword.created[-1]) in TrackedPassword.released
+
+
+def _library_object(value: object) -> bool:
+    return type(value).__module__.startswith("mordred_hermes")
+
+
+def frame_values(error: BaseException) -> list[object]:
+    """Every value reachable from the locals of the library frames in ``error``'s traceback.
+
+    Containers (dicts, lists, tuples, sets) and library objects (their attributes,
+    dataclass fields and slots) are walked recursively; test frames and test objects
+    are left out (they hold the inputs on purpose), and so is each method's ``self``
+    (the registry holds a pending flow by design; a frame must hold nothing more).
+    """
+    found: list[object] = []
+    seen: set[int] = set()
+    pending: list[tuple[object, int]] = []
+    tb = error.__traceback__
+    while tb is not None:
+        if "mordred_hermes" in tb.tb_frame.f_code.co_filename:
+            pending.extend((value, 0) for name, value in tb.tb_frame.f_locals.items() if name != "self")
+        tb = tb.tb_next
+    while pending:
+        value, depth = pending.pop()
+        if id(value) in seen or depth > 8:
+            continue
+        seen.add(id(value))
+        found.append(value)
+        if isinstance(value, dict):
+            pending.extend((item, depth + 1) for pair in value.items() for item in pair)
+        elif isinstance(value, list | tuple | set | frozenset):
+            pending.extend((item, depth + 1) for item in value)
+        elif _library_object(value) and not isinstance(value, type):
+            attributes = dict(getattr(value, "__dict__", {}))
+            for name in getattr(type(value), "__slots__", ()):
+                if hasattr(value, name):
+                    attributes[name] = getattr(value, name)
+            pending.extend((item, depth + 1) for item in attributes.values())
+    return found
+
+
+def secrets_in_traceback(error: BaseException, *secrets: str) -> list[str]:
+    """The ``secrets`` found in ``error``'s library frame locals or in its formatted library traceback.
+
+    The formatted text is the exception line plus the library frames (a test frame's source line
+    names its own inputs).
+    """
+    import traceback
+
+    frames = [item for item in traceback.extract_tb(error.__traceback__) if "mordred_hermes" in item.filename]
+    rendered = "".join(traceback.format_exception_only(error)) + "".join(traceback.format_list(frames))
+    texts = [value for value in frame_values(error) if isinstance(value, str)]
+    return [secret for secret in secrets if secret in rendered or any(secret in text for text in texts)]

@@ -2486,6 +2486,102 @@ allowlist, silenced debug output), `test_mail_trusted_meta.py`,
 cases in `tests/test_privacy_check_reader_mode.py`. A real fetch is
 live-gated ([CI.md](CI.md#provenance-evaluation-runs)).
 
+- Desktop follow-up (2026-10-23): the setup flow and the forget logic move into
+  `imports/mail/setup_flow.py` and `imports/mail/forget.py` so `mail setup`,
+  `mail forget` and the Desktop page share them; `imap.py` adds `ImapError.hint`
+  (PR D2 of the
+  [Desktop mail and ceremony pages implementation](#desktop-mail-and-ceremony-pages-implementation)).
+
+## Desktop mail and ceremony pages implementation
+
+**Spec:** [Desktop mail and ceremony pages](SPEC.md#desktop-mail-and-ceremony-pages-2026-10-23);
+design record
+[`2026-10-23-desktop-mail-and-ceremonies-design.md`](../superpowers/specs/2026-10-23-desktop-mail-and-ceremonies-design.md).
+One component per PR, all targeting `dev`. Each PR runs
+`uv run python tools/run_critical_tests.py`, the changed test modules, `ruff` and
+`mypy --strict`; D2 and D4 also run their complete containing test modules
+(security-sensitive). One full regression runs at the end of D4.
+
+### D1: documentation
+
+- Component: docs. Files: SPEC, PLAN, TODO, PATHS and CI under `docs/dev/`; USAGE,
+  TELEGRAM and QUICKSTART under `docs/user/`; the design document.
+- Tests: `tests/test_docs_links.py`. Depends on: nothing.
+- `tools/ci_scope_paths.json` lists only existing paths (a test asserts it), so
+  entries for new files are added by the PR that creates each file: D2 for
+  `src/mordred_hermes/imports/mail/setup_flow.py`, `forget.py` and
+  `tests/test_mail_setup_flow.py`; D3 for `tests/test_desktop_page.py` and
+  `tests/_desktop_page.py`.
+
+### D2: mail library
+
+- Component: `imports/mail`, its `wizard/mail_sync_cli.py` driver and the read-only
+  opener in `imports/store.py`.
+- Also (Codex design review F5, F6, F14, F19, F7): `secrets.py` writes temporary
+  files and renames in order, reports the residue state `credentials_left` from
+  `flags()`, and `ensure_key` returns the effective Touch ID policy that `store`
+  records (`touch_id_policy_mismatch`); `imap_sync.py` persists `last_attempt` and
+  `last_success`; `imap.py` parses the response code from `exc.args[0]` (bytes or
+  str) and keeps the hint off `FetchResult.as_dict()`; the setup flow takes the
+  writer lock for admission and `finish`, reaps on every call and through a public
+  `reap()`, allows ONE pending flow (`mail_setup_busy`), builds provisional
+  credentials, validates the selection (`invalid_selection`), keeps the generation
+  tombstone `<home>/mordred/mail/generation` (`mail_setup_stale`) and re-checks the
+  effective key policy at finish. `imports.store.open_import_store_readonly(home)` is
+  non-creating (pure path resolution, `is_file()` first, `file:?mode=ro`) with its own
+  non-unlocking gate (key material must decode to 32 bytes; no `check_protection`, no
+  provider), `store_uninitialised`, `disk_full`, and no schema initialisation.
+- Files: `imap.py` (`ImapError.hint`, `IMAP_HINTS`), `setup_flow.py`
+  (`MailSetupFlow`, `MailSetupFlows`, `MailSetupError`), `forget.py`
+  (`forget()`), `cmd_setup` and `cmd_forget` driving them, hint printing in
+  `mail fetch`.
+- Tests: `tests/test_mail_setup_flow.py` (new, on `tests/_fake_imap.py`),
+  `tests/test_mail_imap_client.py`, `tests/test_mail_sync_cli.py`,
+  `tests/test_mail_secrets.py`, the complete `tests/test_mail_imap_sync.py` and the
+  store tests for the read-only opener.
+- Depends on: D1.
+
+### D3: page framework
+
+- Component: `desktop` (page only; no new backend).
+- Files: `src/mordred_hermes/desktop/assets/desktop/plugin.js` (`Step` states,
+  `BLOCKERS`, overview card, groups, "Why?" blocks, accessibility, theme colours,
+  `client_version=4` with the "Update Mordred" rendering).
+- Tests: `tests/_desktop_page.py` (the `block()` / `render_page()` helpers moved
+  from `test_desktop_windows_page.py`), `tests/test_desktop_page.py` (new) and
+  `tests/test_desktop_windows_page.py` (harness moved; the `client_version` assertion is updated deliberately, the other
+  assertions are unchanged).
+- Depends on: D1; can run in parallel with D2.
+
+### D4: Desktop backend and sections
+
+- Component: `desktop` (api and page).
+- Files: `desktop/api.py` (`/status` v4, `/databases/*`, `/imports/status`,
+  `/mail/*`, `vault_anchor_stale` with `anchor_store`) and `plugin.js`
+  (`DatabasesStep`, `MailStep`, store-backed Telegram counts, new `MESSAGES` and
+  `IMAP_HINTS`). Also: `POST /vault/prepare` and `POST /vault/{flow_id}/commit`
+  (passphrase shown before anything is created), `/status.vault`, memory-only
+  `/memory/enable` requiring `env_enrolled && env_injecting` (`env_required`);
+  `/databases/status` and the schedule-or-report `/databases/encrypt` (no `migrate()`);
+  the periodic 30 s reaper for mail and vault flows with `cancel_all()` on shutdown; the shared body-parsing helper (`invalid_body`) applied to
+  every secret-bearing route including the existing ones; the closed
+  `_mail_projection` and `_imports_projection`; `telegram_archive: {"legacy": null}`;
+  `cancel_all` on forget; a coalescing status refresh. It consumes
+  `open_import_store_readonly` from D2.
+- Tests: the complete `tests/extension/test_desktop_api.py` (security-sensitive;
+  adds `/imports/status`, `/databases/status`, `/vault/prepare` and `/commit`, setup finish and
+  cancel, residue, restart with `job_not_found`, and malformed bodies posted to every
+  secret-bearing route) and `tests/test_desktop_page.py`; the live checklist of the design is recorded in
+  [CI.md](CI.md#manual-live-device-validation-log).
+- Depends on: D2 and D3.
+
+### K1: keyvault (reference)
+
+- Separate component, already in [TODO.md](TODO.md) as the stale file-vault anchor:
+  `ensure_initialised` / `init` refuse a stale anchor with a code, a scoped
+  file-vault reset, a `status` line. Independent of D1 to D4; once it lands,
+  D4's `vault_anchor_stale` classification becomes a pass-through.
+
 ## Imported-message provenance evaluation implementation
 
 **Spec:** [Imported-message provenance evaluation](SPEC.md#imported-message-provenance-evaluation-2026-10-22).

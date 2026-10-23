@@ -44,6 +44,8 @@ workers:
 API responses. It checks the reported file count and rechecks head/base metadata;
 renames inspect both paths. It never classifies only the latest PR commit.
 `tools/ci_scope_paths.json` is a finite inventory of reviewed existing paths.
+A PR that adds a file lists it there in the same PR; entries for files that do not
+yet exist are rejected, so documentation PRs cannot pre-register them.
 Only reviewed existing Markdown under `docs/user/` can take the documents route;
 developer policy/version/setup contracts require final validation.
 New, removed, unknown, shared storage/bootstrap/crypto/authentication, native,
@@ -2026,6 +2028,47 @@ completion acceptance matrix track later work and current open gates.
   instance were independently confirmed stopped at **03:06:51Z**; the Windows
   guard was then disarmed.
   No Windows global/product, Windows 11 or whole-product acceptance is claimed.
+
+- **2026-10-23 — Desktop mail and ceremony pages (run by the owner with the
+  Fable session, production profile, macOS 27.0.1, Hermes Desktop git install
+  v0.21.4+canary…df81f543f (workspace build reported as 0.0.0), Python 3.14.7,
+  Mordred 0.3.0a4 from `feat/desktop-mail-ceremonies` at 7f8d6d462 installed with
+  `scripts/install.sh --from-source`).** Counts and codes only.
+  1. Overview: PASS after one fix. The databases step first said "needs
+     attention" because the Xcode build cache of `keyvault enable-se`
+     (`_native/sekey-helper/.build/.../build.db`) was classified as a plaintext
+     database (TODO "Native helper build cache"); after deleting the three
+     `.build` copies the overview read model private, Secure Enclave, vault,
+     memory encrypted, databases on, Telegram 3 chats / 25 messages, mail account
+     `work` / 100 messages.
+  2. Mail setup from the page: not run (the mailbox had been set up from the CLI
+     in the morning; the wrong-password hint was not exercised live).
+  3. Fetch new mail: PASS after two fixes. The first attempts failed in
+     milliseconds with `imap_unreachable` only inside Hermes (the CLI dry run
+     succeeded): Hermes injects `truststore` into every `ssl.SSLContext`, whose
+     `wrap_socket` verifies the chain before our manual handshake (fixed in
+     621f009fa and 7f8d6d462, SPEC "TLS handshake placement"); content-free
+     connection diagnostics were added on the way (fd3efbde7, 9b67a1d7d,
+     7f62b9343, 4d31e64ad). Then: Touch ID prompt, `mailboxes 1`, `fetched 0`,
+     `inserted 0` (nothing new since the morning), `mail status` agrees
+     (`last fetch … (complete)`).
+  4. Chat: PASS. "sync my mail" (second attempt; the first was cut short by the
+     Venice stream closing early) reached `mordred_mail_sync` through the
+     deferred-tool bridge and returned counts only; a history question was
+     answered through `mordred_history_search` (audit `policy.egress.reader_mode`
+     allow); "save this note to a file" was refused (`write_file` blocked,
+     `egress.reader_locked`). One turn took about 43 s, of which Mordred's part
+     was about 6 s; the rest was the Venice model and the bridge round trip
+     (follow-up: the direct-tools option, PR D5).
+  5. Remove the mailbox: not run.
+  6. Throwaway-home databases step: not run.
+  7. Light/dark and VoiceOver: not run.
+  Other findings, each recorded in TODO: Hermes Desktop rebuilds its environment
+  at every restart and deleted the venv the `hermes-mordred` launcher pointed at
+  ("Stale `hermes-mordred` launcher…"); the previous attempt's failure note stays
+  visible while a new fetch runs (fixed on the branch); a chat started before a
+  protection problem was resolved keeps repeating the old warning because Hermes
+  freezes plugin prompt sections at session start ("Stale protection notice…").
 
 After changing a live-gated path, rerun the relevant command and append a dated
 result here. Do not replace the previous result without recording the new date.

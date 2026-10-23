@@ -807,14 +807,25 @@ Follow-ups left by the landed code:
   way to change the Touch ID choice without `mail forget` and a new setup.
 
 - [ ] Desktop operability (owner request 2026-10-23): drive the mail collector
-  (`mail setup`, `mail fetch`, `mail import`, `mail status`, `mail forget`) and the
-  macOS ceremonies that `mordred.db` depends on (`encryption enable env`,
-  `encryption enable memory`, `databases encrypt`) from the Mordred Desktop page
-  (`extension/web/index.html` over the paired loopback gateway), the way
-  `telegram login` already has `login_flow.py`. The app password and the recovery
-  passphrase are typed in the page and travel only over the paired channel; the
-  page shows counts and codes only; the CLI stays as the fallback and the
-  reader-mode and egress rules do not change.
+  (`mail setup`, `mail fetch`, `mail status`, `mail forget`) and the macOS
+  ceremonies that `mordred.db` depends on (`encryption enable env`,
+  `encryption enable memory`, `databases encrypt`) from the Mordred page in Hermes
+  Desktop. The page is `src/mordred_hermes/desktop/assets/desktop/plugin.js` behind
+  `desktop/api.py` and Hermes's plugin REST bridge (not `extension/web/index.html`,
+  which is the browser-extension launcher page). The app password is typed in the
+  page and travels only through `ctx.rest()` to Mordred's local API; the page shows
+  counts and codes only, the CLI stays as the fallback, and reader-mode and egress
+  rules do not change. Design and PR split:
+  [SPEC](SPEC.md#desktop-mail-and-ceremony-pages-2026-10-23),
+  [PLAN](PLAN.md#desktop-mail-and-ceremony-pages-implementation).
+  - [ ] D1: documentation (stays unchecked until merged).
+  - [ ] D2: mail library (`imap.py` hints, `setup_flow.py`, `forget.py`, CLI drivers).
+  - [ ] D3: page framework (`Step` states, overview card, groups, `client_version=4`).
+  - [ ] D4: Desktop backend and sections (`/status` v4, `/databases/*`, `/mail/*`,
+    `vault_anchor_stale`, `DatabasesStep`, `MailStep`), then the live checklist in
+    [CI.md](CI.md#manual-live-device-validation-log).
+  - [x] Second Codex pass on the revised design before D4.
+  - [ ] Third Codex pass after D2/D4 land (implementation review).
 
 - [ ] CLI counts after the Telegram archive moved to `mordred.db` (found during
   the production rollout, 2026-10-23). `hermes-mordred telegram status` prints
@@ -832,6 +843,9 @@ Follow-ups left by the landed code:
   `source = mail` rows only, which is correct; a source-neutral
   `hermes-mordred imports status` (counts per source, no content) would make
   the shared store visible without either secret.
+  The Desktop page reads per-source counts from the import store
+  (`ImportStore.status()["sources"]`), which needs no Telegram secret, so the page
+  is not affected by this gap and the CLI fix can reuse the same call.
 
 - [ ] Native helper build cache inside the Hermes home (found 2026-10-23,
   separate `dbcrypt` / `keyvault` PR). `keyvault enable-se` builds the helper
@@ -849,6 +863,13 @@ Follow-ups left by the landed code:
   in a temporary directory outside the home and copy only the signed binary.
   Workaround today: delete the `.build` directory; the installed helper in
   `~/.local/bin` is unaffected.
+  Correction (2026-10-23, live check): `enable-se` builds inside the Mordred
+  package of the Hermes venv (`site-packages/mordred_hermes/_native/sekey-helper/.build`),
+  and the plugin member copy re-copies the whole package, `.build` included, to
+  `<home>/plugins/mordred/` at every Hermes start; `uv pip install --reinstall`
+  keeps it because it is not in the wheel's RECORD. Deleting only the copy under
+  `<home>/plugins/` therefore comes back at the next start: delete both. The
+  member copy should also skip build directories.
 
 - [ ] Deferred-tool bridge with the production model (found 2026-10-23,
   `e2e` prompt PR). In Hermes 0.21.5 every plugin tool is deferred
@@ -873,10 +894,75 @@ Follow-ups left by the landed code:
   required, `ALERT` web login required), never the free text, and print the
   remediation (same Google account as the address, primary sign-in address,
   2-Step Verification on, Workspace admins can disable IMAP or app passwords,
-  Advanced Protection disables app passwords) in the CLI and on the page.
+  Advanced Protection disables app passwords) in the CLI and on the page
+  (designed in the Desktop design doc, implemented by PR D2).
+  - [x] CLI (PR D2, #264): `ImapError.hint` from the response code only;
+    `mail setup` prints `mail refused (imap_auth_failed: <hint>)` and `mail
+    fetch` prints the hint after the code in its text output; USAGE explains
+    the four hints.
+  - [ ] Page (PR D4): the remediation text per hint in `IMAP_HINTS`.
+
+- [ ] Vault key policy record (`keyvault`, found 2026-10-23 by the Desktop D4 work):
+  the Secure Enclave key's access policy (attended / unattended) is opaque after
+  creation, so `/status.vault.unattended` is `null` and the Desktop page says
+  "unknown". Record the effective policy at key creation next to the key (the way
+  the mail store's `enclave-key.json` does: public-key digest and policy, nothing
+  secret), expose it through a non-unlocking read, and let `status` print it.
+  While it is `null`, the page must never show the requested policy instead.
+
+- [ ] Unescaped SQLite URIs in `dbcrypt/_migrate.py` (~117) and `dbcrypt/_shim.py`
+  (~82) build `file:` URIs without `urllib.parse.quote`; a home path containing
+  `#`, `?` or `%` would open a different file (PR #262 fixed the same bug in
+  `dbcrypt/_monitor.py` and the read-only import-store opener). Fix both with the
+  same `quote(path.as_posix(), safe="/")` and a test with a `we#ird?ho%me` home.
+
+- [ ] Stale `hermes-mordred` launcher after a Hermes Desktop environment rebuild
+  (found 2026-10-23, live check). Hermes Desktop rebuilt its Python environment on
+  restart (`installs/<id>/environments/<new hash>`, Mordred re-sourced from the
+  plugin member copy under `workspace/plugin-sources/`) and deleted the old one, so
+  `~/.local/bin/hermes-mordred` pointed at a removed venv ("No such file or
+  directory") and a `uv pip install` into the old venv was silently lost. Fix:
+  the plugin's start-up (where `ensure_member` already runs) rewrites the launcher
+  when its target no longer exists, or the launcher resolves Hermes's current
+  environment at run time; the Desktop page's Repair panel should report a stale
+  launcher. Document in USAGE that `scripts/install.sh --from-source <checkout>`
+  is the update path for a local checkout, not a direct `uv pip install`.
+
+- [ ] Stale protection notice in long-lived chats (found 2026-10-23, live check,
+  `dbcrypt`). Hermes freezes plugin prompt sections at session start, so a chat
+  that began while `mordred.db_encryption.violation` was in force keeps the
+  "not protected" paragraph for its whole life, and the model repeats it at the
+  start of every reply after the cause is gone. The per-turn `pre_llm_call` hook
+  only injects a warning while a violation exists. Fix: remember per process
+  (and per session id when the hook receives one) that a violation was reported,
+  and when the next `pre_llm_call` finds the home clean, inject once "[Mordred]
+  Hermes's databases are protected now; disregard the earlier warning"; the
+  status line callable cannot help because Hermes caches it.
+
+- [ ] Evidence viewer for maintenance (candidate, 2026-10-23). The owner asked
+  how to see what `mordred.db` holds. By design nothing but the Hermes reader
+  tool and `telegram_ask` show content; counts come from `mail status` /
+  `activity status` / the page. A `hermes-mordred imports show <evidence-id>`
+  that prints ONE part (head line and text) through the SQLCipher gate, Touch
+  ID-gated like the tools and audited, would let an owner verify a citation.
+  Decide with the owner; if added, it must never list or search.
+
+- [ ] Tool result shape for Hermes's error detector (found 2026-10-23): Hermes
+  logs a successful `mordred_mail_sync` as "returned error" because the closed
+  result always carries the key `error` (`null` on success). Omitting the key
+  was tried and reverted: `tests/extension/test_mail_sync_tool.py` pins the
+  closed field set `RESULT_FIELDS | {"note"}`, which the chat prompt, the skill
+  and the audit rely on. The log line is cosmetic (the model reads the counts);
+  if it ever matters, change the closed schema deliberately in SPEC first.
 
 Later (not scheduled):
 
+- [ ] Desktop `mail import` (file picker): Takeout mbox and `.eml` import from the
+  Mordred page; needs a file picker and a long-running job over a user-chosen path.
+  It stays a terminal command until then.
+- [ ] Typed recovery passphrase on the page: the page generates and shows an
+  eight-word passphrase once; a "choose my own" option would match the terminal
+  ceremony.
 - [ ] Gmail API collector feeding the same normalization path.
 - [ ] OAuth 2.0 for mail instead of app passwords: `XOAUTH2` over the same IMAP
   collector and/or the Gmail API (needs an OAuth client, consent flow and the

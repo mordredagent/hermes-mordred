@@ -163,6 +163,21 @@ def test_every_load_is_a_fresh_enclave_unwrap_and_status_uses_none(tmp_path, sea
     assert "SESSION" not in json.dumps(flags)
 
 
+def test_reads_never_create_the_archive_directory(tmp_path):
+    """Status polls (flags), loads and the scope read leave a fresh home untouched; a write creates it."""
+    vault, _enclave = _tee_store(tmp_path)
+    root = tmp_path / "tg"
+    assert vault.flags() is None and vault.load() is None and vault.sync_scope() == {}
+    assert not root.exists()
+    vault.ensure_key()
+    vault.store(_value())
+    assert root.is_dir() and (root / ".gitignore").is_file() and vault.flags()["logged_in"] is True
+    root.rename(tmp_path / "moved")
+    root.symlink_to(tmp_path / "moved")
+    with pytest.raises(store.StoreError):
+        vault.flags()  # a planted symlink is still refused on the read path
+
+
 def test_key_requires_presence_by_default(tmp_path):
     vault, enclave = _tee_store(tmp_path)
     vault.ensure_key()

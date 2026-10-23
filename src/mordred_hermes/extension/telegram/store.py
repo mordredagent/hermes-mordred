@@ -159,6 +159,19 @@ def _ensure_private_dir(path: Path) -> Path:
     return path
 
 
+def _private_dir_for_read(path: Path) -> Path:
+    """``path`` for a read: refused like :func:`_ensure_private_dir`, but never created, chmodded or written.
+
+    Reads (status flags, metadata, a sealed file that may not exist yet) must
+    leave a fresh home untouched; only the write paths create the directory.
+    """
+    if _windows():
+        raise StoreError("store_path_unsafe")
+    if path.is_symlink():
+        raise StoreError("store_path_unsafe")
+    return path
+
+
 def _ensure_gitignored(path: Path) -> None:
     """Drop a ``*`` .gitignore so nothing here is ever committed.
 

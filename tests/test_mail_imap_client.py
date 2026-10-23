@@ -10,6 +10,7 @@ import threading
 import time
 import tracemalloc
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -146,6 +147,232 @@ def test_the_ssl_client_wraps_the_route_socket_with_sni_of_the_sealed_host() -> 
     )
     conn.logout()
     assert [name for _sock, name in wrapped] == ["imap.example.com"]
+
+
+def test_a_platform_verifier_context_gets_its_handshake_inside_wrap_socket() -> None:
+    """truststore verifies the peer chain inside ``wrap_socket``: the handshake must run there."""
+    server = FakeImapServer({"INBOX": FakeMailbox(1)})
+    seen: list[tuple[bool, float | None]] = []
+
+    class VerifierContext(ssl.SSLContext):
+        def wrap_socket(self, sock: socket.socket, *args: Any, **kw: Any) -> socket.socket:  # type: ignore[override]
+            handshake_inside = kw.get("do_handshake_on_connect", True)
+            seen.append((handshake_inside, sock.gettimeout()))
+            if not handshake_inside:  # what truststore does: no peer chain yet, so verification fails
+                raise ssl.SSLError("no certificate to verify")
+            return sock  # the fake server speaks plain IMAP
+
+    assert imap._handshakes_inside_wrap(VerifierContext()) is True
+    conn = GuardedIMAP4SSL(
+        "imap.example.com", 993, raw_socket=server.connect, ssl_context=VerifierContext(), timeout=5.0
+    )
+    conn.logout()
+    assert len(seen) == 1
+    inside, timeout = seen[0]
+    assert inside is True
+    assert timeout is not None and 0 < timeout <= imap.SOCKET_TIMEOUT_S
+
+
+def test_an_interrupt_ends_a_handshake_that_runs_inside_wrap_socket() -> None:
+    """The link holds a duplicate descriptor during an in-wrap handshake: a shutdown reaches it at once."""
+    listener, address = _listener()  # a server that never speaks: the handshake would wait for bytes
+
+    class WaitingContext(ssl.SSLContext):
+        def wrap_socket(self, sock: socket.socket, *args: Any, **kw: Any) -> socket.socket:  # type: ignore[override]
+            if not sock.recv(1):  # "the handshake": blocks until the peer answers or the socket is shut down
+                raise ssl.SSLEOFError("connection shut down during the handshake")
+            return sock
+
+    class Client(GuardedIMAP4SSL):
+        def __init__(self) -> None:  # no IMAP greeting: only _tls_socket is exercised
+            self.host = "imap.example.com"
+            self.ssl_context = WaitingContext()
+            self._raw_socket = lambda link: link.connect_tcp(*address)
+
+    try:
+        with _armed(budget=30.0) as link, patch.object(imap, "_getaddrinfo", _resolving_to(address)):
+            threading.Timer(0.3, link.interrupt).start()
+            started = time.monotonic()
+            with pytest.raises((OSError, imap.ImapError)):  # the interrupt ends the wrap: the link's failure
+                Client()._tls_socket(link)
+            assert time.monotonic() - started < 5.0
+    finally:
+        listener.close()
+
+
+def test_connection_diagnostics_reach_only_an_installed_sink_and_carry_no_content() -> None:
+    """A refused TCP connect is described by class names and errno only, and only to a sink."""
+    listener, address = _listener()
+    listener.close()  # the port is now closed: every connect is refused
+    seen: list[str] = []
+    try:
+        with (
+            _armed(budget=5.0) as link,
+            patch.object(imap, "_getaddrinfo", _resolving_to(address)),
+            pytest.raises(imap.ImapError),
+        ):
+            link.connect_tcp("imap.example.test", address[1])
+        assert seen == []  # no sink: silent
+        imap.set_diagnostic_sink(seen.append)
+        with (
+            _armed(budget=5.0) as link,
+            patch.object(imap, "_getaddrinfo", _resolving_to(address)),
+            pytest.raises(imap.ImapError),
+        ):
+            link.connect_tcp("imap.example.test", address[1])
+        assert seen and seen[0].startswith("mordred imap: TCP connect failed on every address (ipv4:")
+        assert "example" not in seen[0] and str(address[1]) not in seen[0]
+    finally:
+        imap.set_diagnostic_sink(None)
+
+
+def test_a_wrapper_handshake_past_the_deadline_fails_and_closes_the_late_socket() -> None:
+    """truststore's native verification cannot be interrupted: the whole wrap is bounded by the deadline."""
+    server = FakeImapServer({"INBOX": FakeMailbox(1)})
+    produced: list[socket.socket] = []
+    release = threading.Event()
+
+    class SlowVerifier(ssl.SSLContext):
+        def wrap_socket(self, sock: socket.socket, *args: Any, **kw: Any) -> socket.socket:  # type: ignore[override]
+            release.wait(5.0)  # "native verification" that outlives the deadline
+            produced.append(sock)
+            return sock
+
+    class Client(GuardedIMAP4SSL):
+        def __init__(self) -> None:
+            self.host = "imap.example.com"
+            self.ssl_context = SlowVerifier()
+            self._raw_socket = server.connect
+
+    try:
+        with _armed(budget=0.3) as link:
+            started = time.monotonic()
+            with pytest.raises(imap.ImapError):
+                Client()._tls_socket(link)
+            assert time.monotonic() - started < 3.0
+        release.set()
+        deadline = time.monotonic() + 5.0
+        while not produced and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert produced
+        deadline = time.monotonic() + 5.0
+        while produced[0].fileno() != -1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert produced[0].fileno() == -1  # the late socket was closed, never used
+    finally:
+        release.set()
+
+
+def test_a_late_handshake_result_is_closed_whoever_finishes_last() -> None:
+    """The waiter gives up at the deadline; a socket the worker publishes afterwards is closed, not leaked."""
+    server = FakeImapServer({"INBOX": FakeMailbox(1)})
+    release = threading.Event()
+    produced: list[socket.socket] = []
+
+    class DetachingVerifier(ssl.SSLContext):
+        def wrap_socket(self, sock: socket.socket, *args: Any, **kw: Any) -> socket.socket:  # type: ignore[override]
+            fresh = socket.socket(fileno=sock.detach())  # like TLS: a new socket object owns the descriptor
+            release.wait(5.0)  # "native verification" that outlives the waiter
+            produced.append(fresh)
+            return fresh
+
+    class Client(GuardedIMAP4SSL):
+        def __init__(self) -> None:
+            self.host = "imap.example.com"
+            self.ssl_context = DetachingVerifier()
+            self._raw_socket = server.connect
+
+    try:
+        with _armed(budget=0.3) as link, pytest.raises(imap.ImapError):
+            Client()._tls_socket(link)
+        release.set()
+        deadline = time.monotonic() + 5.0
+        while (not produced or produced[0].fileno() != -1) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert produced and produced[0].fileno() == -1
+        deadline = time.monotonic() + 5.0
+        while imap._abandoned_handshakes.active and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert imap._abandoned_handshakes.active == 0
+    finally:
+        release.set()
+
+
+def test_a_handshake_slot_is_released_when_the_worker_never_runs() -> None:
+    """A link that is already interrupted fails before the worker starts: the admitted slot comes back."""
+    server = FakeImapServer({"INBOX": FakeMailbox(1)})
+
+    class Verifier(ssl.SSLContext):
+        def wrap_socket(self, sock: socket.socket, *args: Any, **kw: Any) -> socket.socket:  # type: ignore[override]
+            return sock
+
+    class Client(GuardedIMAP4SSL):
+        def __init__(self) -> None:
+            self.host = "imap.example.com"
+            self.ssl_context = Verifier()
+            self._raw_socket = server.connect
+
+    before = imap._abandoned_handshakes.active
+    with _armed(budget=5.0) as link:
+        link.interrupt()  # bounded() refuses at its first check, before any thread starts
+        with pytest.raises(imap.ImapError):
+            Client()._tls_socket(link)
+    assert imap._abandoned_handshakes.active == before
+
+
+def test_abandoned_handshake_workers_are_capped() -> None:
+    """A verifier that never returns keeps its worker; past the cap a new attempt is refused at once."""
+    server = FakeImapServer({"INBOX": FakeMailbox(1)})
+    release = threading.Event()
+
+    class StuckVerifier(ssl.SSLContext):
+        def wrap_socket(self, sock: socket.socket, *args: Any, **kw: Any) -> socket.socket:  # type: ignore[override]
+            release.wait(10.0)
+            return sock
+
+    class Client(GuardedIMAP4SSL):
+        def __init__(self) -> None:
+            self.host = "imap.example.com"
+            self.ssl_context = StuckVerifier()
+            self._raw_socket = server.connect
+
+    try:
+        for _ in range(imap.MAX_IN_FLIGHT_HANDSHAKES):
+            with _armed(budget=0.2) as link, pytest.raises(imap.ImapError):
+                Client()._tls_socket(link)
+        assert imap._abandoned_handshakes.active == imap.MAX_IN_FLIGHT_HANDSHAKES
+        seen: list[str] = []
+        imap.set_diagnostic_sink(seen.append)
+        opened: list[Any] = []
+
+        class Counting(Client):
+            def __init__(self) -> None:
+                super().__init__()
+                self._raw_socket = lambda link: opened.append(link) or server.connect(link)
+
+        started = time.monotonic()
+        with _armed(budget=5.0) as link, pytest.raises(imap.ImapError):
+            Counting()._tls_socket(link)
+        assert time.monotonic() - started < 1.0  # refused before any handshake
+        assert opened == []  # and before any route, DNS or TCP work
+        assert any("too many abandoned handshakes" in message for message in seen)
+    finally:
+        imap.set_diagnostic_sink(None)
+        release.set()
+        deadline = time.monotonic() + 5.0
+        while imap._abandoned_handshakes.active and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert imap._abandoned_handshakes.active == 0
+
+
+def test_the_standard_context_keeps_the_manual_handshake() -> None:
+    assert imap._handshakes_inside_wrap(ssl.create_default_context()) is False
+
+    class PlainWrapper:
+        def wrap_socket(self, sock: socket.socket, **_kw: Any) -> socket.socket:
+            return sock
+
+    assert imap._handshakes_inside_wrap(PlainWrapper()) is True
 
 
 @contextlib.contextmanager
@@ -326,6 +553,176 @@ def test_login_failure_and_unreachable_are_codes() -> None:
     with pytest.raises(ImapError) as raised:
         imap.connect("not a host", 993)
     assert raised.value.code == "imap_unreachable"
+
+
+# --- login failure hints (response code only, never the server's text) ------------------------------
+
+#: Server text after the response code: a support URL and the account name, as Gmail's alerts carry.
+ALERT_CANARY = "ALERTCANARY-owner@example.com-https://support.example.com/answer/185833"
+
+
+@pytest.mark.parametrize(
+    ("reply", "hint"),
+    [
+        ("NO [AUTHENTICATIONFAILED] Invalid credentials (Failure)", "authentication_failed"),
+        (f"NO [ALERT] Application-specific password required: {ALERT_CANARY} (Failure)", "server_alert"),
+        ("NO [AUTHORIZATIONFAILED] not for this account", None),  # a code without a hint
+        ("NO [CONTACTADMIN]", None),
+        ("NO Invalid credentials", None),  # no bracketed code at all
+        ("NO [alert] lower case is not a response code", None),
+        ("NO see [ALERT] later in the text", None),  # the code must open the text
+        ("BAD [ALERT] a syntax error", None),  # imaplib reports BAD as its own text
+    ],
+)
+def test_login_failure_hint_comes_from_the_response_code_only(reply: str, hint: str | None) -> None:
+    server = FakeImapServer({"INBOX": FakeMailbox(1)}, login_failure=reply)
+    session = server.session()
+    with pytest.raises(ImapError) as raised:
+        session.login("owner@example.com", "wrong")
+    session.logout()
+    assert (raised.value.code, raised.value.hint) == ("imap_auth_failed", hint)
+    assert raised.value.args == ("imap_auth_failed",)
+
+
+def test_the_server_text_after_the_code_is_never_kept(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+    import traceback
+
+    caplog.set_level(logging.DEBUG)
+    server = FakeImapServer({"INBOX": FakeMailbox(1)}, login_failure=f"NO [ALERT] {ALERT_CANARY} (Failure)")
+    session = server.session()
+    with pytest.raises(ImapError) as raised:
+        session.login("owner@example.com", "wrong")
+    error = raised.value
+    assert (error.code, error.hint) == ("imap_auth_failed", "server_alert")
+    assert error.__cause__ is None and error.__context__ is None  # the imaplib error (with the text) is dropped
+    rendered = [str(error), repr(error), repr(error.args), repr(vars(error)), caplog.text]
+    rendered.append("".join(traceback.format_exception(error)))
+    assert [text for text in rendered if "ALERTCANARY" in text] == []
+    assert getattr(session._conn, "mo", None) is None  # imaplib's last regex match held the response line
+    session.logout()
+
+
+def test_logindisabled_is_auth_failed_with_its_hint_and_never_sends_login() -> None:
+    server = FakeImapServer({"INBOX": FakeMailbox(1)}, capabilities=("LOGINDISABLED",))
+    session = server.session()
+    with pytest.raises(ImapError) as raised:
+        session.login("owner@example.com", "app-password-1")
+    session.logout()
+    assert (raised.value.code, raised.value.hint) == ("imap_auth_failed", "login_disabled")
+    assert "LOGIN" not in server.verbs
+
+
+def test_hints_are_a_closed_set() -> None:
+    expected = {"authentication_failed", "server_alert", "login_disabled", "gmail_app_password_length"}
+    assert expected == imap.IMAP_HINTS
+    assert ImapError("imap_auth_failed", hint="anything else").hint is None
+    assert ImapError("imap_unreachable").hint is None
+    assert ImapStopped("time_budget").hint is None
+    error = ImapError("imap_auth_failed", hint="gmail_app_password_length")
+    assert (str(error), error.args) == ("imap_auth_failed", ("imap_auth_failed",))
+    assert error.hint == "gmail_app_password_length"
+
+
+@pytest.mark.parametrize(
+    ("args", "hint"),
+    [
+        ((b"[AUTHENTICATIONFAILED] x",), "authentication_failed"),
+        (("[ALERT] text",), "server_alert"),
+        ((b"[ALERT]",), "server_alert"),
+        ((b"\xff[ALERT] x",), None),
+        ((b"[" + b"A" * 32 + b"] x",), None),  # longer than any response code
+        ((), None),
+        ((42,), None),
+    ],
+)
+def test_the_response_code_is_read_from_the_raw_reply(args: tuple[object, ...], hint: str | None) -> None:
+    assert imap._login_hint(imaplib.IMAP4.error(*args)) == hint
+
+
+# --- no server text survives a failure: chains and buffers ------------------------------------------
+
+CHAIN_CANARY = "CHAINCANARY-owner@example.com-Gesendet"
+
+
+@pytest.mark.parametrize(
+    ("knobs", "step", "code"),
+    [
+        ({"replies": {"CAPABILITY": f"{{tag}} BAD {CHAIN_CANARY}"}}, "login", "imap_protocol"),
+        ({"replies": {"LIST": f"{{tag}} BAD {CHAIN_CANARY}"}}, "list", "imap_protocol"),
+        ({"replies": {"LIST": f'* LIST () "/" "x"\r\n{{tag}} NO {CHAIN_CANARY}'}}, "list", "imap_protocol"),
+        ({"replies": {"LIST": f"* BYE {CHAIN_CANARY}"}}, "list", "imap_unreachable"),
+        ({"login_untagged": (f"* NO [ALERT] {CHAIN_CANARY}",), "password": "other"}, "login", "imap_auth_failed"),
+        ({"login_untagged": (f"* BYE {CHAIN_CANARY}",)}, "login", "imap_unreachable"),
+    ],
+)
+def test_no_server_text_survives_a_failure(knobs: dict[str, Any], step: str, code: str) -> None:
+    from tests._mail_sync_helpers import exception_chain, rendered_chain, retained_buffers
+
+    server = FakeImapServer({"INBOX": FakeMailbox(1)}, **knobs)
+    session = server.session()
+    with pytest.raises(ImapError) as raised:
+        session.login("owner@example.com", "app-password-1")
+        if step == "list":
+            session.list_mailboxes()
+    error = raised.value
+    assert error.code == code
+    assert exception_chain(error) == [error]  # no cause, no context
+    assert CHAIN_CANARY not in rendered_chain(error)
+    assert CHAIN_CANARY not in retained_buffers(session)  # dropped on the failure, before any logout
+    session.logout()
+    assert CHAIN_CANARY not in retained_buffers(session)
+
+
+def test_a_successful_login_keeps_no_untagged_alert_after_logout() -> None:
+    from tests._mail_sync_helpers import retained_buffers
+
+    server = FakeImapServer({"INBOX": FakeMailbox(1)}, login_untagged=(f"* NO [ALERT] {CHAIN_CANARY}",))
+    session = server.session()
+    session.login("owner@example.com", "app-password-1")
+    session.logout()
+    assert CHAIN_CANARY not in retained_buffers(session)
+
+
+def test_a_greeting_that_hangs_up_is_unreachable_without_its_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests._mail_sync_helpers import exception_chain, rendered_chain
+
+    def hang_up(_link: object) -> socket.socket:
+        client, server = socket.socketpair()
+        server.sendall(f"* BYE {CHAIN_CANARY}\r\n".encode())
+        server.close()
+        return client
+
+    def guarded(*_args: Any, **kwargs: Any) -> GuardedIMAP4:
+        return GuardedIMAP4("imap.example.com", 993, raw_socket=hang_up, timeout=5.0, limits=kwargs.get("limits"))
+
+    monkeypatch.setattr(imap, "GuardedIMAP4SSL", guarded)
+    with pytest.raises(ImapError) as raised:
+        imap.connect("imap.example.com", 993)
+    assert raised.value.code == "imap_unreachable"
+    assert exception_chain(raised.value) == [raised.value] and CHAIN_CANARY not in rendered_chain(raised.value)
+
+
+@pytest.mark.parametrize("case", ["refused", "login_disabled", "capability_failure"])
+def test_a_kept_login_error_holds_no_password(case: str) -> None:
+    from tests._mail_sync_helpers import TrackedPassword, password_released, secrets_in_traceback
+
+    knobs: dict[str, Any] = {"password": "PWCANARY-right"}
+    if case == "login_disabled":
+        knobs["capabilities"] = ("LOGINDISABLED",)
+    if case == "capability_failure":
+        knobs["replies"] = {"CAPABILITY": "{tag} BAD nope"}
+    server = FakeImapServer({"INBOX": FakeMailbox(1)}, **knobs)
+    session = server.session()
+    kept: ImapError | None = None
+    try:
+        session.login("owner@example.com", TrackedPassword("PWCANARY-right" if case != "refused" else "PWCANARY-x"))
+    except ImapError as exc:
+        kept = exc
+    session.logout()
+    assert kept is not None and kept.__traceback__ is not None
+    assert secrets_in_traceback(kept, "PWCANARY", "owner@example.com") == []
+    assert password_released()
 
 
 # --- framing, authentication, port ----------------------------------------------------------------

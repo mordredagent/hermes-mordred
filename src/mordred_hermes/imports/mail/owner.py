@@ -69,6 +69,7 @@ __all__ = [
     "classify",
     "dmarc_failed",
     "is_noreply",
+    "own_address",
 ]
 
 #: Labels whose messages are never imported (folded label → skip reason).
@@ -88,6 +89,9 @@ IMAP_SENT_FOLDER: Final = "imap_sent_folder"
 #: Evidence codes of a sent copy: it wins over a received copy of the same Message-ID.
 SENT_EVIDENCE: Final = frozenset({"gmail_label_sent", IMAP_SENT_FOLDER})
 _GMAIL_DOMAINS: Final = frozenset({"gmail.com", "googlemail.com"})
+_MAX_ADDRESS_CHARS: Final = 254
+_ADDRESS_ATOM: Final = r"[^@\s<>()\[\],;:\"\\]+"
+_ADDRESS_RE: Final = re.compile(rf"{_ADDRESS_ATOM}@{_ADDRESS_ATOM}\.{_ADDRESS_ATOM}")
 _GOOGLE_AUTHSERV: Final = "mx.google.com"
 _DMARC_FAIL_RE: Final = re.compile(r"(?:^|[\s;])dmarc\s*=\s*fail\b", re.IGNORECASE)
 _NOREPLY_RE: Final = re.compile(
@@ -105,6 +109,20 @@ def canonical_address(address: str) -> str:
         return value
     if domain in _GMAIL_DOMAINS:
         return f"{local.split('+', 1)[0].replace('.', '')}@gmail.com"
+    return value
+
+
+def own_address(raw: str) -> str:
+    """One address the owner typed as theirs, stripped and lowercased; ``ValueError("bad_own_address")`` otherwise.
+
+    The check ``mail import --own-address`` and ``mail setup`` (and the Desktop
+    page) share: at most 254 printable characters, ``local@domain.tld`` without
+    spaces, brackets or quotes, and an :class:`OwnAddresses` member.
+    """
+    value = raw.strip().lower()
+    if len(value) > _MAX_ADDRESS_CHARS or not value.isprintable() or not _ADDRESS_RE.fullmatch(value):
+        raise ValueError("bad_own_address")
+    OwnAddresses.of([value])
     return value
 
 

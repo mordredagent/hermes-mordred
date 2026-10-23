@@ -1638,6 +1638,10 @@ authority when hardware disappears or loses permissions after a status check.
 - No Linux screen or error remediation prescribes Xcode or Touch ID. Local
   model guidance says this host, not this Mac. Legacy client/server combinations
   must retain a safe unsupported/setup-incomplete state.
+- Desktop `/status?client_version=4` (macOS only) adds the keys `databases`,
+  `imports` and `mail`; requests with `client_version <= 3` keep their keys. A
+  page that receives none of them treats Mordred as older and offers an update
+  ([Desktop mail and ceremony pages](#desktop-mail-and-ceremony-pages-2026-10-23)).
 
 ### EC2 validation contract
 
@@ -4635,7 +4639,13 @@ part of this delivery ([`TODO.md`](./TODO.md)).
   below it.
   UIDs come from windowed `UID SEARCH` (at most 100000 UIDs per window), and a
   UID at or below the cursor (`UID n:*` returns the last message) is dropped.
-  `mail_imap.<account>.last` records `{at, error, gmail, partial}`.
+  `mail_imap.<account>.last` records `{"attempt": {at, error, partial},
+  "success": {at} | null}` (closed keys), written under the writer lock by every
+  fetch that took it, and only while the sealed credentials are still the setup
+  the fetch started with (`setup_id`): a failed attempt keeps the previous
+  success visible. A fetch without an error (a partial one included) is a
+  success. The flat record of earlier versions (`{at, error, gmail, partial}`)
+  is still read, as an attempt and, without an error, as a success.
 - **Batches.** Groups of at most 200 UIDs are size-checked with `UID FETCH
   (UID RFC822.SIZE)`; a message announced over 25 MiB is counted as
   `skipped_oversize` and never downloaded. Batches of at most 48 MiB of
@@ -4735,7 +4745,7 @@ part of this delivery ([`TODO.md`](./TODO.md)).
   `unsupported_platform`, `mail_not_configured`, `memory_encryption_required`,
   `custody_busy`, the gate codes above, `import_store_unavailable`,
   `sync_in_progress`, `store_path_unsafe`, `tee_unavailable`,
-  `tee_auth_cancelled`, `secrets_corrupt`, `routing_unavailable`,
+  `tee_auth_cancelled`, `secrets_corrupt`, `credentials_left`, `routing_unavailable`,
   `egress_unsupported`, `imap_unreachable`, `imap_auth_failed`,
   `imap_protocol`, `imap_command_refused`, `run_failed`, `invalid_request`,
   `fetch_failed`. Exceptions are mapped to codes and never stringified. One
@@ -4754,7 +4764,10 @@ hermes-mordred mail status [--json]
 
 `setup` defaults the host to `imap.gmail.com` for Gmail addresses and asks
 for it otherwise; its probe and sealing run under the same writer lock as
-`fetch`, `mail import` and `forget` (`sync_in_progress`). `fetch` exits 0 on
+`fetch`, `mail import` and `forget` (`sync_in_progress`). It never replaces
+credentials: while a sealed or flags file exists it refuses with
+`mail_already_configured` (`forget --yes` first). A refused login prints its
+hint after the code (`mail refused (imap_auth_failed: authentication_failed)`). `fetch` exits 0 on
 success (a partial fetch included), 1 on
 a refusal or failure, 2 on bad arguments; `--json` prints exactly the
 serialized `FetchResult`; `--dry-run` fetches and plans but writes no rows,
@@ -4778,7 +4791,10 @@ LABEL`); forget never reports success while a sealed or flags file remains
 `key_left` (exit 1, also on a retry that finds no credential file left;
 running forget again deletes it).
 `mail status` adds the account label, the path and scope, the last
-fetch and the cursor positions.
+attempt (JSON key `last_fetch`) and the last success (`last_success`), and the
+cursor positions, as an explicit projection: every field is type-checked and
+anything else in the flags or the store is dropped. Credentials without their
+metadata show as `{"configured": false, "residue": "credentials_left"}`.
 
 Hermes tool `mordred_mail_sync` (toolset `mordred_telegram`, beside
 `mordred_history_search`):
@@ -4861,6 +4877,478 @@ Where the code differs from the design record:
   grouping; an abandonment that cannot fail the worker's run in time keeps
   the writer lock with the worker (result field `lock_retained`), and the
   tool's cleanup is bounded by the call's grace.
+- Desktop mail setup (2026-10-23): `ImapError` carries an optional `hint` from the
+  closed set `IMAP_HINTS` (`authentication_failed`, `server_alert`,
+  `login_disabled`, `gmail_app_password_length`), derived from the response code
+  only and never from the server's text; setup and forget become shared library
+  code (`imports/mail/setup_flow.py`, `forget.py`) used by the CLI and the Desktop
+  page, and `mail.fetch` audit entries may carry `via: "desktop"`. See
+  [Desktop mail and ceremony pages](#desktop-mail-and-ceremony-pages-2026-10-23).
+- Mail library as delivered (PR D2, 2026-10-23):
+  - `mail fetch` receives the hint through `FetchOptions.hint_sink` and prints it
+    after the code in its text output only. The hint is never a `FetchResult`
+    field: the dataclass and `FetchResult.as_dict()` are unchanged, so the tool's
+    and the Desktop job's closed schema cannot widen.
+  - `credentials_left` joins the fetch error codes: `MailSecretStore.flags()`
+    raises it for a sealed file whose flags are missing, unreadable or invalid (a
+    distinct residue state, not "not configured"); the tool's `check_fn` is then
+    false and `forget` treats the credentials as unidentified.
+  - `MailSecretStore.store` writes `.credentials.sealed.<16 hex>.staged` and
+    `.credentials.meta.json.<16 hex>.staged` first, renames them in that order
+    and removes whatever it wrote on any failure; `forget` also removes staged
+    leftovers.
+  - `credentials.meta.json` records the key's EFFECTIVE Touch ID policy. The
+    Enclave cannot report an existing key's policy, so the store records the
+    policy of a key it creates in `enclave-key.json` (`{public_sha256,
+    touch_id}`: the SHA-256 of the key's public point and the policy, nothing
+    secret); `ensure_key` returns that policy for the key the record names, the
+    requested one for a key it creates, and `None` when unknown. `setup` replaces
+    a leftover key (no credentials sealed) under the writer lock, and `finish`
+    re-checks the recorded policy (`touch_id_policy_mismatch`).
+  - `<home>/mordred/mail/generation` (0600, a random 16-byte hex token, not
+    secret) is rewritten under the writer lock after every successful seal and
+    by every forget before it deletes anything, and survives forget; a setup flow
+    whose token changed between `start` and `finish` is `mail_setup_stale`. A
+    seal that fails leaves the token unchanged, so its `finish` can be retried.
+  - `imports.store.REFUSAL_CODES` is the closed set of `ImportRefused` codes
+    (the gate's, `busy`, `disk_full`, `store_unavailable`,
+    `store_uninitialised`, the binding and schema codes); `refusal_code(exc)` maps
+    anything else to `store_unavailable`. `open_import_store_readonly` is
+    specified under [Imports status](#imports-status).
+
+## Desktop mail and ceremony pages (2026-10-23)
+
+Status: specification; nothing below is implemented yet. Design record:
+[`2026-10-23-desktop-mail-and-ceremonies-design.md`](../superpowers/specs/2026-10-23-desktop-mail-and-ceremonies-design.md).
+Delivery is the PR sequence D1 to D4 in
+[PLAN.md](PLAN.md#desktop-mail-and-ceremony-pages-implementation).
+
+The Mordred page in Hermes Desktop is `src/mordred_hermes/desktop/assets/desktop/plugin.js`
+(one plain ES module, no build step) behind `src/mordred_hermes/desktop/api.py`
+and Hermes's plugin REST bridge (`/api/plugins/mordred/…`, session-token
+protected, loopback only). It is not the browser-extension launcher page
+`extension/web/index.html`. A macOS owner MUST be able to protect the Mac, connect
+Telegram and a mailbox, fetch mail, see counts and remove the mailbox from this
+page without a terminal.
+
+Everything typed on the page (app password, Telegram codes, a Venice key) MUST keep
+the existing path: masked inputs, `ctx.rest()`, Mordred's local API, sealing by the
+Secure Enclave. None of it may reach the chat, the model, the agent's tools,
+plugin or browser storage, unencrypted persistence, notifications or logs; the sealed
+stores are the intended destination. Inputs MUST be cleared after every submit. The
+page MUST show counts and codes only, never an address, a subject, a name or a body,
+with two explicit exceptions: folder labels in the mail selection step, and the
+recovery passphrase in the `/vault/prepare` answer.
+
+Out of scope: Linux and Windows branches (unchanged), `mail import` from the page,
+a typed recovery passphrase, the stale-anchor fix itself (a `keyvault` PR), reader
+mode, egress rules, what the Hermes tools return, and any new bundler or framework.
+
+- TLS handshake placement (2026-10-23, found in the Hermes Desktop live check): the
+  IMAP client runs the handshake itself, after the link holds the TLS socket, only
+  when the process's `ssl.SSLContext.wrap_socket` is the standard library's. Hermes
+  injects `truststore` into every `ssl.SSLContext` of its process, and that
+  wrapper verifies the peer chain inside `wrap_socket`, so a socket wrapped with
+  `do_handshake_on_connect=False` fails verification before any handshake
+  (`imap_unreachable` within milliseconds, in Hermes Desktop and the chat tool
+  only; the `hermes-mordred` CLI never injects it). For such contexts the
+  handshake MUST run inside `wrap_socket`, bounded in three ways: the socket
+  timeout the link grants (`IoLimits.io_timeout()`), a duplicate descriptor the
+  link holds so an interrupt shuts the handshake down at once, and
+  `Link.bounded()` around the whole wrap, because the wrapper's chain
+  verification is native code no shutdown can interrupt: past the hard deadline
+  the attempt is `imap_unreachable` and a socket the late worker still produces
+  is closed, never used. `_handshakes_inside_wrap()` decides by comparing the
+  context class's `wrap_socket` with the standard library's. The mail package
+  never imports `logging`; connection diagnostics (class names, errno, route
+  kind, link state, never content) go to an injectable sink
+  (`imap.set_diagnostic_sink`) that the Desktop API points at Hermes's log and
+  `mail fetch` at stderr in text mode.
+
+### Page structure and states
+
+- **Platform gating.** The new sections MUST render only when the API reports
+  `platform === "darwin"` and `hardware_kind === "secure_enclave"`. `hardware_kind
+  === "tpm"` keeps today's Linux list and the overview shows "Databases: not
+  available on Linux" and "Mail: not available on Linux". `hardware_kind === "cng"`
+  keeps `WindowsSetup` untouched. The layout MUST be chosen from these fields, never
+  from English text.
+- **Layout.** One column (max 760 px): an overview card, then four groups in a
+  fixed order, each a `section` with an `h2` and `aria-labelledby`: **1 Protect this
+  Mac** (1.1 Secure Enclave helper, 1.2 Encrypt Hermes memory and secrets, 1.3
+  Encrypt Hermes databases), **2 Connect** (2.1 Hermes chat model, 2.2 Question
+  model, 2.3 Telegram, 2.4 Import Telegram messages, 2.5 Mail over IMAP), **3 Ask
+  Hermes** (copy only), **4 Maintenance** (update, repair, uninstall). `RepairPanel`
+  keeps the top place and, when shown, nothing else renders.
+- **Overview card.** Four `StatusRow({dot, label, detail, target})` rows (Hermes
+  chat model, Protection, Telegram, Mail). The dot is `done`, `partial`, `not
+  started` or `attention`, drawn with `currentColor`, `var(--ui-accent)` or
+  `var(--destructive)`. The detail MUST be built only from status fields; the Mail
+  row shows the owner's opaque account label, never an address; a "Go" link scrolls
+  to and focuses the group heading.
+- **Step states.** `Step` takes a `state`: `done` (muted, one-line summary, a toggle
+  opens the body), `next` (the first not-done step in reading order, accent border),
+  `todo`, `blocked` (body replaced by the reason and a "Go to step X" button),
+  `running` (spinner, controls disabled, `role="status" aria-live="polite"`;
+  restored after a page re-open from `status.jobs[].kind`) and `attention`
+  (`var(--destructive)` border, a `FailureNote`).
+- **Blocked reasons** are codes from the `BLOCKERS` table, never free text from the
+  API: `needs_hermes_model`, `needs_enclave`, `needs_memory`, `needs_databases`,
+  `needs_restart`, `needs_login`, `needs_question_model`. Until the databases are
+  armed after step 1.3, steps 2.4 and 2.5 MUST be `blocked` with `needs_restart`.
+- **Why blocks.** Every step has a native `<details>`/`<summary>` ("Why this
+  step?"). The vault step offers "Ask for Touch ID every time Hermes unlocks the
+  vault", off by default, and MUST send `{"unattended": !askEveryTime}` to
+  `/vault/{flow_id}/commit`; the memory step has no such control.
+- **Versioning.** The page MUST request `client_version=4`. An API answer without
+  the `databases`, `imports` and `mail` keys is an older Mordred: the new steps then
+  render in the attention state as "Update Mordred to use this", never as done or
+  blocked.
+- **Accessibility and imports.** Colours only through `currentColor`, `CanvasText`
+  and the SDK theme variables; hex literals only as `var(--…, #…)` fallbacks.
+  Failures use `role="alert"`; after a submit, focus moves to the result or failure
+  note. The page MUST NOT add a named import from `@hermes/plugin-sdk` beyond
+  `Button`, `Checkbox`, `Input`, `host` and the three area constants, because an
+  export the installed Desktop lacks removes the whole page.
+- **Mail card.** Not set up: the app-password guidance (2-Step Verification,
+  <https://myaccount.google.com/apppasswords>, never the account password, revocable,
+  spaces allowed), the fields address, other addresses, IMAP server, account label
+  and app password, and the "Allow syncing without Touch ID" choice. When the flow
+  answers `step: "folders"` the card lists folder names with radio buttons and a
+  **Finish** button. Set up: label, scope, Touch ID mode, last fetch and store
+  count, **Fetch new mail** with an optional `since`, the counts-only result, and
+  **Remove this mailbox** with the `delete my data` confirmation when rows are
+  deleted. The result block MUST render only the non-zero or non-null keys of
+  `FetchResult.as_dict()` in a fixed order (`RESULT_FIELDS`) plus the `partial`
+  sentence.
+- **New `MESSAGES` entries**: `databases_unsupported`, `databases_key_missing`,
+  `databases_failed`, `databases_busy`, `vault_anchor_stale`,
+  `mail_already_configured`, `mail_setup_flow_expired`, `mail_setup_busy`,
+  `invalid_selection`, `touch_id_policy_mismatch`, `invalid_body`, `job_not_found`,
+  `vault_required`, `vault_exists`, `vault_flow_expired`, `passphrase_reused`,
+  `env_optout`, `env_required`, `mail_setup_stale`, `stale_pending`, `decrypt_pending`,
+  `journal`, `disk_full`, `memory_operation_in_progress`, `plaintext_in_armed_home`, `store_uninitialised`,
+  `profile_mismatch`, `schema_newer`, `unkeyed_connection`, `unsupported_platform`,
+  `mail_fetch_busy`,
+  `mail_not_configured`, `invalid_address`, `invalid_host`, `invalid_account`,
+  `invalid_password`, `too_many_addresses`, `imap_auth_failed`, `imap_unreachable`,
+  `imap_protocol`, `imap_command_refused`, `routing_unavailable`,
+  `egress_unsupported`, `import_store_unavailable`, `not_armed`,
+  `conversion_pending`, `unprotected_process`, `no_key`, `plaintext_store`, `busy`,
+  `credentials_changed`, `credentials_left`, `key_left`, `account_unknown`,
+  `fetch_failed`, `run_failed`; plus explicit `IMAP_HINTS` and `BLOCKERS` tables.
+  A page test MUST check that every code in the API's closed sets has an entry. The
+  `sync_in_progress` text becomes "A Telegram import or a mail fetch is already
+  running."
+- **Stale anchor.** `vault_anchor_stale` renders the `remedy` from the response with
+  a copy button.
+
+- **Request bodies.** Every secret-bearing route, new and existing
+  (`/telegram/login/*`, `/llm/venice`, `/vault/*`, `/mail/setup/*`,
+  `/mail/forget`, `/uninstall`), MUST read the body itself (`await request.json()`
+  inside try/except) and answer `{"ok": false, "error": "invalid_body"}` for
+  malformed JSON or a non-object body, so FastAPI's validation error (which echoes
+  `input`) can never fire for them. The page's `call()` MUST never show response
+  text, only `explain(code)`.
+- **Privacy statement.** The Ask Hermes card, the mail card and the user guide MUST
+  use three statements and not claim that Hermes never sees a subject, name, address
+  or body: (a) secrets typed on the page never reach the chat, the model, tools,
+  plugin or browser storage, unencrypted persistence or logs; (b) a mail sync gives Hermes counts only; (c) asking Hermes about
+  mail or Telegram makes it read the matching messages through
+  `mordred_history_search`, after which that chat runs in reader mode.
+- **Secret inputs** (app password, Telegram api_hash, code and 2FA password, Venice
+  key) MUST be cleared on success, failure, cancellation and unmount.
+- **`Step` compatibility.** `Step` MUST map the legacy `done` prop to `state`, so the
+  Windows components keep passing `done` and their branch is unchanged apart from the
+  `client_version` assertion.
+- **Accessibility.** "Go" links have contextual names ("Go to Protect this Mac");
+  toggles carry `aria-expanded` and `aria-controls`; a state is announced as text,
+  not only as a glyph; the folder choice is a `fieldset`/`legend` radio group;
+  polling MUST NOT remount sections or reset focus. All three bare `#b91c1c`
+  literals become `var(--destructive, #b91c1c)`.
+- **State precedence** after a reopen or restart: status facts, then
+  `status.jobs[].kind` (`running`), then transient page state. The vault, memory and
+  Telegram-import operations are not registry jobs; their `running` state lives in
+  page state during the request only. A job that disappears (backend restart) renders
+  `attention` with `job_not_found`. The page coalesces status refreshes (one in
+  flight, the next queued), polls counts at most every 10 s while a job runs, and
+  polls `GET /jobs/{id}` every 3 s for the job alone. Telegram import state
+  (`syncing`, progress, `last_error`) comes from `/sync`.
+- **Mail card wording.** It says "Fetch new mail here. You can also say 'sync my
+  mail' in a chat; if Hermes cannot reach the tool, see the USAGE note on
+  `tools.tool_search`". Chat sync is not advertised as the reliable path. The fetch
+  form has a "Fetch at most N messages" field (default 2000, 1 to 2000). The Telegram
+  import step follows the archive rule of `### Imports status`.
+
+### Mail setup flow
+
+`imports/mail/setup_flow.py` provides the step-wise flow that `mail setup` and the
+page share (modelled on `extension/telegram/login_flow.py`). `cmd_setup` MUST be a
+thin driver over it so the two entry points cannot drift. There is ONE contract:
+
+- `MailSetupFlows(secret_store, *, connect, lock, home, clock)` offers
+  `start(address, imap_host, account, extra_addresses, app_password, presence)`,
+  `finish(flow_id, selection)`, `cancel(flow_id)`, `cancel_all()` and a public
+  `reap()`. A flow holds provisional credentials only (the probe result, the
+  password in memory, `presence`, the offered folders, the recorded key policy and
+  generation token, `created`); `MailCredentials` is built only after the selection.
+  The flow lives in memory only, with a TTL of 600 s; every repr is redacted and
+  references are dropped on finish, cancel and expiry.
+- `start` MUST validate (`_own_address`, `valid_host`, `ACCOUNT_RE`, at most 20 extra
+  addresses, a password of 1 to 256 printable characters, whitespace stripped for
+  Gmail). On `imap.gmail.com` a stripped length other than 16 MUST fail with
+  `imap_auth_failed` and hint `gmail_app_password_length` before any connection.
+  Under the writer lock `fetch_lock(home)` it checks atomically that no credentials
+  are sealed (`mail_already_configured`), calls
+  `secret_store.ensure_key(require_presence=presence)` before contacting the server,
+  records the effective key policy returned and the current generation token, and
+  makes one read-only login (`connect`, `login`, `list_mailboxes`, `logout`).
+- **One pending flow.** At most ONE setup flow is pending; a second `start` answers
+  `mail_setup_busy` and the page offers Cancel.
+- Gmail (`X-GM-EXT-1`) with a detectable All Mail folder seals at once (`step:
+  "done"`, `question: null`). A generic server with a `\Sent` special-use folder
+  seals at once. Otherwise the flow stays pending and answers `step: "folders"` with
+  `question: "all_mail" | "sent"` and the selectable entries (`id` an opaque id,
+  `display` sanitised like `_term_safe`, at most 200 characters). `finish` takes
+  `{"selection": id | null}`, validated against the flow's own choices
+  (`invalid_selection`); `null` is accepted only for the `sent` question ("No sent
+  folder").
+- **Generation tombstone.** `<home>/mordred/mail/generation` (0600, a random 16-byte
+  hex token, non-secret) is rewritten under the writer lock by every successful seal
+  and by every forget, and survives forget. `start` records the current token (or
+  "absent"); `finish` re-reads it under the lock and refuses with `mail_setup_stale`
+  when it changed. The CLI uses the same library, so both entry points agree.
+- **Finish re-checks**, under the writer lock: no credentials sealed
+  (`mail_already_configured`), the TTL (`mail_setup_flow_expired`), the generation
+  token (`mail_setup_stale`), and the effective key policy:
+  `ensure_key(require_presence=<recorded>)` is called again and a difference answers
+  `touch_id_policy_mismatch`. The page shows the effective policy from
+  `/status.vault`, and the vault key policy is never promised.
+- **Active expiry.** `reap()` is public and is also called on every call. The Desktop
+  API runs a periodic task (every 30 s) that calls `MailSetupFlows.reap()` and
+  `VaultFlows.reap()`, and calls `cancel_all()` on shutdown. Tests drive the reaper
+  with a fake clock while no requests arrive. Cleanup MUST NOT need the protection
+  gate.
+- Nothing may be written before the seal; a refusal, a cancel or an expiry leaves no
+  `credentials.*` file. `MailSecretStore.store` writes temporary files and renames in
+  order, removing both on failure. A sealed file without metadata is reported by
+  `flags()` as the residue state `credentials_left`; the page then offers "Remove"
+  and forget works on residue. "Nothing was stored" is shown only for refusals raised
+  before the seal. A leftover key with no sealed credentials MUST be deleted and
+  recreated with the requested policy; if that is impossible the answer is
+  `touch_id_policy_mismatch`.
+- `MailSetupError(code, hint=None)` codes: `invalid_address`, `invalid_host`,
+  `invalid_account`, `invalid_password`, `too_many_addresses`,
+  `mail_already_configured`, `mail_setup_flow_expired`, `mail_setup_busy`,
+  `mail_setup_stale`, `invalid_selection`, `touch_id_policy_mismatch`,
+  `sync_in_progress`, `store_path_unsafe`, `tee_unavailable`, `tee_auth_cancelled`,
+  `imap_unreachable`, `imap_auth_failed`, `imap_protocol`, `imap_command_refused`,
+  `routing_unavailable`, `egress_unsupported`.
+- Routes (macOS only; bodies hand-validated; expected failures answer HTTP 200 with
+  `{"ok": false, "error": code, "hint"?}`). `_require_memory()` applies to setup
+  start and finish, fetch and `rows: true` forget only; cancel and credential-only
+  forget are exempt. Cancel routes accept an empty body.
+
+| route | body | answer |
+|---|---|---|
+| `POST /mail/setup/start` | `{"address", "imap_host"?, "account"? (default `mail`), "extra_addresses"?: [..], "app_password", "touch_id"?: bool (default true)}` | `{"ok": true, "flow_id", "step": "done" \| "folders", "question": "all_mail" \| "sent" \| null, "gmail": bool, "account", "folders": [{"id", "display"}]}` |
+| `POST /mail/setup/{flow_id}/finish` | `{"selection": id \| null}` | `{"ok": true, "step": "done"}` |
+| `POST /mail/setup/{flow_id}/cancel` | empty body accepted | `{"ok": true}` |
+| `POST /mail/fetch` | `{"max"?: 1-2000 (default 2000), "since"?: "YYYY-MM-DD", "mailbox"?: "all" \| "inbox" \| "sent", "dry_run"?: bool}` | job `mail_fetch`: `{"ok": true, "job_id", …}`; on completion `progress.result` is `FetchResult.as_dict()`; a `result.error` makes the job `failed` with that code |
+| `POST /mail/forget` | `{"rows": bool (strict JSON boolean), "account"?: label, "confirm"?: "delete my data"}` | `{"ok": true, "had_credentials", "deleted_messages", "cursors_deleted", "warnings": [codes]}` |
+| `GET /imports/status` | none | the `imports` and `mail` objects of `/status` |
+
+- `/mail/fetch` MUST use `FetchOptions(max_messages, roles, since, dry_run,
+  budget_s=DESKTOP_BUDGET_S (600.0), via="desktop")` and `imap_sync.default_env(home)`
+  and run `run_fetch` in a thread through `job.run_sync`. Progress is not streamed;
+  `progress.message` reads "Fetching new mail… up to 10 minutes". The `mail.fetch`
+  audit entry carries `via: "desktop"` (a new value of the existing key). A fetch cut
+  by a backend shutdown resumes from the persisted cursors on the next run (the sync
+  is cursor-based and idempotent); the page says "a fetch may take up to about 10
+  minutes and continues where it stopped if interrupted".
+- A second `mail_fetch` request while a job runs returns the existing job with
+  `already_running: true`; a fetch, setup, import or forget from the chat tool or the
+  CLI holding `<home>/mordred/mail/.lock` answers `sync_in_progress`.
+- `forget` moves from the CLI's `_identity` / `_forget_target` / `_locked_forget`
+  into `imports/mail/forget.py` as `forget(secret_store, home, *, account=None,
+  rows=False) -> Forgotten`. `rows: true` MUST require `confirm == PURGE_PHRASE`
+  (`delete my data`), checked before anything is read; a mismatch answers
+  `forget_confirm_mismatch`. The confirmation text says it "deletes every message
+  imported under account <label>, including Takeout imports". `account` in the body
+  allows retries when credentials or metadata are gone (validated against
+  `ACCOUNT_RE`); the answer carries the residue codes `credentials_left`, `key_left`
+  and `account_unknown`. A credential-only forget MUST NOT require the import store;
+  only `rows: true` does. The Desktop forget route calls `cancel_all()` on the flows;
+  a CLI forget cannot reach the backend's flows, but the generation token it rewrites
+  makes a later `finish` fail with `mail_setup_stale`.
+- **Last attempt and last success.** `imap_sync` persists `last_attempt {at, error,
+  partial}` separately from `last_success {at}` (closed keys, written under the
+  writer lock after checking the setup identity). The mail card shows both when they
+  differ.
+- The address, the extra addresses, the app password and (generic path) folder
+  display names MUST NOT appear in `/mail/fetch`, `/mail/forget`, `/status`, job
+  views, `plugin.mordred.job` events, logs or captured output. Folder names appear
+  only in the `folders` list of `/mail/setup/start`.
+
+### IMAP failure hints
+
+- `ImapError` gains `hint: str | None`, a member of the closed set `IMAP_HINTS =
+  {"authentication_failed", "server_alert", "login_disabled",
+  "gmail_app_password_length"}`; anything else MUST be `None`.
+- `ImapSession.login` MUST derive the hint from the response code only. The code is
+  taken from `exc.args[0]` of the `imaplib.IMAP4.error` (bytes or str) and matched at
+  the start with `^\[([A-Z][A-Z0-9-]{1,30})\]`; no other attribute or `str(exc)` is
+  consulted. `AUTHENTICATIONFAILED` gives `authentication_failed`; `ALERT` gives
+  `server_alert`; the `LOGINDISABLED` capability gives `login_disabled`; no bracketed
+  code gives `None`. `gmail_app_password_length` is raised by the setup flow's
+  pre-check.
+- The free text after the code MUST never be kept, logged or returned (Gmail's alert
+  text can hold a support URL and the account name). A canary in the alert text MUST
+  be absent from `str(exc)`, `repr(exc)` and the log.
+- `FetchStop` and `FetchResult` are unchanged (`error: "imap_auth_failed"`). The hint
+  is carried outside the `FetchResult` dataclass fields (a separate return value or
+  an attribute set after construction), and the serializer output of `as_dict()` is
+  unchanged. It reaches `MailSetupError` and, in `mail fetch`'s text output, is
+  printed after the code when present. `mail setup` prints `mail refused
+  (imap_auth_failed: authentication_failed)`.
+
+### Vault and memory ceremonies from the page
+
+- **Prepare, acknowledge, commit.** The recovery passphrase MUST be delivered before
+  anything is created. `POST /vault/prepare {}` generates the eight-word passphrase in
+  memory (`VaultFlow`, TTL 600 s, one at a time) and returns `{"ok": true, "flow_id",
+  "passphrase": [8 words]}`; nothing on disk changes, and the passphrase appears in no
+  job or event. The page shows it, the owner ticks "I have written it down", then
+  `POST /vault/{flow_id}/commit {"unattended": bool}` creates the vault with THAT
+  passphrase (the typed-passphrase path of `_vault_lifecycle.init`), creates an empty
+  0600 `.env` when none exists, and enrolls `.env`. A lost response after commit is
+  harmless (the phrase was delivered before commit). A backend restart between prepare
+  and commit answers `vault_flow_expired` and nothing was created.
+- Commit on an existing vault with `env_enrolled: false` enrolls `.env` without a new
+  phrase and answers `passphrase_reused: true` (the phrase shown at creation stays the
+  only one). `optout: true` answers `env_optout` (the owner restored a plaintext
+  `.env`; Terminal: `hermes-mordred encryption enable env`).
+- `GET /status` adds `vault`: `{"exists", "env_enrolled", "env_injecting", "optout",
+  "unattended"}`. These are facts; `unattended` is the key's effective policy read
+  from the key store, never the requested one, and it is `null` when that policy is
+  not recorded: today's `keyvault` cannot read an existing Secure Enclave key's
+  access policy, so the page shows "unknown" until a `keyvault` release records the
+  effective policy at key creation (TODO "Vault key policy record"). The page MUST
+  never substitute the requested policy for `null`.
+- `POST /memory/enable` is memory-only and idempotent. It requires `env_enrolled &&
+  env_injecting` and answers `env_required` otherwise (and `vault_required` when the
+  vault does not exist). The Touch ID choice ("Ask for Touch ID every time Hermes
+  unlocks the vault", off by default) belongs to the vault step, not the memory step;
+  the page sends `unattended` explicitly in the commit body (default true). When the
+  memory half fails the page shows "Vault created, memory encryption failed (<code>);
+  retry", and a retry calls only `/memory/enable`.
+- Ceremonies run in a worker thread under one module-level lock and are not cancelled
+  when the HTTP request is; a concurrent call answers `memory_operation_in_progress`.
+  The page re-reads status afterwards.
+- **Stale anchor.** The diagnosis MUST NOT call `default_anchor_store().read()` (it
+  can migrate a legacy item into the helper store and prompt). The route reads the
+  legacy store with `KeychainAnchorStore().read(id)` and the helper store with
+  `HelperAnchorStore(ops, legacy=None).read(id)` (no legacy fallback, so no
+  migration), and answers `{"ok": false, "error": "vault_anchor_stale",
+  "anchor_store": "legacy" | "helper" | "unknown", "anchor_identity":
+  "mordred-hermes.vault.<16 hex>"}`; an old helper that cannot read answers
+  `"unknown"`. The page shows `security delete-generic-password -s
+  mordred-hermes.vault.anchor -a <identity>` only when the anchor is in the legacy
+  store AND the vault directory is absent or holds no `manifest.*.mvmf`, no
+  `recovery.mrkv` and an empty or missing `blobs/` (stronger than
+  `artifacts_present`). Otherwise the note is informational ("an anchor remains; the
+  keyvault reset of a later release handles it"). No "nothing changed" or "no prompt"
+  promise is made. The classification becomes a pass-through once K1 lands.
+
+### Databases from the page
+
+- `GET /status?client_version=4` on macOS adds `databases`, computed with
+  `dbcrypt._migrate.discover(home, key=None)` and without a key, a Touch ID prompt or
+  a capture: `{"supported", "armed" (persisted intent), "encrypt_pending",
+  "decrypt_pending", "journal", "runtime_protected", "databases": [{"relative",
+  "state": "plaintext" | "unreadable"}], "plaintext_backups"}`. With `key=None`
+  discovery yields `plaintext` or `unreadable` (ciphertext) and omits absent files.
+  `runtime_protected` is computed by the same non-unlocking checks as the imports
+  path (darwin, no pending conversion, armed, shim installed, valid key material),
+  not by `check_protection`. On Linux and Windows the object is `{"supported": false}`.
+  `GET /databases/status` returns that object alone.
+- **The Desktop route never converts or arms itself.** `POST /databases/encrypt`
+  (`{"dry_run": bool}`, default false) MUST NOT call `migrate()`; it only schedules or
+  reports. It answers `databases_unsupported` (not macOS or no `sqlcipher3`) first;
+  `dry_run` answers `{"ok": true, "action": "dry_run"}`. The decision is total over
+  `armed`, `encrypt_pending`, `decrypt_pending`, `journal`, `plaintext` (any plaintext
+  file discovered) and `runtime_protected`:
+
+| armed | plaintext | pending / journal | answer and step state |
+|---|---|---|---|
+| no | any (even none) | none | `schedule(home)`, `{"ok": true, "action": "scheduled", "restart_required": true}` (startup converts what is plaintext and arms) |
+| no | any | `encrypt_pending` already | `scheduled` (idempotent) |
+| yes | none | none | done ("Database encryption: on") |
+| yes | some | none | `attention`, code `plaintext_in_armed_home` (Terminal, Hermes quit) |
+| yes | any | `encrypt_pending` | `attention`, code `stale_pending` (Terminal `databases status`) |
+| any | any | `decrypt_pending` | `attention`, code `decrypt_pending` |
+| any | any | `journal` | `attention`, code `journal` |
+
+- `runtime_protected` false while `armed` makes the step say "restart Hermes
+  Desktop" (`needs_restart`). An error from `schedule()` answers `databases_failed`,
+  and the page re-reads status rather than assuming "nothing changed". The page says
+  "Database encryption: on (N files encrypted or unreadable)" only when `armed &&
+  runtime_protected`, and never "N databases encrypted". Because the preview needs no
+  key, `databases_key_missing` applies only if a later release needs the key for the
+  act.
+
+### Imports status
+
+- `/status` MUST never initialise the import schema, create a file or directory, or
+  unlock anything. It uses `imports.store.open_import_store_readonly(home)`, which is
+  non-creating: it resolves the path with a pure path function (not `store_path()`);
+  `path.is_file()` false gives `store_uninitialised`. It has its own non-unlocking gate
+  sequence (darwin, no pending conversion in either direction, `armed`, shim
+  installed, key material VALID: `HERMES_MEMORY_KEY` decodes to 32 bytes, otherwise
+  `no_key`) and MUST NOT call `check_protection` or any provider that could inject or
+  unlock. It connects with `file:<path>?mode=ro` (`uri=True`) through the process
+  `sqlite3`, so the shim keys it from the already-validated environment value; sidecar
+  failures give `store_unavailable`. It verifies `mordred_key`, not plaintext, profile
+  binding and `schema_version <= code` with plain reads, and never calls
+  `initialize()` or upgrades. The status path reads rollback-journal stores at rest
+  only: a store whose header says WAL, or with a `-journal`, `-wal` or `-shm` next to
+  it (a write transaction in flight, or a crashed writer), reports `store_unavailable`
+  before any connection; `activity restore` refuses a WAL-mode backup
+  (`backup_wal_unsupported`) and `activity backup` writes rollback-mode copies.
+  Counts still answer while a fetch holds the mail writer lock between batches.
+  Tests: an absent file is not created; empty, malformed and valid keys run with a
+  provider fake that fails the test if called.
+- `GET /status?client_version=4` adds `imports`: `{"available": true, "code": null,
+  "sources": {"telegram": {"conversations": 3, "messages": 25, "parts": 25}, "mail":
+  {"conversations": 0, "messages": 0, "parts": 0}}}`. No Telegram or mail secret is
+  needed. A gate refusal is a state, not an error: `{"available": false, "code": …,
+  "sources": {}}` where `code` is one of `not_armed`, `conversion_pending`,
+  `unprotected_process`, `no_key`, `plaintext_store`, `store_unavailable`, `busy`,
+  `profile_mismatch`, `schema_newer`, `unkeyed_connection`, `store_uninitialised`,
+  `unsupported_platform`, `disk_full`; the refusal set MUST be mapped completely and
+  any unknown code maps to `store_unavailable`.
+- `GET /status?client_version=4` adds `mail`: `{"configured": false}` when not set up;
+  otherwise the account label, `gmail`, `scope`, `touch_id`, `last_attempt {at, error,
+  partial}`, `last_success {at}` and cursors, taken from
+  `wizard.mail_sync_cli.imap_status(store, MailSecretStore().flags())` when the store
+  is available, else from the flags only (for example `{"configured": true,
+  "account": "work", "gmail": true, "scope": ["all"], "touch_id": true}`). The residue
+  state `credentials_left` is reported here. It MUST NOT contain the address.
+- `/status.mail` and `/imports/status` MUST be built by explicit projection functions
+  (`_mail_projection(flags, status)`, `_imports_projection(status)`) that copy only
+  named keys with type checks (ints, bools, codes from the closed sets) and drop
+  everything else. Tests feed a canary extra field and corrupt metadata.
+- `imports.sources.<source>` are totals across all accounts; the page MUST label them
+  "in Mordred's store (all accounts)". `/status.telegram_archive` is `{"legacy": null}`
+  on a cold status, because the legacy index needs the sealed Telegram key and no
+  polling ever unwraps Telegram credentials. The Telegram import step MUST show "your
+  Telegram history may still be in the older archive; run `hermes-mordred telegram
+  migrate-store --commit` in Terminal to move it into Mordred's store" whenever the
+  account is logged in and `imports.sources.telegram.messages` is 0. The page MUST read
+  Telegram counts from `imports.sources.telegram`, never from the in-process summary or
+  from `index.enc`.
+- Responses for `client_version <= 3` keep their keys unchanged. `jobs` lists running
+  jobs with `kind` (`mail_fetch`, `enclave`, `update`, `uninstall`).
 
 ## Imported-message provenance evaluation (2026-10-22)
 

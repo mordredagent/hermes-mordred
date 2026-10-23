@@ -623,6 +623,91 @@ hermes-mordred desktop uninstall
 > sidebar entry. On Windows, from a local checkout, or without `uv`, the panel
 > explains why an in-place update cannot run and offers no button (Windows
 > users rerun the Windows installer).
+>
+> **The page's groups.** On macOS the page opens with an overview card (the
+> Hermes chat model, the protection state, Telegram and mail, each with a
+> status dot and a link to its group), then four groups in a fixed order:
+> **Protect this Mac** (the Secure Enclave helper, encryption of Hermes's
+> memory and secrets, encryption of Hermes's databases), **Connect** (the chat
+> model, the question model, Telegram, the Telegram import and mail over IMAP),
+> **Ask Hermes** (what to say in a chat, what Hermes reads, and the commands that
+> stay in the terminal) and **Maintenance** (update, repair, uninstall). Each
+> step shows whether it is done, next, waiting for an earlier step (with a
+> button that jumps there), running or in need of attention, and a "Why this
+> step?" block that explains the reason in plain words. The Telegram and mail
+> counts come from Mordred's encrypted store, so they are right after a restart
+> too. Linux shows its existing list, with databases and mail marked as not
+> available; Windows keeps its own page.
+>
+> **Database encryption from the page.** The step "Encrypt Hermes databases"
+> lists the plaintext and unreadable (encrypted) database files it finds, and
+> warns when backup archives in the Hermes home may still hold plaintext copies.
+> The page never converts or arms anything itself: Hermes Desktop keeps its
+> databases open, so **Encrypt databases** only schedules the conversion, which
+> runs at the next restart before Hermes opens them, and the step offers
+> **Restart now**. The Telegram import and the mail step wait until the
+> databases are encrypted, because `mordred.db` only opens then. The outcomes
+> are: not armed yet, the conversion is scheduled (also when no file needs
+> converting, and asking again changes nothing); armed and no plaintext file, the
+> step is done and says "Database encryption: on"; armed but a plaintext file
+> appeared (a new or restored file), the page schedules nothing and tells you to
+> quit Hermes and run `hermes-mordred databases encrypt` in Terminal; a pending
+> conversion that did not run, a pending decryption or a leftover journal, the
+> page tells you to check `hermes-mordred databases status` in Terminal; armed but
+> this Hermes process not yet protected, the page asks you to restart Hermes
+> Desktop.
+>
+> The vault comes first. Its own step shows the eight-word recovery passphrase
+> BEFORE anything is created and asks you to tick "I have written it down"; only
+> then does it create the file vault with that passphrase and move `.env` into it.
+> The next step encrypts Hermes's memory, and if it fails you retry it without a
+> new passphrase. The vault step is also where you choose "Ask for Touch ID every
+> time Hermes unlocks the vault". It is off by default, because Hermes Desktop
+> starts its backend in the background and cannot answer a prompt; the page shows
+> the policy the key actually has, and your Telegram and mail keys keep their own
+> Touch ID setting. If an earlier vault was removed but its Keychain anchor was left
+> behind, the page shows the exact `security delete-generic-password` command to run
+> in Terminal only when that anchor is in the legacy Keychain item and the vault
+> folder is empty; in every other case it only says that an anchor remains and that
+> a later keyvault release will clear it. The page itself changes nothing.
+>
+> **Mail from the page.** The mail step does what `mail setup`, `mail fetch`
+> and `mail forget` do (see
+> [Sync new mail over IMAP](#sync-new-mail-over-imap-mail-setup-mail-fetch-mail-forget)).
+> It explains the app password where you need it: turn on 2-Step Verification
+> for your Google account, open <https://myaccount.google.com/apppasswords> and
+> create one for "Mordred". Google shows it as four groups of four letters;
+> paste it with or without the spaces. Mordred never needs your account
+> password, and you can revoke the app password in the same place at any time.
+> Other providers call it an app-specific password. The form asks for the
+> address, other addresses that are yours (optional), the IMAP server, a short
+> account label (a name for the mailbox inside Mordred, never an address) and
+> the app password. A checkbox, "Allow syncing without Touch ID", chooses the
+> key policy for scheduled syncs; otherwise each fetch asks for Touch ID. If the
+> server does not mark a sent folder, the page lists the folder names and asks
+> which one holds your sent mail. Once the mailbox is set up the card shows the
+> account label, the last fetch and the counts, **Fetch new mail** with an
+> optional "also older mail since" date, and **Remove this mailbox** (removing
+> the fetched mail too asks you to type `delete my data`). A fetch runs in the
+> background for up to 10 minutes and may show a Touch ID prompt; its result is
+> counts only (inserted, duplicates, skipped, partial), and a "Fetch at most N
+> messages" field limits one run. **Fetch new mail** on the page is the reliable
+> path. Saying "sync my mail" in a Hermes chat is optional and works only when
+> Hermes can reach the tool; if it cannot, see the `tools.tool_search` note in
+> step 4 of
+> [Sync new mail over IMAP](#sync-new-mail-over-imap-mail-setup-mail-fetch-mail-forget).
+> Removing the mailbox with its mail deletes every message imported under that
+> account label, including Takeout imports. `mail import` (Takeout files) stays a
+> terminal command.
+>
+> **What the page never shows, and what Hermes reads.** (1) Nothing you type (the
+> app password, Telegram codes, a Venice key) reaches the chat, the model,
+> Hermes's tools, plugin storage or logs, and the inputs are cleared after every
+> submit, failure or cancel. (2) A mail sync gives Hermes counts only. (3) When you
+> ask Hermes about your mail or Telegram, it reads the matching messages through
+> `mordred_history_search`, and that chat then runs in reader mode. The page
+> itself shows counts and codes only, never an address, a subject, a name or a
+> message body, and every failure is a stable code with a remediation line.
 
 ### `uninstall` — remove Mordred and restore Hermes's files
 ```sh
@@ -908,6 +993,10 @@ hermes-mordred mail forget --yes                        # delete the sealed cred
 hermes-mordred mail forget --rows --yes                 # ... and the account's imported mail
 ```
 
+0. **From Hermes Desktop (optional).** The Mordred page's mail step does steps
+   1 to 3 below with a form and shows the app-password guidance inline; after
+   it, steps 4 and 5 are the same. See
+   [`desktop`](#desktop--mordred-setup-page-in-hermes-desktop).
 1. **Prerequisites:** macOS, `hermes-mordred databases encrypt` done,
    `hermes-mordred encryption enable memory`, and the Secure Enclave helper
    (`hermes-mordred keyvault enable-se`).
@@ -947,8 +1036,36 @@ hermes-mordred mail forget --rows --yes                 # ... and the account's 
 `mail fetch` does the same as the tool from a terminal, with up to 10 minutes
 per run; `--dry-run` fetches and counts but writes nothing. It exits 0 when it
 worked (also when partial), 1 with a code such as `imap_auth_failed` (the app
-password was revoked: run `mail setup` again), `mail_not_configured`,
+password was revoked or changed: run `mail forget --yes`, then `mail setup`
+again; see the hints below), `mail_not_configured`, `credentials_left` (a
+crash left credentials without their metadata: run `mail forget --yes`),
 `not_armed` or `sync_in_progress`, and 2 for bad arguments.
+
+`mail setup` refuses with `mail_already_configured` while credentials (or what
+an interrupted setup left of them) exist: it never replaces them, so remove
+them first with `hermes-mordred mail forget --yes`.
+
+`mail setup`, `mail fetch` and the Desktop page also say why a login was
+refused: the hint follows the code, as in `mail refused (imap_auth_failed:
+authentication_failed)` from `mail setup` or `mail fetch failed
+(imap_auth_failed: authentication_failed)` from `mail fetch` (text output only;
+`--json` and the chat tool carry the code alone). The hint is taken only from
+the server's response code; the server's own text is never kept or shown:
+
+- `authentication_failed`: the server rejected the address or the app
+  password; check that the app password was made in the same Google account,
+  that the address is the primary sign-in address and not an alias, and that
+  2-Step Verification is on (a Workspace administrator or Advanced Protection
+  can also turn app passwords off).
+- `server_alert`: the server refused with an alert, which for Gmail usually
+  means an app password is required or Google wants a sign-in in the browser
+  first.
+- `login_disabled`: the server does not allow password login over IMAP.
+- `gmail_app_password_length`: a Gmail app password is exactly 16 letters and
+  what was pasted has another length, so it is probably the account password;
+  nothing was sent to the server.
+
+A refusal never stores anything.
 
 **Cron.** Cron cannot answer Touch ID, so set up with `--no-touch-id`, then run
 the command once by hand from a non-interactive shell to see that nothing
@@ -1153,8 +1270,10 @@ while your login session is unlocked.
 per-use Touch ID / passcode prompt?", or `--unattended-keys` /
 `--attended-keys`). The answer applies to every device key the run creates:
 the keyvault key and the file-vault key. The default is attended. The Hermes
-Desktop setup page uses the same default (`MORDRED_SEKEY_UNATTENDED=1`, else
-attended). A key that already exists keeps the policy it was created with.
+Desktop setup page creates the file-vault key unattended unless "Ask for Touch
+ID every time Hermes unlocks the vault" is ticked, because Hermes Desktop
+starts its backend in the background and cannot answer a prompt. A key that
+already exists keeps the policy it was created with.
 
 `keyvault enable-se` may install or refresh the helper with an existing
 keyvault, but never creates, promotes, or migrates a wrapping key. Existing
