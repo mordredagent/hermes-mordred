@@ -11,7 +11,8 @@ Adversarial knobs: ``FakeMessage.literal`` announces a literal size other than
 the bytes sent (a lie the client must catch before reading), ``trickle_s``
 answers a body fetch with a huge literal and then one byte per interval for
 ever (a server that never lets a read time out), and ``raw_labels`` sends the
-``X-GM-LABELS`` list verbatim.
+``X-GM-LABELS`` list verbatim. ``capabilities`` adds capability words (``LOGINDISABLED``) and
+``login_failure`` is the tagged reply to a wrong ``LOGIN`` (a response code and server text).
 """
 
 from __future__ import annotations
@@ -126,6 +127,8 @@ class FakeImapServer:
         send_uidnext: bool = True,
         uid_after_body: bool = False,
         unsolicited_flags: bool = False,
+        capabilities: tuple[str, ...] = (),
+        login_failure: str = "NO [AUTHENTICATIONFAILED] bad",
     ) -> None:
         self.mailboxes = mailboxes
         self.gmail = gmail
@@ -134,6 +137,8 @@ class FakeImapServer:
         self.send_uidnext = send_uidnext
         self.uid_after_body = uid_after_body
         self.unsolicited_flags = unsolicited_flags
+        self.capabilities = capabilities
+        self.login_failure = login_failure
         self.commands: list[str] = []
         self.violations: list[str] = []
         self.on_body_fetch: Callable[[list[int]], None] | None = None
@@ -183,7 +188,8 @@ class FakeImapServer:
     def _serve(self, sock: socket.socket) -> None:
         stream = sock.makefile("rb")
         try:
-            caps = b"IMAP4rev1 AUTH=PLAIN" + (b" X-GM-EXT-1" if self.gmail else b"")
+            extra = "".join(f" {word}" for word in self.capabilities).encode("ascii")
+            caps = b"IMAP4rev1 AUTH=PLAIN" + (b" X-GM-EXT-1" if self.gmail else b"") + extra
             sock.sendall(b"* OK [CAPABILITY " + caps + b"] fake ready\r\n")
             while True:
                 line = stream.readline()
@@ -220,7 +226,7 @@ class FakeImapServer:
         elif verb == "LOGIN":
             user, password = _tokens(args)
             ok = (user, password) == (self.user, self.password)
-            reply(f"{tag} {'OK LOGIN completed' if ok else 'NO [AUTHENTICATIONFAILED] bad'}\r\n".encode())
+            reply(f"{tag} {'OK LOGIN completed' if ok else self.login_failure}\r\n".encode())
         elif verb == "LIST":
             for name, box in self.mailboxes.items():
                 attrs = " ".join(("\\HasNoChildren", *box.attributes))
