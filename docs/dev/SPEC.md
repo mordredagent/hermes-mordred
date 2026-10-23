@@ -5289,7 +5289,9 @@ thin driver over it so the two entry points cannot drift. There is ONE contract:
   `sqlite3`, so the shim keys it from the already-validated environment value; sidecar
   failures give `store_unavailable`. It verifies `mordred_key`, not plaintext, profile
   binding and `schema_version <= code` with plain reads, and never calls
-  `initialize()` or upgrades. Counts still answer while a fetch holds the writer lock.
+  `initialize()` or upgrades. The status path reads rollback-journal stores only: a
+  store whose header says WAL reports `store_unavailable` before any connection,
+  whatever sidecars exist. Counts still answer while a fetch holds the writer lock.
   Tests: an absent file is not created; empty, malformed and valid keys run with a
   provider fake that fails the test if called.
 - `GET /status?client_version=4` adds `imports`: `{"available": true, "code": null,

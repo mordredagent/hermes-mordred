@@ -960,7 +960,7 @@ def test_a_wrong_key_reads_as_store_unavailable(readonly_home: Path, monkeypatch
     assert caught.value.code == "store_unavailable"
 
 
-# --- WAL sidecars and URI-special paths -------------------------------------------------------------
+# --- rollback-journal stores only, and URI-special paths --------------------------------------------
 
 
 def wal_store(home: Path) -> Path:
@@ -975,41 +975,63 @@ def wal_store(home: Path) -> Path:
     return path
 
 
-def test_a_wal_store_without_its_reader_sidecar_is_refused_without_creating_it(readonly_home: Path) -> None:
-    path = wal_store(readonly_home)
-    before = sorted(item.name for item in path.parent.iterdir())
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store_readonly(readonly_home)
-    assert caught.value.code == "store_unavailable" and _ReadOnlyModule.calls == []
-    assert sorted(item.name for item in path.parent.iterdir()) == before == ["mordred.db"]
-
-
-def test_a_wal_store_with_a_writer_answers_counts(readonly_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    path = wal_store(readonly_home)
-    monkeypatch.setattr(store_module, "BUSY_TIMEOUT_S", 0.05)
-    holder = sqlite3.connect(path, isolation_level=None)  # a fetch: its connection keeps -wal and -shm
-    holder.execute("BEGIN IMMEDIATE")
-    holder.execute("INSERT INTO import_meta (key, value) VALUES ('mail_imap.x.last', '{}')")
-    try:
-        assert Path(f"{path}-shm").exists()
-        status = open_import_store_readonly(readonly_home).status()
-        assert status["sources"]["telegram"]["messages"] == 1  # the uncommitted write is not visible
-    finally:
-        holder.rollback()
-        holder.close()
-
-
-@pytest.mark.parametrize("present", ["-shm", "-wal"])
-def test_a_wal_store_missing_one_sidecar_is_refused_without_creating_the_other(
-    readonly_home: Path, present: str
+@pytest.mark.parametrize("sidecars", [(), ("-shm", "-wal"), ("-shm",), ("-wal",)])
+def test_a_wal_store_is_refused_before_any_connection_whatever_sidecars_exist(
+    readonly_home: Path, sidecars: tuple[str, ...]
 ) -> None:
     path = wal_store(readonly_home)
-    Path(f"{path}{present}").write_bytes(b"")
+    for suffix in sidecars:
+        Path(f"{path}{suffix}").write_bytes(b"")
     before = sorted(item.name for item in path.parent.iterdir())
     with pytest.raises(ImportRefused) as caught:
         open_import_store_readonly(readonly_home)
     assert caught.value.code == "store_unavailable" and _ReadOnlyModule.calls == []
     assert sorted(item.name for item in path.parent.iterdir()) == before
+
+
+def test_a_wal_store_with_a_writer_is_refused_too(readonly_home: Path) -> None:
+    path = wal_store(readonly_home)
+    holder = sqlite3.connect(path, isolation_level=None)  # a writer: its connection keeps -wal and -shm
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        before = sorted(item.name for item in path.parent.iterdir())
+        assert before == ["mordred.db", "mordred.db-shm", "mordred.db-wal"]
+        with pytest.raises(ImportRefused) as caught:
+            open_import_store_readonly(readonly_home)
+        assert caught.value.code == "store_unavailable" and _ReadOnlyModule.calls == []
+        assert sorted(item.name for item in path.parent.iterdir()) == before
+    finally:
+        holder.rollback()
+        holder.close()
+
+
+@pytest.mark.parametrize("offset", [18, 19])
+def test_either_wal_format_byte_refuses(readonly_home: Path, offset: int) -> None:
+    commit(bound_store(readonly_home), tg_conv(), [authored(1, text="SECRET one")])
+    path = store_path(readonly_home)
+    header = bytearray(path.read_bytes())
+    assert header[18:20] == b"\x01\x01"  # a rollback-journal store
+    header[offset] = 2
+    path.write_bytes(bytes(header))
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(readonly_home)
+    assert caught.value.code == "store_unavailable" and _ReadOnlyModule.calls == []
+
+
+def test_a_rollback_store_with_a_writer_answers_counts(readonly_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    commit(bound_store(readonly_home), tg_conv(), [authored(1, text="SECRET one")])
+    path = store_path(readonly_home)
+    monkeypatch.setattr(store_module, "BUSY_TIMEOUT_S", 0.05)
+    holder = sqlite3.connect(path, isolation_level=None)  # a fetch writing a batch
+    holder.execute("BEGIN IMMEDIATE")
+    holder.execute("INSERT INTO import_meta (key, value) VALUES ('mail_imap.x.last', '{}')")
+    try:
+        with open_import_store_readonly(readonly_home) as store:
+            assert store.status()["sources"]["telegram"]["messages"] == 1  # the uncommitted write is not visible
+        assert not Path(f"{path}-wal").exists() and not Path(f"{path}-shm").exists()
+    finally:
+        holder.rollback()
+        holder.close()
 
 
 def test_the_read_only_store_keeps_one_connection_for_its_life(readonly_home: Path) -> None:
@@ -1108,44 +1130,53 @@ def test_the_real_shim_s_provider_is_never_consulted(real_shim: Path, monkeypatc
     assert _monitor.is_plaintext(store_path(real_shim)) is False
 
 
-def test_a_writer_closing_after_admission_never_makes_a_read_recreate_the_sidecars(
-    real_shim: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def real_wal_store(home: Path) -> Path:
+    """``home``'s encrypted store switched to WAL by a writer of its own (every connection closed)."""
+    from mordred_hermes.dbcrypt import _key
+    from mordred_hermes.keyvault.memory_crypto import decode_key
+
+    key = _key.derive(decode_key(MEMORY_KEY))
+    path = store_path(home)
+    writer = _shim.build_module(key=lambda: key, home=lambda: home, has_key=lambda: True)
+    with contextlib.closing(writer.connect(str(path))) as conn:
+        conn.execute("PRAGMA journal_mode = WAL").fetchone()
+    return path
+
+
+def test_a_real_wal_store_with_a_running_writer_is_refused_and_left_alone(real_shim: Path) -> None:
     import os
 
     from mordred_hermes.dbcrypt import _key
     from mordred_hermes.keyvault.memory_crypto import decode_key
 
+    path = real_wal_store(real_shim)
     key = _key.derive(decode_key(MEMORY_KEY))
-    path = store_path(real_shim)
     writer = _shim.build_module(key=lambda: key, home=lambda: real_shim, has_key=lambda: True)
-    with contextlib.closing(writer.connect(str(path))) as conn:
-        conn.execute("PRAGMA journal_mode = WAL").fetchone()
-    assert not Path(f"{path}-shm").exists()  # every connection closed: SQLite removed the sidecars
-    holder = writer.connect(str(path))  # a fetch running
+    holder = writer.connect(str(path))  # a fetch running: both sidecars exist
     holder.execute("SELECT count(*) FROM import_meta").fetchone()
-    inodes = {suffix: os.stat(f"{path}{suffix}").st_ino for suffix in ("-shm", "-wal")}
-    store = open_import_store_readonly(real_shim)
-    holder.close()  # the fetch ends after the page's admission
-    assert {suffix: os.stat(f"{path}{suffix}").st_ino for suffix in ("-shm", "-wal")} == inodes  # kept, not recreated
-    assert store.status()["sources"]["telegram"]["messages"] == 1
-    store.close()
-    assert sorted(item.name for item in path.parent.iterdir()) == ["mordred.db", "mordred.db-shm", "mordred.db-wal"]
-    assert {suffix: os.stat(f"{path}{suffix}").st_ino for suffix in ("-shm", "-wal")} == inodes
+    try:
+        inodes = {suffix: os.stat(f"{path}{suffix}").st_ino for suffix in ("-shm", "-wal")}
+        with pytest.raises(ImportRefused) as caught:
+            open_import_store_readonly(real_shim)
+        assert caught.value.code == "store_unavailable"
+        assert {suffix: os.stat(f"{path}{suffix}").st_ino for suffix in ("-shm", "-wal")} == inodes
+    finally:
+        holder.close()
 
 
 def test_an_idle_real_wal_store_is_refused_before_any_sidecar_exists(real_shim: Path) -> None:
-    from mordred_hermes.dbcrypt import _key
-    from mordred_hermes.keyvault.memory_crypto import decode_key
-
-    key = _key.derive(decode_key(MEMORY_KEY))
-    path = store_path(real_shim)
-    writer = _shim.build_module(key=lambda: key, home=lambda: real_shim, has_key=lambda: True)
-    with contextlib.closing(writer.connect(str(path))) as conn:
-        conn.execute("PRAGMA journal_mode = WAL").fetchone()
+    path = real_wal_store(real_shim)
     with pytest.raises(ImportRefused) as caught:
         open_import_store_readonly(real_shim)
     assert caught.value.code == "store_unavailable"
+    assert sorted(item.name for item in path.parent.iterdir()) == ["mordred.db"]
+
+
+def test_a_real_rollback_store_creates_no_sidecar(real_shim: Path) -> None:
+    path = store_path(real_shim)
+    assert path.read_bytes()[18:20] == b"\x01\x01"  # mordred.db is created in rollback mode
+    with open_import_store_readonly(real_shim) as store:
+        assert store.status()["sources"]["telegram"]["messages"] == 1
     assert sorted(item.name for item in path.parent.iterdir()) == ["mordred.db"]
 
 

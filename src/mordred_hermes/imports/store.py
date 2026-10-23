@@ -1547,8 +1547,9 @@ def open_import_store(home: Path) -> ImportStore:
 
 # --- the read-only status path ----------------------------------------------------------------
 
-#: Bytes 18 and 19 of a SQLite header (write and read format versions); 2 and 2 mean WAL mode.
-_WAL_FORMAT: Final = b"\x02\x02"
+#: The write and read format version bytes of a SQLite header; 2 in either means WAL mode.
+_FORMAT_VERSION_BYTES: Final = slice(18, 20)
+_WAL_VERSION: Final = 2
 
 
 def readonly_store_path(home: Path) -> Path:
@@ -1629,11 +1630,10 @@ class ReadOnlyImportStore(ImportStore):
     """The status view of ``mordred.db``: ONE read-only connection for the store's whole life.
 
     Every read runs on the connection :func:`open_import_store_readonly` opened at
-    admission, so nothing is ever reopened: a writer closing meanwhile cannot make a
-    later read recreate the WAL sidecars (while this connection is open, SQLite does
-    not remove them). :meth:`close` (or leaving a ``with`` block, or dropping the
-    object) closes it; a read after that is ``store_unavailable``. Writes fail
-    (``mode=ro``).
+    admission (a rollback-journal store; a WAL store is refused there), so nothing
+    is reopened between reads. :meth:`close` (or leaving a ``with`` block, or
+    dropping the object) closes it; a read after that is ``store_unavailable``.
+    Writes fail (``mode=ro``).
     """
 
     def __init__(self, path: Path, conn: sqlite3.Connection) -> None:
@@ -1683,10 +1683,14 @@ def open_import_store_readonly(home: Path) -> ReadOnlyImportStore:
     and ``HERMES_MEMORY_KEY`` already in the environment and decoding to 32 bytes
     (``no_key`` otherwise; read once, the derived key serves every later read of
     the returned store). The path is computed without creating directories; no
-    file (or an empty one) is ``store_uninitialised``. A WAL store whose ``-shm``
-    or ``-wal`` sidecar is absent is ``store_unavailable``: SQLite would create it
-    even for a read-only connection (a fetch or an import creates them), and
-    ``immutable=1`` would disable locking. The file must not be plaintext; it is
+    file (or an empty one) is ``store_uninitialised``. Only rollback-journal stores
+    are read: a header that says WAL (either format byte is 2) is
+    ``store_unavailable`` before any connection, whatever sidecars exist, because a
+    ``mode=ro`` reader of a WAL file may create ``-wal``/``-shm`` when a writer
+    closes between any check and the open, and no lock is shared with every
+    writer (``immutable=1`` would disable locking instead). Mordred never puts
+    ``mordred.db`` in WAL mode: it is created in rollback mode, and only a
+    conversion keeps WAL for a file that already was. The file must not be plaintext; it is
     opened ``mode=ro`` through SQLCipher itself (not the process ``sqlite3``
     shim, whose key provider could inject the vault) with the derived key, and
     any open failure is ``store_unavailable``; ``import_meta`` is read with plain
@@ -1724,7 +1728,7 @@ def open_import_store_readonly(home: Path) -> ReadOnlyImportStore:
 
 
 def _readonly_file(home: Path) -> Path:
-    """The existing, non-empty, not-plaintext store file of ``home``, readable without creating a sidecar."""
+    """The existing, non-empty, not-plaintext, rollback-journal store file of ``home`` (nothing is created)."""
     from ..dbcrypt import _monitor
 
     path = readonly_store_path(home)
@@ -1736,23 +1740,21 @@ def _readonly_file(home: Path) -> Path:
         raise ImportRefused("store_unavailable")
     if info is None or info.st_size == 0:
         raise ImportRefused("store_uninitialised")
-    if _wal_without_reader_sidecar(path):
-        raise ImportRefused("store_unavailable")
+    if _wal_mode(path):
+        raise ImportRefused("store_unavailable")  # rollback-journal stores only: see open_import_store_readonly
     if _monitor.is_plaintext(path):
         raise ImportRefused("plaintext_store")
     return path
 
 
-def _wal_without_reader_sidecar(path: Path) -> bool:
-    """A WAL-mode file (header bytes 18-19) missing its ``-shm`` or ``-wal``: opening it would create them."""
+def _wal_mode(path: Path) -> bool:
+    """Whether the header's format bytes (18-19, plaintext also in an encrypted store) say WAL."""
     try:
         with path.open("rb") as handle:
-            header = handle.read(20)
+            header = handle.read(_FORMAT_VERSION_BYTES.stop)
     except OSError:
         raise ImportRefused("store_unavailable") from None
-    if header[18:20] != _WAL_FORMAT:
-        return False
-    return any(_lstat(Path(f"{path}{suffix}")) is None for suffix in ("-shm", "-wal"))
+    return _WAL_VERSION in header[_FORMAT_VERSION_BYTES]
 
 
 def _readonly_meta(store: ReadOnlyImportStore) -> dict[str, str] | None:
