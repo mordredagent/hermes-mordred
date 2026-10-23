@@ -612,10 +612,15 @@ class MailSetupFlows:
         raise MailSetupError(code)
 
     def _seal(self, creds: MailCredentials, presence: bool) -> None:
-        """Seal under the lock, rewriting the setup generation first; a failure removes what it wrote."""
+        """Seal under the lock, then rewrite the setup generation; a failure removes what it wrote.
+
+        The generation changes only with a seal that succeeded, so a ``finish``
+        whose seal failed can be retried; flows that waited across a successful
+        seal, in any process, go stale.
+        """
         try:
-            new_setup_generation(self._home())  # flows that waited across this seal, in any process, go stale
             self._secret_store.store(creds, require_presence=presence)
+            new_setup_generation(self._home())
         except BaseException as exc:
             with contextlib.suppress(Exception):
                 if self._secret_store.residue():

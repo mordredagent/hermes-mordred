@@ -844,3 +844,35 @@ def test_the_defaults_are_the_real_connect_lock_and_home(
         start(MailSetupFlows(secrets))
     assert raised.value.code == "imap_unreachable" and seen == [("imap.example.com", 993)]
     assert (home / "mordred" / "mail" / ".lock").is_file()
+
+
+def test_a_finish_whose_seal_failed_can_be_retried(
+    secrets: MailSecretStore, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flows = make_flows(secrets, home, Connector(no_folder_server()))
+    flow = start(flows)
+    real_store = secrets.store
+    failures = [MailSecretsError("tee_unavailable")]
+
+    def flaky(value: Any, *, require_presence: bool = True) -> None:
+        if failures:
+            raise failures.pop()
+        real_store(value, require_presence=require_presence)
+
+    monkeypatch.setattr(secrets, "store", flaky)
+    with pytest.raises(MailSetupError) as raised:
+        flows.finish(flow.flow_id, selection=None)
+    assert raised.value.code == "tee_unavailable" and credential_files(secrets) == []
+    assert flows.finish(flow.flow_id, selection=None).step == "done"  # not stale: the generation did not move
+
+
+def test_a_generation_that_cannot_be_written_undoes_the_seal(
+    secrets: MailSecretStore, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unwritable(_home: Path) -> str:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(setup_flow, "new_setup_generation", unwritable)
+    with pytest.raises(MailSetupError) as raised:
+        start(make_flows(secrets, home, Connector(gmail_server())))
+    assert raised.value.code == "store_path_unsafe" and credential_files(secrets) == []
