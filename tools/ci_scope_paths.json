@@ -189,6 +189,12 @@
     "src/mordred_hermes/extension/web/index.html": [
       "package"
     ],
+    "src/mordred_hermes/imports/mail/forget.py": [
+      "macos"
+    ],
+    "src/mordred_hermes/imports/mail/setup_flow.py": [
+      "macos"
+    ],
     "src/mordred_hermes/llm_guard/__init__.py": [],
     "src/mordred_hermes/llm_guard/_cloud_endpoint.py": [],
     "src/mordred_hermes/llm_guard/_exceptions.py": [],
@@ -423,6 +429,9 @@
     ],
     "tests/test_local_adapter.py": [
       "floor"
+    ],
+    "tests/test_mail_setup_flow.py": [
+      "macos"
     ],
     "tests/test_network_api.py": [
       "network",
