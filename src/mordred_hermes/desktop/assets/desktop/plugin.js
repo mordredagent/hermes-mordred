@@ -842,7 +842,10 @@ function storeSources(status) {
 const mailLabel = (mail) => (typeof mail.account === 'string' && /^[a-z][a-z0-9_]{0,31}$/.test(mail.account) ? mail.account : null)
 const timed = (entry) => (entry && typeof entry === 'object' && typeof entry.at === 'number' ? entry : null)
 // A recorded error: its code, or 'failed' when it is not a well-formed code.
-const attemptError = (value) => (value == null ? null : safeCode(value) || 'failed')
+// A code the page names: one of its own MESSAGES keys (never an unknown backend code).
+const knownCode = (value) => (own(MESSAGES, value) ? value : null)
+// A recorded error: its code when the page knows it, else 'failed'.
+const attemptError = (value) => (value == null ? null : knownCode(value) || 'failed')
 // The latest fetch: `last_attempt`, else `last_success` (a complete one).
 function lastFetch(mail) {
   const attempt = timed(mail.last_attempt)
@@ -1344,7 +1347,13 @@ function MemoryStep({ id = null, n, state, blocker = null, goto = null, refresh,
     children: jsxs(Fragment, {
       children: [
         // The vault exists (this step is open only then): a retry runs the memory half alone.
-        split && failure ? jsx('p', { key: 'retry', children: `Vault created, memory encryption failed (${safeCode(failure.code) || 'failed'}); retry.` }) : null,
+        split && failure
+          ? jsx('p', {
+              key: 'retry',
+              // Only a code of the page's own table is named; an unknown one is left out.
+              children: `Vault created, memory encryption failed${knownCode(failure.code) ? ` (${failure.code})` : ''}; retry.`,
+            })
+          : null,
         jsx('p', { key: 'body', children: linux ? linuxBody : split ? MEMORY_ONLY_BODY : MEMORY_BODY }),
         linux || split ? null : jsx(AskEveryTime, { key: 'ask', checked: askEveryTime, onChange: setAskEveryTime }),
         jsx(Row, {
@@ -2082,9 +2091,9 @@ function resultParts(result) {
     const value = result[key]
     if (typeof value === 'number' && Number.isFinite(value) && value !== 0) return [`${label} ${value}`]
     if (value === true) return [`${label}: yes`]
-    const code = safeCode(value)
-    if (code) return [`${label}: ${key === 'partial_reason' ? PARTIAL_REASON_LABELS[code] || code : code}`]
-    return []
+    if (key === 'partial_reason') return own(PARTIAL_REASON_LABELS, value) ? [`${label}: ${PARTIAL_REASON_LABELS[value]}`] : []
+    const code = knownCode(value)
+    return code ? [`${label}: ${code}`] : []
   })
 }
 

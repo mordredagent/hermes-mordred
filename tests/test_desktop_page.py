@@ -1722,6 +1722,28 @@ def test_vault_commit_failure_with_a_stale_anchor_renders_its_remedy():
     assert render_page_words(result["tree"]) == []
 
 
+def test_memory_retry_line_names_only_codes_the_page_knows():
+    unknown = memory({"ok": False, "error": "secret_canary"}, kind="secure_enclave", split=True)
+    text = json.dumps(unknown["tree"], ensure_ascii=False)
+    assert "Vault created, memory encryption failed; retry." in text
+    assert "secret_canary" not in text
+    assert "The request failed." in text, "StepFailure falls back to the fixed sentence"
+
+
+def test_unknown_fetch_codes_are_never_shown_verbatim():
+    failed = {**MAIL_SET_UP, "last_attempt": {"at": NOW_MS // 1000 - 60, "error": "secret_canary", "partial": False}}
+    assert rows(mac(**v4(mail=failed)))["mail"] == (
+        "attention",
+        "account work · 0 messages · last fetch 1 minute ago (failed)",
+    )
+    card = component(mail_step(mac(**v4(mail=failed)), "attention", "failed"), [], FAST)
+    assert "Last attempt: 1 minute ago (failed)." in card["text"] and "secret_canary" not in json.dumps(card["tree"])
+    parts = render_page(
+        "console.log(JSON.stringify(resultParts({error: 'secret_canary', partial_reason: 'secret_canary'})))"
+    )
+    assert parts == []
+
+
 def test_memory_step_after_the_vault_encrypts_memory_only():
     result = memory({"ok": True}, kind="secure_enclave", split=True)
     assert result["requests"] == [["/memory/enable", {}]]
