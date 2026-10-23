@@ -298,6 +298,28 @@ def test_a_late_handshake_result_is_closed_whoever_finishes_last() -> None:
         release.set()
 
 
+def test_a_handshake_slot_is_released_when_the_worker_never_runs() -> None:
+    """A link that is already interrupted fails before the worker starts: the admitted slot comes back."""
+    server = FakeImapServer({"INBOX": FakeMailbox(1)})
+
+    class Verifier(ssl.SSLContext):
+        def wrap_socket(self, sock: socket.socket, *args: Any, **kw: Any) -> socket.socket:  # type: ignore[override]
+            return sock
+
+    class Client(GuardedIMAP4SSL):
+        def __init__(self) -> None:
+            self.host = "imap.example.com"
+            self.ssl_context = Verifier()
+            self._raw_socket = server.connect
+
+    before = imap._abandoned_handshakes.active
+    with _armed(budget=5.0) as link:
+        link.interrupt()  # bounded() refuses at its first check, before any thread starts
+        with pytest.raises(imap.ImapError):
+            Client()._tls_socket(link)
+    assert imap._abandoned_handshakes.active == before
+
+
 def test_abandoned_handshake_workers_are_capped() -> None:
     """A verifier that never returns keeps its worker; past the cap a new attempt is refused at once."""
     server = FakeImapServer({"INBOX": FakeMailbox(1)})

@@ -1021,23 +1021,29 @@ class GuardedIMAP4SSL(_CommandGuard, imaplib.IMAP4_SSL):
                 if not _abandoned_handshakes.admit():
                     _emit("mordred imap: too many abandoned handshakes still running; refusing a new one")
                     raise ImapError("imap_unreachable")
-                mirror = socket.socket(fileno=os.dup(raw.fileno()))
-                link.hold(mirror)
-                handoff = _Handoff()
-
-                def wrap() -> socket.socket:
-                    try:
-                        return handoff.publish(context.wrap_socket(raw, server_hostname=self.host))
-                    finally:
-                        _abandoned_handshakes.release()
-
+                slot = _Slot(_abandoned_handshakes)
                 try:
-                    wrapped = link.bounded(wrap, name=HANDSHAKE_NAME)
-                except BaseException:
-                    handoff.abandon()  # a socket the worker still produces is closed by whoever owns it last
-                    raise
+                    mirror = socket.socket(fileno=os.dup(raw.fileno()))
+                    link.hold(mirror)
+                    handoff = _Handoff()
+
+                    def wrap() -> socket.socket:
+                        if not slot.start():  # the waiter gave up before this thread ran: do nothing
+                            raise ImapError("imap_unreachable")
+                        try:
+                            return handoff.publish(context.wrap_socket(raw, server_hostname=self.host))
+                        finally:
+                            slot.done()
+
+                    try:
+                        wrapped = link.bounded(wrap, name=HANDSHAKE_NAME)
+                    except BaseException:
+                        handoff.abandon()  # a socket the worker still produces is closed by whoever owns it last
+                        raise
+                    finally:
+                        link.drop(mirror)
                 finally:
-                    link.drop(mirror)
+                    slot.forfeit()  # releases the slot when the worker never ran (an early failure)
             else:
                 wrapped = context.wrap_socket(raw, server_hostname=self.host, do_handshake_on_connect=False)
         except BaseException:
@@ -1111,6 +1117,34 @@ class _WorkerCap:
     def active(self) -> int:
         with self._lock:
             return self._active
+
+
+class _Slot:
+    """One admitted handshake slot: released by the worker when it ran, by the waiter when it never did."""
+
+    def __init__(self, cap: _WorkerCap) -> None:
+        self._cap = cap
+        self._lock = threading.Lock()
+        self._state = "pending"  # pending -> running -> done, or pending -> void
+
+    def start(self) -> bool:
+        with self._lock:
+            if self._state != "pending":
+                return False
+            self._state = "running"
+            return True
+
+    def done(self) -> None:
+        with self._lock:
+            self._state = "done"
+        self._cap.release()
+
+    def forfeit(self) -> None:
+        with self._lock:
+            if self._state != "pending":
+                return
+            self._state = "void"
+        self._cap.release()
 
 
 #: A verifier that never returns keeps its worker thread and detached socket; this bounds how many.
