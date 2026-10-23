@@ -807,14 +807,23 @@ Follow-ups left by the landed code:
   way to change the Touch ID choice without `mail forget` and a new setup.
 
 - [ ] Desktop operability (owner request 2026-10-23): drive the mail collector
-  (`mail setup`, `mail fetch`, `mail import`, `mail status`, `mail forget`) and the
-  macOS ceremonies that `mordred.db` depends on (`encryption enable env`,
-  `encryption enable memory`, `databases encrypt`) from the Mordred Desktop page
-  (`extension/web/index.html` over the paired loopback gateway), the way
-  `telegram login` already has `login_flow.py`. The app password and the recovery
-  passphrase are typed in the page and travel only over the paired channel; the
-  page shows counts and codes only; the CLI stays as the fallback and the
-  reader-mode and egress rules do not change.
+  (`mail setup`, `mail fetch`, `mail status`, `mail forget`) and the macOS
+  ceremonies that `mordred.db` depends on (`encryption enable env`,
+  `encryption enable memory`, `databases encrypt`) from the Mordred page in Hermes
+  Desktop. The page is `src/mordred_hermes/desktop/assets/desktop/plugin.js` behind
+  `desktop/api.py` and Hermes's plugin REST bridge (not `extension/web/index.html`,
+  which is the browser-extension launcher page). The app password is typed in the
+  page and travels only through `ctx.rest()` to Mordred's local API; the page shows
+  counts and codes only, the CLI stays as the fallback, and reader-mode and egress
+  rules do not change. Design and PR split:
+  [SPEC](SPEC.md#desktop-mail-and-ceremony-pages-2026-10-23),
+  [PLAN](PLAN.md#desktop-mail-and-ceremony-pages-implementation).
+  - [ ] D1: documentation (stays unchecked until merged).
+  - [ ] D2: mail library (`imap.py` hints, `setup_flow.py`, `forget.py`, CLI drivers).
+  - [ ] D3: page framework (`Step` states, overview card, groups, `client_version=4`).
+  - [ ] D4: Desktop backend and sections (`/status` v4, `/databases/*`, `/mail/*`,
+    `vault_anchor_stale`, `DatabasesStep`, `MailStep`), then the live checklist in
+    [CI.md](CI.md#manual-live-device-validation-log).
 
 - [ ] CLI counts after the Telegram archive moved to `mordred.db` (found during
   the production rollout, 2026-10-23). `hermes-mordred telegram status` prints
@@ -832,6 +841,9 @@ Follow-ups left by the landed code:
   `source = mail` rows only, which is correct; a source-neutral
   `hermes-mordred imports status` (counts per source, no content) would make
   the shared store visible without either secret.
+  The Desktop page reads per-source counts from the import store
+  (`ImportStore.status()["sources"]`), which needs no Telegram secret, so the page
+  is not affected by this gap and the CLI fix can reuse the same call.
 
 - [ ] Native helper build cache inside the Hermes home (found 2026-10-23,
   separate `dbcrypt` / `keyvault` PR). `keyvault enable-se` builds the helper
@@ -873,10 +885,17 @@ Follow-ups left by the landed code:
   required, `ALERT` web login required), never the free text, and print the
   remediation (same Google account as the address, primary sign-in address,
   2-Step Verification on, Workspace admins can disable IMAP or app passwords,
-  Advanced Protection disables app passwords) in the CLI and on the page.
+  Advanced Protection disables app passwords) in the CLI and on the page
+  (designed in the Desktop design doc, implemented by PR D2).
 
 Later (not scheduled):
 
+- [ ] Desktop `mail import` (file picker): Takeout mbox and `.eml` import from the
+  Mordred page; needs a file picker and a long-running job over a user-chosen path.
+  It stays a terminal command until then.
+- [ ] Typed recovery passphrase on the page: the page generates and shows an
+  eight-word passphrase once; a "choose my own" option would match the terminal
+  ceremony.
 - [ ] Gmail API collector feeding the same normalization path.
 - [ ] OAuth 2.0 for mail instead of app passwords: `XOAUTH2` over the same IMAP
   collector and/or the Gmail API (needs an OAuth client, consent flow and the

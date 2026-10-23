@@ -1638,6 +1638,10 @@ authority when hardware disappears or loses permissions after a status check.
 - No Linux screen or error remediation prescribes Xcode or Touch ID. Local
   model guidance says this host, not this Mac. Legacy client/server combinations
   must retain a safe unsupported/setup-incomplete state.
+- Desktop `/status?client_version=4` (macOS only) adds the keys `databases`,
+  `imports` and `mail`; requests with `client_version <= 3` keep their keys. A
+  page that receives none of them treats Mordred as older and offers an update
+  ([Desktop mail and ceremony pages](#desktop-mail-and-ceremony-pages-2026-10-23)).
 
 ### EC2 validation contract
 
@@ -4861,6 +4865,253 @@ Where the code differs from the design record:
   grouping; an abandonment that cannot fail the worker's run in time keeps
   the writer lock with the worker (result field `lock_retained`), and the
   tool's cleanup is bounded by the call's grace.
+- Desktop mail setup (2026-10-23): `ImapError` carries an optional `hint` from the
+  closed set `IMAP_HINTS` (`authentication_failed`, `server_alert`,
+  `login_disabled`, `gmail_app_password_length`), derived from the response code
+  only and never from the server's text; setup and forget become shared library
+  code (`imports/mail/setup_flow.py`, `forget.py`) used by the CLI and the Desktop
+  page, and `mail.fetch` audit entries may carry `via: "desktop"`. See
+  [Desktop mail and ceremony pages](#desktop-mail-and-ceremony-pages-2026-10-23).
+
+## Desktop mail and ceremony pages (2026-10-23)
+
+Status: specification; nothing below is implemented yet. Design record:
+[`2026-10-23-desktop-mail-and-ceremonies-design.md`](../superpowers/specs/2026-10-23-desktop-mail-and-ceremonies-design.md).
+Delivery is the PR sequence D1 to D4 in
+[PLAN.md](PLAN.md#desktop-mail-and-ceremony-pages-implementation).
+
+The Mordred page in Hermes Desktop is `src/mordred_hermes/desktop/assets/desktop/plugin.js`
+(one plain ES module, no build step) behind `src/mordred_hermes/desktop/api.py`
+and Hermes's plugin REST bridge (`/api/plugins/mordred/…`, session-token
+protected, loopback only). It is not the browser-extension launcher page
+`extension/web/index.html`. A macOS owner MUST be able to protect the Mac, connect
+Telegram and a mailbox, fetch mail, see counts and remove the mailbox from this
+page without a terminal.
+
+Everything typed on the page (app password, Telegram codes, a Venice key) MUST keep
+the existing path: masked inputs, `ctx.rest()`, Mordred's local API, sealing by the
+Secure Enclave. None of it may reach the chat, the model, the agent's tools, plugin
+storage, notifications or logs. Inputs MUST be cleared after every submit. The page
+MUST show counts and codes only, never an address, a subject, a name or a body.
+
+Out of scope: Linux and Windows branches (unchanged), `mail import` from the page,
+a typed recovery passphrase, the stale-anchor fix itself (a `keyvault` PR), reader
+mode, egress rules, what the Hermes tools return, and any new bundler or framework.
+
+### Page structure and states
+
+- **Platform gating.** The new sections MUST render only when the API reports
+  `platform === "darwin"` and `hardware_kind === "secure_enclave"`. `hardware_kind
+  === "tpm"` keeps today's Linux list and the overview shows "Databases: not
+  available on Linux" and "Mail: not available on Linux". `hardware_kind === "cng"`
+  keeps `WindowsSetup` untouched. The layout MUST be chosen from these fields, never
+  from English text.
+- **Layout.** One column (max 760 px): an overview card, then four groups in a
+  fixed order, each a `section` with an `h2` and `aria-labelledby`: **1 Protect this
+  Mac** (1.1 Secure Enclave helper, 1.2 Encrypt Hermes memory and secrets, 1.3
+  Encrypt Hermes databases), **2 Connect** (2.1 Hermes chat model, 2.2 Question
+  model, 2.3 Telegram, 2.4 Import Telegram messages, 2.5 Mail over IMAP), **3 Ask
+  Hermes** (copy only), **4 Maintenance** (update, repair, uninstall). `RepairPanel`
+  keeps the top place and, when shown, nothing else renders.
+- **Overview card.** Four `StatusRow({dot, label, detail, target})` rows (Hermes
+  chat model, Protection, Telegram, Mail). The dot is `done`, `partial`, `not
+  started` or `attention`, drawn with `currentColor`, `var(--ui-accent)` or
+  `var(--destructive)`. The detail MUST be built only from status fields; the Mail
+  row shows the owner's opaque account label, never an address; a "Go" link scrolls
+  to and focuses the group heading.
+- **Step states.** `Step` takes a `state`: `done` (muted, one-line summary, a toggle
+  opens the body), `next` (the first not-done step in reading order, accent border),
+  `todo`, `blocked` (body replaced by the reason and a "Go to step X" button),
+  `running` (spinner, controls disabled, `role="status" aria-live="polite"`;
+  restored after a page re-open from `status.jobs[].kind`) and `attention`
+  (`var(--destructive)` border, a `FailureNote`).
+- **Blocked reasons** are codes from the `BLOCKERS` table, never free text from the
+  API: `needs_hermes_model`, `needs_enclave`, `needs_memory`, `needs_databases`,
+  `needs_restart`, `needs_login`, `needs_question_model`. Until the databases are
+  armed after step 1.3, steps 2.4 and 2.5 MUST be `blocked` with `needs_restart`.
+- **Why blocks.** Every step has a native `<details>`/`<summary>` ("Why this
+  step?"). Step 1.2 offers "Ask for Touch ID every time Hermes unlocks the vault",
+  off by default, and MUST send `{"unattended": !askEveryTime}` to `/memory/enable`.
+- **Versioning.** The page MUST request `client_version=4`. An API answer without
+  the `databases`, `imports` and `mail` keys is an older Mordred: the new steps then
+  render in the attention state as "Update Mordred to use this", never as done or
+  blocked.
+- **Accessibility and imports.** Colours only through `currentColor`, `CanvasText`
+  and the SDK theme variables; hex literals only as `var(--…, #…)` fallbacks.
+  Failures use `role="alert"`; after a submit, focus moves to the result or failure
+  note. The page MUST NOT add a named import from `@hermes/plugin-sdk` beyond
+  `Button`, `Checkbox`, `Input`, `host` and the three area constants, because an
+  export the installed Desktop lacks removes the whole page.
+- **Mail card.** Not set up: the app-password guidance (2-Step Verification,
+  <https://myaccount.google.com/apppasswords>, never the account password, revocable,
+  spaces allowed), the fields address, other addresses, IMAP server, account label
+  and app password, and the "Allow syncing without Touch ID" choice. When the flow
+  answers `step: "folders"` the card lists folder names with radio buttons and a
+  **Finish** button. Set up: label, scope, Touch ID mode, last fetch and store
+  count, **Fetch new mail** with an optional `since`, the counts-only result, and
+  **Remove this mailbox** with the `delete my data` confirmation when rows are
+  deleted. The result block MUST render only the non-zero or non-null keys of
+  `FetchResult.as_dict()` in a fixed order (`RESULT_FIELDS`) plus the `partial`
+  sentence.
+- **New `MESSAGES` entries**: `databases_unsupported`, `databases_key_missing`,
+  `databases_failed`, `databases_busy`, `vault_anchor_stale`,
+  `mail_already_configured`, `mail_setup_flow_expired`, `mail_fetch_busy`,
+  `mail_not_configured`, `invalid_address`, `invalid_host`, `invalid_account`,
+  `invalid_password`, `too_many_addresses`, `imap_auth_failed`, `imap_unreachable`,
+  `imap_protocol`, `imap_command_refused`, `routing_unavailable`,
+  `egress_unsupported`, `import_store_unavailable`, `not_armed`,
+  `conversion_pending`, `unprotected_process`, `no_key`, `plaintext_store`, `busy`,
+  `credentials_changed`, `credentials_left`, `key_left`, `account_unknown`,
+  `fetch_failed`, `run_failed`; plus explicit `IMAP_HINTS` and `BLOCKERS` tables.
+  A page test MUST check that every code in the API's closed sets has an entry. The
+  `sync_in_progress` text becomes "A Telegram import or a mail fetch is already
+  running."
+- **Stale anchor.** `vault_anchor_stale` renders the `remedy` from the response with
+  a copy button.
+
+### Mail setup flow
+
+`imports/mail/setup_flow.py` provides the step-wise flow that `mail setup` and the
+page share (modelled on `extension/telegram/login_flow.py`). `cmd_setup` MUST be a
+thin driver over it so the two entry points cannot drift.
+
+- `MailSetupFlow` fields: `flow_id`, `creds` (`MailCredentials`), `presence`
+  (Touch ID per use), `folders` (selectable `LIST` entries; empty on the Gmail
+  path), `gmail`, `step` (`"folders"` or `"done"`), `created`. The flow lives in
+  memory only, with a TTL of 600 s; its `__repr__` MUST NOT print a secret.
+- `MailSetupFlows(secret_store, *, connect, lock, home, clock)` offers
+  `start(address, imap_host, account, extra_addresses, app_password, presence)`,
+  `finish(flow_id, sent)` and `cancel(flow_id)`.
+- `start` MUST validate (`_own_address`, `valid_host`, `ACCOUNT_RE`, at most 20 extra
+  addresses, a password of 1 to 256 printable characters, whitespace stripped for
+  Gmail). On `imap.gmail.com` a stripped length other than 16 MUST fail with
+  `imap_auth_failed` and hint `gmail_app_password_length` before any connection.
+  It MUST refuse when credentials are already sealed (`mail_already_configured`),
+  call `secret_store.ensure_key(require_presence=presence)` before contacting the
+  server, then, under `fetch_lock(home)`, make one read-only login (`connect`,
+  `login`, `list_mailboxes`, `logout`).
+- Gmail (`X-GM-EXT-1`) chooses All Mail, seals at once and answers `done`. A generic
+  server with a `\Sent` special-use folder seals and answers `done`. A generic server
+  without one keeps the flow (password included) in memory only and answers
+  `folders` with the selectable entries (`name` as an opaque id, `display`
+  sanitised like `_term_safe`, at most 200 characters). `finish(sent=…)` re-takes
+  the lock and seals `MailCredentials` with `{"inbox": …, "sent": …}`.
+- Nothing may be written before the seal; a refusal, a cancel or an expiry leaves no
+  `credentials.*` file.
+- `MailSetupError(code, hint=None)` codes: `invalid_address`, `invalid_host`,
+  `invalid_account`, `invalid_password`, `too_many_addresses`,
+  `mail_already_configured`, `mail_setup_flow_expired`, `sync_in_progress`,
+  `store_path_unsafe`, `tee_unavailable`, `tee_auth_cancelled`, `imap_unreachable`,
+  `imap_auth_failed`, `imap_protocol`, `imap_command_refused`,
+  `routing_unavailable`, `egress_unsupported`.
+- Routes (all macOS only, all behind `_require_memory()`; bodies hand-validated;
+  expected failures answer HTTP 200 with `{"ok": false, "error": code, "hint"?}`):
+
+| route | body | answer |
+|---|---|---|
+| `POST /mail/setup/start` | `{"address", "imap_host"?, "account"? (default `mail`), "extra_addresses"?: [..], "app_password", "touch_id"?: bool (default true)}` | `{"ok": true, "flow_id", "step": "done" \| "folders", "gmail": bool, "account", "folders"?: [{"id", "display"}]}` |
+| `POST /mail/setup/{flow_id}/finish` | `{"sent": id \| null}` | `{"ok": true, "step": "done"}` |
+| `POST /mail/setup/{flow_id}/cancel` | none | `{"ok": true}` |
+| `POST /mail/fetch` | `{"max"?: 1-2000 (default 2000), "since"?: "YYYY-MM-DD", "mailbox"?: "all" \| "inbox" \| "sent", "dry_run"?: bool}` | job `mail_fetch`: `{"ok": true, "job_id", …}`; on completion `progress.result` is `FetchResult.as_dict()`; a `result.error` makes the job `failed` with that code |
+| `POST /mail/forget` | `{"rows": bool, "confirm"?: "delete my data"}` | `{"ok": true, "had_credentials", "deleted_messages", "cursors_deleted", "warnings": [codes]}` |
+| `GET /imports/status` | none | the `imports` and `mail` objects of `/status` |
+
+- `/mail/fetch` MUST use `FetchOptions(max_messages, roles, since, dry_run,
+  budget_s=DESKTOP_BUDGET_S (600.0), via="desktop")` and `imap_sync.default_env(home)`
+  and run `run_fetch` in a thread through `job.run_sync`. Progress is not streamed;
+  `progress.message` reads "Fetching new mail… up to 10 minutes". The `mail.fetch`
+  audit entry carries `via: "desktop"` (a new value of the existing key).
+- A second `mail_fetch` job answers `mail_fetch_busy`; a fetch, setup, import or
+  forget from the chat tool or the CLI holding `<home>/mordred/mail/.lock` answers
+  `sync_in_progress`.
+- `forget` moves from the CLI's `_identity` / `_forget_target` / `_locked_forget`
+  into `imports/mail/forget.py` as `forget(secret_store, home, *, account=None,
+  rows=False) -> Forgotten`. `rows: true` MUST require `confirm == PURGE_PHRASE`
+  (`delete my data`), checked before anything is read; a mismatch answers
+  `forget_confirm_mismatch`.
+- The address, the extra addresses, the app password and (generic path) folder
+  display names MUST NOT appear in `/mail/fetch`, `/mail/forget`, `/status`, job
+  views, `plugin.mordred.job` events, logs or captured output. Folder names appear
+  only in the `folders` list of `/mail/setup/start`.
+
+### IMAP failure hints
+
+- `ImapError` gains `hint: str | None`, a member of the closed set `IMAP_HINTS =
+  {"authentication_failed", "server_alert", "login_disabled",
+  "gmail_app_password_length"}`; anything else MUST be `None`.
+- `ImapSession.login` MUST derive the hint from the response code only: the
+  `str()` of the `imaplib.IMAP4.error` is matched with
+  `^\[([A-Z][A-Z0-9-]{1,30})\]`. `AUTHENTICATIONFAILED` gives
+  `authentication_failed`; `ALERT` gives `server_alert`; the `LOGINDISABLED`
+  capability gives `login_disabled`; no bracketed code gives `None`.
+  `gmail_app_password_length` is raised by the setup flow's pre-check.
+- The free text after the code MUST never be kept, logged or returned (Gmail's alert
+  text can hold a support URL and the account name). A canary in the alert text MUST
+  be absent from `str(exc)`, `repr(exc)` and the log.
+- `FetchStop` and `FetchResult` are unchanged (`error: "imap_auth_failed"`; the
+  serializer stays closed). The hint travels only with `MailSetupError` and, in
+  `mail fetch`'s text output, after the code when present. `mail setup` prints
+  `mail refused (imap_auth_failed: authentication_failed)`.
+
+### Databases from the page
+
+- `GET /status?client_version=4` on macOS adds `databases` from
+  `dbcrypt._migrate.discover(home, key=None)`, `armed(home)`, `pending_path`,
+  `journal_path` and `plaintext_backups`, without a key, a Touch ID prompt or a
+  capture: `{"supported": true, "armed": false, "pending": false, "journal": false,
+  "databases": [{"relative": "state.db", "state": "plaintext"}, …],
+  "plaintext_backups": 0}`. `state` is `plaintext`, `encrypted`, `unreadable` or
+  `missing`. On Linux and Windows the object is `{"supported": false}`.
+  `GET /databases/status` returns that object alone.
+- `POST /databases/encrypt` takes `{"dry_run": bool}` (default false) and mirrors
+  `wizard.databases_cli.databases_encrypt` without printing:
+  1. not macOS or `sqlcipher3` missing: `databases_unsupported`;
+  2. `KeyProvider()()` is `None`: `databases_key_missing`;
+  3. `discover(home, key)`; the response carries `databases` and
+     `plaintext_backups`;
+  4. `dry_run`: `{"ok": true, "action": "dry_run"}`;
+  5. nothing plaintext: `{"ok": true, "action": "nothing", "armed": …}`;
+  6. `_migrate.holders(paths)` unknown or non-empty: `_migrate.schedule(home)` and
+     `{"ok": true, "action": "scheduled", "restart_required": true}`; this is the
+     normal answer in Hermes Desktop, whose backend holds the files;
+  7. otherwise `_migrate.migrate(home, key, arm=arm)` in a thread and
+     `{"ok": true, "action": "encrypted", "converted": n, "unreadable": n,
+     "restart_required": false}`; `MigrationBusy` schedules as in 6;
+     `MigrationError` answers `databases_failed` and changes nothing. A repeated
+     call answers `scheduled` again (idempotent).
+- The key unwrap may show a Touch ID prompt when the vault key is attended.
+- After `scheduled` the step MUST show the restart control; after the restart the
+  status reports `armed: true` and the step is done.
+- `POST /memory/enable` keeps its behaviour and gains the stale-anchor
+  classification: before answering `memory_encryption_failed`, if
+  `not vault.artifacts_present(root)` and `default_anchor_store().read(
+  vault_identity(root)) is not None` (both read-only), the answer is
+  `{"ok": false, "error": "vault_anchor_stale", "anchor_identity":
+  "mordred-hermes.vault.<16 hex>", "remedy": "security delete-generic-password -s
+  mordred-hermes.vault.anchor -a mordred-hermes.vault.<16 hex>"}`. The identity is a
+  hash of the vault path, not a secret. When the `keyvault` fix lands, this becomes a
+  pass-through of the ceremony's own code.
+
+### Imports status
+
+- `GET /status?client_version=4` adds `imports`, from
+  `imports.store.open_import_store(home).status()["sources"]`: `{"available": true,
+  "code": null, "sources": {"telegram": {"conversations": 3, "messages": 25,
+  "parts": 25}, "mail": {"conversations": 0, "messages": 0, "parts": 0}}}`. No
+  Telegram or mail secret is needed.
+- A refusal of the SQLCipher gate is a state, not an error: `{"available": false,
+  "code": "not_armed" | "conversion_pending" | "unprotected_process" | "no_key" |
+  "plaintext_store" | "store_unavailable" | "busy", "sources": {}}`. The page MUST
+  read the Telegram counts from `imports.sources.telegram`, never from the in-process
+  summary or from `index.enc`.
+- `GET /status?client_version=4` adds `mail`: `wizard.mail_sync_cli.imap_status(store,
+  MailSecretStore().flags())` when the store is available (label, `gmail`, `scope`,
+  `touch_id`, `last_fetch {at, error, partial}`, cursors), otherwise the flags only,
+  for example `{"configured": true, "account": "work", "gmail": true, "scope":
+  ["all"], "touch_id": true, "last_fetch": null}`; not set up is `{"configured":
+  false}`. It MUST NOT contain the address.
+- Responses for `client_version <= 3` keep their keys unchanged. `jobs` lists running
+  jobs with `kind` (`mail_fetch`, `enclave`, `update`, `uninstall`).
 
 ## Imported-message provenance evaluation (2026-10-22)
 

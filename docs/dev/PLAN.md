@@ -2486,6 +2486,74 @@ allowlist, silenced debug output), `test_mail_trusted_meta.py`,
 cases in `tests/test_privacy_check_reader_mode.py`. A real fetch is
 live-gated ([CI.md](CI.md#provenance-evaluation-runs)).
 
+- Desktop follow-up (2026-10-23): the setup flow and the forget logic move into
+  `imports/mail/setup_flow.py` and `imports/mail/forget.py` so `mail setup`,
+  `mail forget` and the Desktop page share them; `imap.py` adds `ImapError.hint`
+  (PR D2 of the
+  [Desktop mail and ceremony pages implementation](#desktop-mail-and-ceremony-pages-implementation)).
+
+## Desktop mail and ceremony pages implementation
+
+**Spec:** [Desktop mail and ceremony pages](SPEC.md#desktop-mail-and-ceremony-pages-2026-10-23);
+design record
+[`2026-10-23-desktop-mail-and-ceremonies-design.md`](../superpowers/specs/2026-10-23-desktop-mail-and-ceremonies-design.md).
+One component per PR, all targeting `dev`. Each PR runs
+`uv run python tools/run_critical_tests.py`, the changed test modules, `ruff` and
+`mypy --strict`; D2 and D4 also run their complete containing test modules
+(security-sensitive). One full regression runs at the end of D4.
+
+### D1: documentation
+
+- Component: docs. Files: SPEC, PLAN, TODO, PATHS and CI under `docs/dev/`; USAGE,
+  TELEGRAM and QUICKSTART under `docs/user/`; the design document.
+- Tests: `tests/test_docs_links.py`. Depends on: nothing.
+- `tools/ci_scope_paths.json` lists only existing paths (a test asserts it), so
+  entries for new files are added by the PR that creates each file: D2 for
+  `src/mordred_hermes/imports/mail/setup_flow.py`, `forget.py` and
+  `tests/test_mail_setup_flow.py`; D3 for `tests/test_desktop_page.py` and
+  `tests/_desktop_page.py`.
+
+### D2: mail library
+
+- Component: `imports/mail` and its `wizard/mail_sync_cli.py` driver.
+- Files: `imap.py` (`ImapError.hint`, `IMAP_HINTS`), `setup_flow.py`
+  (`MailSetupFlow`, `MailSetupFlows`, `MailSetupError`), `forget.py`
+  (`forget()`), `cmd_setup` and `cmd_forget` driving them, hint printing in
+  `mail fetch`.
+- Tests: `tests/test_mail_setup_flow.py` (new, on `tests/_fake_imap.py`),
+  `tests/test_mail_imap_client.py`, `tests/test_mail_sync_cli.py`,
+  `tests/test_mail_secrets.py` and the complete `tests/test_mail_imap_sync.py`.
+- Depends on: D1.
+
+### D3: page framework
+
+- Component: `desktop` (page only; no new backend).
+- Files: `src/mordred_hermes/desktop/assets/desktop/plugin.js` (`Step` states,
+  `BLOCKERS`, overview card, groups, "Why?" blocks, accessibility, theme colours,
+  `client_version=4` with the "Update Mordred" rendering).
+- Tests: `tests/_desktop_page.py` (the `block()` / `render_page()` helpers moved
+  from `test_desktop_windows_page.py`), `tests/test_desktop_page.py` (new) and
+  `tests/test_desktop_windows_page.py` (harness moved, assertions unchanged).
+- Depends on: D1; can run in parallel with D2.
+
+### D4: Desktop backend and sections
+
+- Component: `desktop` (api and page).
+- Files: `desktop/api.py` (`/status` v4, `/databases/*`, `/imports/status`,
+  `/mail/*`, `vault_anchor_stale`) and `plugin.js` (`DatabasesStep`, `MailStep`,
+  store-backed Telegram counts, new `MESSAGES` and `IMAP_HINTS`).
+- Tests: the complete `tests/extension/test_desktop_api.py` (security-sensitive) and
+  `tests/test_desktop_page.py`; the live checklist of the design is recorded in
+  [CI.md](CI.md#manual-live-device-validation-log).
+- Depends on: D2 and D3.
+
+### K1: keyvault (reference)
+
+- Separate component, already in [TODO.md](TODO.md) as the stale file-vault anchor:
+  `ensure_initialised` / `init` refuse a stale anchor with a code, a scoped
+  file-vault reset, a `status` line. Independent of D1 to D4; once it lands,
+  D4's `vault_anchor_stale` classification becomes a pass-through.
+
 ## Imported-message provenance evaluation implementation
 
 **Spec:** [Imported-message provenance evaluation](SPEC.md#imported-message-provenance-evaluation-2026-10-22).

@@ -41,7 +41,7 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/telegram/` | extension (Telegram importer) | encrypted read-only Telegram archive |
 | `<home>/mordred/mail/credentials.sealed` | `mail setup` | IMAP address, app password, host, port, own addresses and chosen mailboxes, sealed by the Secure Enclave role `mordred-hermes.mail.credentials.v1`; read by `mail fetch` and `mordred_mail_sync` |
 | `<home>/mordred/mail/credentials.meta.json` | `mail setup` | non-secret flags (account label, Gmail path, mailbox roles, Touch ID); read by `mail status` and the tool's `check_fn` |
-| `<home>/mordred/mail/.lock` | `mail fetch`, `mordred_mail_sync`, `mail import`, `mail forget` | non-blocking per-home mail writer lock (`sync_in_progress`) |
+| `<home>/mordred/mail/.lock` | `mail fetch`, `mordred_mail_sync`, `mail import`, `mail forget`, `mail setup`, the Desktop page (`/mail/*`) | non-blocking per-home mail writer lock (`sync_in_progress`) |
 | `<home>/mordred/reader_sessions.json` | privacy_check reader mode | durable record (SHA-256 digests) of sessions that used a reader tool |
 | `<home>/mordred/uninstall/` | `uninstall` | `.env` lines (`HERMES_MEMORY_KEY`, `MORDRED_*`) moved out of `.env`, mode `0600` |
 | `<home>/extension/` | extension and keyvault signer | pairing, E2E, WebAuthn, history, wallet config |
