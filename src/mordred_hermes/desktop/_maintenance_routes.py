@@ -243,8 +243,8 @@ TOOLS_ERROR_CODES = frozenset(
         "config_unreadable",
         "config_vault_managed",
         "config_write_failed",
-        "config_unsupported_shape",
         "config_has_setting",
+        "hermes_cli_missing",
     }
 )
 
@@ -268,10 +268,10 @@ async def tools_direct() -> Any:
 async def tools_direct_set(request: Request) -> Any:
     """Body ``{"direct": true | false}`` (a JSON boolean, nothing else): the explicit choice.
 
-    ``true`` writes ``tools.tool_search.enabled: "off"`` into Hermes's
-    ``config.yaml``, ``false`` removes it; every other key and comment is kept.
-    Hermes reads it at start, so the answer is ``{"ok": true, "direct": bool,
-    "restart_required": true}``.
+    Hermes's own ``hermes config set tools.tool_search.enabled off`` (``true``)
+    or ``hermes config unset ...`` (``false``) does the write; Mordred never
+    edits config.yaml. Hermes reads it at start, so the answer is
+    ``{"ok": true, "direct": bool, "restart_required": true}``.
     """
     body = await read_object(request)
     if isinstance(body, JSONResponse):

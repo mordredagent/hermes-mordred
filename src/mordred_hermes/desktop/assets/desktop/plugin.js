@@ -192,9 +192,9 @@ const MESSAGES = {
   // Hermes's direct tool calls (`/tools/direct`, the Tool calls card).
   config_unreadable: 'Hermes’s config.yaml could not be read (or is not a YAML mapping), so this setting cannot be shown or changed here. Nothing was changed. Run hermes-mordred direct-tools status in Terminal.',
   config_vault_managed: 'Hermes’s config.yaml is sealed in Mordred’s vault and not on disk right now, so nothing was changed. Restart Hermes Desktop (it opens config.yaml when it starts) and try again.',
-  config_write_failed: 'Hermes’s config.yaml could not be written, or changed while it was being edited. Nothing was changed. Check that the Hermes home is writable and private to this account, then try again.',
-  config_unsupported_shape: 'Hermes’s config.yaml reaches this setting through a YAML alias, anchor or merge key (<<), so changing it here could change other settings. Nothing was changed. Edit config.yaml by hand.',
+  config_write_failed: 'Hermes’s own hermes config command did not finish, or Hermes does not read the setting as asked afterwards. Check config.yaml, then try again, or add the lines below by hand.',
   config_has_setting: 'Hermes’s config.yaml already sets tools.tool_search to a value Mordred does not replace. Nothing was changed. Edit config.yaml by hand.',
+  hermes_cli_missing: 'Hermes’s own hermes command was not found, so nothing was changed. Add the lines below to config.yaml by hand.',
 }
 
 // `imap_auth_failed` refined by the server's response code (never its text).
@@ -1150,6 +1150,8 @@ function HermesModelInstructions({ check, refresh, ok, verifying }) {
 
 // The card's heading: step 2.1's recommendation scrolls here.
 const TOOLS_ANCHOR = 'mordred-tools'
+// What Hermes's own `hermes config set` writes; the card offers it for a manual edit.
+const DIRECT_TOOLS_SNIPPET = 'tools:\n  tool_search:\n    enabled: "off"'
 const DIRECT_TOOLS_LABEL = 'Let Hermes call Mordred’s tools directly (recommended with a Venice private model)'
 const DIRECT_TOOLS_SAVED = {
   on: 'Saved: Hermes calls tools directly once it restarts. Restart Hermes Desktop for the change to take effect.',
@@ -1177,11 +1179,15 @@ function DirectToolsCopy() {
   return jsxs(Fragment, {
     children: [
       paragraph('what', [
-        'What it changes: Hermes’s ',
-        code('config.yaml'),
-        ' gets ',
+        'What it changes: Hermes’s own ',
+        code('hermes config set'),
+        ' writes ',
         code('tools.tool_search.enabled: "off"'),
-        ' (unticking removes it). The setting is Hermes-wide: it affects every plugin tool, not only Mordred’s. Mordred changes it only when you tick or untick this box (or run ',
+        ' into its ',
+        code('config.yaml'),
+        ' (unticking runs ',
+        code('hermes config unset'),
+        '). The setting is Hermes-wide: it affects every plugin tool, not only Mordred’s. Mordred changes it only when you tick or untick this box (or run ',
         code('hermes-mordred direct-tools'),
         ').',
       ]),
@@ -1196,6 +1202,28 @@ function DirectToolsCopy() {
         'The cost: every request carries the deferred tool schemas (the prompt grows by about 8,000 tokens here), and remote-connector tool discovery, which goes through that bridge, is unavailable.',
       ]),
       paragraph('restart', ['It takes effect after a restart of Hermes Desktop.']),
+    ],
+  })
+}
+
+// The three lines `hermes config set` writes, for a manual edit when the command cannot run.
+function DirectToolsSnippet() {
+  return jsxs('div', {
+    style: { marginTop: 10 },
+    children: [
+      jsx('p', { key: 'label', style: { margin: '0 0 4px' }, children: 'If this fails, add it to config.yaml by hand:' }),
+      jsxs(Row, {
+        key: 'snippet',
+        children: [
+          jsx('pre', { key: 'text', style: { margin: 0, userSelect: 'all', whiteSpace: 'pre' }, children: DIRECT_TOOLS_SNIPPET }),
+          jsx(Button, {
+            key: 'copy',
+            variant: 'outline',
+            onClick: () => navigator.clipboard && navigator.clipboard.writeText(`${DIRECT_TOOLS_SNIPPET}\n`),
+            children: 'Copy',
+          }),
+        ],
+      }),
     ],
   })
 }
@@ -1253,6 +1281,7 @@ function DirectToolsCard({ tools, refresh }) {
       state,
       busy ? jsx('p', { key: 'busy', role: 'status', 'aria-live': 'polite', children: '⟳ Saving…' }) : null,
       jsx(DirectToolsCopy, { key: 'copy' }),
+      jsx(DirectToolsSnippet, { key: 'snippet' }),
       saved
         ? jsxs('div', {
             key: 'saved',

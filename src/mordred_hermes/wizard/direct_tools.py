@@ -11,49 +11,57 @@ discovery) is gone. Mordred therefore never changes it on its own; only an
 explicit request (``hermes-mordred direct-tools on|off``, the Desktop page's
 Tool calls card) calls :func:`set_direct`.
 
-- :func:`read_mode` reports the setting exactly as Hermes reads it (its YAML
-  1.1 loader and ``ToolSearchConfig.from_raw``; see :mod:`._direct_tools_yaml`).
-- :func:`set_direct` writes ``enabled: "off"`` (``True``) or removes what makes
-  the tools direct (``False``), and writes nothing when the setting is already
-  as asked. ``on`` replaces only an absent value or an explicit deferral.
+Mordred never edits config.yaml itself. :func:`read_mode` reads it the way
+Hermes does (:mod:`._direct_tools_yaml`); :func:`set_direct` asks Hermes's own
+writer through its CLI, in Hermes's environment::
 
-The file goes through the wizard's own writer: ruamel round-trip (comments, key
-order and every other key preserved), the policy write lock and
-``_atomic_write_text`` (temporary file plus ``os.replace``) with the file's
-mode kept; on Windows the checked canonical transaction (``PolicyWriter``).
-Before the write, the new text must read as asked and differ in this setting
-only; after it, the file is read again and, if Hermes would not read it as
-asked, the previous bytes are put back (``config_write_failed``). A
-vault-managed config.yaml (``encryption enable config``) is edited as its
-plaintext working copy when one is on disk, like every other wizard writer,
-and the reseal re-enrolls the changed copy; no plaintext means it is sealed
-away (``config_vault_managed``), and a plaintext that disappears or changes
-between the read and the write is refused, never recreated.
+    hermes config set tools.tool_search.enabled off     # on (stored as the string 'off')
+    hermes config unset tools.tool_search.enabled       # off (tools.tool_search for the legacy false)
+    hermes config get tools.tool_search.enabled         # the check afterwards
 
-Failures are the closed codes of :data:`ERROR_CODES`. Nothing here logs,
-prints, returns or chains anything that could carry another config value:
-YAML errors and warnings quote source lines, so they are captured and dropped.
+with ``HERMES_HOME`` set to the home, the home as working directory, no
+``PYTHONPATH`` / ``PYTHONHOME``, a 60 s timeout and its output captured and
+dropped: only the exit code is used, and the result is a closed code. The
+change counts only when ``hermes config get`` then reads as asked. In a
+vault-managed home Hermes's own start-up hook opens and reseals config.yaml
+for each command, as for any ``hermes`` command; a config sealed away while
+no Hermes runs is refused before anything starts (``config_vault_managed``).
 """
 
 from __future__ import annotations
 
-import contextlib
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Final
 
-from ._direct_tools_yaml import DirectToolsError, edited, hermes_data, mode_of
+from ._direct_tools_yaml import DirectToolsError, existing_value, hermes_data, is_off, mode_of
 
-__all__ = ["CONFIG_NAME", "ERROR_CODES", "DirectToolsError", "read_mode", "set_direct"]
+__all__ = [
+    "CONFIG_NAME",
+    "ERROR_CODES",
+    "KEY",
+    "SNIPPET",
+    "DirectToolsError",
+    "hermes_command",
+    "read_mode",
+    "set_direct",
+]
 
 CONFIG_NAME: Final = "config.yaml"
+KEY: Final = "tools.tool_search.enabled"
+LEGACY_KEY: Final = "tools.tool_search"
 ERROR_CODES: Final = (
     "config_unreadable",
     "config_vault_managed",
     "config_write_failed",
-    "config_unsupported_shape",
     "config_has_setting",
+    "hermes_cli_missing",
 )
+#: What to add to config.yaml by hand when Hermes's CLI cannot do it.
+SNIPPET: Final = 'tools:\n  tool_search:\n    enabled: "off"\n'
+HERMES_TIMEOUT_S: Final = 60.0
 
 
 def _windows() -> bool:
@@ -71,163 +79,113 @@ def _managed(home: Path) -> bool:
     return _marker_path(home).exists()
 
 
-def _yaml() -> Any:
-    from .policy_writer import _round_trip_yaml
-
-    return _round_trip_yaml()
-
-
-_Stamp = tuple[int, int, int, int, int]
-
-
-def _stamp(path: Path) -> _Stamp | None:
-    """Identity, size, mtime and mode of ``path`` (``None``: absent)."""
+def _read_text(home: Path) -> str | None:
+    """config.yaml's text, ``None`` when there is none; a sealed-away vault copy is refused."""
     try:
-        metadata = os.lstat(path)
-    except FileNotFoundError:
-        return None
-    return metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns, metadata.st_mode
+        if _windows():
+            from .._config_io import CanonicalPaths, read_canonical_snapshot
 
+            snapshot = read_canonical_snapshot(CanonicalPaths(home))
+            return None if snapshot.config is None else snapshot.config.data.decode("utf-8")
+        from .policy_writer import _read_regular_text
 
-def _read_posix(home: Path) -> tuple[str | None, _Stamp | None]:
-    """config.yaml's text and stamp; refuses a sealed-away vault copy and a file changing meanwhile.
-
-    The seal marker is checked after the read, so a reseal that removes the
-    plaintext during it is refused too, never taken for "no config.yaml".
-    """
-    from .policy_writer import _read_regular_text
-
-    path = home / CONFIG_NAME
-    try:
-        before = _stamp(path)
-        text = _read_regular_text(path)
-        after = _stamp(path)
-        if after != before:  # sealed away (a reseal takes no lock) or replaced while being read
-            sealed = after is None and _managed(home)
-            raise DirectToolsError("config_vault_managed" if sealed else "config_write_failed")
+        text = _read_regular_text(home / CONFIG_NAME)
         if text is None and _managed(home):
             raise DirectToolsError("config_vault_managed")
-        return text, before
-    except (OSError, ValueError):  # UnicodeDecodeError included
-        raise DirectToolsError("config_unreadable") from None
-
-
-def _read_windows(home: Path) -> str | None:
-    from .._config_io import CanonicalPaths, read_canonical_snapshot
-
-    try:
-        snapshot = read_canonical_snapshot(CanonicalPaths(home))
-        return None if snapshot.config is None else snapshot.config.data.decode("utf-8")
+        return text
     except (OSError, ValueError):  # PrivateFSError and UnicodeDecodeError included
         raise DirectToolsError("config_unreadable") from None
 
 
-def read_mode(home: Path) -> dict[str, Any]:
-    """``{"direct": bool, "source": "config" | "default", "raw": str | None}``.
+def _data(home: Path) -> Any:
+    text = _read_text(home)
+    data = hermes_data(text)
+    if data is None and text is not None and _windows():
+        raise DirectToolsError("config_unreadable")  # the checked Windows reader refuses an empty config
+    return data
 
-    ``raw`` is the key's own value as Hermes loads it (``enabled``, or the
-    legacy ``tools.tool_search`` scalar) as text, at most 32 characters. A
-    config that cannot be read answers ``{"direct": None, "source":
-    "unreadable", "code": <code>}`` (``config_unreadable`` or
-    ``config_vault_managed``). Read-only: it never waits for a lock (POSIX
-    takes none; Windows reads the nonblocking checked snapshot) and creates
-    no file or directory. On Windows an empty or comment-only config.yaml is
-    unreadable, as for the checked writer.
+
+def read_mode(home: Path) -> dict[str, Any]:
+    """``{"direct": bool, "source": "config" | "default"}``, or ``{"direct": None, "source":
+    "unreadable", "code": "config_unreadable" | "config_vault_managed"}``.
+
+    Read-only: it never waits for a lock (POSIX takes none; Windows reads the
+    nonblocking checked snapshot) and creates no file or directory.
     """
     try:
-        text = _read_windows(home) if _windows() else _read_posix(home)[0]
-        data = hermes_data(text)
-        if data is None and text is not None and _windows():
-            raise DirectToolsError("config_unreadable")
-        return mode_of(data)
+        return mode_of(_data(home))
     except DirectToolsError as exc:
         return {"direct": None, "source": "unreadable", "code": exc.code}
 
 
-def _verify_or_restore(home: Path, enabled: bool, restore: Any) -> None:
-    """Read the file back; if Hermes would not read it as asked, put the old bytes back and refuse."""
-    if read_mode(home)["direct"] is enabled:
-        return
-    with contextlib.suppress(DirectToolsError, OSError):
-        restore()
-    raise DirectToolsError("config_write_failed")
+# -- Hermes's CLI -----------------------------------------------------------------------------------
 
 
-def _set_posix(home: Path, enabled: bool) -> None:
-    from .policy_writer import _atomic_write_text, _policy_write_lock
+def _python() -> str:
+    return sys.executable
 
-    path = home / CONFIG_NAME
+
+def hermes_command(home: Path) -> Path | None:
+    """Hermes's ``hermes`` console script: next to this interpreter (the same venv) first, then
+    Hermes's managed runtime venv and Hermes Desktop's launcher under the home."""
+    if _windows():
+        names = [Path(_python()).parent / "hermes.exe", home / "hermes-agent" / "venv" / "Scripts" / "hermes.exe"]
+    else:
+        names = [
+            Path(_python()).parent / "hermes",
+            home / "hermes-agent" / "venv" / "bin" / "hermes",
+            home / "hermes-agent" / ".hermes" / "bin" / "hermes",
+        ]
+    return next((path for path in names if path.is_file() and os.access(path, os.X_OK)), None)
+
+
+def _run(command: Path, home: Path, *args: str) -> tuple[int, str]:
+    """``hermes config <args>`` for ``home``: the exit code and stdout (never shown or logged)."""
+    env = {key: value for key, value in os.environ.items() if key not in ("PYTHONPATH", "PYTHONHOME")}
+    env["HERMES_HOME"] = str(home)
     try:
-        with _policy_write_lock(home / "mordred"):
-            text, stamp = _read_posix(home)
-            mode = stamp[4] & 0o7777 if stamp is not None and text is not None else None
-            result = edited(_yaml(), text, enabled)
-            if result is None:
-                return
-            if _stamp(path) != stamp:  # sealed away, or rewritten, since the read: never recreate it
-                raise DirectToolsError("config_vault_managed" if _managed(home) else "config_write_failed")
-            _atomic_write_text(path, result, mode=mode)
-
-            def restore() -> None:
-                if text is None:
-                    path.unlink(missing_ok=True)
-                else:
-                    _atomic_write_text(path, text, mode=mode)
-
-            _verify_or_restore(home, enabled, restore)
-    except OSError:
-        raise DirectToolsError("config_write_failed") from None
+        done = subprocess.run(
+            [str(command), "config", *args],
+            cwd=home,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=HERMES_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):  # not runnable, or the timeout
+        return -1, ""
+    return done.returncode, done.stdout or ""
 
 
-class _Unchanged(Exception):
-    """Leaves the canonical transaction without publishing: the setting already was as asked."""
-
-
-def _set_windows(home: Path, enabled: bool) -> None:
-    from ruamel.yaml.error import YAMLError
-
-    from .._config_io import CONFIG_LIMIT
-    from ._direct_tools_yaml import _quiet
-    from .policy_writer import PolicyWriter, _bounded_utf8
-
-    mordred = home / "mordred"
-    writer = PolicyWriter(home / CONFIG_NAME, mordred / "policy.json", mordred)
-    original: bytes | None = None
-    try:
-        # The checked edit parses the pair itself: its warnings are captured too.
-        with _quiet() as caught, writer._checked_edit() as edit:
-            if caught:
-                caught.clear()
-                raise DirectToolsError("config_unreadable")
-            pair = edit.session.read_pair()
-            original = None if pair.config is None else pair.config.data
-            result = edited(_yaml(), None if original is None else original.decode("utf-8"), enabled)
-            if result is None:
-                raise _Unchanged
-            edit.config_bytes = _bounded_utf8(result, CONFIG_LIMIT)
-    except _Unchanged:
-        return
-    except (YAMLError, ValueError):
-        raise DirectToolsError("config_unreadable") from None
-    except OSError:
-        raise DirectToolsError("config_write_failed") from None
-
-    def restore() -> None:
-        if original is not None:  # a config.yaml this call created stays (the checked writer cannot delete)
-            with writer._checked_edit() as edit:
-                edit.config_bytes = original
-
-    _verify_or_restore(home, enabled, restore)
+def _hermes_reads_direct(command: Path, home: Path) -> bool | None:
+    """``hermes config get tools.tool_search.enabled`` read with Hermes's rule; ``None``: no answer."""
+    code, out = _run(command, home, "get", KEY)
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    return is_off(lines[-1]) if code == 0 and lines else None
 
 
 def set_direct(home: Path, enabled: bool) -> None:
-    """Turn Hermes's direct tool calls on (``enabled: "off"``) or off (the setting removed).
+    """Turn Hermes's direct tool calls on or off through Hermes's own ``hermes config``.
 
-    Writes only when the setting changes; every other key and comment is kept.
-    Raises :class:`DirectToolsError` with one of :data:`ERROR_CODES`. Hermes
-    reads the setting at start: the change takes effect after a restart.
+    Reads first: nothing runs when the setting already is as asked, and ``on``
+    refuses a value other than an absent one or an explicit deferral
+    (``config_has_setting``). Raises :class:`DirectToolsError` with one of
+    :data:`ERROR_CODES`. Hermes reads the setting at start: a change takes
+    effect after a restart.
     """
-    if _windows():
-        _set_windows(home, enabled)
-    else:
-        _set_posix(home, enabled)
+    data = _data(home)
+    if mode_of(data)["direct"] is enabled:
+        return
+    held = existing_value(data)
+    if enabled and held not in ("absent", "deferral"):
+        raise DirectToolsError("config_has_setting")
+    command = hermes_command(home)
+    if command is None:
+        raise DirectToolsError("hermes_cli_missing")
+    args = ("set", KEY, "off") if enabled else ("unset", LEGACY_KEY if held == "legacy" else KEY)
+    code, _ = _run(command, home, *args)
+    if code != 0 or _hermes_reads_direct(command, home) is not enabled:
+        raise DirectToolsError("config_write_failed")

@@ -1,9 +1,10 @@
 """``/tools/direct`` and ``/status.tools``: Hermes's direct tool calls from the Desktop page.
 
 ``GET`` reads ``tools.tool_search.enabled``; ``POST {"direct": bool}`` (a JSON boolean,
-nothing else) changes it on the owner's explicit request and asks for a restart.
-Failures are the closed codes of ``wizard.direct_tools``; no other config value ever
-leaves the route.
+nothing else) has Hermes's own ``hermes config set|unset`` change it on the owner's
+explicit request (a fake ``hermes`` here, see ``tests/test_direct_tools.py``) and asks for
+a restart. Failures are the closed codes of ``wizard.direct_tools``; no other config
+value, and nothing Hermes prints, ever leaves the route.
 """
 
 from __future__ import annotations
@@ -19,8 +20,11 @@ pytest.importorskip("fastapi")
 
 from mordred_hermes.desktop import _seams, _status_v4, api
 from mordred_hermes.wizard.direct_tools import ERROR_CODES, DirectToolsError
+from tests.test_direct_tools import CANARY as HERMES_CANARY
+from tests.test_direct_tools import FakeHermes
+from tests.test_direct_tools import hermes as hermes
 
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the POSIX writer path (macOS fixture)")
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX paths and a shebang fake (macOS fixture)")
 
 CANARY = "canary-model-3e8a"
 CONFIG = f"# kept\nmodel:\n  default: {CANARY}\n"
@@ -31,7 +35,7 @@ def config(desktop: Any) -> Path:
 
 
 @pytest.fixture
-def configured(desktop: Any) -> Any:
+def configured(desktop: Any, hermes: FakeHermes) -> Any:
     path = config(desktop)
     path.write_text(CONFIG, encoding="utf-8")
     path.chmod(0o600)
@@ -42,35 +46,37 @@ def test_get_reads_the_default(configured: Any) -> None:
     assert configured.get("/tools/direct") == {"ok": True, "direct": False, "source": "default"}
 
 
-def test_post_true_writes_off_and_asks_for_a_restart(configured: Any) -> None:
+def test_post_true_runs_hermes_config_set_and_asks_for_a_restart(configured: Any, hermes: FakeHermes) -> None:
     answer = configured.post("/tools/direct", {"direct": True})
     assert answer == {"ok": True, "direct": True, "restart_required": True}
-    text = config(configured).read_text(encoding="utf-8")
-    assert text == CONFIG + 'tools:\n  tool_search:\n    enabled: "off"\n'
+    assert [call["argv"] for call in hermes.calls()] == [
+        ["config", "set", "tools.tool_search.enabled", "off"],
+        ["config", "get", "tools.tool_search.enabled"],
+    ]
     assert configured.get("/tools/direct") == {"ok": True, "direct": True, "source": "config"}
     assert configured.get("/status?client_version=4")["tools"] == {"direct": True, "source": "config"}
 
 
-def test_post_false_removes_the_key(configured: Any) -> None:
+def test_post_false_runs_hermes_config_unset(configured: Any, hermes: FakeHermes) -> None:
     configured.post("/tools/direct", {"direct": True})
     answer = configured.post("/tools/direct", {"direct": False})
     assert answer == {"ok": True, "direct": False, "restart_required": True}
-    assert config(configured).read_text(encoding="utf-8") == CONFIG
+    assert hermes.calls()[2]["argv"] == ["config", "unset", "tools.tool_search.enabled"]
     assert configured.get("/status?client_version=4")["tools"] == {"direct": False, "source": "default"}
 
 
 @pytest.mark.parametrize(
     "body", [{}, {"direct": "true"}, {"direct": 1}, {"direct": 0}, {"direct": None}, {"direct": [True]}, {"on": True}]
 )
-def test_only_a_json_boolean_is_accepted(configured: Any, body: dict[str, Any]) -> None:
+def test_only_a_json_boolean_is_accepted(configured: Any, hermes: FakeHermes, body: dict[str, Any]) -> None:
     assert configured.post("/tools/direct", body) == {"ok": False, "error": "invalid_body"}
-    assert config(configured).read_text(encoding="utf-8") == CONFIG
+    assert config(configured).read_text(encoding="utf-8") == CONFIG and hermes.calls() == []
 
 
 @pytest.mark.parametrize("raw", [b"[true]", b"true", b'{"direct": tru', b"direct=true"])
-def test_a_malformed_body_is_invalid_body(configured: Any, raw: bytes) -> None:
+def test_a_malformed_body_is_invalid_body(configured: Any, hermes: FakeHermes, raw: bytes) -> None:
     assert configured.post("/tools/direct", raw=raw) == {"ok": False, "error": "invalid_body"}
-    assert config(configured).read_text(encoding="utf-8") == CONFIG
+    assert config(configured).read_text(encoding="utf-8") == CONFIG and hermes.calls() == []
 
 
 @pytest.mark.parametrize("code", ERROR_CODES)
@@ -158,11 +164,28 @@ def test_no_answer_or_log_carries_another_config_value(configured: Any) -> None:
     assert not configured.leaked(answers)
 
 
-def test_an_aliased_tool_search_is_refused_by_the_route(desktop: Any) -> None:
-    text = "base: &a\n  enabled: auto\ntools:\n  tool_search: *a\n"
-    config(desktop).write_text(text, encoding="utf-8")
-    assert desktop.post("/tools/direct", {"direct": True}) == {"ok": False, "error": "config_unsupported_shape"}
-    assert config(desktop).read_text(encoding="utf-8") == text
+def test_a_failed_hermes_command_is_config_write_failed_and_hidden(
+    configured: Any, hermes: FakeHermes, capfd: pytest.CaptureFixture[str]
+) -> None:
+    hermes.plan(exit_set=1)
+    assert configured.post("/tools/direct", {"direct": True}) == {"ok": False, "error": "config_write_failed"}
+    out, err = capfd.readouterr()
+    assert HERMES_CANARY not in out + err and not any(HERMES_CANARY in line for line in configured.logs.lines)
+
+
+def test_no_hermes_command_is_hermes_cli_missing(
+    configured: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mordred_hermes.wizard import direct_tools
+
+    monkeypatch.setattr(direct_tools, "_python", lambda: str(tmp_path / "no-venv" / "python"))
+    assert configured.post("/tools/direct", {"direct": True}) == {"ok": False, "error": "hermes_cli_missing"}
+
+
+def test_a_value_mordred_does_not_replace_is_config_has_setting(desktop: Any, hermes: FakeHermes) -> None:
+    config(desktop).write_text("tools:\n  tool_search:\n    enabled: maybe\n", encoding="utf-8")
+    assert desktop.post("/tools/direct", {"direct": True}) == {"ok": False, "error": "config_has_setting"}
+    assert hermes.calls() == []
 
 
 def test_a_yaml_warning_is_unreadable_and_quoted_nowhere(desktop: Any, capfd: pytest.CaptureFixture[str]) -> None:

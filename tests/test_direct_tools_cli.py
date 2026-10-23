@@ -10,11 +10,14 @@ import pytest
 
 from mordred_hermes.wizard import direct_tools_cli
 from mordred_hermes.wizard._cli_parsers import _setup_subparser
-from mordred_hermes.wizard.direct_tools import DirectToolsError
+from mordred_hermes.wizard.direct_tools import SNIPPET, DirectToolsError
+from tests.test_direct_tools import CANARY as HERMES_CANARY
+from tests.test_direct_tools import FakeHermes
+from tests.test_direct_tools import hermes as hermes
 
-# The real Hermes home here is a POSIX temporary directory; the Windows writer path is covered
-# on the fake canonical coordinator in test_direct_tools.py.
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the POSIX writer path")
+# The Hermes home is a POSIX temporary directory and ``hermes`` a fake with a shebang (see
+# test_direct_tools.py); the Windows read path is covered there on the fake coordinator.
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX paths and a shebang fake")
 
 CANARIES = ("canary-model-5d2b", "canary-key-env-91f0", "https://canary.example.invalid/v1")
 CONFIG = f"""# kept
@@ -30,7 +33,7 @@ RESTART = "Restart Hermes (or Hermes Desktop) for this to take effect."
 
 
 @pytest.fixture
-def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hermes: FakeHermes) -> Path:
     path = tmp_path / "hermes-home"
     (path / "mordred").mkdir(parents=True, mode=0o700)
     (path / "config.yaml").write_text(CONFIG, encoding="utf-8")
@@ -47,7 +50,7 @@ def run(*argv: str) -> int:
 
 
 def no_canary(*texts: str) -> bool:
-    return not any(canary in text for canary in CANARIES for text in texts)
+    return not any(canary in text for canary in (*CANARIES, HERMES_CANARY) for text in texts)
 
 
 def test_the_parser_offers_on_off_and_status() -> None:
@@ -73,7 +76,7 @@ def test_on_prints_the_change_both_trade_offs_and_the_restart_note(
     assert run("on") == 0
     out, err = capsys.readouterr()
     lines = out.splitlines()
-    assert lines[0] == 'direct tool calls: off -> on (tools.tool_search.enabled: "off" written to config.yaml).'
+    assert lines[0] == "direct tool calls: off -> on (hermes config set tools.tool_search.enabled off)."
     assert "8,000 more prompt tokens" in lines[1]
     assert "remote connectors" in lines[2] and "unavailable" in lines[2]
     assert lines[3] == RESTART and len(lines) == 4 and err == ""
@@ -93,7 +96,6 @@ def test_off_prints_the_change_both_trade_offs_and_the_restart_note(
     assert "prompts are smaller" in lines[1] and "tool_search and tool_call" in lines[1]
     assert "remote connectors" in lines[2]
     assert lines[3] == RESTART and len(lines) == 4
-    assert (home / "config.yaml").read_text(encoding="utf-8") == CONFIG
 
 
 @pytest.mark.parametrize("command,state", [("off", "off (default)"), ("on", "on (config)")])
@@ -122,9 +124,7 @@ def test_an_unreadable_config_is_refused_with_exit_1(
     assert no_canary(out, err)
 
 
-@pytest.mark.parametrize(
-    "code", ["config_vault_managed", "config_write_failed", "config_unsupported_shape", "config_has_setting"]
-)
+@pytest.mark.parametrize("code", ["config_vault_managed", "config_write_failed", "config_has_setting"])
 def test_a_refused_write_exits_1_with_its_code_and_remedy(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, code: str
 ) -> None:
@@ -162,7 +162,6 @@ def test_every_closed_code_has_a_remedy() -> None:
     from mordred_hermes.wizard.direct_tools import ERROR_CODES
 
     assert set(direct_tools_cli.REMEDIES) == set(ERROR_CODES)
-    assert "Edit config.yaml by hand." in direct_tools_cli.REMEDIES["config_unsupported_shape"]
     assert "Edit config.yaml by hand." in direct_tools_cli.REMEDIES["config_has_setting"]
 
 
@@ -172,3 +171,28 @@ def test_a_yaml_warning_prints_nothing_but_the_refusal(home: Path, capfd: pytest
         assert run(command) == 1
     out, err = capfd.readouterr()
     assert "direct-tools refused (config_unreadable)" in err and no_canary(out, err)
+
+
+def test_a_missing_hermes_command_prints_the_three_lines_to_add_by_hand(
+    home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mordred_hermes.wizard import direct_tools
+
+    monkeypatch.setattr(direct_tools, "_python", lambda: str(tmp_path / "no-venv" / "python"))
+    assert run("on") == 1
+    out, err = capsys.readouterr()
+    assert out == "" and "direct-tools refused (hermes_cli_missing)" in err
+    assert err.endswith(SNIPPET) and 'tools:\n  tool_search:\n    enabled: "off"\n' in err
+
+
+def test_hermes_runs_with_its_output_hidden(home: Path, hermes: FakeHermes, capfd: pytest.CaptureFixture[str]) -> None:
+    assert run("on") == 0
+    assert run("off") == 0
+    assert [call["argv"][:2] for call in hermes.calls()] == [
+        ["config", "set"],
+        ["config", "get"],
+        ["config", "unset"],
+        ["config", "get"],
+    ]
+    out, err = capfd.readouterr()
+    assert HERMES_CANARY not in out + err

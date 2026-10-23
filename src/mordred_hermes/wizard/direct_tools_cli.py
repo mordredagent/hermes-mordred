@@ -1,8 +1,9 @@
 """``hermes-mordred direct-tools on | off | status`` — Hermes's direct tool calls.
 
-``on`` writes ``tools.tool_search.enabled: "off"`` into ``<home>/config.yaml``
-(Hermes then offers every tool directly instead of through its
-``tool_search`` / ``tool_call`` bridge); ``off`` removes it again. Both print
+``on`` has Hermes's own ``hermes config set tools.tool_search.enabled off``
+write ``<home>/config.yaml`` (Hermes then offers every tool directly instead of
+through its ``tool_search`` / ``tool_call`` bridge); ``off`` has ``hermes config
+unset`` remove it again. Mordred never edits the file itself. Both print
 what changed, the two trade-offs and the restart note; ``status`` prints one
 line. A refusal prints ``refused (<code>)`` with a remediation line and exits
 1. No other config value is ever printed. The library is
@@ -42,22 +43,21 @@ REMEDIES = {
     ),
     "config_vault_managed": (
         "config.yaml is sealed in Mordred's vault and not on disk right now; nothing was changed. "
-        "Run this command with the hermes-mordred installed in Hermes's own environment (it opens "
-        "config.yaml at start), use the Tool calls card on the Mordred page in Hermes Desktop, or turn "
-        "the seal off with hermes-mordred encryption disable config."
+        "Start Hermes (or Hermes Desktop, then use the Tool calls card on the Mordred page), which "
+        "opens config.yaml, or turn the seal off with hermes-mordred encryption disable config."
     ),
     "config_write_failed": (
-        "config.yaml could not be written, or changed while it was being edited; nothing was changed. "
-        "Check that the Hermes home is writable and private to this account, then try again."
-    ),
-    "config_unsupported_shape": (
-        "config.yaml reaches tools.tool_search through a YAML alias, an anchor used elsewhere or a merge "
-        "key (<<), so changing it here could change other settings; nothing was changed. Edit config.yaml "
-        "by hand."
+        "Hermes's `hermes config` command did not finish, or Hermes does not read the setting as asked "
+        "afterwards; check config.yaml (hermes config get tools.tool_search.enabled), then try again."
     ),
     "config_has_setting": (
         "config.yaml already sets tools.tool_search to a value Mordred does not replace (only an absent "
         "value, auto, on, true, yes or 1); nothing was changed. Edit config.yaml by hand."
+    ),
+    "hermes_cli_missing": (
+        "Hermes's own `hermes` command was not found (next to this Python, in "
+        "<home>/hermes-agent/venv/bin or as Hermes Desktop's launcher); nothing was changed. "
+        "Add these lines to config.yaml by hand (remove them to turn direct calls off again):"
     ),
 }
 
@@ -73,8 +73,12 @@ def _state(mode: dict[str, Any]) -> str:
 
 
 def _refused(code: str) -> int:
+    from .direct_tools import SNIPPET
+
     _term.emit_error(f"direct-tools refused ({code})")
     print(REMEDIES.get(code, REMEDIES["config_write_failed"]), file=sys.stderr)
+    if code == "hermes_cli_missing":
+        print(SNIPPET, end="", file=sys.stderr)
     return 1
 
 
@@ -106,9 +110,9 @@ def direct_tools_switch(enabled: bool, *, home: Path | None = None) -> int:
     except DirectToolsError as exc:
         return _refused(exc.code)
     change = (
-        'tools.tool_search.enabled: "off" written to config.yaml'
+        "hermes config set tools.tool_search.enabled off"
         if enabled
-        else "the tools.tool_search setting that made tools direct was removed from config.yaml"
+        else "hermes config unset removed the tools.tool_search setting that made tools direct"
     )
     print(f"direct tool calls: {_state(before)} -> {wanted} ({change}).")
     for sentence in TRADE_OFFS[enabled]:

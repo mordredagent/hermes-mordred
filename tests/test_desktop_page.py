@@ -118,8 +118,8 @@ PAGE_CODES = (
     "config_unreadable",
     "config_vault_managed",
     "config_write_failed",
-    "config_unsupported_shape",
     "config_has_setting",
+    "hermes_cli_missing",
 )
 STEP_KEYS = (
     "enclave",
@@ -3410,6 +3410,8 @@ console.log(JSON.stringify({order, heading: heading.props, card: text(card)}))
     card = result["card"]
     assert DIRECT_LABEL in card
     for phrase in (
+        "hermes config set",
+        "hermes config unset",
         'tools.tool_search.enabled: "off"',
         "config.yaml",
         "every plugin tool",
@@ -3568,3 +3570,18 @@ def test_the_grouped_page_passes_the_status_tools_to_step_2_1():
     assert RECOMMENDATION in page_text(mac(**v4(), tools=TOOLS_OFF))
     assert RECOMMENDATION not in page_text(mac(**v4(), tools=TOOLS_ON))
     assert RECOMMENDATION not in page_text(mac(**v4()))  # an older Mordred without `tools`
+
+
+def test_the_card_offers_the_three_lines_to_add_by_hand_with_a_copy_button():
+    result = tools_card(TOOLS_OFF, [], "await press(tree, 'Copy')\n")
+    snippet = 'tools:\n  tool_search:\n    enabled: "off"'
+    assert "If this fails, add it to config.yaml by hand:" in result["text"]
+    assert snippet in result["text"] and "Copy" in result["buttons"]
+    assert result["copied"] == [snippet + "\n"]
+
+
+def test_the_snippet_is_the_one_the_cli_prints():
+    from mordred_hermes.wizard.direct_tools import SNIPPET
+
+    page = render_page("console.log(JSON.stringify(DIRECT_TOOLS_SNIPPET))")
+    assert page + "\n" == SNIPPET
