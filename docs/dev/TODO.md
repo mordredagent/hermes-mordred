@@ -675,10 +675,9 @@ learning implementation".
 - [ ] Live-verify the extension-relay path (`--browser extension`,
   `activityObserved` navigation observations) in a real Chrome and record it
   in [`CI.md`](./CI.md).
-- [ ] Separate PR (`dbcrypt`, not part of this branch): `databases encrypt
-  --dry-run` must not traceback when the Keychain vault anchor exists but the
-  vault directory is missing; the `VaultError` should become the "run
-  `encryption enable memory` first" message.
+- [ ] Separate PR (`keyvault` file vault, not part of this branch): a stale
+  file-vault anchor must not crash the ceremonies. See the entry under
+  "Imported message provenance" below for the root cause and the fix.
 
 ### Operator collector (other repository, not changed here)
 
@@ -786,14 +785,36 @@ Follow-ups left by the landed code:
   Message-ID is indistinguishable from the real parent and can bridge that parent's
   sibling groups; the merge guard still bounds the damage to that parent's
   children. Revisit if real mail shows abuse.
-- [ ] `databases encrypt --dry-run` (and any command that opens the keyvault) prints a
-  full traceback when the device-bound anchor pins a generation whose manifest is
-  missing (`VaultError: authoritative manifest ... is missing`); it should print the
-  content-free code and point at `keyvault recover` / `keyvault reset`. Seen on
-  2026-10-22 on a home whose vault directory had been removed under 0.2.0a0.
+- [ ] Stale file-vault anchor (found 2026-10-22, root cause confirmed 2026-10-23,
+  separate `keyvault` PR): when `<home>/mordred/vault` has been removed but its
+  Keychain anchor (service `mordred-hermes.vault.anchor`, account
+  `vault_identity(<home>/mordred/vault)`) survives, `ensure_initialised` treats
+  "anchor present" as "vault exists" and the following `open_vault` raises
+  `VaultError: authoritative manifest for generation N is missing` as a raw
+  traceback from `encryption enable env`, `encryption enable memory` and
+  `databases encrypt --dry-run`. `keyvault reset` does not help (it covers only
+  `<home>/mordred/keyvault` and prints "No keyvault found") and `uninstall
+  --purge-data` is the only CLI that deletes that anchor. Fix: (1) `init` /
+  `ensure_initialised` check `vault.artifacts_present(root)` before trusting the
+  anchor and print a content-free remediation instead of the traceback; (2) add a
+  scoped reset for the file vault (anchor + device key, confirmation and journal
+  like `keyvault reset`) or extend `keyvault reset` to cover it; (3) `status`
+  reports "anchor present, vault directory missing". Workaround used on the
+  production profile: `security delete-generic-password -s
+  mordred-hermes.vault.anchor -a <vault_identity>`.
 - [ ] IMAP sync beyond the chosen mailboxes (other folders and labels' own
   folders), IP-literal or loopback hosts (for example a local bridge), and a
   way to change the Touch ID choice without `mail forget` and a new setup.
+
+- [ ] Desktop operability (owner request 2026-10-23): drive the mail collector
+  (`mail setup`, `mail fetch`, `mail import`, `mail status`, `mail forget`) and the
+  macOS ceremonies that `mordred.db` depends on (`encryption enable env`,
+  `encryption enable memory`, `databases encrypt`) from the Mordred Desktop page
+  (`extension/web/index.html` over the paired loopback gateway), the way
+  `telegram login` already has `login_flow.py`. The app password and the recovery
+  passphrase are typed in the page and travel only over the paired channel; the
+  page shows counts and codes only; the CLI stays as the fallback and the
+  reader-mode and egress rules do not change.
 
 Later (not scheduled):
 
