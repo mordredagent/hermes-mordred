@@ -3483,6 +3483,8 @@ function SetupPage() {
   const [sync, setSync] = useState(null)
   const [updateInfo, setUpdateInfo] = useState(null)
   const lastSync = useRef('')
+  // The last /sync answer's activity, to see a Telegram import end.
+  const syncWas = useRef({ syncing: false, error: null })
   const reading = useRef(null)
   const again = useRef(false)
   // One status read at a time: refreshes asked for meanwhile run once, after it.
@@ -3512,13 +3514,23 @@ function SetupPage() {
     reading.current = read()
     return reading.current
   }, [])
-  // The import step polls GET /sync; keep the answer only when it changed.
-  const onSync = useCallback((answer) => {
-    const key = JSON.stringify(answer)
-    if (key === lastSync.current) return
-    lastSync.current = key
-    setSync(answer)
-  }, [])
+  // The import step polls GET /sync; keep the answer only when it changed. An import that
+  // ended (syncing → idle, or a new error) changed the store counts and the step states,
+  // so the status is read once more (coalesced with a read in flight).
+  const onSync = useCallback(
+    (answer) => {
+      const key = JSON.stringify(answer)
+      if (key === lastSync.current) return
+      lastSync.current = key
+      setSync(answer)
+      const syncing = Boolean(answer && answer.syncing)
+      const error = (answer && safeCode(answer.last_error)) || null
+      const ended = (syncWas.current.syncing && !syncing) || (error !== null && error !== syncWas.current.error)
+      syncWas.current = { syncing, error }
+      if (ended) refresh()
+    },
+    [refresh],
+  )
   useEffect(() => {
     refresh()
   }, [refresh])
@@ -3528,7 +3540,9 @@ function SetupPage() {
     jobListeners.add(refresh)
     return () => jobListeners.delete(refresh)
   }, [refresh])
-  const running = Boolean(status && status.jobs && status.jobs.length)
+  // A registry job or a Telegram import (not a registry job) is running: re-read the status,
+  // store counts included, at most every STATUS_POLL_MS.
+  const running = Boolean(status && status.jobs && status.jobs.length) || Boolean(sync && sync.syncing)
   useEffect(() => {
     if (!running) return undefined
     const t = setInterval(refresh, STATUS_POLL_MS)

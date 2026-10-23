@@ -1052,6 +1052,79 @@ console.log(JSON.stringify({first, second, total: reads.length}))
     assert result == {"first": 1, "second": 2, "total": 2}
 
 
+SYNC_RUNNING = {
+    "syncing": True,
+    "progress": {"dialogs_done": 1, "dialogs_total": 3, "messages_imported": 10},
+    "last_error": None,
+    "dialog_count": 3,
+    "message_count": 10,
+}
+SYNC_DONE = {**SYNC_RUNNING, "syncing": False, "progress": None, "message_count": 40}
+
+
+def test_a_finished_telegram_import_refreshes_the_counts_and_the_step():
+    """The import is not a registry job: its end (seen through /sync) triggers one status read."""
+    before = mac(**v4(telegram=(0, 0)))
+    after = mac(**v4(telegram=(3, 40)))
+    result = render_page(
+        """
+const intervals = []
+globalThis.setInterval = (fn, ms) => { intervals.push(ms); return 0 }
+globalThis.clearInterval = () => {}
+const original = jsx
+let body = null
+jsx = jsxs = (type, props) => type === PageBody ? (body = props, {type: 'PageBody', props: {}}) : original(type, props)
+const statuses = [BEFORE, AFTER]
+const reads = []
+rest = async path => {
+  if (!path.startsWith('/status')) return {ok: true}
+  reads.push(path)
+  return statuses[Math.min(reads.length - 1, statuses.length - 1)]
+}
+const flush = async () => { for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r)) }
+const page = () => { cursor = 0; effects.length = 0; return SetupPage({}) }
+const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
+  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
+  : text(node.props && node.props.children)
+const out = {}
+page()
+effects.slice().forEach(f => f())
+await flush()
+page()
+out.first = reads.length
+body.onSync(RUNNING); await flush(); page()
+out.whileRunning = reads.length
+effects.find(f => String(f).includes('STATUS_POLL_MS'))()
+out.intervals = intervals.slice()
+body.onSync(DONE); await flush(); page()
+out.afterDone = reads.length
+body.onSync(DONE); await flush()
+out.repeated = reads.length
+body.onSync({...DONE, message_count: 41, last_error: 'telegram_rate_limited'}); await flush(); page()
+out.afterError = reads.length
+body.onSync({...DONE, message_count: 42, last_error: 'telegram_rate_limited'}); await flush()
+out.sameError = reads.length
+jsx = jsxs = original
+// A fresh render of the page body with what SetupPage now hands it (hooks are numbered globally).
+states = []
+cursor = 0
+out.text = text(PageBody({...body, sync: DONE}))
+console.log(JSON.stringify(out))
+""".replace("BEFORE", json.dumps(before))
+        .replace("AFTER", json.dumps(after))
+        .replace("RUNNING", json.dumps(SYNC_RUNNING))
+        .replace("DONE", json.dumps(SYNC_DONE))
+    )
+    assert result["first"] == 1 and result["whileRunning"] == 1
+    assert result["intervals"] == [10_000], "counts are re-read at most every 10 s while the import runs"
+    assert result["afterDone"] == 2 and result["repeated"] == 2
+    assert result["afterError"] == 3 and result["sameError"] == 3
+    text = result["text"]
+    assert "connected · 3 chats · 40 messages in Mordred\u2019s store (all accounts)" in text
+    assert "Import Telegram messages\u2713 Done" in text
+    assert "3 chats · 40 messages in Mordred\u2019s store (all accounts)." in text
+
+
 def test_windows_and_unsupported_statuses_keep_their_pages():
     result = render_page("""
 jsx = jsxs = (type, props) => ({type: typeof type === 'function' ? type.name : type, props})
