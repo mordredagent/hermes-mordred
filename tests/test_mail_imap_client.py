@@ -10,6 +10,7 @@ import threading
 import time
 import tracemalloc
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -170,6 +171,33 @@ def test_a_platform_verifier_context_gets_its_handshake_inside_wrap_socket() -> 
     inside, timeout = seen[0]
     assert inside is True
     assert timeout is not None and 0 < timeout <= imap.SOCKET_TIMEOUT_S
+
+
+def test_an_interrupt_ends_a_handshake_that_runs_inside_wrap_socket() -> None:
+    """The link holds a duplicate descriptor during an in-wrap handshake: a shutdown reaches it at once."""
+    listener, address = _listener()  # a server that never speaks: the handshake would wait for bytes
+
+    class WaitingContext(ssl.SSLContext):
+        def wrap_socket(self, sock: socket.socket, *args: Any, **kw: Any) -> socket.socket:  # type: ignore[override]
+            if not sock.recv(1):  # "the handshake": blocks until the peer answers or the socket is shut down
+                raise ssl.SSLEOFError("connection shut down during the handshake")
+            return sock
+
+    class Client(GuardedIMAP4SSL):
+        def __init__(self) -> None:  # no IMAP greeting: only _tls_socket is exercised
+            self.host = "imap.example.com"
+            self.ssl_context = WaitingContext()
+            self._raw_socket = lambda link: link.connect_tcp(*address)
+
+    try:
+        with _armed(budget=30.0) as link, patch.object(imap, "_getaddrinfo", _resolving_to(address)):
+            threading.Timer(0.3, link.interrupt).start()
+            started = time.monotonic()
+            with pytest.raises(OSError):
+                Client()._tls_socket(link)
+            assert time.monotonic() - started < 5.0
+    finally:
+        listener.close()
 
 
 def test_the_standard_context_keeps_the_manual_handshake() -> None:

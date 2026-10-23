@@ -80,6 +80,7 @@ import contextlib
 import errno
 import imaplib
 import logging
+import os
 import re
 import selectors
 import socket
@@ -980,8 +981,8 @@ class GuardedIMAP4SSL(_CommandGuard, imaplib.IMAP4_SSL):
         into every ``ssl.SSLContext`` of its process) verifies the peer chain
         inside ``wrap_socket`` and therefore needs the handshake to happen there:
         for those the handshake runs inside ``wrap_socket`` under the socket
-        timeout the link grants, and an interrupt takes effect when that timeout
-        ends the handshake.
+        timeout the link grants, while the link holds a duplicate descriptor of
+        the connection so that an interrupt still ends the handshake at once.
         """
         context: ssl.SSLContext = self.ssl_context
         raw = self._raw_socket(link)
@@ -990,7 +991,16 @@ class GuardedIMAP4SSL(_CommandGuard, imaplib.IMAP4_SSL):
         try:
             if inside:
                 raw.settimeout(link.timeout())
-                wrapped = context.wrap_socket(raw, server_hostname=self.host)
+                # ``wrap_socket`` detaches ``raw``'s descriptor into the TLS socket, so an interrupt
+                # could no longer reach the handshake through ``raw``. A duplicate descriptor shares
+                # the connection: shutting it down ends the handshake at once, and closing it
+                # afterwards releases only the duplicate.
+                mirror = socket.socket(fileno=os.dup(raw.fileno()))
+                link.hold(mirror)
+                try:
+                    wrapped = context.wrap_socket(raw, server_hostname=self.host)
+                finally:
+                    link.drop(mirror)
             else:
                 wrapped = context.wrap_socket(raw, server_hostname=self.host, do_handshake_on_connect=False)
         except BaseException:
