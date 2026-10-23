@@ -630,7 +630,7 @@ hermes-mordred desktop uninstall
 > **Protect this Mac** (the Secure Enclave helper, encryption of Hermes's
 > memory and secrets, encryption of Hermes's databases), **Connect** (the chat
 > model, the question model, Telegram, the Telegram import and mail over IMAP),
-> **Ask Hermes** (what to say in a chat, what Hermes sees, and the commands that
+> **Ask Hermes** (what to say in a chat, what Hermes reads, and the commands that
 > stay in the terminal) and **Maintenance** (update, repair, uninstall). Each
 > step shows whether it is done, next, waiting for an earlier step (with a
 > button that jumps there), running or in need of attention, and a "Why this
@@ -646,8 +646,20 @@ hermes-mordred desktop uninstall
 > Hermes Desktop keeps its databases open, so the files are converted at the
 > next restart, before Hermes opens them, and the step offers **Restart now**.
 > The Telegram import and the mail step wait until the databases are encrypted,
-> because `mordred.db` only opens then. The step for encrypted memory lets you
-> choose "Ask for Touch ID every time Hermes unlocks the vault". It is off by
+> because `mordred.db` only opens then. The step has three outcomes. Nothing to
+> convert: the databases are armed at once and nothing is scheduled. Plaintext
+> files while Hermes is running: the conversion is scheduled and runs at the next
+> restart. Plaintext files that appeared in a home that is already armed (a new or
+> restored file): the page does not schedule anything and tells you to quit Hermes
+> and run `hermes-mordred databases encrypt` in Terminal. The status line says
+> "on" only when encryption is armed and this Hermes process is protected, and
+> never counts databases as encrypted on its own.
+>
+> The vault comes first. Its own step creates the file vault, moves `.env` into it
+> and shows the eight-word recovery passphrase once, with an "I have written it
+> down" checkbox; only after that does the next step encrypt Hermes's memory, and
+> if that second step fails you retry it without a new passphrase. The memory step
+> lets you choose "Ask for Touch ID every time Hermes unlocks the vault". It is off by
 > default, because Hermes Desktop starts its backend in the background and
 > cannot answer a prompt; your Telegram and mail keys keep their own Touch ID
 > setting. If an earlier vault was removed but its Keychain anchor was left
@@ -673,15 +685,24 @@ hermes-mordred desktop uninstall
 > optional "also older mail since" date, and **Remove this mailbox** (removing
 > the fetched mail too asks you to type `delete my data`). A fetch runs in the
 > background for up to 10 minutes and may show a Touch ID prompt; its result is
-> counts only (inserted, duplicates, skipped, partial). Say "sync my mail" in
-> any Hermes chat to do the same from the chat; Hermes sees only those counts.
-> `mail import` (Takeout files) stays a terminal command.
+> counts only (inserted, duplicates, skipped, partial), and a "Fetch at most N
+> messages" field limits one run. **Fetch new mail** on the page is the reliable
+> path. Saying "sync my mail" in a Hermes chat is optional and works only when
+> Hermes can reach the tool; if it cannot, see the `tools.tool_search` note in
+> step 4 of
+> [Sync new mail over IMAP](#sync-new-mail-over-imap-mail-setup-mail-fetch-mail-forget).
+> Removing the mailbox with its mail deletes every message imported under that
+> account label, including Takeout imports. `mail import` (Takeout files) stays a
+> terminal command.
 >
-> **What the page never shows.** Nothing you type (the app password, Telegram
-> codes, a Venice key) reaches the chat, the model, Hermes's tools, plugin
-> storage, notifications or logs, and the inputs are cleared after each submit.
-> The page shows counts and codes only, never an address, a subject, a name or a
-> message body. Every failure is a stable code with a remediation line.
+> **What the page never shows, and what Hermes reads.** (1) Nothing you type (the
+> app password, Telegram codes, a Venice key) reaches the chat, the model,
+> Hermes's tools, plugin storage or logs, and the inputs are cleared after every
+> submit, failure or cancel. (2) A mail sync gives Hermes counts only. (3) When you
+> ask Hermes about your mail or Telegram, it reads the matching messages through
+> `mordred_history_search`, and that chat then runs in reader mode. The page
+> itself shows counts and codes only, never an address, a subject, a name or a
+> message body, and every failure is a stable code with a remediation line.
 
 ### `uninstall` — remove Mordred and restore Hermes's files
 ```sh
