@@ -1125,6 +1125,86 @@ console.log(JSON.stringify(out))
     assert "3 chats · 40 messages in Mordred\u2019s store (all accounts)." in text
 
 
+SYNC_IDLE = {"syncing": False, "progress": None, "last_error": None, "dialog_count": 0, "message_count": 0}
+
+
+@pytest.mark.parametrize(
+    "polls",
+    [
+        # Finished before any poll saw it running: the first idle answer is its completion.
+        [{**SYNC_IDLE, "dialog_count": 2, "message_count": 9}],
+        # Seen running first: the busy → idle rule refreshes, and only once.
+        [SYNC_RUNNING, {**SYNC_IDLE, "dialog_count": 2, "message_count": 9}],
+    ],
+    ids=["idle-to-idle", "busy-to-idle"],
+)
+def test_an_import_started_here_refreshes_the_counts_once_even_between_polls(polls):
+    before = mac(**v4(telegram=(0, 0)))
+    after = mac(**v4(telegram=(2, 9)))
+    result = render_page(
+        """
+globalThis.setInterval = () => 0
+globalThis.clearInterval = () => {}
+const original = jsx
+let body = null
+jsx = jsxs = (type, props) => type === PageBody ? (body = props, {type: 'PageBody', props: {}}) : original(type, props)
+const statuses = [BEFORE, AFTER]
+const reads = []
+const polls = POLLS
+rest = async (path, init) => {
+  if (path.startsWith('/status')) {
+    reads.push(path)
+    return statuses[Math.min(reads.length - 1, statuses.length - 1)]
+  }
+  if (path === '/sync') return init && init.method === 'POST' ? {ok: true} : polls.length ? polls.shift() : LAST
+  return {ok: true}
+}
+const flush = async () => { for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r)) }
+const page = () => { cursor = 0; effects.length = 0; return SetupPage({}) }
+const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
+  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
+  : text(node.props && node.props.children)
+const out = {}
+page()
+effects.slice().forEach(f => f())
+await flush()
+page()
+// The import step's first poll, before anything was started: idle, nothing to refresh.
+body.onSync(IDLE)
+await flush()
+out.beforeStart = reads.length
+// The real import step (its hooks numbered apart from SetupPage's), started by its button.
+const step = () => { cursor = 1000; effects.length = 0; return ImportStep({id: 'telegram_import', n: '2.4',
+  state: 'next', title: 'Import Telegram messages', refresh: body.refresh, onSync: body.onSync,
+  onStarted: body.onImportStarted}) }
+let tree = step()
+await find(tree, n => n.type === 'button' && n.props.children === 'Import').props.onClick()
+await flush()
+// The step's next polls (its interval), until the import is seen idle.
+while (polls.length) { body.onSync(await rest('/sync')); await flush() }
+out.afterImport = reads.length
+// Later polls of the same idle state, or of another one, never read the status again.
+body.onSync(LAST); await flush()
+body.onSync({...LAST, message_count: 10}); await flush()
+out.later = reads.length
+page()
+cursor = 2000
+out.text = text(PageBody({...body}))
+console.log(JSON.stringify(out))
+""".replace("BEFORE", json.dumps(before))
+        .replace("AFTER", json.dumps(after))
+        .replace("POLLS", json.dumps(polls))
+        .replace("LAST", json.dumps(polls[-1]))
+        .replace("IDLE", json.dumps(SYNC_IDLE))
+    )
+    assert result["beforeStart"] == 1
+    assert result["afterImport"] == 2, "exactly one extra status read for the finished import"
+    assert result["later"] == 2
+    text = result["text"]
+    assert "connected · 2 chats · 9 messages in Mordred\u2019s store (all accounts)" in text
+    assert "Import Telegram messages\u2713 Done" in text
+
+
 def test_windows_and_unsupported_statuses_keep_their_pages():
     result = render_page("""
 jsx = jsxs = (type, props) => ({type: typeof type === 'function' ? type.name : type, props})
@@ -1253,7 +1333,7 @@ console.log(JSON.stringify({done: Step({n: 2, title: 'Encrypt Hermes memory', do
         "props": {
             "style": border,
             "children": [
-                {"type": "h3", "props": {"style": {"margin": "0 0 8px"}, "children": "✓  Encrypt Hermes memory"}},
+                {"type": "h3", "props": {"style": {"margin": "0 0 8px"}, "children": "\u2713  Encrypt Hermes memory"}},
                 None,
             ],
         },

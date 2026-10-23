@@ -1772,7 +1772,8 @@ function ImportSummary({ counts, sync }) {
 
 // `legacyHint`: logged in, and Mordred's store holds no Telegram message, so the history
 // may still be in the older archive (the status cannot tell without the sealed key).
-function ImportStep({ ready, refresh, n = 5, id = null, state = null, blocker = null, goto = null, code = null, title = 'Import messages', counts = null, onSync = null, why = null, legacyHint = false }) {
+// `onStarted` tells the page an import was started here (see SetupPage's onSync).
+function ImportStep({ ready, refresh, n = 5, id = null, state = null, blocker = null, goto = null, code = null, title = 'Import messages', counts = null, onSync = null, onStarted = null, why = null, legacyHint = false }) {
   const legacy = state == null
   const usable = legacy ? ready : state !== 'blocked'
   const [days, setDays] = useState(3)
@@ -1807,6 +1808,7 @@ function ImportStep({ ready, refresh, n = 5, id = null, state = null, blocker = 
     try {
       await call('/sync', { days: Number(days) || 3, include_archived: false })
       host.notify({ kind: 'info', message: 'Import started. Approve a hardware prompt if asked.' })
+      if (onStarted) onStarted()
       poll()
     } catch (e) {
       if (legacy) host.notifyError(asMordredError(e), 'Import failed')
@@ -3374,7 +3376,7 @@ function UpdateLine({ info }) {
 
 // macOS and Linux: overview card, then the four groups in a fixed order. Every
 // component keeps its place on each status refresh, so typed values and focus survive.
-function GroupedSetup({ status, health, sync = null, onSync = null, updateInfo = null, onUpdateInfo = null, refresh }) {
+function GroupedSetup({ status, health, sync = null, onSync = null, onImportStarted = null, updateInfo = null, onUpdateInfo = null, refresh }) {
   const layout = pageLayout(status)
   const macos = layout === 'macos'
   const v4 = macos && reportsV4(status)
@@ -3423,6 +3425,7 @@ function GroupedSetup({ status, health, sync = null, onSync = null, updateInfo =
             title: 'Import Telegram messages',
             counts: telegramCounts(status, sync),
             onSync,
+            onStarted: onImportStarted,
             refresh,
             why: WHY.telegram_import,
             legacyHint,
@@ -3449,10 +3452,10 @@ function GroupedSetup({ status, health, sync = null, onSync = null, updateInfo =
 
 // Everything below the title once the API answered: the grouped page on macOS and
 // Linux; Windows and unsupported platforms keep the page they had.
-function PageBody({ status, health, sync = null, onSync = null, updateInfo = null, onUpdateInfo = null, refresh }) {
+function PageBody({ status, health, sync = null, onSync = null, onImportStarted = null, updateInfo = null, onUpdateInfo = null, refresh }) {
   const layout = pageLayout(status)
   if (layout === 'macos' || layout === 'linux') {
-    return jsx(GroupedSetup, { status, health, sync, onSync, updateInfo, onUpdateInfo, refresh })
+    return jsx(GroupedSetup, { status, health, sync, onSync, onImportStarted, updateInfo, onUpdateInfo, refresh })
   }
   return jsxs(Fragment, {
     children: [
@@ -3485,6 +3488,9 @@ function SetupPage() {
   const lastSync = useRef('')
   // The last /sync answer's activity, to see a Telegram import end.
   const syncWas = useRef({ syncing: false, error: null })
+  // An import this page started that no /sync answer has shown running yet: it may end
+  // between two polls, so the first idle answer is its completion.
+  const importPending = useRef(false)
   const reading = useRef(null)
   const again = useRef(false)
   // One status read at a time: refreshes asked for meanwhile run once, after it.
@@ -3515,22 +3521,35 @@ function SetupPage() {
     return reading.current
   }, [])
   // The import step polls GET /sync; keep the answer only when it changed. An import that
-  // ended (syncing → idle, or a new error) changed the store counts and the step states,
-  // so the status is read once more (coalesced with a read in flight).
+  // ended (syncing → idle, a new error, or an idle answer after this page started one
+  // that was never seen running) changed the store counts and the step states, so the
+  // status is read once more (coalesced with a read in flight).
   const onSync = useCallback(
     (answer) => {
+      const syncing = Boolean(answer && answer.syncing)
+      // Seen running, the busy → idle rule takes over; seen idle, it already ended.
+      const startedAndEnded = importPending.current && !syncing
+      if (importPending.current) importPending.current = false
       const key = JSON.stringify(answer)
-      if (key === lastSync.current) return
+      if (key === lastSync.current) {
+        if (startedAndEnded) refresh()
+        return
+      }
       lastSync.current = key
       setSync(answer)
-      const syncing = Boolean(answer && answer.syncing)
       const error = (answer && safeCode(answer.last_error)) || null
-      const ended = (syncWas.current.syncing && !syncing) || (error !== null && error !== syncWas.current.error)
+      const ended = startedAndEnded || (syncWas.current.syncing && !syncing) || (error !== null && error !== syncWas.current.error)
       syncWas.current = { syncing, error }
       if (ended) refresh()
     },
     [refresh],
   )
+  const onImportStarted = useCallback(() => {
+    importPending.current = true
+  }, [])
+  useEffect(() => () => {
+    importPending.current = false
+  }, [])
   useEffect(() => {
     refresh()
   }, [refresh])
@@ -3558,7 +3577,7 @@ function SetupPage() {
       jsx('p', { style: grouped ? { marginTop: 0 } : undefined, children: TAGLINES[layout] || TAGLINES.other }),
       broken ? jsx(RepairPanel, { probeResult: broken, recheck: refresh }) : null,
       status
-        ? jsx(PageBody, { status, health, sync, onSync, updateInfo, onUpdateInfo: setUpdateInfo, refresh })
+        ? jsx(PageBody, { status, health, sync, onSync, onImportStarted, updateInfo, onUpdateInfo: setUpdateInfo, refresh })
         : broken
           ? null
           : jsx('p', { children: 'Loading…' }),
