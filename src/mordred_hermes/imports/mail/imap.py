@@ -58,7 +58,11 @@ Bounds (:class:`IoLimits`, enforced inside imaplib's own ``read``/``readline``):
 Errors are :class:`ImapError` codes: ``imap_unreachable``, ``imap_auth_failed``,
 ``imap_protocol``, ``imap_command_refused``, ``egress_unsupported``,
 ``routing_unavailable``; :class:`ImapStopped` (a deadline or a cancellation,
-``reason``) is not a server failure.
+``reason``) is not a server failure. A refused ``LOGIN`` also carries a
+``hint`` from :data:`IMAP_HINTS`, taken from the bracketed RFC 5530 response
+code only (``[AUTHENTICATIONFAILED]``, ``[ALERT]``) or the ``LOGINDISABLED``
+capability; the server's text after the code is never kept, logged or returned
+(Gmail's alert text holds a support URL and sometimes the account name).
 """
 
 from __future__ import annotations
@@ -95,6 +99,7 @@ __all__ = [
     "DEFAULT_PORT",
     "GMAIL_CAPABILITY",
     "IMAPS_PORT",
+    "IMAP_HINTS",
     "MAX_BATCH_LITERAL_BYTES",
     "MAX_LITERAL_BYTES",
     "MAX_RUN_BYTES",
@@ -156,13 +161,20 @@ _HOST_RE: Final = re.compile(rf"(?=.{{1,253}}\Z){_HOST_LABEL}(?:\.{_HOST_LABEL})
 _IMAP_COMMAND: Final[Any] = getattr(imaplib.IMAP4, "_command")  # noqa: B009 - private, absent from typeshed
 _T = TypeVar("_T")
 
+#: Why a login was refused, for the owner's remediation text (closed: anything else is ``None``).
+IMAP_HINTS: Final = frozenset({"authentication_failed", "server_alert", "login_disabled", "gmail_app_password_length"})
+#: An RFC 5530 response code opening a tagged reply's text; only the code is ever read.
+_RESPONSE_CODE_RE: Final = re.compile(r"^\[([A-Z][A-Z0-9-]{1,30})\]")
+_RESPONSE_CODE_HINTS: Final = {"AUTHENTICATIONFAILED": "authentication_failed", "ALERT": "server_alert"}
+
 
 class ImapError(Exception):
-    """A content-free IMAP failure code (never server text)."""
+    """A content-free IMAP failure code (never server text), with an optional :data:`IMAP_HINTS` member."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, hint: str | None = None) -> None:
         super().__init__(code)
         self.code = code
+        self.hint = hint if hint in IMAP_HINTS else None
 
 
 class ImapStopped(ImapError):
@@ -980,21 +992,30 @@ class ImapSession:
         return conn.limits.run_bytes if isinstance(conn, _CommandGuard) else 0
 
     def login(self, user: str, password: str) -> None:
-        """``LOGIN`` inside the implicit-TLS connection: the only mechanism, so nothing can downgrade it."""
+        """``LOGIN`` inside the implicit-TLS connection: the only mechanism, so nothing can downgrade it.
+
+        A refusal is ``imap_auth_failed`` with the hint of its response code
+        (:func:`_login_hint`). The failure is raised outside the handler, so the
+        imaplib error holding the server's text is not even its ``__context__``.
+        """
         if "LOGINDISABLED" in self.capabilities:
-            raise ImapError("imap_auth_failed")
+            raise ImapError("imap_auth_failed", hint="login_disabled")
+        failure: ImapError | None = None
         try:
             self._conn.login(user, password)
         except ImapError:
             raise
         except imaplib.IMAP4.abort:
-            raise ImapError("imap_unreachable") from None
-        except imaplib.IMAP4.error:
-            raise ImapError("imap_auth_failed") from None
+            failure = ImapError("imap_unreachable")
+        except imaplib.IMAP4.error as exc:
+            failure = ImapError("imap_auth_failed", hint=_login_hint(exc))
         except OSError:
-            raise ImapError("imap_unreachable") from None
+            failure = ImapError("imap_unreachable")
         except (UnicodeError, ValueError):
-            raise ImapError("imap_auth_failed") from None
+            failure = ImapError("imap_auth_failed")
+        if failure is not None:
+            setattr(self._conn, "mo", None)  # noqa: B010 - imaplib's last regex match still holds the reply line
+            raise failure
         with _mapped():
             # Refreshed after login: servers may advertise more (Gmail's X-GM-EXT-1) once authenticated.
             words = _capability_words(_ok(self._conn.capability()))
@@ -1078,6 +1099,24 @@ class ImapSession:
         finally:
             if isinstance(conn, _CommandGuard):
                 conn.release()
+
+
+def _login_hint(exc: BaseException) -> str | None:
+    """The :data:`IMAP_HINTS` member for a refused ``LOGIN``, from its response code only.
+
+    imaplib raises ``error(<reply text>)`` with the tagged reply's bytes, so
+    ``str(exc)`` reads ``b'[ALERT] ...'``; the raw first argument is matched
+    instead. Only the bracketed code is read; nothing of the text is returned.
+    """
+    first = exc.args[0] if exc.args else None
+    if isinstance(first, bytes):
+        text = first[:34].decode("ascii", "replace")
+    elif isinstance(first, str):
+        text = first[:34]
+    else:
+        return None
+    match = _RESPONSE_CODE_RE.match(text)
+    return _RESPONSE_CODE_HINTS.get(match.group(1)) if match else None
 
 
 def _capability_words(data: Sequence[object]) -> list[str]:

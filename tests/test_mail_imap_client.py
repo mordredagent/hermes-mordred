@@ -328,6 +328,91 @@ def test_login_failure_and_unreachable_are_codes() -> None:
     assert raised.value.code == "imap_unreachable"
 
 
+# --- login failure hints (response code only, never the server's text) ------------------------------
+
+#: Server text after the response code: a support URL and the account name, as Gmail's alerts carry.
+ALERT_CANARY = "ALERTCANARY-owner@example.com-https://support.example.com/answer/185833"
+
+
+@pytest.mark.parametrize(
+    ("reply", "hint"),
+    [
+        ("NO [AUTHENTICATIONFAILED] Invalid credentials (Failure)", "authentication_failed"),
+        (f"NO [ALERT] Application-specific password required: {ALERT_CANARY} (Failure)", "server_alert"),
+        ("NO [AUTHORIZATIONFAILED] not for this account", None),  # a code without a hint
+        ("NO [CONTACTADMIN]", None),
+        ("NO Invalid credentials", None),  # no bracketed code at all
+        ("NO [alert] lower case is not a response code", None),
+        ("NO see [ALERT] later in the text", None),  # the code must open the text
+        ("BAD [ALERT] a syntax error", None),  # imaplib reports BAD as its own text
+    ],
+)
+def test_login_failure_hint_comes_from_the_response_code_only(reply: str, hint: str | None) -> None:
+    server = FakeImapServer({"INBOX": FakeMailbox(1)}, login_failure=reply)
+    session = server.session()
+    with pytest.raises(ImapError) as raised:
+        session.login("owner@example.com", "wrong")
+    session.logout()
+    assert (raised.value.code, raised.value.hint) == ("imap_auth_failed", hint)
+    assert raised.value.args == ("imap_auth_failed",)
+
+
+def test_the_server_text_after_the_code_is_never_kept(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+    import traceback
+
+    caplog.set_level(logging.DEBUG)
+    server = FakeImapServer({"INBOX": FakeMailbox(1)}, login_failure=f"NO [ALERT] {ALERT_CANARY} (Failure)")
+    session = server.session()
+    with pytest.raises(ImapError) as raised:
+        session.login("owner@example.com", "wrong")
+    error = raised.value
+    assert (error.code, error.hint) == ("imap_auth_failed", "server_alert")
+    assert error.__cause__ is None and error.__context__ is None  # the imaplib error (with the text) is dropped
+    rendered = [str(error), repr(error), repr(error.args), repr(vars(error)), caplog.text]
+    rendered.append("".join(traceback.format_exception(error)))
+    assert [text for text in rendered if "ALERTCANARY" in text] == []
+    assert getattr(session._conn, "mo", None) is None  # imaplib's last regex match held the response line
+    session.logout()
+
+
+def test_logindisabled_is_auth_failed_with_its_hint_and_never_sends_login() -> None:
+    server = FakeImapServer({"INBOX": FakeMailbox(1)}, capabilities=("LOGINDISABLED",))
+    session = server.session()
+    with pytest.raises(ImapError) as raised:
+        session.login("owner@example.com", "app-password-1")
+    session.logout()
+    assert (raised.value.code, raised.value.hint) == ("imap_auth_failed", "login_disabled")
+    assert "LOGIN" not in server.verbs
+
+
+def test_hints_are_a_closed_set() -> None:
+    expected = {"authentication_failed", "server_alert", "login_disabled", "gmail_app_password_length"}
+    assert expected == imap.IMAP_HINTS
+    assert ImapError("imap_auth_failed", hint="anything else").hint is None
+    assert ImapError("imap_unreachable").hint is None
+    assert ImapStopped("time_budget").hint is None
+    error = ImapError("imap_auth_failed", hint="gmail_app_password_length")
+    assert (str(error), error.args) == ("imap_auth_failed", ("imap_auth_failed",))
+    assert error.hint == "gmail_app_password_length"
+
+
+@pytest.mark.parametrize(
+    ("args", "hint"),
+    [
+        ((b"[AUTHENTICATIONFAILED] x",), "authentication_failed"),
+        (("[ALERT] text",), "server_alert"),
+        ((b"[ALERT]",), "server_alert"),
+        ((b"\xff[ALERT] x",), None),
+        ((b"[" + b"A" * 32 + b"] x",), None),  # longer than any response code
+        ((), None),
+        ((42,), None),
+    ],
+)
+def test_the_response_code_is_read_from_the_raw_reply(args: tuple[object, ...], hint: str | None) -> None:
+    assert imap._login_hint(imaplib.IMAP4.error(*args)) == hint
+
+
 # --- framing, authentication, port ----------------------------------------------------------------
 
 
