@@ -11,28 +11,46 @@ default mapping is ignored, any other value replaces it) and resolves
 the rule. Nothing here writes config.yaml: :func:`.direct_tools.set_direct`
 delegates the write to Hermes's own ``hermes config`` command.
 
-ruamel's errors and warnings (``ReusedAnchorWarning``,
-``MantissaNoDotYAML1_1Warning``) quote source lines, values included, so every
-load runs under :func:`_quiet` and any error or warning is ``config_unreadable``;
-nothing of it is kept. ``warnings.catch_warnings`` swaps process-wide state, so
-a warning another thread raises during a parse may be captured (and that parse
-refuses) instead of shown.
+**A child process parses.** ruamel's errors and warnings
+(``ReusedAnchorWarning``, ``MantissaNoDotYAML1_1Warning``) quote source lines,
+values included, and Python's warning sink is process-wide, so no parse runs in
+the Hermes process. :mod:`.direct_tools` starts this module as a child
+(``python -I``, ``main``): it gets the config.yaml text on stdin, never opens a
+file, and prints exactly one JSON line, ``{"direct", "source", "existing"}`` or
+``{"code": "config_unreadable"}``; the parent drops its stderr. Inside the child
+every load still runs under :func:`_quiet`, and any error or warning is
+``config_unreadable``. The functions stay pure, for the child and for tests.
 """
 
 from __future__ import annotations
 
+import json
+import sys
 import threading
 import warnings
+from collections import Counter
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any, Final, Literal
 
-__all__ = ["DEFERRED", "DirectToolsError", "existing_value", "hermes_data", "is_off", "mode_of"]
+__all__ = [
+    "DEFERRED",
+    "EXISTING",
+    "DirectToolsError",
+    "answer",
+    "existing_value",
+    "hermes_data",
+    "is_off",
+    "main",
+    "mode_of",
+]
 
 #: The explicit deferrals ``on`` may replace (``_tri_state`` gives "auto" or "on" for them).
 DEFERRED: Final = frozenset({"auto", "on", "true", "1", "yes"})
-#: Mordred's own parses, one at a time (their warning filters must not interleave).
+#: Parses in one process, one at a time (the reader child is single-threaded anyway).
 _PARSE_LOCK = threading.RLock()
+#: ``existing_value`` answers (``main`` prints one of them).
+EXISTING: Final = frozenset({"absent", "deferral", "legacy", "other", "shared"})
 
 
 class DirectToolsError(Exception):
@@ -125,9 +143,32 @@ def mode_of(data: Any) -> dict[str, Any]:
     return {"direct": is_off(value), "source": "config"}
 
 
-def existing_value(data: Any) -> Literal["absent", "deferral", "legacy", "other"]:
+def _shared(data: Any) -> bool:
+    """The ``tools`` or the ``tools.tool_search`` mapping is referenced from more than one place.
+
+    Safe loading gives every alias (and every ``<<`` merge source) the same
+    object, so counting object ids over every mapping and sequence finds them.
+    Hermes's setter would change the other place too.
+    """
+    counts: Counter[int] = Counter()
+    stack = [data]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, Mapping | list):
+            continue
+        counts[id(node)] += 1
+        if counts[id(node)] == 1:
+            stack.extend(node.values() if isinstance(node, Mapping) else node)
+    tools = data.get("tools") if isinstance(data, Mapping) else None
+    search = tools.get("tool_search") if isinstance(tools, Mapping) else None
+    return any(isinstance(node, Mapping) and counts[id(node)] > 1 for node in (tools, search))
+
+
+def existing_value(data: Any) -> Literal["absent", "deferral", "legacy", "other", "shared"]:
     """What ``tools.tool_search`` holds: ``on`` replaces only "absent" and "deferral"; ``off``
-    unsets ``tools.tool_search`` itself for "legacy"."""
+    unsets ``tools.tool_search`` itself for "legacy"; "shared" (an alias) is never changed."""
+    if _shared(data):
+        return "shared"
     search = _search(data)
     if search is None:
         return "absent"
@@ -137,3 +178,35 @@ def existing_value(data: Any) -> Literal["absent", "deferral", "legacy", "other"
     if value is None:
         return "absent"
     return "deferral" if str(value).strip().lower() in DEFERRED else "other"
+
+
+def answer(text: str, *, strict_empty: bool = False) -> dict[str, Any]:
+    """The reader's answer for config.yaml ``text``: ``{"direct", "source", "existing"}`` or
+    ``{"code": "config_unreadable"}``. ``strict_empty``: an empty or comment-only document is
+    unreadable (the checked Windows reader's rule)."""
+    try:
+        data = hermes_data(text)
+        if data is None and strict_empty:
+            raise DirectToolsError("config_unreadable")
+        mode = mode_of(data)
+        return {"direct": mode["direct"], "source": mode["source"], "existing": existing_value(data)}
+    except DirectToolsError:
+        return {"code": "config_unreadable"}
+
+
+def main(argv: list[str] | None = None) -> int:
+    """The reader child: config.yaml's text on stdin (UTF-8), one JSON line on stdout."""
+    args = sys.argv[1:] if argv is None else argv
+    try:
+        text = sys.stdin.buffer.read().decode("utf-8")
+    except (OSError, ValueError):
+        result: dict[str, Any] = {"code": "config_unreadable"}
+    else:
+        result = answer(text, strict_empty="strict" in args)
+    sys.stdout.write(json.dumps(result) + "\n")
+    sys.stdout.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

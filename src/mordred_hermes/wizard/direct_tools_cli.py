@@ -54,6 +54,11 @@ REMEDIES = {
         "config.yaml already sets tools.tool_search to a value Mordred does not replace (only an absent "
         "value, auto, on, true, yes or 1); nothing was changed. Edit config.yaml by hand."
     ),
+    "config_unsupported_shape": (
+        "config.yaml shares the tools or tool_search mapping with another setting through a YAML "
+        "anchor/alias, so changing it would change that setting too; nothing was changed. Edit "
+        "config.yaml by hand."
+    ),
     "hermes_cli_missing": (
         "Hermes's own `hermes` command was not found (next to this Python, in "
         "<home>/hermes-agent/venv/bin or as Hermes Desktop's launcher); nothing was changed. "

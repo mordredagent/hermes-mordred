@@ -245,6 +245,7 @@ TOOLS_ERROR_CODES = frozenset(
         "config_write_failed",
         "config_has_setting",
         "hermes_cli_missing",
+        "config_unsupported_shape",
     }
 )
 

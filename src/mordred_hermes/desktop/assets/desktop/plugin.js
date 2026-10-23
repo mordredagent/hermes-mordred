@@ -195,6 +195,7 @@ const MESSAGES = {
   config_write_failed: 'Hermes’s own hermes config command did not finish, or Hermes does not read the setting as asked afterwards. Check config.yaml, then try again, or add the lines below by hand.',
   config_has_setting: 'Hermes’s config.yaml already sets tools.tool_search to a value Mordred does not replace. Nothing was changed. Edit config.yaml by hand.',
   hermes_cli_missing: 'Hermes’s own hermes command was not found, so nothing was changed. Add the lines below to config.yaml by hand.',
+  config_unsupported_shape: 'Hermes’s config.yaml shares the tools or tool_search mapping with another setting through a YAML anchor/alias, so changing it would change that setting too. Nothing was changed. Edit config.yaml by hand.',
 }
 
 // `imap_auth_failed` refined by the server's response code (never its text).

@@ -273,6 +273,8 @@ elif plan.get("apply", True):
     out.default_flow_style = False
     with config.open("w", encoding="utf-8") as handle:
         out.dump(data, handle) if data else handle.write("")
+if plan.get("managed") and os.environ.get("MORDRED_CONFIG_DECRYPT") != "0" and config.exists():
+    config.unlink()  # the lifecycle hook's reseal at exit removes the plaintext working copy
 sys.exit(plan.get("exit_" + verb, 0))
 """
 
@@ -503,6 +505,7 @@ def test_error_codes_are_closed() -> None:
         "config_write_failed",
         "config_has_setting",
         "hermes_cli_missing",
+        "config_unsupported_shape",
     )
 
 
@@ -572,4 +575,248 @@ def test_the_real_hermes_config_set_unset_get(home: Path, monkeypatch: pytest.Mo
     assert read_mode(home) == {"direct": True, "source": "config"}
     assert "enabled: 'off'" in config.read_text(encoding="utf-8")  # Hermes stores the string 'off'
     set_direct(home, False)
+    assert read_mode(home) == {"direct": False, "source": "default"}
+
+
+@posix_only
+@pytest.mark.skipif(_repo_hermes() is None, reason="no hermes-agent (hermes console script) in this venv")
+def test_the_real_hermes_never_runs_for_a_shared_mapping(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hermes's setter would change ``other.enabled`` too: Mordred refuses before running it."""
+    monkeypatch.setenv("MORDRED_CONFIG_DECRYPT", "0")
+    config = write(home, SHARED.format("auto"))
+    with pytest.raises(DirectToolsError) as error:
+        set_direct(home, True)
+    assert error.value.code == "config_unsupported_shape"
+    assert config.read_text(encoding="utf-8") == SHARED.format("auto")
+    from ruamel.yaml import YAML
+
+    assert YAML(typ="safe", pure=True).load(config.read_text(encoding="utf-8"))["other"]["enabled"] == "auto"
+
+
+# -- pass 3: the reader child, the lifecycle hook, shared mappings, relative homes, concurrency -------
+
+SHARED = "other: &shared\n  enabled: {}\ntools:\n  tool_search: *shared\n"
+WARNING_DOCS = {
+    "reused-anchor": f"model: &m {CANARY}\nother: &m second-{CANARY}\n",
+    "mantissa-no-dot": f"model:\n  default: {CANARY}\n  temperature: 1e3\n",
+}
+
+
+@pytest.fixture
+def fresh_reader():
+    """No cached reader answers (each read below spawns the child)."""
+    direct_tools._ANSWERS.clear()
+    yield
+    direct_tools._ANSWERS.clear()
+
+
+@pytest.mark.parametrize("name", list(WARNING_DOCS))
+def test_the_reader_raises_these_warnings_and_refuses(name: str) -> None:
+    """In the child the YAML warning is raised, recorded and turned into config_unreadable."""
+    from mordred_hermes.wizard._direct_tools_yaml import answer
+
+    assert answer(WARNING_DOCS[name]) == {"code": "config_unreadable"}
+
+
+@posix_only
+@pytest.mark.parametrize("name", list(WARNING_DOCS))
+def test_yaml_warnings_never_reach_this_process_even_with_other_warning_contexts(
+    home: Path,
+    fresh_reader: None,
+    capfd: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+    name: str,
+) -> None:
+    """Another thread keeps entering and leaving warnings.catch_warnings() while config.yaml is read:
+    the parse runs in the child, whose stderr is dropped, so nothing of the document gets out."""
+    import threading
+    import warnings
+
+    write(home, WARNING_DOCS[name])
+    stop = threading.Event()
+
+    def churn() -> None:
+        while not stop.is_set():
+            with warnings.catch_warnings():
+                warnings.simplefilter("default")
+
+    thread = threading.Thread(target=churn, daemon=True)
+    thread.start()
+    try:
+        for _ in range(5):
+            direct_tools._ANSWERS.clear()
+            assert read_mode(home) == {"direct": None, "source": "unreadable", "code": "config_unreadable"}
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+    out, err = capfd.readouterr()
+    assert CANARY not in out + err + caplog.text
+    assert "Warning" not in out + err
+
+
+@posix_only
+def test_the_reader_child_gets_the_text_on_stdin_and_answers_one_json_line(
+    home: Path, fresh_reader: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    seen: list[dict[str, Any]] = []
+    real = subprocess.run
+
+    def spy(argv: list[str], **kwargs: Any) -> Any:
+        seen.append({"argv": argv, **kwargs})
+        return real(argv, **kwargs)
+
+    monkeypatch.setenv("PYTHONPATH", "/nonexistent-pythonpath")
+    monkeypatch.setattr(direct_tools.subprocess, "run", spy)
+    write(home, "tools:\n  tool_search:\n    enabled: off\n")
+    assert read_mode(home) == {"direct": True, "source": "config"}
+    (call,) = seen
+    assert call["argv"][:3] == [sys.executable, "-I", "-c"] and call["cwd"] is None
+    assert call["input"] == b"tools:\n  tool_search:\n    enabled: off\n"  # the text, never a path
+    assert str(home) not in " ".join(call["argv"])
+    assert "PYTHONPATH" not in call["env"] and "PYTHONHOME" not in call["env"]
+    assert call["timeout"] == direct_tools.READER_TIMEOUT_S
+
+
+@posix_only
+def test_an_unchanged_file_is_answered_from_the_cache(
+    home: Path, fresh_reader: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    real = direct_tools._spawn_reader
+
+    def counted(text: str, strict_empty: bool) -> Any:
+        calls.append(text)
+        return real(text, strict_empty)
+
+    monkeypatch.setattr(direct_tools, "_spawn_reader", counted)
+    write(home, CONFIG)
+    for _ in range(3):
+        assert read_mode(home) == {"direct": False, "source": "default"}
+    write(home, CONFIG + "tools:\n  tool_search:\n    enabled: off\n")
+    assert read_mode(home)["direct"] is True
+    assert len(calls) == 2
+    for index in range(10):
+        write(home, f"model: m{index}\n")
+        read_mode(home)
+    assert len(direct_tools._ANSWERS) == 8
+
+
+@posix_only
+@pytest.mark.parametrize(
+    "stdout,code",
+    [
+        (b"", 0),
+        (b"not json\n", 0),
+        (b'{"direct": "yes", "source": "config", "existing": "absent"}\n', 0),
+        (b'{"direct": true, "source": "config", "existing": "absent", "raw": "x"}\n', 0),
+        (b'{"code": "something_else"}\n', 0),
+        (b'{"direct": true, "source": "config", "existing": "absent"}\n', 1),
+    ],
+)
+def test_a_reader_answer_that_does_not_conform_is_unreadable(
+    home: Path, fresh_reader: None, monkeypatch: pytest.MonkeyPatch, stdout: bytes, code: int
+) -> None:
+    import subprocess
+
+    monkeypatch.setattr(
+        direct_tools.subprocess, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, code, stdout, b"")
+    )
+    write(home, CONFIG)
+    assert read_mode(home) == {"direct": None, "source": "unreadable", "code": "config_unreadable"}
+    assert direct_tools._ANSWERS == {}  # a failed answer is never cached
+
+
+@posix_only
+def test_a_reader_that_hangs_is_unreadable(home: Path, fresh_reader: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(direct_tools, "READER_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(direct_tools, "_READER_BOOT", "import time; time.sleep(5)")
+    write(home, CONFIG)
+    assert read_mode(home)["code"] == "config_unreadable"
+
+
+@posix_only
+def test_the_child_hermes_never_reseals_the_running_processs_config(
+    home: Path, hermes: FakeHermes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the lifecycle hook, each child hermes would remove the working copy at exit."""
+    monkeypatch.setenv("MORDRED_CONFIG_DECRYPT", "1")
+    _manage(home)
+    write(home, CONFIG)
+    hermes.plan(managed=True)
+    set_direct(home, True)
+    assert (home / "config.yaml").exists()
+    assert read_mode(home) == {"direct": True, "source": "config"}
+
+
+@posix_only
+@pytest.mark.parametrize("enabled,value", [(True, "auto"), (False, "'off'")])
+def test_a_shared_tools_or_tool_search_mapping_is_refused_before_hermes_runs(
+    home: Path, hermes: FakeHermes, enabled: bool, value: str
+) -> None:
+    config = write(home, SHARED.format(value))
+    with pytest.raises(DirectToolsError) as error:
+        set_direct(home, enabled)
+    assert error.value.code == "config_unsupported_shape"
+    assert hermes.calls() == [] and config.read_text(encoding="utf-8") == SHARED.format(value)
+
+
+@posix_only
+@pytest.mark.parametrize(
+    "text",
+    [
+        "base: &t\n  tool_search:\n    enabled: auto\ntools: *t\n",
+        "base: &t\n  tool_search:\n    enabled: auto\ntools:\n  <<: *t\n  other: 1\n",
+        "shared: &s\n  enabled: auto\nlist:\n  - *s\ntools:\n  tool_search: *s\n",
+    ],
+    ids=["tools-alias", "tool-search-through-a-merge", "alias-in-a-list"],
+)
+def test_every_shared_shape_is_refused(home: Path, hermes: FakeHermes, text: str) -> None:
+    write(home, text)
+    with pytest.raises(DirectToolsError) as error:
+        set_direct(home, True)
+    assert error.value.code == "config_unsupported_shape" and hermes.calls() == []
+
+
+@posix_only
+def test_a_relative_home_is_made_absolute_for_the_child(
+    tmp_path: Path, hermes: FakeHermes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = tmp_path / "profile"
+    (profile / "mordred").mkdir(parents=True)
+    (profile / "config.yaml").write_text(CONFIG, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    set_direct(Path("profile"), True)
+    absolute = str(Path.cwd() / "profile")
+    assert [call["home"] for call in hermes.calls()] == [absolute, absolute]
+    assert all(Path(call["cwd"]).resolve() == profile.resolve() for call in hermes.calls())
+    assert read_mode(Path("profile")) == {"direct": True, "source": "config"}
+    assert not (profile / "profile").exists()
+    assert direct_tools.hermes_command(Path("profile")) == hermes.bin / "hermes"
+
+
+@posix_only
+def test_two_simultaneous_off_requests_both_succeed_with_one_unset(home: Path, hermes: FakeHermes) -> None:
+    import threading
+
+    write(home, CONFIG + "tools:\n  tool_search:\n    enabled: 'off'\n")
+    hermes.plan(sleep=0.3)  # widen the window in which the second request arrives
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def off() -> None:
+        barrier.wait()
+        try:
+            set_direct(home, False)
+        except BaseException as exc:  # recorded for the assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=off) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert errors == []
+    assert [call["argv"][1] for call in hermes.calls()].count("unset") == 1
     assert read_mode(home) == {"direct": False, "source": "default"}
