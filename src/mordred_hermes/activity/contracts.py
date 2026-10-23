@@ -503,24 +503,36 @@ MAX_SECRET_VALUE_WORDS: Final = 8
 _LINE_BREAKS: Final = frozenset("\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
 _WORD_GAP_RE: Final = re.compile(r"[^\S\n\r\x0b\x0c\x1c-\x1e\x85\u2028\u2029]{1,32}")
 _HIRAGANA_RE: Final = re.compile("[\u3040-\u309f]")
+#: Articles, possessives and demonstratives: a spoken passphrase may hold them ("my secret sauce 42", "hunter the
+#: great 7"), so they never end a value of several words; one may start it after a strong frame
+#: (:func:`_after_a_determiner`).
+_DETERMINERS: Final = frozenset(
+    {"a", "an", "the", "my", "your", "our", "their", "his", "her", "its", "this", "that", "these", "those"}
+)
 #: Words that start another part of the sentence, so a value of several words ends before them: the interface and
-#: function words (:data:`SECRET_VALUE_STOP_WORDS`: "and", "then", "please", "with", "in", "as", "is", "expires" ...),
-#: more connectives and words of time. A keyword, a URL and a verb that puts or sets a value end it too
-#: (:func:`_ends_value`).
-_VALUE_END_WORDS: Final = SECRET_VALUE_STOP_WORDS | frozenset(
+#: function words (:data:`SECRET_VALUE_STOP_WORDS`: "and", "then", "please", "with", "in", "as", "is", "expires" ...)
+#: but the determiners, more connectives and words of time. A keyword that starts a frame of its own and a verb that
+#: puts or sets a value end it too (:func:`_ends_value`).
+_VALUE_END_WORDS: Final = (SECRET_VALUE_STOP_WORDS - _DETERMINERS) | frozenset(
     {
         *("also", "after", "before", "because", "while", "until", "once", "which", "where", "since", "unless"),
         *("yesterday", "today", "tomorrow", "tonight", "now", "soon", "later", "again", "instead", "okay", "thanks"),
     }
 )
 #: Words of :data:`_VALUE_END_WORDS` that may stand for a symbol or a digit inside a spoken value ("hunter at fake dot
-#: pw"): they stay inside it only between two spoken words (:func:`_link_ends`), not before "the bank" or "log in".
+#: pw"): they end it only before (reading on) or after (reading back) a word that starts another part, a typed word
+#: or nothing (:func:`_link_ends`: "for the bank", "to log in", "use at least").
 _SPOKEN_LINKS: Final = frozenset({"at", "to", "for"})
-#: A word that only separates ("token = abcdef", "demo-user / Hunter2"): it ends a value of several words.
+#: A word that only separates ("hunter / 2 fake pw", "blue | s3cr3t!"): a value of several words is read on (or back)
+#: through it, and it is replaced only between two words of the value. It ends the value only after a field label
+#: that starts another part ("user = demo", :data:`_FIELD_LABELS`).
 _SEPARATOR_WORD_RE: Final = re.compile("[:=\uff1a\uff1d/|]+")
+_FIELD_LABELS: Final = frozenset({"user", "username", "userid", "email", "e-mail", "mail", "id", "name", "account"})
 _NEXT_PART_VERBS: Final = frozenset(
     {"log", "access", "unlock", "open", "get", "go", "start", "finish", "proceed", "complete", "visit", "click"}
 )
+#: The words after (or before) a spoken link that start another part, so the link ends the value (:func:`_link_ends`).
+_NEXT_PART_WORDS: Final = SECRET_VALUE_STOP_WORDS | _VALUE_END_WORDS | _NEXT_PART_VERBS
 #: Words a value of several words never starts with (:func:`_starts_a_value`): the interface and function words, the
 #: heads that make a keyword a modifier, placeholders, units, and the pronouns and quantifiers that start a
 #: description ("the password you received", "the password every 90 days"), and the login page's "keep me signed
@@ -942,11 +954,12 @@ class _Connection(NamedTuple):
     labelled: bool  # ``:`` or ``=``
     linked: bool  # ``is`` / ``was`` / ``of`` or a Japanese particle
     japanese: bool  # a Japanese particle: the value is read as Japanese (:func:`_words_after`)
+    strong: bool = False  # a label, ``is`` / ``was`` or a particle (not ``of``): the value is the keyword's
 
 
 def _connection(text: str, pos: int) -> _Connection:
     """Up to :data:`_MAX_CONNECTORS` connectors after a keyword: whitespace, labels, particles and words."""
-    joined = labelled = linked = particle = False
+    joined = labelled = linked = particle = strong = False
     for _ in range(_MAX_CONNECTORS):
         space = _SPACE_RE.match(text, pos)
         if space:
@@ -954,14 +967,14 @@ def _connection(text: str, pos: int) -> _Connection:
         char = text[pos : pos + 1]
         word = _WORD_CONNECTOR_RE.match(text, pos) if space else None
         if char and char in _LABEL_MARKS:
-            pos, joined, labelled = pos + 1, True, True
+            pos, joined, labelled, strong = pos + 1, True, True, True
         elif char and char in _PARTICLES:
-            pos, joined, linked, particle = pos + 1, True, True, True
+            pos, joined, linked, particle, strong = pos + 1, True, True, True, True
         elif word:
-            pos, linked = word.end(), True
+            pos, linked, strong = word.end(), True, strong or word.group(0).lower() != "of"
         else:
             break
-    return _Connection(pos, joined, labelled, linked, particle)
+    return _Connection(pos, joined, labelled, linked, particle, strong)
 
 
 def _quoted_value(text: str, pos: int) -> tuple[int, int] | None:
@@ -1213,82 +1226,116 @@ def _is_end_word(text: str, span: tuple[int, int]) -> bool:
     return word in _VALUE_END_WORDS or bool(_VALUE_VERB_RE.fullmatch(word) or _SET_VERB_RE.fullmatch(word))
 
 
-def _link_ends(index: _TextIndex, start: int, end: int) -> bool:
-    """A spoken link (:data:`_SPOKEN_LINKS`) at ``start:end`` ends the value unless it stands between two spoken
-    words: a word of letters or digits on each side on its line, neither one that starts another part ("for the
-    bank", "to log in", "use at least") nor a keyword. A typed word, with a symbol in it, ends it too ("PIN=4821 to
-    Hunter2-x", "the bank to Hunter2-x as the password": speech writes words of letters and digits)."""
+def _starts_frame(index: _TextIndex, start: int, end: int) -> bool:
+    """The word ``text[start:end]`` holds a keyword that starts a frame of its own: the keyword (at the word's start
+    or inside it, "DB_PASSWORD=xyz") followed by a label, ``is`` / ``was``, a particle or a direct quote ("pin: 1234",
+    "token=abc", "PIN is 4821"). A word that only contains or starts a keyword ("pin cushion", "spinach",
+    "tokenize") does not: a passphrase may hold it."""
     text = index.text
-    gap = _WORD_GAP_RE.match(text, end)
-    after = _BARE_VALUE_RE.match(text, gap.end()) if gap else None
-    stop = _gap_before(text, start)
-    begin = index.run_start(stop) if 0 < stop < start else stop
-    if after is None or begin == stop:
+    first = _SECRET_KEYWORD_RE.match(text, start)
+    for keyword in [*([first] if first else []), *_SECRET_KEYWORD_RE.finditer(text, start + 1, end)]:
+        connection = _connection(text, keyword.end())
+        if connection.strong or text[connection.start : connection.start + 1] in _DIRECT_QUOTES:
+            return True
+    return False
+
+
+def _link_ends(index: _TextIndex, start: int, end: int, *, forward: bool) -> bool:
+    """A spoken link (:data:`_SPOKEN_LINKS`) at ``start:end`` ends the value when the word on its far side (after it
+    reading on, before it reading back) starts another part (:data:`_NEXT_PART_WORDS`: "for the bank", "to log in",
+    "use at least"), is typed (a symbol in it: "PIN=4821 to Hunter2-x"; speech writes letters and digits), is a
+    keyword ("the password for the bank": the link is the keyword's qualifier) or starts a frame of its own, or is
+    missing. The word on the value's own side never decides: when unsure, read on."""
+    text = index.text
+    if forward:
+        gap = _WORD_GAP_RE.match(text, end)
+        word = _BARE_VALUE_RE.match(text, gap.end()) if gap else None
+        if word is None:
+            return True
+        span = (word.start(), _without_closing_marks(text, word.start(), word.end()))
+    else:
+        stop = _gap_before(text, start)
+        begin = index.run_start(stop) if 0 < stop < start else stop
+        if begin == stop or text[stop - 1] in _TRAILING_MARKS:
+            return True
+        span = (begin, stop)
+    if not text[span[0] : span[1]].isalnum() or _SECRET_KEYWORD_RE.fullmatch(text, span[0], span[1]):
         return True
-    for span in ((begin, stop), (after.start(), _without_closing_marks(text, after.start(), after.end()))):
-        if not text[span[0] : span[1]].isalnum() or _SECRET_KEYWORD_RE.match(text, span[0]):
-            return True
-        if _is_end_word(text, span) or _word(text, span) in _NEXT_PART_VERBS:
-            return True
-    return False
+    if _starts_frame(index, span[0], span[1]):
+        return True
+    word_text = _word(text, span)
+    return word_text in _NEXT_PART_WORDS or bool(
+        _VALUE_VERB_RE.fullmatch(word_text) or _SET_VERB_RE.fullmatch(word_text)
+    )
 
 
-def _keyword_reaches(index: _TextIndex, start: int) -> bool:
-    """A two-word keyword that starts one or two words before ``start`` reaches it ("code" of "pin code", "key" of
-    "api key"): the word is part of a keyword, not of a value."""
-    text, pos = index.text, start
-    for _ in range(2):
-        stop = _gap_before(text, pos)
-        if stop in (pos, 0):
-            return False
-        pos = index.run_start(stop)
-        keyword = _SECRET_KEYWORD_RE.match(text, pos)
-        if keyword is not None and keyword.end() > start:
-            return True
-    return False
-
-
-def _ends_value(index: _TextIndex, start: int, end: int) -> bool:
+def _ends_value(index: _TextIndex, start: int, end: int, *, forward: bool) -> bool:
     """The word ``text[start:end]`` starts another part of the sentence, so a value of several words ends before it
-    (reading on) or after it (reading back): a word holding a keyword (it names a value of its own,
-    "DB_PASSWORD=xyz") or the second word of one (:func:`_keyword_reaches`), a URL, a separator (``=``, ``:``,
-    ``/``, ``|``), a word of :data:`_VALUE_END_WORDS`, a verb that puts or sets a value, a Japanese verb or
-    interface word (:data:`_JA_VALUE_END_RE`), or a spoken link that is not between two spoken words
-    (:func:`_link_ends`)."""
+    (reading on) or after it (reading back): a keyword that starts a frame of its own (:func:`_starts_frame`), a
+    word of :data:`_VALUE_END_WORDS`, a verb that puts or sets a value, a Japanese verb or interface word
+    (:data:`_JA_VALUE_END_RE`), a spoken link before a word that starts another part (:func:`_link_ends`) or,
+    reading back, a URL (a value named before its keyword never starts inside one). Reading on, a URL is read
+    through: when unsure, the rest of the clause is replaced."""
     text = index.text
-    if _SECRET_KEYWORD_RE.match(text, start) or _SECRET_KEYWORD_RE.search(text, start, end):
-        return True  # also the first word of a two-word keyword ("access" of "access token")
-    if _JA_VALUE_END_RE.match(text, start) or "://" in text[start:end]:
+    if _starts_frame(index, start, end) or _JA_VALUE_END_RE.match(text, start):
+        return True
+    if not forward and "://" in text[start:end]:
         return True
     core = _without_closing_marks(text, start, end)
-    if _SEPARATOR_WORD_RE.fullmatch(text, start, end) or _keyword_reaches(index, start):
-        return True
     if _word(text, (start, core)) in _SPOKEN_LINKS:
-        return core < end or _link_ends(index, start, core)
+        return core < end or _link_ends(index, start, core, forward=forward)
     return _is_end_word(text, (start, core))
+
+
+def _field_label(text: str, span: tuple[int, int]) -> bool:
+    return _word(text, span) in _FIELD_LABELS
+
+
+def _next_word_start(text: str, pos: int, japanese: bool) -> int | None:
+    """Where the next word of a value starts after ``pos``: after same-line whitespace, or (``japanese``) after a
+    joint (:func:`_joint_after`); ``None`` before closing punctuation, a line break, hiragana, CJK punctuation or the
+    end."""
+    gap = _WORD_GAP_RE.match(text, pos)
+    start = _joint_after(text, gap.end() if gap else pos) if japanese else None
+    if start is None and gap is not None:
+        start = gap.end()
+    return start
+
+
+def _word_after_ends(index: _TextIndex, start: int, end: int) -> bool:
+    """Reading on, the word at ``start:end`` ends the value: an opening quote or bracket, a field label that starts
+    another part ("hunter2 user: demo") or a word that starts another part (:func:`_ends_value`)."""
+    text = index.text
+    core = _without_closing_marks(text, start, end)
+    if text[start] in _VALUE_QUOTES or (text[core : core + 1] in _LABEL_MARKS and _field_label(text, (start, core))):
+        return True
+    return _ends_value(index, start, end, forward=True)
 
 
 def _scan_after(index: _TextIndex, end: int, japanese: bool) -> tuple[tuple[int, int], ...]:
     text = index.text
     words: list[tuple[int, int]] = []
     pos = end
-    while len(words) < MAX_SECRET_VALUE_WORDS - 1:
-        gap = _WORD_GAP_RE.match(text, pos)
-        start = _joint_after(text, gap.end() if gap else pos) if japanese else None
-        if start is None:
-            if gap is None:
-                break  # closing punctuation, a line break, hiragana, CJK punctuation or the end
-            start = gap.end()
-        word = _BARE_VALUE_RE.match(text, start)
-        if word is None or text[start] in _VALUE_QUOTES or _ends_value(index, start, word.end()):
+    for _ in range(2 * MAX_SECRET_VALUE_WORDS):  # separators are read through but not counted
+        start = _next_word_start(text, pos, japanese) if len(words) < MAX_SECRET_VALUE_WORDS - 1 else None
+        word = _BARE_VALUE_RE.match(text, start) if start is not None else None
+        if word is None:
             break
-        capped = word.end() - start == MAX_SECRET_VALUE_CHARS
-        stop = _without_closing_marks(text, start, word.end())
+        if _SEPARATOR_WORD_RE.fullmatch(text, word.start(), word.end()):
+            if words and _field_label(text, words[-1]):
+                words.pop()  # "hunter2 user = demo": the label starts another part
+                break
+            pos = word.end()  # replaced only if a word of the value follows it
+            continue
+        if _word_after_ends(index, word.start(), word.end()):
+            break
+        capped = word.end() - word.start() == MAX_SECRET_VALUE_CHARS
+        stop = _without_closing_marks(text, word.start(), word.end())
         if capped:  # a long run is redacted to its end, never left half visible
-            stop = index.trimmed(start, max(index.run_end(start), word.end()))
-        if stop == start:
+            stop = index.trimmed(word.start(), max(index.run_end(word.start()), word.end()))
+        if stop == word.start():
             break
-        words.append((start, stop))
+        words.append((word.start(), stop))
         if capped or stop < word.end():
             break  # closing punctuation ends the clause
         pos = stop
@@ -1313,25 +1360,37 @@ def _words_after(index: _TextIndex, end: int, japanese: bool) -> tuple[tuple[int
     return found
 
 
+def _previous_word(index: _TextIndex, pos: int, japanese: bool) -> tuple[int, int] | None:
+    """The run of value characters that ends before ``pos`` behind same-line whitespace, or (``japanese``) behind a
+    joint (:func:`_joint_before`); ``None`` without one, or when it is longer than :data:`MAX_SECRET_VALUE_CHARS`."""
+    text = index.text
+    gap = _gap_before(text, pos)
+    end = _joint_before(text, pos, gap) if japanese else None
+    if end is None:
+        end = gap if gap < pos else 0
+    begin = index.run_start(end) if end else end
+    return (begin, end) if begin < end and end - begin <= MAX_SECRET_VALUE_CHARS else None
+
+
 def _scan_before(index: _TextIndex, start: int, japanese: bool) -> tuple[tuple[int, int], ...]:
     text = index.text
     words: list[tuple[int, int]] = []
     pos = start
-    while len(words) < MAX_SECRET_VALUE_WORDS - 1:
-        gap = _gap_before(text, pos)
-        end = _joint_before(text, pos, gap) if japanese else None
-        if end is None:
-            if gap == pos:
-                break
-            end = gap
-        if end == 0 or text[end - 1] in _TRAILING_MARKS:
-            break  # the word before ends a clause ("user, hunter 2 as the password")
-        begin = index.run_start(end)
-        if begin == end or end - begin > MAX_SECRET_VALUE_CHARS:
+    separated = False
+    for _ in range(2 * MAX_SECRET_VALUE_WORDS):  # separators are read through but not counted
+        word = _previous_word(index, pos, japanese) if len(words) < MAX_SECRET_VALUE_WORDS - 1 else None
+        if word is None:
             break
+        begin, end = word
+        if _SEPARATOR_WORD_RE.fullmatch(text, begin, end):
+            pos, separated = begin, True  # replaced only if a word of the value precedes it
+            continue
         opened = index.opened(begin, end)
-        if opened == end or _ends_value(index, opened, end):
-            break
+        if text[end - 1] in _TRAILING_MARKS or opened == end:
+            break  # the word before ends a clause ("user, hunter 2 as the password")
+        if (separated and _field_label(text, (opened, end))) or _ends_value(index, opened, end, forward=False):
+            break  # "user = demo hunter 2 as the password": the label starts the part before
+        separated = False
         words.append((opened, end))
         if opened > begin:
             break  # an opening quote or bracket starts the value
@@ -1353,14 +1412,29 @@ def _words_before(index: _TextIndex, start: int, japanese: bool) -> tuple[tuple[
 
 def _starts_a_value(word: str) -> bool:
     """The word next to the keyword's frame may start a value of several words: it holds a letter or a digit and is
-    no word of :data:`_NOT_VALUE_STARTS`, no keyword, no URL and not ``redacted``."""
+    no word of :data:`_NOT_VALUE_STARTS`, no URL and not ``redacted`` (a keyword may: "my secret sauce 42")."""
     return (
         word != REDACTED
         and "://" not in word
         and any(char.isalnum() for char in word)
         and word.lower() not in _NOT_VALUE_STARTS
-        and not _SECRET_KEYWORD_RE.fullmatch(word)
     )
+
+
+def _after_a_determiner(
+    index: _TextIndex, span: tuple[int, int], japanese: bool, plausible: Callable[[list[str]], bool]
+) -> tuple[int, int] | None:
+    """A value of several words that starts with a determiner (:data:`_DETERMINERS`) after a strong frame ("the
+    password is my secret sauce 42"): the words after the determiner are a value of several words
+    (:func:`_several_words`) and ``plausible``."""
+    text = index.text
+    if text[span[0] : span[1]].lower() not in _DETERMINERS:
+        return None
+    more = _words_after(index, span[1], japanese)
+    words = _texts(text, more)
+    if words and _several_words(words[0], words, needs_credential=False) and plausible(words):
+        return span[0], more[-1][1]
+    return None
 
 
 def _several_words(first: str, words: Sequence[str], *, needs_credential: bool) -> bool:
@@ -1409,10 +1483,16 @@ def _secret_value(index: _TextIndex, keyword: re.Match[str]) -> tuple[int, int] 
         return span[0], end
     # "password hunter 2 fake pw", "パスワード は ハンター ツー フェイク です": the first word alone says too little
     ambiguous = keyword.group(0).lower() in AMBIGUOUS_SECRET_KEYWORDS and not connection.labelled
+    if not _whole_keyword(text, keyword):
+        return None
+    if connection.strong:  # "the password is my secret sauce 42", not "the passcode of my work account"
+        led = _after_a_determiner(
+            index, span, connection.japanese, lambda words: not ambiguous or any(map(_credential_shaped, words))
+        )
+        if led is not None:
+            return led
     words = [value, *_texts(text, more)]
-    if _whole_keyword(text, keyword) and _several_words(value, words, needs_credential=ambiguous):
-        return span[0], end
-    return None
+    return (span[0], end) if _several_words(value, words, needs_credential=ambiguous) else None
 
 
 def _set_verb_before(index: _TextIndex, start: int) -> bool:
@@ -1462,9 +1542,14 @@ def _value_after_to(index: _TextIndex, keyword: re.Match[str]) -> tuple[int, int
     if to is None or not _set_verb_before(index, keyword.start()):
         return None
     span, quoted, capped = _value_at(text, to)
+    name = keyword.group(0).lower()
+    if span is not None and not (quoted or capped) and _whole_keyword(text, keyword):  # "set it to my dog rex 7"
+        ambiguous = name in AMBIGUOUS_SECRET_KEYWORDS
+        led = _after_a_determiner(index, span, False, lambda words: not ambiguous or _set_value(name, "".join(words)))
+        if led is not None:
+            return led
     if span is None or not _named_value(value := text[span[0] : span[1]]) or (not quoted and _counted(text, span[1])):
         return None
-    name = keyword.group(0).lower()
     if quoted or capped:
         return _to_its_end(index, span, capped) if quoted or _set_value(name, value) else None
     more = _words_after(index, span[1], False)
@@ -1507,9 +1592,15 @@ def _qualified_value(index: _TextIndex, keyword: re.Match[str]) -> tuple[int, in
     if link is None:
         return None
     span, quoted, capped = _value_at(text, _connection(text, link).start)
+    ambiguous = keyword.group(0).lower() in AMBIGUOUS_SECRET_KEYWORDS
+    if span is not None and not (quoted or capped) and _whole_keyword(text, keyword):  # "... is my dog rex 7"
+        led = _after_a_determiner(
+            index, span, False, lambda words: not ambiguous or _qualified_secret(True, "".join(words))
+        )
+        if led is not None:
+            return led
     if span is None or not _named_value(value := text[span[0] : span[1]]) or (not quoted and _counted(text, span[1])):
         return None
-    ambiguous = keyword.group(0).lower() in AMBIGUOUS_SECRET_KEYWORDS
     if quoted or capped:
         return _to_its_end(index, span, capped) if quoted or _qualified_secret(ambiguous, value) else None
     more = _words_after(index, span[1], False)
@@ -1860,9 +1951,12 @@ def redact_text_secrets(text: str) -> tuple[str, bool]:
     over the words before it, to the end of its clause (:func:`_words_after`, :func:`_words_before`): closing
     punctuation, a line break, a quote or bracket, CJK punctuation, hiragana that is no joint, or a word that starts
     another part (:func:`_ends_value`: the words of :data:`_VALUE_END_WORDS` such as "and", "then", "please",
-    "with", "in", "as", "is", "expires"; a verb that puts or sets a value; a word holding a keyword or the second
-    word of a two-word one; a separator; a URL; "at", "to" and "for" unless between two spoken words, as they may
-    be a spoken symbol or digit). In a Japanese reading (a
+    "with", "in", "as", "is", "expires", not the determiners; a verb that puts or sets a value; a keyword that
+    starts a frame of its own, :func:`_starts_frame`; reading back, a URL; "at", "to" and "for" only before a word
+    that starts another part, as they may be a spoken symbol or digit). When unsure the rest of the clause goes: a
+    word that only holds a keyword, a separator word (``/``, ``|``, ``:``, ``=``; but after a field label,
+    :data:`_FIELD_LABELS`) and, reading on, a URL are read through. After a strong frame a value may start with a
+    determiner (:func:`_after_a_determiner`). In a Japanese reading (a
     Japanese keyword or particle) a joint may stand between two words (:data:`_JA_JOINT_RE`: "ハンターにフェイクPW"),
     and a verb or interface word after it ends the value (:data:`_JA_VALUE_END_RE`). At most
     :data:`MAX_SECRET_VALUE_WORDS` words, each read for at most :data:`MAX_SECRET_VALUE_CHARS` characters. When

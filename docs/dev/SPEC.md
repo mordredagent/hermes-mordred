@@ -4014,16 +4014,25 @@ and revocable on its own:
   same-line whitespace; the clause ends at closing punctuation (kept outside
   the replacement), a line break, an opening quote or bracket, CJK
   punctuation, hiragana that is no joint (below), or a word that starts
-  another part: a stop word (`and`, `then`, `please`, `with`, `in`, `on`,
-  `as`, `is`, `expires` ...), `also`, `after`, `before`, `because`, `which`,
-  words of time (`now`, `today`, `yesterday` ...), a verb that puts or sets
-  a value, a word holding a keyword or the second word of a two-word one
-  (which names a value of its own: "DB_PASSWORD=xyz", "access token"), a
-  separator (`=`, `:`, `/`, `|`) or a URL. `at`, `to` and `for` may be a
-  spoken symbol or digit ("hunter at fake dot pw"), so they stay inside the
-  value only between two words of letters or digits neither of which starts
-  another part ("for the bank", "to log in" and "PIN=4821 to Hunter2-x" end
-  it). In a
+  another part: a stop word other than the articles, possessives and
+  demonstratives (`and`, `then`, `please`, `with`, `in`, `on`, `as`, `is`,
+  `expires` ...; a passphrase may hold "my" or "the"), `also`, `after`,
+  `before`, `because`, `which`, words of time (`now`, `today`, `yesterday`
+  ...), a verb that puts or sets a value, or a keyword that starts a frame of
+  its own (followed by a label, `is` / `was`, a particle or a direct quote:
+  "PIN: 4821", "DB_PASSWORD=xyz"). Privacy first, when unsure the rest of
+  the clause goes (security review of `748e431a0`): a word that only holds
+  or starts a keyword ("red pin cushion 7", "spinach", "tokenize",
+  "passwordless") stays inside the value, a separator word (`=`, `:`, `/`,
+  `|`) is read through ("hunter / 2 fake pw"; it ends the value only after a
+  field label such as `user` or `email`: "hunter2 user = demo"), and reading
+  on a URL is read through too (reading back it ends the value). `at`, `to`
+  and `for` may be a spoken symbol or digit ("hunter at fake dot pw"), so
+  they end the value only when the word on their far side starts another
+  part, is typed (holds a symbol), is a keyword or is missing ("for the
+  bank", "to log in", "PIN=4821 to Hunter2-x"). After `is` / `was` or a
+  label, a value of several words may start with an article or possessive
+  ("the password is my secret sauce 42"). In a
   Japanese reading (a Japanese keyword or particle after the keyword) a
   joint may stand between two words: the particles for "to", "of" and "and"
   and the readings of digits, which speech recognition writes for a spoken

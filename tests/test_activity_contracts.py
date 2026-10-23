@@ -1023,10 +1023,8 @@ def test_typed_value_first_secrets_are_withheld(value: str) -> None:
 def test_both_values_around_one_keyword_are_replaced() -> None:
     text = "use Hunter2-x as the password, not the password Hunter3-y"
     assert contracts.redact_text_secrets(text) == ("use redacted as the password, not the password redacted", True)
-    assert contracts.redact_text_secrets("password Hunter2-x as the password") == (
-        "password redacted as the password",
-        True,
-    )
+    # the keyword before the value names no frame of its own, so the value is read back over it (privacy first)
+    assert contracts.redact_text_secrets("password Hunter2-x as the password") == ("redacted as the password", True)
 
 
 def test_value_first_redaction_is_linear_on_hostile_input() -> None:
@@ -1395,26 +1393,53 @@ SPOKEN_KEPT = [
     pytest.param("パスワードは他人に教えないでください", id="ja-kanji-joint"),
 ]
 
-#: Typed phrasings next to a value: a keyword, the words of a two-word keyword, a separator and a link before a typed
-#: word each end a value of several words, so the structure around it stays.
+#: Typed phrasings next to a value: a keyword that starts a frame of its own and a link before a typed word end a value
+#: of several words; a separator, a keyword without a frame of its own and a username before a separator are read
+#: through (privacy first: when unsure, the rest of the clause goes).
 TYPED_NEIGHBOURS = [
     pytest.param(
         "pin code 0000 access token: abcdef", "pin code redacted access token: redacted", id="two-word-keyword"
     ),
-    pytest.param("pin\u3000code 0000 as the password", "pin\u3000code redacted as the password", id="keyword-before"),
+    pytest.param("pin\u3000code 0000 as the password", "redacted as the password", id="keyword-without-a-frame"),
     pytest.param("access\ttoken = abcdef as the password", "access\ttoken = redacted as the password", id="separator"),
-    pytest.param("the password for PIN=4821 = s3cr3t!", "the password for PIN=redacted = redacted!", id="equals"),
+    pytest.param("the password for PIN=4821 = s3cr3t!", "the password for PIN=redacted!", id="equals-read-through"),
     pytest.param("API key: abc123def DB_PASSWORD=xyz", "API key: redacted DB_PASSWORD=redacted", id="keyword-inside"),
     pytest.param(
         "set the password for the bank to Hunter2-x as the password",
-        "set the password for the bank to redacted as the password",
-        id="link-before-a-typed-word",
+        "set the password for redacted as the password",
+        id="link-after-a-keyword",
     ),
-    pytest.param("the password is api key: abc123def", "the password is redacted key: redacted", id="api-key"),
+    pytest.param("the password is api key: abc123def", "the password is redacted: redacted", id="api-key"),
     pytest.param(
-        "demo-user / hunter 2 fake pw as the password", "demo-user / redacted as the password", id="slash-separator"
+        "set the password for PIN=4821 to Hunter2-x", "set the password for PIN=redacted to redacted", id="typed"
     ),
+    pytest.param("password: hunter2 user: demo", "password: redacted user: demo", id="field-label"),
+    pytest.param("password: hunter2 user = demo", "password: redacted user = demo", id="field-label-separator"),
+    pytest.param("user = demo hunter 2 fake pw as the password", "user = redacted as the password", id="label-before"),
+    pytest.param("demo-user / hunter 2 fake pw as the password", "redacted as the password", id="slash-separator"),
 ]
+
+#: The automated security review of 748e431a0: a separator, a link, a URL or a word holding a keyword inside a value
+#: once ended it and left the rest visible.
+REVIEW_TEXTS = [
+    *(
+        pytest.param(f"The password is hunter {mark} 2 fake pw", "The password is redacted", id=f"separator-{mark}")
+        for mark in "/|:="
+    ),
+    pytest.param("hunter / 2 fake pw as the password", "redacted as the password", id="separator-before"),
+    pytest.param("The password is my secret sauce 42", "The password is redacted", id="determiner-and-keyword"),
+    pytest.param("The password is red pin cushion 7", "The password is redacted", id="keyword-inside"),
+    pytest.param("The password is blue https://x.example fake pw", "The password is redacted", id="url-inside"),
+    pytest.param("パスワードは ハンター / ツー でログイン", "パスワードは redacted でログイン", id="ja-separator"),
+    pytest.param("The password is hunter / s3cr3t!", "The password is redacted!", id="separator-typed-word"),
+    pytest.param("password: blue | s3cr3t!", "password: redacted!", id="label-pipe"),
+    pytest.param("token: abc / s3cr3t!", "token: redacted!", id="ambiguous-keyword-slash"),
+    pytest.param("set the password to my dog rex 7", "set the password to redacted", id="to-determiner"),
+    pytest.param("the password for the bank is my dog rex 7", "the password for the bank is redacted", id="qualified"),
+]
+
+#: Passphrase words holding a keyword's letters: none of them names a value of its own, so none ends the value.
+PASSPHRASE_WORDS = ["spinach", "tokenize", "passwordless", "pinned", "secretary", "otpx", "tokens", "pins", "pwd2"]
 
 #: A field or feature noun right after the keyword: never a value (:data:`contracts.SECRET_VALUE_STOP_WORDS`).
 FIELD_NOUNS = ["field", "box", "reset", "manager", "page", "form", "hint", "button", "settings", "policy", "link"]
@@ -1433,6 +1458,19 @@ def test_a_value_of_several_words_is_replaced_to_the_end_of_its_clause(text: str
     assert contracts.redact_text_secrets(text) == (expected, True)
     event = _task_start(text)
     assert event.text == expected and "text_secrets_redacted" in event.exclusions
+
+
+@pytest.mark.parametrize(("text", "expected"), REVIEW_TEXTS)
+def test_a_value_of_several_words_is_read_through_separators_links_urls_and_keywords(text: str, expected: str) -> None:
+    clean, replaced = contracts.redact_text_secrets(text)
+    assert (clean, replaced) == (expected, True)
+    assert "s3cr3t" not in clean and "fake" not in clean and "cushion" not in clean and "sauce" not in clean
+
+
+@pytest.mark.parametrize("word", PASSPHRASE_WORDS)
+def test_passphrase_words_holding_a_keywords_letters_stay_inside_the_value(word: str) -> None:
+    assert contracts.redact_text_secrets(f"the password is red {word} mango 4")[0] == "the password is redacted"
+    assert contracts.redact_text_secrets(f"red {word} mango 4 as the password")[0] == "redacted as the password"
 
 
 @pytest.mark.parametrize(("text", "expected"), TYPED_NEIGHBOURS)
@@ -1454,10 +1492,11 @@ def test_a_field_noun_after_the_keyword_is_no_value(noun: str) -> None:
 @pytest.mark.parametrize("end", VALUE_ENDS, ids=repr)
 def test_a_value_of_several_words_ends_at_its_clause(end: str) -> None:
     redacted = contracts.redact_text_secrets(f"the password is hunter 2 fake pw{end}")[0]
-    # the next keyword names a value of its own; a URL is left to URL scrubbing
-    assert redacted == ("the password is redacted PIN redacted" if "PIN" in end else f"the password is redacted{end}")
+    # reading on, a URL and a keyword without a frame of its own are read through (when unsure, the clause goes)
+    reads_on = "PIN" in end or "://" in end
+    assert redacted == ("the password is redacted" if reads_on else f"the password is redacted{end}")
     before = contracts.redact_text_secrets(f"{end.strip()} hunter 2 fake pw as the password")[0]
-    assert before.endswith(" redacted as the password") and "hunter" not in before and "fake" not in before
+    assert before.endswith("redacted as the password") and "hunter" not in before and "fake" not in before
 
 
 def test_japanese_values_end_at_punctuation_particles_and_verbs() -> None:
