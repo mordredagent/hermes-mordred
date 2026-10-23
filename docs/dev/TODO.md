@@ -916,6 +916,18 @@ Follow-ups left by the landed code:
   `dbcrypt/_monitor.py` and the read-only import-store opener). Fix both with the
   same `quote(path.as_posix(), safe="/")` and a test with a `we#ird?ho%me` home.
 
+- [ ] Stale `hermes-mordred` launcher after a Hermes Desktop environment rebuild
+  (found 2026-10-23, live check). Hermes Desktop rebuilt its Python environment on
+  restart (`installs/<id>/environments/<new hash>`, Mordred re-sourced from the
+  plugin member copy under `workspace/plugin-sources/`) and deleted the old one, so
+  `~/.local/bin/hermes-mordred` pointed at a removed venv ("No such file or
+  directory") and a `uv pip install` into the old venv was silently lost. Fix:
+  the plugin's start-up (where `ensure_member` already runs) rewrites the launcher
+  when its target no longer exists, or the launcher resolves Hermes's current
+  environment at run time; the Desktop page's Repair panel should report a stale
+  launcher. Document in USAGE that `scripts/install.sh --from-source <checkout>`
+  is the update path for a local checkout, not a direct `uv pip install`.
+
 Later (not scheduled):
 
 - [ ] Desktop `mail import` (file picker): Takeout mbox and `.eml` import from the
