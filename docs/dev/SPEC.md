@@ -6083,9 +6083,12 @@ thin driver over it so the two entry points cannot drift. There is ONE contract:
 
 ### Databases from the page
 
-- `GET /status?client_version=4` on macOS adds `databases`, computed with
-  `dbcrypt._migrate.discover(home, key=None)` and without a key, a Touch ID prompt or
-  a capture: `{"supported", "armed" (persisted intent), "encrypt_pending",
+- `GET /status?client_version=4` on macOS adds `databases`, computed without a key, a
+  Touch ID prompt or a capture (outside a Hermes process by
+  `dbcrypt._migrate.discover(home, key=None)`; inside one, where that classifier is
+  refused because it opens the files directly, by probing each file through the
+  process's own SQLite library, `dbcrypt._monitor.is_plaintext`):
+  `{"supported", "armed" (persisted intent), "encrypt_pending",
   "decrypt_pending", "journal", "runtime_protected", "databases": [{"relative",
   "state": "plaintext" | "unreadable"}], "plaintext_backups"}`. With `key=None`
   discovery yields `plaintext` or `unreadable` (ciphertext) and omits absent files.

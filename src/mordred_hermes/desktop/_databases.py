@@ -68,11 +68,6 @@ def status_object(
     env = os.environ if environ is None else environ
     root = dbcrypt.root_home(home)
     encrypt_pending, decrypt_pending, journal = _pending(root)
-    databases = [
-        {"relative": found.relative, "state": found.state}
-        for found in _migrate.discover(root, None)
-        if isinstance(found.relative, str) and found.state in _STATES
-    ]
     return {
         "supported": sqlcipher,
         "armed": dbcrypt.armed(root),
@@ -80,9 +75,40 @@ def status_object(
         "decrypt_pending": decrypt_pending,
         "journal": journal,
         "runtime_protected": runtime_protected(home, platform=platform, environ=env),
-        "databases": databases,
+        "databases": _discovered(root),
         "plaintext_backups": len(_migrate.plaintext_backups(root)),
     }
+
+
+def _discovered(root: Path) -> list[dict[str, Any]]:
+    """Key-less discovery: ``plaintext`` or ``unreadable`` per database file (``encrypted`` needs the key).
+
+    Inside a Hermes process whose ``sqlite3`` is the SQLCipher shim, the offline
+    classifier may not open the files (it would drop Hermes's own SQLite locks;
+    ``dbcrypt._migrate._refuse_inside_a_runtime``), so every file is probed
+    through the process's own library instead (``dbcrypt._monitor.is_plaintext``,
+    the per-turn check's probe). Outside one the classifier runs as before.
+    """
+    from ..dbcrypt import _migrate, _monitor, _shim
+
+    if not _shim.is_installed():
+        return [
+            {"relative": found.relative, "state": found.state}
+            for found in _migrate.discover(root, None)
+            if isinstance(found.relative, str) and found.state in _STATES
+        ]
+    found: list[dict[str, Any]] = []
+    for path in _migrate.database_paths(root):
+        try:
+            size = path.stat().st_size
+        except OSError:
+            found.append({"relative": str(path.relative_to(root)), "state": "unreadable"})
+            continue
+        if size == 0 or path.suffix.casefold() == ".json":  # what the classifier omits as "other"
+            continue
+        state = "plaintext" if _monitor.is_plaintext(path) else "unreadable"
+        found.append({"relative": str(path.relative_to(root)), "state": state})
+    return found
 
 
 def _attention(code: str) -> dict[str, Any]:
