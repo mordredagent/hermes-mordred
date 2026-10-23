@@ -1561,10 +1561,16 @@ def test_vault_commit_sends_the_touch_id_choice_and_drops_the_passphrase(ask, un
         assert word not in result["text"]
 
 
-def test_vault_passphrase_can_be_copied_and_is_never_notified():
-    result = component(vault_step(VAULT_NONE), [PREPARED], PREPARE + "press(tree, 'Copy the words'); tree = view()\n")
-    assert result["copied"] == [" ".join(WORDS)]
-    assert result["notifications"] == []
+def test_vault_passphrase_is_selectable_text_never_copied_or_notified():
+    """A clipboard manager would keep the recovery passphrase: no copy button, only selectable words."""
+    result = component(vault_step(VAULT_NONE), [PREPARED], PREPARE)
+    assert not any("Copy" in str(label) for label in result["buttons"])
+    words = find_tree(result["tree"], "ol")
+    assert words["props"]["style"]["userSelect"] == "text"
+    assert (
+        "clipboard" not in source()[source().index("function VaultCommitCard") : source().index("function VaultStep")]
+    )
+    assert result["copied"] == [] and result["notifications"] == []
 
 
 @pytest.mark.parametrize(
@@ -1582,28 +1588,56 @@ def test_vault_passphrase_is_dropped_on_cancel_and_unmount(script):
     assert result["requests"] == [["/vault/prepare", {}]]
 
 
-def test_vault_commit_reusing_an_existing_vault_says_the_words_were_not_used():
+# `/vault/prepare` for an existing vault whose .env is not enrolled: no passphrase exists.
+REUSE = {"ok": True, "flow_id": "v2", "passphrase": None, "passphrase_reused": True}
+MOVE = "await press(tree, 'Move .env into the vault'); tree = view()\n"
+
+
+@pytest.mark.parametrize("ask,unattended", [(False, True), (True, False)])
+def test_an_existing_vault_skips_the_passphrase_card_and_commits_straight_away(ask, unattended):
+    script = MOVE + "out.card = text(tree)\nout.disabled = button(tree, 'Move .env into the vault').props.disabled\n"
+    if ask:
+        script += "tick(tree, 'Ask for Touch ID every time'); tree = view()\n"
     result = component(
-        vault_step({**VAULT_NONE, "exists": True}),
-        [PREPARED, {"ok": True, "passphrase_reused": True}],
-        "await press(tree, 'Move .env into the vault'); tree = view()\n"
-        + SAVED
-        + "await press(tree, 'Move .env into the vault'); tree = view()\n",
+        vault_step({**VAULT_NONE, "exists": True}), [REUSE, {"ok": True, "passphrase_reused": True}], script + MOVE
     )
-    assert result["requests"][1] == ["/vault/v1/commit", {"unattended": True}]
-    assert "the words shown here were not used" in result["text"]
+    card = result["out"]["card"]
+    assert (
+        "The vault already exists; its recovery passphrase is the one shown when it was created. "
+        ".env will be moved into it." in card
+    )
+    assert "I have written it down" not in card and "Your recovery passphrase" not in card
+    assert "Ask for Touch ID every time Hermes unlocks the vault" in card
+    assert result["out"]["disabled"] is False
+    assert result["requests"] == [["/vault/prepare", {}], ["/vault/v2/commit", {"unattended": unattended}]]
+    assert (
+        ".env was moved into the existing vault; its recovery passphrase is the one shown when it was created."
+        in (result["text"])
+    )
+    assert "the words shown here were not used" not in result["text"]
     assert result["notifications"] == [{"kind": "success", "message": ".env moved into the existing vault."}]
 
 
-def test_vault_card_for_an_existing_vault_explains_and_offers_no_key_policy():
+def test_words_shown_but_an_existing_vault_kept_says_they_were_not_used():
     result = component(
-        vault_step({**VAULT_NONE, "exists": True}),
-        [PREPARED],
-        "await press(tree, 'Move .env into the vault'); tree = view()\n",
+        vault_step(VAULT_NONE), [PREPARED, {"ok": True, "passphrase_reused": True}], PREPARE + SAVED + COMMIT
     )
-    assert "This Mac already has a vault" in result["text"]
-    assert "Ask for Touch ID" not in result["text"]
-    assert render_page_words(result["tree"]) == WORDS
+    assert "the words shown here were not used" in result["text"]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"ok": True, "flow_id": "v3", "passphrase": None},
+        {"ok": True, "flow_id": "v3", "passphrase": []},
+        {"ok": True, "passphrase": WORDS},
+    ],
+    ids=["no-words-not-reused", "empty-words", "no-flow"],
+)
+def test_a_malformed_prepare_answer_shows_no_card(answer):
+    result = component(vault_step(VAULT_NONE), [answer], PREPARE)
+    assert "Your recovery passphrase" not in result["text"] and "Move .env into the vault" not in result["buttons"]
+    assert '"role": "alert"' in json.dumps(result["tree"])
 
 
 @pytest.mark.parametrize(
@@ -1740,8 +1774,18 @@ def test_encrypt_databases_schedules_and_offers_the_restart():
     assert SCHEDULED_TEXT in result["text"]
     assert "Restart Hermes Desktop" in result["buttons"] and "Encrypt databases" not in result["buttons"]
     assert result["refreshes"] == 1
-    nothing = component(databases_step(PLAINTEXT_HOME), [{"ok": True, "action": "nothing"}], script)
-    assert "Nothing to encrypt." in nothing["text"] and "Restart Hermes Desktop" not in nothing["buttons"]
+    restart = component(
+        databases_step(mac(**v4(protected=False))),
+        [{"ok": True, "action": "needs_restart", "restart_required": True}],
+        script,
+    )
+    assert ARMED_TEXT in restart["text"] and SCHEDULED_TEXT not in restart["text"]
+    assert "Restart Hermes Desktop" in restart["buttons"] and "Encrypt databases" not in restart["buttons"]
+    done = component(databases_step(PLAINTEXT_HOME), [{"ok": True, "action": "done"}], script)
+    assert done["refreshes"] == 1 and "Restart Hermes Desktop" not in done["buttons"]
+    assert '"role": "alert"' not in json.dumps(done["tree"])
+    unknown = component(databases_step(PLAINTEXT_HOME), [{"ok": True, "action": "nothing"}], script)
+    assert '"role": "alert"' in json.dumps(unknown["tree"]) and unknown["refreshes"] == 1
 
 
 @pytest.mark.parametrize(

@@ -1360,7 +1360,8 @@ function MemoryStep({ id = null, n, state, blocker = null, goto = null, refresh,
 
 const VAULT_BODY = 'Hermes keeps its API keys in .env. This step creates Mordred’s encrypted vault on this Mac and moves .env into it. First you get a recovery passphrase of eight words: it is the only way to open the vault if this Mac is lost or the Secure Enclave key is gone. Nothing is created until you confirm that you wrote it down.'
 const VAULT_EXISTS_BODY = 'This Mac already has a vault, but Hermes’s .env is not in it yet. This step moves .env into the vault; the recovery passphrase shown when the vault was created stays the only one.'
-const VAULT_EXISTS_NOTE = 'This Mac already has a vault: .env moves into it and its original recovery passphrase stays the only one, so these words are then not used. Write them down anyway: if that vault is gone when you continue, a new one is created with these words.'
+// `/vault/prepare` on an existing vault without .env: no passphrase exists to show.
+const VAULT_REUSE = 'The vault already exists; its recovery passphrase is the one shown when it was created. .env will be moved into it.'
 const VAULT_DONE = 'Hermes reads .env from the vault when it starts. The recovery passphrase was shown once, when the vault was created.'
 const VAULT_RESTART = 'Restart Hermes Desktop so Hermes reads .env from the vault, then turn on memory encryption (step 1.2b).'
 
@@ -1370,37 +1371,36 @@ function passphraseWords(passphrase) {
   return words.map((word) => String(word).trim()).filter(Boolean)
 }
 
-// The prepared recovery passphrase: shown once, before anything is created.
-function VaultPassphraseCard({ words, exists, saved, setSaved, askEveryTime, setAskEveryTime, onCommit, onCancel, cardRef }) {
+// The prepared flow before its commit. With words: the recovery passphrase, shown once
+// and gated by "I have written it down" (selectable text only: no copy button, since a
+// clipboard manager would keep it). Without (`reuse`, an existing vault): one sentence
+// and the commit straight away.
+function VaultCommitCard({ flow, saved, setSaved, askEveryTime, setAskEveryTime, onCommit, onCancel, cardRef }) {
+  const reuse = flow.reuse
   return jsxs('div', {
     ref: cardRef,
     tabIndex: -1,
     children: [
-      jsx('p', {
-        key: 'intro',
-        children: 'Your recovery passphrase. Write these eight words down in this order and keep them somewhere safe. They are shown only now; nothing is created until you continue.',
-      }),
-      exists ? jsx('p', { key: 'exists', children: VAULT_EXISTS_NOTE }) : null,
-      jsx('ol', {
-        key: 'words',
-        'aria-label': 'Recovery passphrase',
-        style: { fontSize: 18, columns: 2, margin: '8px 0', userSelect: 'all' },
-        children: words.map((word, index) => jsx('li', { key: index, children: word })),
-      }),
-      jsx(Row, {
-        key: 'copy',
-        children: jsx(Button, {
-          variant: 'outline',
-          onClick: () => navigator.clipboard && navigator.clipboard.writeText(words.join(' ')),
-          children: 'Copy the words',
-        }),
-      }),
-      jsx(Checked, { key: 'saved', checked: saved, onChange: setSaved, children: 'I have written it down' }),
-      exists ? null : jsx(AskEveryTime, { key: 'ask', checked: askEveryTime, onChange: setAskEveryTime }),
+      reuse
+        ? jsx('p', { key: 'reuse', children: VAULT_REUSE })
+        : jsx('p', {
+            key: 'intro',
+            children: 'Your recovery passphrase. Write these eight words down in this order and keep them somewhere safe. They are shown only now; nothing is created until you continue.',
+          }),
+      reuse
+        ? null
+        : jsx('ol', {
+            key: 'words',
+            'aria-label': 'Recovery passphrase',
+            style: { fontSize: 18, columns: 2, margin: '8px 0', userSelect: 'text' },
+            children: flow.words.map((word, index) => jsx('li', { key: index, children: word })),
+          }),
+      reuse ? null : jsx(Checked, { key: 'saved', checked: saved, onChange: setSaved, children: 'I have written it down' }),
+      jsx(AskEveryTime, { key: 'ask', checked: askEveryTime, onChange: setAskEveryTime }),
       jsx(Row, {
         key: 'commit',
         children: [
-          jsx(Button, { key: 'create', disabled: !saved, onClick: onCommit, children: exists ? 'Move .env into the vault' : 'Create the vault' }),
+          jsx(Button, { key: 'create', disabled: !reuse && !saved, onClick: onCommit, children: reuse ? 'Move .env into the vault' : 'Create the vault' }),
           jsx(Button, { key: 'cancel', variant: 'ghost', onClick: onCancel, children: 'Cancel' }),
           jsx('span', { key: 'hint', style: { fontSize: 12, color: MUTED_TEXT }, children: 'May show a Touch ID prompt.' }),
         ],
@@ -1411,9 +1411,11 @@ function VaultPassphraseCard({ words, exists, saved, setSaved, askEveryTime, set
 
 // Step 1.2a (macOS, version 4 API): prepare → acknowledge → commit. `/vault/prepare`
 // returns the passphrase and changes nothing; `/vault/{flow}/commit` creates the vault
-// with that passphrase and moves .env into it. The passphrase lives only in this
-// component's state: dropped after the commit, on Cancel, on a failure that ends the
-// flow, when the step is blocked and when the page goes away. Never notified or logged.
+// with that passphrase and moves .env into it. For an existing vault without .env the
+// prepare answer has no passphrase (`passphrase_reused`) and the commit only moves .env.
+// The passphrase lives only in this component's state: dropped after the commit, on
+// Cancel, on a failure that ends the flow, when the step is done or blocked and when the
+// page goes away. Never notified, logged or copied.
 function VaultStep({ id, n, state, blocker = null, goto = null, code = null, vault, refresh }) {
   const [flow, setFlow] = useState(null)
   const [saved, setSaved] = useState(false)
@@ -1440,10 +1442,11 @@ function VaultStep({ id, n, state, blocker = null, goto = null, code = null, vau
     setOutcome(null)
     try {
       const r = await call('/vault/prepare', {})
-      const words = passphraseWords(r.passphrase)
-      if (!r.flow_id || words.length === 0) throw new MordredError('invalid_request')
+      const reuse = r.passphrase == null && r.passphrase_reused === true
+      const words = reuse ? [] : passphraseWords(r.passphrase)
+      if (!r.flow_id || (!reuse && words.length === 0)) throw new MordredError('invalid_response')
       setSaved(false)
-      setFlow({ id: String(r.flow_id), words })
+      setFlow({ id: String(r.flow_id), words, reuse })
     } catch (e) {
       setFailure(asMordredError(e))
     } finally {
@@ -1451,13 +1454,14 @@ function VaultStep({ id, n, state, blocker = null, goto = null, code = null, vau
     }
   }
   const commit = async () => {
-    if (!flow || !saved) return
+    if (!flow || (!flow.reuse && !saved)) return
     setBusy(true)
     setFailure(null)
     try {
       const r = await call(`/vault/${encodeURIComponent(flow.id)}/commit`, { unattended: !askEveryTime })
+      // Words shown but an existing vault kept: say they were not used.
+      setOutcome(flow.reuse ? 'moved' : r.passphrase_reused ? 'reused' : 'created')
       drop()
-      setOutcome(r.passphrase_reused ? 'reused' : 'created')
       host.notify({ kind: 'success', message: r.passphrase_reused ? '.env moved into the existing vault.' : 'Vault created.' })
     } catch (e) {
       // A busy ceremony leaves the prepared flow valid for a retry; any other answer ends it.
@@ -1479,17 +1483,21 @@ function VaultStep({ id, n, state, blocker = null, goto = null, code = null, vau
       style: { marginTop: 10 },
       children: [jsx('p', { key: 'text', role: 'status', children: text }), jsx(RestartHermesControl, { key: 'restart' })],
     })
+  const outcomes = {
+    created: 'Vault created and .env moved into it.',
+    reused: MESSAGES.passphrase_reused,
+    moved: '.env was moved into the existing vault; its recovery passphrase is the one shown when it was created.',
+  }
   const notice = outcome
-    ? restartNotice(outcome === 'reused' ? `${MESSAGES.passphrase_reused} ${VAULT_RESTART}` : `Vault created and .env moved into it. ${VAULT_RESTART}`)
+    ? restartNotice(`${outcomes[outcome]} ${VAULT_RESTART}`)
     : state === 'done' && vault && !vault.env_injecting
       ? restartNotice(VAULT_RESTART)
       : null
   // The key's effective policy as the API reads it, never the one requested here.
   const policy = vault && vault.unattended === true ? ' · opens without Touch ID while you are logged in' : vault && vault.unattended === false ? ' · Touch ID on every unlock' : ''
   const children = flow
-    ? jsx(VaultPassphraseCard, {
-        words: flow.words,
-        exists,
+    ? jsx(VaultCommitCard, {
+        flow,
         saved,
         setSaved,
         askEveryTime,
@@ -1509,7 +1517,11 @@ function VaultStep({ id, n, state, blocker = null, goto = null, code = null, vau
                   key: 'prepare',
                   children: [
                     jsx(Button, { key: 'go', disabled: busy, onClick: prepare, children: exists ? 'Move .env into the vault' : 'Create the vault' }),
-                    jsx('span', { key: 'hint', style: { fontSize: 12, color: MUTED_TEXT }, children: 'Shows a recovery passphrase first; nothing is created yet.' }),
+                    jsx('span', {
+                      key: 'hint',
+                      style: { fontSize: 12, color: MUTED_TEXT },
+                      children: exists ? 'Nothing changes until you confirm.' : 'Shows a recovery passphrase first; nothing is created yet.',
+                    }),
                   ],
                 }),
           ],
@@ -1522,7 +1534,7 @@ function VaultStep({ id, n, state, blocker = null, goto = null, code = null, vau
     blocker,
     goto,
     summary: `On · .env is in the vault${policy}.`,
-    progress: flow ? 'Creating the vault… approve a Touch ID prompt if one appears.' : 'Preparing a recovery passphrase…',
+    progress: flow ? 'Creating the vault… approve a Touch ID prompt if one appears.' : 'Preparing…',
     failure: stepFailure(failure, code),
     noteRef,
     notice,
@@ -1916,23 +1928,24 @@ function DatabasesStep({ id, n, state, blocker = null, goto = null, code = null,
   const db = status.databases || {}
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState(null)
-  const [scheduled, setScheduled] = useState(false)
-  const [nothing, setNothing] = useState(false)
+  // The answer that asks for a restart: `scheduled` (converted at the next start) or
+  // `needs_restart` (armed, but this Hermes Desktop opened the databases before).
+  const [restartFor, setRestartFor] = useState(null)
   const noteRef = useFocusOn(failure)
-  const resultRef = useFocusOn(scheduled || nothing)
+  const resultRef = useFocusOn(restartFor)
   useDropOnDone(state, () => setFailure(null))
   const encrypt = async () => {
     setBusy(true)
     setFailure(null)
-    setNothing(false)
     try {
       const r = await call('/databases/encrypt', {})
       // An attention answer carries its code; only a well-formed one is shown.
       if (r.action === 'attention') throw new MordredError(safeCode(r.code) || 'databases_failed', {})
-      if (r.action === 'scheduled') {
-        setScheduled(true)
-        host.notify({ kind: 'info', message: 'Database encryption is scheduled for the next start of Hermes Desktop.' })
-      } else setNothing(true)
+      if (r.action === 'scheduled' || r.action === 'needs_restart') {
+        setRestartFor(r.action)
+        if (r.action === 'scheduled') host.notify({ kind: 'info', message: 'Database encryption is scheduled for the next start of Hermes Desktop.' })
+      } else if (r.action !== 'done') throw new MordredError('invalid_response', {})
+      // `done`: already on; the status read below makes the step done.
     } catch (e) {
       setFailure(asMordredError(e))
     } finally {
@@ -1944,8 +1957,9 @@ function DatabasesStep({ id, n, state, blocker = null, goto = null, code = null,
   const rows = databaseRows(db)
   const unreadable = rows.filter((row) => row.state === 'unreadable').length
   const backups = Number(db.plaintext_backups) || 0
-  const waiting = scheduled || restart
+  const waiting = Boolean(restartFor) || restart
   const shown = state === 'done' || state === 'blocked' ? state : busy ? 'running' : failure ? 'attention' : state
+  const scheduledText = restartFor ? restartFor === 'scheduled' : !db.armed
   const notice =
     waiting && shown !== 'done'
       ? jsxs('div', {
@@ -1953,13 +1967,11 @@ function DatabasesStep({ id, n, state, blocker = null, goto = null, code = null,
           tabIndex: -1,
           style: { marginTop: 10 },
           children: [
-            jsx('p', { key: 'text', role: 'status', children: scheduled || !db.armed ? DATABASES_RESTART.scheduled : DATABASES_RESTART.armed }),
+            jsx('p', { key: 'text', role: 'status', children: scheduledText ? DATABASES_RESTART.scheduled : DATABASES_RESTART.armed }),
             jsx(RestartHermesControl, { key: 'restart' }),
           ],
         })
-      : nothing
-        ? jsx('p', { ref: resultRef, tabIndex: -1, role: 'status', children: 'Nothing to encrypt.' })
-        : null
+      : null
   return jsx(Step, {
     id,
     n,
