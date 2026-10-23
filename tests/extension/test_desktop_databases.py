@@ -12,8 +12,8 @@ import pytest
 pytest.importorskip("fastapi")
 
 from mordred_hermes import dbcrypt
-from mordred_hermes.dbcrypt import _migrate, _shim
-from mordred_hermes.desktop import _seams, api
+from mordred_hermes.dbcrypt import _migrate, _monitor, _shim
+from mordred_hermes.desktop import _databases, _seams, api
 
 VALID_KEY = "hex:" + "22" * 32
 
@@ -138,3 +138,37 @@ def test_unsupported_off_macos_or_without_sqlcipher(db: Any, monkeypatch: pytest
 
 def test_the_sqlcipher_probe() -> None:
     assert isinstance(_seams.sqlcipher_available(), bool)
+
+
+def test_status_object_probes_through_the_process_library_inside_a_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inside Hermes (the shim installed) discovery never runs the offline classifier, which opens
+    the files directly and would drop Hermes's own SQLite locks; each file is probed through the
+    process's own library, so plaintext is still reported and the rest stays ``unreadable``."""
+    home = tmp_path / "home"
+    (home / "cron").mkdir(parents=True)
+    plain = sqlite3.connect(home / "state.db")
+    try:
+        plain.execute("CREATE TABLE t (x INTEGER)")
+        plain.commit()
+    finally:
+        plain.close()
+    (home / "shared-state.db").write_bytes(bytes(range(256)) * 8)  # ciphertext stand-in: no SQLite header
+    (home / "cron" / "executions.db").write_bytes(b"")  # empty: omitted, as the classifier omits it
+    (home / "state.db.repair-attempts.json").write_text("{}", encoding="utf-8")  # metadata: omitted
+    monkeypatch.setattr(_shim, "is_installed", lambda: True)
+    monkeypatch.setattr(_monitor, "_own_sqlite", lambda: (sqlite3, False))
+
+    def refused(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the offline classifier ran inside the runtime")
+
+    monkeypatch.setattr(_migrate, "discover", refused)
+
+    status = _databases.status_object(home, platform="darwin", sqlcipher=True, environ={})
+
+    assert status["databases"] == [
+        {"relative": "shared-state.db", "state": "unreadable"},
+        {"relative": "state.db", "state": "plaintext"},
+    ]
+    assert status["armed"] is False and status["runtime_protected"] is False

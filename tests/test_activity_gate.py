@@ -21,6 +21,9 @@ def protected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A home that passes every process/home-level check (armed, shim loaded, key resolves)."""
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(_shim, "is_installed", lambda: True)
+    # The plaintext probe goes through the process's own SQLite library; here that is the stdlib
+    # (the fakes below are plain sqlite3), and sqlcipher3 need not be importable.
+    monkeypatch.setattr(_monitor, "_own_sqlite", lambda: (sqlite3, False))
     monkeypatch.setattr(dbcrypt, "_PROVIDER", lambda: object())
     dbcrypt.arm(tmp_path)
     return tmp_path
