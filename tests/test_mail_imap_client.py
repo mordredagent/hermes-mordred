@@ -343,10 +343,18 @@ def test_abandoned_handshake_workers_are_capped() -> None:
         assert imap._abandoned_handshakes.active == imap.MAX_IN_FLIGHT_HANDSHAKES
         seen: list[str] = []
         imap.set_diagnostic_sink(seen.append)
+        opened: list[Any] = []
+
+        class Counting(Client):
+            def __init__(self) -> None:
+                super().__init__()
+                self._raw_socket = lambda link: opened.append(link) or server.connect(link)
+
         started = time.monotonic()
         with _armed(budget=5.0) as link, pytest.raises(imap.ImapError):
-            Client()._tls_socket(link)
+            Counting()._tls_socket(link)
         assert time.monotonic() - started < 1.0  # refused before any handshake
+        assert opened == []  # and before any route, DNS or TCP work
         assert any("too many abandoned handshakes" in message for message in seen)
     finally:
         imap.set_diagnostic_sink(None)

@@ -1003,13 +1003,28 @@ class GuardedIMAP4SSL(_CommandGuard, imaplib.IMAP4_SSL):
         for those the handshake runs inside ``wrap_socket`` under the socket
         timeout the link grants, while the link holds a duplicate descriptor of
         the connection so that an interrupt still ends the handshake at once.
+        The in-wrap path is admitted against :data:`MAX_IN_FLIGHT_HANDSHAKES`
+        BEFORE any route, DNS or TCP work: a refusal costs nothing.
         """
         context: ssl.SSLContext = self.ssl_context
+        inside = _handshakes_inside_wrap(context)
+        slot: _Slot | None = None
+        if inside:
+            if not _abandoned_handshakes.admit():
+                _emit("mordred imap: too many abandoned handshakes still running; refusing a new one")
+                raise ImapError("imap_unreachable")
+            slot = _Slot(_abandoned_handshakes)
+        try:
+            return self._wrap_route_socket(link, context, slot)
+        finally:
+            if slot is not None:
+                slot.forfeit()  # releases the slot when the worker never ran (an early failure)
+
+    def _wrap_route_socket(self, link: Link, context: ssl.SSLContext, slot: _Slot | None) -> socket.socket:
         raw = self._raw_socket(link)
         link.hold(raw)
-        inside = _handshakes_inside_wrap(context)
         try:
-            if inside:
+            if slot is not None:
                 raw.settimeout(link.timeout())
                 # ``wrap_socket`` detaches ``raw``'s descriptor into the TLS socket, so an interrupt
                 # could no longer reach the handshake through ``raw``. A duplicate descriptor shares
@@ -1018,39 +1033,33 @@ class GuardedIMAP4SSL(_CommandGuard, imaplib.IMAP4_SSL):
                 # native code no shutdown can interrupt, so the whole wrap runs under
                 # :meth:`Link.bounded`: past the hard deadline the attempt fails and a socket
                 # the late worker still produces is closed, never used.
-                if not _abandoned_handshakes.admit():
-                    _emit("mordred imap: too many abandoned handshakes still running; refusing a new one")
-                    raise ImapError("imap_unreachable")
-                slot = _Slot(_abandoned_handshakes)
-                try:
-                    mirror = socket.socket(fileno=os.dup(raw.fileno()))
-                    link.hold(mirror)
-                    handoff = _Handoff()
+                mirror = socket.socket(fileno=os.dup(raw.fileno()))
+                link.hold(mirror)
+                handoff = _Handoff()
+                admitted = slot
 
-                    def wrap() -> socket.socket:
-                        if not slot.start():  # the waiter gave up before this thread ran: do nothing
-                            raise ImapError("imap_unreachable")
-                        try:
-                            return handoff.publish(context.wrap_socket(raw, server_hostname=self.host))
-                        finally:
-                            slot.done()
-
+                def wrap() -> socket.socket:
+                    if not admitted.start():  # the waiter gave up before this thread ran: do nothing
+                        raise ImapError("imap_unreachable")
                     try:
-                        wrapped = link.bounded(wrap, name=HANDSHAKE_NAME)
-                    except BaseException:
-                        handoff.abandon()  # a socket the worker still produces is closed by whoever owns it last
-                        raise
+                        return handoff.publish(context.wrap_socket(raw, server_hostname=self.host))
                     finally:
-                        link.drop(mirror)
+                        admitted.done()
+
+                try:
+                    wrapped = link.bounded(wrap, name=HANDSHAKE_NAME)
+                except BaseException:
+                    handoff.abandon()  # a socket the worker still produces is closed by whoever owns it last
+                    raise
                 finally:
-                    slot.forfeit()  # releases the slot when the worker never ran (an early failure)
+                    link.drop(mirror)
             else:
                 wrapped = context.wrap_socket(raw, server_hostname=self.host, do_handshake_on_connect=False)
         except BaseException:
             link.drop(raw)
             raise
         link.hold(wrapped)  # the raw socket object is detached now: interrupts reach the TLS socket
-        if inside:
+        if slot is not None:
             return wrapped
         try:
             handshake = getattr(wrapped, "do_handshake", None)
