@@ -5367,8 +5367,11 @@ CLI `wizard/direct_tools_cli.py`, routes in `desktop/_maintenance_routes.py`. Re
 records:
 [`2026-10-23-direct-tools-codex-review.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review.md)
 and
-[`2026-10-23-direct-tools-codex-review-pass2.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review-pass2.md);
-after the second pass the write was delegated to Hermes.
+[`2026-10-23-direct-tools-codex-review-pass2.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review-pass2.md)
+and
+[`2026-10-23-direct-tools-codex-review-pass3.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review-pass3.md);
+after the second pass the write was delegated to Hermes, after the third the parse
+moved to a child process.
 
 - **Never silent.** Mordred MUST NOT change `tools.tool_search` except on an explicit
   request: `hermes-mordred direct-tools on | off`, or a change of the Tool calls
@@ -5382,7 +5385,8 @@ after the second pass the write was delegated to Hermes.
   running interpreter (the same venv), else `<home>/hermes-agent/venv/bin/hermes`, else
   Hermes Desktop's launcher `<home>/hermes-agent/.hermes/bin/hermes` (Windows:
   `hermes.exe` next to the interpreter, else `<home>/hermes-agent/venv/Scripts`). It
-  runs with `HERMES_HOME` set to the home, the home as working directory,
+  runs with `HERMES_HOME` set to the home (made absolute first, so the working
+  directory and `HERMES_HOME` always name the same home), the home as working directory,
   `PYTHONPATH` and `PYTHONHOME` removed, stdin closed, a 60 s timeout, and its output
   captured and dropped: only exit codes count and nothing it prints is shown, logged
   or returned. Afterwards `hermes config get tools.tool_search.enabled` must print a
@@ -5403,22 +5407,44 @@ after the second pass the write was delegated to Hermes.
   legacy non-mapping `tools.tool_search` is the boolean false (the string `"off"` and the
   integer `0` are deferred). A test compares 26 cases with a re-implementation of
   Hermes's rule. The read result is `{direct, source}` only, never the value itself.
-- **Before the command.** Nothing runs when the setting already is as asked. `on`
-  runs only when `enabled` is absent or null or an explicit deferral (`auto`, `on`,
-  `true`, `yes`, `1` in Hermes's view); any other value, or a legacy scalar, is refused
-  with `config_has_setting` ("edit config.yaml by hand"). A vault-managed config.yaml
-  (the `config-vault.marker`) without its plaintext on disk is sealed away: the read is
-  `unreadable` and the change is refused with `config_vault_managed` before Hermes
-  runs. A missing `hermes` command is `hermes_cli_missing`, with the three lines to add
-  by hand (`tools:` / `tool_search:` / `enabled: "off"`).
+- **A child process parses.** The Hermes process (Desktop's backend, the CLI) only
+  reads the file: POSIX through the wizard's regular-file reader, Windows through the
+  checked snapshot. It never parses YAML. It starts `python -I` (this interpreter;
+  `PYTHONPATH` and `PYTHONHOME` removed; no working directory set) running
+  `mordred_hermes.wizard._direct_tools_yaml` as `__main__`, writes the config.yaml text
+  to its stdin and reads exactly one JSON line from its stdout: `{"direct": bool,
+  "source": "config" | "default", "existing": "absent" | "deferral" | "legacy" |
+  "other" | "shared"}` or `{"code": "config_unreadable"}`. The child never opens
+  config.yaml. Its stderr is captured and dropped. A non-zero exit, the 20 s timeout,
+  or output that is not one conforming JSON line is `config_unreadable`. Under Hermes
+  Desktop, whose interpreter is the base one with Hermes's environment only on
+  `sys.path`, the `site-packages` directories outside the interpreter's prefix are
+  added back for the child (`site.addsitedir`). Answers are cached by the sha256 of
+  the text (the last 8), so the status poll starts no process while the file is
+  unchanged; a failed answer is never cached.
 - **No text escapes.** ruamel's errors and warnings (`ReusedAnchorWarning`,
-  `MantissaNoDotYAML1_1Warning`) quote source lines. Every Mordred parse runs under
-  `warnings.catch_warnings(record=True)` with `simplefilter("always")`; any error or
-  warning is `config_unreadable`, and nothing of it is kept, logged or printed. The
-  warning filters are process-wide, so a warning context another thread opens or
-  closes during a parse can still let a warning through or swallow one.
+  `MantissaNoDotYAML1_1Warning`) quote source lines, values included. They are raised
+  only in the reader child, which records every warning and turns any error or warning
+  into `config_unreadable`; its stderr never reaches the Hermes process, so nothing of
+  the document is logged, printed or returned.
+- **Before the command.** One request runs at a time (a lock around the whole read,
+  command and check; the state is read again once the lock is held, so a second
+  simultaneous request sees the first one's result). Nothing runs when the setting
+  already is as asked. A `tools` or `tools.tool_search` mapping referenced from more
+  than one place (a YAML anchor/alias or a merge source; the safe loader gives them the
+  same object) is refused for `on` and `off` with `config_unsupported_shape`:
+  "config.yaml shares the tools or tool_search mapping with another setting through a
+  YAML anchor/alias, so changing it would change that setting too; edit config.yaml by
+  hand". `on` runs only when `enabled` is absent or null or an explicit deferral
+  (`auto`, `on`, `true`, `yes`, `1` in Hermes's view); any other value, or a legacy
+  scalar, is refused with `config_has_setting` ("edit config.yaml by hand"). A
+  vault-managed config.yaml (the `config-vault.marker`) without its plaintext on disk is
+  sealed away: the read is `unreadable` and the change is refused with
+  `config_vault_managed` before Hermes runs. A missing `hermes` command is
+  `hermes_cli_missing`, with the three lines to add by hand (`tools:` / `tool_search:` /
+  `enabled: "off"`).
 - **Closed codes.** `config_unreadable`, `config_vault_managed`, `config_write_failed`,
-  `config_has_setting`, `hermes_cli_missing`.
+  `config_has_setting`, `hermes_cli_missing`, `config_unsupported_shape`.
 - **CLI.** `status` prints `direct tool calls: on|off (config|default)`. `on` and `off`
   print the Hermes command that made the change, the two trade-offs (prompt size: every
   request carries the deferred tool schemas, about 8,000 tokens with Mordred's tools;
@@ -5436,8 +5462,9 @@ after the second pass the write was delegated to Hermes.
   null, "source": "config" | "default" | "unreadable"}` on every platform, Windows
   included (the setting is Hermes-wide). It is a cheap read that creates no file or
   directory and never waits (POSIX: no lock; Windows: the nonblocking checked
-  snapshot), and it never fails the status: an unreadable, busy or sealed-away config
-  is `{"direct": null, "source": "unreadable"}`. Versions 1 to 3 do not carry it.
+  snapshot); the reader child runs only when the text changed since a cached answer.
+  It never fails the status: an unreadable, busy or sealed-away config is
+  `{"direct": null, "source": "unreadable"}`. Versions 1 to 3 do not carry it.
 - **Page.** The Maintenance group shows a "Tool calls" card between the update panel
   and uninstall: the checkbox "Let Hermes call Mordred's tools directly (recommended
   with a Venice private model)" and fixed copy saying what it changes (Hermes's own
@@ -5456,7 +5483,7 @@ after the second pass the write was delegated to Hermes.
   with a "Go" button (`aria-label` "Go to Tool calls") that scrolls to and focuses the
   card heading `mordred-tools`, only when the chat model is a Venice private model
   (`hermes_model.ok` and `kind: "venice"`) and `tools.direct` is `false`. `MESSAGES`
-  gains the five closed codes. The card is on the grouped page (macOS and Linux); the
+  gains the six closed codes. The card is on the grouped page (macOS and Linux); the
   Windows page is a separate component and stays byte-identical (the snapshot test), so
   Windows uses the CLI.
 - **Restart.** Hermes reads `tools.tool_search` when it starts: every change takes

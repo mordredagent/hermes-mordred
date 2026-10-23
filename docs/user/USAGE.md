@@ -844,7 +844,9 @@ hermes-mordred direct-tools off      # runs: hermes config unset tools.tool_sear
 > config set` / `hermes config unset` (the `hermes` command of Hermes's
 > environment, with `HERMES_HOME` set to your Hermes home; its output is not
 > shown) and then checks with `hermes config get` that Hermes reads the setting
-> as asked. How the file looks afterwards is up to Hermes's writer.
+> as asked. How the file looks afterwards is up to Hermes's writer. Mordred
+> reads the file itself but parses it in a separate short-lived Python process,
+> so nothing YAML prints about your configuration reaches Hermes's output.
 >
 > The trade-offs, because the setting is Hermes-wide and affects every plugin
 > tool, not only Mordred's:
@@ -861,7 +863,11 @@ hermes-mordred direct-tools off      # runs: hermes config unset tools.tool_sear
 > `"no"` and `"false"`, all count as on; the old form `tool_search: false` too.
 > `on` runs only when the setting is missing or an explicit deferral (`auto`,
 > `on`, `true`, `yes`, `1`); any other value is refused with
-> `config_has_setting`: edit `config.yaml` by hand. `off` removes the setting
+> `config_has_setting`: edit `config.yaml` by hand. A `tools` or `tool_search`
+> mapping that `config.yaml` shares with another setting through a YAML
+> anchor/alias is refused with `config_unsupported_shape`, for `on` and `off`,
+> because changing it would change that setting too: edit `config.yaml` by
+> hand. `off` removes the setting
 > (Hermes's default, `auto`, then applies). Mordred never changes this setting
 > unless you run `on` / `off` or tick the **Tool calls** card on the Desktop
 > page. If Hermes's `hermes` command cannot be found the command refuses with
