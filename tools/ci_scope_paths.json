@@ -384,6 +384,9 @@
       "extension",
       "macos"
     ],
+    "tests/test_desktop_page.py": [
+      "extension"
+    ],
     "tests/test_desktop_windows_api.py": [
       "extension"
     ],
