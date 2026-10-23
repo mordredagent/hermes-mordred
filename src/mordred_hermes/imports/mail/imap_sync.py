@@ -65,7 +65,19 @@ Per mailbox (Gmail: All Mail; other servers: INBOX, then the sent folder chosen 
   batch; at most :data:`RUN_BYTES` of mail is read per run (``max_bytes``).
 
 Output is :class:`FetchResult` only: integers, booleans and closed-enum codes.
-No subject, name, address, label or body is returned, logged or audited.
+No subject, name, address, label or body is returned, logged or audited. A
+refused login's :data:`~.imap.IMAP_HINTS` member rides on ``FetchResult.hint``
+for ``mail fetch``'s text output only; :meth:`FetchResult.as_dict` (the tool's
+and the Desktop job's serializer) never carries it.
+
+Every fetch that took the writer lock records, under it, the account's
+``mail_imap.<account>.last`` value ``{"attempt": {at, error, partial},
+"success": {at} | null}`` (closed keys; :func:`last_fetch_status` reads it back
+with every field type-checked): a failed fetch replaces the attempt and keeps
+the previous success visible as such (a fetch without an error, partial
+included, is a success). It is written only while the sealed credentials are
+still the setup the fetch started with (``setup_id``), so another setup's
+record is never overwritten.
 """
 
 from __future__ import annotations
@@ -106,6 +118,7 @@ __all__ = [
     "cursor_key",
     "default_env",
     "fetch_lock",
+    "last_fetch_status",
     "run_fetch",
 ]
 
@@ -140,6 +153,7 @@ ERROR_CODES: Final = frozenset(
         "tee_unavailable",
         "tee_auth_cancelled",
         "secrets_corrupt",
+        "credentials_left",
         "routing_unavailable",
         "egress_unsupported",
         "imap_unreachable",
@@ -207,10 +221,13 @@ class FetchResult:
     lock_retained: bool = False
     partial_reason: str | None = None
     error: str | None = None
+    #: The :data:`~.imap.IMAP_HINTS` member of a refused login, for ``mail fetch``'s text output only:
+    #: never serialized (:meth:`as_dict`), audited or recorded.
+    hint: str | None = field(default=None, compare=False, repr=False)
 
     def as_dict(self) -> dict[str, int | bool | str | None]:
-        """Every field, type- and enum-checked (a bad value raises; nothing else can appear)."""
-        return checked_result({item.name: getattr(self, item.name) for item in fields(self)})
+        """Every serialized field, type- and enum-checked (a bad value raises; nothing else can appear)."""
+        return checked_result({item.name: getattr(self, item.name) for item in fields(self) if item.name != "hint"})
 
 
 _INT_FIELDS: Final = frozenset(
@@ -341,6 +358,45 @@ def cursor_key(account: str, digest: str) -> str:
 
 def last_fetch_key(account: str) -> str:
     return f"{CURSOR_PREFIX}.{account}.last"
+
+
+def _timestamp(value: object) -> int | None:
+    return value if type(value) is int and value >= 0 else None
+
+
+def last_fetch_status(raw: str | None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """The recorded last attempt ``{at, error, partial}`` and last success ``{at}``, every field type-checked.
+
+    Unknown keys are dropped; a field of the wrong type or a code outside
+    :data:`ERROR_CODES` voids its part (``None``), and so does corrupt JSON. The
+    flat record of earlier versions (``{at, error, gmail, partial}``) reads as an
+    attempt, and as a success when it had no error.
+    """
+    try:
+        value = json.loads(raw) if raw else None
+    except ValueError:
+        return None, None
+    if not isinstance(value, dict):
+        return None, None
+    if "attempt" not in value and "at" in value:  # the earlier flat record
+        attempt = _attempt(value)
+        return attempt, ({"at": attempt["at"]} if attempt is not None and attempt["error"] is None else None)
+    success = value.get("success")
+    at = _timestamp(success.get("at")) if isinstance(success, dict) else None
+    return _attempt(value.get("attempt")), (None if at is None else {"at": at})
+
+
+def _attempt(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    at, error, partial = _timestamp(value.get("at")), value.get("error"), value.get("partial")
+    if (
+        at is None
+        or not isinstance(partial, bool)
+        or not (error is None or (isinstance(error, str) and error in ERROR_CODES))
+    ):
+        return None
+    return {"at": at, "error": error, "partial": partial}
 
 
 def imap_date(day: _dt.date) -> str:
@@ -1038,7 +1094,7 @@ def _sync(store: Any, creds: MailCredentials, options: FetchOptions, env: FetchE
 def _gated_store(options: FetchOptions, env: FetchEnv) -> Any:
     if env.platform() != "darwin":
         raise FetchStop("unsupported_platform")
-    if env.secret_store.flags() is None:
+    if _setup_identity(env) is None:
         raise FetchStop("mail_not_configured")
     try:
         env.memory_guard(env.home)
@@ -1069,30 +1125,68 @@ def _locked_fetch(store: Any, options: FetchOptions, env: FetchEnv, result: Fetc
             raise
         except Exception as exc:
             raise FetchStop(_store_code(exc)) from None
-    creds = _unseal(env)
+    identity = _setup_identity(env)  # read under the lock: the setup this fetch belongs to
     try:
-        _sync(store, creds, options, env, result)
-    finally:
-        del creds
-    if not options.dry_run:
-        with contextlib.suppress(Exception):  # an abandoned fetch (_Abandoned) records nothing either
-            _leased(
-                options,
-                lambda guard: store.set_meta(last_fetch_key(_account_of(env)), _last_json(result, env), guard=guard),
-            )
+        creds = _unseal(env)
+        try:
+            _sync(store, creds, options, env, result)
+        finally:
+            del creds
+    except _Partial:  # abandoned (or stopped before the run): reported by run_fetch, never recorded
+        raise
+    except Exception as exc:
+        _apply_failure(result, exc)  # recorded below as the last attempt, then returned as run_fetch would
+    _finish_result(result)
+    if not options.dry_run and identity is not None:
+        _record_last(store, options, env, result, identity)
 
 
-def _account_of(env: FetchEnv) -> str:
-    flags = env.secret_store.flags() or {}
-    return str(flags.get("account", "mail"))
+def _setup_identity(env: FetchEnv) -> tuple[str, str] | None:
+    """(account, setup_id) of the sealed credentials; ``None`` when none; ``credentials_left`` for a residue."""
+    try:
+        flags = env.secret_store.flags()
+    except MailSecretsError as exc:
+        raise FetchStop(_code(exc, "secrets_corrupt")) from None
+    if not flags:
+        return None
+    return str(flags.get("account")), str(flags.get("setup_id", ""))
 
 
-def _last_json(result: FetchResult, env: FetchEnv) -> str:
-    return json.dumps(
-        {"at": int(env.now()), "error": result.error, "partial": result.partial, "gmail": result.gmail},
-        separators=(",", ":"),
-        sort_keys=True,
-    )
+def _record_last(
+    store: Any, options: FetchOptions, env: FetchEnv, result: FetchResult, identity: tuple[str, str]
+) -> None:
+    """Under the writer lock: this attempt, and the last success (this one, or the previous one kept)."""
+    with contextlib.suppress(Exception):  # an abandoned fetch (_Abandoned) records nothing either
+        if _setup_identity(env) != identity:
+            return  # the credentials are another setup's now: its record is never overwritten
+        key = last_fetch_key(identity[0])
+        now = int(env.now())
+        _attempt_before, success = last_fetch_status(store.get_meta(key))
+        value = {
+            "attempt": {"at": now, "error": result.error, "partial": result.partial},
+            "success": {"at": now} if result.error is None else success,
+        }
+        text = json.dumps(value, separators=(",", ":"), sort_keys=True)
+        _leased(options, lambda guard: store.set_meta(key, text, guard=guard))
+
+
+def _apply_failure(result: FetchResult, exc: BaseException) -> None:
+    """``exc`` as the result's code or partial reason (never stringified: the class name is not even kept)."""
+    if isinstance(exc, FetchStop):
+        result.error = exc.code
+    elif isinstance(exc, _Partial | ImapStopped):
+        result.partial, result.partial_reason = True, exc.reason
+    elif isinstance(exc, ImapError):
+        result.error, result.hint = _code(exc, "imap_protocol"), exc.hint
+    elif isinstance(exc, MailSecretsError):
+        result.error = _code(exc, "secrets_corrupt")
+    else:
+        result.error = "fetch_failed"
+
+
+def _finish_result(result: FetchResult) -> None:
+    if result.error is not None and result.batches:
+        result.partial, result.partial_reason = True, "error"
 
 
 def _audit(env: FetchEnv, options: FetchOptions, result: FetchResult) -> None:
@@ -1118,19 +1212,8 @@ def run_fetch(options: FetchOptions, env: FetchEnv | None = None) -> FetchResult
         lock = contextlib.nullcontext() if options.dry_run else _writer_lock(options, env)
         with lock:
             _locked_fetch(store, options, env, result)
-    except FetchStop as stop:
-        result.error = stop.code
-    except _Partial as stop:  # abandoned before or while taking the lock, or in its crash recovery
-        result.partial, result.partial_reason = True, stop.reason
-    except ImapStopped as stopped:
-        result.partial, result.partial_reason = True, stopped.reason
-    except ImapError as exc:
-        result.error = _code(exc, "imap_protocol")
-    except MailSecretsError as exc:
-        result.error = _code(exc, "secrets_corrupt")
-    except Exception:  # never stringified: the class name is not even kept
-        result.error = "fetch_failed"
-    if result.error is not None and result.batches:
-        result.partial, result.partial_reason = True, "error"
+    except Exception as exc:  # a refusal before or while taking the lock, or an abandoned fetch (_Partial)
+        _apply_failure(result, exc)
+    _finish_result(result)
     _audit(env, options, result)
     return result
