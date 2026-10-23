@@ -21,9 +21,22 @@ Gmail path, mailbox roles, presence, and a random ``setup_id`` naming this
 setup) so status and the Hermes tool's availability check never touch the
 Enclave and never see the address; ``mail forget`` uses ``setup_id`` to tell
 the credentials it resolved from ones a concurrent ``mail setup`` installed.
+:meth:`MailSecretStore.store` writes both files under staging names first and
+renames them in order (sealed file, then flags); a failure removes whatever it
+wrote. A sealed file without readable flags (a crash between the two renames,
+or a damaged flags file) is a distinct state: :meth:`MailSecretStore.flags`
+raises ``credentials_left`` instead of reporting "not configured".
 :meth:`MailSecretStore.forget` deletes the sealed file, the flags and the
 Enclave key whatever the flags say, and :meth:`MailSecretStore.residue` sees
-a sealed file whose flags are missing or corrupt (``flags()`` is ``None``).
+any sealed or flags file in any form.
+
+An existing Enclave key keeps the Touch ID policy it was created with, which
+cannot be read back. :meth:`MailSecretStore.ensure_key` therefore returns the
+policy it is sure of: the requested one for a key it created, ``None`` for a key
+it kept; with ``replace=True`` (``mail setup``, under the writer lock, with no
+credentials sealed: a key left by a failed setup) it deletes an existing key
+first (``touch_id_policy_mismatch`` when that is impossible), so the flags
+always record the key's effective policy.
 
 The sealed payload is validated on every load: port 993 only (implicit TLS),
 a DNS host name, mailbox names that are printable ASCII without control
@@ -35,6 +48,7 @@ Other platforms refuse with ``unsupported_platform`` before any filesystem use
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -73,6 +87,8 @@ _ROLES: Final = frozenset({"all", "inbox", "sent"})
 IMAPS_PORT: Final = 993
 _MAX_MAILBOX_CHARS: Final = 1000
 _GITIGNORE: Final = b"# Mordred mail credentials: sealed, never version-controlled.\n*\n"
+#: Staging names of :meth:`MailSecretStore.store` (dot files: never read as credentials, removed by forget).
+_STAGED_GLOB: Final = ".credentials.*.staged"
 
 
 class MailSecretsError(RuntimeError):
@@ -275,8 +291,16 @@ class MailSecretStore:
 
     # -- Enclave key ------------------------------------------------------------------------
 
-    def ensure_key(self, *, require_presence: bool = True) -> None:
-        """Create the Enclave key if it does not exist yet (presence applies only to a new key)."""
+    def ensure_key(self, *, require_presence: bool = True, replace: bool = False) -> bool | None:
+        """Make sure the Enclave key exists; return its Touch ID policy when it is known.
+
+        A key created here has the requested policy (returned). An existing key
+        keeps the policy it was created with, which cannot be read back: without
+        ``replace`` it is kept and ``None`` is returned. ``replace=True`` deletes it
+        first (only when no credentials are sealed and the caller holds the
+        writer lock, as ``mail setup`` does) and raises ``touch_id_policy_mismatch``
+        when it cannot be deleted.
+        """
         from ...keyvault import wrap
         from ...keyvault._exceptions import WrapError, WrapKeyNotFound
 
@@ -284,15 +308,23 @@ class MailSecretStore:
         backend = self._backend_factory()
         try:
             wrap.get_wrapping_key_public(KEY_ID, backend=backend)
-            return
+            exists = True
         except WrapKeyNotFound:
-            pass
+            exists = False
         except WrapError:
             raise MailSecretsError("tee_unavailable") from None
+        if exists and not replace:
+            return None
+        if exists:
+            try:
+                wrap.delete_wrapping_key(KEY_ID, backend=backend)
+            except Exception:  # never stringified: a Keychain refusal is only a code
+                raise MailSecretsError("touch_id_policy_mismatch") from None
         try:
             wrap.generate_wrapping_key(KEY_ID, backend=backend, unattended=not require_presence)
         except WrapError:
             raise MailSecretsError("tee_unavailable") from None
+        return require_presence
 
     # -- seal / unseal ----------------------------------------------------------------------
 
@@ -342,11 +374,17 @@ class MailSecretStore:
         return None if sealed is None else decode(self._unseal(sealed))
 
     def store(self, value: MailCredentials, *, require_presence: bool = True) -> None:
-        """Seal ``value`` (replacing any earlier credentials) and write the non-secret flags."""
+        """Seal ``value`` (replacing any earlier credentials) and write the non-secret flags.
+
+        ``require_presence`` is recorded as the flags' ``touch_id``: pass the
+        policy :meth:`ensure_key` returned. Both files are written under staging
+        names, then renamed in order (sealed file, then flags); on any failure
+        everything this call wrote is removed and the error re-raised.
+        """
         from ...keyvault._storage import atomic_write
 
-        self._dir(create=True)
-        atomic_write(self.sealed_path, self._seal(encode(value)))
+        folder = self._dir(create=True)
+        sealed = self._seal(encode(value))  # the Enclave wrap first: an Enclave failure writes nothing
         flags = {
             "version": _SCHEMA_VERSION,
             "account": value.account,
@@ -355,24 +393,43 @@ class MailSecretStore:
             "touch_id": require_presence,
             "setup_id": _secrets.token_hex(16),
         }
-        atomic_write(self.meta_path, json.dumps(flags, sort_keys=True).encode("utf-8"))
+        token = _secrets.token_hex(8)
+        staged = [folder / f".{_SEALED_NAME}.{token}.staged", folder / f".{_META_NAME}.{token}.staged"]
+        written: list[Path] = []
+        try:
+            for path, data in zip(staged, (sealed, json.dumps(flags, sort_keys=True).encode("utf-8")), strict=True):
+                written.append(path)
+                atomic_write(path, data)
+            for path, final in zip(staged, (self.sealed_path, self.meta_path), strict=True):
+                os.replace(path, final)
+                written.append(final)
+            _sync_directory(folder)
+        except BaseException:
+            for path in written:
+                with contextlib.suppress(OSError):
+                    path.unlink(missing_ok=True)
+            raise
 
     def flags(self) -> dict[str, Any] | None:
-        """Non-secret flags, or ``None`` when no credentials are sealed. Never touches the Enclave."""
+        """Non-secret flags, or ``None`` when no credentials are sealed. Never touches the Enclave.
+
+        A sealed file whose flags are missing, unreadable or invalid raises
+        ``MailSecretsError("credentials_left")``: it is neither configured nor
+        absent (``mail forget`` removes it).
+        """
         try:
             sealed, meta = self.sealed_path, self.meta_path
         except MailSecretsError:
             return None
-        if sealed.is_symlink() or meta.is_symlink() or not sealed.is_file():
-            return None
         try:
-            value = json.loads(meta.read_text("utf-8"))
-        except (OSError, ValueError):
+            os.lstat(sealed)
+        except FileNotFoundError:
             return None
-        if not isinstance(value, dict) or not isinstance(value.get("account"), str):
-            return None
-        if not ACCOUNT_RE.fullmatch(value["account"]):
-            return None
+        except OSError:
+            raise MailSecretsError("credentials_left") from None
+        value = _read_flags(sealed, meta)
+        if value is None:
+            raise MailSecretsError("credentials_left")
         return value
 
     def residue(self) -> bool:
@@ -405,11 +462,39 @@ class MailSecretStore:
 
         for path in (self.sealed_path, self.meta_path):
             path.unlink(missing_ok=True)
+        for path in self.sealed_path.parent.glob(_STAGED_GLOB):  # left by a store() that was killed
+            path.unlink(missing_ok=True)
         try:
             wrap.delete_wrapping_key(KEY_ID, backend=self._backend_factory())  # idempotent: no key is fine
         except Exception:
             return False
         return True
+
+
+def _read_flags(sealed: Path, meta: Path) -> dict[str, Any] | None:
+    """The flags of a regular sealed file, or ``None`` when they are missing, unreadable or invalid."""
+    if sealed.is_symlink() or meta.is_symlink() or not sealed.is_file():
+        return None
+    try:
+        value = json.loads(meta.read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(value, dict) or not isinstance(value.get("account"), str):
+        return None
+    if not ACCOUNT_RE.fullmatch(value["account"]):
+        return None
+    return value
+
+
+def _sync_directory(folder: Path) -> None:
+    """Flush the directory entries of the renames (POSIX; a directory cannot be opened elsewhere)."""
+    if os.name != "posix":
+        return
+    fd = os.open(folder, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def own_address_list(address: str, extra: Sequence[str]) -> tuple[str, ...]:

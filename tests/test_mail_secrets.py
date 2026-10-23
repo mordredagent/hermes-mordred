@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -144,7 +145,9 @@ def test_forget_and_residue_ignore_unreadable_flags(tmp_path: Path, enclave: Fak
         store.meta_path.write_text("{not json")
     elif damage == "symlink":
         store.meta_path.symlink_to(tmp_path / "elsewhere.json")
-    assert store.flags() is None and store.residue()  # unreadable flags, credentials still on disk
+    with pytest.raises(MailSecretsError) as raised:  # unreadable flags, credentials still on disk: a distinct state
+        store.flags()
+    assert raised.value.code == "credentials_left" and store.residue()
     assert store.forget() is True
     assert not store.residue() and not store.sealed_path.exists() and KEY_ID not in enclave.keys
 
@@ -194,3 +197,128 @@ def test_only_port_993_is_ever_loaded(port: int) -> None:
     with pytest.raises(MailSecretsError) as raised:
         secrets.decode(good.replace(b'"imap_port":993', b'"imap_port":%d' % port))
     assert raised.value.code == "secrets_corrupt"
+
+
+# --- no residue on failure, and the residue state -------------------------------------------------
+
+
+def _files(folder: Path) -> list[str]:
+    return sorted(path.name for path in folder.iterdir()) if folder.exists() else []
+
+
+@pytest.mark.parametrize("fault", ["flags_write", "flags_rename", "directory_sync"])
+def test_a_failure_between_the_two_writes_leaves_nothing(
+    tmp_path: Path, enclave: FakeEnclave, fault: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mordred_hermes.keyvault import _storage
+
+    store = sealed_store(tmp_path / "mail", enclave)
+    store.ensure_key()
+    real_write, real_replace = _storage.atomic_write, os.replace
+    writes: list[Path] = []
+
+    def atomic_write(path: Path, data: bytes) -> None:
+        if path.name.startswith(".credentials."):
+            writes.append(path)
+            if fault == "flags_write" and len(writes) == 2:
+                raise OSError("disk full")  # the sealed file is staged, the flags are not
+        real_write(path, data)
+
+    def replace(src: Any, dst: Any) -> None:
+        if fault == "flags_rename" and Path(dst) == store.meta_path:
+            raise OSError("rename failed")
+        real_replace(src, dst)
+
+    def sync(_folder: Path) -> None:
+        raise OSError("fsync failed")
+
+    monkeypatch.setattr(_storage, "atomic_write", atomic_write)
+    monkeypatch.setattr(os, "replace", replace)
+    if fault == "directory_sync":
+        monkeypatch.setattr(secrets, "_sync_directory", sync)
+    with pytest.raises(OSError):
+        store.store(gmail_creds())
+    assert _files(tmp_path / "mail") == [".gitignore"]  # neither the sealed file, the flags nor a staged file
+    assert store.flags() is None and not store.residue()
+    assert [path.name.split(".")[2] for path in writes] == ["sealed", "meta"]  # both staged before any rename
+
+
+def test_store_writes_through_staging_names_in_order(
+    tmp_path: Path, enclave: FakeEnclave, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = sealed_store(tmp_path / "mail", enclave)
+    store.ensure_key()
+    real_replace = os.replace
+    renamed: list[str] = []
+
+    def replace(src: Any, dst: Any) -> None:
+        if Path(dst).parent == tmp_path / "mail":
+            renamed.append(Path(dst).name)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace)
+    store.store(gmail_creds())
+    assert [name for name in renamed if not name.startswith(".")] == ["credentials.sealed", "credentials.meta.json"]
+    assert _files(tmp_path / "mail") == [".gitignore", "credentials.meta.json", "credentials.sealed"]
+
+
+def test_a_sealed_file_without_flags_is_credentials_left_and_flags_alone_are_not_configured(
+    tmp_path: Path, enclave: FakeEnclave
+) -> None:
+    store = sealed_store(tmp_path / "mail", enclave)
+    store.ensure_key()
+    store.store(gmail_creds())
+    meta = store.meta_path.read_bytes()
+    store.meta_path.unlink()  # a crash between the two renames
+    with pytest.raises(MailSecretsError) as raised:
+        store.flags()
+    assert raised.value.code == "credentials_left" and store.residue()
+    store.meta_path.write_bytes(meta)
+    store.sealed_path.unlink()  # a forget interrupted between its two deletions
+    assert store.flags() is None and store.residue()
+
+
+def test_forget_removes_staged_leftovers(tmp_path: Path, enclave: FakeEnclave) -> None:
+    store = sealed_store(tmp_path / "mail", enclave)
+    store.ensure_key()
+    store.store(gmail_creds())
+    (tmp_path / "mail" / ".credentials.sealed.0011223344556677.staged").write_bytes(b"MMC1")
+    assert store.forget() is True
+    assert _files(tmp_path / "mail") == [".gitignore"]
+
+
+# --- the Enclave key's Touch ID policy ------------------------------------------------------------------
+
+
+def test_ensure_key_returns_the_policy_it_is_sure_of(tmp_path: Path, enclave: FakeEnclave) -> None:
+    store = sealed_store(tmp_path / "mail", enclave)
+    assert store.ensure_key(require_presence=False) is False and enclave.unattended == {KEY_ID: True}
+    assert store.ensure_key(require_presence=True) is None  # kept: its policy cannot be read back
+    assert enclave.unattended == {KEY_ID: True}
+    assert store.ensure_key(require_presence=True, replace=True) is True
+    assert enclave.unattended == {KEY_ID: False}  # a fresh key with the requested policy
+
+
+def test_a_key_that_cannot_be_replaced_is_a_policy_mismatch(tmp_path: Path, enclave: FakeEnclave) -> None:
+    store = sealed_store(tmp_path / "mail", enclave)
+    store.ensure_key(require_presence=False)
+
+    def broken(_key_id: str) -> None:
+        raise OSError("keychain unavailable")
+
+    enclave.delete_enclave_key = broken  # type: ignore[method-assign]
+    with pytest.raises(MailSecretsError) as raised:
+        store.ensure_key(require_presence=True, replace=True)
+    assert raised.value.code == "touch_id_policy_mismatch" and enclave.unattended == {KEY_ID: True}
+
+
+def test_an_unavailable_enclave_is_tee_unavailable(tmp_path: Path, enclave: FakeEnclave) -> None:
+    from mordred_hermes.keyvault._exceptions import WrapError
+
+    def unavailable(_key_id: str) -> bytes:
+        raise WrapError("helper missing")
+
+    enclave.get_enclave_public_key = unavailable  # type: ignore[method-assign]
+    with pytest.raises(MailSecretsError) as raised:
+        sealed_store(tmp_path / "mail", enclave).ensure_key()
+    assert raised.value.code == "tee_unavailable"
