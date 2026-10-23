@@ -5209,7 +5209,11 @@ thin driver over it so the two entry points cannot drift. There is ONE contract:
   `.env`; Terminal: `hermes-mordred encryption enable env`).
 - `GET /status` adds `vault`: `{"exists", "env_enrolled", "env_injecting", "optout",
   "unattended"}`. These are facts; `unattended` is the key's effective policy read
-  from the key store, never the requested one.
+  from the key store, never the requested one, and it is `null` when that policy is
+  not recorded: today's `keyvault` cannot read an existing Secure Enclave key's
+  access policy, so the page shows "unknown" until a `keyvault` release records the
+  effective policy at key creation (TODO "Vault key policy record"). The page MUST
+  never substitute the requested policy for `null`.
 - `POST /memory/enable` is memory-only and idempotent. It requires `env_enrolled &&
   env_injecting` and answers `env_required` otherwise (and `vault_required` when the
   vault does not exist). The Touch ID choice ("Ask for Touch ID every time Hermes

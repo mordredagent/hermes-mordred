@@ -895,6 +895,20 @@ Follow-ups left by the landed code:
     the four hints.
   - [ ] Page (PR D4): the remediation text per hint in `IMAP_HINTS`.
 
+- [ ] Vault key policy record (`keyvault`, found 2026-10-23 by the Desktop D4 work):
+  the Secure Enclave key's access policy (attended / unattended) is opaque after
+  creation, so `/status.vault.unattended` is `null` and the Desktop page says
+  "unknown". Record the effective policy at key creation next to the key (the way
+  the mail store's `enclave-key.json` does: public-key digest and policy, nothing
+  secret), expose it through a non-unlocking read, and let `status` print it.
+  While it is `null`, the page must never show the requested policy instead.
+
+- [ ] Unescaped SQLite URIs in `dbcrypt/_migrate.py` (~117) and `dbcrypt/_shim.py`
+  (~82) build `file:` URIs without `urllib.parse.quote`; a home path containing
+  `#`, `?` or `%` would open a different file (PR #262 fixed the same bug in
+  `dbcrypt/_monitor.py` and the read-only import-store opener). Fix both with the
+  same `quote(path.as_posix(), safe="/")` and a test with a `we#ird?ho%me` home.
+
 Later (not scheduled):
 
 - [ ] Desktop `mail import` (file picker): Takeout mbox and `.eml` import from the
