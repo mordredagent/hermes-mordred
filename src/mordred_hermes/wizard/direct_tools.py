@@ -212,9 +212,9 @@ def read_mode(home: Path) -> dict[str, Any]:
 
     This process only reads the file (no lock: POSIX takes none, Windows reads
     the nonblocking checked snapshot, and nothing is created); a child process
-    parses the text (see :func:`_answer`). A cached answer is immediate; a
-    cache miss, or a file whose last answer failed, waits for the child, up to
-    :data:`READER_TIMEOUT_S`.
+    parses the text (see :func:`_answer`). A cached answer (a refusal included)
+    is immediate; a cache miss, or a file for which the child gave no
+    conforming answer, waits for the child, up to :data:`READER_TIMEOUT_S`.
     """
     home = Path(home).absolute()
     try:
