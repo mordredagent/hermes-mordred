@@ -816,6 +816,23 @@ Follow-ups left by the landed code:
   page shows counts and codes only; the CLI stays as the fallback and the
   reader-mode and egress rules do not change.
 
+- [ ] CLI counts after the Telegram archive moved to `mordred.db` (found during
+  the production rollout, 2026-10-23). `hermes-mordred telegram status` prints
+  `Dialogs: 0  Messages: 0` from a fresh process although the sync just reported
+  25 messages: `TelegramService.status()` deliberately never unseals the
+  credentials, so it only returns the counts `_remember_summary` /
+  `_imported_dialogs` kept in-process, which a one-shot CLI process never has
+  (the audit event `telegram.sync` and the gateway popup are right). Fix: when
+  `index.enc` is version 2 (`retired_to: mordred.db`) read the counts from the
+  import store through the SQLCipher gate (no Telegram secret is needed for
+  that), the way `mail status` does; a version-1 index keeps today's behaviour
+  (the `.enc` index needs the sealed key). Same for `telegram doctor`, whose
+  `archive` line still counts `.enc` segment files only and should name
+  `mordred.db` rows once the index is retired. `mail status` prints
+  `source = mail` rows only, which is correct; a source-neutral
+  `hermes-mordred imports status` (counts per source, no content) would make
+  the shared store visible without either secret.
+
 Later (not scheduled):
 
 - [ ] Gmail API collector feeding the same normalization path.
