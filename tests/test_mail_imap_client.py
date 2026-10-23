@@ -263,6 +263,78 @@ def test_a_wrapper_handshake_past_the_deadline_fails_and_closes_the_late_socket(
         release.set()
 
 
+def test_a_late_handshake_result_is_closed_whoever_finishes_last() -> None:
+    """The waiter gives up at the deadline; a socket the worker publishes afterwards is closed, not leaked."""
+    server = FakeImapServer({"INBOX": FakeMailbox(1)})
+    release = threading.Event()
+    produced: list[socket.socket] = []
+
+    class DetachingVerifier(ssl.SSLContext):
+        def wrap_socket(self, sock: socket.socket, *args: Any, **kw: Any) -> socket.socket:  # type: ignore[override]
+            fresh = socket.socket(fileno=sock.detach())  # like TLS: a new socket object owns the descriptor
+            release.wait(5.0)  # "native verification" that outlives the waiter
+            produced.append(fresh)
+            return fresh
+
+    class Client(GuardedIMAP4SSL):
+        def __init__(self) -> None:
+            self.host = "imap.example.com"
+            self.ssl_context = DetachingVerifier()
+            self._raw_socket = server.connect
+
+    try:
+        with _armed(budget=0.3) as link, pytest.raises(imap.ImapError):
+            Client()._tls_socket(link)
+        release.set()
+        deadline = time.monotonic() + 5.0
+        while (not produced or produced[0].fileno() != -1) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert produced and produced[0].fileno() == -1
+        deadline = time.monotonic() + 5.0
+        while imap._abandoned_handshakes.active and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert imap._abandoned_handshakes.active == 0
+    finally:
+        release.set()
+
+
+def test_abandoned_handshake_workers_are_capped() -> None:
+    """A verifier that never returns keeps its worker; past the cap a new attempt is refused at once."""
+    server = FakeImapServer({"INBOX": FakeMailbox(1)})
+    release = threading.Event()
+
+    class StuckVerifier(ssl.SSLContext):
+        def wrap_socket(self, sock: socket.socket, *args: Any, **kw: Any) -> socket.socket:  # type: ignore[override]
+            release.wait(10.0)
+            return sock
+
+    class Client(GuardedIMAP4SSL):
+        def __init__(self) -> None:
+            self.host = "imap.example.com"
+            self.ssl_context = StuckVerifier()
+            self._raw_socket = server.connect
+
+    try:
+        for _ in range(imap.MAX_IN_FLIGHT_HANDSHAKES):
+            with _armed(budget=0.2) as link, pytest.raises(imap.ImapError):
+                Client()._tls_socket(link)
+        assert imap._abandoned_handshakes.active == imap.MAX_IN_FLIGHT_HANDSHAKES
+        seen: list[str] = []
+        imap.set_diagnostic_sink(seen.append)
+        started = time.monotonic()
+        with _armed(budget=5.0) as link, pytest.raises(imap.ImapError):
+            Client()._tls_socket(link)
+        assert time.monotonic() - started < 1.0  # refused before any handshake
+        assert any("too many abandoned handshakes" in message for message in seen)
+    finally:
+        imap.set_diagnostic_sink(None)
+        release.set()
+        deadline = time.monotonic() + 5.0
+        while imap._abandoned_handshakes.active and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert imap._abandoned_handshakes.active == 0
+
+
 def test_the_standard_context_keeps_the_manual_handshake() -> None:
     assert imap._handshakes_inside_wrap(ssl.create_default_context()) is False
 

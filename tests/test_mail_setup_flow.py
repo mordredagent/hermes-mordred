@@ -21,6 +21,7 @@ import pytest
 
 from mordred_hermes.imports.mail import setup_flow
 from mordred_hermes.imports.mail._imap_codec import encode_mutf7
+from mordred_hermes.imports.mail import imap
 from mordred_hermes.imports.mail.imap import ImapError, ImapStopped
 from mordred_hermes.imports.mail.imap_sync import fetch_lock
 from mordred_hermes.imports.mail.secrets import KEY_ID, MailSecretsError, MailSecretStore
@@ -137,7 +138,10 @@ def test_gmail_seals_all_mail_at_once(secrets: MailSecretStore, enclave: FakeEnc
     assert creds.own_addresses == ("old.me@example.org", ADDRESS)
     assert (creds.app_password, creds.imap_host, creds.imap_port) == (PASSWORD, "imap.example.com", 993)
     assert (secrets.flags() or {})["touch_id"] is True and enclave.unattended == {KEY_ID: False}
-    assert server.violations == [] and server.verbs == ["CAPABILITY", "LOGIN", "CAPABILITY", "LIST", "LOGOUT"]
+    # Python 3.13's imaplib takes the capabilities from the greeting and refreshes them itself after LOGIN;
+    # older versions ask once before and the session asks once after. One CAPABILITY follows LOGIN either way.
+    initial = [] if imap._IMAPLIB_REFRESHES_AFTER_LOGIN else ["CAPABILITY"]
+    assert server.violations == [] and server.verbs == [*initial, "LOGIN", "CAPABILITY", "LIST", "LOGOUT"]
     assert pending(flows) == 0  # a finished flow is never kept
 
 

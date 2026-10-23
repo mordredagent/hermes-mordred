@@ -356,6 +356,11 @@ def _diag(exc: BaseException) -> str:
     return " ".join(parts)
 
 
+#: Python 3.13+ ``imaplib.login`` re-reads the capabilities itself after a successful LOGIN;
+#: older versions leave that to the session, so one CAPABILITY follows LOGIN on every version.
+_IMAPLIB_REFRESHES_AFTER_LOGIN: Final = hasattr(imaplib.IMAP4, "_refresh_capabilities")
+
+
 def _no_deadline() -> float:
     return SOCKET_TIMEOUT_S
 
@@ -1013,26 +1018,26 @@ class GuardedIMAP4SSL(_CommandGuard, imaplib.IMAP4_SSL):
                 # native code no shutdown can interrupt, so the whole wrap runs under
                 # :meth:`Link.bounded`: past the hard deadline the attempt fails and a socket
                 # the late worker still produces is closed, never used.
+                if not _abandoned_handshakes.admit():
+                    _emit("mordred imap: too many abandoned handshakes still running; refusing a new one")
+                    raise ImapError("imap_unreachable")
                 mirror = socket.socket(fileno=os.dup(raw.fileno()))
                 link.hold(mirror)
-                late: dict[str, socket.socket] = {}
+                handoff = _Handoff()
 
                 def wrap() -> socket.socket:
-                    produced = context.wrap_socket(raw, server_hostname=self.host)
-                    late["sock"] = produced
-                    return produced
+                    try:
+                        return handoff.publish(context.wrap_socket(raw, server_hostname=self.host))
+                    finally:
+                        _abandoned_handshakes.release()
 
                 try:
                     wrapped = link.bounded(wrap, name=HANDSHAKE_NAME)
                 except BaseException:
-                    produced = late.pop("sock", None)
-                    if produced is not None:
-                        with contextlib.suppress(OSError):
-                            produced.close()
+                    handoff.abandon()  # a socket the worker still produces is closed by whoever owns it last
                     raise
                 finally:
                     link.drop(mirror)
-                late.clear()
             else:
                 wrapped = context.wrap_socket(raw, server_hostname=self.host, do_handshake_on_connect=False)
         except BaseException:
@@ -1050,6 +1055,67 @@ class GuardedIMAP4SSL(_CommandGuard, imaplib.IMAP4_SSL):
             link.drop(wrapped)
             raise
         return wrapped
+
+
+class _Handoff:
+    """Ownership of a socket a worker produces after its waiter may have given up.
+
+    ``publish`` (worker) and ``abandon`` (waiter) run under one lock: whichever
+    comes second closes the socket, so a late handshake result is never left open
+    and never used.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._abandoned = False
+        self._sock: socket.socket | None = None
+
+    def publish(self, sock: socket.socket) -> socket.socket:
+        with self._lock:
+            if not self._abandoned:
+                self._sock = sock
+                return sock
+        with contextlib.suppress(OSError):
+            sock.close()
+        raise ImapError("imap_unreachable")  # the waiter is gone; the worker ends here
+
+    def abandon(self) -> None:
+        with self._lock:
+            self._abandoned = True
+            sock, self._sock = self._sock, None
+        if sock is not None:
+            with contextlib.suppress(OSError):
+                sock.close()
+
+
+class _WorkerCap:
+    """At most ``limit`` in-wrap handshakes in flight per process: abandoned workers cannot pile up."""
+
+    def __init__(self, limit: int) -> None:
+        self._lock = threading.Lock()
+        self._limit = limit
+        self._active = 0
+
+    def admit(self) -> bool:
+        with self._lock:
+            if self._active >= self._limit:
+                return False
+            self._active += 1
+            return True
+
+    def release(self) -> None:
+        with self._lock:
+            self._active = max(0, self._active - 1)
+
+    @property
+    def active(self) -> int:
+        with self._lock:
+            return self._active
+
+
+#: A verifier that never returns keeps its worker thread and detached socket; this bounds how many.
+MAX_IN_FLIGHT_HANDSHAKES: Final = 4
+_abandoned_handshakes = _WorkerCap(MAX_IN_FLIGHT_HANDSHAKES)
 
 
 def _handshakes_inside_wrap(context: Any) -> bool:
@@ -1153,7 +1219,8 @@ class ImapSession:
         if failure is not None:
             self._scrub()
             raise sever_chain(failure)
-        self._run(self._refresh_capabilities)
+        if not _IMAPLIB_REFRESHES_AFTER_LOGIN:
+            self._run(self._refresh_capabilities)
 
     def _login(self, user: str, password: str) -> ImapError | None:
         """``LOGIN``; the failure is returned, so no frame holding the password is ever in a traceback."""
@@ -1163,6 +1230,8 @@ class ImapSession:
             _emit(f"mordred imap: connection aborted during LOGIN ({_diag(exc)})")
             return ImapError("imap_unreachable")
         except imaplib.IMAP4.error as exc:
+            if getattr(self._conn, "state", "") == "AUTH":  # LOGIN was accepted: a later command failed
+                return ImapError("imap_protocol")
             return ImapError("imap_auth_failed", hint=_login_hint(exc))
         except (UnicodeError, ValueError):
             return ImapError("imap_auth_failed")

@@ -414,6 +414,20 @@ def test_fetch_text_prints_counts_and_cursors(fetch_env: dict[str, Any], capsys:
     assert_no_canaries(out, err)
 
 
+def test_fetch_installs_the_diagnostic_sink_for_text_mode_only_and_restores_it(
+    fetch_env: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mordred_hermes.imports.mail import imap
+
+    assert imap._DIAGNOSTIC_SINK is None
+    code, _out, _err = run(["mail", "fetch"], capsys)
+    assert code == 0
+    assert imap._DIAGNOSTIC_SINK is None  # restored after the command, so a later --json run stays silent
+    code, out, err = run(["mail", "fetch", "--json"], capsys)
+    assert code == 0 and err == "" and imap._DIAGNOSTIC_SINK is None
+    json.loads(out)
+
+
 def test_fetch_dry_run_writes_nothing(
     fetch_env: dict[str, Any], store: ImportStore, capsys: pytest.CaptureFixture[str]
 ) -> None:

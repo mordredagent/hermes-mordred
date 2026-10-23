@@ -426,6 +426,15 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     if not getattr(args, "json", False):  # content-free connection diagnostics, text mode only
         imap.set_diagnostic_sink(lambda message: _term.emit_error(message))
     try:
+        return _cmd_fetch(args, hints, CLI_BUDGET_S, FetchOptions, run_fetch)
+    finally:
+        imap.set_diagnostic_sink(None)
+
+
+def _cmd_fetch(
+    args: argparse.Namespace, hints: list[str], CLI_BUDGET_S: float, FetchOptions: Any, run_fetch: Any
+) -> int:
+    try:
         role = getattr(args, "mailbox", None)
         options = FetchOptions(
             max_messages=int(getattr(args, "max", 2000)),
