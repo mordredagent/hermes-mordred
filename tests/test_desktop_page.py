@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.imports.mail.imap_sync import ERROR_CODES
+from mordred_hermes.imports.mail.imap_sync import ERROR_CODES, RESULT_FIELDS
 
 from ._desktop_page import block, render_page, source
 
@@ -218,9 +218,14 @@ MAIL_SET_UP = {
     "gmail": True,
     "scope": ["all"],
     "touch_id": True,
-    "last_fetch": {"at": NOW_MS // 1000 - 7200, "error": None, "partial": False},
+    "last_success": {"at": NOW_MS // 1000 - 7200},
+    "last_attempt": {"at": NOW_MS // 1000 - 7200, "error": None, "partial": False},
+    "residue": None,
 }
-MAIL_FAILED = {**MAIL_SET_UP, "last_fetch": {"at": NOW_MS // 1000 - 60, "error": "imap_auth_failed", "partial": False}}
+MAIL_FAILED = {
+    **MAIL_SET_UP,
+    "last_attempt": {"at": NOW_MS // 1000 - 60, "error": "imap_auth_failed", "partial": False},
+}
 SYNC_COUNTS = {"syncing": False, "progress": None, "last_error": None, "dialog_count": 3, "message_count": 25}
 OLD = "mordred_update_required"
 
@@ -636,6 +641,28 @@ STATE_CASES.update(
 )
 
 
+# Step 2.5 over the mail facts (`last_attempt` / `last_success`, residue).
+STATE_CASES.update(
+    {
+        "v4, mail set up, never fetched": (
+            mac(**v4(mail={**MAIL_SET_UP, "last_success": None, "last_attempt": None})),
+            None,
+            ready_but(mail="done"),
+        ),
+        "v4, mail partial last attempt": (
+            mac(**v4(mail={**MAIL_SET_UP, "last_attempt": {"at": 1, "error": None, "partial": True}})),
+            None,
+            ready_but(mail="done"),
+        ),
+        "v4, mail credentials left over": (
+            mac(**v4(mail={"configured": False, "residue": "credentials_left"})),
+            None,
+            ready_but(mail="attention:credentials_left"),
+        ),
+    }
+)
+
+
 def compact(states: dict[str, Any]) -> dict[str, str | None]:
     result: dict[str, str | None] = {}
     for key in STEP_KEYS:
@@ -769,7 +796,7 @@ def test_every_code_the_page_knows_has_an_entry():
         block("BLOCKERS"),
         block("STEP_NUMBERS"),
     )
-    for code in sorted(set(PAGE_CODES) | set(ERROR_CODES) | set(STORE_GATE_CODES)):
+    for code in sorted(set(PAGE_CODES) | set(ERROR_CODES) | set(STORE_GATE_CODES) | set(MAIL_CODES)):
         assert re.search(rf"^  {re.escape(code)}:", messages, re.M), code
     for hint in IMAP_HINT_CODES:
         assert re.search(rf"^  {hint}:", hints, re.M), hint
@@ -1125,7 +1152,7 @@ def test_overview_from_version_4_reads_the_store_and_the_mailbox_label():
     assert result["mail"] == ("done", "account work · 40 messages · last fetch 2 hours ago (complete)")
     failed = rows(mac(**v4(mail=MAIL_FAILED)))
     assert failed["mail"] == ("attention", "account work · 0 messages · last fetch 1 minute ago (imap_auth_failed)")
-    odd = rows(mac(**v4(mail={**MAIL_FAILED, "last_fetch": {"at": NOW_MS // 1000 - 60, "error": "<b>x</b>"}})))
+    odd = rows(mac(**v4(mail={**MAIL_FAILED, "last_attempt": {"at": NOW_MS // 1000 - 60, "error": "<b>x</b>"}})))
     assert odd["mail"] == ("attention", "account work · 0 messages · last fetch 1 minute ago (failed)")
     restart = rows(mac(**v4(protected=False, available=False, code="unprotected_process")))
     assert restart["protection"] == ("partial", "Secure Enclave · memory encrypted · databases: restart Hermes Desktop")
@@ -1639,6 +1666,501 @@ def test_databases_done_says_encrypted_or_unreadable_never_databases_encrypted()
     result = component(databases_step(status, "done"), [])
     assert "Database encryption: on (2 files encrypted or unreadable)." in result["text"]
     assert "databases encrypted" not in result["text"].lower()
+
+
+# -- step 2.5: mail --------------------------------------------------------------------------------
+
+# Every code a mail route can answer: MailSetupError (imports/mail/setup_flow.py,
+# SETUP_ERROR_CODES), the forget refusals and warnings (imports/mail/forget.py) and the
+# fetch job's codes (imap_sync.ERROR_CODES, checked separately).
+MAIL_CODES = (
+    "invalid_address",
+    "invalid_host",
+    "invalid_account",
+    "invalid_password",
+    "too_many_addresses",
+    "mail_already_configured",
+    "mail_setup_flow_expired",
+    "mail_setup_busy",
+    "mail_setup_stale",
+    "invalid_selection",
+    "sync_in_progress",
+    "store_path_unsafe",
+    "tee_unavailable",
+    "tee_auth_cancelled",
+    "touch_id_policy_mismatch",
+    "imap_unreachable",
+    "imap_auth_failed",
+    "imap_protocol",
+    "imap_command_refused",
+    "routing_unavailable",
+    "egress_unsupported",
+    "account_mismatch",
+    "credentials_changed",
+    "credentials_left",
+    "key_left",
+    "account_unknown",
+    "forget_confirm_mismatch",
+    "mail_fetch_busy",
+    "mail_fetch_timeout",
+)
+APP_PASSWORD = "abcd efgh ijkl mnop"
+ADDRESS = "owner.canary@gmail.com"
+MAIL_V4 = mac(**v4(mail_messages=40))
+SET_UP = mac(**v4(mail=MAIL_SET_UP, mail_messages=40))
+# Polls without waiting, a fixed clock, and a first render that uses both.
+FAST = "globalThis.setTimeout = fn => {fn(); return 0}\nDate.now = () => NOW\ntree = view()\n".replace(
+    "NOW", str(NOW_MS)
+)
+
+
+def mail_step(status: dict[str, Any], state: str = "next", code: str | None = None) -> str:
+    return (
+        f"MailStep({{id: 'mail', n: '2.5', state: {json.dumps(state)}, code: {json.dumps(code)}, "
+        f"status: {json.dumps(status)}, refresh}})"
+    )
+
+
+FILL = (
+    (
+        "type(tree, 'Mail address', ADDRESS); tree = view()\n"
+        "type(tree, 'Other addresses that are yours', 'me@work.example, alias@example.org;  third@example.net'); "
+        "tree = view()\n"
+        "type(tree, 'App password', APP_PASSWORD); tree = view()\n"
+    )
+    .replace("ADDRESS", json.dumps(ADDRESS))
+    .replace("APP_PASSWORD", json.dumps(APP_PASSWORD))
+)
+CONNECT = "await press(tree, 'Connect mailbox'); tree = view()\n"
+FIELDS = """
+out.fields = {address: field(tree, 'Mail address'), others: field(tree, 'Other addresses that are yours'),
+  server: field(tree, 'IMAP server'), account: field(tree, 'Account label'), password: field(tree, 'App password')}
+for (const key in out.fields) out.fields[key] = out.fields[key] ? out.fields[key].props.value : null
+"""
+DONE = {"ok": True, "flow_id": "m1", "step": "done", "question": None, "gmail": True, "account": "mail"}
+CLEARED = {"address": "", "others": "", "server": "", "account": "mail", "password": ""}
+
+
+def test_mail_setup_sends_the_form_and_prefills_the_gmail_server():
+    prefilled = component(mail_step(MAIL_V4), [], FILL + FIELDS)
+    assert prefilled["out"]["fields"]["server"] == "imap.gmail.com"
+    assert prefilled["out"]["fields"]["account"] == "mail"
+    result = component(mail_step(MAIL_V4), [DONE], FILL + CONNECT + FIELDS)
+    assert result["requests"] == [
+        [
+            "/mail/setup/start",
+            {
+                "address": ADDRESS,
+                "account": "mail",
+                "extra_addresses": ["me@work.example", "alias@example.org", "third@example.net"],
+                "app_password": APP_PASSWORD,
+                "touch_id": True,
+                "imap_host": "imap.gmail.com",
+            },
+        ]
+    ]
+    assert result["out"]["fields"] == CLEARED
+    assert result["notifications"] == [{"kind": "success", "message": "Mailbox connected (read-only)."}]
+    assert "Mailbox connected (read-only)." in result["text"]
+    assert result["refreshes"] == 1
+    assert APP_PASSWORD not in json.dumps(result["tree"]) and ADDRESS not in json.dumps(result["tree"])
+
+
+def test_mail_setup_with_another_server_a_label_and_no_touch_id():
+    script = (
+        "type(tree, 'IMAP server', 'imap.example.org'); tree = view()\n"
+        "type(tree, 'Mail address', 'me@example.org'); tree = view()\n"
+        "type(tree, 'Account label', ' work '); tree = view()\n"
+        "type(tree, 'App password', 'secret-canary'); tree = view()\n"
+        "tick(tree, 'Allow syncing without Touch ID'); tree = view()\n" + CONNECT
+    )
+    result = component(mail_step(MAIL_V4), [DONE], script)
+    assert result["requests"] == [
+        [
+            "/mail/setup/start",
+            {
+                "address": "me@example.org",
+                "account": "work",
+                "extra_addresses": [],
+                "app_password": "secret-canary",
+                "touch_id": False,
+                "imap_host": "imap.example.org",
+            },
+        ]
+    ]
+    # Without a server and a Gmail address, the backend's default applies (no imap_host).
+    bare = component(
+        mail_step(MAIL_V4),
+        [DONE],
+        "type(tree, 'Mail address', 'me@example.org'); tree = view()\n"
+        "type(tree, 'App password', 'x'); tree = view()\n" + CONNECT,
+    )
+    assert "imap_host" not in bare["requests"][0][1]
+
+
+def test_mail_connect_waits_for_an_address_and_a_password():
+    result = component(mail_step(MAIL_V4), [], "")
+    assert find_button(result["tree"], "Connect mailbox")["props"]["disabled"] is True
+    assert "Before you start (Gmail). Create an app password" in result["text"]
+    assert "https://myaccount.google.com/apppasswords" in result["text"]
+    assert "never reach the chat, the model, the tools, plugin or browser storage, or logs" in result["text"]
+    assert "reader mode" in result["text"] and "never sees" not in result["text"]
+
+
+FOLDERS = {
+    "ok": True,
+    "flow_id": "m7",
+    "step": "folders",
+    "question": "sent",
+    "gmail": False,
+    "account": "mail",
+    "folders": [{"id": "f-sent", "display": "Gesendet"}, {"id": "f-arch", "display": "Archiv"}],
+}
+
+
+@pytest.mark.parametrize("choice,selection", [("Gesendet", "f-sent"), ("No sent folder", None)])
+def test_mail_folder_question_sends_the_selection(choice, selection):
+    script = (
+        FILL
+        + CONNECT
+        + "out.legend = text(find(tree, n => n.type === 'legend'))\n"
+        + "out.disabled = button(tree, 'Finish').props.disabled\n"
+        + "out.options = []\n"
+        + "find(tree, n => { if (n.type === 'label' && find(n, m => m.props && m.props.type === 'radio'))"
+        + " out.options.push(text(n)); return false })\n"
+        + "find(find(tree, n => n.type === 'label' && text(n) === CHOICE), n => n.props && n.props.type === 'radio')"
+        + ".props.onChange(); tree = view()\n"
+        + "await press(tree, 'Finish'); tree = view()\n"
+    ).replace("CHOICE", json.dumps(choice))
+    result = component(mail_step(MAIL_V4), [FOLDERS, {"ok": True, "step": "done"}], script)
+    assert result["out"]["legend"] == "Which folder holds your sent mail? (optional)"
+    assert result["out"]["disabled"] is True
+    assert result["out"]["options"] == ["Gesendet", "Archiv", "No sent folder"]
+    assert result["requests"][1] == ["/mail/setup/m7/finish", {"selection": selection}]
+    assert "Gesendet" not in json.dumps(result["tree"]) and "Mailbox connected (read-only)." in result["text"]
+
+
+def test_gmail_all_mail_question_has_no_none_choice():
+    answer = {**FOLDERS, "question": "all_mail", "gmail": True}
+    result = component(mail_step(MAIL_V4), [answer], FILL + CONNECT)
+    assert "Which folder holds all your mail (Gmail\u2019s “All Mail”)?" in result["text"]
+    assert "No sent folder" not in result["text"]
+
+
+@pytest.mark.parametrize(
+    "script,expected",
+    [
+        ("await press(tree, 'Cancel'); tree = view()\n", [["/mail/setup/m7/cancel", {}]]),
+        ("unmount(); tree = view()\n", [["/mail/setup/m7/cancel", {}]]),
+    ],
+    ids=["cancel", "unmount"],
+)
+def test_a_pending_mail_flow_is_cancelled_on_cancel_and_unmount(script, expected):
+    result = component(mail_step(MAIL_V4), [FOLDERS, {"ok": True}], FILL + CONNECT + script + FIELDS)
+    assert result["requests"][1:] == expected
+    assert "Gesendet" not in json.dumps(result["tree"])
+    assert result["out"]["fields"] == CLEARED
+
+
+@pytest.mark.parametrize("code,kept", [("invalid_selection", True), ("mail_setup_stale", False)])
+def test_mail_finish_failures_keep_the_flow_only_for_a_retry(code, kept):
+    script = (
+        FILL
+        + CONNECT
+        + "find(find(tree, n => n.type === 'label' && text(n) === 'Archiv'), n => n.props && n.props.type === 'radio')"
+        + ".props.onChange(); tree = view()\n"
+        + "await press(tree, 'Finish'); tree = view()\n"
+    )
+    result = component(mail_step(MAIL_V4), [FOLDERS, {"ok": False, "error": code}, {"ok": True}], script)
+    assert ("Archiv" in json.dumps(result["tree"])) is kept
+    assert (["/mail/setup/m7/cancel", {}] in result["requests"]) is not kept
+    assert '"role": "alert"' in json.dumps(result["tree"])
+
+
+@pytest.mark.parametrize(
+    "answer,phrase",
+    [
+        ({"error": "imap_auth_failed", "hint": "authentication_failed"}, "The server rejected the address or the app"),
+        ({"error": "imap_auth_failed", "hint": "server_alert"}, "The server refused the login with an alert"),
+        ({"error": "imap_auth_failed", "hint": "login_disabled"}, "does not allow password login over IMAP"),
+        ({"error": "imap_auth_failed", "hint": "gmail_app_password_length"}, "exactly 16 letters"),
+        ({"error": "imap_auth_failed"}, "The login was refused. Nothing was stored."),
+        ({"error": "imap_unreachable"}, "The server could not be reached"),
+        ({"error": "sync_in_progress"}, "A mail fetch or import is running (from Hermes or Terminal)"),
+        ({"error": "mail_already_configured"}, "A mailbox is already set up. Remove it below first."),
+        ({"error": "mail_setup_busy"}, "Another mail setup is waiting for its folder choice"),
+        ({"error": "touch_id_policy_mismatch"}, "Touch ID setting differs from your choice"),
+        ({"error": "invalid_address"}, "Enter a mail address"),
+        ({"error": "invalid_host"}, "Enter the IMAP server name"),
+        ({"error": "invalid_account"}, "The account label must start with a lowercase letter"),
+        ({"error": "invalid_password"}, "1 to 256 printable characters"),
+        ({"error": "too_many_addresses"}, "at most 20 other addresses"),
+    ],
+)
+def test_mail_setup_failures_are_explained_and_clear_every_input(answer, phrase):
+    result = component(mail_step(MAIL_V4), [{"ok": False, **answer}], FILL + CONNECT + FIELDS)
+    assert phrase in result["text"]
+    assert '"role": "alert"' in json.dumps(result["tree"])
+    assert result["out"]["fields"] == CLEARED
+    assert result["notifications"] == []
+    assert APP_PASSWORD not in json.dumps(result["tree"])
+
+
+def test_mail_inputs_are_cleared_on_unmount_and_never_shown_after_a_transport_failure():
+    unmounted = component(mail_step(MAIL_V4), [], FILL + "unmount(); tree = view()\n" + FIELDS)
+    assert unmounted["out"]["fields"] == CLEARED
+    broken = component(mail_step(MAIL_V4), [{"throw": "network down"}], FILL + CONNECT + FIELDS)
+    assert broken["out"]["fields"] == CLEARED
+    assert APP_PASSWORD not in json.dumps(broken["tree"]) + json.dumps(broken["notifications"])
+
+
+def test_mail_set_up_card_shows_label_scope_policy_history_and_counts():
+    result = component(mail_step(SET_UP, "done"), [], FAST)
+    text = result["text"]
+    assert "Account work · Gmail (All Mail with labels) · Touch ID on each fetch" in text
+    assert text.count("Account work") == 1
+    assert "Last successful fetch: 2 hours ago." in text and "Last attempt" not in text
+    assert "40 messages in Mordred\u2019s store (all accounts)." in text
+    assert (
+        "Fetch new mail here (reliable). You can also say “sync my mail” in a Hermes chat; if Hermes fails to reach "
+        "the tool, see the note on tools.tool_search in Mordred\u2019s USAGE guide. A mail sync or fetch gives Hermes "
+        "counts only." in text
+    )
+    assert "Fetch new mail" in result["buttons"] and "Remove mailbox" in result["buttons"]
+    assert field_value(result["tree"], "Fetch at most N messages") == "2000"
+    generic = {**MAIL_SET_UP, "gmail": False, "scope": ["inbox", "sent"], "touch_id": False}
+    other = component(mail_step(mac(**v4(mail=generic)), "done"), [], FAST)
+    assert "Account work · inbox and sent folder · syncs without Touch ID" in other["text"]
+    assert "May show a Touch ID prompt." not in other["text"]
+
+
+def field_value(tree: Any, label: str) -> Any:
+    if isinstance(tree, list):
+        for child in tree:
+            found = field_value(child, label)
+            if found is not None:
+                return found
+        return None
+    if not isinstance(tree, dict):
+        return None
+    props = tree.get("props", {})
+    if tree.get("type") == "input" and props.get("aria-label") == label:
+        return props.get("value")
+    return field_value(props.get("children"), label)
+
+
+def test_mail_last_attempt_failure_is_the_step_attention():
+    result = component(mail_step(mac(**v4(mail=MAIL_FAILED)), "attention", "imap_auth_failed"), [], FAST)
+    assert "The fetch stopped: the mail server refused the login." in result["text"]
+    assert "Nothing was stored" not in result["text"]
+    assert "Last successful fetch: 2 hours ago." in result["text"]
+    assert "Last attempt: 1 minute ago (imap_auth_failed)." in result["text"]
+    assert "Fetch new mail" in result["buttons"]
+
+
+FETCHED = {
+    "inserted": 37,
+    "duplicates": 0,
+    "revised": 0,
+    "conflicts": 0,
+    "fetched": 39,
+    "skipped": 2,
+    "skipped_oversize": 0,
+    "excluded_history": 0,
+    "merge_skipped": 0,
+    "mailboxes": 1,
+    "batches": 1,
+    "gmail": True,
+    "cursor_reset": False,
+    "dry_run": False,
+    "partial": True,
+    "partial_reason": "time_budget",
+    "abandoned": False,
+    "lock_retained": False,
+    "error": None,
+}
+FETCH = "await press(tree, 'Fetch new mail'); tree = view()\n"
+
+
+def test_fetch_sends_the_limits_follows_the_job_and_shows_counts_only():
+    script = (
+        FAST
+        + "type(tree, 'Fetch at most N messages', '100'); tree = view()\n"
+        + "tick(tree, 'Also fetch older mail since'); tree = view()\n"
+        + "type(tree, 'Fetch older mail since', '2026-01-01'); tree = view()\n"
+        + FETCH
+        + "out.max = field(tree, 'Fetch at most N messages').props.value\n"
+    )
+    done = {"ok": True, "job_id": "j9", "kind": "mail_fetch", "state": "done", "progress": {"result": FETCHED}}
+    result = component(mail_step(SET_UP, "done"), [{"ok": True, "job_id": "j9"}, done], script)
+    assert result["requests"] == [["/mail/fetch", {"max": 100, "since": "2026-01-01"}], ["/jobs/j9"]]
+    assert (
+        "Result (counts only): inserted 37 · fetched 39 · skipped 2 · mailboxes 1 · batches 1 · Gmail: yes · "
+        "partial: yes · stopped by: the time limit." in result["text"]
+    )
+    assert "Fetch again to continue." in result["text"]
+    assert result["out"]["max"] == "2000"
+    assert result["refreshes"] == 1
+    plain = component(mail_step(SET_UP, "done"), [{"ok": True, "job_id": "j9"}, done], FAST + FETCH)
+    assert plain["requests"][0] == ["/mail/fetch", {"max": 2000}]
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "type(tree, 'Fetch at most N messages', '0'); tree = view()\n",
+        "type(tree, 'Fetch at most N messages', '2001'); tree = view()\n",
+        "type(tree, 'Fetch at most N messages', '12.5'); tree = view()\n",
+        "tick(tree, 'Also fetch older mail since'); tree = view()\n",
+    ],
+    ids=["zero", "above-2000", "fraction", "since-without-date"],
+)
+def test_fetch_is_disabled_for_invalid_limits(script):
+    result = component(mail_step(SET_UP, "done"), [], script + FETCH)
+    assert result["requests"] == []
+    assert find_button(result["tree"], "Fetch new mail")["props"]["disabled"] is True
+
+
+def test_fetch_result_renders_only_result_fields_in_their_order():
+    fields = render_page("console.log(JSON.stringify(RESULT_FIELDS))")
+    assert {key for key, _ in fields} == set(RESULT_FIELDS) and len(fields) == len(RESULT_FIELDS)
+    everything = {key: (True if isinstance(value, bool) else 3) for key, value in FETCHED.items()}
+    everything.update(partial_reason="max_messages", error="imap_protocol")
+    # Anything outside the closed serializer never renders, nor does free text in a known key.
+    everything.update(subject="Hello canary", address="someone@example.org")
+    result = render_page(f"console.log(JSON.stringify(resultParts({json.dumps(everything)})))")
+    assert len(result) == len(fields)
+    for (key, label), part in zip(fields, result, strict=True):
+        assert part.startswith(f"{label} ") or part.startswith(f"{label}: "), (key, part)
+    assert "canary" not in json.dumps(result) and "someone@example.org" not in json.dumps(result)
+    assert result[0] == "inserted 3" and result[-1] == "error: imap_protocol"
+    assert "stopped by: the message limit" in result
+    free = render_page("console.log(JSON.stringify(resultParts({error: 'Login failed for someone@example.org'})))")
+    assert free == []
+    nothing = render_page("console.log(JSON.stringify(resultParts({inserted: 0, partial: false, error: null})))")
+    assert nothing == []
+
+
+@pytest.mark.parametrize(
+    "end,phrase",
+    [
+        (
+            {"ok": True, "state": "failed", "error": "imap_unreachable", "progress": {}},
+            "The fetch stopped: the mail server could not be reached",
+        ),
+        ({"ok": True, "state": "failed", "error": "tee_auth_cancelled", "progress": {}}, "Touch ID was cancelled."),
+        ({"ok": False, "error": "job_not_found"}, "The backend no longer reports that job"),
+    ],
+)
+def test_a_failed_or_lost_fetch_job_is_the_step_attention(end, phrase):
+    result = component(mail_step(SET_UP, "done"), [{"ok": True, "job_id": "j9"}, end], FAST + FETCH)
+    assert phrase in result["text"]
+    assert '"role": "alert"' in json.dumps(result["tree"])
+
+
+def test_fetch_attaches_to_an_already_running_job():
+    done = {"ok": True, "state": "done", "progress": {"result": {**FETCHED, "partial": False, "partial_reason": None}}}
+    result = component(
+        mail_step(SET_UP, "done"), [{"ok": True, "job_id": "j3", "already_running": True}, done], FAST + FETCH
+    )
+    assert result["requests"] == [["/mail/fetch", {"max": 2000}], ["/jobs/j3"]]
+    assert "A fetch was already running; its result appears here when it ends." in result["text"]
+    assert "Result (counts only): inserted 37" in result["text"] and "Fetch again" not in result["text"]
+
+
+def test_a_running_fetch_in_status_jobs_shows_running_and_is_followed():
+    status = mac(jobs=(job("mail_fetch", "j5"),), **v4(mail=MAIL_SET_UP))
+    running = component(mail_step(status, "done"), [], FAST)
+    assert "Fetching new mail… this may take up to about 10 minutes" in running["text"]
+    assert "Fetching…" in running["buttons"]
+    assert '"disabled": true' in json.dumps(find_tree(running["tree"], "fieldset"))
+    done = {"ok": True, "state": "done", "progress": {"result": FETCHED}}
+    followed = component(
+        mail_step(status, "done"),
+        [done],
+        FAST + "effects.map(f => f()); await new Promise(r => setImmediate(r)); tree = view()\n",
+    )
+    assert followed["requests"] == [["/jobs/j5"]]
+    assert "Result (counts only): inserted 37" in followed["text"]
+
+
+def find_tree(tree: Any, kind: str) -> Any:
+    if isinstance(tree, list):
+        for child in tree:
+            found = find_tree(child, kind)
+            if found is not None:
+                return found
+        return None
+    if not isinstance(tree, dict):
+        return None
+    if tree.get("type") == kind:
+        return tree
+    return find_tree(tree.get("props", {}).get("children"), kind)
+
+
+PURGE_LABEL = "Also delete every message imported under account work (including Takeout imports)"
+REMOVE_ALL = "await press(tree, 'Remove mailbox and delete its mail'); tree = view()\n"
+
+
+def test_remove_with_mail_requires_the_typed_phrase_before_calling():
+    script = (
+        f"tick(tree, {json.dumps(PURGE_LABEL)}); tree = view()\n"
+        "type(tree, 'Type delete my data to confirm', 'delete my dat'); tree = view()\n" + REMOVE_ALL
+    )
+    result = component(mail_step(SET_UP, "done"), [], script)
+    assert result["requests"] == []
+    assert "Type delete my data exactly to also delete the fetched mail." in result["text"]
+    assert field_value(result["tree"], "Type delete my data to confirm") is None
+
+
+def test_remove_mailbox_with_its_mail_and_show_the_outcome():
+    script = (
+        f"tick(tree, {json.dumps(PURGE_LABEL)}); tree = view()\n"
+        "type(tree, 'Type delete my data to confirm', ' delete my data '); tree = view()\n" + REMOVE_ALL
+    )
+    answer = {
+        "ok": True,
+        "had_credentials": True,
+        "deleted_messages": 40,
+        "cursors_deleted": 2,
+        "warnings": ["key_left"],
+    }
+    result = component(mail_step(SET_UP, "done"), [answer], script)
+    assert result["requests"] == [["/mail/forget", {"rows": True, "confirm": "delete my data"}]]
+    assert "Mailbox removed. 40 messages and 2 cursors deleted." in result["text"]
+    assert "The mailbox key in the Secure Enclave could not be deleted" in result["text"]
+    assert result["notifications"] == [{"kind": "success", "message": "Mailbox removed."}]
+    assert result["refreshes"] == 1
+    plain = component(
+        mail_step(SET_UP, "done"),
+        [{"ok": True, "had_credentials": True, "deleted_messages": 0, "cursors_deleted": 0, "warnings": []}],
+        "await press(tree, 'Remove mailbox'); tree = view()\n",
+    )
+    assert plain["requests"] == [["/mail/forget", {"rows": False}]]
+    assert "Account label to remove" not in json.dumps(plain["tree"])
+
+
+def test_leftover_credentials_offer_remove_with_the_account_field():
+    status = mac(**v4(mail={"configured": False, "residue": "credentials_left"}))
+    script = (
+        "type(tree, 'Account label to remove', 'work'); tree = view()\n"
+        "await press(tree, 'Remove mailbox'); tree = view()\n"
+    )
+    answer = {"ok": True, "had_credentials": True, "deleted_messages": 0, "cursors_deleted": 0, "warnings": []}
+    result = component(mail_step(status, "attention", "credentials_left"), [answer], script)
+    assert result["requests"] == [["/mail/forget", {"rows": False, "account": "work"}]]
+    shown = component(mail_step(status, "attention", "credentials_left"), [], "")
+    assert "Sealed mailbox credentials are still on this Mac." in shown["text"]
+    assert "Connect mailbox" not in shown["buttons"]
+    assert "Also delete every message imported under account of this mailbox" in shown["text"]
+
+
+def test_an_unknown_account_after_remove_asks_for_the_label():
+    answer = {"ok": True, "had_credentials": True, "deleted_messages": 0, "cursors_deleted": 0}
+    answer["warnings"] = ["account_unknown"]
+    result = component(mail_step(SET_UP, "done"), [answer], "await press(tree, 'Remove mailbox'); tree = view()\n")
+    assert "hermes-mordred mail forget --account LABEL" in result["text"]
+    assert field_value(result["tree"], "Account label to remove") == ""
 
 
 # Canaries typed into masked inputs; none may survive in page state, the rendered

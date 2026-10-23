@@ -127,6 +127,12 @@ const MESSAGES = {
   vault_anchor_stale: 'A Mordred vault was removed from this Mac earlier, but its Keychain anchor remains, so a new vault cannot be created.',
   mail_already_configured: 'A mailbox is already set up. Remove it below first.',
   mail_setup_flow_expired: 'This mail setup expired. Start again; nothing was stored.',
+  mail_setup_busy: 'Another mail setup is waiting for its folder choice (in another Hermes Desktop window). Finish or cancel it there, or wait up to 10 minutes. Nothing was stored.',
+  mail_setup_stale: 'A mailbox was set up or removed elsewhere while this setup waited. Start again; this setup stored nothing.',
+  touch_id_policy_mismatch: 'The mailbox key’s Touch ID setting differs from your choice and could not be replaced. Remove the mailbox, then set it up again. Nothing was stored.',
+  invalid_selection: 'Choose one of the listed folders.',
+  account_mismatch: 'The sealed mailbox has a different account label. Leave the label empty, or enter the mailbox’s own label.',
+  mail_fetch_timeout: 'The fetch is taking longer than expected. It continues in the background; check this step again later.',
   mail_fetch_busy: 'A mail fetch is already running. Wait for it to finish.',
   mail_not_configured: 'No mailbox is set up yet.',
   invalid_address: 'Enter a mail address such as name@example.com.',
@@ -148,7 +154,7 @@ const MESSAGES = {
   plaintext_store: 'Mordred’s store can be read without the database key, so Mordred does not use it.',
   busy: 'Mordred’s store is busy. Try again shortly.',
   credentials_changed: 'The mailbox was set up again while it was being removed, so nothing was deleted. Try again.',
-  credentials_left: 'The sealed mailbox credentials could not be deleted. Try again.',
+  credentials_left: 'Sealed mailbox credentials are still on this Mac. Remove the mailbox to delete them.',
   key_left: 'The mailbox key in the Secure Enclave could not be deleted. Remove the mailbox again to finish.',
   account_unknown: 'The label of the removed mailbox could not be read, so its fetched mail and cursors were kept. Remove them in Terminal with hermes-mordred mail forget --account LABEL.',
   fetch_failed: 'The mail fetch failed. Try again later.',
@@ -168,9 +174,13 @@ const MESSAGES = {
   env_optout: '.env encryption was turned off on purpose earlier (a plaintext .env was restored), so this page does not turn it back on. Run hermes-mordred encryption enable env in Terminal to turn it on again.',
   env_required: 'Hermes does not read .env from the vault yet. Create the vault (step 1.2a) and restart Hermes Desktop first.',
   // Mail wording for codes whose shared text names Telegram (see explainMail).
+  mail_sync_in_progress: 'A mail fetch or import is running (from Hermes or Terminal). Try again when it finishes.',
   mail_forget_confirm_mismatch: 'Type delete my data exactly to also delete the fetched mail.',
   mail_secrets_corrupt: 'The sealed mailbox credentials cannot be opened with this Mac’s key. Remove the mailbox and set it up again.',
   mail_store_path_unsafe: 'A Mordred mail file or folder is not private to this account. Nothing was changed.',
+  // A fetch that stopped (the setup wording says "Nothing was stored"; see fetchError).
+  fetch_imap_auth_failed: 'The fetch stopped: the mail server refused the login. If you changed or revoked the app password, remove the mailbox and set it up again with a new one.',
+  fetch_imap_unreachable: 'The fetch stopped: the mail server could not be reached (network, Tor or VPN path). Fetch again later.',
 }
 
 // `imap_auth_failed` refined by the server's response code (never its text).
@@ -257,6 +267,43 @@ const DATABASES_RESTART = {
   scheduled: 'Scheduled. Hermes Desktop keeps its databases open, so they are encrypted the next time Hermes starts, before it opens them. Restart now:',
   armed: 'Database encryption is on, but this Hermes Desktop started before it. Restart Hermes Desktop to finish:',
 }
+// `/mail/fetch` results: the keys of FetchResult.as_dict() in display order, with labels.
+// The result block shows only these, and only the non-zero, true or non-null ones.
+const RESULT_FIELDS = [
+  ['inserted', 'inserted'],
+  ['duplicates', 'duplicates'],
+  ['revised', 'revised'],
+  ['conflicts', 'conflicts'],
+  ['fetched', 'fetched'],
+  ['skipped', 'skipped'],
+  ['skipped_oversize', 'skipped (too large)'],
+  ['excluded_history', 'older, not fetched'],
+  ['merge_skipped', 'not merged into a thread'],
+  ['mailboxes', 'mailboxes'],
+  ['batches', 'batches'],
+  ['gmail', 'Gmail'],
+  ['cursor_reset', 'cursor reset'],
+  ['dry_run', 'dry run'],
+  ['partial', 'partial'],
+  ['partial_reason', 'stopped by'],
+  ['abandoned', 'abandoned'],
+  ['lock_retained', 'lock kept by the stopped fetch'],
+  ['error', 'error'],
+]
+const PARTIAL_REASON_LABELS = {
+  time_budget: 'the time limit',
+  max_messages: 'the message limit',
+  max_bytes: 'the size limit',
+  cancelled: 'a cancel',
+  error: 'an error',
+}
+const DEFAULT_MAIL_ACCOUNT = 'mail'
+const GMAIL_HOST = 'imap.gmail.com'
+const MAX_FETCH = 2000
+// The "No sent folder" choice (an IMAP folder id is never empty).
+const NO_SENT_FOLDER = ''
+// Finish answers after which the server's flow may still wait (any other answer ends it).
+const KEEP_FLOW = new Set(['invalid_selection', 'sync_in_progress', 'tee_auth_cancelled'])
 const TAGLINES = {
   macos: 'Private Telegram and mail for Hermes, encrypted on this Mac.',
   linux: 'Private, read-only Telegram for Hermes, encrypted on this host.',
@@ -535,7 +582,10 @@ function StateBadge({ state, color }) {
   })
 }
 
-function stepBody({ state, id, open, setOpen, onCollapse, summary, toggle, blocker, goto, progress, whyBlock, children }) {
+function stepBody({ state, id, open, setOpen, onCollapse, summary, toggle, keepOpen, blocker, goto, progress, whyBlock, children }) {
+  if (state === 'done' && keepOpen) {
+    return [jsx('p', { key: 'summary', style: { margin: 0, color: MUTED_TEXT }, children: summary || 'Done.' }), children, whyBlock]
+  }
   if (state === 'done') {
     const detailsId = id ? `${stepAnchor(id)}-details` : undefined
     return [
@@ -588,7 +638,8 @@ function stepBody({ state, id, open, setOpen, onCollapse, summary, toggle, block
 // running disables its controls under a polite progress line. `failure` is an alert
 // under the title in every state but blocked, so a failed change of a done step shows
 // too. Without `state` (the Windows steps pass `done`) the step renders as it always did.
-// `goto` is the number of the step that lifts `blocker` on this page (stepNumbers).
+// `goto` is the number of the step that lifts `blocker` on this page (stepNumbers);
+// `keepOpen` keeps a done step's body visible (the mail card: fetching is its daily use).
 function Step({
   id = null,
   n,
@@ -597,6 +648,7 @@ function Step({
   done = false,
   summary = null,
   toggle = 'Details',
+  keepOpen = false,
   blocker = null,
   goto = null,
   failure = null,
@@ -616,7 +668,7 @@ function Step({
   const headingId = id ? stepAnchor(id) : undefined
   const edge = state === 'next' ? ACCENT : state === 'attention' ? DESTRUCTIVE : null
   const whyBlock = why ? jsx(Why, { key: 'why', children: why }) : null
-  const body = stepBody({ state, id, open, setOpen, onCollapse, summary, toggle, blocker, goto, progress, whyBlock, children })
+  const body = stepBody({ state, id, open, setOpen, onCollapse, summary, toggle, keepOpen, blocker, goto, progress, whyBlock, children })
   const failureNote = failure && state !== 'blocked' ? jsx(StepFailure, { key: 'failure', error: failure, noteRef }) : null
   return jsxs('section', {
     'aria-labelledby': headingId,
@@ -763,6 +815,29 @@ function relativeTime(at, now = Date.now()) {
   return `${plural(Math.round(hours / 24), 'day')} ago`
 }
 
+// Per-source counts of Mordred's store (totals across accounts): `{}` while the store is
+// not created yet, null when unknown (Linux, an older API, a gate refusal).
+function storeSources(status) {
+  if (!(pageLayout(status) === 'macos' && reportsV4(status))) return null
+  const imports = status.imports
+  if (imports.available) return imports.sources || {}
+  return imports.code === 'store_uninitialised' ? {} : null
+}
+
+// The mailbox label (ACCOUNT_RE): never anything that could be an address.
+const mailLabel = (mail) => (typeof mail.account === 'string' && /^[a-z][a-z0-9_]{0,31}$/.test(mail.account) ? mail.account : null)
+const timed = (entry) => (entry && typeof entry === 'object' && typeof entry.at === 'number' ? entry : null)
+// A recorded error: its code, or 'failed' when it is not a well-formed code.
+const attemptError = (value) => (value == null ? null : safeCode(value) || 'failed')
+// The latest fetch: `last_attempt`, else `last_success` (a complete one).
+function lastFetch(mail) {
+  const attempt = timed(mail.last_attempt)
+  if (attempt) return { at: attempt.at, error: attemptError(attempt.error), partial: attempt.partial === true }
+  const success = timed(mail.last_success)
+  return success ? { at: success.at, error: null, partial: false } : null
+}
+const fetchOutcome = (last) => last.error || (last.partial ? 'partial' : 'complete')
+
 // Telegram counts: Mordred's store (version 4 `imports`) or, from an older API and on
 // Linux, the import service's in-process counts (`GET /sync`). null when unknown.
 function telegramCounts(status, sync) {
@@ -891,10 +966,13 @@ function stepStates(status, sync = null) {
   if (macos && !v4) states.mail = { state: 'attention', code: 'mordred_update_required' }
   else if (v4) {
     const mail = status.mail
-    const lastError = (mail.configured && mail.last_fetch && mail.last_fetch.error) || null
+    const last = mail.configured ? lastFetch(mail) : null
+    const lastError = (last && last.error) || null
+    // Sealed credentials without their settings: the step offers Remove.
+    const residue = mail.residue === 'credentials_left' ? 'credentials_left' : null
     decide('mail', {
-      done: Boolean(mail.configured) && !lastError,
-      fact: lastError,
+      done: Boolean(mail.configured) && !lastError && !residue,
+      fact: residue || lastError,
       blocker: firstBlocker([hardware, 'needs_enclave'], [memory, 'needs_memory'], [!store, store]),
       job: runningJob('mail_fetch'),
     })
@@ -959,13 +1037,13 @@ function mailRow(status, layout, now) {
   if (layout === 'linux') return { ...row, dot: 'not_started', detail: 'not available on Linux' }
   if (!reportsV4(status)) return { ...row, dot: 'attention', detail: 'Update Mordred to use this' }
   const mail = status.mail
+  if (mail.residue === 'credentials_left') return { ...row, dot: 'attention', detail: 'leftover credentials · remove them in step 2.5' }
   if (!mail.configured) return { ...row, dot: 'not_started', detail: 'not set up' }
-  const parts = [`account ${mail.account}`]
-  const sources = status.imports.available ? status.imports.sources || {} : null
-  if (sources && sources.mail) parts.push(plural(Number(sources.mail.messages) || 0, 'message'))
-  const last = mail.last_fetch || null
-  const outcome = last && last.error ? safeCode(last.error) || 'failed' : last && last.partial ? 'partial' : 'complete'
-  parts.push(last ? `last fetch ${relativeTime(last.at, now)} (${outcome})` : 'never fetched')
+  const parts = [`account ${mailLabel(mail) || 'with an unreadable label'}`]
+  const sources = storeSources(status)
+  if (sources) parts.push(plural(Number(sources.mail && sources.mail.messages) || 0, 'message'))
+  const last = lastFetch(mail)
+  parts.push(last ? `last fetch ${relativeTime(last.at, now)} (${fetchOutcome(last)})` : 'never fetched')
   return { ...row, dot: last && last.error ? 'attention' : 'done', detail: parts.join(' · ') }
 }
 
@@ -1877,19 +1955,495 @@ function DatabasesStep({ id, n, state, blocker = null, goto = null, code = null,
   })
 }
 
-function MailStep({ id, n, state, blocker = null, code = null }) {
+const MAIL_INTRO = 'Mordred can fetch your mail read-only over IMAP and add it to the same encrypted store as Telegram, so Hermes can answer questions about it.'
+const MAIL_PRIVACY = 'The address and app password you type here never reach the chat, the model, the tools, plugin or browser storage, or logs: the Secure Enclave on this Mac seals them. A mail fetch gives Hermes counts only. When you ask Hermes about your mail, it reads the matching messages through mordred_history_search, and that chat then runs in reader mode.'
+const APP_PASSWORD_GUIDE = 'Create an app password: turn on 2-Step Verification for your Google account, then open https://myaccount.google.com/apppasswords and create one for “Mordred”. Google shows it as four groups of four letters; paste it with or without the spaces. Mordred never needs your Google account password, and you can revoke the app password at any time in the same place. Other providers call this an app-specific password.'
+const FETCH_PROGRESS = 'Fetching new mail… this may take up to about 10 minutes and continues where it stopped if interrupted. Approve the Touch ID prompt if it appears.'
+const MAIL_PROGRESS = {
+  setup: 'Connecting to the mail server… it logs in once, read-only. Approve a Touch ID prompt if one appears.',
+  finish: 'Saving the mailbox…',
+  remove: 'Removing the mailbox…',
+}
+const FOLDER_QUESTIONS = {
+  all_mail: 'Which folder holds all your mail (Gmail’s “All Mail”)?',
+  sent: 'Which folder holds your sent mail? (optional)',
+}
+
+// What the page says about the chat sync: not advertised as the reliable path.
+const syncHint = (where) => [
+  `Fetch new mail ${where} (reliable). You can also say “sync my mail” in a Hermes chat; if Hermes fails to reach the tool, see the note on `,
+  jsx('code', { key: 'tool', children: 'tools.tool_search' }),
+  ' in Mordred’s USAGE guide. A mail sync or fetch gives Hermes counts only.',
+]
+
+const gmailAddress = (address) => /@(gmail|googlemail)\.com$/i.test(address.trim())
+// "Other addresses": commas, semicolons, spaces or new lines between them.
+const splitAddresses = (text) => text.split(/[\s,;]+/).filter(Boolean)
+// The "Fetch at most" field: a whole number from 1 to MAX_FETCH.
+const validMax = (text) => {
+  const digits = `${text}`.trim()
+  return /^\d{1,4}$/.test(digits) && Number(digits) >= 1 && Number(digits) <= MAX_FETCH
+}
+const validDate = (text) => /^\d{4}-\d{2}-\d{2}$/.test(text)
+const countOf = (value) => (Number.isFinite(Number(value)) ? Number(value) : 0)
+const codesOf = (list) => (Array.isArray(list) ? list.map(safeCode).filter(Boolean) : [])
+const folderOptions = (folders) =>
+  (Array.isArray(folders) ? folders : [])
+    .filter((folder) => folder && typeof folder.id === 'string' && folder.id && typeof folder.display === 'string')
+    .map((folder) => ({ value: folder.id, label: folder.display }))
+
+function mailScope(mail) {
+  if (mail.gmail === true) return 'Gmail (All Mail with labels)'
+  return Array.isArray(mail.scope) && mail.scope.includes('sent') ? 'inbox and sent folder' : 'inbox'
+}
+
+// Last success and last attempt; the attempt only when it says something the success does not.
+function mailHistory(mail, now = Date.now()) {
+  const success = timed(mail.last_success)
+  const attempt = timed(mail.last_attempt)
+  const lines = []
+  if (success) lines.push(`Last successful fetch: ${relativeTime(success.at, now)}.`)
+  if (attempt && (!success || attempt.at !== success.at || attemptError(attempt.error) || attempt.partial === true)) {
+    lines.push(`Last attempt: ${relativeTime(attempt.at, now)} (${fetchOutcome(lastFetch({ last_attempt: attempt }))}).`)
+  }
+  return lines.length ? lines : ['Not fetched yet.']
+}
+
+// A mail failure under the page's `mail_<code>` wording when there is one (StepFailure
+// shows only explain(code)); the IMAP hint is kept, nothing else of the answer.
+function mailError(error) {
+  const e = asMordredError(error)
+  const code = own(MESSAGES, `mail_${e.code}`) ? `mail_${e.code}` : e.code
+  return new MordredError(code, e.info && e.info.hint ? { hint: e.info.hint } : {})
+}
+
+// A fetch that stopped (a failed job, or the last attempt the status reports), under the
+// page's `fetch_<code>` wording where the setup wording ("Nothing was stored") would mislead.
+function fetchError(code) {
+  const safe = safeCode(code) || 'fetch_failed'
+  return own(MESSAGES, `fetch_${safe}`) ? new MordredError(`fetch_${safe}`, {}) : mailError(new MordredError(safe, {}))
+}
+
+// The result as counts, flags and closed codes only, in RESULT_FIELDS order: zero, false
+// and null are left out, and a value that is not a count, a flag or a code is ignored.
+function resultParts(result) {
+  return RESULT_FIELDS.flatMap(([key, label]) => {
+    const value = result[key]
+    if (typeof value === 'number' && Number.isFinite(value) && value !== 0) return [`${label} ${value}`]
+    if (value === true) return [`${label}: yes`]
+    const code = safeCode(value)
+    if (code) return [`${label}: ${key === 'partial_reason' ? PARTIAL_REASON_LABELS[code] || code : code}`]
+    return []
+  })
+}
+
+function FetchResultBlock({ result, resultRef }) {
+  const parts = resultParts(result)
+  return jsxs('div', {
+    ref: resultRef,
+    tabIndex: -1,
+    role: 'status',
+    style: { marginTop: 10 },
+    children: [
+      jsx('p', { key: 'counts', style: { margin: 0 }, children: `Result (counts only): ${parts.length ? parts.join(' · ') : 'nothing new'}.` }),
+      result.partial === true ? jsx('p', { key: 'partial', style: { margin: '4px 0 0' }, children: 'Fetch again to continue.' }) : null,
+    ],
+  })
+}
+
+function ForgetOutcome({ outcome, noticeRef }) {
+  return jsxs('div', {
+    ref: noticeRef,
+    tabIndex: -1,
+    role: 'status',
+    style: { marginTop: 10 },
+    children: [
+      jsx('p', {
+        key: 'done',
+        children: `${outcome.had ? 'Mailbox removed.' : 'No sealed mailbox credentials were found.'} ${plural(outcome.messages, 'message')} and ${plural(outcome.cursors, 'cursor')} deleted.`,
+      }),
+      outcome.warnings.length ? jsx('ul', { key: 'warnings', children: outcome.warnings.map((code) => jsx('li', { key: code, children: explainMail(code) })) }) : null,
+    ],
+  })
+}
+
+const hint = (text) => jsx('span', { key: 'hint', style: { fontSize: 12, color: MUTED_TEXT }, children: text })
+
+// Step 2.5 (macOS, version 4 API) in four sub-states: not set up (the form), setup in
+// progress (the folder question of a pending flow), set up (fetch and remove) and
+// removing. Every input is cleared after each submit (success, failure, cancel) and when
+// the step is blocked or unmounts; a pending flow is cancelled on unmount (its password
+// waits in the backend's memory). Only counts, codes and the owner's label are shown,
+// and folder names only in the folder question.
+function MailStep({ id, n, state, blocker = null, goto = null, code = null, status, refresh }) {
+  const mail = status.mail || {}
+  const [address, setAddress] = useState('')
+  const [others, setOthers] = useState('')
+  const [server, setServer] = useState('')
+  const [serverEdited, setServerEdited] = useState(false)
+  const [account, setAccount] = useState(DEFAULT_MAIL_ACCOUNT)
+  const [password, setPassword] = useState('')
+  const [unattended, setUnattended] = useState(false)
+  const [flow, setFlow] = useState(null)
+  const [selection, setSelection] = useState(null)
+  const [maxText, setMaxText] = useState(String(MAX_FETCH))
+  const [older, setOlder] = useState(false)
+  const [since, setSince] = useState('')
+  const [fetchJob, setFetchJob] = useState(null)
+  const [result, setResult] = useState(null)
+  const [purge, setPurge] = useState(false)
+  const [phrase, setPhrase] = useState('')
+  const [retryAccount, setRetryAccount] = useState('')
+  const [forgotten, setForgotten] = useState(null)
+  const [busy, setBusy] = useState(null)
+  const [failure, setFailure] = useState(null)
+  const [note, setNote] = useState(null)
+  const mounted = useRef(true)
+  const flowRef = useRef(null)
+  const polling = useRef(null)
+  const noteRef = useFocusOn(failure)
+  const resultRef = useFocusOn(result)
+  const noticeRef = useFocusOn(forgotten || note)
+  const statusJob = (Array.isArray(status.jobs) ? status.jobs : []).find(
+    (job) => job && job.kind === 'mail_fetch' && (!job.state || job.state === 'running'),
+  )
+  const fetching = Boolean(fetchJob) || busy === 'fetch' || Boolean(statusJob)
+  const shown = state === 'blocked' ? state : busy || fetching ? 'running' : failure ? 'attention' : state
+  const clearForm = () => {
+    setAddress('')
+    setOthers('')
+    setServer('')
+    setServerEdited(false)
+    setAccount(DEFAULT_MAIL_ACCOUNT)
+    setPassword('')
+    setUnattended(false)
+  }
+  const clearFetch = () => {
+    setMaxText(String(MAX_FETCH))
+    setOlder(false)
+    setSince('')
+  }
+  const clearRemove = () => {
+    setPurge(false)
+    setPhrase('')
+    setRetryAccount('')
+  }
+  useClearSecrets(() => {
+    clearForm()
+    clearFetch()
+    clearRemove()
+  }, shown)
+  useDropOnDone(state, () => setFailure(null))
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      // A flow waiting for its folder choice holds the password in the backend: cancel it.
+      const pending = flowRef.current
+      flowRef.current = null
+      setFlow(null)
+      setSelection(null)
+      if (pending) call(`/mail/setup/${encodeURIComponent(pending)}/cancel`, {}).catch(() => {})
+    }
+  }, [])
+  // Poll a fetch job until it ends: one this page started, or one in status.jobs (a
+  // re-opened page, another window, `already_running`). Each job is polled once.
+  const follow = async (jobId) => {
+    if (!jobId || polling.current === jobId) return
+    polling.current = jobId
+    setFetchJob(jobId)
+    const end = await pollJob(jobId, { alive: () => mounted.current && polling.current === jobId })
+    if (!mounted.current || polling.current !== jobId) return
+    polling.current = null
+    setFetchJob(null)
+    const counts = end.progress && end.progress.result
+    if (counts && typeof counts === 'object') setResult(counts)
+    if (end.state === 'failed') setFailure(fetchError(end.error || 'fetch_failed'))
+    else if (end.state === 'lost') setFailure(new MordredError('job_not_found'))
+    else if (end.state === 'timeout') setFailure(new MordredError('mail_fetch_timeout'))
+    refresh()
+  }
+  const statusJobId = statusJob ? String(statusJob.job_id) : null
+  useEffect(() => {
+    if (statusJobId) follow(statusJobId)
+  }, [statusJobId])
+  // A flow ends here: cancelled on the server too (idempotent), its folder names dropped.
+  const dropFlow = () => {
+    const pending = flowRef.current
+    flowRef.current = null
+    setFlow(null)
+    setSelection(null)
+    if (pending) call(`/mail/setup/${encodeURIComponent(pending)}/cancel`, {}).catch(() => {})
+  }
+  const finished = () => {
+    flowRef.current = null
+    setFlow(null)
+    setSelection(null)
+    setNote('Mailbox connected (read-only).')
+    host.notify({ kind: 'success', message: 'Mailbox connected (read-only).' })
+    refresh()
+  }
+  const onAddress = (value) => {
+    setAddress(value)
+    if (!serverEdited) setServer(gmailAddress(value) ? GMAIL_HOST : '')
+  }
+  const connect = async () => {
+    setBusy('setup')
+    setFailure(null)
+    setNote(null)
+    setForgotten(null)
+    try {
+      const body = {
+        address: address.trim(),
+        account: account.trim() || DEFAULT_MAIL_ACCOUNT,
+        extra_addresses: splitAddresses(others),
+        app_password: password,
+        touch_id: !unattended,
+      }
+      if (server.trim()) body.imap_host = server.trim()
+      const r = await call('/mail/setup/start', body)
+      if (r.step === 'folders') {
+        if (!r.flow_id) throw new MordredError('invalid_request')
+        flowRef.current = String(r.flow_id)
+        setSelection(null)
+        setFlow({ id: String(r.flow_id), question: r.question === 'all_mail' ? 'all_mail' : 'sent', folders: folderOptions(r.folders) })
+      } else finished()
+    } catch (e) {
+      setFailure(mailError(e))
+    } finally {
+      clearForm()
+      setBusy(null)
+    }
+  }
+  const finish = async () => {
+    if (!flow || selection === null) return
+    setBusy('finish')
+    setFailure(null)
+    try {
+      await call(`/mail/setup/${encodeURIComponent(flow.id)}/finish`, { selection: selection === NO_SENT_FOLDER ? null : selection })
+      finished()
+    } catch (e) {
+      if (!(e && KEEP_FLOW.has(e.code))) dropFlow()
+      setFailure(mailError(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+  const cancelSetup = () => {
+    dropFlow()
+    clearForm()
+    setFailure(null)
+  }
+  const fetchMail = async () => {
+    if (!validMax(maxText) || (older && !validDate(since))) return
+    setBusy('fetch')
+    setFailure(null)
+    setResult(null)
+    setNote(null)
+    setForgotten(null)
+    const body = { max: Number(maxText) }
+    if (older) body.since = since
+    let jobId = null
+    try {
+      const r = await call('/mail/fetch', body)
+      jobId = r.job_id ? String(r.job_id) : null
+      if (!jobId) throw new MordredError('fetch_failed')
+      if (r.already_running) setNote('A fetch was already running; its result appears here when it ends.')
+    } catch (e) {
+      setFailure(mailError(e))
+    } finally {
+      clearFetch()
+      setBusy(null)
+    }
+    if (jobId) await follow(jobId)
+  }
+  const residue = mail.residue === 'credentials_left'
+  const accountUnknown = Boolean(forgotten && forgotten.warnings.includes('account_unknown')) || Boolean(failure && failure.code === 'account_unknown')
+  const askAccount = residue || accountUnknown
+  const remove = async () => {
+    setFailure(null)
+    setForgotten(null)
+    setNote(null)
+    if (purge && phrase.trim() !== PURGE_PHRASE) {
+      // Checked before anything is sent, as the API checks it before anything is read.
+      setFailure(mailError(new MordredError('forget_confirm_mismatch')))
+      clearRemove()
+      return
+    }
+    setBusy('remove')
+    try {
+      const body = { rows: purge }
+      if (purge) body.confirm = PURGE_PHRASE
+      if (askAccount && retryAccount.trim()) body.account = retryAccount.trim()
+      const r = await call('/mail/forget', body)
+      // The route cancels pending setup flows.
+      flowRef.current = null
+      setFlow(null)
+      setForgotten({ had: r.had_credentials === true, messages: countOf(r.deleted_messages), cursors: countOf(r.cursors_deleted), warnings: codesOf(r.warnings) })
+      host.notify({ kind: 'success', message: 'Mailbox removed.' })
+    } catch (e) {
+      setFailure(mailError(e))
+    } finally {
+      clearRemove()
+      setBusy(null)
+      refresh()
+    }
+  }
+  const configured = Boolean(mail.configured)
+  const label = mailLabel(mail)
+  const touch = mail.touch_id === false ? 'syncs without Touch ID' : mail.touch_id === true ? 'Touch ID on each fetch' : null
+  const accountLine = `Account ${label || '(label unreadable)'} · ${mailScope(mail)}${touch ? ` · ${touch}` : ''}`
+  const sources = storeSources(status)
+  const field = (props) => jsx(Input, { autoComplete: 'off', ...props })
+  const removeSection = jsxs('details', {
+    key: 'remove',
+    open: askAccount || undefined,
+    style: { marginTop: 12 },
+    children: [
+      jsx('summary', { key: 'summary', style: { cursor: 'pointer' }, children: 'Remove this mailbox…' }),
+      jsx('p', {
+        key: 'what',
+        children: 'Removes the sealed address, the app password and the mailbox key from this Mac. Revoke the app password with your mail provider too if you no longer need it.',
+      }),
+      jsx(Checked, {
+        key: 'rows',
+        checked: purge,
+        onChange: setPurge,
+        children: `Also delete every message imported under account ${label || 'of this mailbox'} (including Takeout imports)`,
+      }),
+      purge
+        ? jsx('p', { key: 'warn', children: `This deletes data and cannot be undone. Type “${PURGE_PHRASE}” to confirm.` })
+        : null,
+      purge
+        ? jsx(Row, { key: 'phrase', children: field({ placeholder: PURGE_PHRASE, 'aria-label': 'Type delete my data to confirm', value: phrase, onChange: (e) => setPhrase(e.target.value) }) })
+        : null,
+      askAccount
+        ? jsx('p', { key: 'why-label', children: 'The mailbox settings could not be read, so Mordred needs the account label to find its mail and cursors.' })
+        : null,
+      askAccount
+        ? jsx(Row, { key: 'label', children: field({ placeholder: DEFAULT_MAIL_ACCOUNT, 'aria-label': 'Account label to remove', value: retryAccount, onChange: (e) => setRetryAccount(e.target.value) }) })
+        : null,
+      jsx(Row, {
+        key: 'go',
+        children: jsx(Button, { variant: 'outline', disabled: Boolean(busy), onClick: remove, children: purge ? 'Remove mailbox and delete its mail' : 'Remove mailbox' }),
+      }),
+    ],
+  })
+  const fetchReady = validMax(maxText) && (!older || validDate(since))
+  const setUpCard = [
+    shown === 'done' ? null : jsx('p', { key: 'account', children: accountLine }),
+    ...mailHistory(mail).map((line, index) => jsx('p', { key: `history-${index}`, style: { margin: '4px 0' }, children: line })),
+    sources ? jsx('p', { key: 'count', style: { margin: '4px 0' }, children: `${plural(Number(sources.mail && sources.mail.messages) || 0, 'message')} in Mordred’s store (all accounts).` }) : null,
+    jsx(Row, {
+      key: 'max',
+      children: [
+        'Fetch at most',
+        jsx(Input, { key: 'n', style: { width: 90 }, type: 'number', min: 1, max: MAX_FETCH, 'aria-label': 'Fetch at most N messages', value: maxText, onChange: (e) => setMaxText(e.target.value) }),
+        'messages',
+      ],
+    }),
+    jsx(Checked, { key: 'older', checked: older, onChange: setOlder, children: 'Also fetch older mail since a date' }),
+    older ? jsx(Row, { key: 'since', children: jsx(Input, { type: 'date', 'aria-label': 'Fetch older mail since', value: since, onChange: (e) => setSince(e.target.value) }) }) : null,
+    jsx(Row, {
+      key: 'fetch',
+      children: [
+        jsx(Button, { key: 'go', disabled: fetching || !fetchReady, onClick: fetchMail, children: fetching ? 'Fetching…' : 'Fetch new mail' }),
+        mail.touch_id === false ? null : hint('May show a Touch ID prompt.'),
+      ],
+    }),
+    result ? jsx(FetchResultBlock, { key: 'result', result, resultRef }) : null,
+    jsx('p', { key: 'chat', children: syncHint('here') }),
+    removeSection,
+  ]
+  const folderChoice = flow
+    ? [
+        jsx('p', { key: 'intro', children: 'Logged in (read-only). One question before the mailbox is saved; folder names are shown only here.' }),
+        jsx(RadioGroup, {
+          key: 'folders',
+          legend: FOLDER_QUESTIONS[flow.question],
+          name: 'mordred-mail-folder',
+          options: flow.question === 'sent' ? [...flow.folders, { value: NO_SENT_FOLDER, label: 'No sent folder' }] : flow.folders,
+          value: selection,
+          onChange: setSelection,
+        }),
+        jsx(Row, {
+          key: 'finish',
+          children: [
+            jsx(Button, { key: 'finish', disabled: Boolean(busy) || selection === null, onClick: finish, children: 'Finish' }),
+            jsx(Button, { key: 'cancel', variant: 'ghost', disabled: Boolean(busy), onClick: cancelSetup, children: 'Cancel' }),
+          ],
+        }),
+      ]
+    : null
+  const form = [
+    jsx('p', { key: 'intro', children: MAIL_INTRO }),
+    jsx('p', { key: 'privacy', style: { fontSize: 12, color: MUTED_TEXT }, children: MAIL_PRIVACY }),
+    jsxs('p', { key: 'guide', children: [jsx('strong', { key: 'lead', children: 'Before you start (Gmail). ' }), APP_PASSWORD_GUIDE] }),
+    jsx(Row, { key: 'address', children: field({ placeholder: 'Mail address', 'aria-label': 'Mail address', value: address, onChange: (e) => onAddress(e.target.value) }) }),
+    jsx(Row, {
+      key: 'others',
+      children: field({ placeholder: 'Other addresses that are yours (comma-separated, optional)', 'aria-label': 'Other addresses that are yours', value: others, onChange: (e) => setOthers(e.target.value) }),
+    }),
+    jsx(Row, {
+      key: 'server',
+      children: [
+        field({
+          key: 'input',
+          placeholder: 'IMAP server',
+          'aria-label': 'IMAP server',
+          value: server,
+          onChange: (e) => {
+            setServerEdited(true)
+            setServer(e.target.value)
+          },
+        }),
+        hint('Filled in for Gmail addresses.'),
+      ],
+    }),
+    jsx(Row, {
+      key: 'account',
+      children: [
+        field({ key: 'input', placeholder: DEFAULT_MAIL_ACCOUNT, 'aria-label': 'Account label', value: account, onChange: (e) => setAccount(e.target.value) }),
+        hint('A short name for this mailbox in Mordred, not an address.'),
+      ],
+    }),
+    jsx(Row, { key: 'password', children: field({ type: 'password', placeholder: 'App password', 'aria-label': 'App password', value: password, onChange: (e) => setPassword(e.target.value) }) }),
+    jsx(Checked, {
+      key: 'unattended',
+      checked: unattended,
+      onChange: setUnattended,
+      children: [
+        jsx('span', { key: 'label', children: 'Allow syncing without Touch ID' }),
+        jsx('span', { key: 'note', style: { display: 'block', fontSize: 12, color: MUTED_TEXT }, children: 'For scheduled syncs; otherwise each fetch asks for Touch ID.' }),
+      ],
+    }),
+    jsx(Row, {
+      key: 'connect',
+      children: [
+        jsx(Button, { key: 'go', disabled: Boolean(busy) || !address.trim() || !password, onClick: connect, children: 'Connect mailbox' }),
+        hint('Logs in once, read-only; may show a Touch ID prompt.'),
+      ],
+    }),
+    accountUnknown ? removeSection : null,
+  ]
+  const children = flow ? folderChoice : configured ? setUpCard : residue ? [removeSection] : form
+  const notice = forgotten ? jsx(ForgetOutcome, { outcome: forgotten, noticeRef }) : note ? jsx('p', { ref: noticeRef, tabIndex: -1, role: 'status', children: note }) : null
+  const statusFailure = code ? (code === 'credentials_left' ? mailError(new MordredError(code)) : fetchError(code)) : null
   return jsx(Step, {
     id,
     n,
     title: 'Mail over IMAP',
-    state,
+    state: shown,
     blocker,
-    summary: 'Set up.',
-    failure: stepFailure(null, code),
+    goto,
+    summary: accountLine,
+    keepOpen: true,
+    progress: fetching ? FETCH_PROGRESS : MAIL_PROGRESS[busy] || null,
+    failure: failure || statusFailure,
+    noteRef,
+    notice,
     why: WHY.mail,
-    children: jsxs('p', {
-      children: ['Run ', jsx('code', { style: { userSelect: 'all' }, children: 'hermes-mordred mail setup' }), ' in Terminal for now.'],
-    }),
+    children: jsxs(Fragment, { children }),
   })
 }
 
@@ -1907,14 +2461,7 @@ function AskHermes({ macos }) {
         code('mordred_history_search'),
         ' tool, each with its head line (who wrote it, when), and quotes its evidence. After a history question the chat is in reader mode: Hermes cannot write files, run commands, send messages, schedule or delegate in that chat until you start a new chat.',
       ]),
-      macos
-        ? paragraph([
-            strong('Fetching mail. '),
-            'Fetch new mail in step 2.5 (reliable). You can also say “sync my mail” in a Hermes chat; if Hermes fails to reach the tool, see the note on ',
-            code('tools.tool_search'),
-            ' in Mordred’s USAGE guide. A mail sync or fetch gives Hermes counts only.',
-          ])
-        : null,
+      macos ? paragraph([strong('Fetching mail. '), ...syncHint('in step 2.5')]) : null,
       paragraph([
         strong('What Hermes sees. '),
         macos
