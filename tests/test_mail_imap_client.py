@@ -148,6 +148,40 @@ def test_the_ssl_client_wraps_the_route_socket_with_sni_of_the_sealed_host() -> 
     assert [name for _sock, name in wrapped] == ["imap.example.com"]
 
 
+def test_a_platform_verifier_context_gets_its_handshake_inside_wrap_socket() -> None:
+    """truststore verifies the peer chain inside ``wrap_socket``: the handshake must run there."""
+    server = FakeImapServer({"INBOX": FakeMailbox(1)})
+    seen: list[tuple[bool, float | None]] = []
+
+    class VerifierContext(ssl.SSLContext):
+        def wrap_socket(self, sock: socket.socket, *args: Any, **kw: Any) -> socket.socket:  # type: ignore[override]
+            handshake_inside = kw.get("do_handshake_on_connect", True)
+            seen.append((handshake_inside, sock.gettimeout()))
+            if not handshake_inside:  # what truststore does: no peer chain yet, so verification fails
+                raise ssl.SSLError("no certificate to verify")
+            return sock  # the fake server speaks plain IMAP
+
+    assert imap._handshakes_inside_wrap(VerifierContext()) is True
+    conn = GuardedIMAP4SSL(
+        "imap.example.com", 993, raw_socket=server.connect, ssl_context=VerifierContext(), timeout=5.0
+    )
+    conn.logout()
+    assert len(seen) == 1
+    inside, timeout = seen[0]
+    assert inside is True
+    assert timeout is not None and 0 < timeout <= imap.SOCKET_TIMEOUT_S
+
+
+def test_the_standard_context_keeps_the_manual_handshake() -> None:
+    assert imap._handshakes_inside_wrap(ssl.create_default_context()) is False
+
+    class PlainWrapper:
+        def wrap_socket(self, sock: socket.socket, **_kw: Any) -> socket.socket:
+            return sock
+
+    assert imap._handshakes_inside_wrap(PlainWrapper()) is True
+
+
 @contextlib.contextmanager
 def _armed(budget: float = 5.0, cancel: CancelToken | None = None) -> Any:
     """A link armed as the guarded client arms it (watchdog and cancellation hook), released afterwards."""

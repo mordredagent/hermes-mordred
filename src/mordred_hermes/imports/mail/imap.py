@@ -971,16 +971,34 @@ class GuardedIMAP4SSL(_CommandGuard, imaplib.IMAP4_SSL):
         return self._establish(self._tls_socket)
 
     def _tls_socket(self, link: Link) -> socket.socket:
-        """The route socket wrapped in TLS; the handshake reads from a socket the link can shut down."""
+        """The route socket wrapped in TLS.
+
+        With the standard library's context the handshake is run here, after the
+        link holds the TLS socket, so an interrupt (watchdog, cancellation) can
+        shut it down at once. A context whose ``wrap_socket`` is not the standard
+        one (a platform verifier such as ``truststore``, which Hermes injects
+        into every ``ssl.SSLContext`` of its process) verifies the peer chain
+        inside ``wrap_socket`` and therefore needs the handshake to happen there:
+        for those the handshake runs inside ``wrap_socket`` under the socket
+        timeout the link grants, and an interrupt takes effect when that timeout
+        ends the handshake.
+        """
         context: ssl.SSLContext = self.ssl_context
         raw = self._raw_socket(link)
         link.hold(raw)
+        inside = _handshakes_inside_wrap(context)
         try:
-            wrapped = context.wrap_socket(raw, server_hostname=self.host, do_handshake_on_connect=False)
+            if inside:
+                raw.settimeout(link.timeout())
+                wrapped = context.wrap_socket(raw, server_hostname=self.host)
+            else:
+                wrapped = context.wrap_socket(raw, server_hostname=self.host, do_handshake_on_connect=False)
         except BaseException:
             link.drop(raw)
             raise
         link.hold(wrapped)  # the raw socket object is detached now: interrupts reach the TLS socket
+        if inside:
+            return wrapped
         try:
             handshake = getattr(wrapped, "do_handshake", None)
             if handshake is not None:
@@ -990,6 +1008,20 @@ class GuardedIMAP4SSL(_CommandGuard, imaplib.IMAP4_SSL):
             link.drop(wrapped)
             raise
         return wrapped
+
+
+def _handshakes_inside_wrap(context: Any) -> bool:
+    """Whether ``context.wrap_socket`` must run the handshake itself.
+
+    True unless the context's ``wrap_socket`` is the standard library's own: a
+    wrapper (``truststore.SSLContext`` subclasses the original class and
+    overrides ``wrap_socket`` to verify the chain right after wrapping) cannot
+    verify a socket that has not handshaken yet.
+    """
+    stdlib = next((cls for cls in type(context).__mro__ if cls.__module__ == "ssl"), None)
+    if stdlib is None:
+        return True
+    return getattr(type(context), "wrap_socket", None) is not getattr(stdlib, "wrap_socket", None)
 
 
 # --- session --------------------------------------------------------------------------------------

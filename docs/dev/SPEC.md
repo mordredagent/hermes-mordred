@@ -4944,6 +4944,19 @@ Out of scope: Linux and Windows branches (unchanged), `mail import` from the pag
 a typed recovery passphrase, the stale-anchor fix itself (a `keyvault` PR), reader
 mode, egress rules, what the Hermes tools return, and any new bundler or framework.
 
+- TLS handshake placement (2026-10-23, found in the Hermes Desktop live check): the
+  IMAP client runs the handshake itself, after the link holds the TLS socket, only
+  when the process's `ssl.SSLContext.wrap_socket` is the standard library's. Hermes
+  injects `truststore` into every `ssl.SSLContext` of its process, and that
+  wrapper verifies the peer chain inside `wrap_socket`, so a socket wrapped with
+  `do_handshake_on_connect=False` fails verification before any handshake
+  (`imap_unreachable` within milliseconds, in Hermes Desktop and the chat tool
+  only; the `hermes-mordred` CLI never injects it). For such contexts the
+  handshake MUST run inside `wrap_socket` under the socket timeout the link
+  grants (`IoLimits.io_timeout()`); an interrupt then takes effect when that
+  timeout ends the handshake. `_handshakes_inside_wrap()` decides by comparing
+  the context class's `wrap_socket` with the standard library's.
+
 ### Page structure and states
 
 - **Platform gating.** The new sections MUST render only when the API reports
