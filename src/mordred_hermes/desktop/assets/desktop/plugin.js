@@ -2161,6 +2161,11 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
   const mounted = useRef(true)
   const flowRef = useRef(null)
   const polling = useRef(null)
+  // Each setup start is an attempt; leaving the step (done, blocked, unmount) starts a new
+  // one, so a late answer to an abandoned start is cancelled instead of applied.
+  const attempt = useRef(0)
+  const latestState = useRef(state)
+  latestState.current = state
   const noteRef = useFocusOn(failure)
   const resultRef = useFocusOn(result)
   const noticeRef = useFocusOn(forgotten || note)
@@ -2188,8 +2193,10 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
     setPhrase('')
     setRetryAccount('')
   }
-  // Leaving the page or the step (done, blocked) also ends a flow waiting for its folder choice.
+  // Leaving the page or the step (done, blocked) also ends a flow waiting for its folder
+  // choice and abandons a start still in flight.
   useClearSecrets(() => {
+    attempt.current += 1
     clearForm()
     clearFetch()
     clearRemove()
@@ -2250,6 +2257,9 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
     if (!serverEdited) setServer(gmailAddress(value) ? GMAIL_HOST : '')
   }
   const connect = async () => {
+    const mine = ++attempt.current
+    // Still this page's attempt: mounted, not superseded, and the step neither done nor blocked.
+    const current = () => mounted.current && attempt.current === mine && latestState.current !== 'done' && latestState.current !== 'blocked'
     setBusy('setup')
     setFailure(null)
     setNote(null)
@@ -2264,6 +2274,13 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
       }
       if (server.trim()) body.imap_host = server.trim()
       const r = await call('/mail/setup/start', body)
+      if (!current()) {
+        // A late answer: release the backend's single pending flow (and the password it
+        // holds) at once, show nothing; a sealed setup appears with the next status read.
+        if (typeof r.flow_id === 'string' && r.flow_id) call(`/mail/setup/${encodeURIComponent(r.flow_id)}/cancel`, {}).catch(() => {})
+        if (mounted.current && r.step === 'done') refresh()
+        return
+      }
       if (r.step === 'folders') {
         if (!r.flow_id) throw new MordredError('invalid_request')
         flowRef.current = String(r.flow_id)
@@ -2271,7 +2288,7 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
         setFlow({ id: String(r.flow_id), question: r.question === 'all_mail' ? 'all_mail' : 'sent', folders: folderOptions(r.folders) })
       } else finished()
     } catch (e) {
-      setFailure(mailError(e))
+      if (current()) setFailure(mailError(e))
     } finally {
       clearForm()
       setBusy(null)

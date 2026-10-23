@@ -1415,16 +1415,19 @@ def test_memory_failure_is_an_alert_and_not_a_toast():
 
 # A component under test with scripted API answers. RestartHermesControl is kept opaque
 # (its own hooks would shift the harness's global hook numbering). `answers` are popped
-# in order; an answer {"throw": code} makes rest() reject like a transport failure.
+# in order; an answer {"throw": code} makes rest() reject like a transport failure, and
+# "HOLD" stays pending until the script calls held.shift()(answer) (a late answer).
 COMPONENT_SCRIPT = """
 const render = jsx
 jsx = jsxs = (type, props) =>
   type === RestartHermesControl ? {type: 'RestartHermesControl', props} : render(type, props)
 const requests = []
 const answers = ANSWERS
+const held = []
 rest = async (path, init) => {
   requests.push(init && init.body !== undefined ? [path, init.body] : [path])
   const answer = answers.shift()
+  if (answer === 'HOLD') return new Promise(resolve => held.push(resolve))
   if (answer && answer.throw) throw new Error(answer.throw)
   return answer
 }
@@ -2071,6 +2074,78 @@ def test_a_pending_mail_flow_is_cancelled_when_the_step_becomes_blocked():
     result = component(step, [FOLDERS, {"ok": True}], script)
     assert result["requests"][1:] == [["/mail/setup/m7/cancel", {}]]
     assert "Gesendet" not in json.dumps(result["tree"])
+
+
+# A start answered after the card went away (or was superseded) must release the backend's
+# single pending flow at once, or a new setup gets mail_setup_busy until the TTL expires.
+LATE_START = FILL + "const pending = press(tree, 'Connect mailbox')\n"
+RELEASE = "held.shift()(ANSWER)\nawait pending\ntree = view()\n"
+
+
+def late_step(status: dict[str, Any]) -> str:
+    return (
+        "MailStep({id: 'mail', n: '2.5', state: globalThis.stepState || 'next', blocker: 'needs_restart', "
+        f"status: {json.dumps(status)}, refresh}})"
+    )
+
+
+@pytest.mark.parametrize("answer,flow", [(FOLDERS, "m7"), (DONE, "m1")], ids=["folders", "done"])
+@pytest.mark.parametrize(
+    "leave",
+    [
+        "unmount()\n",
+        "globalThis.stepState = 'blocked'; tree = view(); effects.forEach(f => f())\n",
+        "globalThis.stepState = 'done'; tree = view(); effects.forEach(f => f())\n",
+    ],
+    ids=["unmount", "blocked", "done"],
+)
+def test_a_late_setup_answer_is_cancelled_and_never_shown(answer, flow, leave):
+    script = LATE_START + leave + RELEASE.replace("ANSWER", json.dumps(answer))
+    result = component(late_step(MAIL_V4), ["HOLD", {"ok": True}], script)
+    assert result["requests"][0][0] == "/mail/setup/start"
+    assert result["requests"][1:] == [[f"/mail/setup/{flow}/cancel", {}]]
+    tree = json.dumps(result["tree"], ensure_ascii=False)
+    assert "Gesendet" not in tree and "Archiv" not in tree and "Mailbox connected" not in tree
+    assert result["notifications"] == []
+    # A late `done` sealed a mailbox: a mounted page reads the status again; nothing else.
+    expected = 1 if answer is DONE and not leave.startswith("unmount") else 0
+    assert result["refreshes"] == expected
+
+
+def test_a_superseded_setup_start_is_cancelled_and_the_newer_one_applies():
+    newer = {**FOLDERS, "flow_id": "m8"}
+    script = (
+        FILL
+        + "const first = press(tree, 'Connect mailbox')\n"
+        + "const second = press(tree, 'Connect mailbox')\n"
+        + f"held.shift()({json.dumps(FOLDERS)})\nawait first\n"
+        + f"held.shift()({json.dumps(newer)})\nawait second\ntree = view()\n"
+        + "out.finish = Boolean(button(tree, 'Finish'))\n"
+    )
+    result = component(late_step(MAIL_V4), ["HOLD", "HOLD", {"ok": True}], script)
+    assert [request[0] for request in result["requests"]] == [
+        "/mail/setup/start",
+        "/mail/setup/start",
+        "/mail/setup/m7/cancel",
+    ]
+    assert result["out"]["finish"] is True and "Gesendet" in json.dumps(result["tree"])
+    finish = component(
+        late_step(MAIL_V4),
+        ["HOLD", "HOLD", {"ok": True}, {"ok": True, "step": "done"}],
+        script
+        + "find(find(tree, n => n.type === 'label' && text(n) === 'Archiv'), n => n.props && n.props.type === 'radio')"
+        + ".props.onChange(); tree = view()\nawait press(tree, 'Finish'); tree = view()\n",
+    )
+    assert finish["requests"][-1] == ["/mail/setup/m8/finish", {"selection": "f-arch"}]
+
+
+def test_a_late_setup_failure_after_unmount_shows_nothing():
+    script = (
+        LATE_START + "unmount()\n" + RELEASE.replace("ANSWER", json.dumps({"ok": False, "error": "imap_unreachable"}))
+    )
+    result = component(late_step(MAIL_V4), ["HOLD"], script)
+    assert result["requests"][1:] == []
+    assert '"role": "alert"' not in json.dumps(result["tree"])
 
 
 @pytest.mark.parametrize("code,kept", [("invalid_selection", True), ("mail_setup_stale", False)])
