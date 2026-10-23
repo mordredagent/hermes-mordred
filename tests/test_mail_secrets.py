@@ -429,3 +429,13 @@ def test_a_key_whose_policy_cannot_be_recorded_is_not_left_behind(
         assert raised.value.code == "store_path_unsafe" and enclave.keys == {}
     monkeypatch.undo()
     assert store.ensure_key(require_presence=True) is True and KEY_ID in enclave.keys
+
+
+def test_a_staged_copy_alone_is_residue_but_not_credentials(tmp_path: Path, enclave: FakeEnclave) -> None:
+    store = sealed_store(tmp_path / "mail", enclave)
+    store.ensure_key()
+    (tmp_path / "mail" / ".credentials.sealed.0011223344556677.staged").write_bytes(b"MMC1")
+    assert store.residue() and store.staged_files() and not store.credential_files()
+    assert store.flags() is None  # no sealed file: neither configured nor credentials_left through flags
+    assert store.forget() is True
+    assert not store.residue() and KEY_ID not in enclave.keys

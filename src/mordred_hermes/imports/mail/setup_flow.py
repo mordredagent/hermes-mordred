@@ -733,14 +733,24 @@ class MailSetupFlows:
             new_setup_generation(self._home())
         except BaseException as exc:
             stage.value = "cleanup_failed"
-            with contextlib.suppress(Exception):
-                if self._secret_store.residue():
-                    self._secret_store.forget()
-                if not self._secret_store.residue():
-                    stage.value = "pre_seal"
+            if self._cleaned_up():
+                stage.value = "pre_seal"
             if isinstance(exc, MailSecretsError | OSError):
                 raise MailSetupError(_secrets_code(exc)) from None
             raise
+
+    def _cleaned_up(self) -> bool:
+        """After a failed seal: remove every file it may have left (staged copies too) and the key.
+
+        No credentials were sealed before this seal (checked under the same lock),
+        so the key guards nothing. True only once the files are verified gone and
+        the key was deleted.
+        """
+        try:
+            key_gone = self._secret_store.forget() is not False
+            return key_gone and not self._secret_store.residue()
+        except Exception:  # a removal that failed: the residue stays reported
+            return False
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:

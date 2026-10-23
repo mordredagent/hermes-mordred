@@ -993,3 +993,37 @@ def test_forget_rewrites_the_setup_generation(
     assert first != GENERATION_ABSENT  # a setup flow that started before this forget is stale now
     assert run(["mail", "forget", "--yes"], capsys)[0] == 0
     assert setup_generation(home) not in (first, GENERATION_ABSENT)  # every forget, even with nothing left
+
+
+def test_status_and_forget_handle_staged_leftovers(
+    store: ImportStore, home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mordred_hermes.imports.mail import secrets
+
+    monkeypatch.setattr(secrets, "_platform", lambda: "darwin")
+    folder = home / "mordred" / "mail"
+    folder.mkdir(parents=True)
+    (folder / ".credentials.meta.json.0011223344556677.staged").write_text("{}")  # a seal whose cleanup failed
+    code, out, err = run(["mail", "status", "--json"], capsys)
+    assert code == 0, err
+    assert json.loads(out)["imap"] == {"configured": False, "residue": "credentials_left"}
+
+    class Forgettable:
+        """The real store's file handling with an Enclave that holds no key."""
+
+        def __init__(self) -> None:
+            self.real = secrets.MailSecretStore(folder, backend_factory=lambda: _NoKeyBackend())
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.real, name)
+
+    monkeypatch.setattr(mail_sync_cli, "_secret_store", Forgettable)
+    code, out, err = run(["mail", "forget", "--yes"], capsys)
+    assert code == 0, err
+    assert "No mail credentials were set up." in out and "account_unknown" not in err
+    assert sorted(path.name for path in folder.iterdir() if "credentials" in path.name) == []
+
+
+class _NoKeyBackend:
+    def delete_enclave_key(self, _key_id: str) -> None:
+        return None

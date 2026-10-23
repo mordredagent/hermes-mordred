@@ -118,7 +118,9 @@ def _identity(secret_store: Any) -> tuple[str, str] | None:
         flags = None  # credentials_left: a sealed file without readable flags
     if flags:
         return str(flags.get("account")), str(flags.get("setup_id", ""))
-    return _UNIDENTIFIED if secret_store.residue() else None
+    # Staged copies of a failed seal are not credentials: forget removes them, but they name no account.
+    credential_files = getattr(secret_store, "credential_files", secret_store.residue)
+    return _UNIDENTIFIED if credential_files() else None
 
 
 def _target(account: str | None, sealed: tuple[str, str] | None) -> str | None:

@@ -477,12 +477,19 @@ class MailSecretStore:
         return value
 
     def residue(self) -> bool:
-        """True while a sealed file or a flags file exists in any form (valid, corrupt or a symlink).
+        """True while any credential file is left: the sealed file, the flags or a staged copy, in any form.
 
         Unlike :meth:`flags` this never depends on the flags being readable, so
         ``mail forget`` can tell "nothing was set up" from "credentials whose
-        flags are missing or corrupt". Never touches the Enclave.
+        flags are missing or corrupt", and a ``store`` whose cleanup failed is
+        still seen through its staged files (``.credentials.*.staged``). It is the
+        ``credentials_left`` state for everything but sealed credentials with
+        readable flags. Never touches the Enclave.
         """
+        return self.credential_files() or self.staged_files()
+
+    def credential_files(self) -> bool:
+        """True while the sealed file or the flags file exists in any form (a staged copy does not count)."""
         try:
             paths = (self.sealed_path, self.meta_path)
         except MailSecretsError:
@@ -494,6 +501,17 @@ class MailSecretStore:
                 continue
             return True
         return False
+
+    def staged_files(self) -> bool:
+        """True while a staged copy of a seal (``.credentials.*.staged``) is left behind."""
+        try:
+            folder = self.sealed_path.parent
+        except MailSecretsError:
+            return False
+        try:
+            return any(True for _path in folder.glob(_STAGED_GLOB))
+        except OSError:
+            return True  # cannot tell: never report a clean directory
 
     def forget(self) -> bool:
         """Delete the sealed file, the flags and the Enclave key, whatever the flags say (absent is fine).

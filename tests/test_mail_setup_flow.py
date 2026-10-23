@@ -1158,3 +1158,69 @@ def test_a_key_whose_policy_cannot_be_recorded_stops_the_setup(
     with pytest.raises(MailSetupError) as raised:
         start(make_flows(secrets, home, connect))
     assert raised.value.code == "store_path_unsafe" and connect.calls == [] and enclave.keys == {}
+
+
+def test_a_seal_interrupted_before_its_first_rename_whose_cleanup_fails_reports_it(
+    secrets: MailSecretStore, enclave: FakeEnclave, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    real_replace, real_unlink = os.replace, Path.unlink
+
+    def replace(src: Any, dst: Any) -> None:
+        if Path(dst) == secrets.sealed_path:
+            raise OSError("interrupted before the first rename")  # both copies are staged by now
+        real_replace(src, dst)
+
+    def unlink(path: Path, missing_ok: bool = False) -> None:
+        if path.name.endswith(".staged"):
+            raise PermissionError("cannot remove")
+        real_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(os, "replace", replace)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    flows = make_flows(secrets, home, Connector(gmail_server()))
+    with pytest.raises(MailSetupError) as raised:
+        start(flows)
+    assert raised.value.code == "store_path_unsafe" and flows.seal_stage() == "cleanup_failed"
+    assert secrets.residue() and secrets.staged_files() and not secrets.credential_files()
+    monkeypatch.undo()
+    assert secrets.forget() is True  # `mail forget --yes`
+    assert not secrets.residue() and enclave.keys == {} and credential_files(secrets) == []
+
+
+def test_a_failed_seal_removes_the_fresh_key_too(
+    secrets: MailSecretStore, enclave: FakeEnclave, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refused(_value: Any, *, require_presence: bool = True) -> None:
+        raise MailSecretsError("tee_unavailable")  # nothing was written
+
+    monkeypatch.setattr(secrets, "store", refused)
+    flows = make_flows(secrets, home, Connector(gmail_server()))
+    with pytest.raises(MailSetupError):
+        start(flows)
+    assert flows.seal_stage() == "pre_seal" and enclave.keys == {} and not secrets.key_record_path.exists()
+
+
+def test_a_key_that_cannot_be_deleted_after_a_failed_seal_is_cleanup_failed(
+    secrets: MailSecretStore, enclave: FakeEnclave, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refused(_value: Any, *, require_presence: bool = True) -> None:
+        raise MailSecretsError("tee_unavailable")
+
+    def stuck(_key_id: str) -> None:
+        raise OSError("keychain unavailable")
+
+    flows = make_flows(secrets, home, Connector(gmail_server()))
+    monkeypatch.setattr(secrets, "store", refused)
+    real_generate = enclave.generate_enclave_key
+
+    def generate(key_id: str, *, unattended: bool | None = None) -> bytes:
+        public = real_generate(key_id, unattended=unattended)
+        enclave.delete_enclave_key = stuck  # type: ignore[method-assign]  # from now on the key cannot go
+        return public
+
+    monkeypatch.setattr(enclave, "generate_enclave_key", generate)
+    with pytest.raises(MailSetupError):
+        start(flows)
+    assert flows.seal_stage() == "cleanup_failed" and KEY_ID in enclave.keys
