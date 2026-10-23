@@ -56,7 +56,6 @@ import json
 import sys
 import threading
 import time
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
@@ -154,7 +153,7 @@ def _fetch(max_messages: int, cancel: CancelToken | None = None, lease: FetchLea
     options = imap_sync.FetchOptions(
         max_messages=max_messages, budget_s=imap_sync.TOOL_BUDGET_S, via="tool", cancel=cancel, lease=lease
     )
-    return _tool_result(imap_sync.run_fetch(options, imap_sync.default_env()).as_dict())
+    return dict(imap_sync.run_fetch(options, imap_sync.default_env()).as_dict())
 
 
 def _left(until: float) -> float:
@@ -188,16 +187,7 @@ def _abandoned(lock_retained: bool) -> dict[str, Any]:
     from ...imports.mail.imap_sync import FetchResult
 
     result = FetchResult(partial=True, partial_reason="cancelled", abandoned=True, lock_retained=lock_retained)
-    return _tool_result(result.as_dict())
-
-
-def _tool_result(data: Mapping[str, Any]) -> dict[str, Any]:
-    """The closed fetch result for the chat: ``error`` is present only when there is one.
-
-    Hermes's tool-result error detector treats any ``error`` key as a failure, so a
-    successful sync must not carry ``"error": null``.
-    """
-    return {key: value for key, value in data.items() if not (key == "error" and value is None)}
+    return dict(result.as_dict())
 
 
 async def _abandon(lease: FetchLease, until: float) -> bool:

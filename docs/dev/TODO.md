@@ -948,9 +948,12 @@ Follow-ups left by the landed code:
   Decide with the owner; if added, it must never list or search.
 
 - [ ] Tool result shape for Hermes's error detector (found 2026-10-23): Hermes
-  logs `mordred_mail_sync` as "returned error" when the result carries
-  `"error": null`. Fixed on the Desktop branch by omitting the key when it is
-  null; the chat prompt and skill still list `error` as present only on failure.
+  logs a successful `mordred_mail_sync` as "returned error" because the closed
+  result always carries the key `error` (`null` on success). Omitting the key
+  was tried and reverted: `tests/extension/test_mail_sync_tool.py` pins the
+  closed field set `RESULT_FIELDS | {"note"}`, which the chat prompt, the skill
+  and the audit rely on. The log line is cosmetic (the model reads the counts);
+  if it ever matters, change the closed schema deliberately in SPEC first.
 
 Later (not scheduled):
 

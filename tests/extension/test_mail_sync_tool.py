@@ -171,8 +171,7 @@ def test_the_result_is_counts_only(
     _use_env(monkeypatch, env, options)
     result = _call({"max_messages": 50})
     assert set(result) == RESULT_FIELDS | {"note"}
-    assert (result["inserted"], result["gmail"], result["partial"]) == (3, True, False)
-    assert "error" not in result  # Hermes flags any `error` key as a failed tool call
+    assert (result["inserted"], result["error"], result["gmail"], result["partial"]) == (3, None, True, False)
     [opts] = options
     assert (opts.max_messages, opts.budget_s, opts.via, opts.dry_run) == (50, 60.0, "tool", False)
     text = json.dumps(result) + caplog.text + json.dumps(audits)
