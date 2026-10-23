@@ -173,10 +173,12 @@ class TeeSecretStore:
 
     # -- paths ----------------------------------------------------------------
 
-    def _dir(self) -> Path:
-        from .store import _ensure_private_dir, telegram_dir
+    def _dir(self, *, create: bool = True) -> Path:
+        """The archive directory; created (0700, git-ignored) only for writes, never by a read."""
+        from .store import _ensure_private_dir, _private_dir_for_read, telegram_dir
 
-        return _ensure_private_dir(self._root if self._root is not None else telegram_dir())
+        path = self._root if self._root is not None else telegram_dir()
+        return _ensure_private_dir(path) if create else _private_dir_for_read(path)
 
     @property
     def sealed_path(self) -> Path:
@@ -185,6 +187,9 @@ class TeeSecretStore:
     @property
     def meta_path(self) -> Path:
         return self._dir() / _META_NAME
+
+    def _read_path(self, name: str) -> Path:
+        return self._dir(create=False) / name
 
     # -- Enclave key ----------------------------------------------------------
 
@@ -242,7 +247,7 @@ class TeeSecretStore:
     # -- public API -------------------------------------------------------------
 
     def _read_sealed(self) -> bytes | None:
-        path = self.sealed_path
+        path = self._read_path(_SEALED_NAME)
         if path.is_symlink():
             raise TelegramSecretsError("secrets_corrupt")
         try:
@@ -318,7 +323,7 @@ class TeeSecretStore:
 
     def _read_meta(self) -> dict[str, Any] | None:
         try:
-            meta = json.loads(self.meta_path.read_text("utf-8"))
+            meta = json.loads(self._read_path(_META_NAME).read_text("utf-8"))
         except (FileNotFoundError, ValueError):
             return None
         return meta if isinstance(meta, dict) else None
@@ -337,9 +342,9 @@ class TeeSecretStore:
         atomic_write(self.meta_path, json.dumps(meta).encode("utf-8"))
 
     def flags(self) -> dict[str, Any] | None:
-        """Non-secret status flags, or ``None`` when not configured. No Enclave."""
-        path = self.meta_path
-        if path.is_symlink() or not self.sealed_path.exists():
+        """Non-secret status flags, or ``None`` when not configured. No Enclave, and nothing is created."""
+        path = self._read_path(_META_NAME)
+        if path.is_symlink() or not self._read_path(_SEALED_NAME).exists():
             return None
         try:
             meta = json.loads(path.read_text("utf-8"))
