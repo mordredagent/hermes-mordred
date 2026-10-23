@@ -904,6 +904,8 @@ class _CommandGuard:
             return exc
         if self._link.cancelled():
             return ImapStopped("cancelled")
+        if not isinstance(exc, ImapError):
+            _log.warning("mordred imap: connection setup interrupted (%s)", _diag(exc))
         return exc if isinstance(exc, ImapError) else ImapError("imap_unreachable")
 
     def shutdown(self) -> None:
@@ -1018,10 +1020,12 @@ def _mapped_failure(exc: BaseException) -> ImapError | None:
     if isinstance(exc, ImapProtocolError):
         return ImapError("imap_protocol")
     if isinstance(exc, imaplib.IMAP4.abort):
+        _log.warning("mordred imap: connection aborted during a command (%s)", _diag(exc))
         return ImapError("imap_unreachable")
     if isinstance(exc, imaplib.IMAP4.error):
         return ImapError("imap_protocol")
     if isinstance(exc, OSError | EOFError):
+        _log.warning("mordred imap: socket failure during a command (%s)", _diag(exc))
         return ImapError("imap_unreachable")
     if isinstance(exc, ValueError | TypeError | UnicodeError):
         return ImapError("imap_protocol")
@@ -1071,7 +1075,8 @@ class ImapSession:
         """``LOGIN``; the failure is returned, so no frame holding the password is ever in a traceback."""
         try:
             self._conn.login(user, password)
-        except imaplib.IMAP4.abort:
+        except imaplib.IMAP4.abort as exc:
+            _log.warning("mordred imap: connection aborted during LOGIN (%s)", _diag(exc))
             return ImapError("imap_unreachable")
         except imaplib.IMAP4.error as exc:
             return ImapError("imap_auth_failed", hint=_login_hint(exc))
@@ -1260,6 +1265,7 @@ def connect(
     ``imap_unreachable``, a cancellation ``ImapStopped("cancelled")``.
     """
     if not valid_host(host) or port != IMAPS_PORT:
+        _log.warning("mordred imap: refused host or port (port %s)", port if isinstance(port, int) else "?")
         raise ImapError("imap_unreachable")
     bounds = limits if limits is not None else IoLimits.for_budget(SESSION_BUDGET_S)
 
@@ -1275,6 +1281,8 @@ def connect(
         )
     except ImapStopped as stopped:
         # A cancellation stays one; the deadline passing before the session was open is ``imap_unreachable``.
+        if stopped.reason != "cancelled":
+            _log.warning("mordred imap: connection setup stopped (%s)", stopped.reason)
         failure = stopped if stopped.reason == "cancelled" else ImapError("imap_unreachable")
     except ImapError as exc:
         failure = exc
