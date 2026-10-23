@@ -678,7 +678,9 @@ def open_route_socket(
     except EgressError:
         raise ImapError("routing_unavailable") from None
     if route.http_proxy_url is not None:
+        _log.warning("mordred imap: egress route is an HTTP proxy, which IMAP cannot use")
         raise ImapError("egress_unsupported")
+    _log.info("mordred imap: egress route %s", "socks5" if route.socks_proxy_url is not None else "direct")
     try:
         if route.socks_proxy_url is not None:
             url = str(route.socks_proxy_url)
