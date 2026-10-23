@@ -248,9 +248,18 @@ def _setup_values(args: argparse.Namespace) -> tuple[str, str, str, list[str]]:
     return account, host, address, _extra_addresses()
 
 
+#: What an interrupted or refused setup has left, by :meth:`MailSetupFlows.seal_stage`.
+_STAGE_LINES: Final = {
+    "pre_seal": "nothing was stored",
+    "sealed": "the credentials were stored: run `hermes-mordred mail status`",
+    "cleanup_failed": "cleanup failed: run `hermes-mordred mail forget --yes`",
+}
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     from ..imports.mail.setup_flow import MailSetupError, MailSetupFlows
 
+    flows: MailSetupFlows | None = None
     try:
         account, host, address, extra = _setup_values(args)
         password = _password(host)
@@ -279,9 +288,13 @@ def cmd_setup(args: argparse.Namespace) -> int:
         if exc.code in _INPUT_CODES:
             _term.emit_error(f"mail setup input is not valid ({exc.code})")
             return 2
-        return _refused(exc.code, exc.hint)
+        status = _refused(exc.code, exc.hint)
+        if flows is not None and flows.seal_stage() == "cleanup_failed":
+            _term.emit_error(_STAGE_LINES["cleanup_failed"])
+        return status
     except (EOFError, KeyboardInterrupt):
-        _term.emit_error("mail setup cancelled; nothing was stored")
+        stage = "pre_seal" if flows is None else flows.seal_stage()
+        _term.emit_error(f"mail setup cancelled; {_STAGE_LINES[stage]}")
         return 1
     path = "Gmail (All Mail with labels)" if flow.gmail else "IMAP (" + ", ".join(sorted(flow.roles)) + ")"
     print(f"Mail account '{flow.account}' is set up: {path}. The credentials are sealed by the Secure Enclave.")

@@ -245,6 +245,67 @@ def test_setup_asks_which_folder_is_all_mail_when_gmail_marks_none(
     assert setup_env["store"].load().mailboxes == {"all": "Alles"}
 
 
+def _interrupt(*_args: Any, **_kwargs: Any) -> Any:
+    raise KeyboardInterrupt
+
+
+def test_an_interrupted_seal_that_was_cleaned_up_stored_nothing(
+    setup_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mordred_hermes.imports.mail import setup_flow
+
+    use_server(monkeypatch, gmail_server())
+    monkeypatch.setattr(setup_flow, "new_setup_generation", _interrupt)  # Ctrl-C after the credentials were written
+    setup_env["answers"].extend(["owner@example.com", ""])
+    code, _out, err = run(["mail", "setup", "--imap-host", "imap.example.com"], capsys)
+    assert code == 1 and "mail setup cancelled; nothing was stored" in err
+    assert not setup_env["store"].residue()
+
+
+def test_an_interrupted_seal_whose_cleanup_failed_says_so(
+    setup_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mordred_hermes.imports.mail import setup_flow
+
+    use_server(monkeypatch, gmail_server())
+    monkeypatch.setattr(setup_flow, "new_setup_generation", _interrupt)
+    monkeypatch.setattr(setup_env["store"], "forget", lambda: (_ for _ in ()).throw(OSError("busy")))
+    setup_env["answers"].extend(["owner@example.com", ""])
+    code, _out, err = run(["mail", "setup", "--imap-host", "imap.example.com"], capsys)
+    assert code == 1 and "cleanup failed: run `hermes-mordred mail forget --yes`" in err
+    assert "nothing was stored" not in err and setup_env["store"].residue()
+
+
+def test_an_interruption_after_the_seal_says_the_credentials_were_stored(
+    setup_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mordred_hermes.imports.mail.setup_flow import MailSetupFlows
+
+    use_server(monkeypatch, gmail_server())
+    monkeypatch.setattr(MailSetupFlows, "_release", _interrupt)  # Ctrl-C right after a successful seal
+    setup_env["answers"].extend(["owner@example.com", ""])
+    code, _out, err = run(["mail", "setup", "--imap-host", "imap.example.com"], capsys)
+    assert code == 1 and "the credentials were stored: run `hermes-mordred mail status`" in err
+    assert setup_env["store"].flags() is not None
+
+
+def test_a_refused_seal_whose_cleanup_failed_says_so(
+    setup_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mordred_hermes.imports.mail import setup_flow
+
+    def unwritable(_home: Path) -> str:
+        raise OSError("read-only file system")
+
+    use_server(monkeypatch, gmail_server())
+    monkeypatch.setattr(setup_flow, "new_setup_generation", unwritable)
+    monkeypatch.setattr(setup_env["store"], "forget", lambda: (_ for _ in ()).throw(OSError("busy")))
+    setup_env["answers"].extend(["owner@example.com", ""])
+    code, _out, err = run(["mail", "setup", "--imap-host", "imap.example.com"], capsys)
+    assert code == 1 and "mail refused (store_path_unsafe)" in err
+    assert "cleanup failed: run `hermes-mordred mail forget --yes`" in err
+
+
 def _spy_flows(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     """Record the CLI's calls into the shared setup flow (the library the Desktop page drives too)."""
     from mordred_hermes.imports.mail.setup_flow import MailSetupFlows

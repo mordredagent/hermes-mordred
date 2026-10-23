@@ -207,7 +207,7 @@ def _files(folder: Path) -> list[str]:
     return sorted(path.name for path in folder.iterdir()) if folder.exists() else []
 
 
-@pytest.mark.parametrize("fault", ["flags_write", "flags_rename", "directory_sync"])
+@pytest.mark.parametrize("fault", ["sealed_write", "sealed_rename", "flags_write", "flags_rename", "directory_sync"])
 def test_a_failure_between_the_two_writes_leaves_nothing(
     tmp_path: Path, enclave: FakeEnclave, fault: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -221,12 +221,16 @@ def test_a_failure_between_the_two_writes_leaves_nothing(
     def atomic_write(path: Path, data: bytes) -> None:
         if path.name.startswith(".credentials."):
             writes.append(path)
+            if fault == "sealed_write" and len(writes) == 1:
+                raise OSError("disk full")  # nothing is staged yet
             if fault == "flags_write" and len(writes) == 2:
                 raise OSError("disk full")  # the sealed file is staged, the flags are not
         real_write(path, data)
 
     def replace(src: Any, dst: Any) -> None:
         if fault == "flags_rename" and Path(dst) == store.meta_path:
+            raise OSError("rename failed")
+        if fault == "sealed_rename" and Path(dst) == store.sealed_path:
             raise OSError("rename failed")
         real_replace(src, dst)
 
@@ -241,7 +245,8 @@ def test_a_failure_between_the_two_writes_leaves_nothing(
         store.store(gmail_creds())
     assert [name for name in _files(tmp_path / "mail") if "credentials" in name] == []  # nor a staged file
     assert store.flags() is None and not store.residue()
-    assert [path.name.split(".")[2] for path in writes] == ["sealed", "meta"]  # both staged before any rename
+    expected = ["sealed"] if fault == "sealed_write" else ["sealed", "meta"]  # both staged before any rename
+    assert [path.name.split(".")[2] for path in writes] == expected
 
 
 def test_store_writes_through_staging_names_in_order(
@@ -373,3 +378,54 @@ def test_an_unavailable_enclave_is_tee_unavailable(tmp_path: Path, enclave: Fake
     with pytest.raises(MailSecretsError) as raised:
         sealed_store(tmp_path / "mail", enclave).ensure_key()
     assert raised.value.code == "tee_unavailable"
+
+
+def test_a_cleanup_that_fails_too_leaves_the_residue_state(
+    tmp_path: Path, enclave: FakeEnclave, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = sealed_store(tmp_path / "mail", enclave)
+    store.ensure_key()
+    real_replace, real_unlink = os.replace, Path.unlink
+
+    def replace(src: Any, dst: Any) -> None:
+        if Path(dst) == store.meta_path:
+            raise OSError("rename failed")
+        real_replace(src, dst)
+
+    def unlink(path: Path, missing_ok: bool = False) -> None:
+        if path == store.sealed_path:
+            raise PermissionError("cannot remove")
+        real_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(os, "replace", replace)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    with pytest.raises(OSError, match="rename failed"):  # the original failure, not the cleanup's
+        store.store(gmail_creds())
+    monkeypatch.undo()
+    with pytest.raises(MailSecretsError) as raised:
+        store.flags()
+    assert raised.value.code == "credentials_left" and store.residue()
+    assert store.forget() is True
+    assert [name for name in _files(tmp_path / "mail") if "credentials" in name] == []
+
+
+def test_a_key_whose_policy_cannot_be_recorded_is_not_left_behind(
+    tmp_path: Path, enclave: FakeEnclave, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mordred_hermes.keyvault import _storage
+
+    store = sealed_store(tmp_path / "mail", enclave)
+    real_write = _storage.atomic_write
+
+    def atomic_write(path: Path, data: bytes) -> None:
+        if path.name == "enclave-key.json":
+            raise OSError("disk full")
+        real_write(path, data)
+
+    monkeypatch.setattr(_storage, "atomic_write", atomic_write)
+    for replace in (False, True):
+        with pytest.raises(MailSecretsError) as raised:
+            store.ensure_key(require_presence=True, replace=replace)
+        assert raised.value.code == "store_path_unsafe" and enclave.keys == {}
+    monkeypatch.undo()
+    assert store.ensure_key(require_presence=True) is True and KEY_ID in enclave.keys

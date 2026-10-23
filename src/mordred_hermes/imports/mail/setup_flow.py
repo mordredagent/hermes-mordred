@@ -28,10 +28,13 @@ forget or another setup holds it), so admission and sealing are one decision:
      folder, sealed at once;
    - another server without one: ``question == "sent"`` (choosing none is fine).
 
-A flow waiting for the owner's choice lives in this process's memory only, one at
-a time (a second ``start`` is ``mail_setup_busy``; ``cancel`` frees it), for
-:data:`FLOW_TTL_SECONDS`. The address and the app password are held by a
-provisional record the registry alone references; :class:`MailCredentials` is
+A setup holds a slot of this process from the moment ``start`` reserves it (before
+the probe), one at a time (a second ``start`` is ``mail_setup_busy``; ``cancel``
+frees it); a flow waiting for the owner's choice keeps it for
+:data:`FLOW_TTL_SECONDS`. ``cancel``/``cancel_all`` reach a setup that is still
+probing or sealing: it ends with ``mail_setup_cancelled`` and seals nothing. The
+address and the app password are held by a provisional record the registry alone
+references; :class:`MailCredentials` is
 built only from the choice, and every reference is dropped on finish, cancel and
 expiry. Expired flows are reaped on every call and by :meth:`MailSetupFlows.reap`
 (the Desktop backend calls it periodically, and :meth:`~MailSetupFlows.cancel_all`
@@ -45,9 +48,11 @@ order: the flow has not expired; no credentials were sealed meanwhile (a termina
 flow of another process that waited across it goes stale too.
 
 Nothing is written before the seal and a failed seal removes what it wrote, so a
-refusal, a cancel or an expiry leaves no ``credentials.*`` file. Failures are
+refusal, a cancel or an expiry leaves no ``credentials.*`` file; :meth:`MailSetupFlows.seal_stage`
+tells a caller interrupted mid-way whether anything was stored. Failures are
 :class:`MailSetupError` codes (:data:`SETUP_ERROR_CODES`) with an optional
-:data:`~.imap.IMAP_HINTS` member. Nothing here logs, and no ``repr`` shows an
+:data:`~.imap.IMAP_HINTS` member, raised with no cause, context or inner
+traceback (:func:`~.imap.sever_chain`), so no server text rides along. Nothing here logs, and no ``repr`` shows an
 address, a password, a host, a flow id or a folder name.
 """
 
@@ -62,7 +67,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal, NoReturn, Protocol
 
-from .imap import IMAP_HINTS, IMAPS_PORT, ImapError, ImapStopped
+from .imap import IMAP_HINTS, IMAPS_PORT, ImapError, ImapStopped, sever_chain
 from .imap import valid_host as _dns_name
 from .imap_sync import FetchStop, fetch_lock
 from .owner import own_address
@@ -123,6 +128,7 @@ SETUP_ERROR_CODES: Final = frozenset(
         "mail_setup_flow_expired",
         "mail_setup_busy",
         "mail_setup_stale",
+        "mail_setup_cancelled",
         "invalid_selection",
         "sync_in_progress",
         "store_path_unsafe",
@@ -155,6 +161,8 @@ _LOCK_CODES: Final = frozenset({"sync_in_progress", "store_path_unsafe"})
 SetupStep = Literal["folders", "done"]
 #: What a ``folders`` step asks: which folder is All Mail (Gmail), or which is the sent folder (others).
 SetupQuestion = Literal["all_mail", "sent"]
+#: How far a seal got: nothing stored, credentials stored, or a failed seal whose files could not be removed.
+SealStage = Literal["pre_seal", "sealed", "cleanup_failed"]
 Connect = Callable[[str, int], "ImapSession"]
 WriterLock = Callable[[Path], contextlib.AbstractContextManager[None]]
 
@@ -250,6 +258,23 @@ class _Entry:
 
     def __repr__(self) -> str:
         return f"_Entry({self.flow!r})"
+
+
+@dataclass(eq=False)
+class _Slot:
+    """One setup of this process, from the reservation in ``start`` to its finish, cancel or expiry."""
+
+    flow_id: str
+    cancelled: bool = False
+    entry: _Entry | None = None  # set while the flow waits for the owner's choice
+
+    def end(self) -> None:
+        """No longer this process's business: a running setup stops, the password is dropped."""
+        self.cancelled = True
+        self.entry = None
+
+    def __repr__(self) -> str:
+        return f"_Slot(pending={self.entry is not None}, cancelled={self.cancelled})"
 
 
 # --------------------------------------------------------------------------- #
@@ -428,7 +453,17 @@ def _default_home() -> Path:
 
 
 class MailSetupFlows:
-    """The mail setups of this process: in memory only, at most :data:`MAX_PENDING_FLOWS`, each with a TTL."""
+    """The mail setups of this process: in memory only, at most :data:`MAX_PENDING_FLOWS`, each with a TTL.
+
+    Every setup holds a slot from the moment ``start`` reserves it (before the
+    probe) until it is finished, cancelled or expired, so :meth:`cancel_all`
+    reaches a setup that is still probing. A slot's ``cancelled`` flag is checked
+    under the registry mutex right before the setup becomes pending and while it
+    seals (the seal itself runs under that mutex, so a ``cancel`` either stops it
+    or returns after it): a cancelled setup ends with ``mail_setup_cancelled``
+    and seals nothing. Every :class:`MailSetupError` leaving ``start`` and
+    ``finish`` is :func:`~.imap.sever_chain`-ed.
+    """
 
     def __init__(
         self,
@@ -444,13 +479,13 @@ class MailSetupFlows:
         self._lock = lock
         self._home = home
         self._clock = clock
-        self._entries: dict[str, _Entry] = {}
-        self._starting = 0
+        self._slots: dict[str, _Slot] = {}
         self._guard = threading.Lock()
+        self._stage = threading.local()
 
     def __repr__(self) -> str:
         with self._guard:
-            return f"MailSetupFlows(pending={len(self._entries)})"
+            return f"MailSetupFlows(pending={sum(slot.entry is not None for slot in self._slots.values())})"
 
     # -- steps ----------------------------------------------------------------------------------
 
@@ -465,33 +500,98 @@ class MailSetupFlows:
         presence: bool = True,
     ) -> MailSetupFlow:
         """Validate; under the writer lock: admission, a fresh key, one read-only login, then a seal or a question."""
+        failure: MailSetupError
+        try:
+            return self._start(_validated(address, imap_host, account, extra_addresses, app_password, presence))
+        except MailSetupError as exc:
+            failure = exc
+        raise sever_chain(failure)
+
+    def finish(self, flow_id: str, *, selection: str | None) -> MailSetupFlow:
+        """Seal the owner's choice under the writer lock (``None``: no sent folder; never for All Mail)."""
+        failure: MailSetupError
+        try:
+            return self._finish(flow_id, selection)
+        except MailSetupError as exc:
+            failure = exc
+        raise sever_chain(failure)
+
+    def get(self, flow_id: str) -> MailSetupFlow:
+        """A flow waiting for the owner's choice; ``mail_setup_flow_expired`` when there is none."""
+        entry = self._pending(flow_id).entry
+        assert entry is not None  # _pending returns pending slots only
+        return entry.flow
+
+    def cancel(self, flow_id: str) -> None:
+        """Forget a setup and the password it holds; a setup still running ends ``mail_setup_cancelled``."""
         self.reap()
-        request = _validated(address, imap_host, account, extra_addresses, app_password, presence)
-        with self._slot():
+        if isinstance(flow_id, str):
+            with self._guard:
+                slot = self._slots.pop(flow_id, None)
+                if slot is not None:
+                    slot.end()
+
+    def cancel_all(self) -> None:
+        """Forget every setup, pending or still probing (the mailbox was removed, or the backend stops)."""
+        with self._guard:
+            for slot in self._slots.values():
+                slot.end()
+            self._slots.clear()
+
+    def reap(self) -> None:
+        """Drop every flow past its TTL (each call does this; the Desktop backend also calls it periodically)."""
+        now = self._clock()
+        with self._guard:
+            for flow_id, slot in list(self._slots.items()):
+                if slot.entry is not None and now - slot.entry.flow.created > FLOW_TTL_SECONDS:
+                    del self._slots[flow_id]
+                    slot.end()
+
+    def seal_stage(self) -> SealStage:
+        """How far the calling thread's last ``start`` or ``finish`` got with sealing (for its message).
+
+        ``pre_seal``: nothing is stored; ``sealed``: the credentials are stored;
+        ``cleanup_failed``: a seal failed and what it wrote could not be removed.
+        """
+        stage: SealStage = getattr(self._stage, "value", "pre_seal")
+        return stage
+
+    # -- the two halves -------------------------------------------------------------------------
+
+    def _start(self, request: _Request) -> MailSetupFlow:
+        self._stage.value = "pre_seal"
+        self.reap()
+        slot = self._reserve()
+        pending = False
+        try:
             with self._locked():
                 self._refuse_if_configured()
                 generation = self._generation()
                 policy = self._fresh_key(request.presence)  # before the server is contacted
                 gmail, entries = self._probe(request)
-                flow, question, mailboxes = self._plan(request, gmail, entries, policy)
+                flow, question, mailboxes = self._plan(slot.flow_id, request, gmail, entries, policy)
                 if mailboxes is not None:
                     creds = _credentials(request, mailboxes, gmail=gmail)
-                    self._seal(creds, policy)
+                    self._seal_unless_cancelled(slot, creds, policy)
                     flow.roles = creds.roles
             if question is not None:
                 inbox, choices = question
                 with self._guard:
-                    self._entries[flow.flow_id] = _Entry(
-                        flow, _Provisional(request, inbox, choices, generation, policy)
-                    )
-        return flow
+                    if slot.cancelled:
+                        raise MailSetupError("mail_setup_cancelled")
+                    slot.entry = _Entry(flow, _Provisional(request, inbox, choices, generation, policy))
+                    pending = True
+            return flow
+        finally:
+            if not pending:
+                self._release(slot)
 
-    def finish(self, flow_id: str, *, selection: str | None) -> MailSetupFlow:
-        """Seal the owner's choice under the writer lock (``None``: no sent folder; never for All Mail)."""
-        entry = self._entry(flow_id)
+    def _finish(self, flow_id: str, selection: object) -> MailSetupFlow:
+        self._stage.value = "pre_seal"
+        entry = self._pending_entry(flow_id)
         creds = _credentials(entry.provisional.request, _selected(entry, selection), gmail=entry.flow.gmail)
         with self._locked():
-            entry = self._entry(flow_id)  # still pending: not cancelled or expired while waiting for the lock
+            slot = self._pending(flow_id)  # still pending: not cancelled or expired while waiting for the lock
             provisional = entry.provisional
             if self._configured():
                 self._refuse(flow_id, "mail_already_configured")  # a setup elsewhere sealed first: it wins
@@ -499,44 +599,33 @@ class MailSetupFlows:
                 self._refuse(flow_id, "mail_setup_stale")  # set up or forgotten since this flow started
             if self._key_policy(provisional.policy) != provisional.policy:
                 self._refuse(flow_id, "touch_id_policy_mismatch")  # another setup replaced the key meanwhile
-            self._seal(creds, provisional.policy)
-        self._drop(flow_id)
+            self._seal_unless_cancelled(slot, creds, provisional.policy)
+        self._release(slot)
         flow = entry.flow
         flow.step, flow.question, flow.folders, flow.roles = "done", None, (), creds.roles
         return flow
-
-    def get(self, flow_id: str) -> MailSetupFlow:
-        """A flow waiting for the owner's choice; ``mail_setup_flow_expired`` when there is none."""
-        return self._entry(flow_id).flow
-
-    def cancel(self, flow_id: str) -> None:
-        """Forget a pending flow and the password it holds (an unknown id is fine)."""
-        self.reap()
-        self._drop(flow_id)
-
-    def cancel_all(self) -> None:
-        """Forget every pending flow (the mailbox was removed)."""
-        with self._guard:
-            self._entries.clear()
 
     # -- the server -----------------------------------------------------------------------------
 
     def _probe(self, request: _Request) -> tuple[bool, list[ListEntry]]:
         """One read-only session: ``LOGIN``, ``LIST``, ``LOGOUT``; the Gmail capability and the folders."""
+        failure: MailSetupError
         try:
             session = self._connect(request.host, IMAPS_PORT)
         except ImapError as exc:
-            raise _imap_refusal(exc) from None
-        try:
-            session.login(request.address, request.password)
-            return session.gmail, session.list_mailboxes()
-        except ImapError as exc:
-            raise _imap_refusal(exc) from None
-        finally:
-            session.logout()
+            failure = _imap_refusal(exc)
+        else:
+            try:
+                session.login(request.address, request.password)
+                return session.gmail, session.list_mailboxes()
+            except ImapError as exc:
+                failure = _imap_refusal(exc)
+            finally:
+                session.logout()
+        raise sever_chain(failure)
 
     def _plan(
-        self, request: _Request, gmail: bool, entries: Sequence[ListEntry], policy: bool
+        self, flow_id: str, request: _Request, gmail: bool, entries: Sequence[ListEntry], policy: bool
     ) -> tuple[MailSetupFlow, tuple[str, frozenset[str]] | None, dict[str, str] | None]:
         """The flow, and either the question's (inbox, choices) or the mailboxes to seal now."""
         folders = tuple(SetupFolder(entry.name, display_name(entry.display)) for entry in entries if entry.selectable)
@@ -544,17 +633,19 @@ class MailSetupFlows:
         if gmail:
             chosen = _all_mail(entries)
             if chosen is not None:
-                return self._flow(request, policy, gmail=True), None, {"all": chosen}
+                return self._flow(flow_id, request, policy, gmail=True), None, {"all": chosen}
             if not folders:
                 raise MailSetupError("imap_protocol")
-            return self._flow(request, policy, gmail=True, question="all_mail", folders=folders), choices, None
+            flow = self._flow(flow_id, request, policy, gmail=True, question="all_mail", folders=folders)
+            return flow, choices, None
         sent = _special(entries, "\\sent")
         if sent is None and folders:
-            return self._flow(request, policy, gmail=False, question="sent", folders=folders), choices, None
-        return self._flow(request, policy, gmail=False), None, _mailboxes(choices[0], sent)
+            return self._flow(flow_id, request, policy, gmail=False, question="sent", folders=folders), choices, None
+        return self._flow(flow_id, request, policy, gmail=False), None, _mailboxes(choices[0], sent)
 
     def _flow(
         self,
+        flow_id: str,
         request: _Request,
         policy: bool,
         *,
@@ -563,7 +654,7 @@ class MailSetupFlows:
         folders: tuple[SetupFolder, ...] = (),
     ) -> MailSetupFlow:
         return MailSetupFlow(
-            flow_id=_secrets.token_urlsafe(16),
+            flow_id=flow_id,
             account=request.account,
             presence=policy,
             gmail=gmail,
@@ -608,23 +699,36 @@ class MailSetupFlows:
             raise MailSetupError("store_path_unsafe") from None
 
     def _refuse(self, flow_id: str, code: str) -> NoReturn:
-        self._drop(flow_id)
+        self.cancel(flow_id)
         raise MailSetupError(code)
+
+    def _seal_unless_cancelled(self, slot: _Slot, creds: MailCredentials, presence: bool) -> None:
+        """Seal while holding the registry mutex: a cancel either stops the seal or returns after it."""
+        with self._guard:
+            if slot.cancelled:
+                raise MailSetupError("mail_setup_cancelled")
+            self._seal(creds, presence)
 
     def _seal(self, creds: MailCredentials, presence: bool) -> None:
         """Seal under the lock, then rewrite the setup generation; a failure removes what it wrote.
 
         The generation changes only with a seal that succeeded, so a ``finish``
         whose seal failed can be retried; flows that waited across a successful
-        seal, in any process, go stale.
+        seal, in any process, go stale. The calling thread's :meth:`seal_stage`
+        follows each step.
         """
+        stage = self._stage
         try:
             self._secret_store.store(creds, require_presence=presence)
+            stage.value = "sealed"
             new_setup_generation(self._home())
         except BaseException as exc:
+            stage.value = "cleanup_failed"
             with contextlib.suppress(Exception):
                 if self._secret_store.residue():
                     self._secret_store.forget()
+                if not self._secret_store.residue():
+                    stage.value = "pre_seal"
             if isinstance(exc, MailSecretsError | OSError):
                 raise MailSetupError(_secrets_code(exc)) from None
             raise
@@ -639,35 +743,31 @@ class MailSetupFlows:
 
     # -- the registry ---------------------------------------------------------------------------
 
-    @contextlib.contextmanager
-    def _slot(self) -> Iterator[None]:
-        """One of the :data:`MAX_PENDING_FLOWS` places while a start runs (refused before the server)."""
+    def _reserve(self) -> _Slot:
+        """A slot for a starting setup, registered before the probe (refused before the server when full)."""
         with self._guard:
-            if len(self._entries) + self._starting >= MAX_PENDING_FLOWS:
+            if len(self._slots) >= MAX_PENDING_FLOWS:
                 raise MailSetupError("mail_setup_busy")
-            self._starting += 1
-        try:
-            yield
-        finally:
-            with self._guard:
-                self._starting -= 1
+            slot = _Slot(_secrets.token_urlsafe(16))
+            self._slots[slot.flow_id] = slot
+        return slot
 
-    def _entry(self, flow_id: object) -> _Entry:
+    def _release(self, slot: _Slot) -> None:
+        with self._guard:
+            if self._slots.get(slot.flow_id) is slot:
+                del self._slots[slot.flow_id]
+            slot.end()
+
+    def _pending(self, flow_id: object) -> _Slot:
         self.reap()
         with self._guard:
-            entry = self._entries.get(flow_id) if isinstance(flow_id, str) else None
-        if entry is None:
+            slot = self._slots.get(flow_id) if isinstance(flow_id, str) else None
+            if slot is None or slot.entry is None:
+                raise MailSetupError("mail_setup_flow_expired")
+        return slot
+
+    def _pending_entry(self, flow_id: object) -> _Entry:
+        entry = self._pending(flow_id).entry
+        if entry is None:  # cancelled between the two reads
             raise MailSetupError("mail_setup_flow_expired")
         return entry
-
-    def _drop(self, flow_id: object) -> None:
-        if isinstance(flow_id, str):
-            with self._guard:
-                self._entries.pop(flow_id, None)
-
-    def reap(self) -> None:
-        """Drop every flow past its TTL (each call does this; the Desktop backend also calls it periodically)."""
-        now = self._clock()
-        with self._guard:
-            for flow_id in [key for key, entry in self._entries.items() if now - entry.flow.created > FLOW_TTL_SECONDS]:
-                del self._entries[flow_id]

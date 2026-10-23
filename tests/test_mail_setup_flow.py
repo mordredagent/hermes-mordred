@@ -12,11 +12,11 @@ import contextlib
 import gc
 import logging
 import sys
+import threading
 import traceback
-import weakref
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -62,13 +62,16 @@ class Connector:
         self.server = server
         self.error = error
         self.calls: list[tuple[str, int]] = []
+        self.sessions: list[Any] = []
 
     def __call__(self, host: str, port: int) -> Any:
         self.calls.append((host, port))
         if self.error is not None:
             raise self.error
         assert self.server is not None
-        return self.server.session()
+        session = self.server.session()
+        self.sessions.append(session)
+        return session
 
 
 def make_flows(
@@ -303,7 +306,7 @@ def test_an_expired_flow_is_gone_after_the_next_call(call: str, secrets: MailSec
         flows.cancel("another id")
     else:
         start(flows)
-    assert flow.flow_id not in flows._entries
+    assert flow.flow_id not in flows._slots
     assert pending(flows) == (1 if call == "start" else 0)
 
 
@@ -361,24 +364,228 @@ def test_reap_expires_flows_while_nothing_else_happens(secrets: MailSecretStore,
     assert pending(flows) == 0 and credential_files(secrets) == []
 
 
+class TrackedPassword(str):
+    """The app password as an object of its own: its finaliser records when nothing holds it any more."""
+
+    released: ClassVar[list[str]] = []
+
+    def __del__(self) -> None:
+        TrackedPassword.released.append("released")
+
+
+def password_released() -> bool:
+    gc.collect()
+    return TrackedPassword.released == ["released"]
+
+
+@pytest.fixture
+def tracked() -> Iterator[None]:
+    TrackedPassword.released = []
+    yield
+    TrackedPassword.released = []
+
+
 @pytest.mark.parametrize("end", ["finish", "cancel", "cancel_all", "expiry"])
-def test_every_reference_to_the_password_is_dropped(end: str, secrets: MailSecretStore, home: Path) -> None:
+def test_the_password_object_is_released_when_a_flow_ends(
+    end: str, secrets: MailSecretStore, home: Path, tracked: None
+) -> None:
     clock = Clock()
     flows = make_flows(secrets, home, Connector(no_folder_server()), clock=clock)
-    flow = start(flows)
-    provisional = weakref.ref(flows._entries[flow.flow_id].provisional)
+    flow_id = start(flows, app_password=TrackedPassword(PASSWORD)).flow_id
+    assert not password_released()  # the pending flow holds it, and only the flow
     if end == "finish":
-        flows.finish(flow.flow_id, selection=None)
+        flows.finish(flow_id, selection=None)
     elif end == "cancel":
-        flows.cancel(flow.flow_id)
+        flows.cancel(flow_id)
     elif end == "cancel_all":
         flows.cancel_all()
     else:
         clock.now = setup_flow.FLOW_TTL_SECONDS + 1
-        flows.cancel("another id")
-    gc.collect()
-    assert provisional() is None  # the address and the password are unreachable
-    assert [value for value in vars(flow).values() if value in (PASSWORD, ADDRESS)] == []
+        flows.reap()
+    assert password_released()
+
+
+def test_the_password_object_is_released_after_a_failed_start(
+    secrets: MailSecretStore, home: Path, tracked: None
+) -> None:
+    flows = make_flows(secrets, home, Connector(no_folder_server(password="another")))
+    try:
+        start(flows, app_password=TrackedPassword(PASSWORD))
+    except MailSetupError as exc:
+        assert exc.code == "imap_auth_failed"
+    assert password_released() and pending(flows) == 0
+
+
+def test_a_failed_finish_keeps_the_password_only_until_the_flow_ends(
+    secrets: MailSecretStore, home: Path, monkeypatch: pytest.MonkeyPatch, tracked: None
+) -> None:
+    flows = make_flows(secrets, home, Connector(no_folder_server()))
+    flow_id = start(flows, app_password=TrackedPassword(PASSWORD)).flow_id
+
+    def refused(_value: Any, *, require_presence: bool = True) -> None:
+        raise MailSecretsError("tee_unavailable")
+
+    monkeypatch.setattr(secrets, "store", refused)
+    try:
+        flows.finish(flow_id, selection=None)
+    except MailSetupError as exc:
+        assert exc.code == "tee_unavailable"
+    assert not password_released()  # the flow is still pending: the owner may retry
+    flows.cancel(flow_id)
+    assert password_released()
+
+
+# --- cancellation races -------------------------------------------------------------------------------
+
+
+def run_in_thread(action: Any) -> tuple[threading.Thread, dict[str, Any]]:
+    outcome: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            outcome["flow"] = action()
+        except MailSetupError as exc:
+            outcome["code"] = exc.code
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    return worker, outcome
+
+
+@pytest.mark.parametrize("server", [gmail_server, no_folder_server])
+def test_cancel_all_reaches_a_setup_that_is_still_probing(server: Any, secrets: MailSecretStore, home: Path) -> None:
+    probing, go = threading.Event(), threading.Event()
+    fake = server()
+
+    def connect(_host: str, _port: int) -> Any:
+        probing.set()
+        assert go.wait(5)
+        return fake.session()
+
+    flows = make_flows(secrets, home, connect)
+    worker, outcome = run_in_thread(lambda: start(flows))
+    assert probing.wait(5)
+    flows.cancel_all()  # the Desktop page removed the mailbox, or the backend stops
+    go.set()
+    worker.join(5)
+    assert outcome == {"code": "mail_setup_cancelled"}
+    assert credential_files(secrets) == [] and pending(flows) == 0
+
+
+def test_a_cancel_during_finish_seals_nothing(
+    secrets: MailSecretStore, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flows = make_flows(secrets, home, Connector(no_folder_server()))
+    flow_id = start(flows).flow_id
+    checking, go = threading.Event(), threading.Event()
+    real_ensure_key = secrets.ensure_key
+
+    def ensure_key(*, require_presence: bool = True, replace: bool = False) -> bool | None:
+        if not replace:  # finish's re-check of the key policy
+            checking.set()
+            assert go.wait(5)
+        return real_ensure_key(require_presence=require_presence, replace=replace)
+
+    monkeypatch.setattr(secrets, "ensure_key", ensure_key)
+    worker, outcome = run_in_thread(lambda: flows.finish(flow_id, selection=None))
+    assert checking.wait(5)
+    flows.cancel(flow_id)
+    go.set()
+    worker.join(5)
+    assert outcome == {"code": "mail_setup_cancelled"} and credential_files(secrets) == []
+
+
+def test_a_cancel_during_the_seal_returns_after_it(
+    secrets: MailSecretStore, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flows = make_flows(secrets, home, Connector(no_folder_server()))
+    flow_id = start(flows).flow_id
+    sealing, go = threading.Event(), threading.Event()
+    real_store = secrets.store
+
+    def store(value: Any, *, require_presence: bool = True) -> None:
+        sealing.set()
+        assert go.wait(5)
+        real_store(value, require_presence=require_presence)
+
+    monkeypatch.setattr(secrets, "store", store)
+    worker, outcome = run_in_thread(lambda: flows.finish(flow_id, selection=None))
+    assert sealing.wait(5)
+    canceller = threading.Thread(target=flows.cancel, args=(flow_id,), daemon=True)
+    canceller.start()
+    canceller.join(0.2)
+    assert canceller.is_alive()  # the seal holds the registry: cancel waits for it
+    go.set()
+    worker.join(5)
+    canceller.join(5)
+    assert outcome["flow"].step == "done" and secrets.load() is not None
+
+
+# --- seal stage (what an interrupted caller may say) ---------------------------------------------------
+
+
+def test_the_seal_stage_follows_each_call(
+    secrets: MailSecretStore, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flows = make_flows(secrets, home, Connector(gmail_server(password="another")))
+    with pytest.raises(MailSetupError):
+        start(flows)
+    assert flows.seal_stage() == "pre_seal"
+
+    def unwritable(_home: Path) -> str:
+        raise OSError("read-only file system")
+
+    flows = make_flows(secrets, home, Connector(gmail_server()))
+    monkeypatch.setattr(setup_flow, "new_setup_generation", unwritable)
+    with pytest.raises(MailSetupError) as raised:
+        start(flows)
+    assert raised.value.code == "store_path_unsafe" and flows.seal_stage() == "pre_seal"  # cleaned up
+
+    def stuck() -> bool:
+        raise OSError("cannot unlink")
+
+    monkeypatch.setattr(secrets, "forget", stuck)
+    with pytest.raises(MailSetupError):
+        start(flows)
+    assert flows.seal_stage() == "cleanup_failed" and secrets.residue()
+    monkeypatch.undo()
+    secrets.forget()
+    start(make_flows(secrets, home, Connector(gmail_server())))
+    assert secrets.load() is not None
+
+
+def test_the_seal_stage_is_sealed_after_a_seal(secrets: MailSecretStore, home: Path) -> None:
+    flows = make_flows(secrets, home, Connector(gmail_server()))
+    start(flows)
+    assert flows.seal_stage() == "sealed"
+
+
+# --- no server text in what a failed setup raises ------------------------------------------------------
+
+CHAIN_CANARY = "CHAINCANARY-owner@example.com-Gesendet"
+
+
+@pytest.mark.parametrize(
+    ("knobs", "code"),
+    [
+        ({"replies": {"CAPABILITY": f"{{tag}} BAD {CHAIN_CANARY}"}}, "imap_protocol"),
+        ({"replies": {"LIST": f"{{tag}} BAD {CHAIN_CANARY}"}}, "imap_protocol"),
+        ({"replies": {"LIST": f"* BYE {CHAIN_CANARY}"}}, "imap_unreachable"),
+        ({"login_untagged": (f"* NO [ALERT] {CHAIN_CANARY}",), "password": "other"}, "imap_auth_failed"),
+    ],
+)
+def test_a_failed_setup_carries_no_server_text(
+    knobs: dict[str, Any], code: str, secrets: MailSecretStore, home: Path
+) -> None:
+    from tests._mail_sync_helpers import exception_chain, rendered_chain, retained_buffers
+
+    connect = Connector(no_folder_server(**knobs))
+    with pytest.raises(MailSetupError) as raised:
+        start(make_flows(secrets, home, connect))
+    error = raised.value
+    assert error.code == code and exception_chain(error) == [error]
+    assert CHAIN_CANARY not in rendered_chain(error)
+    assert [CHAIN_CANARY in retained_buffers(session) for session in connect.sessions] == [False]
 
 
 def test_a_key_deleted_meanwhile_is_recreated_with_the_recorded_policy(
@@ -791,7 +998,8 @@ def test_the_validators_normalise_what_the_cli_types() -> None:
 def test_repr_never_shows_a_secret_an_address_or_a_folder_name(secrets: MailSecretStore, home: Path) -> None:
     flows = make_flows(secrets, home, Connector(no_folder_server()))
     flow = start(flows, extra_addresses=["second@example.org"])
-    entry = flows._entries[flow.flow_id]
+    entry = flows._slots[flow.flow_id].entry
+    assert entry is not None
     shown = " ".join(
         [repr(flow), str(flow), repr(flows), str(flows), repr(flow.folders), repr(flow.folders[1]),
          repr(entry), repr(entry.provisional), repr(entry.provisional.request)]
@@ -809,7 +1017,7 @@ def test_mail_setup_error_is_a_closed_code_with_a_closed_hint() -> None:
         "mail_already_configured", "mail_setup_flow_expired", "sync_in_progress", "store_path_unsafe",
         "tee_unavailable", "tee_auth_cancelled", "imap_unreachable", "imap_auth_failed", "imap_protocol",
         "imap_command_refused", "routing_unavailable", "egress_unsupported", "touch_id_policy_mismatch",
-        "mail_setup_busy", "mail_setup_stale", "invalid_selection",
+        "mail_setup_busy", "mail_setup_stale", "mail_setup_cancelled", "invalid_selection",
     }  # fmt: skip
     assert expected == SETUP_ERROR_CODES
     error = MailSetupError("imap_auth_failed", hint="server_alert")
@@ -876,3 +1084,40 @@ def test_a_generation_that_cannot_be_written_undoes_the_seal(
     with pytest.raises(MailSetupError) as raised:
         start(make_flows(secrets, home, Connector(gmail_server())))
     assert raised.value.code == "store_path_unsafe" and credential_files(secrets) == []
+
+
+def test_a_generation_failure_after_a_key_replacement_leaves_nothing(
+    secrets: MailSecretStore, enclave: FakeEnclave, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secrets.ensure_key(require_presence=False)  # left by a failed unattended setup
+    left = enclave.keys[KEY_ID]
+
+    def unwritable(_home: Path) -> str:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(setup_flow, "new_setup_generation", unwritable)
+    flows = make_flows(secrets, home, Connector(gmail_server()))
+    with pytest.raises(MailSetupError) as raised:
+        start(flows, presence=True)
+    assert raised.value.code == "store_path_unsafe" and flows.seal_stage() == "pre_seal"
+    assert credential_files(secrets) == [] and KEY_ID not in enclave.keys and left is not None
+    assert not secrets.key_record_path.exists()
+
+
+def test_a_key_whose_policy_cannot_be_recorded_stops_the_setup(
+    secrets: MailSecretStore, enclave: FakeEnclave, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mordred_hermes.keyvault import _storage
+
+    real_write = _storage.atomic_write
+
+    def atomic_write(path: Path, data: bytes) -> None:
+        if path.name == "enclave-key.json":
+            raise OSError("disk full")
+        real_write(path, data)
+
+    monkeypatch.setattr(_storage, "atomic_write", atomic_write)
+    connect = Connector(gmail_server())
+    with pytest.raises(MailSetupError) as raised:
+        start(make_flows(secrets, home, connect))
+    assert raised.value.code == "store_path_unsafe" and connect.calls == [] and enclave.keys == {}

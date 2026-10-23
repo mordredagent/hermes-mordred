@@ -345,7 +345,13 @@ class MailSecretStore:
             public = wrap.generate_wrapping_key(KEY_ID, backend=backend, unattended=not require_presence)
         except WrapError:
             raise MailSecretsError("tee_unavailable") from None
-        self._record_policy(public, require_presence)
+        try:
+            self._record_policy(public, require_presence)
+        except (OSError, MailSecretsError):
+            # A key whose policy is not recorded would read as "unknown" forever: never leave one behind.
+            with contextlib.suppress(Exception):
+                wrap.delete_wrapping_key(KEY_ID, backend=backend)
+            raise MailSecretsError("store_path_unsafe") from None
         return require_presence
 
     def _record_policy(self, public: bytes, require_presence: bool) -> None:
