@@ -4017,10 +4017,13 @@ and revocable on its own:
   another part: a stop word (`and`, `then`, `please`, `with`, `in`, `on`,
   `as`, `is`, `expires` ...), `also`, `after`, `before`, `because`, `which`,
   words of time (`now`, `today`, `yesterday` ...), a verb that puts or sets
-  a value, a keyword (which names a value of its own) or a URL. `at`, `to`
-  and `for` may be a spoken symbol or digit ("hunter at fake dot pw"), so
-  they end the value only next to such a word, a word with a symbol in it
-  or nothing ("for the bank", "to log in", "PIN=4821 to Hunter2-x"). In a
+  a value, a word holding a keyword or the second word of a two-word one
+  (which names a value of its own: "DB_PASSWORD=xyz", "access token"), a
+  separator (`=`, `:`, `/`, `|`) or a URL. `at`, `to` and `for` may be a
+  spoken symbol or digit ("hunter at fake dot pw"), so they stay inside the
+  value only between two words of letters or digits neither of which starts
+  another part ("for the bank", "to log in" and "PIN=4821 to Hunter2-x" end
+  it). In a
   Japanese reading (a Japanese keyword or particle after the keyword) a
   joint may stand between two words: the particles for "to", "of" and "and"
   and the readings of digits, which speech recognition writes for a spoken

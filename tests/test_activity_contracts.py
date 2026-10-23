@@ -1395,6 +1395,27 @@ SPOKEN_KEPT = [
     pytest.param("パスワードは他人に教えないでください", id="ja-kanji-joint"),
 ]
 
+#: Typed phrasings next to a value: a keyword, the words of a two-word keyword, a separator and a link before a typed
+#: word each end a value of several words, so the structure around it stays.
+TYPED_NEIGHBOURS = [
+    pytest.param(
+        "pin code 0000 access token: abcdef", "pin code redacted access token: redacted", id="two-word-keyword"
+    ),
+    pytest.param("pin\u3000code 0000 as the password", "pin\u3000code redacted as the password", id="keyword-before"),
+    pytest.param("access\ttoken = abcdef as the password", "access\ttoken = redacted as the password", id="separator"),
+    pytest.param("the password for PIN=4821 = s3cr3t!", "the password for PIN=redacted = redacted!", id="equals"),
+    pytest.param("API key: abc123def DB_PASSWORD=xyz", "API key: redacted DB_PASSWORD=redacted", id="keyword-inside"),
+    pytest.param(
+        "set the password for the bank to Hunter2-x as the password",
+        "set the password for the bank to redacted as the password",
+        id="link-before-a-typed-word",
+    ),
+    pytest.param("the password is api key: abc123def", "the password is redacted key: redacted", id="api-key"),
+    pytest.param(
+        "demo-user / hunter 2 fake pw as the password", "demo-user / redacted as the password", id="slash-separator"
+    ),
+]
+
 #: A field or feature noun right after the keyword: never a value (:data:`contracts.SECRET_VALUE_STOP_WORDS`).
 FIELD_NOUNS = ["field", "box", "reset", "manager", "page", "form", "hint", "button", "settings", "policy", "link"]
 
@@ -1412,6 +1433,11 @@ def test_a_value_of_several_words_is_replaced_to_the_end_of_its_clause(text: str
     assert contracts.redact_text_secrets(text) == (expected, True)
     event = _task_start(text)
     assert event.text == expected and "text_secrets_redacted" in event.exclusions
+
+
+@pytest.mark.parametrize(("text", "expected"), TYPED_NEIGHBOURS)
+def test_typed_neighbours_end_a_value_of_several_words(text: str, expected: str) -> None:
+    assert contracts.redact_text_secrets(text) == (expected, True)
 
 
 @pytest.mark.parametrize("text", SPOKEN_KEPT)
