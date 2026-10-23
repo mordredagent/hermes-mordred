@@ -2515,14 +2515,27 @@ One component per PR, all targeting `dev`. Each PR runs
 
 ### D2: mail library
 
-- Component: `imports/mail` and its `wizard/mail_sync_cli.py` driver.
+- Component: `imports/mail`, its `wizard/mail_sync_cli.py` driver and the read-only
+  opener in `imports/store.py`.
+- Also (Codex design review F5, F6, F14, F19, F7): `secrets.py` writes temporary
+  files and renames in order, reports the residue state `credentials_left` from
+  `flags()`, and `ensure_key` returns the effective Touch ID policy that `store`
+  records (`touch_id_policy_mismatch`); `imap_sync.py` persists `last_attempt` and
+  `last_success`; `imap.py` parses the response code from `exc.args[0]` (bytes or
+  str) and keeps the hint off `FetchResult.as_dict()`; the setup flow takes the
+  writer lock for admission and `finish`, reaps on every call, allows at most 2
+  flows (`mail_setup_busy`), builds provisional credentials and validates the
+  selection (`invalid_selection`); `imports.store.open_import_store_readonly(home)`
+  (gate, `keyed_opener`, plain schema read, `store_uninitialised`, key check by
+  `HERMES_MEMORY_KEY` presence, no schema initialisation).
 - Files: `imap.py` (`ImapError.hint`, `IMAP_HINTS`), `setup_flow.py`
   (`MailSetupFlow`, `MailSetupFlows`, `MailSetupError`), `forget.py`
   (`forget()`), `cmd_setup` and `cmd_forget` driving them, hint printing in
   `mail fetch`.
 - Tests: `tests/test_mail_setup_flow.py` (new, on `tests/_fake_imap.py`),
   `tests/test_mail_imap_client.py`, `tests/test_mail_sync_cli.py`,
-  `tests/test_mail_secrets.py` and the complete `tests/test_mail_imap_sync.py`.
+  `tests/test_mail_secrets.py`, the complete `tests/test_mail_imap_sync.py` and the
+  store tests for the read-only opener.
 - Depends on: D1.
 
 ### D3: page framework
@@ -2540,10 +2553,19 @@ One component per PR, all targeting `dev`. Each PR runs
 
 - Component: `desktop` (api and page).
 - Files: `desktop/api.py` (`/status` v4, `/databases/*`, `/imports/status`,
-  `/mail/*`, `vault_anchor_stale`) and `plugin.js` (`DatabasesStep`, `MailStep`,
-  store-backed Telegram counts, new `MESSAGES` and `IMAP_HINTS`).
-- Tests: the complete `tests/extension/test_desktop_api.py` (security-sensitive) and
-  `tests/test_desktop_page.py`; the live checklist of the design is recorded in
+  `/mail/*`, `vault_anchor_stale` with `anchor_store`) and `plugin.js`
+  (`DatabasesStep`, `MailStep`, store-backed Telegram counts, new `MESSAGES` and
+  `IMAP_HINTS`). Also: `POST /vault/enable` (passphrase once), memory-only
+  `/memory/enable` with `vault_required`; `/databases/status` and the three-case
+  `/databases/encrypt`; the shared body-parsing helper (`invalid_body`) applied to
+  every secret-bearing route including the existing ones; the closed
+  `_mail_projection` and `_imports_projection`; `telegram_archive.legacy_dialogs`;
+  `cancel_all` on forget; a coalescing status refresh. It consumes
+  `open_import_store_readonly` from D2.
+- Tests: the complete `tests/extension/test_desktop_api.py` (security-sensitive;
+  adds `/imports/status`, `/databases/status`, `/vault/enable`, setup finish and
+  cancel, residue, restart with `job_not_found`, and malformed bodies posted to every
+  secret-bearing route) and `tests/test_desktop_page.py`; the live checklist of the design is recorded in
   [CI.md](CI.md#manual-live-device-validation-log).
 - Depends on: D2 and D3.
 
