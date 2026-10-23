@@ -204,6 +204,9 @@ def cancel_all_flows() -> None:
 @contextlib.asynccontextmanager
 async def lifespan(_app: Any) -> AsyncIterator[None]:
     """``api.router``'s lifespan, merged into the host app's: the reaper runs while the app does."""
+    from ..imports.mail import imap as _imap
+
+    _imap.set_diagnostic_sink(_log.warning)  # content-free connection diagnostics into Hermes's log
     task = asyncio.get_running_loop().create_task(reaper())
     try:
         yield
@@ -212,3 +215,4 @@ async def lifespan(_app: Any) -> AsyncIterator[None]:
         with contextlib.suppress(asyncio.CancelledError):
             await task
         cancel_all_flows()
+        _imap.set_diagnostic_sink(None)

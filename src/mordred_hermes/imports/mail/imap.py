@@ -79,7 +79,6 @@ from __future__ import annotations
 import contextlib
 import errno
 import imaplib
-import logging
 import os
 import re
 import selectors
@@ -140,6 +139,7 @@ HARD_GRACE_S: Final = 30.0
 LOGOUT_GRACE_S: Final = 5.0
 WATCHDOG_NAME: Final = "mordred-imap-watchdog"
 RESOLVER_NAME: Final = "mordred-imap-resolver"
+HANDSHAKE_NAME: Final = "mordred-imap-handshake"
 ROUTE_RESOLVER_NAME: Final = "mordred-imap-route"
 _WATCHDOG_SLACK_S: Final = 0.25
 #: How often a pending TCP connect looks at the cancellation and the deadline.
@@ -312,7 +312,24 @@ def tls_context() -> ssl.SSLContext:
 Remaining = Callable[[], float]
 
 
-_log = logging.getLogger(__name__)
+#: Receives content-free connection diagnostics (class names, errno, route kind, link state);
+#: ``None`` keeps the client silent. The mail package never imports ``logging`` (policy test):
+#: a host (the Desktop API, the CLI) installs a sink that writes where it wants.
+DiagnosticSink = Callable[[str], None]
+_DIAGNOSTIC_SINK: DiagnosticSink | None = None
+
+
+def set_diagnostic_sink(sink: DiagnosticSink | None) -> None:
+    """Install (or remove) the sink for content-free connection diagnostics."""
+    global _DIAGNOSTIC_SINK
+    _DIAGNOSTIC_SINK = sink
+
+
+def _emit(message: str) -> None:
+    sink = _DIAGNOSTIC_SINK
+    if sink is not None:
+        with contextlib.suppress(Exception):  # a sink never changes the connection's outcome
+            sink(message)
 
 
 def _family_name(family: int) -> str:
@@ -457,11 +474,9 @@ class Link:
         """What an interrupted or failed establishment step is: a cancellation, else ``imap_unreachable``."""
         if self.cancelled():
             return ImapStopped("cancelled")
-        _log.warning(
-            "mordred imap: establishment stopped (watchdog_fired=%s remaining=%.1fs holding=%s)",
-            self._fired,
-            self.remaining(),
-            self.holding,
+        _emit(
+            "mordred imap: establishment stopped (watchdog_fired=%s remaining=%.1fs holding=%s)"
+            % (self._fired, self.remaining(), self.holding)
         )
         return ImapError("imap_unreachable")
 
@@ -516,10 +531,10 @@ class Link:
         except ImapError:
             raise
         except Exception as exc:  # a failed lookup is reported as a code, never stringified
-            _log.warning("mordred imap: name lookup failed (%s)", _diag(exc))
+            _emit("mordred imap: name lookup failed (%s)" % (_diag(exc),))
             raise ImapError("imap_unreachable") from None
         if not found:
-            _log.warning("mordred imap: name lookup returned no address")
+            _emit("mordred imap: name lookup returned no address")
             raise ImapError("imap_unreachable")
         return found
 
@@ -537,7 +552,7 @@ class Link:
             except OSError as exc:
                 failures.append(f"{_family_name(family)}:{_diag(exc)}")
         self.check()
-        _log.warning("mordred imap: TCP connect failed on every address (%s)", ", ".join(failures) or "none")
+        _emit("mordred imap: TCP connect failed on every address (%s)" % (", ".join(failures) or "none",))
         raise ImapError("imap_unreachable")
 
     def _connect_one(self, family: int, kind: int, proto: int, address: Any) -> socket.socket:
@@ -679,9 +694,9 @@ def open_route_socket(
     except EgressError:
         raise ImapError("routing_unavailable") from None
     if route.http_proxy_url is not None:
-        _log.warning("mordred imap: egress route is an HTTP proxy, which IMAP cannot use")
+        _emit("mordred imap: egress route is an HTTP proxy, which IMAP cannot use")
         raise ImapError("egress_unsupported")
-    _log.info("mordred imap: egress route %s", "socks5" if route.socks_proxy_url is not None else "direct")
+    _emit("mordred imap: egress route %s" % ("socks5" if route.socks_proxy_url is not None else "direct",))
     try:
         if route.socks_proxy_url is not None:
             url = str(route.socks_proxy_url)
@@ -916,7 +931,7 @@ class _CommandGuard:
         if self._link.cancelled():
             return ImapStopped("cancelled")
         if not isinstance(exc, ImapError):
-            _log.warning("mordred imap: connection setup interrupted (%s)", _diag(exc))
+            _emit("mordred imap: connection setup interrupted (%s)" % (_diag(exc),))
         return exc if isinstance(exc, ImapError) else ImapError("imap_unreachable")
 
     def shutdown(self) -> None:
@@ -994,13 +1009,30 @@ class GuardedIMAP4SSL(_CommandGuard, imaplib.IMAP4_SSL):
                 # ``wrap_socket`` detaches ``raw``'s descriptor into the TLS socket, so an interrupt
                 # could no longer reach the handshake through ``raw``. A duplicate descriptor shares
                 # the connection: shutting it down ends the handshake at once, and closing it
-                # afterwards releases only the duplicate.
+                # afterwards releases only the duplicate. The wrapper's own chain verification is
+                # native code no shutdown can interrupt, so the whole wrap runs under
+                # :meth:`Link.bounded`: past the hard deadline the attempt fails and a socket
+                # the late worker still produces is closed, never used.
                 mirror = socket.socket(fileno=os.dup(raw.fileno()))
                 link.hold(mirror)
+                late: dict[str, socket.socket] = {}
+
+                def wrap() -> socket.socket:
+                    produced = context.wrap_socket(raw, server_hostname=self.host)
+                    late["sock"] = produced
+                    return produced
+
                 try:
-                    wrapped = context.wrap_socket(raw, server_hostname=self.host)
+                    wrapped = link.bounded(wrap, name=HANDSHAKE_NAME)
+                except BaseException:
+                    produced = late.pop("sock", None)
+                    if produced is not None:
+                        with contextlib.suppress(OSError):
+                            produced.close()
+                    raise
                 finally:
                     link.drop(mirror)
+                late.clear()
             else:
                 wrapped = context.wrap_socket(raw, server_hostname=self.host, do_handshake_on_connect=False)
         except BaseException:
@@ -1072,12 +1104,12 @@ def _mapped_failure(exc: BaseException) -> ImapError | None:
     if isinstance(exc, ImapProtocolError):
         return ImapError("imap_protocol")
     if isinstance(exc, imaplib.IMAP4.abort):
-        _log.warning("mordred imap: connection aborted during a command (%s)", _diag(exc))
+        _emit("mordred imap: connection aborted during a command (%s)" % (_diag(exc),))
         return ImapError("imap_unreachable")
     if isinstance(exc, imaplib.IMAP4.error):
         return ImapError("imap_protocol")
     if isinstance(exc, OSError | EOFError):
-        _log.warning("mordred imap: socket failure during a command (%s)", _diag(exc))
+        _emit("mordred imap: socket failure during a command (%s)" % (_diag(exc),))
         return ImapError("imap_unreachable")
     if isinstance(exc, ValueError | TypeError | UnicodeError):
         return ImapError("imap_protocol")
@@ -1128,7 +1160,7 @@ class ImapSession:
         try:
             self._conn.login(user, password)
         except imaplib.IMAP4.abort as exc:
-            _log.warning("mordred imap: connection aborted during LOGIN (%s)", _diag(exc))
+            _emit("mordred imap: connection aborted during LOGIN (%s)" % (_diag(exc),))
             return ImapError("imap_unreachable")
         except imaplib.IMAP4.error as exc:
             return ImapError("imap_auth_failed", hint=_login_hint(exc))
@@ -1317,7 +1349,7 @@ def connect(
     ``imap_unreachable``, a cancellation ``ImapStopped("cancelled")``.
     """
     if not valid_host(host) or port != IMAPS_PORT:
-        _log.warning("mordred imap: refused host or port (port %s)", port if isinstance(port, int) else "?")
+        _emit("mordred imap: refused host or port (port %s)" % (port if isinstance(port, int) else "?",))
         raise ImapError("imap_unreachable")
     bounds = limits if limits is not None else IoLimits.for_budget(SESSION_BUDGET_S)
 
@@ -1334,11 +1366,11 @@ def connect(
     except ImapStopped as stopped:
         # A cancellation stays one; the deadline passing before the session was open is ``imap_unreachable``.
         if stopped.reason != "cancelled":
-            _log.warning("mordred imap: connection setup stopped (%s)", stopped.reason)
+            _emit("mordred imap: connection setup stopped (%s)" % (stopped.reason,))
         failure = stopped if stopped.reason == "cancelled" else ImapError("imap_unreachable")
     except ImapError as exc:
         failure = exc
     except (ssl.SSLError, imaplib.IMAP4.error, OSError, EOFError) as exc:  # a greeting's text never travels on
-        _log.warning("mordred imap: connection setup failed (%s)", _diag(exc))
+        _emit("mordred imap: connection setup failed (%s)" % (_diag(exc),))
         failure = ImapError("imap_unreachable")
     raise sever_chain(failure)

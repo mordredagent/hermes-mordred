@@ -4952,10 +4952,18 @@ mode, egress rules, what the Hermes tools return, and any new bundler or framewo
   `do_handshake_on_connect=False` fails verification before any handshake
   (`imap_unreachable` within milliseconds, in Hermes Desktop and the chat tool
   only; the `hermes-mordred` CLI never injects it). For such contexts the
-  handshake MUST run inside `wrap_socket` under the socket timeout the link
-  grants (`IoLimits.io_timeout()`); an interrupt then takes effect when that
-  timeout ends the handshake. `_handshakes_inside_wrap()` decides by comparing
-  the context class's `wrap_socket` with the standard library's.
+  handshake MUST run inside `wrap_socket`, bounded in three ways: the socket
+  timeout the link grants (`IoLimits.io_timeout()`), a duplicate descriptor the
+  link holds so an interrupt shuts the handshake down at once, and
+  `Link.bounded()` around the whole wrap, because the wrapper's chain
+  verification is native code no shutdown can interrupt: past the hard deadline
+  the attempt is `imap_unreachable` and a socket the late worker still produces
+  is closed, never used. `_handshakes_inside_wrap()` decides by comparing the
+  context class's `wrap_socket` with the standard library's. The mail package
+  never imports `logging`; connection diagnostics (class names, errno, route
+  kind, link state, never content) go to an injectable sink
+  (`imap.set_diagnostic_sink`) that the Desktop API points at Hermes's log and
+  `mail fetch` at stderr in text mode.
 
 ### Page structure and states
 

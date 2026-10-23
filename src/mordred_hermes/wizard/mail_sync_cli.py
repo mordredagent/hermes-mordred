@@ -419,9 +419,12 @@ def _print_fetch(result: FetchResult, as_json: bool) -> None:
 
 
 def cmd_fetch(args: argparse.Namespace) -> int:
+    from ..imports.mail import imap
     from ..imports.mail.imap_sync import CLI_BUDGET_S, FetchOptions, run_fetch
 
     hints: list[str] = []
+    if not getattr(args, "json", False):  # content-free connection diagnostics, text mode only
+        imap.set_diagnostic_sink(lambda message: _term.emit_error(message))
     try:
         role = getattr(args, "mailbox", None)
         options = FetchOptions(

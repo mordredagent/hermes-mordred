@@ -193,11 +193,68 @@ def test_an_interrupt_ends_a_handshake_that_runs_inside_wrap_socket() -> None:
         with _armed(budget=30.0) as link, patch.object(imap, "_getaddrinfo", _resolving_to(address)):
             threading.Timer(0.3, link.interrupt).start()
             started = time.monotonic()
-            with pytest.raises(OSError):
+            with pytest.raises((OSError, imap.ImapError)):  # the interrupt ends the wrap: the link's failure
                 Client()._tls_socket(link)
             assert time.monotonic() - started < 5.0
     finally:
         listener.close()
+
+
+def test_connection_diagnostics_reach_only_an_installed_sink_and_carry_no_content() -> None:
+    """A refused TCP connect is described by class names and errno only, and only to a sink."""
+    listener, address = _listener()
+    listener.close()  # the port is now closed: every connect is refused
+    seen: list[str] = []
+    try:
+        with _armed(budget=5.0) as link, patch.object(imap, "_getaddrinfo", _resolving_to(address)):
+            with pytest.raises(imap.ImapError):
+                link.connect_tcp("imap.example.test", address[1])
+        assert seen == []  # no sink: silent
+        imap.set_diagnostic_sink(seen.append)
+        with _armed(budget=5.0) as link, patch.object(imap, "_getaddrinfo", _resolving_to(address)):
+            with pytest.raises(imap.ImapError):
+                link.connect_tcp("imap.example.test", address[1])
+        assert seen and seen[0].startswith("mordred imap: TCP connect failed on every address (ipv4:")
+        assert "example" not in seen[0] and str(address[1]) not in seen[0]
+    finally:
+        imap.set_diagnostic_sink(None)
+
+
+def test_a_wrapper_handshake_past_the_deadline_fails_and_closes_the_late_socket() -> None:
+    """truststore's native verification cannot be interrupted: the whole wrap is bounded by the deadline."""
+    server = FakeImapServer({"INBOX": FakeMailbox(1)})
+    produced: list[socket.socket] = []
+    release = threading.Event()
+
+    class SlowVerifier(ssl.SSLContext):
+        def wrap_socket(self, sock: socket.socket, *args: Any, **kw: Any) -> socket.socket:  # type: ignore[override]
+            release.wait(5.0)  # "native verification" that outlives the deadline
+            produced.append(sock)
+            return sock
+
+    class Client(GuardedIMAP4SSL):
+        def __init__(self) -> None:
+            self.host = "imap.example.com"
+            self.ssl_context = SlowVerifier()
+            self._raw_socket = server.connect
+
+    try:
+        with _armed(budget=0.3) as link:
+            started = time.monotonic()
+            with pytest.raises(imap.ImapError):
+                Client()._tls_socket(link)
+            assert time.monotonic() - started < 3.0
+        release.set()
+        deadline = time.monotonic() + 5.0
+        while not produced and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert produced
+        deadline = time.monotonic() + 5.0
+        while produced[0].fileno() != -1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert produced[0].fileno() == -1  # the late socket was closed, never used
+    finally:
+        release.set()
 
 
 def test_the_standard_context_keeps_the_manual_handshake() -> None:
