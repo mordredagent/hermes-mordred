@@ -366,6 +366,13 @@
     "src/mordred_hermes/wizard/_prompt_io.py": [],
     "src/mordred_hermes/wizard/_term.py": [],
     "src/mordred_hermes/wizard/_typing.py": [],
+    "src/mordred_hermes/wizard/direct_tools.py": [
+      "extension",
+      "macos"
+    ],
+    "src/mordred_hermes/wizard/direct_tools_cli.py": [
+      "extension"
+    ],
     "src/mordred_hermes/wizard/extension_pair_cli.py": [
       "features"
     ],
@@ -398,6 +405,9 @@
       "macos"
     ],
     "tests/extension/test_desktop_status_v4.py": [
+      "extension"
+    ],
+    "tests/extension/test_desktop_tools.py": [
       "extension"
     ],
     "tests/extension/test_desktop_vault.py": [
@@ -471,6 +481,13 @@
       "extension"
     ],
     "tests/test_desktop_windows_pm_compat.py": [
+      "extension"
+    ],
+    "tests/test_direct_tools.py": [
+      "extension",
+      "macos"
+    ],
+    "tests/test_direct_tools_cli.py": [
       "extension"
     ],
     "tests/test_enforce.py": [],

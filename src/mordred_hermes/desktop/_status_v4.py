@@ -5,6 +5,9 @@ built from files, the read-only import store and the mail flags only: nothing
 here unlocks the vault, prompts, initialises a schema or creates a file. A
 failure in one section is a state of that section, never a 500. The seams are
 reached through :mod:`._seams` at call time.
+
+``tools`` (``{direct, source}``, Hermes's direct tool calls read from
+``config.yaml``) is reported on every platform: the setting is Hermes-wide.
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ from typing import Any
 
 from . import _databases, _projections, _seams, _vault
 
-__all__ = ["databases_safe", "imports_sections", "sections", "vault_facts_safe"]
+__all__ = ["databases_safe", "imports_sections", "sections", "tools_safe", "vault_facts_safe"]
 
 _log = logging.getLogger(__name__)
 
@@ -40,13 +43,27 @@ async def sections(platform: str, home: Path) -> dict[str, Any]:
             "imports": _projections.imports_refused("unsupported_platform"),
             "mail": {"configured": False},
             "telegram_archive": dict(_TELEGRAM_ARCHIVE),
+            "tools": await asyncio.to_thread(tools_safe, home),
         }
-    vault, databases, imports = await asyncio.gather(
+    vault, databases, imports, tools = await asyncio.gather(
         asyncio.to_thread(vault_facts_safe, home),
         asyncio.to_thread(databases_safe, home, platform),
         asyncio.to_thread(imports_sections, home, platform),
+        asyncio.to_thread(tools_safe, home),
     )
-    return {"vault": vault, "databases": databases, **imports}
+    return {"vault": vault, "databases": databases, **imports, "tools": tools}
+
+
+def tools_safe(home: Path) -> dict[str, Any]:
+    """``{"direct": bool | None, "source": "config" | "default" | "unreadable"}``; never fails the status."""
+    try:
+        mode = _seams.tools_mode(home)
+        direct, source = mode.get("direct"), mode.get("source")
+        if isinstance(direct, bool) and source in ("config", "default"):
+            return {"direct": direct, "source": source}
+    except Exception as exc:
+        _log.warning("mordred desktop tool-call mode unreadable (%s)", type(exc).__name__)
+    return {"direct": None, "source": "unreadable"}
 
 
 def vault_facts_safe(home: Path) -> dict[str, Any]:

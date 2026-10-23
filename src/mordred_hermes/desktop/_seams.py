@@ -10,7 +10,9 @@ test replaces one attribute here and every route sees it.
   (``imports.mail.forget.audit_entry``), :func:`open_store_readonly` and
   :func:`store_refusal` (``imports.store``), :func:`mail_secret_store`,
   :func:`imap_status`, :func:`run_fetch` and :func:`fetch_env`. The mail
-  library is imported only when first used.
+  library is imported only when first used. :func:`tools_mode` and
+  :func:`set_direct_tools` reach ``wizard.direct_tools`` (Hermes's
+  ``tools.tool_search.enabled``).
 - Registries: ``MAIL_FLOWS`` (the process's ``MailSetupFlows``) and
   ``VAULT_FLOWS`` (:class:`._vault.VaultFlows`).
 - ``CEREMONY_LOCK`` / :func:`run_ceremony`: one vault or memory ceremony at a
@@ -118,6 +120,19 @@ def fetch_env(home: Path) -> Any:
     from ..imports.mail.imap_sync import default_env
 
     return default_env(home)
+
+
+# -- Hermes's direct tool calls (``tools.tool_search.enabled``) ---------------------------------
+
+
+def tools_mode(home: Path) -> dict[str, Any]:
+    """``wizard.direct_tools.read_mode``: read-only, never waits and never creates a file."""
+    return dict(library("..wizard.direct_tools", "read_mode")(home))
+
+
+def set_direct_tools(home: Path, enabled: bool) -> None:
+    """``wizard.direct_tools.set_direct``: raises ``DirectToolsError`` with a closed code."""
+    library("..wizard.direct_tools", "set_direct")(home, enabled)
 
 
 # -- vault and databases --------------------------------------------------------------------------

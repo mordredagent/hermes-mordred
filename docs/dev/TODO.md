@@ -887,6 +887,11 @@ Follow-ups left by the landed code:
   "off"` as the fallback. Remaining: the eval (Part G) must cover the bridge
   path with the production model. Hermes itself is not changed (zero-PR
   rule).
+  - [x] direct-tools option (PR D5): `hermes-mordred direct-tools on | off |
+    status`, `GET` / `POST /tools/direct`, `status.tools`, the Desktop page's Tool
+    calls card and step 2.1's recommendation for a Venice private model. The
+    default stays deferred; Mordred writes `tools.tool_search.enabled: "off"` only
+    on an explicit request.
 
 - [ ] `imap_auth_failed` without a hint (found 2026-10-23, part of the
   Desktop design): every Gmail `NO` collapses to one code. Classify the

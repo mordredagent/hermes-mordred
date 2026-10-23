@@ -631,13 +631,26 @@ hermes-mordred desktop uninstall
 > memory and secrets, encryption of Hermes's databases), **Connect** (the chat
 > model, the question model, Telegram, the Telegram import and mail over IMAP),
 > **Ask Hermes** (what to say in a chat, what Hermes reads, and the commands that
-> stay in the terminal) and **Maintenance** (update, repair, uninstall). Each
+> stay in the terminal) and **Maintenance** (update, repair, tool calls, uninstall). Each
 > step shows whether it is done, next, waiting for an earlier step (with a
 > button that jumps there), running or in need of attention, and a "Why this
 > step?" block that explains the reason in plain words. The Telegram and mail
 > counts come from Mordred's encrypted store, so they are right after a restart
 > too. Linux shows its existing list, with databases and mail marked as not
 > available; Windows keeps its own page.
+>
+> **Tool calls from the page.** The **Tool calls** card under Maintenance has
+> one checkbox, "Let Hermes call Mordred's tools directly (recommended with a
+> Venice private model)". Ticking it writes `tools.tool_search.enabled: "off"`
+> into Hermes's `config.yaml` and unticking removes it, exactly like
+> [`direct-tools on` / `off`](#direct-tools--let-hermes-call-tools-directly);
+> the card explains what it changes and what it costs. Hermes reads the setting when it starts, so after a change the
+> card offers **Restart Hermes Desktop**. When the chat model is a Venice
+> private model and Hermes still defers its tools, the chat-model step (2.1)
+> adds "Recommended: turn on direct tool calls (Maintenance)" with a link to
+> the card. The page never changes the setting on its own. The card is on the
+> macOS and Linux page; the Windows page is unchanged, so use
+> `hermes-mordred direct-tools` there.
 >
 > **Database encryption from the page.** The step "Encrypt Hermes databases"
 > lists the plaintext and unreadable (encrypted) database files it finds, and
@@ -693,9 +706,9 @@ hermes-mordred desktop uninstall
 > counts only (inserted, duplicates, skipped, partial), and a "Fetch at most N
 > messages" field limits one run. **Fetch new mail** on the page is the reliable
 > path. Saying "sync my mail" in a Hermes chat is optional and works only when
-> Hermes can reach the tool; if it cannot, see the `tools.tool_search` note in
-> step 4 of
-> [Sync new mail over IMAP](#sync-new-mail-over-imap-mail-setup-mail-fetch-mail-forget).
+> Hermes can reach the tool; if it cannot, turn on direct tool calls (the
+> **Tool calls** card under Maintenance, or
+> [`direct-tools`](#direct-tools--let-hermes-call-tools-directly)).
 > Removing the mailbox with its mail deletes every message imported under that
 > account label, including Takeout imports. `mail import` (Takeout files) stays a
 > terminal command.
@@ -808,6 +821,45 @@ hermes-mordred egress taint on               # no plaintext writes after a sessi
 > `session_search`, skills, `todo` and `clarify` keep working. The restriction
 > survives a Hermes restart (a digest of the session id is kept in
 > `<home>/mordred/reader_sessions.json`) and ends with a new session.
+
+### `direct-tools` — let Hermes call tools directly
+```sh
+hermes-mordred direct-tools status   # direct tool calls: on|off (config|default)
+hermes-mordred direct-tools on       # writes tools.tool_search.enabled: "off" into config.yaml
+hermes-mordred direct-tools off      # removes it again (Hermes's default)
+```
+> Hermes defers every plugin tool: the model sees Mordred's tools
+> (`mordred_mail_sync`, `mordred_history_search`, `telegram_ask`,
+> `telegram_chats`) only through its bridge, `tool_search` to find one and
+> `tool_call` to call it. That is one more model round trip per use, and
+> smaller models sometimes break the bridge arguments, so nothing runs (for
+> example "sync my mail" never reaches `mordred_mail_sync`). `direct-tools on`
+> writes Hermes's own switch, `tools.tool_search.enabled: "off"`, into
+> `config.yaml`; every other key and comment stays as it was, and nothing is
+> written when the setting is already as asked. It is recommended with a
+> Venice private model.
+>
+> The trade-offs, because the setting is Hermes-wide and affects every plugin
+> tool, not only Mordred's:
+>
+> - **Prompt size.** Every request carries the schemas of all the tools Hermes
+>   used to defer, about 8,000 more prompt tokens with Mordred's tools.
+> - **No remote-connector bridge.** Tools of remote connectors, which Hermes
+>   discovers and calls only through `tool_search` / `tool_call`, are
+>   unavailable while it is on.
+>
+> **Restart Hermes (or Hermes Desktop) for a change to take effect**: Hermes
+> reads the setting when it starts. `off` removes only what makes the tools
+> direct (an explicit `enabled: auto` or `on` is left alone). `status` reports
+> `on` for every value Hermes reads as off (`"off"` or `false`, also `no` and
+> `0`). Mordred never changes this setting unless you run `on` / `off` or tick
+> the **Tool calls** card on the Desktop page. If `config.yaml` is
+> vault-managed (`encryption enable config`) and its plaintext is sealed away,
+> the command refuses with `config_vault_managed`: run it from Hermes's own
+> environment (which opens `config.yaml` at start), use the Desktop page, or
+> turn the seal off with `encryption disable config`. A `config.yaml` that is
+> not valid YAML is refused with `config_unreadable`, and a failed write with
+> `config_write_failed`; nothing is changed and no other value is printed.
 
 ### `telegram` — read-only import of your own Telegram account (preview)
 
@@ -1021,10 +1073,9 @@ hermes-mordred mail forget --rows --yes                 # ... and the account's 
    `private` model or a local one, and each call may show a Touch ID prompt.
    One call works for about a minute; if the answer says `partial`, ask again
    and it continues where it stopped. If Hermes keeps failing to reach the
-   tool through its deferred-tool bridge (`tool_search` / `tool_call`), put
-   `tools: {tool_search: {enabled: "off"}}` in `config.yaml`: every tool is then
-   direct until the next restart, at the cost of larger prompts and no
-   remote-connector bridge.
+   tool through its deferred-tool bridge (`tool_search` / `tool_call`), turn
+   on direct tool calls (`tools.tool_search.enabled: "off"`); the trade-offs
+   and the restart are in [`direct-tools`](#direct-tools--let-hermes-call-tools-directly).
 5. **Older mail.** The first sync takes your newest 2000 messages and reports
    how many older ones it left out (`excluded_history`). To fetch older mail,
    run `hermes-mordred mail fetch --since 2025-01-01` (repeat while it reports
