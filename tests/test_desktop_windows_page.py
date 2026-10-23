@@ -2,10 +2,12 @@
 
 ``plugin.js`` runs only inside Hermes Desktop, so this checks what can be
 checked without it: the module parses (``node --input-type=module --check``
-when Node is installed), the page asks for ``client_version=3``, the Windows
-branch is chosen by ``hardware_kind`` and every capability name, reason code
-and step the Windows API can return has an explicit label. Readiness is never
-derived from matching English text.
+when Node is installed), the page asks for a Windows-capable status
+(``client_version>=3``: the page asks for 4, the start-up notice for 3), the
+Windows branch is chosen by ``hardware_kind`` and every capability name, reason
+code and step the Windows API can return has an explicit label. Readiness is
+never derived from matching English text. The Node harness lives in
+``tests/_desktop_page.py``, shared with ``test_desktop_page.py``.
 """
 
 from __future__ import annotations
@@ -14,13 +16,13 @@ import json
 import re
 import shutil
 import subprocess
-from importlib import resources
 
 import pytest
 
 from mordred_hermes.wizard import _windows_gates
 
-PAGE = resources.files("mordred_hermes.desktop").joinpath("assets", "desktop", "plugin.js")
+from ._desktop_page import block, render_page, source
+
 CAPABILITIES = (
     "memory_custody",
     "native_audit",
@@ -49,16 +51,6 @@ CODES = (
     "forget_confirm_mismatch",
     "custody_busy",
 )
-
-
-def source() -> str:
-    return PAGE.read_text(encoding="utf-8")
-
-
-def block(name: str) -> str:
-    match = re.search(rf"const {name} = \{{(.*?)\n\}}", source(), re.S)
-    assert match, f"{name} table missing"
-    return match.group(1)
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
@@ -106,52 +98,6 @@ def test_no_readiness_is_derived_from_english_text():
     assert ".test(String(" not in text, "error handling selects by code, not by matching the message"
     assert "/expired/" not in text
     assert "e.code === 'login_flow_expired'" in text
-
-
-def render_page(script):
-    """Run the page components and button handlers with a tiny SDK/React boundary."""
-    if shutil.which("node") is None:
-        pytest.skip("Node.js is not installed")
-    page = re.sub(r"^import[\s\S]*?from '[^']+'\n", "", source(), flags=re.M)
-    page = page.replace("export default {", "globalThis.plugin = {")
-    harness = """
-const notifications = []
-let states = [], cursor = 0
-const host = {notify: n => notifications.push(n), notifyError: e => notifications.push({error: e.message})}
-const Button = 'button', Checkbox = 'checkbox', Input = 'input', Fragment = 'fragment'
-const ROUTES_AREA = '', SIDEBAR_NAV_AREA = '', PALETTE_AREA = ''
-const effects = []
-const useCallback = f => f, useEffect = f => {effects.push(f)}
-const useState = initial => {
-  const index = cursor++
-  if (!(index in states)) states[index] = initial
-  return [states[index], value => {states[index] = value}]
-}
-const useRef = initial => useState({current: initial})[0]
-let jsx = (type, props) => typeof type === 'function' ? type(props) : {type, props}
-let jsxs = jsx
-const find = (node, predicate) => {
-  if (!node || typeof node !== 'object') return null
-  if (predicate(node)) return node
-  const children = node.props && node.props.children
-  for (const child of Array.isArray(children) ? children : [children]) {
-    const found = find(child, predicate)
-    if (found) return found
-  }
-  return null
-}
-"""
-    result = subprocess.run(
-        ["node", "--input-type=module"],
-        input=harness + page + "\n" + script,
-        text=True,
-        encoding="utf-8",
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout)
 
 
 def test_custody_step_renders_the_status_ceremony_command():
