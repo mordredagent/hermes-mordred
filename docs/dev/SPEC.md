@@ -891,6 +891,8 @@ egress      status | set | block | unblock | block-tool | unblock-tool |
 databases   status | encrypt | decrypt
 telegram    setup | doctor | login | sync | status | logout | venice |
             local-llm | migrate-tee
+activity    status | pair-operator | peers | correct | backup |
+            restore | retention
 uninstall
 ```
 
@@ -3662,3 +3664,281 @@ before secrets, archive or network access, and its existing error mapper
 retains it for extension and Hermes-tool transport. POSIX status routing and
 the public signatures are unchanged. This slice imports no Desktop code and
 does not establish native Windows, live-account or Windows 11 acceptance.
+
+## Browser activity and conditional learning (2026-10-20)
+
+This section is the shipped contract of the `activity` component
+(`src/mordred_hermes/activity/`). The rationale, alternatives and acceptance
+targets of the original capture design are in the
+[browser activity learning design](../superpowers/specs/2026-10-19-browser-activity-learning-design.md);
+where this section and that design differ, this section describes the code.
+The operator-side collector is documented in the operator repository
+(`docs/activity.md`).
+
+On 2026-10-22 the lesson pipeline (candidate lessons, validation and
+adoption, the LLM review, the recall tools and the two bundled skills) was
+removed before any release. What remains is capture, the encrypted store,
+corrections stored as raw events, retention, backup and restore. Hermes-side
+use of the stored history is designed in
+[browser history for Hermes](../superpowers/specs/2026-10-22-browser-history-for-hermes-design.md)
+and arrives in a later phase ([`TODO.md`](./TODO.md) §"Browser activity learning").
+
+### Purpose and boundary
+
+Mordred records attributed browser actions from paired collectors into an
+encrypted per-profile store, keeps explicit user corrections as raw events
+next to the actions they concern, and ages raw events out on a retention
+horizon. Nothing is derived from the history: no model call, no summary and
+no guidance is produced. Hermes core is unchanged, and today the `activity`
+component stays in the plugin's fixed wiring order (keyvault, llm_guard,
+network, privacy_check, dbcrypt, e2e, activity, wizard) but its `register()`
+registers nothing: no hooks, tools, skills or auxiliary task.
+
+**Capture policy (2026-10-22).** The receiver records everything a collector
+reports except secrets: typed text outside sensitive fields, URLs with their
+query strings and fragments (credential parameters redacted), and page titles
+and visible-text excerpts when the collector sends them (§"Event contract").
+The stored history is kept because it is meant to benefit Hermes directly;
+the raw retention default is 365 days.
+
+### Storage and the protection gate
+
+- One store per profile: `<profile-home>/plugin-data/mordred/mordred.db`
+  (directory `0700`, resolved from an explicit home on every entry point; the
+  component never reads `HERMES_HOME` for queued work). No `activity.db`, no
+  tables in `state.db`. Schema v3 holds `activity_meta`, `activity_events` and
+  `activity_episodes` only. Older stores upgrade in place on open and on
+  restore: v1 → v2 adds three nullable `activity_events` columns for the
+  `query`, `page_title` and `page_text` event fields (content digests of
+  existing rows stay valid because absent new fields are omitted from the
+  canonical form); v2 → v3 drops the removed lesson and review tables
+  (`activity_review_jobs`, `activity_review_attempts`, `activity_lessons`,
+  `activity_lesson_evidence`, `activity_uses`, `activity_budget`) and their
+  indexes. The column `activity_episodes.reviewed_revision` stays as a dormant
+  column (always 0) so a fresh store and a migrated store have identical
+  schemas without `ALTER TABLE DROP COLUMN`. A newer schema is refused.
+- The store opens only through the SQLCipher shim of `dbcrypt`. The gate
+  (`activity/_gate.py`) requires, in order: macOS; no database conversion
+  journal or pending marker; the encryption marker (armed); the shim installed
+  in this process; a resolvable database key; a keyed connection
+  (`mordred_key` present); a store file the stdlib `sqlite3` cannot read; and
+  `activity_meta.profile_home` equal to the opening home. There is **no
+  plaintext fallback** anywhere in the component.
+- Refusal codes are content-free: `unsupported_platform`,
+  `conversion_pending`, `not_armed`, `unprotected_process`, `no_key`,
+  `unkeyed_connection`, `plaintext_store`, `profile_mismatch`,
+  `schema_newer`, `busy`, `disk_full`, `store_unavailable`, `conflict`,
+  `collection_disabled`, and `destination_exists` / `destination_unavailable`
+  (missing directory or no permission) for a backup target. A newer schema is
+  refused, never recreated or downgraded. Receiver refusals for disabled
+  collection, the gate or the store are audited as `activity.capture_refused`
+  once per process and code, with the `peer_id`
+  (`activity/_capture_audit.py`); that is the only activity audit code.
+- Each public store method uses one short connection and one transaction
+  (`busy_timeout` 2 s, host journal mode left alone); nothing is retried.
+- `ActivityStore.backup(dest)` writes a new `0600` file through the SQLite
+  backup API (keyed by the shim) and refuses a plaintext result.
+  `restore(src)` keeps the current profile binding, writes a new
+  `store_generation` and marks Hermes session references `unavailable`. No
+  model call or browser action starts after a restore.
+- Commands: `activity backup --output PATH` (the destination must not exist);
+  `activity restore --input PATH [--yes]` — without `--yes` it prints the
+  backup's schema version, generation and row counts and exits 2, and a backup
+  bound to another profile home is refused with `profile_mismatch`;
+  `activity retention [--dry-run] [--json]` — `--dry-run` reports the counts
+  from the read-only `ActivityStore.plan_retention`. Restore while no writer
+  is open (stop `hermes-mordred extension serve` and Hermes sessions first):
+  the store takes no exclusive lease, so a concurrent writer may be refused
+  `busy` or observe the restored content before the post-restore reset.
+- `ActivityStore.apply_retention(now, raw_days)` is one bounded pass: raw
+  events older than `retention_raw_days` are deleted, then episodes left
+  without events (`retention_raw_days: 0` keeps everything forever). The
+  report fields are `events_deleted`, `episodes_deleted` and `complete`.
+  Besides the `retention` command, the receiver runs one pass (limit 200)
+  after a successful append, at most once per hour per store; retention
+  failures never refuse the batch.
+- `activity status [--json]` prints the feature and collection switches, the
+  protection gate result, the store schema version, generation and row counts
+  for `activity_events` and `activity_episodes`, and the activity peers. It
+  never prints content.
+
+### Collector credentials and WebSocket frames
+
+Activity collectors talk to the extension API (`extension/activity_api.py`,
+capability `activity_batch_v1`). The operator collector holds its own peer
+credential (`activity/peers.py`), separate from the browser-extension pairing
+and revocable on its own:
+
+| Frame (client → server) | Pre-auth | Reply |
+|---|---|---|
+| `activity_pair_init` `{code, label}` | yes | `activity_pair_complete {peer_id, peer_token}` or `activity_pair_fail {reason: invalid_code \| expired_code \| used_code \| storage_refused}` |
+| `activity_auth` `{peer_token}` | yes | `activity_auth_ok {peer_id, capabilities}` or `auth_fail {reason: invalid_token \| peer_revoked \| pairing_changed}` |
+| `activity_batch` `{batch}` | no | `activity_ack {status, accepted, duplicates, episode_revisions}` or `activity_refused {reason}` |
+| `activity_status` | no | `activity_status {collection: enabled \| disabled \| unavailable, reason}` |
+
+- Pair codes come from `hermes-mordred activity pair-operator` (single use,
+  10 minutes, `MORT-XXXXXXXX-XXXXXXXX` shape) and are purpose-bound: the
+  extension's `pair_init` never consumes them and vice versa. Peer ids are
+  `operator:<12 hex>`; only the SHA-256 of a peer token is stored.
+- A socket authenticated by `activity_auth` is an activity principal: only
+  `activity_batch` and `activity_status` are dispatched; any other frame gets
+  `error: activity_session_forbidden`. The principal is revalidated on every
+  frame against that peer's credential record; revoking or re-pairing it
+  answers `auth_fail: pairing_changed`. The paired browser extension (`auth`
+  with its extension token) may also submit `activity_batch` as principal
+  `extension`; the localhost page principal cannot.
+- Trust (`paired_peer`) and permitted use (`learning`) come from the
+  principal, never from the payload; a batch's `producer_kind` must match the
+  credential's kind.
+- Limits: at most 100 events per batch, 16 KiB normalized per event
+  (`MAX_EVENT_BYTES`; 4 KiB before 2026-10-22), 256 KiB per raw batch frame.
+  Configuration may lower these, never raise them.
+- Receiver order (`activity/ingest.py`), evaluated per batch: collection
+  switches, envelope, per-event normalization, sequence order, gate/store
+  open, append. One bad event refuses the whole batch. Reasons: `malformed`,
+  `unsupported_schema`, `batch_too_large`, `event_too_large`,
+  `source_excluded`, `sequence_regression`, `collection_disabled`,
+  `store_unavailable`, `busy`, `store_full`, `conflict`.
+- The ACK is sent only after the transaction commits. The same `event_id`
+  with identical canonical content counts as a duplicate and is not inserted
+  again; the same `event_id` (or producer sequence) with different content
+  refuses the whole batch as `conflict` and overwrites nothing. Lost ACKs are
+  handled by the collector resending the identical batch.
+- No receiver (an install without the activity core) answers
+  `store_unavailable`; the extension server keeps running. The extension
+  server grants no launch permits and starts no review around chat turns; the
+  activity frames above are its only activity surface.
+
+### Event contract
+
+`activity/contracts.py` normalizes every event before storage:
+
+- **Phases** (`intended`, `dispatched`, `observed`, `cancelled`,
+  `timed_out`, plus `boundary`, `correction`, `gap`) are separate from
+  **results** (`unknown`, `claimed_success`, `claimed_failure`,
+  `verified_success`, `verified_failure`). A model's "done" is
+  `claimed_success`; a timeout stays `unknown`.
+- **Claimed versus verified.** Collectors may only claim: a collector
+  `verified_*` becomes `claimed_*` with exclusion
+  `verification_claim_dropped`. The only verification method name is
+  `page_signature_change`, and a page change verifies at most navigation,
+  never a business outcome.
+- `site` is a lower-case host. `route` stays the URL path; the route's
+  scrubbed `?query#fragment` suffix is kept in the separate field `query`.
+  `target`/`route`/`query`/`text` are bounded to 120/200/1000/4000 characters
+  (`MAX_QUERY_CHARS`, `MAX_TEXT_CHARS`); `args` keep only allowlisted keys
+  within 512 bytes.
+- **URL scrubbing (2026-10-22).** URLs keep their query strings and fragments
+  wherever they appear (`query`, free text, target labels and page fields),
+  but credential parameters have their value replaced by `redacted`: the
+  names `token`, `access_token`, `id_token`, `refresh_token`, `auth`,
+  `authorization`, `api_key`, `apikey`, `api-key`, `key`, `secret`,
+  `client_secret`, `password`, `passwd`, `pwd`, `session`, `sessionid`,
+  `session_id`, `sid`, `sig`, `signature`, `code`, `otp` and `nonce`, and any
+  name ending in `token`, `secret`, `password`, `passwd`, `signature`,
+  `apikey` or `api_key`. Any JWT-looking value and any userinfo password
+  (`user:password@`) is redacted as well. An event with a redacted value
+  carries the exclusion `url_params_redacted`.
+- **Typed text (2026-10-22).** A `type` or `search` operation keeps its text
+  when the collector classifies the field (`args.field_kind`) as anything
+  other than `sensitive`; a `type` event that sends the text under
+  `args.text` or `args.value` has it lifted into `text`. Password fields,
+  fields the collector marks `sensitive` and unclassified fields never keep
+  the text (exclusion `typed_text_dropped`). Otherwise free text survives only
+  in `correction` and `boundary` phases.
+- **Page content (2026-10-22).** Collectors may send the optional fields
+  `page_title` (300 characters) and `page_text`, a visible-text excerpt (8000
+  characters); both are URL-scrubbed and bounded. Screenshots and the DOM are
+  not stored.
+- **Excluded sites.** No site is excluded by default: the store records
+  events from every site, messaging and mail included. `excluded_sites` in
+  configuration names hosts (and their subdomains) whose events refuse the
+  batch as `source_excluded`. Unless the operator excludes a messaging or
+  mail site, what the user types there (in fields the collector classifies
+  as non-sensitive) and any page text the collector sends are recorded.
+- `source` (`operator`, `browser`, `hermes`, `user_correction`) and `actor`
+  (`human`, `agent`, `unknown`) are collector attribution (bounded enums), not
+  receiver-verified; only `trust` (`paired_peer`) and `permitted_use`
+  (`learning`) come from the authenticated principal. A collector-submitted
+  `correction` is stored as an ordinary event; nothing is derived from it.
+- Episodes record their revision (advanced by every committed append), worst
+  reported coverage (`selected_tab` < `partial` < `gap`) and an observed
+  outcome; recording gaps stay explicit. An episode belongs to the peer that
+  first wrote to it; a batch from another peer naming that episode is refused
+  as `conflict` (only the local `activity correct` command may add a
+  correction to it).
+- **Corrections join their attempt's episode.** Before the replay check,
+  `ActivityStore.append_batch` stores a `correction` event that carries an
+  `attempt_id` in the episode of that attempt, looked up first among the same
+  batch's events (`intended` preferred) and then in the store, for the same
+  `peer_id` only; its `content_digest` is recomputed from the re-homed
+  content, so a resent batch re-homes identically and stays a duplicate, not a
+  `conflict`. This covers the operator closing its episode at task end and
+  sending a later correction in a fresh episode. A correction whose attempt is
+  unknown keeps its own episode, and a correction already stored in its own
+  episode (received before its attempt) is never moved, so replays keep
+  matching. The attempt phases are `ATTEMPT_PHASES = ("intended",
+  "dispatched", "observed")` in `activity/store.py`.
+
+### Corrections
+
+`activity/corrections.py` records corrections and derives nothing from them:
+
+- `hermes-mordred activity correct --episode ID --text TEXT [--attempt ID]`
+  appends one `user_correction` / `human` / `correction` event, linked to the
+  attempt when given, to an existing episode (also one a paired peer wrote)
+  and prints the event id. A correction sent by the operator collector (for
+  example its "correct:" input) is stored the same way. There is no
+  candidate, no lesson and no model call.
+
+### Hermes integration
+
+None today beyond the empty `register()` described under "Purpose and
+boundary". `activity/matching.py` holds the term extraction (`terms`, with CJK
+bigrams) and `SessionBudget`, kept for the next phase. The Hermes-side use of
+the raw history in `mordred.db` (read through a Mordred-owned tool) is
+designed in
+[browser history for Hermes](../superpowers/specs/2026-10-22-browser-history-for-hermes-design.md).
+
+### Configuration: `plugins.mordred_activity`
+
+Read from the owning profile's `config.yaml` (`activity/config.py`). Unknown
+keys or wrong types fall back to the default and are reported by key name.
+The removed keys `review_mode`, `recall_enabled`, every `review_*`, every
+`recall_*` and `retention_candidate_days` are reported as unknown keys and
+ignored.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Feature switch; no profile is enrolled silently |
+| `collection_enabled` | `false` | Accept batches (requires `enabled`) |
+| `max_batch_events` / `max_event_bytes` / `max_batch_bytes` | 100 / 16384 / 262144 | Wire limits; may only be lowered |
+| `retention_raw_days` | 365 | Raw events older than this are deleted; `0` keeps everything forever |
+| `excluded_sites` | empty | Hosts (and their subdomains) whose events refuse the batch as `source_excluded`; no site is excluded by default |
+
+### Non-goals of this delivery
+
+- No writes to `MEMORY.md`, `USER.md` or any skill.
+- No cron job, timer or background processing triggered by hooks, browser
+  events, shutdown or subagents.
+- No raw-history viewer: CLI output carries identifiers, states, codes and
+  counts only, and raw events never reach a Hermes prompt through this
+  feature yet.
+- Human DOM clicks and typing on a page are not observed; the operator records
+  its own dispatched actions, direct commands, corrections and navigation of
+  the handed-over tab.
+- No encrypted client outbox: unacknowledged events can be lost on collector
+  restart and are reported as gaps.
+
+### Not implemented in this delivery
+
+These statements have no code yet and must not be assumed:
+
+- Hermes-side use of the stored history (tools, hooks, skills, auxiliary
+  task): designed in the 2026-10-22 document linked above, not built.
+- No logical deletion of events or episodes; retention deletes physically.
+- The store does not take the `dbcrypt` lifecycle lease; it checks the
+  conversion markers at open time only.
+- Migrations only move forward (v1 → v2 → v3); there is no
+  migration-rollback procedure, and code that supports an older schema
+  refuses a newer store as `schema_newer`.

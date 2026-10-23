@@ -635,3 +635,81 @@ C11 integration follow-up (R-C11-5/R-C11-6):
   source and sdist-derived wheel environments; retain the real Telegram
   account and Windows 11 acceptance gates. Wizard setup completion wording
   remains a separate wizard slice; C10c changes no wizard user flow.
+
+## Browser activity learning
+
+Shipped contract: [`SPEC.md`](./SPEC.md) §"Browser activity and conditional
+learning (2026-10-20)"; module map: [`PLAN.md`](./PLAN.md) §"Browser activity
+learning implementation".
+
+- [ ] Raw-history administrative viewer: authenticated, separate from the
+  collector credential and from agent tools; CLI status keeps printing
+  identifiers and counts only.
+- [ ] Encrypted client outbox for complete offline delivery, with reviewed key
+  custody, rotation and deletion; the extension never receives Hermes's
+  database or memory key.
+- [ ] Human DOM observation (clicks and typing made directly on the page),
+  with the same exclusions as operator events.
+- [ ] Windows checked-storage port of `<home>/extension/activity_peers.json`
+  and `activity_pending.json`: explicit per-file bounds in
+  `extension/_windows_storage.py` and Windows tests. The store itself stays
+  refused off macOS (`unsupported_platform`).
+- [x] The 2026-10-22 removal of the lesson pipeline (candidates, adoption, LLM
+  review, recall tools and skills) is done; Hermes is to use the raw history
+  instead (see "Hermes-side use of the history" below).
+- [x] The 2026-10-20 integration runs (live SQLCipher check on a throwaway
+  home; end-to-end operator pairing and batch delivery to the receiver) are
+  recorded in [`CI.md`](./CI.md) §"Manual live-device validation log".
+- [x] Repeat the live SQLCipher check (store and backup unreadable to the
+  stdlib `sqlite3`, no fixture bytes in the file) after any change to
+  `activity/_gate.py`, `activity/store.py` backup/restore or the dbcrypt shim,
+  and record it in [`CI.md`](./CI.md). Done 2026-10-21 after the correction
+  re-homing change to `activity/store.py` (live end-to-end run in
+  [`CI.md`](./CI.md) §"Manual live-device validation log").
+- [ ] Cross-repo (operator collector `mordred-browser-os-oparator`): record a
+  correction in the episode of the attempt it references instead of a fresh
+  post-task episode. The receiver already re-homes such corrections
+  ([`SPEC.md`](./SPEC.md) §"Event contract"), so this is cleanup, not a fix.
+- [ ] Optional index on `activity_events.attempt_id` for the correction
+  re-homing lookup; it is a schema DDL change for existing stores.
+- [ ] Live-verify the extension-relay path (`--browser extension`,
+  `activityObserved` navigation observations) in a real Chrome and record it
+  in [`CI.md`](./CI.md).
+- [ ] Separate PR (`dbcrypt`, not part of this branch): `databases encrypt
+  --dry-run` must not traceback when the Keychain vault anchor exists but the
+  vault directory is missing; the `VaultError` should become the "run
+  `encryption enable memory` first" message.
+
+### Operator collector (other repository, not changed here)
+
+Follow-ups in `mordred-browser-os-oparator` for the 2026-10-22 capture policy;
+the receiver side is [`SPEC.md`](./SPEC.md) §"Event contract".
+
+- [ ] Send `text` for `type`/`search` operations when the field is not
+  sensitive, and keep sending `args.field_kind`.
+- [ ] Send `route` with its query and fragment (or the full URL) and let the
+  receiver scrub credentials.
+- [ ] Send `page_title` and `page_text` (at most 8000 characters of visible
+  text) on `observed` events after navigation and at task boundaries.
+- [ ] Raise the client-side per-event limit to 16 KiB to match the receiver's
+  `MAX_EVENT_BYTES`.
+- [ ] Make `--activity` default on.
+
+### Hermes-side use of the history (next design)
+
+Design: `docs/superpowers/specs/2026-10-22-browser-history-for-hermes-design.md`
+(2026-10-22; `pre_tool_call` cannot annotate in Hermes 0.19.0, so the
+injection channels are `transform_tool_result` and `pre_llm_call`).
+
+- [ ] B1: `activity/history.py` reader and summarizer; site block appended to
+  `browser_navigate` results via `transform_tool_result`; turn-start context
+  via `pre_llm_call` when the user message names a host or shares task terms;
+  tools `mordred_browser_history` / `mordred_browser_history_episode`; config
+  keys `history_*`; hook payload contract, HOOK_PAYLOADS.md (§5 is stale about
+  `pre_llm_call`), SPEC and USAGE.
+- [ ] B2: record Hermes's own browser tool calls as `source: hermes` events via
+  `post_tool_call` (episode per session turn, task text from `pre_llm_call`,
+  field kind from the ref's snapshot line); accept `correct:` (or its
+  Japanese equivalent) corrections typed in Hermes chat.
+- [ ] B3: live validation with a real Hermes session and the operator's
+  extended capture, recorded in CI.md.

@@ -35,8 +35,8 @@ argument that Mordred can rely on.
 
 Mordred is one plugin, `mordred` (`mordred_hermes.plugin`). Its `register()`
 registers the integrity callback first, then the components in a fixed order
-(keyvault, llm_guard, network, privacy_check, e2e, wizard), so component
-callbacks run in that order within each hook. A callback registered by more
+(keyvault, llm_guard, network, privacy_check, dbcrypt, e2e, activity, wizard),
+so component callbacks run in that order within each hook. A callback registered by more
 than one component (the shared `check_plugin_integrity`) is registered once.
 The `.pth` runtime bootstrap additionally keeps a mandatory integrity bridge at
 the front of `on_session_start`. Network startup still uses explicit readiness

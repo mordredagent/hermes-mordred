@@ -11,7 +11,7 @@ audit vocabulary. Typed implementation remains authoritative:
 
 ## Audit log `reason` enum (frozen)
 
-`ReasonCode` is a closed `Literal` with 31 stable values. “Reserved” means the
+`ReasonCode` is a closed `Literal` with 34 stable values. “Reserved” means the
 string remains valid for compatibility but current code deliberately has no
 emit site. A reserved value is not evidence that the feature exists.
 
@@ -50,6 +50,7 @@ emit site. A reserved value is not evidence that the feature exists.
 | 31 | `mordred.degraded.audit_encryption_unavailable` | live | Encrypted audit was expected but writer creation fell back to plaintext. |
 | 32 | `policy.egress.tool_blocked` | live | The tool-egress level blocked a tool call that could reach the internet; the entry's `rule` field names the rule (e.g. `egress.url_fetch`, `egress.tainted_session`). |
 | 33 | `mordred.db_encryption.violation` | live | Database encryption is on but Hermes's databases are not protected (unprotected process, no key, interrupted conversion, or a plaintext database); `findings` lists the checks. Strict blocks the turn, lenient warns. |
+| 34 | `activity.capture_refused` | live | The browser-activity receiver refused recording: collection disabled, or a gate/store refusal under its wire reason (`store_unavailable`, `busy`, `store_full`, `conflict`), with `peer_id`. The entry's `code` field names the refusal; emitted once per process and code (`activity/_capture_audit.py`). |
 
 Existing reason strings are not renamed. Adding one requires the typed Literal,
 an emit site or explicit reserved rationale, focused tests, and this table in

@@ -11,11 +11,17 @@ module's :func:`register` wires every component in a fixed order:
                         auxiliary-client guards, session / request enforcement.
 3. ``network``       — the process-wide Tor / VPN / clearnet route and hooks.
 4. ``privacy_check`` — tool-call policy and the session-start integrity gate.
-5. ``e2e``           — encrypted gateway dispatch, outbound re-encryption and
+5. ``dbcrypt``       — the database-encryption monitor and status line.
+6. ``e2e``           — encrypted gateway dispatch, outbound re-encryption and
                         the read-only Telegram tools.
-6. ``wizard``        — the ``hermes mordred`` CLI subcommand.
+7. ``activity``      — browser activity history; its ``register`` is a
+                        documented no-op for now (no hooks, tools or skills;
+                        capture runs in the extension server's receiver), and
+                        Hermes-side use of the history arrives in a later
+                        phase.
+8. ``wizard``        — the ``hermes mordred`` CLI subcommand.
 
-Components 1-4 and 6 keep the relative order they had as separate plugins
+Components 1-4 and 8 keep the relative order they had as separate plugins
 (Hermes loaded those alphabetically: keyvault, llm_guard, network,
 privacy_check, wizard). ``e2e`` used to load first only because its old name
 sorted first; it now loads after the runtime guards it relies on.
@@ -64,12 +70,14 @@ COMPONENTS: Final[tuple[tuple[str, str], ...]] = (
     ("privacy_check", "mordred_hermes.privacy_check"),
     ("dbcrypt", "mordred_hermes.dbcrypt"),
     ("e2e", "mordred_hermes.extension.gateway_plugin"),
+    ("activity", "mordred_hermes.activity"),
     ("wizard", "mordred_hermes.wizard"),
 )
 
 #: Minimum hook surface each component promises. The integrity gate checks it
 #: per component (recorded here) and, as a union, against Hermes's own ledger
-#: for the ``mordred`` plugin. The wizard is CLI-only.
+#: for the ``mordred`` plugin. The wizard is CLI-only; ``activity`` registers
+#: nothing yet (capture runs in the extension server, not in Hermes hooks).
 COMPONENT_REQUIRED_HOOKS: Final[dict[str, frozenset[str]]] = {
     "keyvault": frozenset({"on_session_start", "on_session_end"}),
     "llm_guard": frozenset({"on_session_start", "pre_api_request"}),
@@ -77,6 +85,7 @@ COMPONENT_REQUIRED_HOOKS: Final[dict[str, frozenset[str]]] = {
     "privacy_check": frozenset({"on_session_start", "pre_tool_call"}),
     "dbcrypt": frozenset({"on_session_start", "pre_llm_call"}),
     "e2e": frozenset({"on_session_start", "pre_gateway_dispatch"}),
+    "activity": frozenset(),
     "wizard": frozenset(),
 }
 

@@ -787,6 +787,46 @@ hermes-mordred telegram logout --forget     # also delete the API credentials, a
 > address (`127.0.0.1` / `[::1]`, reached without any proxy). Redirects are
 > never followed.
 
+### `activity` — record browser work (preview, macOS)
+
+```sh
+hermes-mordred activity status                # switches, protection gate, counts, peers (no content)
+hermes-mordred activity pair-operator         # single-use code for the browser operator's collector
+hermes-mordred activity peers list            # peers revoke <peer_id> stops a collector at once
+hermes-mordred activity correct --episode ID --text "Open the official site instead"   # stores one correction event; prints its id
+hermes-mordred activity backup --output ~/mordred-activity.bak  # encrypted; file must not exist
+hermes-mordred activity restore --input ~/mordred-activity.bak  # preview; add --yes to restore
+hermes-mordred activity retention --dry-run   # what one retention pass would remove
+```
+> Off until `plugins.mordred_activity.enabled` and `collection_enabled` are set
+> in `config.yaml`. Records are stored only in the SQLCipher-encrypted
+> `<home>/plugin-data/mordred/mordred.db`, so database encryption must be
+> enabled first (`databases encrypt`); otherwise recording refuses.
+> Everything the collector reports is recorded except secrets: operations,
+> typed text except in password or sensitive fields, URLs with credential
+> parameters (tokens, keys, session ids, codes) replaced by `redacted`, and the
+> page title and a visible-text excerpt when the collector sends them.
+> No site is excluded by default: messaging and mail sites (Telegram, WhatsApp,
+> Discord, Slack, Gmail, Outlook and others) are recorded too, including what
+> you type there. To keep a site out, list its host in
+> `plugins.mordred_activity.excluded_sites`; events from that host and its
+> subdomains are then refused. Raw events are kept
+> for `retention_raw_days` (default 365; `0` keeps them forever);
+> `activity retention` runs or plans one pass, and the receiver runs one at
+> most once an hour.
+> `activity correct` appends your correction as one raw event to an existing
+> episode (also one a paired collector wrote); nothing is derived from it and
+> no model is called. A correction typed in the operator after a task finished
+> is attributed to that task when it names the task's last action.
+> `activity restore` without `--yes` prints the backup's schema version,
+> generation and row counts and exits 2; with it, the content is replaced and
+> Hermes session references are marked unavailable. Stop `extension serve` and
+> Hermes sessions before restoring. Hermes does not read this history yet;
+> that is designed in
+> [browser history for Hermes](../superpowers/specs/2026-10-22-browser-history-for-hermes-design.md).
+> Contract:
+> [SPEC](../dev/SPEC.md#browser-activity-and-conditional-learning-2026-10-20).
+
 ---
 
 ## 4. Interactive command walkthroughs
