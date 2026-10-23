@@ -1096,7 +1096,8 @@ def test_readonly_open_of_a_home_with_uri_characters_reads_the_right_file(
     home = special_home(tmp_path)
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(_shim, "is_installed", lambda: True)
-    monkeypatch.setattr(_monitor, "_own_sqlite", lambda: (sqlite3, False))  # the plain test store is probed by the stdlib
+    # The plain test store is probed through the process library, here the stdlib.
+    monkeypatch.setattr(_monitor, "_own_sqlite", lambda: (sqlite3, False))
     monkeypatch.setenv("HERMES_MEMORY_KEY", MEMORY_KEY)
     monkeypatch.setattr(store_module, "_sqlcipher", lambda: _ReadOnlyModule)
     _ReadOnlyModule.calls = []
