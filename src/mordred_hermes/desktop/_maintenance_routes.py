@@ -1,10 +1,13 @@
-"""Package updates and uninstall from the Desktop page (a sub-router of ``api.router``).
+"""Package updates, Hermes's tool calls and uninstall from the Desktop page (a sub-router of ``api.router``).
 
 ``/update/check`` and ``/update/apply`` drive ``hermes-mordred update`` (never a
 downgrade; refusals before any job starts); ``/uninstall/plan`` and
 ``/uninstall`` drive ``hermes-mordred uninstall`` with the page's answers. The
-two jobs exclude each other. Shared helpers (``_home``, ``_error``, the job
-registry) are read from :mod:`.api` at call time.
+two jobs exclude each other. ``/tools/direct`` reads and, on an explicit
+request only, changes Hermes's ``tools.tool_search.enabled`` (the Tool calls
+card; ``hermes-mordred direct-tools``) through :mod:`._seams`. Shared helpers
+(``_home``, ``_error``, the job registry) are read from :mod:`.api` at call
+time.
 """
 
 from __future__ import annotations
@@ -18,7 +21,8 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from ._body import read_object
+from . import _seams
+from ._body import invalid_body, read_object
 from ._capture import captured_output
 from ._jobs import JobBusy
 
@@ -229,6 +233,64 @@ async def update_apply(body: dict[str, Any] | None = None) -> Any:
     except JobBusy as exc:
         return _api()._error(exc.code)
     return {"ok": True, **_api()._job_view(job)}
+
+
+# -- Hermes's direct tool calls ----------------------------------------------------------
+
+#: The closed codes of ``wizard.direct_tools`` (an unexpected failure is ``config_write_failed``).
+TOOLS_ERROR_CODES = frozenset(
+    {
+        "config_unreadable",
+        "config_vault_managed",
+        "config_write_failed",
+        "config_has_setting",
+        "hermes_cli_missing",
+        "config_unsupported_shape",
+        "hermes_cli_unsupported",
+    }
+)
+
+
+@router.get("/tools/direct")
+async def tools_direct() -> Any:
+    """``{"ok": true, "direct": bool, "source": "config" | "default"}`` or a closed code; read-only."""
+    home = _api()._home()
+    try:
+        mode = await asyncio.to_thread(_seams.tools_mode, home)
+    except Exception as exc:
+        _log.warning("mordred desktop tool-call mode unreadable (%s)", type(exc).__name__)
+        return _api()._error("config_unreadable")
+    if not isinstance(mode.get("direct"), bool):
+        code = mode.get("code")
+        return _api()._error(code if code in TOOLS_ERROR_CODES else "config_unreadable")
+    return {"ok": True, "direct": mode["direct"], "source": mode["source"]}
+
+
+@router.post("/tools/direct")
+async def tools_direct_set(request: Request) -> Any:
+    """Body ``{"direct": true | false}`` (a JSON boolean, nothing else): the explicit choice.
+
+    Hermes's own ``hermes config set tools.tool_search.enabled off`` (``true``)
+    or ``hermes config unset ...`` (``false``) does the write; Mordred never
+    edits config.yaml. Hermes reads it at start, so the answer is
+    ``{"ok": true, "direct": bool, "restart_required": true}``.
+    """
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
+    direct = body.get("direct")
+    if not isinstance(direct, bool):
+        return invalid_body()
+    home = _api()._home()
+    try:
+        await asyncio.to_thread(_seams.set_direct_tools, home, direct)
+    except Exception as exc:
+        code = getattr(exc, "code", None)
+        if code not in TOOLS_ERROR_CODES:
+            _log.warning("mordred desktop tool-call change failed (%s)", type(exc).__name__)
+            code = "config_write_failed"
+        return _api()._error(code)
+    return {"ok": True, "direct": direct, "restart_required": True}
 
 
 # -- uninstall ----------------------------------------------------------------------------

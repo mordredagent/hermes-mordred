@@ -292,8 +292,6 @@ The macOS CLI, startup protection, monitor and uninstall lifecycle are implement
   extension/Desktop migration, Windows 11 and full installation-to-use acceptance.
   Passing wallet storage tests does not establish these capabilities.
 
-
-
 ## Windows native support
 
 - [x] Investigate native Windows feasibility and identify actual AWS NitroTPM
@@ -887,6 +885,12 @@ Follow-ups left by the landed code:
   "off"` as the fallback. Remaining: the eval (Part G) must cover the bridge
   path with the production model. Hermes itself is not changed (zero-PR
   rule).
+  - [x] direct-tools option (PR D5): `hermes-mordred direct-tools on | off |
+    status`, `GET` / `POST /tools/direct`, `status.tools`, the Desktop page's Tool
+    calls card and step 2.1's recommendation for a Venice private model. The
+    default stays deferred; only on an explicit request does Mordred run Hermes's
+    own `hermes config set tools.tool_search.enabled off` (or `unset`), and it never
+    edits config.yaml itself.
 
 - [ ] `imap_auth_failed` without a hint (found 2026-10-23, part of the
   Desktop design): every Gmail `NO` collapses to one code. Classify the
@@ -947,6 +951,16 @@ Follow-ups left by the landed code:
   ID-gated like the tools and audited, would let an owner verify a citation.
   Decide with the owner; if added, it must never list or search.
 
+- [ ] `_yaml_io.load_yaml_mapping` lets YAML warnings and error text out (found
+  2026-10-23 while reviewing direct-tools). ruamel's `ReusedAnchorWarning` goes
+  through Python's default warning display (the anchor name and the file path
+  reach stderr, so Hermes Desktop's log), and a `YAMLError` is logged with `%s`,
+  which quotes the offending source lines. Seen from `desktop/api.py`
+  `_hermes_venice_key` (the privacy-LLM step reads config.yaml) under a duplicate
+  anchor. Fix centrally: load under a recording `warnings.catch_warnings`, drop
+  the messages, and log the exception class only, as
+  `wizard/_direct_tools_yaml.py` does. The direct-tools reader itself keeps
+  everything quiet (covered by its tests).
 
 - [ ] Direct-tools CLI wording when only the probe ran (Codex seventh pass,
   2026-10-23, P3). When config.yaml on disk differs from Hermes's resolved view

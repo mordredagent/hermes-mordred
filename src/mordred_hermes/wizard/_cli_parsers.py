@@ -23,6 +23,7 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 - ``activity {status,pair-operator,peers,correct,backup,restore,retention}`` — browser activity
   history administration
 - ``mail {import,status,setup,fetch,forget}``    — mail import (mbox / .eml) and IMAP sync into ``mordred.db``
+- ``direct-tools {on,off,status}``               — Hermes's direct tool calls (``tools.tool_search.enabled``)
 - ``uninstall [--dry-run|--yes|--purge-data|--remove-helper]`` — remove Mordred, restore Hermes's files
 """
 
@@ -64,6 +65,7 @@ def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) 
     _add_extension(sub)
     _add_telegram(sub)
     _add_egress(sub)
+    _add_direct_tools(sub)
     _add_databases(sub)
     _add_activity(sub)
     _add_mail(sub)
@@ -194,6 +196,25 @@ def _add_egress(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     p_taint = esub.add_parser("taint", help="Lock a session down after it reads private data (on|off)")
     p_taint.add_argument("state", choices=["on", "off"])
     p_taint.set_defaults(func=_handle_egress)
+
+
+def _add_direct_tools(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "direct-tools",
+        help="Let Hermes call Mordred's tools directly instead of through tool_search (Hermes-wide)",
+        description=(
+            'on writes tools.tool_search.enabled: "off" into Hermes\'s config.yaml, so every tool is offered '
+            "directly (larger prompts; no remote-connector bridge); off removes it again. Restart Hermes "
+            "(or Hermes Desktop) for a change to take effect."
+        ),
+    )
+    dsub = p.add_subparsers(dest="direct_tools_command", required=True, metavar="COMMAND")
+    for name, text in (
+        ("on", 'Turn direct tool calls on (writes tools.tool_search.enabled: "off")'),
+        ("off", "Turn direct tool calls off (Hermes's default: deferred tools through tool_search)"),
+        ("status", "Show whether direct tool calls are on"),
+    ):
+        dsub.add_parser(name, help=text).set_defaults(func=_handle_direct_tools)
 
 
 _MACHINE_BOUND_HELP = (
@@ -1143,6 +1164,12 @@ def _handle_egress(args: argparse.Namespace) -> int:
     from . import egress_cli
 
     return egress_cli.cli_egress(args)
+
+
+def _handle_direct_tools(args: argparse.Namespace) -> int:
+    from . import direct_tools_cli
+
+    return direct_tools_cli.cli_direct_tools(args)
 
 
 def _handle_telegram(args: argparse.Namespace) -> int:

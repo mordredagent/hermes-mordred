@@ -897,6 +897,7 @@ extension   pair | serve
 desktop     install | uninstall | status
 egress      status | set | block | unblock | block-tool | unblock-tool |
             taint
+direct-tools  on | off | status
 databases   status | encrypt | decrypt
 telegram    setup | doctor | login | sync | status | logout | venice |
             local-llm | migrate-tee | migrate-store
@@ -4920,7 +4921,7 @@ Where the code differs from the design record:
 
 Status: specification; nothing below is implemented yet. Design record:
 [`2026-10-23-desktop-mail-and-ceremonies-design.md`](../superpowers/specs/2026-10-23-desktop-mail-and-ceremonies-design.md).
-Delivery is the PR sequence D1 to D4 in
+Delivery is the PR sequence D1 to D5 in
 [PLAN.md](PLAN.md#desktop-mail-and-ceremony-pages-implementation).
 
 The Mordred page in Hermes Desktop is `src/mordred_hermes/desktop/assets/desktop/plugin.js`
@@ -4978,7 +4979,7 @@ mode, egress rules, what the Hermes tools return, and any new bundler or framewo
   Mac** (1.1 Secure Enclave helper, 1.2 Encrypt Hermes memory and secrets, 1.3
   Encrypt Hermes databases), **2 Connect** (2.1 Hermes chat model, 2.2 Question
   model, 2.3 Telegram, 2.4 Import Telegram messages, 2.5 Mail over IMAP), **3 Ask
-  Hermes** (copy only), **4 Maintenance** (update, repair, uninstall). `RepairPanel`
+  Hermes** (copy only), **4 Maintenance** (update, repair, tool calls, uninstall). `RepairPanel`
   keeps the top place and, when shown, nothing else renders.
 - **Overview card.** Four `StatusRow({dot, label, detail, target})` rows (Hermes
   chat model, Protection, Telegram, Mail). The dot is `done`, `partial`, `not
@@ -5349,6 +5350,164 @@ thin driver over it so the two entry points cannot drift. There is ONE contract:
   from `index.enc`.
 - Responses for `client_version <= 3` keep their keys unchanged. `jobs` lists running
   jobs with `kind` (`mail_fetch`, `enclave`, `update`, `uninstall`).
+
+### Direct tool calls (2026-10-23)
+
+Hermes 0.21 defers every plugin tool, so the model reaches `mordred_mail_sync`,
+`mordred_history_search`, `telegram_ask` and `telegram_chats` only through
+`tool_search` + `tool_call`: one more model round trip per use, and smaller models
+sometimes break the bridge arguments (TODO "Deferred-tool bridge with the production
+model"; investigation record
+[`2026-10-23-hermes-tool-bridge-codex-investigation.md`](../superpowers/reviews/2026-10-23-hermes-tool-bridge-codex-investigation.md)
+section 2). Hermes's global `tools.tool_search.enabled: "off"` makes every tool direct.
+Owner decision (2026-10-23): the default stays deferred; direct calls are an explicit,
+explained opt-in from the CLI and the Desktop page, recommended with a Venice private
+model. Library `wizard/direct_tools.py` (the read in `wizard/_direct_tools_yaml.py`),
+CLI `wizard/direct_tools_cli.py`, routes in `desktop/_maintenance_routes.py`. Review
+records:
+[`2026-10-23-direct-tools-codex-review.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review.md)
+and
+[`2026-10-23-direct-tools-codex-review-pass2.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review-pass2.md)
+and
+[`2026-10-23-direct-tools-codex-review-pass3.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review-pass3.md);
+after the second pass the write was delegated to Hermes, after the third the parse
+moved to a child process.
+
+- **Never silent.** Mordred MUST NOT change `tools.tool_search` except on an explicit
+  request: `hermes-mordred direct-tools on | off`, or a change of the Tool calls
+  checkbox on the Desktop page (`POST /tools/direct`). No setup step, upgrade, repair,
+  status read or plugin start changes it.
+- **Hermes writes, Mordred never edits config.yaml.** A change is three `hermes`
+  processes. First the probe `hermes config get tools.tool_search.enabled` (`hermes
+  config get tools.tool_search` for the legacy `tool_search: false`): exit 2 (an
+  argparse usage error: no `get`, hence no `unset` either) is `hermes_cli_unsupported`
+  and nothing is written; any other non-zero exit or a timeout is
+  `config_write_failed`; an answer that Hermes already reads as asked ends the request
+  without writing. Then `on` runs Hermes's own `hermes config set
+  tools.tool_search.enabled off` (Hermes keeps this string-typed setting a string and
+  stores `enabled: 'off'`) and `off` runs `hermes config unset tools.tool_search.enabled`
+  (`hermes config unset tools.tool_search` for the legacy `tool_search: false`). A
+  setting the in-process read already finds as asked runs no `hermes` at all. Floor:
+  hermes-agent before 0.19 (the Linux floor CI runs 0.13.0) has only `config
+  show|edit|set|path|env-path|check|migrate`, and its `set` would store the boolean
+  `false`; such a Hermes is refused by the probe before anything is written (0.13 has
+  no tool search at all; Hermes 0.21 is the release that defers every plugin tool). The
+  command is Hermes's `hermes` console script next to the
+  running interpreter (the same venv), else `<home>/hermes-agent/venv/bin/hermes`, else
+  Hermes Desktop's launcher `<home>/hermes-agent/.hermes/bin/hermes` (Windows:
+  `hermes.exe` next to the interpreter, else `<home>/hermes-agent/venv/Scripts`). It
+  runs with `HERMES_HOME` set to the home (made absolute first, so the working
+  directory and `HERMES_HOME` always name the same home), the home as working directory,
+  `PYTHONPATH` and `PYTHONHOME` removed, stdin closed, a 60 s timeout, and its output
+  captured and dropped: only exit codes count and nothing it prints is shown, logged
+  or returned. Afterwards `hermes config get tools.tool_search.enabled` must print a
+  value Hermes reads as asked; a non-zero exit, a timeout or another answer is
+  `config_write_failed`. How the file looks afterwards (comments, layout) is Hermes's
+  writer's business. The child runs with `MORDRED_CONFIG_DECRYPT=0`: in a vault-managed
+  home the plaintext working copy is on disk only while a managed process (Hermes,
+  Hermes Desktop or `hermes-mordred` itself) runs and that process reseals it at exit,
+  so the child edits that copy and never materializes or reseals it itself.
+- **Reading like Hermes.** Before anything runs, the state is read the way Hermes
+  0.21.5 reads it: `hermes_yaml.safe_load` (ruamel `typ="safe"`, `version = (1, 1)`,
+  the C parser first and the pure one when it refuses; plain `off`, `no`, `n` and
+  `false` are booleans, `on`, `yes`, `y` and `true` too, also under a `%YAML 1.2`
+  directive), the file deep-merged over `DEFAULT_CONFIG`
+  (`tools.tool_search.enabled: "auto"`; a null over a default mapping is ignored) and
+  `ToolSearchConfig.from_raw`. The tools are direct when `enabled` gives `"off"` under
+  `_tri_state` (`str(v).strip().lower()` is `off`, `false`, `no` or `0`), or when the
+  legacy non-mapping `tools.tool_search` is the boolean false (the string `"off"` and the
+  integer `0` are deferred). A test compares 26 cases with a re-implementation of
+  Hermes's rule. The read result is `{direct, source}` only, never the value itself.
+- **A child process parses.** The Hermes process (Desktop's backend, the CLI) only
+  reads the file: POSIX through the wizard's regular-file reader, Windows through the
+  checked snapshot. It never parses YAML. It starts `python -I` (this interpreter;
+  `PYTHONPATH` and `PYTHONHOME` removed, `MORDRED_CONFIG_DECRYPT=0`; no working
+  directory set) running
+  `mordred_hermes.wizard._direct_tools_yaml` as `__main__`, writes the config.yaml text
+  to its stdin and reads exactly one JSON line from its stdout: `{"direct": bool,
+  "source": "config" | "default", "existing": "absent" | "deferral" | "legacy" |
+  "other" | "shared"}` or `{"code": "config_unreadable"}`. The child never opens
+  config.yaml. Its stderr is captured and dropped. A non-zero exit, the 20 s timeout,
+  or output that is not one conforming JSON line is `config_unreadable`. Under Hermes
+  Desktop, whose interpreter is the base one with Hermes's environment only on
+  `sys.path`, the `site-packages` directories outside the interpreter's prefix are
+  added back for the child (`site.addsitedir`). Answers are cached by the sha256 of
+  the text (the last 8): an unchanged file starts no process once the child has
+  answered, a `config_unreadable` refusal included. Only a run that yields no
+  conforming answer (the child could not start, exited non-zero, timed out, or
+  printed anything other than one JSON line) is not cached, so such a file is read
+  again, and waits for the child again, on every poll.
+- **No text escapes.** ruamel's errors and warnings (`ReusedAnchorWarning`,
+  `MantissaNoDotYAML1_1Warning`) quote source lines, values included. They are raised
+  only in the reader child, which records every warning and turns any error or warning
+  into `config_unreadable`; its stderr never reaches the Hermes process, so nothing of
+  the document is logged, printed or returned.
+- **Before the command.** One request runs at a time (a lock around the whole read,
+  command and check; the state is read again once the lock is held, so a second
+  simultaneous request sees the first one's result). Nothing runs when the setting
+  already is as asked. A `tools` or `tools.tool_search` mapping referenced from more
+  than one place (a YAML anchor/alias or a merge source; the safe loader gives them the
+  same object) is refused for `on` and `off` with `config_unsupported_shape`:
+  "config.yaml shares the tools or tool_search mapping with another setting through a
+  YAML anchor/alias, so changing it would change that setting too; edit config.yaml by
+  hand". `on` runs only when `enabled` is absent or null or an explicit deferral
+  (`auto`, `on`, `true`, `yes`, `1` in Hermes's view); any other value, or a legacy
+  scalar, is refused with `config_has_setting` ("edit config.yaml by hand"). A
+  vault-managed config.yaml (the `config-vault.marker`) without its plaintext on disk is
+  sealed away: the read is `unreadable` and the change is refused with
+  `config_vault_managed` before Hermes runs. A missing `hermes` command is
+  `hermes_cli_missing`, with the three lines to add by hand (`tools:` / `tool_search:` /
+  `enabled: "off"`).
+- **Closed codes.** `config_unreadable`, `config_vault_managed`, `config_write_failed`,
+  `config_has_setting`, `hermes_cli_missing`, `config_unsupported_shape`,
+  `hermes_cli_unsupported`.
+- **CLI.** `status` prints `direct tool calls: on|off (config|default)`. `on` and `off`
+  print the Hermes command that made the change, the two trade-offs (prompt size: every
+  request carries the deferred tool schemas, about 8,000 tokens with Mordred's tools;
+  remote-connector tools, reached only through the bridge, are unavailable while it is
+  on) and "Restart Hermes (or Hermes Desktop) for this to take effect."; an unchanged
+  setting says so and runs nothing. A refusal prints `refused (<code>)` and a
+  remediation line (for `hermes_cli_missing` and `hermes_cli_unsupported` also the three
+  lines) and exits 1.
+- **API.** `GET /tools/direct` answers `{"ok": true, "direct": bool, "source": "config"
+  | "default"}`. `POST /tools/direct` reads its body by hand (`read_object`); the body
+  MUST be an object whose `direct` is a JSON boolean, otherwise `invalid_body`. Success
+  is `{"ok": true, "direct": bool, "restart_required": true}`. Failures are HTTP 200
+  `{"ok": false, "error": <closed code>}`; an unexpected exception is
+  `config_write_failed` (its type name only is logged).
+- **Status field.** `GET /status?client_version=4` carries `tools: {"direct": bool |
+  null, "source": "config" | "default" | "unreadable"}` on every platform, Windows
+  included (the setting is Hermes-wide). It creates no file or directory and takes
+  no lock (POSIX: none; Windows: the nonblocking checked snapshot). A cached answer
+  (the text unchanged since the child last answered, a refusal included) is
+  immediate; a cache miss, or a file for which the child gave no conforming answer,
+  waits for the reader child, up to its 20 s timeout.
+  It never fails the status: an unreadable, busy or sealed-away config is
+  `{"direct": null, "source": "unreadable"}`. Versions 1 to 3 do not carry it.
+- **Page.** The Maintenance group shows a "Tool calls" card between the update panel
+  and uninstall: the checkbox "Let Hermes call Mordred's tools directly (recommended
+  with a Venice private model)" and fixed copy saying what it changes (Hermes's own
+  `hermes config set` writes `tools.tool_search.enabled: "off"` into its `config.yaml`;
+  unticking runs `hermes config unset`; every plugin tool), why (one model round trip
+  fewer; no malformed bridge calls from smaller models), the costs (about 8,000 more
+  prompt tokens; remote-connector tool discovery unavailable) and that it takes effect
+  after a restart. Under "If this fails, add it to config.yaml by hand:" the card shows
+  the three lines with a **Copy** button. The checkbox shows `status.tools.direct` only,
+  never a request's answer. A change sends exactly `{"direct": bool}` and reads the
+  status again; while both are in flight the checkbox is disabled under "Saving…". On
+  success the card shows a status line with `RestartHermesControl`; a refusal is a
+  `StepFailure` alert. `direct: null` shows the `config_unreadable` sentence and no
+  checkbox; a status without `tools` (an older Mordred) shows "Update Mordred to use
+  this". Step 2.1 adds the line "Recommended: turn on direct tool calls (Maintenance)"
+  with a "Go" button (`aria-label` "Go to Tool calls") that scrolls to and focuses the
+  card heading `mordred-tools`, only when the chat model is a Venice private model
+  (`hermes_model.ok` and `kind: "venice"`) and `tools.direct` is `false`. `MESSAGES`
+  gains the seven closed codes. The card is on the grouped page (macOS and Linux); the
+  Windows page is a separate component and stays byte-identical (the snapshot test), so
+  Windows uses the CLI.
+- **Restart.** Hermes reads `tools.tool_search` when it starts: every change takes
+  effect after a restart of Hermes or Hermes Desktop, and both the CLI and the page say
+  so.
 
 ## Imported-message provenance evaluation (2026-10-22)
 

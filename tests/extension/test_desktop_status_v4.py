@@ -27,7 +27,7 @@ from ._desktop_support import (
 )
 
 REAL_STORE_REFUSAL = _seams.store_refusal
-V4_KEYS = {"vault", "databases", "imports", "mail", "telegram_archive"}
+V4_KEYS = {"vault", "databases", "imports", "mail", "telegram_archive", "tools"}
 VALID_KEY = "hex:" + "11" * 32
 
 
@@ -325,7 +325,9 @@ def test_a_broken_vault_reader_reports_no_vault(desktop: Any, monkeypatch: pytes
 
 
 @pytest.mark.parametrize("platform", ["linux", "win32", "freebsd"])
-def test_other_platforms_get_fixed_unsupported_sections(platform: str) -> None:
+def test_other_platforms_get_fixed_unsupported_sections(platform: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Hermes's tool-call setting is read on every platform (it is Hermes-wide).
+    monkeypatch.setattr(_seams, "tools_mode", lambda home: {"direct": True, "source": "config", "raw": "off"})
     sections = asyncio.run(_status_v4.sections(platform, Path("/nonexistent")))
     assert sections == {
         "vault": {"exists": False, "env_enrolled": False, "env_injecting": False, "optout": False, "unattended": None},
@@ -333,6 +335,7 @@ def test_other_platforms_get_fixed_unsupported_sections(platform: str) -> None:
         "imports": {"available": False, "code": "unsupported_platform", "sources": {}},
         "mail": {"configured": False},
         "telegram_archive": {"legacy": None},
+        "tools": {"direct": True, "source": "config"},
     }
     assert _status_v4.imports_sections(Path("/nonexistent"), platform)["imports"]["code"] == "unsupported_platform"
 

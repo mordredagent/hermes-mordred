@@ -30,7 +30,7 @@ SECRET_BEARING = [
     "/uninstall",
 ]
 # Not secret-bearing, but hand-read too (new routes).
-ALSO_HAND_READ = ["/mail/fetch", "/databases/encrypt"]
+ALSO_HAND_READ = ["/mail/fetch", "/databases/encrypt", "/tools/direct"]
 
 MALFORMED = [
     f'["{CANARY}"]'.encode(),  # a JSON array

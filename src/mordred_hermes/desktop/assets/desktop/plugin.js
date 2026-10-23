@@ -189,6 +189,14 @@ const MESSAGES = {
   // A fetch that stopped (the setup wording says "Nothing was stored"; see fetchError).
   fetch_imap_auth_failed: 'The fetch stopped: the mail server refused the login. If you changed or revoked the app password, remove the mailbox and set it up again with a new one.',
   fetch_imap_unreachable: 'The fetch stopped: the mail server could not be reached (network, Tor or VPN path). Fetch again later.',
+  // Hermes's direct tool calls (`/tools/direct`, the Tool calls card).
+  config_unreadable: 'Hermes’s config.yaml could not be read (or is not a YAML mapping), so this setting cannot be shown or changed here. Nothing was changed. Run hermes-mordred direct-tools status in Terminal.',
+  config_vault_managed: 'Hermes’s config.yaml is sealed in Mordred’s vault and not on disk right now, so nothing was changed. Restart Hermes Desktop (it opens config.yaml when it starts) and try again.',
+  config_write_failed: 'Hermes’s own hermes config command did not finish, or Hermes does not read the setting as asked afterwards. Check config.yaml, then try again, or add the lines below by hand.',
+  config_has_setting: 'Hermes’s config.yaml already sets tools.tool_search to a value Mordred does not replace. Nothing was changed. Edit config.yaml by hand.',
+  hermes_cli_missing: 'Hermes’s own hermes command was not found, so nothing was changed. Add the lines below to config.yaml by hand.',
+  config_unsupported_shape: 'Hermes’s config.yaml shares the tools or tool_search mapping with another setting through a YAML anchor/alias, so changing it would change that setting too. Nothing was changed. Edit config.yaml by hand.',
+  hermes_cli_unsupported: 'This Hermes’s hermes config command has no get/unset (hermes-agent before 0.19), so nothing was changed. Such a Hermes may not defer tools at all (Hermes 0.21 is the release that defers every plugin tool); to set it anyway, add the lines below to config.yaml by hand.',
 }
 
 // `imap_auth_failed` refined by the server's response code (never its text).
@@ -1140,7 +1148,159 @@ function HermesModelInstructions({ check, refresh, ok, verifying }) {
   })
 }
 
-function HermesModelStep({ id = null, n = 0, state = null, check, refresh, why = null }) {
+// -- Hermes's direct tool calls (the Tool calls card under Maintenance) ---------------------
+
+// The card's heading: step 2.1's recommendation scrolls here.
+const TOOLS_ANCHOR = 'mordred-tools'
+// What Hermes's own `hermes config set` writes; the card offers it for a manual edit.
+const DIRECT_TOOLS_SNIPPET = 'tools:\n  tool_search:\n    enabled: "off"'
+const DIRECT_TOOLS_LABEL = 'Let Hermes call Mordred’s tools directly (recommended with a Venice private model)'
+const DIRECT_TOOLS_SAVED = {
+  on: 'Saved: Hermes calls tools directly once it restarts. Restart Hermes Desktop for the change to take effect.',
+  off: 'Saved: Hermes defers plugin tools again once it restarts. Restart Hermes Desktop for the change to take effect.',
+}
+
+// Step 2.1 recommends direct calls for a Venice private chat model while Hermes still defers tools.
+const recommendDirectTools = (check, tools) =>
+  Boolean(check && check.ok && check.kind === 'venice' && tools && tools.direct === false)
+
+function DirectToolsHint() {
+  return jsxs('div', {
+    style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 10 },
+    children: [
+      jsx('span', { key: 'text', children: 'Recommended: turn on direct tool calls (Maintenance)' }),
+      jsx(Button, { key: 'go', variant: 'ghost', 'aria-label': 'Go to Tool calls', onClick: () => focusTarget(TOOLS_ANCHOR), children: 'Go' }),
+    ],
+  })
+}
+
+// What the switch does, why and what it costs (the copy is fixed; the state comes from `status.tools`).
+function DirectToolsCopy() {
+  const code = (text) => jsx('code', { children: text })
+  const paragraph = (key, children) => jsxs('p', { key, style: { margin: '8px 0 0' }, children })
+  return jsxs(Fragment, {
+    children: [
+      paragraph('what', [
+        'What it changes: Hermes’s own ',
+        code('hermes config set'),
+        ' writes ',
+        code('tools.tool_search.enabled: "off"'),
+        ' into its ',
+        code('config.yaml'),
+        ' (unticking runs ',
+        code('hermes config unset'),
+        '). The setting is Hermes-wide: it affects every plugin tool, not only Mordred’s. Mordred changes it only when you tick or untick this box (or run ',
+        code('hermes-mordred direct-tools'),
+        ').',
+      ]),
+      paragraph('why', [
+        'Why: Hermes otherwise defers plugin tools, so the model reaches Mordred’s mail, history and Telegram tools only through ',
+        code('tool_search'),
+        ' and ',
+        code('tool_call'),
+        '. Direct calls save one model round trip per use and avoid the malformed bridge calls that smaller models sometimes make.',
+      ]),
+      paragraph('cost', [
+        'The cost: every request carries the deferred tool schemas (the prompt grows by about 8,000 tokens here), and remote-connector tool discovery, which goes through that bridge, is unavailable.',
+      ]),
+      paragraph('restart', ['It takes effect after a restart of Hermes Desktop.']),
+    ],
+  })
+}
+
+// The three lines `hermes config set` writes, for a manual edit when the command cannot run.
+function DirectToolsSnippet() {
+  return jsxs('div', {
+    style: { marginTop: 10 },
+    children: [
+      jsx('p', { key: 'label', style: { margin: '0 0 4px' }, children: 'If this fails, add it to config.yaml by hand:' }),
+      jsxs(Row, {
+        key: 'snippet',
+        children: [
+          jsx('pre', { key: 'text', style: { margin: 0, userSelect: 'all', whiteSpace: 'pre' }, children: DIRECT_TOOLS_SNIPPET }),
+          jsx(Button, {
+            key: 'copy',
+            variant: 'outline',
+            onClick: () => navigator.clipboard && navigator.clipboard.writeText(`${DIRECT_TOOLS_SNIPPET}\n`),
+            children: 'Copy',
+          }),
+        ],
+      }),
+    ],
+  })
+}
+
+// `tools` is `status.tools` ({direct, source}); missing from an older Mordred, `direct: null`
+// when config.yaml cannot be read. The checkbox sends an explicit {direct} and nothing else.
+function DirectToolsCard({ tools, refresh }) {
+  // Saving: the request and the status read after it are in flight (checkbox disabled).
+  const [busy, setBusy] = useState(false)
+  const [failure, setFailure] = useState(null)
+  // A change this page saved: Hermes uses it only after a restart (the restart note).
+  const [saved, setSaved] = useState(null)
+  const noteRef = useFocusOn(failure)
+  const resultRef = useFocusOn(saved)
+  const known = Boolean(tools) && typeof tools.direct === 'boolean'
+  // The state shown is the status only, never a request's answer.
+  const checked = known && tools.direct
+  const change = async (direct) => {
+    if (busy) return
+    setBusy(true)
+    setFailure(null)
+    try {
+      const r = await call('/tools/direct', { direct })
+      if (typeof r.direct !== 'boolean') throw new MordredError('invalid_response', {})
+      setSaved({ direct })
+    } catch (e) {
+      setFailure(asMordredError(e))
+    } finally {
+      try {
+        await refresh()
+      } catch (_) {
+        // the page's own status read reports its failures
+      }
+      setBusy(false)
+    }
+  }
+  const state = !tools
+    ? jsx('p', { key: 'state', role: 'status', children: MESSAGES.mordred_update_required })
+    : !known
+      ? jsx('p', { key: 'state', role: 'status', children: explain('config_unreadable') })
+      : jsxs('label', {
+          key: 'state',
+          style: { display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 8 },
+          children: [
+            jsx(Checkbox, { checked, disabled: busy, onCheckedChange: (v) => change(v === true), style: CHECKBOX_STYLE }),
+            jsx('span', { children: DIRECT_TOOLS_LABEL }),
+          ],
+        })
+  return jsxs('section', {
+    'aria-labelledby': TOOLS_ANCHOR,
+    style: { border: `1px solid ${STROKE}`, borderRadius: 10, padding: 16, marginBottom: 12 },
+    children: [
+      jsx('h3', { key: 'title', id: TOOLS_ANCHOR, tabIndex: -1, style: { margin: '0 0 8px' }, children: 'Tool calls' }),
+      failure ? jsx(StepFailure, { key: 'failure', error: failure, noteRef }) : null,
+      state,
+      busy ? jsx('p', { key: 'busy', role: 'status', 'aria-live': 'polite', children: '⟳ Saving…' }) : null,
+      jsx(DirectToolsCopy, { key: 'copy' }),
+      jsx(DirectToolsSnippet, { key: 'snippet' }),
+      saved
+        ? jsxs('div', {
+            key: 'saved',
+            ref: resultRef,
+            tabIndex: -1,
+            style: { marginTop: 10 },
+            children: [
+              jsx('p', { key: 'text', role: 'status', children: DIRECT_TOOLS_SAVED[saved.direct ? 'on' : 'off'] }),
+              jsx(RestartHermesControl, { key: 'restart' }),
+            ],
+          })
+        : null,
+    ],
+  })
+}
+
+function HermesModelStep({ id = null, n = 0, state = null, check, refresh, why = null, tools = null }) {
   const ok = Boolean(check && check.ok)
   const verifying = check && check.kind === 'venice' && check.private === null
   const line = ok ? `${check.model} (${check.kind === 'local' ? 'local, this host only' : 'Venice private, no retention'})` : null
@@ -1162,6 +1322,7 @@ function HermesModelStep({ id = null, n = 0, state = null, check, refresh, why =
     summary: line,
     toggle: 'Change',
     why,
+    notice: recommendDirectTools(check, tools) ? jsx(DirectToolsHint, { key: 'tools' }) : null,
     children: jsx(HermesModelInstructions, { check, refresh, ok, verifying }),
   })
 }
@@ -3467,7 +3628,13 @@ function GroupedSetup({ status, health, sync = null, onSync = null, onImportStar
         id: 'connect',
         layout,
         children: [
-          jsx(HermesModelStep, { ...step('hermes_model'), check: status.hermes_model, refresh, why: macos ? WHY.hermes_model : WHY.hermes_model_linux }),
+          jsx(HermesModelStep, {
+            ...step('hermes_model'),
+            check: status.hermes_model,
+            tools: status.tools || null,
+            refresh,
+            why: macos ? WHY.hermes_model : WHY.hermes_model_linux,
+          }),
           jsx(LlmStep, { ...step('question_model'), hermesKey: status.hermes_venice_key, refresh, why: WHY.question_model }),
           jsx(TelegramStep, { ...step('telegram'), needsApi: !status.telegram_api, refresh, summary: TELEGRAM_DONE, why: WHY.telegram }),
           jsx(ImportStep, {
@@ -3493,6 +3660,7 @@ function GroupedSetup({ status, health, sync = null, onSync = null, onImportStar
         layout,
         children: [
           jsx(UpdatePanel, { key: 'update', health, onInfo: onUpdateInfo }),
+          jsx(DirectToolsCard, { key: 'tools', tools: status.tools || null, refresh }),
           jsx(UninstallSection, { key: 'uninstall', platform: status.uninstall || null }),
         ],
       }),

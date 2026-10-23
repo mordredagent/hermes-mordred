@@ -28,6 +28,7 @@ from mordred_hermes.imports.mail.imap import IMAP_HINTS
 from mordred_hermes.imports.mail.imap_sync import ERROR_CODES, RESULT_FIELDS
 from mordred_hermes.imports.mail.setup_flow import SETUP_ERROR_CODES
 from mordred_hermes.imports.store import REFUSAL_CODES
+from mordred_hermes.wizard.direct_tools import ERROR_CODES as DIRECT_TOOLS_CODES
 
 from ._desktop_page import block, render_page, source
 
@@ -113,6 +114,14 @@ PAGE_CODES = (
     "memory_operation_in_progress",
     "memory_encryption_failed",
     "invalid_body",
+    # Hermes's direct tool calls (the Tool calls card, `/tools/direct`).
+    "config_unreadable",
+    "config_vault_managed",
+    "config_write_failed",
+    "config_has_setting",
+    "hermes_cli_missing",
+    "config_unsupported_shape",
+    "hermes_cli_unsupported",
 )
 STEP_KEYS = (
     "enclave",
@@ -757,7 +766,7 @@ console.log(JSON.stringify(paths))
 
 @pytest.mark.parametrize("platform", ["darwin", "linux"])
 def test_backend_answers_version_4_like_version_3(monkeypatch, platform, tmp_path):
-    """Version 4 is version 3 plus the five page keys (vault, databases, imports, mail, telegram_archive)."""
+    """Version 4 is version 3 plus the six page keys (vault, databases, imports, mail, telegram_archive, tools)."""
     pytest.importorskip("fastapi")
     from mordred_hermes.desktop import api
     from mordred_hermes.wizard import telegram_setup_cli
@@ -774,7 +783,7 @@ def test_backend_answers_version_4_like_version_3(monkeypatch, platform, tmp_pat
     monkeypatch.setattr(api, "_hermes_venice_key", lambda: None)
     v3 = asyncio.run(api.status(client_version=3))
     v4 = asyncio.run(api.status(client_version=4))
-    page_keys = {"vault", "databases", "imports", "mail", "telegram_archive"}
+    page_keys = {"vault", "databases", "imports", "mail", "telegram_archive", "tools"}
     assert set(v4) - set(v3) == page_keys
     assert {key: value for key, value in v4.items() if key not in page_keys} == v3
 
@@ -819,7 +828,7 @@ def test_every_code_the_page_knows_has_an_entry():
         block("BLOCKERS"),
         block("STEP_NUMBERS"),
     )
-    library = set(ERROR_CODES) | set(SETUP_ERROR_CODES) | set(REFUSAL_CODES)
+    library = set(ERROR_CODES) | set(SETUP_ERROR_CODES) | set(REFUSAL_CODES) | set(DIRECT_TOOLS_CODES)
     for code in sorted(set(PAGE_CODES) | library | set(STORE_GATE_CODES) | set(MAIL_CODES)):
         assert re.search(rf"^  {re.escape(code)}:", messages, re.M), code
     assert set(IMAP_HINT_CODES) == set(IMAP_HINTS)
@@ -933,8 +942,11 @@ BADGE_TEXT = {
 def test_rendered_page_shows_each_step_in_its_computed_state(name):
     status, sync, expected = STATE_CASES[name]
     rendered = headings(status, sync)
-    shown = {key.removeprefix("mordred-step-"): value for key, value in rendered["steps"].items()}
+    # Step headings only: the Tool calls card's heading (`mordred-tools`) is not a numbered step.
+    steps = {key: value for key, value in rendered["steps"].items() if key.startswith("mordred-step-")}
+    shown = {key.removeprefix("mordred-step-"): value for key, value in steps.items()}
     assert set(shown) == {key for key, value in expected.items() if value is not None}
+    assert set(rendered["steps"]) - set(steps) == {"mordred-tools"}
     for key, value in expected.items():
         if value is None:
             continue
@@ -3355,3 +3367,223 @@ def test_why_blocks_are_native_details_with_the_design_copy():
         "type": "summary",
         "props": {"style": {"cursor": "pointer"}, "children": "Why this step?"},
     }
+
+
+# -- Hermes's direct tool calls: the Tool calls card and step 2.1's recommendation ------------------
+
+TOOLS_OFF = {"direct": False, "source": "default"}
+TOOLS_ON = {"direct": True, "source": "config"}
+DIRECT_LABEL = "Let Hermes call Mordred\u2019s tools directly (recommended with a Venice private model)"
+RECOMMENDATION = "Recommended: turn on direct tool calls (Maintenance)"
+TICK = "await tick(tree, 'Let Hermes call'); tree = view()\n"
+UNTICK = "await tick(tree, 'Let Hermes call', false); tree = view()\n"
+CHECKBOX = "out.checkbox = find(tree, n => n.type === 'checkbox')?.props ?? null\n"
+
+
+def tools_card(
+    tools: dict[str, Any] | None, answers: list[Any], script: str = "", after: dict[str, Any] | None = None
+) -> Any:
+    """The card on `tools`; its refresh makes the next render read `after` (the status read after a save)."""
+    card = (
+        f"(globalThis.statusTools === undefined ? (globalThis.statusTools = {json.dumps(tools)}) : 0, "
+        f"DirectToolsCard({{tools: globalThis.statusTools, refresh: async () => {{refresh(); "
+        f"globalThis.statusTools = {json.dumps(after if after is not None else tools)}}}}}))"
+    )
+    return component(card, answers, script + CHECKBOX)
+
+
+def test_the_card_sits_in_maintenance_between_updates_and_uninstall():
+    result = render_page(
+        """
+const tree = PageBody({status: STATUS, health: null, refresh: () => {}})
+const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
+  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
+  : text(node.props && node.props.children)
+const group = find(tree, n => n.type === 'section' && n.props['aria-labelledby'] === 'mordred-group-maintenance')
+const order = [].concat(group.props.children).filter(Boolean).map(n => n.props && n.props['aria-labelledby'] || n.type)
+const card = find(group, n => n.type === 'section' && n.props['aria-labelledby'] === 'mordred-tools')
+const heading = find(card, n => n.type === 'h3')
+console.log(JSON.stringify({order, heading: heading.props, card: text(card)}))
+""".replace("STATUS", json.dumps(mac(**v4(), tools=TOOLS_OFF)))
+    )
+    assert result["order"][2] == "mordred-tools"  # after the h2 and the update panel, before uninstall
+    assert result["heading"]["id"] == "mordred-tools" and result["heading"]["tabIndex"] == -1
+    assert result["heading"]["children"] == "Tool calls"
+    card = result["card"]
+    assert DIRECT_LABEL in card
+    for phrase in (
+        "hermes config set",
+        "hermes config unset",
+        'tools.tool_search.enabled: "off"',
+        "config.yaml",
+        "every plugin tool",
+        "one model round trip",
+        "malformed bridge calls",
+        "about 8,000 tokens",
+        "remote-connector tool discovery",
+        "is unavailable",
+        "after a restart",
+    ):
+        assert phrase in card, phrase
+
+
+def test_the_card_is_on_the_linux_page_too():
+    assert DIRECT_LABEL in page_text(linux(tools=TOOLS_OFF))
+
+
+@pytest.mark.parametrize(
+    "tools,checked", [(TOOLS_OFF, False), (TOOLS_ON, True), ({"direct": False, "source": "config"}, False)]
+)
+def test_the_checkbox_shows_the_status(tools, checked):
+    result = tools_card(tools, [])
+    assert result["out"]["checkbox"]["checked"] is checked
+    assert result["out"]["checkbox"]["disabled"] is False
+    assert result["requests"] == [] and "Restart Hermes Desktop" not in result["buttons"]
+
+
+def test_ticking_posts_direct_true_then_offers_the_restart():
+    result = tools_card(TOOLS_OFF, [{"ok": True, "direct": True, "restart_required": True}], TICK, after=TOOLS_ON)
+    assert result["requests"] == [["/tools/direct", {"direct": True}]]
+    assert result["refreshes"] == 1
+    assert result["out"]["checkbox"]["checked"] is True
+    assert "Hermes calls tools directly once it restarts" in result["text"]
+    assert "Restart Hermes Desktop" in result["buttons"]
+    assert result["notifications"] == []
+
+
+def test_unticking_posts_direct_false_then_offers_the_restart():
+    result = tools_card(TOOLS_ON, [{"ok": True, "direct": False, "restart_required": True}], UNTICK, after=TOOLS_OFF)
+    assert result["requests"] == [["/tools/direct", {"direct": False}]]
+    assert result["out"]["checkbox"]["checked"] is False
+    assert "Hermes defers plugin tools again once it restarts" in result["text"]
+    assert "Restart Hermes Desktop" in result["buttons"]
+
+
+def test_the_checkbox_follows_the_status_read_after_a_save():
+    """The status wins over the request's answer (another writer, the CLI); the restart note stays."""
+    result = tools_card(TOOLS_OFF, [{"ok": True, "direct": True, "restart_required": True}], TICK, after=TOOLS_OFF)
+    assert result["out"]["checkbox"]["checked"] is False and result["out"]["checkbox"]["disabled"] is False
+    assert "Hermes calls tools directly once it restarts" in result["text"]
+
+
+def test_the_checkbox_shows_only_the_status_and_stays_disabled_while_saving():
+    """Never the request's answer: until the status read lands, the old status, disabled, with a spinner."""
+    script = (
+        "const pendingTick = tick(tree, 'Let Hermes call')\n"
+        "await new Promise(r => setTimeout(r, 0)); tree = view()\n"
+        "out.during = find(tree, n => n.type === 'checkbox').props\n"
+        "out.spinner = text(tree).includes('Saving')\n"
+        "await pendingTick; tree = view()\n"
+    )
+    card = (
+        (
+            "(globalThis.statusTools === undefined ? (globalThis.statusTools = TOOLS_OFF) : 0, "
+            "DirectToolsCard({tools: globalThis.statusTools, refresh: () => new Promise(resolve => "
+            "setTimeout(() => {refresh(); globalThis.statusTools = TOOLS_ON; resolve()}, 5))}))"
+        )
+        .replace("TOOLS_OFF", json.dumps(TOOLS_OFF))
+        .replace("TOOLS_ON", json.dumps(TOOLS_ON))
+    )
+    result = component(card, [{"ok": True, "direct": True, "restart_required": True}], script + CHECKBOX)
+    assert result["out"]["during"]["checked"] is False and result["out"]["during"]["disabled"] is True
+    assert result["out"]["spinner"] is True and "Saving" not in result["text"]
+    assert result["out"]["checkbox"]["checked"] is True and result["out"]["checkbox"]["disabled"] is False
+    assert result["refreshes"] == 1
+
+
+@pytest.mark.parametrize("code", DIRECT_TOOLS_CODES)
+def test_a_refused_change_is_an_alert_with_its_sentence_and_no_restart(code):
+    result = tools_card(TOOLS_OFF, [{"ok": False, "error": code}], TICK)
+    messages = block("MESSAGES")
+    sentence = re.search(rf"^  {code}: '([^']+)',$", messages, re.M).group(1)
+    assert sentence in result["text"]
+    assert '"role": "alert"' in json.dumps(result["tree"])
+    assert result["out"]["checkbox"]["checked"] is False and "Restart Hermes Desktop" not in result["buttons"]
+    assert result["refreshes"] == 1
+
+
+def test_an_answer_without_a_boolean_is_invalid_response():
+    result = tools_card(TOOLS_OFF, [{"ok": True}], TICK)
+    assert "answer this page does not understand" in result["text"]
+    assert "Restart Hermes Desktop" not in result["buttons"]
+
+
+@pytest.mark.parametrize(
+    "tools,phrase",
+    [
+        ({"direct": None, "source": "unreadable"}, "config.yaml could not be read"),
+        (None, "Update Mordred to use this"),
+    ],
+    ids=["unreadable", "older-mordred"],
+)
+def test_without_a_known_state_there_is_no_checkbox(tools, phrase):
+    result = tools_card(tools, [])
+    assert result["out"]["checkbox"] is None and phrase in result["text"]
+    assert 'tools.tool_search.enabled: "off"' in result["text"]  # the explanation stays
+
+
+def model_step(check: dict[str, Any], tools: dict[str, Any] | None, state: str = "done") -> Any:
+    return render_page(
+        """
+const calls = []
+globalThis.document = {getElementById: id => ({scrollIntoView: () => calls.push(['scroll', id]),
+  focus: () => calls.push(['focus', id])})}
+const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
+  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
+  : text(node.props && node.props.children)
+const props = {id: 'hermes_model', n: '2.1', state: STATE, check: CHECK, tools: TOOLS, refresh: () => {}}
+const tree = HermesModelStep(props)
+const go = find(tree, n => n.type === 'button' && n.props['aria-label'] === 'Go to Tool calls')
+if (go) go.props.onClick()
+console.log(JSON.stringify({text: text(tree), go: go ? go.props.children : null, calls}))
+""".replace("STATE", json.dumps(state))
+        .replace("CHECK", json.dumps(check))
+        .replace("TOOLS", json.dumps(tools))
+    )
+
+
+VENICE_PRIVATE = {"model": "e2ee-deepseek-v4-flash", "kind": "venice", "private": True, "ok": True}
+
+
+def test_step_2_1_recommends_direct_calls_for_a_venice_private_model_with_deferred_tools():
+    result = model_step(VENICE_PRIVATE, TOOLS_OFF)
+    assert RECOMMENDATION in result["text"] and result["go"] == "Go"
+    assert result["calls"] == [["scroll", "mordred-tools"], ["focus", "mordred-tools"]]
+
+
+@pytest.mark.parametrize(
+    "check,tools,state",
+    [
+        (VENICE_PRIVATE, TOOLS_ON, "done"),
+        (VENICE_PRIVATE, {"direct": None, "source": "unreadable"}, "done"),
+        (VENICE_PRIVATE, None, "done"),
+        ({"model": "qwen", "kind": "local", "private": True, "ok": True}, TOOLS_OFF, "done"),
+        ({"model": "deepseek-v4-flash", "kind": "venice", "private": None, "ok": False}, TOOLS_OFF, "next"),
+        ({"model": "gpt-x", "kind": "other", "private": None, "ok": False}, TOOLS_OFF, "next"),
+    ],
+    ids=["already-direct", "unreadable", "older-mordred", "local-model", "unverified", "not-private"],
+)
+def test_no_recommendation_otherwise(check, tools, state):
+    result = model_step(check, tools, state)
+    assert RECOMMENDATION not in result["text"] and result["go"] is None
+
+
+def test_the_grouped_page_passes_the_status_tools_to_step_2_1():
+    assert RECOMMENDATION in page_text(mac(**v4(), tools=TOOLS_OFF))
+    assert RECOMMENDATION not in page_text(mac(**v4(), tools=TOOLS_ON))
+    assert RECOMMENDATION not in page_text(mac(**v4()))  # an older Mordred without `tools`
+
+
+def test_the_card_offers_the_three_lines_to_add_by_hand_with_a_copy_button():
+    result = tools_card(TOOLS_OFF, [], "await press(tree, 'Copy')\n")
+    snippet = 'tools:\n  tool_search:\n    enabled: "off"'
+    assert "If this fails, add it to config.yaml by hand:" in result["text"]
+    assert snippet in result["text"] and "Copy" in result["buttons"]
+    assert result["copied"] == [snippet + "\n"]
+
+
+def test_the_snippet_is_the_one_the_cli_prints():
+    from mordred_hermes.wizard.direct_tools import SNIPPET
+
+    page = render_page("console.log(JSON.stringify(DIRECT_TOOLS_SNIPPET))")
+    assert page + "\n" == SNIPPET
