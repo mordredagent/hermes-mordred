@@ -393,6 +393,10 @@
       "extension",
       "macos"
     ],
+    "tests/extension/test_desktop_status_e2e.py": [
+      "extension",
+      "macos"
+    ],
     "tests/extension/test_desktop_status_v4.py": [
       "extension"
     ],
