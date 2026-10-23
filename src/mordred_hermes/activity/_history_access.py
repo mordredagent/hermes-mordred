@@ -5,7 +5,7 @@
   hand edit) applies from the next turn without restarting Hermes.
 - :func:`reader` returns the profile's store only through the protection gate,
   on every call: :func:`._gate.check_protection`, a plaintext check of the
-  file, the keyed opener (:func:`._gate._keyed_opener` refuses an unkeyed
+  file, the keyed opener (:func:`._gate.keyed_opener` refuses an unkeyed
   connection; :data:`OPENER` gives it the read bound
   :data:`.history.READ_BUSY_MS`, so the shim's schema probe never waits
   longer for a writer's lock) and a read-only check of the schema version and
@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Final
 
 from ._capture_audit import audit_history_unavailable
-from ._gate import ActivityRefused, _keyed_opener, check_protection, refusal
+from ._gate import ActivityRefused, check_protection, keyed_opener, refusal
 from ._paths import PLUGIN_DATA_SUBPATH, STORE_NAME
 from .config import ActivityConfig
 from .matching import SessionBudget
@@ -71,7 +71,7 @@ def _read_opener(path: Path) -> sqlite3.Connection:
     """The keyed opener with the read bound: opening waits at most ``READ_BUSY_MS`` for a writer's lock."""
     from .history import READ_BUSY_MS
 
-    return _keyed_opener(path, timeout=READ_BUSY_MS / 1000)
+    return keyed_opener(path, timeout=READ_BUSY_MS / 1000)
 
 
 #: The opener for reads; production only ever uses the keyed opener (tests replace this seam).

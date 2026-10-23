@@ -138,9 +138,21 @@ def test_ceremony_enrolls_only_the_requested_roles(win, capsys):
     assert generated(env) == 2
 
 
-def test_ceremony_cli_parses_role_flags(win, capsys):
-    assert cli.main(["keyvault", "native", "init", "--role", "audit"]) == 0
-    assert role_current(win, "audit") is not None and memory_lease(win) is None
+def test_ceremony_cli_parses_role_flags(monkeypatch, tmp_path):
+    # Enrollment and role isolation have real-custody coverage immediately above.
+    # This case owns parsing, selected-home forwarding and exit propagation.
+    selected_home = tmp_path / "selected-home"
+    monkeypatch.setenv("HERMES_HOME", str(selected_home))
+    seen = []
+
+    def enroll_selected(*, home, roles):
+        seen.append((home, roles))
+        return 7
+
+    monkeypatch.setattr(keyvault_windows_cli, "native_init", enroll_selected)
+    assert cli.main(["keyvault", "native", "init", "--role", "audit"]) == 7
+    assert seen == [(selected_home, ["audit"])]
+    assert not selected_home.exists()
 
 
 def test_ceremony_refuses_a_copied_profile_without_generating(win, capsys):
@@ -457,23 +469,25 @@ def test_purge_refuses_at_the_gate_without_journal(seeded, monkeypatch, capsys):
     assert not (env.home / "mordred" / "windows-memory.pending.json").exists()
 
 
-def test_proof_python_routes_through_the_launcher(win, monkeypatch):
+def test_proof_python_routes_through_the_launcher(monkeypatch, tmp_path):
     from mordred_hermes import _windows_runtime
     from mordred_hermes.keyvault._windows_proof import WindowsRuntimeProofError
     from mordred_hermes.wizard import _uninstall_hermes_env, _windows_memory
 
-    launcher = win.home / "bin" / "hermes.exe"
+    home = tmp_path / "home"
+    launcher = home / "bin" / "hermes.exe"
+    monkeypatch.setenv("MORDRED_HERMES_PYTHON", str(home / "override.exe"))
     monkeypatch.setattr(_uninstall_hermes_env, "find_hermes_launcher", lambda home: launcher)
-    assert _windows_memory.proof_python(win.home) is None, "MORDRED_HERMES_PYTHON stays authoritative"
+    assert _windows_memory.proof_python(home) is None, "MORDRED_HERMES_PYTHON stays authoritative"
     monkeypatch.delenv("MORDRED_HERMES_PYTHON")
     selected = Path("C:/hermes/python.exe")
     monkeypatch.setattr(_windows_runtime, "resolve_windows_python", lambda home, found: selected)
-    assert _windows_memory.proof_python(win.home) == selected
+    assert _windows_memory.proof_python(home) == selected
     monkeypatch.setattr(_windows_runtime, "resolve_windows_python", lambda home, found: None)
     with pytest.raises(WindowsRuntimeProofError, match=r"\(interpreter-invalid\)"):
-        _windows_memory.proof_python(win.home)
+        _windows_memory.proof_python(home)
     monkeypatch.setattr(_uninstall_hermes_env, "find_hermes_launcher", lambda home: None)
-    assert _windows_memory.proof_python(win.home) is None
+    assert _windows_memory.proof_python(home) is None
 
 
 _WRITE_SPIES: tuple[tuple[object, str], ...] = (

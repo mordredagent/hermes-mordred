@@ -165,6 +165,7 @@ def test_cross_process_contention_retains_busy_code_before_telegram_access(windo
     )
     monkeypatch.setattr(svc, "_archive", forbidden)
     monkeypatch.setattr(hermes_tools, "_service", lambda: svc)
+    monkeypatch.setattr(hermes_tools, "_reader_mode_ready", lambda _session_id: True)
 
     async def ask():
         async for _ in svc.ask(AskRequest(question="q"), forbidden):

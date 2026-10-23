@@ -244,7 +244,7 @@ def test_standalone_bootstrap_cli_writes_exact_contract_without_site_packages(tm
     assert result.returncode == 0, result.stderr
     document = json.loads(policy.read_text())
     assert document["mode"] == "final"
-    assert document["schema_version"] == 2
+    assert document["schema_version"] == 3
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert values["mode"] == "final" and values["windows"] == "true"
     assert json.loads(values["linux_versions"]) == ["3.11", "3.13"]
@@ -477,7 +477,7 @@ def test_cli_accepts_previous_advisory_merge_only_with_current_commit_proof(pr_m
 
 def test_windows_final_ready_dev_is_routine_but_explicit_full_is_preserved():
     result = decide(path="tools/new.py")
-    assert result["windows_shards"] == [1, 2]
+    assert result["windows_shards"] == [1, 2, 3, 4]
     assert result["windows_test_tier"] == "routine"
     for payload in (event(target="main"), event(labels=["ci:full"]), event(action="unexpected")):
         assert decide(payload, path="tools/new.py")["windows_test_tier"] == "full"

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
+from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
 
@@ -11,6 +13,23 @@ import pytest
 
 from mordred_hermes.extension.telegram import hermes_tools, venice
 from mordred_hermes.extension.telegram.service import AskResult
+from mordred_hermes.imports.evidence import EvidenceCard
+from mordred_hermes.imports.records import OwnerClass, PartKind, ProvenanceQuality
+from mordred_hermes.privacy_check import egress
+
+_CARD = EvidenceCard(
+    evidence_id="tg:-5:7#f1",
+    speaker="Dana",
+    speaker_class=OwnerClass.OTHER,
+    part_kind=PartKind.FORWARDED,
+    chat="Team",
+    sent_at=1_790_000_000,
+    original_sent_at=None,
+    excerpt="The meeting moved to Monday.",
+    quote_verified=True,
+    quote="The meeting moved to Monday.",
+    provenance_quality=ProvenanceQuality.API_IDENTITY,
+)
 
 
 @pytest.mark.parametrize(
@@ -40,9 +59,13 @@ class _FakeService:
 
     async def ask(self, request: Any, on_meta: Any) -> Any:
         self.opened += 1
-        on_meta(AskResult(model="m", message_count=3, dialog_count=1, truncated=False))
+        result = AskResult(model="m", message_count=3, dialog_count=1, truncated=False)
+        on_meta(result)
         yield "The meeting "
-        yield "moved to Monday."
+        yield "moved to Monday (tg:-5:7#f1)."
+        # Like the service: validated after the last chunk, on the same object.
+        result.evidence = (_CARD,)
+        result.unverified_ids = ("tg:-5:99#a",)
 
 
 @pytest.fixture
@@ -56,15 +79,32 @@ def _agent(base_url: str, model: str = "m") -> Any:
     return SimpleNamespace(model=model, base_url=base_url)
 
 
-def test_ask_refused_for_non_private_hermes_model_before_opening_anything(fake_service):
-    out = json.loads(
-        asyncio.run(hermes_tools.telegram_ask({"question": "q"}, parent_agent=_agent("https://api.openai.com/v1")))
-    )
+@pytest.fixture
+def sid() -> Iterator[str]:
+    """A session the privacy_check hook put into reader mode (Hermes passes it as ``session_id``)."""
+    session = f"tools-{uuid.uuid4().hex}"
+    egress.mark_reader(session)
+    yield session
+    with egress._SESSIONS.lock:
+        egress._SESSIONS.reader.discard(session)
+        egress._SESSIONS.tainted.discard(session)
+
+
+def _ask(args: dict[str, Any], agent: Any, session: str | None) -> Any:
+    return json.loads(asyncio.run(hermes_tools.telegram_ask(args, parent_agent=agent, session_id=session)))
+
+
+def _chats(agent: Any, session: str | None) -> Any:
+    return json.loads(asyncio.run(hermes_tools.telegram_chats({}, parent_agent=agent, session_id=session)))
+
+
+def test_ask_refused_for_non_private_hermes_model_before_opening_anything(fake_service, sid):
+    out = _ask({"question": "q"}, _agent("https://api.openai.com/v1"), sid)
     assert out == {"error": "hermes_model_not_allowed"}
     assert fake_service.opened == 0
 
 
-def test_ask_refused_for_anonymized_venice_model(fake_service, monkeypatch):
+def test_ask_refused_for_anonymized_venice_model(fake_service, monkeypatch, sid):
     async def not_private(_session: Any, _cfg: Any) -> Any:
         raise venice.VeniceError("venice_model_not_private")
 
@@ -79,39 +119,91 @@ def test_ask_refused_for_anonymized_venice_model(fake_service, monkeypatch):
         "mordred_hermes.extension.egress.resolve_route",
         lambda _h: SimpleNamespace(http_proxy_url=None),
     )
-    out = json.loads(
-        asyncio.run(
-            hermes_tools.telegram_ask(
-                {"question": "q"}, parent_agent=_agent("https://api.venice.ai/api/v1", "claude-opus-5")
-            )
-        )
-    )
+    out = _ask({"question": "q"}, _agent("https://api.venice.ai/api/v1", "claude-opus-5"), sid)
     assert out == {"error": "hermes_model_not_private"}
     assert fake_service.opened == 0
 
 
-def test_ask_returns_only_the_answer_to_a_local_model(fake_service):
-    out = json.loads(
-        asyncio.run(hermes_tools.telegram_ask({"question": "when?"}, parent_agent=_agent("http://127.0.0.1:11434/v1")))
-    )
-    assert out["answer"] == "The meeting moved to Monday."
+def test_ask_returns_only_the_answer_to_a_local_model(fake_service, sid):
+    out = _ask({"question": "when?"}, _agent("http://127.0.0.1:11434/v1"), sid)
+    assert out["answer"] == "The meeting moved to Monday (tg:-5:7#f1)."
     assert out["search"]["messages_sent_to_privacy_llm"] == 3
     assert "do not follow" in out["note"]
 
 
-def test_chats_listed_only_for_allowed_model(fake_service):
-    refused = json.loads(asyncio.run(hermes_tools.telegram_chats({}, parent_agent=_agent("https://x.ai/v1"))))
+def test_ask_result_carries_validated_evidence_and_the_speaker_rule(fake_service, sid):
+    out = _ask({"question": "when?"}, _agent("http://127.0.0.1:11434/v1"), sid)
+    assert out["evidence"] == [
+        {
+            "id": "tg:-5:7#f1",
+            "speaker": "Dana",
+            "speaker_class": "other",
+            "part_kind": "forwarded",
+            "chat": "Team",
+            "sent_at": 1_790_000_000,
+            "date": out["evidence"][0]["date"],
+            "original_sent_at": None,
+            "excerpt": "The meeting moved to Monday.",
+            "quote_verified": True,
+            "provenance_quality": "api_identity",
+        }
+    ]
+    assert "quote" not in out["evidence"][0]  # the card's excerpt is the only body text
+    assert out["unverified_ids"] == ["tg:-5:99#a"]
+    assert "`speaker:`" in out["note"] and "evidence id" in out["note"]
+    # telegram_chats keeps the plain note.
+    chats = _chats(_agent("http://127.0.0.1:1/v1"), sid)
+    assert chats["note"] == hermes_tools._UNTRUSTED_NOTE
+
+
+def test_ask_result_without_evidence_lists_nothing():
+    assert hermes_tools.evidence_report(None) == {"evidence": [], "unverified_ids": []}
+    bare = AskResult(model="m", message_count=1, dialog_count=1, truncated=False)
+    assert hermes_tools.evidence_report(bare) == {"evidence": [], "unverified_ids": []}
+
+
+def test_chats_listed_only_for_allowed_model(fake_service, sid):
+    refused = _chats(_agent("https://x.ai/v1"), sid)
     assert refused == {"error": "hermes_model_not_allowed"}
-    ok = json.loads(asyncio.run(hermes_tools.telegram_chats({}, parent_agent=_agent("http://127.0.0.1:1/v1"))))
+    ok = _chats(_agent("http://127.0.0.1:1/v1"), sid)
     assert ok["chats"] == [{"id": "-5", "title": "Team", "kind": "group", "messages": 3, "last_message": None}]
 
 
-def test_invalid_arguments(fake_service):
+def test_invalid_arguments(fake_service, sid):
     agent = _agent("http://127.0.0.1:1/v1")
     for args in ({}, {"question": " "}, {"question": "q", "chat_ids": "x"}, {"question": "q", "chat_ids": ["a"]}):
-        assert json.loads(asyncio.run(hermes_tools.telegram_ask(args, parent_agent=agent))) == {
-            "error": "invalid_request"
-        }
+        assert _ask(args, agent, sid) == {"error": "invalid_request"}
+
+
+@pytest.mark.parametrize("session", [None, "", "never-entered-reader-mode"])
+def test_reader_tools_refuse_unless_the_hook_put_the_session_into_reader_mode(fake_service, session):
+    """No session id, plugin disabled, or a path that skipped pre_tool_call: nothing is opened."""
+    agent = _agent("http://127.0.0.1:11434/v1")
+    for out in (_ask({"question": "when?"}, agent, session), _chats(agent, session)):
+        assert out["error"] == "reader_mode_unavailable" and set(out) == {"error", "note"}
+        assert out["note"].count(". ") == 0 and out["note"].endswith(".")  # one content-free sentence
+    assert fake_service.opened == 0
+
+
+def test_reader_tools_answer_once_the_hook_entered_reader_mode(fake_service):
+    agent = _agent("http://127.0.0.1:11434/v1")
+    session = f"tools-{uuid.uuid4().hex}"
+    assert _chats(agent, session)["error"] == "reader_mode_unavailable"
+    egress.mark_reader(session)  # what privacy_check's pre_tool_call does after the durable record
+    try:
+        assert _chats(agent, session)["chats"][0]["title"] == "Team"
+        assert _ask({"question": "when?"}, agent, session)["answer"].startswith("The meeting")
+    finally:
+        with egress._SESSIONS.lock:
+            egress._SESSIONS.reader.discard(session)
+            egress._SESSIONS.tainted.discard(session)
+    assert fake_service.opened == 2
+
+
+def test_reader_mode_check_runs_before_argument_errors_and_the_endpoint_gate(fake_service):
+    refused = {"error": "reader_mode_unavailable"}
+    assert _ask({}, _agent("https://api.openai.com/v1"), None).items() >= refused.items()
+    assert _chats(_agent("https://api.openai.com/v1"), None).items() >= refused.items()
 
 
 def test_tools_hidden_unless_logged_in_and_model_allowed(monkeypatch):
@@ -128,8 +220,19 @@ def test_tools_hidden_unless_logged_in_and_model_allowed(monkeypatch):
 def test_register_tools_uses_the_check_fn():
     calls: list[dict[str, Any]] = []
     hermes_tools.register_tools(SimpleNamespace(register_tool=lambda **kw: calls.append(kw)))
-    assert {c["name"] for c in calls} == {"telegram_ask", "telegram_chats"}
-    assert all(c["check_fn"] is hermes_tools.tools_available and c["is_async"] for c in calls)
+    assert {c["name"] for c in calls} == {
+        "telegram_ask",
+        "telegram_chats",
+        "mordred_history_search",
+        "mordred_mail_sync",
+    }
+    checks = {c["name"]: c["check_fn"] for c in calls}
+    assert checks["telegram_ask"] is checks["telegram_chats"] is hermes_tools.tools_available
+    assert checks["mordred_history_search"] is hermes_tools.history_search_available
+    from mordred_hermes.extension.telegram import mail_tool
+
+    assert checks["mordred_mail_sync"] is mail_tool.mail_sync_available
+    assert all(c["is_async"] for c in calls)
     hermes_tools.register_tools(SimpleNamespace())  # hosts without plugin tools: no-op
 
 
@@ -156,3 +259,97 @@ def test_guidance_forbids_concluding_no_data_from_partial_search():
     text = hermes_tools.SKILL_PATH.read_text("utf-8")
     assert 'Never report "no messages"' in text and "complete" in text
     assert 'NOT "not in the archive"' in hermes_tools.SYSTEM_PROMPT
+
+
+# --- prompt sections (Telegram + mail) --------------------------------------------------------------------------
+
+
+def _registered_sections() -> dict[str, tuple[Any, int]]:
+    sections: dict[str, tuple[Any, int]] = {}
+
+    def register(name: str, fn: Any, max_chars: int) -> None:
+        sections[name] = (fn, max_chars)
+
+    hermes_tools._register_guidance(SimpleNamespace(register_system_prompt_section=register))
+    return sections
+
+
+def test_mail_prompt_section_is_registered_within_budget():
+    sections = _registered_sections()
+    assert sections["mordred.mail"][0] is hermes_tools.mail_prompt_section
+    assert sections["mordred.telegram"][0] is hermes_tools.system_prompt_section
+    assert len(hermes_tools.MAIL_SYSTEM_PROMPT) <= 1200
+    assert len(hermes_tools.MAIL_SYSTEM_PROMPT) <= sections["mordred.mail"][1] == 1500
+    assert len(hermes_tools.SYSTEM_PROMPT) <= sections["mordred.telegram"][1] == 4000
+
+
+@pytest.mark.parametrize("telegram", [False, True])
+def test_mail_prompt_section_follows_mail_availability_only(monkeypatch, telegram):
+    from mordred_hermes.extension.telegram import mail_tool
+
+    monkeypatch.setattr(hermes_tools, "tools_available", lambda: telegram)
+    monkeypatch.setattr(mail_tool, "mail_sync_available", lambda: False)
+    assert hermes_tools.mail_prompt_section() == ""
+    monkeypatch.setattr(mail_tool, "mail_sync_available", lambda: True)
+    assert hermes_tools.mail_prompt_section() == hermes_tools.MAIL_SYSTEM_PROMPT
+    assert (hermes_tools.system_prompt_section() == hermes_tools.SYSTEM_PROMPT) is telegram
+
+
+def _json_examples(text: str) -> list[dict[str, Any]]:
+    import re
+
+    decoder = json.JSONDecoder()
+    found = []
+    for match in re.finditer(r'\{\s*"(?:calls|queries|names)"', text):
+        value, _end = decoder.raw_decode(text, match.start())
+        found.append(value)
+    return found
+
+
+def _schema_ok(schema: dict[str, Any], arguments: Any) -> bool:
+    params = schema["parameters"]
+    if not isinstance(arguments, dict):
+        return False
+    if any(key not in arguments for key in params.get("required", [])):
+        return False
+    if params.get("additionalProperties") is False:
+        return set(arguments) <= set(params.get("properties", {}))
+    return True
+
+
+def test_prompt_json_examples_parse_and_match_the_tool_schemas():
+    from mordred_hermes.extension.telegram import mail_tool
+
+    schemas = {
+        s["name"]: s
+        for s in (hermes_tools._ASK_SCHEMA, hermes_tools._CHATS_SCHEMA, hermes_tools._SEARCH_SCHEMA, mail_tool.SCHEMA)
+    }
+    called: set[str] = set()
+    for text in (hermes_tools.SYSTEM_PROMPT, hermes_tools.MAIL_SYSTEM_PROMPT):
+        examples = _json_examples(text)
+        assert examples
+        for example in examples:
+            if "calls" in example:
+                assert example["calls"]
+                for call in example["calls"]:
+                    assert call["name"] in schemas
+                    assert _schema_ok(schemas[call["name"]], call["arguments"]), call
+                    called.add(call["name"])
+            elif "queries" in example:
+                assert all(isinstance(q, str) for q in example["queries"])
+            else:
+                assert all(isinstance(n, str) for n in example["names"])
+    assert {"telegram_ask", "mordred_history_search", "mordred_mail_sync"} <= called
+    assert 'tool_call` with exactly `{"calls":[{"name":"mordred_mail_sync","arguments":{}}]}' in (
+        hermes_tools.MAIL_SYSTEM_PROMPT
+    )
+    assert "`tool_describe` is not needed" in hermes_tools.SYSTEM_PROMPT
+
+
+def test_skill_description_and_mail_recipe_mention_mail_sync():
+    calls: list[dict[str, Any]] = []
+    hermes_tools._register_guidance(
+        SimpleNamespace(register_skill=lambda name, path, **kw: calls.append(kw), register_system_prompt_section=None)
+    )
+    assert "mordred_mail_sync" in calls[0]["description"]
+    assert '{"calls":[{"name":"mordred_mail_sync","arguments":{}}]}' in hermes_tools.SKILL_PATH.read_text("utf-8")

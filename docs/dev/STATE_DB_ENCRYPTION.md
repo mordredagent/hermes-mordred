@@ -160,7 +160,11 @@ chooses for new databases) and verify it
 (`quick_check`, same tables and row counts). Only then: write a journal, arm,
 swap with `os.replace`, drop the old sidecars, remove the journal. A failure
 while preparing changes nothing; a crash after arming is completed from the
-journal on the next start. `hermes-mordred databases encrypt` runs it now, or
+journal on the next start. Classification reads each file with a plain
+`open()` and the stdlib `sqlite3`, so it is offline work: it runs only in the
+maintenance CLI or in the bootstrap before Hermes opens a database, and it
+refuses inside a Hermes process that has the SQLCipher module (see the POSIX
+lock gotcha below). `hermes-mordred databases encrypt` runs it now, or
 schedules it (`db-encryption.pending`) when a Hermes runtime or another
 converter holds the lock. Quit all Hermes processes before restarting to
 apply the pending conversion; a runtime that has not opened a database yet
@@ -173,13 +177,16 @@ Verified end-to-end on a throwaway home with Hermes's own code.
 - `dbcrypt._monitor.check` (component `dbcrypt`, hooks `on_session_start` and
   `pre_llm_call`, i.e. every turn): when armed, it reports a process without
   the SQLCipher module, a missing key, a left-over journal, and any Hermes
-  database the *stdlib* `sqlite3` can read (opened `mode=ro&immutable=1`, so
-  the probe creates no sidecars). Top-level files are re-listed every check,
-  the full walk is cached for five minutes. A violation is audited once per
-  process and kind (`mordred.db_encryption.violation`), broadcast to Hermes
-  Desktop, and either stops the turn (strict: a `MordredIntegrityRefused`
-  subclass, which escapes Hermes's hook guard) or is added to the turn's
-  context so the model tells the user (lenient).
+  database that SQLite reads without the key and the key does not open
+  (opened `mode=ro&immutable=1`, so the probe takes no locks and creates no
+  sidecars). The probes use the SQLite library of the process's own
+  connections (SQLCipher's once the shim is installed) and never a plain
+  `open()`. Top-level files are re-listed every check; the full walk (names
+  only, nothing opened) is cached for five minutes. A violation is audited
+  once per process and kind (`mordred.db_encryption.violation`), broadcast
+  to Hermes Desktop, and either stops the turn (strict: a
+  `MordredIntegrityRefused` subclass, which escapes Hermes's hook guard) or is
+  added to the turn's context so the model tells the user (lenient).
 - The `mordred.databases` system-prompt section states the checked status:
   encrypted, scheduled (not active yet), or the violation.
 - `databases decrypt` (`_migrate.decrypt_all`) mirrors the conversion: prepare
@@ -190,6 +197,24 @@ Verified end-to-end on a throwaway home with Hermes's own code.
   with a different key, refuses decryption before preparing copies or removing
   the marker. SQLCipher imports are optional on unsupported platforms; their
   monitor reports protected homes as unsupported instead of reporting success.
+- Gotcha found live (a Hermes process died with SIGBUS mid-turn): POSIX
+  record locks belong to the process, and closing *any* descriptor of a file
+  drops every lock the process holds on it. SQLite protects its connections
+  from this only within one library, by deferring its own closes. The
+  monitor used to classify the live `state.db` inside Hermes with a plain
+  `open()` and the stdlib `sqlite3`. Each close silently released the locks of
+  Hermes's SQLCipher connection, including its shared lock on the `-shm`
+  "dead man switch" byte. Another process that then opened `state.db` took
+  itself for the first one and reset the WAL index under Hermes's mapping.
+  Rule: inside a Hermes process, open a database file only through the
+  library its connections use. The shim's own probe of files outside the
+  home follows this rule too. `tests/test_dbcrypt_monitor.py` checks the locks
+  from a second process.
+- An encrypted database before its first checkpoint (main file = page 1 with
+  an empty schema, rows only in the WAL) reads like an empty plaintext
+  database without the key, because page 1's b-tree header is inside the
+  plaintext header. The monitor confirms such a file with the key, which
+  never opens a plaintext file. Without the key it is still reported.
 - Gotcha found while testing: reading an encrypted file without the right key
   usually raises `DatabaseError`, but with the plaintext header SQLite
   sometimes parses the encrypted page as a schema and the random bytes end up

@@ -75,6 +75,7 @@ PACK_STEPS = {
     "windows-wheel": ("wheel",),
 }
 Json = dict[str, Any]
+WorkerKey = tuple[str, str, int, str]
 
 
 def require(condition: bool, message: str) -> None:
@@ -127,7 +128,7 @@ def _strings(value: object) -> bool:
 
 
 def validate_context(policy: Json) -> None:
-    require(type(policy.get("schema_version")) is int and policy["schema_version"] == 2, "unsupported schema")
+    require(type(policy.get("schema_version")) is int and policy["schema_version"] == 3, "unsupported schema")
     require(policy.get("workflow_path") == WORKFLOW, "unexpected workflow")
     require(
         isinstance(policy.get("repository"), str)
@@ -211,7 +212,7 @@ def validate_policy(policy: Json) -> None:
     require(isinstance(policy["reason"], str) and bool(policy["reason"]), "missing policy reason")
     for os_name in FINAL_PACKS:
         _validate_packs(policy, os_name)
-    shards = [1, 2] if mode == "final" else [1] if policy["windows"] else []
+    shards = [1, 2, 3, 4] if mode == "final" else [1] if policy["windows"] else []
     require(
         type(policy["windows_shards"]) is list
         and all(type(s) is int for s in policy["windows_shards"])
@@ -234,19 +235,33 @@ def validate_policy(policy: Json) -> None:
     _validate_windows_modules(policy)
 
 
-def expected_workers(policy: Json) -> dict[tuple[str, str, int], list[str]]:
+def expected_workers(policy: Json) -> dict[WorkerKey, list[str]]:
     validate_policy(policy)
+    main_packs = [pack for pack in policy["linux_packs"] if pack != "floor"]
     expected = {
-        ("linux", version, 1): policy["linux_packs"] if version == policy["support_python"] else ["main"]
+        ("linux", version, 1, "main"): main_packs if version == policy["support_python"] else ["main"]
         for version in policy["linux_versions"]
     }
+    if "floor" in policy["linux_packs"]:
+        expected[("linux", policy["support_python"], 1, "floor")] = ["floor"]
     for os_name in ("macos", "windows"):
         if policy[os_name]:
             for shard in policy["windows_shards"] if os_name == "windows" else [1]:
-                expected[(os_name, policy["platform_python"], shard)] = (
+                expected[(os_name, policy["platform_python"], shard, "main")] = (
                     policy[f"{os_name}_packs"] if shard == 1 else ["main"]
                 )
     return expected
+
+
+def worker_job_name(os_name: str, python: str, shard: int, role: str) -> str:
+    """GitHub job names for the already validated selected worker identities."""
+    if role == "floor":
+        return "linux-floor"
+    if os_name == "linux":
+        return f"linux ({python})"
+    if os_name == "windows":
+        return f"windows-private-fs ({shard})"
+    return os_name
 
 
 def pack_steps(pack: str, os_name: str, mode: str) -> tuple[str, ...]:
@@ -330,14 +345,15 @@ def build_worker(
     *,
     actual_python: str,
     shard: int = 1,
+    role: str = "main",
     native_selection: Json | None = None,
 ) -> Json:
     expected = expected_workers(policy)
-    require(type(shard) is int and (os_name, python, shard) in expected, "unrequested worker")
+    require(type(shard) is int and (os_name, python, shard, role) in expected, "unrequested worker")
     require(actual_python == python, "actual interpreter does not match selected interpreter")
     packs = {
         pack: {name: _step(steps, name) for name in pack_steps(pack, os_name, policy["mode"])}
-        for pack in expected[(os_name, python, shard)]
+        for pack in expected[(os_name, python, shard, role)]
     }
     native_ok = True
     if os_name == "windows" and policy["mode"] == "final":
@@ -350,20 +366,21 @@ def build_worker(
     else:
         require(native_selection is None, "unrequested native manifest")
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": "worker",
         "context": {key: policy[key] for key in CONTEXT_KEYS},
         "os": os_name,
         "python": python,
         "actual_python": actual_python,
         "shard": shard,
+        "role": role,
         "native_selection": native_selection,
         "packs": packs,
         "success": native_ok and all(_succeeded(step) for pack in packs.values() for step in pack.values()),
     }
 
 
-def _validate_worker(policy: Json, worker: Json) -> tuple[str, str, int]:
+def _validate_worker(policy: Json, worker: Json) -> WorkerKey:
     require(isinstance(worker.get("packs"), dict), "missing worker packs")
     steps: Json = {}
     for pack in worker["packs"].values():
@@ -378,16 +395,18 @@ def _validate_worker(policy: Json, worker: Json) -> tuple[str, str, int]:
         steps,
         actual_python=worker.get("actual_python", ""),
         shard=worker.get("shard", 0),
+        role=worker.get("role", ""),
         native_selection=worker.get("native_selection"),
     )
     require(_same_json(worker, expected) and expected["success"] is True, "incomplete or mismatched worker evidence")
-    return worker["os"], worker["python"], worker["shard"]
+    return worker["os"], worker["python"], worker["shard"], worker["role"]
 
 
 def expected_needs(policy: Json) -> dict[str, str]:
     return {
         "ci-policy": "success",
         "linux": "success" if policy["linux_versions"] else "skipped",
+        "linux-floor": "success" if "floor" in policy["linux_packs"] else "skipped",
         "macos": "success" if policy["macos"] else "skipped",
         "windows-private-fs": "success" if policy["windows"] else "skipped",
     }
@@ -403,10 +422,12 @@ def accept(policy: Json, workers: list[Json], needs: Json, steps: Json) -> Json:
     docs_steps = {"docs_tests": _step(steps, "docs_tests")} if policy["mode"] == "docs" else {}
     require(all(_succeeded(step) for step in docs_steps.values()), "documentation checks did not succeed")
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": "acceptance",
         "policy": policy,
-        "workers": sorted(workers, key=lambda worker: (worker["os"], worker["python"], worker["shard"])),
+        "workers": sorted(
+            workers, key=lambda worker: (worker["os"], worker["python"], worker["shard"], worker["role"] != "main")
+        ),
         "needs": {name: {"result": value["result"]} for name, value in needs.items()},
         "docs_steps": docs_steps,
         "accepted": policy["mode"] != "critical",
@@ -480,6 +501,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--python")
     parser.add_argument("--workers", type=Path)
     parser.add_argument("--shard", type=int, default=1)
+    parser.add_argument("--role", choices=("main", "floor"), default="main")
     parser.add_argument("--native-manifest", type=Path)
     args = parser.parse_args(argv)
     try:
@@ -500,6 +522,7 @@ def main(argv: list[str] | None = None) -> int:
                 steps,
                 actual_python=f"{sys.version_info.major}.{sys.version_info.minor}",
                 shard=args.shard,
+                role=args.role,
                 native_selection=native_selection,
             )
         else:

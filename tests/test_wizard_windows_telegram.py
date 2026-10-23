@@ -127,13 +127,24 @@ class Factory:
         return self.client
 
 
+def _route_to_windows(monkeypatch):
+    monkeypatch.setattr(_windows_capability, "_platform", lambda: "win32")
+    monkeypatch.setattr(_windows_gates, "host_platform", lambda: "win32")
+
+
+@pytest.fixture
+def windows_routing(monkeypatch):
+    """Message and parser tests need platform routing, not a custody profile."""
+    _route_to_windows(monkeypatch)
+
+
 @pytest.fixture
 def wt(tg, monkeypatch):
     """Windows routing on any host over the C10b custody fixture."""
+    # Other modules import this fixture; keep its existing fixture dependencies.
+    _route_to_windows(monkeypatch)
     c, home, backend = tg
     helper = str(home.parent / "bin" / "mordred-hermes-winkey.exe")
-    monkeypatch.setattr(_windows_capability, "_platform", lambda: "win32")
-    monkeypatch.setattr(_windows_gates, "host_platform", lambda: "win32")
     monkeypatch.setattr(_seckey_helper, "find_winkey_helper", lambda: helper)
     monkeypatch.setattr(_memory_storage, "windows_memory_runtime_admitted", lambda executable=None: True)
     monkeypatch.setattr(c, "windows_backend", lambda: backend)
@@ -481,7 +492,7 @@ def test_login_wipes_an_orphaned_archive_through_checked_storage(wt, monkeypatch
     assert not (wt.root / "index.enc").exists()
 
 
-def test_cli_flags_reach_login_and_setup(wt, monkeypatch):
+def test_cli_flags_reach_login_and_setup(windows_routing, monkeypatch):
     seen: list[tuple[str, dict]] = []
     monkeypatch.setattr(telegram_cli, "telegram_login", lambda **kw: seen.append(("login", kw)) or 0)
     monkeypatch.setattr(telegram_setup_cli, "telegram_setup", lambda **kw: seen.append(("setup", kw)) or 0)
@@ -525,7 +536,7 @@ CODES = {
 
 
 @pytest.mark.parametrize(("code", "remedy"), sorted(CODES.items()))
-def test_every_classified_code_has_a_windows_message_with_a_remedy(wt, capsys, code, remedy):
+def test_every_classified_code_has_a_windows_message_with_a_remedy(windows_routing, capsys, code, remedy):
     assert telegram_cli._report(code) == 1
     err = capsys.readouterr().err
     assert remedy in err
@@ -534,7 +545,7 @@ def test_every_classified_code_has_a_windows_message_with_a_remedy(wt, capsys, c
     assert "enable env" not in err
 
 
-def test_the_message_table_covers_every_store_and_custody_code(wt):
+def test_the_message_table_covers_every_store_and_custody_code():
     from mordred_hermes._private_fs import PrivateFSError
 
     produced = set(_DEFINITE.values()) | {"custody_unsafe", "custody_uncertain", "custody_broken"}

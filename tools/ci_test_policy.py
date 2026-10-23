@@ -225,7 +225,7 @@ def build_policy(
     )
     tier = "none" if not windows else "routine" if final and routine_eligible else "full"
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "mode": mode,
         "repository": context.get("GITHUB_REPOSITORY", ""),
         "workflow_path": ".github/workflows/ci.yml",
@@ -247,7 +247,7 @@ def build_policy(
         else ["main", *(() if critical else scope.windows_packs)]
         if windows
         else [],
-        "windows_shards": [1, 2] if final else [1] if windows else [],
+        "windows_shards": [1, 2, 3, 4] if final else [1] if windows else [],
         "windows_test_tier": tier,
         "windows_exclusions_sha256": exclusions_digest("full" if tier == "none" else tier),
         "windows_modules": list(native_modules()) if final else [] if critical else list(scope.windows_modules),

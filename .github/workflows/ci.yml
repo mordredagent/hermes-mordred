@@ -1,4 +1,4 @@
-# Scope-aware CI: routine 3–5, documentation 2, final 7 jobs.
+# Scope-aware CI: routine 3–6, documentation 2, final 10 jobs.
 # Policy and positive acceptance are defined in docs/dev/CI.md.
 # Keep PR event types stable: label-only runs can cancel actual testing.
 name: CI
@@ -182,30 +182,6 @@ jobs:
             tests/extension/test_telegram_import.py
         id: feature_tests
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'features') && matrix.python-version == needs.ci-policy.outputs.support_python
-      - name: Install declared Hermes floor in a clean environment
-        id: floor_install
-        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'floor') && matrix.python-version == needs.ci-policy.outputs.support_python
-        run: |-
-          python -m venv "$RUNNER_TEMP/mordred-ci-floor"
-          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pip install "hermes-agent==0.13.0"
-          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pip install -e ".[dev,keyvault,extension]"
-      - name: Guard — resolver must not have upgraded hermes-agent off the floor
-        run: |
-          set -euo pipefail
-          INSTALLED_VERSION="$("$RUNNER_TEMP/mordred-ci-floor/bin/python" -c 'import importlib.metadata as m; print(m.version("hermes-agent"))')"
-          if [ "$INSTALLED_VERSION" != "0.13.0" ]; then
-            echo "::error::hermes-agent floor test is void: resolver left hermes-agent at $INSTALLED_VERSION instead of the pinned 0.13.0, so pyproject.toml's declared floor was not actually exercised."
-            exit 1
-          fi
-        id: floor_guard
-        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'floor') && matrix.python-version == needs.ci-policy.outputs.support_python
-      - name: pytest against the hermes-agent floor
-        env:
-          HERMES_HOME: /tmp/hermes-mordred-ci-home
-        run: >-
-          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pytest -q --deselect tests/test_provider_identity.py::test_replica_matches_hermes_source --deselect tests/test_provider_transport_flagger.py::TestRegistrySync::test_known_provider_slugs_are_real_hermes_ids
-        id: floor_tests
-        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'floor') && matrix.python-version == needs.ci-policy.outputs.support_python
       - name: Build canonical and compatibility artifacts
         id: package_build
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'package') && matrix.python-version == needs.ci-policy.outputs.support_python
@@ -451,6 +427,61 @@ jobs:
         if: always()
         with:
           name: ci-worker-evidence-linux-${{ matrix.python-version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: worker.json
+          if-no-files-found: error
+  linux-floor:
+    needs:
+      - ci-policy
+    if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'floor')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      HERMES_HOME: /tmp/mordred-ci-floor-home
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ needs.ci-policy.outputs.support_python }}
+          cache: pip
+      - name: Download immutable run policy
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: ci-policy-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Install declared Hermes floor in a clean environment
+        id: floor_install
+        run: |-
+          python -m venv "$RUNNER_TEMP/mordred-ci-floor"
+          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pip install "hermes-agent==0.13.0"
+          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pip install -e ".[dev,keyvault,extension]"
+      - name: Guard — resolver must not have upgraded hermes-agent off the floor
+        run: |
+          set -euo pipefail
+          INSTALLED_VERSION="$("$RUNNER_TEMP/mordred-ci-floor/bin/python" -c 'import importlib.metadata as m; print(m.version("hermes-agent"))')"
+          if [ "$INSTALLED_VERSION" != "0.13.0" ]; then
+            echo "::error::hermes-agent floor test is void: resolver left hermes-agent at $INSTALLED_VERSION instead of the pinned 0.13.0, so pyproject.toml's declared floor was not actually exercised."
+            exit 1
+          fi
+        id: floor_guard
+      - name: pytest against the hermes-agent floor
+        env:
+          HERMES_HOME: /tmp/hermes-mordred-ci-home
+        run: >-
+          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pytest -q --deselect tests/test_provider_identity.py::test_replica_matches_hermes_source --deselect tests/test_provider_transport_flagger.py::TestRegistrySync::test_known_provider_slugs_are_real_hermes_ids
+        id: floor_tests
+      - name: Record worker checks
+        id: evidence
+        if: always()
+        env:
+          CI_STEPS_JSON: ${{ toJSON(steps) }}
+          CI_PYTHON: ${{ needs.ci-policy.outputs.support_python }}
+        run: python tools/ci_evidence.py worker --policy ci-policy.json --os linux --python "$CI_PYTHON" --role floor --output worker.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: ci-worker-evidence-linux-floor-${{ needs.ci-policy.outputs.support_python }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: worker.json
           if-no-files-found: error
   macos:
@@ -826,6 +857,7 @@ jobs:
     needs:
       - ci-policy
       - linux
+      - linux-floor
       - macos
       - windows-private-fs
     if: always()
