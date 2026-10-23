@@ -4,6 +4,13 @@
 // key) go from these masked inputs straight to Mordred's local API through
 // ctx.rest(): never into the chat, the model, the agent's tools, plugin
 // storage, notifications or logs. Inputs are cleared after each submit.
+//
+// The macOS and Linux page is one column: an overview card, then four groups
+// (Protect, Connect, Ask Hermes, Maintenance) of steps whose state comes only
+// from status fields (stepStates / overviewRows). The layout is chosen from
+// `platform` and `hardware_kind`, never from English text; Windows keeps
+// WindowsSetup. Only the names below may be imported from the SDK: a named
+// export the installed Desktop lacks fails the module link and the whole page.
 import {
   host,
   Button,
@@ -20,14 +27,26 @@ let rest = null
 // The SDK checkbox's default border is a pale theme colour that disappears on
 // a white card; draw it in the text colour (CanvasText follows light/dark).
 const CHECKBOX_STYLE = { borderColor: 'CanvasText', borderWidth: 1.5, borderStyle: 'solid' }
+// Colours come only from currentColor, CanvasText and the Desktop theme
+// variables, so light and dark both work; a hex value is only a var() fallback.
+const DESTRUCTIVE = 'var(--destructive, #b91c1c)'
+const ACCENT = 'var(--ui-accent, currentColor)'
+const STROKE = 'var(--ui-stroke-secondary, var(--border, #333))'
+const MUTED_TEXT = 'var(--ui-text-secondary, currentColor)'
 // Pages listening for background-job events (Enclave build, import).
 const jobListeners = new Set()
+// The page reads the version 4 status (databases, imports, mail). The start-up
+// notice only needs installed / missing / unreachable, so it keeps the lighter
+// version 3 answer and opens no store at every Desktop start. The backend
+// compares versions with >=, so an older Mordred answers 4 like 3.
+const STATUS_PATH = '/status?client_version=4'
+const STARTUP_STATUS_PATH = '/status?client_version=3'
 
 const MESSAGES = {
   telegram_session_revoked:
-    'Telegram ended this login (for example it was terminated in Telegram → Settings → Devices, or Telegram signed it out). Log in again in step 4 — your imported messages are kept.',
+    'Telegram ended this login (for example it was terminated in Telegram → Settings → Devices, or Telegram signed it out). Log in again in the Telegram step — your imported messages are kept.',
   telegram_platform_unsupported: 'Private Telegram requires macOS Secure Enclave or Linux TPM 2.0, with memory encryption enabled. Update both Mordred and its Desktop assets if platform metadata is missing.',
-  memory_encryption_required: 'Turn on memory encryption first (step 2).',
+  memory_encryption_required: 'Turn on memory encryption first (the memory encryption step).',
   memory_encryption_failed: 'Memory encryption could not be turned on. Check hardware access and the Hermes runtime, then try again.',
   telegram_already_logged_in: 'Telegram is already connected.',
   invalid_api_credentials: 'api_id must be a number and api_hash 32 hex characters (my.telegram.org → API development tools).',
@@ -41,13 +60,13 @@ const MESSAGES = {
   telegram_rate_limited: 'Telegram asked to wait before trying again.',
   hermes_venice_key_missing: 'No Venice key is set in Hermes. Enter one below.',
   local_endpoint_invalid: 'Use http://127.0.0.1:<port>/… (this host only).',
-  tee_unavailable: 'The hardware key helper is unavailable (step 1).',
+  tee_unavailable: 'The hardware key helper is unavailable (the helper step).',
   tee_auth_cancelled: 'Touch ID was cancelled.',
   tpm_build_failed: 'Building or probing the TPM helper failed. Install Rust, pkg-config and libtss2-dev; ensure this user can access /dev/tpmrm0.',
   enclave_build_failed: 'Building the Secure Enclave helper failed. Install the Xcode command-line tools and retry.',
-  sync_in_progress: 'An import is already running.',
-  telegram_not_configured: 'Set the question model first (step 3).',
-  hermes_model_not_private: 'Hermes itself must use a Venice private model or a local model first (step 0).',
+  sync_in_progress: 'A Telegram import or a mail fetch is already running.',
+  telegram_not_configured: 'Set the question model first.',
+  hermes_model_not_private: 'Hermes itself must use a Venice private model or a local model first (the Hermes chat model step).',
   // Package updates (`hermes-mordred update` behind the Update Mordred button).
   update_check_failed: 'PyPI could not be asked for Mordred releases right now. Check the network path and try again.',
   update_failed: 'The update stopped and the previous version was kept or reinstalled. See the step output below; fix the cause and try again.',
@@ -93,6 +112,132 @@ const MESSAGES = {
   storage_uncertain: 'A Mordred storage write may not have completed; check the pairing before retrying.',
   storage_error: 'Mordred’s local storage refused the operation.',
   attestation_key_missing: 'The pairing identity key is missing; remove the pairing, then pair again.',
+  // The page needs a newer Mordred (its status lacks the version 4 keys).
+  mordred_update_required: 'Update Mordred to use this. The running Mordred does not report this step yet; the update is under Maintenance.',
+  // Database encryption, the import store and mail (closed sets of the version 4 API).
+  databases_unsupported: 'Database encryption needs macOS with SQLCipher. Nothing was changed.',
+  databases_key_missing: 'The database key is not available yet. Finish step 1.2 and restart Hermes first.',
+  databases_failed: 'The databases could not be encrypted. Nothing was changed.',
+  databases_busy: 'A database conversion is already running. Try again when it finishes.',
+  vault_anchor_stale: 'A Mordred vault was removed from this Mac earlier, but its Keychain anchor remains, so the vault cannot be created. Run the command below in Terminal and try again. Nothing was changed.',
+  mail_already_configured: 'A mailbox is already set up. Remove it below first.',
+  mail_setup_flow_expired: 'This mail setup expired. Start again; nothing was stored.',
+  mail_fetch_busy: 'A mail fetch is already running. Wait for it to finish.',
+  mail_not_configured: 'No mailbox is set up yet.',
+  invalid_address: 'Enter a mail address such as name@example.com.',
+  invalid_host: 'Enter the IMAP server name, for example imap.gmail.com.',
+  invalid_account: 'The account label must start with a lowercase letter and use only lowercase letters, digits and underscores (at most 32 characters).',
+  invalid_password: 'The app password must be 1 to 256 printable characters.',
+  too_many_addresses: 'List at most 20 other addresses.',
+  imap_auth_failed: 'The login was refused. Nothing was stored.',
+  imap_unreachable: 'The server could not be reached (network, Tor or VPN path). Nothing was stored.',
+  imap_protocol: 'The mail server answered in a way Mordred does not accept. Try again later.',
+  imap_command_refused: 'The mail server refused a read-only command. Try again later.',
+  routing_unavailable: 'Mordred’s network route (Tor or VPN) is not ready, so the mail server was not contacted.',
+  egress_unsupported: 'Mordred’s network policy cannot reach the mail server safely from here, so it was not contacted.',
+  import_store_unavailable: 'Mordred’s encrypted store is not available right now.',
+  not_armed: 'Mordred’s store opens only after the Hermes databases are encrypted (step 1.3).',
+  conversion_pending: 'The Hermes databases are converted at the next start. Restart Hermes Desktop to finish step 1.3.',
+  unprotected_process: 'Hermes started before its databases were encrypted. Restart Hermes Desktop.',
+  no_key: 'The database key is not available. Finish step 1.2 and restart Hermes.',
+  plaintext_store: 'Mordred’s store can be read without the database key, so Mordred does not use it.',
+  busy: 'Mordred’s store is busy. Try again shortly.',
+  credentials_changed: 'The mailbox was set up again while it was being removed, so nothing was deleted. Try again.',
+  credentials_left: 'The sealed mailbox credentials could not be deleted. Try again.',
+  key_left: 'The mailbox key in the Secure Enclave could not be deleted. Remove the mailbox again to finish.',
+  account_unknown: 'The label of the removed mailbox could not be read, so its fetched mail and cursors were kept. Remove them in Terminal with hermes-mordred mail forget --account LABEL.',
+  fetch_failed: 'The mail fetch failed. Try again later.',
+  run_failed: 'The fetch stopped because Mordred’s store refused a write; nothing incomplete was kept. Try again.',
+  unsupported_platform: 'This is available only on macOS.',
+  invalid_request: 'The request was not valid.',
+  // Mail wording for codes whose shared text names Telegram (see explainMail).
+  mail_forget_confirm_mismatch: 'Type delete my data exactly to also delete the fetched mail.',
+  mail_secrets_corrupt: 'The sealed mailbox credentials cannot be opened with this Mac’s key. Remove the mailbox and set it up again.',
+  mail_store_path_unsafe: 'A Mordred mail file or folder is not private to this account. Nothing was changed.',
+}
+
+// `imap_auth_failed` refined by the server's response code (never its text).
+const IMAP_HINTS = {
+  authentication_failed: 'The server rejected the address or the app password. Check that the app password was created while signed in to the same Google account as this address, that the address is the account’s primary sign-in address (not an alias or a “send as” address), and that 2-Step Verification is on. A Workspace administrator can turn off IMAP or app passwords for the organisation, and Advanced Protection disables app passwords. Nothing was stored.',
+  server_alert: 'The server refused the login with an alert. For Gmail this usually means an app password is required (not the account password) or that Google wants a sign-in in the browser first. Open https://myaccount.google.com/apppasswords, create a new app password and try again. Nothing was stored.',
+  login_disabled: 'This server does not allow password login over IMAP. Nothing was stored.',
+  gmail_app_password_length: 'A Gmail app password is exactly 16 letters. What you pasted has a different length, so it is probably the account password or incomplete. Nothing was sent to the server.',
+}
+
+// Why a step cannot run yet: a code computed by stepStates from status fields
+// (never free text from the API) and the step that lifts it.
+const BLOCKERS = {
+  needs_hermes_model: { step: 'hermes_model', text: 'Hermes must chat with a Venice private model or a local model first.' },
+  needs_enclave: { step: 'enclave', text: 'Set up the hardware key helper first.' },
+  needs_memory: { step: 'memory', text: 'Turn on memory encryption first.' },
+  needs_databases: { step: 'databases', text: 'Encrypt the Hermes databases first.' },
+  needs_restart: { step: 'databases', text: 'Restart Hermes Desktop to finish step 1.3.' },
+  needs_login: { step: 'telegram', text: 'Connect Telegram first.' },
+  needs_question_model: { step: 'question_model', text: 'Set the question model first.' },
+}
+
+// macOS/Linux steps in reading order (Linux has no 1.3 and no 2.5).
+const STEP_NUMBERS = {
+  enclave: '1.1',
+  memory: '1.2',
+  databases: '1.3',
+  hermes_model: '2.1',
+  question_model: '2.2',
+  telegram: '2.3',
+  telegram_import: '2.4',
+  mail: '2.5',
+}
+// Step states: a decorative glyph and the state as text after the title (the
+// text of `todo` is read by screen readers only).
+const STATE_BADGES = {
+  done: { glyph: '✓', text: 'Done' },
+  next: { glyph: '→', text: 'Next' },
+  todo: { glyph: '', text: 'To do' },
+  blocked: { glyph: '⏸', text: 'Blocked' },
+  running: { glyph: '⟳', text: 'Running' },
+  attention: { glyph: '!', text: 'Needs attention' },
+}
+const VISUALLY_HIDDEN = { position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap' }
+// Overview dots.
+const DOTS = {
+  done: { glyph: '●', color: 'currentColor', label: 'done' },
+  partial: { glyph: '◐', color: ACCENT, label: 'partly done' },
+  not_started: { glyph: '○', color: 'currentColor', label: 'not started' },
+  attention: { glyph: '!', color: DESTRUCTIVE, label: 'needs attention' },
+}
+const GROUPS = {
+  protect: { n: 1, title: 'Protect this Mac', linux: 'Protect this host' },
+  connect: { n: 2, title: 'Connect' },
+  ask: { n: 3, title: 'Ask Hermes' },
+  maintenance: { n: 4, title: 'Maintenance' },
+}
+// Import-store gate codes (`status.imports.code`) for the Telegram overview row.
+const STORE_GATES = {
+  not_armed: 'counts after step 1.3',
+  conversion_pending: 'counts after a restart',
+  unprotected_process: 'counts after a restart',
+  no_key: 'store key unavailable',
+  plaintext_store: 'store not encrypted',
+  store_unavailable: 'store unavailable',
+  busy: 'store busy',
+}
+const TAGLINES = {
+  macos: 'Private Telegram and mail for Hermes, encrypted on this Mac.',
+  linux: 'Private, read-only Telegram for Hermes, encrypted on this host.',
+  other: 'Private, read-only Telegram for Hermes.',
+}
+// "Why this step?" copy.
+const WHY = {
+  enclave: 'Mordred seals your Telegram login, your mail app password and the encryption keys with a key that never leaves this Mac’s Secure Enclave. The helper is a small signed program that talks to it.',
+  enclave_linux: 'Mordred seals your Telegram login and the memory key with a key bound to this host’s TPM 2.0. The helper is a small program that talks to it.',
+  memory: 'Telegram and mail history can be connected only when everything Hermes remembers is encrypted: what Hermes learns from your history ends up in its memory files, so they must not stay readable on disk.',
+  databases: 'Hermes stores your chats (state.db), projects and cron history in SQLite files. Mordred’s own store for imported Telegram and mail history (mordred.db) only opens when these files are encrypted too, with the same key as the memory files. Encryption happens on disk; Hermes keeps working as before.',
+  hermes_model: 'Everything Hermes reads goes to its chat model. Telegram and mail history are offered to Hermes only when that model is a Venice private model (no retention) or a model running on this Mac.',
+  hermes_model_linux: 'Everything Hermes reads goes to its chat model. Telegram history is offered to Hermes only when that model is a Venice private model (no retention) or a model running on this host.',
+  question_model: 'When Hermes asks Mordred about your Telegram history, Mordred prepares the answer with this model, and the imported text is sent nowhere else. Only two kinds are accepted: a Venice private model (no retention) or a model on this computer, reached directly and never redirected.',
+  telegram: 'Telegram requires every third-party client to register an app. The app is yours; its api_id and api_hash identify it, not you. They are sealed with your login.',
+  telegram_import: 'Mordred copies your messages into its encrypted store on this computer, so Hermes can search them without asking Telegram each time. Pinned chats come first; large groups and archived chats are skipped; nothing is downloaded twice.',
+  mail: 'Your address and the app password are sealed by the Secure Enclave on this Mac. Each fetch unseals them, logs in with TLS, reads new mail and logs out: nothing is marked read, moved, deleted or sent. Gmail: Mordred reads All Mail with its labels, so mail you sent is recognised as yours. Other servers: the inbox and the sent folder.',
 }
 
 // Windows labels, selected from explicit metadata (codes and names), never by matching text.
@@ -161,8 +306,14 @@ const MEMORY_STATES = {
   unavailable: 'unavailable',
 }
 
-function explain(code) {
+function explain(code, hint = null) {
+  if (code === 'imap_auth_failed' && hint && IMAP_HINTS[hint]) return IMAP_HINTS[hint]
   return MESSAGES[code] || `Failed (${code || 'unknown'})`
+}
+
+// Mail routes share some codes with Telegram; prefer the mail wording when one exists.
+function explainMail(code, hint = null) {
+  return MESSAGES[`mail_${code}`] || explain(code, hint)
 }
 
 function reason(code) {
@@ -171,7 +322,7 @@ function reason(code) {
 
 class MordredError extends Error {
   constructor(code, info) {
-    super(explain(code))
+    super(explain(code, info && info.hint))
     this.code = code
     this.info = info || {}
   }
@@ -189,23 +340,79 @@ async function call(path, body) {
   return res
 }
 
-function FailureNote({ error }) {
+// A command the owner runs in Terminal (the stale vault anchor's remedy), with a copy button.
+function CommandLine({ command }) {
+  return jsxs(Row, {
+    children: [
+      jsx('code', { key: 'command', style: { userSelect: 'all', whiteSpace: 'pre-wrap' }, children: command }),
+      jsx(Button, {
+        key: 'copy',
+        variant: 'outline',
+        onClick: () => navigator.clipboard && navigator.clipboard.writeText(command),
+        children: 'Copy command',
+      }),
+    ],
+  })
+}
+
+function FailureNote({ error, noteRef = null }) {
   const info = (error && error.info) || {}
   return jsxs('div', {
     role: 'alert',
-    style: { border: '1px solid #b91c1c', borderRadius: 8, padding: 10, marginTop: 10 },
+    ref: noteRef,
+    tabIndex: -1,
+    style: { border: `1px solid ${DESTRUCTIVE}`, borderRadius: 8, padding: 10, marginTop: 10 },
     children: [
       jsx('p', { style: { margin: 0 }, children: error && error.message }),
       info.storage_error ? jsx('p', { children: explain(info.storage_error) }) : null,
       info.step ? jsx('p', { children: `Stopped at the ${STEP_LABELS[info.step] || info.step} step: ${reason(info.reason)}.` }) : null,
-      info.remedy ? jsx('p', { children: info.remedy }) : null,
+      info.remedy
+        ? error.code === 'vault_anchor_stale'
+          ? jsx(CommandLine, { command: info.remedy })
+          : jsx('p', { children: info.remedy })
+        : null,
       info.custody_notice ? jsx('p', { children: `A memory custody key was created and is kept for a retry. ${info.custody_notice}` }) : null,
       info.detail ? jsx('pre', { style: { whiteSpace: 'pre-wrap', fontSize: 12 }, children: info.detail }) : null,
     ],
   })
 }
 
-function Step({ n, title, done, children }) {
+// -- page framework: steps, groups, overview -------------------------------------------
+
+const stepAnchor = (key) => `mordred-step-${key}`
+const groupAnchor = (key) => `mordred-group-${key}`
+
+// Scroll to a step or group heading and give it keyboard focus (headings carry tabIndex -1).
+function focusTarget(id) {
+  const target = typeof document !== 'undefined' && document.getElementById(id)
+  if (!target) return
+  if (typeof target.scrollIntoView === 'function') target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  if (typeof target.focus === 'function') target.focus({ preventScroll: true })
+}
+
+// Move keyboard focus to a result or failure container once it appears.
+function useFocusOn(value) {
+  const ref = useRef(null)
+  useEffect(() => {
+    if (value && ref.current && typeof ref.current.focus === 'function') ref.current.focus()
+  }, [value])
+  return ref
+}
+
+// Native disclosure: keyboard-operable and announced without extra code.
+function Why({ children }) {
+  return jsxs('details', {
+    style: { marginTop: 10 },
+    children: [
+      jsx('summary', { style: { cursor: 'pointer' }, children: 'Why this step?' }),
+      jsx('p', { style: { margin: '6px 0 0' }, children }),
+    ],
+  })
+}
+
+// Before the state model: a numbered card whose body disappears when `done`.
+// Every Windows step still renders this way (no `state`), unchanged.
+function legacyStep({ n, title, done, children }) {
   return jsxs('section', {
     style: { border: '1px solid var(--border, #333)', borderRadius: 10, padding: 16, marginBottom: 12 },
     children: [
@@ -215,138 +422,648 @@ function Step({ n, title, done, children }) {
   })
 }
 
-function Row({ children }) {
-  return jsx('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }, children })
-}
-
-function HermesModelStep({ check, refresh }) {
-  const ok = Boolean(check && check.ok)
-  const verifying = check && check.kind === 'venice' && check.private === null
-  return jsxs('section', {
-    style: { border: '1px solid var(--border, #333)', borderRadius: 10, padding: 16, marginBottom: 12 },
+function StateBadge({ state, color }) {
+  const badge = STATE_BADGES[state] || STATE_BADGES.todo
+  return jsxs('span', {
+    style: { marginLeft: 10, fontSize: 12, fontWeight: 'normal', color },
     children: [
-      jsx('h3', { style: { margin: '0 0 8px' }, children: `${ok ? '✓' : '0'}  Hermes chat model` }),
-      ok
-        ? jsx('p', { children: `${check.model} (${check.kind === 'local' ? 'local, this host only' : 'Venice private, no retention'})` })
-        : jsxs(Fragment, {
-            children: [
-              jsx('p', {
-                children: verifying
-                  ? `Could not verify ${check.model} with Venice right now (offline?).`
-                  : `Everything Hermes reads goes to its chat model${check && check.model ? ` (now: ${check.model})` : ''}. For Telegram it must be a Venice private model or a model on this host.`,
-              }),
-              verifying
-                ? null
-                : jsx('ol', {
-                    children: [
-                      jsx('li', { key: 1, children: 'Open Settings → Providers → “Local / custom endpoint”.' }),
-                      jsx('li', { key: 2, children: 'Venice: base URL https://api.venice.ai/api/v1, your Venice API key, and a private model such as e2ee-deepseek-v4-flash or deepseek-v4-flash.' }),
-                      jsx('li', { key: 3, children: 'Or a local server (Ollama / LM Studio) at http://127.0.0.1:<port>/v1.' }),
-                      jsx('li', { key: 4, children: 'Select that model for chats, then press Check again.' }),
-                    ],
-                  }),
-              jsx(Button, { onClick: refresh, children: 'Check again' }),
-            ],
-          }),
+      badge.glyph ? jsx('span', { 'aria-hidden': true, children: `${badge.glyph} ` }) : null,
+      jsx('span', { style: badge.glyph ? undefined : VISUALLY_HIDDEN, children: badge.text }),
     ],
   })
 }
 
-function EnclaveStep({ done, refresh, hardwareKind }) {
-  const linux = hardwareKind === "tpm"
-  const label = linux ? "TPM 2.0" : "Secure Enclave"
-  const [busy, setBusy] = useState(false)
-  const build = async () => {
-    setBusy(true)
-    try {
-      await call('/hardware/build', {})
-      host.notify({ kind: 'info', message: `Building the ${label} helper… this takes a few minutes.` })
+function stepBody({ state, id, open, setOpen, summary, toggle, blocker, failure, noteRef, progress, whyBlock, children }) {
+  if (state === 'done') {
+    const detailsId = id ? `${stepAnchor(id)}-details` : undefined
+    return [
+      jsx('p', { key: 'summary', style: { margin: 0, color: MUTED_TEXT }, children: summary || 'Done.' }),
+      children
+        ? jsx(Button, {
+            key: 'toggle',
+            variant: 'ghost',
+            'aria-expanded': open,
+            'aria-controls': detailsId,
+            onClick: () => setOpen(!open),
+            children: open ? 'Hide' : toggle,
+          })
+        : null,
+      open ? jsxs('div', { key: 'details', id: detailsId, children: [children, whyBlock] }) : null,
+    ]
+  }
+  if (state === 'blocked') {
+    const reasonFor = BLOCKERS[blocker] || null
+    return [
+      jsx('p', { key: 'reason', children: reasonFor ? reasonFor.text : 'Finish the earlier steps first.' }),
+      reasonFor
+        ? jsx(Button, {
+            key: 'go',
+            variant: 'outline',
+            onClick: () => focusTarget(stepAnchor(reasonFor.step)),
+            children: `Go to step ${STEP_NUMBERS[reasonFor.step]}`,
+          })
+        : null,
+      whyBlock,
+    ]
+  }
+  if (state === 'running') {
+    return [
+      jsx('p', { key: 'progress', role: 'status', 'aria-live': 'polite', children: `⟳ ${progress || 'Working…'}` }),
+      jsx('fieldset', { key: 'controls', disabled: true, style: { border: 0, margin: 0, padding: 0, minWidth: 0 }, children }),
+      whyBlock,
+    ]
+  }
+  return [state === 'attention' && failure ? jsx(FailureNote, { key: 'failure', error: failure, noteRef }) : null, children, whyBlock]
+}
+
+// A setup step. `state` is one of done | next | todo | blocked | running | attention:
+// done collapses the body into `summary` behind a toggle, blocked replaces it by the
+// BLOCKERS reason and a "Go to step" button, running disables its controls under a
+// polite progress line, attention shows `failure` as an alert above the body.
+// Without `state` (the Windows steps pass `done`) the step renders as it always did.
+function Step({
+  id = null,
+  n,
+  title,
+  state = null,
+  done = false,
+  summary = null,
+  toggle = 'Details',
+  blocker = null,
+  failure = null,
+  noteRef = null,
+  progress = null,
+  notice = null,
+  why = null,
+  children = null,
+}) {
+  // One hook in every mode, so a step keeps its identity whatever it renders.
+  const [open, setOpen] = useState(false)
+  if (state == null) return legacyStep({ n, title, done, children })
+  const headingId = id ? stepAnchor(id) : undefined
+  const edge = state === 'next' ? ACCENT : state === 'attention' ? DESTRUCTIVE : null
+  const whyBlock = why ? jsx(Why, { key: 'why', children: why }) : null
+  const body = stepBody({ state, id, open, setOpen, summary, toggle, blocker, failure, noteRef, progress, whyBlock, children })
+  return jsxs('section', {
+    'aria-labelledby': headingId,
+    style: {
+      border: `1px solid ${STROKE}`,
+      borderLeft: edge ? `4px solid ${edge}` : `1px solid ${STROKE}`,
+      borderRadius: 10,
+      padding: 16,
+      marginBottom: 12,
+    },
+    children: [
+      jsxs('h3', {
+        id: headingId,
+        tabIndex: headingId ? -1 : undefined,
+        style: { margin: '0 0 8px', color: state === 'done' ? MUTED_TEXT : undefined },
+        children: [`${n}  ${title}`, jsx(StateBadge, { state, color: edge || MUTED_TEXT })],
+      }),
+      ...body,
+      state === 'blocked' ? null : notice,
+    ],
+  })
+}
+
+function Row({ children }) {
+  return jsx('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }, children })
+}
+
+// A labelled radio group (fieldset + legend), e.g. the mail sent-folder choice.
+// options: [{value, label, detail?}].
+function RadioGroup({ legend, name, options, value, onChange, disabled = false }) {
+  return jsxs('fieldset', {
+    disabled,
+    style: { border: 0, margin: '8px 0 0', padding: 0, minWidth: 0 },
+    children: [
+      jsx('legend', { style: { padding: 0, marginBottom: 4 }, children: legend }),
+      ...options.map((option) =>
+        jsxs('label', {
+          key: option.value,
+          style: { display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 6, cursor: 'pointer' },
+          children: [
+            jsx('input', {
+              type: 'radio',
+              name,
+              value: option.value,
+              checked: value === option.value,
+              onChange: () => onChange(option.value),
+              style: { accentColor: 'CanvasText', width: 16, height: 16, marginTop: 3, flexShrink: 0 },
+            }),
+            jsxs('span', {
+              children: [option.label, option.detail ? jsx('span', { style: { display: 'block', fontSize: 12, color: MUTED_TEXT }, children: option.detail }) : null],
+            }),
+          ],
+        }),
+      ),
+    ],
+  })
+}
+
+const groupTitle = (key, layout) => (layout === 'linux' && GROUPS[key].linux) || GROUPS[key].title
+
+// One of the four page groups: a section labelled by its focusable h2.
+function Group({ id, layout, children }) {
+  const headingId = groupAnchor(id)
+  return jsxs('section', {
+    'aria-labelledby': headingId,
+    style: { marginTop: 28 },
+    children: [
+      jsx('h2', { id: headingId, tabIndex: -1, style: { margin: '0 0 12px', fontSize: 18 }, children: `${GROUPS[id].n}  ${groupTitle(id, layout)}` }),
+      ...[].concat(children),
+    ],
+  })
+}
+
+function StatusRow({ dot, label, detail, target, layout }) {
+  const look = DOTS[dot] || DOTS.not_started
+  return jsxs('div', {
+    role: 'listitem',
+    style: { display: 'flex', gap: 10, alignItems: 'baseline', padding: '3px 0' },
+    children: [
+      jsx('span', { role: 'img', 'aria-label': look.label, style: { color: look.color, width: 16, flexShrink: 0 }, children: look.glyph }),
+      jsx('strong', { style: { width: 150, flexShrink: 0 }, children: label }),
+      jsx('span', { style: { flex: 1 }, children: detail }),
+      GROUPS[target]
+        ? jsx(Button, {
+            variant: 'ghost',
+            'aria-label': `Go to ${groupTitle(target, layout)}`,
+            onClick: () => focusTarget(groupAnchor(target)),
+            children: 'Go',
+          })
+        : null,
+    ],
+  })
+}
+
+function Overview({ rows, layout }) {
+  return jsxs('section', {
+    'aria-labelledby': 'mordred-overview',
+    style: { border: `1px solid ${STROKE}`, borderRadius: 10, padding: '12px 16px', margin: '16px 0' },
+    children: [
+      jsx('h2', { id: 'mordred-overview', style: { margin: '0 0 6px', fontSize: 16 }, children: 'Overview' }),
+      jsx('div', { role: 'list', children: rows.map((row) => jsx(StatusRow, { key: row.key, ...row, layout })) }),
+    ],
+  })
+}
+
+// -- state from status fields -------------------------------------------------------------
+
+// The page layout from explicit metadata only (never from English text).
+function pageLayout(status) {
+  if (!status) return null
+  if (status.hardware_kind === 'cng') return 'windows'
+  if (!status.telegram_supported) return 'unsupported'
+  if (status.platform === 'darwin' && status.hardware_kind === 'secure_enclave') return 'macos'
+  if (status.hardware_kind === 'tpm') return 'linux'
+  return 'unsupported'
+}
+
+// A version 4 answer carries all three keys; without them Mordred is older than this page.
+function reportsV4(status) {
+  return Boolean(status) && ['databases', 'imports', 'mail'].every((key) => status[key] != null)
+}
+
+const plural = (count, noun) => `${count} ${noun}${count === 1 ? '' : 's'}`
+
+function relativeTime(at, now = Date.now()) {
+  if (typeof at !== 'number') return 'at an unknown time'
+  const minutes = Math.max(0, Math.round((now / 1000 - at) / 60))
+  if (minutes < 1) return 'just now'
+  if (minutes < 60) return `${plural(minutes, 'minute')} ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 48) return `${plural(hours, 'hour')} ago`
+  return `${plural(Math.round(hours / 24), 'day')} ago`
+}
+
+// Telegram counts: Mordred's store (version 4 `imports`) or, from an older API and on
+// Linux, the import service's in-process counts (`GET /sync`). null when unknown.
+function telegramCounts(status, sync) {
+  if (pageLayout(status) === 'macos' && reportsV4(status)) {
+    const imports = status.imports
+    if (!imports.available) return null
+    const telegram = (imports.sources && imports.sources.telegram) || {}
+    return { chats: Number(telegram.conversations) || 0, messages: Number(telegram.messages) || 0, store: true }
+  }
+  if (!sync) return null
+  return { chats: Number(sync.dialog_count) || 0, messages: Number(sync.message_count) || 0, store: false }
+}
+
+const countsText = (counts) => `${plural(counts.chats, 'chat')} · ${plural(counts.messages, 'message')}`
+
+// The first unmet prerequisite, in reading order: rules are [met, blocker] pairs.
+function firstBlocker(...rules) {
+  const unmet = rules.find(([met]) => !met)
+  return unmet ? unmet[1] : null
+}
+
+// Steps 2.4 and 2.5 write to mordred.db, which opens only once the databases are
+// armed (step 1.3) and Hermes restarted. null on Linux and from an older API.
+function storeBlocker(status) {
+  if (!(pageLayout(status) === 'macos' && reportsV4(status))) return null
+  const db = status.databases
+  if (!db.armed) return db.pending ? 'needs_restart' : 'needs_databases'
+  const code = status.imports.available === false ? status.imports.code : null
+  if (code === 'conversion_pending' || code === 'unprotected_process') return 'needs_restart'
+  return code === 'not_armed' ? 'needs_databases' : null
+}
+
+// The state of every step of the macOS/Linux page: {key: {state, blocker?, code?, job?}}.
+// Facts from the status decide first (helper installed, memory on, databases armed,
+// logged in, model private, mailbox configured, a failure the status reports), then
+// unmet prerequisites (`blocked`), then `status.jobs[].kind` (`running`), then page
+// state: `sync`, the polled `GET /sync` answer. Memory enable and the Telegram import
+// are not registry jobs, so their `running` lives only in the page. A reopened page
+// with no job shows the fact-derived state. The first `todo` in reading order is `next`.
+function stepStates(status, sync = null) {
+  const layout = pageLayout(status)
+  const checks = status.checks || {}
+  const ok = (name) => Boolean(checks[name] && checks[name].ok)
+  const jobs = Array.isArray(status.jobs) ? status.jobs : []
+  const runningJob = (...kinds) => jobs.find((job) => job && kinds.includes(job.kind) && (!job.state || job.state === 'running')) || null
+  const hardware = ok('hardware')
+  const memory = ok('memory_encryption')
+  const model = Boolean(status.hermes_model && status.hermes_model.ok)
+  const llm = ok('privacy_llm')
+  const login = ok('login')
+  const macos = layout === 'macos'
+  const v4 = macos && reportsV4(status)
+  const store = storeBlocker(status)
+  const states = {}
+  const decide = (key, { done = false, fact = null, blocker = null, job = null, page = null }) => {
+    states[key] = done
+      ? { state: 'done' }
+      : fact
+        ? { state: 'attention', code: fact }
+        : blocker
+          ? { state: 'blocked', blocker }
+          : job
+            ? { state: 'running', job: job.job_id }
+            : page || { state: 'todo' }
+  }
+  decide('enclave', { done: hardware, job: runningJob('enclave', 'hardware') })
+  decide('memory', { done: memory, blocker: firstBlocker([hardware, 'needs_enclave']) })
+  if (macos && !v4) states.databases = { state: 'attention', code: 'mordred_update_required' }
+  else if (v4) {
+    decide('databases', {
+      done: Boolean(status.databases.armed),
+      fact: status.databases.supported === false ? 'databases_unsupported' : null,
+      blocker: firstBlocker([hardware, 'needs_enclave'], [memory, 'needs_memory']),
+    })
+  }
+  decide('hermes_model', { done: model })
+  decide('question_model', { done: llm, blocker: firstBlocker([hardware, 'needs_enclave'], [model, 'needs_hermes_model']) })
+  decide('telegram', {
+    done: login,
+    blocker: firstBlocker([hardware, 'needs_enclave'], [memory, 'needs_memory'], [model, 'needs_hermes_model'], [llm, 'needs_question_model']),
+  })
+  const counts = telegramCounts(status, sync)
+  const storeCode = v4 && !store && status.imports.available === false ? status.imports.code || 'import_store_unavailable' : null
+  decide('telegram_import', {
+    done: login && Boolean(counts && counts.messages > 0),
+    fact: storeCode,
+    blocker: firstBlocker(
+      [hardware, 'needs_enclave'],
+      [memory, 'needs_memory'],
+      [!store, store],
+      [model, 'needs_hermes_model'],
+      [llm, 'needs_question_model'],
+      [login, 'needs_login'],
+    ),
+    page: sync && sync.syncing ? { state: 'running' } : sync && sync.last_error ? { state: 'attention', code: sync.last_error } : null,
+  })
+  if (macos && !v4) states.mail = { state: 'attention', code: 'mordred_update_required' }
+  else if (v4) {
+    const mail = status.mail
+    const lastError = (mail.configured && mail.last_fetch && mail.last_fetch.error) || null
+    decide('mail', {
+      done: Boolean(mail.configured) && !lastError,
+      fact: lastError,
+      blocker: firstBlocker([hardware, 'needs_enclave'], [memory, 'needs_memory'], [!store, store]),
+      job: runningJob('mail_fetch'),
+    })
+  }
+  const next = Object.keys(STEP_NUMBERS).find((key) => states[key] && states[key].state === 'todo')
+  if (next) states[next] = { ...states[next], state: 'next' }
+  return states
+}
+
+function modelRow(check) {
+  const c = check || {}
+  const row = { key: 'model', label: 'Hermes chat model', target: 'connect' }
+  if (c.ok) return { ...row, dot: 'done', detail: `${c.model} (${c.kind === 'local' ? 'local, this host only' : 'Venice private'})` }
+  if (c.model && c.kind === 'venice' && c.private === null) return { ...row, dot: 'partial', detail: `${c.model} (not verified with Venice yet)` }
+  if (c.model) return { ...row, dot: 'attention', detail: `${c.model} · not private` }
+  return { ...row, dot: 'not_started', detail: 'not set' }
+}
+
+function protectionRow(status, layout, hardware, memory) {
+  const row = { key: 'protection', label: 'Protection', target: 'protect' }
+  const facts = [
+    hardware ? (layout === 'macos' ? 'Secure Enclave' : 'TPM 2.0') : 'helper missing',
+    memory ? 'memory encrypted' : 'memory not encrypted',
+  ]
+  if (layout === 'linux') {
+    const dot = hardware && memory ? 'done' : hardware || memory ? 'partial' : 'not_started'
+    return { ...row, dot, detail: [...facts, 'Databases: not available on Linux'].join(' · ') }
+  }
+  if (!reportsV4(status)) return { ...row, dot: 'attention', detail: [...facts, 'databases: Update Mordred to use this'].join(' · ') }
+  const db = status.databases
+  const databases = db.armed ? 'databases on' : db.pending ? 'databases: converting at next restart' : 'databases off'
+  const on = [hardware, memory, Boolean(db.armed)].filter(Boolean).length
+  const dot = db.supported === false ? 'attention' : on === 3 ? 'done' : on === 0 && !db.pending ? 'not_started' : 'partial'
+  return { ...row, dot, detail: [...facts, databases].join(' · ') }
+}
+
+function telegramRow(status, sync, login) {
+  const row = { key: 'telegram', label: 'Telegram', target: 'connect' }
+  if (!login) return { ...row, dot: 'not_started', detail: 'not connected' }
+  if (sync && sync.last_error) return { ...row, dot: 'attention', detail: 'connected · the last import stopped' }
+  const counts = telegramCounts(status, sync)
+  if (counts && counts.messages > 0) return { ...row, dot: 'done', detail: `connected · ${countsText(counts)}` }
+  if (pageLayout(status) === 'macos' && reportsV4(status)) {
+    if (!status.imports.available) return { ...row, dot: 'partial', detail: `connected · ${STORE_GATES[status.imports.code] || 'store unavailable'}` }
+    return { ...row, dot: 'partial', detail: 'connected · nothing imported yet' }
+  }
+  // The in-process counts restart at 0 with the backend: say nothing rather than "nothing imported".
+  return { ...row, dot: 'done', detail: 'connected' }
+}
+
+function mailRow(status, layout, now) {
+  const row = { key: 'mail', label: 'Mail', target: 'connect' }
+  if (layout === 'linux') return { ...row, dot: 'not_started', detail: 'not available on Linux' }
+  if (!reportsV4(status)) return { ...row, dot: 'attention', detail: 'Update Mordred to use this' }
+  const mail = status.mail
+  if (!mail.configured) return { ...row, dot: 'not_started', detail: 'not set up' }
+  const parts = [`account ${mail.account}`]
+  const sources = status.imports.available ? status.imports.sources || {} : null
+  if (sources && sources.mail) parts.push(plural(Number(sources.mail.messages) || 0, 'message'))
+  const last = mail.last_fetch || null
+  parts.push(last ? `last fetch ${relativeTime(last.at, now)} (${last.error || (last.partial ? 'partial' : 'complete')})` : 'never fetched')
+  return { ...row, dot: last && last.error ? 'attention' : 'done', detail: parts.join(' · ') }
+}
+
+// The overview card's four rows, built only from status fields (and the `/sync` counts).
+function overviewRows(status, sync = null, now = Date.now()) {
+  const layout = pageLayout(status)
+  const checks = status.checks || {}
+  const ok = (name) => Boolean(checks[name] && checks[name].ok)
+  return [
+    modelRow(status.hermes_model),
+    protectionRow(status, layout, ok('hardware'), ok('memory_encryption')),
+    telegramRow(status, sync, ok('login')),
+    mailRow(status, layout, now),
+  ]
+}
+
+// A step's own failure first, else the attention code stepStates computed from status.
+const stepFailure = (failure, code) => failure || (code ? new MordredError(code) : null)
+
+// Masked inputs are cleared after every submit (success, failure, cancel), and
+// also when their fields leave the page: the step collapses, is blocked or unmounts.
+function useClearSecrets(clear, visible) {
+  useEffect(() => {
+    if (!visible) clear()
+  }, [visible])
+  useEffect(() => clear, [])
+}
+
+function HermesModelInstructions({ check, refresh, ok, verifying }) {
+  return jsxs(Fragment, {
+    children: [
+      ok
+        ? null
+        : jsx('p', {
+            children: verifying
+              ? `Could not verify ${check.model} with Venice right now (offline?).`
+              : `Everything Hermes reads goes to its chat model${check && check.model ? ` (now: ${check.model})` : ''}. For Telegram it must be a Venice private model or a model on this host.`,
+          }),
+      verifying
+        ? null
+        : jsx('ol', {
+            children: [
+              jsx('li', { key: 1, children: 'Open Settings → Providers → “Local / custom endpoint”.' }),
+              jsx('li', { key: 2, children: 'Venice: base URL https://api.venice.ai/api/v1, your Venice API key, and a private model such as e2ee-deepseek-v4-flash or deepseek-v4-flash.' }),
+              jsx('li', { key: 3, children: 'Or a local server (Ollama / LM Studio) at http://127.0.0.1:<port>/v1.' }),
+              jsx('li', { key: 4, children: 'Select that model for chats, then press Check again.' }),
+            ],
+          }),
+      jsx(Button, { onClick: refresh, children: 'Check again' }),
+    ],
+  })
+}
+
+function HermesModelStep({ id = null, n = 0, state = null, check, refresh, why = null }) {
+  const ok = Boolean(check && check.ok)
+  const verifying = check && check.kind === 'venice' && check.private === null
+  const line = ok ? `${check.model} (${check.kind === 'local' ? 'local, this host only' : 'Venice private, no retention'})` : null
+  if (state == null) {
+    // Windows: the card as it always was.
+    return jsxs('section', {
+      style: { border: '1px solid var(--border, #333)', borderRadius: 10, padding: 16, marginBottom: 12 },
+      children: [
+        jsx('h3', { style: { margin: '0 0 8px' }, children: `${ok ? '✓' : '0'}  Hermes chat model` }),
+        ok ? jsx('p', { children: line }) : jsx(HermesModelInstructions, { check, refresh, ok, verifying }),
+      ],
+    })
+  }
+  return jsx(Step, {
+    id,
+    n,
+    title: 'Hermes chat model',
+    state,
+    summary: line,
+    toggle: 'Change',
+    why,
+    children: jsx(HermesModelInstructions, { check, refresh, ok, verifying }),
+  })
+}
+
+function EnclaveStep({ id = null, n, state, job = null, refresh, hardwareKind }) {
+  const linux = hardwareKind === 'tpm'
+  const label = linux ? 'TPM 2.0' : 'Secure Enclave'
+  const [starting, setStarting] = useState(false)
+  const [failure, setFailure] = useState(null)
+  const [watched, setWatched] = useState(null)
+  const alive = useRef(true)
+  const noteRef = useFocusOn(failure)
+  useEffect(() => {
+    alive.current = true
+    return () => {
+      alive.current = false
+    }
+  }, [])
+  // Latch the build job seen in status.jobs (also after a page re-open) and wait
+  // for its end: a failure, or a job the backend no longer reports, becomes a note.
+  useEffect(() => {
+    if (job) setWatched(job)
+  }, [job])
+  useEffect(() => {
+    if (!watched) return undefined
+    let current = true
+    pollJob(watched, { alive: () => current && alive.current }).then((end) => {
+      if (!current || !alive.current) return
+      if (end.state === 'failed') setFailure(new MordredError(end.error || (linux ? 'tpm_build_failed' : 'enclave_build_failed')))
+      else if (end.state === 'lost') setFailure(new MordredError('job_not_found'))
+      setWatched(null)
       refresh()
+    })
+    return () => {
+      current = false
+    }
+  }, [watched])
+  const build = async () => {
+    setStarting(true)
+    setFailure(null)
+    try {
+      const started = await call('/hardware/build', {})
+      host.notify({ kind: 'info', message: `Building the ${label} helper… this takes a few minutes.` })
+      if (started && started.job_id) setWatched(started.job_id)
+      await refresh()
     } catch (e) {
-      host.notifyError(e, 'Build failed')
-      setBusy(false)
+      setFailure(e)
+    } finally {
+      if (alive.current) setStarting(false)
     }
   }
-  useEffect(() => {
-    if (done) setBusy(false)
-  }, [done])
-  useEffect(() => {
-    // A failed build ends the job without `done`; let the user retry.
-    const reset = () => setBusy(false)
-    jobListeners.add(reset)
-    return () => jobListeners.delete(reset)
-  }, [])
+  // Facts first (installed), then the registry job, then this page's request and failure.
+  const shown = state === 'done' ? 'done' : state === 'running' || starting ? 'running' : failure ? 'attention' : state
   return jsx(Step, {
-    n: 1,
-    title: label,
-    done,
+    id,
+    n,
+    title: `${label} helper`,
+    state: shown,
+    summary: 'Installed.',
+    progress: `Building the ${label} helper… this takes a few minutes.`,
+    failure,
+    noteRef,
+    why: linux ? WHY.enclave_linux : WHY.enclave,
     children: jsxs(Fragment, {
       children: [
         jsx('p', { children: linux ? 'Telegram keys are bound to this TPM. There is no per-use user-presence prompt or portable recovery. Losing TPM state loses access.' : 'Your Telegram keys are sealed by a key that never leaves this device’s Secure Enclave.' }),
-        jsx(Button, { disabled: busy, onClick: build, children: busy ? 'Building…' : `Set up ${label}` }),
+        jsx(Button, { disabled: shown === 'running', onClick: build, children: shown === 'running' ? 'Building…' : `Set up ${label}` }),
       ],
     }),
   })
 }
 
-function MemoryStep({ done, refresh, hardwareKind }) {
+const MEMORY_BODY = 'Hermes keeps what it learns about you in memory files and its API keys in .env. This step moves .env into Mordred’s encrypted vault and encrypts the memory files. You get a recovery passphrase once: it is the only way to read these files if this Mac is lost or the Secure Enclave key is gone.'
+const ASK_EVERY_TIME_NOTE = 'Off by default: Hermes Desktop starts its backend in the background, and an unlock it cannot answer would start Hermes without its secrets. With this off, the key opens silently while you are logged in. Your Telegram and mail keys are separate and keep their own Touch ID setting.'
+
+function PassphraseCard({ phrase, resultRef, saved, setSaved, onContinue }) {
+  return jsxs('div', {
+    ref: resultRef,
+    tabIndex: -1,
+    children: [
+      jsx('p', { children: 'Write this down and keep it safe. It is shown only once and is the only way to recover your encrypted data if this Mac is lost.' }),
+      jsx('pre', { style: { fontSize: 18, padding: 12, userSelect: 'all', whiteSpace: 'pre-wrap' }, children: phrase }),
+      jsxs('label', {
+        style: { display: 'flex', gap: 8, alignItems: 'center' },
+        children: [jsx(Checkbox, { checked: saved, onCheckedChange: (v) => setSaved(v === true), style: CHECKBOX_STYLE }), 'I have written it down'],
+      }),
+      jsx(Row, { children: jsx(Button, { disabled: !saved, onClick: onContinue, children: 'Continue' }) }),
+    ],
+  })
+}
+
+function MemoryStep({ id = null, n, state, blocker = null, refresh, hardwareKind }) {
+  const linux = hardwareKind === 'tpm'
   const [busy, setBusy] = useState(false)
   const [phrase, setPhrase] = useState(null)
   const [saved, setSaved] = useState(false)
+  const [askEveryTime, setAskEveryTime] = useState(false)
+  const [failure, setFailure] = useState(null)
+  const [restart, setRestart] = useState(false)
+  const noteRef = useFocusOn(failure)
+  const resultRef = useFocusOn(phrase || restart)
   const enable = async () => {
     setBusy(true)
+    setFailure(null)
     try {
-      const r = await call('/memory/enable', { acknowledge_tpm_no_recovery: hardwareKind === 'tpm' })
+      // macOS: the vault key opens silently unless the owner asks for Touch ID every time.
+      const r = await call('/memory/enable', linux ? { acknowledge_tpm_no_recovery: true } : { unattended: !askEveryTime })
       if (r.recovery_passphrase) setPhrase(r.recovery_passphrase)
-      else refresh()
+      else {
+        if (!r.already) setRestart(true)
+        refresh()
+      }
     } catch (e) {
-      host.notifyError(e, 'Memory encryption failed')
+      setFailure(e)
     } finally {
       setBusy(false)
     }
   }
+  const finish = () => {
+    setPhrase(null)
+    setSaved(false)
+    setRestart(true)
+    host.notify({ kind: 'success', message: 'Memory encryption is on. Restart Hermes to finish.' })
+    refresh()
+  }
+  // The passphrase is the request's one-time answer: shown before any status fact.
   if (phrase) {
     return jsx(Step, {
-      n: 2,
+      id,
+      n,
       title: 'Save your recovery passphrase',
-      done: false,
-      children: jsxs(Fragment, {
-        children: [
-          jsx('p', { children: 'Write this down and keep it safe. It is shown only once and is the only way to recover your encrypted data if this Mac is lost.' }),
-          jsx('pre', { style: { fontSize: 18, padding: 12, userSelect: 'all', whiteSpace: 'pre-wrap' }, children: phrase }),
-          jsxs('label', {
-            style: { display: 'flex', gap: 8, alignItems: 'center' },
-            children: [jsx(Checkbox, { checked: saved, onCheckedChange: (v) => setSaved(v === true), style: CHECKBOX_STYLE }), 'I have written it down'],
-          }),
-          jsx(Row, {
-            children: jsx(Button, {
-              disabled: !saved,
-              onClick: () => {
-                setPhrase(null)
-                host.notify({ kind: 'success', message: 'Memory encryption is on. Restart Hermes to finish.' })
-                refresh()
-              },
-              children: 'Continue',
-            }),
-          }),
-        ],
-      }),
+      state: 'next',
+      children: jsx(PassphraseCard, { phrase, resultRef, saved, setSaved, onContinue: finish }),
     })
   }
+  const restartNotice = restart
+    ? jsxs('div', {
+        ref: resultRef,
+        tabIndex: -1,
+        style: { marginTop: 10 },
+        children: [
+          jsx('p', { role: 'status', children: 'Memory encryption is on. Restart Hermes Desktop to finish: Hermes reads the encrypted files only after a restart.' }),
+          jsx(RestartHermesControl, {}),
+        ],
+      })
+    : null
+  // Not a registry job: `running` only while this page's request is in flight.
+  const shown = state === 'done' || state === 'blocked' ? state : busy ? 'running' : failure ? 'attention' : state
   return jsx(Step, {
-    n: 2,
-    title: 'Encrypt Hermes memory',
-    done,
+    id,
+    n,
+    title: linux ? 'Encrypt Hermes memory' : 'Encrypt Hermes memory and secrets',
+    state: shown,
+    blocker,
+    summary: 'On.',
+    progress: linux ? 'Encrypting Hermes memory…' : 'Encrypting… approve a Touch ID prompt if one appears.',
+    failure,
+    noteRef,
+    notice: restartNotice,
+    why: WHY.memory,
     children: jsxs(Fragment, {
       children: [
-        jsx('p', { children: hardwareKind === 'tpm' ? 'Memory is encrypted with a TPM-bound key, without per-use user presence or a recovery passphrase. Disable encryption before moving hosts to restore plaintext while the original TPM works. Restart Hermes after setup.' : 'Telegram requires everything Hermes remembers to be encrypted. Hardware approval may be requested.' }),
-        jsx(Button, { disabled: busy, onClick: enable, children: busy ? 'Encrypting…' : 'Turn on memory encryption' }),
+        jsx('p', { children: linux ? 'Memory is encrypted with a TPM-bound key, without per-use user presence or a recovery passphrase. Disable encryption before moving hosts to restore plaintext while the original TPM works. Restart Hermes after setup.' : MEMORY_BODY }),
+        linux
+          ? null
+          : jsx(Checked, {
+              checked: askEveryTime,
+              onChange: setAskEveryTime,
+              children: [
+                jsx('span', { key: 'label', children: 'Ask for Touch ID every time Hermes unlocks the vault' }),
+                jsx('span', { key: 'note', style: { display: 'block', fontSize: 12, color: MUTED_TEXT }, children: ASK_EVERY_TIME_NOTE }),
+              ],
+            }),
+        jsx(Row, {
+          children: [
+            jsx(Button, { key: 'enable', disabled: busy, onClick: enable, children: busy ? 'Encrypting…' : 'Turn on memory encryption' }),
+            linux ? null : jsx('span', { key: 'hint', style: { fontSize: 12, color: MUTED_TEXT }, children: 'May show a Touch ID prompt.' }),
+          ],
+        }),
       ],
     }),
   })
 }
 
-function TelegramStep({ done, needsApi, refresh, n = 4, extra = null }) {
+const TELEGRAM_DONE = 'Connected (read-only). To disconnect, end the session in Telegram → Settings → Devices on your phone, or run hermes-mordred telegram logout in Terminal.'
+
+function TelegramStep({ id = null, state = null, blocker = null, done = false, needsApi, refresh, n = 4, extra = null, summary = null, why = null }) {
+  const legacy = state == null
   const [apiId, setApiId] = useState('')
   const [apiHash, setApiHash] = useState('')
   const [phone, setPhone] = useState('')
@@ -354,44 +1071,68 @@ function TelegramStep({ done, needsApi, refresh, n = 4, extra = null }) {
   const [flow, setFlow] = useState(null)
   const [step, setStep] = useState('phone')
   const [busy, setBusy] = useState(false)
+  const [failure, setFailure] = useState(null)
+  const [result, setResult] = useState(null)
+  const noteRef = useFocusOn(failure)
+  const resultRef = useFocusOn(result)
+  const shown = legacy ? null : state === 'done' || state === 'blocked' ? state : failure ? 'attention' : state
+  const clearSecrets = () => {
+    setApiHash('')
+    setSecret('')
+  }
+  useClearSecrets(clearSecrets, legacy ? !done : shown !== 'done' && shown !== 'blocked')
   const reset = () => {
     setFlow(null)
     setStep('phone')
-    setSecret('')
+    clearSecrets()
   }
   const submit = async () => {
     setBusy(true)
+    setFailure(null)
+    setResult(null)
     try {
       if (step === 'phone') {
         const body = { phone, ...(extra || {}) }
         if (needsApi) Object.assign(body, { api_id: apiId, api_hash: apiHash })
         const r = await call('/telegram/login/start', body)
-        setApiHash('')
         setFlow(r.flow_id)
         setStep(r.step)
       } else {
         const path = `/telegram/login/${flow}/${step === 'code' ? 'code' : 'password'}`
         const r = await call(path, step === 'code' ? { code: secret } : { password: secret })
-        setSecret('')
         if (r.step === 'done') {
           host.notify({ kind: 'success', message: 'Telegram connected (read-only).' })
+          setResult('Telegram connected (read-only).')
           reset()
           refresh()
         } else setStep(r.step)
       }
     } catch (e) {
-      setSecret('')
-      host.notifyError(e, 'Telegram login failed')
+      if (legacy) host.notifyError(e, 'Telegram login failed')
+      else setFailure(e)
       if (e && (e.code === 'login_flow_expired' || e.code === 'login_code_expired')) reset()
     } finally {
+      clearSecrets()
       setBusy(false)
     }
   }
+  const cancel = () => {
+    call(`/telegram/login/${flow}/cancel`, {}).catch(() => {})
+    reset()
+  }
   const field = (props) => jsx(Input, { autoComplete: 'off', ...props })
   return jsx(Step, {
+    id,
     n,
     title: 'Connect Telegram (read-only)',
+    state: shown,
     done,
+    blocker,
+    summary: summary || 'Connected (read-only).',
+    failure,
+    noteRef,
+    notice: result ? jsx('p', { ref: resultRef, tabIndex: -1, role: 'status', children: result }) : null,
+    why,
     children: jsxs(Fragment, {
       children: [
         step === 'phone' && needsApi
@@ -404,13 +1145,15 @@ function TelegramStep({ done, needsApi, refresh, n = 4, extra = null }) {
                     ' (API development tools) and paste its api_id and api_hash.',
                   ],
                 }),
-                jsx(Row, { children: field({ placeholder: 'api_id', value: apiId, onChange: (e) => setApiId(e.target.value) }) }),
-                jsx(Row, { children: field({ type: 'password', placeholder: 'api_hash', value: apiHash, onChange: (e) => setApiHash(e.target.value) }) }),
+                jsx(Row, { children: field({ placeholder: 'api_id', 'aria-label': 'api_id', value: apiId, onChange: (e) => setApiId(e.target.value) }) }),
+                jsx(Row, { children: field({ type: 'password', placeholder: 'api_hash', 'aria-label': 'api_hash', value: apiHash, onChange: (e) => setApiHash(e.target.value) }) }),
               ],
             })
           : null,
         step === 'phone'
-          ? jsx(Row, { children: field({ placeholder: 'Phone number, e.g. +819012345678', value: phone, onChange: (e) => setPhone(e.target.value) }) })
+          ? jsx(Row, {
+              children: field({ placeholder: 'Phone number, e.g. +819012345678', 'aria-label': 'Phone number', value: phone, onChange: (e) => setPhone(e.target.value) }),
+            })
           : jsxs(Fragment, {
               children: [
                 jsx('p', {
@@ -419,13 +1162,21 @@ function TelegramStep({ done, needsApi, refresh, n = 4, extra = null }) {
                       ? 'Enter the login code Telegram just sent to your Telegram app.'
                       : 'Enter your Telegram two-step verification password (the "Cloud Password" you set in Telegram → Settings → Privacy and Security). This is not your computer password or a Mordred passphrase. It is not stored.',
                 }),
-                jsx(Row, { children: field({ type: 'password', placeholder: step === 'code' ? 'Telegram login code' : 'Telegram password', value: secret, onChange: (e) => setSecret(e.target.value) }) }),
+                jsx(Row, {
+                  children: field({
+                    type: 'password',
+                    placeholder: step === 'code' ? 'Telegram login code' : 'Telegram password',
+                    'aria-label': step === 'code' ? 'Telegram login code' : 'Telegram password',
+                    value: secret,
+                    onChange: (e) => setSecret(e.target.value),
+                  }),
+                }),
               ],
             }),
         jsxs(Row, {
           children: [
             jsx(Button, { disabled: busy, onClick: submit, children: busy ? 'Working…' : step === 'phone' ? 'Send login code' : 'Continue' }),
-            flow ? jsx(Button, { variant: 'ghost', onClick: () => { call(`/telegram/login/${flow}/cancel`, {}).catch(() => {}); reset() }, children: 'Cancel' }) : null,
+            flow ? jsx(Button, { variant: 'ghost', onClick: cancel, children: 'Cancel' }) : null,
           ],
         }),
       ],
@@ -433,28 +1184,48 @@ function TelegramStep({ done, needsApi, refresh, n = 4, extra = null }) {
   })
 }
 
-function LlmStep({ done, hermesKey, refresh, n = 3, extra = null }) {
+function LlmStep({ id = null, state = null, blocker = null, done = false, hermesKey, refresh, n = 3, extra = null, why = null }) {
+  const legacy = state == null
   const [key, setKey] = useState('')
   const [endpoint, setEndpoint] = useState('http://127.0.0.1:11434/v1')
   const [model, setModel] = useState('')
   const [busy, setBusy] = useState(false)
+  const [failure, setFailure] = useState(null)
+  const [result, setResult] = useState(null)
+  const noteRef = useFocusOn(failure)
+  const resultRef = useFocusOn(result)
+  const shown = legacy ? null : state === 'done' || state === 'blocked' ? state : failure ? 'attention' : state
+  useClearSecrets(() => setKey(''), legacy ? !done : shown !== 'done' && shown !== 'blocked')
   const run = async (path, body) => {
     setBusy(true)
+    setFailure(null)
+    setResult(null)
     try {
       await call(path, { ...body, ...(extra || {}) })
-      setKey('')
       host.notify({ kind: 'success', message: 'Question model set.' })
+      setResult('Question model set.')
       refresh()
     } catch (e) {
-      host.notifyError(e, 'Could not set the model')
+      if (legacy) host.notifyError(e, 'Could not set the model')
+      else setFailure(e)
     } finally {
+      setKey('')
       setBusy(false)
     }
   }
   return jsx(Step, {
+    id,
     n,
     title: 'Question model (Venice private or local)',
+    state: shown,
     done,
+    blocker,
+    summary: 'Set.',
+    toggle: 'Change',
+    failure,
+    noteRef,
+    notice: result ? jsx('p', { ref: resultRef, tabIndex: -1, role: 'status', children: result }) : null,
+    why,
     children: jsxs(Fragment, {
       children: [
         hermesKey
@@ -462,14 +1233,14 @@ function LlmStep({ done, hermesKey, refresh, n = 3, extra = null }) {
           : null,
         jsx(Row, {
           children: [
-            jsx(Input, { key: 'k', type: 'password', autoComplete: 'off', placeholder: 'Or paste a Venice API key', value: key, onChange: (e) => setKey(e.target.value) }),
+            jsx(Input, { key: 'k', type: 'password', autoComplete: 'off', placeholder: 'Or paste a Venice API key', 'aria-label': 'Venice API key', value: key, onChange: (e) => setKey(e.target.value) }),
             jsx(Button, { key: 'b', disabled: busy || !key, onClick: () => run('/llm/venice', { api_key: key }), children: 'Use this key' }),
           ],
         }),
         jsx(Row, {
           children: [
-            jsx(Input, { key: 'e', placeholder: 'Local endpoint', value: endpoint, onChange: (e) => setEndpoint(e.target.value) }),
-            jsx(Input, { key: 'm', placeholder: 'Local model name', value: model, onChange: (e) => setModel(e.target.value) }),
+            jsx(Input, { key: 'e', placeholder: 'Local endpoint', 'aria-label': 'Local endpoint', value: endpoint, onChange: (e) => setEndpoint(e.target.value) }),
+            jsx(Input, { key: 'm', placeholder: 'Local model name', 'aria-label': 'Local model name', value: model, onChange: (e) => setModel(e.target.value) }),
             jsx(Button, { key: 'l', disabled: busy || !model, onClick: () => run('/llm/local', { endpoint, model }), children: 'Use local model' }),
           ],
         }),
@@ -478,65 +1249,207 @@ function LlmStep({ done, hermesKey, refresh, n = 3, extra = null }) {
   })
 }
 
-function ImportStep({ ready, refresh, n = 5 }) {
+const importProgress = (progress) =>
+  progress ? `Chats ${progress.dialogs_done}/${progress.dialogs_total}, ${progress.messages_imported} new messages` : 'Starting the import…'
+
+function ImportSummary({ counts, sync }) {
+  const where = counts && counts.store ? ' in Mordred’s store' : ' imported'
+  const text = sync && sync.syncing ? importProgress(sync.progress) : counts ? `${countsText(counts)}${where}.` : 'Imported.'
+  return jsxs(Fragment, { children: [text, sync && sync.last_error ? ` Last import: ${explain(sync.last_error)}` : null] })
+}
+
+function ImportStep({ ready, refresh, n = 5, id = null, state = null, blocker = null, code = null, title = 'Import messages', counts = null, onSync = null, why = null }) {
+  const legacy = state == null
+  const usable = legacy ? ready : state !== 'blocked'
   const [days, setDays] = useState(3)
   const [sync, setSync] = useState(null)
+  const [starting, setStarting] = useState(false)
+  const [failure, setFailure] = useState(null)
+  const noteRef = useFocusOn(failure)
   const poll = useCallback(async () => {
     try {
-      setSync(await call('/sync'))
+      const answer = await call('/sync')
+      setSync(answer)
+      if (onSync) onSync(answer)
     } catch (_) {
       /* ignore */
     }
-  }, [])
-  // A revoked login flips step 4 back to "log in": re-read the setup status.
+  }, [onSync])
+  // A revoked login flips the Telegram step back to "log in": re-read the setup status.
   const lastError = sync && sync.last_error
   useEffect(() => {
     if (lastError === 'telegram_session_revoked') refresh()
   }, [lastError, refresh])
   useEffect(() => {
-    if (!ready) return undefined
+    if (!usable) return undefined
     poll()
     const t = setInterval(poll, 3000)
     return () => clearInterval(t)
-  }, [ready, poll])
+  }, [usable, poll])
   const start = async () => {
+    setStarting(true)
+    setFailure(null)
     try {
       await call('/sync', { days: Number(days) || 3, include_archived: false })
       host.notify({ kind: 'info', message: 'Import started. Approve a hardware prompt if asked.' })
       poll()
     } catch (e) {
-      host.notifyError(e, 'Import failed')
+      if (legacy) host.notifyError(e, 'Import failed')
+      else setFailure(e)
+    } finally {
+      setStarting(false)
     }
   }
   const progress = sync && sync.progress
+  const syncing = Boolean(sync && sync.syncing)
+  const daysRow = jsxs(Row, {
+    children: [
+      'Last',
+      jsx(Input, { style: { width: 70 }, type: 'number', min: 1, 'aria-label': 'Days of history to import', value: days, onChange: (e) => setDays(e.target.value) }),
+      'days',
+      jsx(Button, { disabled: syncing || starting, onClick: start, children: syncing ? 'Importing…' : 'Import' }),
+    ],
+  })
+  if (legacy) {
+    return jsx(Step, {
+      n,
+      title,
+      done: false,
+      children: ready
+        ? jsxs(Fragment, {
+            children: [
+              jsx('p', { children: 'Pinned chats first. Large groups and archived chats are skipped. Nothing is downloaded twice.' }),
+              daysRow,
+              sync
+                ? jsx('p', {
+                    children: sync.syncing && progress
+                      ? `Chats ${progress.dialogs_done}/${progress.dialogs_total}, ${progress.messages_imported} new messages`
+                      : sync.last_error
+                        ? explain(sync.last_error)
+                        : 'Ready. Ask Hermes about your Telegram messages in any chat.',
+                  })
+                : null,
+            ],
+          })
+        : jsx('p', { children: 'Finish the steps above first.' }),
+    })
+  }
+  // Facts (imported, blocked) first; then this page's request, the polled import and failures.
+  const shown = state === 'done' || state === 'blocked' ? state : starting || syncing ? 'running' : failure ? 'attention' : state
   return jsx(Step, {
+    id,
     n,
-    title: 'Import messages',
-    done: false,
-    children: ready
-      ? jsxs(Fragment, {
-          children: [
-            jsx('p', { children: 'Pinned chats first. Large groups and archived chats are skipped. Nothing is downloaded twice.' }),
-            jsxs(Row, {
-              children: [
-                'Last',
-                jsx(Input, { style: { width: 70 }, type: 'number', min: 1, value: days, onChange: (e) => setDays(e.target.value) }),
-                'days',
-                jsx(Button, { disabled: sync && sync.syncing, onClick: start, children: sync && sync.syncing ? 'Importing…' : 'Import' }),
-              ],
-            }),
-            sync
-              ? jsx('p', {
-                  children: sync.syncing && progress
-                    ? `Chats ${progress.dialogs_done}/${progress.dialogs_total}, ${progress.messages_imported} new messages`
-                    : sync.last_error
-                      ? explain(sync.last_error)
-                      : 'Ready. Ask Hermes about your Telegram messages in any chat.',
-                })
-              : null,
-          ],
-        })
-      : jsx('p', { children: 'Finish the steps above first.' }),
+    title,
+    state: shown,
+    blocker,
+    summary: jsx(ImportSummary, { counts, sync }),
+    toggle: 'Import more',
+    progress: importProgress(progress),
+    failure: stepFailure(failure, code),
+    noteRef,
+    why,
+    children: jsxs(Fragment, {
+      children: [
+        daysRow,
+        jsx('p', { style: { fontSize: 12, color: MUTED_TEXT }, children: '30 for a useful first import; 0 is not accepted here, use the terminal for all history.' }),
+        counts && counts.messages > 0 ? jsx('p', { children: `${countsText(counts)}${counts.store ? ' in Mordred’s store' : ' imported'}.` }) : null,
+      ],
+    }),
+  })
+}
+
+// Shown instead of a step the running Mordred cannot report (no version 4 status keys).
+function UpdateRequiredStep({ id, n, title, why }) {
+  return jsx(Step, {
+    id,
+    n,
+    title,
+    state: 'attention',
+    failure: new MordredError('mordred_update_required'),
+    why,
+    children: jsx(Row, {
+      children: jsx(Button, { variant: 'outline', onClick: () => focusTarget(groupAnchor('maintenance')), children: 'Go to Maintenance' }),
+    }),
+  })
+}
+
+// -- D4 extension point ---------------------------------------------------------------------
+// The databases (1.3) and mail (2.5) sections arrive with the version 4 backend (D4),
+// which replaces only these two components. The framework already computes their
+// state, blocker and overview row; a status without the version 4 keys renders
+// UpdateRequiredStep instead, so until D4 these stubs only point to Terminal.
+function DatabasesStep({ id, n, state, blocker = null, code = null }) {
+  return jsx(Step, {
+    id,
+    n,
+    title: 'Encrypt Hermes databases',
+    state,
+    blocker,
+    summary: 'On.',
+    failure: stepFailure(null, code),
+    why: WHY.databases,
+    children: jsxs('p', {
+      children: ['Run ', jsx('code', { style: { userSelect: 'all' }, children: 'hermes-mordred databases encrypt' }), ' in Terminal for now.'],
+    }),
+  })
+}
+
+function MailStep({ id, n, state, blocker = null, code = null }) {
+  return jsx(Step, {
+    id,
+    n,
+    title: 'Mail over IMAP',
+    state,
+    blocker,
+    summary: 'Set up.',
+    failure: stepFailure(null, code),
+    why: WHY.mail,
+    children: jsxs('p', {
+      children: ['Run ', jsx('code', { style: { userSelect: 'all' }, children: 'hermes-mordred mail setup' }), ' in Terminal for now.'],
+    }),
+  })
+}
+
+// Group 3: what to say in a chat and what Hermes sees (copy only).
+function AskHermes({ macos }) {
+  const strong = (text) => jsx('strong', { children: text })
+  const code = (text) => jsx('code', { children: text })
+  const paragraph = (children) => jsxs('p', { children })
+  return jsxs('div', {
+    style: { border: `1px solid ${STROKE}`, borderRadius: 10, padding: '4px 16px' },
+    children: [
+      paragraph([
+        strong('In any Hermes chat. '),
+        `Ask about your ${macos ? 'Telegram or mail' : 'Telegram'} history the way you would ask a colleague: “What did Tanaka say about the invoice last week?” Hermes reads the matching messages through Mordred’s `,
+        code('mordred_history_search'),
+        ' tool, each with its head line (who wrote it, when), and quotes its evidence. After a history question the chat is in reader mode: Hermes cannot write files, run commands, send messages, schedule or delegate in that chat until you start a new chat.',
+      ]),
+      macos
+        ? paragraph([
+            strong('Fetching mail. '),
+            'Fetch new mail in step 2.5 (reliable). You can also say “sync my mail” in a Hermes chat; if Hermes fails to reach the tool, see the note on ',
+            code('tools.tool_search'),
+            ' in Mordred’s USAGE guide. A mail sync or fetch gives Hermes counts only.',
+          ])
+        : null,
+      paragraph([
+        strong('What Hermes sees. '),
+        macos
+          ? 'Secrets you type on this page (the app password, Telegram codes, keys) never reach the chat, the model, the tools, storage or logs. A Telegram import or a mail fetch gives Hermes counts only. '
+          : 'Secrets you type on this page (Telegram codes, keys) never reach the chat, the model, the tools, storage or logs. A Telegram import gives Hermes counts only. ',
+        'When you ask about your history, Hermes reads the matching messages (head line and text). The chat model must be a Venice private model or a local model, or these tools are not offered.',
+      ]),
+      paragraph([
+        strong('Terminal only. '),
+        ...(macos ? [code('hermes-mordred mail import'), ' (Takeout files), '] : []),
+        code('hermes-mordred telegram sync --days 0'),
+        ' (all history), ',
+        code('hermes-mordred telegram logout'),
+        ', and ',
+        code('hermes-mordred status'),
+        ' for the full report.',
+      ]),
+    ],
   })
 }
 
@@ -830,7 +1743,7 @@ function UninstallSection({ platform = null }) {
       setPhrase('')
     }
   }
-  const box = { border: '1px solid #b91c1c', borderRadius: 10, padding: 16, margin: '32px 0 12px' }
+  const box = { border: `1px solid ${DESTRUCTIVE}`, borderRadius: 10, padding: 16, margin: '32px 0 12px' }
   const pre = { whiteSpace: 'pre-wrap', fontSize: 12, maxHeight: 280, overflow: 'auto', background: 'rgba(127,127,127,0.08)', padding: 8, borderRadius: 6 }
   const radio = { accentColor: 'CanvasText', width: 16, height: 16, marginTop: 3, flexShrink: 0 }
   const choice = (value, title, detail) =>
@@ -930,10 +1843,10 @@ const WINDOWS_REINSTALL = 'Automatic repair after Hermes updates is not supporte
 // loaded but the package is not in Hermes's current environment) and
 // unreachable (no API mounted at all: Mordred is disabled, or an older shim
 // failed to import).
-async function probe() {
+async function probe(path = STATUS_PATH) {
   let res
   try {
-    res = await rest('/status?client_version=3')
+    res = await rest(path)
   } catch (err) {
     return { kind: 'unreachable', detail: String((err && err.message) || err || '') }
   }
@@ -1197,7 +2110,7 @@ function describeCheck(check) {
   return `Mordred ${check.installed} is up to date (newest: ${check.latest}; ${via}${when ? ', ' + when : ''}).`
 }
 
-function UpdatePanel({ health }) {
+function UpdatePanel({ health, onInfo = null }) {
   const [info, setInfo] = useState(null)
   const [busy, setBusy] = useState(false)
   const [checking, setChecking] = useState(false)
@@ -1218,6 +2131,7 @@ function UpdatePanel({ health }) {
       if (!mounted.current) return
       if (res && res.ok) {
         setInfo(res)
+        if (onInfo) onInfo(res)
         if (res.check_error) setFailure({ error: 'update_check_failed', output: res.check_error })
       } else {
         setFailure({ error: (res && res.error) || 'update_check_failed' })
@@ -1227,7 +2141,7 @@ function UpdatePanel({ health }) {
     } finally {
       if (mounted.current) setChecking(false)
     }
-  }, [])
+  }, [onInfo])
   useEffect(() => {
     load(false)
   }, [load])
@@ -1304,7 +2218,7 @@ function UpdatePanel({ health }) {
       failure
         ? jsxs('div', {
             role: 'alert',
-            style: { border: '1px solid #b91c1c', borderRadius: 8, padding: 10, marginTop: 10 },
+            style: { border: `1px solid ${DESTRUCTIVE}`, borderRadius: 8, padding: 10, marginTop: 10 },
             children: [
               jsx('p', { style: { margin: 0 }, children: explain(failure.error) }),
               failure.step || failure.output ? jsx('pre', { style: pre, children: `${failure.step ? 'step: ' + failure.step + '\n' : ''}${failure.output || ''}` }) : null,
@@ -1329,10 +2243,121 @@ function HealthLine({ health }) {
   })
 }
 
+// The update panel's state in one line near the page title; the panel itself is under Maintenance.
+function UpdateLine({ info }) {
+  if (!info) return null
+  const check = info.check || null
+  const text = info.foreign_source
+    ? 'Mordred is loaded from outside its installed package.'
+    : info.restart_required
+      ? `Restart Hermes to load Mordred ${info.installed}.`
+      : check && check.available === true && check.latest
+        ? `Mordred ${check.latest} is available.`
+        : describeCheck(check)
+  return jsxs('div', {
+    style: { display: 'flex', gap: 8, alignItems: 'center', fontSize: 12, color: MUTED_TEXT },
+    children: [
+      jsx('span', { key: 'text', children: text }),
+      jsx(Button, { key: 'go', variant: 'ghost', 'aria-label': 'Go to Maintenance', onClick: () => focusTarget(groupAnchor('maintenance')), children: 'Maintenance' }),
+    ],
+  })
+}
+
+// macOS and Linux: overview card, then the four groups in a fixed order. Every
+// component keeps its place on each status refresh, so typed values and focus survive.
+function GroupedSetup({ status, health, sync = null, onSync = null, updateInfo = null, onUpdateInfo = null, refresh }) {
+  const layout = pageLayout(status)
+  const macos = layout === 'macos'
+  const v4 = macos && reportsV4(status)
+  const states = stepStates(status, sync)
+  const step = (key) => ({ key, id: key, n: STEP_NUMBERS[key], ...states[key] })
+  const kind = status.hardware_kind
+  return jsxs(Fragment, {
+    children: [
+      jsx(HealthLine, { health }),
+      jsx(UpdateLine, { info: updateInfo }),
+      jsx(Overview, { rows: overviewRows(status, sync), layout }),
+      jsx('p', { children: 'Secrets entered here go only to Mordred on this host and are sealed by its hardware key.' }),
+      jsx(Group, {
+        id: 'protect',
+        layout,
+        children: [
+          jsx(EnclaveStep, { ...step('enclave'), refresh, hardwareKind: kind }),
+          jsx(MemoryStep, { ...step('memory'), refresh, hardwareKind: kind }),
+          macos
+            ? v4
+              ? jsx(DatabasesStep, { ...step('databases'), status, refresh })
+              : jsx(UpdateRequiredStep, { key: 'databases', id: 'databases', n: STEP_NUMBERS.databases, title: 'Encrypt Hermes databases', why: WHY.databases })
+            : null,
+        ],
+      }),
+      jsx(Group, {
+        id: 'connect',
+        layout,
+        children: [
+          jsx(HermesModelStep, { ...step('hermes_model'), check: status.hermes_model, refresh, why: macos ? WHY.hermes_model : WHY.hermes_model_linux }),
+          jsx(LlmStep, { ...step('question_model'), hermesKey: status.hermes_venice_key, refresh, why: WHY.question_model }),
+          jsx(TelegramStep, { ...step('telegram'), needsApi: !status.telegram_api, refresh, summary: TELEGRAM_DONE, why: WHY.telegram }),
+          jsx(ImportStep, {
+            ...step('telegram_import'),
+            title: 'Import Telegram messages',
+            counts: telegramCounts(status, sync),
+            onSync,
+            refresh,
+            why: WHY.telegram_import,
+          }),
+          macos
+            ? v4
+              ? jsx(MailStep, { ...step('mail'), status, refresh })
+              : jsx(UpdateRequiredStep, { key: 'mail', id: 'mail', n: STEP_NUMBERS.mail, title: 'Mail over IMAP', why: WHY.mail })
+            : null,
+        ],
+      }),
+      jsx(Group, { id: 'ask', layout, children: jsx(AskHermes, { macos }) }),
+      jsx(Group, {
+        id: 'maintenance',
+        layout,
+        children: [
+          jsx(UpdatePanel, { key: 'update', health, onInfo: onUpdateInfo }),
+          jsx(UninstallSection, { key: 'uninstall', platform: status.uninstall || null }),
+        ],
+      }),
+    ],
+  })
+}
+
+// Everything below the title once the API answered: the grouped page on macOS and
+// Linux; Windows and unsupported platforms keep the page they had.
+function PageBody({ status, health, sync = null, onSync = null, updateInfo = null, onUpdateInfo = null, refresh }) {
+  const layout = pageLayout(status)
+  if (layout === 'macos' || layout === 'linux') {
+    return jsx(GroupedSetup, { status, health, sync, onSync, updateInfo, onUpdateInfo, refresh })
+  }
+  return jsxs(Fragment, {
+    children: [
+      jsx(HealthLine, { health }),
+      jsx(UpdatePanel, { health }),
+      layout === 'windows'
+        ? jsx(WindowsSetup, { status, refresh })
+        : jsxs('section', {
+            role: 'status',
+            children: [
+              jsx('h3', { children: 'Private Telegram setup unavailable' }),
+              jsx('p', { children: MESSAGES.telegram_platform_unsupported }),
+            ],
+          }),
+      jsx(UninstallSection, { platform: status.uninstall || null }),
+    ],
+  })
+}
+
 function SetupPage() {
   const [status, setStatus] = useState(null)
   const [health, setHealth] = useState(null)
   const [broken, setBroken] = useState(null)
+  const [sync, setSync] = useState(null)
+  const [updateInfo, setUpdateInfo] = useState(null)
+  const lastSync = useRef('')
   const refresh = useCallback(async () => {
     const result = await probe()
     if (result.kind === 'installed') {
@@ -1343,6 +2368,13 @@ function SetupPage() {
       setStatus(null)
       setBroken(result)
     }
+  }, [])
+  // The import step polls GET /sync; keep the answer only when it changed.
+  const onSync = useCallback((answer) => {
+    const key = JSON.stringify(answer)
+    if (key === lastSync.current) return
+    lastSync.current = key
+    setSync(answer)
   }, [])
   useEffect(() => {
     refresh()
@@ -1359,50 +2391,20 @@ function SetupPage() {
     const t = setInterval(refresh, 3000)
     return () => clearInterval(t)
   }, [running, refresh])
-  const c = (status && status.checks) || {}
-  const ok = (name) => Boolean(c[name] && c[name].ok)
-  const loggedIn = ok('login')
-  const modelOk = Boolean(status && status.hermes_model && status.hermes_model.ok)
+  const layout = pageLayout(status)
+  // The grouped page titles its h2 groups with an h1; Windows keeps its old header.
+  const grouped = layout === 'macos' || layout === 'linux'
   return jsxs('div', {
-    style: { maxWidth: 720, margin: '24px auto', padding: '0 16px' },
+    style: { maxWidth: grouped ? 760 : 720, margin: '24px auto', padding: '0 16px' },
     children: [
-      jsx('h2', { children: 'Mordred setup' }),
-      jsx('p', { children: 'Private, read-only Telegram for Hermes.' }),
+      grouped ? jsx('h1', { style: { fontSize: 24, margin: '0 0 4px' }, children: 'Mordred' }) : jsx('h2', { children: 'Mordred setup' }),
+      jsx('p', { style: grouped ? { marginTop: 0 } : undefined, children: TAGLINES[layout] || TAGLINES.other }),
       broken ? jsx(RepairPanel, { probeResult: broken, recheck: refresh }) : null,
-      status ? jsx(HealthLine, { health }) : null,
-      status ? jsx(UpdatePanel, { health }) : null,
-      status && status.hardware_kind === 'cng'
-        ? jsx(WindowsSetup, { status, refresh })
-        : status
-        ? status.telegram_supported && ["secure_enclave", "tpm"].includes(status.hardware_kind)
-          ? jsxs(Fragment, {
-              children: [
-                jsx('p', { children: 'Secrets entered here go only to Mordred on this host and are sealed by its hardware key.' }),
-                jsx(HermesModelStep, { check: status.hermes_model, refresh }),
-                modelOk
-                  ? jsxs(Fragment, {
-                      children: [
-                        jsx(EnclaveStep, { done: c.hardware?.ok === true, refresh, hardwareKind: status.hardware_kind }),
-                        jsx(MemoryStep, { done: ok('memory_encryption'), refresh, hardwareKind: status.hardware_kind }),
-                        jsx(LlmStep, { done: ok('privacy_llm'), hermesKey: status.hermes_venice_key, refresh }),
-                        ok('privacy_llm')
-                          ? jsx(TelegramStep, { done: loggedIn, needsApi: !status.telegram_api, refresh })
-                          : jsx(Step, { n: 4, title: 'Connect Telegram (read-only)', done: false, children: jsx('p', { children: 'Set the question model first (step 3).' }) }),
-                        jsx(ImportStep, { ready: loggedIn && ok('privacy_llm') && ok('memory_encryption'), refresh }),
-                      ],
-                    })
-                  : jsx('p', { children: 'The remaining steps unlock once Hermes uses a private or local model.' }),
-              ],
-            })
-          : jsxs('section', {
-              role: 'status',
-              children: [
-                jsx('h3', { children: 'Private Telegram setup unavailable' }),
-                jsx('p', { children: MESSAGES.telegram_platform_unsupported }),
-              ],
-            })
-        : broken ? null : jsx('p', { children: 'Loading…' }),
-      status ? jsx(UninstallSection, { platform: status.uninstall || null }) : null,
+      status
+        ? jsx(PageBody, { status, health, sync, onSync, updateInfo, onUpdateInfo: setUpdateInfo, refresh })
+        : broken
+          ? null
+          : jsx('p', { children: 'Loading…' }),
     ],
   })
 }
@@ -1422,7 +2424,7 @@ export default {
     // Notice at Desktop start when a Hermes update left Mordred out of the
     // environment (the Python side cannot report it: it is not there).
     ctx.setTimeout(async () => {
-      const result = await probe()
+      const result = await probe(STARTUP_STATUS_PATH)
       if (result.kind === 'installed') {
         // Newer release known (Hermes's daily plugin check or our day-old
         // answer; at most one PyPI request a day, none when the user turned
