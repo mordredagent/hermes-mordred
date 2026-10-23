@@ -79,6 +79,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import imaplib
+import logging
 import re
 import selectors
 import socket
@@ -310,6 +311,33 @@ def tls_context() -> ssl.SSLContext:
 Remaining = Callable[[], float]
 
 
+_log = logging.getLogger(__name__)
+
+
+def _family_name(family: int) -> str:
+    if family == socket.AF_INET:
+        return "ipv4"
+    if family == socket.AF_INET6:
+        return "ipv6"
+    return "other"
+
+
+def _diag(exc: BaseException) -> str:
+    """Content-free description of a connection failure: class name, errno and OpenSSL reason only.
+
+    Never the message text: an IMAP error carries the server's words and a resolver
+    error can carry the host name.
+    """
+    parts = [type(exc).__name__]
+    errno_value = getattr(exc, "errno", None)
+    if isinstance(errno_value, int):
+        parts.append(f"errno={errno_value}")
+    reason = getattr(exc, "reason", None) if isinstance(exc, ssl.SSLError) else None
+    if isinstance(reason, str) and reason.replace("_", "").isalnum() and reason.isupper():
+        parts.append(f"reason={reason}")
+    return " ".join(parts)
+
+
 def _no_deadline() -> float:
     return SOCKET_TIMEOUT_S
 
@@ -478,9 +506,11 @@ class Link:
             found = self.bounded(lambda: list(_getaddrinfo(host, port)), name=RESOLVER_NAME)
         except ImapError:
             raise
-        except Exception:  # a failed lookup is reported as a code, never stringified
+        except Exception as exc:  # a failed lookup is reported as a code, never stringified
+            _log.warning("mordred imap: name lookup failed (%s)", _diag(exc))
             raise ImapError("imap_unreachable") from None
         if not found:
+            _log.warning("mordred imap: name lookup returned no address")
             raise ImapError("imap_unreachable")
         return found
 
@@ -490,11 +520,15 @@ class Link:
         Each address gets at most ``min(op_timeout, remaining)`` (:meth:`_connect_one`),
         so a stalled first address cannot use up the budget of the ones after it.
         """
+        failures: list[str] = []
         for family, kind, proto, _name, address in self.resolve(host, port):
             self.check()
-            with contextlib.suppress(OSError):  # refused, unreachable or timed out: the next address
+            try:  # refused, unreachable or timed out: the next address
                 return self._connect_one(family, kind, proto, address)
+            except OSError as exc:
+                failures.append(f"{_family_name(family)}:{_diag(exc)}")
         self.check()
+        _log.warning("mordred imap: TCP connect failed on every address (%s)", ", ".join(failures) or "none")
         raise ImapError("imap_unreachable")
 
     def _connect_one(self, family: int, kind: int, proto: int, address: Any) -> socket.socket:
@@ -1244,6 +1278,7 @@ def connect(
         failure = stopped if stopped.reason == "cancelled" else ImapError("imap_unreachable")
     except ImapError as exc:
         failure = exc
-    except (ssl.SSLError, imaplib.IMAP4.error, OSError, EOFError):  # a greeting's text never travels on
+    except (ssl.SSLError, imaplib.IMAP4.error, OSError, EOFError) as exc:  # a greeting's text never travels on
+        _log.warning("mordred imap: connection setup failed (%s)", _diag(exc))
         failure = ImapError("imap_unreachable")
     raise sever_chain(failure)
