@@ -815,7 +815,8 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > password is hunter 2 fake pw", "hunter 2 fake pw as the password"), is
 > replaced up to the end of its clause: a comma or full stop, a line break,
 > or a word such as "and", "then" or "please" that starts the next part, at
-> most eight words; in your own
+> most eight words. In Japanese the same holds for a value written only in
+> kana, as speech recognition writes a spoken password and its digits; in your own
 > task and correction texts, so is a long password-like token without any
 > keyword (20 or more characters mixing letters with digits or symbols).
 > No site is excluded by default: messaging and mail sites (Telegram, WhatsApp,

@@ -4053,7 +4053,22 @@ and revocable on its own:
   to 4 8 2 1"). The first word of a two-word keyword read on its own never
   takes such a value ("pin code 0000" keeps "code"). `secret_values` lists a
   value of several words whole and also without its whitespace
-  ("hunter2fakepw"), as a spoken password is likely typed.
+  ("hunter2fakepw"), as a spoken password is likely typed. A value written
+  only in kana (live microphone test 2026-10-23: speech recognition writes a
+  spoken password and its digits in katakana or hiragana, with no ASCII
+  letter or digit) is replaced too: after a Japanese keyword joined by the
+  topic particle or a label (not the object or subject particle), before the
+  object particle or the word for "called", and between the target and
+  object particles, a value that starts with kana runs, hiragana and spaces
+  included, to its clause's end: punctuation, a line break, a keyword, a
+  copula, a verb ending ("shite", "kudasai") or a particle before a verb or
+  an interface word ("de roguin", "wo nyuuryoku"); reading back, also a
+  clause ending or a particle after a word. It never starts with a statement
+  ("kochira", "arimasen", "nai", an honorific before kanji as in "o-wasure"),
+  a verb or a Japanese interface word (field, reset, manager, e-mail
+  address, random ...), so "the password field", "forgot the password" and
+  "the password is incorrect" stay; a value in kanji still needs an ASCII
+  letter or digit.
   Keywords inside a URL are left to URL scrubbing. Known gaps: a plain word
   after whitespace alone ("password swordfish"), a plain word after `to` or
   after a qualifier ("set the password to swordfish", "the password for the

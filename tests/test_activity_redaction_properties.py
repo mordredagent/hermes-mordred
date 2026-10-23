@@ -89,6 +89,9 @@ PHRASES = [
     "ユーザー名はデモユーザー、パスワードはハンターにフェイクPWでログインして",
     "ハンターにフェイクPWをパスワードにして",
     "パスワードに ハンター ツー を入力",
+    # values in kana only (live microphone test 2026-10-23)
+    "ユーザー名はデモユーザーパスワードはハンターツーフェイクでログインして",
+    "ひみつのあいことばをパスワードに入力して",
 ]
 #: Separators that end a phrase: what one phrase loses it must still lose next to another.
 CLAUSE_SEPARATORS = [". ", "; ", ", ", "\n"]
@@ -441,6 +444,8 @@ SHAPES: dict[str, Callable[[int], str]] = {
     "ja-joints-before": lambda size: "ハンターに" * (size // 5) + "フェイクをパスワードに",
     "ja-spaced-joints": lambda size: "パスワード は " + "ハンター に " * (size // 7),
     "ja-target-joints": lambda size: "パスワードにa" * (size // 7),
+    "ja-kana-after": lambda size: "パスワードはあ " * (size // 8),
+    "ja-kana-before": lambda size: "ひみつをパスワードに" * (size // 10),
 }
 
 

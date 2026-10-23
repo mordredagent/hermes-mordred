@@ -1453,6 +1453,87 @@ VALUE_ENDS = [
 ]
 
 
+#: Values in kana only, as speech recognition writes a spoken password and its digits (live microphone test,
+#: 2026-10-23): after a Japanese topic or label frame, before the object particle and between the target and object
+#: particles, to the clause's end.
+KANA_TEXTS = [
+    pytest.param("パスワードはハンターツーフェイクでログインして", "パスワードはredactedでログインして", id="katakana"),
+    pytest.param(
+        "ユーザー名はデモユーザー、パスワードはハンターツーフェイクでログインして",
+        "ユーザー名はデモユーザー、パスワードはredactedでログインして",
+        id="katakana-after-a-username",
+    ),
+    pytest.param(
+        "ユーザー名はデモユーザーパスワードはハンターツーフェイクでログインして",
+        "ユーザー名はデモユーザーパスワードはredactedでログインして",
+        id="live-no-comma",
+    ),
+    pytest.param("パスワードはハンターでログインして", "パスワードはredactedでログインして", id="one-katakana-word"),
+    pytest.param("パスワードはひみつのあいことばでログインして", "パスワードはredactedでログインして", id="hiragana"),
+    pytest.param(
+        "パスワードはハンター2フェイクでログインして", "パスワードはredactedでログインして", id="katakana-digit"
+    ),
+    pytest.param("パスワードは山田太郎123でログインして", "パスワードはredactedでログインして", id="kanji-digits"),
+    pytest.param(
+        f"パスワード{FULLWIDTH_COLON}ハンターツーフェイク", f"パスワード{FULLWIDTH_COLON}redacted", id="label"
+    ),
+    pytest.param("パスワード: ハンターツーフェイク", "パスワード: redacted", id="ascii-label"),
+    pytest.param("パスワード は ハンター です", "パスワード は redacted です", id="spaced"),
+    pytest.param("暗証番号はいちにさんよんです", "暗証番号はredactedです", id="pin-digit-readings"),
+    pytest.param("パスワードはハンター2ふぇいくでログイン", "パスワードはredactedでログイン", id="mixed-kana"),
+    pytest.param("ハンターツーフェイクをパスワードに入力", "redactedをパスワードに入力", id="value-first-katakana"),
+    pytest.param(
+        "ひみつのあいことばをパスワードに入力して", "redactedをパスワードに入力して", id="value-first-hiragana"
+    ),
+    pytest.param(
+        "ユーザー名はデモユーザー、ひみつのあいことばをパスワードに入力",
+        "ユーザー名はデモユーザー、redactedをパスワードに入力",
+        id="value-first-after-a-username",
+    ),
+    pytest.param("ハンターというパスワード", "redactedというパスワード", id="called"),
+    pytest.param("パスワードにハンターツーフェイクを入力", "パスワードにredactedを入力", id="target-katakana"),
+    pytest.param("パスワードにひみつのあいことばを入力", "パスワードにredactedを入力", id="target-hiragana"),
+    pytest.param("the password is hunter", "the password is redacted", id="english-one-word"),
+]
+
+#: A field or feature noun, a verb or a statement after the keyword, and Japanese words before it, stay.
+KANA_KEPT = [
+    *("パスワード欄に入力する", "パスワードを忘れた場合はこちら", "パスワードを変更", "パスワードリセット画面を開く"),
+    *("パスワードマネージャー", "パスワードを入力してください", "パスワードは正しくありません", "パスワードはこちら"),
+    *(
+        "パスワードはありません",
+        "パスワードをお忘れの方",
+        "パスワードが違います",
+        "メールアドレスをパスワードに含めない",
+    ),
+    *("パスワードはメールで送信されます", "パスワードはランダムに生成されます", "名前というパスワード"),
+    *("パスワードに関する設定", "ログインしてパスワードを変更する", "パスワードは安全に管理してください"),
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), KANA_TEXTS)
+def test_a_value_in_kana_is_replaced_to_the_end_of_its_clause(text: str, expected: str) -> None:
+    assert contracts.redact_text_secrets(text) == (expected, True)
+    assert _task_start(text).text == expected
+
+
+@pytest.mark.parametrize("text", KANA_KEPT)
+def test_japanese_interface_words_verbs_and_statements_after_a_keyword_stay(text: str) -> None:
+    assert contracts.redact_text_secrets(text) == (text, False)
+
+
+def test_kana_value_redaction_is_linear_on_hostile_input() -> None:
+    _assert_linear(
+        [
+            lambda part: "パスワードは" + "あ" * (250_000 // part),
+            lambda part: "あ" * (250_000 // part) + "をパスワードに",
+            lambda part: "ひみつをパスワードに" * (25_000 // part),
+            lambda part: "パスワードはあ " * (30_000 // part),
+            lambda part: "パスワードにひみつを" * (25_000 // part),
+        ]
+    )
+
+
 @pytest.mark.parametrize(("text", "expected"), SPOKEN_TEXTS)
 def test_a_value_of_several_words_is_replaced_to_the_end_of_its_clause(text: str, expected: str) -> None:
     assert contracts.redact_text_secrets(text) == (expected, True)

@@ -371,6 +371,8 @@ SECRET_VALUE_STOP_WORDS: Final = frozenset(
         *("マネージャー", "マネージャ", "ページ", "フォーム", "ヒント", "ボックス", "ボタン", "ポリシー", "ルール"),
         *("リンク", "メニュー", "リスト", "エラー", "ファイル", "アプリ", "管理", "生成", "保存", "保護", "必須"),
         *("表示", "再発行", "強度", "要件", "条件", "期限", "有効期限", "履歴", "登録", "更新"),
+        # and for e-mail address, e-mail, user name, account and random (no kana value starts with them either)
+        *("メールアドレス", "メール", "ユーザー名", "アカウント", "ランダム"),
     }
 )
 #: Words the newer forms (a value before its keyword, after ``to``, after a qualifier) never take as a value:
@@ -569,6 +571,30 @@ _JA_VALUE_END_RE: Final = re.compile(
 #: A word of katakana only (the long vowel mark and the middle dot, half-width forms too): how speech recognition
 #: writes a spoken foreign word. Words of several such words are a spoken value; kanji words are a description.
 _KATAKANA_WORD_RE: Final = re.compile("[\u30a1-\u30ff\uff66-\uff9f]+")
+#: Kana: speech recognition writes a spoken password, its digits too, in kana ("ハンターツーフェイク", "ひみつの
+#: あいことば"), with no ASCII letter or digit, so after a Japanese topic or label frame and in the value-first and
+#: target forms a value that starts with kana is read to its clause's end (:func:`_kana_value_end`).
+_KANA_RE: Final = re.compile("[\u3041-\u3096\u309d\u309e\u30a1-\u30fa\u30fc-\u30fe\uff66-\uff9f]")
+#: Where a kana value ends, reading on: a particle before a verb or an interface word (:data:`_JA_VALUE_END_RE`,
+#: "でログイン", "を入力", "に変更"), a copula ("です", "だ") or a verb ending ("して", "ください").
+_JA_CLAUSE_END_RE: Final = re.compile(
+    "(?:[でをにとがへはも](?:"
+    + _JA_VALUE_END_RE.pattern
+    + "|して|する|します|しま|した|しよう|ください|下さい|お願い|おねがい|いれ|にゅうりょく)"
+    + "|です|でした|でしょう|だった|である|だ(?![\u3040-\u309f])|して|します|ください|お願い|おねがい)"
+)
+#: Hiragana before a kana value that end the clause before it, reading back ("ログインして", "です").
+_JA_CLAUSE_ENDINGS: Final = ("して", "します", "ます", "です", "でした", "ください", "から", "たら", "ので", "けど")
+#: The last characters of :data:`JAPANESE_SECRET_KEYWORDS` (a cheap first check reading back).
+_JA_KEYWORD_ENDS: Final = frozenset(word[-1] for word in JAPANESE_SECRET_KEYWORDS)
+#: Particles that end the clause before a kana value when no hiragana stands before them ("デモユーザーは").
+_JA_CLAUSE_PARTICLES: Final = frozenset("はがをでも")
+#: Kana that start a statement about the password, not a value ("パスワードはこちら", "ありません", "ないです",
+#: "お忘れの方"): a kana value never starts with them.
+_JA_NOT_VALUE_RE: Final = re.compile(
+    "(?:こちら|ここ|ありま|ない(?![\u3040-\u309f])|ないで|なし|まだ|なん|なに|わから|わすれ|おぼえ|ちが|ただし|すべて"
+    "|いりま|[おご][\u4e00-\u9fff])"
+)
 #: A run of ASCII without whitespace (a token of the user's own words, :func:`redact_secret_shaped_tokens`).
 _ASCII_TOKEN_RE: Final = re.compile(r"[^\s\x80-\U0010ffff]+")
 #: A run of 13-19 digits, optionally grouped by single spaces or dashes (a payment card number candidate).
@@ -1462,8 +1488,89 @@ def _texts(text: str, spans: Iterable[tuple[int, int]]) -> list[str]:
     return [text[start:end] for start, end in spans]
 
 
+def _starts_kana_value(text: str, start: int) -> bool:
+    """A kana value may start at ``start``: kana, and no statement (:data:`_JA_NOT_VALUE_RE`), verb or interface
+    word (:data:`_JA_VALUE_END_RE`) or keyword."""
+    return bool(_KANA_RE.match(text, start)) and not (
+        _JA_NOT_VALUE_RE.match(text, start)
+        or _JA_VALUE_END_RE.match(text, start)
+        or _SECRET_KEYWORD_RE.match(text, start)
+    )
+
+
+def _kana_value_stops(text: str, start: int, pos: int, *, spaced: bool) -> bool:
+    """A kana value that started at ``start`` ends before ``pos``: punctuation, no value character, the clause's end
+    (:data:`_JA_CLAUSE_END_RE`) or a keyword; after a space also a verb or an interface word."""
+    if pos >= len(text) or text[pos] in _TRAILING_MARKS or not (_KANA_RE.match(text, pos) or _value_char_at(text, pos)):
+        return True
+    if pos > start and (_JA_CLAUSE_END_RE.match(text, pos) or _SECRET_KEYWORD_RE.match(text, pos)):
+        return True
+    return spaced and bool(_JA_VALUE_END_RE.match(text, pos))
+
+
+def _kana_value_end(text: str, start: int) -> int | None:
+    """The end of a value that starts with kana at ``start`` (:func:`_starts_kana_value`), or ``None``: kana and
+    value characters, hiragana too, across same-line spaces, up to the clause's end (:data:`_JA_CLAUSE_END_RE`,
+    punctuation, a line break, a keyword), at most :data:`MAX_SECRET_VALUE_CHARS` characters."""
+    if not _starts_kana_value(text, start):
+        return None
+    pos = end = start
+    limit = min(len(text), start + MAX_SECRET_VALUE_CHARS)
+    while pos < limit:
+        gap = _WORD_GAP_RE.match(text, pos)  # a space between two words of the value, not before its clause's end
+        at = gap.end() if gap else pos
+        if _kana_value_stops(text, start, at, spaced=gap is not None):
+            break
+        pos = end = at + 1
+    return end if end > start else None
+
+
+def _kana_value_start(text: str, end: int) -> int | None:
+    """The start of a value that ends at ``end`` and starts with kana (:func:`_kana_value_end` read back): to the
+    previous clause's end (whitespace, punctuation, a clause ending such as "して" or a particle after a word,
+    :data:`_JA_CLAUSE_PARTICLES`), at most :data:`MAX_SECRET_VALUE_CHARS` characters; ``None`` without kana in it."""
+    pos, limit = end, max(0, end - MAX_SECRET_VALUE_CHARS)
+    while pos > limit:
+        char = text[pos - 1]
+        if char.isspace() or char in _TRAILING_MARKS or not (_KANA_RE.match(char) or _value_char(char)):
+            break
+        if pos < end and (
+            text.endswith(_JA_CLAUSE_ENDINGS, 0, pos)
+            or (char in _JA_CLAUSE_PARTICLES and pos > 1 and not _HIRAGANA_RE.match(text, pos - 2))
+            or (char in _JA_KEYWORD_ENDS and text.endswith(JAPANESE_SECRET_KEYWORDS, 0, pos))
+        ):
+            break  # also after a keyword: its own frame
+        pos -= 1
+    while pos < end and not _starts_kana_value(text, pos) and _HIRAGANA_RE.match(text, pos):
+        pos += 1  # a particle the reading back took ("にハンター" after a word)
+    return pos if pos < end and _starts_kana_value(text, pos) else None
+
+
+def _japanese_topic(text: str, keyword: re.Match[str], connection: _Connection) -> bool:
+    """A Japanese keyword-first frame naming the keyword's content: a Japanese keyword or particle, joined by the
+    topic particle or a label, not by the object or subject particle ("パスワードを忘れた", "パスワードが違います")."""
+    frame = text[keyword.end() : connection.start]
+    if keyword.group(0).isascii() and not connection.japanese:
+        return False
+    return ("は" in frame or any(mark in frame for mark in _LABEL_MARKS)) and "を" not in frame and "が" not in frame
+
+
 def _secret_value(index: _TextIndex, keyword: re.Match[str]) -> tuple[int, int] | None:
-    """``(start, end)`` of the secret value following ``keyword``, or ``None``."""
+    """``(start, end)`` of the secret value following ``keyword``, or ``None``: one of words
+    (:func:`_word_value`) and, after a Japanese topic or label frame, one that starts with kana, to its clause's end
+    (:func:`_kana_value_end`); the longer of the two."""
+    span = _word_value(index, keyword)
+    connection = _connection(index.text, keyword.end())
+    if not _japanese_topic(index.text, keyword, connection):
+        return span
+    kana = _kana_value_end(index.text, connection.start)
+    if kana is None:
+        return span
+    return (connection.start, kana) if span is None else (min(span[0], connection.start), max(span[1], kana))
+
+
+def _word_value(index: _TextIndex, keyword: re.Match[str]) -> tuple[int, int] | None:
+    """``(start, end)`` of the secret value of words following ``keyword``, or ``None``."""
     text = index.text
     connection = _connection(text, keyword.end())
     pos = connection.start
@@ -1762,6 +1869,16 @@ def _japanese_value_before(index: _TextIndex, keyword: re.Match[str]) -> tuple[i
     if text[end - 1 : end] in _OPENER_OF:
         span = _quoted_before(text, end, word_start=False)
         return span if _japanese_value(text, span, keyword, True) else None
+    found = _japanese_words_before(index, keyword, end)
+    kana = _kana_value_start(text, end)  # "ハンターツーフェイクをパスワードに", "ひみつのあいことばをパスワードに"
+    if kana is None or (found is not None and found[0] <= kana):
+        return found
+    return (kana, max(end, found[1])) if found is not None else (kana, end)
+
+
+def _japanese_words_before(index: _TextIndex, keyword: re.Match[str], end: int) -> tuple[int, int] | None:
+    """An unquoted value of words that ends at ``end`` before the object particle or the word for "called"."""
+    text = index.text
     span = _unquoted_value(index, index.ascii_start(end), end)
     named = _japanese_value(text, span, keyword, False)
     # the whole word before the particle and the words before it: "ハンターにフェイクPWをパスワードに"
@@ -1800,6 +1917,9 @@ def _japanese_value_after(index: _TextIndex, keyword: re.Match[str]) -> tuple[in
     if span is not None and text.startswith(_JA_OBJECT, _space_after(text, end)):
         return span if _japanese_value(text, span, keyword, False) else None
     # a value of several words, or one with Japanese in it, up to the object particle: "パスワードにハンター ツーを"
+    kana = _kana_value_end(text, pos)  # "パスワードにハンターツーフェイクを入力"
+    if kana is not None and text.startswith(_JA_OBJECT, _space_after(text, kana)):
+        return pos, kana
     first, _quoted, capped = _value_at(text, pos)
     if first is None or capped:
         return None
