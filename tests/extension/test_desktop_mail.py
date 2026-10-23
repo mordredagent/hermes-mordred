@@ -193,7 +193,6 @@ def fetch(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     def run_fetch(options: Any, env: Any) -> Any:
         seen["calls"].append((options, env))
         gate.wait(5)
-        print("fetching for", ADDRESS)  # nothing printed may reach a response
         if isinstance(seen.get("result"), BaseException):
             raise seen["result"]
         return seen.get("result", result)
@@ -221,7 +220,8 @@ def test_fetch_runs_as_a_job_with_the_desktop_budget(fetch: Any, capsys: Any) ->
     assert kinds == ["progress", "job"]
     assert fetch.desktop.events[0][1]["message"] == "Fetching new mail… up to 10 minutes"
     assert not fetch.desktop.leaked(started, job)
-    assert ADDRESS in capsys.readouterr().out  # printed by the fake only, never in a response
+    captured = capsys.readouterr()
+    assert not [secret for secret in (ADDRESS, EXTRA, APP_PASSWORD) if secret in captured.out + captured.err]
 
 
 def test_fetch_defaults(fetch: Any) -> None:
@@ -506,3 +506,111 @@ def test_flows_seam_in_status_is_untouched(desktop: Any, monkeypatch: pytest.Mon
     monkeypatch.setattr(_seams, "mail_flows", lambda: pytest.fail("status must not reach the flows"))
     monkeypatch.setattr(_seams, "mail_secret_store", lambda: FakeMailSecrets(None))
     assert desktop.get("/status?client_version=4")["mail"] == {"configured": False}
+
+
+# -- the real mail library behind the seams ----------------------------------------------------------
+
+
+def test_a_real_fetch_job_prints_logs_and_answers_counts_only(
+    desktop: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: Any, caplog: Any
+) -> None:
+    """Gap (d): the REAL run_fetch (scripted IMAP server, plain-SQLite store) through the Desktop job."""
+    import logging
+
+    from tests._mail_sync_helpers import CANARIES, FakeSecrets, gmail_creds, gmail_server, make_env, make_store
+
+    caplog.set_level(logging.DEBUG)
+    store = make_store(tmp_path, desktop.home)
+    audits: list[Any] = []
+    env = make_env(desktop.home, store, gmail_server(), FakeSecrets(gmail_creds()), audits=audits)
+    monkeypatch.setattr(_seams, "fetch_env", lambda home: env)
+    started = desktop.post("/mail/fetch", {"max": 50})
+    job = desktop.wait_job(started["job_id"])
+    assert job["state"] == "done" and job["progress"]["result"]["inserted"] >= 1
+    assert audits and audits[-1]["via"] == "desktop"
+    captured = capsys.readouterr()
+    everything = json.dumps([started, job, desktop.events, audits]) + captured.out + captured.err + caplog.text
+    assert not [canary for canary in CANARIES if canary in everything]
+
+
+@pytest.fixture
+def real_flows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
+    """D2's MailSetupFlows on a scripted server without a Sent folder (so a flow stays pending)."""
+    from mordred_hermes.imports.mail.imap_sync import fetch_lock
+    from tests._fake_imap import FakeImapServer, FakeMailbox
+    from tests._mail_sync_helpers import Clock
+    from tests.test_mail_secrets import FakeEnclave, sealed_store
+
+    setup_flow = pytest.importorskip("mordred_hermes.imports.mail.setup_flow")
+    home = tmp_path / "flows-home"
+    home.mkdir()
+    server = FakeImapServer({"INBOX": FakeMailbox(1), f"Archive {FOLDER}": FakeMailbox(2)})
+    clock = Clock()
+    flows = setup_flow.MailSetupFlows(
+        sealed_store(tmp_path / "sealed", FakeEnclave()),
+        connect=lambda host, port: server.session(),
+        lock=fetch_lock,
+        home=lambda: home,
+        clock=clock,
+    )
+    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(api, "_home", lambda: home)
+    monkeypatch.setattr(_seams, "MAIL_FLOWS", flows)
+    monkeypatch.setattr(_seams, "VAULT_FLOWS", None)
+    monkeypatch.setattr(_seams, "REAP_INTERVAL_S", 0.01)
+    return SimpleNamespace(flows=flows, clock=clock, home=home)
+
+
+def _pending(flows: Any) -> int:
+    return int(repr(flows).removeprefix("MailSetupFlows(pending=").removesuffix(")"))
+
+
+def _start_pending(http: Any) -> dict[str, Any]:
+    body = {"address": "owner@example.com", "imap_host": "imap.example.com", "app_password": "app-password-1"}
+    started = dict(http.post("/api/plugins/mordred/mail/setup/start", json=body).json())
+    assert started["step"] == "folders" and started["question"] == "sent", started
+    return started
+
+
+def _app_client() -> Any:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(api.router, prefix="/api/plugins/mordred")
+    return TestClient(app)
+
+
+def test_the_router_lifespan_reaps_a_real_pending_flow_while_idle(real_flows: Any) -> None:
+    import time
+
+    with _app_client() as http:
+        started = _start_pending(http)
+        assert _pending(real_flows.flows) == 1
+        real_flows.clock.now += 601.0  # past the TTL; no request arrives from here on
+        for _ in range(200):
+            if _pending(real_flows.flows) == 0:
+                break
+            time.sleep(0.01)
+        assert _pending(real_flows.flows) == 0  # the reaper dropped it (and its password)
+        finished = http.post(f"/api/plugins/mordred/mail/setup/{started['flow_id']}/finish", json={"selection": None})
+        assert finished.json() == {"ok": False, "error": "mail_setup_flow_expired"}
+
+
+def test_forget_cancels_a_real_pending_flow(real_flows: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    done = SimpleNamespace(had_credentials=False, deleted_messages=0, cursors_deleted=0, warnings=())
+    monkeypatch.setattr(_seams, "forget", lambda store, home, *, account, rows: done)
+    monkeypatch.setattr(_seams, "mail_audit", lambda result, *, rows, home: None)
+    with _app_client() as http:
+        started = _start_pending(http)
+        assert http.post("/api/plugins/mordred/mail/forget", json={"rows": False}).json()["ok"] is True
+        assert _pending(real_flows.flows) == 0
+        finished = http.post(f"/api/plugins/mordred/mail/setup/{started['flow_id']}/finish", json={"selection": None})
+        assert finished.json()["error"] == "mail_setup_flow_expired"
+
+
+def test_shutdown_cancels_a_real_pending_flow(real_flows: Any) -> None:
+    with _app_client() as http:
+        _start_pending(http)
+        assert _pending(real_flows.flows) == 1
+    assert _pending(real_flows.flows) == 0  # the lifespan's exit called cancel_all()
