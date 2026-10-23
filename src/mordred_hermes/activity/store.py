@@ -130,6 +130,16 @@ def _db_errors() -> tuple[type[BaseException], ...]:
     return (sqlite3.Error, getattr(current, "Error", sqlite3.Error))
 
 
+def _wal_header(path: Path) -> bool:
+    """Whether ``path``'s SQLite header (format bytes 18-19, plaintext also when encrypted) says WAL."""
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(20)
+    except OSError:
+        return False  # unreadable: the copy checks that follow refuse it
+    return 2 in header[18:20]
+
+
 def _classify(exc: BaseException) -> Refusal:
     text = str(exc).lower()
     if "locked" in text or "busy" in text:
@@ -558,12 +568,14 @@ class ActivityStore:
     # --- backup and restore -----------------------------------------------------------------
 
     def _check_copy(self, path: Path) -> None:
+        if _wal_header(path):  # restoring it would put mordred.db in WAL mode, which nothing here uses
+            raise ActivityRefused(refusal("backup_wal_unsupported"))
         found = self._verify_copy(path) if self._verify_copy is not None else None
         if found is not None:
             raise ActivityRefused(found)
 
     def backup(self, dest: Path) -> None:
-        """A consistent snapshot (SQLite backup API, WAL included) to a new ``0600`` file."""
+        """A consistent snapshot (SQLite backup API, WAL included) to a new ``0600`` rollback-journal file."""
         try:
             fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         except FileExistsError:
@@ -572,6 +584,7 @@ class ActivityStore:
         try:
             with _refusing(), contextlib.closing(self._copy_opener(dest)) as target, self.connection() as source:
                 source.backup(target)
+                target.execute("PRAGMA journal_mode = DELETE")  # the copy takes the source's header verbatim
             self._check_copy(dest)
         except BaseException:
             dest.unlink(missing_ok=True)
@@ -582,6 +595,8 @@ class ActivityStore:
 
         The store stays bound to its current profile home, gets a new
         generation, and every Hermes session reference becomes ``unavailable``.
+        A backup in WAL mode is refused (``backup_wal_unsupported``) and the store
+        is left in rollback-journal mode whatever the copy carried.
         """
         if not src.is_file():
             raise ActivityRefused(refusal("store_unavailable"))
@@ -591,6 +606,7 @@ class ActivityStore:
             self._checked_meta(self._read_meta(source))
             with self.connection() as target:
                 source.backup(target)
+                target.execute("PRAGMA journal_mode = DELETE")  # never leave mordred.db in WAL mode
         with self._transaction() as conn:
             self._after_restore(conn, bound)
             return self._upgraded(conn, self._checked_meta(self._read_meta(conn)))

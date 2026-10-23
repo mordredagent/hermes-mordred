@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import shutil
 import sqlite3 as stdlib_sqlite3
+import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -152,3 +155,221 @@ def test_a_long_violation_still_fits_the_prompt_section(home: Path, monkeypatch:
     )
     text = _hooks.status_line()
     assert "NOT protected" in text and len(text) <= _hooks._SECTION_MAX_CHARS
+
+
+# -- in-process probes keep this process's SQLite locks ------------------------------------
+#
+# POSIX record locks belong to the process: closing ANY descriptor of a file
+# drops every lock the process holds on it. SQLite defers closing its own
+# descriptors while another connection of the same library holds a lock, but
+# a plain open() or another SQLite library (the stdlib's, while Hermes uses
+# SQLCipher's) closes immediately. Hermes then still believes it holds its
+# locks; another process can reset the -shm under its mapping (SIGBUS) or
+# checkpoint and delete the WAL.
+
+_posix_locks = pytest.mark.skipif(sys.platform == "win32", reason="POSIX record-lock semantics")
+
+#: Run in another process: can it take what this process should still hold?
+#: SQLite's unix VFS keeps a shared lock on the -shm "dead man switch" byte
+#: (offset 128) while the wal-index is mapped, and a SHARED lock on the main
+#: file (bytes 0x40000002..+510) for as long as a WAL connection is open.
+_LOCK_PROBE = """
+import fcntl, os, sys
+
+def held(path, start, length):
+    fd = os.open(path, os.O_RDWR)
+    try:
+        fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB, length, start, os.SEEK_SET)
+    except OSError:
+        return 1
+    finally:
+        os.close(fd)
+    return 0
+
+db = sys.argv[1]
+print(held(db + "-shm", 128, 1), held(db, 0x40000002, 510))
+"""
+
+#: Run in another process: a plaintext WAL database whose rows are only in the WAL, held open.
+_PLAINTEXT_WRITER = """
+import sqlite3, sys
+
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("PRAGMA journal_mode = WAL")
+conn.execute("PRAGMA wal_autocheckpoint = 0")
+conn.execute("CREATE TABLE tasks (title TEXT)")
+conn.execute("INSERT INTO tasks VALUES ('plaintext row')")
+conn.commit()
+print("ready", flush=True)
+sys.stdin.read()
+conn.close()
+"""
+
+
+def _locks_held(path: Path) -> tuple[bool, bool]:
+    """(-shm dead-man-switch lock, main-file SHARED lock) still held by this process, as another one sees it."""
+    out = subprocess.run(
+        [sys.executable, "-c", _LOCK_PROBE, str(path)], capture_output=True, text=True, check=True, timeout=60
+    )
+    shm, shared = out.stdout.split()
+    return shm == "1", shared == "1"
+
+
+def _hermes_sqlite3(home: Path) -> Any:
+    """The ``sqlite3`` module Hermes gets in an armed home (the shim, backed by sqlcipher3)."""
+    return _shim.build_module(key=lambda: KEY, home=lambda: home, has_key=lambda: True)
+
+
+def _live(module: Any, path: Path, *, tables: bool = True) -> Any:
+    """A connection held open like Hermes's SessionDB: WAL mode, rows only in the WAL (no checkpoint)."""
+    conn = module.connect(str(path), check_same_thread=False)
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA wal_autocheckpoint = 0")
+    if tables:
+        conn.execute("CREATE TABLE IF NOT EXISTS live (a)")
+        conn.execute("INSERT INTO live VALUES ('row')")
+        conn.commit()
+    return conn
+
+
+def _protected_with_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    _protected(monkeypatch)
+    monkeypatch.setattr(_hooks, "_key", lambda: KEY)
+
+
+@_posix_locks
+def test_the_lock_probe_sees_a_dropped_lock(tmp_path: Path) -> None:
+    """Without this the tests below could pass vacuously: one plain open() and close unlocks the file."""
+    home = tmp_path / "home"
+    home.mkdir()
+    live = _live(_hermes_sqlite3(home), home / "state.db")
+    try:
+        assert _locks_held(home / "state.db") == (True, True)
+        with (home / "state.db").open("rb") as handle:
+            handle.read(16)
+        assert _locks_held(home / "state.db") == (True, False)
+    finally:
+        live.close()
+
+
+@_posix_locks
+def test_the_per_turn_check_keeps_hermess_locks_on_its_live_database(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D1: the check runs inside Hermes while state.db is open; it must never unlock it."""
+    _protected_with_key(monkeypatch)
+    live = _live(_hermes_sqlite3(home), home / "state.db")
+    try:
+        assert _locks_held(home / "state.db") == (True, True)
+        for _ in range(2):  # the second turn uses the cached deep scan
+            assert _monitor.check(home, key_available=lambda: True, key=lambda: KEY) == []
+            assert _hooks.pre_llm_call() is None
+            assert "encrypted at rest" in _hooks.status_line()
+        assert _locks_held(home / "state.db") == (True, True)
+        live.execute("INSERT INTO live VALUES ('after the check')")
+        live.commit()
+    finally:
+        live.close()
+
+
+@_posix_locks
+def test_an_unprotected_process_is_probed_through_its_own_sqlite(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hermes started without the SQLCipher module: its connections are the stdlib's, and so are the probes."""
+    monkeypatch.setattr(_shim, "is_installed", lambda: False)
+    (home / "state.db").unlink()
+    live = _live(stdlib_sqlite3, home / "state.db")  # a plaintext state.db, rows only in the WAL
+    try:
+        assert _locks_held(home / "state.db") == (True, True)
+        findings = _monitor.check(home, key_available=lambda: True, key=lambda: KEY)
+        assert [f.code for f in findings] == ["unprotected_process", "plaintext"]
+        assert "state.db" in findings[1].detail
+        assert _locks_held(home / "state.db") == (True, True)
+    finally:
+        live.close()
+
+
+@_posix_locks
+def test_reopening_an_encrypted_copy_keeps_the_locks_of_its_open_connection(tmp_path: Path) -> None:
+    """The shim probes a file outside the home on every connect(); Hermes may already have it open."""
+    home = tmp_path / "home"
+    home.mkdir()
+    sq = _hermes_sqlite3(home)
+    _live(sq, home / "kanban.db").close()
+    staged = tmp_path / "export" / "kanban.db"  # keyed only because it is one of our encrypted databases
+    staged.parent.mkdir()
+    shutil.copy(home / "kanban.db", staged)
+    first = _live(sq, staged)
+    try:
+        assert _locks_held(staged) == (True, True)
+        second = sq.connect(str(staged))
+        assert second.execute("SELECT count(*) FROM live").fetchone() == (2,)
+        second.close()
+        assert _locks_held(staged) == (True, True)
+    finally:
+        first.close()
+
+
+@pytest.mark.parametrize("tables", [True, False], ids=["rows-only-in-the-wal", "no-tables-yet"])
+def test_a_fresh_encrypted_database_is_not_reported_as_plaintext(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tables: bool
+) -> None:
+    """L1: before its first checkpoint a new state.db's main file is page 1 with an empty schema.
+
+    Page 1's b-tree header lies inside the 112-byte plaintext header, so the
+    stdlib reads that file as an empty plaintext database.
+    """
+    base = tmp_path / "fresh"
+    base.mkdir()
+    dbcrypt.arm(base)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(_hooks, "_home", lambda: base)
+    _protected_with_key(monkeypatch)
+    live = _live(_hermes_sqlite3(base), base / "state.db", tables=tables)
+    try:
+        seen = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sqlite3, sys; c = sqlite3.connect(sys.argv[1], uri=True); "
+                "print(c.execute('SELECT count(*) FROM sqlite_master').fetchone()[0])",
+                f"file:{(base / 'state.db').as_posix()}?mode=ro&immutable=1",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        )
+        assert seen.stdout.strip() == "0"  # what the stdlib makes of the main file alone
+        assert _monitor.check(base, key_available=lambda: True, key=lambda: KEY) == []
+        assert "encrypted at rest" in _hooks.status_line()
+    finally:
+        live.close()
+
+
+def test_a_plaintext_database_with_rows_only_in_its_wal_is_still_reported(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never claim protection that is not there: an empty-looking plaintext main file is not 'encrypted'."""
+    _protected_with_key(monkeypatch)
+    writer = subprocess.Popen(
+        [sys.executable, "-c", _PLAINTEXT_WRITER, str(home / "kanban.db")],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert writer.stdout is not None and writer.stdout.readline().strip() == "ready"
+        findings = _monitor.check(home, key_available=lambda: True, key=lambda: KEY)
+        assert [f.code for f in findings] == ["plaintext"] and "kanban.db" in findings[0].detail
+    finally:
+        writer.communicate("", timeout=60)
+
+
+def test_offline_classification_refuses_to_run_inside_a_protected_runtime(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``discover`` opens files with plain open() and the stdlib: only where nothing holds a connection."""
+    monkeypatch.setattr(_shim, "is_installed", lambda: True)
+    with pytest.raises(_migrate.MigrationError, match="inside a Hermes process"):
+        _migrate.discover(home, KEY)
+    assert [p.name for p in _migrate.database_paths(home)] == ["state.db"]  # listing never opens a file

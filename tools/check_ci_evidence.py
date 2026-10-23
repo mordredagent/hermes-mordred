@@ -29,6 +29,7 @@ from ci_evidence import (
     parse_json,
     require,
     validate_acceptance,
+    worker_job_name,
 )
 
 MAX_API_BYTES = 4 * 1024 * 1024
@@ -140,18 +141,12 @@ def _timestamp(value: Any) -> datetime:
 
 def _check_jobs(jobs: list[Json], policy: Json) -> Json:
     required = {"ci-policy", "CI acceptance"}
-    for os_name, version, shard in expected_workers(policy):
-        required.add(
-            f"linux ({version})"
-            if os_name == "linux"
-            else f"windows-private-fs ({shard})"
-            if os_name == "windows"
-            else os_name
-        )
+    for identity in expected_workers(policy):
+        required.add(worker_job_name(*identity))
     by_name = {job.get("name"): job for job in jobs}
     require(len(by_name) == len(jobs), "duplicate job names")
     require(required <= by_name.keys(), "missing required GitHub jobs")
-    optional = {"macos", "windows-private-fs"} - required
+    optional = {"macos", "windows-private-fs", "linux-floor"} - required
     require(set(by_name) <= required | optional, "unexpected GitHub jobs")
     for name, job in by_name.items():
         require(

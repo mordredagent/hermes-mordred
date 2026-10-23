@@ -19,6 +19,12 @@ Databases must not be open in another process while this runs (checked with
 instead (``db-encryption.pending``) and runs from the interpreter-startup
 bootstrap of the next Hermes process, before anything opens a database.
 
+Classification (:func:`discover`) is offline work too: it reads each file with
+a plain ``open()`` and the stdlib ``sqlite3``. Run it only in a process that
+holds no connection to these files — the maintenance CLI, or the bootstrap
+before Hermes opens anything; it refuses inside a protected Hermes process.
+Hermes's own per-turn check is ``_monitor``, which never does either.
+
 Old plaintext blocks are freed by the swap, not overwritten: on an SSD/APFS
 volume they can survive in free space or local snapshots until reused.
 """
@@ -36,6 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
+from . import _shim
 from ._key import DatabaseKey
 from ._locking import LOCK_SUBPATH as LOCK_SUBPATH
 from ._locking import MigrationBusy as MigrationBusy
@@ -102,7 +109,30 @@ def _wrong_key_errors(sc: Any) -> tuple[type[BaseException], ...]:
     return wrong_key_errors(sc)
 
 
+def _refuse_inside_a_runtime() -> None:
+    """Classification is offline work: refuse it in a Hermes process that has the SQLCipher module.
+
+    POSIX record locks belong to the process, and closing *any* descriptor of
+    a file drops every lock the process holds on it. SQLite protects its own
+    connections from that only within one library; the plain ``open()`` and
+    the stdlib ``sqlite3`` used here are not Hermes's SQLCipher, so each close
+    would silently unlock Hermes's live connections. Another process could
+    then reset the WAL index under them (SIGBUS) or checkpoint and delete the WAL.
+    """
+    if _shim.is_installed():
+        raise MigrationError(
+            "classifying the databases opens the files directly, which cannot run inside a Hermes process "
+            "(it would drop Hermes's own SQLite locks); use `hermes-mordred databases` instead"
+        )
+
+
 def _classify(path: Path, key: DatabaseKey | None) -> str:
+    """``plaintext`` / ``encrypted`` / ``unreadable``, or ``other`` (empty file, JSON metadata).
+
+    Offline only (see :func:`_refuse_inside_a_runtime`): nothing in this process
+    may have ``path`` open.
+    """
+    _refuse_inside_a_runtime()
     plain_sqlite = stdlib_sqlite3()
     try:
         with path.open("rb") as handle:
@@ -133,9 +163,12 @@ def _classify(path: Path, key: DatabaseKey | None) -> str:
     return "unreadable"
 
 
-def discover(home: Path, key: DatabaseKey | None) -> list[Database]:
-    """Every database file Hermes owns under ``home`` (and its profile homes)."""
-    found: list[Database] = []
+def database_paths(home: Path) -> list[Path]:
+    """Every file under ``home`` (and its profile homes) that may be one of Hermes's databases.
+
+    Only lists directories: no file is opened, so this is safe inside Hermes.
+    """
+    found: list[Path] = []
     for root, dirs, files in os.walk(home):
         relative_root = Path(root).relative_to(home).parts
         dirs[:] = sorted(d for d in dirs if not _pruned((*relative_root, d)))
@@ -143,9 +176,17 @@ def discover(home: Path, key: DatabaseKey | None) -> list[Database]:
             path = Path(root, name)
             if name.endswith(PREPARED_SUFFIX) or not looks_like_database_name(name) or not in_scope(path, home):
                 continue
-            state = _classify(path, key)
-            if state != "other":
-                found.append(Database(path, str(path.relative_to(home)), state))
+            found.append(path)
+    return found
+
+
+def discover(home: Path, key: DatabaseKey | None) -> list[Database]:
+    """Every database file Hermes owns under ``home`` (and its profile homes), classified. Offline only."""
+    found: list[Database] = []
+    for path in database_paths(home):
+        state = _classify(path, key)
+        if state != "other":
+            found.append(Database(path, str(path.relative_to(home)), state))
     return found
 
 

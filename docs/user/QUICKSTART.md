@@ -238,6 +238,12 @@ The stores and recovery mechanisms remain separate despite reusing that input.
 | 6 | `hermes-mordred encryption enable env` (macOS runtime) | Enrolls `.env` and activates transparent injection on macOS. |
 | 7 | `hermes-mordred encryption enable memory` | Arms and seals memory through macOS file-vault or Linux TPM custody. |
 
+On macOS, steps 4 to 7, the database encryption of
+[Encrypt conversation databases](#encrypt-conversation-databases-macos) and the
+mail setup can also be run from the Mordred page in Hermes Desktop, in the same
+order, with the reasons shown inline (see
+[`desktop`](./USAGE.md#desktop--mordred-setup-page-in-hermes-desktop)).
+
 Final `hermes-mordred status` is outside the numbered steps. Linux skips
 step 6 and enables memory without a file vault or recovery-passphrase prompt.
 Windows setup uses `enable-winkey`, skips the

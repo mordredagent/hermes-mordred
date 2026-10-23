@@ -39,9 +39,10 @@ integration/code freeze, rather than repeatedly for reports or documentation.
 Security-sensitive changes still require the complete containing test modules
 and the relevant explicit live-gated paths. Draft PR CI runs critical feedback
 on Ubuntu Python 3.12 and mapped macOS/Windows workers. Ready PRs and accepted-
-baseline `dev` pushes use conservative changed-scope CI (normally 3–5 jobs).
+baseline `dev` pushes use conservative changed-scope CI (normally 3–6 jobs).
 Sensitive/unknown changes, `main`, manual dispatch and `ci:full` use final CI:
-Linux 3.11/3.13, macOS 3.11 and one Windows 3.11 worker, with all validation packs.
+Linux 3.11/3.13, a parallel Linux floor worker, macOS 3.11 and four Windows 3.11
+workers, with all validation packs.
 See `docs/dev/CI.md` for exact evidence and rerun rules.
 
 ## Critical gotchas
