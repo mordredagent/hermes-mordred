@@ -54,13 +54,10 @@ if TYPE_CHECKING:
     from ..imports.store import ImportStore, WriteResult
 
 _LOG: Final = logging.getLogger(__name__)
-_MAX_ADDRESS_CHARS: Final = 254
 _MAX_ADDRESSES_FILE_BYTES: Final = 1024 * 1024
 _MAX_PREVIEW: Final = 10_000
 _MAX_SENT_LABEL_CHARS: Final = 128
 _ACCOUNT_FORBIDDEN_RE: Final = re.compile(r"[@:\s]")
-_ADDRESS_ATOM: Final = r"[^@\s<>()\[\],;:\"\\]+"
-_ADDRESS_RE: Final = re.compile(rf"{_ADDRESS_ATOM}@{_ADDRESS_ATOM}\.{_ADDRESS_ATOM}")
 #: A refusal code (``not_armed``) or an exception class name (``RuntimeError``): never message text.
 _CODE_RE: Final = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
 
@@ -175,16 +172,12 @@ def _account(raw: object) -> str:
 
 
 def _own_address(raw: str, where: str) -> str:
-    from ..imports.mail import OwnAddresses
+    from ..imports.mail.owner import own_address
 
-    value = raw.strip().lower()
-    if len(value) > _MAX_ADDRESS_CHARS or not value.isprintable() or not _ADDRESS_RE.fullmatch(value):
-        raise _UsageError(f"{where} is not a valid email address")
     try:
-        OwnAddresses.of([value])
+        return own_address(raw)
     except ValueError:
         raise _UsageError(f"{where} is not a valid email address") from None
-    return value
 
 
 def _addresses_file(raw: str) -> list[str]:
@@ -467,10 +460,17 @@ def _print_status(report: Mapping[str, Any]) -> None:
 
 
 def _imap_flags() -> Mapping[str, Any] | None:
+    """The sealed credentials' flags; ``{"residue": "credentials_left"}`` for a credential file without its pair."""
     try:
-        from ..imports.mail.secrets import MailSecretStore
+        from ..imports.mail.secrets import MailSecretsError, MailSecretStore
 
-        flags: Mapping[str, Any] | None = MailSecretStore().flags()
+        secret_store = MailSecretStore()
+        try:
+            flags: Mapping[str, Any] | None = secret_store.flags()
+        except MailSecretsError:
+            return {"residue": "credentials_left"}  # a sealed file without readable flags
+        if flags is None and secret_store.residue():
+            return {"residue": "credentials_left"}  # flags left by an interrupted forget
         return flags
     except Exception:
         return None
