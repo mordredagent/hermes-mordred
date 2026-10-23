@@ -282,6 +282,32 @@ def _ensure_env_file(home: Path) -> None:
         os.close(fd)
 
 
+def _stale_before_wizard(root: Path) -> dict[str, Any] | None:
+    """``vault_anchor_stale`` for an anchor over an empty vault directory, decided BEFORE the wizard runs.
+
+    The wizard's ``default_anchor_store().read()`` would MIGRATE a legacy anchor
+    into the helper store (deleting the legacy item), turning the actionable
+    case into a deferred one. The snapshot and the anchor reads hold the vault
+    lifecycle lock (``<root.parent>/.keyvault.lifecycle.lock``), which
+    ``init_vault`` holds around its anchor check and its writes, and the
+    directory is checked again after the reads: a vault that a CLI ``encryption
+    enable env`` created meanwhile is never reported as stale. The lock is
+    released before the wizard (which takes it itself).
+    """
+    if not vault_dir_clean(root):
+        return None
+    from ..keyvault._storage import keyvault_lifecycle_lock
+
+    root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with keyvault_lifecycle_lock(root):
+        if not vault_dir_clean(root):
+            return None
+        stale = diagnose_anchor(root, require_present=True)
+        if stale is None or not vault_dir_clean(root):
+            return None
+        return stale
+
+
 def commit(
     *,
     home: Path,
@@ -301,12 +327,9 @@ def commit(
     if state["exists"] and state["env_enrolled"]:
         flows.discard(flow.flow_id)
         return {"ok": False, "error": "vault_exists"}
-    if vault_dir_clean(root):
-        # Before the wizard: its default_anchor_store().read() would MIGRATE a legacy anchor into
-        # the helper store (and delete the legacy item), turning the actionable case into a deferred one.
-        stale = diagnose_anchor(root, require_present=True)
-        if stale is not None:
-            return stale
+    stale = _stale_before_wizard(root)
+    if stale is not None:
+        return stale
     _ensure_env_file(home)
     session = _commit_session(unattended, flow.passphrase)
     try:

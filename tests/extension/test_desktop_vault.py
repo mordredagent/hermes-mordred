@@ -283,6 +283,85 @@ def test_no_anchor_anywhere_is_a_plain_failure(ceremony: Any, anchors: Any) -> N
     assert _commit_failure(ceremony) == {"ok": False, "error": "memory_encryption_failed"}
 
 
+# -- a vault created by the CLI while the commit diagnoses (no false vault_anchor_stale) -------------
+
+
+def _cli_creates_the_vault(root: Path, anchors: Any) -> None:
+    """``encryption enable env`` in another process: init_vault's critical section under the vault locks."""
+    from mordred_hermes.keyvault._storage import keyvault_lock
+
+    kv_vault._ensure_dir(root)
+    kv_vault._ensure_lock(root)
+    with keyvault_lock(root):
+        (root / "recovery.mrkv").write_bytes(b"r")
+        (root / "manifest.0.mvmf").write_bytes(b"m")
+        anchors.legacy = _Anchors(b"live-pin")  # the anchor of the vault just created
+
+
+@pytest.fixture
+def racing(ceremony: Any, anchors: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A commit whose wizard succeeds once it runs (the live vault is reused)."""
+    monkeypatch.setattr(env_decrypt_cli, "enable", lambda **kwargs: 0)
+    return SimpleNamespace(ceremony=ceremony, anchors=anchors)
+
+
+def test_a_vault_created_after_the_first_snapshot_is_seen_under_the_lock(
+    racing: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = _vault.vault_dir_clean
+    calls: list[bool] = []
+
+    def snapshot_then_cli(root: Path) -> bool:
+        clean = real(root)
+        if not calls:  # the unlocked first look: the CLI creates the vault right after it
+            creator = threading.Thread(target=_cli_creates_the_vault, args=(root, racing.anchors))
+            creator.start()
+            creator.join(5)
+        calls.append(clean)
+        return clean
+
+    monkeypatch.setattr(_vault, "vault_dir_clean", snapshot_then_cli)
+    answer = _commit_failure(racing.ceremony)
+    assert answer == {"ok": True, "passphrase_reused": True}  # no vault_anchor_stale: the live vault is used
+    assert calls[:2] == [True, False]  # the locked snapshot saw the new vault
+    assert racing.anchors.legacy.reads == []  # and nothing was diagnosed
+
+
+def test_a_vault_appearing_during_the_reads_is_rechecked(racing: Any) -> None:
+    root = racing.ceremony.root
+
+    class _CreatesWhileRead(_Anchors):
+        def read(self, label: str) -> bytes | None:
+            # A creator that does not take the lifecycle lock: the vault appears during the read.
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "manifest.0.mvmf").write_bytes(b"m")
+            return super().read(label)
+
+    racing.anchors.legacy = _CreatesWhileRead(b"live-pin")
+    assert _commit_failure(racing.ceremony) == {"ok": True, "passphrase_reused": True}
+
+
+def test_a_cli_init_waits_for_the_diagnosis_lock(racing: Any) -> None:
+    root = racing.ceremony.root
+    started, blocked = threading.Event(), []
+    creator = threading.Thread(target=_cli_creates_the_vault, args=(root, racing.anchors))
+
+    class _StartsTheCli(_Anchors):
+        def read(self, label: str) -> bytes | None:
+            if not started.is_set():
+                started.set()
+                creator.start()
+                time.sleep(0.1)
+                blocked.append(creator.is_alive())  # init_vault waits on the lifecycle lock we hold
+            return super().read(label)
+
+    racing.anchors.legacy = _StartsTheCli(None)
+    answer = _commit_failure(racing.ceremony)
+    creator.join(5)
+    assert answer["ok"] is True and blocked == [True]
+    assert kv_vault.artifacts_present(root)  # the CLI then finished: nothing of its vault was refused
+
+
 def test_the_helper_store_has_no_legacy_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper.find_sekey_helper", lambda: None)
     assert _vault._helper_anchor_store() is None
