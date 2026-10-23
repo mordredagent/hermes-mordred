@@ -833,6 +833,46 @@ Follow-ups left by the landed code:
   `hermes-mordred imports status` (counts per source, no content) would make
   the shared store visible without either secret.
 
+- [ ] Native helper build cache inside the Hermes home (found 2026-10-23,
+  separate `dbcrypt` / `keyvault` PR). `keyvault enable-se` builds the helper
+  in place under `<home>/plugins/mordred/mordred_hermes/_native/sekey-helper/.build/`
+  (50 MB) and leaves Xcode's `Intermediates.noindex/XCBuildData/build.db`
+  there. `dbcrypt._migrate.discover` walks the whole home and classifies it as
+  a plaintext Hermes database: `databases status` lists it, the session-start
+  and `pre_llm_call` hooks audit `mordred.db_encryption.violation` with
+  `findings: ["plaintext"]` on every call, the `mordred.databases` prompt
+  section tells the model the databases are not protected, and Hermes Desktop
+  logs "Hermes's databases are not protected". Fix both halves: `_policy`
+  must prune build and code directories (`.build`, `Intermediates.noindex`,
+  `node_modules`, `__pycache__`, `.git`; arguably all of `plugins/`, which holds
+  code, never data; `plugin-data/` stays in scope), and `enable-se` must build
+  in a temporary directory outside the home and copy only the signed binary.
+  Workaround today: delete the `.build` directory; the installed helper in
+  `~/.local/bin` is unaffected.
+
+- [ ] Deferred-tool bridge with the production model (found 2026-10-23,
+  `e2e` prompt PR). In Hermes 0.21.5 every plugin tool is deferred
+  (`tool_search.is_deferrable_tool_name`: not core, not a GUI surface), so the
+  Mordred tools are reachable only through `tool_search` + `tool_call`. With
+  the production model (Venice `e2ee-deepseek-v4-flash`) "sync my mail" ran
+  `tool_search` twice, then called `tool_describe` four times with the
+  unquoted arguments `{"names": mordred_mail_sync}`; Hermes's sanitizer could
+  not repair them and nothing was synced. The `mordred.telegram` prompt
+  section already shows the `tool_call` form; add "tool_search's result
+  already contains the schema: call with `tool_call` directly, never
+  `tool_describe`", repeat the `tool_call` example for `mordred_mail_sync` and
+  `mordred_history_search`, and document `tools.tool_search.enabled: "off"` in
+  USAGE as the fallback that makes every tool direct. Hermes itself is not
+  changed (zero-PR rule). The eval (Part G) must cover the bridge path.
+
+- [ ] `imap_auth_failed` without a hint (found 2026-10-23, part of the
+  Desktop design): every Gmail `NO` collapses to one code. Classify the
+  bracketed response code only (`AUTHENTICATIONFAILED`, `ALERT` app password
+  required, `ALERT` web login required), never the free text, and print the
+  remediation (same Google account as the address, primary sign-in address,
+  2-Step Verification on, Workspace admins can disable IMAP or app passwords,
+  Advanced Protection disables app passwords) in the CLI and on the page.
+
 Later (not scheduled):
 
 - [ ] Gmail API collector feeding the same normalization path.
