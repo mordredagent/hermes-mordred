@@ -870,9 +870,15 @@ hermes-mordred direct-tools off      # runs: hermes config unset tools.tool_sear
 > hand. `off` removes the setting
 > (Hermes's default, `auto`, then applies). Mordred never changes this setting
 > unless you run `on` / `off` or tick the **Tool calls** card on the Desktop
-> page. If Hermes's `hermes` command cannot be found the command refuses with
-> `hermes_cli_missing` and prints the lines to add to `config.yaml` by hand
-> (remove them again to turn direct calls off):
+> page. A change runs `hermes config get` first: on a Hermes whose `hermes
+> config` has no `get`/`unset` (hermes-agent before 0.19) the command refuses
+> with `hermes_cli_unsupported` before anything is written, and when Hermes
+> already reads the setting as asked nothing is written. Such an old Hermes may
+> not defer tools at all (hermes-agent 0.13 has no tool search; Hermes 0.21 is
+> the release that defers every plugin tool). If Hermes's `hermes` command
+> cannot be found the command refuses with `hermes_cli_missing`. Both print the
+> lines to add to `config.yaml` by hand (remove them again to turn direct calls
+> off):
 >
 > ```yaml
 > tools:

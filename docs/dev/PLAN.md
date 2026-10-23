@@ -2586,7 +2586,9 @@ One component per PR, all targeting `dev`. Each PR runs
   `hermes config set|unset|get` in Hermes's environment under one lock, `hermes_command`,
   the reader child with its sha256 answer cache, closed codes `config_unreadable`,
   `config_vault_managed`, `config_write_failed`, `config_has_setting`,
-  `hermes_cli_missing`, `config_unsupported_shape`), `wizard/_direct_tools_yaml.py` (the
+  `hermes_cli_missing`, `config_unsupported_shape`, `hermes_cli_unsupported` for a
+  Hermes without `config get`/`unset`, found by a `get` probe before any write),
+  `wizard/_direct_tools_yaml.py` (the
   reader child's `main`: Hermes's YAML 1.1 C-first loader setup and rule, shared-mapping
   detection, warnings captured),
   `wizard/direct_tools_cli.py` and `_cli_parsers.py` (`direct-tools on | off |
@@ -2594,16 +2596,19 @@ One component per PR, all targeting `dev`. Each PR runs
   `desktop/_maintenance_routes.py` (`GET` / `POST /tools/direct`),
   `desktop/_status_v4.py` (`tools` on every platform), `plugin.js` (the Tool calls card
   under Maintenance with the manual three-line snippet and Copy, step 2.1's
-  recommendation, five `MESSAGES`); USAGE, SPEC, PLAN, TODO and
+  recommendation, seven `MESSAGES`); USAGE, SPEC, PLAN, TODO and
   `tools/ci_scope_paths.json`.
 - Tests: `tests/test_direct_tools.py` (the 26-case Hermes parity table and `%YAML 1.2`
   directives, YAML warnings kept in the reader child while another thread churns
   warning contexts, the child's stdin/one-line contract and cache, shared mappings,
   a relative home, two simultaneous `off` requests, the lifecycle hook's reseal, a fake
-  `hermes` console script for set/unset/get,
+  `hermes` console script for get/set/unset (the `get` probe, a Hermes without `get`/
+  `unset` refused with no write, a probe already as asked),
   a missing script, non-zero exits, a timeout, a verification mismatch, hidden output,
   sealed-away and unreadable configs, the Windows read and delegation, and one real
-  `hermes config` round trip with the repo venv's hermes-agent),
+  `hermes config` test that is version-aware: a round trip on hermes-agent 0.19/0.21,
+  `hermes_cli_unsupported` with config.yaml byte-for-byte unchanged on 0.13, the Linux
+  floor; `MORDRED_TEST_HERMES_BIN` points it at another venv),
   `tests/test_direct_tools_cli.py` (output, exit codes, the snippet, canaries),
   `tests/extension/test_desktop_tools.py` (routes, strict boolean, closed codes, the
   status field), `tests/test_desktop_page.py` (card, snippet and Copy, checkbox state,

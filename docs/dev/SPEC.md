@@ -5377,11 +5377,22 @@ moved to a child process.
   request: `hermes-mordred direct-tools on | off`, or a change of the Tool calls
   checkbox on the Desktop page (`POST /tools/direct`). No setup step, upgrade, repair,
   status read or plugin start changes it.
-- **Hermes writes, Mordred never edits config.yaml.** `on` runs Hermes's own
-  `hermes config set tools.tool_search.enabled off` (Hermes keeps this string-typed
-  setting a string and stores `enabled: 'off'`); `off` runs `hermes config unset
-  tools.tool_search.enabled` (`hermes config unset tools.tool_search` for the legacy
-  `tool_search: false`). The command is Hermes's `hermes` console script next to the
+- **Hermes writes, Mordred never edits config.yaml.** A change is three `hermes`
+  processes. First the probe `hermes config get tools.tool_search.enabled` (`hermes
+  config get tools.tool_search` for the legacy `tool_search: false`): exit 2 (an
+  argparse usage error: no `get`, hence no `unset` either) is `hermes_cli_unsupported`
+  and nothing is written; any other non-zero exit or a timeout is
+  `config_write_failed`; an answer that Hermes already reads as asked ends the request
+  without writing. Then `on` runs Hermes's own `hermes config set
+  tools.tool_search.enabled off` (Hermes keeps this string-typed setting a string and
+  stores `enabled: 'off'`) and `off` runs `hermes config unset tools.tool_search.enabled`
+  (`hermes config unset tools.tool_search` for the legacy `tool_search: false`). A
+  setting the in-process read already finds as asked runs no `hermes` at all. Floor:
+  hermes-agent before 0.19 (the Linux floor CI runs 0.13.0) has only `config
+  show|edit|set|path|env-path|check|migrate`, and its `set` would store the boolean
+  `false`; such a Hermes is refused by the probe before anything is written (0.13 has
+  no tool search at all; Hermes 0.21 is the release that defers every plugin tool). The
+  command is Hermes's `hermes` console script next to the
   running interpreter (the same venv), else `<home>/hermes-agent/venv/bin/hermes`, else
   Hermes Desktop's launcher `<home>/hermes-agent/.hermes/bin/hermes` (Windows:
   `hermes.exe` next to the interpreter, else `<home>/hermes-agent/venv/Scripts`). It
@@ -5448,14 +5459,16 @@ moved to a child process.
   `hermes_cli_missing`, with the three lines to add by hand (`tools:` / `tool_search:` /
   `enabled: "off"`).
 - **Closed codes.** `config_unreadable`, `config_vault_managed`, `config_write_failed`,
-  `config_has_setting`, `hermes_cli_missing`, `config_unsupported_shape`.
+  `config_has_setting`, `hermes_cli_missing`, `config_unsupported_shape`,
+  `hermes_cli_unsupported`.
 - **CLI.** `status` prints `direct tool calls: on|off (config|default)`. `on` and `off`
   print the Hermes command that made the change, the two trade-offs (prompt size: every
   request carries the deferred tool schemas, about 8,000 tokens with Mordred's tools;
   remote-connector tools, reached only through the bridge, are unavailable while it is
   on) and "Restart Hermes (or Hermes Desktop) for this to take effect."; an unchanged
   setting says so and runs nothing. A refusal prints `refused (<code>)` and a
-  remediation line (for `hermes_cli_missing` also the three lines) and exits 1.
+  remediation line (for `hermes_cli_missing` and `hermes_cli_unsupported` also the three
+  lines) and exits 1.
 - **API.** `GET /tools/direct` answers `{"ok": true, "direct": bool, "source": "config"
   | "default"}`. `POST /tools/direct` reads its body by hand (`read_object`); the body
   MUST be an object whose `direct` is a JSON boolean, otherwise `invalid_body`. Success
@@ -5489,7 +5502,7 @@ moved to a child process.
   with a "Go" button (`aria-label` "Go to Tool calls") that scrolls to and focuses the
   card heading `mordred-tools`, only when the chat model is a Venice private model
   (`hermes_model.ok` and `kind: "venice"`) and `tools.direct` is `false`. `MESSAGES`
-  gains the six closed codes. The card is on the grouped page (macOS and Linux); the
+  gains the seven closed codes. The card is on the grouped page (macOS and Linux); the
   Windows page is a separate component and stays byte-identical (the snapshot test), so
   Windows uses the CLI.
 - **Restart.** Hermes reads `tools.tool_search` when it starts: every change takes
