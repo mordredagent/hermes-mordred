@@ -837,7 +837,8 @@ hermes-mordred direct-tools off      # removes it again (Hermes's default)
 > writes Hermes's own switch, `tools.tool_search.enabled: "off"`, into
 > `config.yaml`; every other key and comment stays as it was, and nothing is
 > written when the setting is already as asked. It is recommended with a
-> Venice private model.
+> Venice private model. `on` followed by `off` gives back the file you had when
+> `enabled` was not set before.
 >
 > The trade-offs, because the setting is Hermes-wide and affects every plugin
 > tool, not only Mordred's:
@@ -849,17 +850,26 @@ hermes-mordred direct-tools off      # removes it again (Hermes's default)
 >   unavailable while it is on.
 >
 > **Restart Hermes (or Hermes Desktop) for a change to take effect**: Hermes
-> reads the setting when it starts. `off` removes only what makes the tools
-> direct (an explicit `enabled: auto` or `on` is left alone). `status` reports
-> `on` for every value Hermes reads as off (`"off"` or `false`, also `no` and
-> `0`). Mordred never changes this setting unless you run `on` / `off` or tick
-> the **Tool calls** card on the Desktop page. If `config.yaml` is
+> reads the setting when it starts. `status` reads the file the way Hermes does
+> (YAML 1.1), so plain `off`, `no`, `n`, `false` and `0`, and quoted `"off"`,
+> `"no"` and `"false"`, all count as on; the old form `tool_search: false` too.
+> `on` replaces only a missing value or an explicit deferral (`auto`, `on`,
+> `true`, `yes`, `1`); `off` then removes the key instead of writing the old
+> value back (Hermes's default, `auto`, is the same). Any other value is refused
+> with `config_has_setting`, and a setting reached through a YAML alias, an
+> anchor used elsewhere or a merge key (`<<`) with `config_unsupported_shape`:
+> edit `config.yaml` by hand in both cases. `off` removes only what makes the
+> tools direct. Mordred never changes this setting unless you run `on` / `off`
+> or tick the **Tool calls** card on the Desktop page. If `config.yaml` is
 > vault-managed (`encryption enable config`) and its plaintext is sealed away,
 > the command refuses with `config_vault_managed`: run it from Hermes's own
 > environment (which opens `config.yaml` at start), use the Desktop page, or
 > turn the seal off with `encryption disable config`. A `config.yaml` that is
-> not valid YAML is refused with `config_unreadable`, and a failed write with
-> `config_write_failed`; nothing is changed and no other value is printed.
+> not valid YAML, or whose YAML warns (a reused anchor, for example), is refused
+> with `config_unreadable`. A failed write, a file that changed while it was
+> being edited, or a written file Hermes would not read as asked (the old bytes
+> are put back) is `config_write_failed`. Nothing is changed and no other value
+> is printed.
 
 ### `telegram` — read-only import of your own Telegram account (preview)
 

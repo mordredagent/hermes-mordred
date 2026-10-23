@@ -5362,43 +5362,76 @@ model"; investigation record
 section 2). Hermes's global `tools.tool_search.enabled: "off"` makes every tool direct.
 Owner decision (2026-10-23): the default stays deferred; direct calls are an explicit,
 explained opt-in from the CLI and the Desktop page, recommended with a Venice private
-model. Library `wizard/direct_tools.py`, CLI `wizard/direct_tools_cli.py`, routes in
-`desktop/_maintenance_routes.py`.
+model. Library `wizard/direct_tools.py` (YAML handling in `wizard/_direct_tools_yaml.py`),
+CLI `wizard/direct_tools_cli.py`, routes in `desktop/_maintenance_routes.py`. Review
+record:
+[`2026-10-23-direct-tools-codex-review.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review.md).
 
 - **Never silent.** Mordred MUST NOT write `tools.tool_search` in `<home>/config.yaml`
   except on an explicit request: `hermes-mordred direct-tools on | off`, or a change of
   the Tool calls checkbox on the Desktop page (`POST /tools/direct`). No setup step,
   upgrade, repair, status read or plugin start writes it.
-- **Key and values.** The tools are direct when Hermes reads the setting as off
-  (`ToolSearchConfig.from_raw`): `tools.tool_search.enabled` is the boolean `false` or a
-  string whose trimmed lower-case form is `off`, `false`, `no` or `0`, or the legacy
-  `tools.tool_search: false`. Anything else, or no key, is deferred. `on` writes
-  `tools.tool_search.enabled: "off"` (a double-quoted string), creating `tools` and
-  `tool_search` when absent and replacing a `tool_search` that is not a mapping; a
-  present `tools` that is not a mapping is refused (`config_unreadable`), never
-  replaced. `off` removes only what makes the tools direct (`enabled`, or the legacy
-  boolean) and the `tool_search` / `tools` mappings that this leaves empty; an explicit
-  deferral (`auto`, `on`) is left alone. Nothing is written when the setting is already
-  as asked.
-- **Writer.** The wizard's round-trip writer: ruamel round-trip (comments, key order
-  and every other key preserved), the policy write lock under `<home>/mordred`, and
-  `_atomic_write_text` (temporary file, `os.replace`) with the file's existing mode
-  (0600 for a new file); on Windows the checked canonical transaction
-  `PolicyWriter.transform_config`. Full-line comments that followed a removed or
-  inserted block stay in front of the next key (ruamel keeps them on the block's last
-  line, so they are handed on), and the file of `on` followed by `off` is the original
-  one. An empty or comment-only config.yaml keeps its text on POSIX; on Windows it is
-  `config_unreadable`, because the checked writer never turns a present non-mapping
-  config into fresh state. A vault-managed config.yaml (the `config-vault.marker`) is
+- **Hermes's reading.** The state MUST be read the way Hermes 0.21.5 reads it:
+  `hermes_yaml.safe_load` (ruamel `typ="safe"`, `version = (1, 1)`, so plain `off`,
+  `no`, `n` and `false` are booleans, `on`, `yes`, `y` and `true` too), the file
+  deep-merged over `DEFAULT_CONFIG` (`tools.tool_search.enabled: "auto"`; a null over a
+  default mapping is ignored) and `ToolSearchConfig.from_raw`. The tools are direct when
+  `enabled` gives `"off"` under `_tri_state` (`str(v).strip().lower()` is `off`, `false`,
+  `no` or `0`: plain `off`, `Off`, `no`, `n`, `false`, `0`, quoted `"off"`, `"no"`,
+  `"false"`), or when the legacy non-mapping `tools.tool_search` is the boolean false
+  (plain `false`, `off`, `n`; the string `"off"` and the integer `0` are deferred). Anything
+  else, or no key, is deferred. A test compares 26 cases with a re-implementation of
+  Hermes's rule.
+- **Edits.** `on` writes `tools.tool_search.enabled: "off"` (a double-quoted string),
+  creating `tools` and `tool_search` when absent or null. It replaces only an absent or
+  null value or an explicit deferral (`auto`, `on`, `true`, `yes`, `1` in Hermes's view,
+  or the legacy `tool_search: true`); any other value is refused with
+  `config_has_setting` ("edit config.yaml by hand"). `off` removes only what makes the
+  tools direct (`enabled`, or the legacy boolean) and the `tool_search` / `tools`
+  mappings that this leaves empty. Nothing is written when the setting is already as
+  asked. `on` followed by `off` gives back the original bytes when `enabled` was absent
+  (comments included, also for an empty or comment-only file on POSIX); a replaced
+  deferral is not restored: `off` removes the key, and Hermes's default (`auto`) is the
+  same deferral.
+- **Shapes.** `tools`, `tool_search` and `enabled` MUST NOT be a YAML alias, an anchor
+  used elsewhere, or come from (or be shadowed over) a merge key (`<<`), and a present
+  `tools` must be a mapping: editing such a node would change another setting, and
+  removing a local value could reveal an inherited one. These are refused with
+  `config_unsupported_shape` ("edit config.yaml by hand"). Every edit is checked on its
+  own output before anything is written: Hermes must read the new text as asked, and
+  nothing but this setting may differ from the old text in Hermes's view (otherwise
+  `config_unsupported_shape`).
+- **No text escapes.** ruamel's errors and warnings (`ReusedAnchorWarning` for a reused
+  anchor, `MantissaNoDotYAML1_1Warning`) quote source lines. Every parse, including the
+  Windows checked writer's own, runs under `warnings.catch_warnings(record=True)` with
+  `simplefilter("always")`, serialized behind one lock (the warning filters are
+  process-wide); any error or warning is `config_unreadable`, and nothing of it is kept,
+  logged or printed.
+- **Writer.** The wizard's round-trip writer: ruamel round-trip (comments, key order,
+  anchors and every other key preserved), the policy write lock under `<home>/mordred`,
+  and `_atomic_write_text` (temporary file, `os.replace`) with the file's existing mode
+  (0600 for a new file); on Windows the checked canonical transaction of `PolicyWriter`.
+  Full-line comments that followed a removed or inserted block stay in front of the next
+  key (ruamel keeps them on the block's last line, so they are handed on; when the first
+  key of a mapping goes, they join the mapping's head after any head comment). On
+  Windows an empty or comment-only config.yaml is `config_unreadable`, because the
+  checked writer never turns a present non-mapping config into fresh state. After the
+  write the file is read back: if Hermes would not read it as asked, the previous bytes
+  are put back (a file this call created is removed; on Windows it stays) and the call
+  answers `config_write_failed`.
+- **Vault-managed config.** A vault-managed config.yaml (the `config-vault.marker`) is
   edited as its plaintext working copy when that is on disk, like every other wizard
   writer (the reseal re-enrolls a changed copy). No plaintext while the marker exists
   means it is sealed away: the read is `unreadable` and the write is refused with
-  `config_vault_managed`. The marker is checked after the read, under the write lock,
-  so a reseal that removes the plaintext meanwhile is refused too and no fresh partial
-  config.yaml is ever created for the next start to adopt.
-- **Closed codes.** `config_unreadable`, `config_vault_managed`, `config_write_failed`.
-  No YAML error text (it quotes the offending line) and no other config value is
-  logged, printed, returned or chained into an exception.
+  `config_vault_managed`. A reseal takes no Mordred lock, so the file's identity (device,
+  inode, size, mtime, mode) is taken before and after the read and again just before the
+  write: a plaintext that disappears is refused with `config_vault_managed` (with the
+  marker; otherwise `config_write_failed`), one rewritten meanwhile with
+  `config_write_failed`, and no fresh or partial config.yaml is ever created for the next
+  start to adopt.
+- **Closed codes.** `config_unreadable`, `config_vault_managed`, `config_write_failed`,
+  `config_unsupported_shape`, `config_has_setting`. No YAML error or warning text and no
+  other config value is logged, printed, returned or chained into an exception.
 - **CLI.** `status` prints `direct tool calls: on|off (config|default)`. `on` and `off`
   print the change, the two trade-offs (prompt size: every request carries the
   deferred tool schemas, about 8,000 tokens with Mordred's tools; remote-connector
@@ -5425,15 +5458,16 @@ model. Library `wizard/direct_tools.py`, CLI `wizard/direct_tools_cli.py`, route
   `config.yaml`, every plugin tool), why (one model round trip fewer; no malformed
   bridge calls from smaller models), the costs (about 8,000 more prompt tokens;
   remote-connector tool discovery unavailable) and that it takes effect after a
-  restart. A change sends exactly `{"direct": bool}`, reads the status again and, on
-  success, shows a status line with `RestartHermesControl`; a refusal is a
-  `StepFailure` alert. `direct: null` shows the `config_unreadable` sentence and no
+  restart. The checkbox shows `status.tools.direct` only, never a request's answer. A
+  change sends exactly `{"direct": bool}` and reads the status again; while both are in
+  flight the checkbox is disabled under "Saving…". On success the card shows a status
+  line with `RestartHermesControl`; a refusal is a `StepFailure` alert. `direct: null` shows the `config_unreadable` sentence and no
   checkbox; a status without `tools` (an older Mordred) shows "Update Mordred to use
   this". Step 2.1 adds the line "Recommended: turn on direct tool calls (Maintenance)"
   with a "Go" button (`aria-label` "Go to Tool calls") that scrolls to and focuses the
   card heading `mordred-tools`, only when the chat model is a Venice private model
   (`hermes_model.ok` and `kind: "venice"`) and `tools.direct` is `false`. `MESSAGES`
-  gains `config_unreadable`, `config_vault_managed` and `config_write_failed`. The card
+  gains the five closed codes. The card
   is on the grouped page (macOS and Linux); the Windows page is a separate component
   and stays byte-identical (the snapshot test), so Windows uses the CLI.
 - **Restart.** Hermes reads `tools.tool_search` when it starts: every change takes

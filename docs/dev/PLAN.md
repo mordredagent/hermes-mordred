@@ -2582,24 +2582,30 @@ One component per PR, all targeting `dev`. Each PR runs
   [Direct tool calls](SPEC.md#direct-tool-calls-2026-10-23); owner decision of
   2026-10-23 (default deferred, explicit opt-in).
 - Files: `wizard/direct_tools.py` (`read_mode`, `set_direct`, `DirectToolsError` with
-  `config_unreadable`, `config_vault_managed`, `config_write_failed`; the round-trip
-  writer of `policy_writer`, `PolicyWriter.transform_config` on Windows),
+  `config_unreadable`, `config_vault_managed`, `config_write_failed`,
+  `config_unsupported_shape`, `config_has_setting`; the round-trip writer of
+  `policy_writer`, the checked `PolicyWriter` transaction on Windows; read-back
+  verification), `wizard/_direct_tools_yaml.py` (Hermes's YAML 1.1 reading, captured
+  warnings, alias/anchor/merge refusal, comment-keeping edits),
   `wizard/direct_tools_cli.py` and `_cli_parsers.py` (`direct-tools on | off |
   status`), `desktop/_seams.py` (`tools_mode`, `set_direct_tools`),
   `desktop/_maintenance_routes.py` (`GET` / `POST /tools/direct`),
   `desktop/_status_v4.py` (`tools` on every platform), `plugin.js` (the Tool calls card
   under Maintenance, step 2.1's recommendation, three `MESSAGES`); USAGE, SPEC, PLAN,
   TODO and `tools/ci_scope_paths.json`.
-- Tests: `tests/test_direct_tools.py` (round trip with comments and other keys kept,
-  both spellings of off, removal, unreadable and sealed-away configs, atomic replace,
-  the Windows transaction on the fake coordinator), `tests/test_direct_tools_cli.py`
+- Tests: `tests/test_direct_tools.py` (byte-for-byte round trips with comments, the
+  26-case Hermes parity table, YAML warnings captured, aliases/anchors/merges refused,
+  read-back verification, removal, unreadable and sealed-away configs including a
+  reseal between the read and the write, atomic replace, the Windows transaction on the
+  fake coordinator), `tests/test_direct_tools_cli.py`
   (output, exit codes, a canary for other config values),
   `tests/extension/test_desktop_tools.py` (routes, strict boolean, closed codes, the
   status field), `tests/test_desktop_page.py` (card, checkbox state, payload, restart
   control, recommendation, `MESSAGES`), the version 4 key sets in
   `tests/extension/test_desktop_status_v4.py`, `/tools/direct` in
   `tests/extension/test_desktop_bodies.py`, and the unchanged Windows snapshot.
-- Depends on: D4.
+- Depends on: D4. Codex review (REVISE) and its fixes:
+  [`2026-10-23-direct-tools-codex-review.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review.md).
 
 ### K1: keyvault (reference)
 
