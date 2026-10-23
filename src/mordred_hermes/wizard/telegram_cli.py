@@ -9,8 +9,13 @@ Subcommands:
 - ``sync``   — import every dialog's new messages into the encrypted archive.
 - ``status`` — show login state and archive counts.
 - ``logout`` — revoke the session at Telegram and drop it from the vault;
-  ``--forget`` also deletes the API credentials, the archive key, and the
-  archive files.
+  ``--forget`` first deletes the account's Telegram rows in ``mordred.db`` and
+  then the API credentials, the archive key and the archive files. When the
+  rows cannot be deleted it stops with nothing else removed, unless
+  ``--force`` forgets the rest anyway and leaves the rows.
+- ``migrate-tee`` / ``migrate-store`` — move vault-stored credentials into
+  the hardware seal / the ``.enc`` archive into ``mordred.db``
+  (:mod:`.telegram_migrate_cli`).
 - ``venice`` — store the Venice.ai API key (read with ``getpass``) and the
   model used for questions.
 
@@ -41,7 +46,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from . import _term, _windows_telegram
+from . import _term, _windows_telegram, telegram_migrate_cli
+from .telegram_migrate_cli import telegram_migrate_store, telegram_migrate_tee
 
 InputFn = Callable[[str], str]
 
@@ -123,7 +129,6 @@ def _report(code: str) -> int:
         "memory_encryption_required": "Telegram needs agent-memory encryption on, so nothing Hermes remembers "
         f"about your chats is stored in plaintext. Run {memory_setup}, restart Hermes, then try again "
         "(`hermes-mordred telegram setup` does this for you).",
-        "no_legacy_credentials": "there are no vault-stored Telegram credentials to migrate.",
         "telegram_already_logged_in": "a Telegram session is already stored. Run `hermes-mordred telegram logout` "
         "first so the old session is revoked instead of being left behind.",
     }
@@ -465,10 +470,17 @@ def _revoke_stored(current: Any, client_factory: Callable[..., Any] | None) -> N
 def telegram_logout(
     *,
     forget: bool = False,
+    force: bool = False,
     store: Any = None,
     client_factory: Callable[..., Any] | None = None,
     input_fn: InputFn | None = None,
 ) -> int:
+    """Revoke and drop the session; ``forget`` deletes the import rows first, then everything else.
+
+    A failed row deletion stops ``forget`` before the session, the credentials,
+    the keys or the archive are touched (exit 1); ``force`` goes on without the
+    rows and still exits 1. ``force`` means nothing without ``forget``.
+    """
     from ..extension.telegram.secrets import TelegramSecretsError
     from ..extension.telegram.store import wipe_archive
 
@@ -484,6 +496,10 @@ def telegram_logout(
     if current is None:
         print("Telegram is not configured; nothing to do.")
         return 0
+    # First, while the store key and the archive index exist: the index names the account whose rows to delete.
+    rows_kept = telegram_migrate_cli.forget_import_rows(current) if forget else None
+    if rows_kept is not None and not force:
+        return telegram_migrate_cli.rows_not_deleted(rows_kept)
     _revoke_stored(current, client_factory)
     try:
         # One unseal for the whole command: the write reuses the value read above.
@@ -493,16 +509,15 @@ def telegram_logout(
             _write_back(secrets_store, snapshot, lambda old: replace(old, session=None) if old is not None else None)
     except TelegramSecretsError as exc:
         return _report(exc.code)
-    if forget:
-        wipe_archive()
-        delete_key = getattr(secrets_store, "delete_key", None)
-        if delete_key is not None:
-            with contextlib.suppress(Exception):
-                delete_key()
-        print("Deleted the API credentials, the archive key, the hardware key, and the local archive.")
-    else:
+    if not forget:
         print("Logged out. The encrypted archive is kept (use --forget to delete it).")
-    return 0
+        return 0
+    wipe_archive()
+    delete_key = getattr(secrets_store, "delete_key", None)
+    if delete_key is not None:
+        with contextlib.suppress(Exception):
+            delete_key()
+    return telegram_migrate_cli.forgotten(rows_kept)
 
 
 def _windows_logout(*, forget: bool, store: Any, client_factory: Callable[..., Any] | None, input_fn: InputFn) -> int:
@@ -708,33 +723,6 @@ def telegram_local_llm(
     return 0
 
 
-def telegram_migrate_tee(*, require_presence: bool = True, store: Any = None, legacy: Any = None) -> int:
-    """Move credentials from the software-keyed file vault into the Enclave seal."""
-    from ._windows_gates import excluded_refusal
-
-    # Windows: the file vault is excluded and there is no Enclave seal; refuse first.
-    refused = excluded_refusal("file_vault", "telegram migrate-tee")
-    if refused is not None:
-        return refused
-    from ..extension.telegram.secrets import VAULT_FILE, TelegramSecretsError, VaultSecretStore
-
-    target = store if store is not None else _secret_store()
-    source = legacy if legacy is not None else VaultSecretStore()
-    try:
-        value = source.load(fresh=True)
-        if value is None:
-            return _report("no_legacy_credentials")
-        target.ensure_key(require_presence=require_presence)
-        target.store(value)
-        if target.load() != value:  # read back through the Enclave before deleting the old copy
-            return _report("secrets_corrupt")
-        source.update(lambda _old: None)
-    except TelegramSecretsError as exc:
-        return _report(exc.code)
-    print(f"Moved the Telegram credentials into the Secure Enclave seal and removed {VAULT_FILE} from the vault.")
-    return 0
-
-
 # -- argparse ------------------------------------------------------------------------
 
 
@@ -768,7 +756,7 @@ def cli_telegram(args: argparse.Namespace) -> int:
     if command == "status":
         return telegram_status(show_account=bool(getattr(args, "show_account", False)))
     if command == "logout":
-        return telegram_logout(forget=bool(args.forget))
+        return telegram_logout(forget=bool(args.forget), force=bool(getattr(args, "force", False)))
     if command == "venice":
         return telegram_venice(model=args.model)
     if command == "local-llm":
@@ -779,10 +767,11 @@ def cli_telegram(args: argparse.Namespace) -> int:
             api_key_env=getattr(args, "api_key_env", None),
             clear_api_key=bool(getattr(args, "clear_api_key", False)),
         )
-    if command == "migrate-tee":
-        return telegram_migrate_tee(require_presence=not getattr(args, "no_touch_id", False))
+    if command in telegram_migrate_cli.COMMANDS:
+        return telegram_migrate_cli.dispatch(str(command), args)
     print(
-        "usage: hermes-mordred telegram {setup,doctor,login,sync,status,logout,venice,local-llm,migrate-tee}",
+        "usage: hermes-mordred telegram "
+        "{setup,doctor,login,sync,status,logout,venice,local-llm,migrate-tee,migrate-store}",
         file=sys.stderr,
     )
     return 2
@@ -793,6 +782,7 @@ __all__ = [
     "telegram_local_llm",
     "telegram_login",
     "telegram_logout",
+    "telegram_migrate_store",
     "telegram_migrate_tee",
     "telegram_status",
     "telegram_sync",

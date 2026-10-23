@@ -22,6 +22,8 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 - ``plugins migrate``                            — switch config.yaml to the single ``mordred`` plugin
 - ``activity {status,pair-operator,peers,correct,backup,restore,retention}`` — browser activity
   history administration
+- ``mail {import,status,setup,fetch,forget}``    — mail import (mbox / .eml) and IMAP sync into ``mordred.db``
+- ``direct-tools {on,off,status}``               — Hermes's direct tool calls (``tools.tool_search.enabled``)
 - ``uninstall [--dry-run|--yes|--purge-data|--remove-helper]`` — remove Mordred, restore Hermes's files
 """
 
@@ -63,8 +65,10 @@ def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) 
     _add_extension(sub)
     _add_telegram(sub)
     _add_egress(sub)
+    _add_direct_tools(sub)
     _add_databases(sub)
     _add_activity(sub)
+    _add_mail(sub)
     _add_desktop(sub)
     _add_uninstall(sub)
 
@@ -165,6 +169,14 @@ def _add_activity(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     _add_store_parsers(asub, _handle_activity)
 
 
+def _add_mail(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser("mail", help="Mail import (Takeout mbox / .eml) and IMAP sync into the encrypted store")
+    msub = p.add_subparsers(dest="mail_command", required=True, metavar="COMMAND")
+    from .mail_cli import add_parsers as _add_mail_parsers
+
+    _add_mail_parsers(msub, _handle_mail)
+
+
 def _add_egress(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("egress", help="Tool-egress level: stop the agent's tools from sending data out")
     esub = p.add_subparsers(dest="egress_command", required=True, metavar="COMMAND")
@@ -184,6 +196,25 @@ def _add_egress(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     p_taint = esub.add_parser("taint", help="Lock a session down after it reads private data (on|off)")
     p_taint.add_argument("state", choices=["on", "off"])
     p_taint.set_defaults(func=_handle_egress)
+
+
+def _add_direct_tools(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "direct-tools",
+        help="Let Hermes call Mordred's tools directly instead of through tool_search (Hermes-wide)",
+        description=(
+            'on writes tools.tool_search.enabled: "off" into Hermes\'s config.yaml, so every tool is offered '
+            "directly (larger prompts; no remote-connector bridge); off removes it again. Restart Hermes "
+            "(or Hermes Desktop) for a change to take effect."
+        ),
+    )
+    dsub = p.add_subparsers(dest="direct_tools_command", required=True, metavar="COMMAND")
+    for name, text in (
+        ("on", 'Turn direct tool calls on (writes tools.tool_search.enabled: "off")'),
+        ("off", "Turn direct tool calls off (Hermes's default: deferred tools through tool_search)"),
+        ("status", "Show whether direct tool calls are on"),
+    ):
+        dsub.add_parser(name, help=text).set_defaults(func=_handle_direct_tools)
 
 
 _MACHINE_BOUND_HELP = (
@@ -265,6 +296,11 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
         action="store_true",
         help="Also delete the API credentials, the archive key and the local archive",
     )
+    p_logout.add_argument(
+        "--force",
+        action="store_true",
+        help="With --forget: go on even when this account's mordred.db rows could not be deleted (left behind)",
+    )
     p_logout.set_defaults(func=_handle_telegram)
     p_venice = tsub.add_parser("venice", help="Store the Venice.ai API key and model used for questions")
     p_venice.add_argument("--model", default=None, help="Venice model id (must be labelled 'private')")
@@ -279,13 +315,9 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     )
     local_auth.add_argument("--clear-api-key", action="store_true", help="Remove the stored local API key")
     p_local.set_defaults(func=_handle_telegram)
-    p_migrate = tsub.add_parser("migrate-tee", help="Move vault-stored credentials into the Secure Enclave seal")
-    p_migrate.add_argument(
-        "--no-touch-id",
-        action="store_true",
-        help="Create the Enclave key without a per-use Touch ID / passcode requirement",
-    )
-    p_migrate.set_defaults(func=_handle_telegram)
+    from .telegram_migrate_cli import add_parsers as _add_migrate_parsers  # migrate-tee, migrate-store
+
+    _add_migrate_parsers(tsub, _handle_telegram)
 
 
 def _add_extension(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -1122,10 +1154,22 @@ def _handle_activity(args: argparse.Namespace) -> int:
     return activity_cli.cli_activity(args)
 
 
+def _handle_mail(args: argparse.Namespace) -> int:
+    from . import mail_cli
+
+    return mail_cli.cli_mail(args)
+
+
 def _handle_egress(args: argparse.Namespace) -> int:
     from . import egress_cli
 
     return egress_cli.cli_egress(args)
+
+
+def _handle_direct_tools(args: argparse.Namespace) -> int:
+    from . import direct_tools_cli
+
+    return direct_tools_cli.cli_direct_tools(args)
 
 
 def _handle_telegram(args: argparse.Namespace) -> int:

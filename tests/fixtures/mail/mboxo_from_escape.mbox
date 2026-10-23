@@ -1,0 +1,20 @@
+From MAILER-DAEMON Mon Oct  5 10:00:00 2026
+Message-ID: <esc1@example.net>
+Date: Mon, 05 Oct 2026 10:00:00 +0900
+From: Taro Yamada <taro@example.net>
+To: owner@example.com
+Subject: escape test
+
+Line one CANARY-ESC-1
+>From the start of this line, escaped by the writer.
+>>From a line that really began with a greater-than sign.
+From here on this is body text, not a separator.
+
+From MAILER-DAEMON Mon Oct  5 11:00:00 2026
+Message-ID: <esc2@example.net>
+Date: Mon, 05 Oct 2026 11:00:00 +0900
+From: Hanako Suzuki <hanako@example.org>
+To: owner@example.com
+Subject: crlf message
+
+Body with CRLF line endings. CANARY-ESC-2

@@ -27,6 +27,7 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``, now the ``mordred`` plugi
 - ``plugins migrate``                            — switch config.yaml to the single ``mordred`` plugin
 - ``activity {status,pair-operator,peers,correct,backup,restore,retention}`` — browser activity
   history administration
+- ``mail {import,status,setup,fetch,forget}``    — mail import (mbox / .eml) and IMAP sync into ``mordred.db``
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ from ._cli_parsers import (
     _add_extension,
     _add_install,
     _add_keyvault,
+    _add_mail,
     _add_network,
     _add_plugins,
     _add_policy,
@@ -84,6 +86,7 @@ from ._cli_parsers import (
     _handle_keyvault_recover,
     _handle_keyvault_reset,
     _handle_keyvault_verify_digest,
+    _handle_mail,
     _handle_network_init,
     _handle_network_status,
     _handle_network_use,
@@ -124,6 +127,7 @@ __all__ = [
     "_add_extension",
     "_add_install",
     "_add_keyvault",
+    "_add_mail",
     "_add_network",
     "_add_plugins",
     "_add_policy",
@@ -157,6 +161,7 @@ __all__ = [
     "_handle_keyvault_recover",
     "_handle_keyvault_reset",
     "_handle_keyvault_verify_digest",
+    "_handle_mail",
     "_handle_network_init",
     "_handle_network_status",
     "_handle_network_use",

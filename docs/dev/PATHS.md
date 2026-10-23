@@ -39,11 +39,18 @@ the optional workspace target has user-home paths of its own.
 | `<db>.mordred-enc` | database conversion | the verified converted copy (encrypted, or plain when decrypting), renamed over `<db>` |
 | `<home>/mordred/memory-vault.optout` | encryption CLI | pauses the memory hook (paused by operator) |
 | `<home>/mordred/telegram/` | extension (Telegram importer) | encrypted read-only Telegram archive |
+| `<home>/mordred/mail/credentials.sealed` | `mail setup` | IMAP address, app password, host, port, own addresses and chosen mailboxes, sealed by the Secure Enclave role `mordred-hermes.mail.credentials.v1`; read by `mail fetch` and `mordred_mail_sync` |
+| `<home>/mordred/mail/credentials.meta.json` | `mail setup` | non-secret flags (account label, Gmail path, mailbox roles, effective Touch ID policy, setup id); read by `mail status` and the tool's `check_fn` |
+| `<home>/mordred/mail/.credentials.sealed.<16 hex>.staged`, `<home>/mordred/mail/.credentials.meta.json.<16 hex>.staged` | `mail setup`, the Desktop page (`/mail/setup/*`) | staging copies written before the two renames of a seal and removed on any failure; a killed seal can leave one, which `mail forget` removes |
+| `<home>/mordred/mail/enclave-key.json` | `mail setup`, the Desktop page (`/mail/setup/*`) | `{public_sha256, touch_id}`: the Touch ID policy of the mail Enclave key this store created, bound to the SHA-256 of its public key; nothing secret; deleted by `mail forget` |
+| `<home>/mordred/mail/generation` | `mail setup`, `mail forget`, the Desktop page (`/mail/setup/*`, `/mail/forget`) | setup generation tombstone: random 16-byte hex token (not secret), mode 0600, rewritten after every successful seal and by every forget, survives forget (`mail_setup_stale`) |
+| `<home>/mordred/mail/.lock` | `mail fetch`, `mordred_mail_sync`, `mail import`, `mail forget`, `mail setup`, the Desktop page (`/mail/*`) | non-blocking per-home mail writer lock (`sync_in_progress`) |
+| `<home>/mordred/reader_sessions.json` | privacy_check reader mode | durable record (SHA-256 digests) of sessions that used a reader tool |
 | `<home>/mordred/uninstall/` | `uninstall` | `.env` lines (`HERMES_MEMORY_KEY`, `MORDRED_*`) moved out of `.env`, mode `0600` |
 | `<home>/extension/` | extension and keyvault signer | pairing, E2E, WebAuthn, history, wallet config |
 | `<home>/extension/activity_pending.json` | `activity pair-operator` / extension server | pending activity pair codes (SHA-256 of the code only), `0600` |
 | `<home>/extension/activity_peers.json` | extension server (`activity_pair_init`) / `activity peers revoke` | activity peer credentials (token SHA-256 only), `0600` |
-| `<home>/plugin-data/mordred/mordred.db` | `activity` component (SQLCipher only) | browser activity events and episodes (schema v3: `activity_meta`, `activity_events`, `activity_episodes`) |
+| `<home>/plugin-data/mordred/mordred.db` | `activity` component and `imports` library (SQLCipher only) | browser activity events and episodes (schema v3: `activity_meta`, `activity_events`, `activity_episodes`); `import_*` imported-message tables |
 | `<home>/.env` | Hermes + Mordred writers | plaintext runtime secrets when present |
 | `<home>/config.yaml` | Hermes + Mordred writers | Hermes config and Mordred plugin sections |
 | `<home>/config.yaml.mordred-uninstall-<ts>.bak` | `uninstall` | copy of `config.yaml` taken before Mordred's entries are removed |
@@ -458,6 +465,109 @@ key. The directory is mode `0700`; files are mode `0600`.
 Every directory here carries a `.gitignore` of `*` (rewritten if changed), so
 not even the ciphertext can be committed if `HERMES_HOME` sits inside a git
 working tree.
+
+Imported-message provenance bumps the index: `index.enc` version 2 carries
+`retired_to: mordred.db`, written by `telegram migrate-store --commit` or by the
+first macOS sync of an account with no dialogs yet, and an older Mordred
+refuses a version-2 index (`store_undecryptable`) instead of diverging. Version
+1 stays the write version of every archive that is not retired (Linux, Windows,
+macOS archives not yet migrated). Once the index is retired there is no `.enc`
+fallback: a refusal of the `mordred.db` gate is `import_store_unavailable` for
+sync, ask and history search alike. The `dialogs/*.enc` files remain until
+`telegram migrate-store --finalize --yes` verifies every archived message in
+`mordred.db` and deletes them; `index.enc` stays as the retirement marker. See
+[SPEC.md](SPEC.md#imported-message-provenance-2026-10-22).
+
+### Imported message tables
+
+Written by the `mordred_hermes.imports` library (Telegram sync, `telegram
+migrate-store`, `mail import`) and read by `telegram_ask` and
+`mordred_history_search`:
+
+- `import_meta` (`schema_version`), `import_conversations`, `import_messages`
+  (including `recipients_json` for mail `to:` names and `run_id`, the run that
+  last wrote the row), `import_parts` (with a stable `id` that anchors the FTS5
+  index `import_parts_fts`, a trigram index), `import_runs` (staging journal;
+  only committed runs are readable), `import_accounts` (the owner's mail
+  addresses per account label; they are never written to `config.yaml`) and
+  `import_mail_refs` (schema v2: the Message-IDs each IMAP-synced mail
+  message references, so a parent fetched after its replies merges their
+  conversations; deleted with the account's rows).
+- Readers go through `ImportStore` (`search`, `parts_for`, `neighbors`,
+  `find_messages` for the mail quote linker); every read sees committed runs
+  only.
+- `activity status` and activity retention ignore every `import_*` table, and
+  the import code never touches `activity_*` tables.
+- `ActivityStore.backup` / `restore` copy the whole file, so a restore also
+  rewinds imported history; there is no per-table backup.
+- Telegram deletion: `telegram logout --forget` removes the Telegram `import_*`
+  rows (with `secure_delete=ON`).
+- IMAP sync cursors live in `import_meta` (content-free markers set through
+  `ImportStore.set_meta` / `commit_batch`): `mail_imap.<account>.m<12 hex>`
+  (forward cursor per mailbox; the hex is the start of SHA-256 over host, port,
+  address and mailbox name) and `mail_imap.<account>.m<12 hex>.back` (the
+  `--since` backfill), JSON `{base, epoch, low, mailbox_digest, role, uid,
+  uidvalidity}`, and `mail_imap.<account>.last` (`{"attempt": {at, error,
+  partial}, "success": {at} | null}`; the flat `{at, error, gmail, partial}` of
+  earlier versions is still read). `mail forget` deletes them; `mail forget --rows` also deletes the
+  account's mail rows and their `import_mail_refs` rows.
+
+## `<home>/mordred/mail/`
+
+Owned by the IMAP mail sync (`mordred_hermes.imports.mail.secrets` and
+`imap_sync`; macOS only). The directory is mode `0700` with a `.gitignore` of
+`*`; files are mode `0600`, replaced atomically.
+
+- `credentials.sealed` — `MMC1 || u16 len || wrap_blob || nonce(12) ||
+  AES-256-GCM(json)` with AAD `mordred-mail-credentials-v1`; `wrap_blob` wraps
+  the data key under the Secure Enclave key `mordred-hermes.mail.credentials.v1`
+  (its opaque Enclave blob lives in `<home>/mordred/keyvault/sekey/`), through
+  the same hardware-only backend as the Telegram credentials. Every fetch
+  unseals it afresh; nothing decrypted is cached or written.
+- `credentials.meta.json` — `{version, account, gmail, roles, touch_id,
+  setup_id}`; never the address, host or password. `touch_id` is the key's
+  effective policy.
+- `.credentials.sealed.<16 hex>.staged`, `.credentials.meta.json.<16 hex>.staged`
+  — the two files of a seal, written (each through `atomic_write`, which uses
+  its own short-lived `<name>.<16 hex>.tmp`) before they are renamed in that
+  order to their final names; any failure removes what the seal wrote. A seal
+  killed between the steps can leave a staged file (never read as credentials);
+  `mail forget` removes it. A sealed file whose flags are missing or unreadable is
+  the residue state `credentials_left`.
+- `enclave-key.json` — `{public_sha256, touch_id}`: the Touch ID policy of the
+  Enclave key this store created, bound to the SHA-256 of the key's public
+  point (the Enclave cannot report a key's policy). Not secret; replaced when
+  `mail setup` replaces a leftover key, deleted by `mail forget`.
+- `.lock` — the per-home mail writer lock (`flock`, non-blocking).
+- `generation` — mode `0600`, a random 16-byte hex token, not secret; rewritten under
+  the lock after every successful seal and by every forget (before it deletes
+  anything), and survives `mail forget`. A setup flow (the CLI's or the Desktop
+  page's) records it at `start` and refuses `finish` with `mail_setup_stale` when
+  it changed; a seal that fails leaves it unchanged.
+
+`mail forget --yes` deletes both credential files, staged leftovers,
+`enclave-key.json` and the Enclave key, also
+when `credentials.meta.json` is missing or corrupt (the label is then reported
+as unknown). No fetched mail is ever written here or to a temporary file:
+messages go only into `<home>/plugin-data/mordred/mordred.db`.
+
+## `<home>/mordred/reader_sessions.json`
+
+Durable record of Hermes sessions that have used a reader tool
+(`telegram_ask`, `telegram_chats`, `mordred_history_search`), owned by
+`privacy_check/_reader_sessions.py`. Mode `0600`, replaced atomically. It
+holds at most 4096 digests (read bounded to 512 KiB, a full record is about
+268 KiB) and never evicts one,
+because dropping a digest would lift the restriction from that session when it
+is resumed; when it is full, reader tools are refused for sessions not yet
+recorded (`egress.reader_unrecorded`) until the operator prunes the file (a
+pruning CLI is future work). Session ids are stored as SHA-256 digests, never
+raw. The directory `<home>/mordred` must be private (`0700`): a wider-mode
+directory makes the record refuse (`storage_unsafe`). An unwritable record
+blocks reader tools (`egress.reader_unrecorded`); a missing record reads as
+empty and is recreated at the next reader-tool call.
+On Windows the file uses the checked private-storage path. It carries no
+message content.
 
 ## `<home>/desktop-plugins/mordred/` and `<home>/plugins/mordred/`
 
