@@ -408,6 +408,7 @@ def _print_fetch(result: FetchResult, as_json: bool) -> None:
 def cmd_fetch(args: argparse.Namespace) -> int:
     from ..imports.mail.imap_sync import CLI_BUDGET_S, FetchOptions, run_fetch
 
+    hints: list[str] = []
     try:
         role = getattr(args, "mailbox", None)
         options = FetchOptions(
@@ -417,6 +418,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
             dry_run=bool(getattr(args, "dry_run", False)),
             budget_s=CLI_BUDGET_S,
             via="cli",
+            hint_sink=hints.append,
         )
     except _Usage as exc:
         _term.emit_error(str(exc))
@@ -428,7 +430,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     result = run_fetch(options, env)
     as_json = bool(getattr(args, "json", False))
     if result.error is not None:
-        hint = None if as_json else result.hint  # text output only: --json stays exactly the fixed serializer
+        hint = None if as_json or not hints else hints[-1]  # text output only: --json is the fixed serializer
         _term.emit_error(
             f"mail fetch failed ({result.error}: {hint})" if hint else f"mail fetch failed ({result.error})"
         )

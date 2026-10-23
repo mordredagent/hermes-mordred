@@ -66,9 +66,10 @@ Per mailbox (Gmail: All Mail; other servers: INBOX, then the sent folder chosen 
 
 Output is :class:`FetchResult` only: integers, booleans and closed-enum codes.
 No subject, name, address, label or body is returned, logged or audited. A
-refused login's :data:`~.imap.IMAP_HINTS` member rides on ``FetchResult.hint``
-for ``mail fetch``'s text output only; :meth:`FetchResult.as_dict` (the tool's
-and the Desktop job's serializer) never carries it.
+refused login's :data:`~.imap.IMAP_HINTS` member goes to the caller's
+``FetchOptions.hint_sink`` only (``mail fetch``'s text output): it is never a
+:class:`FetchResult` field, so :meth:`FetchResult.as_dict` (the tool's and the
+Desktop job's closed serializer) is unchanged.
 
 Every fetch that took the writer lock records, under it, the account's
 ``mail_imap.<account>.last`` value ``{"attempt": {at, error, partial},
@@ -221,13 +222,10 @@ class FetchResult:
     lock_retained: bool = False
     partial_reason: str | None = None
     error: str | None = None
-    #: The :data:`~.imap.IMAP_HINTS` member of a refused login, for ``mail fetch``'s text output only:
-    #: never serialized (:meth:`as_dict`), audited or recorded.
-    hint: str | None = field(default=None, compare=False, repr=False)
 
     def as_dict(self) -> dict[str, int | bool | str | None]:
-        """Every serialized field, type- and enum-checked (a bad value raises; nothing else can appear)."""
-        return checked_result({item.name: getattr(self, item.name) for item in fields(self) if item.name != "hint"})
+        """Every field, type- and enum-checked (a bad value raises; nothing else can appear)."""
+        return checked_result({item.name: getattr(self, item.name) for item in fields(self)})
 
 
 _INT_FIELDS: Final = frozenset(
@@ -637,6 +635,9 @@ class FetchOptions:
     cancel: CancelToken | None = field(default=None, compare=False, repr=False)
     #: Lets the caller abandon the fetch: the writer lock released, the open run failed, later writes refused.
     lease: FetchLease | None = field(default=None, compare=False, repr=False)
+    #: Receives the :data:`~.imap.IMAP_HINTS` member of a refused login (``mail fetch``'s text output only);
+    #: the hint never enters :class:`FetchResult`, its serializer, the audit entry or the recorded attempt.
+    hint_sink: Callable[[str], None] | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if isinstance(self.max_messages, bool) or not 1 <= self.max_messages <= MAX_MAX_MESSAGES:
@@ -1135,7 +1136,7 @@ def _locked_fetch(store: Any, options: FetchOptions, env: FetchEnv, result: Fetc
     except _Partial:  # abandoned (or stopped before the run): reported by run_fetch, never recorded
         raise
     except Exception as exc:
-        _apply_failure(result, exc)  # recorded below as the last attempt, then returned as run_fetch would
+        _apply_failure(result, exc, options)  # recorded below as the last attempt, then returned as run_fetch would
     _finish_result(result)
     if not options.dry_run and identity is not None:
         _record_last(store, options, env, result, identity)
@@ -1170,14 +1171,17 @@ def _record_last(
         _leased(options, lambda guard: store.set_meta(key, text, guard=guard))
 
 
-def _apply_failure(result: FetchResult, exc: BaseException) -> None:
+def _apply_failure(result: FetchResult, exc: BaseException, options: FetchOptions) -> None:
     """``exc`` as the result's code or partial reason (never stringified: the class name is not even kept)."""
     if isinstance(exc, FetchStop):
         result.error = exc.code
     elif isinstance(exc, _Partial | ImapStopped):
         result.partial, result.partial_reason = True, exc.reason
     elif isinstance(exc, ImapError):
-        result.error, result.hint = _code(exc, "imap_protocol"), exc.hint
+        result.error = _code(exc, "imap_protocol")
+        if exc.hint is not None and options.hint_sink is not None:
+            with contextlib.suppress(Exception):  # a caller's sink never changes the fetch's outcome
+                options.hint_sink(exc.hint)
     elif isinstance(exc, MailSecretsError):
         result.error = _code(exc, "secrets_corrupt")
     else:
@@ -1213,7 +1217,7 @@ def run_fetch(options: FetchOptions, env: FetchEnv | None = None) -> FetchResult
         with lock:
             _locked_fetch(store, options, env, result)
     except Exception as exc:  # a refusal before or while taking the lock, or an abandoned fetch (_Partial)
-        _apply_failure(result, exc)
+        _apply_failure(result, exc, options)
     _finish_result(result)
     _audit(env, options, result)
     return result
