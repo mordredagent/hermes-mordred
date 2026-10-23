@@ -947,6 +947,15 @@ Follow-ups left by the landed code:
   ID-gated like the tools and audited, would let an owner verify a citation.
   Decide with the owner; if added, it must never list or search.
 
+
+- [ ] Direct-tools CLI wording when only the probe ran (Codex seventh pass,
+  2026-10-23, P3). When config.yaml on disk differs from Hermes's resolved view
+  but `hermes config get` already reads the setting as asked, `set_direct`
+  returns without writing, yet `hermes-mordred direct-tools on|off` prints the
+  change line naming `hermes config set` / `unset`. Make `set_direct` return
+  whether it wrote, print "Hermes already reads it as asked; nothing written"
+  in that case, and add CLI tests for both probe-only outcomes. The route
+  answer is unaffected.
 - [ ] Tool result shape for Hermes's error detector (found 2026-10-23): Hermes
   logs a successful `mordred_mail_sync` as "returned error" because the closed
   result always carries the key `error` (`null` on success). Omitting the key
