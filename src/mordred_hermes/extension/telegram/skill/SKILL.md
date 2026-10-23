@@ -214,6 +214,13 @@ in its encrypted history. You receive **counts only** (`inserted`,
 `duplicates`, `fetched`, `skipped`, `partial`, `error`, ...), never subjects,
 names, addresses or text; then use `mordred_history_search` to read mail.
 
+If `mordred_mail_sync` is not in your tool list, it is deferred: call it through
+the bridge with `tool_call` and exactly
+`{"calls":[{"name":"mordred_mail_sync","arguments":{}}]}` (unsure it exists?
+`tool_search` with `{"queries":["mordred_mail_sync"]}` first). `tool_describe`
+is not needed; if you use it, names are JSON strings:
+`{"names":["mordred_mail_sync"]}`.
+
 - `partial: true` with `partial_reason: "time_budget"`, `"max_messages"`, `"max_bytes"` or `"cancelled"`:
   more mail is waiting; call `mordred_mail_sync` again (each call works about a
   minute and continues where the last one stopped). Do not loop more than a

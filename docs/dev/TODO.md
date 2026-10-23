@@ -857,13 +857,15 @@ Follow-ups left by the landed code:
   the production model (Venice `e2ee-deepseek-v4-flash`) "sync my mail" ran
   `tool_search` twice, then called `tool_describe` four times with the
   unquoted arguments `{"names": mordred_mail_sync}`; Hermes's sanitizer could
-  not repair them and nothing was synced. The `mordred.telegram` prompt
-  section already shows the `tool_call` form; add "tool_search's result
-  already contains the schema: call with `tool_call` directly, never
-  `tool_describe`", repeat the `tool_call` example for `mordred_mail_sync` and
-  `mordred_history_search`, and document `tools.tool_search.enabled: "off"` in
-  USAGE as the fallback that makes every tool direct. Hermes itself is not
-  changed (zero-PR rule). The eval (Part G) must cover the bridge path.
+  not repair them and nothing was synced. Done: the `mordred.telegram` prompt
+  section says the `tool_search` result is enough, `tool_describe` is not
+  needed, and shows `tool_call` examples for `telegram_ask` and
+  `mordred_history_search`; a separate `mordred.mail` section carries the
+  `mordred_mail_sync` recipe and is gated on `mail_sync_available()`, so a
+  mail-only install gets it too; USAGE documents `tools.tool_search.enabled:
+  "off"` as the fallback. Remaining: the eval (Part G) must cover the bridge
+  path with the production model. Hermes itself is not changed (zero-PR
+  rule).
 
 - [ ] `imap_auth_failed` without a hint (found 2026-10-23, part of the
   Desktop design): every Gmail `NO` collapses to one code. Classify the

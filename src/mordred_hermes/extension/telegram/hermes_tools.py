@@ -559,6 +559,11 @@ and `telegram_chats` (lists chats). If they are not in your tool list, use \
 `tool_search` with the query "telegram" and call them through the bridge, \
 ALWAYS naming the tool: `tool_call` with \
 `{"calls": [{"name": "telegram_ask", "arguments": {"question": "...", \
+"start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"}}]}`. The `tool_search` \
+result already tells you the tool exists: call it with `tool_call` directly. \
+`tool_describe` is not needed; if you use it, `names` is a JSON array of \
+strings. Searching messages looks like `tool_call` with \
+`{"calls": [{"name": "mordred_history_search", "arguments": {"query": "...", \
 "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"}}]}`.
 Reading imported messages:
 1. """
@@ -605,6 +610,30 @@ exact name `mordred:mordred-telegram` (no other Telegram skill exists)."""
 )
 
 
+MAIL_SYSTEM_PROMPT = """## Mail sync (Mordred)
+When the user asks to sync, refresh, fetch or import their mail, use \
+`mordred_mail_sync`. Its default arguments are `{}`.
+- If it is listed in your tools, call it directly with `{}`.
+- If it is not listed, call it through the deferred-tool bridge: `tool_call` \
+with exactly `{"calls":[{"name":"mordred_mail_sync","arguments":{}}]}`.
+- If you are unsure it exists, first run `tool_search` with \
+`{"queries":["mordred_mail_sync"]}`.
+- `tool_describe` is NOT needed for this call. If you ever need it, names are \
+JSON strings: `{"names":["mordred_mail_sync"]}`.
+- The result is counts only (`inserted`, `duplicates`, `partial`, `error`). If \
+`partial` is true, say so and offer to run it again.
+- Never ask for or repeat the app password or the mail address. The user sets \
+mail up on the "Mordred" page in Hermes Desktop or with `hermes-mordred mail \
+setup`, never in the chat."""
+
+
+def mail_prompt_section(_info: Any = None) -> str:
+    """Only present when ``mordred_mail_sync`` itself is offered (independent of Telegram)."""
+    from . import mail_tool
+
+    return MAIL_SYSTEM_PROMPT if mail_tool.mail_sync_available() else ""
+
+
 def system_prompt_section(_info: Any = None) -> str:
     """Only present when Telegram is set up and this Hermes model may read it."""
     return SYSTEM_PROMPT if tools_available() else ""
@@ -648,7 +677,8 @@ def _register_guidance(ctx: Any) -> None:
                 "mordred-telegram",
                 SKILL_PATH,
                 description="Answer questions about the user's own Telegram messages via the Mordred tools "
-                "(telegram_ask, mordred_history_search, telegram_chats) only.",
+                "(telegram_ask, mordred_history_search, telegram_chats) only, and sync the user's mail with "
+                "mordred_mail_sync (through the tool_call bridge when it is not listed).",
             )
         except Exception as exc:
             _log.warning("mordred_e2e: could not register the Telegram skill (%s)", type(exc).__name__)
@@ -658,3 +688,7 @@ def _register_guidance(ctx: Any) -> None:
             register_section("mordred.telegram", system_prompt_section, max_chars=4000)
         except Exception as exc:
             _log.warning("mordred_e2e: could not register the Telegram prompt section (%s)", type(exc).__name__)
+        try:
+            register_section("mordred.mail", mail_prompt_section, max_chars=1500)
+        except Exception as exc:
+            _log.warning("mordred_e2e: could not register the mail prompt section (%s)", type(exc).__name__)

@@ -931,7 +931,11 @@ hermes-mordred mail forget --rows --yes                 # ... and the account's 
    mail as usual. The tool is offered only when the chat's model is a Venice
    `private` model or a local one, and each call may show a Touch ID prompt.
    One call works for about a minute; if the answer says `partial`, ask again
-   and it continues where it stopped.
+   and it continues where it stopped. If Hermes keeps failing to reach the
+   tool through its deferred-tool bridge (`tool_search` / `tool_call`), put
+   `tools: {tool_search: {enabled: "off"}}` in `config.yaml`: every tool is then
+   direct until the next restart, at the cost of larger prompts and no
+   remote-connector bridge.
 5. **Older mail.** The first sync takes your newest 2000 messages and reports
    how many older ones it left out (`excluded_history`). To fetch older mail,
    run `hermes-mordred mail fetch --since 2025-01-01` (repeat while it reports

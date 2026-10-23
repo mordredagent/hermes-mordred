@@ -259,3 +259,97 @@ def test_guidance_forbids_concluding_no_data_from_partial_search():
     text = hermes_tools.SKILL_PATH.read_text("utf-8")
     assert 'Never report "no messages"' in text and "complete" in text
     assert 'NOT "not in the archive"' in hermes_tools.SYSTEM_PROMPT
+
+
+# --- prompt sections (Telegram + mail) --------------------------------------------------------------------------
+
+
+def _registered_sections() -> dict[str, tuple[Any, int]]:
+    sections: dict[str, tuple[Any, int]] = {}
+
+    def register(name: str, fn: Any, max_chars: int) -> None:
+        sections[name] = (fn, max_chars)
+
+    hermes_tools._register_guidance(SimpleNamespace(register_system_prompt_section=register))
+    return sections
+
+
+def test_mail_prompt_section_is_registered_within_budget():
+    sections = _registered_sections()
+    assert sections["mordred.mail"][0] is hermes_tools.mail_prompt_section
+    assert sections["mordred.telegram"][0] is hermes_tools.system_prompt_section
+    assert len(hermes_tools.MAIL_SYSTEM_PROMPT) <= 1200
+    assert len(hermes_tools.MAIL_SYSTEM_PROMPT) <= sections["mordred.mail"][1] == 1500
+    assert len(hermes_tools.SYSTEM_PROMPT) <= sections["mordred.telegram"][1] == 4000
+
+
+@pytest.mark.parametrize("telegram", [False, True])
+def test_mail_prompt_section_follows_mail_availability_only(monkeypatch, telegram):
+    from mordred_hermes.extension.telegram import mail_tool
+
+    monkeypatch.setattr(hermes_tools, "tools_available", lambda: telegram)
+    monkeypatch.setattr(mail_tool, "mail_sync_available", lambda: False)
+    assert hermes_tools.mail_prompt_section() == ""
+    monkeypatch.setattr(mail_tool, "mail_sync_available", lambda: True)
+    assert hermes_tools.mail_prompt_section() == hermes_tools.MAIL_SYSTEM_PROMPT
+    assert (hermes_tools.system_prompt_section() == hermes_tools.SYSTEM_PROMPT) is telegram
+
+
+def _json_examples(text: str) -> list[dict[str, Any]]:
+    import re
+
+    decoder = json.JSONDecoder()
+    found = []
+    for match in re.finditer(r'\{\s*"(?:calls|queries|names)"', text):
+        value, _end = decoder.raw_decode(text, match.start())
+        found.append(value)
+    return found
+
+
+def _schema_ok(schema: dict[str, Any], arguments: Any) -> bool:
+    params = schema["parameters"]
+    if not isinstance(arguments, dict):
+        return False
+    if any(key not in arguments for key in params.get("required", [])):
+        return False
+    if params.get("additionalProperties") is False:
+        return set(arguments) <= set(params.get("properties", {}))
+    return True
+
+
+def test_prompt_json_examples_parse_and_match_the_tool_schemas():
+    from mordred_hermes.extension.telegram import mail_tool
+
+    schemas = {
+        s["name"]: s
+        for s in (hermes_tools._ASK_SCHEMA, hermes_tools._CHATS_SCHEMA, hermes_tools._SEARCH_SCHEMA, mail_tool.SCHEMA)
+    }
+    called: set[str] = set()
+    for text in (hermes_tools.SYSTEM_PROMPT, hermes_tools.MAIL_SYSTEM_PROMPT):
+        examples = _json_examples(text)
+        assert examples
+        for example in examples:
+            if "calls" in example:
+                assert example["calls"]
+                for call in example["calls"]:
+                    assert call["name"] in schemas
+                    assert _schema_ok(schemas[call["name"]], call["arguments"]), call
+                    called.add(call["name"])
+            elif "queries" in example:
+                assert all(isinstance(q, str) for q in example["queries"])
+            else:
+                assert all(isinstance(n, str) for n in example["names"])
+    assert {"telegram_ask", "mordred_history_search", "mordred_mail_sync"} <= called
+    assert 'tool_call` with exactly `{"calls":[{"name":"mordred_mail_sync","arguments":{}}]}' in (
+        hermes_tools.MAIL_SYSTEM_PROMPT
+    )
+    assert "`tool_describe` is not needed" in hermes_tools.SYSTEM_PROMPT
+
+
+def test_skill_description_and_mail_recipe_mention_mail_sync():
+    calls: list[dict[str, Any]] = []
+    hermes_tools._register_guidance(
+        SimpleNamespace(register_skill=lambda name, path, **kw: calls.append(kw), register_system_prompt_section=None)
+    )
+    assert "mordred_mail_sync" in calls[0]["description"]
+    assert '{"calls":[{"name":"mordred_mail_sync","arguments":{}}]}' in hermes_tools.SKILL_PATH.read_text("utf-8")
