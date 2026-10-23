@@ -87,8 +87,9 @@ def imports_sections(home: Path, platform: str) -> dict[str, Any]:
             "telegram_archive": dict(_TELEGRAM_ARCHIVE),
         }
     store: Any = None
+    opened: Any = None
     try:
-        store = _seams.open_store_readonly(home)
+        store = opened = _seams.open_store_readonly(home)
         imports = _projections.imports_projection(store.status())
     except Exception as exc:  # a gate or store refusal is a state (ImportRefused carries the code)
         imports = _projections.imports_refused(_seams.store_refusal(exc))
@@ -96,11 +97,18 @@ def imports_sections(home: Path, platform: str) -> dict[str, Any]:
         store = None
     flags, residue = _mail_flags()
     mail_status: Any = None
-    if store is not None and flags:
-        try:
-            mail_status = _seams.imap_status(store, flags)
-        except Exception as exc:
-            _log.warning("mordred desktop mail status unreadable (%s)", type(exc).__name__)
+    try:
+        if store is not None and flags:
+            try:
+                mail_status = _seams.imap_status(store, flags)
+            except Exception as exc:
+                _log.warning("mordred desktop mail status unreadable (%s)", type(exc).__name__)
+    finally:
+        # The read-only store keeps one SQLCipher connection for its life: close it here,
+        # not in a finaliser, so a status poll never leaves a reader open.
+        closer = getattr(opened, "close", None)
+        if callable(closer):
+            closer()
     return {
         "imports": imports,
         "mail": _projections.mail_projection(flags, mail_status, residue=residue),
