@@ -953,6 +953,17 @@ Follow-ups left by the landed code:
   ID-gated like the tools and audited, would let an owner verify a citation.
   Decide with the owner; if added, it must never list or search.
 
+- [ ] `_yaml_io.load_yaml_mapping` lets YAML warnings and error text out (found
+  2026-10-23 while reviewing direct-tools). ruamel's `ReusedAnchorWarning` goes
+  through Python's default warning display (the anchor name and the file path
+  reach stderr, so Hermes Desktop's log), and a `YAMLError` is logged with `%s`,
+  which quotes the offending source lines. Seen from `desktop/api.py`
+  `_hermes_venice_key` (the privacy-LLM step reads config.yaml) under a duplicate
+  anchor. Fix centrally: load under a recording `warnings.catch_warnings`, drop
+  the messages, and log the exception class only, as
+  `wizard/_direct_tools_yaml.py` does. The direct-tools reader itself keeps
+  everything quiet (covered by its tests).
+
 - [ ] Tool result shape for Hermes's error detector (found 2026-10-23): Hermes
   logs a successful `mordred_mail_sync` as "returned error" because the closed
   result always carries the key `error` (`null` on success). Omitting the key

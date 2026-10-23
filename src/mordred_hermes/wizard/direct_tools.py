@@ -20,12 +20,15 @@ writer through its CLI, in Hermes's environment::
     hermes config get tools.tool_search.enabled         # the check afterwards
 
 with ``HERMES_HOME`` set to the home, the home as working directory, no
-``PYTHONPATH`` / ``PYTHONHOME``, a 60 s timeout and its output captured and
-dropped: only the exit code is used, and the result is a closed code. The
-change counts only when ``hermes config get`` then reads as asked. In a
-vault-managed home Hermes's own start-up hook opens and reseals config.yaml
-for each command, as for any ``hermes`` command; a config sealed away while
-no Hermes runs is refused before anything starts (``config_vault_managed``).
+``PYTHONPATH`` / ``PYTHONHOME``, ``MORDRED_CONFIG_DECRYPT=0``, a 60 s timeout
+and its output captured and dropped: only the exit code is used, and the
+result is a closed code. The change counts only when ``hermes config get``
+then reads as asked. In a vault-managed home the plaintext working copy is on
+disk only while a managed process (Hermes, Hermes Desktop or this
+``hermes-mordred``) runs, and that process reseals it at exit; the child edits
+that working copy and, with ``MORDRED_CONFIG_DECRYPT=0``, never materializes
+or reseals it itself. A config sealed away while nothing runs is refused
+before anything starts (``config_vault_managed``).
 """
 
 from __future__ import annotations
@@ -143,6 +146,7 @@ def _run(command: Path, home: Path, *args: str) -> tuple[int, str]:
     """``hermes config <args>`` for ``home``: the exit code and stdout (never shown or logged)."""
     env = {key: value for key, value in os.environ.items() if key not in ("PYTHONPATH", "PYTHONHOME")}
     env["HERMES_HOME"] = str(home)
+    env["MORDRED_CONFIG_DECRYPT"] = "0"  # the running process's lifecycle owns the plaintext; the child only edits it
     try:
         done = subprocess.run(
             [str(command), "config", *args],

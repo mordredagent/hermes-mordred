@@ -234,6 +234,7 @@ with (here / "calls.jsonl").open("a", encoding="utf-8") as log:
     log.write(json.dumps({
         "argv": args, "home": os.environ.get("HERMES_HOME"), "cwd": os.getcwd(),
         "pythonpath": "PYTHONPATH" in os.environ, "pythonhome": "PYTHONHOME" in os.environ,
+        "decrypt": os.environ.get("MORDRED_CONFIG_DECRYPT"),
     }) + "\n")
 print("CANARY-stdout")
 print("CANARY-stderr", file=sys.stderr)
@@ -302,6 +303,7 @@ def hermes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeHermes:
         script.chmod(0o755)
     monkeypatch.setattr(direct_tools, "_python", lambda: str(bin_dir / "python"))
     monkeypatch.setenv("PYTHONPATH", "/nonexistent-pythonpath")
+    monkeypatch.setenv("MORDRED_CONFIG_DECRYPT", "1")  # the child must get 0 whatever the parent exports
     return FakeHermes(bin_dir)
 
 
@@ -319,6 +321,7 @@ def test_on_runs_hermes_config_set_then_checks_with_get(home: Path, hermes: Fake
     for call in hermes.calls():
         assert call["home"] == str(home) and Path(call["cwd"]).resolve() == home.resolve()
         assert call["pythonpath"] is False and call["pythonhome"] is False
+        assert call["decrypt"] == "0"  # the child never materializes or reseals a vault-managed config.yaml
 
 
 @posix_only

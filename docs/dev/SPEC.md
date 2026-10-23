@@ -5388,8 +5388,10 @@ after the second pass the write was delegated to Hermes.
   or returned. Afterwards `hermes config get tools.tool_search.enabled` must print a
   value Hermes reads as asked; a non-zero exit, a timeout or another answer is
   `config_write_failed`. How the file looks afterwards (comments, layout) is Hermes's
-  writer's business. In a vault-managed home each `hermes` command opens and reseals
-  config.yaml through Mordred's start-up hook, as any `hermes` command does.
+  writer's business. The child runs with `MORDRED_CONFIG_DECRYPT=0`: in a vault-managed
+  home the plaintext working copy is on disk only while a managed process (Hermes,
+  Hermes Desktop or `hermes-mordred` itself) runs and that process reseals it at exit,
+  so the child edits that copy and never materializes or reseals it itself.
 - **Reading like Hermes.** Before anything runs, the state is read the way Hermes
   0.21.5 reads it: `hermes_yaml.safe_load` (ruamel `typ="safe"`, `version = (1, 1)`,
   the C parser first and the pure one when it refuses; plain `off`, `no`, `n` and

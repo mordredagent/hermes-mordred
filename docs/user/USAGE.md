@@ -877,7 +877,10 @@ hermes-mordred direct-tools off      # runs: hermes config unset tools.tool_sear
 > If `config.yaml` is vault-managed (`encryption enable config`) and its
 > plaintext is sealed away, the command refuses with `config_vault_managed`:
 > start Hermes (or use the Desktop page while Hermes Desktop runs), or turn the
-> seal off with `encryption disable config`. A `config.yaml` that is not valid
+> seal off with `encryption disable config`. While a managed Hermes runs, the
+> `hermes config` command edits its on-disk working copy and that Hermes reseals
+> it at exit (the command runs with `MORDRED_CONFIG_DECRYPT=0`, so it never
+> materializes or reseals `config.yaml` itself). A `config.yaml` that is not valid
 > YAML, or whose YAML warns (a reused anchor, for example), is refused with
 > `config_unreadable`; a `hermes config` command that fails, times out after 60
 > seconds or leaves the setting otherwise than asked is `config_write_failed`.
