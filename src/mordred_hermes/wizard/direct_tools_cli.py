@@ -37,8 +37,8 @@ TRADE_OFFS = {
 }
 REMEDIES = {
     "config_unreadable": (
-        "Hermes's config.yaml could not be read or is not a YAML mapping (or tools is not a mapping); "
-        "nothing was changed. Fix or restore it, then try again."
+        "Hermes's config.yaml could not be read, is not valid YAML or not a mapping, or its YAML "
+        "warns (for example a reused anchor); nothing was changed. Fix or restore it, then try again."
     ),
     "config_vault_managed": (
         "config.yaml is sealed in Mordred's vault and not on disk right now; nothing was changed. "
@@ -47,8 +47,17 @@ REMEDIES = {
         "the seal off with hermes-mordred encryption disable config."
     ),
     "config_write_failed": (
-        "config.yaml could not be written; nothing was changed. Check that the Hermes home is "
-        "writable and private to this account, then try again."
+        "config.yaml could not be written, or changed while it was being edited; nothing was changed. "
+        "Check that the Hermes home is writable and private to this account, then try again."
+    ),
+    "config_unsupported_shape": (
+        "config.yaml reaches tools.tool_search through a YAML alias, an anchor used elsewhere or a merge "
+        "key (<<), so changing it here could change other settings; nothing was changed. Edit config.yaml "
+        "by hand."
+    ),
+    "config_has_setting": (
+        "config.yaml already sets tools.tool_search to a value Mordred does not replace (only an absent "
+        "value, auto, on, true, yes or 1); nothing was changed. Edit config.yaml by hand."
     ),
 }
 

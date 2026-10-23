@@ -192,7 +192,9 @@ const MESSAGES = {
   // Hermes's direct tool calls (`/tools/direct`, the Tool calls card).
   config_unreadable: 'Hermes’s config.yaml could not be read (or is not a YAML mapping), so this setting cannot be shown or changed here. Nothing was changed. Run hermes-mordred direct-tools status in Terminal.',
   config_vault_managed: 'Hermes’s config.yaml is sealed in Mordred’s vault and not on disk right now, so nothing was changed. Restart Hermes Desktop (it opens config.yaml when it starts) and try again.',
-  config_write_failed: 'Hermes’s config.yaml could not be written. Nothing was changed. Check that the Hermes home is writable and private to this account, then try again.',
+  config_write_failed: 'Hermes’s config.yaml could not be written, or changed while it was being edited. Nothing was changed. Check that the Hermes home is writable and private to this account, then try again.',
+  config_unsupported_shape: 'Hermes’s config.yaml reaches this setting through a YAML alias, anchor or merge key (<<), so changing it here could change other settings. Nothing was changed. Edit config.yaml by hand.',
+  config_has_setting: 'Hermes’s config.yaml already sets tools.tool_search to a value Mordred does not replace. Nothing was changed. Edit config.yaml by hand.',
 }
 
 // `imap_auth_failed` refined by the server's response code (never its text).
@@ -1201,16 +1203,16 @@ function DirectToolsCopy() {
 // `tools` is `status.tools` ({direct, source}); missing from an older Mordred, `direct: null`
 // when config.yaml cannot be read. The checkbox sends an explicit {direct} and nothing else.
 function DirectToolsCard({ tools, refresh }) {
+  // Saving: the request and the status read after it are in flight (checkbox disabled).
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState(null)
-  // What this page saved ({direct}): the restart note. Hermes uses it only after a restart.
+  // A change this page saved: Hermes uses it only after a restart (the restart note).
   const [saved, setSaved] = useState(null)
-  // The value just saved, shown until the status read after it lands; then the status decides.
-  const [pending, setPending] = useState(null)
   const noteRef = useFocusOn(failure)
   const resultRef = useFocusOn(saved)
   const known = Boolean(tools) && typeof tools.direct === 'boolean'
-  const checked = pending !== null ? pending : known && tools.direct
+  // The state shown is the status only, never a request's answer.
+  const checked = known && tools.direct
   const change = async (direct) => {
     if (busy) return
     setBusy(true)
@@ -1218,8 +1220,7 @@ function DirectToolsCard({ tools, refresh }) {
     try {
       const r = await call('/tools/direct', { direct })
       if (typeof r.direct !== 'boolean') throw new MordredError('invalid_response', {})
-      setSaved({ direct: r.direct })
-      setPending(r.direct)
+      setSaved({ direct })
     } catch (e) {
       setFailure(asMordredError(e))
     } finally {
@@ -1228,7 +1229,6 @@ function DirectToolsCard({ tools, refresh }) {
       } catch (_) {
         // the page's own status read reports its failures
       }
-      setPending(null)
       setBusy(false)
     }
   }

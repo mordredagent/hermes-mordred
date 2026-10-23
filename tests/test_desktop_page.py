@@ -118,6 +118,8 @@ PAGE_CODES = (
     "config_unreadable",
     "config_vault_managed",
     "config_write_failed",
+    "config_unsupported_shape",
+    "config_has_setting",
 )
 STEP_KEYS = (
     "enclave",
@@ -3454,18 +3456,19 @@ def test_unticking_posts_direct_false_then_offers_the_restart():
 
 
 def test_the_checkbox_follows_the_status_read_after_a_save():
-    """A later status (another writer, the CLI) wins over what this page saved; the restart note stays."""
+    """The status wins over the request's answer (another writer, the CLI); the restart note stays."""
     result = tools_card(TOOLS_OFF, [{"ok": True, "direct": True, "restart_required": True}], TICK, after=TOOLS_OFF)
     assert result["out"]["checkbox"]["checked"] is False and result["out"]["checkbox"]["disabled"] is False
     assert "Hermes calls tools directly once it restarts" in result["text"]
 
 
-def test_the_checkbox_shows_the_saved_value_and_stays_disabled_until_the_status_read_lands():
+def test_the_checkbox_shows_only_the_status_and_stays_disabled_while_saving():
+    """Never the request's answer: until the status read lands, the old status, disabled, with a spinner."""
     script = (
-        "globalThis.hold = null\n"
         "const pendingTick = tick(tree, 'Let Hermes call')\n"
         "await new Promise(r => setTimeout(r, 0)); tree = view()\n"
         "out.during = find(tree, n => n.type === 'checkbox').props\n"
+        "out.spinner = text(tree).includes('Saving')\n"
         "await pendingTick; tree = view()\n"
     )
     card = (
@@ -3478,12 +3481,13 @@ def test_the_checkbox_shows_the_saved_value_and_stays_disabled_until_the_status_
         .replace("TOOLS_ON", json.dumps(TOOLS_ON))
     )
     result = component(card, [{"ok": True, "direct": True, "restart_required": True}], script + CHECKBOX)
-    assert result["out"]["during"]["checked"] is True and result["out"]["during"]["disabled"] is True
+    assert result["out"]["during"]["checked"] is False and result["out"]["during"]["disabled"] is True
+    assert result["out"]["spinner"] is True and "Saving" not in result["text"]
     assert result["out"]["checkbox"]["checked"] is True and result["out"]["checkbox"]["disabled"] is False
     assert result["refreshes"] == 1
 
 
-@pytest.mark.parametrize("code", ["config_unreadable", "config_vault_managed", "config_write_failed"])
+@pytest.mark.parametrize("code", DIRECT_TOOLS_CODES)
 def test_a_refused_change_is_an_alert_with_its_sentence_and_no_restart(code):
     result = tools_card(TOOLS_OFF, [{"ok": False, "error": code}], TICK)
     messages = block("MESSAGES")

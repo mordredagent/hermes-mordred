@@ -54,7 +54,89 @@ def write(home: Path, text: str, mode: int = 0o600) -> Path:
     return config
 
 
-# -- read ------------------------------------------------------------------------------------------
+# -- read: parity with Hermes ---------------------------------------------------------------------
+#
+# Hermes 0.21.5 (``~/.hermes/hermes-agent``), re-implemented here independently of the module under
+# test: ``hermes_yaml.safe_load`` is ruamel ``YAML(typ="safe")`` with ``version = (1, 1)`` (plain
+# ``off``/``no``/``n``/``false`` are booleans, ``y``/``yes``/``on``/``true`` too); ``_deep_merge``
+# puts the user's file over ``DEFAULT_CONFIG`` (``tools.tool_search.enabled: "auto"``), ignoring a
+# ``None`` over a default mapping; ``ToolSearchConfig.from_raw`` turns a non-mapping into
+# ``{"enabled": "off" if raw is False else "auto"}`` and reads ``enabled`` with ``_tri_state``:
+# ``str(v).strip().lower()``, aliases true/1/yes -> on and false/0/no -> off, else auto/on/off or auto.
+
+
+def hermes_rule(text: str) -> bool:
+    """Is Hermes direct (``enabled == "off"``) for this config.yaml text?"""
+    from ruamel.yaml import YAML
+
+    yaml = YAML(typ="safe", pure=True)
+    yaml.version = (1, 1)
+    user = yaml.load(text) or {}
+    tools = user.get("tools")
+    tools = tools if isinstance(tools, dict) else {}
+    raw = tools.get("tool_search")
+    raw = {"enabled": "auto"} if raw is None else raw  # None over the default mapping is ignored
+    if not isinstance(raw, dict):
+        raw = {"enabled": "off" if raw is False else "auto"}
+    value = raw.get("enabled")
+    value = "auto" if value is None else value  # the default's "auto" survives a None
+    aliases = {"true": "on", "1": "on", "yes": "on", "false": "off", "0": "off", "no": "off"}
+    word = str(value).strip().lower()
+    return aliases.get(word, word if word in ("auto", "on", "off") else "auto") == "off"
+
+
+ENABLED = "tools:\n  tool_search:\n    enabled: {}\n"
+LEGACY = "tools:\n  tool_search: {}\n"
+#: (YAML value, direct for Hermes): 20 values of ``enabled`` and 6 of the legacy scalar.
+PARITY = [
+    (ENABLED.format("off"), True),
+    (ENABLED.format("Off"), True),
+    (ENABLED.format("OFF"), True),
+    (ENABLED.format('"off"'), True),
+    (ENABLED.format("'OFF'"), True),
+    (ENABLED.format("no"), True),
+    (ENABLED.format("n"), True),  # YAML 1.1 boolean
+    (ENABLED.format("N"), True),
+    (ENABLED.format("false"), True),
+    (ENABLED.format('"false"'), True),
+    (ENABLED.format("0"), True),
+    (ENABLED.format('"no"'), True),
+    (ENABLED.format('"n"'), False),  # a string "n" is not one of _tri_state's spellings
+    (ENABLED.format("auto"), False),
+    (ENABLED.format("on"), False),  # YAML 1.1 true
+    (ENABLED.format("yes"), False),
+    (ENABLED.format("y"), False),
+    (ENABLED.format("1"), False),
+    (ENABLED.format('""'), False),
+    (ENABLED.format(""), False),  # null: the default "auto"
+    (LEGACY.format("false"), True),
+    (LEGACY.format("off"), True),  # YAML 1.1 false
+    (LEGACY.format("n"), True),
+    (LEGACY.format('"off"'), False),  # a string is not ``False``: Hermes reads "auto"
+    (LEGACY.format("0"), False),  # neither is the integer 0
+    (LEGACY.format("true"), False),
+]
+
+
+def test_the_parity_table_has_26_cases() -> None:
+    assert len(PARITY) == 26 and len({text for text, _ in PARITY}) == 26
+
+
+@posix_only
+@pytest.mark.parametrize("text,direct", PARITY)
+def test_read_mode_reads_like_hermes(home: Path, text: str, direct: bool) -> None:
+    write(home, text)
+    assert hermes_rule(text) is direct  # the table itself follows Hermes's rule
+    mode = read_mode(home)
+    assert mode["direct"] is direct and mode["source"] in ("config", "default")
+
+
+@posix_only
+@pytest.mark.parametrize("text,direct", [(text, direct) for text, direct in PARITY if direct])
+def test_off_turns_every_direct_spelling_deferred(home: Path, text: str, direct: bool) -> None:
+    write(home, text)
+    set_direct(home, False)
+    assert read_mode(home)["direct"] is False and hermes_rule((home / "config.yaml").read_text()) is False
 
 
 @posix_only
@@ -65,36 +147,20 @@ def test_no_config_reads_as_the_default_deferred_mode(home: Path) -> None:
 
 @posix_only
 @pytest.mark.parametrize(
-    "text,raw",
-    [
-        ('tools:\n  tool_search:\n    enabled: "off"\n', "off"),
-        ("tools:\n  tool_search:\n    enabled: off\n", "off"),
-        ("tools:\n  tool_search:\n    enabled: false\n", "false"),
-        ("tools:\n  tool_search: false\n", "false"),  # Hermes's legacy shape
-        ('tools:\n  tool_search:\n    enabled: " OFF "\n', " OFF "),
-        ('tools:\n  tool_search:\n    enabled: "no"\n', "no"),  # Hermes reads these as off too
-    ],
-)
-def test_off_string_and_false_boolean_read_as_direct(home: Path, text: str, raw: str) -> None:
-    write(home, text)
-    assert read_mode(home) == {"direct": True, "source": "config", "raw": raw}
-
-
-@posix_only
-@pytest.mark.parametrize(
     "text,expected",
     [
-        ('tools:\n  tool_search:\n    enabled: "auto"\n', {"direct": False, "source": "config", "raw": "auto"}),
-        ("tools:\n  tool_search:\n    enabled: on\n", {"direct": False, "source": "config", "raw": "on"}),
-        ("tools:\n  tool_search:\n    enabled: true\n", {"direct": False, "source": "config", "raw": "true"}),
-        ("tools:\n  tool_search: true\n", {"direct": False, "source": "config", "raw": "true"}),
+        ('tools:\n  tool_search:\n    enabled: "off"\n', {"direct": True, "source": "config", "raw": "off"}),
+        ("tools:\n  tool_search:\n    enabled: off\n", {"direct": True, "source": "config", "raw": "false"}),
+        ("tools:\n  tool_search: false\n", {"direct": True, "source": "config", "raw": "false"}),
+        ("tools:\n  tool_search:\n    enabled: on\n", {"direct": False, "source": "config", "raw": "true"}),
         ("tools:\n  tool_search:\n    listing: auto\n", {"direct": False, "source": "default", "raw": None}),
         ("tools: [a, b]\n", {"direct": False, "source": "default", "raw": None}),
+        ("tools:\n", {"direct": False, "source": "default", "raw": None}),
         ("model:\n  default: x\n", {"direct": False, "source": "default", "raw": None}),
         ("", {"direct": False, "source": "default", "raw": None}),
     ],
 )
-def test_anything_else_reads_as_deferred(home: Path, text: str, expected: dict[str, object]) -> None:
+def test_source_and_raw(home: Path, text: str, expected: dict[str, object]) -> None:
     write(home, text)
     assert read_mode(home) == expected
 
@@ -107,10 +173,43 @@ def test_raw_is_the_keys_own_value_and_bounded(home: Path) -> None:
 
 
 @posix_only
-@pytest.mark.parametrize("text", [f"model: [{CANARY}\n", f"- {CANARY}\n", f"{CANARY}\n"])
+@pytest.mark.parametrize("text", [f"model: [{CANARY}\n", f"- {CANARY}\n", f"{CANARY}\n", f"a: 1\na: {CANARY}\n"])
 def test_unreadable_config_reads_as_unknown_without_any_value(home: Path, text: str) -> None:
     write(home, text)
     assert read_mode(home) == {"direct": None, "source": "unreadable", "code": "config_unreadable"}
+
+
+DUPLICATE_ANCHOR = f"model: &m {CANARY}\nother: &m second-{CANARY}\ntools:\n  tool_search:\n    enabled: auto\n"
+
+
+@posix_only
+@pytest.mark.parametrize("enabled", [None, True, False])
+def test_a_yaml_warning_is_a_refusal_and_nothing_reaches_any_output(
+    home: Path, capfd: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture, enabled: bool | None
+) -> None:
+    """ruamel's ReusedAnchorWarning quotes both source lines: it is captured, never shown."""
+    write(home, DUPLICATE_ANCHOR)
+    if enabled is None:
+        assert read_mode(home) == {"direct": None, "source": "unreadable", "code": "config_unreadable"}
+    else:
+        with pytest.raises(DirectToolsError) as error:
+            set_direct(home, enabled)
+        assert error.value.code == "config_unreadable"
+        assert CANARY not in "".join(traceback.format_exception(error.value))
+    out, err = capfd.readouterr()
+    assert CANARY not in out + err + caplog.text
+    assert (home / "config.yaml").read_text(encoding="utf-8") == DUPLICATE_ANCHOR
+
+
+def test_warnings_are_captured_without_changing_the_process_filters() -> None:
+    import warnings
+
+    before = list(warnings.filters)
+    from mordred_hermes.wizard._direct_tools_yaml import hermes_data
+
+    with pytest.raises(DirectToolsError):
+        hermes_data(DUPLICATE_ANCHOR)
+    assert warnings.filters == before
 
 
 # -- write -----------------------------------------------------------------------------------------
@@ -245,17 +344,153 @@ def test_an_unreadable_config_is_refused_unchanged_and_no_value_travels(home: Pa
     assert config.read_text(encoding="utf-8") == text
 
 
+def test_error_codes_are_closed() -> None:
+    assert ERROR_CODES == (
+        "config_unreadable",
+        "config_vault_managed",
+        "config_write_failed",
+        "config_unsupported_shape",
+        "config_has_setting",
+    )
+
+
+# -- shapes Mordred does not edit -----------------------------------------------------------------------
+
+ALIAS = "base: &a\n  enabled: auto\n  listing: on\ntools:\n  tool_search: *a\n"
+OWNER = "tools:\n  tool_search: &a\n    enabled: 'off'\nmirror: *a\n"
+MERGED = "base: &b\n  enabled: 'off'\ntools:\n  tool_search:\n    <<: *b\n    listing: auto\n"
+SHADOWED = "base: &b\n  enabled: 'off'\ntools:\n  tool_search:\n    <<: *b\n    enabled: auto\n"
+ROOT_MERGED = "defaults: &d\n  tools:\n    tool_search:\n      enabled: 'off'\n<<: *d\nmodel: x\n"
+TOOLS_MERGED = "ts: &t\n  tool_search:\n    enabled: 'off'\ntools:\n  <<: *t\n  other: 1\n"
+SCALAR_ALIAS = "x: &v off\ntools:\n  tool_search:\n    enabled: *v\n"
+TOOLS_ALIAS = "shared: &t\n  tool_search:\n    enabled: auto\ntools: *t\n"
+
+
 @posix_only
-def test_tools_that_is_not_a_mapping_is_never_replaced(home: Path) -> None:
-    config = write(home, "tools: [a, b]\n")
+@pytest.mark.parametrize(
+    "text,enabled",
+    [
+        (ALIAS, True),  # editing the alias would also turn on ``base``
+        (OWNER, False),  # removing from the anchor owner would also change ``mirror``
+        (MERGED, False),  # the off value is inherited: removing nothing local keeps it direct
+        (SHADOWED, True),  # removing or replacing the local value reveals the inherited one
+        (ROOT_MERGED, False),
+        (TOOLS_MERGED, False),
+        (SCALAR_ALIAS, False),
+        (TOOLS_ALIAS, True),
+        ("tools: [a, b]\n", True),  # never replace an unknown top-level value
+    ],
+    ids=[
+        "alias",
+        "anchor-owner",
+        "merge-inherited",
+        "merge-shadowed",
+        "root-merge",
+        "tools-merge",
+        "scalar-alias",
+        "tools-alias",
+        "tools-not-a-mapping",
+    ],
+)
+def test_aliases_anchors_and_merges_on_the_path_are_refused_unchanged(home: Path, text: str, enabled: bool) -> None:
+    config = write(home, text)
+    with pytest.raises(DirectToolsError) as error:
+        set_direct(home, enabled)
+    assert error.value.code == "config_unsupported_shape"
+    assert config.read_text(encoding="utf-8") == text
+
+
+@posix_only
+def test_an_unused_anchor_and_merges_off_the_path_are_fine(home: Path) -> None:
+    text = "defaults: &d\n  model: x\nprofile:\n  <<: *d\ntools:\n  tool_search: &own\n    listing: auto\n"
+    config = write(home, text)
+    set_direct(home, True)
+    assert read_mode(home)["direct"] is True
+    set_direct(home, False)
+    assert config.read_text(encoding="utf-8") == text
+
+
+@posix_only
+@pytest.mark.parametrize(
+    "text",
+    [
+        "tools:\n  tool_search:\n    enabled: maybe\n",
+        "tools:\n  tool_search:\n    enabled: 2\n",
+        "tools:\n  tool_search:\n    enabled: [off]\n",
+        'tools:\n  tool_search: "auto"\n',
+        "tools:\n  tool_search: 0\n",
+    ],
+)
+def test_on_refuses_a_value_it_would_not_restore(home: Path, text: str) -> None:
+    config = write(home, text)
     with pytest.raises(DirectToolsError) as error:
         set_direct(home, True)
-    assert error.value.code == "config_unreadable"
-    assert config.read_text(encoding="utf-8") == "tools: [a, b]\n"
+    assert error.value.code == "config_has_setting"
+    assert config.read_text(encoding="utf-8") == text
 
 
-def test_error_codes_are_closed() -> None:
-    assert ERROR_CODES == ("config_unreadable", "config_vault_managed", "config_write_failed")
+@posix_only
+@pytest.mark.parametrize(
+    "value", ["auto", '"auto"', "on", "true", "yes", "y", "1", "Auto", ""], ids=lambda v: v or "null"
+)
+def test_on_replaces_an_explicit_deferral_and_off_then_removes_the_key(home: Path, value: str) -> None:
+    config = write(home, f"tools:\n  tool_search:\n    enabled: {value}\n    listing: auto\n")
+    set_direct(home, True)
+    assert config.read_text(encoding="utf-8") == 'tools:\n  tool_search:\n    enabled: "off"\n    listing: auto\n'
+    set_direct(home, False)
+    # Not restored: the key goes, and Hermes's default ("auto") is the same deferral.
+    assert config.read_text(encoding="utf-8") == "tools:\n  tool_search:\n    listing: auto\n"
+
+
+# -- the write is verified --------------------------------------------------------------------------
+
+
+@posix_only
+@pytest.mark.parametrize("existed", [True, False])
+def test_a_write_hermes_would_not_read_as_asked_is_put_back(
+    home: Path, monkeypatch: pytest.MonkeyPatch, existed: bool
+) -> None:
+    """The file is read back after the write; a wrong result is replaced by the old bytes."""
+    original = "model: x  # kept\n"
+    config = home / "config.yaml"
+    if existed:
+        write(home, original, mode=0o640)
+    real = pw._atomic_write_text
+    calls: list[str] = []
+
+    def broken_then_real(path: Path, text: str, *, mode: int | None = None) -> None:
+        calls.append(text)
+        real(path, "model: x\n" if len(calls) == 1 else text, mode=mode)  # the first write loses the setting
+
+    monkeypatch.setattr(pw, "_atomic_write_text", broken_then_real)
+    with pytest.raises(DirectToolsError) as error:
+        set_direct(home, True)
+    assert error.value.code == "config_write_failed"
+    if existed:
+        assert config.read_text(encoding="utf-8") == original and stat.S_IMODE(config.stat().st_mode) == 0o640
+        assert calls[1] == original
+    else:
+        assert not config.exists()
+
+
+@posix_only
+def test_an_edit_that_changes_anything_else_is_refused_before_writing(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mordred_hermes.wizard import _direct_tools_yaml as yamlmod
+
+    real = yamlmod._apply
+
+    def also_other(root: object, enabled: bool) -> None:
+        real(root, enabled)
+        root["model"] = "changed"  # type: ignore[index]
+
+    monkeypatch.setattr(yamlmod, "_apply", also_other)
+    config = write(home, "model: x\n")
+    with pytest.raises(DirectToolsError) as error:
+        set_direct(home, True)
+    assert error.value.code == "config_unsupported_shape"
+    assert config.read_text(encoding="utf-8") == "model: x\n"
 
 
 # -- a vault-managed config.yaml (``encryption enable config``) ---------------------------------------
@@ -429,13 +664,27 @@ def test_on_inserts_before_the_comments_that_follow_and_off_restores_the_file(
 
 
 @posix_only
-def test_a_comment_only_config_keeps_its_comment(home: Path) -> None:
-    config = write(home, "# only a comment\n")
+@pytest.mark.parametrize("text", ["# only a comment\n", "", "# one\n\n# two\n"], ids=["comment", "empty", "two"])
+def test_an_empty_or_comment_only_config_round_trips_byte_for_byte(home: Path, text: str) -> None:
+    config = write(home, text)
     set_direct(home, True)
-    assert config.read_text(encoding="utf-8") == '# only a comment\ntools:\n  tool_search:\n    enabled: "off"\n'
+    assert config.read_text(encoding="utf-8") == text + 'tools:\n  tool_search:\n    enabled: "off"\n'
     set_direct(home, False)
-    assert config.read_text(encoding="utf-8").startswith("# only a comment\n")
+    assert config.read_text(encoding="utf-8") == text
     assert read_mode(home)["direct"] is False
+
+
+@posix_only
+def test_removing_a_first_key_keeps_the_head_comment_and_the_next_keys_comment(home: Path) -> None:
+    text = (
+        'tools:\n  tool_search:\n    # head comment for the block\n    enabled: "off"\n'
+        "    # about listing\n    listing: auto\nx: 1\n"
+    )
+    config = write(home, text)
+    set_direct(home, False)
+    assert config.read_text(encoding="utf-8") == (
+        "tools:\n  tool_search:\n    # head comment for the block\n    # about listing\n    listing: auto\nx: 1\n"
+    )
 
 
 # -- races and refusals --------------------------------------------------------------------------------
@@ -474,3 +723,80 @@ def test_an_inaccessible_seal_marker_is_unreadable_not_a_traceback(home: Path, m
         set_direct(home, True)
     assert error.value.code == "config_unreadable"
     assert not (home / "config.yaml").exists()
+
+
+@posix_only
+@pytest.mark.parametrize("managed", [True, False])
+def test_a_config_sealed_away_after_the_read_is_refused_and_never_recreated(
+    home: Path, monkeypatch: pytest.MonkeyPatch, managed: bool
+) -> None:
+    """A reseal (it takes no Mordred lock) removes the plaintext between the read and the write."""
+    if managed:
+        _manage(home)
+    config = write(home, CONFIG)
+    real = direct_tools.edited
+
+    def resealed_meanwhile(*args: object) -> str | None:
+        result = real(*args)  # type: ignore[arg-type]
+        config.unlink()
+        return result
+
+    monkeypatch.setattr(direct_tools, "edited", resealed_meanwhile)
+    with pytest.raises(DirectToolsError) as error:
+        set_direct(home, True)
+    assert error.value.code == ("config_vault_managed" if managed else "config_write_failed")
+    assert not config.exists()  # no partial (or any) config.yaml appeared
+
+
+@posix_only
+def test_a_config_rewritten_after_the_read_is_refused_and_the_other_write_kept(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = write(home, CONFIG)
+    real = direct_tools.edited
+    other = "model:\n  default: written-by-hermes\n"
+
+    def rewritten_meanwhile(*args: object) -> str | None:
+        result = real(*args)  # type: ignore[arg-type]
+        config.write_text(other, encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(direct_tools, "edited", rewritten_meanwhile)
+    with pytest.raises(DirectToolsError) as error:
+        set_direct(home, True)
+    assert error.value.code == "config_write_failed"
+    assert config.read_text(encoding="utf-8") == other
+
+
+def test_windows_a_yaml_warning_publishes_nothing(windows, capfd: pytest.CaptureFixture[str]) -> None:
+    b, paths = windows
+    put(b.home, "config.yaml", DUPLICATE_ANCHOR.encode())
+    before = b.home.files.copy(), b.policy.files.copy()
+    assert read_mode(paths.home)["code"] == "config_unreadable"
+    with pytest.raises(DirectToolsError) as error:
+        set_direct(paths.home, True)
+    assert error.value.code == "config_unreadable"
+    assert (b.home.files, b.policy.files) == before
+    out, err = capfd.readouterr()
+    assert CANARY not in out + err
+
+
+@pytest.mark.parametrize("text,enabled", [(ALIAS, True), (MERGED, False)], ids=["alias", "merge"])
+def test_windows_refuses_the_same_shapes(windows, text: str, enabled: bool) -> None:
+    b, paths = windows
+    put(b.home, "config.yaml", text.encode())
+    before = b.home.files.copy(), b.policy.files.copy()
+    with pytest.raises(DirectToolsError) as error:
+        set_direct(paths.home, enabled)
+    assert error.value.code == "config_unsupported_shape"
+    assert (b.home.files, b.policy.files) == before
+
+
+def test_windows_a_write_read_back_wrong_is_put_back(windows, monkeypatch: pytest.MonkeyPatch) -> None:
+    b, paths = windows
+    put(b.home, "config.yaml", CONFIG.encode())
+    monkeypatch.setattr(direct_tools, "read_mode", lambda home: {"direct": False, "source": "default", "raw": None})
+    with pytest.raises(DirectToolsError) as error:
+        set_direct(paths.home, True)
+    assert error.value.code == "config_write_failed"
+    assert b.home.files["config.yaml"][0] == CONFIG.encode()

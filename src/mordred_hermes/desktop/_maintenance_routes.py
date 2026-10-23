@@ -238,7 +238,15 @@ async def update_apply(body: dict[str, Any] | None = None) -> Any:
 # -- Hermes's direct tool calls ----------------------------------------------------------
 
 #: The closed codes of ``wizard.direct_tools`` (an unexpected failure is ``config_write_failed``).
-TOOLS_ERROR_CODES = frozenset({"config_unreadable", "config_vault_managed", "config_write_failed"})
+TOOLS_ERROR_CODES = frozenset(
+    {
+        "config_unreadable",
+        "config_vault_managed",
+        "config_write_failed",
+        "config_unsupported_shape",
+        "config_has_setting",
+    }
+)
 
 
 @router.get("/tools/direct")

@@ -362,6 +362,10 @@
     ],
     "src/mordred_hermes/privacy_check/skill_frontmatter.py": [],
     "src/mordred_hermes/wizard/_defaults.py": [],
+    "src/mordred_hermes/wizard/_direct_tools_yaml.py": [
+      "extension",
+      "macos"
+    ],
     "src/mordred_hermes/wizard/_network_answers.py": [],
     "src/mordred_hermes/wizard/_prompt_io.py": [],
     "src/mordred_hermes/wizard/_term.py": [],

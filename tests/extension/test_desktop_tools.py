@@ -156,3 +156,20 @@ def test_no_answer_or_log_carries_another_config_value(configured: Any) -> None:
     ]
     assert CANARY not in str(answers) and not any(CANARY in line for line in configured.logs.lines)
     assert not configured.leaked(answers)
+
+
+def test_an_aliased_tool_search_is_refused_by_the_route(desktop: Any) -> None:
+    text = "base: &a\n  enabled: auto\ntools:\n  tool_search: *a\n"
+    config(desktop).write_text(text, encoding="utf-8")
+    assert desktop.post("/tools/direct", {"direct": True}) == {"ok": False, "error": "config_unsupported_shape"}
+    assert config(desktop).read_text(encoding="utf-8") == text
+
+
+def test_a_yaml_warning_is_unreadable_and_quoted_nowhere(desktop: Any, capfd: pytest.CaptureFixture[str]) -> None:
+    config(desktop).write_text(f"model: &m {CANARY}\nother: &m {CANARY}-2\n", encoding="utf-8")
+    status = desktop.get("/status?client_version=4")
+    assert status["tools"] == {"direct": None, "source": "unreadable"}
+    assert desktop.get("/tools/direct") == {"ok": False, "error": "config_unreadable"}
+    assert desktop.post("/tools/direct", {"direct": True}) == {"ok": False, "error": "config_unreadable"}
+    out, err = capfd.readouterr()
+    assert CANARY not in out + err and not any(CANARY in line for line in desktop.logs.lines)

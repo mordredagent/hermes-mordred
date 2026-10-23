@@ -122,7 +122,9 @@ def test_an_unreadable_config_is_refused_with_exit_1(
     assert no_canary(out, err)
 
 
-@pytest.mark.parametrize("code", ["config_vault_managed", "config_write_failed"])
+@pytest.mark.parametrize(
+    "code", ["config_vault_managed", "config_write_failed", "config_unsupported_shape", "config_has_setting"]
+)
 def test_a_refused_write_exits_1_with_its_code_and_remedy(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, code: str
 ) -> None:
@@ -154,3 +156,19 @@ def test_no_other_config_value_is_ever_printed(home: Path, capsys: pytest.Captur
         run(command)
     out, err = capsys.readouterr()
     assert out and no_canary(out, err)
+
+
+def test_every_closed_code_has_a_remedy() -> None:
+    from mordred_hermes.wizard.direct_tools import ERROR_CODES
+
+    assert set(direct_tools_cli.REMEDIES) == set(ERROR_CODES)
+    assert "Edit config.yaml by hand." in direct_tools_cli.REMEDIES["config_unsupported_shape"]
+    assert "Edit config.yaml by hand." in direct_tools_cli.REMEDIES["config_has_setting"]
+
+
+def test_a_yaml_warning_prints_nothing_but_the_refusal(home: Path, capfd: pytest.CaptureFixture[str]) -> None:
+    (home / "config.yaml").write_text(f"model: &m {CANARIES[0]}\nother: &m {CANARIES[1]}\n", encoding="utf-8")
+    for command in ("status", "on", "off"):
+        assert run(command) == 1
+    out, err = capfd.readouterr()
+    assert "direct-tools refused (config_unreadable)" in err and no_canary(out, err)

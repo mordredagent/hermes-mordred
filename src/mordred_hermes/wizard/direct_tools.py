@@ -11,85 +11,55 @@ discovery) is gone. Mordred therefore never changes it on its own; only an
 explicit request (``hermes-mordred direct-tools on|off``, the Desktop page's
 Tool calls card) calls :func:`set_direct`.
 
-- :func:`read_mode` reports the setting the way Hermes reads it
-  (``ToolSearchConfig.from_raw``): direct when ``enabled`` is the boolean
-  false or a string Hermes reads as off (``"off"``, also ``"false"``, ``"no"``,
-  ``"0"``, any case), or when the legacy ``tools.tool_search`` itself is
-  ``false``. Anything else, or no such key, is deferred.
-- :func:`set_direct` writes ``enabled: "off"`` (``True``) or removes what
-  makes the tools direct (``False``), and writes nothing when the setting is
-  already as asked.
+- :func:`read_mode` reports the setting exactly as Hermes reads it (its YAML
+  1.1 loader and ``ToolSearchConfig.from_raw``; see :mod:`._direct_tools_yaml`).
+- :func:`set_direct` writes ``enabled: "off"`` (``True``) or removes what makes
+  the tools direct (``False``), and writes nothing when the setting is already
+  as asked. ``on`` replaces only an absent value or an explicit deferral.
 
-The file goes through the wizard's own round-trip writer: ruamel round-trip
-(comments, key order and every other key preserved), the policy write lock,
-and ``_atomic_write_text`` (temporary file plus ``os.replace``) with the
-file's mode kept; on Windows the checked canonical transaction
-(``PolicyWriter.transform_config``). A vault-managed config.yaml
-(``encryption enable config``) is edited as its plaintext working copy when
-one is on disk, like every other wizard writer, and the reseal re-enrolls the
-changed copy; while the plaintext is sealed away the read answers
-``unreadable`` and the write is refused with ``config_vault_managed``.
+The file goes through the wizard's own writer: ruamel round-trip (comments, key
+order and every other key preserved), the policy write lock and
+``_atomic_write_text`` (temporary file plus ``os.replace``) with the file's
+mode kept; on Windows the checked canonical transaction (``PolicyWriter``).
+Before the write, the new text must read as asked and differ in this setting
+only; after it, the file is read again and, if Hermes would not read it as
+asked, the previous bytes are put back (``config_write_failed``). A
+vault-managed config.yaml (``encryption enable config``) is edited as its
+plaintext working copy when one is on disk, like every other wizard writer,
+and the reseal re-enrolls the changed copy; no plaintext means it is sealed
+away (``config_vault_managed``), and a plaintext that disappears or changes
+between the read and the write is refused, never recreated.
 
 Failures are the closed codes of :data:`ERROR_CODES`. Nothing here logs,
-returns or chains an exception that could carry another config value: a YAML
-error message quotes the offending line, so it is dropped (``from None``).
+prints, returns or chains anything that could carry another config value:
+YAML errors and warnings quote source lines, so they are captured and dropped.
 """
 
 from __future__ import annotations
 
-import io
-import stat
-from collections.abc import Mapping, MutableMapping
+import contextlib
+import os
 from pathlib import Path
 from typing import Any, Final
+
+from ._direct_tools_yaml import DirectToolsError, edited, hermes_data, mode_of
 
 __all__ = ["CONFIG_NAME", "ERROR_CODES", "DirectToolsError", "read_mode", "set_direct"]
 
 CONFIG_NAME: Final = "config.yaml"
-ERROR_CODES: Final = ("config_unreadable", "config_vault_managed", "config_write_failed")
-#: What Hermes reads as "off" after ``str(value).strip().lower()`` (``tools/tool_search.py``).
-_OFF: Final = frozenset({"off", "false", "0", "no"})
-#: The longest ``raw`` value reported (the key's own value, never another one).
-_RAW_LIMIT: Final = 32
-
-
-class DirectToolsError(Exception):
-    """A refusal with one of :data:`ERROR_CODES`; the message is the code alone."""
-
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
-        self.code = code
+ERROR_CODES: Final = (
+    "config_unreadable",
+    "config_vault_managed",
+    "config_write_failed",
+    "config_unsupported_shape",
+    "config_has_setting",
+)
 
 
 def _windows() -> bool:
     from .. import _config_text_io
 
     return _config_text_io._windows()
-
-
-def _is_off(value: Any) -> bool:
-    return str(value).strip().lower() in _OFF
-
-
-def _raw(value: Any) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    return str(value)[:_RAW_LIMIT]
-
-
-def _mode_of(root: Any) -> dict[str, Any]:
-    """``{"direct", "source", "raw"}`` for a loaded config root (``None``: no config.yaml)."""
-    default: dict[str, Any] = {"direct": False, "source": "default", "raw": None}
-    tools = root.get("tools") if isinstance(root, Mapping) else None
-    if not isinstance(tools, Mapping) or "tool_search" not in tools:
-        return default
-    search = tools["tool_search"]
-    if isinstance(search, bool):  # the legacy shape: ``tools.tool_search: true | false``
-        return {"direct": search is False, "source": "config", "raw": _raw(search)}
-    if not isinstance(search, Mapping) or "enabled" not in search:
-        return default
-    value = search["enabled"]
-    return {"direct": _is_off(value), "source": "config", "raw": _raw(value)}
 
 
 def _managed(home: Path) -> bool:
@@ -107,188 +77,80 @@ def _yaml() -> Any:
     return _round_trip_yaml()
 
 
-def _parse(yaml: Any, text: str | None) -> MutableMapping[str, Any] | None:
-    """The round-trip root of ``text``; ``None`` for no file.
+_Stamp = tuple[int, int, int, int, int]
 
-    An empty or comment-only file is an empty mapping on POSIX, like the other
-    POSIX writers. The Windows checked writer never turns a present
-    non-mapping config into fresh state, so there it is ``config_unreadable``.
-    """
-    from ruamel.yaml.comments import CommentedMap
-    from ruamel.yaml.error import YAMLError
 
-    if text is None:
+def _stamp(path: Path) -> _Stamp | None:
+    """Identity, size, mtime and mode of ``path`` (``None``: absent)."""
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
         return None
-    try:
-        root = yaml.load(text)
-    except (YAMLError, ValueError):
-        raise DirectToolsError("config_unreadable") from None
-    if root is None and not _windows():
-        return CommentedMap()
-    if not isinstance(root, MutableMapping):
-        raise DirectToolsError("config_unreadable")
-    return root
+    return metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns, metadata.st_mode
 
 
-def _read_text(home: Path) -> str | None:
-    """config.yaml's text, ``None`` when there is none.
+def _read_posix(home: Path) -> tuple[str | None, _Stamp | None]:
+    """config.yaml's text and stamp; refuses a sealed-away vault copy and a file changing meanwhile.
 
-    No plaintext while config.yaml is vault-managed means it is sealed away:
-    ``config_vault_managed``. The marker is checked after the read, so a
-    reseal that removes the plaintext meanwhile is refused too, never taken
-    for "no config.yaml".
+    The seal marker is checked after the read, so a reseal that removes the
+    plaintext during it is refused too, never taken for "no config.yaml".
     """
+    from .policy_writer import _read_regular_text
+
+    path = home / CONFIG_NAME
     try:
-        if _windows():
-            from .._config_io import CanonicalPaths, read_canonical_snapshot
-
-            snapshot = read_canonical_snapshot(CanonicalPaths(home))
-            return None if snapshot.config is None else snapshot.config.data.decode("utf-8")
-        from .policy_writer import _read_regular_text
-
-        text = _read_regular_text(home / CONFIG_NAME)
+        before = _stamp(path)
+        text = _read_regular_text(path)
+        after = _stamp(path)
+        if after != before:  # sealed away (a reseal takes no lock) or replaced while being read
+            sealed = after is None and _managed(home)
+            raise DirectToolsError("config_vault_managed" if sealed else "config_write_failed")
         if text is None and _managed(home):
             raise DirectToolsError("config_vault_managed")
-        return text
-    except (OSError, ValueError):  # UnicodeDecodeError and PrivateFSError included
+        return text, before
+    except (OSError, ValueError):  # UnicodeDecodeError included
+        raise DirectToolsError("config_unreadable") from None
+
+
+def _read_windows(home: Path) -> str | None:
+    from .._config_io import CanonicalPaths, read_canonical_snapshot
+
+    try:
+        snapshot = read_canonical_snapshot(CanonicalPaths(home))
+        return None if snapshot.config is None else snapshot.config.data.decode("utf-8")
+    except (OSError, ValueError):  # PrivateFSError and UnicodeDecodeError included
         raise DirectToolsError("config_unreadable") from None
 
 
 def read_mode(home: Path) -> dict[str, Any]:
     """``{"direct": bool, "source": "config" | "default", "raw": str | None}``.
 
-    ``raw`` is the key's own value (``enabled``, or the legacy
-    ``tools.tool_search`` boolean) as text, at most 32 characters. A config
-    that cannot be read answers ``{"direct": None, "source": "unreadable",
-    "code": <code>}`` (``config_unreadable`` or ``config_vault_managed``).
-    Read-only: it never waits for a lock (POSIX takes none; Windows reads the
-    nonblocking checked snapshot) and creates no file or directory.
+    ``raw`` is the key's own value as Hermes loads it (``enabled``, or the
+    legacy ``tools.tool_search`` scalar) as text, at most 32 characters. A
+    config that cannot be read answers ``{"direct": None, "source":
+    "unreadable", "code": <code>}`` (``config_unreadable`` or
+    ``config_vault_managed``). Read-only: it never waits for a lock (POSIX
+    takes none; Windows reads the nonblocking checked snapshot) and creates
+    no file or directory. On Windows an empty or comment-only config.yaml is
+    unreadable, as for the checked writer.
     """
     try:
-        return _mode_of(_parse(_yaml(), _read_text(home)))
+        text = _read_windows(home) if _windows() else _read_posix(home)[0]
+        data = hermes_data(text)
+        if data is None and text is not None and _windows():
+            raise DirectToolsError("config_unreadable")
+        return mode_of(data)
     except DirectToolsError as exc:
         return {"direct": None, "source": "unreadable", "code": exc.code}
 
 
-# -- comments ---------------------------------------------------------------------------------------
-#
-# ruamel keeps the comment lines that follow a value on the last line of that value
-# (``ca.items[key][2]`` in a mapping, ``ca.items[index][0]`` in a sequence): the
-# line's own end-of-line comment first, then the full-line comments up to the next
-# key. Those full lines belong to whatever comes next ("# provider settings below"),
-# so an inserted or removed block hands them on instead of taking them along.
-
-
-def _block(value: Any) -> bool:
-    from ruamel.yaml.comments import CommentedMap, CommentedSeq
-
-    return isinstance(value, CommentedMap | CommentedSeq) and len(value) > 0 and not value.fa.flow_style()
-
-
-def _slot(container: Any, key: Any) -> tuple[list[Any], int]:
-    """The comment entry (and its index) of the last line of ``container[key]``."""
-    from ruamel.yaml.comments import CommentedSeq
-
-    value = container[key]
-    while _block(value):
-        container, key = value, (len(value) - 1 if isinstance(value, CommentedSeq) else list(value)[-1])
-        value = container[key]
-    entry: list[Any] = container.ca.items.setdefault(key, [None, None, None, None])
-    return entry, 0 if isinstance(container, CommentedSeq) else 2
-
-
-def _take_following(container: Any, key: Any) -> str:
-    """Detach the full-line comments after ``container[key]``; its end-of-line comment stays."""
-    entry, index = _slot(container, key)
-    token = entry[index]
-    if token is None:
-        return ""
-    own, newline, following = str(token.value).partition("\n")
-    if not following:
-        return ""
-    token.value = own + newline
-    return following
-
-
-def _comment(text: str) -> Any:
-    from ruamel.yaml.error import CommentMark
-    from ruamel.yaml.tokens import CommentToken
-
-    return CommentToken(text, CommentMark(0), None)
-
-
-def _put_following(container: Any, key: Any, following: str) -> None:
-    """Attach full-line comments after the last line of ``container[key]``."""
-    if not following:
+def _verify_or_restore(home: Path, enabled: bool, restore: Any) -> None:
+    """Read the file back; if Hermes would not read it as asked, put the old bytes back and refuse."""
+    if read_mode(home)["direct"] is enabled:
         return
-    entry, index = _slot(container, key)
-    if entry[index] is None:
-        entry[index] = _comment("\n" + following)  # the line itself has no end-of-line comment
-    else:
-        entry[index].value = str(entry[index].value) + following
-
-
-def _set_block(mapping: Any, key: str, value: Any) -> None:
-    """``mapping[key] = value`` (appended or replaced), handing on the comments that followed."""
-    keys = list(mapping)
-    if key in mapping:
-        following = _take_following(mapping, key)
-    elif keys:
-        following = _take_following(mapping, keys[-1])
-    else:
-        following = ""
-    mapping[key] = value
-    _put_following(mapping, key, following)
-
-
-def _remove(mapping: Any, key: str) -> None:
-    """``del mapping[key]``, keeping the comments that followed it before the next key."""
-    keys = list(mapping)
-    position = keys.index(key)
-    following = _take_following(mapping, key)
-    del mapping[key]
-    mapping.ca.items.pop(key, None)
-    if not following:
-        return
-    if position > 0:
-        _put_following(mapping, keys[position - 1], following)
-        return
-    # The first key: the comments now precede the mapping's first key (the document's, at the root).
-    head, before = mapping.ca.comment if mapping.ca.comment else (None, None)
-    mapping.ca.comment = [head, [*(before or []), _comment(following)]]
-
-
-def _apply(root: MutableMapping[str, Any], enabled: bool) -> bool:
-    """Make ``root`` direct (``enabled``) or deferred in place; ``False`` when it already was."""
-    from ruamel.yaml.comments import CommentedMap
-    from ruamel.yaml.scalarstring import DoubleQuotedScalarString
-
-    if _mode_of(root)["direct"] is enabled:
-        return False
-    tools = root.get("tools")
-    if enabled:
-        off = DoubleQuotedScalarString("off")
-        if tools is None:  # absent or null
-            _set_block(root, "tools", CommentedMap([("tool_search", CommentedMap([("enabled", off)]))]))
-        elif not isinstance(tools, MutableMapping):
-            raise DirectToolsError("config_unreadable")  # never replace an unknown top-level value
-        elif not isinstance(tools.get("tool_search"), MutableMapping):  # absent, null, legacy boolean, scalar
-            _set_block(tools, "tool_search", CommentedMap([("enabled", off)]))
-        else:
-            _set_block(tools["tool_search"], "enabled", off)
-        return True
-    # Direct now: ``tool_search`` is the legacy false or a mapping whose ``enabled`` is off.
-    # Remove that, and each mapping it leaves empty, as one block.
-    if not isinstance(tools, MutableMapping):
-        return False
-    search = tools["tool_search"]
-    mapping, key = (
-        (search, "enabled") if isinstance(search, MutableMapping) and len(search) > 1 else (tools, "tool_search")
-    )
-    if mapping is tools and len(tools) == 1:
-        mapping, key = root, "tools"
-    _remove(mapping, key)
-    return True
+    with contextlib.suppress(DirectToolsError, OSError):
+        restore()
+    raise DirectToolsError("config_write_failed")
 
 
 def _set_posix(home: Path, enabled: bool) -> None:
@@ -297,25 +159,22 @@ def _set_posix(home: Path, enabled: bool) -> None:
     path = home / CONFIG_NAME
     try:
         with _policy_write_lock(home / "mordred"):
-            text = _read_text(home)
-            yaml = _yaml()
-            root = _parse(yaml, text)
-            if root is None:
-                if not enabled:
-                    return  # no config.yaml: Hermes's default is already deferred
-                from ruamel.yaml.comments import CommentedMap
-
-                root = CommentedMap()
-            # ruamel drops the comments of a file without any value (empty or comment-only): keep its text.
-            preamble = text if enabled and text and not root and yaml.load(text) is None else ""
-            if not _apply(root, enabled):
+            text, stamp = _read_posix(home)
+            mode = stamp[4] & 0o7777 if stamp is not None and text is not None else None
+            result = edited(_yaml(), text, enabled)
+            if result is None:
                 return
-            buffer = io.StringIO()
-            yaml.dump(root, buffer)
-            if preamble and not preamble.endswith("\n"):
-                preamble += "\n"
-            mode = stat.S_IMODE(path.stat().st_mode) if text is not None else None
-            _atomic_write_text(path, preamble + buffer.getvalue(), mode=mode)
+            if _stamp(path) != stamp:  # sealed away, or rewritten, since the read: never recreate it
+                raise DirectToolsError("config_vault_managed" if _managed(home) else "config_write_failed")
+            _atomic_write_text(path, result, mode=mode)
+
+            def restore() -> None:
+                if text is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    _atomic_write_text(path, text, mode=mode)
+
+            _verify_or_restore(home, enabled, restore)
     except OSError:
         raise DirectToolsError("config_write_failed") from None
 
@@ -327,18 +186,25 @@ class _Unchanged(Exception):
 def _set_windows(home: Path, enabled: bool) -> None:
     from ruamel.yaml.error import YAMLError
 
-    from .policy_writer import PolicyWriter
+    from .._config_io import CONFIG_LIMIT
+    from ._direct_tools_yaml import _quiet
+    from .policy_writer import PolicyWriter, _bounded_utf8
 
-    if read_mode(home)["direct"] is enabled:
-        return  # never open a canonical transaction to rewrite an unchanged file
     mordred = home / "mordred"
-
-    def edit(root: MutableMapping[str, Any]) -> None:
-        if not _apply(root, enabled):  # changed by someone else since the read above
-            raise _Unchanged
-
+    writer = PolicyWriter(home / CONFIG_NAME, mordred / "policy.json", mordred)
+    original: bytes | None = None
     try:
-        PolicyWriter(home / CONFIG_NAME, mordred / "policy.json", mordred).transform_config(edit)
+        # The checked edit parses the pair itself: its warnings are captured too.
+        with _quiet() as caught, writer._checked_edit() as edit:
+            if caught:
+                caught.clear()
+                raise DirectToolsError("config_unreadable")
+            pair = edit.session.read_pair()
+            original = None if pair.config is None else pair.config.data
+            result = edited(_yaml(), None if original is None else original.decode("utf-8"), enabled)
+            if result is None:
+                raise _Unchanged
+            edit.config_bytes = _bounded_utf8(result, CONFIG_LIMIT)
     except _Unchanged:
         return
     except (YAMLError, ValueError):
@@ -346,14 +212,20 @@ def _set_windows(home: Path, enabled: bool) -> None:
     except OSError:
         raise DirectToolsError("config_write_failed") from None
 
+    def restore() -> None:
+        if original is not None:  # a config.yaml this call created stays (the checked writer cannot delete)
+            with writer._checked_edit() as edit:
+                edit.config_bytes = original
+
+    _verify_or_restore(home, enabled, restore)
+
 
 def set_direct(home: Path, enabled: bool) -> None:
-    """Turn Hermes's direct tool calls on (``enabled: "off"``) or off (the key removed).
+    """Turn Hermes's direct tool calls on (``enabled: "off"``) or off (the setting removed).
 
     Writes only when the setting changes; every other key and comment is kept.
-    Raises :class:`DirectToolsError` with ``config_unreadable``,
-    ``config_vault_managed`` or ``config_write_failed``. Hermes reads the
-    setting at start: the change takes effect after a restart.
+    Raises :class:`DirectToolsError` with one of :data:`ERROR_CODES`. Hermes
+    reads the setting at start: the change takes effect after a restart.
     """
     if _windows():
         _set_windows(home, enabled)
