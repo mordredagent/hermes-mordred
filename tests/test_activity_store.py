@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import sqlite3
 import time
@@ -232,6 +233,7 @@ def test_backup_restore_round_trip_preserves_rows_and_bumps_generation(tmp_path:
     backup.parent.mkdir()
     store.backup(backup)
     assert backup.stat().st_mode & 0o777 == 0o600
+    assert backup.read_bytes()[18:20] == b"\x01\x01"  # a rollback-journal copy
     store.append_batch(PEER, PRODUCER, [event(3)])
 
     after = store.restore(backup)
@@ -272,6 +274,47 @@ def test_restore_refuses_a_newer_schema(tmp_path: Path) -> None:
     assert caught.value.code == "schema_newer"
     assert store.meta().store_generation == generation
     assert len(store.events_for_episode("ep-1")) == 2
+
+
+def wal_backup(tmp_path: Path, store: ActivityStore) -> Path:
+    """A copy of ``store`` switched to WAL mode afterwards (as a foreign tool or an older copy might be)."""
+    path = tmp_path / "wal.db"
+    store.backup(path)
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        assert conn.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"
+    assert path.read_bytes()[18:20] == b"\x02\x02"
+    return path
+
+
+def test_restore_refuses_a_wal_backup_and_leaves_the_store_untouched(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    store.append_batch(PEER, PRODUCER, [event(1)])
+    backup = wal_backup(tmp_path, store)
+    store.append_batch(PEER, PRODUCER, [event(2)])
+    generation, before = store.meta().store_generation, store.path.read_bytes()
+
+    with pytest.raises(ActivityRefused) as caught:
+        store.restore(backup)
+
+    assert caught.value.code == "backup_wal_unsupported"
+    assert "WAL" in caught.value.refusal.detail
+    assert store.meta().store_generation == generation and len(store.events_for_episode("ep-1")) == 2
+    assert store.path.read_bytes() == before and before[18:20] == b"\x01\x01"
+
+
+def test_a_backup_of_a_wal_store_is_written_in_rollback_mode_and_restores(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    store.append_batch(PEER, PRODUCER, [event(1)])
+    with store.connection() as conn:
+        assert conn.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"  # however it got there
+    backup = tmp_path / "snapshot.db"
+    store.backup(backup)
+    assert backup.read_bytes()[18:20] == b"\x01\x01"
+    with store.connection() as conn:
+        conn.execute("PRAGMA journal_mode = DELETE")
+    store.append_batch(PEER, PRODUCER, [event(2)])
+    store.restore(backup)
+    assert store.path.read_bytes()[18:20] == b"\x01\x01" and len(store.events_for_episode("ep-1")) == 1
 
 
 def test_retention_deletes_old_raw_events_then_their_emptied_episodes(tmp_path: Path) -> None:

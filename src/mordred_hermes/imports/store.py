@@ -1550,6 +1550,8 @@ def open_import_store(home: Path) -> ImportStore:
 #: The write and read format version bytes of a SQLite header; 2 in either means WAL mode.
 _FORMAT_VERSION_BYTES: Final = slice(18, 20)
 _WAL_VERSION: Final = 2
+#: A journal or WAL sidecar next to the store: a writer is active (or crashed); the status path stays away.
+_SIDECARS: Final = ("-journal", "-wal", "-shm")
 
 
 def readonly_store_path(home: Path) -> Path:
@@ -1684,13 +1686,16 @@ def open_import_store_readonly(home: Path) -> ReadOnlyImportStore:
     (``no_key`` otherwise; read once, the derived key serves every later read of
     the returned store). The path is computed without creating directories; no
     file (or an empty one) is ``store_uninitialised``. Only rollback-journal stores
-    are read: a header that says WAL (either format byte is 2) is
-    ``store_unavailable`` before any connection, whatever sidecars exist, because a
-    ``mode=ro`` reader of a WAL file may create ``-wal``/``-shm`` when a writer
-    closes between any check and the open, and no lock is shared with every
-    writer (``immutable=1`` would disable locking instead). Mordred never puts
-    ``mordred.db`` in WAL mode: it is created in rollback mode, and only a
-    conversion keeps WAL for a file that already was. The file must not be plaintext; it is
+    at rest are read: a header that says WAL (either format byte is 2), or any
+    ``-journal``, ``-wal`` or ``-shm`` next to the file (a writer in a write
+    transaction, or one that crashed), is ``store_unavailable`` before any
+    connection. A ``mode=ro`` reader of a WAL file may create ``-wal``/``-shm``
+    when a writer closes between any check and the open, a hot journal or an
+    orphan sidecar would make it roll back or map and delete it, and no lock is
+    shared with every writer (``immutable=1`` would disable locking instead).
+    Mordred never puts ``mordred.db`` in WAL mode: it is created in rollback mode,
+    a backup is written and restored in rollback mode, and only a conversion
+    keeps WAL for a file that already was. The file must not be plaintext; it is
     opened ``mode=ro`` through SQLCipher itself (not the process ``sqlite3``
     shim, whose key provider could inject the vault) with the derived key, and
     any open failure is ``store_unavailable``; ``import_meta`` is read with plain
@@ -1728,7 +1733,7 @@ def open_import_store_readonly(home: Path) -> ReadOnlyImportStore:
 
 
 def _readonly_file(home: Path) -> Path:
-    """The existing, non-empty, not-plaintext, rollback-journal store file of ``home`` (nothing is created)."""
+    """The existing, non-empty, not-plaintext, rollback-journal store of ``home`` at rest (nothing is created)."""
     from ..dbcrypt import _monitor
 
     path = readonly_store_path(home)
@@ -1740,8 +1745,8 @@ def _readonly_file(home: Path) -> Path:
         raise ImportRefused("store_unavailable")
     if info is None or info.st_size == 0:
         raise ImportRefused("store_uninitialised")
-    if _wal_mode(path):
-        raise ImportRefused("store_unavailable")  # rollback-journal stores only: see open_import_store_readonly
+    if _wal_mode(path) or any(_lstat(Path(f"{path}{suffix}")) is not None for suffix in _SIDECARS):
+        raise ImportRefused("store_unavailable")  # rollback-journal stores at rest only: see open_import_store_readonly
     if _monitor.is_plaintext(path):
         raise ImportRefused("plaintext_store")
     return path

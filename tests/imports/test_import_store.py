@@ -1018,20 +1018,35 @@ def test_either_wal_format_byte_refuses(readonly_home: Path, offset: int) -> Non
     assert caught.value.code == "store_unavailable" and _ReadOnlyModule.calls == []
 
 
-def test_a_rollback_store_with_a_writer_answers_counts(readonly_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("sidecar", ["-journal", "-wal", "-shm"])
+def test_an_orphan_journal_or_sidecar_is_refused_before_any_connection(readonly_home: Path, sidecar: str) -> None:
     commit(bound_store(readonly_home), tg_conv(), [authored(1, text="SECRET one")])
     path = store_path(readonly_home)
-    monkeypatch.setattr(store_module, "BUSY_TIMEOUT_S", 0.05)
-    holder = sqlite3.connect(path, isolation_level=None)  # a fetch writing a batch
+    assert path.read_bytes()[18:20] == b"\x01\x01"  # a rollback-journal header
+    Path(f"{path}{sidecar}").write_bytes(b"left by a crashed writer")
+    before = {item.name: item.read_bytes() for item in path.parent.iterdir()}
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(readonly_home)
+    assert caught.value.code == "store_unavailable" and _ReadOnlyModule.calls == []
+    assert {item.name: item.read_bytes() for item in path.parent.iterdir()} == before  # nothing rolled back or deleted
+
+
+def test_a_rollback_store_with_a_write_in_flight_is_refused(readonly_home: Path) -> None:
+    commit(bound_store(readonly_home), tg_conv(), [authored(1, text="SECRET one")])
+    path = store_path(readonly_home)
+    holder = sqlite3.connect(path, isolation_level=None)  # a fetch writing a batch: its -journal exists
     holder.execute("BEGIN IMMEDIATE")
     holder.execute("INSERT INTO import_meta (key, value) VALUES ('mail_imap.x.last', '{}')")
     try:
-        with open_import_store_readonly(readonly_home) as store:
-            assert store.status()["sources"]["telegram"]["messages"] == 1  # the uncommitted write is not visible
-        assert not Path(f"{path}-wal").exists() and not Path(f"{path}-shm").exists()
+        assert Path(f"{path}-journal").exists()
+        with pytest.raises(ImportRefused) as caught:
+            open_import_store_readonly(readonly_home)
+        assert caught.value.code == "store_unavailable" and _ReadOnlyModule.calls == []
     finally:
         holder.rollback()
         holder.close()
+    with open_import_store_readonly(readonly_home) as store:  # at rest again: counts
+        assert store.status()["sources"]["telegram"]["messages"] == 1
 
 
 def test_the_read_only_store_keeps_one_connection_for_its_life(readonly_home: Path) -> None:

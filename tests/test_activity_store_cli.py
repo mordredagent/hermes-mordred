@@ -121,6 +121,27 @@ def test_restore_refuses_another_profiles_copy(
     assert store.meta().store_generation == generation
 
 
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_restore_refuses_a_wal_backup(
+    store: ActivityStore, tmp_path: Path, confirmed: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import contextlib
+    import sqlite3
+
+    seed_episode(store)
+    dest = tmp_path / "snapshot.db"
+    store.backup(dest)
+    with contextlib.closing(sqlite3.connect(dest)) as conn:
+        conn.execute("PRAGMA journal_mode = WAL")
+    generation, events = store.meta().store_generation, _events(store)
+    argv = ["activity", "restore", "--input", str(dest)] + (["--yes"] if confirmed else [])
+
+    assert cli.main(argv) == 1
+
+    assert "refused (backup_wal_unsupported)" in capsys.readouterr().err
+    assert (store.meta().store_generation, _events(store)) == (generation, events)
+
+
 def test_restore_of_a_missing_file_is_refused_without_creating_it(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

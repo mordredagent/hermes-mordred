@@ -64,6 +64,7 @@ _DETAILS = {
     "unkeyed_connection": "the activity store connection is not keyed",
     "plaintext_store": "the activity store is readable without the database key",
     "profile_mismatch": "the activity store belongs to another Hermes profile",
+    "backup_wal_unsupported": "the backup is in WAL mode; restore takes the rollback-journal backups Mordred writes",
 }
 
 
