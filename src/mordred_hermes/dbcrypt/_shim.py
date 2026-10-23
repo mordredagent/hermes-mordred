@@ -72,14 +72,20 @@ def apply_key(conn: Any, key: DatabaseKey) -> None:
 
 
 def _is_encrypted_copy(path: str, key: DatabaseKey, sc: Any) -> bool:
-    """An existing file outside Hermes's home that is one of our encrypted databases."""
+    """An existing file outside Hermes's home that is one of our encrypted databases.
+
+    Probed only through ``sc``, the library of every connection this module
+    opens, never with a plain ``open()``: Hermes may have the file open
+    already, and closing any other descriptor of it would drop every POSIX
+    lock this process holds on it (see ``_monitor._own_sqlite``). SQLite
+    rejects a file without its header itself.
+    """
     try:
-        with open(path, "rb") as handle:
-            if handle.read(len(SQLITE_MAGIC)) != SQLITE_MAGIC:
-                return False
-    except OSError:
+        if os.path.getsize(path) == 0:
+            return False  # a new file Hermes is about to create, not a copy
+        probe = sc.connect(f"file:{Path(path).as_posix()}?mode=ro", uri=True)
+    except (OSError, sc.Error):
         return False
-    probe = sc.connect(f"file:{Path(path).as_posix()}?mode=ro", uri=True)
     try:
         apply_key(probe, key)
         probe.execute("SELECT count(*) FROM sqlite_master").fetchone()
