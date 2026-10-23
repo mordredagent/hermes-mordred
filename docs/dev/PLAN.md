@@ -2523,11 +2523,14 @@ One component per PR, all targeting `dev`. Each PR runs
   records (`touch_id_policy_mismatch`); `imap_sync.py` persists `last_attempt` and
   `last_success`; `imap.py` parses the response code from `exc.args[0]` (bytes or
   str) and keeps the hint off `FetchResult.as_dict()`; the setup flow takes the
-  writer lock for admission and `finish`, reaps on every call, allows at most 2
-  flows (`mail_setup_busy`), builds provisional credentials and validates the
-  selection (`invalid_selection`); `imports.store.open_import_store_readonly(home)`
-  (gate, `keyed_opener`, plain schema read, `store_uninitialised`, key check by
-  `HERMES_MEMORY_KEY` presence, no schema initialisation).
+  writer lock for admission and `finish`, reaps on every call and through a public
+  `reap()`, allows ONE pending flow (`mail_setup_busy`), builds provisional
+  credentials, validates the selection (`invalid_selection`), keeps the generation
+  tombstone `<home>/mordred/mail/generation` (`mail_setup_stale`) and re-checks the
+  effective key policy at finish. `imports.store.open_import_store_readonly(home)` is
+  non-creating (pure path resolution, `is_file()` first, `file:?mode=ro`) with its own
+  non-unlocking gate (key material must decode to 32 bytes; no `check_protection`, no
+  provider), `store_uninitialised`, `disk_full`, and no schema initialisation.
 - Files: `imap.py` (`ImapError.hint`, `IMAP_HINTS`), `setup_flow.py`
   (`MailSetupFlow`, `MailSetupFlows`, `MailSetupError`), `forget.py`
   (`forget()`), `cmd_setup` and `cmd_forget` driving them, hint printing in
@@ -2546,7 +2549,8 @@ One component per PR, all targeting `dev`. Each PR runs
   `client_version=4` with the "Update Mordred" rendering).
 - Tests: `tests/_desktop_page.py` (the `block()` / `render_page()` helpers moved
   from `test_desktop_windows_page.py`), `tests/test_desktop_page.py` (new) and
-  `tests/test_desktop_windows_page.py` (harness moved, assertions unchanged).
+  `tests/test_desktop_windows_page.py` (harness moved; the `client_version` assertion is updated deliberately, the other
+  assertions are unchanged).
 - Depends on: D1; can run in parallel with D2.
 
 ### D4: Desktop backend and sections
@@ -2555,15 +2559,17 @@ One component per PR, all targeting `dev`. Each PR runs
 - Files: `desktop/api.py` (`/status` v4, `/databases/*`, `/imports/status`,
   `/mail/*`, `vault_anchor_stale` with `anchor_store`) and `plugin.js`
   (`DatabasesStep`, `MailStep`, store-backed Telegram counts, new `MESSAGES` and
-  `IMAP_HINTS`). Also: `POST /vault/enable` (passphrase once), memory-only
-  `/memory/enable` with `vault_required`; `/databases/status` and the three-case
-  `/databases/encrypt`; the shared body-parsing helper (`invalid_body`) applied to
+  `IMAP_HINTS`). Also: `POST /vault/prepare` and `POST /vault/{flow_id}/commit`
+  (passphrase shown before anything is created), `/status.vault`, memory-only
+  `/memory/enable` requiring `env_enrolled && env_injecting` (`env_required`);
+  `/databases/status` and the schedule-or-report `/databases/encrypt` (no `migrate()`);
+  the periodic 30 s reaper for mail and vault flows with `cancel_all()` on shutdown; the shared body-parsing helper (`invalid_body`) applied to
   every secret-bearing route including the existing ones; the closed
-  `_mail_projection` and `_imports_projection`; `telegram_archive.legacy_dialogs`;
+  `_mail_projection` and `_imports_projection`; `telegram_archive: {"legacy": null}`;
   `cancel_all` on forget; a coalescing status refresh. It consumes
   `open_import_store_readonly` from D2.
 - Tests: the complete `tests/extension/test_desktop_api.py` (security-sensitive;
-  adds `/imports/status`, `/databases/status`, `/vault/enable`, setup finish and
+  adds `/imports/status`, `/databases/status`, `/vault/prepare` and `/commit`, setup finish and
   cancel, residue, restart with `job_not_found`, and malformed bodies posted to every
   secret-bearing route) and `tests/test_desktop_page.py`; the live checklist of the design is recorded in
   [CI.md](CI.md#manual-live-device-validation-log).

@@ -850,7 +850,8 @@ regression at the end of D4.
   `mordred-extension` repository. The Mordred page in Hermes Desktop is
   `src/mordred_hermes/desktop/assets/desktop/plugin.js` with
   `src/mordred_hermes/desktop/api.py` behind Hermes's plugin REST bridge; this
-  design targets that, and D1 corrects the TODO entry.
+  design targets that, and D1 corrects the TODO entry. (The TODO entry has since been
+  corrected, so this paragraph is history.)
 - The brief asks for an env-vault route "passphrase twice, unattended by
   default". `/memory/enable` already creates the vault *and* seals memory in
   one `FlowSession`, with a generated passphrase shown once and an

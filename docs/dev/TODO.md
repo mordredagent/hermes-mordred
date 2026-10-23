@@ -824,7 +824,8 @@ Follow-ups left by the landed code:
   - [ ] D4: Desktop backend and sections (`/status` v4, `/databases/*`, `/mail/*`,
     `vault_anchor_stale`, `DatabasesStep`, `MailStep`), then the live checklist in
     [CI.md](CI.md#manual-live-device-validation-log).
-  - [ ] Second Codex pass on the revised design before D4.
+  - [x] Second Codex pass on the revised design before D4.
+  - [ ] Third Codex pass after D2/D4 land (implementation review).
 
 - [ ] CLI counts after the Telegram archive moved to `mordred.db` (found during
   the production rollout, 2026-10-23). `hermes-mordred telegram status` prints

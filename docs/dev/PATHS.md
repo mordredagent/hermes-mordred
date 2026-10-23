@@ -41,6 +41,7 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/telegram/` | extension (Telegram importer) | encrypted read-only Telegram archive |
 | `<home>/mordred/mail/credentials.sealed` | `mail setup` | IMAP address, app password, host, port, own addresses and chosen mailboxes, sealed by the Secure Enclave role `mordred-hermes.mail.credentials.v1`; read by `mail fetch` and `mordred_mail_sync` |
 | `<home>/mordred/mail/credentials.meta.json` | `mail setup` | non-secret flags (account label, Gmail path, mailbox roles, Touch ID); read by `mail status` and the tool's `check_fn` |
+| `<home>/mordred/mail/generation` | `mail setup`, `mail forget`, the Desktop page (`/mail/setup/*`, `/mail/forget`) | setup generation tombstone: random non-secret token, mode 0600, survives forget (`mail_setup_stale`) |
 | `<home>/mordred/mail/.lock` | `mail fetch`, `mordred_mail_sync`, `mail import`, `mail forget`, `mail setup`, the Desktop page (`/mail/*`) | non-blocking per-home mail writer lock (`sync_in_progress`) |
 | `<home>/mordred/reader_sessions.json` | privacy_check reader mode | durable record (SHA-256 digests) of sessions that used a reader tool |
 | `<home>/mordred/uninstall/` | `uninstall` | `.env` lines (`HERMES_MEMORY_KEY`, `MORDRED_*`) moved out of `.env`, mode `0600` |
@@ -523,6 +524,10 @@ Owned by the IMAP mail sync (`mordred_hermes.imports.mail.secrets` and
 - `credentials.meta.json` — `{version, account, gmail, roles, touch_id}`; never
   the address, host or password.
 - `.lock` — the per-home mail writer lock (`flock`, non-blocking).
+- `generation` — mode `0600`, a random 16-byte hex token, not secret; rewritten under
+  the lock by every successful seal and every forget, and survives `mail forget`. A
+  Desktop setup flow records it at `start` and refuses `finish` with
+  `mail_setup_stale` when it changed.
 
 `mail forget --yes` deletes both credential files and the Enclave key, also
 when `credentials.meta.json` is missing or corrupt (the label is then reported
