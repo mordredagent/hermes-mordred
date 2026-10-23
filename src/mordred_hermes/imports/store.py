@@ -115,6 +115,7 @@ import secrets
 import sqlite3
 import stat
 import sys
+import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -166,6 +167,7 @@ __all__ = [
     "ImportRefused",
     "ImportStore",
     "IncomingCopy",
+    "ReadOnlyImportStore",
     "SearchHit",
     "StoredPart",
     "WriteGuard",
@@ -1600,21 +1602,67 @@ def _readonly_gate(home: Path) -> str | None:
     return None
 
 
-def _readonly_opener(key: Any) -> Opener:
-    """Connections through SQLCipher itself, keyed with ``key``: never the shim and its key provider."""
+def _open_readonly(path: Path, key: Any) -> sqlite3.Connection:
+    """One connection through SQLCipher itself, keyed with ``key``: never the shim and its key provider.
 
-    def open_readonly(path: Path) -> sqlite3.Connection:
-        from ..dbcrypt._shim import apply_key
+    ``check_same_thread`` is off because :class:`ReadOnlyImportStore` serialises its
+    single connection with its own lock across the threads that read status.
+    """
+    from ..dbcrypt._shim import apply_key
 
-        conn = _sqlcipher().connect(readonly_uri(path), uri=True, timeout=BUSY_TIMEOUT_S)
-        try:
-            apply_key(conn, key)
-        except BaseException:
-            conn.close()
-            raise
-        return cast(sqlite3.Connection, conn)
+    conn = _sqlcipher().connect(readonly_uri(path), uri=True, timeout=BUSY_TIMEOUT_S, check_same_thread=False)
+    try:
+        apply_key(conn, key)
+        conn.isolation_level = None  # explicit BEGIN / COMMIT, as ImportStore.connection does
+        conn.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT_S * 1000)}")
+    except BaseException:
+        conn.close()
+        raise
+    return cast(sqlite3.Connection, conn)
 
-    return open_readonly
+
+def _no_reopen(_path: Path) -> sqlite3.Connection:
+    raise ImportRefused("store_unavailable")  # a read-only store never opens a second connection
+
+
+class ReadOnlyImportStore(ImportStore):
+    """The status view of ``mordred.db``: ONE read-only connection for the store's whole life.
+
+    Every read runs on the connection :func:`open_import_store_readonly` opened at
+    admission, so nothing is ever reopened: a writer closing meanwhile cannot make a
+    later read recreate the WAL sidecars (while this connection is open, SQLite does
+    not remove them). :meth:`close` (or leaving a ``with`` block, or dropping the
+    object) closes it; a read after that is ``store_unavailable``. Writes fail
+    (``mode=ro``).
+    """
+
+    def __init__(self, path: Path, conn: sqlite3.Connection) -> None:
+        super().__init__(path, _no_reopen)
+        self._conn: sqlite3.Connection | None = conn
+        self._held = threading.Lock()
+
+    @contextlib.contextmanager
+    def connection(self) -> Iterator[sqlite3.Connection]:
+        with self._held, _refusing():
+            if self._conn is None:
+                raise ImportRefused("store_unavailable")
+            yield self._conn
+
+    def close(self) -> None:
+        with self._held:
+            conn, self._conn = self._conn, None
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                conn.close()
+
+    def __enter__(self) -> ReadOnlyImportStore:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        self.close()
 
 
 def _lstat(path: Path) -> os.stat_result | None:
@@ -1626,7 +1674,7 @@ def _lstat(path: Path) -> os.stat_result | None:
         raise ImportRefused("store_unavailable") from None
 
 
-def open_import_store_readonly(home: Path) -> ImportStore:
+def open_import_store_readonly(home: Path) -> ReadOnlyImportStore:
     """Open ``home``'s ``import_*`` tables for status reads: nothing is created, initialised, upgraded or unlocked.
 
     Its own gate sequence (never :func:`~..activity._gate.check_protection`, never a
@@ -1636,8 +1684,8 @@ def open_import_store_readonly(home: Path) -> ImportStore:
     (``no_key`` otherwise; read once, the derived key serves every later read of
     the returned store). The path is computed without creating directories; no
     file (or an empty one) is ``store_uninitialised``. A WAL store whose ``-shm``
-    sidecar is absent is ``store_unavailable``: SQLite would create the sidecar
-    even for a read-only connection (a fetch or an import creates it), and
+    or ``-wal`` sidecar is absent is ``store_unavailable``: SQLite would create it
+    even for a read-only connection (a fetch or an import creates them), and
     ``immutable=1`` would disable locking. The file must not be plaintext; it is
     opened ``mode=ro`` through SQLCipher itself (not the process ``sqlite3``
     shim, whose key provider could inject the vault) with the derived key, and
@@ -1645,9 +1693,10 @@ def open_import_store_readonly(home: Path) -> ImportStore:
     selects (no table: ``store_uninitialised``; a wrong key or an unreadable
     file: ``store_unavailable``; a newer schema: ``schema_newer``; another
     profile: ``profile_mismatch``; an older schema is read as it is). The
-    returned store serves :meth:`ImportStore.status` and other reads (deferred
-    read transactions, which a writer holding ``BEGIN IMMEDIATE`` does not
-    block); callers never write through it. Raises :class:`ImportRefused` with a
+    returned :class:`ReadOnlyImportStore` keeps that one connection for its life
+    and serves :meth:`ImportStore.status` and other reads on it (deferred read
+    transactions, which a writer holding ``BEGIN IMMEDIATE`` does not block);
+    callers close it (``with``) and never write through it. Raises :class:`ImportRefused` with a
     :data:`REFUSAL_CODES` member.
     """
     found = _readonly_gate(home)
@@ -1657,13 +1706,21 @@ def open_import_store_readonly(home: Path) -> ImportStore:
     if key is None:
         raise ImportRefused("no_key")
     path = _readonly_file(home)
-    opener = _readonly_opener(key)
-    meta = _readonly_meta(path, opener)
-    if meta is None:
-        raise ImportRefused("store_uninitialised")
-    if ImportStore._checked_meta(meta).profile_home != os.path.realpath(home):
-        raise ImportRefused("profile_mismatch")
-    return ImportStore(path, opener)
+    try:
+        conn = _open_readonly(path, key)
+    except Exception:  # an open or sidecar failure: never stringified
+        raise ImportRefused("store_unavailable") from None
+    store = ReadOnlyImportStore(path, conn)
+    try:
+        meta = _readonly_meta(store)
+        if meta is None:
+            raise ImportRefused("store_uninitialised")
+        if ImportStore._checked_meta(meta).profile_home != os.path.realpath(home):
+            raise ImportRefused("profile_mismatch")
+    except BaseException:
+        store.close()
+        raise
+    return store
 
 
 def _readonly_file(home: Path) -> Path:
@@ -1687,27 +1744,23 @@ def _readonly_file(home: Path) -> Path:
 
 
 def _wal_without_reader_sidecar(path: Path) -> bool:
-    """A WAL-mode file (header bytes 18-19) whose ``-shm`` is absent: opening it would create the sidecar."""
+    """A WAL-mode file (header bytes 18-19) missing its ``-shm`` or ``-wal``: opening it would create them."""
     try:
         with path.open("rb") as handle:
             header = handle.read(20)
     except OSError:
         raise ImportRefused("store_unavailable") from None
-    return header[18:20] == _WAL_FORMAT and _lstat(Path(f"{path}-shm")) is None
+    if header[18:20] != _WAL_FORMAT:
+        return False
+    return any(_lstat(Path(f"{path}{suffix}")) is None for suffix in ("-shm", "-wal"))
 
 
-def _readonly_meta(path: Path, opener: Opener) -> dict[str, str] | None:
-    """``import_meta`` through one read-only connection (plain selects, no transaction is begun)."""
+def _readonly_meta(store: ReadOnlyImportStore) -> dict[str, str] | None:
+    """``import_meta`` on the store's connection (plain selects, no transaction is begun)."""
     try:
-        conn = opener(path)
-    except Exception:  # an open or sidecar failure: never stringified
-        raise ImportRefused("store_unavailable") from None
-    try:
-        with _refusing():
+        with store.connection() as conn:
             return ImportStore._read_meta(conn)
     except ImportRefused:
         raise
     except Exception:  # SQLCipher's own errors (a wrong key reads as "not a database")
         raise ImportRefused("store_unavailable") from None
-    finally:
-        conn.close()

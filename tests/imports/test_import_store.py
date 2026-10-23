@@ -6,6 +6,7 @@ import contextlib
 import dataclasses
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -998,6 +999,36 @@ def test_a_wal_store_with_a_writer_answers_counts(readonly_home: Path, monkeypat
         holder.close()
 
 
+@pytest.mark.parametrize("present", ["-shm", "-wal"])
+def test_a_wal_store_missing_one_sidecar_is_refused_without_creating_the_other(
+    readonly_home: Path, present: str
+) -> None:
+    path = wal_store(readonly_home)
+    Path(f"{path}{present}").write_bytes(b"")
+    before = sorted(item.name for item in path.parent.iterdir())
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(readonly_home)
+    assert caught.value.code == "store_unavailable" and _ReadOnlyModule.calls == []
+    assert sorted(item.name for item in path.parent.iterdir()) == before
+
+
+def test_the_read_only_store_keeps_one_connection_for_its_life(readonly_home: Path) -> None:
+    commit(bound_store(readonly_home), tg_conv(), [authored(1, text="SECRET one")])
+    with open_import_store_readonly(readonly_home) as store:
+        for _ in range(3):
+            assert store.status()["sources"]["telegram"]["messages"] == 1
+        assert store.get_meta("schema_version") == "2" and store.meta_items("mail_imap.") == {}
+        seen: list[int] = []
+        reader = threading.Thread(target=lambda: seen.append(store.status()["sources"]["telegram"]["messages"]))
+        reader.start()
+        reader.join(5)
+        assert seen == [1]  # another thread reads on the same connection
+    assert len(_ReadOnlyModule.calls) == 1  # opened once, at admission; never reopened
+    with pytest.raises(ImportRefused) as caught:
+        store.status()
+    assert caught.value.code == "store_unavailable"  # closed by the with block
+
+
 def special_home(tmp_path: Path) -> Path:
     home = tmp_path / "we#ird?ho%me"
     home.mkdir()
@@ -1075,6 +1106,47 @@ def test_the_real_shim_s_provider_is_never_consulted(real_shim: Path, monkeypatc
     monkeypatch.delenv("HERMES_MEMORY_KEY")  # gone after admission: later reads keep the derived key
     assert store.status()["sources"]["telegram"]["messages"] == 1
     assert _monitor.is_plaintext(store_path(real_shim)) is False
+
+
+def test_a_writer_closing_after_admission_never_makes_a_read_recreate_the_sidecars(
+    real_shim: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    from mordred_hermes.dbcrypt import _key
+    from mordred_hermes.keyvault.memory_crypto import decode_key
+
+    key = _key.derive(decode_key(MEMORY_KEY))
+    path = store_path(real_shim)
+    writer = _shim.build_module(key=lambda: key, home=lambda: real_shim, has_key=lambda: True)
+    with contextlib.closing(writer.connect(str(path))) as conn:
+        conn.execute("PRAGMA journal_mode = WAL").fetchone()
+    assert not Path(f"{path}-shm").exists()  # every connection closed: SQLite removed the sidecars
+    holder = writer.connect(str(path))  # a fetch running
+    holder.execute("SELECT count(*) FROM import_meta").fetchone()
+    inodes = {suffix: os.stat(f"{path}{suffix}").st_ino for suffix in ("-shm", "-wal")}
+    store = open_import_store_readonly(real_shim)
+    holder.close()  # the fetch ends after the page's admission
+    assert {suffix: os.stat(f"{path}{suffix}").st_ino for suffix in ("-shm", "-wal")} == inodes  # kept, not recreated
+    assert store.status()["sources"]["telegram"]["messages"] == 1
+    store.close()
+    assert sorted(item.name for item in path.parent.iterdir()) == ["mordred.db", "mordred.db-shm", "mordred.db-wal"]
+    assert {suffix: os.stat(f"{path}{suffix}").st_ino for suffix in ("-shm", "-wal")} == inodes
+
+
+def test_an_idle_real_wal_store_is_refused_before_any_sidecar_exists(real_shim: Path) -> None:
+    from mordred_hermes.dbcrypt import _key
+    from mordred_hermes.keyvault.memory_crypto import decode_key
+
+    key = _key.derive(decode_key(MEMORY_KEY))
+    path = store_path(real_shim)
+    writer = _shim.build_module(key=lambda: key, home=lambda: real_shim, has_key=lambda: True)
+    with contextlib.closing(writer.connect(str(path))) as conn:
+        conn.execute("PRAGMA journal_mode = WAL").fetchone()
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(real_shim)
+    assert caught.value.code == "store_unavailable"
+    assert sorted(item.name for item in path.parent.iterdir()) == ["mordred.db"]
 
 
 def test_a_key_removed_right_after_the_gate_is_no_key(real_shim: Path, monkeypatch: pytest.MonkeyPatch) -> None:
