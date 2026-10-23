@@ -556,17 +556,31 @@ _JA_JOINTS: Final = (
     *("に", "の", "と", "ご"),
 )
 _JA_JOINT_RE: Final = re.compile("(?:" + "|".join(_JA_JOINTS) + ")(?![\u3040-\u309f])")
-#: Words a value in a Japanese sentence ends before, after a joint or a space: the verbs that put, send or set a value
+#: Words a value in a Japanese sentence ends before, after a joint or a space. The verbs that put, send or set a value
 #: (log in, sign in, input, send, use, put in, type, press, set, change, register, authenticate, access, confirm,
-#: specify, fill in, update, reset, paste, place) and the Japanese words of :data:`SECRET_VALUE_STOP_WORDS`; matched at
-#: the start of a word ("に変更", "と入力"). A particle with no joint reading ("で", "を", "です") ends it anyway.
-_JA_VALUE_END_WORDS: Final = (
+#: specify, fill in, update, reset, paste, place) match at the start of a word ("に変更", "と入力"). The Japanese
+#: interface nouns of :data:`SECRET_VALUE_STOP_WORDS` match only as a whole word followed by a particle or a verb
+#: ("メールで送信", "ランダムに生成"): a value may start with one ("ランダムキー", "アカウントバンク", "アカウント9").
+#: A particle with no joint reading ("で", "を", "です") ends a value anyway.
+_JA_VERB_WORDS: Final = (
     *("ログイン", "ログオン", "サインイン", "入力", "送信", "利用", "使", "入れ", "打", "押", "設定", "変更", "登録"),
     *("認証", "アクセス", "確認", "指定", "記入", "更新", "再設定", "貼", "置"),
-    *(word for word in SECRET_VALUE_STOP_WORDS if not word.isascii()),
 )
+_JA_NOUN_WORDS: Final = tuple(word for word in SECRET_VALUE_STOP_WORDS if not word.isascii())
+
+
+def _longest_first(words: Iterable[str]) -> str:
+    return "|".join(re.escape(word) for word in sorted(set(words), key=lambda word: (-len(word), word)))
+
+
 _JA_VALUE_END_RE: Final = re.compile(
-    "|".join(re.escape(word) for word in sorted(set(_JA_VALUE_END_WORDS), key=lambda word: (-len(word), word)))
+    "(?:"
+    + _longest_first(_JA_VERB_WORDS)
+    + ")|(?:"
+    + _longest_first(_JA_NOUN_WORDS)
+    + ")(?=[\u3067\u306b\u3092\u306f\u304c\u306e\u3078\u3068\u3082\u3084]|"
+    + _longest_first(_JA_VERB_WORDS)
+    + ")"
 )
 #: A word of katakana only (the long vowel mark and the middle dot, half-width forms too): how speech recognition
 #: writes a spoken foreign word. Words of several such words are a spoken value; kanji words are a description.

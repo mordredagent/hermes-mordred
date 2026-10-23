@@ -1494,6 +1494,20 @@ KANA_TEXTS = [
     pytest.param("パスワードにハンターツーフェイクを入力", "パスワードにredactedを入力", id="target-katakana"),
     pytest.param("パスワードにひみつのあいことばを入力", "パスワードにredactedを入力", id="target-hiragana"),
     pytest.param("the password is hunter", "the password is redacted", id="english-one-word"),
+    # a Japanese interface noun at the start of a value names no field (security review of 5d14b1a97)
+    pytest.param(
+        "パスワードは Hunter2 アカウント9 でログイン",
+        "パスワードは redacted でログイン",
+        id="noun-with-a-digit-in-a-run",
+    ),
+    pytest.param("パスワードはランダムキーです", "パスワードはredactedです", id="noun-prefix-random"),
+    pytest.param("パスワードはアカウントバンクでログイン", "パスワードはredactedでログイン", id="noun-prefix-account"),
+    pytest.param(
+        "パスワードはランダムキー7でログインして", "パスワードはredactedでログインして", id="noun-prefix-digit"
+    ),
+    pytest.param("パスワードはメールボックス99です", "パスワードはredactedです", id="noun-prefix-mail"),
+    pytest.param("パスワードはページキーです", "パスワードはredactedです", id="noun-prefix-page"),
+    pytest.param("パスワード は アカウント バンク です", "パスワード は redacted です", id="noun-word-then-space"),
 ]
 
 #: A field or feature noun, a verb or a statement after the keyword, and Japanese words before it, stay.
