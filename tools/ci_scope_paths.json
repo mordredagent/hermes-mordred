@@ -338,6 +338,9 @@
       "features"
     ],
     "src/mordred_hermes/wizard/policy_explainer.py": [],
+    "tests/_desktop_page.py": [
+      "extension"
+    ],
     "tests/extension/test_desktop_api.py": [
       "extension"
     ],
