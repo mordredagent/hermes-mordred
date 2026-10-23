@@ -4,11 +4,15 @@ Mirrors :class:`mordred_hermes.activity.store.ActivityStore`: :func:`open_import
 runs the activity protection gate and passes the gate's keyed opener; tests pass
 a plain-SQLite opener (the only test seam). The tables share the activity
 store's encrypted file but keep their own ``import_meta``; ``activity_*`` is never touched.
+:func:`open_import_store_readonly` is the status path (the Desktop page's polling): it
+creates, initialises, upgrades and unlocks nothing (see its docstring).
 
 Every public method runs one short connection and one transaction (``BEGIN IMMEDIATE``
 for writes, busy timeout 2 s). SQLite failures become :class:`ImportRefused` (``busy``,
 ``disk_full``, ``store_unavailable``); nothing is retried and no exception text carries
-imported content. Records are validated before any write; a record that does not fit
+imported content. :data:`REFUSAL_CODES` is the closed set of codes a refusal from this
+module (its gate included) carries; :func:`refusal_code` maps anything else to
+``store_unavailable``. Records are validated before any write; a record that does not fit
 the store (unknown conversation, wrong source for the run) raises
 :class:`~.records.RecordError` inside the transaction, which rolls it back.
 
@@ -109,6 +113,7 @@ import os
 import re
 import secrets
 import sqlite3
+import stat
 import sys
 import time
 from collections import Counter
@@ -116,7 +121,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, NamedTuple
+from typing import TYPE_CHECKING, Any, Final, NamedTuple, cast
 
 from ..activity._gate import (
     ActivityRefused,
@@ -151,6 +156,7 @@ if TYPE_CHECKING:  # the mail package imports this module; the guard is imported
 __all__ = [
     "MAX_NEIGHBORS",
     "MAX_SEARCH_LIMIT",
+    "REFUSAL_CODES",
     "RESERVED_META_KEYS",
     "SENT_EVIDENCE_RANK",
     "SUPPORTED_SCHEMA_VERSION",
@@ -165,6 +171,8 @@ __all__ = [
     "WriteGuard",
     "WriteResult",
     "open_import_store",
+    "open_import_store_readonly",
+    "refusal_code",
 ]
 
 SUPPORTED_SCHEMA_VERSION: Final = _schema.SCHEMA_VERSION
@@ -216,7 +224,29 @@ _DETAILS: Final = {
     "plaintext_store": "the import store is readable without the database key",
     "run_not_open": "the import run is not open",
     "conflict": "the conversation is already stored for another source account",
+    "store_uninitialised": "the import store has not been created yet",
 }
+#: Every code an :class:`ImportRefused` of this module carries: the protection gate's, the store's own
+#: (``busy``, ``disk_full``, ``store_unavailable`` and the binding/schema codes) and the read-only path's.
+REFUSAL_CODES: Final = frozenset(
+    {
+        "unsupported_platform",
+        "conversion_pending",
+        "not_armed",
+        "unprotected_process",
+        "no_key",
+        "unkeyed_connection",
+        "plaintext_store",
+        "profile_mismatch",
+        "schema_newer",
+        "busy",
+        "disk_full",
+        "store_unavailable",
+        "store_uninitialised",
+        "run_not_open",
+        "conflict",
+    }
+)
 
 #: Record fields in column order; ``participants`` / ``recipients`` are stored as ``*_json``.
 _CONV_FIELDS: Final = (
@@ -1480,6 +1510,12 @@ class ImportStore:
         return {"schema_version": meta.schema_version, "sources": sources, "runs": runs, "last_run": last_run}
 
 
+def refusal_code(exc: BaseException) -> str:
+    """The :data:`REFUSAL_CODES` member for ``exc``: its own code when it is one, else ``store_unavailable``."""
+    code = getattr(exc, "code", None)
+    return code if isinstance(code, str) and code in REFUSAL_CODES else "store_unavailable"
+
+
 def open_import_store(home: Path) -> ImportStore:
     """Gate, open, verify and bind the ``import_*`` tables of ``home``'s ``mordred.db``.
 
@@ -1505,3 +1541,129 @@ def open_import_store(home: Path) -> ImportStore:
     if found is not None:
         raise ImportRefused(found.code)
     return store
+
+
+# --- the read-only status path ----------------------------------------------------------------
+
+
+def readonly_store_path(home: Path) -> Path:
+    """``<home>/plugin-data/mordred/mordred.db``, computed only (``store_path`` creates the directory)."""
+    from ..activity._paths import PLUGIN_DATA_SUBPATH, STORE_NAME
+
+    return home.joinpath(*PLUGIN_DATA_SUBPATH, STORE_NAME)
+
+
+def _env_key_valid() -> bool:
+    """``HERMES_MEMORY_KEY`` is in this process's environment and decodes to 32 bytes (nothing is unlocked)."""
+    from ..keyvault._memory_hook import _decode_env_key
+
+    return _decode_env_key(os.environ) is not None
+
+
+def _readonly_gate(home: Path) -> str | None:
+    """The protection checks without anything that could unlock the vault or prompt; ``None`` when they pass."""
+    if sys.platform != "darwin":
+        return "unsupported_platform"
+    from .. import dbcrypt
+    from ..dbcrypt import _migrate, _shim
+
+    root = dbcrypt.root_home(home)
+    markers = (_migrate.journal_path(root), _migrate.pending_path(root), _migrate.decrypt_pending_path(root))
+    if any(path.is_file() for path in markers):
+        return "conversion_pending"  # either direction
+    if not dbcrypt.armed(root):
+        return "not_armed"
+    if not _shim.is_installed():
+        return "unprotected_process"
+    if not _env_key_valid():
+        return "no_key"
+    return None
+
+
+def _readonly_opener(path: Path) -> sqlite3.Connection:
+    """``file:<path>?mode=ro`` through the process ``sqlite3``: the shim keys it from the environment's key."""
+    from urllib.parse import quote
+
+    from ..activity import _gate as activity_gate
+
+    database = f"file:{quote(path.as_posix(), safe='/')}?mode=ro"
+    conn = activity_gate._process_sqlite().connect(database, uri=True, timeout=BUSY_TIMEOUT_S)
+    if getattr(conn, "mordred_key", None) is None:
+        conn.close()
+        raise ActivityRefused(refusal("unkeyed_connection"))
+    return cast(sqlite3.Connection, conn)
+
+
+def _lstat(path: Path) -> os.stat_result | None:
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise ImportRefused("store_unavailable") from None
+
+
+def open_import_store_readonly(home: Path) -> ImportStore:
+    """Open ``home``'s ``import_*`` tables for status reads: nothing is created, initialised, upgraded or unlocked.
+
+    Its own gate sequence (never :func:`~..activity._gate.check_protection`, never a
+    key provider that could inject the vault or prompt): macOS, no database
+    conversion pending in either direction, armed, the SQLCipher shim installed, and
+    ``HERMES_MEMORY_KEY`` already in the environment and decoding to 32 bytes
+    (``no_key`` otherwise). The path is computed without creating directories; no
+    file (or an empty one) is ``store_uninitialised``. The file is opened
+    ``mode=ro`` through the process ``sqlite3`` (any open or sidecar failure is
+    ``store_unavailable``), the connection must carry the shim's key and the file
+    must not be plaintext; ``import_meta`` is read with plain selects (no table:
+    ``store_uninitialised``; a newer schema: ``schema_newer``; another profile:
+    ``profile_mismatch``; an older schema is read as it is). The returned store
+    serves :meth:`ImportStore.status` and other reads (deferred read transactions,
+    which a writer holding ``BEGIN IMMEDIATE`` does not block); callers never write
+    through it. Raises :class:`ImportRefused` with a :data:`REFUSAL_CODES` member.
+    """
+    found = _readonly_gate(home)
+    if found is not None:
+        raise ImportRefused(found)
+    path = _readonly_file(home)
+    meta = _readonly_meta(path)
+    if meta is None:
+        raise ImportRefused("store_uninitialised")
+    if ImportStore._checked_meta(meta).profile_home != os.path.realpath(home):
+        raise ImportRefused("profile_mismatch")
+    return ImportStore(path, _readonly_opener)
+
+
+def _readonly_file(home: Path) -> Path:
+    """The existing, non-empty, not-plaintext store file of ``home`` (nothing is created or touched)."""
+    from ..dbcrypt import _monitor
+
+    path = readonly_store_path(home)
+    info = _lstat(path.parent)
+    if info is not None and not stat.S_ISDIR(info.st_mode):
+        raise ImportRefused("store_unavailable")  # a planted symlink would move the store elsewhere
+    info = None if info is None else _lstat(path)
+    if info is not None and not stat.S_ISREG(info.st_mode):
+        raise ImportRefused("store_unavailable")
+    if info is None or info.st_size == 0:
+        raise ImportRefused("store_uninitialised")
+    if _monitor.is_plaintext(path):
+        raise ImportRefused("plaintext_store")
+    return path
+
+
+def _readonly_meta(path: Path) -> dict[str, str] | None:
+    """``import_meta`` through one keyed read-only connection (plain selects, no transaction is begun)."""
+    try:
+        conn = _readonly_opener(path)
+    except ActivityRefused as exc:
+        raise ImportRefused(exc.code) from None
+    except Exception:  # an open or sidecar failure: never stringified
+        raise ImportRefused("store_unavailable") from None
+    try:
+        found = verify_keyed_connection(conn, path)
+        if found is not None:
+            raise ImportRefused(found.code)
+        with _refusing():
+            return ImportStore._read_meta(conn)
+    finally:
+        conn.close()
