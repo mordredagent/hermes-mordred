@@ -24,7 +24,10 @@ from typing import Any
 
 import pytest
 
+from mordred_hermes.imports.mail.imap import IMAP_HINTS
 from mordred_hermes.imports.mail.imap_sync import ERROR_CODES, RESULT_FIELDS
+from mordred_hermes.imports.mail.setup_flow import SETUP_ERROR_CODES
+from mordred_hermes.imports.store import REFUSAL_CODES
 
 from ._desktop_page import block, render_page, source
 
@@ -45,6 +48,8 @@ BLOCKER_CODES = (
     "needs_question_model",
 )
 IMAP_HINT_CODES = ("authentication_failed", "server_alert", "login_disabled", "gmail_app_password_length")
+# `status.imports.code`: the read-only status path's complete refusal mapping (SPEC
+# "Imports status"); each has an overview phrase and a MESSAGES entry.
 STORE_GATE_CODES = (
     "not_armed",
     "conversion_pending",
@@ -53,6 +58,12 @@ STORE_GATE_CODES = (
     "plaintext_store",
     "store_unavailable",
     "busy",
+    "profile_mismatch",
+    "schema_newer",
+    "unkeyed_connection",
+    "store_uninitialised",
+    "unsupported_platform",
+    "disk_full",
 )
 # The design's new page codes (MailSetupError, databases, forget warnings, ...).
 PAGE_CODES = (
@@ -808,8 +819,10 @@ def test_every_code_the_page_knows_has_an_entry():
         block("BLOCKERS"),
         block("STEP_NUMBERS"),
     )
-    for code in sorted(set(PAGE_CODES) | set(ERROR_CODES) | set(STORE_GATE_CODES) | set(MAIL_CODES)):
+    library = set(ERROR_CODES) | set(SETUP_ERROR_CODES) | set(REFUSAL_CODES)
+    for code in sorted(set(PAGE_CODES) | library | set(STORE_GATE_CODES) | set(MAIL_CODES)):
         assert re.search(rf"^  {re.escape(code)}:", messages, re.M), code
+    assert set(IMAP_HINT_CODES) == set(IMAP_HINTS)
     for hint in IMAP_HINT_CODES:
         assert re.search(rf"^  {hint}:", hints, re.M), hint
     for code in BLOCKER_CODES:
@@ -1789,9 +1802,9 @@ def test_databases_done_says_encrypted_or_unreadable_never_databases_encrypted()
 
 # -- step 2.5: mail --------------------------------------------------------------------------------
 
-# Every code a mail route can answer: MailSetupError (imports/mail/setup_flow.py,
-# SETUP_ERROR_CODES), the forget refusals and warnings (imports/mail/forget.py) and the
-# fetch job's codes (imap_sync.ERROR_CODES, checked separately).
+# Mail codes beyond the library sets checked directly (SETUP_ERROR_CODES, ERROR_CODES,
+# REFUSAL_CODES): the forget refusals and warnings (imports/mail/forget.py) and the
+# page's own codes; the setup codes are repeated here as the design's failure table.
 MAIL_CODES = (
     "invalid_address",
     "invalid_host",
@@ -1979,6 +1992,19 @@ def test_a_pending_mail_flow_is_cancelled_on_cancel_and_unmount(script, expected
     assert result["requests"][1:] == expected
     assert "Gesendet" not in json.dumps(result["tree"])
     assert result["out"]["fields"] == CLEARED
+
+
+def test_a_pending_mail_flow_is_cancelled_when_the_step_becomes_blocked():
+    step = (
+        "MailStep({id: 'mail', n: '2.5', state: globalThis.stepState || 'next', blocker: 'needs_restart', "
+        f"status: {json.dumps(MAIL_V4)}, refresh}})"
+    )
+    script = (
+        FILL + CONNECT + "globalThis.stepState = 'blocked'; tree = view()\neffects.forEach(f => f()); tree = view()\n"
+    )
+    result = component(step, [FOLDERS, {"ok": True}], script)
+    assert result["requests"][1:] == [["/mail/setup/m7/cancel", {}]]
+    assert "Gesendet" not in json.dumps(result["tree"])
 
 
 @pytest.mark.parametrize("code,kept", [("invalid_selection", True), ("mail_setup_stale", False)])

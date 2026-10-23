@@ -158,6 +158,8 @@ const MESSAGES = {
   schema_newer: 'Mordred’s store was written by a newer Mordred. Update Mordred (Maintenance).',
   unkeyed_connection: 'Mordred’s store was not opened with the database key. Restart Hermes Desktop; if this stays, run hermes-mordred databases status in Terminal.',
   disk_full: 'The disk is full. Free some space, then try again.',
+  run_not_open: 'Mordred’s store refused the write because no import run was open. Try again.',
+  conflict: 'Mordred’s store refused the write: the conversation is already stored for another account. Run hermes-mordred status in Terminal.',
   credentials_changed: 'The mailbox was set up again while it was being removed, so nothing was deleted. Try again.',
   credentials_left: 'Sealed mailbox credentials are still on this Mac. Remove the mailbox to delete them.',
   key_left: 'The mailbox key in the Secure Enclave could not be deleted. Remove the mailbox again to finish.',
@@ -2164,10 +2166,12 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
     setPhrase('')
     setRetryAccount('')
   }
+  // Leaving the page or the step (done, blocked) also ends a flow waiting for its folder choice.
   useClearSecrets(() => {
     clearForm()
     clearFetch()
     clearRemove()
+    dropFlow()
   }, shown)
   useDropOnDone(state, () => setFailure(null))
   useEffect(() => {
