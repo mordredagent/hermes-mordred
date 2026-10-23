@@ -71,6 +71,9 @@ page walks through the same steps with buttons and masked fields; what you
 type goes straight to Mordred on this host — never into the chat, the model,
 logs or plugin storage. On macOS it shows the vault recovery passphrase once: write it
 down. Linux/Windows display the TPM recovery limitation instead.
+On macOS the page groups its steps as Protect this Mac, Connect, Ask Hermes and
+Maintenance; database encryption (which `mordred.db` needs) and mail over IMAP
+live on the same page, after the Telegram steps.
 
 **In a terminal.**
 

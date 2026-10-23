@@ -44,6 +44,8 @@ workers:
 API responses. It checks the reported file count and rechecks head/base metadata;
 renames inspect both paths. It never classifies only the latest PR commit.
 `tools/ci_scope_paths.json` is a finite inventory of reviewed existing paths.
+A PR that adds a file lists it there in the same PR; entries for files that do not
+yet exist are rejected, so documentation PRs cannot pre-register them.
 Only reviewed existing Markdown under `docs/user/` can take the documents route;
 developer policy/version/setup contracts require final validation.
 New, removed, unknown, shared storage/bootstrap/crypto/authentication, native,
@@ -2026,6 +2028,31 @@ completion acceptance matrix track later work and current open gates.
   instance were independently confirmed stopped at **03:06:51Z**; the Windows
   guard was then disarmed.
   No Windows global/product, Windows 11 or whole-product acceptance is claimed.
+
+- **2026-10-23 — Desktop mail and ceremony pages (pending).** Not yet run; to be
+  recorded after PR D4 of the
+  [Desktop mail and ceremony pages implementation](PLAN.md#desktop-mail-and-ceremony-pages-implementation)
+  merges. macOS, the production profile after the existing backup; record the
+  commit, macOS, Python and Hermes Desktop versions, the commands and counts only
+  (never an address, subject or password), and state which item was not run.
+  Checklist, each item marked PASS / FAIL / not run:
+  1. The Mordred page overview shows the current production facts (model private,
+     helper installed, memory on, databases on, Telegram 3 chats / 25 messages,
+     mail not set up).
+  2. Mail setup with the Gmail app password succeeds and shows the "set up" card;
+     then a deliberately wrong password shows `imap_auth_failed` /
+     `authentication_failed` with the remediation text and nothing stored
+     (`ls ~/.hermes/mordred/mail`).
+  3. Fetch new mail (`max 100`): counts shown, the Touch ID prompt appeared, and
+     `hermes-mordred mail status` agrees with the page.
+  4. In a chat, "sync my mail" returns counts only, and a history question quotes
+     evidence lines.
+  5. Removing the mailbox with its rows leaves `mail status` at 0 mail rows and no
+     credentials.
+  6. On a throwaway `HERMES_HOME` with plaintext databases, the databases step
+     shows "will encrypt", Encrypt shows "scheduled", and Restart reports `armed`.
+  7. Light and dark theme screenshots of every state; VoiceOver reads the step
+     titles, states and the failure note.
 
 After changing a live-gated path, rerun the relevant command and append a dated
 result here. Do not replace the previous result without recording the new date.
