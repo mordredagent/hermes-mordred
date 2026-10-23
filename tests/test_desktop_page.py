@@ -663,6 +663,18 @@ STATE_CASES.update(
 )
 
 
+STATE_CASES.update(
+    {
+        # The first import creates the store: no failure, Telegram import is simply next.
+        "v4, store not created yet": (
+            mac(**v4(available=False, code="store_uninitialised")),
+            None,
+            ready_but(telegram_import="next", mail="todo"),
+        ),
+    }
+)
+
+
 def compact(states: dict[str, Any]) -> dict[str, str | None]:
     result: dict[str, str | None] = {}
     for key in STEP_KEYS:
@@ -960,6 +972,73 @@ console.log(JSON.stringify([...out]))
     assert set(buttons) == goto
 
 
+def page_text(status: dict[str, Any]) -> str:
+    return render_page(
+        """
+const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
+  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
+  : text(node.props && node.props.children)
+console.log(JSON.stringify(text(PageBody({status: STATUS, health: null, refresh: () => {}}))))
+""".replace("STATUS", json.dumps(status))
+    )
+
+
+MIGRATE_HINT = (
+    "Your Telegram history may still be in the older archive; run hermes-mordred telegram migrate-store "
+    "--commit in Terminal to move it into Mordred\u2019s store."
+)
+
+
+@pytest.mark.parametrize(
+    "status,shown",
+    [
+        (mac(**v4(telegram=(0, 0))), True),
+        (mac(**v4(available=False, code="store_uninitialised")), True),
+        (mac(**v4()), False),
+        (mac(**v4(available=False, code="no_key")), False),
+        (mac(login=False, **v4(telegram=(0, 0))), False),
+        (mac(), False),
+        (linux(), False),
+    ],
+    ids=["empty-store", "store-not-created", "imported", "store-locked", "logged-out", "older-api", "linux"],
+)
+def test_telegram_import_points_to_migrate_store_when_the_store_has_no_telegram_message(status, shown):
+    assert (MIGRATE_HINT in page_text(status)) is shown
+
+
+def test_telegram_import_counts_are_store_totals():
+    text = page_text(mac(**v4()))
+    assert "3 chats · 25 messages in Mordred\u2019s store (all accounts)." in text
+
+
+def test_status_refreshes_are_coalesced_and_polled_every_10_seconds_while_a_job_runs():
+    assert "const STATUS_POLL_MS = 10_000" in source()
+    assert "setInterval(refresh, STATUS_POLL_MS)" in source()
+    result = render_page("""
+const reads = [], gates = []
+rest = path => {
+  if (!path.startsWith('/status')) return Promise.resolve({ok: true})
+  reads.push(path)
+  return new Promise(resolve => gates.push(resolve))
+}
+const flush = () => new Promise(resolve => setImmediate(resolve))
+cursor = 0
+SetupPage({})
+effects.forEach(effect => effect())
+const refresh = [...jobListeners][0]
+const pending = [refresh(), refresh(), refresh()]
+const first = reads.length
+gates.shift()({ok: true, platform: 'darwin'})
+await flush()
+const second = reads.length
+gates.shift()({ok: true, platform: 'darwin'})
+await Promise.all(pending)
+await flush()
+console.log(JSON.stringify({first, second, total: reads.length}))
+""")
+    assert result == {"first": 1, "second": 2, "total": 2}
+
+
 def test_windows_and_unsupported_statuses_keep_their_pages():
     result = render_page("""
 jsx = jsxs = (type, props) => ({type: typeof type === 'function' ? type.name : type, props})
@@ -1147,25 +1226,65 @@ def test_overview_on_linux_says_databases_and_mail_are_not_available():
 
 def test_overview_from_version_4_reads_the_store_and_the_mailbox_label():
     result = rows(mac(**v4(mail=MAIL_SET_UP, mail_messages=40)), {**SYNC_COUNTS, "message_count": 0})
-    assert result["protection"] == ("done", "Secure Enclave · memory encrypted · databases on")
-    assert result["telegram"] == ("done", "connected · 3 chats · 25 messages")
+    assert result["protection"] == ("done", "Secure Enclave · vault · memory encrypted · databases on")
+    assert result["telegram"] == ("done", "connected · 3 chats · 25 messages in Mordred\u2019s store (all accounts)")
     assert result["mail"] == ("done", "account work · 40 messages · last fetch 2 hours ago (complete)")
     failed = rows(mac(**v4(mail=MAIL_FAILED)))
     assert failed["mail"] == ("attention", "account work · 0 messages · last fetch 1 minute ago (imap_auth_failed)")
     odd = rows(mac(**v4(mail={**MAIL_FAILED, "last_attempt": {"at": NOW_MS // 1000 - 60, "error": "<b>x</b>"}})))
     assert odd["mail"] == ("attention", "account work · 0 messages · last fetch 1 minute ago (failed)")
+    partial = {**MAIL_SET_UP, "last_attempt": {"at": NOW_MS // 1000 - 300, "error": None, "partial": True}}
+    assert rows(mac(**v4(mail=partial)))["mail"] == (
+        "done",
+        "account work · 0 messages · last fetch 5 minutes ago (partial)",
+    )
+    never = {**MAIL_SET_UP, "last_success": None, "last_attempt": None}
+    assert rows(mac(**v4(mail=never)))["mail"] == ("done", "account work · 0 messages · never fetched")
+    residue = rows(mac(**v4(mail={"configured": False, "residue": "credentials_left"})))
+    assert residue["mail"] == ("attention", "leftover credentials · remove them in step 2.5")
     restart = rows(mac(**v4(protected=False, available=False, code="unprotected_process")))
-    assert restart["protection"] == ("partial", "Secure Enclave · memory encrypted · databases: restart Hermes Desktop")
+    assert restart["protection"] == (
+        "partial",
+        "Secure Enclave · vault · memory encrypted · databases: restart Hermes Desktop",
+    )
     attention = rows(mac(**v4(journal=True)))
-    assert attention["protection"] == ("attention", "Secure Enclave · memory encrypted · databases: needs attention")
+    assert attention["protection"] == (
+        "attention",
+        "Secure Enclave · vault · memory encrypted · databases: needs attention",
+    )
     pending = rows(mac(**v4(armed=False, encrypt_pending=True, available=False, code="conversion_pending")))
     assert pending["protection"] == (
         "partial",
-        "Secure Enclave · memory encrypted · databases: converting at next restart",
+        "Secure Enclave · vault · memory encrypted · databases: converting at next restart",
     )
     assert pending["telegram"] == ("partial", "connected · counts after a restart")
-    assert rows(mac(**v4(telegram=(0, 0))))["telegram"] == ("partial", "connected · nothing imported yet")
+    nothing = ("partial", "connected · nothing in Mordred\u2019s store yet")
+    assert rows(mac(**v4(telegram=(0, 0))))["telegram"] == nothing
+    assert rows(mac(**v4(available=False, code="store_uninitialised")))["telegram"] == nothing
     assert rows(mac(**v4()))["mail"] == ("not_started", "not set up")
+
+
+@pytest.mark.parametrize(
+    "vault,memory,expected",
+    [
+        (VAULT_NONE, False, ("partial", "Secure Enclave · no vault · memory not encrypted · databases off")),
+        (
+            {**VAULT_READY, "env_enrolled": False},
+            False,
+            ("partial", "Secure Enclave · vault without .env · memory not encrypted · databases off"),
+        ),
+        (
+            {**VAULT_NONE, "exists": True, "optout": True},
+            False,
+            ("attention", "Secure Enclave · vault without .env · memory not encrypted · databases off"),
+        ),
+        (None, True, ("partial", "Secure Enclave · memory encrypted · databases off")),
+    ],
+    ids=["no-vault", "vault-without-env", "env-opted-out", "api-without-vault"],
+)
+def test_overview_protection_row_names_the_vault(vault, memory, expected):
+    status = mac(memory=memory, **v4(vault=vault, armed=False, available=False, code="not_armed"))
+    assert rows(status)["protection"] == expected
 
 
 def test_overview_model_row_states():

@@ -153,6 +153,11 @@ const MESSAGES = {
   no_key: 'The database key is not available. Finish the memory step and restart Hermes Desktop.',
   plaintext_store: 'Mordred’s store can be read without the database key, so Mordred does not use it.',
   busy: 'Mordred’s store is busy. Try again shortly.',
+  store_uninitialised: 'Mordred’s store is created by the first Telegram import or mail fetch.',
+  profile_mismatch: 'Mordred’s store belongs to another Hermes profile, so Mordred does not open it here.',
+  schema_newer: 'Mordred’s store was written by a newer Mordred. Update Mordred (Maintenance).',
+  unkeyed_connection: 'Mordred’s store was not opened with the database key. Restart Hermes Desktop; if this stays, run hermes-mordred databases status in Terminal.',
+  disk_full: 'The disk is full. Free some space, then try again.',
   credentials_changed: 'The mailbox was set up again while it was being removed, so nothing was deleted. Try again.',
   credentials_left: 'Sealed mailbox credentials are still on this Mac. Remove the mailbox to delete them.',
   key_left: 'The mailbox key in the Secure Enclave could not be deleted. Remove the mailbox again to finish.',
@@ -257,6 +262,12 @@ const STORE_GATES = {
   plaintext_store: 'store not encrypted',
   store_unavailable: 'store unavailable',
   busy: 'store busy',
+  store_uninitialised: 'nothing in Mordred’s store yet',
+  profile_mismatch: 'store of another profile',
+  schema_newer: 'store from a newer Mordred',
+  unkeyed_connection: 'store key not applied',
+  unsupported_platform: 'store not available here',
+  disk_full: 'disk full',
 }
 // `databases.databases[].state` (discovery without the key) as the step 1.3 table says it.
 const DATABASE_STATES = {
@@ -842,9 +853,9 @@ const fetchOutcome = (last) => last.error || (last.partial ? 'partial' : 'comple
 // Linux, the import service's in-process counts (`GET /sync`). null when unknown.
 function telegramCounts(status, sync) {
   if (pageLayout(status) === 'macos' && reportsV4(status)) {
-    const imports = status.imports
-    if (!imports.available) return null
-    const telegram = (imports.sources && imports.sources.telegram) || {}
+    const sources = storeSources(status)
+    if (!sources) return null
+    const telegram = sources.telegram || {}
     return { chats: Number(telegram.conversations) || 0, messages: Number(telegram.messages) || 0, store: true }
   }
   if (!sync) return null
@@ -852,6 +863,8 @@ function telegramCounts(status, sync) {
 }
 
 const countsText = (counts) => `${plural(counts.chats, 'chat')} · ${plural(counts.messages, 'message')}`
+// Store counts are totals across accounts; the in-process counts (older API, Linux) are this login's.
+const countsWhere = (counts) => (counts.store ? ' in Mordred’s store (all accounts)' : ' imported')
 
 const databaseRows = (db) => (Array.isArray(db && db.databases) ? db.databases.filter((row) => row && typeof row.relative === 'string') : [])
 
@@ -949,7 +962,9 @@ function stepStates(status, sync = null) {
     blocker: firstBlocker([hardware, 'needs_enclave'], [memory, 'needs_memory'], [model, 'needs_hermes_model'], [llm, 'needs_question_model']),
   })
   const counts = telegramCounts(status, sync)
-  const storeCode = v4 && !store && status.imports.available === false ? status.imports.code || 'import_store_unavailable' : null
+  // A store not created yet is no failure: the first import creates it.
+  const gate = v4 && !store && status.imports.available === false ? status.imports.code || 'import_store_unavailable' : null
+  const storeCode = gate === 'store_uninitialised' ? null : gate
   decide('telegram_import', {
     done: login && Boolean(counts && counts.messages > 0),
     fact: storeCode,
@@ -991,10 +1006,17 @@ function modelRow(check) {
   return { ...row, dot: 'not_started', detail: 'not set' }
 }
 
+function vaultFact(vault) {
+  if (!vault.exists) return 'no vault'
+  return vault.env_enrolled ? 'vault' : 'vault without .env'
+}
+
 function protectionRow(status, layout, hardware, memory) {
   const row = { key: 'protection', label: 'Protection', target: 'protect' }
+  const vault = splitVault(status) ? status.vault : null
   const facts = [
     hardware ? (layout === 'macos' ? 'Secure Enclave' : 'TPM 2.0') : 'helper missing',
+    ...(vault ? [vaultFact(vault)] : []),
     memory ? 'memory encrypted' : 'memory not encrypted',
   ]
   if (layout === 'linux') {
@@ -1004,9 +1026,10 @@ function protectionRow(status, layout, hardware, memory) {
   if (!reportsV4(status)) return { ...row, dot: 'attention', detail: [...facts, 'databases: Update Mordred to use this'].join(' · ') }
   const db = status.databases
   const state = databaseState(db)
-  const on = [hardware, memory, Boolean(state.done)].filter(Boolean).length
-  const attention = db.supported === false || Boolean(state.code)
-  const dot = attention ? 'attention' : on === 3 ? 'done' : on === 0 && !state.restart ? 'not_started' : 'partial'
+  const parts = [hardware, memory, Boolean(state.done), ...(vault ? [Boolean(vault.exists && vault.env_enrolled)] : [])]
+  const on = parts.filter(Boolean).length
+  const attention = db.supported === false || Boolean(state.code) || Boolean(vault && vault.optout && !vault.env_enrolled)
+  const dot = attention ? 'attention' : on === parts.length ? 'done' : on === 0 && !state.restart ? 'not_started' : 'partial'
   return { ...row, dot, detail: [...facts, databasesFact(db, state)].join(' · ') }
 }
 
@@ -1023,10 +1046,13 @@ function telegramRow(status, sync, login) {
   if (!login) return { ...row, dot: 'not_started', detail: 'not connected' }
   if (sync && sync.last_error) return { ...row, dot: 'attention', detail: 'connected · the last import stopped' }
   const counts = telegramCounts(status, sync)
-  if (counts && counts.messages > 0) return { ...row, dot: 'done', detail: `connected · ${countsText(counts)}` }
+  if (counts && counts.messages > 0) {
+    return { ...row, dot: 'done', detail: `connected · ${countsText(counts)}${counts.store ? ' in Mordred’s store (all accounts)' : ''}` }
+  }
   if (pageLayout(status) === 'macos' && reportsV4(status)) {
-    if (!status.imports.available) return { ...row, dot: 'partial', detail: `connected · ${STORE_GATES[status.imports.code] || 'store unavailable'}` }
-    return { ...row, dot: 'partial', detail: 'connected · nothing imported yet' }
+    // Zero in the store is not "nothing imported": the history may be in the older archive.
+    if (!counts) return { ...row, dot: 'partial', detail: `connected · ${STORE_GATES[status.imports.code] || 'store unavailable'}` }
+    return { ...row, dot: 'partial', detail: 'connected · nothing in Mordred’s store yet' }
   }
   // The in-process counts restart at 0 with the backend: say nothing rather than "nothing imported".
   return { ...row, dot: 'done', detail: 'connected' }
@@ -1716,12 +1742,13 @@ const importProgress = (progress) =>
   progress ? `Chats ${progress.dialogs_done}/${progress.dialogs_total}, ${progress.messages_imported} new messages` : 'Starting the import…'
 
 function ImportSummary({ counts, sync }) {
-  const where = counts && counts.store ? ' in Mordred’s store' : ' imported'
-  const text = sync && sync.syncing ? importProgress(sync.progress) : counts ? `${countsText(counts)}${where}.` : 'Imported.'
+  const text = sync && sync.syncing ? importProgress(sync.progress) : counts ? `${countsText(counts)}${countsWhere(counts)}.` : 'Imported.'
   return jsxs(Fragment, { children: [text, sync && sync.last_error ? ` Last import: ${explain(sync.last_error)}` : null] })
 }
 
-function ImportStep({ ready, refresh, n = 5, id = null, state = null, blocker = null, goto = null, code = null, title = 'Import messages', counts = null, onSync = null, why = null }) {
+// `legacyHint`: logged in, and Mordred's store holds no Telegram message, so the history
+// may still be in the older archive (the status cannot tell without the sealed key).
+function ImportStep({ ready, refresh, n = 5, id = null, state = null, blocker = null, goto = null, code = null, title = 'Import messages', counts = null, onSync = null, why = null, legacyHint = false }) {
   const legacy = state == null
   const usable = legacy ? ready : state !== 'blocked'
   const [days, setDays] = useState(3)
@@ -1819,7 +1846,16 @@ function ImportStep({ ready, refresh, n = 5, id = null, state = null, blocker = 
       children: [
         daysRow,
         jsx('p', { style: { fontSize: 12, color: MUTED_TEXT }, children: '30 for a useful first import; 0 is not accepted here, use the terminal for all history.' }),
-        counts && counts.messages > 0 ? jsx('p', { children: `${countsText(counts)}${counts.store ? ' in Mordred’s store' : ' imported'}.` }) : null,
+        counts && counts.messages > 0 ? jsx('p', { children: `${countsText(counts)}${countsWhere(counts)}.` }) : null,
+        legacyHint
+          ? jsxs('p', {
+              children: [
+                'Your Telegram history may still be in the older archive; run ',
+                jsx('code', { key: 'command', style: { userSelect: 'all' }, children: 'hermes-mordred telegram migrate-store --commit' }),
+                ' in Terminal to move it into Mordred’s store.',
+              ],
+            })
+          : null,
       ],
     }),
   })
@@ -3309,6 +3345,9 @@ function GroupedSetup({ status, health, sync = null, onSync = null, updateInfo =
   }
   const split = splitVault(status)
   const kind = status.hardware_kind
+  const sources = storeSources(status)
+  const loggedIn = Boolean(status.checks && status.checks.login && status.checks.login.ok)
+  const legacyHint = loggedIn && Boolean(sources) && !(Number(sources.telegram && sources.telegram.messages) > 0)
   return jsxs(Fragment, {
     children: [
       jsx(HealthLine, { health }),
@@ -3343,6 +3382,7 @@ function GroupedSetup({ status, health, sync = null, onSync = null, updateInfo =
             onSync,
             refresh,
             why: WHY.telegram_import,
+            legacyHint,
           }),
           macos
             ? v4
@@ -3389,6 +3429,10 @@ function PageBody({ status, health, sync = null, onSync = null, updateInfo = nul
   })
 }
 
+// While a job runs the whole status (store counts included) is read at most this often;
+// the job itself is polled through GET /jobs/{id} every 3 s.
+const STATUS_POLL_MS = 10_000
+
 function SetupPage() {
   const [status, setStatus] = useState(null)
   const [health, setHealth] = useState(null)
@@ -3396,16 +3440,34 @@ function SetupPage() {
   const [sync, setSync] = useState(null)
   const [updateInfo, setUpdateInfo] = useState(null)
   const lastSync = useRef('')
-  const refresh = useCallback(async () => {
-    const result = await probe()
-    if (result.kind === 'installed') {
-      setBroken(null)
-      setStatus(result.status)
-      setHealth(result.health)
-    } else {
-      setStatus(null)
-      setBroken(result)
+  const reading = useRef(null)
+  const again = useRef(false)
+  // One status read at a time: refreshes asked for meanwhile run once, after it.
+  const refresh = useCallback(() => {
+    if (reading.current) {
+      again.current = true
+      return reading.current
     }
+    const read = async () => {
+      try {
+        do {
+          again.current = false
+          const result = await probe()
+          if (result.kind === 'installed') {
+            setBroken(null)
+            setStatus(result.status)
+            setHealth(result.health)
+          } else {
+            setStatus(null)
+            setBroken(result)
+          }
+        } while (again.current)
+      } finally {
+        reading.current = null
+      }
+    }
+    reading.current = read()
+    return reading.current
   }, [])
   // The import step polls GET /sync; keep the answer only when it changed.
   const onSync = useCallback((answer) => {
@@ -3426,7 +3488,7 @@ function SetupPage() {
   const running = Boolean(status && status.jobs && status.jobs.length)
   useEffect(() => {
     if (!running) return undefined
-    const t = setInterval(refresh, 3000)
+    const t = setInterval(refresh, STATUS_POLL_MS)
     return () => clearInterval(t)
   }, [running, refresh])
   const layout = pageLayout(status)
