@@ -454,7 +454,15 @@ class Link:
 
     def failure(self) -> ImapError:
         """What an interrupted or failed establishment step is: a cancellation, else ``imap_unreachable``."""
-        return ImapStopped("cancelled") if self.cancelled() else ImapError("imap_unreachable")
+        if self.cancelled():
+            return ImapStopped("cancelled")
+        _log.warning(
+            "mordred imap: establishment stopped (watchdog_fired=%s remaining=%.1fs holding=%s)",
+            self._fired,
+            self.remaining(),
+            self.holding,
+        )
+        return ImapError("imap_unreachable")
 
     def check(self) -> None:
         """Raise :meth:`failure` once cancelled, interrupted or past the hard deadline."""
