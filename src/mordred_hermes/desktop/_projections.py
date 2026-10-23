@@ -67,6 +67,7 @@ MAIL_SETUP_CODES: Final = frozenset(
         "mail_setup_flow_expired",
         "mail_setup_busy",
         "mail_setup_stale",
+        "mail_setup_cancelled",
         "invalid_selection",
         "touch_id_policy_mismatch",
         "sync_in_progress",

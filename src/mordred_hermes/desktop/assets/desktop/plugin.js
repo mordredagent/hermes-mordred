@@ -129,6 +129,7 @@ const MESSAGES = {
   mail_setup_flow_expired: 'This mail setup expired. Start again; nothing was stored.',
   mail_setup_busy: 'Another mail setup is waiting for its folder choice (in another Hermes Desktop window). Finish or cancel it there, or wait up to 10 minutes. Nothing was stored.',
   mail_setup_stale: 'A mailbox was set up or removed elsewhere while this setup waited. Start again; this setup stored nothing.',
+  mail_setup_cancelled: 'This mailbox setup was cancelled before anything was stored.',
   touch_id_policy_mismatch: 'The mailbox key’s Touch ID setting differs from your choice and could not be replaced. Remove the mailbox, then set it up again. Nothing was stored.',
   invalid_selection: 'Choose one of the listed folders.',
   account_mismatch: 'The sealed mailbox has a different account label. Leave the label empty, or enter the mailbox’s own label.',
