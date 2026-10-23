@@ -40,8 +40,10 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/memory-vault.optout` | encryption CLI | pauses the memory hook (paused by operator) |
 | `<home>/mordred/telegram/` | extension (Telegram importer) | encrypted read-only Telegram archive |
 | `<home>/mordred/mail/credentials.sealed` | `mail setup` | IMAP address, app password, host, port, own addresses and chosen mailboxes, sealed by the Secure Enclave role `mordred-hermes.mail.credentials.v1`; read by `mail fetch` and `mordred_mail_sync` |
-| `<home>/mordred/mail/credentials.meta.json` | `mail setup` | non-secret flags (account label, Gmail path, mailbox roles, Touch ID); read by `mail status` and the tool's `check_fn` |
-| `<home>/mordred/mail/generation` | `mail setup`, `mail forget`, the Desktop page (`/mail/setup/*`, `/mail/forget`) | setup generation tombstone: random non-secret token, mode 0600, survives forget (`mail_setup_stale`) |
+| `<home>/mordred/mail/credentials.meta.json` | `mail setup` | non-secret flags (account label, Gmail path, mailbox roles, effective Touch ID policy, setup id); read by `mail status` and the tool's `check_fn` |
+| `<home>/mordred/mail/.credentials.sealed.<16 hex>.staged`, `<home>/mordred/mail/.credentials.meta.json.<16 hex>.staged` | `mail setup`, the Desktop page (`/mail/setup/*`) | staging copies written before the two renames of a seal and removed on any failure; a killed seal can leave one, which `mail forget` removes |
+| `<home>/mordred/mail/enclave-key.json` | `mail setup`, the Desktop page (`/mail/setup/*`) | `{public_sha256, touch_id}`: the Touch ID policy of the mail Enclave key this store created, bound to the SHA-256 of its public key; nothing secret; deleted by `mail forget` |
+| `<home>/mordred/mail/generation` | `mail setup`, `mail forget`, the Desktop page (`/mail/setup/*`, `/mail/forget`) | setup generation tombstone: random 16-byte hex token (not secret), mode 0600, rewritten after every successful seal and by every forget, survives forget (`mail_setup_stale`) |
 | `<home>/mordred/mail/.lock` | `mail fetch`, `mordred_mail_sync`, `mail import`, `mail forget`, `mail setup`, the Desktop page (`/mail/*`) | non-blocking per-home mail writer lock (`sync_in_progress`) |
 | `<home>/mordred/reader_sessions.json` | privacy_check reader mode | durable record (SHA-256 digests) of sessions that used a reader tool |
 | `<home>/mordred/uninstall/` | `uninstall` | `.env` lines (`HERMES_MEMORY_KEY`, `MORDRED_*`) moved out of `.env`, mode `0600` |
@@ -505,8 +507,9 @@ migrate-store`, `mail import`) and read by `telegram_ask` and
   (forward cursor per mailbox; the hex is the start of SHA-256 over host, port,
   address and mailbox name) and `mail_imap.<account>.m<12 hex>.back` (the
   `--since` backfill), JSON `{base, epoch, low, mailbox_digest, role, uid,
-  uidvalidity}`, and `mail_imap.<account>.last` (`{at, error, gmail,
-  partial}`). `mail forget` deletes them; `mail forget --rows` also deletes the
+  uidvalidity}`, and `mail_imap.<account>.last` (`{"attempt": {at, error,
+  partial}, "success": {at} | null}`; the flat `{at, error, gmail, partial}` of
+  earlier versions is still read). `mail forget` deletes them; `mail forget --rows` also deletes the
   account's mail rows and their `import_mail_refs` rows.
 
 ## `<home>/mordred/mail/`
@@ -521,15 +524,29 @@ Owned by the IMAP mail sync (`mordred_hermes.imports.mail.secrets` and
   (its opaque Enclave blob lives in `<home>/mordred/keyvault/sekey/`), through
   the same hardware-only backend as the Telegram credentials. Every fetch
   unseals it afresh; nothing decrypted is cached or written.
-- `credentials.meta.json` — `{version, account, gmail, roles, touch_id}`; never
-  the address, host or password.
+- `credentials.meta.json` — `{version, account, gmail, roles, touch_id,
+  setup_id}`; never the address, host or password. `touch_id` is the key's
+  effective policy.
+- `.credentials.sealed.<16 hex>.staged`, `.credentials.meta.json.<16 hex>.staged`
+  — the two files of a seal, written (each through `atomic_write`, which uses
+  its own short-lived `<name>.<16 hex>.tmp`) before they are renamed in that
+  order to their final names; any failure removes what the seal wrote. A seal
+  killed between the steps can leave a staged file (never read as credentials);
+  `mail forget` removes it. A sealed file whose flags are missing or unreadable is
+  the residue state `credentials_left`.
+- `enclave-key.json` — `{public_sha256, touch_id}`: the Touch ID policy of the
+  Enclave key this store created, bound to the SHA-256 of the key's public
+  point (the Enclave cannot report a key's policy). Not secret; replaced when
+  `mail setup` replaces a leftover key, deleted by `mail forget`.
 - `.lock` — the per-home mail writer lock (`flock`, non-blocking).
 - `generation` — mode `0600`, a random 16-byte hex token, not secret; rewritten under
-  the lock by every successful seal and every forget, and survives `mail forget`. A
-  Desktop setup flow records it at `start` and refuses `finish` with
-  `mail_setup_stale` when it changed.
+  the lock after every successful seal and by every forget (before it deletes
+  anything), and survives `mail forget`. A setup flow (the CLI's or the Desktop
+  page's) records it at `start` and refuses `finish` with `mail_setup_stale` when
+  it changed; a seal that fails leaves it unchanged.
 
-`mail forget --yes` deletes both credential files and the Enclave key, also
+`mail forget --yes` deletes both credential files, staged leftovers,
+`enclave-key.json` and the Enclave key, also
 when `credentials.meta.json` is missing or corrupt (the label is then reported
 as unknown). No fetched mail is ever written here or to a temporary file:
 messages go only into `<home>/plugin-data/mordred/mordred.db`.

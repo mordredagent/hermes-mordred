@@ -4639,7 +4639,13 @@ part of this delivery ([`TODO.md`](./TODO.md)).
   below it.
   UIDs come from windowed `UID SEARCH` (at most 100000 UIDs per window), and a
   UID at or below the cursor (`UID n:*` returns the last message) is dropped.
-  `mail_imap.<account>.last` records `{at, error, gmail, partial}`.
+  `mail_imap.<account>.last` records `{"attempt": {at, error, partial},
+  "success": {at} | null}` (closed keys), written under the writer lock by every
+  fetch that took it, and only while the sealed credentials are still the setup
+  the fetch started with (`setup_id`): a failed attempt keeps the previous
+  success visible. A fetch without an error (a partial one included) is a
+  success. The flat record of earlier versions (`{at, error, gmail, partial}`)
+  is still read, as an attempt and, without an error, as a success.
 - **Batches.** Groups of at most 200 UIDs are size-checked with `UID FETCH
   (UID RFC822.SIZE)`; a message announced over 25 MiB is counted as
   `skipped_oversize` and never downloaded. Batches of at most 48 MiB of
@@ -4739,7 +4745,7 @@ part of this delivery ([`TODO.md`](./TODO.md)).
   `unsupported_platform`, `mail_not_configured`, `memory_encryption_required`,
   `custody_busy`, the gate codes above, `import_store_unavailable`,
   `sync_in_progress`, `store_path_unsafe`, `tee_unavailable`,
-  `tee_auth_cancelled`, `secrets_corrupt`, `routing_unavailable`,
+  `tee_auth_cancelled`, `secrets_corrupt`, `credentials_left`, `routing_unavailable`,
   `egress_unsupported`, `imap_unreachable`, `imap_auth_failed`,
   `imap_protocol`, `imap_command_refused`, `run_failed`, `invalid_request`,
   `fetch_failed`. Exceptions are mapped to codes and never stringified. One
@@ -4758,7 +4764,10 @@ hermes-mordred mail status [--json]
 
 `setup` defaults the host to `imap.gmail.com` for Gmail addresses and asks
 for it otherwise; its probe and sealing run under the same writer lock as
-`fetch`, `mail import` and `forget` (`sync_in_progress`). `fetch` exits 0 on
+`fetch`, `mail import` and `forget` (`sync_in_progress`). It never replaces
+credentials: while a sealed or flags file exists it refuses with
+`mail_already_configured` (`forget --yes` first). A refused login prints its
+hint after the code (`mail refused (imap_auth_failed: authentication_failed)`). `fetch` exits 0 on
 success (a partial fetch included), 1 on
 a refusal or failure, 2 on bad arguments; `--json` prints exactly the
 serialized `FetchResult`; `--dry-run` fetches and plans but writes no rows,
@@ -4782,7 +4791,10 @@ LABEL`); forget never reports success while a sealed or flags file remains
 `key_left` (exit 1, also on a retry that finds no credential file left;
 running forget again deletes it).
 `mail status` adds the account label, the path and scope, the last
-fetch and the cursor positions.
+attempt (JSON key `last_fetch`) and the last success (`last_success`), and the
+cursor positions, as an explicit projection: every field is type-checked and
+anything else in the flags or the store is dropped. Credentials without their
+metadata show as `{"configured": false, "residue": "credentials_left"}`.
 
 Hermes tool `mordred_mail_sync` (toolset `mordred_telegram`, beside
 `mordred_history_search`):
@@ -4872,6 +4884,37 @@ Where the code differs from the design record:
   code (`imports/mail/setup_flow.py`, `forget.py`) used by the CLI and the Desktop
   page, and `mail.fetch` audit entries may carry `via: "desktop"`. See
   [Desktop mail and ceremony pages](#desktop-mail-and-ceremony-pages-2026-10-23).
+- Mail library as delivered (PR D2, 2026-10-23):
+  - `mail fetch` receives the hint through `FetchOptions.hint_sink` and prints it
+    after the code in its text output only. The hint is never a `FetchResult`
+    field: the dataclass and `FetchResult.as_dict()` are unchanged, so the tool's
+    and the Desktop job's closed schema cannot widen.
+  - `credentials_left` joins the fetch error codes: `MailSecretStore.flags()`
+    raises it for a sealed file whose flags are missing, unreadable or invalid (a
+    distinct residue state, not "not configured"); the tool's `check_fn` is then
+    false and `forget` treats the credentials as unidentified.
+  - `MailSecretStore.store` writes `.credentials.sealed.<16 hex>.staged` and
+    `.credentials.meta.json.<16 hex>.staged` first, renames them in that order
+    and removes whatever it wrote on any failure; `forget` also removes staged
+    leftovers.
+  - `credentials.meta.json` records the key's EFFECTIVE Touch ID policy. The
+    Enclave cannot report an existing key's policy, so the store records the
+    policy of a key it creates in `enclave-key.json` (`{public_sha256,
+    touch_id}`: the SHA-256 of the key's public point and the policy, nothing
+    secret); `ensure_key` returns that policy for the key the record names, the
+    requested one for a key it creates, and `None` when unknown. `setup` replaces
+    a leftover key (no credentials sealed) under the writer lock, and `finish`
+    re-checks the recorded policy (`touch_id_policy_mismatch`).
+  - `<home>/mordred/mail/generation` (0600, a random 16-byte hex token, not
+    secret) is rewritten under the writer lock after every successful seal and
+    by every forget before it deletes anything, and survives forget; a setup flow
+    whose token changed between `start` and `finish` is `mail_setup_stale`. A
+    seal that fails leaves the token unchanged, so its `finish` can be retried.
+  - `imports.store.REFUSAL_CODES` is the closed set of `ImportRefused` codes
+    (the gate's, `busy`, `disk_full`, `store_unavailable`,
+    `store_uninitialised`, the binding and schema codes); `refusal_code(exc)` maps
+    anything else to `store_unavailable`. `open_import_store_readonly` is
+    specified under [Imports status](#imports-status).
 
 ## Desktop mail and ceremony pages (2026-10-23)
 

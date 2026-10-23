@@ -235,7 +235,8 @@ is not needed; if you use it, names are JSON strings:
 | Error code | Tell the user |
 |------------|---------------|
 | `mail_not_configured` | Run `hermes-mordred mail setup` in a terminal (address and app password are typed there, never in the chat) |
-| `imap_auth_failed` | The app password was revoked or changed: run `hermes-mordred mail setup` again |
+| `imap_auth_failed` | The mail server refused the login (often a revoked or changed app password). Running `hermes-mordred mail fetch` in a terminal prints the reason after the code, e.g. `mail fetch failed (imap_auth_failed: authentication_failed)`; the four reasons are explained in the USAGE guide ("Sync new mail over IMAP"). Then run `hermes-mordred mail forget --yes` and `hermes-mordred mail setup` again (setup refuses with `mail_already_configured` while credentials exist) |
+| `credentials_left` | An interrupted setup or forget left mail credentials without their metadata: run `hermes-mordred mail forget --yes`, then `hermes-mordred mail setup` |
 | `imap_unreachable`, `routing_unavailable`, `egress_unsupported` | The mail server or the network route (Tor/VPN/proxy) is not reachable; nothing was written |
 | `memory_encryption_required` | Run `hermes-mordred encryption enable memory` |
 | `not_armed`, `import_store_unavailable` | Mordred's encrypted store is not available: run `hermes-mordred status` |
