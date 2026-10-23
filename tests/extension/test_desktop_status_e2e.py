@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+from concurrent.futures import CancelledError
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -39,8 +41,22 @@ def _tree(path: Path) -> list[str]:
     return sorted(str(p.relative_to(path)) for p in path.rglob("*"))
 
 
-def _forbidden(*_args: object, **_kwargs: object) -> object:
-    raise AssertionError("the status path called something that can unlock the vault or prompt")
+class _Tripped(BaseException):
+    """Not an ``Exception``: no fallback handler on the status path can swallow it into a state."""
+
+
+class _Tripwires:
+    """Every rigged boundary records its name before it raises; the list must stay empty."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def wire(self, name: str) -> Any:
+        def tripped(*_args: object, **_kwargs: object) -> object:
+            self.calls.append(name)
+            raise _Tripped(f"the status path called {name}, which can unlock the vault or prompt")
+
+        return tripped
 
 
 def _no_helper(*_args: object, **_kwargs: object) -> object:
@@ -50,19 +66,26 @@ def _no_helper(*_args: object, **_kwargs: object) -> object:
 
 
 @pytest.fixture
-def cold_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def trips() -> _Tripwires:
+    return _Tripwires()
+
+
+@pytest.fixture
+def cold_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trips: _Tripwires) -> Path:
     home = tmp_path / "home"
     with open_private_directory(home, create=True):
         pass
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr("mordred_hermes.extension.telegram.tee.hardware_backend", _no_helper)
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", _forbidden)
-    monkeypatch.setattr("mordred_hermes.dbcrypt._key.KeyProvider", _forbidden)
-    monkeypatch.setattr("mordred_hermes.dbcrypt._key._inject_vault_env", _forbidden)
-    monkeypatch.setattr("mordred_hermes.activity._gate.check_protection", _forbidden)
-    monkeypatch.setattr("mordred_hermes.imports.store.check_protection", _forbidden)
-    monkeypatch.setattr("mordred_hermes.keyvault._anchor_keychain.default_anchor_store", _forbidden)
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", trips.wire("dbcrypt._PROVIDER"))
+    monkeypatch.setattr("mordred_hermes.dbcrypt._key.KeyProvider", trips.wire("KeyProvider"))
+    monkeypatch.setattr("mordred_hermes.dbcrypt._key._inject_vault_env", trips.wire("_inject_vault_env"))
+    monkeypatch.setattr("mordred_hermes.activity._gate.check_protection", trips.wire("activity check_protection"))
+    monkeypatch.setattr("mordred_hermes.imports.store.check_protection", trips.wire("store check_protection"))
+    monkeypatch.setattr(
+        "mordred_hermes.keyvault._anchor_keychain.default_anchor_store", trips.wire("default_anchor_store")
+    )
     return home
 
 
@@ -72,7 +95,7 @@ def _client() -> TestClient:
     return TestClient(app)
 
 
-def _protected_store(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _protected_store(home: Path, monkeypatch: pytest.MonkeyPatch, trips: _Tripwires) -> None:
     """An armed home, a real SQLCipher store with one Telegram conversation, and a shim that may not unlock."""
     key = _key.derive(decode_key(MEMORY_KEY))
     writer = _shim.build_module(key=lambda: key, home=lambda: home, has_key=lambda: True)
@@ -84,7 +107,7 @@ def _protected_store(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     )
     store.run_commit(run, {"inserted": written.inserted})
     dbcrypt.arm(home)
-    process = _shim.build_module(key=_forbidden, home=lambda: home, has_key=lambda: True)  # type: ignore[arg-type]
+    process = _shim.build_module(key=trips.wire("the shim's key provider"), home=lambda: home, has_key=lambda: True)
     monkeypatch.setitem(sys.modules, "sqlite3", process)
     monkeypatch.setitem(sys.modules, "sqlite3.dbapi2", process)
     monkeypatch.setenv("HERMES_MEMORY_KEY", MEMORY_KEY)
@@ -98,13 +121,15 @@ def _protected_store(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_the_real_status_chain_reads_counts_through_sqlcipher_without_unlocking(
-    cold_home: Path, monkeypatch: pytest.MonkeyPatch
+    cold_home: Path, monkeypatch: pytest.MonkeyPatch, trips: _Tripwires
 ) -> None:
-    _protected_store(cold_home, monkeypatch)
+    _protected_store(cold_home, monkeypatch, trips)
     before = _tree(cold_home)
     with _client() as http:
         status = http.get(f"{PREFIX}/status?client_version=4").json()
+        assert trips.calls == []
         light = http.get(f"{PREFIX}/imports/status").json()
+        assert trips.calls == []
     assert status["imports"] == {
         "available": True,
         "code": None,
@@ -122,24 +147,44 @@ def test_the_real_status_chain_reads_counts_through_sqlcipher_without_unlocking(
 
 @pytest.mark.parametrize("value", [None, "", "not-a-key", "hex:" + "3c" * 16])
 def test_without_valid_key_material_the_real_chain_answers_no_key(
-    cold_home: Path, monkeypatch: pytest.MonkeyPatch, value: str | None
+    cold_home: Path, monkeypatch: pytest.MonkeyPatch, trips: _Tripwires, value: str | None
 ) -> None:
-    _protected_store(cold_home, monkeypatch)
+    _protected_store(cold_home, monkeypatch, trips)
     if value is None:
         monkeypatch.delenv("HERMES_MEMORY_KEY")
     else:
         monkeypatch.setenv("HERMES_MEMORY_KEY", value)
     with _client() as http:
         status = http.get(f"{PREFIX}/status?client_version=4").json()
+    assert trips.calls == []
     assert status["imports"] == {"available": False, "code": "no_key", "sources": {}}
     assert status["databases"]["runtime_protected"] is False
 
 
-def test_a_cold_status_creates_nothing_in_a_fresh_home(cold_home: Path) -> None:
+def test_a_cold_status_creates_nothing_in_a_fresh_home(cold_home: Path, trips: _Tripwires) -> None:
     """Finding 3: not even <home>/mordred/telegram (the Telegram flags read used to create it)."""
     with _client() as http:
         status = http.get(f"{PREFIX}/status?client_version=4").json()
         old = http.get(f"{PREFIX}/status").json()
+    assert trips.calls == []
     assert status["ok"] is True and old["ok"] is True
     assert status["imports"]["code"] == "not_armed" and status["mail"] == {"configured": False}
     assert _tree(cold_home) == []
+
+
+def test_a_tripwire_cannot_be_swallowed_by_a_status_fallback(
+    cold_home: Path, monkeypatch: pytest.MonkeyPatch, trips: _Tripwires
+) -> None:
+    """The tripwires work: a status path that DID call a provider fails the test, whatever it catches."""
+    _protected_store(cold_home, monkeypatch, trips)
+
+    def leaky_open(home: Path) -> Any:
+        dbcrypt._PROVIDER()  # what a regressed opener would do; _status_v4 catches every Exception here
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr("mordred_hermes.desktop._seams.open_store_readonly", leaky_open)
+    # Never a 200 with a fallback state: the tripwire stops the request (the test client's portal may report
+    # the stopped server task as cancelled when it shuts down).
+    with pytest.raises((_Tripped, CancelledError)), _client() as http:
+        http.get(f"{PREFIX}/imports/status")
+    assert trips.calls == ["dbcrypt._PROVIDER"]  # and the record names the boundary even if it were caught
