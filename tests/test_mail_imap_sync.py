@@ -402,6 +402,117 @@ def test_refusals_are_codes_and_write_nothing(
     assert [entry["error"] for entry in audits] == [code]
 
 
+def test_a_login_hint_rides_on_the_result_but_is_never_serialized(home: Path, store: ImportStore) -> None:
+    server = gmail_server(password="revoked", login_failure="NO [ALERT] ALERTCANARY https://support.example.com/x")
+    audits: list[Any] = []
+    env = make_env(home, store, server, FakeSecrets(gmail_creds()), audits=audits)
+    result = run_fetch(FetchOptions(), env)
+    assert (result.error, result.hint) == ("imap_auth_failed", "server_alert")
+    assert set(result.as_dict()) == RESULT_FIELDS  # the serializer stays closed: no hint field
+    recorded = json.dumps([result.as_dict(), audits, store.meta_items("mail_imap.")])
+    assert "server_alert" not in recorded and "ALERTCANARY" not in recorded
+    assert "hint" not in repr(result)
+
+
+# --- the last attempt and the last success ----------------------------------------------------------
+
+
+class SetupSecrets(FakeSecrets):
+    """Flags with a ``setup_id``; ``replaced_after`` flag reads later, another setup holds the label."""
+
+    def __init__(self, creds: Any, *, replaced_after: int | None = None) -> None:
+        super().__init__(creds)
+        self.reads = 0
+        self.replaced_after = replaced_after
+
+    def flags(self) -> dict[str, Any] | None:
+        self.reads += 1
+        flags = super().flags()
+        if flags is not None:
+            changed = self.replaced_after is not None and self.reads > self.replaced_after
+            flags["setup_id"] = "second" if changed else "first"
+        return flags
+
+
+def last_record(store: ImportStore, account: str = "mail") -> Any:
+    raw = store.get_meta(imap_sync.last_fetch_key(account))
+    return json.loads(raw) if raw else None
+
+
+def test_a_failed_fetch_keeps_the_last_success_visible(home: Path, store: ImportStore) -> None:
+    server = gmail_server()
+    clock = iter([1000.0, 2000.0])
+    env = make_env(home, store, server, SetupSecrets(gmail_creds()))
+    env.now = lambda: next(clock)
+    assert run_fetch(FetchOptions(), env).error is None
+    assert last_record(store) == {"attempt": {"at": 1000, "error": None, "partial": False}, "success": {"at": 1000}}
+    server.password = "revoked"
+    assert run_fetch(FetchOptions(), env).error == "imap_auth_failed"
+    assert last_record(store) == {
+        "attempt": {"at": 2000, "error": "imap_auth_failed", "partial": False},
+        "success": {"at": 1000},
+    }
+    attempt, success = imap_sync.last_fetch_status(store.get_meta(imap_sync.last_fetch_key("mail")))
+    assert (attempt, success) == ({"at": 2000, "error": "imap_auth_failed", "partial": False}, {"at": 1000})
+
+
+def test_a_failed_unseal_is_recorded_as_the_last_attempt(home: Path, store: ImportStore) -> None:
+    from mordred_hermes.imports.mail.secrets import MailSecretsError
+
+    class Cancelled(SetupSecrets):
+        def load(self) -> Any:
+            raise MailSecretsError("tee_auth_cancelled")
+
+    env = make_env(home, store, gmail_server(), Cancelled(gmail_creds()))
+    env.now = lambda: 3000.0
+    assert run_fetch(FetchOptions(), env).error == "tee_auth_cancelled"
+    assert last_record(store) == {"attempt": {"at": 3000, "error": "tee_auth_cancelled", "partial": False},
+                                  "success": None}  # fmt: skip
+
+
+def test_another_setups_record_is_never_overwritten(home: Path, store: ImportStore) -> None:
+    store.set_meta(imap_sync.last_fetch_key("mail"), '{"attempt":null,"success":{"at":5}}')
+    secrets = SetupSecrets(gmail_creds(), replaced_after=2)  # gate, identity under the lock, then a new setup
+    result = run_fetch(FetchOptions(), make_env(home, store, gmail_server(), secrets))
+    assert result.error is None and result.inserted == 3
+    assert last_record(store) == {"attempt": None, "success": {"at": 5}}
+
+
+def test_residual_credentials_are_credentials_left(home: Path, store: ImportStore) -> None:
+    from mordred_hermes.imports.mail.secrets import MailSecretsError
+
+    class Residue(FakeSecrets):
+        def flags(self) -> dict[str, Any] | None:
+            raise MailSecretsError("credentials_left")
+
+    secrets = Residue(gmail_creds())
+    result = run_fetch(FetchOptions(), make_env(home, store, gmail_server(), secrets))
+    assert result.as_dict()["error"] == "credentials_left" and secrets.loads == 0
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, (None, None)),
+        ("{not json", (None, None)),
+        ("[1, 2]", (None, None)),
+        (
+            '{"attempt": {"at": 7, "error": null, "partial": true, "note": "CANARY"}, "success": {"at": 7, "x": 1}}',
+            ({"at": 7, "error": None, "partial": True}, {"at": 7}),
+        ),
+        ('{"attempt": {"at": 7, "error": "CANARY free text", "partial": false}, "success": null}', (None, None)),
+        ('{"attempt": {"at": "7", "error": null, "partial": false}, "success": {"at": true}}', (None, None)),
+        ('{"attempt": {"at": 7, "error": null, "partial": 1}, "success": {"at": -1}}', (None, None)),
+        ('{"at": 9, "error": null, "gmail": true, "partial": false}', ({"at": 9, "error": None, "partial": False},
+                                                                        {"at": 9})),
+        ('{"at": 9, "error": "imap_protocol", "partial": false}', ({"at": 9, "error": "imap_protocol",
+                                                                     "partial": False}, None)),
+    ],
+)  # fmt: skip
+def test_the_last_record_is_read_back_type_checked(raw: str | None, expected: Any) -> None:
+    assert imap_sync.last_fetch_status(raw) == expected
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX flock")
 def test_a_second_fetch_while_one_runs_is_sync_in_progress(home: Path, store: ImportStore) -> None:
     with imap_sync.fetch_lock(home):
