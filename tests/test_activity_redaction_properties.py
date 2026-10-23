@@ -78,6 +78,17 @@ PHRASES = [
     "access\ttoken = abcdef",
     "pin\u3000code 0000",
     "pin  code=1234",
+    # values of several words, as speech recognition writes a spoken password (live speech test 2026-10-23)
+    "Log in with demo user as the username and hunter 2 fake pw as the password",
+    "Log in with demo user as the username in Hunter 2 Fake PW as the password.",
+    "hunter 2 fake pw is the password",
+    "The password is hunter 2 fake pw and then click Login",
+    "Log in as demo user, password hunter 2 fake pw",
+    "update the PIN to 4 8 2 1",
+    "パスワード は ハンター ツー フェイク です",
+    "ユーザー名はデモユーザー、パスワードはハンターにフェイクPWでログインして",
+    "ハンターにフェイクPWをパスワードにして",
+    "パスワードに ハンター ツー を入力",
 ]
 #: Separators that end a phrase: what one phrase loses it must still lose next to another.
 CLAUSE_SEPARATORS = [". ", "; ", ", ", "\n"]
@@ -151,10 +162,16 @@ class _ReferenceIndex:
 
     def __init__(self, text: str) -> None:
         self.text = text
+        self.runs: dict[tuple[bool, int, bool], tuple[tuple[int, int], ...]] = {}
 
     def run_end(self, pos: int) -> int:
         tail = base._VALUE_TAIL_RE.match(self.text, pos)
         return tail.end() if tail else pos
+
+    def run_start(self, end: int) -> int:
+        while end > 0 and base._VALUE_TAIL_RE.fullmatch(self.text[end - 1]):
+            end -= 1
+        return end
 
     def trimmed(self, start: int, end: int) -> int:
         return int(base._without_closing_marks(self.text, start, end))
@@ -223,6 +240,7 @@ def test_the_index_answers_like_the_scans_it_replaced() -> None:
         fast, slow = contracts._TextIndex(text), _ReferenceIndex(text)
         for pos in range(len(text) + 1):
             assert fast.run_end(pos) == slow.run_end(pos), (text, pos)
+            assert fast.run_start(pos) == slow.run_start(pos), (text, pos)
             assert fast.token_start(pos) == slow.token_start(pos), (text, pos)
             assert fast.ascii_start(pos) == slow.ascii_start(pos), (text, pos)
             assert fast.ascii_end(pos) == slow.ascii_end(pos), (text, pos)
@@ -320,6 +338,66 @@ def test_a_phrase_loses_its_values_nested_in_another_form(frame: str) -> None:
     assert not failures, failures[:5]
 
 
+#: Keyword frames a value of several words stands in (keyword ``password``: not one of the ambiguous ones).
+SPOKEN_FRAMES = [
+    "the password is {}",
+    "my password: {}",
+    "password {}",
+    "{} as the password",
+    "use {} for the password",
+    "and {} is the password",
+    "set the password to {}",
+    "the password for the bank is {}",
+    "パスワードは {} です",
+    "パスワード: {}",
+    "{} をパスワードに入力",
+    "パスワードに {} を入力",
+]
+SPOKEN_ENDS = ["", ". then log in", ", then log in", " and then log in", "\nthen log in"]
+
+
+def _spoken(value: str) -> list[str]:
+    """``value`` as speech recognition writes it: its letters and its digits as separate words."""
+    return re.findall(r"[A-Za-z]+|[0-9]+", value)
+
+
+def _spoken_values() -> list[list[str]]:
+    """The values the base revision replaced in its corpus that speech would split into several words (none of
+    them a word that ends a value, a keyword or a placeholder), each also in lower case."""
+    found: set[tuple[str, ...]] = set()
+    for text, spans in BASE_SPANS.items():
+        clean = contracts.redact_secret_tokens(text)
+        for start, end in spans:
+            words = _spoken(clean[start:end])
+            if 2 <= len(words) <= contracts.MAX_SECRET_VALUE_WORDS and all(
+                word.lower() not in contracts._VALUE_END_WORDS
+                and word.lower() not in contracts._NOT_VALUE_STARTS
+                and not contracts._SECRET_KEYWORD_RE.fullmatch(word)
+                for word in words
+            ):
+                found |= {tuple(words), tuple(word.lower() for word in words)}
+    return [list(words) for words in sorted(found)]
+
+
+def test_spaced_versions_of_the_corpus_values_are_replaced_whole() -> None:
+    """Every word of a value the base revision replaced, written as speech writes it ("Hunter2-fake-pw" as "Hunter 2
+    fake pw"), is replaced in every keyword frame, whatever ends the clause; and the phrase is a named secret."""
+    values = _spoken_values()
+    assert len(values) >= 20
+    failures = []
+    for words in values:
+        phrase = " ".join(words)
+        for frame in SPOKEN_FRAMES:
+            for end in SPOKEN_ENDS:
+                text = frame.format(phrase) + end
+                start = text.index(phrase)
+                spans = [(start + match.start(), start + match.end()) for match in re.finditer(r"\S+", phrase)]
+                missed = _covered(spans, _now(text))
+                if missed or phrase not in contracts.secret_values(text).values:
+                    failures.append((text, [text[lo:hi] for lo, hi in missed]))
+    assert not failures, failures[:5]
+
+
 # --- near-linear time on adversarial shapes ------------------------------------------------------------------
 
 #: Each shape builds a text of about ``size`` characters.
@@ -352,6 +430,17 @@ SHAPES: dict[str, Callable[[int], str]] = {
     "url-params": lambda size: "http://a/?" + "password=x&" * (size // 11),
     "long-token-before-as": lambda size: "a" * size + " as the password",
     "words-then-is": lambda size: "the password for " + "a " * (size // 2) + "is x1",
+    # values of several words: each keyword reads at most MAX_SECRET_VALUE_WORDS words, remembered per position
+    "spoken-after-is": lambda size: "the password is hunter 2 fake pw " * (size // 33),
+    "words-after-label": lambda size: "password: " + "a1 " * (size // 3),
+    "words-before-as": lambda size: "a1 " * (size // 3) + "x as the password",
+    "copula-before": lambda size: "hunter 2 is the password " * (size // 25),
+    "links-after": lambda size: "the password is hunter" + " at fake" * (size // 8),
+    "labels-then-words": lambda size: ("pin=" * 60 + "1" + " x1" * 8 + ". ") * (size // 268),
+    "ja-joints-after": lambda size: "パスワードは" + "ハンターに" * (size // 5),
+    "ja-joints-before": lambda size: "ハンターに" * (size // 5) + "フェイクをパスワードに",
+    "ja-spaced-joints": lambda size: "パスワード は " + "ハンター に " * (size // 7),
+    "ja-target-joints": lambda size: "パスワードにa" * (size // 7),
 }
 
 

@@ -3909,7 +3909,8 @@ and revocable on its own:
   brackets), else one token ending at whitespace, hiragana, CJK punctuation
   or full-width punctuation, with closing punctuation (`.,;:!?)]}>` and
   quotes) kept outside the replacement; an unquoted token over 256
-  characters is replaced to its end. Nothing is replaced when the value holds
+  characters is replaced to its end (a value of several words runs on, see
+  below). Nothing is replaced when a value of one word holds
   no ASCII letter or digit (masked dots, Japanese words), is a URL, `redacted`
   or a keyword, or is a stop word (`contracts.SECRET_VALUE_STOP_WORDS`:
   interface words such as `field`, `box`, `input`, `form`, `reset`,
@@ -3924,10 +3925,12 @@ and revocable on its own:
   A value named before its keyword is replaced too (B2 live check
   2026-10-22: "type demo-user as the username and Hunter2-fake-pw as the
   password" was stored verbatim). In English the value is followed by at
-  most five words from `as`, `for`, `in`, `into`, `to` (at least one of
-  these), `the`, `a`, `an`, the possessive pronouns, `this`, `that`, `field`,
-  `box` and `input`, then the keyword: "Hunter2-fake-pw as the password",
-  "use X for my PIN", "type X into the password field". The value is quoted
+  most five words from `as`, `for`, `in`, `into`, `to`, `is`, `was` (at least
+  one of these), `the`, `a`, `an`, the possessive pronouns, `this`, `that`,
+  `field`, `box` and `input`, then the keyword: "Hunter2-fake-pw as the
+  password", "use X for my PIN", "type X into the password field", "X is the
+  password" (after `is` / `was`, `pin`, `secret` and `token` need no verb:
+  "4821 is the PIN"). The value is quoted
   (the opening mark starting a word) or one whitespace-free token that does
   not end in `.,;:!?`. Nothing is replaced when the word after the keyword
   makes the keyword a modifier (`contracts._KEYWORD_HEADS`, such as
@@ -3995,8 +3998,50 @@ and revocable on its own:
   BMP code point; an ASCII run is ASCII without whitespace, control
   characters included) and redacts generated text with control characters,
   other spaces, zero-width characters and other scripts exactly as those
-  scans did, and that 28 adversarial shapes stay near-linear between 10 KB
-  and 40 KB.
+  scans did, that every word of the corpus values written as speech writes
+  them ("Hunter 2 fake pw") is replaced in every keyword frame, and that 38
+  adversarial shapes stay near-linear between 10 KB and 40 KB.
+  A value of several words (live speech test 2026-10-23: speech recognition
+  writes a spoken password as words, and "log in with demo user as the
+  username and hunter 2 fake pw as the password" kept all but "pw"). Wherever
+  a form above takes an unquoted value, the value runs on over the words after
+  it (keyword first) or back over the words before it (value first) to the end
+  of its clause, at most eight words (`contracts.MAX_SECRET_VALUE_WORDS`),
+  each read for at most 256 characters: "the password is hunter 2 fake pw and
+  then click Login" becomes "the password is redacted and then click Login",
+  "... and hunter 2 fake pw as the password" becomes "... and redacted as the
+  password" (the username before `and` stays). The words are joined by
+  same-line whitespace; the clause ends at closing punctuation (kept outside
+  the replacement), a line break, an opening quote or bracket, CJK
+  punctuation, hiragana that is no joint (below), or a word that starts
+  another part: a stop word (`and`, `then`, `please`, `with`, `in`, `on`,
+  `as`, `is`, `expires` ...), `also`, `after`, `before`, `because`, `which`,
+  words of time (`now`, `today`, `yesterday` ...), a verb that puts or sets
+  a value, a keyword (which names a value of its own) or a URL. `at`, `to`
+  and `for` may be a spoken symbol or digit ("hunter at fake dot pw"), so
+  they end the value only next to such a word, a word with a symbol in it
+  or nothing ("for the bank", "to log in", "PIN=4821 to Hunter2-x"). In a
+  Japanese reading (a Japanese keyword or particle after the keyword) a
+  joint may stand between two words: the particles for "to", "of" and "and"
+  and the readings of digits, which speech recognition writes for a spoken
+  digit (romanized: in "pasuwaado wa hantaa ni feiku PW de roguin shite",
+  where speech wrote the digit 2 as "ni", "hantaa ni feiku PW" is replaced
+  and the username clause before the comma stays), unless a verb or a
+  Japanese interface word follows the joint ("ni henkou", to change). When the
+  word next to the frame is accepted alone, its further words are replaced
+  with it. When it is not ("password hunter 2 fake pw", "hunter 2 fake pw as
+  the password", spaced katakana words after the Japanese password keyword),
+  the words are one value when there are at least two, the word next to the
+  frame may start a value (no stop word, head, placeholder, unit, pronoun
+  such as "you", keyword or URL: "the password you received", "the password
+  field" and "the password reset page" stay), some word holds an ASCII letter
+  or digit or every word is katakana (Japanese words in kanji describe, they
+  stay), and after `pin`, `secret` and `token` some word is credential-shaped
+  (after "set the PIN to" the words are 4-12 digits in all: "update the PIN
+  to 4 8 2 1"). The first word of a two-word keyword read on its own never
+  takes such a value ("pin code 0000" keeps "code"). `secret_values` lists a
+  value of several words whole and also without its whitespace
+  ("hunter2fakepw"), as a spoken password is likely typed.
   Keywords inside a URL are left to URL scrubbing. Known gaps: a plain word
   after whitespace alone ("password swordfish"), a plain word after `to` or
   after a qualifier ("set the password to swordfish", "the password for the
@@ -4006,7 +4051,10 @@ and revocable on its own:
   in with Hunter2-x, that is the password") or is a plain word without such
   a verb ("admin for the password"), plural keywords, card numbers and
   secrets without a keyword in free text are kept, except long secret-shaped
-  tokens in the user's own words (below). Hermes's own
+  tokens in the user's own words (below); a spoken value without any keyword
+  ("log in with demo user slash hunter 2 fake pw") is kept, and one of more
+  than eight words, or holding a word that ends a value ("the", "and", "in"),
+  loses only the words up to there. Hermes's own
   capture additionally replaces, whatever the phrasing, every value it typed
   into a secret field in its turn's task start and correction
   (§"History for Hermes").
@@ -4549,7 +4597,9 @@ per-process state.
     on), every value typed during a held correction's turn counts, since no
     field can be classified. A value the turn's
     message names as a secret (the values the free-text redaction replaces in
-    it, `contracts.secret_values`: "type Zebra-77-fake as the password") is
+    it, `contracts.secret_values`: "type Zebra-77-fake as the password"; a
+    value of several words whole and without its whitespace, "hunter 2 fake
+    pw" and "hunter2fakepw") is
     withheld from the store when Hermes types it into any field, also one
     that is not secret (`typed_text_dropped`; N5). Those values are bounded
     (Codex review of `7a1084bee`: every `pin:` of `"pin:" * 9999 + "1234"`

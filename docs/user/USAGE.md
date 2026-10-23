@@ -810,7 +810,12 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > page title and a visible-text excerpt when the collector sends them. A
 > password, PIN, one-time code or key written into a task, a correction, a
 > label or a page ("the password Hunter2-x", "PIN: 4821", "use Hunter2-x as
-> the password") is replaced by `redacted` before it is stored; in your own
+> the password") is replaced by `redacted` before it is stored. A value of
+> several words, as speech recognition writes a spoken password ("the
+> password is hunter 2 fake pw", "hunter 2 fake pw as the password"), is
+> replaced up to the end of its clause: a comma or full stop, a line break,
+> or a word such as "and", "then" or "please" that starts the next part, at
+> most eight words; in your own
 > task and correction texts, so is a long password-like token without any
 > keyword (20 or more characters mixing letters with digits or symbols).
 > No site is excluded by default: messaging and mail sites (Telegram, WhatsApp,
