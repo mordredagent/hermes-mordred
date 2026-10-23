@@ -919,3 +919,16 @@ def test_forget_library_defaults_to_the_real_store_and_lock(
     done = forget(sealed_forget_env["store"], home)
     assert (done.account, done.cursors_deleted) == ("mail", 2) and _gone(sealed_forget_env)
     assert (home / "mordred" / "mail" / ".lock").is_file()
+
+
+def test_forget_rewrites_the_setup_generation(
+    forget_env: dict[str, Any], home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mordred_hermes.imports.mail.secrets import GENERATION_ABSENT, setup_generation
+
+    assert setup_generation(home) == GENERATION_ABSENT
+    assert run(["mail", "forget", "--yes"], capsys)[0] == 0
+    first = setup_generation(home)
+    assert first != GENERATION_ABSENT  # a setup flow that started before this forget is stale now
+    assert run(["mail", "forget", "--yes"], capsys)[0] == 0
+    assert setup_generation(home) not in (first, GENERATION_ABSENT)  # every forget, even with nothing left

@@ -267,20 +267,16 @@ def test_folder_display_names_are_terminal_safe_and_bounded(secrets: MailSecretS
 # --- the registry: bound, TTL, cancel, references ------------------------------------------------------
 
 
-def test_at_most_two_flows_wait_at_once(secrets: MailSecretStore, home: Path) -> None:
+def test_one_flow_waits_at_a_time(secrets: MailSecretStore, home: Path) -> None:
     connect = Connector(no_folder_server())
     flows = make_flows(secrets, home, connect)
-    first, second = start(flows), start(flows)
+    first = start(flows)
     with pytest.raises(MailSetupError) as raised:
         start(flows)
-    assert raised.value.code == "mail_setup_busy" and len(connect.calls) == 2  # refused before the server
+    assert raised.value.code == "mail_setup_busy" and len(connect.calls) == 1  # refused before the server
     flows.cancel(first.flow_id)
-    third = start(flows)
-    assert pending(flows) == 2
-    assert flows.finish(second.flow_id, selection=None).step == "done"
-    with pytest.raises(MailSetupError) as raised:
-        flows.finish(third.flow_id, selection=None)
-    assert raised.value.code == "mail_already_configured" and pending(flows) == 0
+    second = start(flows)
+    assert pending(flows) == 1 and flows.finish(second.flow_id, selection=None).step == "done"
 
 
 def test_a_flow_expires_after_ten_minutes(secrets: MailSecretStore, home: Path) -> None:
@@ -346,12 +342,23 @@ def test_cancel_and_cancel_all_drop_the_flows_and_seal_nothing(secrets: MailSecr
     with pytest.raises(MailSetupError) as raised:
         flows.finish(flow.flow_id, selection=None)
     assert raised.value.code == "mail_setup_flow_expired" and credential_files(secrets) == []
-    first, second = start(flows), start(flows)
+    again = start(flows)
     flows.cancel_all()
     assert pending(flows) == 0
-    for dropped in (first, second):
-        with pytest.raises(MailSetupError):
-            flows.get(dropped.flow_id)
+    with pytest.raises(MailSetupError):
+        flows.get(again.flow_id)
+
+
+def test_reap_expires_flows_while_nothing_else_happens(secrets: MailSecretStore, home: Path) -> None:
+    clock = Clock()
+    flows = make_flows(secrets, home, Connector(no_folder_server()), clock=clock)
+    start(flows)
+    clock.now = setup_flow.FLOW_TTL_SECONDS
+    flows.reap()
+    assert pending(flows) == 1
+    clock.now += 0.5
+    flows.reap()  # the Desktop backend's periodic task: no request needed
+    assert pending(flows) == 0 and credential_files(secrets) == []
 
 
 @pytest.mark.parametrize("end", ["finish", "cancel", "cancel_all", "expiry"])
@@ -374,15 +381,67 @@ def test_every_reference_to_the_password_is_dropped(end: str, secrets: MailSecre
     assert [value for value in vars(flow).values() if value in (PASSWORD, ADDRESS)] == []
 
 
-def test_a_cli_forget_between_start_and_finish_still_seals_within_the_ttl(
+def test_a_key_deleted_meanwhile_is_recreated_with_the_recorded_policy(
     secrets: MailSecretStore, enclave: FakeEnclave, home: Path
 ) -> None:
-    """The documented residual window: a forget in another process cannot reach this process's flows."""
     flows = make_flows(secrets, home, Connector(no_folder_server()))
     flow = start(flows, presence=False)
-    assert secrets.forget() is True and enclave.keys == {}  # what `mail forget --yes` does without credentials
+    assert flow.presence is False
+    enclave.keys.clear()  # the Enclave lost the key (no forget: the generation is unchanged)
     assert flows.finish(flow.flow_id, selection=None).step == "done"
     assert enclave.unattended == {KEY_ID: True} and (secrets.flags() or {})["touch_id"] is False
+
+
+def test_a_forget_between_start_and_finish_makes_the_flow_stale(secrets: MailSecretStore, home: Path) -> None:
+    from mordred_hermes.imports.mail.forget import forget
+
+    flows = make_flows(secrets, home, Connector(no_folder_server()))
+    flow = start(flows)
+    forget(secrets, home, open_store=lambda _home: None)  # `mail forget --yes` in a terminal, nothing sealed yet
+    with pytest.raises(MailSetupError) as raised:
+        flows.finish(flow.flow_id, selection=None)
+    assert raised.value.code == "mail_setup_stale" and credential_files(secrets) == [] and pending(flows) == 0
+
+
+def test_a_seal_elsewhere_and_its_forget_make_the_flow_stale(secrets: MailSecretStore, home: Path) -> None:
+    from mordred_hermes.imports.mail.forget import forget
+
+    flows = make_flows(secrets, home, Connector(no_folder_server()))
+    flow = start(flows)
+    other = make_flows(secrets, home, Connector(gmail_server()))  # the CLI in another process
+    start(other)
+    forget(secrets, home, open_store=lambda _home: None)
+    with pytest.raises(MailSetupError) as raised:
+        flows.finish(flow.flow_id, selection=None)
+    assert raised.value.code == "mail_setup_stale" and credential_files(secrets) == []
+
+
+def test_every_seal_rewrites_the_setup_generation(secrets: MailSecretStore, home: Path) -> None:
+    from mordred_hermes.imports.mail.secrets import GENERATION_ABSENT, setup_generation
+
+    assert setup_generation(home) == GENERATION_ABSENT
+    start(make_flows(secrets, home, Connector(gmail_server())))
+    sealed = setup_generation(home)
+    assert sealed != GENERATION_ABSENT and ((home / "mordred" / "mail" / "generation").stat().st_mode & 0o777) == 0o600
+
+
+def test_finish_refuses_a_key_whose_policy_changed(secrets: MailSecretStore, home: Path) -> None:
+    flows = make_flows(secrets, home, Connector(no_folder_server()))
+    flow = start(flows, presence=True)
+    secrets.ensure_key(require_presence=False, replace=True)  # another setup replaced the key, then failed
+    with pytest.raises(MailSetupError) as raised:
+        flows.finish(flow.flow_id, selection=None)
+    assert raised.value.code == "touch_id_policy_mismatch" and credential_files(secrets) == []
+    assert pending(flows) == 0
+
+
+def test_finish_refuses_a_key_of_unknown_policy(secrets: MailSecretStore, home: Path) -> None:
+    flows = make_flows(secrets, home, Connector(no_folder_server()))
+    flow = start(flows)
+    secrets.key_record_path.unlink()  # a key this store did not create (or whose record was lost)
+    with pytest.raises(MailSetupError) as raised:
+        flows.finish(flow.flow_id, selection=None)
+    assert raised.value.code == "touch_id_policy_mismatch"
 
 
 # --- hints and failures -------------------------------------------------------------------------------
@@ -750,7 +809,7 @@ def test_mail_setup_error_is_a_closed_code_with_a_closed_hint() -> None:
         "mail_already_configured", "mail_setup_flow_expired", "sync_in_progress", "store_path_unsafe",
         "tee_unavailable", "tee_auth_cancelled", "imap_unreachable", "imap_auth_failed", "imap_protocol",
         "imap_command_refused", "routing_unavailable", "egress_unsupported", "touch_id_policy_mismatch",
-        "mail_setup_busy", "invalid_selection",
+        "mail_setup_busy", "mail_setup_stale", "invalid_selection",
     }  # fmt: skip
     assert expected == SETUP_ERROR_CODES
     error = MailSetupError("imap_auth_failed", hint="server_alert")

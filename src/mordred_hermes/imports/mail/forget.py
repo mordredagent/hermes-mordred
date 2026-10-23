@@ -15,6 +15,10 @@ cursors go first, the sealed credentials, their flags and the Enclave key last.
   with the store's code, touching nothing, when the store refuses. Callers ask the
   owner to confirm that deletion (``mail forget --yes``, the page's
   ``delete my data`` phrase) BEFORE calling.
+- Under the lock, before anything is deleted, the setup generation
+  (:func:`~.secrets.new_setup_generation`) is rewritten, so a setup flow that
+  started before this forget, in any process, can no longer seal
+  (``mail_setup_stale``).
 - The sealed file, the flags and the Enclave key are deleted whatever the flags
   say. Credentials whose flags are missing or corrupt are still deleted and
   reported as unidentified (``account_unknown``: their rows and cursors need
@@ -22,8 +26,10 @@ cursors go first, the sealed credentials, their flags and the Enclave key last.
   success); a key that could not be deleted is reported (``key_left``; a retry
   deletes it).
 
-Pending setup flows of another process are out of reach here: the Desktop page
-calls :meth:`~.setup_flow.MailSetupFlows.cancel_all` itself. Failures are
+Pending setup flows are not reached here (they hold the address and the
+password in another object, maybe another process): the generation makes them
+stale, and the Desktop page also calls
+:meth:`~.setup_flow.MailSetupFlows.cancel_all` to drop its own. Failures are
 :class:`MailForgetError` codes; nothing here logs or returns an address.
 """
 
@@ -36,7 +42,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from .imap_sync import CURSOR_PREFIX, FetchStop, fetch_lock
-from .secrets import ACCOUNT_RE, MailSecretsError
+from .secrets import ACCOUNT_RE, MailSecretsError, new_setup_generation
 
 __all__ = ["Forgotten", "MailForgetError", "audit_entry", "forget"]
 
@@ -159,6 +165,7 @@ def _locked_forget(
     if sealed != resolved:
         raise MailForgetError("credentials_changed")  # a setup ran since this forget started: touch nothing
     label = _target(account, sealed)
+    new_setup_generation(home)  # before anything goes: a setup flow that started earlier can no longer seal
     deleted, cursors, left = _forget_store(open_store, home, label, rows) if label else (0, 0, None)
     key_gone = secret_store.forget() is not False  # the sealed file, the flags and the Enclave key, whatever is left
     if secret_store.residue():
