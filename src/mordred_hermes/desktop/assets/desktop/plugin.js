@@ -1762,6 +1762,11 @@ function LlmStep({ id = null, state = null, blocker = null, goto = null, done = 
   })
 }
 
+// Every GET /sync poll gets a number, increasing for the page's life (across remounts of the
+// import step), so an answer can be told apart from one to a poll issued before an import
+// was started (see SetupPage's onSync).
+let syncPollSeq = 0
+
 const importProgress = (progress) =>
   progress ? `Chats ${progress.dialogs_done}/${progress.dialogs_total}, ${progress.messages_imported} new messages` : 'Starting the import…'
 
@@ -1772,7 +1777,8 @@ function ImportSummary({ counts, sync }) {
 
 // `legacyHint`: logged in, and Mordred's store holds no Telegram message, so the history
 // may still be in the older archive (the status cannot tell without the sealed key).
-// `onStarted` tells the page an import was started here (see SetupPage's onSync).
+// `onStarted(fromSeq)` tells the page an import was started here: only answers to polls
+// numbered `fromSeq` or later can show its end (see SetupPage's onSync).
 function ImportStep({ ready, refresh, n = 5, id = null, state = null, blocker = null, goto = null, code = null, title = 'Import messages', counts = null, onSync = null, onStarted = null, why = null, legacyHint = false }) {
   const legacy = state == null
   const usable = legacy ? ready : state !== 'blocked'
@@ -1781,12 +1787,20 @@ function ImportStep({ ready, refresh, n = 5, id = null, state = null, blocker = 
   const [starting, setStarting] = useState(false)
   const [failure, setFailure] = useState(null)
   const noteRef = useFocusOn(failure)
+  const mounted = useRef(true)
   useDropOnDone(state, () => setFailure(null))
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
   const poll = useCallback(async () => {
+    const seq = ++syncPollSeq
     try {
       const answer = await call('/sync')
       setSync(answer)
-      if (onSync) onSync(answer)
+      if (onSync) onSync(answer, seq)
     } catch (_) {
       /* ignore */
     }
@@ -1808,7 +1822,11 @@ function ImportStep({ ready, refresh, n = 5, id = null, state = null, blocker = 
     try {
       await call('/sync', { days: Number(days) || 3, include_archived: false })
       host.notify({ kind: 'info', message: 'Import started. Approve a hardware prompt if asked.' })
-      if (onStarted) onStarted()
+      // Gone meanwhile: no mark and no poll (a later page reads the status itself).
+      if (!mounted.current) return
+      // A poll already in flight may answer "idle" from before the start: only polls
+      // issued from now on can show this import's end.
+      if (onStarted) onStarted(syncPollSeq + 1)
       poll()
     } catch (e) {
       if (legacy) host.notifyError(asMordredError(e), 'Import failed')
@@ -3489,8 +3507,9 @@ function SetupPage() {
   // The last /sync answer's activity, to see a Telegram import end.
   const syncWas = useRef({ syncing: false, error: null })
   // An import this page started that no /sync answer has shown running yet: it may end
-  // between two polls, so the first idle answer is its completion.
-  const importPending = useRef(false)
+  // between two polls, so the first idle answer to a poll issued after the start (number
+  // `importPending.current` or later) is its completion. null: none pending.
+  const importPending = useRef(null)
   const reading = useRef(null)
   const again = useRef(false)
   // One status read at a time: refreshes asked for meanwhile run once, after it.
@@ -3525,11 +3544,13 @@ function SetupPage() {
   // that was never seen running) changed the store counts and the step states, so the
   // status is read once more (coalesced with a read in flight).
   const onSync = useCallback(
-    (answer) => {
+    (answer, seq = null) => {
       const syncing = Boolean(answer && answer.syncing)
-      // Seen running, the busy → idle rule takes over; seen idle, it already ended.
-      const startedAndEnded = importPending.current && !syncing
-      if (importPending.current) importPending.current = false
+      // An answer to a poll issued after the start: seen running, the busy → idle rule
+      // takes over; seen idle, the import already ended. Older answers change nothing here.
+      const afterStart = importPending.current !== null && typeof seq === 'number' && seq >= importPending.current
+      const startedAndEnded = afterStart && !syncing
+      if (afterStart) importPending.current = null
       const key = JSON.stringify(answer)
       if (key === lastSync.current) {
         if (startedAndEnded) refresh()
@@ -3544,11 +3565,11 @@ function SetupPage() {
     },
     [refresh],
   )
-  const onImportStarted = useCallback(() => {
-    importPending.current = true
+  const onImportStarted = useCallback((fromSeq) => {
+    importPending.current = typeof fromSeq === 'number' ? fromSeq : syncPollSeq + 1
   }, [])
   useEffect(() => () => {
-    importPending.current = false
+    importPending.current = null
   }, [])
   useEffect(() => {
     refresh()

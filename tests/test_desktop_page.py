@@ -1205,6 +1205,112 @@ console.log(JSON.stringify(out))
     assert "Import Telegram messages\u2713 Done" in text
 
 
+# SetupPage with its PageBody captured, and the real import step mounted beside it (hooks
+# numbered apart): /sync GETs and the POST answer from `syncAnswers` in order, "HOLD"
+# staying pending until `held.shift()(answer)`; /status answers BEFORE, then AFTER.
+IMPORT_SCRIPT = """
+const timers = []
+globalThis.setInterval = fn => { timers.push(fn); return 0 }
+globalThis.clearInterval = () => {}
+const original = jsx
+let body = null
+jsx = jsxs = (type, props) => type === PageBody ? (body = props, {type: 'PageBody', props: {}}) : original(type, props)
+const statuses = [BEFORE, AFTER]
+const reads = [], gets = [], held = []
+const syncAnswers = SYNC_ANSWERS
+rest = async (path, init) => {
+  if (path.startsWith('/status')) {
+    reads.push(path)
+    return statuses[Math.min(reads.length - 1, statuses.length - 1)]
+  }
+  if (path !== '/sync') return {ok: true}
+  if (!(init && init.method === 'POST')) gets.push(path)
+  const answer = syncAnswers.shift()
+  return answer === 'HOLD' ? new Promise(resolve => held.push(resolve)) : answer
+}
+const flush = async () => { for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r)) }
+const page = () => { cursor = 0; effects.length = 0; return SetupPage({}) }
+const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
+  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
+  : text(node.props && node.props.children)
+page()
+effects.slice().forEach(f => f())
+await flush()
+page()
+const step = () => { cursor = 1000; effects.length = 0; return ImportStep({id: 'telegram_import', n: '2.4',
+  state: 'next', title: 'Import Telegram messages', refresh: body.refresh, onSync: body.onSync,
+  onStarted: body.onImportStarted}) }
+let tree = step()
+// Mount the step: its first poll goes out at once, the interval poll is timers[0].
+const cleanups = effects.slice().map(f => f()).filter(c => typeof c === 'function')
+const out = {}
+SCRIPT
+console.log(JSON.stringify(out))
+"""
+
+
+def import_page(answers: list[Any], script: str) -> Any:
+    return render_page(
+        IMPORT_SCRIPT.replace("BEFORE", json.dumps(mac(**v4(telegram=(0, 0)))))
+        .replace("AFTER", json.dumps(mac(**v4(telegram=(2, 9)))))
+        .replace("SYNC_ANSWERS", json.dumps(answers))
+        .replace("SCRIPT", script)
+    )
+
+
+SYNC_NINE = {**SYNC_IDLE, "dialog_count": 2, "message_count": 9}
+
+
+def test_an_idle_answer_to_a_poll_issued_before_the_start_never_counts_as_its_end():
+    script = """
+out.start = reads.length
+// The mount poll is still in flight when the import POST succeeds; the start then polls again.
+await find(tree, n => n.type === 'button' && n.props.children === 'Import').props.onClick()
+await flush()
+held.shift()(STALE)
+await flush()
+out.afterStale = reads.length
+held.shift()(NINE)
+await flush()
+out.afterCurrent = reads.length
+timers[0](); await flush()
+out.later = reads.length
+out.gets = gets.length
+page()
+cursor = 2000
+out.text = text(PageBody({...body}))
+""".replace("STALE", json.dumps(SYNC_IDLE)).replace("NINE", json.dumps(SYNC_NINE))
+    result = import_page(["HOLD", {"ok": True}, "HOLD", SYNC_NINE], script)
+    assert result["start"] == 1
+    assert result["afterStale"] == 1, "the stale idle answer (poll issued before the start) refreshes nothing"
+    assert result["afterCurrent"] == 2, "the first idle answer to a later poll is the import's end"
+    assert result["later"] == 2 and result["gets"] == 3
+    assert "connected · 2 chats · 9 messages in Mordred\u2019s store (all accounts)" in result["text"]
+    assert "Import Telegram messages\u2713 Done" in result["text"]
+
+
+def test_a_late_import_start_after_unmount_sets_no_mark_and_polls_nothing():
+    script = """
+// The mount poll answers idle; then the POST is held while the step unmounts.
+await flush()
+const gets0 = gets.length
+const pending = find(tree, n => n.type === 'button' && n.props.children === 'Import').props.onClick()
+cleanups.forEach(c => c())
+held.shift()({ok: true})
+await pending
+await flush()
+out.getsAfter = gets.length - gets0
+out.reads = reads.length
+// A later idle answer (another mounted step's poll) finds no mark: no status read.
+body.onSync(NINE, 1000000)
+await flush()
+out.readsLater = reads.length
+""".replace("NINE", json.dumps(SYNC_NINE))
+    result = import_page([SYNC_IDLE, "HOLD"], script)
+    assert result["getsAfter"] == 0, "no poll after the late start"
+    assert result["reads"] == 1 and result["readsLater"] == 1
+
+
 def test_windows_and_unsupported_statuses_keep_their_pages():
     result = render_page("""
 jsx = jsxs = (type, props) => ({type: typeof type === 'function' ? type.name : type, props})
