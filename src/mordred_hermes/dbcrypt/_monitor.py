@@ -26,6 +26,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
+from urllib.parse import quote
 
 from . import _migrate, _shim, armed, protected_state_present
 from ._policy import in_scope, looks_like_database_name
@@ -86,7 +87,7 @@ def is_plaintext(path: Path) -> bool:
     try:
         if path.stat().st_size == 0:
             return False
-        conn = stdlib.connect(f"file:{path.as_posix()}?mode=ro&immutable=1", uri=True)
+        conn = stdlib.connect(f"file:{quote(path.as_posix(), safe='/')}?mode=ro&immutable=1", uri=True)
     except (OSError, stdlib.Error, UnicodeDecodeError):
         return False
     try:
@@ -111,7 +112,7 @@ def key_opens(path: Path, key: Any) -> bool:
         return True
     sc = _migrate._sqlcipher()
     try:
-        conn = sc.connect(f"file:{path.as_posix()}?mode=ro&immutable=1", uri=True)
+        conn = sc.connect(f"file:{quote(path.as_posix(), safe='/')}?mode=ro&immutable=1", uri=True)
     except (OSError, sc.Error):
         return True  # cannot tell; not reported
     try:

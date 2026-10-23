@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import sqlite3
 import sys
@@ -737,14 +738,23 @@ MEMORY_KEY = "hex:" + "11" * 32
 
 
 class _ReadOnlyModule:
-    """The process ``sqlite3`` as the shim would key it, recording every ``connect``."""
+    """A stand-in for SQLCipher itself (plain SQLite ignores the key pragmas), recording every ``connect``."""
 
     calls: ClassVar[list[tuple[str, dict[str, Any]]]] = []
+    Error = sqlite3.Error
 
     @classmethod
     def connect(cls, database: str, **kwargs: Any) -> sqlite3.Connection:
         cls.calls.append((database, kwargs))
-        return sqlite3.connect(database, factory=_ClaimsKey, **kwargs)
+        return sqlite3.connect(database, **kwargs)
+
+
+class _NoProcessSqlite:
+    """The process ``sqlite3`` (the shim, with its key provider): the read-only path must never reach it."""
+
+    @staticmethod
+    def connect(*_args: Any, **_kwargs: Any) -> sqlite3.Connection:
+        raise AssertionError("the read-only opener went through the process sqlite3")
 
 
 @pytest.fixture
@@ -757,7 +767,8 @@ def readonly_home(protected: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(dbcrypt, "_PROVIDER", forbidden)
     monkeypatch.setattr(store_module, "check_protection", forbidden)
     monkeypatch.setenv("HERMES_MEMORY_KEY", MEMORY_KEY)
-    monkeypatch.setattr(_gate, "_process_sqlite", lambda: _ReadOnlyModule)
+    monkeypatch.setattr(_gate, "_process_sqlite", lambda: _NoProcessSqlite)
+    monkeypatch.setattr(store_module, "_sqlcipher", lambda: _ReadOnlyModule)
     monkeypatch.setattr(_monitor, "is_plaintext", lambda _path: False)
     _ReadOnlyModule.calls = []
     return protected
@@ -925,18 +936,166 @@ def test_a_failed_read_only_open_is_store_unavailable(
         def connect(_database: str, **_kwargs: Any) -> sqlite3.Connection:
             raise error
 
-    monkeypatch.setattr(_gate, "_process_sqlite", lambda: Failing)
+    monkeypatch.setattr(store_module, "_sqlcipher", lambda: Failing)
     with pytest.raises(ImportRefused) as caught:
         open_import_store_readonly(readonly_home)
     assert caught.value.code == "store_unavailable"
 
 
-def test_readonly_open_refuses_an_unkeyed_connection(readonly_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_wrong_key_reads_as_store_unavailable(readonly_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bound_store(readonly_home)
-    monkeypatch.setattr(_gate, "_process_sqlite", lambda: sqlite3)  # the shim is not in place after all
+
+    class WrongKey(_ReadOnlyModule):
+        @classmethod
+        def connect(cls, database: str, **kwargs: Any) -> sqlite3.Connection:
+            conn = sqlite3.connect(database, **kwargs)
+            conn.execute("PRAGMA query_only = 1")
+            conn.close()
+            raise sqlite3.DatabaseError("file is not a database")
+
+    monkeypatch.setattr(store_module, "_sqlcipher", lambda: WrongKey)
     with pytest.raises(ImportRefused) as caught:
         open_import_store_readonly(readonly_home)
-    assert caught.value.code == "unkeyed_connection"
+    assert caught.value.code == "store_unavailable"
+
+
+# --- WAL sidecars and URI-special paths -------------------------------------------------------------
+
+
+def wal_store(home: Path) -> Path:
+    """An initialised store in WAL mode with its sidecars removed (every connection closed)."""
+    path = store_path(home)
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        conn.execute("PRAGMA journal_mode = WAL")
+    commit(bound_store(home), tg_conv(), [authored(1, text="SECRET one")])
+    for suffix in ("-wal", "-shm"):
+        Path(f"{path}{suffix}").unlink(missing_ok=True)
+    assert path.read_bytes()[18:20] == b"\x02\x02"
+    return path
+
+
+def test_a_wal_store_without_its_reader_sidecar_is_refused_without_creating_it(readonly_home: Path) -> None:
+    path = wal_store(readonly_home)
+    before = sorted(item.name for item in path.parent.iterdir())
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(readonly_home)
+    assert caught.value.code == "store_unavailable" and _ReadOnlyModule.calls == []
+    assert sorted(item.name for item in path.parent.iterdir()) == before == ["mordred.db"]
+
+
+def test_a_wal_store_with_a_writer_answers_counts(readonly_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = wal_store(readonly_home)
+    monkeypatch.setattr(store_module, "BUSY_TIMEOUT_S", 0.05)
+    holder = sqlite3.connect(path, isolation_level=None)  # a fetch: its connection keeps -wal and -shm
+    holder.execute("BEGIN IMMEDIATE")
+    holder.execute("INSERT INTO import_meta (key, value) VALUES ('mail_imap.x.last', '{}')")
+    try:
+        assert Path(f"{path}-shm").exists()
+        status = open_import_store_readonly(readonly_home).status()
+        assert status["sources"]["telegram"]["messages"] == 1  # the uncommitted write is not visible
+    finally:
+        holder.rollback()
+        holder.close()
+
+
+def special_home(tmp_path: Path) -> Path:
+    home = tmp_path / "we#ird?ho%me"
+    home.mkdir()
+    return home
+
+
+def test_is_plaintext_probes_the_named_file_even_with_uri_characters(tmp_path: Path) -> None:
+    from mordred_hermes.dbcrypt import _monitor as monitor
+
+    home = special_home(tmp_path)
+    target = home / "store.db"
+    target.write_bytes(b"MMC1" + bytes(4092))  # not SQLite: an encrypted store reads like this
+    before = sorted(str(item) for item in tmp_path.rglob("*"))
+    assert monitor.is_plaintext(target) is False
+    with contextlib.closing(sqlite3.connect(home / "plain.db")) as conn:
+        conn.execute("CREATE TABLE t (x INTEGER)")
+    assert monitor.is_plaintext(home / "plain.db") is True
+    after = sorted(str(item) for item in tmp_path.rglob("*"))
+    assert [item for item in after if item not in before] == [str(home / "plain.db")]  # nothing else created
+
+
+def test_readonly_open_of_a_home_with_uri_characters_reads_the_right_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = special_home(tmp_path)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(_shim, "is_installed", lambda: True)
+    monkeypatch.setenv("HERMES_MEMORY_KEY", MEMORY_KEY)
+    monkeypatch.setattr(store_module, "_sqlcipher", lambda: _ReadOnlyModule)
+    _ReadOnlyModule.calls = []
+    dbcrypt.arm(home)
+    commit(bound_store(home), tg_conv(), [authored(1, text="SECRET one")])
+    before = sorted(str(item) for item in tmp_path.rglob("*"))
+    with pytest.raises(ImportRefused) as caught:  # the real probe reads this plain test store, not another file
+        open_import_store_readonly(home)
+    assert caught.value.code == "plaintext_store" and _ReadOnlyModule.calls == []
+    monkeypatch.setattr(_monitor, "is_plaintext", lambda _path: False)  # as for an encrypted store
+    status = open_import_store_readonly(home).status()
+    assert status["sources"]["telegram"]["messages"] == 1
+    assert sorted(str(item) for item in tmp_path.rglob("*")) == before  # no stray file at the cut-off path
+    assert _ReadOnlyModule.calls
+    assert all("%23" in database and "%3F" in database for database, _kwargs in _ReadOnlyModule.calls)
+
+
+# --- the real SQLCipher shim -----------------------------------------------------------------------
+
+
+@pytest.fixture
+def real_shim(protected: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An encrypted store written through a working shim, then the process shim swapped for one whose
+    key provider fails the test if it is ever consulted (it would inject the vault)."""
+    pytest.importorskip("sqlcipher3")
+    from mordred_hermes.dbcrypt import _key
+    from mordred_hermes.keyvault.memory_crypto import decode_key
+
+    key = _key.derive(decode_key(MEMORY_KEY))
+    writer = _shim.build_module(key=lambda: key, home=lambda: protected, has_key=lambda: True)
+    ImportStore(store_path(protected), writer.connect).initialize(protected)
+    commit(ImportStore(store_path(protected), writer.connect), tg_conv(), [authored(1, text="SECRET one")])
+
+    def forbidden() -> object:
+        raise AssertionError("the shim's key provider was consulted")
+
+    process = _shim.build_module(key=forbidden, home=lambda: protected, has_key=lambda: True)
+    monkeypatch.setitem(sys.modules, "sqlite3", process)
+    monkeypatch.setitem(sys.modules, "sqlite3.dbapi2", process)
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", forbidden)
+    monkeypatch.setenv("HERMES_MEMORY_KEY", MEMORY_KEY)
+    assert _shim.is_installed()
+    return protected
+
+
+def test_the_real_shim_s_provider_is_never_consulted(real_shim: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = open_import_store_readonly(real_shim)
+    monkeypatch.delenv("HERMES_MEMORY_KEY")  # gone after admission: later reads keep the derived key
+    assert store.status()["sources"]["telegram"]["messages"] == 1
+    assert _monitor.is_plaintext(store_path(real_shim)) is False
+
+
+def test_a_key_removed_right_after_the_gate_is_no_key(real_shim: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    real_gate = store_module._readonly_gate
+
+    def gate_then_remove(home: Path) -> str | None:
+        found = real_gate(home)
+        monkeypatch.delenv("HERMES_MEMORY_KEY")
+        return found
+
+    monkeypatch.setattr(store_module, "_readonly_gate", gate_then_remove)
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(real_shim)
+    assert caught.value.code == "no_key"
+
+
+def test_a_wrong_environment_key_never_reaches_the_provider(real_shim: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HERMES_MEMORY_KEY", "hex:" + "22" * 32)  # valid shape, another key
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(real_shim)
+    assert caught.value.code == "store_unavailable"
 
 
 def test_refusal_codes_are_closed() -> None:

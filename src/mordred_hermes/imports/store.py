@@ -1545,6 +1545,9 @@ def open_import_store(home: Path) -> ImportStore:
 
 # --- the read-only status path ----------------------------------------------------------------
 
+#: Bytes 18 and 19 of a SQLite header (write and read format versions); 2 and 2 mean WAL mode.
+_WAL_FORMAT: Final = b"\x02\x02"
+
 
 def readonly_store_path(home: Path) -> Path:
     """``<home>/plugin-data/mordred/mordred.db``, computed only (``store_path`` creates the directory)."""
@@ -1553,11 +1556,30 @@ def readonly_store_path(home: Path) -> Path:
     return home.joinpath(*PLUGIN_DATA_SUBPATH, STORE_NAME)
 
 
-def _env_key_valid() -> bool:
-    """``HERMES_MEMORY_KEY`` is in this process's environment and decodes to 32 bytes (nothing is unlocked)."""
+def readonly_uri(path: Path) -> str:
+    """``file:<path>?mode=ro`` with the path escaped, so a ``#``, ``?`` or ``%`` cannot cut it short."""
+    from urllib.parse import quote
+
+    return f"file:{quote(path.as_posix(), safe='/')}?mode=ro"
+
+
+def _sqlcipher() -> Any:
+    """The SQLCipher DB-API module itself, never the process ``sqlite3`` shim (a seam for tests)."""
+    import sqlcipher3.dbapi2 as sc
+
+    return sc
+
+
+def _env_database_key() -> Any:
+    """The database key derived from ``HERMES_MEMORY_KEY`` as it is now; ``None`` unless it decodes to 32 bytes.
+
+    Read once per open; no key provider runs, so nothing can unlock the vault or prompt.
+    """
+    from ..dbcrypt._key import derive
     from ..keyvault._memory_hook import _decode_env_key
 
-    return _decode_env_key(os.environ) is not None
+    memory_key = _decode_env_key(os.environ)
+    return None if memory_key is None else derive(memory_key)
 
 
 def _readonly_gate(home: Path) -> str | None:
@@ -1575,23 +1597,24 @@ def _readonly_gate(home: Path) -> str | None:
         return "not_armed"
     if not _shim.is_installed():
         return "unprotected_process"
-    if not _env_key_valid():
-        return "no_key"
     return None
 
 
-def _readonly_opener(path: Path) -> sqlite3.Connection:
-    """``file:<path>?mode=ro`` through the process ``sqlite3``: the shim keys it from the environment's key."""
-    from urllib.parse import quote
+def _readonly_opener(key: Any) -> Opener:
+    """Connections through SQLCipher itself, keyed with ``key``: never the shim and its key provider."""
 
-    from ..activity import _gate as activity_gate
+    def open_readonly(path: Path) -> sqlite3.Connection:
+        from ..dbcrypt._shim import apply_key
 
-    database = f"file:{quote(path.as_posix(), safe='/')}?mode=ro"
-    conn = activity_gate._process_sqlite().connect(database, uri=True, timeout=BUSY_TIMEOUT_S)
-    if getattr(conn, "mordred_key", None) is None:
-        conn.close()
-        raise ActivityRefused(refusal("unkeyed_connection"))
-    return cast(sqlite3.Connection, conn)
+        conn = _sqlcipher().connect(readonly_uri(path), uri=True, timeout=BUSY_TIMEOUT_S)
+        try:
+            apply_key(conn, key)
+        except BaseException:
+            conn.close()
+            raise
+        return cast(sqlite3.Connection, conn)
+
+    return open_readonly
 
 
 def _lstat(path: Path) -> os.stat_result | None:
@@ -1608,33 +1631,43 @@ def open_import_store_readonly(home: Path) -> ImportStore:
 
     Its own gate sequence (never :func:`~..activity._gate.check_protection`, never a
     key provider that could inject the vault or prompt): macOS, no database
-    conversion pending in either direction, armed, the SQLCipher shim installed, and
-    ``HERMES_MEMORY_KEY`` already in the environment and decoding to 32 bytes
-    (``no_key`` otherwise). The path is computed without creating directories; no
-    file (or an empty one) is ``store_uninitialised``. The file is opened
-    ``mode=ro`` through the process ``sqlite3`` (any open or sidecar failure is
-    ``store_unavailable``), the connection must carry the shim's key and the file
-    must not be plaintext; ``import_meta`` is read with plain selects (no table:
-    ``store_uninitialised``; a newer schema: ``schema_newer``; another profile:
-    ``profile_mismatch``; an older schema is read as it is). The returned store
-    serves :meth:`ImportStore.status` and other reads (deferred read transactions,
-    which a writer holding ``BEGIN IMMEDIATE`` does not block); callers never write
-    through it. Raises :class:`ImportRefused` with a :data:`REFUSAL_CODES` member.
+    conversion pending in either direction, armed, the SQLCipher shim installed,
+    and ``HERMES_MEMORY_KEY`` already in the environment and decoding to 32 bytes
+    (``no_key`` otherwise; read once, the derived key serves every later read of
+    the returned store). The path is computed without creating directories; no
+    file (or an empty one) is ``store_uninitialised``. A WAL store whose ``-shm``
+    sidecar is absent is ``store_unavailable``: SQLite would create the sidecar
+    even for a read-only connection (a fetch or an import creates it), and
+    ``immutable=1`` would disable locking. The file must not be plaintext; it is
+    opened ``mode=ro`` through SQLCipher itself (not the process ``sqlite3``
+    shim, whose key provider could inject the vault) with the derived key, and
+    any open failure is ``store_unavailable``; ``import_meta`` is read with plain
+    selects (no table: ``store_uninitialised``; a wrong key or an unreadable
+    file: ``store_unavailable``; a newer schema: ``schema_newer``; another
+    profile: ``profile_mismatch``; an older schema is read as it is). The
+    returned store serves :meth:`ImportStore.status` and other reads (deferred
+    read transactions, which a writer holding ``BEGIN IMMEDIATE`` does not
+    block); callers never write through it. Raises :class:`ImportRefused` with a
+    :data:`REFUSAL_CODES` member.
     """
     found = _readonly_gate(home)
     if found is not None:
         raise ImportRefused(found)
+    key = _env_database_key()
+    if key is None:
+        raise ImportRefused("no_key")
     path = _readonly_file(home)
-    meta = _readonly_meta(path)
+    opener = _readonly_opener(key)
+    meta = _readonly_meta(path, opener)
     if meta is None:
         raise ImportRefused("store_uninitialised")
     if ImportStore._checked_meta(meta).profile_home != os.path.realpath(home):
         raise ImportRefused("profile_mismatch")
-    return ImportStore(path, _readonly_opener)
+    return ImportStore(path, opener)
 
 
 def _readonly_file(home: Path) -> Path:
-    """The existing, non-empty, not-plaintext store file of ``home`` (nothing is created or touched)."""
+    """The existing, non-empty, not-plaintext store file of ``home``, readable without creating a sidecar."""
     from ..dbcrypt import _monitor
 
     path = readonly_store_path(home)
@@ -1646,24 +1679,35 @@ def _readonly_file(home: Path) -> Path:
         raise ImportRefused("store_unavailable")
     if info is None or info.st_size == 0:
         raise ImportRefused("store_uninitialised")
+    if _wal_without_reader_sidecar(path):
+        raise ImportRefused("store_unavailable")
     if _monitor.is_plaintext(path):
         raise ImportRefused("plaintext_store")
     return path
 
 
-def _readonly_meta(path: Path) -> dict[str, str] | None:
-    """``import_meta`` through one keyed read-only connection (plain selects, no transaction is begun)."""
+def _wal_without_reader_sidecar(path: Path) -> bool:
+    """A WAL-mode file (header bytes 18-19) whose ``-shm`` is absent: opening it would create the sidecar."""
     try:
-        conn = _readonly_opener(path)
-    except ActivityRefused as exc:
-        raise ImportRefused(exc.code) from None
+        with path.open("rb") as handle:
+            header = handle.read(20)
+    except OSError:
+        raise ImportRefused("store_unavailable") from None
+    return header[18:20] == _WAL_FORMAT and _lstat(Path(f"{path}-shm")) is None
+
+
+def _readonly_meta(path: Path, opener: Opener) -> dict[str, str] | None:
+    """``import_meta`` through one read-only connection (plain selects, no transaction is begun)."""
+    try:
+        conn = opener(path)
     except Exception:  # an open or sidecar failure: never stringified
         raise ImportRefused("store_unavailable") from None
     try:
-        found = verify_keyed_connection(conn, path)
-        if found is not None:
-            raise ImportRefused(found.code)
         with _refusing():
             return ImportStore._read_meta(conn)
+    except ImportRefused:
+        raise
+    except Exception:  # SQLCipher's own errors (a wrong key reads as "not a database")
+        raise ImportRefused("store_unavailable") from None
     finally:
         conn.close()
