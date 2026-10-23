@@ -1036,23 +1036,36 @@ hermes-mordred mail forget --rows --yes                 # ... and the account's 
 `mail fetch` does the same as the tool from a terminal, with up to 10 minutes
 per run; `--dry-run` fetches and counts but writes nothing. It exits 0 when it
 worked (also when partial), 1 with a code such as `imap_auth_failed` (the app
-password was revoked: run `mail setup` again), `mail_not_configured`,
+password was revoked or changed: run `mail forget --yes`, then `mail setup`
+again; see the hints below), `mail_not_configured`, `credentials_left` (a
+crash left credentials without their metadata: run `mail forget --yes`),
 `not_armed` or `sync_in_progress`, and 2 for bad arguments.
 
-`mail setup` and the Desktop page also say why a login was refused. An
-`imap_auth_failed` carries one of four hints, taken only from the server's
-response code (the server's own text is never kept or shown):
-`authentication_failed` (the server rejected the address or the app password:
-check that the app password was made in the same Google account, that the
-address is the primary sign-in address and not an alias, and that 2-Step
-Verification is on; a Workspace administrator or Advanced Protection can also
-turn app passwords off), `server_alert` (the server refused with an alert; for
-Gmail this usually means an app password is required or Google wants a sign-in
-in the browser first), `login_disabled` (the server does not allow password
-login over IMAP) and `gmail_app_password_length` (a Gmail app password is
-exactly 16 letters; what was pasted has another length, so it is probably the
-account password, and nothing was sent to the server). A refusal never stores
-anything.
+`mail setup` refuses with `mail_already_configured` while credentials (or what
+an interrupted setup left of them) exist: it never replaces them, so remove
+them first with `hermes-mordred mail forget --yes`.
+
+`mail setup`, `mail fetch` and the Desktop page also say why a login was
+refused: the hint follows the code, as in `mail refused (imap_auth_failed:
+authentication_failed)` from `mail setup` or `mail fetch failed
+(imap_auth_failed: authentication_failed)` from `mail fetch` (text output only;
+`--json` and the chat tool carry the code alone). The hint is taken only from
+the server's response code; the server's own text is never kept or shown:
+
+- `authentication_failed`: the server rejected the address or the app
+  password; check that the app password was made in the same Google account,
+  that the address is the primary sign-in address and not an alias, and that
+  2-Step Verification is on (a Workspace administrator or Advanced Protection
+  can also turn app passwords off).
+- `server_alert`: the server refused with an alert, which for Gmail usually
+  means an app password is required or Google wants a sign-in in the browser
+  first.
+- `login_disabled`: the server does not allow password login over IMAP.
+- `gmail_app_password_length`: a Gmail app password is exactly 16 letters and
+  what was pasted has another length, so it is probably the account password;
+  nothing was sent to the server.
+
+A refusal never stores anything.
 
 **Cron.** Cron cannot answer Touch ID, so set up with `--no-touch-id`, then run
 the command once by hand from a non-interactive shell to see that nothing

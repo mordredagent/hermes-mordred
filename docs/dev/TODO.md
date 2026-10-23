@@ -889,6 +889,11 @@ Follow-ups left by the landed code:
   2-Step Verification on, Workspace admins can disable IMAP or app passwords,
   Advanced Protection disables app passwords) in the CLI and on the page
   (designed in the Desktop design doc, implemented by PR D2).
+  - [x] CLI (PR D2, #264): `ImapError.hint` from the response code only;
+    `mail setup` prints `mail refused (imap_auth_failed: <hint>)` and `mail
+    fetch` prints the hint after the code in its text output; USAGE explains
+    the four hints.
+  - [ ] Page (PR D4): the remediation text per hint in `IMAP_HINTS`.
 
 Later (not scheduled):
 
