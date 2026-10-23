@@ -1,0 +1,2610 @@
+{
+ "code": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "5  Connect Telegram (read-only)",
+      "style": {
+       "margin": "0 0 8px"
+      }
+     },
+     "type": "h3"
+    },
+    null,
+    {
+     "props": {
+      "children": "Enter the login code Telegram just sent to your Telegram app."
+     },
+     "type": "p"
+    },
+    {
+     "props": {
+      "children": {
+       "props": {
+        "autoComplete": "off",
+        "placeholder": "Telegram login code",
+        "type": "password",
+        "value": ""
+       },
+       "type": "input"
+      },
+      "style": {
+       "alignItems": "center",
+       "display": "flex",
+       "gap": 8,
+       "marginTop": 8
+      }
+     },
+     "type": "div"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "Continue",
+         "disabled": false
+        },
+        "type": "button"
+       },
+       {
+        "props": {
+         "children": "Cancel",
+         "variant": "ghost"
+        },
+        "type": "button"
+       }
+      ],
+      "style": {
+       "alignItems": "center",
+       "display": "flex",
+       "gap": 8,
+       "marginTop": 8
+      }
+     },
+     "type": "div"
+    }
+   ],
+   "style": {
+    "border": "1px solid var(--border, #333)",
+    "borderRadius": 10,
+    "marginBottom": 12,
+    "padding": 16
+   }
+  },
+  "type": "section"
+ },
+ "connected": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "Windows: keys are machine-bound CNG keys in this PC’s TPM, without per-use presence or portable recovery."
+     },
+     "type": "p"
+    },
+    {
+     "props": {
+      "children": "Windows capabilities"
+     },
+     "type": "h3"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "Memory custody: available (enrolled)",
+         "key": "memory_custody"
+        },
+        "type": "li"
+       },
+       {
+        "props": {
+         "children": "File vault: not supported on Windows (not available on Windows)",
+         "key": "file_vault"
+        },
+        "type": "li"
+       }
+      ],
+      "style": {
+       "margin": "4px 0 12px",
+       "paddingLeft": 20
+      }
+     },
+     "type": "ul"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Hermes chat model",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": "qwen (local, this host only)"
+        },
+        "type": "p"
+       }
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Windows TPM helper (CNG)",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       null
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Encrypt Hermes memory",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       null
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "3  Telegram custody",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": [
+          {
+           "props": {
+            "checked": true,
+            "style": {
+             "borderColor": "CanvasText",
+             "borderStyle": "solid",
+             "borderWidth": 1.5
+            }
+           },
+           "type": "checkbox"
+          },
+          {
+           "props": {
+            "children": "Telegram credentials are sealed by this PC’s TPM. I understand Windows asks for no per-use approval and there is no portable recovery."
+           },
+           "type": "span"
+          }
+         ],
+         "style": {
+          "alignItems": "flex-start",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "label"
+       }
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Question model (Venice private or local)",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       null
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Connect Telegram (read-only)",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       null
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "6  Import messages",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": "Pinned chats first. Large groups and archived chats are skipped. Nothing is downloaded twice."
+        },
+        "type": "p"
+       },
+       {
+        "props": {
+         "children": [
+          "Last",
+          {
+           "props": {
+            "min": 1,
+            "style": {
+             "width": 70
+            },
+            "type": "number",
+            "value": 3
+           },
+           "type": "input"
+          },
+          "days",
+          {
+           "props": {
+            "children": "Import",
+            "disabled": null
+           },
+           "type": "button"
+          }
+         ],
+         "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "div"
+       },
+       null
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "Disconnect Telegram",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": [
+          {
+           "props": {
+            "checked": false,
+            "style": {
+             "borderColor": "CanvasText",
+             "borderStyle": "solid",
+             "borderWidth": 1.5
+            }
+           },
+           "type": "checkbox"
+          },
+          {
+           "props": {
+            "children": "Also delete the archive, the sealed credentials and the Telegram custody key (memory and audit keys stay)."
+           },
+           "type": "span"
+          }
+         ],
+         "style": {
+          "alignItems": "flex-start",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "label"
+       },
+       null,
+       {
+        "props": {
+         "children": {
+          "props": {
+           "children": "Log out",
+           "disabled": false,
+           "variant": "outline"
+          },
+          "type": "button"
+         },
+         "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "div"
+       },
+       null,
+       null,
+       null,
+       null
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    }
+   ]
+  },
+  "type": "fragment"
+ },
+ "forget_failed": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "Custody is busy or has an unresolved journal. Let other Hermes/Mordred processes finish, then retry.",
+      "style": {
+       "margin": 0
+      }
+     },
+     "type": "p"
+    },
+    null,
+    null,
+    {
+     "props": {
+      "children": "Also end the session in Telegram → Settings → Devices."
+     },
+     "type": "p"
+    },
+    null,
+    null
+   ],
+   "role": "alert",
+   "style": {
+    "border": "1px solid #b91c1c",
+    "borderRadius": 8,
+    "marginTop": 10,
+    "padding": 10
+   }
+  },
+  "type": "div"
+ },
+ "import_ready": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "6  Import messages",
+      "style": {
+       "margin": "0 0 8px"
+      }
+     },
+     "type": "h3"
+    },
+    {
+     "props": {
+      "children": "Pinned chats first. Large groups and archived chats are skipped. Nothing is downloaded twice."
+     },
+     "type": "p"
+    },
+    {
+     "props": {
+      "children": [
+       "Last",
+       {
+        "props": {
+         "min": 1,
+         "style": {
+          "width": 70
+         },
+         "type": "number",
+         "value": 3
+        },
+        "type": "input"
+       },
+       "days",
+       {
+        "props": {
+         "children": "Import",
+         "disabled": false
+        },
+        "type": "button"
+       }
+      ],
+      "style": {
+       "alignItems": "center",
+       "display": "flex",
+       "gap": 8,
+       "marginTop": 8
+      }
+     },
+     "type": "div"
+    },
+    {
+     "props": {
+      "children": "Ready. Ask Hermes about your Telegram messages in any chat."
+     },
+     "type": "p"
+    }
+   ],
+   "style": {
+    "border": "1px solid var(--border, #333)",
+    "borderRadius": 10,
+    "marginBottom": 12,
+    "padding": 16
+   }
+  },
+  "type": "section"
+ },
+ "import_running": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "6  Import messages",
+      "style": {
+       "margin": "0 0 8px"
+      }
+     },
+     "type": "h3"
+    },
+    {
+     "props": {
+      "children": "Pinned chats first. Large groups and archived chats are skipped. Nothing is downloaded twice."
+     },
+     "type": "p"
+    },
+    {
+     "props": {
+      "children": [
+       "Last",
+       {
+        "props": {
+         "min": 1,
+         "style": {
+          "width": 70
+         },
+         "type": "number",
+         "value": 3
+        },
+        "type": "input"
+       },
+       "days",
+       {
+        "props": {
+         "children": "Importing…",
+         "disabled": true
+        },
+        "type": "button"
+       }
+      ],
+      "style": {
+       "alignItems": "center",
+       "display": "flex",
+       "gap": 8,
+       "marginTop": 8
+      }
+     },
+     "type": "div"
+    },
+    {
+     "props": {
+      "children": "Chats 1/4, 9 new messages"
+     },
+     "type": "p"
+    }
+   ],
+   "style": {
+    "border": "1px solid var(--border, #333)",
+    "borderRadius": 10,
+    "marginBottom": 12,
+    "padding": 16
+   }
+  },
+  "type": "section"
+ },
+ "import_stopped": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "6  Import messages",
+      "style": {
+       "margin": "0 0 8px"
+      }
+     },
+     "type": "h3"
+    },
+    {
+     "props": {
+      "children": "Pinned chats first. Large groups and archived chats are skipped. Nothing is downloaded twice."
+     },
+     "type": "p"
+    },
+    {
+     "props": {
+      "children": [
+       "Last",
+       {
+        "props": {
+         "min": 1,
+         "style": {
+          "width": 70
+         },
+         "type": "number",
+         "value": 3
+        },
+        "type": "input"
+       },
+       "days",
+       {
+        "props": {
+         "children": "Import",
+         "disabled": false
+        },
+        "type": "button"
+       }
+      ],
+      "style": {
+       "alignItems": "center",
+       "display": "flex",
+       "gap": 8,
+       "marginTop": 8
+      }
+     },
+     "type": "div"
+    },
+    {
+     "props": {
+      "children": "Telegram asked to wait before trying again."
+     },
+     "type": "p"
+    }
+   ],
+   "style": {
+    "border": "1px solid var(--border, #333)",
+    "borderRadius": 10,
+    "marginBottom": 12,
+    "padding": 16
+   }
+  },
+  "type": "section"
+ },
+ "import_waiting": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "6  Import messages",
+      "style": {
+       "margin": "0 0 8px"
+      }
+     },
+     "type": "h3"
+    },
+    {
+     "props": {
+      "children": "Finish the steps above first."
+     },
+     "type": "p"
+    }
+   ],
+   "style": {
+    "border": "1px solid var(--border, #333)",
+    "borderRadius": 10,
+    "marginBottom": 12,
+    "padding": 16
+   }
+  },
+  "type": "section"
+ },
+ "login": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "Windows: keys are machine-bound CNG keys in this PC’s TPM, without per-use presence or portable recovery."
+     },
+     "type": "p"
+    },
+    {
+     "props": {
+      "children": "Windows capabilities"
+     },
+     "type": "h3"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "Memory custody: available (enrolled)",
+         "key": "memory_custody"
+        },
+        "type": "li"
+       },
+       {
+        "props": {
+         "children": "File vault: not supported on Windows (not available on Windows)",
+         "key": "file_vault"
+        },
+        "type": "li"
+       }
+      ],
+      "style": {
+       "margin": "4px 0 12px",
+       "paddingLeft": 20
+      }
+     },
+     "type": "ul"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Hermes chat model",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": "qwen (local, this host only)"
+        },
+        "type": "p"
+       }
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Windows TPM helper (CNG)",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       null
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Encrypt Hermes memory",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       null
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "3  Telegram custody",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": [
+          {
+           "props": {
+            "checked": true,
+            "style": {
+             "borderColor": "CanvasText",
+             "borderStyle": "solid",
+             "borderWidth": 1.5
+            }
+           },
+           "type": "checkbox"
+          },
+          {
+           "props": {
+            "children": "Telegram credentials are sealed by this PC’s TPM. I understand Windows asks for no per-use approval and there is no portable recovery."
+           },
+           "type": "span"
+          }
+         ],
+         "style": {
+          "alignItems": "flex-start",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "label"
+       }
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Question model (Venice private or local)",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       null
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "5  Connect Telegram (read-only)",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": [
+          "Create an app at ",
+          {
+           "props": {
+            "children": "https://my.telegram.org/apps",
+            "style": {
+             "userSelect": "all"
+            }
+           },
+           "type": "code"
+          },
+          " (API development tools) and paste its api_id and api_hash."
+         ]
+        },
+        "type": "p"
+       },
+       {
+        "props": {
+         "children": {
+          "props": {
+           "autoComplete": "off",
+           "placeholder": "api_id",
+           "value": ""
+          },
+          "type": "input"
+         },
+         "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "div"
+       },
+       {
+        "props": {
+         "children": {
+          "props": {
+           "autoComplete": "off",
+           "placeholder": "api_hash",
+           "type": "password",
+           "value": ""
+          },
+          "type": "input"
+         },
+         "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "div"
+       },
+       {
+        "props": {
+         "children": {
+          "props": {
+           "autoComplete": "off",
+           "placeholder": "Phone number, e.g. +819012345678",
+           "value": ""
+          },
+          "type": "input"
+         },
+         "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "div"
+       },
+       {
+        "props": {
+         "children": [
+          {
+           "props": {
+            "children": "Send login code",
+            "disabled": false
+           },
+           "type": "button"
+          },
+          null
+         ],
+         "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "div"
+       }
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "6  Import messages",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": "Finish the steps above first."
+        },
+        "type": "p"
+       }
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    null
+   ]
+  },
+  "type": "fragment"
+ },
+ "model_local": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "✓  Hermes chat model",
+      "style": {
+       "margin": "0 0 8px"
+      }
+     },
+     "type": "h3"
+    },
+    {
+     "props": {
+      "children": "qwen (local, this host only)"
+     },
+     "type": "p"
+    }
+   ],
+   "style": {
+    "border": "1px solid var(--border, #333)",
+    "borderRadius": 10,
+    "marginBottom": 12,
+    "padding": 16
+   }
+  },
+  "type": "section"
+ },
+ "model_public": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "0  Hermes chat model",
+      "style": {
+       "margin": "0 0 8px"
+      }
+     },
+     "type": "h3"
+    },
+    {
+     "props": {
+      "children": "Everything Hermes reads goes to its chat model (now: gpt-x). For Telegram it must be a Venice private model or a model on this host."
+     },
+     "type": "p"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "Open Settings → Providers → “Local / custom endpoint”.",
+         "key": 1
+        },
+        "type": "li"
+       },
+       {
+        "props": {
+         "children": "Venice: base URL https://api.venice.ai/api/v1, your Venice API key, and a private model such as e2ee-deepseek-v4-flash or deepseek-v4-flash.",
+         "key": 2
+        },
+        "type": "li"
+       },
+       {
+        "props": {
+         "children": "Or a local server (Ollama / LM Studio) at http://127.0.0.1:<port>/v1.",
+         "key": 3
+        },
+        "type": "li"
+       },
+       {
+        "props": {
+         "children": "Select that model for chats, then press Check again.",
+         "key": 4
+        },
+        "type": "li"
+       }
+      ]
+     },
+     "type": "ol"
+    },
+    {
+     "props": {
+      "children": "Check again"
+     },
+     "type": "button"
+    }
+   ],
+   "style": {
+    "border": "1px solid var(--border, #333)",
+    "borderRadius": 10,
+    "marginBottom": 12,
+    "padding": 16
+   }
+  },
+  "type": "section"
+ },
+ "model_unverified": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "0  Hermes chat model",
+      "style": {
+       "margin": "0 0 8px"
+      }
+     },
+     "type": "h3"
+    },
+    {
+     "props": {
+      "children": "Could not verify e2ee-x with Venice right now (offline?)."
+     },
+     "type": "p"
+    },
+    null,
+    {
+     "props": {
+      "children": "Check again"
+     },
+     "type": "button"
+    }
+   ],
+   "style": {
+    "border": "1px solid var(--border, #333)",
+    "borderRadius": 10,
+    "marginBottom": 12,
+    "padding": 16
+   }
+  },
+  "type": "section"
+ },
+ "model_venice": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "✓  Hermes chat model",
+      "style": {
+       "margin": "0 0 8px"
+      }
+     },
+     "type": "h3"
+    },
+    {
+     "props": {
+      "children": "e2ee-x (Venice private, no retention)"
+     },
+     "type": "p"
+    }
+   ],
+   "style": {
+    "border": "1px solid var(--border, #333)",
+    "borderRadius": 10,
+    "marginBottom": 12,
+    "padding": 16
+   }
+  },
+  "type": "section"
+ },
+ "no_acknowledgement": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "Mordred setup"
+     },
+     "type": "h2"
+    },
+    {
+     "props": {
+      "children": "Private, read-only Telegram for Hermes."
+     },
+     "type": "p"
+    },
+    null,
+    {
+     "props": {
+      "children": "Mordred 0.3.0a4 in Hermes environment hermes (Python 3.11). Automatic repair after Hermes updates is not supported on Windows. Rerun the original Windows installer, keeping the existing Hermes home and custody keys, then restart Hermes and check again.",
+      "style": {
+       "fontSize": 12,
+       "opacity": 0.8
+      }
+     },
+     "type": "p"
+    },
+    {
+     "props": {
+      "children": [
+       null,
+       {
+        "props": {
+         "children": "Not checked yet.",
+         "style": {
+          "fontSize": 12,
+          "opacity": 0.8
+         }
+        },
+        "type": "p"
+       },
+       null,
+       null,
+       {
+        "props": {
+         "children": [
+          null,
+          null,
+          {
+           "props": {
+            "children": "Check for updates",
+            "disabled": false,
+            "key": "check",
+            "variant": "outline"
+           },
+           "type": "button"
+          }
+         ],
+         "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "div"
+       },
+       null
+      ],
+      "style": {
+       "marginBottom": 12
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": "Windows: keys are machine-bound CNG keys in this PC’s TPM, without per-use presence or portable recovery."
+     },
+     "type": "p"
+    },
+    {
+     "props": {
+      "children": "Windows capabilities"
+     },
+     "type": "h3"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "Memory custody: available (enrolled)",
+         "key": "memory_custody"
+        },
+        "type": "li"
+       },
+       {
+        "props": {
+         "children": "File vault: not supported on Windows (not available on Windows)",
+         "key": "file_vault"
+        },
+        "type": "li"
+       }
+      ],
+      "style": {
+       "margin": "4px 0 12px",
+       "paddingLeft": 20
+      }
+     },
+     "type": "ul"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Hermes chat model",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": "qwen (local, this host only)"
+        },
+        "type": "p"
+       }
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Windows TPM helper (CNG)",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       null
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Encrypt Hermes memory",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       null
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "3  Telegram custody",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": [
+          {
+           "props": {
+            "checked": false,
+            "style": {
+             "borderColor": "CanvasText",
+             "borderStyle": "solid",
+             "borderWidth": 1.5
+            }
+           },
+           "type": "checkbox"
+          },
+          {
+           "props": {
+            "children": "Telegram credentials are sealed by this PC’s TPM. I understand Windows asks for no per-use approval and there is no portable recovery."
+           },
+           "type": "span"
+          }
+         ],
+         "style": {
+          "alignItems": "flex-start",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "label"
+       }
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": "The Telegram steps unlock once Hermes uses a private or local model, memory encryption is on and Telegram custody is confirmed."
+     },
+     "type": "p"
+    },
+    null,
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "Uninstall Mordred",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": "Removes Mordred from Hermes and restores Hermes to how it was before. Choose what happens to your encrypted data."
+        },
+        "type": "p"
+       },
+       {
+        "props": {
+         "children": {
+          "props": {
+           "children": "Uninstall Mordred…",
+           "variant": "outline"
+          },
+          "type": "button"
+         },
+         "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "div"
+       }
+      ],
+      "style": {
+       "border": "1px solid #b91c1c",
+       "borderRadius": 10,
+       "margin": "32px 0 12px",
+       "padding": 16
+      }
+     },
+     "type": "section"
+    }
+   ],
+   "style": {
+    "margin": "24px auto",
+    "maxWidth": 720,
+    "padding": "0 16px"
+   }
+  },
+  "type": "div"
+ },
+ "not_enrolled": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "Mordred setup"
+     },
+     "type": "h2"
+    },
+    {
+     "props": {
+      "children": "Private, read-only Telegram for Hermes."
+     },
+     "type": "p"
+    },
+    null,
+    {
+     "props": {
+      "children": "Mordred 0.3.0a4 in Hermes environment hermes (Python 3.11). Automatic repair after Hermes updates is not supported on Windows. Rerun the original Windows installer, keeping the existing Hermes home and custody keys, then restart Hermes and check again.",
+      "style": {
+       "fontSize": 12,
+       "opacity": 0.8
+      }
+     },
+     "type": "p"
+    },
+    {
+     "props": {
+      "children": [
+       null,
+       {
+        "props": {
+         "children": "Not checked yet.",
+         "style": {
+          "fontSize": 12,
+          "opacity": 0.8
+         }
+        },
+        "type": "p"
+       },
+       null,
+       null,
+       {
+        "props": {
+         "children": [
+          null,
+          null,
+          {
+           "props": {
+            "children": "Check for updates",
+            "disabled": false,
+            "key": "check",
+            "variant": "outline"
+           },
+           "type": "button"
+          }
+         ],
+         "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "div"
+       },
+       null
+      ],
+      "style": {
+       "marginBottom": 12
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": "Windows: keys are machine-bound CNG keys in this PC’s TPM, without per-use presence or portable recovery."
+     },
+     "type": "p"
+    },
+    {
+     "props": {
+      "children": "Windows capabilities"
+     },
+     "type": "h3"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "Memory custody: available (enrolled)",
+         "key": "memory_custody"
+        },
+        "type": "li"
+       },
+       {
+        "props": {
+         "children": "File vault: not supported on Windows (not available on Windows)",
+         "key": "file_vault"
+        },
+        "type": "li"
+       }
+      ],
+      "style": {
+       "margin": "4px 0 12px",
+       "paddingLeft": 20
+      }
+     },
+     "type": "ul"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Hermes chat model",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": "qwen (local, this host only)"
+        },
+        "type": "p"
+       }
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Windows TPM helper (CNG)",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       null
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Encrypt Hermes memory",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       null
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "3  Telegram custody",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": "Telegram custody is not enrolled (not enrolled yet). Run hermes-mordred keyvault native init --role telegram in a terminal, then reload."
+        },
+        "type": "p"
+       }
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": "The Telegram steps unlock once Hermes uses a private or local model, memory encryption is on and Telegram custody is confirmed."
+     },
+     "type": "p"
+    },
+    null,
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "Uninstall Mordred",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": "Removes Mordred from Hermes and restores Hermes to how it was before. Choose what happens to your encrypted data."
+        },
+        "type": "p"
+       },
+       {
+        "props": {
+         "children": {
+          "props": {
+           "children": "Uninstall Mordred…",
+           "variant": "outline"
+          },
+          "type": "button"
+         },
+         "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "div"
+       }
+      ],
+      "style": {
+       "border": "1px solid #b91c1c",
+       "borderRadius": 10,
+       "margin": "32px 0 12px",
+       "padding": 16
+      }
+     },
+     "type": "section"
+    }
+   ],
+   "style": {
+    "margin": "24px auto",
+    "maxWidth": 720,
+    "padding": "0 16px"
+   }
+  },
+  "type": "div"
+ },
+ "password": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "5  Connect Telegram (read-only)",
+      "style": {
+       "margin": "0 0 8px"
+      }
+     },
+     "type": "h3"
+    },
+    null,
+    {
+     "props": {
+      "children": "Enter your Telegram two-step verification password (the \"Cloud Password\" you set in Telegram → Settings → Privacy and Security). This is not your computer password or a Mordred passphrase. It is not stored."
+     },
+     "type": "p"
+    },
+    {
+     "props": {
+      "children": {
+       "props": {
+        "autoComplete": "off",
+        "placeholder": "Telegram password",
+        "type": "password",
+        "value": ""
+       },
+       "type": "input"
+      },
+      "style": {
+       "alignItems": "center",
+       "display": "flex",
+       "gap": 8,
+       "marginTop": 8
+      }
+     },
+     "type": "div"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "Continue",
+         "disabled": false
+        },
+        "type": "button"
+       },
+       {
+        "props": {
+         "children": "Cancel",
+         "variant": "ghost"
+        },
+        "type": "button"
+       }
+      ],
+      "style": {
+       "alignItems": "center",
+       "display": "flex",
+       "gap": 8,
+       "marginTop": 8
+      }
+     },
+     "type": "div"
+    }
+   ],
+   "style": {
+    "border": "1px solid var(--border, #333)",
+    "borderRadius": 10,
+    "marginBottom": 12,
+    "padding": 16
+   }
+  },
+  "type": "section"
+ },
+ "question_model": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "Windows: keys are machine-bound CNG keys in this PC’s TPM, without per-use presence or portable recovery."
+     },
+     "type": "p"
+    },
+    {
+     "props": {
+      "children": "Windows capabilities"
+     },
+     "type": "h3"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "Memory custody: available (enrolled)",
+         "key": "memory_custody"
+        },
+        "type": "li"
+       },
+       {
+        "props": {
+         "children": "File vault: not supported on Windows (not available on Windows)",
+         "key": "file_vault"
+        },
+        "type": "li"
+       }
+      ],
+      "style": {
+       "margin": "4px 0 12px",
+       "paddingLeft": 20
+      }
+     },
+     "type": "ul"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Hermes chat model",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": "qwen (local, this host only)"
+        },
+        "type": "p"
+       }
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Windows TPM helper (CNG)",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       null
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Encrypt Hermes memory",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       null
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "3  Telegram custody",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": [
+          {
+           "props": {
+            "checked": true,
+            "style": {
+             "borderColor": "CanvasText",
+             "borderStyle": "solid",
+             "borderWidth": 1.5
+            }
+           },
+           "type": "checkbox"
+          },
+          {
+           "props": {
+            "children": "Telegram credentials are sealed by this PC’s TPM. I understand Windows asks for no per-use approval and there is no portable recovery."
+           },
+           "type": "span"
+          }
+         ],
+         "style": {
+          "alignItems": "flex-start",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "label"
+       }
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "4  Question model (Venice private or local)",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": {
+          "props": {
+           "children": "Use the Venice key Hermes already has",
+           "disabled": false
+          },
+          "type": "button"
+         },
+         "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "div"
+       },
+       {
+        "props": {
+         "children": [
+          {
+           "props": {
+            "autoComplete": "off",
+            "key": "k",
+            "placeholder": "Or paste a Venice API key",
+            "type": "password",
+            "value": ""
+           },
+           "type": "input"
+          },
+          {
+           "props": {
+            "children": "Use this key",
+            "disabled": true,
+            "key": "b"
+           },
+           "type": "button"
+          }
+         ],
+         "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "div"
+       },
+       {
+        "props": {
+         "children": [
+          {
+           "props": {
+            "key": "e",
+            "placeholder": "Local endpoint",
+            "value": "http://127.0.0.1:11434/v1"
+           },
+           "type": "input"
+          },
+          {
+           "props": {
+            "key": "m",
+            "placeholder": "Local model name",
+            "value": ""
+           },
+           "type": "input"
+          },
+          {
+           "props": {
+            "children": "Use local model",
+            "disabled": true,
+            "key": "l"
+           },
+           "type": "button"
+          }
+         ],
+         "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "div"
+       }
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "5  Connect Telegram (read-only)",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": "Set the question model first (step 4)."
+        },
+        "type": "p"
+       }
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "6  Import messages",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": "Finish the steps above first."
+        },
+        "type": "p"
+       }
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    null
+   ]
+  },
+  "type": "fragment"
+ },
+ "question_model_done": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "✓  Question model (Venice private or local)",
+      "style": {
+       "margin": "0 0 8px"
+      }
+     },
+     "type": "h3"
+    },
+    null
+   ],
+   "style": {
+    "border": "1px solid var(--border, #333)",
+    "borderRadius": 10,
+    "marginBottom": 12,
+    "padding": 16
+   }
+  },
+  "type": "section"
+ },
+ "question_model_step": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "4  Question model (Venice private or local)",
+      "style": {
+       "margin": "0 0 8px"
+      }
+     },
+     "type": "h3"
+    },
+    {
+     "props": {
+      "children": {
+       "props": {
+        "children": "Use the Venice key Hermes already has",
+        "disabled": false
+       },
+       "type": "button"
+      },
+      "style": {
+       "alignItems": "center",
+       "display": "flex",
+       "gap": 8,
+       "marginTop": 8
+      }
+     },
+     "type": "div"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "autoComplete": "off",
+         "key": "k",
+         "placeholder": "Or paste a Venice API key",
+         "type": "password",
+         "value": ""
+        },
+        "type": "input"
+       },
+       {
+        "props": {
+         "children": "Use this key",
+         "disabled": true,
+         "key": "b"
+        },
+        "type": "button"
+       }
+      ],
+      "style": {
+       "alignItems": "center",
+       "display": "flex",
+       "gap": 8,
+       "marginTop": 8
+      }
+     },
+     "type": "div"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "key": "e",
+         "placeholder": "Local endpoint",
+         "value": "http://127.0.0.1:11434/v1"
+        },
+        "type": "input"
+       },
+       {
+        "props": {
+         "key": "m",
+         "placeholder": "Local model name",
+         "value": ""
+        },
+        "type": "input"
+       },
+       {
+        "props": {
+         "children": "Use local model",
+         "disabled": true,
+         "key": "l"
+        },
+        "type": "button"
+       }
+      ],
+      "style": {
+       "alignItems": "center",
+       "display": "flex",
+       "gap": 8,
+       "marginTop": 8
+      }
+     },
+     "type": "div"
+    }
+   ],
+   "style": {
+    "border": "1px solid var(--border, #333)",
+    "borderRadius": 10,
+    "marginBottom": 12,
+    "padding": 16
+   }
+  },
+  "type": "section"
+ },
+ "refusal": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "Memory encryption was not turned on. Nothing was sealed.",
+      "style": {
+       "margin": 0
+      }
+     },
+     "type": "p"
+    },
+    null,
+    {
+     "props": {
+      "children": "Stopped at the gateway check step: a Hermes gateway is running."
+     },
+     "type": "p"
+    },
+    {
+     "props": {
+      "children": "Stop every Hermes gateway, then retry."
+     },
+     "type": "p"
+    },
+    {
+     "props": {
+      "children": "A memory custody key was created and is kept for a retry. Kept for a retry."
+     },
+     "type": "p"
+    },
+    {
+     "props": {
+      "children": "ceremony output",
+      "style": {
+       "fontSize": 12,
+       "whiteSpace": "pre-wrap"
+      }
+     },
+     "type": "pre"
+    }
+   ],
+   "role": "alert",
+   "style": {
+    "border": "1px solid #b91c1c",
+    "borderRadius": 8,
+    "marginTop": 10,
+    "padding": 10
+   }
+  },
+  "type": "div"
+ },
+ "unsupported": {
+  "props": {
+   "children": [
+    {
+     "props": {
+      "children": "Mordred setup"
+     },
+     "type": "h2"
+    },
+    {
+     "props": {
+      "children": "Private, read-only Telegram for Hermes."
+     },
+     "type": "p"
+    },
+    null,
+    {
+     "props": {
+      "children": "Mordred 0.3.0a4 in Hermes environment hermes (Python 3.11). Automatic repair after Hermes updates is not supported on Windows. Rerun the original Windows installer, keeping the existing Hermes home and custody keys, then restart Hermes and check again.",
+      "style": {
+       "fontSize": 12,
+       "opacity": 0.8
+      }
+     },
+     "type": "p"
+    },
+    {
+     "props": {
+      "children": [
+       null,
+       {
+        "props": {
+         "children": "Not checked yet.",
+         "style": {
+          "fontSize": 12,
+          "opacity": 0.8
+         }
+        },
+        "type": "p"
+       },
+       null,
+       null,
+       {
+        "props": {
+         "children": [
+          null,
+          null,
+          {
+           "props": {
+            "children": "Check for updates",
+            "disabled": false,
+            "key": "check",
+            "variant": "outline"
+           },
+           "type": "button"
+          }
+         ],
+         "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "div"
+       },
+       null
+      ],
+      "style": {
+       "marginBottom": 12
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": "Windows: keys are machine-bound CNG keys in this PC’s TPM, without per-use presence or portable recovery."
+     },
+     "type": "p"
+    },
+    {
+     "props": {
+      "children": "Windows capabilities"
+     },
+     "type": "h3"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "Memory custody: available (enrolled)",
+         "key": "memory_custody"
+        },
+        "type": "li"
+       },
+       {
+        "props": {
+         "children": "File vault: not supported on Windows (not available on Windows)",
+         "key": "file_vault"
+        },
+        "type": "li"
+       }
+      ],
+      "style": {
+       "margin": "4px 0 12px",
+       "paddingLeft": 20
+      }
+     },
+     "type": "ul"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Hermes chat model",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": "qwen (local, this host only)"
+        },
+        "type": "p"
+       }
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Windows TPM helper (CNG)",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       null
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "✓  Encrypt Hermes memory",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       null
+      ],
+      "style": {
+       "border": "1px solid var(--border, #333)",
+       "borderRadius": 10,
+       "marginBottom": 12,
+       "padding": 16
+      }
+     },
+     "type": "section"
+    },
+    {
+     "props": {
+      "children": "Private Telegram is not available on this Windows profile.",
+      "role": "status"
+     },
+     "type": "p"
+    },
+    {
+     "props": {
+      "children": [
+       {
+        "props": {
+         "children": "Uninstall Mordred",
+         "style": {
+          "margin": "0 0 8px"
+         }
+        },
+        "type": "h3"
+       },
+       {
+        "props": {
+         "children": "Removes Mordred from Hermes and restores Hermes to how it was before. Choose what happens to your encrypted data."
+        },
+        "type": "p"
+       },
+       {
+        "props": {
+         "children": {
+          "props": {
+           "children": "Uninstall Mordred…",
+           "variant": "outline"
+          },
+          "type": "button"
+         },
+         "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "gap": 8,
+          "marginTop": 8
+         }
+        },
+        "type": "div"
+       }
+      ],
+      "style": {
+       "border": "1px solid #b91c1c",
+       "borderRadius": 10,
+       "margin": "32px 0 12px",
+       "padding": 16
+      }
+     },
+     "type": "section"
+    }
+   ],
+   "style": {
+    "margin": "24px auto",
+    "maxWidth": 720,
+    "padding": "0 16px"
+   }
+  },
+  "type": "div"
+ }
+}

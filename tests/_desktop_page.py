@@ -65,9 +65,14 @@ def block(name: str) -> str:
 
 def render_page(script: str) -> Any:
     """Run the page components and button handlers with a tiny SDK/React boundary."""
+    return render_source(source(), script)
+
+
+def render_source(text: str, script: str) -> Any:
+    """:func:`render_page` for a given page text (e.g. an earlier revision, for a snapshot)."""
     if shutil.which("node") is None:
         pytest.skip("Node.js is not installed")
-    page = re.sub(r"^import[\s\S]*?from '[^']+'\n", "", source(), flags=re.M)
+    page = re.sub(r"^import[\s\S]*?from '[^']+'\n", "", text, flags=re.M)
     page = page.replace("export default {", "globalThis.plugin = {")
     result = subprocess.run(
         ["node", "--input-type=module"],

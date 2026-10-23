@@ -383,6 +383,12 @@
       "extension",
       "features"
     ],
+    "tests/fixtures/desktop/windows_page.json": [
+      "extension"
+    ],
+    "tests/fixtures/desktop/windows_scenarios.js": [
+      "extension"
+    ],
     "tests/test_audit.py": [],
     "tests/test_audit_reasons_phase3.py": [],
     "tests/test_audit_reasons_phase4.py": [],

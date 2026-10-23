@@ -150,6 +150,10 @@ const MESSAGES = {
   run_failed: 'The fetch stopped because Mordred’s store refused a write; nothing incomplete was kept. Try again.',
   unsupported_platform: 'This is available only on macOS.',
   invalid_request: 'The request was not valid.',
+  // Transport failures (call() never shows the response itself).
+  transport_error: 'Mordred’s local API could not be reached. Check that Hermes is running, then try again.',
+  backend_unreachable: 'Mordred’s local API did not answer: Mordred may be turned off or Hermes may be restarting. Check the Mordred page again.',
+  invalid_response: 'Mordred’s local API gave an answer this page does not understand. Check the Mordred page again or run hermes-mordred status in Terminal.',
   // Mail wording for codes whose shared text names Telegram (see explainMail).
   mail_forget_confirm_mismatch: 'Type delete my data exactly to also delete the fetched mail.',
   mail_secrets_corrupt: 'The sealed mailbox credentials cannot be opened with this Mac’s key. Remove the mailbox and set it up again.',
@@ -306,14 +310,23 @@ const MEMORY_STATES = {
   unavailable: 'unavailable',
 }
 
+// Every failure the page shows is a fixed sentence chosen by code: never response
+// text (a validation error can echo what was typed) and never an unknown code.
+const GENERIC_FAILURE = 'The request failed. Check the Mordred page again or run hermes-mordred status in Terminal.'
+const CODE_RE = /^[a-z][a-z0-9_]{1,63}$/
+const safeCode = (value) => (typeof value === 'string' && CODE_RE.test(value) ? value : null)
+const own = (table, key) => typeof key === 'string' && Object.prototype.hasOwnProperty.call(table, key)
+
 function explain(code, hint = null) {
-  if (code === 'imap_auth_failed' && hint && IMAP_HINTS[hint]) return IMAP_HINTS[hint]
-  return MESSAGES[code] || `Failed (${code || 'unknown'})`
+  if (code === 'imap_auth_failed' && own(IMAP_HINTS, hint)) return IMAP_HINTS[hint]
+  if (own(MESSAGES, code)) return MESSAGES[code]
+  if (own(BLOCKERS, code)) return BLOCKERS[code].text
+  return GENERIC_FAILURE
 }
 
 // Mail routes share some codes with Telegram; prefer the mail wording when one exists.
 function explainMail(code, hint = null) {
-  return MESSAGES[`mail_${code}`] || explain(code, hint)
+  return own(MESSAGES, `mail_${code}`) ? MESSAGES[`mail_${code}`] : explain(code, hint)
 }
 
 function reason(code) {
@@ -328,15 +341,35 @@ class MordredError extends Error {
   }
 }
 
+// Anything thrown inside a handler becomes a MordredError, so toasts and notes only
+// ever carry explain() text.
+const asMordredError = (e) => (e instanceof MordredError ? e : new MordredError(null, {}))
+
+// A rejected request keeps only a code: the Mordred code when the answer carries a
+// well-formed one, else a fixed transport code. Nothing of the body survives.
+function transportCode(err) {
+  const body = err ? err.body : undefined
+  const fromBody = body && typeof body === 'object' ? safeCode(body.error) : null
+  const match = !fromBody && err && typeof err.message === 'string' ? err.message.match(/"error"\s*:\s*"([a-z][a-z0-9_]{1,63})"/) : null
+  if (fromBody || match) return fromBody || match[1]
+  const status = Number(err && (err.status || err.statusCode || (err.response && err.response.status)))
+  if ([404, 502, 503, 504].includes(status)) return 'backend_unreachable'
+  if (status || (body !== undefined && body !== null)) return 'invalid_response'
+  return 'transport_error'
+}
+
 async function call(path, body) {
   let res
   try {
     res = await rest(path, body === undefined ? {} : { method: 'POST', body })
   } catch (err) {
-    const code = (err && (err.body && err.body.error)) || (err && err.message) || 'unknown'
-    throw new MordredError(String(code).replace(/^.*"error":"([^"]+)".*$/, '$1'), (err && err.body) || {})
+    throw new MordredError(transportCode(err), {})
   }
-  if (res && res.ok === false) throw new MordredError(res.error, res)
+  if (!res || typeof res !== 'object') throw new MordredError('invalid_response', {})
+  if (res.ok === false) {
+    const code = safeCode(res.error)
+    throw new MordredError(code || 'invalid_response', code ? res : {})
+  }
   return res
 }
 
@@ -355,25 +388,44 @@ function CommandLine({ command }) {
   })
 }
 
-function FailureNote({ error, noteRef = null }) {
+const asText = (value) => (typeof value === 'string' ? value : null)
+
+// The Windows refusal note. The Windows API composes the refusing step, reason,
+// remedy, custody notice and ceremony output from its fixed tables (C11) and the
+// Windows page shows them. Only Mordred's own `ok: false` answers carry them: call()
+// gives a failed request no info at all, so no response text can arrive here.
+function FailureNote({ error }) {
   const info = (error && error.info) || {}
+  return jsxs('div', {
+    role: 'alert',
+    style: { border: `1px solid ${DESTRUCTIVE}`, borderRadius: 8, padding: 10, marginTop: 10 },
+    children: [
+      jsx('p', { style: { margin: 0 }, children: explain(error && error.code, info.hint) }),
+      info.storage_error ? jsx('p', { children: explain(info.storage_error) }) : null,
+      info.step ? jsx('p', { children: `Stopped at the ${STEP_LABELS[info.step] || info.step} step: ${reason(info.reason)}.` }) : null,
+      asText(info.remedy) ? jsx('p', { children: info.remedy }) : null,
+      asText(info.custody_notice) ? jsx('p', { children: `A memory custody key was created and is kept for a retry. ${info.custody_notice}` }) : null,
+      asText(info.detail) ? jsx('pre', { style: { whiteSpace: 'pre-wrap', fontSize: 12 }, children: info.detail }) : null,
+    ],
+  })
+}
+
+// The only remedy text the grouped page renders, and only in exactly this form.
+const STALE_ANCHOR_REMEDY = /^security delete-generic-password -s mordred-hermes\.vault\.anchor -a mordred-hermes\.vault\.[0-9a-f]{16}$/
+
+// The grouped page's failure note: the code's fixed sentence (an IMAP hint refines
+// imap_auth_failed) and, for a stale vault anchor, the validated remedy command.
+// Nothing else from a response is shown.
+function StepFailure({ error, noteRef = null }) {
+  const code = error && error.code
+  const info = (error && error.info) || {}
+  const remedy = code === 'vault_anchor_stale' && STALE_ANCHOR_REMEDY.test(asText(info.remedy) || '') ? info.remedy : null
   return jsxs('div', {
     role: 'alert',
     ref: noteRef,
     tabIndex: -1,
     style: { border: `1px solid ${DESTRUCTIVE}`, borderRadius: 8, padding: 10, marginTop: 10 },
-    children: [
-      jsx('p', { style: { margin: 0 }, children: error && error.message }),
-      info.storage_error ? jsx('p', { children: explain(info.storage_error) }) : null,
-      info.step ? jsx('p', { children: `Stopped at the ${STEP_LABELS[info.step] || info.step} step: ${reason(info.reason)}.` }) : null,
-      info.remedy
-        ? error.code === 'vault_anchor_stale'
-          ? jsx(CommandLine, { command: info.remedy })
-          : jsx('p', { children: info.remedy })
-        : null,
-      info.custody_notice ? jsx('p', { children: `A memory custody key was created and is kept for a retry. ${info.custody_notice}` }) : null,
-      info.detail ? jsx('pre', { style: { whiteSpace: 'pre-wrap', fontSize: 12 }, children: info.detail }) : null,
-    ],
+    children: [jsx('p', { style: { margin: 0 }, children: explain(code, info.hint) }), remedy ? jsx(CommandLine, { command: remedy }) : null],
   })
 }
 
@@ -433,7 +485,7 @@ function StateBadge({ state, color }) {
   })
 }
 
-function stepBody({ state, id, open, setOpen, summary, toggle, blocker, failure, noteRef, progress, whyBlock, children }) {
+function stepBody({ state, id, open, setOpen, onCollapse, summary, toggle, blocker, progress, whyBlock, children }) {
   if (state === 'done') {
     const detailsId = id ? `${stepAnchor(id)}-details` : undefined
     return [
@@ -444,7 +496,11 @@ function stepBody({ state, id, open, setOpen, summary, toggle, blocker, failure,
             variant: 'ghost',
             'aria-expanded': open,
             'aria-controls': detailsId,
-            onClick: () => setOpen(!open),
+            onClick: () => {
+              // Closing the disclosure is the owner's cue to drop anything typed in it.
+              if (open && onCollapse) onCollapse()
+              setOpen(!open)
+            },
             children: open ? 'Hide' : toggle,
           })
         : null,
@@ -473,14 +529,15 @@ function stepBody({ state, id, open, setOpen, summary, toggle, blocker, failure,
       whyBlock,
     ]
   }
-  return [state === 'attention' && failure ? jsx(FailureNote, { key: 'failure', error: failure, noteRef }) : null, children, whyBlock]
+  return [children, whyBlock]
 }
 
 // A setup step. `state` is one of done | next | todo | blocked | running | attention:
-// done collapses the body into `summary` behind a toggle, blocked replaces it by the
-// BLOCKERS reason and a "Go to step" button, running disables its controls under a
-// polite progress line, attention shows `failure` as an alert above the body.
-// Without `state` (the Windows steps pass `done`) the step renders as it always did.
+// done collapses the body into `summary` behind a toggle (`onCollapse` runs when it
+// closes), blocked replaces it by the BLOCKERS reason and a "Go to step" button,
+// running disables its controls under a polite progress line. `failure` is an alert
+// under the title in every state but blocked, so a failed change of a done step shows
+// too. Without `state` (the Windows steps pass `done`) the step renders as it always did.
 function Step({
   id = null,
   n,
@@ -495,15 +552,20 @@ function Step({
   progress = null,
   notice = null,
   why = null,
+  onCollapse = null,
   children = null,
 }) {
-  // One hook in every mode, so a step keeps its identity whatever it renders.
+  // The same hooks in every mode, so a step keeps its identity whatever it renders.
   const [open, setOpen] = useState(false)
+  useEffect(() => {
+    if (state !== 'done') setOpen(false)
+  }, [state])
   if (state == null) return legacyStep({ n, title, done, children })
   const headingId = id ? stepAnchor(id) : undefined
   const edge = state === 'next' ? ACCENT : state === 'attention' ? DESTRUCTIVE : null
   const whyBlock = why ? jsx(Why, { key: 'why', children: why }) : null
-  const body = stepBody({ state, id, open, setOpen, summary, toggle, blocker, failure, noteRef, progress, whyBlock, children })
+  const body = stepBody({ state, id, open, setOpen, onCollapse, summary, toggle, blocker, progress, whyBlock, children })
+  const failureNote = failure && state !== 'blocked' ? jsx(StepFailure, { key: 'failure', error: failure, noteRef }) : null
   return jsxs('section', {
     'aria-labelledby': headingId,
     style: {
@@ -520,6 +582,7 @@ function Step({
         style: { margin: '0 0 8px', color: state === 'done' ? MUTED_TEXT : undefined },
         children: [`${n}  ${title}`, jsx(StateBadge, { state, color: edge || MUTED_TEXT })],
       }),
+      failureNote,
       ...body,
       state === 'blocked' ? null : notice,
     ],
@@ -800,7 +863,8 @@ function mailRow(status, layout, now) {
   const sources = status.imports.available ? status.imports.sources || {} : null
   if (sources && sources.mail) parts.push(plural(Number(sources.mail.messages) || 0, 'message'))
   const last = mail.last_fetch || null
-  parts.push(last ? `last fetch ${relativeTime(last.at, now)} (${last.error || (last.partial ? 'partial' : 'complete')})` : 'never fetched')
+  const outcome = last && last.error ? safeCode(last.error) || 'failed' : last && last.partial ? 'partial' : 'complete'
+  parts.push(last ? `last fetch ${relativeTime(last.at, now)} (${outcome})` : 'never fetched')
   return { ...row, dot: last && last.error ? 'attention' : 'done', detail: parts.join(' · ') }
 }
 
@@ -820,14 +884,25 @@ function overviewRows(status, sync = null, now = Date.now()) {
 // A step's own failure first, else the attention code stepStates computed from status.
 const stepFailure = (failure, code) => failure || (code ? new MordredError(code) : null)
 
-// Masked inputs are cleared after every submit (success, failure, cancel), and
-// also when their fields leave the page: the step collapses, is blocked or unmounts.
-function useClearSecrets(clear, visible) {
+// Masked inputs are cleared after every submit (success, failure, cancel) and
+// whenever their fields leave the page: the step becomes done or blocked, its
+// disclosure closes (Step's onCollapse) or the component unmounts.
+function useClearSecrets(clear, shown) {
   useEffect(() => {
-    if (!visible) clear()
-  }, [visible])
+    if (shown === 'done' || shown === 'blocked') clear()
+  }, [shown])
   useEffect(() => clear, [])
 }
+
+// A failure note belongs to the attempt that failed: drop it once the step becomes done.
+function useDropOnDone(state, drop) {
+  useEffect(() => {
+    if (state === 'done') drop()
+  }, [state])
+}
+
+// Accessible names on the grouped page only: the Windows fields render as before.
+const named = (legacy, label) => (legacy ? {} : { 'aria-label': label })
 
 function HermesModelInstructions({ check, refresh, ok, verifying }) {
   return jsxs(Fragment, {
@@ -888,6 +963,7 @@ function EnclaveStep({ id = null, n, state, job = null, refresh, hardwareKind })
   const [watched, setWatched] = useState(null)
   const alive = useRef(true)
   const noteRef = useFocusOn(failure)
+  useDropOnDone(state, () => setFailure(null))
   useEffect(() => {
     alive.current = true
     return () => {
@@ -904,7 +980,7 @@ function EnclaveStep({ id = null, n, state, job = null, refresh, hardwareKind })
     let current = true
     pollJob(watched, { alive: () => current && alive.current }).then((end) => {
       if (!current || !alive.current) return
-      if (end.state === 'failed') setFailure(new MordredError(end.error || (linux ? 'tpm_build_failed' : 'enclave_build_failed')))
+      if (end.state === 'failed') setFailure(new MordredError(safeCode(end.error) || (linux ? 'tpm_build_failed' : 'enclave_build_failed')))
       else if (end.state === 'lost') setFailure(new MordredError('job_not_found'))
       setWatched(null)
       refresh()
@@ -922,7 +998,7 @@ function EnclaveStep({ id = null, n, state, job = null, refresh, hardwareKind })
       if (started && started.job_id) setWatched(started.job_id)
       await refresh()
     } catch (e) {
-      setFailure(e)
+      setFailure(asMordredError(e))
     } finally {
       if (alive.current) setStarting(false)
     }
@@ -977,6 +1053,7 @@ function MemoryStep({ id = null, n, state, blocker = null, refresh, hardwareKind
   const [restart, setRestart] = useState(false)
   const noteRef = useFocusOn(failure)
   const resultRef = useFocusOn(phrase || restart)
+  useDropOnDone(state, () => setFailure(null))
   const enable = async () => {
     setBusy(true)
     setFailure(null)
@@ -989,7 +1066,7 @@ function MemoryStep({ id = null, n, state, blocker = null, refresh, hardwareKind
         refresh()
       }
     } catch (e) {
-      setFailure(e)
+      setFailure(asMordredError(e))
     } finally {
       setBusy(false)
     }
@@ -1075,18 +1152,25 @@ function TelegramStep({ id = null, state = null, blocker = null, done = false, n
   const [result, setResult] = useState(null)
   const noteRef = useFocusOn(failure)
   const resultRef = useFocusOn(result)
+  // Each submit is an attempt; cancel and reset start a new one, so a late answer
+  // to an abandoned attempt changes nothing (a late new flow is cancelled).
+  const attempt = useRef(0)
   const shown = legacy ? null : state === 'done' || state === 'blocked' ? state : failure ? 'attention' : state
   const clearSecrets = () => {
     setApiHash('')
     setSecret('')
   }
-  useClearSecrets(clearSecrets, legacy ? !done : shown !== 'done' && shown !== 'blocked')
+  useClearSecrets(clearSecrets, legacy ? (done ? 'done' : 'todo') : shown)
+  useDropOnDone(state, () => setFailure(null))
   const reset = () => {
+    attempt.current += 1
     setFlow(null)
     setStep('phone')
     clearSecrets()
   }
   const submit = async () => {
+    const mine = ++attempt.current
+    const current = () => attempt.current === mine
     setBusy(true)
     setFailure(null)
     setResult(null)
@@ -1095,11 +1179,16 @@ function TelegramStep({ id = null, state = null, blocker = null, done = false, n
         const body = { phone, ...(extra || {}) }
         if (needsApi) Object.assign(body, { api_id: apiId, api_hash: apiHash })
         const r = await call('/telegram/login/start', body)
+        if (!current()) {
+          if (typeof r.flow_id === 'string') call(`/telegram/login/${encodeURIComponent(r.flow_id)}/cancel`, {}).catch(() => {})
+          return
+        }
         setFlow(r.flow_id)
         setStep(r.step)
       } else {
         const path = `/telegram/login/${flow}/${step === 'code' ? 'code' : 'password'}`
         const r = await call(path, step === 'code' ? { code: secret } : { password: secret })
+        if (!current()) return
         if (r.step === 'done') {
           host.notify({ kind: 'success', message: 'Telegram connected (read-only).' })
           setResult('Telegram connected (read-only).')
@@ -1108,8 +1197,9 @@ function TelegramStep({ id = null, state = null, blocker = null, done = false, n
         } else setStep(r.step)
       }
     } catch (e) {
-      if (legacy) host.notifyError(e, 'Telegram login failed')
-      else setFailure(e)
+      if (!current()) return
+      if (legacy) host.notifyError(asMordredError(e), 'Telegram login failed')
+      else setFailure(asMordredError(e))
       if (e && (e.code === 'login_flow_expired' || e.code === 'login_code_expired')) reset()
     } finally {
       clearSecrets()
@@ -1120,7 +1210,10 @@ function TelegramStep({ id = null, state = null, blocker = null, done = false, n
     call(`/telegram/login/${flow}/cancel`, {}).catch(() => {})
     reset()
   }
-  const field = (props) => jsx(Input, { autoComplete: 'off', ...props })
+  // Hiding a done step's details drops what was typed there and abandons any login
+  // attempt (an open flow is cancelled; a late answer to a request is ignored).
+  const collapse = () => (flow ? cancel() : reset())
+  const field = (label, props) => jsx(Input, { autoComplete: 'off', ...props, ...named(legacy, label) })
   return jsx(Step, {
     id,
     n,
@@ -1133,6 +1226,7 @@ function TelegramStep({ id = null, state = null, blocker = null, done = false, n
     noteRef,
     notice: result ? jsx('p', { ref: resultRef, tabIndex: -1, role: 'status', children: result }) : null,
     why,
+    onCollapse: collapse,
     children: jsxs(Fragment, {
       children: [
         step === 'phone' && needsApi
@@ -1145,14 +1239,14 @@ function TelegramStep({ id = null, state = null, blocker = null, done = false, n
                     ' (API development tools) and paste its api_id and api_hash.',
                   ],
                 }),
-                jsx(Row, { children: field({ placeholder: 'api_id', 'aria-label': 'api_id', value: apiId, onChange: (e) => setApiId(e.target.value) }) }),
-                jsx(Row, { children: field({ type: 'password', placeholder: 'api_hash', 'aria-label': 'api_hash', value: apiHash, onChange: (e) => setApiHash(e.target.value) }) }),
+                jsx(Row, { children: field('api_id', { placeholder: 'api_id', value: apiId, onChange: (e) => setApiId(e.target.value) }) }),
+                jsx(Row, { children: field('api_hash', { type: 'password', placeholder: 'api_hash', value: apiHash, onChange: (e) => setApiHash(e.target.value) }) }),
               ],
             })
           : null,
         step === 'phone'
           ? jsx(Row, {
-              children: field({ placeholder: 'Phone number, e.g. +819012345678', 'aria-label': 'Phone number', value: phone, onChange: (e) => setPhone(e.target.value) }),
+              children: field('Phone number', { placeholder: 'Phone number, e.g. +819012345678', value: phone, onChange: (e) => setPhone(e.target.value) }),
             })
           : jsxs(Fragment, {
               children: [
@@ -1163,10 +1257,9 @@ function TelegramStep({ id = null, state = null, blocker = null, done = false, n
                       : 'Enter your Telegram two-step verification password (the "Cloud Password" you set in Telegram → Settings → Privacy and Security). This is not your computer password or a Mordred passphrase. It is not stored.',
                 }),
                 jsx(Row, {
-                  children: field({
+                  children: field(step === 'code' ? 'Telegram login code' : 'Telegram password', {
                     type: 'password',
                     placeholder: step === 'code' ? 'Telegram login code' : 'Telegram password',
-                    'aria-label': step === 'code' ? 'Telegram login code' : 'Telegram password',
                     value: secret,
                     onChange: (e) => setSecret(e.target.value),
                   }),
@@ -1195,7 +1288,8 @@ function LlmStep({ id = null, state = null, blocker = null, done = false, hermes
   const noteRef = useFocusOn(failure)
   const resultRef = useFocusOn(result)
   const shown = legacy ? null : state === 'done' || state === 'blocked' ? state : failure ? 'attention' : state
-  useClearSecrets(() => setKey(''), legacy ? !done : shown !== 'done' && shown !== 'blocked')
+  useClearSecrets(() => setKey(''), legacy ? (done ? 'done' : 'todo') : shown)
+  useDropOnDone(state, () => setFailure(null))
   const run = async (path, body) => {
     setBusy(true)
     setFailure(null)
@@ -1206,8 +1300,8 @@ function LlmStep({ id = null, state = null, blocker = null, done = false, hermes
       setResult('Question model set.')
       refresh()
     } catch (e) {
-      if (legacy) host.notifyError(e, 'Could not set the model')
-      else setFailure(e)
+      if (legacy) host.notifyError(asMordredError(e), 'Could not set the model')
+      else setFailure(asMordredError(e))
     } finally {
       setKey('')
       setBusy(false)
@@ -1226,6 +1320,7 @@ function LlmStep({ id = null, state = null, blocker = null, done = false, hermes
     noteRef,
     notice: result ? jsx('p', { ref: resultRef, tabIndex: -1, role: 'status', children: result }) : null,
     why,
+    onCollapse: () => setKey(''),
     children: jsxs(Fragment, {
       children: [
         hermesKey
@@ -1233,14 +1328,14 @@ function LlmStep({ id = null, state = null, blocker = null, done = false, hermes
           : null,
         jsx(Row, {
           children: [
-            jsx(Input, { key: 'k', type: 'password', autoComplete: 'off', placeholder: 'Or paste a Venice API key', 'aria-label': 'Venice API key', value: key, onChange: (e) => setKey(e.target.value) }),
+            jsx(Input, { key: 'k', type: 'password', autoComplete: 'off', placeholder: 'Or paste a Venice API key', ...named(legacy, 'Venice API key'), value: key, onChange: (e) => setKey(e.target.value) }),
             jsx(Button, { key: 'b', disabled: busy || !key, onClick: () => run('/llm/venice', { api_key: key }), children: 'Use this key' }),
           ],
         }),
         jsx(Row, {
           children: [
-            jsx(Input, { key: 'e', placeholder: 'Local endpoint', 'aria-label': 'Local endpoint', value: endpoint, onChange: (e) => setEndpoint(e.target.value) }),
-            jsx(Input, { key: 'm', placeholder: 'Local model name', 'aria-label': 'Local model name', value: model, onChange: (e) => setModel(e.target.value) }),
+            jsx(Input, { key: 'e', placeholder: 'Local endpoint', ...named(legacy, 'Local endpoint'), value: endpoint, onChange: (e) => setEndpoint(e.target.value) }),
+            jsx(Input, { key: 'm', placeholder: 'Local model name', ...named(legacy, 'Local model name'), value: model, onChange: (e) => setModel(e.target.value) }),
             jsx(Button, { key: 'l', disabled: busy || !model, onClick: () => run('/llm/local', { endpoint, model }), children: 'Use local model' }),
           ],
         }),
@@ -1266,6 +1361,7 @@ function ImportStep({ ready, refresh, n = 5, id = null, state = null, blocker = 
   const [starting, setStarting] = useState(false)
   const [failure, setFailure] = useState(null)
   const noteRef = useFocusOn(failure)
+  useDropOnDone(state, () => setFailure(null))
   const poll = useCallback(async () => {
     try {
       const answer = await call('/sync')
@@ -1294,8 +1390,8 @@ function ImportStep({ ready, refresh, n = 5, id = null, state = null, blocker = 
       host.notify({ kind: 'info', message: 'Import started. Approve a hardware prompt if asked.' })
       poll()
     } catch (e) {
-      if (legacy) host.notifyError(e, 'Import failed')
-      else setFailure(e)
+      if (legacy) host.notifyError(asMordredError(e), 'Import failed')
+      else setFailure(asMordredError(e))
     } finally {
       setStarting(false)
     }
@@ -1305,9 +1401,10 @@ function ImportStep({ ready, refresh, n = 5, id = null, state = null, blocker = 
   const daysRow = jsxs(Row, {
     children: [
       'Last',
-      jsx(Input, { style: { width: 70 }, type: 'number', min: 1, 'aria-label': 'Days of history to import', value: days, onChange: (e) => setDays(e.target.value) }),
+      jsx(Input, { style: { width: 70 }, type: 'number', min: 1, ...named(legacy, 'Days of history to import'), value: days, onChange: (e) => setDays(e.target.value) }),
       'days',
-      jsx(Button, { disabled: syncing || starting, onClick: start, children: syncing ? 'Importing…' : 'Import' }),
+      // Windows keeps its old expression (null or a boolean); the grouped page also waits for its own request.
+      jsx(Button, { disabled: legacy ? sync && sync.syncing : syncing || starting, onClick: start, children: syncing ? 'Importing…' : 'Import' }),
     ],
   })
   if (legacy) {
@@ -1334,8 +1431,9 @@ function ImportStep({ ready, refresh, n = 5, id = null, state = null, blocker = 
         : jsx('p', { children: 'Finish the steps above first.' }),
     })
   }
-  // Facts (imported, blocked) first; then this page's request, the polled import and failures.
-  const shown = state === 'done' || state === 'blocked' ? state : starting || syncing ? 'running' : failure ? 'attention' : state
+  // Status first (imported, blocked, a refusal it reports): a stale poll or this page's
+  // request never hides them; then this page's request, the polled import, failures.
+  const shown = state === 'done' || state === 'blocked' || state === 'attention' ? state : starting || syncing ? 'running' : failure ? 'attention' : state
   return jsx(Step, {
     id,
     n,

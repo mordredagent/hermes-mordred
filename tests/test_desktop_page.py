@@ -18,6 +18,7 @@ import json
 import re
 import shutil
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -26,6 +27,10 @@ import pytest
 from mordred_hermes.imports.mail.imap_sync import ERROR_CODES
 
 from ._desktop_page import block, render_page, source
+
+FIXTURES = Path(__file__).parent / "fixtures" / "desktop"
+WINDOWS_SCENARIOS = FIXTURES / "windows_scenarios.js"
+WINDOWS_SNAPSHOT = FIXTURES / "windows_page.json"
 
 SDK_NAMES = {"host", "Button", "Checkbox", "Input", "ROUTES_AREA", "SIDEBAR_NAV_AREA", "PALETTE_AREA"}
 IMPORT_SOURCES = {"@hermes/plugin-sdk", "react/jsx-runtime", "react"}
@@ -897,6 +902,8 @@ def test_overview_from_version_4_reads_the_store_and_the_mailbox_label():
     assert result["mail"] == ("done", "account work · 40 messages · last fetch 2 hours ago (complete)")
     failed = rows(mac(**v4(mail=MAIL_FAILED)))
     assert failed["mail"] == ("attention", "account work · 0 messages · last fetch 1 minute ago (imap_auth_failed)")
+    odd = rows(mac(**v4(mail={**MAIL_FAILED, "last_fetch": {"at": NOW_MS // 1000 - 60, "error": "<b>x</b>"}})))
+    assert odd["mail"] == ("attention", "account work · 0 messages · last fetch 1 minute ago (failed)")
     pending = rows(mac(**v4(armed=False, pending=True, available=False, code="conversion_pending")))
     assert pending["protection"] == (
         "partial",
@@ -1020,157 +1027,257 @@ def test_memory_failure_is_an_alert_and_not_a_toast():
     assert '"role": "alert"' in text and "could not be turned on" in text
 
 
+# Canaries typed into masked inputs; none may survive in page state, the rendered
+# tree, failure notes or host.notify calls once the step has moved on.
+HASH = "deadbeefdeadbeefdeadbeefdeadbeef"
+CODE = "97531"
+PASSWORD = "pw-canary-2468"
+KEY = "venice-canary-1357"
+CANARIES = (HASH, CODE, PASSWORD, KEY)
+
+# `answers` are rest() results in order: an object is returned, {"throw": x} is
+# thrown, "HOLD" stays pending until the script calls release(answer).
 SECRET_SCRIPT = """
-rest = async (path, init) => {requests.push(path); return RESPONSES.shift()}
 const requests = []
-const RESPONSES = ANSWERS
-const view = () => {cursor = 0; effects.length = 0; return COMPONENT}
-const input = (tree, label) => find(tree, n => n.type === 'input' && n.props['aria-label'] === label)
-const press = (tree, label) => find(tree, n => n.type === 'button' && n.props.children === label).props.onClick()
-const unmount = () => {
-  const cleanups = effects.map(f => f()).filter(c => typeof c === 'function')
-  cleanups.forEach(c => c())
+const ANSWERS = ANSWER_LIST
+let release = null
+rest = async (path, init) => {
+  requests.push(path)
+  const answer = ANSWERS.shift()
+  if (answer === 'HOLD') return new Promise(resolve => {release = resolve})
+  if (answer && answer.throw) throw answer.throw
+  return answer
 }
+const refresh = () => {}
+let props = PROPS
+const view = () => {cursor = 0; effects.length = 0; return COMPONENT({...props, refresh})}
+const field = (tree, placeholder) => find(tree, n => n.type === 'input' && n.props.placeholder === placeholder)
+const type = (tree, placeholder, value) => {
+  const input = field(tree, placeholder)
+  if (!input) throw new Error('no input ' + placeholder)
+  input.props.onChange({target: {value}})
+}
+const press = (tree, label) => {
+  const button = find(tree, n => n.type === 'button' && n.props.children === label)
+  if (!button) throw new Error('no button ' + label)
+  return button.props.onClick()
+}
+const runEffects = () => effects.splice(0).map(f => f()).filter(c => typeof c === 'function')
+const unmount = () => runEffects().forEach(c => c())
 let tree = view()
 SCRIPT
-console.log(JSON.stringify({value: VALUE, requests, notifications}))
+console.log(JSON.stringify({tree, states, notifications, requests}))
 """
 
+TG = ("TelegramStep", {"id": "telegram", "n": "2.3", "state": "next", "needsApi": True})
+TG_DONE = ("TelegramStep", {"id": "telegram", "n": "2.3", "state": "done", "needsApi": True})
+TG_WINDOWS = ("TelegramStep", {"n": 5, "done": False, "needsApi": True})
+LLM = ("LlmStep", {"id": "question_model", "n": "2.2", "state": "next", "hermesKey": False})
+LLM_DONE = ("LlmStep", {"id": "question_model", "n": "2.2", "state": "done", "hermesKey": False})
+LLM_WINDOWS = ("LlmStep", {"n": 4, "done": False, "hermesKey": False})
+FLOW = {"ok": True, "flow_id": "f1", "step": "code"}
+REJECTED_422 = {
+    "throw": {
+        "status": 422,
+        "body": {"detail": [{"type": "missing", "loc": ["body"], "input": {"api_hash": HASH, "api_key": KEY}}]},
+        "message": f'422 {{"detail":[{{"input":"{HASH} {KEY} {CODE} {PASSWORD}"}}]}}',
+    }
+}
 
-def secret(component: str, answers: list[Any], script: str, value: str) -> Any:
+
+def secret(target: tuple[str, dict[str, Any]], answers: list[Any], script: str) -> Any:
+    component, props = target
     return render_page(
         SECRET_SCRIPT.replace("COMPONENT", component)
-        .replace("ANSWERS", json.dumps(answers))
+        .replace("PROPS", json.dumps(props))
+        .replace("ANSWER_LIST", json.dumps(answers))
         .replace("SCRIPT", script)
-        .replace("VALUE", value)
     )
 
 
-TELEGRAM = "TelegramStep({id: 'telegram', n: '2.3', state: 'next', needsApi: true, refresh: () => {}})"
-TELEGRAM_LEGACY = "TelegramStep({n: 4, done: false, needsApi: true, refresh: () => {}})"
-LLM = "LlmStep({id: 'question_model', n: '2.2', state: 'next', hermesKey: false, refresh: () => {}})"
-LLM_LEGACY = "LlmStep({done: false, hermesKey: false, refresh: () => {}})"
-TYPE_HASH = (
-    "input(tree, 'api_hash').props.onChange({target: {value: '0123456789abcdef0123456789abcdef'}}); tree = view()"
+TYPE_HASH = f"type(tree, 'api_hash', '{HASH}'); tree = view()"
+TYPE_KEY = f"type(tree, 'Or paste a Venice API key', '{KEY}'); tree = view()"
+SEND = "await press(tree, 'Send login code'); tree = view()"
+TO_CODE = f"{SEND}\ntype(tree, 'Telegram login code', '{CODE}'); tree = view()"
+TO_PASSWORD = (
+    f"{SEND}\ntype(tree, 'Telegram login code', '{CODE}'); tree = view()\n"
+    "await press(tree, 'Continue'); tree = view()\n"
+    f"type(tree, 'Telegram password', '{PASSWORD}'); tree = view()"
 )
-TYPE_KEY = "input(tree, 'Venice API key').props.onChange({target: {value: 'venice-canary'}}); tree = view()"
-TO_CODE = (
-    "await press(tree, 'Send login code'); tree = view()\n"
-    "input(tree, 'Telegram login code').props.onChange({target: {value: '12345'}}); tree = view()"
+CONTINUE = "await press(tree, 'Continue'); tree = view()"
+USE_KEY = "await press(tree, 'Use this key'); tree = view()"
+BLOCK_AND_BACK = (
+    "props = {...props, state: 'blocked'}; tree = view(); runEffects()\n"
+    "props = {...props, state: 'next'}; tree = view()"
 )
 
+SECRET_CASES = {
+    # Telegram api_hash.
+    "api_hash-success": (TG, [FLOW], f"{TYPE_HASH}\n{SEND}"),
+    "api_hash-refused": (TG, [{"ok": False, "error": "invalid_api_credentials"}], f"{TYPE_HASH}\n{SEND}"),
+    "api_hash-rejected-422": (TG, [REJECTED_422], f"{TYPE_HASH}\n{SEND}"),
+    "api_hash-unmount": (TG, [], f"{TYPE_HASH}\nunmount(); tree = view()"),
+    "api_hash-blocked": (TG, [], f"{TYPE_HASH}\n{BLOCK_AND_BACK}"),
+    "api_hash-collapse": (
+        TG_DONE,
+        [],
+        f"await press(tree, 'Details'); tree = view()\n{TYPE_HASH}\n"
+        "await press(tree, 'Hide'); tree = view()\nawait press(tree, 'Details'); tree = view()",
+    ),
+    "api_hash-windows-422": (TG_WINDOWS, [REJECTED_422], f"{TYPE_HASH}\n{SEND}"),
+    # Telegram login code.
+    "code-refused": (TG, [FLOW, {"ok": False, "error": "login_code_invalid"}], f"{TO_CODE}\n{CONTINUE}"),
+    "code-success": (TG, [FLOW, {"ok": True, "step": "done"}], f"{TO_CODE}\n{CONTINUE}"),
+    "code-cancel": (TG, [FLOW, {"ok": True}], f"{TO_CODE}\npress(tree, 'Cancel'); tree = view()"),
+    "code-unmount": (TG, [FLOW], f"{TO_CODE}\nunmount(); tree = view()"),
+    "code-late-answer-after-cancel": (
+        TG,
+        [FLOW, "HOLD", {"ok": True}],
+        f"{TO_CODE}\nconst pending = press(tree, 'Continue'); tree = view()\npress(tree, 'Cancel'); tree = view()\n"
+        "release({ok: true, step: 'password'}); await pending; tree = view()",
+    ),
+    "code-windows-refused": (
+        TG_WINDOWS,
+        [FLOW, {"ok": False, "error": "login_code_invalid"}],
+        f"{TO_CODE}\n{CONTINUE}",
+    ),
+    # Telegram two-step verification password.
+    "password-refused": (
+        TG,
+        [FLOW, {"ok": True, "step": "password"}, {"ok": False, "error": "login_password_invalid"}],
+        f"{TO_PASSWORD}\n{CONTINUE}",
+    ),
+    "password-success": (
+        TG,
+        [FLOW, {"ok": True, "step": "password"}, {"ok": True, "step": "done"}],
+        f"{TO_PASSWORD}\n{CONTINUE}",
+    ),
+    "password-cancel": (
+        TG,
+        [FLOW, {"ok": True, "step": "password"}, {"ok": True}],
+        f"{TO_PASSWORD}\npress(tree, 'Cancel'); tree = view()",
+    ),
+    "password-unmount": (TG, [FLOW, {"ok": True, "step": "password"}], f"{TO_PASSWORD}\nunmount(); tree = view()"),
+    # Venice key.
+    "venice-success": (LLM, [{"ok": True}], f"{TYPE_KEY}\n{USE_KEY}"),
+    "venice-refused": (LLM, [{"ok": False, "error": "invalid_request"}], f"{TYPE_KEY}\n{USE_KEY}"),
+    "venice-rejected-422": (LLM, [REJECTED_422], f"{TYPE_KEY}\n{USE_KEY}"),
+    "venice-unmount": (LLM, [], f"{TYPE_KEY}\nunmount(); tree = view()"),
+    "venice-blocked": (LLM, [], f"{TYPE_KEY}\n{BLOCK_AND_BACK}"),
+    "venice-collapse": (
+        LLM_DONE,
+        [],
+        f"await press(tree, 'Change'); tree = view()\n{TYPE_KEY}\n"
+        "await press(tree, 'Hide'); tree = view()\nawait press(tree, 'Change'); tree = view()",
+    ),
+    "venice-windows-422": (LLM_WINDOWS, [REJECTED_422], f"{TYPE_KEY}\n{USE_KEY}"),
+}
 
-@pytest.mark.parametrize(
-    "component,answers,script,value",
-    [
-        # api_hash: success, failure, unmount (framework and Windows modes).
-        (
-            TELEGRAM,
-            [{"ok": True, "flow_id": "f1", "step": "code"}],
-            TYPE_HASH + "\nawait press(tree, 'Send login code'); tree = view()",
-            "states[1]",
-        ),
-        (
-            TELEGRAM,
-            [{"ok": False, "error": "invalid_api_credentials"}],
-            TYPE_HASH + "\nawait press(tree, 'Send login code'); tree = view()",
-            "input(tree, 'api_hash').props.value",
-        ),
-        (
-            TELEGRAM_LEGACY,
-            [{"ok": False, "error": "invalid_phone"}],
-            TYPE_HASH + "\nawait press(tree, 'Send login code'); tree = view()",
-            "input(tree, 'api_hash').props.value",
-        ),
-        (TELEGRAM, [], TYPE_HASH + "\nunmount(); tree = view()", "input(tree, 'api_hash').props.value"),
-        # Login code: failure, cancel, unmount.
-        (
-            TELEGRAM,
-            [{"ok": True, "flow_id": "f1", "step": "code"}, {"ok": False, "error": "login_code_invalid"}],
-            TO_CODE + "\nawait press(tree, 'Continue'); tree = view()",
-            "input(tree, 'Telegram login code').props.value",
-        ),
-        (
-            TELEGRAM,
-            [{"ok": True, "flow_id": "f1", "step": "code"}, {"ok": True}],
-            TO_CODE + "\npress(tree, 'Cancel'); tree = view()",
-            "states[3]",
-        ),
-        (
-            TELEGRAM,
-            [{"ok": True, "flow_id": "f1", "step": "code"}],
-            TO_CODE + "\nunmount(); tree = view()",
-            "input(tree, 'Telegram login code').props.value",
-        ),
-        (
-            TELEGRAM,
-            [{"ok": True, "flow_id": "f1", "step": "code"}, {"ok": True, "step": "done"}],
-            TO_CODE + "\nawait press(tree, 'Continue'); tree = view()",
-            "states[3]",
-        ),
-        # Venice key: success, failure (framework and Windows modes), unmount.
-        (
-            LLM,
-            [{"ok": True}],
-            TYPE_KEY + "\nawait press(tree, 'Use this key'); tree = view()",
-            "input(tree, 'Venice API key').props.value",
-        ),
-        (
-            LLM,
-            [{"ok": False, "error": "invalid_request"}],
-            TYPE_KEY + "\nawait press(tree, 'Use this key'); tree = view()",
-            "input(tree, 'Venice API key').props.value",
-        ),
-        (
-            LLM_LEGACY,
-            [{"ok": False, "error": "invalid_request"}],
-            TYPE_KEY + "\nawait press(tree, 'Use this key'); tree = view()",
-            "input(tree, 'Venice API key').props.value",
-        ),
-        (LLM, [], TYPE_KEY + "\nunmount(); tree = view()", "input(tree, 'Venice API key').props.value"),
-    ],
-    ids=[
-        "api_hash-success",
-        "api_hash-failure",
-        "api_hash-failure-windows",
-        "api_hash-unmount",
-        "code-failure",
-        "code-cancel",
-        "code-unmount",
-        "code-success",
-        "venice-success",
-        "venice-failure",
-        "venice-failure-windows",
-        "venice-unmount",
-    ],
-)
-def test_masked_inputs_are_cleared_after_success_failure_cancel_and_unmount(component, answers, script, value):
-    result = secret(component, answers, script, value)
-    assert result["value"] == ""
-    assert "0123456789abcdef0123456789abcdef" not in json.dumps(result)
-    assert "venice-canary" not in json.dumps(result) and "12345" not in json.dumps(result["value"])
+
+@pytest.mark.parametrize("case", list(SECRET_CASES))
+def test_masked_inputs_leave_no_trace_after_success_failure_cancel_collapse_block_and_unmount(case):
+    target, answers, script = SECRET_CASES[case]
+    result = secret(target, answers, script)
+    sinks = json.dumps({"state": result["states"], "tree": result["tree"], "notify": result["notifications"]})
+    assert [canary for canary in CANARIES if canary in sinks] == []
+    for note in result["notifications"]:
+        assert set(note) <= {"error", "kind", "message"}
+
+
+def test_a_late_answer_after_cancel_changes_nothing():
+    target, answers, script = SECRET_CASES["code-late-answer-after-cancel"]
+    result = secret(target, answers, script)
+    text = json.dumps(result["tree"])
+    assert "Telegram password" not in text and "Send login code" in text
+    assert result["requests"][-1] == "/telegram/login/f1/cancel"
+    assert result["notifications"] == []
+
+
+def test_a_late_flow_after_collapse_is_cancelled():
+    result = secret(
+        TG_DONE,
+        ["HOLD", {"ok": True}],
+        f"await press(tree, 'Details'); tree = view()\n{TYPE_HASH}\n"
+        "const pending = press(tree, 'Send login code'); tree = view()\n"
+        "await press(tree, 'Hide'); tree = view()\n"
+        "release({ok: true, flow_id: 'late', step: 'code'}); await pending; await Promise.resolve(); tree = view()",
+    )
+    assert result["requests"] == ["/telegram/login/start", "/telegram/login/late/cancel"]
+    assert "Telegram login code" not in json.dumps(result["tree"])
+
+
+def test_running_effects_alone_keeps_what_is_being_typed():
+    """The harness runs every effect at once: clearing must come from the state change, not from that."""
+    result = secret(LLM, [], f"{TYPE_KEY}\nrunEffects(); tree = view()")
+    assert KEY in json.dumps(result["tree"])
 
 
 def test_failures_are_inline_alerts_on_the_grouped_page_and_toasts_on_windows():
-    framework = secret(
-        LLM,
-        [{"ok": False, "error": "invalid_request"}],
-        TYPE_KEY + "\nawait press(tree, 'Use this key'); tree = view()",
-        "tree",
-    )
-    assert '"role": "alert"' in json.dumps(framework["value"]) and framework["notifications"] == []
-    legacy = secret(
-        LLM_LEGACY,
-        [{"ok": False, "error": "invalid_request"}],
-        TYPE_KEY + "\nawait press(tree, 'Use this key'); tree = view()",
-        "tree",
-    )
-    assert '"role": "alert"' not in json.dumps(legacy["value"])
+    framework = secret(LLM, [{"ok": False, "error": "invalid_request"}], f"{TYPE_KEY}\n{USE_KEY}")
+    alert = json.dumps(framework["tree"])
+    assert '"role": "alert"' in alert and "The request was not valid." in alert and framework["notifications"] == []
+    legacy = secret(LLM_WINDOWS, [{"ok": False, "error": "invalid_request"}], f"{TYPE_KEY}\n{USE_KEY}")
+    assert '"role": "alert"' not in json.dumps(legacy["tree"])
     assert legacy["notifications"] == [{"error": "The request was not valid."}]
 
 
-def test_inputs_carry_accessible_names():
-    result = render_page("""
+def test_a_failed_change_of_a_done_step_shows_and_focuses_its_failure():
+    result = secret(
+        LLM_DONE,
+        [{"ok": False, "error": "invalid_request"}],
+        f"await press(tree, 'Change'); tree = view()\n{TYPE_KEY}\n{USE_KEY}",
+    )
+    tree = result["tree"]
+    heading = json.dumps(tree["props"]["children"][0], ensure_ascii=False)
+    assert "Done" in heading, "the step keeps its done badge"
+    note = tree["props"]["children"][1]
+    assert note["props"]["role"] == "alert" and note["props"]["tabIndex"] == -1
+    assert "ref" in note["props"], "the note is the focus target"
+    assert "The request was not valid." in json.dumps(note)
+    effects = render_page(
+        """
+rest = async () => ({ok: false, error: 'invalid_request'})
+const refresh = () => {}
+const view = () => {cursor = 0; effects.length = 0; return LlmStep({id: 'q', n: '2.2', state: 'done', refresh})}
+let tree = view()
+await find(tree, n => n.type === 'button' && n.props.children === 'Change').props.onClick(); tree = view()
+await find(tree, n => n.type === 'button' && n.props.children === 'Use local model').props.onClick()
+tree = view()
+const focused = []
+const note = find(tree, n => n.props && n.props.role === 'alert')
+note.props.ref.current = {focus: () => focused.push('note')}
+effects.splice(0).forEach(f => f())
+console.log(JSON.stringify(focused))
+"""
+    )
+    assert effects == ["note"]
+
+
+def test_import_status_attention_beats_a_stale_poll():
+    result = render_page(
+        """
+const view = state => {
+  cursor = 0
+  const code = state === 'attention' ? 'no_key' : null
+  return ImportStep({id: 'telegram_import', n: '2.4', state, code, refresh: () => {}})
+}
+// The import's own poll still says it is running.
+states = [3, {syncing: true, progress: {dialogs_done: 1, dialogs_total: 3, messages_imported: 4}}]
+const attention = view('attention')
+const todo = view('todo')
+const badge = tree => find(tree, n => n.type === 'h3').props.children[1].props.children[1].props.children
+const note = JSON.stringify(find(attention, n => n.props && n.props.role === 'alert'))
+console.log(JSON.stringify({attention: badge(attention), note,
+  todo: badge(todo)}))
+"""
+    )
+    assert result["attention"] == "Needs attention"
+    assert "The database key is not available" in result["note"]
+    assert result["todo"] == "Running"
+
+
+def test_inputs_carry_accessible_names_on_the_grouped_page_only():
+    script = """
 const inputs = []
 const visit = node => {
   if (!node || typeof node !== 'object') return
@@ -1180,12 +1287,13 @@ const visit = node => {
   ;(Array.isArray(c) ? c : [c]).forEach(visit)
 }
 const refresh = () => {}
-visit(TelegramStep({id: 'telegram', n: '2.3', state: 'next', needsApi: true, refresh}))
-visit(LlmStep({id: 'question_model', n: '2.2', state: 'next', hermesKey: true, refresh}))
-visit(ImportStep({id: 'telegram_import', n: '2.4', state: 'next', refresh}))
+visit(TelegramStep({STATE, n: '2.3', needsApi: true, refresh}))
+visit(LlmStep({STATE, n: '2.2', hermesKey: true, refresh}))
+visit(ImportStep({STATE, n: '2.4', ready: true, refresh}))
 console.log(JSON.stringify(inputs))
-""")
-    assert result == [
+"""
+    grouped = render_page(script.replace("STATE", "id: 'x', state: 'next'"))
+    assert grouped == [
         "api_id",
         "api_hash",
         "Phone number",
@@ -1194,26 +1302,177 @@ console.log(JSON.stringify(inputs))
         "Local model name",
         "Days of history to import",
     ]
+    assert render_page(script.replace("STATE", "done: false")) == [None] * 7
 
 
-def test_a_typed_value_survives_a_status_refresh():
-    """Refreshes re-render the same components in the same places: nothing remounts or loses input."""
+def test_windows_rendering_matches_the_snapshot_taken_before_the_framework():
+    """Windows and the shared steps in their old mode render as at f782f9cff (only the
+    bare #b91c1c became var(--destructive, #b91c1c), as specified)."""
+    snapshot = json.loads(WINDOWS_SNAPSHOT.read_text(encoding="utf-8"))
+    current = render_page(WINDOWS_SCENARIOS.read_text(encoding="utf-8"))
+    current = json.loads(json.dumps(current, ensure_ascii=False).replace("var(--destructive, #b91c1c)", "#b91c1c"))
+    assert sorted(current) == sorted(snapshot)
+    for name in snapshot:
+        assert current[name] == snapshot[name], name
+
+
+SKELETON = """
+// The structure React reconciles by: element type, key, id and labelling, without text.
+const skeleton = node => {
+  if (Array.isArray(node)) return node.map(skeleton)
+  if (!node || typeof node !== 'object' || !node.props) return null
+  const {key, id} = node.props
+  return [node.type, key ?? null, id ?? null, node.props['aria-labelledby'] ?? null, skeleton(node.props.children)]
+}
+"""
+
+
+def test_a_jobs_refresh_keeps_the_page_structure_and_typed_values():
+    """The harness cannot mount React: it checks that a refresh changing `jobs.length`
+    renders the same element types, keys and ids in the same places (so React keeps
+    every component mounted) and, through hook order, that a typed value survives."""
     status = mac(login=False)
     refreshed = copy.deepcopy(status)
-    refreshed["jobs"] = [job("update")]
+    refreshed["jobs"] = [job("update"), job("uninstall", "j2")]
     result = render_page(
-        """
+        SKELETON
+        + """
 const view = status => {cursor = 0; return PageBody({status, health: null, refresh: () => {}})}
 const phone = tree => find(tree, n => n.type === 'input' && n.props['aria-label'] === 'Phone number')
 let tree = view(FIRST)
+const before = JSON.stringify(skeleton(tree))
 phone(tree).props.onChange({target: {value: '+819012345678'}})
 tree = view(SECOND)
-const kept = phone(tree).props.value
-tree = view(FIRST)
-console.log(JSON.stringify({kept, again: phone(tree).props.value}))
+const after = JSON.stringify(skeleton(tree))
+console.log(JSON.stringify({same: before === after, kept: phone(tree).props.value, size: before.length}))
 """.replace("FIRST", json.dumps(status)).replace("SECOND", json.dumps(refreshed))
     )
-    assert result == {"kept": "+819012345678", "again": "+819012345678"}
+    assert result["same"] is True and result["size"] > 1000
+    assert result["kept"] == "+819012345678"
+
+
+# -- error text never reaches the page -------------------------------------------------------------
+
+LEAK = "CANARY-7f3e-SECRET"
+
+
+@pytest.mark.parametrize(
+    "thrown,code",
+    [
+        (
+            {
+                "status": 422,
+                "body": {"detail": [{"input": LEAK}]},
+                "message": f'422 {{"detail":[{{"input":"{LEAK}"}}]}}',
+            },
+            "invalid_response",
+        ),
+        ({"message": f"TypeError: Failed to fetch {LEAK}"}, "transport_error"),
+        ({"status": 404, "message": f"Not Found {LEAK}"}, "backend_unreachable"),
+        ({"status": 502, "body": f"<html>{LEAK}</html>"}, "backend_unreachable"),
+        ({"status": 500, "message": f"Internal Server Error {LEAK}"}, "invalid_response"),
+        ({"status": 409, "body": {"ok": False, "error": "login_code_invalid", "detail": LEAK}}, "login_code_invalid"),
+        ({"message": 'HTTP 409 {"ok":false,"error":"sync_in_progress","detail":"' + LEAK + '"}'}, "sync_in_progress"),
+        ({"status": 400, "body": {"error": f"<b>{LEAK}</b>"}}, "invalid_response"),
+    ],
+    ids=["422-echo", "network", "404", "502-html", "500", "body-code", "message-code", "bad-code"],
+)
+def test_call_keeps_only_a_code_from_a_failed_request(thrown, code):
+    result = render_page(
+        """
+rest = async () => { throw THROWN }
+let error = null
+try { await call('/llm/venice', {api_key: 'x'}) } catch (e) { error = e }
+console.log(JSON.stringify({code: error.code, message: error.message, info: error.info, note: FailureNote({error}),
+  step: StepFailure({error})}))
+""".replace("THROWN", json.dumps(thrown))
+    )
+    assert result["code"] == code
+    assert result["info"] == {}
+    assert LEAK not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"ok": False, "error": "memory_encryption_failed", "detail": LEAK, "remedy": LEAK, "custody_notice": LEAK},
+        {"ok": False, "error": "canary_unknown_code", "detail": LEAK},
+        {"ok": False, "error": f"not a code {LEAK}"},
+        {"ok": False, "error": "vault_anchor_stale", "remedy": f"rm -rf ~ # {LEAK}"},
+        {
+            "ok": False,
+            "error": "vault_anchor_stale",
+            "remedy": f"security delete-generic-password -s mordred-hermes.vault.anchor -a mordred-hermes.vault.{LEAK}",
+        },
+        f"{LEAK} plain text",
+    ],
+    ids=["macos-refusal-fields", "unknown-code", "invalid-code", "foreign-remedy", "malformed-remedy", "not-json"],
+)
+def test_no_response_text_reaches_the_grouped_page(answer):
+    result = render_page(
+        """
+rest = async () => (ANSWER)
+const props = {id: 'memory', n: '1.2', state: 'next', refresh: () => {}, hardwareKind: 'secure_enclave'}
+const view = () => {cursor = 0; effects.length = 0; return MemoryStep(props)}
+let tree = view()
+await find(tree, n => n.type === 'button' && n.props.children === 'Turn on memory encryption').props.onClick()
+tree = view()
+console.log(JSON.stringify({tree, notifications}))
+""".replace("ANSWER", json.dumps(answer))
+    )
+    text = json.dumps(result)
+    assert LEAK not in text
+    assert '"role": "alert"' in text
+
+
+def test_the_stale_anchor_remedy_is_rendered_only_in_its_exact_form():
+    remedy = "security delete-generic-password -s mordred-hermes.vault.anchor -a mordred-hermes.vault.0123456789abcdef"
+    result = render_page(
+        """
+const error = new MordredError('vault_anchor_stale', {remedy: 'REMEDY'})
+console.log(JSON.stringify(StepFailure({error})))
+""".replace("REMEDY", remedy)
+    )
+    text = json.dumps(result)
+    assert text.count(remedy) == 1 and "Copy command" in text
+    assert "Keychain anchor remains" in text
+
+
+def test_toasts_and_job_events_use_only_fixed_text():
+    result = render_page(
+        """
+rest = async () => { throw {status: 422, body: {detail: [{input: 'LEAK'}]}, message: '422 LEAK'} }
+const view = () => {cursor = 0; return LlmStep({done: false, hermesKey: false, refresh: () => {}})}
+let tree = view()
+const key = find(tree, n => n.type === 'input' && n.props.placeholder === 'Or paste a Venice API key')
+key.props.onChange({target: {value: 'k'}})
+tree = view()
+await find(tree, n => n.type === 'button' && n.props.children === 'Use this key').props.onClick()
+let handler = null
+plugin.register({rest, register: () => {}, setTimeout: () => {}, onEvent: (name, fn) => {handler = fn}})
+handler({payload: {state: 'failed', kind: 'enclave', error: 'LEAK not a code'}})
+handler({payload: {state: 'failed', kind: 'enclave', error: 'constructor'}})
+console.log(JSON.stringify(notifications))
+""".replace("LEAK", LEAK)
+    )
+    assert LEAK not in json.dumps(result)
+    generic = "The request failed. Check the Mordred page again or run hermes-mordred status in Terminal."
+    assert result == [
+        {
+            "error": "Mordred\u2019s local API gave an answer this page does not understand. "
+            "Check the Mordred page again or run hermes-mordred status in Terminal."
+        },
+        {"kind": "error", "message": f"Mordred: {generic}"},
+        {"kind": "error", "message": f"Mordred: {generic}"},
+    ]
+
+
+def test_explain_never_interpolates_unknown_codes():
+    result = render_page(
+        "console.log(JSON.stringify(['__proto__', 'constructor', 'toString', null, undefined, 42, 'unknown_code']"
+        ".map(code => explain(code))))"
+    )
+    assert result == ["The request failed. Check the Mordred page again or run hermes-mordred status in Terminal."] * 7
 
 
 # -- copy ----------------------------------------------------------------------------------------
