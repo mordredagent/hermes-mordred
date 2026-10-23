@@ -95,7 +95,7 @@ const MESSAGES = {
   custody_broken: 'Custody evidence does not match this profile and Windows account (a copied or restored profile). It is preserved, never adopted.',
   memory_encryption_refused: 'Memory encryption was not turned on. Nothing was sealed.',
   memory_disable_refused: 'Memory encryption was not turned off.',
-  memory_operation_in_progress: 'Another memory encryption change is running. Try again when it finishes.',
+  memory_operation_in_progress: 'Another vault or memory encryption change is running. Try again when it finishes.',
   custody_busy: 'Memory custody is busy (another Hermes or Mordred process is using it). Try again in a moment.',
   forget_confirm_mismatch: 'Type delete my data exactly to delete the Telegram data.',
   secrets_corrupt: 'The sealed Telegram credentials cannot be opened with this profile’s key.',
@@ -119,7 +119,7 @@ const MESSAGES = {
   databases_key_missing: 'The database key is not available yet. Finish step 1.2 and restart Hermes first.',
   databases_failed: 'The databases could not be encrypted. Nothing was changed.',
   databases_busy: 'A database conversion is already running. Try again when it finishes.',
-  vault_anchor_stale: 'A Mordred vault was removed from this Mac earlier, but its Keychain anchor remains, so the vault cannot be created. Run the command below in Terminal and try again. Nothing was changed.',
+  vault_anchor_stale: 'A Mordred vault was removed from this Mac earlier, but its Keychain anchor remains, so a new vault cannot be created.',
   mail_already_configured: 'A mailbox is already set up. Remove it below first.',
   mail_setup_flow_expired: 'This mail setup expired. Start again; nothing was stored.',
   mail_fetch_busy: 'A mail fetch is already running. Wait for it to finish.',
@@ -154,6 +154,14 @@ const MESSAGES = {
   transport_error: 'Mordred’s local API could not be reached. Check that Hermes is running, then try again.',
   backend_unreachable: 'Mordred’s local API did not answer: Mordred may be turned off or Hermes may be restarting. Check the Mordred page again.',
   invalid_response: 'Mordred’s local API gave an answer this page does not understand. Check the Mordred page again or run hermes-mordred status in Terminal.',
+  invalid_body: 'The request was not valid.',
+  // The vault (step 1.2a) and memory (step 1.2b) ceremonies of the version 4 API.
+  vault_required: 'Create the vault first (step 1.2a).',
+  vault_exists: 'The vault already exists, so no new recovery passphrase was made: the one shown when it was created stays the only one.',
+  vault_flow_expired: 'This recovery passphrase expired before the vault was created (or Hermes restarted). Nothing was created. Start again for a new passphrase.',
+  passphrase_reused: '.env was moved into the vault that already existed on this Mac. Its recovery passphrase is the one shown when it was created; the words shown here were not used.',
+  env_optout: '.env encryption was turned off on purpose earlier (a plaintext .env was restored), so this page does not turn it back on. Run hermes-mordred encryption enable env in Terminal to turn it on again.',
+  env_required: 'Hermes does not read .env from the vault yet. Create the vault (step 1.2a) and restart Hermes Desktop first.',
   // Mail wording for codes whose shared text names Telegram (see explainMail).
   mail_forget_confirm_mismatch: 'Type delete my data exactly to also delete the fetched mail.',
   mail_secrets_corrupt: 'The sealed mailbox credentials cannot be opened with this Mac’s key. Remove the mailbox and set it up again.',
@@ -168,11 +176,19 @@ const IMAP_HINTS = {
   gmail_app_password_length: 'A Gmail app password is exactly 16 letters. What you pasted has a different length, so it is probably the account password or incomplete. Nothing was sent to the server.',
 }
 
+// The stale vault anchor when the API sends no command to run (by `anchor_store`). The
+// command comes only as `remedy`, when deleting a legacy Keychain anchor is known to be safe.
+const VAULT_ANCHOR_NOTES = {
+  helper: 'The anchor from an earlier installation is held by the hardware helper. It needs the Mordred release with the keyvault anchor reset; until then the vault cannot be created here.',
+  other: 'An anchor remains; the keyvault reset of a later Mordred release handles it.',
+}
+
 // Why a step cannot run yet: a code computed by stepStates from status fields
 // (never free text from the API) and the step that lifts it.
 const BLOCKERS = {
   needs_hermes_model: { step: 'hermes_model', text: 'Hermes must chat with a Venice private model or a local model first.' },
   needs_enclave: { step: 'enclave', text: 'Set up the hardware key helper first.' },
+  needs_vault: { step: 'vault', text: 'Create the vault and restart Hermes Desktop first, so Hermes reads .env from the vault.' },
   needs_memory: { step: 'memory', text: 'Turn on memory encryption first.' },
   needs_databases: { step: 'databases', text: 'Encrypt the Hermes databases first.' },
   needs_restart: { step: 'databases', text: 'Restart Hermes Desktop to finish step 1.3.' },
@@ -180,10 +196,12 @@ const BLOCKERS = {
   needs_question_model: { step: 'question_model', text: 'Set the question model first.' },
 }
 
-// macOS/Linux steps in reading order (Linux has no 1.3 and no 2.5).
+// macOS/Linux steps in reading order. Linux has no 1.2a, 1.3 and 2.5, and its memory
+// step is 1.2 (see stepNumbers).
 const STEP_NUMBERS = {
   enclave: '1.1',
-  memory: '1.2',
+  vault: '1.2a',
+  memory: '1.2b',
   databases: '1.3',
   hermes_model: '2.1',
   question_model: '2.2',
@@ -234,6 +252,7 @@ const TAGLINES = {
 const WHY = {
   enclave: 'Mordred seals your Telegram login, your mail app password and the encryption keys with a key that never leaves this Mac’s Secure Enclave. The helper is a small signed program that talks to it.',
   enclave_linux: 'Mordred seals your Telegram login and the memory key with a key bound to this host’s TPM 2.0. The helper is a small program that talks to it.',
+  vault: 'Hermes keeps its API keys in .env. The vault holds it encrypted with a key that never leaves this Mac’s Secure Enclave, and Hermes Desktop reads it from there when it starts. The recovery passphrase is the only way back in if this Mac or its key is lost.',
   memory: 'Telegram and mail history can be connected only when everything Hermes remembers is encrypted: what Hermes learns from your history ends up in its memory files, so they must not stay readable on disk.',
   databases: 'Hermes stores your chats (state.db), projects and cron history in SQLite files. Mordred’s own store for imported Telegram and mail history (mordred.db) only opens when these files are encrypted too, with the same key as the memory files. Encryption happens on disk; Hermes keeps working as before.',
   hermes_model: 'Everything Hermes reads goes to its chat model. Telegram and mail history are offered to Hermes only when that model is a Venice private model (no retention) or a model running on this Mac.',
@@ -390,6 +409,20 @@ function CommandLine({ command }) {
 
 const asText = (value) => (typeof value === 'string' ? value : null)
 
+// The stale vault anchor under StepFailure: the validated command when the API sends it
+// as `remedy` (a legacy Keychain anchor and no vault left), otherwise a note by `anchor_store`.
+function AnchorRemedy({ remedy, store }) {
+  if (remedy) {
+    return jsxs(Fragment, {
+      children: [
+        jsx('p', { key: 'run', children: 'Run this command in Terminal, then try again:' }),
+        jsx(CommandLine, { key: 'command', command: remedy }),
+      ],
+    })
+  }
+  return jsx('p', { children: own(VAULT_ANCHOR_NOTES, store) ? VAULT_ANCHOR_NOTES[store] : VAULT_ANCHOR_NOTES.other })
+}
+
 // The Windows refusal note. The Windows API composes the refusing step, reason,
 // remedy, custody notice and ceremony output from its fixed tables (C11) and the
 // Windows page shows them. Only Mordred's own `ok: false` answers carry them: call()
@@ -425,7 +458,10 @@ function StepFailure({ error, noteRef = null }) {
     ref: noteRef,
     tabIndex: -1,
     style: { border: `1px solid ${DESTRUCTIVE}`, borderRadius: 8, padding: 10, marginTop: 10 },
-    children: [jsx('p', { style: { margin: 0 }, children: explain(code, info.hint) }), remedy ? jsx(CommandLine, { command: remedy }) : null],
+    children: [
+      jsx('p', { style: { margin: 0 }, children: explain(code, info.hint) }),
+      code === 'vault_anchor_stale' ? jsx(AnchorRemedy, { remedy, store: info.anchor_store }) : null,
+    ],
   })
 }
 
@@ -485,7 +521,7 @@ function StateBadge({ state, color }) {
   })
 }
 
-function stepBody({ state, id, open, setOpen, onCollapse, summary, toggle, blocker, progress, whyBlock, children }) {
+function stepBody({ state, id, open, setOpen, onCollapse, summary, toggle, blocker, goto, progress, whyBlock, children }) {
   if (state === 'done') {
     const detailsId = id ? `${stepAnchor(id)}-details` : undefined
     return [
@@ -516,7 +552,7 @@ function stepBody({ state, id, open, setOpen, onCollapse, summary, toggle, block
             key: 'go',
             variant: 'outline',
             onClick: () => focusTarget(stepAnchor(reasonFor.step)),
-            children: `Go to step ${STEP_NUMBERS[reasonFor.step]}`,
+            children: `Go to step ${goto || STEP_NUMBERS[reasonFor.step]}`,
           })
         : null,
       whyBlock,
@@ -538,6 +574,7 @@ function stepBody({ state, id, open, setOpen, onCollapse, summary, toggle, block
 // running disables its controls under a polite progress line. `failure` is an alert
 // under the title in every state but blocked, so a failed change of a done step shows
 // too. Without `state` (the Windows steps pass `done`) the step renders as it always did.
+// `goto` is the number of the step that lifts `blocker` on this page (stepNumbers).
 function Step({
   id = null,
   n,
@@ -547,6 +584,7 @@ function Step({
   summary = null,
   toggle = 'Details',
   blocker = null,
+  goto = null,
   failure = null,
   noteRef = null,
   progress = null,
@@ -564,7 +602,7 @@ function Step({
   const headingId = id ? stepAnchor(id) : undefined
   const edge = state === 'next' ? ACCENT : state === 'attention' ? DESTRUCTIVE : null
   const whyBlock = why ? jsx(Why, { key: 'why', children: why }) : null
-  const body = stepBody({ state, id, open, setOpen, onCollapse, summary, toggle, blocker, progress, whyBlock, children })
+  const body = stepBody({ state, id, open, setOpen, onCollapse, summary, toggle, blocker, goto, progress, whyBlock, children })
   const failureNote = failure && state !== 'blocked' ? jsx(StepFailure, { key: 'failure', error: failure, noteRef }) : null
   return jsxs('section', {
     'aria-labelledby': headingId,
@@ -688,6 +726,17 @@ function reportsV4(status) {
   return Boolean(status) && ['databases', 'imports', 'mail'].every((key) => status[key] != null)
 }
 
+// The vault ceremony is its own step (1.2a) when the macOS API reports `vault`; elsewhere
+// (Linux, an older Mordred) memory is one ceremony that also creates the vault.
+function splitVault(status) {
+  return pageLayout(status) === 'macos' && Boolean(status.vault) && typeof status.vault === 'object'
+}
+
+// Step numbers for this status: memory is 1.2 wherever there is no separate vault step.
+function stepNumbers(status) {
+  return splitVault(status) ? STEP_NUMBERS : { ...STEP_NUMBERS, memory: '1.2' }
+}
+
 const plural = (count, noun) => `${count} ${noun}${count === 1 ? '' : 's'}`
 
 function relativeTime(at, now = Date.now()) {
@@ -736,8 +785,8 @@ function storeBlocker(status) {
 // Facts from the status decide first (helper installed, memory on, databases armed,
 // logged in, model private, mailbox configured, a failure the status reports), then
 // unmet prerequisites (`blocked`), then `status.jobs[].kind` (`running`), then page
-// state: `sync`, the polled `GET /sync` answer. Memory enable and the Telegram import
-// are not registry jobs, so their `running` lives only in the page. A reopened page
+// state: `sync`, the polled `GET /sync` answer. The vault and memory ceremonies and the
+// Telegram import are not registry jobs, so their `running` lives only in the page. A reopened page
 // with no job shows the fact-derived state. The first `todo` in reading order is `next`.
 function stepStates(status, sync = null) {
   const layout = pageLayout(status)
@@ -766,7 +815,18 @@ function stepStates(status, sync = null) {
             : page || { state: 'todo' }
   }
   decide('enclave', { done: hardware, job: runningJob('enclave', 'hardware') })
-  decide('memory', { done: memory, blocker: firstBlocker([hardware, 'needs_enclave']) })
+  // macOS with a version 4 API: the vault (1.2a) comes first, and memory (1.2b) needs
+  // Hermes to read .env from it (enrolled, and injected into this process at start).
+  const vault = splitVault(status) ? status.vault : null
+  if (vault) {
+    decide('vault', {
+      done: Boolean(vault.exists && vault.env_enrolled),
+      fact: vault.optout ? 'env_optout' : null,
+      blocker: firstBlocker([hardware, 'needs_enclave']),
+    })
+  }
+  const vaultReady = !vault || Boolean(vault.env_enrolled && vault.env_injecting)
+  decide('memory', { done: memory, blocker: firstBlocker([hardware, 'needs_enclave'], [vaultReady, 'needs_vault']) })
   if (macos && !v4) states.databases = { state: 'attention', code: 'mordred_update_required' }
   else if (v4) {
     decide('databases', {
@@ -1026,6 +1086,19 @@ function EnclaveStep({ id = null, n, state, job = null, refresh, hardwareKind })
 
 const MEMORY_BODY = 'Hermes keeps what it learns about you in memory files and its API keys in .env. This step moves .env into Mordred’s encrypted vault and encrypts the memory files. You get a recovery passphrase once: it is the only way to read these files if this Mac is lost or the Secure Enclave key is gone.'
 const ASK_EVERY_TIME_NOTE = 'Off by default: Hermes Desktop starts its backend in the background, and an unlock it cannot answer would start Hermes without its secrets. With this off, the key opens silently while you are logged in. Your Telegram and mail keys are separate and keep their own Touch ID setting.'
+// Memory alone (step 1.2b): the vault and .env are step 1.2a.
+const MEMORY_ONLY_BODY = 'Hermes keeps what it learns about you in memory files. This step encrypts them with the vault’s key, so they are never readable on disk. Restart Hermes Desktop afterwards.'
+
+function AskEveryTime({ checked, onChange }) {
+  return jsx(Checked, {
+    checked,
+    onChange,
+    children: [
+      jsx('span', { key: 'label', children: 'Ask for Touch ID every time Hermes unlocks the vault' }),
+      jsx('span', { key: 'note', style: { display: 'block', fontSize: 12, color: MUTED_TEXT }, children: ASK_EVERY_TIME_NOTE }),
+    ],
+  })
+}
 
 function PassphraseCard({ phrase, resultRef, saved, setSaved, onContinue }) {
   return jsxs('div', {
@@ -1043,7 +1116,10 @@ function PassphraseCard({ phrase, resultRef, saved, setSaved, onContinue }) {
   })
 }
 
-function MemoryStep({ id = null, n, state, blocker = null, refresh, hardwareKind }) {
+// `split`: the macOS version 4 page, where the vault is step 1.2a and this step
+// encrypts memory only. Otherwise (Linux, an older Mordred) one ceremony does both and
+// may answer the recovery passphrase.
+function MemoryStep({ id = null, n, state, blocker = null, goto = null, refresh, hardwareKind, split = false }) {
   const linux = hardwareKind === 'tpm'
   const [busy, setBusy] = useState(false)
   const [phrase, setPhrase] = useState(null)
@@ -1058,9 +1134,11 @@ function MemoryStep({ id = null, n, state, blocker = null, refresh, hardwareKind
     setBusy(true)
     setFailure(null)
     try {
-      // macOS: the vault key opens silently unless the owner asks for Touch ID every time.
-      const r = await call('/memory/enable', linux ? { acknowledge_tpm_no_recovery: true } : { unattended: !askEveryTime })
-      if (r.recovery_passphrase) setPhrase(r.recovery_passphrase)
+      // macOS: the vault key opens silently unless the owner asks for Touch ID every time
+      // (asked by the vault step when it is separate).
+      const body = linux ? { acknowledge_tpm_no_recovery: true } : split ? {} : { unattended: !askEveryTime }
+      const r = await call('/memory/enable', body)
+      if (r.recovery_passphrase && !split) setPhrase(r.recovery_passphrase)
       else {
         if (!r.already) setRestart(true)
         refresh()
@@ -1101,12 +1179,14 @@ function MemoryStep({ id = null, n, state, blocker = null, refresh, hardwareKind
     : null
   // Not a registry job: `running` only while this page's request is in flight.
   const shown = state === 'done' || state === 'blocked' ? state : busy ? 'running' : failure ? 'attention' : state
+  const linuxBody = 'Memory is encrypted with a TPM-bound key, without per-use user presence or a recovery passphrase. Disable encryption before moving hosts to restore plaintext while the original TPM works. Restart Hermes after setup.'
   return jsx(Step, {
     id,
     n,
-    title: linux ? 'Encrypt Hermes memory' : 'Encrypt Hermes memory and secrets',
+    title: linux || split ? 'Encrypt Hermes memory' : 'Encrypt Hermes memory and secrets',
     state: shown,
     blocker,
+    goto,
     summary: 'On.',
     progress: linux ? 'Encrypting Hermes memory…' : 'Encrypting… approve a Touch ID prompt if one appears.',
     failure,
@@ -1115,18 +1195,12 @@ function MemoryStep({ id = null, n, state, blocker = null, refresh, hardwareKind
     why: WHY.memory,
     children: jsxs(Fragment, {
       children: [
-        jsx('p', { children: linux ? 'Memory is encrypted with a TPM-bound key, without per-use user presence or a recovery passphrase. Disable encryption before moving hosts to restore plaintext while the original TPM works. Restart Hermes after setup.' : MEMORY_BODY }),
-        linux
-          ? null
-          : jsx(Checked, {
-              checked: askEveryTime,
-              onChange: setAskEveryTime,
-              children: [
-                jsx('span', { key: 'label', children: 'Ask for Touch ID every time Hermes unlocks the vault' }),
-                jsx('span', { key: 'note', style: { display: 'block', fontSize: 12, color: MUTED_TEXT }, children: ASK_EVERY_TIME_NOTE }),
-              ],
-            }),
+        // The vault exists (this step is open only then): a retry runs the memory half alone.
+        split && failure ? jsx('p', { key: 'retry', children: `Vault created, memory encryption failed (${failure.code}); retry.` }) : null,
+        jsx('p', { key: 'body', children: linux ? linuxBody : split ? MEMORY_ONLY_BODY : MEMORY_BODY }),
+        linux || split ? null : jsx(AskEveryTime, { key: 'ask', checked: askEveryTime, onChange: setAskEveryTime }),
         jsx(Row, {
+          key: 'enable',
           children: [
             jsx(Button, { key: 'enable', disabled: busy, onClick: enable, children: busy ? 'Encrypting…' : 'Turn on memory encryption' }),
             linux ? null : jsx('span', { key: 'hint', style: { fontSize: 12, color: MUTED_TEXT }, children: 'May show a Touch ID prompt.' }),
@@ -1137,9 +1211,182 @@ function MemoryStep({ id = null, n, state, blocker = null, refresh, hardwareKind
   })
 }
 
+const VAULT_BODY = 'Hermes keeps its API keys in .env. This step creates Mordred’s encrypted vault on this Mac and moves .env into it. First you get a recovery passphrase of eight words: it is the only way to open the vault if this Mac is lost or the Secure Enclave key is gone. Nothing is created until you confirm that you wrote it down.'
+const VAULT_EXISTS_BODY = 'This Mac already has a vault, but Hermes’s .env is not in it yet. This step moves .env into the vault; the recovery passphrase shown when the vault was created stays the only one.'
+const VAULT_EXISTS_NOTE = 'This Mac already has a vault: .env moves into it and its original recovery passphrase stays the only one, so these words are then not used. Write them down anyway: if that vault is gone when you continue, a new one is created with these words.'
+const VAULT_DONE = 'Hermes reads .env from the vault when it starts. The recovery passphrase was shown once, when the vault was created.'
+const VAULT_RESTART = 'Restart Hermes Desktop so Hermes reads .env from the vault, then turn on memory encryption (step 1.2b).'
+
+// The eight words of `/vault/prepare` (an array; a string is split defensively).
+function passphraseWords(passphrase) {
+  const words = Array.isArray(passphrase) ? passphrase : typeof passphrase === 'string' ? passphrase.split(/\s+/) : []
+  return words.map((word) => String(word).trim()).filter(Boolean)
+}
+
+// The prepared recovery passphrase: shown once, before anything is created.
+function VaultPassphraseCard({ words, exists, saved, setSaved, askEveryTime, setAskEveryTime, onCommit, onCancel, cardRef }) {
+  return jsxs('div', {
+    ref: cardRef,
+    tabIndex: -1,
+    children: [
+      jsx('p', {
+        key: 'intro',
+        children: 'Your recovery passphrase. Write these eight words down in this order and keep them somewhere safe. They are shown only now; nothing is created until you continue.',
+      }),
+      exists ? jsx('p', { key: 'exists', children: VAULT_EXISTS_NOTE }) : null,
+      jsx('ol', {
+        key: 'words',
+        'aria-label': 'Recovery passphrase',
+        style: { fontSize: 18, columns: 2, margin: '8px 0', userSelect: 'all' },
+        children: words.map((word, index) => jsx('li', { key: index, children: word })),
+      }),
+      jsx(Row, {
+        key: 'copy',
+        children: jsx(Button, {
+          variant: 'outline',
+          onClick: () => navigator.clipboard && navigator.clipboard.writeText(words.join(' ')),
+          children: 'Copy the words',
+        }),
+      }),
+      jsx(Checked, { key: 'saved', checked: saved, onChange: setSaved, children: 'I have written it down' }),
+      exists ? null : jsx(AskEveryTime, { key: 'ask', checked: askEveryTime, onChange: setAskEveryTime }),
+      jsx(Row, {
+        key: 'commit',
+        children: [
+          jsx(Button, { key: 'create', disabled: !saved, onClick: onCommit, children: exists ? 'Move .env into the vault' : 'Create the vault' }),
+          jsx(Button, { key: 'cancel', variant: 'ghost', onClick: onCancel, children: 'Cancel' }),
+          jsx('span', { key: 'hint', style: { fontSize: 12, color: MUTED_TEXT }, children: 'May show a Touch ID prompt.' }),
+        ],
+      }),
+    ],
+  })
+}
+
+// Step 1.2a (macOS, version 4 API): prepare → acknowledge → commit. `/vault/prepare`
+// returns the passphrase and changes nothing; `/vault/{flow}/commit` creates the vault
+// with that passphrase and moves .env into it. The passphrase lives only in this
+// component's state: dropped after the commit, on Cancel, on a failure that ends the
+// flow, when the step is blocked and when the page goes away. Never notified or logged.
+function VaultStep({ id, n, state, blocker = null, goto = null, code = null, vault, refresh }) {
+  const [flow, setFlow] = useState(null)
+  const [saved, setSaved] = useState(false)
+  const [askEveryTime, setAskEveryTime] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [failure, setFailure] = useState(null)
+  const [outcome, setOutcome] = useState(null)
+  const noteRef = useFocusOn(failure)
+  const cardRef = useFocusOn(flow)
+  const resultRef = useFocusOn(outcome)
+  const exists = Boolean(vault && vault.exists)
+  const drop = () => {
+    setFlow(null)
+    setSaved(false)
+    setAskEveryTime(false)
+  }
+  // Blocked first; then this page's request, the prepared passphrase, facts and failures.
+  const shown = state === 'blocked' ? state : busy ? 'running' : flow ? (failure ? 'attention' : 'next') : state === 'done' ? state : failure ? 'attention' : state
+  useClearSecrets(drop, shown)
+  useDropOnDone(state, () => setFailure(null))
+  const prepare = async () => {
+    setBusy(true)
+    setFailure(null)
+    setOutcome(null)
+    try {
+      const r = await call('/vault/prepare', {})
+      const words = passphraseWords(r.passphrase)
+      if (!r.flow_id || words.length === 0) throw new MordredError('invalid_request')
+      setSaved(false)
+      setFlow({ id: String(r.flow_id), words })
+    } catch (e) {
+      setFailure(asMordredError(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const commit = async () => {
+    if (!flow || !saved) return
+    setBusy(true)
+    setFailure(null)
+    try {
+      const r = await call(`/vault/${encodeURIComponent(flow.id)}/commit`, { unattended: !askEveryTime })
+      drop()
+      setOutcome(r.passphrase_reused ? 'reused' : 'created')
+      host.notify({ kind: 'success', message: r.passphrase_reused ? '.env moved into the existing vault.' : 'Vault created.' })
+    } catch (e) {
+      // A busy ceremony leaves the prepared flow valid for a retry; any other answer ends it.
+      if (!(e && e.code === 'memory_operation_in_progress')) drop()
+      setFailure(asMordredError(e))
+    } finally {
+      setBusy(false)
+      refresh()
+    }
+  }
+  const cancel = () => {
+    drop()
+    setFailure(null)
+  }
+  const restartNotice = (text) =>
+    jsxs('div', {
+      ref: resultRef,
+      tabIndex: -1,
+      style: { marginTop: 10 },
+      children: [jsx('p', { key: 'text', role: 'status', children: text }), jsx(RestartHermesControl, { key: 'restart' })],
+    })
+  const notice = outcome
+    ? restartNotice(outcome === 'reused' ? `${MESSAGES.passphrase_reused} ${VAULT_RESTART}` : `Vault created and .env moved into it. ${VAULT_RESTART}`)
+    : state === 'done' && vault && !vault.env_injecting
+      ? restartNotice(VAULT_RESTART)
+      : null
+  // The key's effective policy as the API reads it, never the one requested here.
+  const policy = vault && vault.unattended === true ? ' · opens without Touch ID while you are logged in' : vault && vault.unattended === false ? ' · Touch ID on every unlock' : ''
+  const children = flow
+    ? jsx(VaultPassphraseCard, {
+        words: flow.words,
+        exists,
+        saved,
+        setSaved,
+        askEveryTime,
+        setAskEveryTime,
+        onCommit: commit,
+        onCancel: cancel,
+        cardRef,
+      })
+    : shown === 'done'
+      ? jsx('p', { children: VAULT_DONE })
+      : jsxs(Fragment, {
+          children: [
+            jsx('p', { key: 'body', children: exists ? VAULT_EXISTS_BODY : VAULT_BODY }),
+            code === 'env_optout'
+              ? null
+              : jsx(Row, {
+                  key: 'prepare',
+                  children: [
+                    jsx(Button, { key: 'go', disabled: busy, onClick: prepare, children: exists ? 'Move .env into the vault' : 'Create the vault' }),
+                    jsx('span', { key: 'hint', style: { fontSize: 12, color: MUTED_TEXT }, children: 'Shows a recovery passphrase first; nothing is created yet.' }),
+                  ],
+                }),
+          ],
+        })
+  return jsx(Step, {
+    id,
+    n,
+    title: 'Create the vault',
+    state: shown,
+    blocker,
+    goto,
+    summary: `On · .env is in the vault${policy}.`,
+    progress: flow ? 'Creating the vault… approve a Touch ID prompt if one appears.' : 'Preparing a recovery passphrase…',
+    failure: stepFailure(failure, code),
+    noteRef,
+    notice,
+    why: WHY.vault,
+    children,
+  })
+}
+
 const TELEGRAM_DONE = 'Connected (read-only). To disconnect, end the session in Telegram → Settings → Devices on your phone, or run hermes-mordred telegram logout in Terminal.'
 
-function TelegramStep({ id = null, state = null, blocker = null, done = false, needsApi, refresh, n = 4, extra = null, summary = null, why = null }) {
+function TelegramStep({ id = null, state = null, blocker = null, goto = null, done = false, needsApi, refresh, n = 4, extra = null, summary = null, why = null }) {
   const legacy = state == null
   const [apiId, setApiId] = useState('')
   const [apiHash, setApiHash] = useState('')
@@ -1221,6 +1468,7 @@ function TelegramStep({ id = null, state = null, blocker = null, done = false, n
     state: shown,
     done,
     blocker,
+    goto,
     summary: summary || 'Connected (read-only).',
     failure,
     noteRef,
@@ -1277,7 +1525,7 @@ function TelegramStep({ id = null, state = null, blocker = null, done = false, n
   })
 }
 
-function LlmStep({ id = null, state = null, blocker = null, done = false, hermesKey, refresh, n = 3, extra = null, why = null }) {
+function LlmStep({ id = null, state = null, blocker = null, goto = null, done = false, hermesKey, refresh, n = 3, extra = null, why = null }) {
   const legacy = state == null
   const [key, setKey] = useState('')
   const [endpoint, setEndpoint] = useState('http://127.0.0.1:11434/v1')
@@ -1314,6 +1562,7 @@ function LlmStep({ id = null, state = null, blocker = null, done = false, hermes
     state: shown,
     done,
     blocker,
+    goto,
     summary: 'Set.',
     toggle: 'Change',
     failure,
@@ -1353,7 +1602,7 @@ function ImportSummary({ counts, sync }) {
   return jsxs(Fragment, { children: [text, sync && sync.last_error ? ` Last import: ${explain(sync.last_error)}` : null] })
 }
 
-function ImportStep({ ready, refresh, n = 5, id = null, state = null, blocker = null, code = null, title = 'Import messages', counts = null, onSync = null, why = null }) {
+function ImportStep({ ready, refresh, n = 5, id = null, state = null, blocker = null, goto = null, code = null, title = 'Import messages', counts = null, onSync = null, why = null }) {
   const legacy = state == null
   const usable = legacy ? ready : state !== 'blocked'
   const [days, setDays] = useState(3)
@@ -1440,6 +1689,7 @@ function ImportStep({ ready, refresh, n = 5, id = null, state = null, blocker = 
     title,
     state: shown,
     blocker,
+    goto,
     summary: jsx(ImportSummary, { counts, sync }),
     toggle: 'Import more',
     progress: importProgress(progress),
@@ -2368,7 +2618,14 @@ function GroupedSetup({ status, health, sync = null, onSync = null, updateInfo =
   const macos = layout === 'macos'
   const v4 = macos && reportsV4(status)
   const states = stepStates(status, sync)
-  const step = (key) => ({ key, id: key, n: STEP_NUMBERS[key], ...states[key] })
+  const numbers = stepNumbers(status)
+  // A step's props: its number, its state entry and the number of the step that lifts its blocker.
+  const step = (key) => {
+    const entry = states[key] || {}
+    const target = entry.blocker ? BLOCKERS[entry.blocker] : null
+    return { key, id: key, n: numbers[key], ...entry, goto: target ? numbers[target.step] : null }
+  }
+  const split = splitVault(status)
   const kind = status.hardware_kind
   return jsxs(Fragment, {
     children: [
@@ -2381,7 +2638,8 @@ function GroupedSetup({ status, health, sync = null, onSync = null, updateInfo =
         layout,
         children: [
           jsx(EnclaveStep, { ...step('enclave'), refresh, hardwareKind: kind }),
-          jsx(MemoryStep, { ...step('memory'), refresh, hardwareKind: kind }),
+          split ? jsx(VaultStep, { ...step('vault'), vault: status.vault, refresh }) : null,
+          jsx(MemoryStep, { ...step('memory'), refresh, hardwareKind: kind, split }),
           macos
             ? v4
               ? jsx(DatabasesStep, { ...step('databases'), status, refresh })

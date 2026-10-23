@@ -37,6 +37,7 @@ IMPORT_SOURCES = {"@hermes/plugin-sdk", "react/jsx-runtime", "react"}
 BLOCKER_CODES = (
     "needs_hermes_model",
     "needs_enclave",
+    "needs_vault",
     "needs_memory",
     "needs_databases",
     "needs_restart",
@@ -91,8 +92,28 @@ PAGE_CODES = (
     "mail_secrets_corrupt",
     "mail_store_path_unsafe",
     "job_not_found",
+    # The vault and memory ceremonies (second design revision).
+    "vault_required",
+    "vault_exists",
+    "vault_flow_expired",
+    "passphrase_reused",
+    "env_optout",
+    "env_required",
+    "memory_operation_in_progress",
+    "memory_encryption_failed",
+    "invalid_body",
 )
-STEP_KEYS = ("enclave", "memory", "databases", "hermes_model", "question_model", "telegram", "telegram_import", "mail")
+STEP_KEYS = (
+    "enclave",
+    "vault",
+    "memory",
+    "databases",
+    "hermes_model",
+    "question_model",
+    "telegram",
+    "telegram_import",
+    "mail",
+)
 NOW_MS = 1_800_000_000_000
 
 
@@ -139,8 +160,14 @@ def linux(**kwargs: Any) -> dict[str, Any]:
     return status
 
 
+# `/status.vault` (facts; `unattended` is the key's effective policy).
+VAULT_READY = {"exists": True, "env_enrolled": True, "env_injecting": True, "optout": False, "unattended": True}
+VAULT_NONE = {"exists": False, "env_enrolled": False, "env_injecting": False, "optout": False, "unattended": None}
+
+
 def v4(
     *,
+    vault: dict[str, Any] | None = VAULT_READY,
     armed: bool = True,
     pending: bool = False,
     available: bool = True,
@@ -154,7 +181,7 @@ def v4(
         "telegram": {"conversations": telegram[0], "messages": telegram[1], "parts": telegram[1]},
         "mail": {"conversations": mail_messages, "messages": mail_messages, "parts": mail_messages},
     }
-    return {
+    status: dict[str, Any] = {
         "databases": {
             "supported": supported,
             "armed": armed,
@@ -166,6 +193,9 @@ def v4(
         "imports": {"available": available, "code": code, "sources": sources if available else {}},
         "mail": mail if mail is not None else {"configured": False},
     }
+    if vault is not None:
+        status["vault"] = dict(vault)
+    return status
 
 
 def job(kind: str, job_id: str = "j1") -> dict[str, Any]:
@@ -191,6 +221,7 @@ STATE_CASES = {
         None,
         {
             "enclave": "next",
+            "vault": None,
             "memory": "blocked:needs_enclave",
             "databases": f"attention:{OLD}",
             "hermes_model": "todo",
@@ -205,6 +236,7 @@ STATE_CASES = {
         None,
         {
             "enclave": "running",
+            "vault": None,
             "memory": "blocked:needs_enclave",
             "databases": f"attention:{OLD}",
             "hermes_model": "next",
@@ -219,6 +251,7 @@ STATE_CASES = {
         None,
         {
             "enclave": "done",
+            "vault": None,
             "memory": "done",
             "databases": f"attention:{OLD}",
             "hermes_model": "next",
@@ -233,6 +266,7 @@ STATE_CASES = {
         None,
         {
             "enclave": "done",
+            "vault": None,
             "memory": "done",
             "databases": f"attention:{OLD}",
             "hermes_model": "done",
@@ -247,6 +281,7 @@ STATE_CASES = {
         None,
         {
             "enclave": "done",
+            "vault": None,
             "memory": "next",
             "databases": f"attention:{OLD}",
             "hermes_model": "done",
@@ -261,6 +296,7 @@ STATE_CASES = {
         None,
         {
             "enclave": "done",
+            "vault": None,
             "memory": "done",
             "databases": f"attention:{OLD}",
             "hermes_model": "done",
@@ -275,6 +311,7 @@ STATE_CASES = {
         SYNC_COUNTS,
         {
             "enclave": "done",
+            "vault": None,
             "memory": "done",
             "databases": f"attention:{OLD}",
             "hermes_model": "done",
@@ -289,6 +326,7 @@ STATE_CASES = {
         {**SYNC_COUNTS, "syncing": True, "message_count": 0},
         {
             "enclave": "done",
+            "vault": None,
             "memory": "done",
             "databases": f"attention:{OLD}",
             "hermes_model": "done",
@@ -303,6 +341,7 @@ STATE_CASES = {
         {**SYNC_COUNTS, "message_count": 0, "last_error": "telegram_rate_limited"},
         {
             "enclave": "done",
+            "vault": None,
             "memory": "done",
             "databases": f"attention:{OLD}",
             "hermes_model": "done",
@@ -317,6 +356,7 @@ STATE_CASES = {
         None,
         {
             "enclave": "done",
+            "vault": "done",
             "memory": "done",
             "databases": "next",
             "hermes_model": "done",
@@ -331,6 +371,7 @@ STATE_CASES = {
         None,
         {
             "enclave": "done",
+            "vault": "done",
             "memory": "done",
             "databases": "next",
             "hermes_model": "done",
@@ -345,6 +386,7 @@ STATE_CASES = {
         None,
         {
             "enclave": "done",
+            "vault": "done",
             "memory": "done",
             "databases": "done",
             "hermes_model": "done",
@@ -359,6 +401,7 @@ STATE_CASES = {
         None,
         {
             "enclave": "done",
+            "vault": "done",
             "memory": "next",
             "databases": "blocked:needs_memory",
             "hermes_model": "done",
@@ -373,6 +416,7 @@ STATE_CASES = {
         {**SYNC_COUNTS, "message_count": 0},
         {
             "enclave": "done",
+            "vault": "done",
             "memory": "done",
             "databases": "done",
             "hermes_model": "done",
@@ -387,6 +431,7 @@ STATE_CASES = {
         None,
         {
             "enclave": "done",
+            "vault": "done",
             "memory": "done",
             "databases": "done",
             "hermes_model": "done",
@@ -401,6 +446,7 @@ STATE_CASES = {
         None,
         {
             "enclave": "done",
+            "vault": "done",
             "memory": "done",
             "databases": "done",
             "hermes_model": "done",
@@ -415,6 +461,7 @@ STATE_CASES = {
         None,
         {
             "enclave": "done",
+            "vault": "done",
             "memory": "done",
             "databases": "done",
             "hermes_model": "done",
@@ -429,6 +476,7 @@ STATE_CASES = {
         None,
         {
             "enclave": "done",
+            "vault": "done",
             "memory": "done",
             "databases": "attention:databases_unsupported",
             "hermes_model": "done",
@@ -443,6 +491,7 @@ STATE_CASES = {
         None,
         {
             "enclave": "done",
+            "vault": None,
             "memory": "next",
             "databases": None,
             "hermes_model": "done",
@@ -453,6 +502,88 @@ STATE_CASES = {
         },
     ),
 }
+
+
+# The vault (1.2a) and memory (1.2b) split of the version 4 API.
+STATE_CASES.update(
+    {
+        "v4, no helper yet": (
+            mac(hardware=False, memory=False, login=False, **v4(vault=VAULT_NONE, armed=False)),
+            None,
+            {
+                "enclave": "next",
+                "vault": "blocked:needs_enclave",
+                "memory": "blocked:needs_enclave",
+                "databases": "blocked:needs_enclave",
+                "hermes_model": "done",
+                "question_model": "done",
+                "telegram": "blocked:needs_enclave",
+                "telegram_import": "blocked:needs_enclave",
+                "mail": "blocked:needs_enclave",
+            },
+        ),
+        "v4, vault not created": (
+            mac(memory=False, login=False, **v4(vault=VAULT_NONE, armed=False)),
+            None,
+            {
+                "enclave": "done",
+                "vault": "next",
+                "memory": "blocked:needs_vault",
+                "databases": "blocked:needs_memory",
+                "hermes_model": "done",
+                "question_model": "done",
+                "telegram": "blocked:needs_memory",
+                "telegram_import": "blocked:needs_memory",
+                "mail": "blocked:needs_memory",
+            },
+        ),
+        "v4, vault created, Hermes not restarted": (
+            mac(memory=False, login=False, **v4(vault={**VAULT_READY, "env_injecting": False}, armed=False)),
+            None,
+            {
+                "enclave": "done",
+                "vault": "done",
+                "memory": "blocked:needs_vault",
+                "databases": "blocked:needs_memory",
+                "hermes_model": "done",
+                "question_model": "done",
+                "telegram": "blocked:needs_memory",
+                "telegram_import": "blocked:needs_memory",
+                "mail": "blocked:needs_memory",
+            },
+        ),
+        "v4, .env encryption opted out": (
+            mac(memory=False, login=False, **v4(vault={**VAULT_NONE, "exists": True, "optout": True}, armed=False)),
+            None,
+            {
+                "enclave": "done",
+                "vault": "attention:env_optout",
+                "memory": "blocked:needs_vault",
+                "databases": "blocked:needs_memory",
+                "hermes_model": "done",
+                "question_model": "done",
+                "telegram": "blocked:needs_memory",
+                "telegram_import": "blocked:needs_memory",
+                "mail": "blocked:needs_memory",
+            },
+        ),
+        "v4, memory already on from an older ceremony": (
+            mac(**v4(vault={**VAULT_NONE, "exists": True})),
+            None,
+            {
+                "enclave": "done",
+                "vault": "next",
+                "memory": "done",
+                "databases": "done",
+                "hermes_model": "done",
+                "question_model": "done",
+                "telegram": "done",
+                "telegram_import": "done",
+                "mail": "todo",
+            },
+        ),
+    }
+)
 
 
 def compact(states: dict[str, Any]) -> dict[str, str | None]:
@@ -713,6 +844,43 @@ def test_rendered_page_shows_each_step_in_its_computed_state(name):
     assert titles == ["Overview", protect, "2  Connect", "3  Ask Hermes", "4  Maintenance"]
     assert all(group["labelled"] for group in rendered["groups"])
     assert all(group["focusable"] for group in rendered["groups"][1:])
+
+
+@pytest.mark.parametrize(
+    "status,titles,goto",
+    [
+        (
+            mac(memory=False, login=False, **v4(vault=VAULT_NONE, armed=False)),
+            {"vault": "1.2a  Create the vault", "memory": "1.2b  Encrypt Hermes memory"},
+            {"Go to step 1.2a", "Go to step 1.2b"},
+        ),
+        (mac(memory=False, login=False), {"memory": "1.2  Encrypt Hermes memory and secrets"}, {"Go to step 1.2"}),
+        (linux(memory=False, login=False), {"memory": "1.2  Encrypt Hermes memory"}, {"Go to step 1.2"}),
+    ],
+    ids=["macos-v4", "macos-older-api", "linux"],
+)
+def test_memory_is_step_1_2_unless_the_vault_is_its_own_step(status, titles, goto):
+    rendered = headings(status)
+    shown = {key.removeprefix("mordred-step-"): value["text"] for key, value in rendered["steps"].items()}
+    for key, title in titles.items():
+        assert shown[key].startswith(title), shown[key]
+    assert ("vault" in shown) is ("vault" in titles)
+    buttons = render_page(
+        """
+const tree = PageBody({status: STATUS, health: null, refresh: () => {}})
+const out = new Set()
+const visit = node => {
+  if (!node || typeof node !== 'object') return
+  if (Array.isArray(node)) { node.forEach(visit); return }
+  if (node.type === 'button' && String(node.props.children).startsWith('Go to step')) out.add(node.props.children)
+  const c = node.props && node.props.children
+  ;(Array.isArray(c) ? c : [c]).forEach(visit)
+}
+visit(tree)
+console.log(JSON.stringify([...out]))
+""".replace("STATUS", json.dumps(status))
+    )
+    assert set(buttons) == goto
 
 
 def test_windows_and_unsupported_statuses_keep_their_pages():
@@ -980,11 +1148,11 @@ console.log(JSON.stringify({requests, refreshes, buttons, tree}))
 """
 
 
-def memory(response: dict[str, Any], setup: str = "", kind: str = "secure_enclave") -> Any:
+def memory(response: dict[str, Any], setup: str = "", kind: str = "secure_enclave", split: bool = False) -> Any:
     return render_page(
         MEMORY_SCRIPT.replace("RESPONSE", json.dumps(response))
         .replace("SETUP", setup)
-        .replace("KIND", json.dumps(kind))
+        .replace("KIND", json.dumps(kind) + (", split: true" if split else ""))
     )
 
 
@@ -1030,6 +1198,294 @@ def test_memory_failure_is_an_alert_and_not_a_toast():
     result = memory({"ok": False, "error": "memory_encryption_failed"})
     text = json.dumps(result["tree"])
     assert '"role": "alert"' in text and "could not be turned on" in text
+
+
+# A component under test with scripted API answers. RestartHermesControl is kept opaque
+# (its own hooks would shift the harness's global hook numbering). `answers` are popped
+# in order; an answer {"throw": code} makes rest() reject like a transport failure.
+COMPONENT_SCRIPT = """
+const render = jsx
+jsx = jsxs = (type, props) =>
+  type === RestartHermesControl ? {type: 'RestartHermesControl', props} : render(type, props)
+const requests = []
+const answers = ANSWERS
+rest = async (path, init) => {
+  requests.push(init && init.body !== undefined ? [path, init.body] : [path])
+  const answer = answers.shift()
+  if (answer && answer.throw) throw new Error(answer.throw)
+  return answer
+}
+const copied = []
+const clipboard = {writeText: t => copied.push(t)}
+Object.defineProperty(globalThis, 'navigator', {value: {clipboard}, configurable: true})
+let refreshes = 0
+const refresh = () => {refreshes++}
+const view = () => {cursor = 0; effects.length = 0; return COMPONENT}
+const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
+  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
+  : text(node.props && node.props.children)
+const button = (tree, label) => find(tree, n => n.type === 'button' && n.props.children === label)
+const press = (tree, label) => {
+  const found = button(tree, label)
+  if (!found) throw new Error(`no button ${label}`)
+  return found.props.onClick()
+}
+const field = (tree, label) => find(tree, n => n.type === 'input' && n.props['aria-label'] === label)
+const type = (tree, label, value) => field(tree, label).props.onChange({target: {value}})
+const tick = (tree, label, value = true) =>
+  find(find(tree, n => n.type === 'label' && text(n).includes(label)), n => n.type === 'checkbox')
+    .props.onCheckedChange(value)
+const labels = tree => {
+  const out = []
+  const visit = node => {
+    if (!node || typeof node !== 'object') return
+    if (Array.isArray(node)) { node.forEach(visit); return }
+    if (node.type === 'button') out.push(node.props.children)
+    if (node.type === 'RestartHermesControl') out.push('Restart Hermes Desktop')
+    const c = node.props && node.props.children
+    ;(Array.isArray(c) ? c : [c]).forEach(visit)
+  }
+  visit(tree)
+  return out
+}
+const unmount = () => {
+  const cleanups = effects.map(f => f()).filter(c => typeof c === 'function')
+  cleanups.forEach(c => c())
+}
+const out = {}
+let tree = view()
+SCRIPT
+console.log(JSON.stringify({requests, refreshes, notifications, copied, out, text: text(tree), buttons: labels(tree),
+  tree}))
+"""
+
+
+def component(component_js: str, answers: list[Any], script: str = "") -> Any:
+    return render_page(
+        COMPONENT_SCRIPT.replace("COMPONENT", component_js)
+        .replace("ANSWERS", json.dumps(answers))
+        .replace("SCRIPT", script)
+    )
+
+
+WORDS = ["anchor", "bravo", "cactus", "delta", "ember", "falcon", "garden", "harbor"]
+PREPARED = {"ok": True, "flow_id": "v1", "passphrase": WORDS}
+
+
+def vault_step(vault: dict[str, Any], state: str = "next", code: str | None = None) -> str:
+    return (
+        f"VaultStep({{id: 'vault', n: '1.2a', state: {json.dumps(state)}, code: {json.dumps(code)}, "
+        f"vault: {json.dumps(vault)}, refresh}})"
+    )
+
+
+PREPARE = "await press(tree, 'Create the vault'); tree = view()\n"
+SAVED = "tick(tree, 'I have written it down'); tree = view()\n"
+COMMIT = "await press(tree, 'Create the vault'); tree = view()\n"
+
+
+def test_vault_step_shows_the_passphrase_before_anything_is_created():
+    result = component(vault_step(VAULT_NONE), [PREPARED], PREPARE)
+    assert result["requests"] == [["/vault/prepare", {}]]
+    words = render_page_words(result["tree"])
+    assert words == WORDS
+    assert "nothing is created until you continue" in result["text"]
+    create = [b for b in result["buttons"] if b == "Create the vault"]
+    assert create == ["Create the vault"]
+    assert "Ask for Touch ID every time Hermes unlocks the vault" in result["text"]
+    # Not ticked yet: the commit stays disabled, and pressing it anyway sends nothing.
+    gated = component(vault_step(VAULT_NONE), [PREPARED], PREPARE + COMMIT)
+    assert gated["requests"] == [["/vault/prepare", {}]]
+    assert '"disabled": true' in json.dumps(find_button(gated["tree"], "Create the vault"))
+
+
+def render_page_words(tree: Any) -> list[str]:
+    words: list[str] = []
+
+    def visit(node: Any) -> None:
+        if isinstance(node, list):
+            for child in node:
+                visit(child)
+            return
+        if not isinstance(node, dict):
+            return
+        if node.get("type") == "li":
+            words.append(node["props"]["children"])
+        visit(node.get("props", {}).get("children"))
+
+    visit(tree)
+    return words
+
+
+def find_button(tree: Any, label: str) -> dict[str, Any] | None:
+    if isinstance(tree, list):
+        for child in tree:
+            found = find_button(child, label)
+            if found:
+                return found
+        return None
+    if not isinstance(tree, dict):
+        return None
+    if tree.get("type") == "button" and tree["props"].get("children") == label:
+        return tree
+    return find_button(tree.get("props", {}).get("children"), label)
+
+
+@pytest.mark.parametrize("ask,unattended", [(False, True), (True, False)])
+def test_vault_commit_sends_the_touch_id_choice_and_drops_the_passphrase(ask, unattended):
+    script = PREPARE + SAVED
+    if ask:
+        script += "tick(tree, 'Ask for Touch ID every time'); tree = view()\n"
+    result = component(vault_step(VAULT_NONE), [PREPARED, {"ok": True}], script + COMMIT)
+    assert result["requests"] == [["/vault/prepare", {}], ["/vault/v1/commit", {"unattended": unattended}]]
+    assert result["refreshes"] == 1
+    assert render_page_words(result["tree"]) == []
+    assert "Vault created and .env moved into it." in result["text"]
+    assert "Restart Hermes Desktop" in result["buttons"]
+    assert result["notifications"] == [{"kind": "success", "message": "Vault created."}]
+    for word in WORDS:
+        assert word not in json.dumps(result["notifications"])
+        assert word not in result["text"]
+
+
+def test_vault_passphrase_can_be_copied_and_is_never_notified():
+    result = component(vault_step(VAULT_NONE), [PREPARED], PREPARE + "press(tree, 'Copy the words'); tree = view()\n")
+    assert result["copied"] == [" ".join(WORDS)]
+    assert result["notifications"] == []
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "press(tree, 'Cancel'); tree = view()\n",
+        "unmount(); tree = view()\n",
+    ],
+    ids=["cancel", "unmount"],
+)
+def test_vault_passphrase_is_dropped_on_cancel_and_unmount(script):
+    result = component(vault_step(VAULT_NONE), [PREPARED], PREPARE + SAVED + script)
+    assert render_page_words(result["tree"]) == []
+    assert all(word not in json.dumps(result["tree"]) for word in WORDS)
+    assert result["requests"] == [["/vault/prepare", {}]]
+
+
+def test_vault_commit_reusing_an_existing_vault_says_the_words_were_not_used():
+    result = component(
+        vault_step({**VAULT_NONE, "exists": True}),
+        [PREPARED, {"ok": True, "passphrase_reused": True}],
+        "await press(tree, 'Move .env into the vault'); tree = view()\n"
+        + SAVED
+        + "await press(tree, 'Move .env into the vault'); tree = view()\n",
+    )
+    assert result["requests"][1] == ["/vault/v1/commit", {"unattended": True}]
+    assert "the words shown here were not used" in result["text"]
+    assert result["notifications"] == [{"kind": "success", "message": ".env moved into the existing vault."}]
+
+
+def test_vault_card_for_an_existing_vault_explains_and_offers_no_key_policy():
+    result = component(
+        vault_step({**VAULT_NONE, "exists": True}),
+        [PREPARED],
+        "await press(tree, 'Move .env into the vault'); tree = view()\n",
+    )
+    assert "This Mac already has a vault" in result["text"]
+    assert "Ask for Touch ID" not in result["text"]
+    assert render_page_words(result["tree"]) == WORDS
+
+
+@pytest.mark.parametrize(
+    "code,kept",
+    [
+        ("vault_flow_expired", False),
+        ("vault_exists", False),
+        ("env_optout", False),
+        ("memory_operation_in_progress", True),
+    ],
+)
+def test_vault_commit_failures_end_the_flow_unless_the_ceremony_was_busy(code, kept):
+    result = component(vault_step(VAULT_NONE), [PREPARED, {"ok": False, "error": code}], PREPARE + SAVED + COMMIT)
+    assert (render_page_words(result["tree"]) == WORDS) is kept
+    alert = json.dumps(result["tree"], ensure_ascii=False)
+    assert '"role": "alert"' in alert
+    assert result["refreshes"] == 1
+    assert result["notifications"] == []
+
+
+def test_vault_step_states_from_status():
+    optout = component(vault_step({**VAULT_NONE, "exists": True, "optout": True}, "attention", "env_optout"), [])
+    assert "hermes-mordred encryption enable env" in optout["text"]
+    assert "Create the vault" not in optout["buttons"] and "Move .env into the vault" not in optout["buttons"]
+    done = component(vault_step(VAULT_READY, "done"), [])
+    assert "On · .env is in the vault · opens without Touch ID while you are logged in." in done["text"]
+    assert "Restart Hermes Desktop" not in done["buttons"]
+    attended = component(vault_step({**VAULT_READY, "unattended": False}, "done"), [])
+    assert "Touch ID on every unlock" in attended["text"]
+    waiting = component(vault_step({**VAULT_READY, "env_injecting": False}, "done"), [])
+    assert "Restart Hermes Desktop so Hermes reads .env from the vault" in waiting["text"]
+    assert "Restart Hermes Desktop" in waiting["buttons"]
+
+
+ANCHOR = "mordred-hermes.vault.0123456789abcdef"
+REMEDY = f"security delete-generic-password -s mordred-hermes.vault.anchor -a {ANCHOR}"
+
+
+@pytest.mark.parametrize(
+    "info,command,note",
+    [
+        ({"anchor_store": "legacy", "anchor_identity": ANCHOR, "remedy": REMEDY}, True, "Run this command in Terminal"),
+        ({"anchor_store": "legacy", "anchor_identity": ANCHOR}, False, "An anchor remains"),
+        ({"anchor_store": "helper", "anchor_identity": ANCHOR}, False, "held by the hardware helper"),
+        ({"anchor_store": "unknown", "anchor_identity": ANCHOR}, False, "An anchor remains"),
+        # Only the exact command renders; anything else falls back to the note.
+        ({"anchor_store": "legacy", "remedy": REMEDY + "; rm -rf ~"}, False, "An anchor remains"),
+        ({"anchor_store": "__proto__"}, False, "An anchor remains"),
+    ],
+    ids=["legacy-with-remedy", "legacy-without-remedy", "helper", "unknown", "bad-remedy", "odd-store"],
+)
+def test_stale_anchor_shows_the_command_only_when_the_api_sends_it(info, command, note):
+    result = render_page(
+        """
+const error = new MordredError('vault_anchor_stale', INFO)
+const tree = StepFailure({error})
+const code = find(tree, n => n.type === 'code')
+const copy = find(tree, n => n.type === 'button')
+console.log(JSON.stringify({tree, code: code && code.props.children, copy: copy && copy.props.children}))
+""".replace("INFO", json.dumps(info))
+    )
+    text = json.dumps(result["tree"], ensure_ascii=False)
+    assert note in text
+    assert "Nothing was changed" not in text
+    if command:
+        assert result["code"] == REMEDY and result["copy"] == "Copy command"
+    else:
+        assert result["code"] is None and result["copy"] is None
+        assert "security delete-generic-password" not in text
+
+
+def test_vault_commit_failure_with_a_stale_anchor_renders_its_remedy():
+    answer = {
+        "ok": False,
+        "error": "vault_anchor_stale",
+        "anchor_store": "legacy",
+        "anchor_identity": ANCHOR,
+        "remedy": REMEDY,
+    }
+    result = component(vault_step(VAULT_NONE), [PREPARED, answer], PREPARE + SAVED + COMMIT)
+    assert REMEDY in result["text"] and "Copy command" in result["buttons"]
+    assert render_page_words(result["tree"]) == []
+
+
+def test_memory_step_after_the_vault_encrypts_memory_only():
+    result = memory({"ok": True}, kind="secure_enclave", split=True)
+    assert result["requests"] == [["/memory/enable", {}]]
+    text = json.dumps(result["tree"], ensure_ascii=False)
+    assert "Touch ID every time" not in text and "Encrypt Hermes memory" in text
+    assert "and secrets" not in text
+    assert "Restart Hermes Desktop" in result["buttons"]
+    failed = memory({"ok": False, "error": "memory_encryption_failed"}, kind="secure_enclave", split=True)
+    failed_text = json.dumps(failed["tree"], ensure_ascii=False)
+    assert "Vault created, memory encryption failed (memory_encryption_failed); retry." in failed_text
+    assert '"role": "alert"' in failed_text
 
 
 # Canaries typed into masked inputs; none may survive in page state, the rendered
