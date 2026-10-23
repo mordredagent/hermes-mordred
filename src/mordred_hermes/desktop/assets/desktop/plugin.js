@@ -1788,6 +1788,8 @@ function ImportStep({ ready, refresh, n = 5, id = null, state = null, blocker = 
   const [failure, setFailure] = useState(null)
   const noteRef = useFocusOn(failure)
   const mounted = useRef(true)
+  // The newest poll number this step applied: an older answer arriving late is ignored.
+  const newestPoll = useRef(0)
   useDropOnDone(state, () => setFailure(null))
   useEffect(() => {
     mounted.current = true
@@ -1799,6 +1801,8 @@ function ImportStep({ ready, refresh, n = 5, id = null, state = null, blocker = 
     const seq = ++syncPollSeq
     try {
       const answer = await call('/sync')
+      if (seq < newestPoll.current) return
+      newestPoll.current = seq
       setSync(answer)
       if (onSync) onSync(answer, seq)
     } catch (_) {
@@ -3510,6 +3514,8 @@ function SetupPage() {
   // between two polls, so the first idle answer to a poll issued after the start (number
   // `importPending.current` or later) is its completion. null: none pending.
   const importPending = useRef(null)
+  // The newest /sync poll number answered so far (polls can answer out of order).
+  const newestPoll = useRef(0)
   const reading = useRef(null)
   const again = useRef(false)
   // One status read at a time: refreshes asked for meanwhile run once, after it.
@@ -3539,12 +3545,19 @@ function SetupPage() {
     reading.current = read()
     return reading.current
   }, [])
-  // The import step polls GET /sync; keep the answer only when it changed. An import that
+  // The import step polls GET /sync (numbered polls; out-of-order answers are dropped);
+  // keep the answer only when it changed. An import that
   // ended (syncing → idle, a new error, or an idle answer after this page started one
   // that was never seen running) changed the store counts and the step states, so the
   // status is read once more (coalesced with a read in flight).
   const onSync = useCallback(
     (answer, seq = null) => {
+      // An answer older than the newest one seen is out of date: ignored entirely, before
+      // it can touch the busy → idle state, the pending mark or the shown answer.
+      if (typeof seq === 'number') {
+        if (seq < newestPoll.current) return
+        newestPoll.current = seq
+      }
       const syncing = Boolean(answer && answer.syncing)
       // An answer to a poll issued after the start: seen running, the busy → idle rule
       // takes over; seen idle, the import already ended. Older answers change nothing here.

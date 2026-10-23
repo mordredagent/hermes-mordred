@@ -1289,6 +1289,53 @@ out.text = text(PageBody({...body}))
     assert "Import Telegram messages\u2713 Done" in result["text"]
 
 
+def test_a_stale_pre_start_idle_after_a_post_start_busy_answer_changes_nothing():
+    """busy (post-start) → stale idle (pre-start) → completed idle: one read, at the real end."""
+    script = """
+await find(tree, n => n.type === 'button' && n.props.children === 'Import').props.onClick()
+await flush()
+held[1](RUNNING)
+await flush()
+out.afterBusy = reads.length
+held[0](STALE)
+await flush()
+out.afterStale = reads.length
+timers[0](); await flush()
+out.afterEnd = reads.length
+page()
+cursor = 2000
+out.text = text(PageBody({...body}))
+""".replace("RUNNING", json.dumps(SYNC_RUNNING)).replace("STALE", json.dumps(SYNC_IDLE))
+    result = import_page(["HOLD", {"ok": True}, "HOLD", SYNC_NINE], script)
+    assert result["afterBusy"] == 1 and result["afterStale"] == 1
+    assert result["afterEnd"] == 2, "exactly one extra status read, at the real completion"
+    assert "connected · 2 chats · 9 messages in Mordred\u2019s store (all accounts)" in result["text"]
+    assert "Import Telegram messages\u2713 Done" in result["text"]
+
+
+@pytest.mark.parametrize("started", [True, False], ids=["import-started", "no-import"])
+def test_setup_page_ignores_sync_answers_older_than_the_newest_one(started):
+    """SetupPage's own rule (the import step drops them too): an older answer changes nothing."""
+    script = """
+await flush()
+const base = reads.length
+if (STARTED) body.onImportStarted(10)
+body.onSync(RUNNING, 11); await flush()
+out.afterBusy = reads.length - base
+body.onSync(STALE, 9); await flush()
+body.onSync({...STALE, last_error: 'telegram_rate_limited'}, 8); await flush()
+out.afterStale = reads.length - base
+body.onSync(NINE, 12); await flush()
+out.afterEnd = reads.length - base
+body.onSync(STALE, 7); await flush()
+out.afterLateStale = reads.length - base
+""".replace("STARTED", "true" if started else "false")
+    script = script.replace("RUNNING", json.dumps(SYNC_RUNNING)).replace("STALE", json.dumps(SYNC_IDLE))
+    result = import_page([SYNC_IDLE], script.replace("NINE", json.dumps(SYNC_NINE)))
+    assert result["afterBusy"] == 0 and result["afterStale"] == 0
+    assert result["afterEnd"] == 1 and result["afterLateStale"] == 1
+
+
 def test_a_late_import_start_after_unmount_sets_no_mark_and_polls_nothing():
     script = """
 // The mount poll answers idle; then the POST is held while the step unmounts.
