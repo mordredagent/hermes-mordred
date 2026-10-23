@@ -105,7 +105,21 @@
     "src/mordred_hermes/desktop/__init__.py": [
       "extension"
     ],
+    "src/mordred_hermes/desktop/_body.py": [
+      "extension"
+    ],
     "src/mordred_hermes/desktop/_capture.py": [
+      "extension",
+      "macos"
+    ],
+    "src/mordred_hermes/desktop/_databases.py": [
+      "extension",
+      "macos"
+    ],
+    "src/mordred_hermes/desktop/_projections.py": [
+      "extension"
+    ],
+    "src/mordred_hermes/desktop/_vault.py": [
       "extension",
       "macos"
     ],
@@ -341,10 +355,30 @@
     "tests/_desktop_page.py": [
       "extension"
     ],
+    "tests/extension/_desktop_support.py": [
+      "extension"
+    ],
     "tests/extension/test_desktop_api.py": [
       "extension"
     ],
+    "tests/extension/test_desktop_bodies.py": [
+      "extension"
+    ],
+    "tests/extension/test_desktop_databases.py": [
+      "extension",
+      "macos"
+    ],
+    "tests/extension/test_desktop_mail.py": [
+      "extension"
+    ],
     "tests/extension/test_desktop_platform.py": [
+      "extension",
+      "macos"
+    ],
+    "tests/extension/test_desktop_status_v4.py": [
+      "extension"
+    ],
+    "tests/extension/test_desktop_vault.py": [
       "extension",
       "macos"
     ],
