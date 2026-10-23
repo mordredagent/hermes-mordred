@@ -413,6 +413,69 @@ def test_the_response_code_is_read_from_the_raw_reply(args: tuple[object, ...], 
     assert imap._login_hint(imaplib.IMAP4.error(*args)) == hint
 
 
+# --- no server text survives a failure: chains and buffers ------------------------------------------
+
+CHAIN_CANARY = "CHAINCANARY-owner@example.com-Gesendet"
+
+
+@pytest.mark.parametrize(
+    ("knobs", "step", "code"),
+    [
+        ({"replies": {"CAPABILITY": f"{{tag}} BAD {CHAIN_CANARY}"}}, "login", "imap_protocol"),
+        ({"replies": {"LIST": f"{{tag}} BAD {CHAIN_CANARY}"}}, "list", "imap_protocol"),
+        ({"replies": {"LIST": f'* LIST () "/" "x"\r\n{{tag}} NO {CHAIN_CANARY}'}}, "list", "imap_protocol"),
+        ({"replies": {"LIST": f"* BYE {CHAIN_CANARY}"}}, "list", "imap_unreachable"),
+        ({"login_untagged": (f"* NO [ALERT] {CHAIN_CANARY}",), "password": "other"}, "login", "imap_auth_failed"),
+        ({"login_untagged": (f"* BYE {CHAIN_CANARY}",)}, "login", "imap_unreachable"),
+    ],
+)
+def test_no_server_text_survives_a_failure(knobs: dict[str, Any], step: str, code: str) -> None:
+    from tests._mail_sync_helpers import exception_chain, rendered_chain, retained_buffers
+
+    server = FakeImapServer({"INBOX": FakeMailbox(1)}, **knobs)
+    session = server.session()
+    with pytest.raises(ImapError) as raised:
+        session.login("owner@example.com", "app-password-1")
+        if step == "list":
+            session.list_mailboxes()
+    error = raised.value
+    assert error.code == code
+    assert exception_chain(error) == [error]  # no cause, no context
+    assert CHAIN_CANARY not in rendered_chain(error)
+    assert CHAIN_CANARY not in retained_buffers(session)  # dropped on the failure, before any logout
+    session.logout()
+    assert CHAIN_CANARY not in retained_buffers(session)
+
+
+def test_a_successful_login_keeps_no_untagged_alert_after_logout() -> None:
+    from tests._mail_sync_helpers import retained_buffers
+
+    server = FakeImapServer({"INBOX": FakeMailbox(1)}, login_untagged=(f"* NO [ALERT] {CHAIN_CANARY}",))
+    session = server.session()
+    session.login("owner@example.com", "app-password-1")
+    session.logout()
+    assert CHAIN_CANARY not in retained_buffers(session)
+
+
+def test_a_greeting_that_hangs_up_is_unreachable_without_its_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests._mail_sync_helpers import exception_chain, rendered_chain
+
+    def hang_up(_link: object) -> socket.socket:
+        client, server = socket.socketpair()
+        server.sendall(f"* BYE {CHAIN_CANARY}\r\n".encode())
+        server.close()
+        return client
+
+    def guarded(*_args: Any, **kwargs: Any) -> GuardedIMAP4:
+        return GuardedIMAP4("imap.example.com", 993, raw_socket=hang_up, timeout=5.0, limits=kwargs.get("limits"))
+
+    monkeypatch.setattr(imap, "GuardedIMAP4SSL", guarded)
+    with pytest.raises(ImapError) as raised:
+        imap.connect("imap.example.com", 993)
+    assert raised.value.code == "imap_unreachable"
+    assert exception_chain(raised.value) == [raised.value] and CHAIN_CANARY not in rendered_chain(raised.value)
+
+
 # --- framing, authentication, port ----------------------------------------------------------------
 
 

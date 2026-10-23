@@ -13,6 +13,8 @@ answers a body fetch with a huge literal and then one byte per interval for
 ever (a server that never lets a read time out), and ``raw_labels`` sends the
 ``X-GM-LABELS`` list verbatim. ``capabilities`` adds capability words (``LOGINDISABLED``) and
 ``login_failure`` is the tagged reply to a wrong ``LOGIN`` (a response code and server text).
+``login_untagged`` lines precede every ``LOGIN`` reply, and ``replies`` (verb → raw lines with
+``{tag}``, used once logged in) replaces a command's answer; an answer with ``* BYE`` hangs up.
 """
 
 from __future__ import annotations
@@ -129,6 +131,8 @@ class FakeImapServer:
         unsolicited_flags: bool = False,
         capabilities: tuple[str, ...] = (),
         login_failure: str = "NO [AUTHENTICATIONFAILED] bad",
+        login_untagged: tuple[str, ...] = (),
+        replies: dict[str, str] | None = None,
     ) -> None:
         self.mailboxes = mailboxes
         self.gmail = gmail
@@ -139,6 +143,9 @@ class FakeImapServer:
         self.unsolicited_flags = unsolicited_flags
         self.capabilities = capabilities
         self.login_failure = login_failure
+        self.login_untagged = login_untagged
+        self.replies = replies or {}
+        self.logged_in = False
         self.commands: list[str] = []
         self.violations: list[str] = []
         self.on_body_fetch: Callable[[list[int]], None] | None = None
@@ -221,12 +228,19 @@ class FakeImapServer:
             self.violations.append(verb)
             reply(f"{tag} BAD forbidden\r\n".encode())
             return True
+        if self.logged_in and verb in self.replies:
+            scripted = self.replies[verb].replace("{tag}", tag)
+            reply(scripted.encode() + b"\r\n")
+            return "* BYE" not in scripted
         if verb == "CAPABILITY":
             reply(b"* CAPABILITY " + caps + b"\r\n" + f"{tag} OK done\r\n".encode())
         elif verb == "LOGIN":
             user, password = _tokens(args)
             ok = (user, password) == (self.user, self.password)
+            for line in self.login_untagged:
+                reply(line.encode() + b"\r\n")
             reply(f"{tag} {'OK LOGIN completed' if ok else self.login_failure}\r\n".encode())
+            self.logged_in = ok
         elif verb == "LIST":
             for name, box in self.mailboxes.items():
                 attrs = " ".join(("\\HasNoChildren", *box.attributes))

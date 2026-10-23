@@ -158,3 +158,42 @@ def committed_messages(store: ImportStore) -> dict[str, tuple[str, str, str]]:
         "JOIN import_runs r ON r.run_id = m.run_id AND r.state = 'committed'",
     )
     return {uid: (owner, evidence, quality) for uid, owner, evidence, quality in found}
+
+
+def exception_chain(error: BaseException) -> list[BaseException]:
+    """``error`` and everything reachable through ``__cause__`` and ``__context__``, recursively."""
+    found: list[BaseException] = []
+    pending: list[BaseException | None] = [error]
+    while pending:
+        item = pending.pop()
+        if item is None or any(item is seen for seen in found):
+            continue
+        found.append(item)
+        pending.extend((item.__cause__, item.__context__))
+    return found
+
+
+def rendered_chain(error: BaseException) -> str:
+    """Every ``args``, ``str``, ``repr`` and formatted traceback of the chain, plus the locals of its library frames.
+
+    Frames of the tests themselves are left out: their locals hold the scripted canaries.
+    """
+    import traceback
+
+    parts: list[str] = []
+    for item in exception_chain(error):
+        parts += [repr(item.args), str(item), repr(item), repr(vars(item))]
+        parts.append("".join(traceback.format_exception(item)))
+        tb = item.__traceback__
+        while tb is not None:
+            if "mordred_hermes" in tb.tb_frame.f_code.co_filename:
+                parts.append(repr(tb.tb_frame.f_locals))
+            tb = tb.tb_next
+    return "\n".join(parts)
+
+
+def retained_buffers(session: ImapSession) -> str:
+    """What the imaplib connection behind ``session`` still holds of the server's responses."""
+    conn = session._conn
+    names = ("untagged_responses", "tagged_commands", "mo", "welcome", "continuation_response", "_cmd_log")
+    return "\n".join(repr(getattr(conn, name, None)) for name in names)
