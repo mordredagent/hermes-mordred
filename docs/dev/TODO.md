@@ -863,6 +863,13 @@ Follow-ups left by the landed code:
   in a temporary directory outside the home and copy only the signed binary.
   Workaround today: delete the `.build` directory; the installed helper in
   `~/.local/bin` is unaffected.
+  Correction (2026-10-23, live check): `enable-se` builds inside the Mordred
+  package of the Hermes venv (`site-packages/mordred_hermes/_native/sekey-helper/.build`),
+  and the plugin member copy re-copies the whole package, `.build` included, to
+  `<home>/plugins/mordred/` at every Hermes start; `uv pip install --reinstall`
+  keeps it because it is not in the wheel's RECORD. Deleting only the copy under
+  `<home>/plugins/` therefore comes back at the next start: delete both. The
+  member copy should also skip build directories.
 
 - [ ] Deferred-tool bridge with the production model (found 2026-10-23,
   `e2e` prompt PR). In Hermes 0.21.5 every plugin tool is deferred
