@@ -24,7 +24,7 @@ uv run pytest -q -o addopts= -m integration tests/integration/test_dbcrypt_windo
 ```
 
 Run the non-injection cases again against `-Target Checked` in a fresh Python
-process (`-k 'not injected_io and not every_creation'`). Do not load two compiled
+process (`-k 'not injected_io and not every_creation and not inherited_dacl_race'`). Do not load two compiled
 versions into one driver process: duplicate VFS names and different SQLite API
 tables intentionally refuse. A test-build pass does not qualify a release DLL.
 

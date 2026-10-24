@@ -366,6 +366,56 @@ def test_changed_file_dacl_refuses_without_repair(fixture: tuple[Any, Any, Path]
     assert path.read_bytes() == before
 
 
+def test_inherited_dacl_race_cannot_broaden_a_created_journal(fixture: tuple[Any, Any, Path]) -> None:
+    from mordred_hermes._private_fs._windows_api import OwnedHandle, get_api
+    from mordred_hermes._private_fs._windows_security import validate_private
+
+    driver, registration, root = fixture
+    connection = connect(driver, root)
+    connection.execute("CREATE TABLE data(value)")
+    connection.commit()
+    before = (root / "synthetic.db").read_bytes()
+    events: list[bool] = []
+    errors: list[str] = []
+
+    def race(stage: int, handle: int) -> int:
+        if stage != 1 or events:
+            return 0
+        try:
+            borrowed = OwnedHandle(get_api(), handle)
+            if not get_api().final_path(borrowed).endswith("-journal"):
+                return 0
+            # Change inheritance at the exact boundary between CREATE_NEW and
+            # first data I/O. Protected creation must survive this mutation;
+            # root revalidation must then refuse the pending transaction.
+            subprocess.run(
+                ["icacls.exe", str(root), "/grant", "*S-1-1-0:(OI)(CI)(IO)(R)"],
+                check=True,
+                capture_output=True,
+                timeout=20,
+            )
+            validate_private(borrowed, directory=False)
+            events.append(True)
+        except Exception as error:
+            errors.append(type(error).__name__)
+            return 1
+        return 0
+
+    try:
+        with native_hook(registration, race), pytest.raises(driver.DatabaseError):
+            connection.execute("INSERT INTO data VALUES ('must not commit')")
+            connection.commit()
+    finally:
+        # Removing only this test-added ACE restores the exact existing DACL.
+        subprocess.run(["icacls.exe", str(root), "/remove:g", "*S-1-1-0"], check=True, capture_output=True, timeout=20)
+        connection.close()
+    assert events == [True] and not errors
+    assert (root / "synthetic.db").read_bytes() == before
+    for path in root.iterdir():
+        with get_api().open(str(path)) as handle:
+            validate_private(handle, directory=False)
+
+
 @pytest.mark.parametrize("mode", ["DELETE", "WAL"])
 def test_crash_releases_locks_and_recovers_checked_files(fixture: tuple[Any, Any, Path], mode: str) -> None:
     driver, _registration, root = fixture

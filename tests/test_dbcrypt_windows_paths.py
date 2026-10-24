@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import sqlite3
 from pathlib import Path
 from types import ModuleType
 
@@ -82,3 +83,15 @@ def test_other_platform_registration_does_not_bootstrap(monkeypatch: pytest.Monk
     driver = ModuleType("no_driver_calls")
     with pytest.raises(RuntimeError, match="Windows"):
         module.register_checked_vfs(driver, root=Path(r"C:\private"))
+
+
+def test_non_cipher_driver_refuses_before_loading_native(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = implementation()
+    monkeypatch.setattr(module.sys, "platform", "win32")
+
+    def unexpected() -> None:
+        pytest.fail("must not pin a non-SQLCipher driver's API table")
+
+    monkeypatch.setattr(module, "_load_native", unexpected)
+    with pytest.raises(RuntimeError, match="SQLCipher"):
+        module.register_checked_vfs(sqlite3, root=Path(r"C:\private"))

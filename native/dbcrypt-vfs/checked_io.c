@@ -149,7 +149,7 @@ static int metadata(CiRoot *r, HANDLE handle, int directory, const wchar_t *path
                     BY_HANDLE_FILE_INFORMATION *info, int private_acl) {
   wchar_t actual[CI_NATIVE_PATH];
   DWORD length;
-  if (!GetFileInformationByHandle(handle,info) || info->dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT ||
+  if (GetFileType(handle)!=FILE_TYPE_DISK || !GetFileInformationByHandle(handle,info) || info->dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT ||
       (!!(info->dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY))!=directory ||
       (!directory && info->nNumberOfLinks!=1)) return 0;
   length=GetFinalPathNameByHandleW(handle,actual,CI_NATIVE_PATH,FILE_NAME_NORMALIZED|VOLUME_NAME_GUID);
