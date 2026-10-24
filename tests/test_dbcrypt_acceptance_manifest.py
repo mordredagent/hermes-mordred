@@ -581,3 +581,15 @@ def test_bundle_rejects_build_stage_provenance_pointing_at_unrelated_environment
     write_manifest(bundle, manifest)
     with pytest.raises(tool.AcceptanceRefused):
         tool.validate_bundle(bundle)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink setup requires host privilege on Windows")
+def test_bundle_accepts_recorded_python_alias_for_same_source_interpreter(tmp_path: Path) -> None:
+    tool, bundle, manifest = bundle_fixture(tmp_path)
+    interpreter = tool._python(Path(manifest["checkout"]) / ".venv")
+    alias = interpreter.with_name("python3")
+    alias.symlink_to(interpreter)
+    for index in (1, 2):
+        manifest["build_commands"][index]["argv"][4] = str(alias)
+    write_manifest(bundle, manifest)
+    tool.validate_bundle(bundle)

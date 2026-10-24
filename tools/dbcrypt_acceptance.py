@@ -527,10 +527,10 @@ def _validate_build_records(value: Any, *, root: Path, checkout: Path, extracted
         )
     _require(value[0]["argv"] == ["uv", "build", "--sdist", str(checkout), "--out-dir", str(root / "artifacts")])
     for index, environment in ((1, root / "build-env"), (2, root / "wheel-env")):
-        _require(
-            value[index]["argv"]
-            == ["uv", "venv", "--no-project", "--python", str(_python(checkout / ".venv")), str(environment)]
-        )
+        argv = value[index]["argv"]
+        _require(len(argv) == 6 and argv[:4] == ["uv", "venv", "--no-project", "--python"])
+        _require(argv[-1] == str(environment) and Path(argv[4]).is_absolute())
+        _require(Path(argv[4]).resolve(strict=True) == _python(checkout / ".venv").resolve(strict=True))
     _require(
         value[3]["argv"] == ["uv", "pip", "install", "--python", str(_python(root / "build-env")), "hatchling>=1.18"]
     )
