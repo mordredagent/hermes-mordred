@@ -563,11 +563,17 @@ os._exit(23)
         connection.close()
 
 
-def test_checkedtest_raced_file_lifetimes_include_ephemeral_contents(fixture: tuple[Any, Any, Path]) -> None:
+def assert_observed_lifetimes(
+    fixture: tuple[Any, Any, Path],
+    *,
+    plaintext_journal_control: bool = False,
+    detections: list[tuple[int, str]] | None = None,
+    completed_races: list[bool] | None = None,
+) -> None:
     from mordred_hermes._private_fs._windows_api import FileId, OwnedHandle, get_api
     from mordred_hermes._private_fs._windows_security import check_private, validate_private
 
-    _driver, registration, _root = fixture
+    driver, registration, root = fixture
     native = registration._native
     assert hasattr(native, "mordred_vfs_test_observer"), "use -Target CheckedTest"
     signature = ctypes.CFUNCTYPE(
@@ -576,16 +582,25 @@ def test_checkedtest_raced_file_lifetimes_include_ephemeral_contents(fixture: tu
     setter = native.mordred_vfs_test_observer
     setter.argtypes = [signature]
     setter.restype = None
+    failure_count = native.mordred_vfs_test_observer_failures
+    failure_count.argtypes = []
+    failure_count.restype = ctypes.c_long
     payload = b"Mordred race fixture must never appear as plaintext in any created file"
     snapshots: list[tuple[int, str, int]] = []
     creations: list[str] = []
     errors: list[str] = []
-    active: dict[int, tuple[int, str, int, bytes]] = {}
+    active: dict[int, tuple[int, str, int, int, bytes]] = {}
+    rollback_ready = False
+    rollback_boundaries: list[int] = []
     names: dict[int, str] = {}
     identities: dict[str, tuple[int, bytes]] = {}
 
     def observe(stage: int, handle: int, offset: int, data: int, count: int) -> int:
         try:
+            if offset == -3:
+                errors.append("native snapshot failed")
+                active.pop(handle, None)
+                return 0
             if offset == -1:
                 borrowed = OwnedHandle(get_api(), handle)  # Never close a borrowed handle.
                 if stage == 1:
@@ -606,21 +621,29 @@ def test_checkedtest_raced_file_lifetimes_include_ephemeral_contents(fixture: tu
                 else:
                     assert identities[name] == identity
                 assert handle not in active
-                active[handle] = (stage, name, 0, b"")
+                assert 0 <= count <= 64 * 1024 * 1024
+                active[handle] = (stage, name, count, 0, b"")
                 if stage == 1:
                     creations.append(name)
             elif offset == -2:
-                previous, name, total, _tail = active.pop(handle)
-                assert previous == stage
+                previous, name, expected, total, _tail = active[handle]
+                assert previous == stage and total == expected == count
+                active.pop(handle)
+                if rollback_ready and stage in (4, 8) and name.endswith("rollback-observed.db-journal"):
+                    rollback_boundaries.append(total)
                 snapshots.append((stage, name, total))
                 if stage == 10:
                     names.pop(handle, None)
             else:
-                previous, name, total, tail = active[handle]
-                assert previous == stage and total == offset and count > 0
+                previous, name, expected, total, tail = active[handle]
+                assert previous == stage and total == offset and 0 < count <= expected - total
                 chunk = ctypes.string_at(data, count)
-                assert payload not in tail + chunk
-                active[handle] = (stage, name, total + count, (tail + chunk)[-len(payload) :])
+                inspect_marker = not plaintext_journal_control or (stage in (4, 8) and name.endswith("-journal"))
+                if inspect_marker and payload in tail + chunk:
+                    if detections is not None:
+                        detections.append((stage, name))
+                    raise AssertionError("plaintext marker in observed file")
+                active[handle] = (stage, name, expected, total + count, (tail + chunk)[-len(payload) :])
         except BaseException as error:
             errors.append(repr(error))
             return 1
@@ -630,11 +653,42 @@ def test_checkedtest_raced_file_lifetimes_include_ephemeral_contents(fixture: tu
     before = stats(registration)["created"]
     setter(callback)
     try:
-        # Retains the existing twelve outcomes, nonvacuous baseline, exact DACL,
-        # aggregate creation checks and mandatory physical root no-rename check.
-        test_sidecar_creation_race_has_no_public_window(fixture)
+        # Commit marker-bearing pages in DELETE mode before changing them.
+        # The second transaction must journal their before-images. The negative
+        # control uses the same synthetic workload without a key and checks only
+        # journal destructive boundaries, so an earlier main-file write cannot
+        # satisfy that control accidentally.
+        if plaintext_journal_control:
+            connection = driver.connect(
+                f"file:{(root / 'rollback-observed.db').as_posix()}?vfs=mordred_checked_v1", uri=True
+            )
+        else:
+            connection = connect(driver, root, "rollback-observed.db")
+        try:
+            assert connection.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
+            connection.execute("CREATE TABLE data(id INTEGER PRIMARY KEY, value TEXT)")
+            connection.executemany("INSERT INTO data VALUES (?, ?)", [(n, payload.decode()) for n in range(16)])
+            connection.commit()
+            assert connection.execute("SELECT count(*) FROM data WHERE value=?", (payload.decode(),)).fetchone() == (
+                16,
+            )
+            rollback_ready = True
+            connection.execute("UPDATE data SET value='replacement synthetic value'")
+            connection.commit()
+            assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        finally:
+            connection.close()
+        if not plaintext_journal_control:
+            # Original twelve race outcomes and physical no-rename checks stay.
+            test_sidecar_creation_race_has_no_public_window(fixture)
+            if completed_races is not None:
+                completed_races.append(True)
     finally:
         setter(signature())
+        assert failure_count() == 0, (
+            "native observer failed; permitted SQLite refusals cannot qualify incomplete evidence"
+        )
+    assert rollback_boundaries and all(size > 0 for size in rollback_boundaries)
     assert not errors and not active and not names
     assert len(creations) == stats(registration)["created"] - before
     for suffix in (".db", "-journal", "-wal", "-shm"):
@@ -645,6 +699,48 @@ def test_checkedtest_raced_file_lifetimes_include_ephemeral_contents(fixture: tu
     assert any(stage in (4, 8) and name.endswith("-journal") and size for stage, name, size in snapshots)
     assert any(stage == 9 and name.endswith("-wal") and size for stage, name, size in snapshots)
     assert any(stage == 11 and name.endswith("-shm") and size for stage, name, size in snapshots)
+
+
+def test_checkedtest_raced_file_lifetimes_include_ephemeral_contents(fixture: tuple[Any, Any, Path]) -> None:
+    assert_observed_lifetimes(fixture)
+
+
+@pytest.mark.parametrize("fault", [30, 31, 32])
+def test_checkedtest_incomplete_observation_cannot_pass_as_race_refusal(
+    fixture: tuple[Any, Any, Path], fault: int
+) -> None:
+    from mordred_hermes._private_fs._windows_api import OwnedHandle, get_api
+
+    _driver, registration, _root = fixture
+    hits: list[int] = []
+    errors: list[str] = []
+    completed: list[bool] = []
+
+    def inject(stage: int, handle: int) -> int:
+        if stage != fault * 100 + 10 or hits:
+            return 0
+        try:
+            name = get_api().final_path(OwnedHandle(get_api(), handle))
+            # Fail the final main-file close snapshot after successful admission
+            # and writes. The unchanged race must still accept all outcomes.
+            if name.endswith("race-0.db"):
+                hits.append(fault)
+                return 1
+        except BaseException as error:
+            errors.append(repr(error))
+        return 0
+
+    with native_hook(registration, inject), pytest.raises(AssertionError, match="native observer failed"):
+        assert_observed_lifetimes(fixture, completed_races=completed)
+    assert hits == [fault] and not errors
+    assert completed == [True], "the unchanged race must accept its outcomes before the observer rejects evidence"
+
+
+def test_checkedtest_plaintext_rollback_journal_is_detected(fixture: tuple[Any, Any, Path]) -> None:
+    detections: list[tuple[int, str]] = []
+    with pytest.raises(AssertionError, match="native observer failed"):
+        assert_observed_lifetimes(fixture, plaintext_journal_control=True, detections=detections)
+    assert any(stage in (4, 8) and name.endswith("rollback-observed.db-journal") for stage, name in detections)
 
 
 def test_wal_multiregion_reader_checkpoint_restart(fixture: tuple[Any, Any, Path]) -> None:

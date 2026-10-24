@@ -56,8 +56,16 @@ I/O handles at creation, before/after writes, and before truncate/delete/close
 and SHM unmapping. It does not reopen names, persist data, or export arbitrary
 reads. Install/clear hooks only with no concurrent callbacks; borrowed handles
 and buffers must not escape the callback. Snapshots are limited to 64 MiB and
-fail the observing test on incomplete reads. Production Checked exports no
-observer or fault setter. Initialization fault stages 20/21/22 exercise the
+fail the observing test on incomplete reads. Snapshot begin/success events
+carry the expected byte length; incomplete snapshots emit a distinct failure
+terminal and increment a sticky test-only counter, including size/allocation
+and callback failures. Clearing the observer does not clear this evidence.
+Acceptance checks the counter independently of permitted SQLite I/O refusals.
+The observer negatives inject size/read/short-read failures after the race
+baseline and require acceptance to fail. A separate synthetic plaintext control
+must expose the committed marker's DELETE-journal before-image specifically at
+a pre-delete/pre-truncate boundary; it cannot pass by detecting the main file.
+Production Checked exports no observer, failure counter, or fault setter. Initialization fault stages 20/21/22 exercise the
 actual entrypoint before VFS registration, before auto-extension registration,
 and after successful auto-extension registration, including real rollback.
 
