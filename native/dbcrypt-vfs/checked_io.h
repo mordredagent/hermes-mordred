@@ -54,6 +54,9 @@ int ci_open(CiRoot *root, const wchar_t *path, int create, int readonly, int del
 int ci_check(CiFile *file);
 int ci_close(CiFile *file);
 int ci_delete(CiFile *file);
+/* Close the data handle after disposition, then honor a requested parent
+ * barrier. Original directory pins stay live until the caller's ci_close. */
+int ci_delete_and_sync(CiFile *file, int sync_directory);
 int ci_size(CiFile *file, sqlite3_int64 *size);
 int ci_truncate(CiFile *file, sqlite3_int64 size);
 int ci_read(CiFile *file, void *buffer, int count, sqlite3_int64 offset);

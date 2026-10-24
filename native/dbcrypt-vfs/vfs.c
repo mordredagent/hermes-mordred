@@ -372,15 +372,19 @@ static int vDelete(sqlite3_vfs *vfs, const char *name, int sync) {
   wchar_t path[CI_PATH];
   CiRoot *root;
   CiFile file;
-  int rc=SQLITE_IOERR_DELETE;
-  (void)vfs; (void)sync;
+  int rc=SQLITE_IOERR_DELETE, closing;
+  (void)vfs;
   if (ci_utf8(name,path)!=SQLITE_OK) return rc;
   AcquireSRWLockExclusive(&registry_lock);
   root=find_root(path);
   if (root) {
     InterlockedIncrement64(&root->deletes);
     rc=ci_open(root,path,0,0,1,&file);
-    if (rc==SQLITE_OK) { rc=ci_delete(&file); ci_close(&file); }
+    if (rc==SQLITE_OK) {
+      rc=ci_delete_and_sync(&file,sync);
+      closing=ci_close(&file);
+      if (rc==SQLITE_OK) rc=closing;
+    }
     else if (rc==SQLITE_NOTFOUND) rc=SQLITE_IOERR_DELETE_NOENT;
   }
   ReleaseSRWLockExclusive(&registry_lock);

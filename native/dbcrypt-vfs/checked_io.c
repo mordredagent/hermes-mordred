@@ -355,16 +355,24 @@ failed:
   return rc;
 }
 
-int ci_check(CiFile *f) {
+static int parents_check(CiFile *f) {
   int i;
-  BY_HANDLE_FILE_INFORMATION now;
   if (ci_root_check(f->root)!=SQLITE_OK) return SQLITE_IOERR_ACCESS;
   for (i=0; i<f->count; i++) if (!pin_check(f->root,&f->pins[i])) return SQLITE_IOERR_ACCESS;
+  return SQLITE_OK;
+}
+
+int ci_check(CiFile *f) {
+  BY_HANDLE_FILE_INFORMATION now;
+  if (parents_check(f)!=SQLITE_OK) return SQLITE_IOERR_ACCESS;
   if (!metadata(f->root,f->handle,0,f->path,&now,1) || !identity_equal(&f->identity,&now)) return SQLITE_IOERR_ACCESS;
   return SQLITE_OK;
 }
 
-int ci_close(CiFile *f) {
+/* Keep every original directory pin until the caller has finished any
+ * namespace barrier. In particular, closing the deletion file is not allowed
+ * to release its child-directory pins before the subsequent parent flush. */
+static int close_file_handle(CiFile *f) {
   int rc=SQLITE_OK;
   if (f->handle && f->handle!=INVALID_HANDLE_VALUE && ci_test_observe(CI_BEFORE_CLOSE,f->handle)) rc=SQLITE_IOERR_CLOSE;
   if (f->handle && f->handle!=INVALID_HANDLE_VALUE) {
@@ -376,6 +384,11 @@ int ci_close(CiFile *f) {
 #endif
   }
   f->handle=NULL;
+  return rc;
+}
+
+int ci_close(CiFile *f) {
+  int rc=close_file_handle(f);
   while (f->count) if (!CloseHandle(f->pins[--f->count].handle)) rc=SQLITE_IOERR_CLOSE;
   return rc;
 }
@@ -390,6 +403,68 @@ int ci_delete(CiFile *f) {
   if (marked && ci_test_stage(CI_AFTER_DISPOSITION,f->handle)) return SQLITE_IOERR_DELETE;
 #endif
   return marked ? SQLITE_OK : SQLITE_IOERR_DELETE;
+}
+
+static CiPin *immediate_parent(CiFile *f) {
+  return f->count ? &f->pins[f->count-1] : &f->root->pins[f->root->count-1];
+}
+
+static int barrier_check(CiFile *f, CiPin *barrier) {
+  wchar_t filesystem[32];
+  CiPin *parent=immediate_parent(f);
+  return parents_check(f)==SQLITE_OK && pin_check(f->root,barrier) &&
+         identity_equal(&parent->identity,&barrier->identity) &&
+         equal(parent->path,barrier->path) &&
+         GetDriveTypeW(f->root->pins[0].path)==DRIVE_FIXED &&
+         GetVolumeInformationByHandleW(barrier->handle,NULL,0,NULL,NULL,NULL,filesystem,32) &&
+         wcscmp(filesystem,L"NTFS")==0;
+}
+
+static int barrier_open(CiFile *f, CiPin *barrier) {
+  CiPin *parent=immediate_parent(f);
+  memset(barrier,0,sizeof(*barrier));
+  /* Only a supplemental handle: the original full-read/no-delete-share
+   * ancestor and target pins stay continuously held. Never ReOpenFile or
+   * close/reopen a pin. Admission uses the pinned physical parent pathname. */
+  if (ci_check(f)!=SQLITE_OK || ci_test_stage(CI_BEFORE_DIR_OPEN,parent->handle) ||
+      ci_check(f)!=SQLITE_OK) return SQLITE_IOERR_DIR_FSYNC;
+  barrier->handle=CreateFileW(parent->path,GENERIC_READ|GENERIC_WRITE|READ_CONTROL,
+      FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_WRITE_THROUGH,NULL);
+  if (barrier->handle==INVALID_HANDLE_VALUE) { barrier->handle=NULL; return SQLITE_IOERR_DIR_FSYNC; }
+  barrier->private_acl=1;
+  wcscpy_s(barrier->path,CI_NATIVE_PATH,parent->path);
+  if (!metadata(f->root,barrier->handle,1,barrier->path,&barrier->identity,1) ||
+      !barrier_check(f,barrier)) return SQLITE_IOERR_DIR_FSYNC;
+  return SQLITE_OK;
+}
+
+static int barrier_flush(CiFile *f, CiPin *barrier) {
+  if (!barrier_check(f,barrier) || ci_test_stage(CI_BEFORE_DIR_FLUSH,barrier->handle) ||
+      !barrier_check(f,barrier)) return SQLITE_IOERR_DIR_FSYNC;
+  /* Full file/metadata/storage flush, never a data-only/no-sync variant. The
+   * deletion file handle has already closed; all original pins are still live. */
+  if (!FlushFileBuffers(barrier->handle)) return SQLITE_IOERR_DIR_FSYNC;
+  if (!barrier_check(f,barrier) || ci_test_stage(CI_AFTER_DIR_FLUSH,barrier->handle) ||
+      !barrier_check(f,barrier)) return SQLITE_IOERR_DIR_FSYNC;
+  return SQLITE_OK;
+}
+
+int ci_delete_and_sync(CiFile *f, int sync_directory) {
+  CiPin barrier;
+  int rc=SQLITE_OK, closing;
+  memset(&barrier,0,sizeof(barrier));
+  /* Acquire the extra rights and validate the actual immediate parent before
+   * mutation. A failed admission leaves the file undisposed, without fallback. */
+  if (sync_directory) rc=barrier_open(f,&barrier);
+  if (rc==SQLITE_OK) rc=ci_delete(f);
+  closing=close_file_handle(f);
+  if (rc==SQLITE_OK) rc=closing;
+  if (rc==SQLITE_OK && sync_directory) rc=barrier_flush(f,&barrier);
+  if (barrier.handle && !CloseHandle(barrier.handle) && rc==SQLITE_OK) rc=SQLITE_IOERR_DIR_CLOSE;
+  /* The caller still owns every original directory pin and releases them only
+   * after this returns. Preserve the first error, including close/flush errors. */
+  return rc;
 }
 
 int ci_size(CiFile *f, sqlite3_int64 *size) {
