@@ -46,8 +46,14 @@ except ImportError:  # pragma: no cover — non-POSIX platform (Windows)
     fcntl = None  # type: ignore[assignment]
 
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from weakref import WeakKeyDictionary
+
+if TYPE_CHECKING:
+    from ._native_deletion import _NativeOwnerFacts
+    from .wrap import NativeBackend
 
 from .._custody_order import custody_scope
 from .._home import hermes_home as _hermes_home
@@ -869,6 +875,111 @@ def keyvault_lock(root: Path) -> Iterator[None]:
         assert_keyvault_active(root)
         with _advisory_file_lock(root / ".lock", label="keyvault lock"):
             yield
+
+
+@dataclass(frozen=True)
+class _CustodyRecord:
+    root: Path
+    backend: NativeBackend
+    identity: tuple[int, int] | None
+    process: tuple[int, int]
+    reset: bool
+    binding: tuple[object, ...]
+    locks: tuple[tuple[Path, tuple[int, int, int]], ...]
+
+
+class KeyvaultCustody:
+    """Opaque handle to one live checked lifecycle/keyvault transaction."""
+
+    __slots__ = ("__weakref__",)
+
+    def __new__(cls) -> KeyvaultCustody:
+        from .._database_contracts import DatabaseRefused
+
+        raise DatabaseRefused("keyvault custody cannot be constructed")
+
+    def _check_native_delete_owner(  # noqa: C901 - explicit custody checks fail before authority issuance
+        self, native_key_id: str, backend: NativeBackend
+    ) -> _NativeOwnerFacts:
+        from .._database_contracts import DatabaseRefused
+        from . import _native_deletion, _native_key_id
+
+        record = _KEYVAULT_CUSTODY.get(self)
+        if record is None or record.process != (os.getpid(), threading.get_ident()) or backend is not record.backend:
+            raise DatabaseRefused("keyvault custody is closed or belongs to another backend/process")
+        depths = _thread_lock_depths()
+        if not depths.get(_lock_path_key(record.root.parent / ".keyvault.lifecycle.lock")):
+            raise DatabaseRefused("keyvault custody lifecycle lock is not held")
+        try:
+            current = record.root.lstat()
+        except FileNotFoundError:
+            identity = None
+        else:
+            _check_dir_mode(record.root)
+            identity = (current.st_dev, current.st_ino)
+        if identity != record.identity:
+            raise DatabaseRefused("keyvault custody root changed")
+        if identity is not None and not depths.get(_lock_path_key(record.root / ".lock")):
+            raise DatabaseRefused("keyvault custody lock is not held")
+        for path, held_identity in record.locks:
+            try:
+                lock_stat = path.lstat()
+                _validate_lock_stat(lock_stat, path, label="keyvault custody lock", from_lstat=True)
+            except OSError as exc:
+                raise DatabaseRefused("keyvault custody lock changed") from exc
+            if _lock_inode_identity(lock_stat) != held_identity:
+                raise DatabaseRefused("keyvault custody lock changed")
+        if record.binding != _native_deletion._backend_binding(backend, ""):
+            raise DatabaseRefused("keyvault backend/store changed")
+        try:
+            role = _native_key_id._checked_keyvault_role(record.root, native_key_id, reset=record.reset)
+        except (OSError, ValueError) as exc:
+            raise DatabaseRefused("keyvault ownership cannot be validated") from exc
+        return _native_deletion._NativeOwnerFacts(home=record.root, role=role)
+
+
+_KEYVAULT_CUSTODY: WeakKeyDictionary[KeyvaultCustody, _CustodyRecord] = WeakKeyDictionary()
+
+
+@contextlib.contextmanager
+def keyvault_custody(root: Path, *, backend: NativeBackend, reset: bool = False) -> Iterator[KeyvaultCustody]:
+    """Bind exact backend and physical root while both actual locks are held.
+
+    Reset may resume an absent tree from its durable parent journal. It still
+    holds the stable lifecycle lock; an existing tree also holds its own lock.
+    """
+    from ._native_deletion import _backend_binding
+
+    with keyvault_lifecycle_lock(root), contextlib.ExitStack() as stack:
+        try:
+            current = root.lstat()
+        except FileNotFoundError:
+            if not reset:
+                raise
+            identity = None
+        else:
+            _check_dir_mode(root)
+            identity = (current.st_dev, current.st_ino)
+            if not reset:
+                assert_keyvault_active(root)
+            stack.enter_context(_advisory_file_lock(root / ".lock", label="keyvault lock"))
+        handle = object.__new__(KeyvaultCustody)
+        lock_paths = [root.parent / ".keyvault.lifecycle.lock"]
+        if identity is not None:
+            lock_paths.append(root / ".lock")
+        _KEYVAULT_CUSTODY[handle] = _CustodyRecord(
+            root,
+            backend,
+            identity,
+            (os.getpid(), threading.get_ident()),
+            reset,
+            _backend_binding(backend, ""),
+            tuple((path, _lock_inode_identity(path.lstat())) for path in lock_paths),
+        )
+        try:
+            yield handle
+        finally:
+            _KEYVAULT_CUSTODY.pop(handle, None)
 
 
 def _write_meta_atomic(path: Path, meta: dict[str, Any]) -> None:

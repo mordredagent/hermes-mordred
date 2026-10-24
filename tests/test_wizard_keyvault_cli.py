@@ -36,6 +36,13 @@ from tests._keyvault_fakes import FakeBackend
 pytestmark = pytest.mark.usefixtures("fake_native_creation_receipts")
 
 
+@pytest.fixture(autouse=True)
+def _legacy_owned_deletion_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests._keyvault_owned_deletion import install_fake_owned_deletion
+
+    install_fake_owned_deletion(monkeypatch)
+
+
 def _parse_keyvault(*args: str) -> argparse.Namespace:
     from mordred_hermes.wizard.cli import _setup_subparser
 

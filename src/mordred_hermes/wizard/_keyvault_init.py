@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..keyvault import _native_key_id, _storage
+from ..keyvault._native_deletion import NativeCreateReceipt
 from . import _term
 from ._defaults import resolve_backend, resolve_prompt_io
 from ._windows_gates import unported_refusal
@@ -595,11 +596,22 @@ def _require_scoped_main_key_for_audit(root: Path, meta: dict[str, Any]) -> None
     _secret_ops._assert_key_committed(root, key_id, key_id_hash)
 
 
-def _rollback_new_audit_key(root: Path, backend: NativeBackend, native_key_id: str) -> None:
+def _rollback_new_audit_key(
+    root: Path, backend: NativeBackend, native_key_id: str, *, receipt: NativeCreateReceipt | None = None
+) -> None:
     """Best-effort rollback, retaining pending if native deletion fails."""
 
     try:
-        backend.delete_enclave_key(native_key_id)
+        from ..keyvault import wrap
+        from ..keyvault._native_deletion import _owned_delete_scope
+
+        if receipt is not None:
+            wrap.rollback_created_key(receipt)
+        else:
+            with _storage.keyvault_custody(root, backend=backend) as custody:
+                owner = _native_key_id.checked_native_owner(custody, native_key_id=native_key_id, backend=backend)
+                with _owned_delete_scope(owner, backend=backend, database_lease=None) as permit:
+                    wrap.delete_wrapping_key(native_key_id, backend=backend, deletion=permit)
     except Exception:
         return
     try:
@@ -657,61 +669,68 @@ def _commit_pending_audit_key(
 ) -> None:
     """Generate/adopt the exact pending key and durably commit ownership."""
 
+    from contextlib import ExitStack
+
+    from ..keyvault import wrap
     from ..keyvault._exceptions import WrapKeyAlreadyExists
-    from ..keyvault.wrap import generate_wrapping_key, get_wrapping_key_public
+    from ..keyvault.wrap import get_wrapping_key_public
 
-    generated = False
-    try:
+    with ExitStack() as stack:
+        receipt = None
         try:
-            generate_wrapping_key(
-                logical_key_id,
-                backend=backend,
-                native_key_id=native_key_id,
-            )
-            generated = True
-        except WrapKeyAlreadyExists:
-            # The durable exact pending record proves this profile owns the
-            # deterministic scoped selector. Adoption is still limited to a
-            # key known to predate a freshly-published pending record, or a
-            # row+pending retry proving generation previously succeeded. A
-            # pending-only retry after a generation durability error remains
-            # fail-closed: public visibility alone is not durability.
-            if not allow_duplicate_adoption:
-                # ...but refusing alone left the profile permanently plaintext:
-                # every later retry re-derives the same scoped selector, hits the
-                # same duplicate, and re-refuses. Discard the key of unproven
-                # durability instead of adopting it — strictly stronger than
-                # adoption, and safe because no ciphertext can depend on it
-                # (``make_audit_writer`` requires COMMITTED ownership, which by
-                # definition was never published on this path). The next attempt
-                # then starts from a clean, fresh provisioning.
-                _rollback_new_audit_key(root, backend, native_key_id)
-                raise
-            get_wrapping_key_public(
-                logical_key_id,
-                backend=backend,
-                native_key_id=native_key_id,
-            )
+            try:
+                receipt = stack.enter_context(
+                    wrap.create_wrapping_key_scope(
+                        logical_key_id,
+                        backend=backend,
+                        native_key_id=native_key_id,
+                    )
+                )
+            except WrapKeyAlreadyExists:
+                # The durable exact pending record proves this profile owns the
+                # deterministic scoped selector. Adoption is still limited to a
+                # key known to predate a freshly-published pending record, or a
+                # row+pending retry proving generation previously succeeded. A
+                # pending-only retry after a generation durability error remains
+                # fail-closed: public visibility alone is not durability.
+                if not allow_duplicate_adoption:
+                    # ...but refusing alone left the profile permanently plaintext:
+                    # every later retry re-derives the same scoped selector, hits the
+                    # same duplicate, and re-refuses. Discard the key of unproven
+                    # durability instead of adopting it — strictly stronger than
+                    # adoption, and safe because no ciphertext can depend on it
+                    # (``make_audit_writer`` requires COMMITTED ownership, which by
+                    # definition was never published on this path). The next attempt
+                    # then starts from a clean, fresh provisioning.
+                    _rollback_new_audit_key(root, backend, native_key_id)
+                    raise
+                get_wrapping_key_public(
+                    logical_key_id,
+                    backend=backend,
+                    native_key_id=native_key_id,
+                )
 
-        ownership_meta = _storage.load_meta(root)
-        ownership_pending, ownership_committed = _audit_key_state(root, ownership_meta, logical_key_id)
-        if ownership_pending != native_key_id:
-            raise _storage.KeyvaultCorruptError("audit-key pending ownership changed during provisioning")
-        if ownership_committed is None:
-            _native_key_id.add_committed_audit_key(
-                root,
-                ownership_meta,
-                logical_key_id,
-                native_key_id,
-            )
-        elif ownership_committed != native_key_id:
-            raise _storage.KeyvaultCorruptError("audit-key committed ownership changed during provisioning")
-        # First-phase ownership commit retains pending.
-        _storage.save_meta(root, ownership_meta)
-    except BaseException:
-        if generated:
-            _rollback_new_audit_key(root, backend, native_key_id)
-        raise
+            ownership_meta = _storage.load_meta(root)
+            ownership_pending, ownership_committed = _audit_key_state(root, ownership_meta, logical_key_id)
+            if ownership_pending != native_key_id:
+                raise _storage.KeyvaultCorruptError("audit-key pending ownership changed during provisioning")
+            if ownership_committed is None:
+                _native_key_id.add_committed_audit_key(
+                    root,
+                    ownership_meta,
+                    logical_key_id,
+                    native_key_id,
+                )
+            elif ownership_committed != native_key_id:
+                raise _storage.KeyvaultCorruptError("audit-key committed ownership changed during provisioning")
+            # First-phase ownership commit retains pending.
+            _storage.save_meta(root, ownership_meta)
+            if receipt is not None:
+                wrap.commit_created_key(receipt)
+        except BaseException:
+            if receipt is not None:
+                _rollback_new_audit_key(root, backend, native_key_id, receipt=receipt)
+            raise
 
 
 def _provision_audit_log_key_locked(root: Path, backend: NativeBackend, logical_key_id: str) -> None:
