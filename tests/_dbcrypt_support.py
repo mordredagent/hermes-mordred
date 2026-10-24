@@ -82,7 +82,9 @@ time.sleep(0.1)
 path=Path({str(state)!r})
 data=json.loads(path.read_text())
 args=sys.argv[1:]
-if 'describe-instances' in args:
+if 'get-caller-identity' in args:
+    print('{{"Account":"123456789012"}}')
+elif 'describe-instances' in args:
     print(json.dumps({{'Reservations':[{{'Instances':[{{
         'InstanceId':'i-00f4db5c3a204906b','State':{{'Name':data['state']}},
         'Tags':([] if data['owner'] is None else [{{'Key':'mordred:dbcrypt-validation','Value':data['owner']}}])

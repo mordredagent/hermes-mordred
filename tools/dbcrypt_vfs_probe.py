@@ -86,8 +86,6 @@ def _bootstrap(driver: Any, extension: Path) -> tuple[str, str]:
         finally:
             connection.enable_load_extension(False)
         source_id = connection.execute("SELECT sqlite_source_id()").fetchone()[0]
-        if _stats(connection)["source_id"] != source_id:
-            raise ProbeRefused("extension_library_mismatch")
         return source_id, connection.execute("PRAGMA cipher_version").fetchone()[0]
     finally:
         connection.close()
@@ -177,7 +175,8 @@ def probe(*, output: Path, extension: Path | None = None) -> ProbeResult:
     control = driver.connect(":memory:")
     try:
         # The bootstrap connection is closed: functions and VFS must persist.
-        _stats(control)
+        if _stats(control)["source_id"] != source_id:
+            raise ProbeRefused("extension_library_mismatch")
         with tempfile.TemporaryDirectory(prefix="mordred-dbcrypt-probe-", dir=output.parent) as temporary:
             path = Path(temporary) / "synthetic.db"
             key = derive(bytes(range(32)))  # Public synthetic input, never native custody.

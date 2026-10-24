@@ -19,15 +19,17 @@ from tests._dbcrypt_support import AcceptanceClock, SyntheticCloud, acceptance_t
 INSTANCE = "i-00f4db5c3a204906b"
 
 
-def controller():
+def controller(admission_directory: Path):
     module = acceptance_tool("dbcrypt_acceptance_control")
     clock = AcceptanceClock()
     cloud = SyntheticCloud(clock)
-    return module, clock, cloud, module.Controller(cloud, now=clock.now, sleep=clock.sleep)
+    control = module.Controller(cloud, now=clock.now, sleep=clock.sleep)
+    control.admission_directory = admission_directory
+    return module, clock, cloud, control
 
 
 def test_start_requires_live_supervisor_and_private_receipt(tmp_path: Path) -> None:
-    module, clock, cloud, control = controller()
+    module, clock, cloud, control = controller(tmp_path / "admission")
     path = tmp_path / "receipt.json"
     control.arm(path, instance=INSTANCE, deadline=clock.now() + 180)
     with pytest.raises(module.ControlRefused, match="supervisor"):
@@ -41,7 +43,7 @@ def test_start_requires_live_supervisor_and_private_receipt(tmp_path: Path) -> N
 
 
 def test_watchdog_stops_after_worker_crash(tmp_path: Path) -> None:
-    _module, clock, cloud, control = controller()
+    _module, clock, cloud, control = controller(tmp_path / "admission")
     path = tmp_path / "receipt.json"
     control.arm(path, instance=INSTANCE, deadline=clock.now() + 180)
     control.record_heartbeat(path, pid=os.getpid())
@@ -54,7 +56,7 @@ def test_watchdog_stops_after_worker_crash(tmp_path: Path) -> None:
 
 
 def test_ambiguous_start_response_is_still_stopped(tmp_path: Path) -> None:
-    _module, clock, cloud, control = controller()
+    _module, clock, cloud, control = controller(tmp_path / "admission")
     path = tmp_path / "receipt.json"
     control.arm(path, instance=INSTANCE, deadline=clock.now() + 180)
     control.record_heartbeat(path, pid=os.getpid())
@@ -68,7 +70,7 @@ def test_ambiguous_start_response_is_still_stopped(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("state,owner", [("running", None), ("stopped", "another-task")])
 def test_preexisting_work_is_never_taken_over(tmp_path: Path, state: str, owner: str | None) -> None:
-    module, clock, cloud, control = controller()
+    module, clock, cloud, control = controller(tmp_path / "admission")
     cloud.state, cloud.owner = state, owner
     path = tmp_path / "receipt.json"
     with pytest.raises(module.ControlRefused):
@@ -77,7 +79,7 @@ def test_preexisting_work_is_never_taken_over(tmp_path: Path, state: str, owner:
 
 
 def test_changed_instance_owner_refuses_stop(tmp_path: Path) -> None:
-    module, clock, cloud, control = controller()
+    module, clock, cloud, control = controller(tmp_path / "admission")
     path = tmp_path / "receipt.json"
     control.arm(path, instance=INSTANCE, deadline=clock.now() + 180)
     control.record_heartbeat(path, pid=os.getpid())
@@ -90,14 +92,14 @@ def test_changed_instance_owner_refuses_stop(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("duration", [30, 7_201, -1])
 def test_unbounded_or_too_short_deadline_is_rejected(tmp_path: Path, duration: int) -> None:
-    module, clock, cloud, control = controller()
+    module, clock, cloud, control = controller(tmp_path / "admission")
     with pytest.raises(module.ControlRefused, match="deadline"):
         control.arm(tmp_path / "receipt.json", instance=INSTANCE, deadline=clock.now() + duration)
     assert cloud.starts == 0
 
 
 def test_expiring_credentials_cannot_arm_compute(tmp_path: Path) -> None:
-    module, clock, cloud, control = controller()
+    module, clock, cloud, control = controller(tmp_path / "admission")
     cloud.expiration = clock.now() + 120
     with pytest.raises(module.ControlRefused, match="credential"):
         control.arm(tmp_path / "receipt.json", instance=INSTANCE, deadline=clock.now() + 180)
@@ -105,7 +107,7 @@ def test_expiring_credentials_cannot_arm_compute(tmp_path: Path) -> None:
 
 
 def test_existing_receipt_is_not_overwritten(tmp_path: Path) -> None:
-    module, clock, _cloud, control = controller()
+    module, clock, _cloud, control = controller(tmp_path / "admission")
     path = tmp_path / "receipt.json"
     path.write_bytes(b"existing retained evidence")
     with pytest.raises(module.ControlRefused):
@@ -114,7 +116,7 @@ def test_existing_receipt_is_not_overwritten(tmp_path: Path) -> None:
 
 
 def test_stale_supervisor_cannot_start_compute(tmp_path: Path) -> None:
-    module, clock, cloud, control = controller()
+    module, clock, cloud, control = controller(tmp_path / "admission")
     path = tmp_path / "receipt.json"
     control.arm(path, instance=INSTANCE, deadline=clock.now() + 180)
     control.record_heartbeat(path, pid=os.getpid())
@@ -125,14 +127,14 @@ def test_stale_supervisor_cannot_start_compute(tmp_path: Path) -> None:
 
 
 def test_unknown_instance_is_not_armed(tmp_path: Path) -> None:
-    module, clock, cloud, control = controller()
+    module, clock, cloud, control = controller(tmp_path / "admission")
     with pytest.raises(module.ControlRefused, match="instance"):
         control.arm(tmp_path / "receipt.json", instance="i-00000000000000000", deadline=clock.now() + 180)
     assert cloud.starts == 0
 
 
 def test_cli_refuses_symlink_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    module, clock, cloud, control = controller()
+    module, clock, cloud, control = controller(tmp_path / "admission")
     path = tmp_path / "receipt.json"
     control.arm(path, instance=INSTANCE, deadline=clock.now() + 180)
     control.stop(path)
@@ -173,7 +175,7 @@ def test_windows_liveness_never_uses_a_signal(monkeypatch: pytest.MonkeyPatch) -
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX controller process harness; Windows guest has its own gate")
 def test_detached_supervisor_survives_worker_exit_and_source_change(tmp_path: Path) -> None:
-    module, _clock, _cloud, control = controller()
+    module, _clock, _cloud, control = controller(tmp_path / "admission")
     now = time.time()
     path = tmp_path / "receipt.json"
     state = tmp_path / "cloud.json"
@@ -237,7 +239,7 @@ def test_detached_supervisor_survives_worker_exit_and_source_change(tmp_path: Pa
 
 
 def test_inflight_start_cannot_outlive_verified_stop(tmp_path: Path) -> None:
-    _module, clock, cloud, control = controller()
+    _module, clock, cloud, control = controller(tmp_path / "admission")
     path = tmp_path / "receipt.json"
     control.arm(path, instance=INSTANCE, deadline=clock.now() + 180)
     control.record_heartbeat(path, pid=os.getpid())
@@ -281,7 +283,7 @@ def test_inflight_start_cannot_outlive_verified_stop(tmp_path: Path) -> None:
 
 
 def test_slow_admission_rechecks_deadline_before_start(tmp_path: Path) -> None:
-    module, clock, cloud, control = controller()
+    module, clock, cloud, control = controller(tmp_path / "admission")
     path = tmp_path / "receipt.json"
     control.arm(path, instance=INSTANCE, deadline=clock.now() + 180)
     control.record_heartbeat(path, pid=os.getpid())
@@ -297,3 +299,131 @@ def test_slow_admission_rechecks_deadline_before_start(tmp_path: Path) -> None:
     assert cloud.starts == 0
     control.watch(path)
     assert cloud.state == "stopped" and cloud.owner is None
+
+
+def test_uncertain_start_retains_owner_until_delayed_activation(tmp_path: Path) -> None:
+    _module, clock, cloud, control = controller(tmp_path / "admission")
+    path = tmp_path / "receipt.json"
+    control.arm(path, instance=INSTANCE, deadline=clock.now() + 180)
+    control.record_heartbeat(path, pid=os.getpid())
+
+    def accepted_but_delayed(_instance: str) -> None:
+        raise TimeoutError("accepted remotely; response lost before visibility")
+
+    cloud.start = accepted_but_delayed
+    with pytest.raises(TimeoutError):
+        control.start(path)
+    control.stop(path)
+    assert cloud.owner is not None, "an uncertain stopped observation must not retire the guard"
+    assert control.read(path)["state"] != "stopped"
+    original_observe = cloud.observe
+
+    def eventually_visible(instance: str) -> tuple[str, str | None]:
+        if clock.now() >= 1_130 and not cloud.stops:
+            cloud.state = "running"
+        return original_observe(instance)
+
+    cloud.observe = eventually_visible
+    control.watch(path)
+    assert cloud.stops and cloud.stops[0] < 1_180
+    assert cloud.state == "stopped" and cloud.owner is None
+
+
+def test_receipt_write_failure_still_stops_and_preserves_supervision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module, clock, cloud, control = controller(tmp_path / "admission")
+    path = tmp_path / "receipt.json"
+    control.arm(path, instance=INSTANCE, deadline=clock.now() + 180)
+    control.record_heartbeat(path, pid=os.getpid())
+    control.start(path)
+
+    def full(*_args, **_kwargs):
+        raise OSError(28, "synthetic full evidence volume")
+
+    class ObservedRetry(Exception):
+        pass
+
+    def observe_retry(_duration: float) -> None:
+        assert cloud.stops and cloud.state == "stopped"
+        assert cloud.owner is not None, "do not retire cleanup until evidence recovers"
+        raise ObservedRetry
+
+    monkeypatch.setattr(module, "_write", full)
+    control.sleep = observe_retry
+    with pytest.raises(ObservedRetry):
+        control.watch(path)
+
+
+def test_separate_receipts_cannot_overwrite_another_start(tmp_path: Path) -> None:
+    module, clock, cloud, first = controller(tmp_path / "admission")
+    second = module.Controller(cloud, now=clock.now, sleep=clock.sleep)
+    second.admission_directory = tmp_path / "admission"
+    paths = [tmp_path / "first.json", tmp_path / "second.json"]
+    for path, control in zip(paths, (first, second), strict=True):
+        control.arm(path, instance=INSTANCE, deadline=clock.now() + 180)
+        control.record_heartbeat(path, pid=os.getpid())
+    entered, release = threading.Event(), threading.Event()
+    original_observe = cloud.observe
+    delayed = False
+
+    def observe(instance: str) -> tuple[str, str | None]:
+        nonlocal delayed
+        result = original_observe(instance)
+        if threading.current_thread().name == "first-start" and not delayed:
+            delayed = True
+            entered.set()
+            assert release.wait(5)
+        return result
+
+    def overwrite(_instance: str, owner: str) -> None:
+        cloud.owner = owner  # Real EC2 CreateTags overwrites, without CAS.
+
+    cloud.observe, cloud.claim = observe, overwrite
+    outcomes = {}
+
+    def start(index: int, control) -> None:
+        try:
+            control.start(paths[index])
+            outcomes[index] = "started"
+        except module.ControlRefused:
+            outcomes[index] = "refused"
+
+    a = threading.Thread(target=start, name="first-start", args=(0, first))
+    b = threading.Thread(target=start, name="second-start", args=(1, second))
+    a.start()
+    assert entered.wait(5)
+    b.start()
+    try:
+        b.join(0.2)
+    finally:
+        release.set()
+        a.join(5)
+        b.join(5)
+    assert not a.is_alive() and not b.is_alive()
+    assert sorted(outcomes.values()) == ["refused", "started"]
+    winner = next(index for index, value in outcomes.items() if value == "started")
+    control = (first, second)[winner]
+    assert cloud.owner == control.read(paths[winner])["run"]
+    control.stop(paths[winner])
+    assert cloud.state == "stopped" and cloud.owner is None
+
+
+def test_stale_describe_cannot_replace_canonical_local_run(tmp_path: Path) -> None:
+    module, clock, cloud, first = controller(tmp_path / "admission")
+    second = module.Controller(cloud, now=clock.now, sleep=clock.sleep)
+    second.admission_directory = first.admission_directory
+    a, b = tmp_path / "a.json", tmp_path / "b.json"
+    for path, control in ((a, first), (b, second)):
+        control.arm(path, instance=INSTANCE, deadline=clock.now() + 180)
+        control.record_heartbeat(path, pid=os.getpid())
+    first.start(a)
+    first_owner = cloud.owner
+    original_observe = cloud.observe
+    cloud.observe = lambda _instance: ("stopped", None)  # A stale AWS describe.
+    cloud.claim = lambda _instance, owner: setattr(cloud, "owner", owner)
+    with pytest.raises(module.ControlRefused):
+        second.start(b)
+    assert cloud.owner == first_owner
+    cloud.observe = original_observe
+    first.stop(a)

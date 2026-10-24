@@ -155,9 +155,29 @@ static int functions(sqlite3 *db,char **error,const sqlite3_api_routines *api) {
   int rc;
   (void)error; (void)api;
   rc = sqlite3_create_function(db,"mordred_probe_stats",0,SQLITE_UTF8,0,stats,0,0);
-  if (rc == SQLITE_OK) rc = sqlite3_create_function(db,"mordred_probe_deny_shm",1,SQLITE_UTF8,0,setDeny,0,0);
-  if (rc == SQLITE_OK) rc = sqlite3_create_function(db,"mordred_probe_vfs",0,SQLITE_UTF8,0,selected,0,0);
+  if (rc != SQLITE_OK) return rc;
+  rc = sqlite3_create_function(db,"mordred_probe_deny_shm",1,SQLITE_UTF8,0,setDeny,0,0);
+  if (rc != SQLITE_OK) {
+    sqlite3_create_function(db,"mordred_probe_stats",0,SQLITE_UTF8,0,0,0,0);
+    return rc;
+  }
+  rc = sqlite3_create_function(db,"mordred_probe_vfs",0,SQLITE_UTF8,0,selected,0,0);
+  if (rc != SQLITE_OK) {
+    sqlite3_create_function(db,"mordred_probe_stats",0,SQLITE_UTF8,0,0,0,0);
+    sqlite3_create_function(db,"mordred_probe_deny_shm",1,SQLITE_UTF8,0,0,0,0);
+  }
   return rc;
+}
+static int preflight(sqlite3 *db) {
+  sqlite3_stmt *statement = 0;
+  int rc = sqlite3_prepare_v2(db,
+    "SELECT 1 FROM pragma_function_list WHERE name IN "
+    "('mordred_probe_stats','mordred_probe_deny_shm','mordred_probe_vfs') LIMIT 1",
+    -1,&statement,0);
+  if (rc != SQLITE_OK) return rc;
+  rc = sqlite3_step(statement);
+  sqlite3_finalize(statement);
+  return rc == SQLITE_DONE ? SQLITE_OK : rc == SQLITE_ROW ? SQLITE_BUSY : rc;
 }
 
 #ifdef _WIN32
@@ -167,10 +187,15 @@ int sqlite3_mordredprobe_init(sqlite3 *db,char **error,const sqlite3_api_routine
   int rc;
   if (sqlite3_api && sqlite3_api != api) return SQLITE_MISUSE;
   SQLITE_EXTENSION_INIT2(api);
+  (void)error;
+  if (parent) return SQLITE_OK_LOAD_PERMANENTLY;
+  /* Until success the loader may unload this library: publish transactionally. */
+  rc = preflight(db);
+  if (rc != SQLITE_OK) { sqlite3_api = 0; return rc; }
   if (!parent) {
-    if (sqlite3_vfs_find(PROBE_NAME)) return SQLITE_ERROR;
+    if (sqlite3_vfs_find(PROBE_NAME)) { rc = SQLITE_ERROR; goto failed; }
     parent = sqlite3_vfs_find(0);
-    if (!parent) return SQLITE_ERROR;
+    if (!parent) { rc = SQLITE_ERROR; goto failed; }
     wrapper = *parent;
     wrapper.zName = PROBE_NAME;
     wrapper.szOsFile = (int)sizeof(ProbeFile)+parent->szOsFile;
@@ -181,10 +206,21 @@ int sqlite3_mordredprobe_init(sqlite3 *db,char **error,const sqlite3_api_routine
     if (parent->iVersion >= 2) wrapper.xCurrentTimeInt64=vTime64;
     if (parent->iVersion >= 3) { wrapper.xSetSystemCall=vSet; wrapper.xGetSystemCall=vGet; wrapper.xNextSystemCall=vNext; }
     rc = sqlite3_vfs_register(&wrapper,0);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != SQLITE_OK) goto failed;
+    /* Functions are installed only on FUTURE connections, after this library
+     * is pinned. SQLite cannot reliably undo new SQL functions from inside an
+     * active load_extension() statement if later initialization fails. */
     rc = sqlite3_auto_extension((void (*)(void))functions);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != SQLITE_OK) {
+      sqlite3_cancel_auto_extension((void (*)(void))functions);
+      sqlite3_vfs_unregister(&wrapper);
+      goto failed;
+    }
   }
-  rc = functions(db,error,api);
-  return rc == SQLITE_OK ? SQLITE_OK_LOAD_PERMANENTLY : rc;
+  return SQLITE_OK_LOAD_PERMANENTLY;
+failed:
+  parent = 0;
+  memset(&wrapper,0,sizeof(wrapper));
+  sqlite3_api = 0;
+  return rc;
 }

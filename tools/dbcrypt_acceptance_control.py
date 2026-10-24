@@ -151,6 +151,19 @@ def _receipt_lock(path: Path) -> Iterator[None]:
         os.close(fd)
 
 
+@contextlib.contextmanager
+def _instance_admission(directory: Path, instance: str) -> Iterator[None]:
+    """Serialize all receipts for this operator on one controller host."""
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    metadata = directory.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or (
+        os.name != "nt" and (metadata.st_uid != os.getuid() or metadata.st_mode & 0o077)
+    ):
+        raise ControlRefused("unsafe_instance_admission_directory")
+    with _receipt_lock(directory / f"{instance}.admission"):
+        yield
+
+
 def _write(path: Path, value: dict[str, Any], *, create: bool = False) -> None:
     data = (json.dumps(value, sort_keys=True) + "\n").encode()
     if create:
@@ -210,6 +223,7 @@ class Controller:
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.cloud, self.now, self.sleep = cloud, now, sleep
+        self.admission_directory = Path.home() / ".cache" / "mordred-dbcrypt-control"
 
     def _read(self, path: Path) -> dict[str, Any]:
         _check_file(path)
@@ -271,75 +285,164 @@ class Controller:
     def start(self, path: Path) -> dict[str, Any]:
         with _receipt_lock(path):
             value = self._read(path)
-            heartbeat, pid = value.get("heartbeat"), value.get("supervisor_pid")
-            if (
-                not isinstance(heartbeat, (int, float))
-                or self.now() - heartbeat > 10
-                or not isinstance(pid, int)
-                or not _alive(pid)
-            ):
-                raise ControlRefused("supervisor_not_live")
-            if value["state"] != "armed" or self.now() >= value["deadline"] - STOP_MARGIN:
-                raise ControlRefused("deadline_or_state_refuses_start")
-            if self.cloud.identity() != value["account"]:
-                raise ControlRefused("aws_account_changed")
-            if self.cloud.observe(value["instance"]) != ("stopped", None):
-                raise ControlRefused("instance_already_owned_or_running")
-            self.cloud.claim(value["instance"], value["run"])
-            if self.cloud.observe(value["instance"]) != ("stopped", value["run"]):
-                raise ControlRefused("instance_owner_changed")
-            value.update(start_requested=True, state="start_intent")
-            _write(path, value)  # Durable before the possibly ambiguous start RPC.
-            if self.now() >= value["deadline"] - STOP_MARGIN:
-                value["state"] = "stopping"
-                _write(path, value)
-                raise ControlRefused("deadline_refuses_start_after_admission")
-            # The bounded RPC remains inside the receipt lock: the supervisor
-            # cannot release ownership and exit before an in-flight start lands.
-            self.cloud.start(value["instance"])
-            value["state"] = "running"
+            with _instance_admission(self.admission_directory, value["instance"]):
+                return self._start_locked(path, value)
+
+    def _start_locked(self, path: Path, value: dict[str, Any]) -> dict[str, Any]:
+        heartbeat, pid = value.get("heartbeat"), value.get("supervisor_pid")
+        if (
+            not isinstance(heartbeat, (int, float))
+            or self.now() - heartbeat > 10
+            or not isinstance(pid, int)
+            or not _alive(pid)
+        ):
+            raise ControlRefused("supervisor_not_live")
+        if value["state"] != "armed" or self.now() >= value["deadline"] - STOP_MARGIN:
+            raise ControlRefused("deadline_or_state_refuses_start")
+        if self.cloud.identity() != value["account"]:
+            raise ControlRefused("aws_account_changed")
+        admission = self.admission_directory / f"{value['instance']}.admission"
+        if admission.exists() or admission.is_symlink():
+            raise ControlRefused("instance_already_admitted_on_controller")
+        if self.cloud.observe(value["instance"]) != ("stopped", None):
+            raise ControlRefused("instance_already_owned_or_running")
+        _write(admission, self._admission_record(path, value), create=True)
+        self.cloud.claim(value["instance"], value["run"])
+        if self.cloud.observe(value["instance"]) != ("stopped", value["run"]):
+            raise ControlRefused("instance_owner_changed")
+        value.update(start_requested=True, state="start_intent", start_uncertain=True)
+        _write(path, value)  # Durable before the possibly ambiguous start RPC.
+        if self.now() >= value["deadline"] - STOP_MARGIN:
+            value.update(state="stopping", start_uncertain=False)
             _write(path, value)
+            raise ControlRefused("deadline_refuses_start_after_admission")
+        # Keep the bounded RPC inside both locks; no stop/other receipt can
+        # release or overwrite ownership before this in-flight request returns.
+        self.cloud.start(value["instance"])
+        state, owner = self.cloud.observe(value["instance"])
+        if owner != value["run"]:
+            raise ControlRefused("instance_owner_changed")
+        visible = state != "stopped"
+        value.update(state="running" if visible else "start_intent", start_uncertain=not visible)
+        _write(path, value)
         return value
+
+    @staticmethod
+    def _same_run(first: dict[str, Any], second: dict[str, Any]) -> bool:
+        return all(first.get(key) == second.get(key) for key in ("instance", "run", "account", "created", "deadline"))
+
+    @staticmethod
+    def _admission_record(path: Path, value: dict[str, Any]) -> dict[str, Any]:
+        return dict(
+            version=1,
+            instance=value["instance"],
+            run=value["run"],
+            account=value["account"],
+            receipt=str(path.absolute()),
+        )
+
+    def _release_admission(self, path: Path, value: dict[str, Any]) -> None:
+        with _instance_admission(self.admission_directory, value["instance"]):
+            admission = self.admission_directory / f"{value['instance']}.admission"
+            if not admission.exists() and not admission.is_symlink():
+                return  # A receipt from a prior controller version.
+            _check_file(admission)
+            if json.loads(admission.read_text()) != self._admission_record(path, value):
+                raise ControlRefused("controller_admission_owner_changed")
+            admission.unlink()
+
+    def _stop_cloud(self, value: dict[str, Any]) -> None:
+        """Cloud cleanup never depends on a successful local evidence write."""
+        if self.cloud.identity() != value["account"]:
+            raise ControlRefused("aws_account_changed")
+        state, owner = self.cloud.observe(value["instance"])
+        if owner != value["run"]:
+            if state == "stopped" and owner is None and (not value["start_requested"] or value["state"] == "stopped"):
+                value["state"] = "stopped"
+                return
+            raise ControlRefused("instance_owner_changed")
+        if state != "stopped":
+            value["start_uncertain"] = False  # Actual activation has become visible.
+            value["state"] = "stopping"
+            if state != "stopping":
+                self.cloud.stop(value["instance"])
+            state, owner = self.cloud.observe(value["instance"])
+            if owner != value["run"]:
+                raise ControlRefused("instance_owner_changed")
+        if state == "stopped":
+            uncertain = value.get("start_uncertain", value["state"] == "start_intent")
+            # A timed-out start may still become visible later. There is no
+            # provider settlement bound: retain ownership/supervision until
+            # actual activation then stop, rather than inventing a grace period.
+            value["state"] = "settling" if uncertain else "stopped"
+            if not uncertain:
+                value["stopped_at"] = self.now()
+
+    def _publish_cleanup(self, path: Path, value: dict[str, Any]) -> None:
+        current = self._read(path)
+        if not self._same_run(current, value):
+            raise ControlRefused("receipt_identity_changed")
+        _write(path, value)
+        if value["state"] == "stopped":
+            state, owner = self.cloud.observe(value["instance"])
+            if state != "stopped" or owner not in (None, value["run"]):
+                raise ControlRefused("instance_owner_changed")
+            if owner == value["run"]:
+                self.cloud.release(value["instance"], value["run"])
+            self._release_admission(path, value)
 
     def stop(self, path: Path) -> dict[str, Any]:
         with _receipt_lock(path):
             value = self._read(path)
-            state, owner = self.cloud.observe(value["instance"])
-            if not value["start_requested"]:
-                if state != "stopped" or owner is not None:
-                    raise ControlRefused("instance_owner_changed")
-            elif owner != value["run"]:
-                if value["state"] == "stopped" and state == "stopped" and owner is None:
-                    return value
-                raise ControlRefused("instance_owner_changed")
-            if state != "stopped":
-                value["state"] = "stopping"
+            try:
+                self._stop_cloud(value)
+            except (ControlRefused, OSError, ValueError, TimeoutError):
                 _write(path, value)
-                if state != "stopping":
-                    self.cloud.stop(value["instance"])
-                state, owner = self.cloud.observe(value["instance"])
-            if state == "stopped":
-                if owner == value["run"]:
-                    self.cloud.release(value["instance"], value["run"])
-                value.update(state="stopped", stopped_at=self.now())
-                _write(path, value)
+                raise
+            self._publish_cleanup(path, value)
             return value
 
     def watch(self, path: Path) -> None:
+        # Startup must validate storage before advertising a heartbeat. Once
+        # admitted, retain this immutable identity even if storage later fails.
+        value = self.read(path)
+        last_error: str | None = None
         while True:
-            self.record_heartbeat(path, pid=os.getpid())
-            value = self.read(path)
-            if value["state"] == "stopped":
-                return
-            if self.now() >= value["deadline"] - STOP_MARGIN or value["state"] == "stopping":
+            storage_fault = False
+            try:
+                with _receipt_lock(path):
+                    current = self._read(path)
+                    if not self._same_run(current, value):
+                        raise ControlRefused("receipt_identity_changed")
+                    current.update(supervisor_pid=os.getpid(), heartbeat=self.now())
+                    _write(path, current)
+                    value = current
+            except (ControlRefused, OSError, ValueError) as exc:
+                storage_fault = True
+                value["last_error"] = type(exc).__name__
+            if (
+                storage_fault
+                or self.now() >= value["deadline"] - STOP_MARGIN
+                or value["state"] in {"stopping", "settling", "stopped"}
+            ):
                 try:
-                    if self.stop(path)["state"] == "stopped":
+                    if storage_fault:
+                        if not value["start_requested"]:
+                            value.update(start_requested=True, start_uncertain=True)
+                        # Even a broken receipt parent/lock cannot prevent a
+                        # stop using the retained identity and current owner tag.
+                        self._stop_cloud(value)
+                        with _receipt_lock(path):
+                            self._publish_cleanup(path, value)
+                    else:
+                        value = self.stop(path)
+                    if value["state"] == "stopped":
                         return
-                except (ControlRefused, OSError, TimeoutError) as exc:
-                    with _receipt_lock(path):
-                        value = self._read(path)
-                        value["last_error"] = type(exc).__name__
-                        _write(path, value)
+                except (ControlRefused, OSError, ValueError, TimeoutError) as exc:
+                    error = str(exc) if isinstance(exc, ControlRefused) else type(exc).__name__
+                    if error != last_error:
+                        print(json.dumps({"cleanup_retry": error}), flush=True)
+                        last_error = error
             self.sleep(2)
 
 

@@ -11,6 +11,10 @@ and links no SQLite library. It returns `SQLITE_OK_LOAD_PERMANENTLY` and
 registers its diagnostic functions for subsequent connections. The runner
 closes the bootstrap connection before testing encrypted rollback/WAL I/O,
 Japanese trigram FTS, keyless refusal, and SHM denial.
+Bootstrap initialization publishes no SQL function callbacks before permanent
+loading succeeds. Reserved-name collisions refuse before publication; failed
+VFS/auto-extension registration is rolled back. A subprocess regression checks
+all three reserved names and verifies later connections remain usable.
 
 ## Build and run
 
@@ -52,6 +56,23 @@ hours), credentials lasting beyond cleanup, stopped instance state, and a
 live supervisor before admitting `start`. The supervisor begins stopping
 one minute before the deadline and retries while preserving failure evidence.
 Keep the controller computer awake and connected for this bounded run.
+
+Use one controller host and one OS operator identity for these two instances.
+The private canonical admission directory
+`~/.cache/mordred-dbcrypt-control/` serializes starts across worktrees and
+receipt paths and retains an ownership record until cleanup finishes. Do not
+delete its records or start these hosts from another controller while a run
+is admitted. EC2 tags alone are not a conditional ownership lock.
+
+A start with an uncertain result remains supervised and keeps its ownership
+until actual activation becomes visible and is stopped. A stale `stopped`
+observation never retires an uncertain start. The guard can therefore remain
+active beyond the requested deadline while the provider result is unresolved;
+the deadline is a stop-request deadline, not a guarantee against AWS API
+unavailability or unbounded eventual consistency. Investigate an unresolved
+run without deleting its receipt or admission record. Evidence-write failures
+trigger cloud cleanup using retained validated run identity; the guard retries
+and retains ownership until evidence persistence recovers.
 
 The two retained instance IDs, AWS profile `intmax-dev` and region
 `ap-southeast-1` are allowlisted. A receipt's token must match the EC2 owner
