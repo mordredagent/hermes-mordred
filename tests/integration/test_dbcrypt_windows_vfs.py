@@ -366,6 +366,29 @@ def test_changed_file_dacl_refuses_without_repair(fixture: tuple[Any, Any, Path]
     assert path.read_bytes() == before
 
 
+def test_readonly_wal_reader_uses_owned_shm(fixture: tuple[Any, Any, Path]) -> None:
+    driver, registration, root = fixture
+    writer = connect(driver, root)
+    reader = None
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("CREATE TABLE data(value)")
+        writer.execute("INSERT INTO data VALUES ('committed')")
+        writer.commit()
+        reader = driver.connect(
+            f"file:{(root / 'synthetic.db').as_posix()}?mode=ro&vfs=mordred_checked_v1", uri=True, timeout=0
+        )
+        reader.execute("PRAGMA key='synthetic acceptance fixture only'")
+        assert reader.execute("SELECT value FROM data").fetchall() == [("committed",)]
+        with pytest.raises(driver.OperationalError):
+            reader.execute("INSERT INTO data VALUES ('forbidden')")
+        assert stats(registration)["xShmMap"] >= 2
+    finally:
+        if reader is not None:
+            reader.close()
+        writer.close()
+
+
 def test_inherited_dacl_race_cannot_broaden_a_created_journal(fixture: tuple[Any, Any, Path]) -> None:
     from mordred_hermes._private_fs._windows_api import OwnedHandle, get_api
     from mordred_hermes._private_fs._windows_security import validate_private
