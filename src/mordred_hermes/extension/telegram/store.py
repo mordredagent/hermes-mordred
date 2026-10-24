@@ -43,10 +43,12 @@ import os
 import secrets
 import stat
 import sys
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
+from weakref import WeakKeyDictionary
 
 from ..._private_fs import PrivateFSError
 
@@ -416,8 +418,7 @@ class ArchiveStore:
             with _windows_sync_lock(self._root):
                 yield
             return
-        _ensure_private_dir(self._root)
-        with _nonblocking_flock(self._root / ".lock"):
+        with _posix_archive_lock(self._root):
             yield
 
     def wipe(self) -> None:
@@ -445,6 +446,153 @@ def _windows_sync_lock(root: Path) -> Iterator[None]:
             raise
     else:
         _checked(lambda: held.__exit__(None, None, None))
+
+
+@dataclass
+class _ArchiveLockRecord:
+    root: Path
+    root_identity: tuple[int, int, int, int]
+    fd: int
+    lock_identity: tuple[int, int, int]
+    process: tuple[int, int]
+    candidates: tuple[tuple[Path, tuple[int, int, int, int]], ...] | None = None
+
+
+class PosixArchiveLock:
+    """A live checked FD, issued only by the real nonblocking archive lock."""
+
+    __slots__ = ("__weakref__",)
+
+    def __new__(cls) -> PosixArchiveLock:
+        raise StoreError("store_path_unsafe")
+
+
+_archive_locks: WeakKeyDictionary[PosixArchiveLock, _ArchiveLockRecord] = WeakKeyDictionary()
+
+
+def _archive_identity(path: Path, *, directory: bool = False) -> tuple[int, int, int, int]:
+    observed = path.lstat()
+    expected = stat.S_ISDIR if directory else stat.S_ISREG
+    if (
+        not expected(observed.st_mode)
+        or observed.st_uid != os.getuid()
+        or stat.S_IMODE(observed.st_mode) != (0o700 if directory else 0o600)
+        or (not directory and observed.st_nlink != 1)
+    ):
+        raise StoreError("store_path_unsafe")
+    return observed.st_dev, observed.st_ino, observed.st_mode, observed.st_uid
+
+
+def _checked_archive_lock(lock: PosixArchiveLock) -> _ArchiveLockRecord:
+    from ...keyvault import _storage
+
+    record = _archive_locks.get(lock) if type(lock) is PosixArchiveLock else None
+    if record is None or record.process != (os.getpid(), threading.get_ident()):
+        raise StoreError("store_path_unsafe")
+    try:
+        if _archive_identity(record.root, directory=True) != record.root_identity:
+            raise StoreError("store_path_unsafe")
+        path = record.root / ".lock"
+        _archive_identity(path)
+        current, opened = path.lstat(), os.fstat(record.fd)
+        _storage._validate_lock_stat(current, path, label="Telegram archive lock", from_lstat=True)
+        _storage._validate_lock_stat(opened, path, label="Telegram archive lock", from_lstat=False)
+        if any(_storage._lock_inode_identity(item) != record.lock_identity for item in (current, opened)):
+            raise StoreError("store_path_unsafe")
+    except OSError as exc:
+        raise StoreError("store_path_unsafe") from exc
+    return record
+
+
+@contextlib.contextmanager
+def _posix_archive_lock(root: Path, *, allow_pending: bool = False) -> Iterator[PosixArchiveLock]:
+    import fcntl
+
+    from ...keyvault import _storage
+    from ...keyvault._telegram_custody import assert_no_pending_forget
+
+    if _windows():
+        raise StoreError("store_path_unsafe")
+    if root.exists() or root.is_symlink():
+        _archive_identity(root, directory=True)
+    else:
+        _ensure_private_dir(root)
+    path = root / ".lock"
+    try:
+        _storage.ensure_lock_file(path)
+        fd = _storage._open_validated_lock(path, label="Telegram archive lock")
+    except OSError as exc:
+        raise StoreError("store_path_unsafe") from exc
+    pid = os.getpid()
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                raise StoreError("sync_in_progress") from exc
+            raise StoreError("store_path_unsafe") from exc
+        lock = object.__new__(PosixArchiveLock)
+        _archive_locks[lock] = _ArchiveLockRecord(
+            root,
+            _archive_identity(root, directory=True),
+            fd,
+            _storage._lock_inode_identity(os.fstat(fd)),
+            (pid, threading.get_ident()),
+        )
+        try:
+            _checked_archive_lock(lock)
+            if not allow_pending and root.name == "telegram" and root.parent.name == "mordred":
+                assert_no_pending_forget(root.parent.parent)
+            yield lock
+        finally:
+            _archive_locks.pop(lock, None)
+            if pid == os.getpid():
+                fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _prepare_archive_wipe(lock: PosixArchiveLock) -> None:
+    record = _checked_archive_lock(lock)
+    candidates = []
+    dialogs = record.root / "dialogs"
+    for directory in (record.root, dialogs):
+        if not directory.exists() and not directory.is_symlink():
+            continue
+        _archive_identity(directory, directory=True)
+        for path in directory.iterdir():
+            if path.suffix in {".enc", ".tmp"}:
+                candidates.append((path, _archive_identity(path)))
+    record.candidates = tuple(candidates)
+
+
+def _wipe_archive_locked(lock: PosixArchiveLock) -> None:
+    """Borrow the actual held archive lock; never reopen or reacquire it."""
+    record = _checked_archive_lock(lock)
+    if record.candidates is None:
+        _prepare_archive_wipe(lock)
+    assert record.candidates is not None
+    for path, identity in record.candidates:
+        _checked_archive_lock(lock)
+        try:
+            observed = _archive_identity(path)
+        except FileNotFoundError:
+            continue  # an acknowledged cleanup retry may already have removed it
+        if observed != identity:
+            raise StoreError("store_path_unsafe")
+        path.unlink()
+    dialogs = record.root / "dialogs"
+    if dialogs.exists():
+        _archive_identity(dialogs, directory=True)
+        if not any(dialogs.iterdir()):
+            dialogs.rmdir()
+        else:
+            from ...keyvault._telegram_custody import _sync_directory
+
+            _sync_directory(dialogs)
+    from ...keyvault._telegram_custody import _sync_directory
+
+    _sync_directory(record.root)
 
 
 @contextlib.contextmanager
@@ -520,18 +668,10 @@ def wipe_archive(root: Path | None = None, *, forget: bool = False, backend: Nat
         return
     if forget:
         raise StoreError("forget_unsupported")
-    if base.is_symlink() or not base.is_dir():
+    if not base.exists() and not base.is_symlink():
         return
-    with _nonblocking_flock(base / ".lock"):
-        dialogs = base / "dialogs"
-        for directory in (dialogs, base):
-            if not directory.is_dir() or directory.is_symlink():
-                continue
-            for child in directory.iterdir():
-                if child.is_file() and not child.is_symlink() and (child.suffix in {".enc", ".tmp"}):
-                    child.unlink()
-        if dialogs.is_dir() and not dialogs.is_symlink() and not any(dialogs.iterdir()):
-            dialogs.rmdir()
+    with _posix_archive_lock(base) as lock:
+        _wipe_archive_locked(lock)
 
 
 def _windows_wipe(base: Path, *, forget: bool, backend: NativeBackend | None) -> None:

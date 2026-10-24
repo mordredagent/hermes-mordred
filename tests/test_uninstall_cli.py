@@ -1386,7 +1386,7 @@ def test_telegram_database_refusal_stops_full_uninstall_before_later_cleanup(pla
 
 
 @pytest.mark.parametrize("failure", ["exception", "nonzero", "exception-cycle"])
-def test_ordinary_telegram_remote_failure_remains_best_effort_during_uninstall(plain_install, failure, capsys):
+def test_unknown_telegram_collaborator_failure_stops_uninstall(plain_install, failure, capsys):
     ctx, runner = plain_install
     ctx.platform = "darwin"
     telegram = ctx.home / "mordred/telegram/credentials.sealed"
@@ -1409,7 +1409,55 @@ def test_ordinary_telegram_remote_failure_remains_best_effort_during_uninstall(p
 
     ctx.telegram_forget = forget
     ctx.keyvault_reset = lambda _home: events.append("later keyvault reset") or 0
-    assert run_uninstall(ctx, UninstallOptions(yes=True, purge_data=True)) == 0
-    assert events == ["telegram remote failure", "later keyvault reset"]
-    assert "terminate it in Telegram" in capsys.readouterr().err
-    assert len(runner.uninstalls) == 1
+    assert run_uninstall(ctx, UninstallOptions(yes=True, purge_data=True)) == 1
+    assert events == ["telegram remote failure"]
+    assert "uninstall stopped" in capsys.readouterr().err
+    assert telegram.exists()
+    assert runner.uninstalls == []
+
+
+@pytest.mark.parametrize("native_failure", [False, True])
+def test_default_telegram_forget_proves_local_completion_before_uninstall(
+    plain_install, monkeypatch, native_failure, capsys
+):
+    from mordred_hermes.wizard import telegram_cli
+    from tests.test_posix_telegram_custody import native_store, value
+
+    ctx, runner = plain_install
+    (ctx.home / "mordred").chmod(0o700)
+    (ctx.home / "mordred/keyvault").mkdir(mode=0o700)
+    vault, native = native_store(ctx.home)
+    vault.ensure_key()
+    vault.store(value())
+    ctx.telegram_forget = None
+    ctx.prompt_io = _TypedPrompt(uninstall_cli.PURGE_PHRASE)
+    monkeypatch.setattr(telegram_cli, "_secret_store", lambda: vault)
+    monkeypatch.setattr(telegram_cli.telegram_migrate_cli, "forget_import_rows", lambda current: None)
+    events = []
+    ctx.keyvault_reset = lambda _home: events.append("reset") or 0
+    native.fail_delete = native_failure
+
+    def remote(current, factory):
+        assert not vault.sealed_path.exists()
+        assert not any(native.home.joinpath("mordred").glob("telegram-forget.json"))
+        events.append("remote warning")
+        return True
+
+    monkeypatch.setattr(telegram_cli, "_revoke_stored", remote)
+    rc = run_uninstall(ctx, UninstallOptions(yes=True, purge_data=True))
+    assert rc == (1 if native_failure else 0)
+    if native_failure:
+        assert events == [] and vault.sealed_path.exists()
+        assert runner.uninstalls == []
+        assert (ctx.home / "mordred/telegram-forget.json").is_file()
+    else:
+        assert events == ["remote warning", "reset"]
+        assert len(runner.uninstalls) == 1
+    capsys.readouterr()
+
+
+def test_pending_telegram_forget_journal_is_retained_configuration(plain_install):
+    ctx, _runner = plain_install
+    (ctx.home / "mordred/telegram-forget.json").write_text("retained interrupted cleanup")
+    plan = uninstall_cli.build_plan(ctx, UninstallOptions(yes=True, purge_data=True))
+    assert plan.telegram_configured

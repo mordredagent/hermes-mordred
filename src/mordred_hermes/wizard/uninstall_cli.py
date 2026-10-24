@@ -315,7 +315,10 @@ def build_plan(ctx: UninstallContext, opts: UninstallOptions) -> UninstallPlan:
         plugin_dir(ctx.home),
     )
     hermes_env = detect_hermes_env(ctx.home, which=ctx.which, runner=ctx.runner)
-    telegram_configured = (ctx.home / "mordred" / "telegram" / "credentials.sealed").exists()
+    telegram_configured = any(
+        path.exists() or path.is_symlink()
+        for path in (ctx.home / "mordred/telegram/credentials.sealed", ctx.home / "mordred/telegram-forget.json")
+    )
     plan = UninstallPlan(
         restores=restores,
         config=config,
@@ -621,11 +624,13 @@ def _remove_helpers(
                 _term.emit_warn(f"kept {helper.path}: {helper.reason}.")
 
 
-def _default_telegram_forget() -> int:
-    from .telegram_cli import telegram_logout
+def _default_telegram_forget() -> object:
+    from . import _windows_telegram
+    from .telegram_cli import _telegram_logout_result, telegram_logout
 
-    # Never stop the uninstall on undeletable mordred.db rows: forget the rest, report the rows (exit 1).
-    return telegram_logout(forget=True, force=True)
+    if _windows_telegram.routed():
+        return telegram_logout(forget=True, force=True)
+    return _telegram_logout_result(forget=True, force=True)
 
 
 def _default_keyvault_reset(ctx: UninstallContext) -> Callable[[Path], int]:
@@ -696,18 +701,22 @@ def _has_database_refusal(error: BaseException) -> bool:
 
 
 def _forget_telegram_for_uninstall(ctx: UninstallContext) -> None:
+    from .._database_contracts import DatabaseRefused
+    from .telegram_cli import _TelegramLogoutOutcome
+
     forget = ctx.telegram_forget or _default_telegram_forget
     try:
-        rc = forget()
-    except Exception as exc:  # e.g. the optional Telegram extra is missing
+        outcome = forget()
+    except Exception as exc:
         if _has_database_refusal(exc):
-            raise  # Preserve the original wrapper, cause chain and traceback.
-        rc = 1
-        _term.emit_warn(f"Telegram logout failed: {exc}")
-    if rc != 0:
-        _term.emit_warn(
-            "the Telegram session could not be revoked here; terminate it in Telegram -> Settings -> Devices."
-        )
+            raise  # Preserve direct and wrapped safety refusals and their traceback.
+        raise DatabaseRefused("Telegram local cleanup failed; uninstall retained later sources") from exc
+    if type(outcome) is _TelegramLogoutOutcome:
+        if not outcome.local_complete:
+            raise DatabaseRefused("Telegram local cleanup was not completed")
+        return
+    if type(outcome) is not int or outcome != 0:
+        raise DatabaseRefused("Telegram collaborator did not confirm local cleanup")
 
 
 def _purge_except_database_lock(path: Path) -> None:
