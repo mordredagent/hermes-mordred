@@ -44,6 +44,7 @@ def implementation() -> ModuleType:
         ("file:///C:/private/state.db", True),
         (":memory:", False),
         ("", False),
+        ("C:\\private\\" + "x" * 218 + ".db", False),
     ],
 )
 def test_unsupported_path_never_calls_xopen(path: str, uri: bool, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -50,7 +50,9 @@ def classify_windows_database(path: str, *, uri: bool, root: Path) -> Path:
     its own URI after classification, selecting exactly ``mordred_checked_v1``.
     Filesystem type, reparse points, links and ACLs require native handle admission.
     """
-    if uri or not isinstance(path, str):
+    # Reserve eight UTF-16 units for SQLite's longest supported sidecar suffix
+    # (-journal), so a valid main name cannot fail only after creating the DB.
+    if uri or not isinstance(path, str) or len(path.encode("utf-16-le", errors="surrogatepass")) > 462:
         raise ValueError("Windows database URIs are unsupported")
     parts, root_parts = _path_parts(path), _path_parts(os.fspath(root))
     if len(parts) <= len(root_parts) or tuple(p.casefold() for p in parts[: len(root_parts)]) != tuple(
