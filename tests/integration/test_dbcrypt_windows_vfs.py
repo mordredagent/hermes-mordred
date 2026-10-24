@@ -161,6 +161,36 @@ def test_hardlink_refuses_before_data_open(fixture: tuple[Any, Any, Path]) -> No
     assert (root / "synthetic.db").read_bytes() == before
 
 
+@pytest.mark.parametrize("suffix", ["-journal", "-wal", "-shm"])
+def test_forged_sidecar_hardlink_never_changes_target(fixture: tuple[Any, Any, Path], suffix: str) -> None:
+    from mordred_hermes._private_fs import open_private_directory
+
+    driver, _registration, root = fixture
+    connection = connect(driver, root)
+    connection.execute("CREATE TABLE data(value)")
+    connection.commit()
+    if suffix != "-journal":
+        connection.execute("PRAGMA journal_mode=WAL")
+    connection.close()
+    with open_private_directory(root) as directory, directory.transaction() as transaction:
+        transaction.create_bytes("sidecar-target", b"synthetic target must remain byte-identical")
+    target = root / "sidecar-target"
+    os.link(target, root / ("synthetic.db" + suffix))
+    before_target = target.read_bytes()
+    before_main = (root / "synthetic.db").read_bytes()
+    connection = None
+    try:
+        with pytest.raises(driver.DatabaseError):
+            connection = connect(driver, root)
+            connection.execute("INSERT INTO data VALUES ('must not commit')")
+            connection.commit()
+    finally:
+        if connection is not None:
+            connection.close()
+    assert target.read_bytes() == before_target
+    assert (root / "synthetic.db").read_bytes() == before_main
+
+
 def test_same_process_and_multiprocess_writer_exclusion(fixture: tuple[Any, Any, Path]) -> None:
     driver, _registration, root = fixture
     first, second = connect(driver, root), connect(driver, root)
