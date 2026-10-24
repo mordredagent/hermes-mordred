@@ -451,6 +451,20 @@ def test_readonly_wal_reader_uses_owned_shm(fixture: tuple[Any, Any, Path]) -> N
         writer.close()
 
 
+def test_shm_shared_lock_is_idempotent_and_single_unlock_releases(fixture: tuple[Any, Any, Path]) -> None:
+    _driver, registration, root = fixture
+    native = registration._native
+    assert hasattr(native, "mordred_vfs_test_shm_idempotence"), "use -Target CheckedTest"
+    check = native.mordred_vfs_test_shm_idempotence
+    check.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_int)]
+    check.restype = ctypes.c_int
+    results = (ctypes.c_int * 8)()
+    assert check(str(root / "shm-idempotence.db").encode("utf-8"), results) == 0
+    # Repeat SHARED, competing EXCLUSIVE busy, wrong-mode unlock refused,
+    # one SHARED unlock, empty unlock, then competing EXCLUSIVE succeeds.
+    assert list(results) == [0, 0, 5, 10 | (20 << 8), 0, 0, 0, 0]
+
+
 def test_recovery_exclusive_lock_reports_own_reserved_state(fixture: tuple[Any, Any, Path]) -> None:
     _driver, registration, root = fixture
     native = registration._native

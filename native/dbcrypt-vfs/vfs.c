@@ -562,6 +562,40 @@ int mordred_vfs_stats(uint64_t token, char *out, int size) {
 }
 
 #ifdef MORDRED_VFS_TESTING
+/* Exercise real callbacks on two independently opened checked handles. Return
+ * every observed lock result so the Python gate can distinguish idempotence,
+ * exclusion, wrong-mode refusal, and release without a stacked OS lock. */
+__declspec(dllexport)
+int mordred_vfs_test_shm_idempotence(const char *path, int *results) {
+  CheckedFile first, second;
+  void volatile *mapped=NULL;
+  int rc, closing, first_open=0, second_open=0, i;
+  if (!initialized || !results) return SQLITE_MISUSE;
+  for (i=0; i<8; i++) results[i]=-1;
+  rc=vOpen(&checked_vfs,path,&first.base,SQLITE_OPEN_MAIN_DB|SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE,NULL);
+  if (rc!=SQLITE_OK) return rc;
+  first_open=1;
+  rc=vOpen(&checked_vfs,path,&second.base,SQLITE_OPEN_MAIN_DB|SQLITE_OPEN_READWRITE,NULL);
+  if (rc==SQLITE_OK) {
+    second_open=1;
+    rc=fMap(&first.base,0,32768,1,&mapped);
+    if (rc==SQLITE_OK) rc=fMap(&second.base,0,32768,1,&mapped);
+    if (rc==SQLITE_OK) {
+      results[0]=fShmLock(&first.base,1,1,SQLITE_SHM_LOCK|SQLITE_SHM_SHARED);
+      results[1]=fShmLock(&first.base,1,1,SQLITE_SHM_LOCK|SQLITE_SHM_SHARED);
+      results[2]=fShmLock(&second.base,1,1,SQLITE_SHM_LOCK|SQLITE_SHM_EXCLUSIVE);
+      results[3]=fShmLock(&first.base,1,1,SQLITE_SHM_UNLOCK|SQLITE_SHM_EXCLUSIVE);
+      results[4]=fShmLock(&first.base,1,1,SQLITE_SHM_UNLOCK|SQLITE_SHM_SHARED);
+      results[5]=fShmLock(&first.base,1,1,SQLITE_SHM_UNLOCK|SQLITE_SHM_SHARED);
+      results[6]=fShmLock(&second.base,1,1,SQLITE_SHM_LOCK|SQLITE_SHM_EXCLUSIVE);
+      results[7]=fShmLock(&second.base,1,1,SQLITE_SHM_UNLOCK|SQLITE_SHM_EXCLUSIVE);
+    }
+  }
+  if (second_open) { closing=fClose(&second.base); if (rc==SQLITE_OK) rc=closing; }
+  if (first_open) { closing=fClose(&first.base); if (rc==SQLITE_OK) rc=closing; }
+  return rc;
+}
+
 /* Invoke the actual VFS callbacks/Win32 locks for the recovery-only transition
  * that SQL's ordinary BEGIN EXCLUSIVE reaches through RESERVED instead.
  * No content is written; the caller supplies a synthetic admitted pathname. */
