@@ -2312,6 +2312,7 @@ implementation plan:
 |---|---|
 | Operator and extension collectors | operator repository (`src/mordred/activity.py`, `activity_cli.py`, `docs/activity.md`); no collector code in this repository |
 | Authenticated receiver | `activity/peers.py` (peer credentials), `extension/activity_api.py` (frames, principal revalidation), `activity/contracts.py` (normalization, `PeerPrincipal`), `activity/ingest.py` (`build_receiver`, hourly bounded retention after append), `activity/_capture_audit.py` (`activity.capture_refused`, once per process and code) |
+| Secret redaction | `activity/_redaction.py` (standard-library-only masking, bounded scanning and caches); `activity/contracts.py` explicitly re-exports its public redaction functions, constants and type alongside event validation, serialization and digests |
 | Activity store | `activity/_paths.py`, `activity/_gate.py` (protection gate, keyed opener), `activity/_schema.py` (schema v3, in-place v1→v2→v3 migration), `activity/store.py` (append, episodes, status, backup/restore, `plan_retention`/`apply_retention`) |
 | Corrections | `activity/corrections.py` (record-only: one `user_correction` event appended to an existing episode; nothing derived) |
 | Term matching helpers | `activity/matching.py` (`terms` with CJK bigrams, `SessionBudget` counting characters and shown episodes per session) |

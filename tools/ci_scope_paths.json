@@ -102,6 +102,7 @@
     "docs/user/USAGE.md": [
       "docs"
     ],
+    "src/mordred_hermes/activity/_redaction.py": [],
     "src/mordred_hermes/desktop/__init__.py": [
       "extension"
     ],
