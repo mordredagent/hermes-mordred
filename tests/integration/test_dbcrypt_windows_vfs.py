@@ -238,9 +238,30 @@ def test_sidecar_creation_race_has_no_public_window(fixture: tuple[Any, Any, Pat
     # Creation DACL counters are native handle checks made before any data I/O.
     import threading
 
+    from mordred_hermes._private_fs._windows_api import get_api
+    from mordred_hermes._private_fs._windows_security import validate_private
+
     driver, registration, root = fixture
     stop = threading.Event()
     replaced: list[bool] = []
+    outcomes: list[str] = []
+    payload = "Mordred race fixture must never appear as plaintext in any created file"
+
+    def populate(name: str) -> None:
+        connection = connect(driver, root, name)
+        try:
+            connection.execute("CREATE TABLE data(value)")
+            connection.commit()
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("INSERT INTO data VALUES (?)", (payload,))
+            connection.commit()
+        finally:
+            connection.close()
+
+    # Nonvacuous creation/callback evidence, independently of allowed refusals
+    # under the adversarial rename race.
+    populate("baseline.db")
+    baseline = (root / "baseline.db").read_bytes()
 
     def race() -> None:
         while not stop.wait(0.001):
@@ -255,21 +276,28 @@ def test_sidecar_creation_race_has_no_public_window(fixture: tuple[Any, Any, Pat
     thread.start()
     try:
         for index in range(12):
-            connection = connect(driver, root, f"race-{index}.db")
             try:
-                connection.execute("CREATE TABLE data(value)")
-                connection.commit()
-                connection.execute("PRAGMA journal_mode=WAL")
-                connection.execute("INSERT INTO data VALUES ('synthetic')")
-                connection.commit()
-            finally:
-                connection.close()
+                populate(f"race-{index}.db")
+            except driver.OperationalError as error:
+                # Pinning/identity admission may refuse during mutation. It
+                # must never turn that refusal into an unchecked retry/open.
+                assert str(error) in ("unable to open database file", "disk I/O error", "database is locked")
+                outcomes.append("refused")
+            else:
+                outcomes.append("committed")
     finally:
         stop.set()
         thread.join(timeout=10)
     assert not thread.is_alive() and not replaced
+    assert len(outcomes) == 12
+    assert (root / "baseline.db").read_bytes() == baseline
+    for path in root.iterdir():
+        with get_api().open(str(path)) as handle:
+            validate_private(handle, directory=False)
+        assert payload.encode() not in path.read_bytes()
     counters = stats(registration)
-    assert counters["created"] >= 48
+    assert counters["created"] >= 4
+    assert all(counters[name] > 0 for name in ("xOpen", "xDelete", "xShmMap", "xShmUnmap"))
     assert counters["created"] == counters["private_at_creation"]
     assert counters["unchecked_opens"] == 0
 
@@ -340,6 +368,10 @@ def test_injected_io_failure_never_commits_new_row(fixture: tuple[Any, Any, Path
         try:
             with pytest.raises(driver.DatabaseError):
                 connection = connect(driver, root)
+                if stage == 4:
+                    # Unlike WAL, TRUNCATE is connection-local: the mode set
+                    # on the setup connection was lost when it closed.
+                    assert connection.execute("PRAGMA journal_mode=TRUNCATE").fetchone() == ("truncate",)
                 connection.execute("INSERT INTO data VALUES ('must not commit')")
                 connection.commit()
         finally:
