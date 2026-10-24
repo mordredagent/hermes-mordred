@@ -15,13 +15,18 @@ the caller's SQLite API table and no SQLite import/static library. The checked
 implementation additionally links the Windows `Advapi32` security API.
 
 ```powershell
-& ./native/dbcrypt-vfs/build.ps1 -Target Checked -OutputDirectory $env:DBCRYPT_BUILD_ROOT -SqliteIncludeDirectory $env:DBCRYPT_HEADER_ROOT
-$env:MORDRED_DBCRYPT_CHECKED_LIBRARY = "$env:DBCRYPT_BUILD_ROOT/mordred_dbcrypt_checked.dll"
+& ./native/dbcrypt-vfs/build.ps1 -Target CheckedTest -OutputDirectory $env:DBCRYPT_BUILD_ROOT -SqliteIncludeDirectory $env:DBCRYPT_HEADER_ROOT
+$env:MORDRED_DBCRYPT_CHECKED_LIBRARY = "$env:DBCRYPT_BUILD_ROOT/mordred_dbcrypt_checked_test.dll"
 $env:MORDRED_DBCRYPT_WINDOWS_VFS_TEST = '1'
 # Existing, isolated ordinary-user root, basename mordred-dbcrypt-*.
 $env:MORDRED_DBCRYPT_TEST_ROOT = $env:DBCRYPT_EVIDENCE_ROOT
 uv run pytest -q -o addopts= -m integration tests/integration/test_dbcrypt_windows_vfs.py
 ```
+
+Run the non-injection cases again against `-Target Checked` in a fresh Python
+process (`-k 'not injected_io and not every_creation'`). Do not load two compiled
+versions into one driver process: duplicate VFS names and different SQLite API
+tables intentionally refuse. A test-build pass does not qualify a release DLL.
 
 The bootstrap registers `mordred_checked_v1` permanently in the loading driver's
 library. Explicit root leases hold ancestor handles without delete sharing;
