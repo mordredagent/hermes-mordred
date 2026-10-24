@@ -561,3 +561,650 @@ os._exit(23)
         connection.commit()
     finally:
         connection.close()
+
+
+def test_checkedtest_raced_file_lifetimes_include_ephemeral_contents(fixture: tuple[Any, Any, Path]) -> None:
+    from mordred_hermes._private_fs._windows_api import FileId, OwnedHandle, get_api
+    from mordred_hermes._private_fs._windows_security import check_private, validate_private
+
+    _driver, registration, _root = fixture
+    native = registration._native
+    assert hasattr(native, "mordred_vfs_test_observer"), "use -Target CheckedTest"
+    signature = ctypes.CFUNCTYPE(
+        ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int64, ctypes.c_void_p, ctypes.c_int
+    )
+    setter = native.mordred_vfs_test_observer
+    setter.argtypes = [signature]
+    setter.restype = None
+    payload = b"Mordred race fixture must never appear as plaintext in any created file"
+    snapshots: list[tuple[int, str, int]] = []
+    creations: list[str] = []
+    errors: list[str] = []
+    active: dict[int, tuple[int, str, int, bytes]] = {}
+    names: dict[int, str] = {}
+    identities: dict[str, tuple[int, bytes]] = {}
+
+    def observe(stage: int, handle: int, offset: int, data: int, count: int) -> int:
+        try:
+            if offset == -1:
+                borrowed = OwnedHandle(get_api(), handle)  # Never close a borrowed handle.
+                if stage == 1:
+                    validate_private(borrowed, directory=False)
+                else:
+                    # Delete-pending handles remain valid for reads/ACL inspection.
+                    check_private(get_api().descriptor(borrowed), get_api().user_sid())
+                name = names.get(handle) if stage == 10 else None
+                if name is None:
+                    name = get_api().final_path(borrowed)
+                names[handle] = name
+                identifier = FileId()
+                api = get_api()
+                api.checked(api.GetInfo(handle, 18, ctypes.byref(identifier), ctypes.sizeof(identifier)), "identity")
+                identity = (identifier.volume, bytes(identifier.identifier))
+                if stage == 1:
+                    identities[name] = identity
+                else:
+                    assert identities[name] == identity
+                assert handle not in active
+                active[handle] = (stage, name, 0, b"")
+                if stage == 1:
+                    creations.append(name)
+            elif offset == -2:
+                previous, name, total, _tail = active.pop(handle)
+                assert previous == stage
+                snapshots.append((stage, name, total))
+                if stage == 10:
+                    names.pop(handle, None)
+            else:
+                previous, name, total, tail = active[handle]
+                assert previous == stage and total == offset and count > 0
+                chunk = ctypes.string_at(data, count)
+                assert payload not in tail + chunk
+                active[handle] = (stage, name, total + count, (tail + chunk)[-len(payload) :])
+        except BaseException as error:
+            errors.append(repr(error))
+            return 1
+        return 0
+
+    callback = signature(observe)
+    before = stats(registration)["created"]
+    setter(callback)
+    try:
+        # Retains the existing twelve outcomes, nonvacuous baseline, exact DACL,
+        # aggregate creation checks and mandatory physical root no-rename check.
+        test_sidecar_creation_race_has_no_public_window(fixture)
+    finally:
+        setter(signature())
+    assert not errors and not active and not names
+    assert len(creations) == stats(registration)["created"] - before
+    for suffix in (".db", "-journal", "-wal", "-shm"):
+        assert any(name.endswith(suffix) for name in creations)
+        assert any(name.endswith(suffix) and stage == 10 for stage, name, _ in snapshots)
+    # Actual nonempty encrypted companions were inspected while still present,
+    # before deletion/truncation and while SHM views were still mapped.
+    assert any(stage in (4, 8) and name.endswith("-journal") and size for stage, name, size in snapshots)
+    assert any(stage == 9 and name.endswith("-wal") and size for stage, name, size in snapshots)
+    assert any(stage == 11 and name.endswith("-shm") and size for stage, name, size in snapshots)
+
+
+def test_wal_multiregion_reader_checkpoint_restart(fixture: tuple[Any, Any, Path]) -> None:
+    driver, _registration, root = fixture
+    writer, reader = connect(driver, root), connect(driver, root)
+    payload = "multi-region synthetic encrypted payload: " + "x" * 6000
+    try:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("CREATE TABLE data(id INTEGER PRIMARY KEY, value TEXT)")
+        writer.execute("INSERT INTO data VALUES (0, ?)", (payload,))
+        writer.commit()
+        reader.execute("BEGIN")
+        assert reader.execute("SELECT count(*) FROM data").fetchone() == (1,)
+        writer.executemany("INSERT INTO data VALUES (?, ?)", [(n, payload) for n in range(1, 4601)])
+        writer.commit()
+        page_size = writer.execute("PRAGMA page_size").fetchone()[0]
+        wal = root / "synthetic.db-wal"
+        assert (wal.stat().st_size - 32) // (page_size + 24) > 4096
+        assert (root / "synthetic.db-shm").stat().st_size >= 65536
+        assert reader.execute("SELECT count(*) FROM data").fetchone() == (1,)
+        busy, frames, copied = writer.execute("PRAGMA wal_checkpoint(RESTART)").fetchone()
+        assert busy == 1 and frames > 4096 and copied < frames
+        reader.rollback()
+        assert writer.execute("PRAGMA wal_checkpoint(RESTART)").fetchone()[0] == 0
+        assert reader.execute("SELECT count(*), sum(id) FROM data").fetchone() == (4601, 10582300)
+        writer.execute("INSERT INTO data VALUES (4601, ?)", (payload,))
+        writer.commit()
+        assert writer.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone() == (0, 0, 0)
+        assert writer.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert payload.encode() not in (root / "synthetic.db").read_bytes()
+    finally:
+        reader.close()
+        writer.close()
+    assert not (root / "synthetic.db-wal").exists()
+    assert not (root / "synthetic.db-shm").exists()
+    reopened = connect(driver, root)
+    try:
+        assert reopened.execute("SELECT count(*), sum(id) FROM data").fetchone() == (4602, 10586901)
+        assert reopened.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("query", ["immutable=1", "nolock=1", "cache=shared", "unknown=value", "%69mmutable=1"])
+def test_native_uri_refusal_has_zero_data_opens(fixture: tuple[Any, Any, Path], query: str) -> None:
+    driver, registration, root = fixture
+    before = stats(registration)
+    with pytest.raises(driver.DatabaseError):
+        connection = driver.connect(f"file:{(root / 'refused.db').as_posix()}?vfs=mordred_checked_v1&{query}", uri=True)
+        connection.close()
+    after = stats(registration)
+    assert after["data_opens"] == before["data_opens"]
+    assert after["created"] == before["created"]
+    assert list(root.iterdir()) == []
+
+
+@pytest.mark.parametrize("component", ["ancestor", "root", "child"])
+def test_pinned_directories_refuse_replacement_during_io(fixture: tuple[Any, Any, Path], component: str) -> None:
+    from mordred_hermes._private_fs import open_private_directory
+
+    driver, _registration, root = fixture
+    child = root / "child"
+    with open_private_directory(child, create=True):
+        pass
+    connection = connect(driver, root, "child/pinned.db")
+    try:
+        connection.execute("CREATE TABLE data(value)")
+        connection.commit()
+        selected = {"ancestor": root.parent, "root": root, "child": child}[component]
+        destination = selected.with_name(selected.name + "-must-not-move")
+        assert not destination.exists()
+        with pytest.raises(OSError):
+            selected.rename(destination)
+        assert selected.is_dir() and not destination.exists()
+        connection.execute("INSERT INTO data VALUES ('retained identity')")
+        connection.commit()
+        assert connection.execute("SELECT value FROM data").fetchall() == [("retained identity",)]
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    finally:
+        connection.close()
+
+
+def qualification_manifest() -> dict[str, Any]:
+    from mordred_hermes._private_fs._windows_api import get_api
+
+    value = os.environ.get("MORDRED_DBCRYPT_QUALIFICATION_MANIFEST")
+    assert value, "native qualification requires the owned non-NTFS/reparse fixture manifest"
+    manifest = json.loads(Path(value).read_text(encoding="utf-8-sig"))
+    assert manifest["schema"] == 1
+    assert manifest["owner_sid"] == get_api().sid_text(get_api().user_sid())
+    root = Path(os.environ["MORDRED_DBCRYPT_TEST_ROOT"])
+    assert Path(manifest["reparse_root"]).parent == root
+    assert Path(manifest["reparse_root"]).name == "qualification-reparse"
+    assert Path(manifest["non_ntfs_root"]).name.startswith("mordred-dbcrypt-")
+    return manifest
+
+
+def test_native_non_ntfs_root_refuses(fixture: tuple[Any, Any, Path]) -> None:
+    from mordred_hermes._private_fs._windows_api import get_api
+
+    _driver, registration, _root = fixture
+    manifest = qualification_manifest()
+    path = Path(manifest["non_ntfs_root"])
+    api = get_api()
+    # Establish an actual fixed non-NTFS volume, not merely a manifest label.
+    assert path.is_absolute() and path.is_dir()
+    api.validate_drive(path.anchor)
+    with api.open(str(path)) as handle:
+        fs = ctypes.create_unicode_buffer(32)
+        api.checked(api.VolumeInfo(handle.value, None, 0, None, None, None, fs, len(fs)), "volume")
+        assert fs.value in ("FAT32", "exFAT", "ReFS") and fs.value == manifest["filesystem"]
+    before = sorted(p.name for p in path.iterdir())
+    counters = stats(registration)
+    token = ctypes.c_uint64()
+    assert registration._native.mordred_vfs_register_root(str(path), ctypes.byref(token)) != 0
+    assert token.value == 0
+    assert stats(registration)["data_opens"] == counters["data_opens"]
+    assert sorted(p.name for p in path.iterdir()) == before
+
+
+@pytest.mark.parametrize("name,tag", [("direct-link.db", 0xA000000C), ("unknown-tag.db", 0x00000042)])
+def test_native_file_reparse_refuses_before_data_open(fixture: tuple[Any, Any, Path], name: str, tag: int) -> None:
+    from mordred_hermes._private_fs._windows_api import get_api
+
+    driver, _registration, _root = fixture
+    manifest = qualification_manifest()
+    root = Path(manifest["reparse_root"])
+    target = root / "sentinel.bin"
+    assert target.read_bytes() == b"mordred synthetic reparse target must not change\n"
+    # FILE_ATTRIBUTE_TAG_INFO follows an OPEN_REPARSE_POINT handle, never its target.
+    with get_api().open(str(root / name)) as handle:
+        info = (ctypes.c_uint32 * 2)()
+        query = ctypes.WinDLL("kernel32", use_last_error=True).GetFileInformationByHandleEx
+        query.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        query.restype = ctypes.c_int
+        assert query(handle.value, 9, ctypes.byref(info), ctypes.sizeof(info))
+        assert info[0] & 0x400 and info[1] == tag
+    registration = register_checked_vfs(driver, root=root)
+    try:
+        before = stats(registration)
+        with pytest.raises(driver.DatabaseError):
+            connect(driver, root, name)
+        after = stats(registration)
+        assert after["data_opens"] == before["data_opens"]
+        assert after["created"] == before["created"]
+        assert target.read_bytes() == b"mordred synthetic reparse target must not change\n"
+    finally:
+        registration.close()
+
+
+@pytest.mark.parametrize("failed_lock", [1, 2, 3, 4])
+def test_checkedtest_recovery_lock_transition_failure_releases_handles(
+    fixture: tuple[Any, Any, Path], failed_lock: int
+) -> None:
+    driver, registration, root = fixture
+    check = registration._native.mordred_vfs_test_recovery_lock
+    check.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_int)]
+    check.restype = ctypes.c_int
+    calls: list[int] = []
+
+    def fail(stage: int, _handle: int) -> int:
+        if stage == 7:
+            calls.append(stage)
+            return int(len(calls) == failed_lock)
+        return 0
+
+    path = str(root / "recovery-fault.db").encode()
+    reserved = ctypes.c_int(-1)
+    with native_hook(registration, fail):
+        assert check(path, ctypes.byref(reserved)) != 0
+    assert len(calls) >= failed_lock
+    assert check(path, ctypes.byref(reserved)) == 0 and reserved.value == 1
+    connection = connect(driver, root, "recovery-fault.db")
+    try:
+        connection.execute("CREATE TABLE data(value)")
+        connection.execute("INSERT INTO data VALUES ('after failed transition')")
+        connection.commit()
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("failed_lock", [1, 2, 3, 4, 5, 6, 7])
+def test_checkedtest_shm_lock_transition_failure_releases_handles(
+    fixture: tuple[Any, Any, Path], failed_lock: int
+) -> None:
+    _driver, registration, root = fixture
+    check = registration._native.mordred_vfs_test_shm_idempotence
+    check.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_int)]
+    check.restype = ctypes.c_int
+    calls: list[int] = []
+
+    def fail(stage: int, _handle: int) -> int:
+        if stage == 7:
+            calls.append(stage)
+            return int(len(calls) == failed_lock)
+        return 0
+
+    path = str(root / "shm-fault.db").encode()
+    results = (ctypes.c_int * 8)()
+    expected = [0, 0, 5, 5130, 0, 0, 0, 0]
+    with native_hook(registration, fail):
+        rc = check(path, results)
+    assert len(calls) >= failed_lock
+    assert rc != 0 or list(results) != expected
+    assert check(path, results) == 0
+    assert list(results) == expected
+
+
+@pytest.mark.parametrize("failure_stage", [20, 21, 22])
+def test_checkedtest_initialization_failure_rolls_back_in_fresh_process(
+    fixture: tuple[Any, Any, Path], failure_stage: int
+) -> None:
+    _driver, _registration, root = fixture
+    child = r"""
+import ctypes, os, sys
+from pathlib import Path
+import sqlcipher3.dbapi2 as driver
+from mordred_hermes.dbcrypt._windows_vfs import register_checked_vfs
+root, stage = Path(sys.argv[1]), int(sys.argv[2])
+native = ctypes.CDLL(os.environ['MORDRED_DBCRYPT_CHECKED_LIBRARY'])
+signature = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_void_p)
+hits = []
+def fail(actual, handle):
+    if actual == stage:
+        hits.append(actual)
+        return 1
+    return 0
+hook = signature(fail)
+native.mordred_vfs_test_hook.argtypes = [signature]
+native.mordred_vfs_test_hook.restype = None
+native.mordred_vfs_test_hook(hook)
+try:
+    register_checked_vfs(driver, root=root)
+except driver.DatabaseError:
+    pass
+else:
+    raise AssertionError('injected checked initialization succeeded')
+assert hits == [stage], hits
+native.mordred_vfs_test_hook(signature())
+# No VFS or auto-extension callback may remain from failed initialization.
+try:
+    driver.connect('file:' + (root / 'must-not-exist.db').as_posix() + '?vfs=mordred_checked_v1', uri=True)
+except driver.OperationalError as error:
+    assert 'no such vfs' in str(error).lower(), str(error)
+else:
+    raise AssertionError('failed VFS remained registered')
+assert not (root / 'must-not-exist.db').exists()
+with driver.connect(':memory:') as memory:
+    assert memory.execute('SELECT 41+1').fetchone() == (42,)
+r = register_checked_vfs(driver, root=root)
+c = driver.connect('file:' + (root / 'recovered-init.db').as_posix() + '?vfs=' + r.name, uri=True)
+c.execute("PRAGMA key='synthetic acceptance fixture only'")
+c.execute('CREATE TABLE data(value)')
+c.execute("INSERT INTO data VALUES ('initialization recovered')")
+c.commit()
+assert c.execute('SELECT value FROM data').fetchone() == ('initialization recovered',)
+assert c.execute('PRAGMA integrity_check').fetchone() == ('ok',)
+c.close()
+r.close()
+assert b'initialization recovered' not in (root / 'recovered-init.db').read_bytes()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", child, str(root), str(failure_stage)], capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+
+
+def test_distinct_sqlite_library_cannot_replace_checked_api(fixture: tuple[Any, Any, Path]) -> None:
+    _driver, _registration, root = fixture
+    child = r"""
+import os, sqlite3, sys
+from pathlib import Path
+import sqlcipher3.dbapi2 as cipher
+from mordred_hermes.dbcrypt._windows_vfs import register_checked_vfs
+root = Path(sys.argv[1])
+r = register_checked_vfs(cipher, root=root)
+foreign = sqlite3.connect(':memory:')
+assert foreign.execute('PRAGMA cipher_version').fetchone() is None
+foreign.enable_load_extension(True)
+try:
+    foreign.execute('SELECT load_extension(?, ?)',
+                    (os.environ['MORDRED_DBCRYPT_CHECKED_LIBRARY'], 'sqlite3_mordredvfs_init'))
+except sqlite3.DatabaseError as error:
+    assert 'initialization' in str(error).lower(), str(error)
+else:
+    raise AssertionError('distinct SQLite API table admitted')
+finally:
+    foreign.enable_load_extension(False)
+assert foreign.execute('SELECT 6*7').fetchone() == (42,)
+foreign.close()
+with sqlite3.connect(':memory:') as later:
+    assert later.execute('SELECT 42').fetchone() == (42,)
+for index in range(2):
+    c = cipher.connect('file:' + (root / 'retained-api.db').as_posix() + '?vfs=' + r.name, uri=True)
+    c.execute("PRAGMA key='synthetic acceptance fixture only'")
+    if index == 0:
+        c.execute('CREATE TABLE data(value)')
+        c.execute("INSERT INTO data VALUES ('retained original API')")
+        c.commit()
+    assert c.execute('SELECT value FROM data').fetchone() == ('retained original API',)
+    assert c.execute('PRAGMA integrity_check').fetchone() == ('ok',)
+    c.close()
+r.close()
+"""
+    result = subprocess.run([sys.executable, "-c", child, str(root)], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+
+
+def test_wal_reader_in_another_process_blocks_restart_until_release(fixture: tuple[Any, Any, Path]) -> None:
+    import queue
+    import threading
+
+    driver, _registration, root = fixture
+    writer = connect(driver, root)
+    child = r"""
+import sys
+from pathlib import Path
+import sqlcipher3.dbapi2 as driver
+from mordred_hermes.dbcrypt._windows_vfs import register_checked_vfs
+root = Path(sys.argv[1])
+r = register_checked_vfs(driver, root=root)
+c = driver.connect('file:' + (root / 'synthetic.db').as_posix() + '?vfs=' + r.name, uri=True, timeout=0)
+c.execute("PRAGMA key='synthetic acceptance fixture only'")
+c.execute('BEGIN')
+assert c.execute('SELECT count(*) FROM data').fetchone() == (1,)
+print('snapshot held', flush=True)
+assert sys.stdin.readline().strip() == 'release'
+assert c.execute('SELECT count(*) FROM data').fetchone() == (1,)
+c.rollback()
+assert c.execute('SELECT count(*) FROM data').fetchone() == (201,)
+assert c.execute('PRAGMA integrity_check').fetchone() == ('ok',)
+c.close()
+r.close()
+"""
+    process = None
+    ready: queue.Queue[str] = queue.Queue()
+    waiter = None
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("CREATE TABLE data(value)")
+        writer.execute("INSERT INTO data VALUES ('initial')")
+        writer.commit()
+        process = subprocess.Popen(
+            [sys.executable, "-c", child, str(root)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert process.stdout is not None
+        waiter = threading.Thread(target=lambda: ready.put(process.stdout.readline()), daemon=True)
+        waiter.start()
+        assert ready.get(timeout=30).strip() == "snapshot held"
+        writer.executemany("INSERT INTO data VALUES (?)", [("committed across processes",)] * 200)
+        writer.commit()
+        assert writer.execute("PRAGMA wal_checkpoint(RESTART)").fetchone()[0] == 1
+        waiter.join(timeout=5)
+        output, error = process.communicate("release\n", timeout=30)
+        assert process.returncode == 0, (output, error)
+        assert writer.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone() == (0, 0, 0)
+        assert writer.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.communicate(timeout=10)
+        if waiter is not None:
+            waiter.join(timeout=5)
+        writer.close()
+    assert not (root / "synthetic.db-wal").exists()
+    assert not (root / "synthetic.db-shm").exists()
+    assert b"committed across processes" not in (root / "synthetic.db").read_bytes()
+
+
+def test_wal_multiregion_commit_survives_process_crash(fixture: tuple[Any, Any, Path]) -> None:
+    driver, _registration, root = fixture
+    child = r"""
+import os, sys
+from pathlib import Path
+import sqlcipher3.dbapi2 as driver
+from mordred_hermes.dbcrypt._windows_vfs import register_checked_vfs
+root = Path(sys.argv[1])
+r = register_checked_vfs(driver, root=root)
+c = driver.connect('file:' + (root / 'synthetic.db').as_posix() + '?vfs=' + r.name, uri=True)
+c.execute("PRAGMA key='synthetic acceptance fixture only'")
+c.execute('PRAGMA journal_mode=WAL')
+c.execute('PRAGMA wal_autocheckpoint=0')
+c.execute('CREATE TABLE data(id INTEGER PRIMARY KEY, value TEXT)')
+c.executemany('INSERT INTO data VALUES (?, ?)', [(n, 'committed crash payload:' + 'x'*6000) for n in range(4601)])
+c.commit()
+assert (root / 'synthetic.db-shm').stat().st_size >= 65536
+os._exit(23)
+"""
+    result = subprocess.run([sys.executable, "-c", child, str(root)], capture_output=True, text=True, timeout=180)
+    assert result.returncode == 23, (result.stdout, result.stderr)
+    assert (root / "synthetic.db-shm").stat().st_size >= 65536
+    assert b"committed crash payload:" not in (root / "synthetic.db-wal").read_bytes()
+    recovered = connect(driver, root)
+    try:
+        page_size = recovered.execute("PRAGMA page_size").fetchone()[0]
+        assert ((root / "synthetic.db-wal").stat().st_size - 32) // (page_size + 24) > 4096
+        assert recovered.execute("SELECT count(*), sum(id) FROM data").fetchone() == (4601, 10582300)
+        assert recovered.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert recovered.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone() == (0, 0, 0)
+    finally:
+        recovered.close()
+    assert not (root / "synthetic.db-wal").exists()
+    assert not (root / "synthetic.db-shm").exists()
+
+
+@pytest.mark.parametrize("component", ["ancestor", "root", "child"])
+def test_checkedtest_replacement_at_each_companion_creation(fixture: tuple[Any, Any, Path], component: str) -> None:
+    from mordred_hermes._private_fs import open_private_directory
+    from mordred_hermes._private_fs._windows_api import OwnedHandle, get_api
+    from mordred_hermes._private_fs._windows_security import validate_private
+
+    driver, registration, root = fixture
+    child = root / "race-child"
+    with open_private_directory(child, create=True):
+        pass
+    selected = {"ancestor": root.parent, "root": root, "child": child}[component]
+    destination = selected.with_name(selected.name + "-must-not-move")
+    assert not destination.exists()
+    events: list[str] = []
+    errors: list[str] = []
+
+    def attempt(stage: int, handle: int) -> int:
+        if stage != 1:
+            return 0
+        try:
+            borrowed = OwnedHandle(get_api(), handle)
+            validate_private(borrowed, directory=False)
+            name = get_api().final_path(borrowed)
+            try:
+                selected.rename(destination)
+            except OSError:
+                pass
+            else:
+                raise AssertionError("pinned directory was replaced")
+            validate_private(borrowed, directory=False)
+            assert selected.is_dir() and not destination.exists()
+            events.append(name)
+        except BaseException as error:
+            errors.append(repr(error))
+            return 1
+        return 0
+
+    with native_hook(registration, attempt):
+        connection = connect(driver, root, "race-child/synthetic.db")
+        try:
+            connection.execute("CREATE TABLE data(value)")
+            connection.commit()
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("INSERT INTO data VALUES ('companion mutation fixture')")
+            connection.commit()
+            assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        finally:
+            connection.close()
+    assert not errors and not destination.exists()
+    for suffix in (".db", "-journal", "-wal", "-shm"):
+        assert any(name.endswith(suffix) for name in events)
+    assert len(events) == stats(registration)["created"]
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_checkedtest_inherited_dacl_race_on_wal_companion(fixture: tuple[Any, Any, Path], suffix: str) -> None:
+    from mordred_hermes._private_fs._windows_api import OwnedHandle, get_api
+    from mordred_hermes._private_fs._windows_security import validate_private
+
+    driver, registration, root = fixture
+    connection = connect(driver, root)
+    connection.execute("CREATE TABLE data(value)")
+    connection.commit()
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.close()
+    before = (root / "synthetic.db").read_bytes()
+    events: list[str] = []
+    errors: list[str] = []
+    changed: list[bool] = []
+
+    def attempt(stage: int, handle: int) -> int:
+        if stage != 1 or events:
+            return 0
+        try:
+            borrowed = OwnedHandle(get_api(), handle)
+            name = get_api().final_path(borrowed)
+            if not name.endswith(suffix):
+                return 0
+            subprocess.run(
+                ["icacls.exe", str(root), "/grant", "*S-1-1-0:(OI)(CI)(IO)(R)"],
+                check=True,
+                capture_output=True,
+                timeout=20,
+            )
+            changed.append(True)
+            validate_private(borrowed, directory=False)
+            events.append(name)
+        except BaseException as error:
+            errors.append(repr(error))
+            return 1
+        return 0
+
+    connection = None
+    try:
+        with native_hook(registration, attempt), pytest.raises(driver.DatabaseError):
+            connection = connect(driver, root)
+            connection.execute("INSERT INTO data VALUES ('must not commit')")
+            connection.commit()
+    finally:
+        if changed:
+            subprocess.run(
+                ["icacls.exe", str(root), "/remove:g", "*S-1-1-0"],
+                check=True,
+                capture_output=True,
+                timeout=20,
+            )
+        if connection is not None:
+            connection.close()
+    assert len(events) == 1 and not errors
+    assert (root / "synthetic.db").read_bytes() == before
+    recovered = connect(driver, root)
+    try:
+        assert recovered.execute("SELECT count(*) FROM data").fetchone() == (0,)
+        assert recovered.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    finally:
+        recovered.close()
+
+
+@pytest.mark.parametrize(
+    "name", ["refused.db:stream", "trailing.", "trailing ", "CON", "encoded%252f.db", "../outside.db"]
+)
+def test_native_ambiguous_path_refuses_without_creating(fixture: tuple[Any, Any, Path], name: str) -> None:
+    driver, registration, root = fixture
+    before = stats(registration)
+    with pytest.raises(driver.DatabaseError):
+        connection = connect(driver, root, name)
+        connection.close()
+    assert stats(registration)["data_opens"] == before["data_opens"]
+    assert stats(registration)["created"] == before["created"]
+    assert list(root.iterdir()) == []
+    assert not (root.parent / "outside.db").exists()
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "file://server/share/refused.db",
+        "file:////server/share/refused.db",
+        "file:////%3f/C:/refused.db",
+        "file:C:drive-relative.db",
+    ],
+)
+def test_native_namespace_uri_refusal_has_zero_data_opens(fixture: tuple[Any, Any, Path], uri: str) -> None:
+    driver, registration, root = fixture
+    before = stats(registration)
+    with pytest.raises(driver.DatabaseError):
+        connection = driver.connect(uri + "?vfs=mordred_checked_v1", uri=True)
+        connection.close()
+    assert stats(registration)["data_opens"] == before["data_opens"]
+    assert stats(registration)["created"] == before["created"]
+    assert list(root.iterdir()) == []

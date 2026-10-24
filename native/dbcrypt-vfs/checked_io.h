@@ -68,8 +68,13 @@ int ci_unlock(CiFile *file, DWORD offset, DWORD length);
 #ifdef MORDRED_VFS_TESTING
 typedef int (__cdecl *CiTestHook)(int stage, HANDLE handle);
 int ci_test_stage(int stage, HANDLE handle);
+typedef int (__cdecl *CiTestObserver)(int stage, HANDLE handle, sqlite3_int64 offset, const void *data, int count);
+int ci_test_observe(int stage, HANDLE handle);
 #else
 static __inline int ci_test_stage(int stage, HANDLE handle) {
+  (void)stage; (void)handle; return 0;
+}
+static __inline int ci_test_observe(int stage, HANDLE handle) {
   (void)stage; (void)handle; return 0;
 }
 #endif
@@ -81,4 +86,7 @@ static __inline int ci_test_stage(int stage, HANDLE handle) {
 #define CI_BEFORE_MAP 6
 #define CI_BEFORE_LOCK 7
 #define CI_BEFORE_DELETE 8
+#define CI_AFTER_WRITE 9
+#define CI_BEFORE_CLOSE 10
+#define CI_BEFORE_UNMAP 11
 #endif

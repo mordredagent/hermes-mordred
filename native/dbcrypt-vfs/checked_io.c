@@ -11,8 +11,37 @@
 
 #ifdef MORDRED_VFS_TESTING
 static CiTestHook test_hook;
+static CiTestObserver test_observer;
 __declspec(dllexport) void mordred_vfs_test_hook(CiTestHook hook) { test_hook=hook; }
+__declspec(dllexport) void mordred_vfs_test_observer(CiTestObserver observer) { test_observer=observer; }
 int ci_test_stage(int stage, HANDLE handle) { return test_hook ? test_hook(stage,handle) : 0; }
+/* Synchronous bounded snapshots of the exact borrowed I/O handle. No pathname
+ * opens, persistent copies, or arbitrary exported read primitive. The observer
+ * consumes chunks only during this call. -1/-2 bracket a complete snapshot. */
+int ci_test_observe(int stage, HANDLE handle) {
+  LARGE_INTEGER size;
+  sqlite3_int64 offset=0;
+  unsigned char *buffer;
+  int failed=0;
+  if (!test_observer) return 0;
+  if (!GetFileSizeEx(handle,&size) || size.QuadPart<0 || size.QuadPart>64*1024*1024 ||
+      test_observer(stage,handle,-1,NULL,0)) return 1;
+  buffer=(unsigned char *)HeapAlloc(GetProcessHeap(),0,65536);
+  if (!buffer) return 1;
+  while (offset<size.QuadPart) {
+    OVERLAPPED position;
+    DWORD got=0, wanted=(DWORD)((size.QuadPart-offset)>65536 ? 65536 : size.QuadPart-offset);
+    memset(&position,0,sizeof(position));
+    position.Offset=(DWORD)offset; position.OffsetHigh=(DWORD)((uint64_t)offset>>32);
+    if (!ReadFile(handle,buffer,wanted,&got,&position) || got!=wanted ||
+        test_observer(stage,handle,offset,buffer,(int)got)) { failed=1; break; }
+    offset+=got;
+  }
+  SecureZeroMemory(buffer,65536);
+  HeapFree(GetProcessHeap(),0,buffer);
+  if (test_observer(stage,handle,-2,NULL,0)) failed=1;
+  return failed;
+}
 #endif
 
 static int equal(const wchar_t *a, const wchar_t *b) {
@@ -288,7 +317,7 @@ int ci_open(CiRoot *r, const wchar_t *path, int create, int readonly, int deleti
   }
   if (created) {
     InterlockedIncrement64(&r->created);
-    if (ci_test_stage(CI_AFTER_CREATE,f->handle)) goto failed;
+    if (ci_test_stage(CI_AFTER_CREATE,f->handle) || ci_test_observe(CI_AFTER_CREATE,f->handle)) goto failed;
   }
   if (!metadata(r,f->handle,0,f->path,&f->identity,1)) goto failed;
   if (created) InterlockedIncrement64(&r->private_created);
@@ -311,6 +340,7 @@ int ci_check(CiFile *f) {
 
 int ci_close(CiFile *f) {
   int rc=SQLITE_OK;
+  if (f->handle && f->handle!=INVALID_HANDLE_VALUE && ci_test_observe(CI_BEFORE_CLOSE,f->handle)) rc=SQLITE_IOERR_CLOSE;
   if (f->handle && f->handle!=INVALID_HANDLE_VALUE && !CloseHandle(f->handle)) rc=SQLITE_IOERR_CLOSE;
   f->handle=NULL;
   while (f->count) if (!CloseHandle(f->pins[--f->count].handle)) rc=SQLITE_IOERR_CLOSE;
@@ -319,7 +349,8 @@ int ci_close(CiFile *f) {
 
 int ci_delete(CiFile *f) {
   FILE_DISPOSITION_INFO disposition={TRUE};
-  if (ci_check(f)!=SQLITE_OK || ci_test_stage(CI_BEFORE_DELETE,f->handle)) return SQLITE_IOERR_DELETE;
+  if (ci_check(f)!=SQLITE_OK || ci_test_stage(CI_BEFORE_DELETE,f->handle) ||
+      ci_test_observe(CI_BEFORE_DELETE,f->handle)) return SQLITE_IOERR_DELETE;
   return SetFileInformationByHandle(f->handle,FileDispositionInfo,&disposition,sizeof(disposition)) ? SQLITE_OK : SQLITE_IOERR_DELETE;
 }
 
@@ -333,6 +364,7 @@ int ci_truncate(CiFile *f, sqlite3_int64 size) {
   FILE_END_OF_FILE_INFO value;
   value.EndOfFile.QuadPart=size;
   if (size<0 || ci_check(f)!=SQLITE_OK || f->readonly || ci_test_stage(CI_BEFORE_TRUNCATE,f->handle)) return SQLITE_IOERR_TRUNCATE;
+  if (ci_test_observe(CI_BEFORE_TRUNCATE,f->handle)) return SQLITE_IOERR_TRUNCATE;
   InterlockedIncrement64(&f->root->truncates);
   return SetFileInformationByHandle(f->handle,FileEndOfFileInfo,&value,sizeof(value)) ? SQLITE_OK : SQLITE_IOERR_TRUNCATE;
 }
@@ -356,8 +388,12 @@ int ci_write(CiFile *f, const void *buffer, int count, sqlite3_int64 offset) {
   OVERLAPPED position;
   memset(&position,0,sizeof(position));
   if (count<0 || offset<0 || ci_check(f)!=SQLITE_OK || f->readonly || ci_test_stage(CI_BEFORE_WRITE,f->handle)) return SQLITE_IOERR_WRITE;
+  /* Capture the previous image too: a failed/partial earlier write must not
+   * disappear unnoticed if rollback overwrites it before close. */
+  if (ci_test_observe(CI_BEFORE_WRITE,f->handle)) return SQLITE_IOERR_WRITE;
   position.Offset=(DWORD)offset; position.OffsetHigh=(DWORD)((uint64_t)offset>>32);
   if (!WriteFile(f->handle,buffer,(DWORD)count,&wrote,&position) || wrote!=(DWORD)count) return SQLITE_IOERR_WRITE;
+  if (ci_test_observe(CI_AFTER_WRITE,f->handle)) return SQLITE_IOERR_WRITE;
   return SQLITE_OK;
 }
 

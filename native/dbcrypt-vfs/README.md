@@ -24,9 +24,49 @@ uv run pytest -q -o addopts= -m integration tests/integration/test_dbcrypt_windo
 ```
 
 Run the non-injection cases again against `-Target Checked` in a fresh Python
-process (`-k 'not injected_io and not every_creation and not inherited_dacl_race and not recovery_exclusive_lock and not shm_shared_lock'`). Do not load two compiled
+process (`-k 'not checkedtest and not injected_io and not every_creation and not inherited_dacl_race and not recovery_exclusive_lock and not shm_shared_lock'`). Do not load two compiled
 versions into one driver process: duplicate VFS names and different SQLite API
 tables intentionally refuse. A test-build pass does not qualify a release DLL.
+
+The full native gate also requires `MORDRED_DBCRYPT_QUALIFICATION_MANIFEST`.
+Missing special fixtures fail the gate. Its JSON schema is:
+
+```json
+{
+  "schema": 1,
+  "owner_sid": "<ordinary test SID>",
+  "non_ntfs_root": "<owned fixed exFAT/FAT32/ReFS drive>:\\mordred-dbcrypt-<run>",
+  "filesystem": "exFAT",
+  "reparse_root": "<test root>\\qualification-reparse"
+}
+```
+
+The NTFS reparse root must have the exact current-SID private DACL. It contains
+`sentinel.bin` (exact bytes `mordred synthetic reparse target must not change\n`),
+`direct-link.db` (file symlink to sentinel, tag `0xA000000C`), and
+`unknown-tag.db` (non-Microsoft tag `0x00000042`, a non-null per-run GUID and
+synthetic payload). Tests query actual volume information and reparse tags;
+manifest labels alone are insufficient. Only an isolated owned VHD/drive and
+owned objects may be provisioned. Preserve the unknown tag/GUID for cleanup,
+remove owned reparse objects after handles close, then dismount/delete only the
+owned VHD. No system-wide privilege or policy changes are needed by the tests.
+
+CheckedTest's optional observer streams bounded snapshots directly from actual
+I/O handles at creation, before/after writes, and before truncate/delete/close
+and SHM unmapping. It does not reopen names, persist data, or export arbitrary
+reads. Install/clear hooks only with no concurrent callbacks; borrowed handles
+and buffers must not escape the callback. Snapshots are limited to 64 MiB and
+fail the observing test on incomplete reads. Production Checked exports no
+observer or fault setter. Initialization fault stages 20/21/22 exercise the
+actual entrypoint before VFS registration, before auto-extension registration,
+and after successful auto-extension registration, including real rollback.
+
+The extended suite adds multi-region WAL/SHM growth (>4096 frames), reader and
+checkpoint/restart coordination in one and multiple processes, committed crash
+recovery, lock-transition faults, API-library mismatch, native URI/path refusal,
+and adversarial directory/DACL creation boundaries. These cases require new
+native execution; earlier 27-test/16-production-case evidence does not cover
+them. Use fresh processes and separate output directories for both DLL variants.
 
 The bootstrap registers `mordred_checked_v1` permanently in the loading driver's
 library. Explicit root leases hold ancestor handles without delete sharing;
