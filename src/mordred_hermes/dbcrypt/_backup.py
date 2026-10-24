@@ -36,9 +36,11 @@ def _transition(phase: str) -> None:
 def _registry(root: Path) -> Iterator[None]:
     # A distinct metadata lock, taken after lifecycle/source custody scopes.
     # Runtime SH continues to exclude key retirement throughout publication.
+    # Every caller releases external directory transactions before entering;
+    # waiting here therefore cannot form a reciprocal directory-lock cycle.
     with (
         open_private_directory(root / "mordred/backup-registry", create=True) as directory,
-        directory.transaction(blocking=False),
+        directory.transaction(),
     ):
         yield
 
@@ -294,25 +296,32 @@ def recover_backups(root: Path, *, lease: ExclusiveLease) -> None:
     snapshot, key = _migrate._authenticate(root, None, lease)
     if snapshot is None:
         raise DatabaseRefused("backup recovery requires native source proof")
+    # EX excludes cooperating root operations; the registry protects short
+    # metadata transitions only. Never carry it into an external directory lock.
     with _registry(root):
         pending = _migrate._read_json(root, _JOURNAL)
-        if isinstance(pending, dict) and pending.get("operation") == "delete":
-            _recover_delete(root, snapshot, pending)
-            return
-        data = _pending(root, snapshot)
-        if data["phase"] != "verified":
-            _recover_preparing(root, data, key)
-        destination, prepared = Path(data["destination"]), Path(data["prepared"])
-        candidate = prepared if prepared.exists() else destination
-        if (
-            _migrate._file_identity(candidate) != data["identity"]
-            or _migrate._schema(candidate, key, root=root) != data["verification"]
-        ):
-            raise DatabaseRefused("backup recovery identity/schema proof failed")
-        if candidate == prepared:
-            with open_private_directory(prepared.parent) as directory, directory.transaction() as tx:
-                tx.rename_file(prepared.name, destination.name, expected_identity=tx.stat(prepared.name).identity)
-        ExclusiveLease.assert_held(lease, root)
+        deleting = isinstance(pending, dict) and pending.get("operation") == "delete"
+        data = pending if deleting else _pending(root, snapshot)
+    if deleting:
+        _recover_delete(root, snapshot, data)
+        return
+    if data["phase"] != "verified":
+        _recover_preparing(root, data, key)
+    destination, prepared = Path(data["destination"]), Path(data["prepared"])
+    _migrate._refuse_if_open([_migrate.Database(p, str(p), "") for p in (prepared, destination)], None)
+    candidate = prepared if prepared.exists() else destination
+    if (
+        _migrate._file_identity(candidate) != data["identity"]
+        or _migrate._schema(candidate, key, root=root) != data["verification"]
+    ):
+        raise DatabaseRefused("backup recovery identity/schema proof failed")
+    if candidate == prepared:
+        with open_private_directory(prepared.parent) as directory, directory.transaction() as tx:
+            tx.rename_file(prepared.name, destination.name, expected_identity=tx.stat(prepared.name).identity)
+    ExclusiveLease.assert_held(lease, root)
+    with _registry(root):
+        if _migrate._read_json(root, _JOURNAL) != data:
+            raise DatabaseRefused("backup recovery journal changed")
         _register(root, snapshot, data)
 
 
@@ -352,6 +361,7 @@ def _recover_preparing(root: Path, data: dict[str, Any], key: DatabaseKey) -> No
         raise DatabaseRefused("incomplete backup source or destination changed")
     _migrate._refuse_if_open([_migrate.Database(p, str(p), "") for p in (source, staged) if p.exists()], None)
     expected = _migrate._schema(source, key, root=root)
+    previous = dict(data)
     with open_private_directory(staged.parent) as directory, directory.transaction() as tx:
         try:
             observed = tx.stat(staged.name)
@@ -366,13 +376,17 @@ def _recover_preparing(root: Path, data: dict[str, Any], key: DatabaseKey) -> No
             tx.delete_file(staged.name, expected_identity=observed.identity)
         tx.create_bytes(staged.name, b"")
         data["identity"] = _migrate._file_identity(staged)
-        _migrate._put_json(root, _JOURNAL, data)
-        _offline_copy(source, staged, key, root)
+    _update_pending(root, previous, data)
+    previous = dict(data)
+    _offline_copy(source, staged, key, root)
+    with open_private_directory(staged.parent) as directory, directory.transaction() as tx:
+        if _migrate._file_identity(staged) != data["identity"]:
+            raise DatabaseRefused("backup recovery staging identity changed")
         tx.flush_file(staged.name, expected_identity=tx.stat(staged.name).identity)
-        if _migrate._schema(staged, key, root=root) != expected:
-            raise DatabaseRefused("recovered backup schema/count proof failed")
-        data["verification"], data["phase"] = expected, "verified"
-        _migrate._put_json(root, _JOURNAL, data)
+    if _migrate._schema(staged, key, root=root) != expected:
+        raise DatabaseRefused("recovered backup schema/count proof failed")
+    data["verification"], data["phase"] = expected, "verified"
+    _update_pending(root, previous, data)
 
 
 def _find(root: Path, source: Path, snapshot: NativeSnapshot) -> dict[str, Any]:
@@ -414,10 +428,10 @@ def restore_database(source: Path, destination: Path, *, lease: ExclusiveLease) 
     with _registry(root):
         _no_pending(root)
         entry = _find(root, source, snapshot)
-        if _migrate._schema(source, key, root=root) != entry["verification"]:
-            raise DatabaseRefused("backup schema/count verification failed")
-        _migrate._schema(destination, key)
-        _restore_copy(root, source, destination, key, lease, snapshot, entry)
+    if _migrate._schema(source, key, root=root) != entry["verification"]:
+        raise DatabaseRefused("backup schema/count verification failed")
+    _migrate._schema(destination, key)
+    _restore_copy(root, source, destination, key, lease, snapshot, entry)
 
 
 def _restore_copy(
@@ -465,24 +479,9 @@ def _restore_copy(
     _migrate._finish(root, data, key, snapshot, lease, None, None)
 
 
-def _recover_delete(root: Path, snapshot: NativeSnapshot, data: dict[str, Any]) -> None:
-    if (
-        set(data) != {"version", "operation", "snapshot", "entry", "parent"}
-        or data["version"] != 1
-        or data["snapshot"] != asdict(snapshot)
-        or not isinstance(data["entry"], dict)
-    ):
-        raise DatabaseRefused("invalid backup deletion journal")
-    entry = data["entry"]
-    inventory = _load_inventory(root, snapshot)
-    if entry not in inventory["entries"]:
-        # A crash after the durable inventory commit may leave only the intent.
-        if any(e["path"] == entry.get("path") for e in inventory["entries"]):
-            raise DatabaseRefused("backup deletion registry changed")
-        _migrate._remove_record(root, _JOURNAL)
-        return
+def _delete_registered_file(entry: dict[str, Any], parent: list[dict[str, Any]]) -> None:
     source = _canonical_destination(Path(entry["path"]))
-    if _migrate._parents(source.parent, source) != data["parent"]:
+    if _migrate._parents(source.parent, source) != parent:
         raise DatabaseRefused("backup deletion parent identity changed")
     with open_private_directory(source.parent) as directory, directory.transaction() as tx:
         try:
@@ -494,28 +493,54 @@ def _recover_delete(root: Path, snapshot: NativeSnapshot, data: dict[str, Any]) 
             if _migrate._file_identity(source) != entry["identity"]:
                 raise DatabaseRefused("registered backup identity changed")
             tx.delete_file(source.name, expected_identity=observed.identity)
+
+
+def _recover_delete(root: Path, snapshot: NativeSnapshot, data: dict[str, Any]) -> None:
+    if (
+        set(data) != {"version", "operation", "snapshot", "entry", "parent"}
+        or data["version"] != 1
+        or data["snapshot"] != asdict(snapshot)
+        or not isinstance(data["entry"], dict)
+    ):
+        raise DatabaseRefused("invalid backup deletion journal")
+    entry = data["entry"]
+    with _registry(root):
+        if _migrate._read_json(root, _JOURNAL) != data:
+            raise DatabaseRefused("backup deletion journal changed")
+        inventory = _load_inventory(root, snapshot)
+        if entry not in inventory["entries"]:
+            # A crash after durable inventory commit may leave only the intent.
+            if any(e["path"] == entry.get("path") for e in inventory["entries"]):
+                raise DatabaseRefused("backup deletion registry changed")
+            _migrate._remove_record(root, _JOURNAL)
+            return
+    _delete_registered_file(entry, data["parent"])
     _transition("deleted")
-    inventory["entries"].remove(entry)
-    if inventory["entries"]:
-        _migrate._put_json(root, _INVENTORY, inventory)
-    else:
-        _migrate._remove_record(root, _INVENTORY)
-    _migrate._remove_record(root, _JOURNAL)
+    with _registry(root):
+        if _migrate._read_json(root, _JOURNAL) != data or _load_inventory(root, snapshot) != inventory:
+            raise DatabaseRefused("backup deletion metadata changed")
+        inventory["entries"].remove(entry)
+        if inventory["entries"]:
+            _migrate._put_json(root, _INVENTORY, inventory)
+        else:
+            _migrate._remove_record(root, _INVENTORY)
+        _migrate._remove_record(root, _JOURNAL)
 
 
 def delete_backup(source: Path, *, authority: Authority) -> None:
     """Unregister only after identity-checked deletion has become durable."""
     authority.check()
-    with authority.operation(), _registry(authority.root):
-        _no_pending(authority.root)
-        entry = _find(authority.root, source, authority.snapshot)
-        source = Path(entry["path"])
-        data = {
-            "version": 1,
-            "operation": "delete",
-            "snapshot": asdict(authority.snapshot),
-            "entry": entry,
-            "parent": _migrate._parents(source.parent, source),
-        }
-        _migrate._put_json(authority.root, _JOURNAL, data)
+    with authority.operation():
+        with _registry(authority.root):
+            _no_pending(authority.root)
+            entry = _find(authority.root, source, authority.snapshot)
+            source = Path(entry["path"])
+            data = {
+                "version": 1,
+                "operation": "delete",
+                "snapshot": asdict(authority.snapshot),
+                "entry": entry,
+                "parent": _migrate._parents(source.parent, source),
+            }
+            _migrate._put_json(authority.root, _JOURNAL, data)
         _recover_delete(authority.root, authority.snapshot, data)

@@ -80,9 +80,9 @@ def test_a_starting_reader_waits_for_the_prepared_copy(tmp_path: Path, monkeypat
     prepare = _migrate.prepare
     child: subprocess.Popen[str] | None = None
 
-    def pause(database: _migrate.Database, key: _key.DatabaseKey) -> Path:
+    def pause(database: _migrate.Database, key: _key.DatabaseKey, **kwargs) -> Path:
         nonlocal child
-        copy = prepare(database, key)
+        copy = prepare(database, key, **kwargs)
         child = subprocess.Popen(
             [sys.executable, "-c", _START_READER, str(tmp_path)],
             stdin=subprocess.PIPE,

@@ -165,7 +165,7 @@ def native_root():
     [
         (direction, phase)
         for direction in ("encrypt", "decrypt")
-        for phase in ("prepared", "verified", "armed", "swapped", "complete", "removed")
+        for phase in ("prepared", "reserved", "verified", "armed", "swapped", "complete", "removed")
     ]
     + [("adopt", phase) for phase in ("verified", "armed", "complete")]
     + [("backup", "published")]

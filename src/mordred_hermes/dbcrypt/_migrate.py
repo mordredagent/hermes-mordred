@@ -273,11 +273,14 @@ def wal_reset_vulnerable(version_info: tuple[int, ...]) -> bool:
     )
 
 
-def prepare(database: Database, key: DatabaseKey) -> Path:
+def prepare(database: Database, key: DatabaseKey, *, _reserved_identity: list[int] | None = None) -> Path:
     """Export ``database`` to an encrypted sibling and verify it; return the sibling."""
     sc = _sqlcipher()
     target = Path(f"{database.path}{PREPARED_SUFFIX}")
-    _reserve(target)
+    if _reserved_identity is None:
+        _reserve(target)
+    elif _file_identity(target) != _reserved_identity or target.stat().st_size != 0:
+        raise MigrationError("reserved export staging identity changed")
     with _offline_connection(database.path, target=target, alias="enc") as source:
         source.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
         if source.execute("PRAGMA quick_check").fetchone()[0] != "ok":
@@ -316,11 +319,14 @@ def prepare(database: Database, key: DatabaseKey) -> Path:
     return target
 
 
-def prepare_plain(database: Database, key: DatabaseKey) -> Path:
+def prepare_plain(database: Database, key: DatabaseKey, *, _reserved_identity: list[int] | None = None) -> Path:
     """Export an encrypted ``database`` to a plaintext sibling and verify it; return the sibling."""
     sc = _sqlcipher()
     target = Path(f"{database.path}{PREPARED_SUFFIX}")
-    _reserve(target)
+    if _reserved_identity is None:
+        _reserve(target)
+    elif _file_identity(target) != _reserved_identity or target.stat().st_size != 0:
+        raise MigrationError("reserved export staging identity changed")
     with _offline_connection(database.path, target=target, alias="plain") as source:
         apply_key(source, key)
         source.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
@@ -741,25 +747,57 @@ def _validate_journal(root: Path, data: Any, snapshot: NativeSnapshot | None, le
             raise MigrationError("invalid journal prepared path")
 
 
+def _reserve_journal_staging(root: Path, data: dict[str, Any], entry: dict[str, Any]) -> None:
+    path, staged = root / entry["relative"], root / entry["prepared"]
+    try:
+        identity = _file_identity(staged)
+    except FileNotFoundError:
+        pass
+    else:
+        if entry["prepared_identity"] is None or identity != entry["prepared_identity"]:
+            raise MigrationError("unrecorded staging survivor cannot authorize export")
+        # A crash during export may leave arbitrary partial bytes. Rebuild
+        # only the recorded inode from the unchanged authenticated source.
+        _cleanup_sidecars(staged)
+        if os.name == "nt":
+            with open_private_directory(staged.parent) as directory, directory.transaction() as tx:
+                tx.delete_file(staged.name, expected_identity=tx.stat(staged.name).identity)
+        else:
+            if _file_identity(staged) != identity:
+                raise MigrationError("reserved staging changed before removal")
+            staged.unlink()
+            _sync_directory(staged.parent)
+    _reserve(staged)
+    if os.name != "nt":
+        os.chmod(staged, stat.S_IMODE(path.stat().st_mode))
+    entry["prepared_identity"] = _file_identity(staged)
+    _fsync_file(staged)
+    # Reserve ownership must reach the journal BEFORE any export writes.
+    # A crash before this save leaves an unrecorded inode and refuses.
+    _save_journal(root, data, "reserved")
+
+
 def _complete_preparation(root: Path, data: dict[str, Any], key: DatabaseKey, decrypting: bool) -> None:
     target_key = None if decrypting else key
     # A durable prepare record lists the WHOLE conversion, including files not
     # yet exported. Recovery must never arm only the prefix prepared so far.
     for entry in data["files"]:
-        if entry["prepared_identity"] is None:
+        if entry["phase"] == "prepared":
             path = _bound_path(root, entry["relative"])
             staged = root / entry["prepared"]
             if _file_identity(path) != entry["source_identity"] or _revision(path) != entry["source_revision"]:
                 raise MigrationError("unprepared source identity or contents changed")
             if _schema(path, key if decrypting else None) != entry["verification"]:
                 raise MigrationError("unprepared source schema changed")
-            if not staged.exists():
-                database = Database(path, entry["relative"], "encrypted" if decrypting else "plaintext")
-                (prepare_plain if decrypting else prepare)(database, key)
-            if _schema(staged, target_key) != entry["verification"]:
-                raise MigrationError("unrecorded staged file is not a verified target")
+            _reserve_journal_staging(root, data, entry)
+            database = Database(path, entry["relative"], "encrypted" if decrypting else "plaintext")
+            (prepare_plain if decrypting else prepare)(database, key, _reserved_identity=entry["prepared_identity"])
+            if (
+                _file_identity(staged) != entry["prepared_identity"]
+                or _schema(staged, target_key) != entry["verification"]
+            ):
+                raise MigrationError("reserved staged file is not a verified target")
             _fsync_file(staged)
-            entry["prepared_identity"] = _file_identity(staged)
             entry["source_revision"] = _revision(path)
             entry["phase"] = "verified"
             _save_journal(root, data, "verified")

@@ -139,11 +139,11 @@ def test_a_failure_while_preparing_retains_originals_and_recovery(home: Path, mo
     real = _migrate.prepare
     calls: list[str] = []
 
-    def flaky(database: _migrate.Database, key: _key.DatabaseKey) -> Path:
+    def flaky(database: _migrate.Database, key: _key.DatabaseKey, **kwargs) -> Path:
         calls.append(database.relative)
         if len(calls) == 2:
             raise _migrate.MigrationError("boom")
-        return real(database, key)
+        return real(database, key, **kwargs)
 
     monkeypatch.setattr(_migrate, "prepare", flaky)
     with pytest.raises(_migrate.MigrationError, match="boom"):

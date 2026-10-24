@@ -289,3 +289,195 @@ def test_backup_never_observes_custody_inside_registry_lock(native_root, monkeyp
         _backup.backup_database(root / "state.db", root.parent / (root.name + "-backup.db"), authority=authority)
     finally:
         authority.close()
+
+
+@pytest.mark.parametrize("phase", ["verified", "published"])
+@pytest.mark.parametrize("unknown", [False, True])
+def test_backup_recovery_refuses_live_external_writer(native_root, monkeypatch, phase, unknown):
+    import json
+    import os
+    from pathlib import Path
+
+    import sqlcipher3.dbapi2 as sc
+
+    from mordred_hermes.dbcrypt import _backup, _migrate
+    from mordred_hermes.dbcrypt._key import derive
+    from mordred_hermes.dbcrypt._shim import apply_key
+
+    root, _, key, _ = native_root
+    cipher(root / "state.db", key)
+    destination = root.parent / (root.name + "-writer.backup")
+
+    def crash(point):
+        if point == phase:
+            raise RuntimeError("crash")
+
+    monkeypatch.setattr(_backup, "_transition", crash)
+    authority = Authority.acquire(root)
+    try:
+        with pytest.raises(RuntimeError, match="crash"):
+            _backup.backup_database(root / "state.db", destination, authority=authority)
+    finally:
+        authority.close()
+    journal = root / "mordred/db-backups.journal.json"
+    data = json.loads(journal.read_bytes())
+    candidate = Path(data["prepared"]) if phase == "verified" else destination
+    writer = sc.connect(str(candidate))
+    try:
+        apply_key(writer, derive(key))
+        writer.execute("UPDATE messages SET body='pending external writer'")
+        assert writer.in_transaction
+        sidecar = Path(str(candidate) + "-journal")
+        assert sidecar.exists()
+        paths = (journal, candidate, sidecar)
+        before = {path: path.read_bytes() for path in paths}
+        called = []
+
+        def holders(paths):
+            called.append(paths)
+            assert candidate in paths
+            return None if unknown else [os.getpid()]
+
+        monkeypatch.setattr(_migrate, "holders", holders)
+        monkeypatch.setattr(_backup, "_transition", lambda phase: None)
+        with acquire_exclusive(root) as lease, pytest.raises(DatabaseRefused):
+            _backup.recover_backups(root, lease=lease)
+        assert called and writer.in_transaction
+        assert {path: path.read_bytes() for path in before} == before
+        assert destination.exists() == (phase == "published")
+        assert not (root / "mordred/db-backups.json").exists()
+    finally:
+        writer.rollback()
+        writer.close()
+
+
+_RECIPROCAL_RECOVERY = r"""
+import os, sys, threading, contextlib
+from pathlib import Path
+base, parent, phase = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+os.environ['HERMES_HOME'] = str(base)
+from mordred_hermes.keyvault import kek
+kek._noop_audit = lambda entry: None
+from pytest import MonkeyPatch
+from mordred_hermes._database_lifecycle import acquire_exclusive
+from mordred_hermes.dbcrypt import _backup, _migrate
+from mordred_hermes.dbcrypt._authority import Authority
+from mordred_hermes.keyvault import _memory_key as memory
+from tests.test_dbcrypt_authority import native_root
+from tests.test_dbcrypt_adoption import cipher
+mp = MonkeyPatch()
+roots, backends = [], {}
+for name in ('a', 'b'):
+    root = base / name
+    root.mkdir(mode=0o700)
+    root, backend, key, _ = native_root.__wrapped__(root, mp)
+    roots.append(root)
+    backends[root] = backend
+    cipher(root / 'state.db', key)
+    (root / 'mordred/backup-registry').mkdir(mode=0o700)
+mp.setattr(memory, 'linux_memory_backend', lambda home: backends[home])
+def stop(point):
+    if point == phase:
+        raise RuntimeError('crash')
+mp.setattr(_backup, '_transition', stop)
+real_delete = _backup._recover_delete
+if phase == 'delete':
+    def pause_delete(*args):
+        raise RuntimeError('crash')
+    mp.setattr(_backup, '_recover_delete', pause_delete)
+for root, other in ((roots[0], roots[1]), (roots[1], roots[0])):
+    authority = Authority.acquire(root)
+    try:
+        try:
+            _backup.backup_database(root / 'state.db', other / parent / (root.name + '.backup'), authority=authority)
+            if phase == 'delete':
+                _backup.delete_backup(other / parent / (root.name + '.backup'), authority=authority)
+        except RuntimeError as exc:
+            assert str(exc) == 'crash'
+    finally:
+        authority.close()
+mp.setattr(_backup, '_recover_delete', real_delete)
+mp.setattr(_backup, '_transition', lambda point: None)
+originals = {root: (root / 'state.db').read_bytes() for root in roots}
+mp.setattr(_migrate, 'holders', lambda paths: [])
+barrier = threading.Barrier(2)
+external_barrier = threading.Barrier(2)
+real_registry, real_open = _backup._registry, _backup.open_private_directory
+seen, held, external_seen, errors = set(), {}, set(), []
+@contextlib.contextmanager
+def registry(root):
+    with real_registry(root):
+        held[threading.get_ident()] = root
+        try:
+            if root not in seen:
+                seen.add(root)
+                barrier.wait(timeout=4)
+            yield
+        finally:
+            held.pop(threading.get_ident(), None)
+class Wrapped:
+    def __init__(self, directory, path):
+        self.directory, self.path = directory, path
+    def __getattr__(self, name):
+        return getattr(self.directory, name)
+    @contextlib.contextmanager
+    def transaction(self, *, blocking=True):
+        with self.directory.transaction(blocking=blocking) as tx:
+            # Force simultaneous real opposite metadata locks in preparing
+            # recovery, where old code next writes its own root journal.
+            if parent == 'mordred' and self.path.name == 'mordred':
+                ident = threading.get_ident()
+                if ident not in external_seen:
+                    external_seen.add(ident)
+                    external_barrier.wait(timeout=4)
+            yield tx
+@contextlib.contextmanager
+def opened(path, **kwargs):
+    with real_open(path, **kwargs) as directory:
+        yield Wrapped(directory, path)
+mp.setattr(_backup, '_registry', registry)
+mp.setattr(_backup, 'open_private_directory', opened)
+def recover(root):
+    try:
+        with acquire_exclusive(root) as lease:
+            _backup.recover_backups(root, lease=lease)
+    except BaseException as exc:
+        errors.append(repr(exc))
+threads = [threading.Thread(target=recover, args=(root,), daemon=True) for root in roots]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join(timeout=3)
+if any(thread.is_alive() for thread in threads):
+    print('reciprocal directory locks deadlocked', flush=True)
+    os._exit(92)
+assert not errors, errors
+for root, other in ((roots[0], roots[1]), (roots[1], roots[0])):
+    assert (other / parent / (root.name + '.backup')).exists() == (phase != 'delete')
+    assert (root / 'state.db').read_bytes() == originals[root]
+    assert not (root / 'mordred/db-backups.journal.json').exists()
+    assert (root / 'mordred/db-backups.json').exists() == (phase != 'delete')
+mp.undo()
+"""
+
+
+@pytest.mark.parametrize(
+    "parent,phase",
+    [
+        ("mordred/backup-registry", "pending"),
+        ("mordred/backup-registry", "verified"),
+        ("mordred/backup-registry", "delete"),
+        ("mordred", "pending"),
+    ],
+)
+def test_reciprocal_backup_recovery_has_no_directory_lock_cycle(tmp_path, parent, phase):
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c", _RECIPROCAL_RECOVERY, str(tmp_path), parent, phase],
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

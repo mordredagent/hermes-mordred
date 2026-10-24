@@ -132,7 +132,7 @@ def test_adoption_uncertain_inventory_or_custody_refuses(native_root, monkeypatc
     [
         (direction, phase)
         for direction in ("encrypt", "decrypt")
-        for phase in ("prepared", "verified", "armed", "swapped", "complete", "removed")
+        for phase in ("prepared", "reserved", "verified", "armed", "swapped", "complete", "removed")
     ]
     + [("adopt", phase) for phase in ("verified", "armed", "complete")],
 )
@@ -369,3 +369,59 @@ def test_unbound_macos_vault_adoption_preserves_ciphertext(mac_source, monkeypat
     assert read_marker(root) == Marker(snapshot)
     assert (root / "state.db").read_bytes() == before
     assert sum(op == "ecdh" for op, _ in backend.calls) == 2
+
+
+def test_resume_refuses_unrecorded_stale_ciphertext_without_mutation(native_root, monkeypatch):
+    root, _, key, _ = native_root
+    (root / "mordred/db-encryption.marker").unlink()
+    source = root / "state.db"
+    with sc.connect(str(source)) as conn:
+        conn.execute("CREATE TABLE messages (body TEXT)")
+        conn.execute("INSERT INTO messages VALUES ('current original')")
+    conn.close()
+    source.chmod(0o600)
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
+
+    def crash(phase):
+        if phase == "prepared":
+            raise RuntimeError("crash")
+
+    monkeypatch.setattr(_migrate, "_transition", crash)
+    with pytest.raises(RuntimeError, match="crash"):
+        _migrate.migrate(root, derive(key), arm=lambda root: None)
+    staged = Path(str(source) + _migrate.PREPARED_SUFFIX)
+    cipher(staged, key)  # Same key, schema/count, but unrelated older row values.
+    journal = _migrate.journal_path(root)
+    before = {path: path.read_bytes() for path in (source, staged, journal)}
+    monkeypatch.setattr(_migrate, "_transition", lambda phase: None)
+    with pytest.raises(DatabaseRefused, match="unrecorded"):
+        _migrate.resume(root)
+    assert {path: path.read_bytes() for path in before} == before
+    assert not (root / "mordred/db-encryption.marker").exists()
+
+
+def test_staging_identity_is_durable_before_any_export(native_root, monkeypatch):
+    import json
+
+    root, _, key, _ = native_root
+    (root / "mordred/db-encryption.marker").unlink()
+    path = root / "state.db"
+    with sc.connect(str(path)) as conn:
+        conn.execute("CREATE TABLE messages (body TEXT)")
+    conn.close()
+    path.chmod(0o600)
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
+    prepare = _migrate.prepare
+    seen = []
+
+    def checked(database, key, **kwargs):
+        entry = json.loads(_migrate.journal_path(root).read_bytes())["files"][0]
+        staged = root / entry["prepared"]
+        assert staged.stat().st_size == 0
+        assert entry["prepared_identity"] == _migrate._file_identity(staged)
+        seen.append(True)
+        return prepare(database, key, **kwargs)
+
+    monkeypatch.setattr(_migrate, "prepare", checked)
+    _migrate.migrate(root, derive(key), arm=lambda root: None)
+    assert seen == [True]
