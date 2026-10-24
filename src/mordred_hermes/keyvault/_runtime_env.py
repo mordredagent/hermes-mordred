@@ -132,6 +132,10 @@ def install_vault_env_decrypt(*, environ: MutableMapping[str, str] | None = None
     nothing is injected, even if ``.env`` is still enrolled — the operator has
     restored a plaintext ``.env`` and wants the runtime to use that.
     """
+    from ..dbcrypt._cli import maintenance_process
+
+    if maintenance_process():
+        return 0
     global _INJECTED_INTO_OS_ENVIRON
     if sys.platform != "darwin":
         return 0

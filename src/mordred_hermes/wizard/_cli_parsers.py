@@ -125,12 +125,15 @@ def _add_uninstall(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
 def _add_databases(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("databases", help="Encrypt Hermes's SQLite databases (state.db and its siblings) with SQLCipher")
     dsub = p.add_subparsers(dest="databases_command", required=True, metavar="COMMAND")
-    dsub.add_parser("status", help="Show whether each Hermes database is encrypted").set_defaults(
+    dsub.add_parser("status", help="Show passive database configuration and capability").set_defaults(
+        func=_handle_databases
+    )
+    dsub.add_parser("diagnose", help="Authenticate existing database authority explicitly").set_defaults(
         func=_handle_databases
     )
     p_encrypt = dsub.add_parser(
         "encrypt",
-        help="Encrypt every Hermes database now (or at the next Hermes start if Hermes has them open)",
+        help="Encrypt every Hermes database offline; stop Hermes first",
     )
     p_encrypt.add_argument("--dry-run", action="store_true", help="List what would be encrypted; change nothing")
     p_encrypt.set_defaults(func=_handle_databases)

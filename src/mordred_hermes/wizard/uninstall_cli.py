@@ -532,29 +532,39 @@ def _restore_all(ctx: UninstallContext, restores: list[Restore], flow_session: F
         "memory": memory_cli.disable,
         "env": env_decrypt_cli.disable,
     }
-    with contextlib.nullcontext(flow_session) if flow_session is not None else FlowSession() as flow:
-        needed = any(r.needs_vault for r in restores)
-        vault_open = _open_vault_for_flow(ctx, flow, needed=needed) if restores else False
+    # Database restoration owns native EX authentication before any borrowed
+    # vault opening. A successful decrypt is not authorization to strip keys.
+    remaining = []
+    for restore in restores:
+        if restore.target == "databases":
+            print("Restoring databases ...")
+            _uninstall_databases.restore(ctx, flow_session)
+        else:
+            remaining.append(restore)
+    with contextlib.ExitStack() as stack:
+        if any(restore.target == "memory" for restore in remaining):
+            from ..keyvault._database_mutation import database_key_mutation
+
+            stack.enter_context(database_key_mutation(root=ctx.home, generation=None))
+        flow = flow_session if flow_session is not None else stack.enter_context(FlowSession())
+        needed = any(r.needs_vault for r in remaining)
+        vault_open = _open_vault_for_flow(ctx, flow, needed=needed) if remaining else False
         if not vault_open and needed:
-            targets = ", ".join(r.target for r in restores if r.needs_vault)
+            targets = ", ".join(r.target for r in remaining if r.needs_vault)
             _term.emit_error(
                 f"uninstall stopped: the vault could not be opened, and restoring {targets} requires it. "
                 "Nothing was removed. Fix vault access (see the message above) and re-run."
             )
             return 1
-        for restore in restores:
+        for restore in remaining:
             print(f"Restoring {restore.target} ...")
-            if restore.target == "databases":
-                _uninstall_databases.restore(ctx, flow)
-                rc = 0
-            else:
-                rc = engines[restore.target](
-                    home=ctx.home, root=ctx.vault_root, backend=ctx.backend, store=ctx.store, flow_session=flow
-                )
+            rc = engines[restore.target](
+                home=ctx.home, root=ctx.vault_root, backend=ctx.backend, store=ctx.store, flow_session=flow
+            )
             if rc != 0:
                 _term.emit_error(
                     f"uninstall stopped: {restore.target} could not be restored to plaintext (see above). "
-                    "Nothing was removed and Mordred stays installed, so Hermes keeps working. "
+                    "Mordred and its native sources remain installed. "
                     f"Fix the cause, then re-run `hermes-mordred uninstall` (or `encryption disable {restore.target}`)."
                 )
                 return 1
@@ -606,13 +616,12 @@ def _remove_helpers(
     if opts.remove_helper or opts.purge_data:
         for helper in plan.helpers:
             if helper.mordred_built:
-                if ctx.platform != "win32":
-                    from .._database_contracts import DatabaseRefused
-                    from ..keyvault._database_mutation import assert_database_helper_removal_safe
+                from .._database_contracts import DatabaseRefused
+                from ..keyvault._database_mutation import assert_database_helper_removal_safe
 
-                    if lease is None:
-                        raise DatabaseRefused("helper removal requires preceding database exclusion")
-                    assert_database_helper_removal_safe(ctx.home, lease)
+                if lease is None:
+                    raise DatabaseRefused("helper removal requires preceding database exclusion")
+                assert_database_helper_removal_safe(ctx.home, lease)
                 if helper.path.name == "mordred-hermes-winkey.exe":
                     from ._windows_install import remove_owned
 
@@ -661,6 +670,9 @@ def _delete_vault_keys(ctx: UninstallContext, flow: FlowSession, lease: Exclusiv
         owner = opened._native_delete_owner(backend)
         vault._guard_vault_source_change(opened._root, lease)
         with _owned_delete_scope(owner, backend=backend, database_lease=lease) as permit:
+            from .memory_cli import _warn_external_backups
+
+            _warn_external_backups()
             backend.delete_enclave_key(opened._key_id, deletion=permit)
         store.delete(opened._label)
         shutil.rmtree(opened._root)
@@ -811,7 +823,7 @@ def _execute(ctx: UninstallContext, plan: UninstallPlan, opts: UninstallOptions)
         return _execute_with_flow(ctx, plan, opts, flow, stack)
 
 
-def _execute_with_flow(  # noqa: C901 - ordered teardown retains explicit stop points
+def _execute_with_flow(
     ctx: UninstallContext,
     plan: UninstallPlan,
     opts: UninstallOptions,
@@ -835,14 +847,13 @@ def _execute_with_flow(  # noqa: C901 - ordered teardown retains explicit stop p
     )
     if rc != 0:
         return 1
-    lease = None
-    if not windows and (opts.purge_data or (opts.remove_helper and any(h.mordred_built for h in plan.helpers))):
-        from ..keyvault._database_mutation import assert_database_helper_removal_safe, database_key_mutation
+    # Every package/helper teardown follows a fresh all-generation guard.
+    from ..keyvault._database_mutation import assert_database_helper_removal_safe, database_key_mutation
 
-        lease = stack.enter_context(database_key_mutation(root=ctx.home, generation=None))
-        assert_database_helper_removal_safe(ctx.home, lease)
-        if opts.purge_data and _purge_sources(ctx, plan, flow, lease) != 0:
-            return 1
+    lease = stack.enter_context(database_key_mutation(root=ctx.home, generation=None))
+    assert_database_helper_removal_safe(ctx.home, lease)
+    if not windows and opts.purge_data and _purge_sources(ctx, plan, flow, lease) != 0:
+        return 1
     if _clean_hermes_files(ctx, plan) != 0:
         return 1
     _remove_launchers(plan)
@@ -857,6 +868,9 @@ def _execute_with_flow(  # noqa: C901 - ordered teardown retains explicit stop p
     # printed afterwards is formatted now, before its files disappear.
     farewell = _uninstall_windows.kept_lines(plan) if windows else _render_kept(plan, purged=opts.purge_data)
     env = plan.hermes_env
+    # Recheck at the actual last removal, including Windows and package-only
+    # uninstall. Earlier preflights cannot authorize later dependencies.
+    assert_database_helper_removal_safe(ctx.home, lease)
     ok, output = uninstall_packages(env, runner=ctx.runner)
     if output:
         print(output)
@@ -896,7 +910,7 @@ def run_uninstall(ctx: UninstallContext, opts: UninstallOptions) -> int:
         print("Uninstall cancelled; nothing was changed.")
         return 1
     planned_databases = any(r.target == "databases" for r in plan.restores)
-    if ctx.platform == "darwin" or (planned_databases and ctx.platform != "win32"):
+    if ctx.home.exists() and ctx.platform != "win32":
         try:
             # Confirmation happens without a lease. Always take custody now:
             # another process may have enabled encryption after the plan.

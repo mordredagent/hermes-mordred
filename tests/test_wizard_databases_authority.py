@@ -13,22 +13,30 @@ from tests.test_dbcrypt_authority import native_root as native_root
 
 @pytest.mark.parametrize("command", ["encrypt", "decrypt"])
 @pytest.mark.parametrize("dry_run", [False, True])
-def test_native_offline_commands_refuse_before_key_or_mutation(native_root, monkeypatch, capsys, command, dry_run):
+def test_native_offline_commands_use_ex_without_runtime_provider(native_root, monkeypatch, capsys, command, dry_run):
+    from mordred_hermes import dbcrypt
+    from mordred_hermes._database_lifecycle import current_thread_exclusive_leases
+    from mordred_hermes.dbcrypt import _migrate
+    from mordred_hermes.dbcrypt._capability import DatabaseStatus
     from mordred_hermes.wizard import databases_cli
 
     root, backend, _, _ = native_root
-    (root / "state.db").write_bytes(b"retained database bytes")
-    (root / "mordred/db-encryption.pending").write_bytes(b"retained pending bytes")
     before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
-    monkeypatch.setattr(databases_cli, "_preflight", lambda: None)
+    monkeypatch.setattr(dbcrypt, "database_status", lambda home: DatabaseStatus(True, 1, "unknown", False, None))
+    monkeypatch.setattr(KeyProvider, "__call__", lambda self: pytest.fail("offline command consumed runtime SH key"))
+    calls = []
 
-    def forbidden(self):
-        pytest.fail("legacy offline command consumed a runtime-native bare key")
+    def convert(home, key, **kwargs):
+        assert home == root and key is None
+        leases = current_thread_exclusive_leases()
+        assert len(leases) == 1
+        leases[0].assert_held(root)
+        calls.append(command)
+        return _migrate.Report()
 
-    monkeypatch.setattr(KeyProvider, "__call__", forbidden)
-    operation = getattr(databases_cli, "databases_" + command)
-    assert operation(home=root, dry_run=dry_run) == 1
-    assert "offline" in capsys.readouterr().err.lower()
+    monkeypatch.setattr(_migrate, "migrate" if command == "encrypt" else "decrypt_all", convert)
+    assert getattr(databases_cli, "databases_" + command)(home=root, dry_run=dry_run) == 0
+    assert calls == ([] if dry_run else [command])
     assert backend.calls == []
     assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
 

@@ -153,9 +153,9 @@ def test_enabling_an_empty_home_waits_for_existing_runtimes(tmp_path: Path, monk
     assert dbcrypt.install(home=tmp_path) is False
     key = _key.derive(bytes(range(32)))
     monkeypatch.setattr(_key, "KeyProvider", lambda: lambda: key)
-    assert databases_cli.databases_encrypt(home=tmp_path) == 0
+    assert databases_cli.databases_encrypt(home=tmp_path) == 1
     assert not dbcrypt.marker_path(tmp_path).exists()
-    assert _migrate.pending_path(tmp_path).exists()
+    assert not _migrate.pending_path(tmp_path).exists()
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork lifetime")
@@ -312,13 +312,12 @@ if sys.argv[3] == 'True':
     else:
         raise AssertionError('encrypted home was admitted on unsupported platform')
     assert any(f.code == 'unsupported_platform' for f in _monitor.check(home))
-    assert databases_cli.databases_status(home=home) == 1
+    assert databases_cli.databases_status(home=home) == 0
 else:
     assert dbcrypt.install(home=home) is False
     assert _monitor.check(home) == []
-    # Offline classification requires the owning SQLCipher driver; absence
-    # reports failure even when the unarmed home has ordinary SQLite bytes.
-    assert databases_cli.databases_status(home=home) == 1
+    # Passive status projects unavailable capability without SQL or native auth.
+    assert databases_cli.databases_status(home=home) == 0
 assert databases_cli.databases_encrypt(home=home) == 1
 assert databases_cli.databases_decrypt(home=home) == 1
 """
@@ -330,7 +329,7 @@ assert databases_cli.databases_decrypt(home=home) == 1
         timeout=15,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "unsupported" in result.stdout.lower()
+    assert "capability: unavailable" in result.stdout.lower()
     assert path.read_bytes() == before
 
 

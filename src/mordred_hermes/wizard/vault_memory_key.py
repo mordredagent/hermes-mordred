@@ -189,6 +189,27 @@ def ensure_memory_key(
     store: AnchorStore | None = None,
     flow_session: FlowSession | None = None,
 ) -> tuple[int, str | None]:
+    if not rotate:
+        return _ensure_memory_key(root=root, backend=backend, store=store, flow_session=flow_session)
+    from ..keyvault._database_mutation import database_key_mutation
+    from ..keyvault._identity import _vault_database_home
+
+    try:
+        with database_key_mutation(root=_vault_database_home(root), generation=None):
+            return _ensure_memory_key(root=root, rotate=True, backend=backend, store=store, flow_session=flow_session)
+    except (OSError, RuntimeError, ValueError) as exc:
+        _term.emit_error(f"cannot rotate native memory key: {exc}")
+        return 1, None
+
+
+def _ensure_memory_key(
+    *,
+    root: Path,
+    rotate: bool = False,
+    backend: NativeBackend | None = None,
+    store: AnchorStore | None = None,
+    flow_session: FlowSession | None = None,
+) -> tuple[int, str | None]:
     """Ensure the vault ``.env`` carries a usable ``HERMES_MEMORY_KEY``, and report it.
 
     Returns ``(exit_code, key_value)`` — the value is the effective key the
@@ -285,6 +306,10 @@ def ensure_memory_key(
         try:
             plaintext = new_text.encode("utf-8")
             with _source_change_lease(root, opened, ".env", plaintext) as lease:
+                if orphan_risk:
+                    from .memory_cli import _warn_external_backups
+
+                    _warn_external_backups()
                 opened.enroll_file(".env", plaintext, database_lease=lease)
             generation = opened.generation
         except (DatabaseRefused, vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:

@@ -42,6 +42,8 @@ from __future__ import annotations
 import io
 import os
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from ..keyvault._memory_hook import _write_private, memory_marker_path, memory_optout_marker_path
@@ -605,17 +607,34 @@ def disable(
     flow_session: FlowSession | None = None,
     platform: str | None = None,
 ) -> int:
-    from ..keyvault._memory_key import MemoryKeyError, memory_key_lock, memory_key_path
-
     if _windows_memory.routed(platform):
         return _windows_memory.disable(home=home)
-    if sys.platform == "linux" or memory_key_path(home).exists() or memory_key_path(home).is_symlink():
-        try:
-            with memory_key_lock(home):
-                return _disable(home=home, root=root, backend=backend, store=store, flow_session=flow_session)
-        except MemoryKeyError:
-            return _refuse("disable", "TPM memory lifecycle lock unavailable; existing state preserved")
-    return _disable(home=home, root=root, backend=backend, store=store, flow_session=flow_session)
+    from ..keyvault._memory_key import memory_key_lock, memory_key_path
+
+    try:
+        with _disable_database_guard(home):
+            if sys.platform == "linux" or memory_key_path(home).exists() or memory_key_path(home).is_symlink():
+                with memory_key_lock(home):
+                    return _disable(home=home, root=root, backend=backend, store=store, flow_session=flow_session)
+            return _disable(home=home, root=root, backend=backend, store=store, flow_session=flow_session)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return _refuse("disable", f"memory/database lifecycle refused: {exc}; existing state preserved")
+
+
+@contextmanager
+def _disable_database_guard(home: Path) -> Iterator[None]:
+    """Root disable precedes custody; reversible child disable keeps its key."""
+    from ..keyvault._database_authority import resolve_database_domain
+    from ..keyvault._database_mutation import database_key_mutation
+
+    domain = resolve_database_domain(home)
+    if domain.root == home.absolute():
+        with database_key_mutation(root=domain.root, generation=None):
+            yield
+    else:
+        # resolve_database_domain checked the actual root/profile relation.
+        # No root authority changes in reversible child memory disable.
+        yield
 
 
 def _disable(
@@ -693,7 +712,31 @@ def _disable(
     return 0
 
 
-def purge(  # noqa: C901 - platform lifecycle branches retain explicit stop points
+def _warn_external_backups() -> None:
+    _term.emit_warn(
+        "Deleting or replacing the native source may make external/offline encrypted backups "
+        "unrecoverable; their absence is not proven."
+    )
+
+
+def purge(
+    *,
+    home: Path,
+    root: Path,
+    backend: NativeBackend | None = None,
+    store: AnchorStore | None = None,
+    platform: str | None = None,
+) -> int:
+    from ..keyvault._database_mutation import database_key_mutation
+
+    try:
+        with database_key_mutation(root=home, generation=None):
+            return _purge(home=home, root=root, backend=backend, store=store, platform=platform)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return _refuse("purge", f"memory/database lifecycle refused: {exc}; existing source retained")
+
+
+def _purge(  # noqa: C901, PLR0912 - platform lifecycle branches retain explicit stop points
     *,
     home: Path,
     root: Path,
@@ -721,6 +764,8 @@ def purge(  # noqa: C901 - platform lifecycle branches retain explicit stop poin
                 rc = disable(home=home, root=root, backend=backend, store=store)
                 if rc != 0 or _sealed_memory_files(home):
                     return _refuse("purge", "sealed memory remains; stop running gateways before retrying")
+                if memory_key_path(home).exists() or memory_key_path(home).is_symlink():
+                    _warn_external_backups()
                 delete_linux_memory_key(home=home, backend=backend, database_lease=database_lease)
                 memory_marker_path(home).unlink(missing_ok=True)
                 memory_optout_marker_path(home).unlink(missing_ok=True)
@@ -741,8 +786,11 @@ def purge(  # noqa: C901 - platform lifecycle branches retain explicit stop poin
                 if opened is None:
                     return 1
                 plaintext = None
+                source_changed = False
                 if ".env" in opened.list_files():
-                    plaintext = _strip_memory_key(opened.read_file(".env").decode("utf-8")).encode("utf-8")
+                    previous = opened.read_file(".env")
+                    plaintext = _strip_memory_key(previous.decode("utf-8")).encode("utf-8")
+                    source_changed = plaintext != previous
                 with _source_change_lease(root, opened, ".env", plaintext) as lease:
                     rc = disable(home=home, root=root, backend=backend, store=store, flow_session=flow)
                     if rc != 0:
@@ -751,6 +799,8 @@ def purge(  # noqa: C901 - platform lifecycle branches retain explicit stop poin
                         )
                         return rc
                     if plaintext is not None:
+                        if source_changed:
+                            _warn_external_backups()
                         opened.enroll_file(".env", plaintext, database_lease=lease)
             else:
                 rc = disable(home=home, root=root, backend=backend, store=store, flow_session=flow)

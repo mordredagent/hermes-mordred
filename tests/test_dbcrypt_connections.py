@@ -670,6 +670,8 @@ def test_first_install_refuses_provider_from_another_home(native_root, monkeypat
         supplied = root / "other-home"
         supplied.mkdir(mode=0o700)
         memory.ensure_linux_memory_key(home=supplied, backend=backend)
+        (supplied / "mordred/memory-vault.marker").write_bytes(b"memory-encryption enabled\n")
+        (supplied / "mordred/memory-vault.marker").chmod(0o600)
         with acquire_exclusive(supplied) as lease:
             snapshot = custody.enroll_database_source(root=supplied, lease=lease)
         put(supplied, encoded(snapshot))

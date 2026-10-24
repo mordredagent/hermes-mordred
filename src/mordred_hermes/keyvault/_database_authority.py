@@ -272,6 +272,28 @@ def load_database_source(*, root: Path, expected: NativeSnapshot) -> bytes:
         return material
 
 
+def require_database_memory_enabled(*, root: Path) -> None:
+    """Checked root opt-in prerequisite; never create custody or enrollment."""
+    with _refusal():
+        root, _ = _root(root)
+        with open_private_directory(root / "mordred") as directory:
+            try:
+                marker = directory.read_bytes("memory-vault.marker", max_bytes=4096)
+            except PrivateFSError as exc:
+                if exc.reason != "missing":
+                    raise
+                raise DatabaseRefused("root native memory must be explicitly enabled first") from None
+            try:
+                directory.stat("memory-vault.optout")
+            except PrivateFSError as exc:
+                if exc.reason != "missing":
+                    raise
+            else:
+                raise DatabaseRefused("root native memory must be explicitly enabled first")
+            if marker != b"memory-encryption enabled\n":
+                raise DatabaseRefused("root native memory enabled marker is invalid")
+
+
 def enroll_database_source(*, root: Path, lease: ExclusiveLease) -> NativeSnapshot:
     """Authenticate existing native custody under preceding exclusive authority."""
     with _refusal():
@@ -293,6 +315,8 @@ def enroll_database_source(*, root: Path, lease: ExclusiveLease) -> NativeSnapsh
                     raise
                 raw = None
         existing = None if raw is None else _binding(raw, identity, provider, digest)
+        if existing is None:
+            require_database_memory_enabled(root=root)
         _key(_load_posix(root, identity, digest))
         if _posix_record(root, identity) != (provider, digest):
             raise DatabaseRefused("database source changed during enrollment")
@@ -309,6 +333,7 @@ def enroll_database_source(*, root: Path, lease: ExclusiveLease) -> NativeSnapsh
             "generation": result.generation,
             "record_sha256": digest,
         }
+        require_database_memory_enabled(root=root)
         with open_private_directory(root / "mordred") as directory, directory.transaction() as tx:
             lease.assert_held(root)
             tx.create_bytes(_BINDING, _json(data))

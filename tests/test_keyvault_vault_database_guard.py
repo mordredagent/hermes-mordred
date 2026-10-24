@@ -215,6 +215,8 @@ def enrolled_source(source, monkeypatch):
         monkeypatch.setattr(
             authority, "_load_posix", lambda root, identity, digest: effective_memory_key(opened.read_file(".env"))
         )
+        (home / "mordred/memory-vault.marker").write_bytes(b"memory-encryption enabled\n")
+        (home / "mordred/memory-vault.marker").chmod(0o600)
         snapshot = authority.enroll_database_source(root=home, lease=lease)
     return (*source, authority, snapshot)
 

@@ -977,7 +977,7 @@ def resume(
 
 def _convert(
     home: Path,
-    key: DatabaseKey,
+    key: DatabaseKey | None,
     *,
     decrypting: bool,
     arm: Callable[[Path], None] | None = None,
@@ -1033,7 +1033,7 @@ def _convert(
 
 def migrate(
     home: Path,
-    key: DatabaseKey,
+    key: DatabaseKey | None,
     *,
     arm: Callable[[Path], None],
     holders_of: Callable[[list[Path]], list[int] | None] | None = None,
@@ -1043,7 +1043,7 @@ def migrate(
 
 def decrypt_all(
     home: Path,
-    key: DatabaseKey,
+    key: DatabaseKey | None,
     *,
     disarm: Callable[[Path], None] = _disarm,
     holders_of: Callable[[list[Path]], list[int] | None] | None = None,

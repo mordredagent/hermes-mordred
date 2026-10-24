@@ -282,6 +282,8 @@ def test_valid_source_only_binding_survives_reset_after_source_is_lost(tmp_path,
     monkeypatch.setattr(authority.sys, "platform", "linux")
     monkeypatch.setattr(memory, "linux_memory_backend", lambda home: memory_backend)
     memory.ensure_linux_memory_key(home=tmp_path, backend=memory_backend)
+    (tmp_path / "mordred/memory-vault.marker").write_bytes(b"memory-encryption enabled\n")
+    (tmp_path / "mordred/memory-vault.marker").chmod(0o600)
     with acquire_exclusive(tmp_path) as lease:
         authority.enroll_database_source(root=tmp_path, lease=lease)
     source = tmp_path / "mordred/db-key-source.json"

@@ -19,9 +19,9 @@
   thread under one run and commits it; any failure fails the run (nothing published).
 - ``--preview-labels N`` prints up to N conversation labels and part head lines (names
   and subjects, escaped; never bodies). It is refused together with ``--json``.
-- ``mail status`` prints mail row and run counts and the NUMBER of recorded own
-  addresses per account label — never the addresses — and the IMAP sync state
-  (account label, path, last fetch, cursor positions).
+- ``mail status`` reports passive database capability and checked IMAP metadata.
+  Record/run/account counts, fetch history and cursor positions remain unknown;
+  status never opens SQL, enrolls a schema or authenticates native authority.
 - A real import holds the per-home mail writer lock that ``mail fetch`` uses, so a
   fetch never marks a running import's run as crashed (``sync_in_progress``).
 
@@ -477,20 +477,26 @@ def _imap_flags() -> Mapping[str, Any] | None:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    from ..imports.mail import mail_store_status
+    from dataclasses import asdict
+
+    from ..dbcrypt import database_status
     from .mail_sync_cli import imap_status, print_imap_status
 
-    try:
-        store = _open_store(_home())
-        report = mail_store_status(store)
-        report["imap"] = imap_status(store, _imap_flags())
-    except Exception as exc:
-        return _refused(_code(exc))
+    imap = imap_status(None, _imap_flags())
+    report = {
+        "database": asdict(database_status(_home())),
+        "mail": None,
+        "runs": None,
+        "last_run": None,
+        "accounts": None,
+        "imap": imap,
+    }
     if getattr(args, "json", False):
         print(json.dumps(report, sort_keys=True))
     else:
-        _print_status(report)
-        print_imap_status(report["imap"])
+        print("Mordred mail import")
+        print("  records, runs, accounts and cursors: unknown (passive status; no database authentication)")
+        print_imap_status(imap)
     return 0
 
 
@@ -581,7 +587,9 @@ def add_parsers(msub: Any, handler: Callable[[argparse.Namespace], int]) -> None
         help="Also print up to N conversation labels and head lines (names and subjects; never bodies)",
     )
     p.set_defaults(func=handler)
-    p_status = msub.add_parser("status", help="Show mail row and run counts and own-address counts (no content)")
+    p_status = msub.add_parser(
+        "status", help="Show passive mail configuration and database capability (no authentication)"
+    )
     p_status.add_argument("--json", action="store_true", help="Print one JSON object")
     p_status.set_defaults(func=handler)
     from .mail_sync_cli import add_parsers as add_sync_parsers

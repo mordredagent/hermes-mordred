@@ -905,7 +905,7 @@ desktop     install | uninstall | status
 egress      status | set | block | unblock | block-tool | unblock-tool |
             taint
 direct-tools  on | off | status
-databases   status | encrypt | decrypt
+databases   status | diagnose | encrypt | decrypt
 telegram    setup | doctor | login | sync | status | logout | venice |
             local-llm | migrate-tee | migrate-store
 mail        import | status | setup | fetch | forget
@@ -913,6 +913,20 @@ activity    status | use | tools | pair-operator | peers | correct |
             backup | restore | retention
 uninstall
 ```
+
+`databases status` reports configured intent, capability, dependency count (or
+unknown), and authentication **not checked**, without SQL, native authentication,
+or writes. `databases diagnose` explicitly authenticates existing authority and
+exits nonzero on refusal; its result applies only to that invocation. `mail status`
+also remains passive: record, run, account and cursor counts are unknown.
+`databases encrypt` requires root native memory to have been explicitly enabled
+first and uses offline exclusive custody; busy maintenance refuses without
+scheduling. Decryption retains source and backup evidence. Uninstall and native
+key teardown recheck all generations and refuse while database dependencies
+remain, including plaintext files after restoration. External/offline encrypted
+backups may become unrecoverable after an explicit destructive source operation;
+their absence is never proven. Platform activation still requires native
+qualification; a platform name or marker alone does not admit storage.
 
 `hermes-mordred --version` and the registered Hermes-host compatibility alias
 print the invoked command name and the Mordred package version, then exit successfully.
@@ -3332,15 +3346,16 @@ retained secret store or file vault, and the `<home>\mordred` and
 recursive removal yet. The plan lists exactly that. `--erase-encrypted`
 refuses on Windows, including `--dry-run`.
 
-Database encryption remains macOS-only. Windows `databases status` observes
-only known protection-state names through bounded, nonblocking checked
-storage; it never discovers databases or promises a scheduled conversion.
-Retained encryption/decryption markers, pending work or a conversion journal
-require reconciliation on macOS. Windows uninstall reports that refusal in
-its plan and stops before memory disable, custody purge or any teardown. It
-checks both a profile home and its owning root, and rechecks after confirmation.
-Unknown or unsafe storage refuses instead of reporting absence. This adds no
-Windows SQLCipher migration or decryption support.
+Native database activation remains qualified separately; Windows VFS
+qualification is incomplete. Windows `databases status` uses the passive
+capability API to project intent, bounded dependency facts and reasons without
+SQL, native authentication or writes. Markers and driver presence do not prove
+usable authority, and no conversion is promised for the next startup. Retained
+protection state blocks Windows uninstall before memory disable, custody purge
+or teardown while restoration is unavailable. Checked root/profile relationships
+and all-generation mutation guards apply again at the actual owning boundaries.
+Unknown or unsafe storage never proves absence. This adds no Windows SQLCipher
+activation or native qualification.
 
 Purge ordering on Windows uninstall: purge requires an explicit disable (the
 opt-out marker) and no seal, broken seal or staging entry. With `--purge-data`
@@ -5364,9 +5379,10 @@ in `import_accounts`. Fixtures use RFC 2606 domains only.
   recorded ones and only accumulate (no command removes a stored address yet);
   `mail import --dry-run` never opens the store; `--preview-labels` cannot be
   combined with `--json`; the audit event `mail.import` is written once per real
-  run, with decision `committed` or `failed`, counts only; `mail status` prints
-  row and run counts and the number of recorded own addresses per account
-  label, never the addresses, and exits 1 with the gate code when refused.
+  run, with decision `committed` or `failed`, counts only; `mail status` projects
+  checked metadata and passive database capability without SQL or authentication.
+  Record/run/account counts remain unknown; unavailable capability is reported
+  without turning observation into an authenticated readiness claim.
 
 ### IMAP sync (2026-10-22)
 
@@ -5632,10 +5648,11 @@ LABEL`); forget never reports success while a sealed or flags file remains
 (`credentials_left`, exit 1), and an Enclave key it could not delete is
 `key_left` (exit 1, also on a retry that finds no credential file left;
 running forget again deletes it).
-`mail status` adds the account label, the path and scope, the last
-attempt (JSON key `last_fetch`) and the last success (`last_success`), and the
-cursor positions, as an explicit projection: every field is type-checked and
-anything else in the flags or the store is dropped. Credentials without their
+`mail status` projects only checked account metadata, path and scope. The last
+attempt (JSON key `last_fetch`), last success (`last_success`) and cursor
+positions stay unknown without an authenticated foreground read; status never
+opens the store. Every metadata field is type-checked and unknown fields are
+dropped. Credentials without their
 metadata show as `{"configured": false, "residue": "credentials_left"}`.
 
 Hermes tool `mordred_mail_sync` (toolset `mordred_telegram`, beside

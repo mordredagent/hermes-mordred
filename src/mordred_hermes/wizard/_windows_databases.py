@@ -49,7 +49,7 @@ def refusal(home: Path) -> str | None:
         )
     if retained:
         return (
-            "this home retains database protection state, which Windows cannot restore; "
-            "decrypt or reconcile the home on macOS before using or uninstalling Mordred here"
+            "this home retains database protection state; native Windows VFS qualification is incomplete; "
+            "retain the native key/helper and reconcile the database state on its qualified original runtime"
         )
     return None

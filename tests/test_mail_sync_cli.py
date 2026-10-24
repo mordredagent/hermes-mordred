@@ -29,6 +29,7 @@ from tests._mail_sync_helpers import (
     rows,
 )
 from tests.test_mail_secrets import FakeEnclave, sealed_store
+from tests.test_windows_custody import fs as fs
 
 
 @pytest.fixture
@@ -179,7 +180,7 @@ def test_setup_with_a_wrong_password_seals_nothing(
 def test_setup_refuses_other_platforms(
     setup_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(mail_sync_cli, "_platform", lambda: "linux")
+    monkeypatch.setattr(mail_sync_cli, "_platform", lambda: "freebsd")
     code, _out, err = run(["mail", "setup"], capsys)
     assert code == 1 and "unsupported_platform" in err and setup_env["prompts"] == []
 
@@ -510,13 +511,13 @@ def test_status_shows_the_imap_state_but_never_the_address(
     monkeypatch.setattr(mail_cli, "_imap_flags", lambda: fetch_env["secrets"].flags())
     code, out, err = run(["mail", "status"], capsys)
     assert code == 0, err
-    assert "imap sync: account mail (Gmail All Mail" in out and "all: uid 4" in out and "last fetch:" in out
+    assert "imap sync: account mail (Gmail All Mail" in out and "cursors: unknown (passive status)" in out
     assert "@" not in out
     code, out, _err = run(["mail", "status", "--json"], capsys)
     imap = json.loads(out)["imap"]
     assert (imap["account"], imap["gmail"], imap["scope"]) == ("mail", True, ["all"])
-    assert imap["cursors"]["all"]["forward"]["uid"] == 4
-    assert imap["last_fetch"]["error"] is None
+    assert imap["cursors"] is None
+    assert imap["last_fetch"] is None
     assert "@" not in out
 
 
@@ -543,11 +544,11 @@ def test_status_projects_only_checked_fields(
         "scope": ["all"],
         "touch_id": False,
         "last_fetch": None,  # its error was not a code: the attempt is void
-        "last_success": {"at": 4},
-        "cursors": {"all": {"forward": {"low": 3}}},
+        "last_success": None,
+        "cursors": None,
     }
     code, out, _err = run(["mail", "status"], capsys)
-    assert "last fetch: never" in out and "last successful fetch: 19" in out
+    assert "cursors: unknown (passive status)" in out
 
 
 def test_status_reports_credentials_left_by_a_crash(
@@ -1042,3 +1043,42 @@ def test_status_and_forget_handle_staged_leftovers(
 class _NoKeyBackend:
     def delete_enclave_key(self, _key_id: str) -> None:
         return None
+
+
+def test_windows_setup_presence_refuses_before_prompt_or_discovery(setup_env, monkeypatch, capsys):
+    monkeypatch.setattr(mail_sync_cli, "_platform", lambda: "win32")
+    monkeypatch.setattr(
+        mail_sync_cli, "_secret_store", lambda: pytest.fail("presence refusal discovered native custody")
+    )
+    code, _, err = run(["mail", "setup"], capsys)
+    assert code == 1 and "presence_unsupported" in err and setup_env["prompts"] == []
+
+
+@pytest.mark.usefixtures("fs")
+def test_windows_setup_checks_actual_mail_backend_before_prompts(fs, monkeypatch, capsys):
+    from mordred_hermes.imports.mail.secrets import MailSecretStore
+    from mordred_hermes.keyvault._windows_profile import CustodyError
+
+    custody, _, home, _ = fs
+
+    def unavailable():
+        raise CustodyError("native helper unavailable")
+
+    monkeypatch.setattr(custody, "windows_backend", unavailable)
+    monkeypatch.setattr(mail_sync_cli, "_home", lambda: home)
+    monkeypatch.setattr(mail_sync_cli, "_platform", lambda: "win32")
+    monkeypatch.setattr(mail_sync_cli, "_isatty", lambda: True)
+    monkeypatch.setattr(mail_sync_cli, "_input", lambda *a: pytest.fail("prompt before native mail capability"))
+    secret_store = MailSecretStore(home / "mordred/mail", platform=lambda: "win32", audit_sink=lambda e: None)
+    monkeypatch.setattr(mail_sync_cli, "_secret_store", lambda: secret_store)
+    code, _, err = run(["mail", "setup", "--no-touch-id"], capsys)
+    assert code == 1 and "tee_unavailable" in err
+
+
+def test_linux_setup_uses_native_capability_instead_of_os_gate(setup_env, monkeypatch, capsys):
+    monkeypatch.setattr(mail_sync_cli, "_platform", lambda: "linux")
+    use_server(monkeypatch, gmail_server())
+    setup_env["answers"].extend(["owner@example.com", ""])
+    code, out, err = run(["mail", "setup", "--imap-host", "imap.example.com", "--no-touch-id"], capsys)
+    assert code == 0, err
+    assert "native key" in out

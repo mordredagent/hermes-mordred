@@ -309,7 +309,11 @@ def test_encrypt_with_another_key_does_not_claim_everything_is_encrypted(
     _migrate.migrate(home, KEY, arm=dbcrypt.arm, holders_of=_no_holders)
     wrong = _key.derive(bytes(32))
     monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setattr(_key, "KeyProvider", lambda: lambda: wrong)
+    (home / "mordred/memory-vault.marker").write_bytes(b"memory-encryption enabled\n")
+    (home / "mordred/memory-vault.marker").chmod(0o600)
+    # Offline maintenance authenticates under EX; it never calls KeyProvider.
+    monkeypatch.setattr(_migrate, "adopt_legacy", lambda *a, **k: None)
+    monkeypatch.setattr(_migrate, "_authenticate", lambda root, supplied, lease: (None, wrong))
     assert databases_cli.databases_encrypt(home=home) == 1
     out = capsys.readouterr()
     assert "unreadable" in out.out + out.err and "state.db" in out.out + out.err

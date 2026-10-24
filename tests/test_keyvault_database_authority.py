@@ -22,6 +22,8 @@ def source(tmp_path, monkeypatch):
     backend = FakeBackend()
     key = memory.ensure_linux_memory_key(home=tmp_path, backend=backend)
     monkeypatch.setattr(memory, "linux_memory_backend", lambda home: backend)
+    (tmp_path / "mordred/memory-vault.marker").write_bytes(b"memory-encryption enabled\n")
+    (tmp_path / "mordred/memory-vault.marker").chmod(0o600)
     return authority, tmp_path, backend, key
 
 
@@ -235,6 +237,8 @@ def mac_source(tmp_path, monkeypatch):
 
     monkeypatch.setattr(_seckey_backend, "_SecKeyBackend", native_only_backend)
     monkeypatch.setattr(_identity, "resolve_store", lambda value: store)
+    (tmp_path / "mordred/memory-vault.marker").write_bytes(b"memory-encryption enabled\n")
+    (tmp_path / "mordred/memory-vault.marker").chmod(0o600)
     return authority, tmp_path, backend, store, key_id
 
 

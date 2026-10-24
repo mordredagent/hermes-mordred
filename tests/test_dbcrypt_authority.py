@@ -32,6 +32,8 @@ def native_root(tmp_path, monkeypatch):
     child = tmp_path / "profiles/work"
     child.mkdir(parents=True, mode=0o700, exist_ok=True)
     memory.ensure_linux_memory_key(home=child, backend=backend)
+    (tmp_path / "mordred/memory-vault.marker").write_bytes(b"memory-encryption enabled\n")
+    (tmp_path / "mordred/memory-vault.marker").chmod(0o600)
     with acquire_exclusive(tmp_path) as lease:
         snapshot = custody.enroll_database_source(root=tmp_path, lease=lease)
     put(tmp_path, encoded(snapshot))
