@@ -150,7 +150,7 @@ def boot_identity() -> dict[str, str]:
     return {"method": "cim_last_boot_utc_and_system_uuid", "identity": value["host"] + ":" + value["boot"]}
 
 
-def _owned_windows_dll(qualified: dict[str, Any]) -> dict[str, Any]:
+def _observe_packaged_dll() -> dict[str, Any]:
     import base64
     import ctypes
     import importlib.metadata
@@ -161,12 +161,8 @@ def _owned_windows_dll(qualified: dict[str, Any]) -> dict[str, Any]:
     if path is None or not _windows_vfs.driver_distribution_qualified():
         raise RuntimeError("owned_checked_distribution_required")
     path = path.resolve(strict=True)
-    tested = qualified["source" if os.environ["MORDRED_DBCRYPT_ACCEPTANCE_MODE"] == "source" else "wheel"]
     import sqlcipher3._sqlite3 as driver_native
 
-    assert _digest(Path(driver_native.__file__)) == tested["driver_native_sha256"]
-    if _digest(path) != tested["dll_sha256"]:
-        raise RuntimeError("owned_checked_distribution_required")
     distribution = importlib.metadata.distribution("hermes-mordred")
     matches = [entry for entry in distribution.files or () if Path(entry.locate()).resolve() == path]
     assert len(matches) == 1 and matches[0].hash is not None and matches[0].hash.mode == "sha256"
@@ -175,7 +171,126 @@ def _owned_windows_dll(qualified: dict[str, Any]) -> dict[str, Any]:
     assert not os.environ.get("MORDRED_DBCRYPT_CHECKED_LIBRARY"), "runtime collector forbids environment DLL override"
     native = ctypes.CDLL(str(path))
     assert not any(hasattr(native, name) for name in ("mordred_vfs_test_hook", "mordred_vfs_test_shm_idempotence"))
-    return {"path": str(path), "sha256": _digest(path), "kind": "distribution_owned_Checked", "record_verified": True}
+    records = [entry for entry in distribution.files or () if str(entry).endswith(".dist-info/RECORD")]
+    assert len(records) == 1
+    record = Path(records[0].locate()).resolve(strict=True)
+    return {
+        "path": str(path),
+        "sha256": _digest(path),
+        "kind": "distribution_owned_Checked",
+        "record_verified": True,
+        "driver_native": str(Path(driver_native.__file__).resolve()),
+        "driver_native_sha256": _digest(Path(driver_native.__file__)),
+        "record": str(record),
+        "record_sha256": _digest(record),
+        "record_size": record.stat().st_size,
+        "installed_at": record.stat().st_mtime,
+    }
+
+
+def _owned_windows_dll(qualified: dict[str, Any]) -> dict[str, Any]:
+    observed = _observe_packaged_dll()
+    tested = qualified["source" if os.environ["MORDRED_DBCRYPT_ACCEPTANCE_MODE"] == "source" else "wheel"]
+    assert observed["driver_native_sha256"] == tested["driver_native_sha256"]
+    if observed["sha256"] != tested["dll_sha256"]:
+        raise RuntimeError("owned_checked_distribution_required")
+    return {key: observed[key] for key in ("path", "sha256", "kind", "record_verified")}
+
+
+def package_qualification_observation() -> dict[str, Any]:
+    """Packaged C-test facts only; no custody/native-source/bootstrap operations."""
+    import ctypes
+    import importlib.metadata
+
+    import sqlcipher3.dbapi2 as driver
+
+    import mordred_hermes
+    from mordred_hermes._database_locking_windows import identify_root
+    from mordred_hermes._private_fs import open_confidential_directory
+    from mordred_hermes.keyvault import kek
+
+    kek._noop_audit = lambda _entry: None
+
+    assert sys.platform == "win32" and not ctypes.windll.shell32.IsUserAnAdmin()
+    assert not any(
+        os.environ.get(name)
+        for name in (
+            "MORDRED_DBCRYPT_COLLECTORS_TEST",
+            "MORDRED_DBCRYPT_ACCEPTANCE_KIND",
+            "MORDRED_WINKEY_HELPER",
+            "HERMES_MEMORY_KEY",
+            "MORDRED_DBCRYPT_CHECKED_LIBRARY",
+        )
+    )
+    tool = _tool()
+    bundle_path = Path(os.environ["DBCRYPT_BUNDLE"])
+    bundle = tool["validate_bundle"](bundle_path)
+    proof = tool["_local_bundle_proof"](bundle_path, bundle)
+    diagnostic = tool["validate_windows_diagnostic"](
+        Path(os.environ["MORDRED_DBCRYPT_VFS_DIAGNOSTIC"]).parent, checkout=Path(bundle["checkout"])
+    )
+    fixture_path = Path(os.environ["MORDRED_DBCRYPT_VFS_FIXTURES_DESCRIPTOR"])
+    fixture = json.loads(fixture_path.read_text())
+    plan = tool["_qualification_fixture"](fixture_path.parent, fixture)
+    root = Path(os.environ["MORDRED_DBCRYPT_TEST_ROOT"])
+    assert str(root) == plan["test_root"]
+    with open_confidential_directory(root):
+        identity = asdict(identify_root(root))
+    assert identity["owner"] == plan["owner_sid"]
+    mode = os.environ["MORDRED_DBCRYPT_VFS_PACKAGE_MODE"]
+    dll = _observe_packaged_dll()
+    connection = driver.connect(":memory:")
+    try:
+        versions = {
+            "sqlite": driver.sqlite_version,
+            "sqlcipher": connection.execute("pragma cipher_version").fetchone()[0],
+        }
+    finally:
+        connection.close()
+    observed = {
+        "mode": mode,
+        "role": "packaged_editable" if mode == "source" else "packaged_wheel",
+        "commit": bundle["commit"],
+        "bundle_manifest_sha256": _digest(bundle_path / "manifest.json"),
+        "product_module": str(Path(mordred_hermes.__file__).resolve()),
+        "executable": str(Path(sys.executable).resolve()),
+        "python_sha256": _digest(Path(sys.executable)),
+        "dll": dll["path"],
+        "dll_sha256": dll["sha256"],
+        **{
+            key: dll[key]
+            for key in (
+                "driver_native",
+                "driver_native_sha256",
+                "record",
+                "record_sha256",
+                "record_size",
+                "installed_at",
+            )
+        },
+        "driver_version": importlib.metadata.version("sqlcipher3-wheels"),
+        "versions": versions,
+        "elevated": False,
+        "sid": identity["owner"],
+        "fixture_root": str(root),
+        "filesystem": {"method": "checked_confidential_fixed_local_ntfs", "identity": identity},
+        "test_exports_absent": True,
+        "env_dll_override": None,
+        "observed_at": time.time(),
+    }
+    observed["build_receipts"] = tool["matching_build_receipts"](
+        observed, bundle=bundle, proof=proof, directory=bundle_path, headers=diagnostic["provenance"]["headers"]
+    )
+    tool["validate_package_observation"](
+        observed,
+        mode=mode,
+        bundle=bundle,
+        proof=proof,
+        directory=bundle_path,
+        headers=diagnostic["provenance"]["headers"],
+    )
+    assert observed["driver_native_sha256"] == diagnostic["diagnostic"]["driver_native_sha256"]
+    return observed
 
 
 def native_facts(root: Path) -> dict[str, Any]:
@@ -1559,6 +1674,9 @@ class NativeReport:
         self.deselected: list[str] = []
         self.reports: list[dict[str, Any]] = []
         self.collection_errors: list[dict[str, str]] = []
+        self.qualification: dict[str, Any] | None = None
+        self.pytest_argv: list[str] = []
+        self.fixture_manifest_sha256: str | None = None
 
     def pytest_collection_finish(self, session: Any) -> None:
         self.nodeids = [item.nodeid for item in session.items]
@@ -1592,20 +1710,37 @@ class NativeReport:
         path = os.environ.get("MORDRED_DBCRYPT_PYTEST_REPORT")
         if path:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            with os.fdopen(fd, "w") as handle:
-                json.dump(
-                    {
-                        "nodeids": self.nodeids,
-                        "deselected": self.deselected,
-                        "reports": self.reports,
-                        "collection_errors": self.collection_errors,
-                        "exitstatus": int(exitstatus),
-                    },
-                    handle,
+            result: dict[str, Any] = {
+                "nodeids": self.nodeids,
+                "deselected": self.deselected,
+                "reports": self.reports,
+                "collection_errors": self.collection_errors,
+                "exitstatus": int(exitstatus),
+            }
+            if self.qualification is not None:
+                result.update(
+                    qualification=self.qualification,
+                    qualification_after=package_qualification_observation(),
+                    pytest_argv=self.pytest_argv,
+                    fixture_manifest_sha256=self.fixture_manifest_sha256,
                 )
+            with os.fdopen(fd, "w") as handle:
+                json.dump(result, handle)
 
 
 def pytest_configure(config: Any) -> None:
+    reporter = NativeReport()
+    if os.environ.get("MORDRED_DBCRYPT_VFS_PACKAGE_QUALIFY") == "1":
+        reporter.qualification = package_qualification_observation()
+        reporter.pytest_argv = list(config.invocation_params.args)
+        reporter.fixture_manifest_sha256 = _digest(Path(os.environ["MORDRED_DBCRYPT_VFS_FIXTURES_DESCRIPTOR"]))
+        from mordred_hermes.dbcrypt import _windows_vfs
+
+        assert _windows_vfs.NATIVE_QUALIFIED is False
+        _windows_vfs.NATIVE_QUALIFIED = True
+        config.add_cleanup(lambda: setattr(_windows_vfs, "NATIVE_QUALIFIED", False))
+        config.pluginmanager.register(reporter, "dbcrypt-safe-native-report")
+        return
     if (
         os.environ.get("MORDRED_DBCRYPT_RUN_SUITE") == "windows-vfs"
         and os.environ.get("MORDRED_DBCRYPT_ACCEPTANCE_MODE") == "wheel"
@@ -1616,4 +1751,4 @@ def pytest_configure(config: Any) -> None:
         eligibility = candidate_eligibility(root)
         eligibility.__enter__()
         config.add_cleanup(lambda: eligibility.__exit__(None, None, None))
-    config.pluginmanager.register(NativeReport(), "dbcrypt-safe-native-report")
+    config.pluginmanager.register(reporter, "dbcrypt-safe-native-report")

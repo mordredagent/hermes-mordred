@@ -1535,7 +1535,7 @@ def test_full_synthetic_windows_qualification_closes_exact_source_and_release_no
     tmp_path: Path, monkeypatch
 ) -> None:
     tool, root, checkout, _manifest = full_qualification_fixture(tmp_path, monkeypatch)
-    actual = tool.validate_windows_qualification(root, checkout=checkout)
+    actual = tool._validate_legacy_windows_qualification(root, checkout=checkout)
     assert actual["diagnostic"]["nodeids"] == tool.windows_vfs_required_nodes(checkout, release=False)
     assert actual["wheel"]["nodeids"] == tool.windows_vfs_required_nodes(checkout, release=True)
 
@@ -1582,7 +1582,7 @@ def test_windows_qualification_refuses_subset_selection_or_provenance_gaps(
         (root / manifest["headers"]["sqlite3.h"]["path"]).write_bytes(b"changed header")
     (root / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
-        tool.validate_windows_qualification(root, checkout=checkout)
+        tool._validate_legacy_windows_qualification(root, checkout=checkout)
 
 
 def test_windows_qualification_rejects_artifact_shape_without_real_archive_closure(tmp_path: Path, monkeypatch) -> None:
@@ -1598,7 +1598,7 @@ def test_windows_qualification_rejects_artifact_shape_without_real_archive_closu
     manifest["provenance"]["sha256"] = tool.sha256_file(path)
     (root / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
-        tool.validate_windows_qualification(root, checkout=checkout)
+        tool._validate_legacy_windows_qualification(root, checkout=checkout)
 
 
 def test_windows_qualification_export_closes_referenced_public_inputs_only(tmp_path: Path, monkeypatch) -> None:
@@ -1608,7 +1608,7 @@ def test_windows_qualification_export_closes_referenced_public_inputs_only(tmp_p
     reference = tool._export_windows_qualification({"qualification": str(root)}, output)
     copied = tmp_path / reference["path"]
     assert tool.sha256_file(copied) == tool.sha256_file(root / "manifest.json")
-    actual = tool.validate_windows_qualification(copied.parent, checkout=checkout)
+    actual = tool._validate_legacy_windows_qualification(copied.parent, checkout=checkout)
     assert actual["manifest_sha256"] == reference["sha256"]
 
 
@@ -1711,9 +1711,285 @@ def test_public_read_generation_follows_the_actual_provider_contract(platform: s
             tool._public_read(payload, phase, bundle, persistence=True)
 
 
+def test_packaged_qualification_has_fixed_commands_without_native_custody_gate() -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    rows = tool.windows_package_commands(
+        checkout=Path("/checkout"),
+        bundle=Path("/bundle"),
+        mode="wheel",
+        basetemp=Path("/private/temp"),
+        configuration=Path("/bundle/sdist/pyproject.toml"),
+    )
+    assert len(rows) == 2
+    assert rows[0]["argv"] == [*rows[1]["argv"], "--collect-only"]
+    assert rows[1]["argv"][:7] == [
+        "uv",
+        "run",
+        "--no-project",
+        "--python",
+        "/bundle/wheel-env/Scripts/python.exe",
+        "python",
+        "-m",
+    ]
+    assert rows[1]["argv"][rows[1]["argv"].index("-k") + 1] == tool.WINDOWS_RELEASE_SELECTION
+    assert rows[1]["env"] == {"MORDRED_DBCRYPT_WINDOWS_VFS_TEST": "1", "MORDRED_DBCRYPT_VFS_PACKAGE_QUALIFY": "1"}
+
+
+def test_legacy_complete_descriptor_cannot_admit_packaged_candidate(tmp_path: Path, monkeypatch) -> None:
+    tool, root, checkout, _manifest = full_qualification_fixture(tmp_path, monkeypatch)
+    with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
+        tool.validate_windows_qualification(root, checkout=checkout)
+
+
+def packaged_pipeline_fixture(tmp_path: Path, monkeypatch):
+    from tests._dbcrypt_acceptance_evidence import complete_qualification
+    from tests._dbcrypt_acceptance_evidence import packaged_pipeline_fixture as prepare
+
+    directory = tmp_path / "prepared-bundle"
+    directory.mkdir()
+    bundle = bundle_fixture(directory)
+    old = complete_qualification(bundle, tmp_path, monkeypatch)
+    return (*prepare(old, bundle[1], monkeypatch), bundle[1])
+
+
+def test_packaged_pipeline_assembles_real_inert_artifact_closure_with_distinct_dlls(
+    tmp_path: Path, monkeypatch
+) -> None:
+    tool, root, checkout, _manifest, results, _fixtures, bundle = packaged_pipeline_fixture(tmp_path, monkeypatch)
+    output = tmp_path / "assembled"
+    path = tool.assemble_windows_qualification(
+        bundle=bundle,
+        diagnostic=root / "manifest.json",
+        source_result=results["source"][0] / "result.json",
+        wheel_result=results["wheel"][0] / "result.json",
+        output=output,
+    )
+    actual = tool.validate_windows_qualification(path.parent, checkout=checkout)
+    assert actual["source"]["dll_sha256"] != actual["wheel"]["dll_sha256"]
+    assert actual["diagnostic"]["nodeids"] == tool.windows_vfs_required_nodes(checkout, release=False)
+    assert actual["source"]["role"] == "packaged_editable" and actual["wheel"]["role"] == "packaged_wheel"
+    historical_plan = json.loads((root / "fixture-plan.json").read_text())["plan"]
+    assert actual["fixtures"]["test_root"] != historical_plan["test_root"]
+    assert actual["source"]["fixture_root"] == actual["wheel"]["fixture_root"] == actual["fixtures"]["test_root"]
+    with pytest.raises(tool.AcceptanceRefused):
+        tool.assemble_windows_qualification(
+            bundle=bundle,
+            diagnostic=root / "manifest.json",
+            source_result=results["source"][0] / "result.json",
+            wheel_result=results["wheel"][0] / "result.json",
+            output=output,
+        )
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing_capture",
+        "dll",
+        "record",
+        "driver",
+        "selection",
+        "subset",
+        "skip",
+        "fixture",
+        "build_argv",
+        "build_input",
+        "header",
+        "override",
+        "current_fixture_mismatch",
+        "current_fixture_raw",
+    ],
+)
+def test_packaged_pipeline_refuses_broken_actual_artifact_or_execution_link(
+    tmp_path: Path, monkeypatch, damage: str
+) -> None:
+    tool, root, _checkout, _manifest, results, _fixtures, bundle = packaged_pipeline_fixture(tmp_path, monkeypatch)
+    source_dir, source = results["source"]
+    if damage in {"dll", "record", "driver"}:
+        key = {"dll": "dll", "record": "record", "driver": "driver_native"}[damage]
+        (source_dir / source["artifacts"][key]["path"]).write_bytes(b"different artifact")
+    else:
+        path = source_dir / "run.json"
+        report = json.loads(path.read_text())
+        if damage == "selection":
+            report["pytest_argv"].extend(["-k", "focused"])
+        elif damage == "subset":
+            report["nodeids"] = report["nodeids"][:1]
+        elif damage == "skip":
+            report["reports"][0]["outcome"] = "skipped"
+        elif damage == "fixture":
+            report["qualification"]["filesystem"]["identity"]["owner"] = "foreign"
+        elif damage == "override":
+            report["qualification"]["env_dll_override"] = r"C:\unowned.dll"
+        elif damage == "current_fixture_mismatch":
+            report["qualification"]["fixture_root"] = r"C:\different-current-guid"
+        elif damage == "current_fixture_raw":
+            fixture_path = source_dir / "fixtures/manifest.json"
+            descriptor = json.loads(fixture_path.read_text())
+            (fixture_path.parent / descriptor["fixture_verify"]["path"]).write_text('{"ready": true}')
+        else:
+            name = report["qualification"]["build_receipts"][0]
+            receipt_path = bundle / name
+            receipt = json.loads(receipt_path.read_text())
+            if damage == "missing_capture":
+                report["qualification"]["build_receipts"] = []
+            elif damage == "build_argv":
+                receipt["argv"].append("-Unreviewed")
+            else:
+                key = "headers/sqlite3.h" if damage == "header" else "native/dbcrypt-vfs/vfs.c"
+                (receipt_path.parent / receipt["inputs"][key]["path"]).write_bytes(b"changed input")
+            receipt_path.write_text(json.dumps(receipt))
+        path.write_text(json.dumps(report))
+        source["run"]["report"]["sha256"] = tool.sha256_file(path)
+        (source_dir / "result.json").write_text(json.dumps(source))
+    with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
+        tool.assemble_windows_qualification(
+            bundle=bundle,
+            diagnostic=root / "manifest.json",
+            source_result=source_dir / "result.json",
+            wheel_result=results["wheel"][0] / "result.json",
+            output=tmp_path / "refused",
+        )
+    assert not (tmp_path / "refused/manifest.json").exists()
+
+
+def test_candidate_windows_consumes_prerequisite_instead_of_executing_vfs_again() -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    candidate = tool.native_acceptance_commands(
+        checkout=Path("/source"), bundle=Path("/bundle"), platform="win32", kind="candidate"
+    )
+    rows = [row for row in candidate if row["suite"] == "windows-vfs"]
+    assert len(rows) == 2 and all(
+        row["status"] == "satisfied_by_qualified_artifact_reference" and "argv" not in row for row in rows
+    )
+    production = tool.native_acceptance_commands(
+        checkout=Path("/source"), bundle=Path("/bundle"), platform="win32", kind="production"
+    )
+    assert all("argv" in row for row in production if row["suite"] == "windows-vfs")
+
+
+def test_qualification_plugin_never_enters_custody_or_candidate_branch(monkeypatch) -> None:
+    import runpy
+    from types import SimpleNamespace
+
+    from mordred_hermes.dbcrypt import _windows_vfs
+
+    helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
+    configure = helper["pytest_configure"]
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("qualification entered native custody")
+
+    monkeypatch.setitem(configure.__globals__, "native_facts", forbidden)
+    monkeypatch.setitem(configure.__globals__, "candidate_eligibility", forbidden)
+    monkeypatch.setitem(
+        configure.__globals__, "package_qualification_observation", lambda: {"role": "controlled parser observation"}
+    )
+    monkeypatch.setitem(configure.__globals__, "_digest", lambda path: "a" * 64)
+    monkeypatch.setenv("MORDRED_DBCRYPT_VFS_PACKAGE_QUALIFY", "1")
+    monkeypatch.setenv("MORDRED_DBCRYPT_VFS_FIXTURES_DESCRIPTOR", "/fixture/manifest.json")
+    monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", False)
+    cleanups, reports = [], []
+    config = SimpleNamespace(
+        invocation_params=SimpleNamespace(args=("fixed",)),
+        add_cleanup=cleanups.append,
+        pluginmanager=SimpleNamespace(register=lambda reporter, name: reports.append(reporter)),
+    )
+    configure(config)
+    assert _windows_vfs.NATIVE_QUALIFIED is True and reports[0].qualification is not None
+    cleanups[0]()
+    assert _windows_vfs.NATIVE_QUALIFIED is False
+
+
+def test_packaged_producer_reaches_only_fixed_children_without_custody_and_retains_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from types import SimpleNamespace
+
+    tool, root, checkout, manifest, results, fixtures, bundle = packaged_pipeline_fixture(tmp_path, monkeypatch)
+    original_diagnostic = tool.validate_windows_diagnostic
+    monkeypatch.setattr(
+        tool,
+        "validate_windows_diagnostic",
+        lambda directory, **kwargs: original_diagnostic(directory, checkout=checkout),
+    )
+    monkeypatch.setattr(tool, "sys", SimpleNamespace(platform="win32"))
+    calls = []
+
+    def child(argv, **kwargs):
+        assert argv[:4] == ["uv", "run", "--no-project", "--python"]
+        env = kwargs["env"]
+        assert env["MORDRED_DBCRYPT_VFS_PACKAGE_QUALIFY"] == "1"
+        assert not any(
+            key in env
+            for key in ("MORDRED_WINKEY_HELPER", "MORDRED_DBCRYPT_COLLECTORS_TEST", "MORDRED_DBCRYPT_ACCEPTANCE_KIND")
+        )
+        action = "collect" if argv[-1] == "--collect-only" else "run"
+        Path(env["MORDRED_DBCRYPT_PYTEST_REPORT"]).write_bytes((results["wheel"][0] / (action + ".json")).read_bytes())
+        calls.append(argv)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(tool.subprocess, "run", child)
+    output = tmp_path / "producer-output"
+    # Modelled guest artifact paths cannot be opened on this inert host; keep
+    # that honest failure, after proving both fixed children are dispatched.
+    with pytest.raises(tool.AcceptanceRefused, match="packaged_windows_qualification_failed"):
+        tool.qualify_windows_vfs(
+            bundle=bundle,
+            mode="wheel",
+            diagnostic=root / "manifest.json",
+            fixtures=fixtures / "manifest.json",
+            output=output,
+        )
+    expected = tool.windows_package_commands(
+        checkout=Path(manifest["checkout"]),
+        bundle=bundle,
+        mode="wheel",
+        basetemp=output / "pytest-temp",
+        configuration=bundle / manifest["extracted_sdist"] / "pyproject.toml",
+    )
+    assert calls == [row["argv"] for row in expected]
+    assert json.loads((output / "result.json").read_text())["status"] == "failed"
+
+
+def test_outer_package_manager_output_is_not_compiler_receipt(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    tool = acceptance_tool("dbcrypt_acceptance")
+    monkeypatch.setattr(
+        tool.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout="https://user:secret@index.invalid", stderr="password"
+        ),
+    )
+    records = []
+    tool._run_build(["uv", "build"], cwd=tmp_path, environment={}, log=records)
+    assert "secret" not in json.dumps(records) and "password" not in json.dumps(records)
+
+
+def test_packaged_receipt_must_belong_to_the_actual_bundle_wheel_build_interval(tmp_path: Path, monkeypatch) -> None:
+    tool, _root, _checkout, manifest, results, _fixtures, bundle = packaged_pipeline_fixture(tmp_path, monkeypatch)
+    observation = json.loads((results["wheel"][0] / "run.json").read_text())["qualification"]
+    receipt_path = bundle / observation["build_receipts"][0]
+    receipt = json.loads(receipt_path.read_text())
+    receipt.update(started_at=1.0, finished_at=2.0)
+    receipt_path.write_text(json.dumps(receipt))
+    manifest["files"] = tool._bundle_hashes(bundle)
+    (bundle / "manifest.json").write_text(json.dumps(manifest))
+    observation["bundle_manifest_sha256"] = tool.sha256_file(bundle / "manifest.json")
+    proof = tool._local_bundle_proof(bundle, manifest)
+    proof["bundle_path"] = r"C:\bundle"
+    diagnostic = json.loads((_root / "provenance.json").read_text())
+    with pytest.raises(ValueError, match="inconsistent bundle provenance"):
+        tool.validate_package_observation(
+            observation, mode="wheel", bundle=manifest, proof=proof, directory=bundle, headers=diagnostic["headers"]
+        )
+
+
 def test_full8_explicit_reviewed_source_configuration_is_bound(tmp_path: Path, monkeypatch) -> None:
     tool, root, checkout, manifest = full_qualification_fixture(tmp_path, monkeypatch)
-    actual = tool.validate_windows_qualification(root, checkout=checkout)
+    actual = tool._validate_legacy_windows_qualification(root, checkout=checkout)
     assert actual["diagnostic"]["argv"][1:3] == ["-c", r"C:\qualified\source\pyproject.toml"]
     assert manifest["configuration"]["sha256"] == tool.sha256_file(checkout / "pyproject.toml")
 
@@ -1790,7 +2066,7 @@ def test_full8_configuration_and_actual_wheel_dll_remain_bound(tmp_path: Path, m
             rewrite(row_ref, lambda row: row.update(dll_sha256=reference["sha256"]))
     (root / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
-        tool.validate_windows_qualification(root, checkout=checkout)
+        tool._validate_legacy_windows_qualification(root, checkout=checkout)
 
 
 def test_full8_reused_source_builds_bind_actual_artifacts_and_all_critical_inputs(tmp_path: Path, monkeypatch) -> None:
@@ -1821,8 +2097,8 @@ def test_full8_reused_source_builds_bind_actual_artifacts_and_all_critical_input
     manifest["provenance"]["sha256"] = tool.sha256_file(path)
     (root / "manifest.json").write_text(json.dumps(manifest))
     assert (
-        tool.validate_windows_qualification(root, checkout=checkout)["source"]["dll_sha256"]
-        != tool.validate_windows_qualification(root, checkout=checkout)["wheel"]["dll_sha256"]
+        tool._validate_legacy_windows_qualification(root, checkout=checkout)["source"]["dll_sha256"]
+        != tool._validate_legacy_windows_qualification(root, checkout=checkout)["wheel"]["dll_sha256"]
     )
     provenance["reused_builds"]["CheckedTest"]["critical_inputs"] = {
         "native/dbcrypt-vfs/vfs.c": critical["native/dbcrypt-vfs/vfs.c"]
@@ -1831,4 +2107,4 @@ def test_full8_reused_source_builds_bind_actual_artifacts_and_all_critical_input
     manifest["provenance"]["sha256"] = tool.sha256_file(path)
     (root / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
-        tool.validate_windows_qualification(root, checkout=checkout)
+        tool._validate_legacy_windows_qualification(root, checkout=checkout)

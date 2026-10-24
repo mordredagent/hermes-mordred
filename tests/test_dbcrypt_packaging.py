@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import shutil
 import struct
@@ -104,6 +105,114 @@ def test_windows_build_selects_checked_and_packages_only_production_asset(tmp_pa
     assert data["pure_python"] is False and data["tag"] == "py3-none-win_amd64"
     assert list(data["force_include"].values()) == ["mordred_hermes/_native/dbcrypt-vfs/mordred_dbcrypt_vfs.dll"]
     assert Path(next(iter(data["force_include"]))).read_bytes()[0x80:0x86] == b"PE\0\0\x64\x86"
+
+
+@pytest.mark.parametrize("version", ["editable", "standard"])
+def test_opt_in_hook_retains_actual_compiler_receipt_before_staging_cleanup(tmp_path, monkeypatch, version):
+    module = hook()
+    monkeypatch.setattr(module.sys, "platform", "win32")
+    monkeypatch.setattr(module.platform, "machine", lambda: "AMD64")
+    headers = tmp_path / "headers"
+    headers.mkdir()
+    for name in ("sqlite3.h", "sqlite3ext.h"):
+        (headers / name).write_bytes(b"controlled header")
+    monkeypatch.setattr(module, "validate_headers", lambda path: None)
+    monkeypatch.setenv("MORDRED_SQLITE_INCLUDE_DIR", str(headers))
+    receipts = tmp_path / "receipts"
+    receipts.mkdir(mode=0o700)
+    monkeypatch.setenv("MORDRED_DBCRYPT_BUILD_RECEIPT_DIR", str(receipts))
+
+    def compiler(argv, **kwargs):
+        output = Path(argv[argv.index("-OutputDirectory") + 1])
+        image = bytearray(256)
+        image[:2] = b"MZ"
+        struct.pack_into("<I", image, 0x3C, 0x80)
+        image[0x80:0x86] = b"PE\0\0\x64\x86"
+        image[-len(version) :] = version.encode()
+        (output / "mordred_dbcrypt_checked.dll").write_bytes(image)
+        return subprocess.CompletedProcess(argv, 0, b"actual controlled compiler stdout\n", b"")
+
+    monkeypatch.setattr(module.subprocess, "run", compiler)
+    monkeypatch.setattr(module, "_capture_compiler", compiler, raising=False)
+    data = {}
+    module.CustomBuildHook(str(ROOT), {}, None, None, str(tmp_path / version), "wheel").initialize(version, data)
+    paths = list(receipts.glob("*/receipt.json"))
+    assert len(paths) == 1, "opt-in build must retain its actual compiler receipt"
+    receipt = json.loads(paths[0].read_text())
+    assert receipt["status"] == "succeeded" and receipt["version"] == version
+    argv = receipt["argv"]
+    assert len(argv) == 13 and argv[:6] == [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+    ]
+    assert argv[-2:] == ["-Target", "Checked"]
+    assert not Path(argv[8]).exists(), "original compiler staging must still be removed"
+    assert (paths[0].parent / receipt["stdout"]["path"]).read_bytes() == b"actual controlled compiler stdout\n"
+    assert (paths[0].parent / receipt["dll"]["path"]).read_bytes() == Path(
+        next(iter(data["force_include"]))
+    ).read_bytes()
+    assert "hatch_build.py" in receipt["inputs"]
+
+
+@pytest.mark.parametrize("failure", ["exit", "overflow", "timeout"])
+def test_captured_compiler_failure_retains_failed_receipt_without_package_tag(tmp_path, monkeypatch, failure):
+    module = hook()
+    monkeypatch.setattr(module.sys, "platform", "win32")
+    monkeypatch.setattr(module.platform, "machine", lambda: "AMD64")
+    headers = tmp_path / "headers"
+    headers.mkdir()
+    for name in ("sqlite3.h", "sqlite3ext.h"):
+        (headers / name).write_bytes(b"controlled header")
+    receipts = tmp_path / "receipts"
+    receipts.mkdir(mode=0o700)
+    monkeypatch.setenv("MORDRED_SQLITE_INCLUDE_DIR", str(headers))
+    monkeypatch.setenv("MORDRED_DBCRYPT_BUILD_RECEIPT_DIR", str(receipts))
+    monkeypatch.setattr(module, "validate_headers", lambda path: None)
+
+    def compiler(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv,
+            -2 if failure == "timeout" else 1 if failure == "exit" else 0,
+            b"x" * (module.COMPILER_LIMIT + 1) if failure == "overflow" else b"failure",
+            b"",
+        )
+
+    monkeypatch.setattr(module, "_capture_compiler", compiler)
+    data = {}
+    with pytest.raises(RuntimeError, match="captured compiler failed"):
+        module.CustomBuildHook(str(ROOT), {}, None, None, str(tmp_path / "wheel"), "wheel").initialize("standard", data)
+    path = next(receipts.glob("*/receipt.json"))
+    receipt = json.loads(path.read_text())
+    assert receipt["status"] == "failed" and "dll" not in receipt and "tag" not in data and "force_include" not in data
+    assert (path.parent / receipt["stdout"]["path"]).stat().st_size <= module.COMPILER_LIMIT
+
+
+@pytest.mark.parametrize("unsafe", ["relative", "checkout", "link", "existing-child"])
+def test_build_receipt_output_rejects_unsafe_or_duplicate_paths(tmp_path, monkeypatch, unsafe):
+    from types import SimpleNamespace
+
+    module = hook()
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    output = tmp_path / "receipts"
+    output.mkdir(mode=0o700)
+    if unsafe == "relative":
+        output = Path("relative")
+    elif unsafe == "checkout":
+        output = checkout
+    elif unsafe == "link":
+        linked = tmp_path / "linked"
+        linked.symlink_to(output, target_is_directory=True)
+        output = linked
+    else:
+        monkeypatch.setattr(module.uuid, "uuid4", lambda: SimpleNamespace(hex="same"))
+        (output / "hook-same").mkdir()
+    with pytest.raises((RuntimeError, FileExistsError)):
+        module._receipt_directory(output, checkout)
 
 
 def test_header_validation_rejects_arbitrary_caller_headers(tmp_path):

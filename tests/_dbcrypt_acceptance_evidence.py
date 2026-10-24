@@ -610,3 +610,244 @@ def complete_qualification(
         manifest["artifacts"][name] = artifacts
     (root / "manifest.json").write_text(json.dumps(manifest))
     return tool, root, checkout, manifest
+
+
+def packaged_pipeline_fixture(prepared: tuple[Any, ...], bundle_path: Path, monkeypatch: Any) -> tuple[Any, ...]:
+    """Actual inert archives/RECORD/receipt bytes; no Windows/native execution."""
+    import base64
+    import hashlib
+    import io
+    import shutil
+    import tarfile
+    from pathlib import PureWindowsPath
+
+    tool, root, checkout, historical = prepared
+    manifest = json.loads((bundle_path / "manifest.json").read_text())
+    sdist = bundle_path / manifest["sdist"]
+    with tarfile.open(sdist, "r:gz") as archive:
+        members = {}
+        for member in archive.getmembers():
+            if member.isfile():
+                stream = archive.extractfile(member)
+                assert stream is not None
+                members[member.name] = stream.read()
+    prefix = sdist.name.removesuffix(".tar.gz") + "/"
+    for name in ("hatch_build.py", "tools/dbcrypt_build_headers.py"):
+        members[prefix + name] = (checkout / name).read_bytes()
+    with tarfile.open(sdist, "w:gz") as archive:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    manifest["sdist_sha256"] = tool.sha256_file(sdist)
+    for row, (started, finished) in zip(
+        manifest["build_commands"], ((16, 17), (18, 18.1), (18.2, 18.3), (19, 19.5), (20, 23), (24, 26)), strict=True
+    ):
+        row.update(started_at=float(started), finished_at=float(finished))
+    guest_bundle = PureWindowsPath(r"C:\bundle")
+    fixture_dir = root / "operator-fixtures"
+    fixture_dir.mkdir()
+    fixture: dict[str, Any] = {"schema": 1, "kind": "windows_vfs_fixtures"}
+    for key in ("fixture_plan", "fixture_manifest", "fixture_verify"):
+        source = root / historical[key]["path"]
+        shutil.copyfile(source, fixture_dir / source.name)
+        fixture[key] = {"path": source.name, "sha256": tool.sha256_file(source)}
+    wrapper_path = fixture_dir / fixture["fixture_plan"]["path"]
+    wrapper = json.loads(wrapper_path.read_text())
+    wrapper["plan"].update(
+        test_root=r"C:\fresh-packaged-0123456789abcdef",
+        non_ntfs_root=r"Q:\fresh-0123456789abcdef",
+        reparse_root=r"C:\fresh-packaged-0123456789abcdef\qualification-reparse",
+    )
+    wrapper["reviewed_plan_sha256"] = "d" * 64
+    wrapper_path.write_text(json.dumps(wrapper))
+    fixture_owned = fixture_dir / fixture["fixture_manifest"]["path"]
+    owned = json.loads(fixture_owned.read_text())
+    owned.update({key: wrapper["plan"][key] for key in ("non_ntfs_root", "reparse_root")})
+    fixture_owned.write_text(json.dumps(owned))
+    verify_path = fixture_dir / fixture["fixture_verify"]["path"]
+    verified = json.loads(verify_path.read_text())
+    verified["plan_sha256"] = "d" * 64
+    verify_path.write_text(json.dumps(verified))
+    for key in ("fixture_plan", "fixture_manifest", "fixture_verify"):
+        fixture[key]["sha256"] = tool.sha256_file(fixture_dir / fixture[key]["path"])
+    (fixture_dir / "manifest.json").write_text(json.dumps(fixture))
+    fixture_sha = tool.sha256_file(fixture_dir / "manifest.json")
+    results = {}
+    for mode in ("source", "wheel"):
+        env = PureWindowsPath(manifest["checkout"]) / ".venv" if mode == "source" else guest_bundle / "wheel-env"
+        source_root = manifest["checkout"] if mode == "source" else str(guest_bundle / manifest["extracted_sdist"])
+        asset = b"fresh editable Checked" if mode == "source" else b"checked_wheel"
+        receipt_dir = bundle_path / f"artifacts/native-build/{mode}/hook-synthetic"
+        receipt_dir.mkdir(parents=True)
+
+        def artifact(directory: Path, name: str, content: bytes) -> dict[str, Any]:
+            target = directory / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+            return {"path": name, "sha256": tool.sha256_file(target), "size": len(content)}
+
+        inputs = {}
+        for name, content in members.items():
+            relative = name.removeprefix(prefix)
+            if relative in ("hatch_build.py", "tools/dbcrypt_build_headers.py", "native/dbcrypt-vfs/build.ps1") or (
+                relative.startswith("native/dbcrypt-vfs/") and relative.endswith((".c", ".h"))
+            ):
+                inputs[relative] = artifact(receipt_dir, "inputs/" + relative, content)
+        for name, ref in historical["headers"].items():
+            inputs["headers/" + name] = artifact(
+                receipt_dir, "inputs/headers/" + name, (root / ref["path"]).read_bytes()
+            )
+        staging = PureWindowsPath(r"C:\temp") / mode
+        receipt = {
+            "schema_version": 1,
+            "kind": "dbcrypt_vfs_build",
+            "status": "succeeded",
+            "version": "editable" if mode == "source" else "standard",
+            "source_root": source_root,
+            "started_at": 10.0 if mode == "source" else 20.0,
+            "finished_at": 12.0 if mode == "source" else 22.0,
+            "returncode": 0,
+            "cwd": r"C:\build",
+            "inputs": inputs,
+            "argv": [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(PureWindowsPath(source_root) / "native/dbcrypt-vfs/build.ps1"),
+                "-OutputDirectory",
+                str(staging),
+                "-SqliteIncludeDirectory",
+                str(staging / "include"),
+                "-Target",
+                "Checked",
+            ],
+            "stdout": artifact(receipt_dir, "stdout.bin", b"controlled compiler output"),
+            "stderr": artifact(receipt_dir, "stderr.bin", b""),
+            "dll": {
+                **artifact(receipt_dir, "mordred_dbcrypt_checked.dll", asset),
+                "observed_path": str(staging / "mordred_dbcrypt_checked.dll"),
+            },
+        }
+        (receipt_dir / "receipt.json").write_text(json.dumps(receipt))
+        output = root / (mode + "-result")
+        output.mkdir()
+        shutil.copytree(fixture_dir, output / "fixtures")
+        dll_hash = hashlib.sha256(asset).hexdigest()
+        encoded = base64.urlsafe_b64encode(bytes.fromhex(dll_hash)).rstrip(b"=").decode()
+        record = f"mordred_hermes/_native/dbcrypt-vfs/mordred_dbcrypt_vfs.dll,sha256={encoded},{len(asset)}\n".encode()
+        refs = {
+            name: artifact(output, name + ".bin", content)
+            for name, content in (
+                ("dll", asset),
+                ("driver_native", b"inert driver"),
+                ("python", b"inert interpreter"),
+                ("record", record),
+            )
+        }
+        obs = {
+            "mode": mode,
+            "role": "packaged_editable" if mode == "source" else "packaged_wheel",
+            "commit": manifest["commit"],
+            "product_module": manifest[mode + "_probe"]["product_file"],
+            "executable": str(env / "Scripts/python.exe"),
+            "python_sha256": refs["python"]["sha256"],
+            "dll": str(env / "Lib/site-packages/mordred_hermes/_native/dbcrypt-vfs/mordred_dbcrypt_vfs.dll"),
+            "dll_sha256": dll_hash,
+            "driver_native": str(env / "Lib/site-packages/sqlcipher3/_sqlite3.pyd"),
+            "driver_native_sha256": refs["driver_native"]["sha256"],
+            "record": str(env / "Lib/site-packages/hermes_mordred-0.3.0a4.dist-info/RECORD"),
+            "record_sha256": refs["record"]["sha256"],
+            "record_size": len(record),
+            "installed_at": 15.0 if mode == "source" else 25.0,
+            "elevated": False,
+            "env_dll_override": None,
+            "test_exports_absent": True,
+            "driver_version": "0.5.7",
+            "versions": {"sqlite": "3.51.1", "sqlcipher": "4.12.0 community"},
+            "sid": "S-1-synthetic-ordinary",
+            "fixture_root": wrapper["plan"]["test_root"],
+            "filesystem": {
+                "method": "checked_confidential_fixed_local_ntfs",
+                "identity": {"owner": "S-1-synthetic-ordinary", "platform": "win32"},
+            },
+            "build_receipts": [str((receipt_dir / "receipt.json").relative_to(bundle_path)).replace("\\", "/")],
+        }
+        result = {
+            "schema_version": 1,
+            "kind": "packaged_windows_vfs_result",
+            "status": "passed",
+            "mode": mode,
+            "diagnostic_manifest_sha256": tool.sha256_file(root / "manifest.json"),
+            "fixtures_sha256": fixture_sha,
+            "fixtures_descriptor": {"path": "fixtures/manifest.json", "sha256": fixture_sha},
+            "artifacts": refs,
+            "dll_sha256": dll_hash,
+        }
+        required = tool.windows_vfs_required_nodes(checkout, release=True)
+        full = tool.windows_vfs_required_nodes(checkout, release=False)
+        commands = tool.windows_package_commands(
+            checkout=PureWindowsPath(manifest["checkout"]),
+            bundle=guest_bundle,
+            mode=mode,
+            basetemp=PureWindowsPath(r"C:\private") / mode / "pytest-temp",
+            configuration=guest_bundle / manifest["extracted_sdist"] / "pyproject.toml",
+        )
+        for i, action in enumerate(("collect", "run")):
+            report = {
+                "nodeids": required,
+                "deselected": [node for node in full if node not in required],
+                "exitstatus": 0,
+                "collection_errors": [],
+                "reports": []
+                if i == 0
+                else [
+                    {"nodeid": node, "when": stage, "outcome": "passed", "reason_code": None}
+                    for node in required
+                    for stage in ("setup", "call", "teardown")
+                ],
+                "pytest_argv": commands[i]["pytest_argv"],
+                "fixture_manifest_sha256": fixture_sha,
+                "qualification": {**obs, "observed_at": 31.0 + 10 * i},
+                "qualification_after": {**obs, "observed_at": 32.0 + 10 * i},
+            }
+            (output / (action + ".json")).write_text(json.dumps(report))
+            result[action] = {
+                "argv": commands[i]["argv"],
+                "basetemp": str(PureWindowsPath(r"C:\private") / mode / "pytest-temp"),
+                "started_at": 30.0 + 10 * i,
+                "finished_at": 35.0 + 10 * i,
+                "returncode": 0,
+                "report": {"path": action + ".json", "sha256": tool.sha256_file(output / (action + ".json"))},
+            }
+        results[mode] = (output, result)
+    manifest["files"] = tool._bundle_hashes(bundle_path)
+    (bundle_path / "manifest.json").write_text(json.dumps(manifest))
+    digest = tool.sha256_file(bundle_path / "manifest.json")
+    for output, result in results.values():
+        for action in ("collect", "run"):
+            path = output / (action + ".json")
+            report = json.loads(path.read_text())
+            for key in ("qualification", "qualification_after"):
+                report[key]["bundle_manifest_sha256"] = digest
+            path.write_text(json.dumps(report))
+            result[action]["report"]["sha256"] = tool.sha256_file(path)
+        (output / "result.json").write_text(json.dumps(result))
+    # Foreign Windows guest paths cannot be stat'ed on this inert host. The
+    # assembler's exported-byte validator still closes every actual file below.
+    monkeypatch.setattr(tool, "validate_bundle", lambda path: manifest)
+    original_export = tool._export_bundle_evidence
+
+    def guest_export(context: dict[str, Any], directory: Path) -> dict[str, str]:
+        reference = original_export(context, directory)
+        path = directory.parent / reference["path"]
+        proof = json.loads(path.read_text())
+        proof["bundle_path"] = str(guest_bundle)
+        path.write_text(json.dumps(proof))
+        return {**reference, "sha256": tool.sha256_file(path)}
+
+    monkeypatch.setattr(tool, "_export_bundle_evidence", guest_export)
+    return tool, root, checkout, manifest, results, fixture_dir

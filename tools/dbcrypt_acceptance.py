@@ -728,6 +728,10 @@ def _bundle_build(checkout: Path, output: Path, commands: list[dict[str, Any]], 
         environment["MORDRED_SQLITE_INCLUDE_DIR"] = os.environ["MORDRED_SQLITE_INCLUDE_DIR"]
     artifacts = output / "artifacts"
     artifacts.mkdir()
+    if sys.platform == "win32":
+        receipts = artifacts / "native-build/wheel"
+        receipts.mkdir(mode=0o700, parents=True)
+        environment["MORDRED_DBCRYPT_BUILD_RECEIPT_DIR"] = str(receipts)
     _run_build(
         ["uv", "build", "--sdist", str(checkout), "--out-dir", str(artifacts)],
         cwd=output,
@@ -884,12 +888,14 @@ def _bundle_hashes(output: Path) -> dict[str, str]:
         raise AcceptanceRefused("unsafe_bundle_input_inventory") from exc
 
 
-def build_acceptance_bundle(*, checkout: Path, output: Path) -> Path:
+def build_acceptance_bundle(*, checkout: Path, output: Path, source_build_receipts: Path | None = None) -> Path:
     checkout, output = checkout.resolve(strict=True), output.resolve()
     if output.is_relative_to(checkout):
         raise AcceptanceRefused("bundle_must_be_outside_checkout")
     if output.exists():
         raise AcceptanceRefused("bundle_output_already_exists")
+    if sys.platform == "win32" and source_build_receipts is None:
+        raise AcceptanceRefused("source_editable_build_receipts_required")
     commit = _git(checkout, "rev-parse", "HEAD")
     if _git(checkout, "status", "--porcelain", "--untracked-files=normal"):
         raise AcceptanceRefused("clean_committed_checkout_required")
@@ -899,6 +905,8 @@ def build_acceptance_bundle(*, checkout: Path, output: Path) -> Path:
         _copy_inputs(checkout, output)
         with tempfile.TemporaryDirectory(prefix="mordred-dbcrypt-build-") as directory:
             provenance = _bundle_build(checkout, output, commands, Path(directory))
+        if source_build_receipts is not None:
+            _copy_build_receipts(source_build_receipts, output / "artifacts/native-build/source")
         if _git(checkout, "rev-parse", "HEAD") != commit or _git(
             checkout, "status", "--porcelain", "--untracked-files=normal"
         ):
@@ -1338,7 +1346,11 @@ def native_phase_inputs(root: Path, phase: Phase) -> dict[str, Any]:
     if sys.platform == "win32":
         if not qualification:
             raise AcceptanceRefused("windows_native_qualification_incomplete")
-        validate_windows_qualification(_absolute(qualification), checkout=Path(manifest["checkout"]))
+        qualified = validate_windows_qualification(_absolute(qualification), checkout=Path(manifest["checkout"]))
+        _require(os.environ.get("MORDRED_DBCRYPT_VFS_FIXTURE_ROOT") == qualified["fixtures"]["test_root"])
+        fixture_input = os.environ.get("MORDRED_DBCRYPT_QUALIFICATION_MANIFEST")
+        _require(bool(fixture_input))
+        _require(sha256_file(_input_file(Path(str(fixture_input)))) == qualified["fixture_manifest_sha256"])
     return {
         "bundle": bundle,
         "manifest": manifest,
@@ -1801,7 +1813,7 @@ def _qualified_package_artifacts(
     _require(bundle["files"][module] == provenance["source_hashes"][module])
 
 
-def validate_windows_qualification(directory: Path, *, checkout: Path) -> dict[str, Any]:
+def _validate_legacy_windows_qualification(directory: Path, *, checkout: Path) -> dict[str, Any]:
     try:
         directory = directory.resolve(strict=True)
         manifest = json.loads(_input_file(directory / "manifest.json").read_text())
@@ -1887,6 +1899,29 @@ def validate_windows_qualification(directory: Path, *, checkout: Path) -> dict[s
 
 
 def _qualification_inputs(directory: Path, manifest: dict[str, Any]) -> set[Path]:
+    if manifest.get("schema") == 2:
+        paths = {directory / "manifest.json"}
+        diagnostic_path = _artifact_ref(directory, manifest["diagnostic"])
+        paths.update(_diagnostic_files(diagnostic_path.parent, json.loads(diagnostic_path.read_text())))
+        fixture_path = _artifact_ref(directory, manifest["fixtures"])
+        _, fixture_files = _fixture_descriptor(fixture_path)
+        paths.update(fixture_files)
+        for reference in manifest["results"].values():
+            result_path = _artifact_ref(directory, reference)
+            value = json.loads(result_path.read_text())
+            paths.add(result_path)
+            paths.update(_artifact_ref(result_path.parent, value[action]["report"]) for action in ("collect", "run"))
+            paths.update(_artifact_ref(result_path.parent, ref) for ref in value["artifacts"].values())
+        proof_path, proof = _evidence_ref(directory, manifest["wheel_bundle"])
+        paths.add(proof_path)
+        paths.add(_artifact_ref(proof_path.parent, proof["manifest"]))
+        paths.add(_artifact_ref(proof_path.parent, proof["configuration"]))
+        paths.update(
+            _artifact_ref(proof_path.parent, ref)
+            for group in ("inputs", "artifacts", "native_build")
+            for ref in proof[group].values()
+        )
+        return paths
     paths = {directory / "manifest.json"}
     for key in (
         "provenance",
@@ -1961,6 +1996,13 @@ def validate_reopen_continuity(before: dict[str, Any], after: dict[str, Any], ob
 
 def native_acceptance_commands(*, checkout: Path, bundle: Path, platform: str, kind: str) -> list[dict[str, Any]]:
     rows = acceptance_commands(checkout=checkout, bundle=bundle, platform=platform)
+    if platform == "win32" and kind == "candidate":
+        rows = [
+            {"suite": row["suite"], "mode": row["mode"], "status": "satisfied_by_qualified_artifact_reference"}
+            if row["suite"] == "windows-vfs"
+            else row
+            for row in rows
+        ]
     for row in rows:
         if row["suite"] == "affected":
             row["argv"].extend(str(bundle / "tests" / name) for name in ADDITIONAL_MODULES)
@@ -2089,6 +2131,10 @@ def validate_bundle_evidence(value: Any, *, directory: Path) -> dict[str, Any]:
     for kind in ("sdist", "wheel"):
         artifact = _artifact_ref(directory, proof["artifacts"][kind])
         _require(sha256_file(artifact) == manifest[kind + "_sha256"] == files[manifest[kind]])
+    captured = {name for name in files if name.startswith("artifacts/native-build/")}
+    _require(set(proof.get("native_build", {})) == captured)
+    for name in captured:
+        _require(sha256_file(_artifact_ref(directory, proof["native_build"][name])) == files[name])
     config_name = manifest["extracted_sdist"] + "/pyproject.toml"
     configuration = _artifact_ref(directory, proof["configuration"])
     _require(sha256_file(configuration) == files[config_name])
@@ -2130,6 +2176,7 @@ def _export_bundle_evidence(context: dict[str, Any], directory: Path) -> dict[st
         "bundle_path": str(context["bundle"]),
         "inputs": {},
         "artifacts": {},
+        "native_build": {},
     }
     manifest = context["manifest"]
     config_name = manifest["extracted_sdist"] + "/pyproject.toml"
@@ -2139,6 +2186,7 @@ def _export_bundle_evidence(context: dict[str, Any], directory: Path) -> dict[st
         manifest["sdist"],
         manifest["wheel"],
         *(name for name in manifest["files"] if name.startswith(("tests/", "tools/"))),
+        *(name for name in manifest["files"] if name.startswith("artifacts/native-build/")),
     ]
     for name in names:
         path = target / name
@@ -2151,6 +2199,8 @@ def _export_bundle_evidence(context: dict[str, Any], directory: Path) -> dict[st
             proof["configuration"] = reference
         elif name in (manifest["sdist"], manifest["wheel"]):
             proof["artifacts"]["sdist" if name == manifest["sdist"] else "wheel"] = reference
+        elif name.startswith("artifacts/native-build/"):
+            proof["native_build"][name] = reference
         else:
             proof["inputs"][name] = reference
     path = target / "proof.json"
@@ -2394,6 +2444,10 @@ def _provision_fixture_closure(phase: dict[str, Any]) -> None:
 def _native_execution_report(phase: dict[str, Any], directory: Path) -> None:
     bundle = _phase_bundle(phase, directory)
     qualified = _phase_qualification(phase, directory)
+    if phase["platform"] == "win32" and phase["acceptance_kind"] == "candidate":
+        _require(qualified is not None)
+        assert qualified is not None
+        _require(phase["qualified_vfs"] == _qualified_vfs_reference(qualified, phase["mode"]))
     executions = phase["executions"]
     _require(isinstance(executions, list) and bool(executions))
     plans = _planned_rows(phase, bundle) if phase["observation"] == "provision" else {}
@@ -2940,6 +2994,13 @@ def _execute_native_phase(context: dict[str, Any], *, phase: Phase, directory: P
         "finished_at": time.time(),
         "limitations": ["cached_access_failure_is_injected_not_physical_tpm_disable"],
     }
+    if sys.platform == "win32" and context["kind"] == "candidate":
+        result["qualified_vfs"] = _qualified_vfs_reference(
+            validate_windows_qualification(
+                Path(context["qualification"]), checkout=Path(context["manifest"]["checkout"])
+            ),
+            context["mode"],
+        )
     result["test_counts"] = {
         "passed": sum(row.get("counts", {}).get("passed", 0) for row in executions),
         "collected": sum(len(row.get("nodeids", [])) for row in executions),
@@ -2957,12 +3018,755 @@ def _execute_native_phase(context: dict[str, Any], *, phase: Phase, directory: P
     return result
 
 
+def _build_receipt_files(directory: Path, receipt: dict[str, Any]) -> set[Path]:
+    files = {directory / "receipt.json"}
+    files.update(_artifact_ref(directory, ref) for ref in receipt.get("inputs", {}).values())
+    files.update(_artifact_ref(directory, receipt[key]) for key in ("stdout", "stderr", "dll") if key in receipt)
+    return files
+
+
+def _copy_build_receipts(source: Path, target: Path) -> None:
+    _require(source.is_absolute() and source == source.resolve(strict=True))
+    source = source.resolve(strict=True)
+    target.mkdir(mode=0o700, parents=True)
+    receipts = sorted(source.glob("*/receipt.json"))
+    _require(bool(receipts))
+    for path in receipts:
+        receipt = json.loads(_input_file(path).read_text())
+        for original in _build_receipt_files(path.parent, receipt):
+            destination = target / original.relative_to(source)
+            destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with destination.open("xb") as output:
+                output.write(_input_file(original).read_bytes())
+
+
+def _validate_build_receipt(
+    path: Path,
+    *,
+    expected_inputs: dict[str, str],
+    source_root: str,
+    version: str,
+    dll_hash: str,
+    installed_at: float,
+    observed_at: float,
+) -> dict[str, Any]:
+    receipt = json.loads(_input_file(path).read_text())
+    _require(receipt["schema_version"] == 1 and receipt["kind"] == "dbcrypt_vfs_build")
+    _require(
+        receipt["status"] == "succeeded"
+        and receipt["version"] == version
+        and type(receipt["returncode"]) is int
+        and receipt["returncode"] == 0
+    )
+    _require(receipt["source_root"] == source_root and _timestamp(receipt["started_at"]))
+    _require(receipt["started_at"] <= receipt["finished_at"] <= installed_at <= observed_at)
+    args = receipt["argv"]
+    _require(
+        len(args) == 13
+        and args[:6] == ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]
+    )
+    root = _guest_path(source_root, "win32")
+    _require(_guest_path(args[6], "win32") == root / "native/dbcrypt-vfs/build.ps1")
+    _require(
+        args[7] == "-OutputDirectory" and args[9] == "-SqliteIncludeDirectory" and args[11:] == ["-Target", "Checked"]
+    )
+    staging = _guest_path(args[8], "win32")
+    _require(_guest_path(args[10], "win32") == staging / "include")
+    _require(_guest_path(receipt["dll"]["observed_path"], "win32") == staging / "mordred_dbcrypt_checked.dll")
+    _require(set(receipt["inputs"]) == set(expected_inputs))
+    for name, digest in expected_inputs.items():
+        _require(sha256_file(_artifact_ref(path.parent, receipt["inputs"][name])) == digest)
+    dll = _artifact_ref(path.parent, receipt["dll"])
+    _require(sha256_file(dll) == dll_hash and dll.stat().st_size == receipt["dll"]["size"])
+    for key in ("stdout", "stderr"):
+        _require(_artifact_ref(path.parent, receipt[key]).stat().st_size == receipt[key]["size"] <= 1024 * 1024)
+    return dict(receipt)
+
+
+def _package_build_inputs(
+    bundle: dict[str, Any], directory: Path, proof: dict[str, Any], headers: dict[str, str]
+) -> dict[str, str]:
+    expected = {}
+    with tarfile.open(_artifact_ref(directory, proof["artifacts"]["sdist"]), "r:gz") as archive:
+        prefix = Path(bundle["sdist"]).name.removesuffix(".tar.gz") + "/"
+        for member in archive.getmembers():
+            name = member.name.removeprefix(prefix)
+            if name in {"hatch_build.py", "tools/dbcrypt_build_headers.py", "native/dbcrypt-vfs/build.ps1"} or (
+                name.startswith("native/dbcrypt-vfs/") and name.endswith((".c", ".h"))
+            ):
+                stream = archive.extractfile(member)
+                _require(member.isfile() and stream is not None)
+                assert stream is not None
+                expected[name] = hashlib.sha256(stream.read()).hexdigest()
+    _require({"hatch_build.py", "tools/dbcrypt_build_headers.py", "native/dbcrypt-vfs/build.ps1"} <= set(expected))
+    return {**expected, **{"headers/" + name: digest for name, digest in headers.items()}}
+
+
+def _local_bundle_proof(path: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    def ref(name: str) -> dict[str, str]:
+        return {"path": name, "sha256": sha256_file(path / name)}
+
+    return {
+        "schema_version": 1,
+        "kind": "dbcrypt_bundle_evidence",
+        "bundle_path": str(path),
+        "manifest": ref("manifest.json"),
+        "configuration": ref(manifest["extracted_sdist"] + "/pyproject.toml"),
+        "artifacts": {kind: ref(manifest[kind]) for kind in ("sdist", "wheel")},
+        "inputs": {name: ref(name) for name in manifest["files"] if name.startswith(("tests/", "tools/"))},
+        "native_build": {name: ref(name) for name in manifest["files"] if name.startswith("artifacts/native-build/")},
+    }
+
+
+def matching_build_receipts(
+    observed: dict[str, Any], *, bundle: dict[str, Any], proof: dict[str, Any], directory: Path, headers: dict[str, str]
+) -> list[str]:
+    mode = observed["mode"]
+    expected = _package_build_inputs(bundle, directory, proof, headers)
+    root = (
+        bundle["checkout"]
+        if mode == "source"
+        else str(_guest_path(proof["bundle_path"], "win32") / bundle["extracted_sdist"])
+    )
+    matches = []
+    for name, reference in proof["native_build"].items():
+        if name.startswith("artifacts/native-build/" + mode + "/") and name.endswith("/receipt.json"):
+            try:
+                _validate_build_receipt(
+                    _artifact_ref(directory, reference),
+                    expected_inputs=expected,
+                    source_root=root,
+                    version="editable" if mode == "source" else "standard",
+                    dll_hash=observed["dll_sha256"],
+                    installed_at=observed["installed_at"],
+                    observed_at=observed["observed_at"],
+                )
+            except (OSError, KeyError, ValueError, TypeError):
+                continue
+            matches.append(name)
+    _require(bool(matches))
+    return sorted(matches)
+
+
+def validate_windows_diagnostic(directory: Path, *, checkout: Path) -> dict[str, Any]:
+    """Historical full C proof only; never admits native storage eligibility."""
+    manifest = json.loads(_input_file(directory / "manifest.json").read_text())
+    _require(manifest["schema"] == 1 and manifest["kind"] in {"windows_vfs_diagnostic", "windows_vfs_qualification"})
+    provenance = _qualification_source(directory, manifest, checkout)
+    full = windows_vfs_required_nodes(checkout, release=False)
+    raw = _qualification_row(
+        directory, manifest["rows"]["checkedtest_source"], "CheckedTest", full, provenance["configuration"]
+    )
+    for reference in manifest["rows"]["checkedtest_source"].values():
+        _, row = _evidence_ref(directory, reference)
+        _require(row.get("deselected", []) == [])
+    _qualification_binaries(directory, manifest["artifacts"]["checkedtest_source"], raw, provenance)
+    plan = _qualification_fixture(directory, manifest)
+    _require(PureWindowsPath(raw["dll"]).parent.parent == PureWindowsPath(plan["test_root"]))
+    _require(
+        PureWindowsPath(raw["product_module"]).is_relative_to(
+            PureWindowsPath(provenance["source"]) / "src/mordred_hermes"
+        )
+    )
+    if "reused_builds" in provenance:
+        reused = provenance["reused_builds"]["CheckedTest"]
+        critical = {
+            key: digest
+            for key, digest in provenance["source_hashes"].items()
+            if key.startswith(("native/dbcrypt-vfs/", "src/mordred_hermes/_private_fs/"))
+            or key == "src/mordred_hermes/dbcrypt/_windows_vfs.py"
+        }
+        _require(reused["critical_inputs"] == critical and reused["headers"] == provenance["headers"])
+        _require(reused["dll_sha256"] == raw["dll_sha256"])
+        _require(
+            reused["actual_build_stdout_sha256"]
+            == manifest["artifacts"]["checkedtest_source"]["build_stdout"]["sha256"]
+        )
+        _require(reused["cached_runtime"][raw["executable"]] == raw["python_sha256"])
+        _require(reused["cached_runtime"][raw["driver_native"]] == raw["driver_native_sha256"])
+    return {
+        "manifest": manifest,
+        "provenance": provenance,
+        "diagnostic": {**raw, "role": "diagnostic_source"},
+        "manifest_sha256": sha256_file(directory / "manifest.json"),
+        "fixture": plan,
+    }
+
+
+def _diagnostic_files(directory: Path, manifest: dict[str, Any]) -> set[Path]:
+    paths = {directory / "manifest.json"}
+    for key in (
+        "provenance",
+        "source_map",
+        "source_archive",
+        "configuration",
+        "fixture_plan",
+        "fixture_manifest",
+        "fixture_verify",
+    ):
+        paths.add(_artifact_ref(directory, manifest[key]))
+    paths.update(_artifact_ref(directory, ref) for ref in manifest["headers"].values())
+    for name in ("checkedtest_source", "checked_source"):
+        if name in manifest["rows"]:
+            paths.update(_artifact_ref(directory, ref) for ref in manifest["rows"][name].values())
+            paths.update(
+                _artifact_ref(directory, manifest["artifacts"][name][key])
+                for key in ("dll", "driver_native", "python", "build_stdout", "build_script")
+            )
+    return paths
+
+
+def windows_package_commands(
+    *,
+    checkout: Path | PureWindowsPath,
+    bundle: Path | PureWindowsPath,
+    mode: str,
+    basetemp: Path | PureWindowsPath,
+    configuration: Path | PureWindowsPath,
+) -> list[dict[str, Any]]:
+    _require(mode in {"source", "wheel"})
+    prefix = (
+        ["uv", "run", "--project", str(checkout), "pytest"]
+        if mode == "source"
+        else [
+            "uv",
+            "run",
+            "--no-project",
+            "--python",
+            str(bundle / "wheel-env/Scripts/python.exe"),
+            "python",
+            "-m",
+            "pytest",
+        ]
+    )
+    args = [
+        "-q",
+        "-c",
+        str(configuration),
+        "-o",
+        "addopts=",
+        "-m",
+        "integration",
+        "--basetemp",
+        str(basetemp),
+        str(bundle / "tests/integration/test_dbcrypt_windows_vfs.py"),
+        "-k",
+        WINDOWS_RELEASE_SELECTION,
+        "-p",
+        "tests._dbcrypt_acceptance_native",
+    ]
+    gates = {"MORDRED_DBCRYPT_WINDOWS_VFS_TEST": "1", "MORDRED_DBCRYPT_VFS_PACKAGE_QUALIFY": "1"}
+    return [
+        {
+            "argv": [*prefix, *args, *(["--collect-only"] if action == "collect" else [])],
+            "pytest_argv": [*args, *(["--collect-only"] if action == "collect" else [])],
+            "env": gates,
+            "action": action,
+        }
+        for action in ("collect", "run")
+    ]
+
+
+def validate_package_observation(
+    observed: dict[str, Any],
+    *,
+    mode: str,
+    bundle: dict[str, Any],
+    proof: dict[str, Any],
+    directory: Path,
+    headers: dict[str, str],
+) -> None:
+    _require(
+        mode in {"source", "wheel"}
+        and observed["mode"] == mode
+        and observed["role"] == "packaged_" + ("editable" if mode == "source" else "wheel")
+    )
+    _require(
+        observed["bundle_manifest_sha256"] == proof["manifest"]["sha256"] and observed["commit"] == bundle["commit"]
+    )
+    _require(
+        observed["elevated"] is False
+        and observed["env_dll_override"] is None
+        and observed["test_exports_absent"] is True
+    )
+    _validate_exported_import(
+        observed["product_module"], mode=mode, platform="win32", bundle=bundle, bundle_path=proof["bundle_path"]
+    )
+    env = (
+        _guest_path(bundle["checkout"], "win32") / ".venv"
+        if mode == "source"
+        else _guest_path(proof["bundle_path"], "win32") / "wheel-env"
+    )
+    _require(_guest_path(observed["executable"], "win32") == env / "Scripts/python.exe")
+    _require(_guest_path(observed["driver_native"], "win32").is_relative_to(env))
+    _require(
+        _guest_path(observed["dll"], "win32").is_relative_to(env)
+        and _guest_path(observed["record"], "win32").is_relative_to(env)
+    )
+    _require(
+        observed["driver_version"] == "0.5.7"
+        and observed["versions"] == {"sqlite": "3.51.1", "sqlcipher": "4.12.0 community"}
+    )
+    _require(observed["filesystem"]["method"] == "checked_confidential_fixed_local_ntfs")
+    _require(observed["filesystem"]["identity"]["owner"] == observed["sid"])
+    expected = _package_build_inputs(bundle, directory, proof, headers)
+    root = (
+        bundle["checkout"]
+        if mode == "source"
+        else str(_guest_path(proof["bundle_path"], "win32") / bundle["extracted_sdist"])
+    )
+    matches = observed["build_receipts"]
+    _require(isinstance(matches, list) and bool(matches) and len(matches) == len(set(matches)))
+    for name in matches:
+        _require(name.startswith("artifacts/native-build/" + mode + "/") and name in proof["native_build"])
+        receipt = _validate_build_receipt(
+            _artifact_ref(directory, proof["native_build"][name]),
+            expected_inputs=expected,
+            source_root=root,
+            version="editable" if mode == "source" else "standard",
+            dll_hash=observed["dll_sha256"],
+            installed_at=observed["installed_at"],
+            observed_at=observed["observed_at"],
+        )
+        if mode == "wheel":
+            command = bundle["build_commands"][4]
+            _require(command["started_at"] <= receipt["started_at"] <= receipt["finished_at"] <= command["finished_at"])
+            _require(observed["installed_at"] <= bundle["build_commands"][5]["finished_at"])
+        else:
+            _require(receipt["finished_at"] <= observed["installed_at"] <= bundle["build_commands"][0]["started_at"])
+
+
+def _validate_packaged_result(
+    directory: Path,
+    result: dict[str, Any],
+    *,
+    mode: str,
+    bundle: dict[str, Any],
+    proof: dict[str, Any],
+    proof_directory: Path,
+    diagnostic: dict[str, Any],
+    fixtures: dict[str, Any],
+) -> dict[str, Any]:
+    _require(
+        result["schema_version"] == 1
+        and result["kind"] == "packaged_windows_vfs_result"
+        and result["status"] == "passed"
+    )
+    _require(result["mode"] == mode and result["diagnostic_manifest_sha256"] == diagnostic["manifest_sha256"])
+    _require(result["fixtures_sha256"] == fixtures["manifest_sha256"])
+    paths = {key: _artifact_ref(directory, ref) for key, ref in result["artifacts"].items()}
+    required = windows_vfs_required_nodes(Path(__file__).resolve().parents[1], release=True)
+    full = windows_vfs_required_nodes(Path(__file__).resolve().parents[1], release=False)
+    observations = []
+    for index, action in enumerate(("collect", "run")):
+        execution = result[action]
+        _, report = _evidence_ref(directory, execution["report"])
+        obs = report["qualification"]
+        _require(obs["fixture_root"] == fixtures["plan"]["test_root"] and obs["sid"] == fixtures["plan"]["owner_sid"])
+        validate_package_observation(
+            obs,
+            mode=mode,
+            bundle=bundle,
+            proof=proof,
+            directory=proof_directory,
+            headers=diagnostic["provenance"]["headers"],
+        )
+        _require(obs["driver_native_sha256"] == diagnostic["diagnostic"]["driver_native_sha256"])
+        _require(
+            [_normalized_node(node) for node in report["nodeids"]] == [_normalized_node(node) for node in required]
+        )
+        _require(
+            {_normalized_node(node) for node in report["deselected"]}
+            == {_normalized_node(node) for node in set(full) - set(required)}
+        )
+        expected = windows_package_commands(
+            checkout=PureWindowsPath(bundle["checkout"]),
+            bundle=PureWindowsPath(proof["bundle_path"]),
+            mode=mode,
+            basetemp=PureWindowsPath(execution["basetemp"]),
+            configuration=PureWindowsPath(proof["bundle_path"]) / bundle["extracted_sdist"] / "pyproject.toml",
+        )[index]
+        _require(execution["argv"] == expected["argv"] and report["pytest_argv"] == expected["pytest_argv"])
+        _require(execution["returncode"] == 0 and report["exitstatus"] == 0 and report["collection_errors"] == [])
+        _require(execution["started_at"] <= obs["observed_at"] <= execution["finished_at"])
+        _require(report["fixture_manifest_sha256"] == fixtures["manifest_sha256"])
+        after = report["qualification_after"]
+        validate_package_observation(
+            after,
+            mode=mode,
+            bundle=bundle,
+            proof=proof,
+            directory=proof_directory,
+            headers=diagnostic["provenance"]["headers"],
+        )
+        _require(
+            {key: value for key, value in obs.items() if key != "observed_at"}
+            == {key: value for key, value in after.items() if key != "observed_at"}
+        )
+        _require(obs["observed_at"] <= after["observed_at"] <= execution["finished_at"])
+        if action == "collect":
+            _require(report["reports"] == [])
+        else:
+            validate_native_test_report(report)
+        observations.append(obs)
+    _require(result["collect"]["finished_at"] <= result["run"]["started_at"])
+    _, collection_report = _evidence_ref(directory, result["collect"]["report"])
+    _, run_report = _evidence_ref(directory, result["run"]["report"])
+    _require(
+        collection_report["nodeids"] == run_report["nodeids"]
+        and collection_report["deselected"] == run_report["deselected"]
+    )
+    before, after = observations
+    stable = (
+        "mode",
+        "role",
+        "commit",
+        "bundle_manifest_sha256",
+        "dll",
+        "dll_sha256",
+        "driver_native",
+        "driver_native_sha256",
+        "executable",
+        "python_sha256",
+        "record",
+        "record_sha256",
+        "product_module",
+        "installed_at",
+        "build_receipts",
+        "filesystem",
+        "sid",
+    )
+    _require(all(before[key] == after[key] for key in stable))
+    for key, digest in (
+        ("dll", "dll_sha256"),
+        ("driver_native", "driver_native_sha256"),
+        ("python", "python_sha256"),
+        ("record", "record_sha256"),
+    ):
+        _require(sha256_file(paths[key]) == after[digest])
+    _require(after["record_size"] == paths["record"].stat().st_size)
+    asset = "mordred_hermes/_native/dbcrypt-vfs/mordred_dbcrypt_vfs.dll"
+    rows = [row for row in csv.reader(io.StringIO(paths["record"].read_text())) if row[0] == asset]
+    encoded = base64.urlsafe_b64encode(bytes.fromhex(after["dll_sha256"])).rstrip(b"=").decode()
+    _require(len(rows) == 1 and rows[0][1:] == ["sha256=" + encoded, str(paths["dll"].stat().st_size)])
+    if mode == "wheel":
+        with zipfile.ZipFile(_artifact_ref(proof_directory, proof["artifacts"]["wheel"])) as wheel:
+            _require(hashlib.sha256(wheel.read(asset)).hexdigest() == after["dll_sha256"])
+    return {
+        **after,
+        "nodeids": run_report["nodeids"],
+        "target": "Checked",
+        "argv": result["run"]["argv"],
+        "bundle_manifest_sha256": proof["manifest"]["sha256"],
+        "sdist_sha256": bundle["sdist_sha256"],
+        "wheel_sha256": bundle["wheel_sha256"],
+    }
+
+
+def _copy_referenced(source: Path, files: set[Path], target: Path) -> None:
+    target.mkdir(mode=0o700)
+    for original in sorted(files):
+        relative = original.relative_to(source)
+        _relative(relative.as_posix())
+        destination = target / relative
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with destination.open("xb") as output:
+            output.write(_input_file(original).read_bytes())
+
+
+def _fixture_descriptor(path: Path) -> tuple[dict[str, Any], set[Path]]:
+    value = json.loads(_input_file(path).read_text())
+    _require(path.name == "manifest.json" and value["schema"] == 1 and value["kind"] == "windows_vfs_fixtures")
+    _qualification_fixture(path.parent, value)
+    files = {
+        path,
+        *(_artifact_ref(path.parent, value[key]) for key in ("fixture_plan", "fixture_manifest", "fixture_verify")),
+    }
+    return value, files
+
+
+def qualify_windows_vfs(*, bundle: Path, mode: str, diagnostic: Path, fixtures: Path, output: Path) -> Path:
+    """One collection and one packaged release run, never custody provisioning."""
+    _require(sys.platform == "win32" and mode in {"source", "wheel"})
+    manifest = validate_bundle(bundle)
+    require_native_source_checkout({"mode": mode, "manifest": manifest})
+    historical = validate_windows_diagnostic(diagnostic.parent, checkout=Path(manifest["checkout"]))
+    fixture, _files = _fixture_descriptor(fixtures)
+    plan = _qualification_fixture(fixtures.parent, fixture)
+    _require(
+        output.is_absolute()
+        and output.parent == output.parent.resolve(strict=True)
+        and not output.exists()
+        and not output.is_relative_to(bundle)
+        and not output.is_relative_to(Path(manifest["checkout"]))
+    )
+    output.mkdir(mode=0o700)
+    result: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "packaged_windows_vfs_result",
+        "status": "failed",
+        "mode": mode,
+        "diagnostic_manifest_sha256": historical["manifest_sha256"],
+        "fixtures_sha256": sha256_file(fixtures),
+    }
+    _copy_referenced(fixtures.parent, _files, output / "fixtures")
+    result["fixtures_descriptor"] = {"path": "fixtures/manifest.json", "sha256": sha256_file(fixtures)}
+    try:
+        configuration = bundle / manifest["extracted_sdist"] / "pyproject.toml"
+        rows = windows_package_commands(
+            checkout=Path(manifest["checkout"]),
+            bundle=bundle,
+            mode=mode,
+            basetemp=output / "pytest-temp",
+            configuration=configuration,
+        )
+        with tempfile.TemporaryDirectory(prefix="mordred-dbcrypt-probe-") as home:
+            environment = probe_environment(Path(home))
+            environment.update(
+                DBCRYPT_BUNDLE=str(bundle),
+                MORDRED_DBCRYPT_VFS_DIAGNOSTIC=str(diagnostic),
+                MORDRED_DBCRYPT_VFS_FIXTURES_DESCRIPTOR=str(fixtures),
+                MORDRED_DBCRYPT_VFS_PACKAGE_MODE=mode,
+                MORDRED_DBCRYPT_TEST_ROOT=plan["test_root"],
+                MORDRED_DBCRYPT_QUALIFICATION_MANIFEST=str(_artifact_ref(fixtures.parent, fixture["fixture_manifest"])),
+                UV_NO_SYNC="1",
+            )
+            for row in rows:
+                action = row["action"]
+                path = output / (action + ".json")
+                started = time.time()
+                execution = subprocess.run(
+                    row["argv"],
+                    cwd=bundle,
+                    env={**environment, **row["env"], "MORDRED_DBCRYPT_PYTEST_REPORT": str(path)},
+                    capture_output=True,
+                    timeout=3600,
+                    check=False,
+                )
+                result[action] = {
+                    "argv": row["argv"],
+                    "basetemp": str(output / "pytest-temp"),
+                    "started_at": started,
+                    "finished_at": time.time(),
+                    "returncode": execution.returncode,
+                    "report": {"path": path.name, "sha256": sha256_file(path)},
+                }
+                _require(execution.returncode == 0)
+        report = json.loads((output / "run.json").read_text())
+        observation = report["qualification_after"]
+        result["artifacts"] = {}
+        for key, original in (
+            ("dll", observation["dll"]),
+            ("driver_native", observation["driver_native"]),
+            ("python", observation["executable"]),
+            ("record", observation["record"]),
+        ):
+            target = output / (key + ".bin")
+            observed_path = Path(original)
+            _require(
+                observed_path.is_absolute()
+                and observed_path.resolve(strict=True) == observed_path
+                and stat.S_ISREG(observed_path.lstat().st_mode)
+            )
+            with target.open("xb") as destination:
+                destination.write(observed_path.read_bytes())
+            result["artifacts"][key] = {"path": target.name, "sha256": sha256_file(target)}
+        result["dll_sha256"] = observation["dll_sha256"]
+        result["status"] = "passed"
+        proof = _local_bundle_proof(bundle, manifest)
+        _validate_packaged_result(
+            output,
+            result,
+            mode=mode,
+            bundle=manifest,
+            proof=proof,
+            proof_directory=bundle,
+            diagnostic=historical,
+            fixtures={"manifest_sha256": sha256_file(fixtures), "plan": plan},
+        )
+        validate_bundle(bundle)
+        require_native_source_checkout({"mode": mode, "manifest": manifest})
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError, AcceptanceRefused):
+        result["status"] = "failed"
+        _write_new(output / "result.json", result)
+        raise AcceptanceRefused("packaged_windows_qualification_failed") from None
+    _write_new(output / "result.json", result)
+    return output / "result.json"
+
+
+def _assemble_windows_qualification(
+    *, bundle: Path, diagnostic: Path, source_result: Path, wheel_result: Path, output: Path
+) -> Path:
+    """Offline fixed closure; copies referenced public artifacts only."""
+    manifest = validate_bundle(bundle)
+    checkout = Path(__file__).resolve().parents[1]
+    historical = validate_windows_diagnostic(diagnostic.parent, checkout=checkout)
+    _require(
+        output.is_absolute()
+        and output.parent == output.parent.resolve(strict=True)
+        and not output.exists()
+        and not output.is_relative_to(bundle)
+        and not output.is_relative_to(checkout)
+    )
+    output.mkdir(mode=0o700)
+    _copy_referenced(
+        diagnostic.parent, _diagnostic_files(diagnostic.parent, historical["manifest"]), output / "diagnostic"
+    )
+    # The same original fixture bytes are retained independently of the diagnostic identity.
+    # Results bind the operator fixture descriptor's exact bytes; copy it from each producer.
+    source_value = json.loads(_input_file(source_result).read_text())
+    original_fixtures = _artifact_ref(source_result.parent, source_value["fixtures_descriptor"])
+    fixture, fixture_files = _fixture_descriptor(original_fixtures)
+    _qualification_fixture(original_fixtures.parent, fixture)
+    _copy_referenced(original_fixtures.parent, fixture_files, output / "fixtures")
+    refs = {}
+    for mode, path in (("source", source_result), ("wheel", wheel_result)):
+        value = json.loads(_input_file(path).read_text())
+        files = {
+            path,
+            *(_artifact_ref(path.parent, value[action]["report"]) for action in ("collect", "run")),
+            *(_artifact_ref(path.parent, ref) for ref in value["artifacts"].values()),
+        }
+        _copy_referenced(path.parent, files, output / mode)
+        copied = output / mode / path.name
+        refs[mode] = {"path": str(copied.relative_to(output)), "sha256": sha256_file(copied)}
+    export_directory = output / "export"
+    export_directory.mkdir(mode=0o700)
+    proof = _export_bundle_evidence({"bundle": bundle, "manifest": manifest}, export_directory)
+    proof_file = output / proof["path"]
+    descriptor = {
+        "schema": 2,
+        "kind": "windows_vfs_qualification",
+        "diagnostic": {"path": "diagnostic/manifest.json", "sha256": sha256_file(diagnostic)},
+        "fixtures": {"path": "fixtures/manifest.json", "sha256": sha256_file(original_fixtures)},
+        "results": refs,
+        "wheel_bundle": {"path": str(proof_file.relative_to(output)), "sha256": sha256_file(proof_file)},
+    }
+    try:
+        _validate_qualification_payload(output, descriptor, checkout=checkout)
+    except AcceptanceRefused:
+        _write_new(
+            output / "assembly-failure.json", {"status": "failed", "reason": "windows_native_qualification_incomplete"}
+        )
+        raise
+    _write_new(output / "manifest.json", descriptor)
+    return output / "manifest.json"
+
+
+def assemble_windows_qualification(
+    *, bundle: Path, diagnostic: Path, source_result: Path, wheel_result: Path, output: Path
+) -> Path:
+    try:
+        return _assemble_windows_qualification(
+            bundle=bundle, diagnostic=diagnostic, source_result=source_result, wheel_result=wheel_result, output=output
+        )
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        KeyError,
+        IndexError,
+        tarfile.TarError,
+        zipfile.BadZipFile,
+        AcceptanceRefused,
+    ):
+        raise AcceptanceRefused("windows_native_qualification_incomplete") from None
+
+
+def _validate_qualification_payload(directory: Path, manifest: dict[str, Any], *, checkout: Path) -> dict[str, Any]:
+    _require(manifest["schema"] == 2 and manifest["kind"] == "windows_vfs_qualification")
+    path = _artifact_ref(directory, manifest["diagnostic"])
+    historical = validate_windows_diagnostic(path.parent, checkout=checkout)
+    fixture_path = _artifact_ref(directory, manifest["fixtures"])
+    fixture_manifest = json.loads(fixture_path.read_text())
+    plan = _qualification_fixture(fixture_path.parent, fixture_manifest)
+    fixture = {"manifest_sha256": sha256_file(fixture_path), "plan": plan}
+    proof_path, proof = _evidence_ref(directory, manifest["wheel_bundle"])
+    bundle = validate_bundle_evidence(proof, directory=proof_path.parent)
+    provenance = historical["provenance"]
+    # C/header/private-FS/config/test compatibility; the changed hook is bound by each new receipt.
+    _qualified_package_artifacts(
+        proof_path.parent,
+        proof,
+        bundle,
+        {"dll_sha256": json.loads(_artifact_ref(directory, manifest["results"]["wheel"]).read_text())["dll_sha256"]},
+        provenance,
+    )
+    released = {}
+    for mode in ("source", "wheel"):
+        result_path = _artifact_ref(directory, manifest["results"][mode])
+        result = json.loads(result_path.read_text())
+        released[mode] = _validate_packaged_result(
+            result_path.parent,
+            result,
+            mode=mode,
+            bundle=bundle,
+            proof=proof,
+            proof_directory=proof_path.parent,
+            diagnostic=historical,
+            fixtures=fixture,
+        )
+    _require(released["source"]["filesystem"] == released["wheel"]["filesystem"])
+    return {
+        "diagnostic": historical["diagnostic"],
+        "source": released["source"],
+        "wheel": released["wheel"],
+        "prerequisite": manifest,
+        "fixtures": plan,
+        "fixture_manifest_sha256": fixture_manifest["fixture_manifest"]["sha256"],
+    }
+
+
+def validate_windows_qualification(directory: Path, *, checkout: Path) -> dict[str, Any]:
+    try:
+        manifest = json.loads(_input_file(directory / "manifest.json").read_text())
+        return {
+            **_validate_qualification_payload(directory, manifest, checkout=checkout),
+            "manifest_sha256": sha256_file(directory / "manifest.json"),
+        }
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        KeyError,
+        IndexError,
+        tarfile.TarError,
+        zipfile.BadZipFile,
+        AcceptanceRefused,
+    ) as exc:
+        raise AcceptanceRefused("windows_native_qualification_incomplete") from exc
+
+
+def _qualified_vfs_reference(qualified: dict[str, Any], mode: str) -> dict[str, Any]:
+    row = qualified[mode]
+    return {
+        "status": "satisfied_by_qualified_artifact_reference",
+        "qualification_manifest_sha256": qualified["manifest_sha256"],
+        "mode": mode,
+        "dll_sha256": row["dll_sha256"],
+        "driver_native_sha256": row["driver_native_sha256"],
+        "nodeids": row["nodeids"],
+        "original_results": qualified["prerequisite"]["results"],
+        "historical_diagnostic": qualified["prerequisite"]["diagnostic"],
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     build = commands.add_parser("build")
     build.add_argument("--checkout", type=Path, required=True)
     build.add_argument("--output", type=Path, required=True)
+    build.add_argument("--source-build-receipts", type=Path)
+    qualify = commands.add_parser("qualify-windows-vfs")
+    qualify.add_argument("--bundle", type=Path, required=True)
+    qualify.add_argument("--mode", choices=("source", "wheel"), required=True)
+    qualify.add_argument("--diagnostic", type=Path, required=True)
+    qualify.add_argument("--fixtures", type=Path, required=True)
+    qualify.add_argument("--output", type=Path, required=True)
+    assemble = commands.add_parser("assemble-windows-qualification")
+    for name in ("bundle", "diagnostic", "source-result", "wheel-result", "output"):
+        assemble.add_argument("--" + name, type=Path, required=True)
     run = commands.add_parser("run")
     run.add_argument("--root", type=Path, required=True)
     run.add_argument("--phase", choices=("provision", "reopen", "verify"), required=True)
@@ -2970,10 +3774,46 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.command == "build":
-            print(build_acceptance_bundle(checkout=args.checkout, output=args.output))
+            print(
+                build_acceptance_bundle(
+                    checkout=args.checkout, output=args.output, source_build_receipts=args.source_build_receipts
+                )
+            )
+            return 0
+        if args.command == "qualify-windows-vfs":
+            print(
+                qualify_windows_vfs(
+                    bundle=args.bundle,
+                    mode=args.mode,
+                    diagnostic=args.diagnostic,
+                    fixtures=args.fixtures,
+                    output=args.output,
+                )
+            )
+            return 0
+        if args.command == "assemble-windows-qualification":
+            print(
+                assemble_windows_qualification(
+                    bundle=args.bundle,
+                    diagnostic=args.diagnostic,
+                    source_result=args.source_result,
+                    wheel_result=args.wheel_result,
+                    output=args.output,
+                )
+            )
             return 0
         return run_acceptance(root=args.root, phase=args.phase, output=args.output)
-    except (AcceptanceRefused, OSError, subprocess.SubprocessError) as exc:
+    except (
+        AcceptanceRefused,
+        OSError,
+        ValueError,
+        TypeError,
+        KeyError,
+        IndexError,
+        tarfile.TarError,
+        zipfile.BadZipFile,
+        subprocess.SubprocessError,
+    ) as exc:
         print(str(exc) if isinstance(exc, AcceptanceRefused) else type(exc).__name__, file=sys.stderr)
         return 2
 
