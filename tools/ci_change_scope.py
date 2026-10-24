@@ -172,6 +172,8 @@ def _sensitive(path: str) -> bool:
     if rel.startswith(("keyvault/", "dbcrypt/", "_private_fs/")):
         return True
     if rel in {
+        "imports/store.py",
+        "imports/_mail_reconcile.py",
         "activity/contracts.py",
         "activity/_redaction.py",
         "extension/crypto.py",

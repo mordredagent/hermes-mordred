@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,7 @@ import pytest
 from mordred_hermes.imports.mail import EmlBytes, TrustedBytes, TrustedMeta, plan_import
 from mordred_hermes.imports.mail._imap_codec import system_label
 from mordred_hermes.imports.mail.owner import SENT_EVIDENCE
-from mordred_hermes.imports.records import RecordError
+from mordred_hermes.imports.records import ImportMessage, ProvenanceQuality, RecordError
 from mordred_hermes.imports.store import SENT_EVIDENCE_RANK, BatchResult, ImportRefused, ImportStore, IncomingCopy
 from tests._fake_imap import mail
 from tests._mail_sync_helpers import rows
@@ -555,3 +556,174 @@ def test_a_write_guard_runs_inside_the_transaction(store: ImportStore, tmp_path:
             call()
     assert store.get_meta(key) is None
     assert rows(store, "SELECT run_id, state FROM import_runs") == [(run_id, "open")]  # nothing was written
+
+
+# Characterization of the two ingestion paths before sharing their message writer.
+
+
+@pytest.mark.parametrize("mode", ["thread", "batch"])
+@pytest.mark.parametrize(
+    ("change", "expected"),
+    [
+        ("identical", (0, 1, 0, 0)),
+        ("revision", (0, 0, 1, 0)),
+        ("conflict", (0, 0, 0, 1)),
+        ("legacy_downgrade", (0, 1, 0, 0)),
+        ("legacy_upgrade", (0, 0, 1, 0)),
+        ("sent_upgrade", (0, 0, 1, 0)),
+        ("sent_downgrade", (0, 1, 0, 0)),
+    ],
+)
+def test_both_ingestion_paths_keep_copy_decisions(
+    store: ImportStore, mode: str, change: str, expected: tuple[int, int, int, int]
+) -> None:
+    thread = _thread(store, mail(1))
+    [base] = thread.messages
+    incoming = base
+    if change == "revision":
+        incoming = replace(base, source_revision="new-revision")
+    elif change == "conflict":
+        [incoming] = _thread(store, mail(1, body="different content")).messages
+        incoming = replace(incoming, source_revision=base.source_revision)
+    elif change == "legacy_downgrade":
+        incoming = replace(base, provenance_quality=ProvenanceQuality.LEGACY)
+    elif change == "legacy_upgrade":
+        base = replace(base, provenance_quality=ProvenanceQuality.LEGACY)
+    elif change == "sent_upgrade":
+        incoming = replace(base, owner_evidence="gmail_label_sent")
+    elif change == "sent_downgrade":
+        base = replace(base, owner_evidence="gmail_label_sent")
+
+    def write(msg: ImportMessage) -> tuple[int, int, int, int]:
+        run = store.run_begin("mail")
+        if mode == "batch":
+            result = store.write_batch(run, [[msg]], conversations=[thread.conversation], meta_updates={})
+        else:
+            result = store.write_thread(run, [msg], conversation=thread.conversation)
+            store.run_commit(run, {})
+        return result.inserted, result.duplicates, result.revised, result.conflicts
+
+    assert write(base) == (1, 0, 0, 0)
+    assert write(incoming) == expected
+    kept = incoming if change in {"revision", "legacy_upgrade", "sent_upgrade"} else base
+    assert rows(
+        store, "SELECT source_revision, content_digest, provenance_quality, owner_evidence FROM import_messages"
+    ) == [(kept.source_revision, kept.content_digest, str(kept.provenance_quality), kept.owner_evidence)]
+
+
+@pytest.mark.parametrize("mode", ["thread", "batch"])
+def test_repeated_uid_is_decided_after_each_write(store: ImportStore, mode: str) -> None:
+    thread = _thread(store, mail(1))
+    [message] = thread.messages
+    changed = replace(message, source_revision="new-revision")
+    messages = [message, message, changed, changed]
+    run = store.run_begin("mail")
+    if mode == "batch":
+        result = store.write_batch(run, [messages], conversations=[thread.conversation], meta_updates={})
+    else:
+        result = store.write_thread(run, messages, conversation=thread.conversation)
+        assert store.contains([message.source_uid]) == set()
+        store.run_commit(run, {})
+    assert (result.inserted, result.duplicates, result.revised, result.conflicts) == (1, 2, 1, 0)
+    assert rows(store, "SELECT source_revision FROM import_messages") == [("new-revision",)]
+    assert store.contains([message.source_uid]) == {message.source_uid}
+
+
+@pytest.mark.parametrize(("refs", "count"), [(None, 2), ({}, 1)])
+def test_missing_references_skip_reconciliation_but_empty_references_find_stored_replies(
+    store: ImportStore, refs: dict[str, list[str]] | None, count: int
+) -> None:
+    _synced(store, _reply(3, _JIRO, _HANAKO, 2))
+    parent = _thread(store, _reply(2, _HANAKO, _TARO, 1))
+    _batch(store, parent, refs=refs)
+    assert len(rows(store, "SELECT conv_uid FROM import_conversations")) == count
+    assert sum(n for (n,) in rows(store, "SELECT message_count FROM import_conversations")) == 2
+
+
+@pytest.mark.parametrize(("mode", "old_count"), [("thread", 1), ("batch", 0)])
+def test_conversation_movement_keeps_each_paths_recount_scope(store: ImportStore, mode: str, old_count: int) -> None:
+    first = _thread(store, mail(1))
+    _batch(store, first)
+    destination = _thread(store, mail(2)).conversation
+    [message] = first.messages
+    moved = replace(message, conv_uid=destination.conv_uid, source_revision="moved")
+    run = store.run_begin("mail")
+    if mode == "batch":
+        store.write_batch(run, [[moved]], conversations=[destination], meta_updates={})
+    else:
+        store.write_thread(run, [moved], conversation=destination, merge_conversation=True)
+        store.run_commit(run, {})
+    assert dict(rows(store, "SELECT conv_uid, message_count FROM import_conversations")) == {
+        first.conversation.conv_uid: old_count,
+        destination.conv_uid: 1,
+    }
+    assert rows(store, "SELECT conv_uid FROM import_messages") == [(destination.conv_uid,)]
+
+
+@pytest.mark.parametrize("cursor", [None, "", "incoming"])
+def test_update_and_conversation_merge_have_distinct_cursor_precedence(store: ImportStore, cursor: str | None) -> None:
+    first = _thread(store, mail(1))
+    stored = replace(first.conversation, sync_cursor="stored")
+    store.upsert_conversation(stored)
+    update = replace(stored, sync_cursor=cursor, title="replacement")
+    store.write_batch(store.run_begin("mail"), [], conversations=[update], meta_updates={})
+    expected = "stored" if cursor is None else cursor
+    assert rows(store, "SELECT sync_cursor, title FROM import_conversations") == [(expected, stored.title)]
+    second = replace(_thread(store, mail(2)).conversation, sync_cursor="folded")
+    store.upsert_conversation(second)
+    store.merge_conversations(stored.conv_uid, [second.conv_uid])
+    assert rows(store, "SELECT sync_cursor, title FROM import_conversations") == [(expected, stored.title)]
+
+
+def test_batch_guard_precedes_closed_run_check(store: ImportStore) -> None:
+    run = store.run_begin("mail")
+    store.run_commit(run, {})
+
+    def revoked() -> None:
+        raise RuntimeError("revoked")
+
+    with pytest.raises(RuntimeError, match="revoked"):
+        store.write_batch(run, [], conversations=[], meta_updates={}, guard=revoked)
+
+
+def test_a_conflicting_copy_never_contributes_references(store: ImportStore) -> None:
+    first = _thread(store, mail(1))
+    _batch(store, first)
+    _batch(store, _thread(store, mail(2)))
+    [stored] = first.messages
+    [forged] = _thread(store, mail(1, body="conflicting headers", references="msg2@example.net")).messages
+    forged = replace(forged, source_revision=stored.source_revision)
+    result = store.write_batch(
+        store.run_begin("mail"),
+        [[forged]],
+        conversations=[first.conversation],
+        meta_updates={},
+        refs={forged.source_uid: ["msg2@example.net"]},
+    )
+    assert result == BatchResult(0, 0, 0, 1)
+    assert _conversations(store) == [["msg1@example.net"], ["msg2@example.net"]]
+    assert rows(store, "SELECT source_uid, ref_message_id FROM import_mail_refs") == []
+
+
+def test_a_failed_batch_rolls_back_reference_reconciliation(
+    store: ImportStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _synced(store, _reply(3, _JIRO, _HANAKO, 2))
+    _synced(store, mail(1, date="Wed, 30 Sep 2026 10:00:00 +0900"))
+    before_conversations = rows(store, "SELECT * FROM import_conversations ORDER BY conv_uid")
+    before_refs = rows(store, "SELECT * FROM import_mail_refs ORDER BY source_uid")
+    middle = _thread(store, _reply(2, _HANAKO, _TARO, 1))
+
+    def broken(*_args: Any) -> None:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(ImportStore, "_apply_meta", staticmethod(broken))
+    with pytest.raises(ImportRefused):
+        _batch(store, middle, refs={middle.messages[0].source_uid: ["msg1@example.net"]})
+    assert rows(store, "SELECT * FROM import_conversations ORDER BY conv_uid") == before_conversations
+    assert rows(store, "SELECT * FROM import_mail_refs ORDER BY source_uid") == before_refs
+    assert store.contains(["mail:mail:msg2@example.net"]) == set()
+    assert store.get_meta("mail_imap.mail.mabc") is None
+    monkeypatch.undo()
+    assert _batch(store, middle, refs={middle.messages[0].source_uid: ["msg1@example.net"]}) == BatchResult(1, 0, 0, 0)
+    assert _conversations(store) == [["msg1@example.net", "msg2@example.net", "msg3@example.net"]]
