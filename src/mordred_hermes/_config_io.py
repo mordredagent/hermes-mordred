@@ -511,6 +511,13 @@ class _MordredTransaction:
     def directory_identity(self) -> FileIdentity:
         return self._invoke(self._transaction.directory_identity)
 
+    def flush_directory(self) -> None:
+        self._invoke(self._transaction.flush_directory)
+
+    def flush_file(self, name: str, *, expected_identity: FileIdentity | None = None) -> None:
+        self._leaf(name)
+        self._invoke(lambda: self._transaction.flush_file(name, expected_identity=expected_identity))
+
     def stat(self, name: str) -> FileMetadata:
         self._leaf(name)
         return self._invoke(lambda: self._transaction.stat(name))

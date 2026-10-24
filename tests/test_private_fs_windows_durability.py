@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import contextlib
+from pathlib import PureWindowsPath
 
 import pytest
 
+from mordred_hermes import _config_io as cio
 from mordred_hermes import _private_fs as fs
 from mordred_hermes._private_fs import _windows_paths as paths
 from mordred_hermes._private_fs._windows_api import NativeAPI
@@ -42,6 +44,17 @@ class DurableNative(Native):
     def flush(self, handle):
         path, node = self.handles[handle.value]
         self.event("directory_flush" if node.directory else "file_flush", path)
+
+    def seek(self, handle, offset):
+        self.positions[handle.value] = offset
+
+    def lock(self, handle):
+        super().lock(handle)
+        self.event("lock", self.final_path(handle))
+
+    def unlock(self, handle):
+        super().unlock(handle)
+        self.event("unlock", self.final_path(handle))
 
     def mkdir(self, path):
         super().mkdir(path)
@@ -91,6 +104,84 @@ def test_passive_reads_do_not_upgrade_directory_or_flush(native):
     with fs.open_private_directory("C:\\home") as directory:
         directory.list_names(max_entries=20)
     assert not any(kind in {"writable_directory", "directory_flush", "file_flush"} for kind, _ in native.events)
+
+
+@pytest.fixture
+def canonical(native):
+    native.nodes["C:\\home\\mordred"] = Node(True, PRIVATE)
+    for parent in ("C:\\home", "C:\\home\\mordred"):
+        native.nodes[parent + "\\.mordred-fs.lock"] = Node(False, PRIVATE)
+    return cio.CanonicalPaths(PureWindowsPath("C:/home"))
+
+
+@pytest.mark.parametrize("caller", ["canonical", "custody"])
+def test_passive_canonical_custody_holds_existing_locks_without_writable_flush(native, canonical, monkeypatch, caller):
+    from mordred_hermes.keyvault import _windows_custody as custody
+
+    monkeypatch.setattr(custody, "current_principal_id", lambda: b"user")
+    monkeypatch.setattr(custody, "windows_backend", lambda: pytest.fail("passive read requested native backend"))
+    before = {name: (id(node), node.data, node.descriptor) for name, node in native.nodes.items()}
+    if caller == "canonical":
+        with cio.canonical_session(canonical, scope="policy", create=False) as session:
+            assert session.read_pair().config.data == b"old"
+    else:
+        with custody.windows_custody_session(canonical.home, create=False) as session:
+            assert session.role_status("memory") == custody.RoleStatus("memory", None, (), False)
+    assert {name: (id(node), node.data, node.descriptor) for name, node in native.nodes.items()} == before
+    assert not native.write_descriptors
+    assert not any(
+        kind in {"writable_directory", "directory_flush", "file_flush", "create", "mkdir", "rename", "disposition"}
+        for kind, _ in native.events
+    )
+    assert [event for event in native.events if event[0] in {"lock", "unlock"}] == [
+        ("lock", "C:\\home\\.mordred-fs.lock"),
+        ("lock", "C:\\home\\mordred\\.mordred-fs.lock"),
+        ("unlock", "C:\\home\\mordred\\.mordred-fs.lock"),
+        ("unlock", "C:\\home\\.mordred-fs.lock"),
+    ]
+    assert not native.handles
+
+
+def test_canonical_loan_flushes_checked_file_and_directory(native, canonical):
+    native.nodes["C:\\home\\mordred\\owned"] = Node(False, PRIVATE, b"data")
+    with cio.canonical_session(canonical, scope="policy") as session, session.borrow_mordred_transaction() as tx:
+        identity = tx.stat("owned").identity
+        native.events.clear()
+        with pytest.raises(fs.PrivateFSError) as error:
+            tx.flush_file("owned", expected_identity=fs.FileIdentity(1, b"wrong"))
+        assert error.value.operation == "identity"
+        assert not any(kind == "file_flush" for kind, _ in native.events)
+        tx.flush_file("owned", expected_identity=identity)
+        tx.flush_directory()
+        assert ("file_flush", "C:\\home\\mordred\\owned") in native.events
+        assert ("directory_flush", "C:\\home\\mordred") in native.events
+        assert tx.stat("owned").identity == identity
+
+
+@pytest.mark.parametrize("operation", ["create", "replace", "rename", "delete", "append"])
+def test_mutation_preflight_failure_preserves_files_before_native_mutation(native, operation):
+    native.nodes["C:\\home\\source"] = Node(False, PRIVATE, b"original")
+    native.nodes["C:\\home\\.mordred-fs.lock"] = Node(False, PRIVATE)
+    with fs.open_private_directory("C:\\home") as directory, directory.transaction() as tx:
+        native.events.clear()
+        native.fail = lambda event: event == ("directory_flush", "C:\\home")
+        with pytest.raises(fs.PrivateFSError) as error:
+            if operation == "create":
+                tx.create_bytes("target", b"new")
+            elif operation == "replace":
+                tx.replace_bytes("source", b"new")
+            elif operation == "rename":
+                tx.rename_file("source", "target")
+            elif operation == "delete":
+                tx.delete_file("source")
+            else:
+                tx.append_bytes("source", b"new")
+        assert error.value.operation == "injected_directory_flush"
+        assert error.value.commit_state == "not_committed"
+        assert native.nodes["C:\\home\\source"].data == b"original"
+        assert "C:\\home\\target" not in native.nodes
+        assert not any(kind in {"create", "rename", "disposition", "file_flush"} for kind, _ in native.events)
+        assert not any(".mordred-fs-tmp-" in name for name in native.nodes)
 
 
 @pytest.mark.parametrize("operation", ["create", "rename", "delete"])
@@ -217,7 +308,9 @@ def test_bootstrap_accepts_trusted_system_owned_parent_without_relaxing_new_chil
 
 def test_staging_namespace_barrier_failure_preserves_unpublished_bytes(native):
     with fs.open_private_directory("C:\\home") as directory, directory.transaction() as tx:
-        native.fail = lambda event: event == ("directory_flush", "C:\\home")
+        native.fail = lambda event: (
+            event == ("directory_flush", "C:\\home") and any(".mordred-fs-tmp-" in name for name in native.nodes)
+        )
         with pytest.raises(fs.PrivateFSError) as error:
             tx.create_bytes("target", b"unpublished data")
         assert error.value.commit_state == "uncertain"
@@ -233,7 +326,8 @@ def test_delete_close_failure_never_claims_parent_barrier(native):
         with pytest.raises(fs.PrivateFSError) as error:
             tx.delete_file("source")
         assert error.value.commit_state == "uncertain"
-        assert not any(kind == "directory_flush" for kind, _ in native.events)
+        disposition = native.events.index(("disposition", "C:\\home\\source"))
+        assert not any(kind == "directory_flush" for kind, _ in native.events[disposition + 1 :])
 
 
 def test_failed_staging_cleanup_is_uncertain_and_preserves_original_error(native, monkeypatch):

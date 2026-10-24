@@ -209,7 +209,6 @@ class _Directory:
         transaction = _Transaction(self)
         try:
             with exclusive_lock(self.checked, blocking=blocking):
-                self.checked.flush()  # Writable parent admission before dependent mutation.
                 try:
                     yield transaction
                 finally:
@@ -288,6 +287,7 @@ class _Transaction:
         try:
             with self.directory.opened(name, access=0x40130089, share=0) as handle:
                 self.directory.file_identity(handle, expected_identity)
+                self.flush_directory()  # Admit writable parent before disposition.
                 attempted = True
                 handle.api.discard(handle)
             self._absent(name)
@@ -320,6 +320,7 @@ class _Transaction:
         try:
             with self.directory.opened(name, access=0x40130089, share=0) as handle:
                 identity = _check_identity(handle, expected_identity)
+                self.flush_directory()  # Admit writable parent before rename.
                 changed = True
                 try:
                     handle.api.rename(handle, destination_path, replace=False)
@@ -358,6 +359,7 @@ class _Transaction:
             with self.directory.opened(name, access=0xC0020000, share=0) as handle:
                 api = handle.api
                 identity = _check_identity(handle, None)
+                self.flush_directory()  # Admit writable parent before changing bytes.
                 length = api.metadata(handle).size
                 api.seek(handle, length)
                 changed = True
@@ -396,6 +398,7 @@ class _Transaction:
         if replace:
             with self.directory.opened(name):
                 pass
+        self.flush_directory()  # Admit writable parent before staging creation.
         temporary = self.directory.checked.path + "\\.mordred-fs-tmp-" + secrets.token_hex(16)
         safe_to_discard = True
         cleanup_attempted = False

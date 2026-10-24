@@ -117,7 +117,7 @@ class FakeAPI:
         return min(2, len(data))
 
     def flush(self, handle):
-        if self.fail == "flush":
+        if self.fail == "flush" and not self.metadata(handle).directory:
             raise self.native_failure
 
     def names(self, handle):
