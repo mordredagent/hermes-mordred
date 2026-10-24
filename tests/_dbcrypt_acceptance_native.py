@@ -210,6 +210,7 @@ def native_facts(root: Path) -> dict[str, Any]:
         qualification = tool["validate_windows_qualification"](directory, checkout=Path(os.environ["DBCRYPT_CHECKOUT"]))
         facts = _windows_provider()
         facts["dll"] = _owned_windows_dll(qualification)
+        facts["qualification_manifest_sha256"] = qualification["manifest_sha256"]
         from mordred_hermes._database_locking_windows import identify_root
         from mordred_hermes._private_fs import open_confidential_directory
 
@@ -399,7 +400,7 @@ def _telegram_store(home: Path) -> Any:
     )
 
 
-def _seed_credentials(home: Path) -> None:
+def _seed_credentials(home: Path) -> tuple[Any, Any]:
     import secrets
 
     from mordred_hermes.extension.telegram.secrets import TelegramSecrets
@@ -433,12 +434,100 @@ def _seed_credentials(home: Path) -> None:
         "imap.example.invalid",
         993,
         ("owner@example.invalid",),
-        "native-sync",
+        "native_sync",
         False,
         {"inbox": "INBOX"},
     )
     mail.store(credentials, require_presence=False)
     assert MailSecretStore(home / "mordred/mail", audit_sink=lambda _entry: None).load() == credentials
+    return value, credentials
+
+
+def _private_credential_values(telegram: Any, mail: Any) -> str:
+    """RAM/Root-protected SQL only: never return this value in public evidence."""
+    values = {"telegram": asdict(telegram), "mail": asdict(mail)}
+    values["telegram"]["store_key"] = telegram.store_key.hex()
+    return json.dumps(values, sort_keys=True, separators=(",", ":"))
+
+
+def _assert_original_credentials(reference: str, telegram: Any, mail: Any) -> None:
+    if reference != _private_credential_values(telegram, mail):
+        raise RuntimeError("original_native_credentials_changed")
+
+
+def _credential_reference(root: Path, home: Path, authority: Any, original: tuple[Any, Any] | None) -> None:
+    # This table must NEVER enter sacrificial roots whose lifecycle probes may
+    # legitimately decrypt their databases before dependency refusal.
+    if not root.name.endswith("-persistence") or home not in {path for _name, path in _homes(root)}:
+        raise RuntimeError("credential_reference_requires_persistence_root")
+    from mordred_hermes.dbcrypt._connection import open_protected
+    from mordred_hermes.imports.mail.secrets import MailSecretStore
+
+    connection = open_protected(home / "state.db", authority=authority)
+    try:
+        if original is not None:
+            connection.execute(
+                "CREATE TABLE task15_private_credential_reference("
+                "singleton INTEGER PRIMARY KEY CHECK(singleton=1), value TEXT NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO task15_private_credential_reference VALUES(1, ?)", (_private_credential_values(*original),)
+            )
+            connection.commit()
+        rows = connection.execute("SELECT value FROM task15_private_credential_reference WHERE singleton=1").fetchall()
+        if len(rows) != 1:
+            raise RuntimeError("original_native_credentials_reference_missing")
+        telegram = _telegram_store(home).load(fresh=True)
+        mail = MailSecretStore(home / "mordred/mail", audit_sink=lambda _entry: None).load()
+        if telegram is None or mail is None:
+            raise RuntimeError("original_native_credentials_changed")
+        _assert_original_credentials(rows[0][0], telegram, mail)
+    finally:
+        connection.close()
+
+
+def _credential_replacement_probe(root: Path, home: Path, authority: Any, original: tuple[Any, Any]) -> None:
+    """Real sealing of different valid values must fail the original-value oracle.
+
+    Runs only while seeding one finite persistence profile, before its baseline.
+    It updates credentials, never rotates/deletes native keys, and restores the
+    original values in finally. No reference is allocated on a destructive Root.
+    """
+    if not root.name.endswith("-persistence") or home not in {path for _name, path in _homes(root)}:
+        raise RuntimeError("credential_reference_requires_persistence_root")
+    import secrets
+
+    from mordred_hermes.imports.mail.secrets import MailSecretStore
+
+    telegram, mail = original
+    tg_store = _telegram_store(home)
+    mail_store = MailSecretStore(home / "mordred/mail", audit_sink=lambda _entry: None)
+    replacements = (
+        (tg_store, replace(telegram, session=secrets.token_urlsafe(24))),
+        (tg_store, replace(telegram, store_key=secrets.token_bytes(32))),
+        (mail_store, replace(mail, app_password=secrets.token_urlsafe(32))),
+    )
+    try:
+        for store, replacement in replacements:
+            if store is mail_store:
+                store.store(replacement, require_presence=False)
+            else:
+                store.store(replacement)
+            try:
+                _credential_reference(root, home, authority, None)
+            except RuntimeError as exc:
+                if str(exc) != "original_native_credentials_changed":
+                    raise
+            else:
+                raise RuntimeError("different_valid_sealed_credential_accepted")
+            if store is mail_store:
+                store.store(mail, require_presence=False)
+            else:
+                store.store(telegram)
+    finally:
+        tg_store.store(telegram)
+        mail_store.store(mail, require_presence=False)
+    _credential_reference(root, home, authority, None)
 
 
 def _role_isolation(home: Path) -> None:
@@ -602,6 +691,9 @@ def _telegram(home: Path, seed: bool) -> str:
             assert (await svc.status())["last_error"] is None
 
         asyncio.run(sync())
+    reopened_archive = ArchiveStore(value.store_key, home / "mordred/telegram")
+    assert reopened_archive.load_index().account_id == 7
+    assert [(message.id, message.text) for message in reopened_archive.load_messages(11)] == [(1, TEXT)]
     store = open_import_store(home)
     try:
         hits = store.search("日本語", source="telegram")
@@ -719,8 +811,7 @@ def collect(root: Path, *, seed: bool) -> dict[str, Any]:
             # The actual installed provider owns Root SH before credential custody.
             authority = dbcrypt._PROVIDER.authority
             assert authority.snapshot == observe_database_source(root=root)
-            if seed:
-                _seed_credentials(home)
+            original = _seed_credentials(home) if seed else None
             _role_isolation(home)
             _fresh_memory(home, seed=False)
             key = resolve_memory_key(home=home, platform=sys.platform, environ={})
@@ -730,6 +821,10 @@ def collect(root: Path, *, seed: bool) -> dict[str, Any]:
             )
             logical[profile + ":source_memory"] = logical_digest([{"id": profile, "text": TEXT}])
             logical[profile + ":sessiondb"] = _session(home, profile, seed)
+            if root.name.endswith("-persistence"):
+                _credential_reference(root, home, authority, original)
+                if original is not None and profile == "work":
+                    _credential_replacement_probe(root, home, authority, original)
             logical[profile + ":scoped_siblings"] = _scoped_siblings(home, authority, seed)
             logical[profile + ":activity"] = _activity(home, seed)
             logical[profile + ":telegram"] = _telegram(home, seed)
@@ -751,6 +846,9 @@ def collect(root: Path, *, seed: bool) -> dict[str, Any]:
             "fixture": {"root": asdict(authority.snapshot.root), "source": asdict(authority.snapshot)},
             "rows": list(COLLECTOR_ROWS),
             "transport": "synthetic_transport_real_native_custody_sqlcipher",
+            "credential_continuity": "original_native_protected_reference"
+            if root.name.endswith("-persistence")
+            else "reload_only_sacrificial_no_reference",
         }
     finally:
         if dbcrypt._PROVIDER is not None:
@@ -831,7 +929,7 @@ def _forget_roles(root: Path) -> None:
     before = observe_database_source(root=root)
     home = root / "profiles/other"
     mail = MailSecretStore(home / "mordred/mail", audit_sink=lambda _entry: None)
-    forget(mail, home, account="native-sync", rows=True)
+    forget(mail, home, account="native_sync", rows=True)
     assert mail.load() is None
     store = open_import_store(home)
     try:
@@ -1459,7 +1557,7 @@ class NativeReport:
     def __init__(self) -> None:
         self.nodeids: list[str] = []
         self.deselected: list[str] = []
-        self.reports: list[dict[str, str]] = []
+        self.reports: list[dict[str, Any]] = []
         self.collection_errors: list[dict[str, str]] = []
 
     def pytest_collection_finish(self, session: Any) -> None:
@@ -1474,7 +1572,21 @@ class NativeReport:
 
     def pytest_runtest_logreport(self, report: Any) -> None:
         outcome = "failed" if getattr(report, "wasxfail", None) else report.outcome
-        self.reports.append({"nodeid": report.nodeid, "when": report.when, "outcome": outcome})
+        reason_code = None
+        if outcome == "skipped":
+            raw = report.longrepr
+            reason = raw[2].removeprefix("Skipped: ") if isinstance(raw, tuple) and len(raw) == 3 else None
+            reason_code = (
+                _tool()["platform_na_reason"](
+                    report.nodeid, reason, platform=sys.platform, suite=os.environ.get("MORDRED_DBCRYPT_RUN_SUITE", "")
+                )
+                if reason is not None
+                else None
+            )
+            reason_code = reason_code or "unrecognized_skip"
+        self.reports.append(
+            {"nodeid": report.nodeid, "when": report.when, "outcome": outcome, "reason_code": reason_code}
+        )
 
     def pytest_sessionfinish(self, session: Any, exitstatus: int) -> None:
         path = os.environ.get("MORDRED_DBCRYPT_PYTEST_REPORT")

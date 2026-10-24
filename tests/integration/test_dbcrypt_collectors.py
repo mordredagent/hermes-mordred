@@ -56,6 +56,7 @@ def test_real_native_collectors_reopen_logical_records_and_sealed_credentials() 
     assert root.name.endswith("-persistence"), "Task7 crash root is never a persistence root"
     baseline = json.loads(Path(os.environ["MORDRED_DBCRYPT_BASELINE"]).read_text())
     actual = _run("read", root, "public-collectors")
+    assert actual["credential_continuity"] == "original_native_protected_reference"
     assert actual["logical"] == baseline["logical"]
     assert actual["fixture"] == baseline["fixture"]
     assert set(actual["rows"]) == set(_dbcrypt_acceptance_native.COLLECTOR_ROWS)

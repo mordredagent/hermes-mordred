@@ -1211,3 +1211,541 @@ def test_reopen_malformed_prior_refuses_before_native_child(tmp_path: Path, monk
     evidence = json.loads(output.read_text())
     assert evidence["status"] == "refused" and evidence["live_accepted"] is False
     assert evidence["reasons"] == ["native_evidence_invalid"]
+
+
+@pytest.mark.parametrize(
+    "node,when,reason",
+    [
+        (
+            "tests/test_dbcrypt_capability.py::test_explicit_diagnosis_authenticates_once_and_releases",
+            "setup",
+            "windows_posix_authority_fixture",
+        ),
+        (
+            "tests/test_dbcrypt_authority.py::test_fork_invalidates_without_releasing_parent_lease",
+            "call",
+            "windows_posix_fork",
+        ),
+        (
+            "tests/extension/test_telegram_migrate_store.py::test_any_existing_collected_case",
+            "setup",
+            "windows_telegram_migration_module",
+        ),
+    ],
+)
+def test_reviewed_windows_platform_na_is_counted_separately(node: str, when: str, reason: str) -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    stages = ("setup", "teardown") if when == "setup" else ("setup", "call", "teardown")
+    report = {
+        "nodeids": [node],
+        "deselected": [],
+        "collection_errors": [],
+        "exitstatus": 0,
+        "reports": [
+            {
+                "nodeid": node,
+                "when": stage,
+                "outcome": "skipped" if stage == when else "passed",
+                "reason_code": reason if stage == when else None,
+            }
+            for stage in stages
+        ],
+    }
+    actual = tool.validate_native_test_report(report, platform="win32", suite="affected")
+    assert actual["counts"] == {"passed": 0, "platform_na": 1, "skipped": 0}
+    with pytest.raises(tool.AcceptanceRefused, match="native_test_results_incomplete"):
+        tool.validate_native_test_report(report, platform="linux", suite="affected")
+    report["reports"][0 if when == "setup" else 1]["reason_code"] = "native_helper_missing"
+    with pytest.raises(tool.AcceptanceRefused, match="native_test_results_incomplete"):
+        tool.validate_native_test_report(report, platform="win32", suite="affected")
+
+
+def test_safe_native_report_exports_only_reviewed_skip_code_not_raw_reason() -> None:
+    import runpy
+    from types import SimpleNamespace
+
+    helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
+    report = helper["NativeReport"]()
+    report.pytest_runtest_logreport(
+        SimpleNamespace(
+            nodeid="test_unrecognized.py::test_native",
+            when="setup",
+            outcome="skipped",
+            longrepr=("fixture.py", 1, "Skipped: mustnotexportsecret"),
+        )
+    )
+    assert report.reports[0]["reason_code"] == "unrecognized_skip"
+    assert "mustnotexportsecret" not in json.dumps(report.reports)
+
+
+def qualification_fixture(tmp_path: Path):
+    """Synthetic qualification files exercise closure only; never hardware proof."""
+    import runpy
+
+    tool = acceptance_tool("dbcrypt_acceptance")
+    checkout = Path(__file__).resolve().parents[1]
+    root = tmp_path / "qualification"
+    root.mkdir()
+
+    def saved(name, value):
+        path = root / name
+        path.write_text(json.dumps(value))
+        return {"path": name, "sha256": tool.sha256_file(path)}
+
+    node = "tests/integration/test_dbcrypt_windows_vfs.py::test_rollback_wal_temp_vacuum_and_bootstrap_lifetime"
+    rows = {}
+    for name, target in (
+        ("checkedtest_source", "CheckedTest"),
+        ("checked_source", "Checked"),
+        ("checked_wheel", "Checked"),
+    ):
+        run = {
+            "action": "run",
+            "target": target,
+            "nodeids": [node],
+            "collected": 1,
+            "pytest_exit_code": 0,
+            "reports": [
+                {"nodeid": node, "when": stage, "outcome": "passed"} for stage in ("setup", "call", "teardown")
+            ],
+            "collection_errors": [],
+            "dll_sha256": "a" * 64,
+            "driver_version": "0.5.7",
+            "versions": {"sqlite": "3.51.1", "sqlcipher": "4.12.0 community"},
+            "bundle_manifest_sha256": "b" * 64,
+            "sdist_sha256": "c" * 64,
+            "wheel_sha256": "d" * 64,
+            "record_owned_packaged_dll": True,
+            "test_exports_absent": True,
+            "env_dll_override": None,
+            "product_module": "/outside/wheel-env/lib/site-packages/mordred_hermes/__init__.py",
+            "argv": ["-q", "-k", "rollback"],
+        }
+        rows[name] = {
+            "collect": saved(name + "-collect.json", {**run, "action": "collect"}),
+            "run": saved(name + "-run.json", run),
+        }
+    critical = [
+        *(checkout / "native/dbcrypt-vfs").glob("*.c"),
+        *(checkout / "native/dbcrypt-vfs").glob("*.h"),
+        *(checkout / "src/mordred_hermes/_private_fs").glob("*.py"),
+        checkout / "src/mordred_hermes/dbcrypt/_windows_vfs.py",
+        checkout / "tests/integration/test_dbcrypt_windows_vfs.py",
+    ]
+    manifest = {
+        "schema": 1,
+        "kind": "windows_vfs_qualification",
+        "rows": rows,
+        "provenance": saved(
+            "provenance.json",
+            {
+                "source_hashes": {path.relative_to(checkout).as_posix(): tool.sha256_file(path) for path in critical},
+                "headers": runpy.run_path(str(checkout / "tools/dbcrypt_build_headers.py"))["HEADER_SHA256"],
+            },
+        ),
+        "fixture_verify": saved("fixture.json", {"elevated": False, "sid": "ordinary-test-fixture"}),
+    }
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    return tool, root, checkout, manifest, saved
+
+
+def test_windows_qualification_rejects_self_consistent_focused_subset(tmp_path: Path) -> None:
+    tool, root, checkout, _manifest, _saved = qualification_fixture(tmp_path)
+    with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
+        tool.validate_windows_qualification(root, checkout=checkout)
+
+
+@pytest.mark.parametrize(
+    "component,field,value",
+    [
+        ("telegram", "api_id", 23456),
+        ("telegram", "api_hash", "b" * 32),
+        ("telegram", "session", "different-valid-session"),
+        ("telegram", "store_key", b"b" * 32),
+        ("mail", "address", "changed@example.invalid"),
+        ("mail", "app_password", "different-valid-password"),
+        ("mail", "imap_host", "changed.example.invalid"),
+        ("mail", "own_addresses", ("changed@example.invalid",)),
+        ("mail", "account", "changed"),
+        ("mail", "gmail", True),
+        ("mail", "mailboxes", {"sent": "Sent"}),
+    ],
+)
+def test_original_private_credential_oracle_rejects_different_valid_fields(component, field, value) -> None:
+    import runpy
+    from dataclasses import replace
+
+    from mordred_hermes.extension.telegram.secrets import TelegramSecrets
+    from mordred_hermes.imports.mail.secrets import MailCredentials
+
+    helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
+    telegram = TelegramSecrets(12345, "a" * 32, b"a" * 32, "original-session")
+    mail = MailCredentials(
+        "owner@example.invalid",
+        "original-password",
+        "imap.example.invalid",
+        993,
+        ("owner@example.invalid",),
+        "native_sync",
+        False,
+        {"inbox": "INBOX"},
+    )
+    reference = helper["_private_credential_values"](telegram, mail)
+    helper["_assert_original_credentials"](reference, telegram, mail)
+    changed_tg = replace(telegram, **{field: value}) if component == "telegram" else telegram
+    changed_mail = replace(mail, **{field: value}) if component == "mail" else mail
+    with pytest.raises(RuntimeError, match="original_native_credentials_changed"):
+        helper["_assert_original_credentials"](reference, changed_tg, changed_mail)
+
+
+def test_credential_reference_refuses_destructive_roots_before_sql_import(tmp_path: Path) -> None:
+    import runpy
+
+    helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
+    for suffix in ("negative", "crash"):
+        root = tmp_path / ("mordred-dbcrypt-source-" + suffix)
+        with pytest.raises(RuntimeError, match="credential_reference_requires_persistence_root"):
+            helper["_credential_reference"](root, root, None, None)
+        with pytest.raises(RuntimeError, match="credential_reference_requires_persistence_root"):
+            helper["_credential_replacement_probe"](root, root, None, None)
+
+
+def test_offline_execution_rejects_missing_actual_probe_provenance(tmp_path: Path) -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    payload = {
+        "schema_version": 2,
+        "status": "executed",
+        "acceptance_kind": "production",
+        "bootstrap": "automatic_production",
+        "implementation_sha256": "a" * 64,
+    }
+    phase = {
+        "acceptance_kind": "production",
+        "bootstrap": "automatic_production",
+        "native_implementation_sha256": "a" * 64,
+        "executions": [
+            {
+                "operation": operation,
+                "returncode": 0,
+                "started_at": 10.0,
+                "finished_at": 11.0,
+                "payload": payload,
+                "import_probe": {"product_file": "/unrelated/source/__init__.py"},
+            }
+            for operation in ("preflight", "read")
+        ],
+    }
+    with pytest.raises((tool.AcceptanceRefused, ValueError, KeyError)):
+        tool._native_execution_report(phase, tmp_path)
+
+
+def complete_native_phase_fixture(tmp_path: Path, *, mode="source"):
+    from tests._dbcrypt_acceptance_evidence import complete_phase
+
+    bundle_root = tmp_path / "bundle-fixture"
+    bundle_root.mkdir()
+    control_root = tmp_path / "control-fixture"
+    control_root.mkdir()
+    helper_root = tmp_path / "helper-fixture"
+    helper_root.mkdir()
+    return complete_phase(
+        bundle_fixture(bundle_root), control_action_fixture(control_root), helper_copy_fixture(helper_root), mode=mode
+    )
+
+
+@pytest.mark.parametrize("mode", ["source", "wheel"])
+def test_complete_synthetic_native_phase_has_required_offline_closure(tmp_path: Path, mode: str) -> None:
+    tool, spool, phase = complete_native_phase_fixture(tmp_path, mode=mode)
+    assert phase["mode"] == mode
+    assert tool.validate_native_phase_evidence(phase, directory=spool) == phase
+    assert phase["live_accepted"] is False, "unit fixture acceptance is not native qualification"
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing_public_read",
+        "missing_successful_restore",
+        "missing_restore_reopen",
+        "missing_crash",
+        "relabeled_node",
+        "missing_profile_component",
+        "wrong_probe",
+        "wrong_artifact",
+        "wrong_read_binding",
+        "wrong_bundle_commit",
+        "extra_deselection",
+        "missing_operation",
+    ],
+)
+def test_offline_native_evidence_rejects_incomplete_or_relabeled_closure(tmp_path: Path, damage: str) -> None:
+    tool, spool, phase = complete_native_phase_fixture(tmp_path)
+    native = next(row for row in phase["executions"] if row.get("suite") == "dbcrypt-native")
+    if damage.startswith("missing_") and damage in {
+        "missing_public_read",
+        "missing_successful_restore",
+        "missing_restore_reopen",
+    }:
+        name = {
+            "missing_public_read": "public-collectors",
+            "missing_successful_restore": "backup-restore",
+            "missing_restore_reopen": "after-restore",
+        }[damage]
+        native["collector_rows"] = [ref for ref in native["collector_rows"] if Path(ref["path"]).stem != name]
+    elif damage in {"missing_crash", "relabeled_node", "extra_deselection"}:
+        report_path = spool / native["pytest_report"]["path"]
+        report = json.loads(report_path.read_text())
+        if damage == "missing_crash":
+            report["nodeids"] = [node for node in report["nodeids"] if "encrypt-prepared" not in node]
+            report["reports"] = [row for row in report["reports"] if row["nodeid"] in report["nodeids"]]
+        elif damage == "relabeled_node":
+            report["nodeids"][0] = "tests/integration/test_dbcrypt_native.py::test_focused_subset"
+        else:
+            report["deselected"] = [
+                "tests/integration/test_dbcrypt_native.py::test_native_crash_subprocess_recovery[encrypt-prepared]"
+            ]
+        report_path.write_text(json.dumps(report))
+        native["pytest_report"]["sha256"] = tool.sha256_file(report_path)
+    elif damage == "missing_profile_component":
+        del phase["logical"]["other:telegram"]
+    elif damage == "wrong_probe":
+        native["import_probe"] = {**native["import_probe"], "product_file": "/wrong/source/__init__.py"}
+    elif damage == "wrong_artifact":
+        phase["bundle"]["wheel_sha256"] = "f" * 64
+    elif damage == "wrong_read_binding":
+        read = next(row for row in phase["executions"] if row.get("operation") == "read")
+        read["payload"] = {**read["payload"], "logical": {**read["payload"]["logical"], "root:telegram": "f" * 64}}
+    elif damage == "wrong_bundle_commit":
+        phase["bundle"]["commit"] = "f" * 40
+    else:
+        phase["executions"] = [row for row in phase["executions"] if row.get("operation") != "seed"]
+    with pytest.raises(tool.AcceptanceRefused, match="native_phase_evidence_incomplete"):
+        tool.validate_native_phase_evidence(phase, directory=spool)
+
+
+def full_qualification_fixture(tmp_path: Path, monkeypatch):
+    from tests._dbcrypt_acceptance_evidence import complete_qualification
+
+    directory = tmp_path / "bundle-fixture"
+    directory.mkdir()
+    return complete_qualification(bundle_fixture(directory), tmp_path, monkeypatch)
+
+
+def test_full_synthetic_windows_qualification_closes_exact_source_and_release_nodes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    tool, root, checkout, _manifest = full_qualification_fixture(tmp_path, monkeypatch)
+    actual = tool.validate_windows_qualification(root, checkout=checkout)
+    assert actual["diagnostic"]["nodeids"] == tool.windows_vfs_required_nodes(checkout, release=False)
+    assert actual["wheel"]["nodeids"] == tool.windows_vfs_required_nodes(checkout, release=True)
+
+
+@pytest.mark.parametrize(
+    "damage", ["focused_both", "selection", "deselected", "fixture", "artifact", "source_map", "wheel_hash", "header"]
+)
+def test_windows_qualification_refuses_subset_selection_or_provenance_gaps(
+    tmp_path: Path, monkeypatch, damage: str
+) -> None:
+    tool, root, checkout, manifest = full_qualification_fixture(tmp_path, monkeypatch)
+
+    def rewrite(reference, edit):
+        path = root / reference["path"]
+        value = json.loads(path.read_text())
+        edit(value)
+        path.write_text(json.dumps(value))
+        reference["sha256"] = tool.sha256_file(path)
+
+    if damage == "focused_both":
+        for links in manifest["rows"].values():
+            for reference in links.values():
+                rewrite(
+                    reference,
+                    lambda value: value.update(
+                        nodeids=value["nodeids"][:1],
+                        collected=1,
+                        reports=[row for row in value["reports"] if row["nodeid"] == value["nodeids"][0]],
+                    ),
+                )
+    elif damage == "selection":
+        rewrite(manifest["rows"]["checked_source"]["run"], lambda value: value["argv"].extend(["-k", "focused"]))
+    elif damage == "deselected":
+        rewrite(manifest["rows"]["checked_source"]["run"], lambda value: value.update(deselected=[value["nodeids"][0]]))
+    elif damage == "fixture":
+        rewrite(manifest["fixture_verify"], lambda value: value.update(sid="different-ordinary-sid"))
+    elif damage == "artifact":
+        (root / manifest["artifacts"]["checked_source"]["dll"]["path"]).write_bytes(b"changed actual tested artifact")
+    elif damage == "source_map":
+        rewrite(manifest["source_map"], lambda value: value["files"].update({"native/dbcrypt-vfs/vfs.c": "f" * 64}))
+    elif damage == "wheel_hash":
+        rewrite(manifest["rows"]["checked_wheel"]["run"], lambda value: value.update(wheel_sha256="f" * 64))
+    else:
+        (root / manifest["headers"]["sqlite3.h"]["path"]).write_bytes(b"changed header")
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
+        tool.validate_windows_qualification(root, checkout=checkout)
+
+
+def test_windows_qualification_rejects_artifact_shape_without_real_archive_closure(tmp_path: Path, monkeypatch) -> None:
+    tool, root, checkout, manifest = full_qualification_fixture(tmp_path, monkeypatch)
+    # Even consistent hashes cannot turn non-archive bytes into a source chain.
+    (root / manifest["source_archive"]["path"]).write_bytes(b"not an archive")
+    digest = tool.sha256_file(root / manifest["source_archive"]["path"])
+    manifest["source_archive"]["sha256"] = digest
+    path = root / manifest["provenance"]["path"]
+    provenance = json.loads(path.read_text())
+    provenance["source_archive_sha256"] = digest
+    path.write_text(json.dumps(provenance))
+    manifest["provenance"]["sha256"] = tool.sha256_file(path)
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
+        tool.validate_windows_qualification(root, checkout=checkout)
+
+
+def test_windows_qualification_export_closes_referenced_public_inputs_only(tmp_path: Path, monkeypatch) -> None:
+    tool, root, checkout, _manifest = full_qualification_fixture(tmp_path, monkeypatch)
+    output = tmp_path / "phase-output"
+    output.mkdir()
+    reference = tool._export_windows_qualification({"qualification": str(root)}, output)
+    copied = tmp_path / reference["path"]
+    assert tool.sha256_file(copied) == tool.sha256_file(root / "manifest.json")
+    actual = tool.validate_windows_qualification(copied.parent, checkout=checkout)
+    assert actual["manifest_sha256"] == reference["sha256"]
+
+
+def test_known_na_node_without_a_matching_raw_reason_still_refuses(monkeypatch) -> None:
+    import runpy
+    from types import SimpleNamespace
+
+    helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
+    reporter = helper["NativeReport"]()
+    # Parser-only unit model; native factories and subprocess tripwires remain.
+    monkeypatch.setitem(reporter.pytest_runtest_logreport.__globals__, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setenv("MORDRED_DBCRYPT_RUN_SUITE", "affected")
+    node = "tests/test_dbcrypt_authority.py::test_fork_invalidates_without_releasing_parent_lease"
+    reporter.pytest_runtest_logreport(
+        SimpleNamespace(nodeid=node, when="call", outcome="skipped", longrepr="unrecognized native prerequisite reason")
+    )
+    assert reporter.reports[0]["reason_code"] == "unrecognized_skip"
+
+
+def test_full8_explicit_reviewed_source_configuration_is_bound(tmp_path: Path, monkeypatch) -> None:
+    tool, root, checkout, manifest = full_qualification_fixture(tmp_path, monkeypatch)
+    actual = tool.validate_windows_qualification(root, checkout=checkout)
+    assert actual["diagnostic"]["argv"][1:3] == ["-c", r"C:\qualified\source\pyproject.toml"]
+    assert manifest["configuration"]["sha256"] == tool.sha256_file(checkout / "pyproject.toml")
+
+
+def test_consistently_narrowed_collection_and_run_still_missing_a_crash_case_refuses(tmp_path: Path) -> None:
+    tool, spool, phase = complete_native_phase_fixture(tmp_path)
+    native = next(row for row in phase["executions"] if row.get("suite") == "dbcrypt-native")
+    for reference in (native["pytest_report"], native["collection"]["report"]):
+        path = spool / reference["path"]
+        report = json.loads(path.read_text())
+        report["nodeids"] = [node for node in report["nodeids"] if "encrypt-prepared" not in node]
+        report["reports"] = [row for row in report["reports"] if row["nodeid"] in report["nodeids"]]
+        path.write_text(json.dumps(report))
+        reference["sha256"] = tool.sha256_file(path)
+    native["nodeids"] = [node for node in native["nodeids"] if "encrypt-prepared" not in node]
+    for counts in (native["counts"], phase["test_counts"]):
+        counts["passed"] -= 1
+    phase["test_counts"]["collected"] -= 1
+    with pytest.raises(tool.AcceptanceRefused, match="native_phase_evidence_incomplete"):
+        tool.validate_native_phase_evidence(phase, directory=spool)
+
+
+def test_offline_wheel_phase_refuses_the_source_import_probe(tmp_path: Path) -> None:
+    tool, spool, phase = complete_native_phase_fixture(tmp_path, mode="wheel")
+    row = phase["executions"][0]
+    path, proof = tool._evidence_ref(spool, phase["bundle_evidence"])
+    _, bundle = tool._evidence_ref(path.parent, proof["manifest"])
+    row["import_probe"] = bundle["source_probe"]
+    with pytest.raises(tool.AcceptanceRefused, match="native_phase_evidence_incomplete"):
+        tool.validate_native_phase_evidence(phase, directory=spool)
+
+
+def test_offline_exported_input_hash_update_cannot_hide_inventory_drift(tmp_path: Path) -> None:
+    tool, spool, phase = complete_native_phase_fixture(tmp_path)
+    path, proof = tool._evidence_ref(spool, phase["bundle_evidence"])
+    reference = proof["inputs"]["tests/_dbcrypt_acceptance_native.py"]
+    exported = path.parent / reference["path"]
+    exported.write_text("# changed input; no longer the recorded implementation\n")
+    reference["sha256"] = tool.sha256_file(exported)
+    path.write_text(json.dumps(proof))
+    phase["bundle_evidence"]["sha256"] = tool.sha256_file(path)
+    with pytest.raises(tool.AcceptanceRefused, match="native_phase_evidence_incomplete"):
+        tool.validate_native_phase_evidence(phase, directory=spool)
+
+
+@pytest.mark.parametrize("damage", ["path", "bytes", "wheel_dll", "missing_wheel_row"])
+def test_full8_configuration_and_actual_wheel_dll_remain_bound(tmp_path: Path, monkeypatch, damage: str) -> None:
+    tool, root, checkout, manifest = full_qualification_fixture(tmp_path, monkeypatch)
+
+    def rewrite(reference, edit):
+        path = root / reference["path"]
+        row = json.loads(path.read_text())
+        edit(row)
+        path.write_text(json.dumps(row))
+        reference["sha256"] = tool.sha256_file(path)
+
+    if damage == "path":
+        rewrite(
+            manifest["rows"]["checkedtest_source"]["run"],
+            lambda row: row["argv"].__setitem__(2, r"C:\unrelated\pyproject.toml"),
+        )
+    elif damage == "bytes":
+        path = root / manifest["configuration"]["path"]
+        path.write_text(path.read_text() + "\n# different settings\n")
+        manifest["configuration"]["sha256"] = tool.sha256_file(path)
+    elif damage == "missing_wheel_row":
+        del manifest["rows"]["checked_wheel"]
+    else:
+        reference = manifest["artifacts"]["checked_wheel"]["dll"]
+        path = root / reference["path"]
+        path.write_bytes(b"different DLL from the recorded packaged wheel")
+        reference["sha256"] = tool.sha256_file(path)
+        for row_ref in manifest["rows"]["checked_wheel"].values():
+            rewrite(row_ref, lambda row: row.update(dll_sha256=reference["sha256"]))
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
+        tool.validate_windows_qualification(root, checkout=checkout)
+
+
+def test_full8_reused_source_builds_bind_actual_artifacts_and_all_critical_inputs(tmp_path: Path, monkeypatch) -> None:
+    tool, root, checkout, manifest = full_qualification_fixture(tmp_path, monkeypatch)
+    path = root / manifest["provenance"]["path"]
+    provenance = json.loads(path.read_text())
+    critical = {
+        key: digest
+        for key, digest in provenance["source_hashes"].items()
+        if key.startswith(("native/dbcrypt-vfs/", "src/mordred_hermes/_private_fs/"))
+        or key == "src/mordred_hermes/dbcrypt/_windows_vfs.py"
+    }
+    reused = {}
+    for name in ("checkedtest_source", "checked_source"):
+        run = json.loads((root / manifest["rows"][name]["run"]["path"]).read_text())
+        reused[run["target"]] = {
+            "dll_sha256": run["dll_sha256"],
+            "actual_build_stdout_sha256": manifest["artifacts"][name]["build_stdout"]["sha256"],
+            "critical_inputs": critical,
+            "headers": provenance["headers"],
+            "cached_runtime": {
+                run["executable"]: run["python_sha256"],
+                run["driver_native"]: run["driver_native_sha256"],
+            },
+        }
+    provenance["reused_builds"] = reused
+    path.write_text(json.dumps(provenance))
+    manifest["provenance"]["sha256"] = tool.sha256_file(path)
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    assert (
+        tool.validate_windows_qualification(root, checkout=checkout)["source"]["dll_sha256"]
+        != tool.validate_windows_qualification(root, checkout=checkout)["wheel"]["dll_sha256"]
+    )
+    provenance["reused_builds"]["CheckedTest"]["critical_inputs"] = {
+        "native/dbcrypt-vfs/vfs.c": critical["native/dbcrypt-vfs/vfs.c"]
+    }
+    path.write_text(json.dumps(provenance))
+    manifest["provenance"]["sha256"] = tool.sha256_file(path)
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
+        tool.validate_windows_qualification(root, checkout=checkout)

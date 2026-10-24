@@ -11,7 +11,11 @@ Frozen operator-furnished receipts are evidence input, not authorization.
 from __future__ import annotations
 
 import argparse
+import ast
+import base64
+import csv
 import hashlib
+import io
 import itertools
 import json
 import math
@@ -24,7 +28,8 @@ import sys
 import tarfile
 import tempfile
 import time
-from pathlib import Path
+import zipfile
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
 Phase = Literal["provision", "reopen", "verify"]
@@ -1299,7 +1304,7 @@ def native_phase_inputs(root: Path, phase: Phase) -> dict[str, Any]:
     mode, kind = (os.environ[name] for name in names[1:])
     if mode not in {"source", "wheel"} or kind not in {"candidate", "production"}:
         raise AcceptanceRefused("native_mode_or_kind_invalid")
-    bundle = Path(os.environ["DBCRYPT_BUNDLE"])
+    bundle = _absolute(os.environ["DBCRYPT_BUNDLE"])
     manifest = validate_bundle(bundle)
     helper_name = "MORDRED_WINKEY_HELPER" if sys.platform == "win32" else "MORDRED_TPMKEY_HELPER"
     helper_text = os.environ.get(helper_name)
@@ -1320,7 +1325,7 @@ def native_phase_inputs(root: Path, phase: Phase) -> dict[str, Any]:
     copy_manifest = os.environ.get("MORDRED_DBCRYPT_WITHDRAWABLE_HELPER_MANIFEST")
     if not copy_manifest:
         raise AcceptanceRefused("owned_withdrawable_helper_manifest_required")
-    helper_copy = validate_withdrawable_helper(Path(copy_manifest), production=helper, parent=root)
+    helper_copy = validate_withdrawable_helper(_absolute(copy_manifest), production=helper, parent=root)
     prior, observation = _native_observation_inputs(phase)
     action_text = os.environ.get("MORDRED_DBCRYPT_CONTROL_ACTION")
     if not action_text:
@@ -1333,7 +1338,7 @@ def native_phase_inputs(root: Path, phase: Phase) -> dict[str, Any]:
     if sys.platform == "win32":
         if not qualification:
             raise AcceptanceRefused("windows_native_qualification_incomplete")
-        validate_windows_qualification(Path(qualification), checkout=Path(manifest["checkout"]))
+        validate_windows_qualification(_absolute(qualification), checkout=Path(manifest["checkout"]))
     return {
         "bundle": bundle,
         "manifest": manifest,
@@ -1354,7 +1359,198 @@ def native_phase_inputs(root: Path, phase: Phase) -> dict[str, Any]:
     }
 
 
-def validate_native_test_report(value: Any) -> dict[str, Any]:
+# Reviewed platform-only N/A surface. Exact cases and original reasons only;
+# collection and all applicable cases still execute. Native gates never use it.
+WINDOWS_PLATFORM_NA = {
+    "test_dbcrypt_authority.py::test_fork_invalidates_without_releasing_parent_lease": (
+        "POSIX fork lifetime",
+        "windows_posix_fork",
+    ),
+    "test_dbcrypt_authority.py::test_fork_refuses_before_entering_inherited_thread_lock": (
+        "POSIX fork lifetime",
+        "windows_posix_fork",
+    ),
+    "test_dbcrypt_capability.py::test_explicit_diagnosis_authenticates_once_and_releases": (
+        "uses the POSIX authority fixture; Windows native proof is explicit",
+        "windows_posix_authority_fixture",
+    ),
+    "test_dbcrypt_capability.py::test_native_prompt_does_not_revoke_registered_sql_on_changed_metadata": (
+        "uses the POSIX authority fixture; Windows native proof is explicit",
+        "windows_posix_authority_fixture",
+    ),
+    "test_dbcrypt_capability.py::test_diagnosis_authentication_failure_releases_lease": (
+        "uses the POSIX authority fixture; Windows native proof is explicit",
+        "windows_posix_authority_fixture",
+    ),
+    "test_dbcrypt_connections.py::test_fork_held_connection_refuses_before_inherited_locks": (
+        "POSIX fork only",
+        "windows_posix_fork",
+    ),
+    "test_dbcrypt_connections.py::test_fork_normal_shutdown_cannot_finalize_inherited_handles": (
+        "POSIX fork only",
+        "windows_posix_fork",
+    ),
+    "test_dbcrypt_connections.py::test_closed_connection_retained_cursor_allows_normal_child_exit": (
+        "POSIX fork only",
+        "windows_posix_fork",
+    ),
+    "test_dbcrypt_locking.py::test_root_lease_precedes_custody": (
+        "POSIX native primitive; Windows lease qualification is Task 5's explicit gate",
+        "windows_posix_dbcrypt_locking",
+    ),
+    "test_dbcrypt_locking.py::test_multiprocess_shared_exclusive_and_crash_release": (
+        "POSIX process acceptance; Windows lock/rename native gate follows in Task 5",
+        "windows_posix_dbcrypt_locking",
+    ),
+    "test_dbcrypt_locking.py::test_root_and_lock_replacement_invalidate_runtime": (
+        "POSIX pathname replacement; Windows denies rename and is gated in Task 5",
+        "windows_posix_dbcrypt_locking",
+    ),
+    "test_dbcrypt_locking.py::test_fork_discards_inherited_authority_without_unlocking_parent": (
+        "POSIX fork ownership",
+        "windows_posix_fork",
+    ),
+    "test_dbcrypt_locking.py::test_unsafe_lock_refuses_without_repair": (
+        "POSIX file permissions; checked Windows descriptor cases have their own tests",
+        "windows_posix_dbcrypt_locking",
+    ),
+    "test_dbcrypt_locking.py::test_other_user_writable_root_refuses_without_repair": (
+        "POSIX ownership/mode admission; Windows uses checked token/DACL tests",
+        "windows_posix_dbcrypt_locking",
+    ),
+    "test_dbcrypt_locking.py::test_exclusive_reentry_revalidates_the_original_proof": (
+        "POSIX replacement admission; Windows denies native rename",
+        "windows_posix_dbcrypt_locking",
+    ),
+    "test_dbcrypt_locking.py::test_holder_scan_distinguishes_empty_visible_and_live_denied": (
+        "POSIX proc metadata model; actual Linux holder qualification is a native gate",
+        "windows_posix_dbcrypt_locking",
+    ),
+    "test_dbcrypt_locking.py::test_holder_scan_knows_when_a_process_disappeared": (
+        "POSIX proc disappearance model",
+        "windows_posix_dbcrypt_locking",
+    ),
+    "test_dbcrypt_locking.py::test_existing_lock_opens_without_nonexclusive_create": (
+        "POSIX first-open creation protocol",
+        "windows_posix_dbcrypt_locking",
+    ),
+    "test_dbcrypt_inventory.py::test_symlinked_in_scope_tree_is_unknown_without_following_it": (
+        "POSIX alias/rename semantics; Windows sharing/rename qualification is Task 5's gate",
+        "windows_posix_dbcrypt_inventory",
+    ),
+    "test_dbcrypt_inventory.py::test_unrelated_regular_file_alias_is_not_a_database_dependency": (
+        "POSIX alias/rename semantics; Windows sharing/rename qualification is Task 5's gate",
+        "windows_posix_dbcrypt_inventory",
+    ),
+    "test_dbcrypt_inventory.py::test_mutation_guard_rechecks_the_lease_after_scan": (
+        "POSIX alias/rename semantics; Windows sharing/rename qualification is Task 5's gate",
+        "windows_posix_dbcrypt_inventory",
+    ),
+    "test_dbcrypt_lifecycle.py::test_a_forked_runtime_keeps_its_lease_after_the_parent_exits": (
+        "POSIX fork lifetime",
+        "windows_posix_fork",
+    ),
+    "test_dbcrypt_lifecycle.py::test_offline_sql_fork_quarantines_cursors_before_child_finalization": (
+        "POSIX fork lifecycle",
+        "windows_posix_fork",
+    ),
+    "test_dbcrypt_monitor.py::test_the_lock_probe_sees_a_dropped_lock": (
+        "POSIX record-lock semantics",
+        "windows_posix_dbcrypt_monitor",
+    ),
+    "test_dbcrypt_monitor.py::test_the_per_turn_check_keeps_hermess_locks_on_its_live_database": (
+        "POSIX record-lock semantics",
+        "windows_posix_dbcrypt_monitor",
+    ),
+    "test_dbcrypt_monitor.py::test_an_unprotected_process_is_probed_through_its_own_sqlite": (
+        "POSIX record-lock semantics",
+        "windows_posix_dbcrypt_monitor",
+    ),
+    "test_dbcrypt_monitor.py::test_reopening_an_encrypted_copy_keeps_the_locks_of_its_open_connection": (
+        "POSIX record-lock semantics",
+        "windows_posix_dbcrypt_monitor",
+    ),
+    "test_mail_imap_sync.py::test_a_second_fetch_while_one_runs_is_sync_in_progress": (
+        "POSIX flock",
+        "windows_posix_mail_imap_sync",
+    ),
+    "test_mail_imap_sync.py::test_an_abandoned_lease_releases_the_writer_lock_its_holder_still_keeps": (
+        "POSIX flock",
+        "windows_posix_mail_imap_sync",
+    ),
+    "test_mail_imap_sync.py::test_a_failed_revocation_keeps_the_lock_and_a_late_batch_is_still_refused": (
+        "POSIX flock",
+        "windows_posix_mail_imap_sync",
+    ),
+    "test_mail_imap_sync.py::test_a_write_in_flight_keeps_the_lock_until_its_worker_exits": (
+        "POSIX flock",
+        "windows_posix_mail_imap_sync",
+    ),
+    "test_wizard_databases_authority.py::test_legacy_arm_is_idempotent_in_owned_0755_directory": (
+        "POSIX legacy directory modes",
+        "windows_posix_wizard_databases_authority",
+    ),
+    "test_wizard_databases_authority.py::test_legacy_arm_in_0755_directory_refuses_unsafe_or_unknown_entries": (
+        "POSIX legacy directory/file admission",
+        "windows_posix_wizard_databases_authority",
+    ),
+    "test_database_mutation_broker.py::test_fork_discards_inherited_custody_and_database_proof": (
+        "POSIX fork registry cleanup",
+        "windows_posix_fork",
+    ),
+}
+WINDOWS_TELEGRAM_MIGRATION_REASON = "mordred.db (and so migrate-store) is macOS-only; Windows keeps the .enc archive"
+
+
+def _test_identity(nodeid: str) -> str:
+    text = nodeid.replace("\\", "/")
+    text = text.split("/tests/", 1)[-1].removeprefix("tests/")
+    return text.split("[", 1)[0]
+
+
+def platform_na_reason(
+    nodeid: str, reason: str | None = None, *, platform: str = "win32", suite: str = "affected"
+) -> str | None:
+    identity = _test_identity(nodeid)
+    if platform == "linux" and suite == "dbcrypt-activity":
+        return (
+            "linux_windows_peer_handles"
+            if identity == "integration/test_dbcrypt_activity.py::test_windows_peer_swap_refuses"
+            and reason in {None, "Windows checked peer source handles"}
+            else None
+        )
+    if platform != "win32" or suite != "affected":
+        return None
+    if identity.startswith("extension/test_telegram_migrate_store.py::"):
+        expected: tuple[str, str] | None = (WINDOWS_TELEGRAM_MIGRATION_REASON, "windows_telegram_migration_module")
+    else:
+        expected = WINDOWS_PLATFORM_NA.get(identity)
+    if expected is None or (reason is not None and reason != expected[0]):
+        return None
+    return expected[1]
+
+
+def _native_node_outcome(node: str, rows: list[dict[str, Any]], platform: str, suite: str) -> str | None:
+    _require(all(not row.get("wasxfail") for row in rows))
+    actual = {(row["when"], row["outcome"]) for row in rows}
+    skipped = [row for row in rows if row["outcome"] == "skipped"]
+    if not skipped:
+        _require(len(rows) == 3 and actual == {(stage, "passed") for stage in ("setup", "call", "teardown")})
+        return None
+    _require(len(skipped) == 1)
+    reason = platform_na_reason(node, platform=platform, suite=suite)
+    _require(reason is not None and skipped[0].get("reason_code") == reason)
+    stage = skipped[0]["when"]
+    expected = (
+        {("setup", "skipped"), ("teardown", "passed")}
+        if stage == "setup"
+        else {("setup", "passed"), ("call", "skipped"), ("teardown", "passed")}
+    )
+    _require(stage in {"setup", "call"} and len(rows) == len(expected) and actual == expected)
+    return reason
+
+
+def validate_native_test_report(value: Any, *, platform: str = "", suite: str = "") -> dict[str, Any]:
     try:
         report = _object(value, ("nodeids", "reports", "exitstatus", "collection_errors", "deselected"))
         nodes = report["nodeids"]
@@ -1366,15 +1562,21 @@ def validate_native_test_report(value: Any) -> dict[str, Any]:
         )
         _require(type(report["exitstatus"]) is int and report["exitstatus"] == 0 and report["collection_errors"] == [])
         _require(isinstance(report["deselected"], list) and all(_text(node) for node in report["deselected"]))
-        expected = {(node, stage) for node in nodes for stage in ("setup", "call", "teardown")}
-        actual = []
-        for row in report["reports"]:
-            _require(row["outcome"] == "passed" and not row.get("wasxfail"))
-            actual.append((row["nodeid"], row["when"]))
-        _require(len(actual) == len(expected) and set(actual) == expected)
+        _require(all(row["nodeid"] in nodes for row in report["reports"]))
+        unavailable = []
+        for node in nodes:
+            reason = _native_node_outcome(
+                node, [row for row in report["reports"] if row["nodeid"] == node], platform, suite
+            )
+            if reason is not None:
+                unavailable.append({"nodeid": node, "reason_code": reason})
     except (ValueError, TypeError, KeyError) as exc:
         raise AcceptanceRefused("native_test_results_incomplete") from exc
-    return report
+    return {
+        **report,
+        "platform_na": unavailable,
+        "counts": {"passed": len(nodes) - len(unavailable), "platform_na": len(unavailable), "skipped": 0},
+    }
 
 
 def _evidence_ref(directory: Path, value: Any) -> tuple[Path, dict[str, Any]]:
@@ -1388,70 +1590,364 @@ def _evidence_ref(directory: Path, value: Any) -> tuple[Path, dict[str, Any]]:
     return path, payload
 
 
-def _qualification_row(directory: Path, reference: Any, target: str) -> dict[str, Any]:
+def _artifact_ref(directory: Path, reference: Any) -> Path:
+    row = _object(reference, ("path", "sha256"))
+    path = _input_file(directory / _relative(row["path"]))
+    _require(path.resolve().is_relative_to(directory.resolve()) and _hex(row["sha256"], 64))
+    _require(sha256_file(path) == row["sha256"])
+    return path
+
+
+def windows_vfs_required_nodes(checkout: Path, *, release: bool) -> list[str]:
+    """Expand this one reviewed literal-parametrized module without importing it."""
+    relative = "tests/integration/test_dbcrypt_windows_vfs.py"
+    module = ast.parse((checkout / relative).read_text())
+    result: list[str] = []
+    excluded = (
+        "checkedtest",
+        "injected_io",
+        "every_creation",
+        "inherited_dacl_race",
+        "recovery_exclusive_lock",
+        "shm_shared_lock",
+    )
+    for node in module.body:
+        if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test_"):
+            continue
+        if release and any(token in node.name for token in excluded):
+            continue
+        dimensions = []
+        for decorator in reversed(node.decorator_list):
+            if isinstance(decorator, ast.Call) and ast.unparse(decorator.func) == "pytest.mark.parametrize":
+                _require(len(decorator.args) == 2 and not decorator.keywords)
+                names = ast.literal_eval(decorator.args[0]).split(",")
+                ids = []
+                for values in ast.literal_eval(decorator.args[1]):
+                    row = (values,) if len(names) == 1 else values
+                    _require(all(type(value) in (str, int, bool) for value in row))
+                    ids.append("-".join(str(value).encode("unicode_escape").decode() for value in row))
+                _require(len(ids) == len(set(ids)))
+                dimensions.append(ids)
+        suffixes = ["-".join(values) for values in itertools.product(*dimensions)] if dimensions else []
+        result.extend(f"{relative}::{node.name}[{suffix}]" for suffix in suffixes)
+        if not dimensions:
+            result.append(f"{relative}::{node.name}")
+    _require(bool(result) and len(result) == len(set(result)))
+    return result
+
+
+def _qualification_argv(row: dict[str, Any], target: str, action: str, configuration: str) -> None:
+    args = row["argv"]
+    _require(isinstance(args, list) and args[:3] == ["-q", "-c", configuration])
+    _require(args[3:8] == ["-o", "addopts=", "-m", "integration", "--basetemp"])
+    _require(_guest_path(args[8], "win32").is_absolute())
+    _require(args[9].replace("\\", "/").endswith("tests/integration/test_dbcrypt_windows_vfs.py"))
+    tail = ["-k", WINDOWS_RELEASE_SELECTION] if target == "Checked" else []
+    tail += ["--collect-only"] if action == "collect" else []
+    _require(args[10:] == tail)
+
+
+def _qualification_row(
+    directory: Path, reference: Any, target: str, required: list[str], configuration: str
+) -> dict[str, Any]:
     links = _object(reference, ("collect", "run"))
     _, collected = _evidence_ref(directory, links["collect"])
     _, run = _evidence_ref(directory, links["run"])
-    _require(collected["action"] == "collect" and run["action"] == "run")
-    _require(collected["target"] == target and run["target"] == target)
-    _require(collected["nodeids"] == run["nodeids"] and collected["pytest_exit_code"] == 0)
-    validate_native_test_report({**run, "exitstatus": run["pytest_exit_code"], "deselected": []})
-    _require(run["collected"] == len(run["nodeids"]) and _hex(run["dll_sha256"], 64))
+    for action, row in (("collect", collected), ("run", run)):
+        _require(row["action"] == action and row["target"] == target and row["nodeids"] == required)
+        _require(type(row["collected"]) is int and row["collected"] == len(required))
+        _require(
+            type(row["pytest_exit_code"]) is int and row["pytest_exit_code"] == 0 and row["collection_errors"] == []
+        )
+        _qualification_argv(row, target, action, configuration)
+    _require(collected.get("reports", []) == [])
+    for key in ("dll_sha256", "driver_native_sha256", "python_sha256"):
+        _require(_hex(run[key], 64) and collected[key] == run[key])
+    for key in ("dll", "driver_native", "executable", "product_module", "driver_version", "versions"):
+        _require(collected[key] == run[key])
+    validate_native_test_report({**run, "exitstatus": run["pytest_exit_code"], "deselected": run.get("deselected", [])})
     _require(
         run["driver_version"] == "0.5.7" and run["versions"] == {"sqlite": "3.51.1", "sqlcipher": "4.12.0 community"}
     )
     return run
 
 
+def _qualification_binaries(
+    directory: Path, entry: dict[str, Any], row: dict[str, Any], provenance: dict[str, Any]
+) -> None:
+    for key, digest in (("dll", "dll_sha256"), ("driver_native", "driver_native_sha256"), ("python", "python_sha256")):
+        _require(sha256_file(_artifact_ref(directory, entry[key])) == row[digest])
+    _artifact_ref(directory, entry["build_stdout"])
+    _require(
+        sha256_file(_artifact_ref(directory, entry["build_script"]))
+        == provenance["source_hashes"]["native/dbcrypt-vfs/build.ps1"]
+    )
+    args = entry["build_argv"]
+    _require(isinstance(args, list) and len(args) == 11 and args[1:4] == ["-NoProfile", "-NonInteractive", "-File"])
+    _require(args[5:8] == ["-Target", row["target"], "-OutputDirectory"] and args[9] == "-SqliteIncludeDirectory")
+    _require(PureWindowsPath(args[4]).name == "build.ps1")
+
+
+def _qualification_fixture(directory: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    _, fixture = _evidence_ref(directory, manifest["fixture_verify"])
+    _, wrapper = _evidence_ref(directory, manifest["fixture_plan"])
+    _, owned = _evidence_ref(directory, manifest["fixture_manifest"])
+    plan = wrapper["plan"]
+    _require(fixture["schema"] == owned["schema"] == 1 and fixture["ready"] is True and fixture["elevated"] is False)
+    _require(
+        fixture["sentinel_unchanged"] is True and fixture["direct"]["ok"] is True and fixture["unknown"]["ok"] is True
+    )
+    _require(_hex(fixture["plan_sha256"], 64) and fixture["plan_sha256"] == wrapper["reviewed_plan_sha256"])
+    _require(fixture["sid"] == owned["owner_sid"] == plan["owner_sid"] and _text(fixture["sid"]))
+    _require(
+        owned["filesystem"] == "exFAT" and all(owned[key] == plan[key] for key in ("non_ntfs_root", "reparse_root"))
+    )
+    return dict(plan)
+
+
+def _required_qualification_headers(checkout: Path) -> dict[str, str]:
+    import runpy
+
+    return dict(runpy.run_path(str(checkout / "tools/dbcrypt_build_headers.py"))["HEADER_SHA256"])
+
+
+def _qualification_source(directory: Path, manifest: dict[str, Any], checkout: Path) -> dict[str, Any]:
+    _, provenance = _evidence_ref(directory, manifest["provenance"])
+    _, source_map = _evidence_ref(directory, manifest["source_map"])
+    _require(_hex(provenance["candidate"], 40) and provenance["candidate"] == source_map["candidate"])
+    _require(provenance["source_hashes"] == source_map["files"] and provenance["headers"] == source_map["headers"])
+    archive = _artifact_ref(directory, manifest["source_archive"])
+    _require(sha256_file(archive) == provenance["source_archive_sha256"])
+    with zipfile.ZipFile(archive) as source_zip:
+        names = source_zip.namelist()
+        _require(len(names) == len(set(names)) and set(names) == set(source_map["delta_files"]))
+        for name in names:
+            _relative(name)
+            _require(
+                hashlib.sha256(source_zip.read(name)).hexdigest()
+                == source_map["delta_files"][name]
+                == source_map["files"][name]
+            )
+
+    critical = [
+        *(checkout / "native/dbcrypt-vfs").glob("*.c"),
+        *(checkout / "native/dbcrypt-vfs").glob("*.h"),
+        *(checkout / "src/mordred_hermes/_private_fs").glob("*.py"),
+        checkout / "native/dbcrypt-vfs/build.ps1",
+        checkout / "pyproject.toml",
+        checkout / "src/mordred_hermes/dbcrypt/_windows_vfs.py",
+        checkout / "tests/integration/test_dbcrypt_windows_vfs.py",
+    ]
+    _require(
+        all(
+            provenance["source_hashes"].get(path.relative_to(checkout).as_posix()) == sha256_file(path)
+            for path in critical
+        )
+    )
+    configuration = _artifact_ref(directory, manifest["configuration"])
+    _require(
+        sha256_file(configuration)
+        == provenance["configuration_sha256"]
+        == provenance["source_hashes"]["pyproject.toml"]
+    )
+    _require(PureWindowsPath(provenance["configuration"]) == PureWindowsPath(provenance["source"]) / "pyproject.toml")
+    expected_headers = _required_qualification_headers(checkout)
+    _require(provenance["headers"] == expected_headers and set(manifest["headers"]) == set(expected_headers))
+    for name, digest in expected_headers.items():
+        _require(sha256_file(_artifact_ref(directory, manifest["headers"][name])) == digest)
+    return dict(provenance)
+
+
+def _qualified_package_artifacts(
+    directory: Path, proof: dict[str, Any], bundle: dict[str, Any], row: dict[str, Any], provenance: dict[str, Any]
+) -> None:
+    wheel_path = _artifact_ref(directory, proof["artifacts"]["wheel"])
+    sdist_path = _artifact_ref(directory, proof["artifacts"]["sdist"])
+    native_name = "mordred_hermes/_native/dbcrypt-vfs/mordred_dbcrypt_vfs.dll"
+    critical = {
+        name: digest
+        for name, digest in provenance["source_hashes"].items()
+        if name.startswith(("native/dbcrypt-vfs/", "src/mordred_hermes/_private_fs/"))
+        or name == "src/mordred_hermes/dbcrypt/_windows_vfs.py"
+    }
+    with tarfile.open(sdist_path, "r:gz") as archive:
+        members = {member.name: member for member in archive.getmembers()}
+        _require(len(members) == len(archive.getmembers()))
+        prefix = Path(bundle["sdist"]).name.removesuffix(".tar.gz")
+        for name, digest in critical.items():
+            member = members[prefix + "/" + name]
+            _require(member.isfile())
+            stream = archive.extractfile(member)
+            _require(stream is not None)
+            assert stream is not None
+            _require(hashlib.sha256(stream.read()).hexdigest() == digest)
+    with zipfile.ZipFile(wheel_path) as archive:
+        _require(len(archive.namelist()) == len(set(archive.namelist())))
+        dll = archive.read(native_name)
+        _require(hashlib.sha256(dll).hexdigest() == row["dll_sha256"])
+        version = bundle["wheel_probe"]["versions"]["hermes-mordred"]
+        record = csv.reader(io.StringIO(archive.read(f"hermes_mordred-{version}.dist-info/RECORD").decode()))
+        native_entries = [entry for entry in record if entry[0] == native_name]
+        encoded = base64.urlsafe_b64encode(hashlib.sha256(dll).digest()).rstrip(b"=").decode()
+        _require(len(native_entries) == 1 and native_entries[0][1:] == ["sha256=" + encoded, str(len(dll))])
+        for name, digest in critical.items():
+            if name.startswith("src/"):
+                _require(hashlib.sha256(archive.read(name.removeprefix("src/"))).hexdigest() == digest)
+    module = "tests/integration/test_dbcrypt_windows_vfs.py"
+    _require(bundle["files"][module] == provenance["source_hashes"][module])
+
+
 def validate_windows_qualification(directory: Path, *, checkout: Path) -> dict[str, Any]:
     try:
-        _root = directory.resolve(strict=True)
-        manifest = json.loads(_input_file(_root / "manifest.json").read_text())
+        directory = directory.resolve(strict=True)
+        manifest = json.loads(_input_file(directory / "manifest.json").read_text())
         _require(manifest["schema"] == 1 and manifest["kind"] == "windows_vfs_qualification")
+        full, release = (windows_vfs_required_nodes(checkout, release=value) for value in (False, True))
         rows = manifest["rows"]
-        diagnostic = _qualification_row(_root, rows["checkedtest_source"], "CheckedTest")
-        source = _qualification_row(_root, rows["checked_source"], "Checked")
-        wheel = _qualification_row(_root, rows["checked_wheel"], "Checked")
-        _require(set(source["nodeids"]) <= set(diagnostic["nodeids"]) and source["nodeids"] == wheel["nodeids"])
-        _, provenance = _evidence_ref(_root, manifest["provenance"])
-        _, fixture = _evidence_ref(_root, manifest["fixture_verify"])
-        _require(fixture["elevated"] is False and _text(fixture["sid"]))
-        critical = [
-            *(checkout / "native/dbcrypt-vfs").glob("*.c"),
-            *(checkout / "native/dbcrypt-vfs").glob("*.h"),
-            *(checkout / "src/mordred_hermes/_private_fs").glob("*.py"),
-            checkout / "src/mordred_hermes/dbcrypt/_windows_vfs.py",
-            checkout / "tests/integration/test_dbcrypt_windows_vfs.py",
-        ]
-        _require(
-            all(
-                provenance["source_hashes"].get(path.relative_to(checkout).as_posix()) == sha256_file(path)
-                for path in critical
-            )
-        )
-        import runpy
+        provenance = _qualification_source(directory, manifest, checkout)
+        configuration = provenance["configuration"]
+        diagnostic = _qualification_row(directory, rows["checkedtest_source"], "CheckedTest", full, configuration)
+        source = _qualification_row(directory, rows["checked_source"], "Checked", release, configuration)
+        wheel = _qualification_row(directory, rows["checked_wheel"], "Checked", release, configuration)
+        excluded = set(full) - set(release)
+        for name in ("checkedtest_source", "checked_source", "checked_wheel"):
+            for reference in rows[name].values():
+                _, raw = _evidence_ref(directory, reference)
+                if "deselected" in raw:
+                    _require(set(raw["deselected"]) == (set() if name == "checkedtest_source" else excluded))
+        plan = _qualification_fixture(directory, manifest)
+        for name, row in (("checkedtest_source", diagnostic), ("checked_source", source), ("checked_wheel", wheel)):
+            _qualification_binaries(directory, manifest["artifacts"][name], row, provenance)
+            if name != "checked_wheel" and "reused_builds" in provenance:
+                reused = provenance["reused_builds"][row["target"]]
+                _require(reused["dll_sha256"] == row["dll_sha256"])
+                _require(manifest["artifacts"][name]["build_stdout"]["sha256"] == reused["actual_build_stdout_sha256"])
+                _require(reused["headers"] == provenance["headers"] and bool(reused["critical_inputs"]))
+                expected_critical = {
+                    key
+                    for key in provenance["source_hashes"]
+                    if (
+                        key.startswith("native/dbcrypt-vfs/")
+                        and (key.endswith((".c", ".h")) or key.endswith("/build.ps1"))
+                    )
+                    or key.startswith("src/mordred_hermes/_private_fs/")
+                    or key == "src/mordred_hermes/dbcrypt/_windows_vfs.py"
+                }
+                _require(set(reused["critical_inputs"]) == expected_critical)
 
-        expected_headers = runpy.run_path(str(checkout / "tools/dbcrypt_build_headers.py"))["HEADER_SHA256"]
-        _require(provenance["headers"] == expected_headers)
-        for key in ("bundle_manifest_sha256", "sdist_sha256", "wheel_sha256"):
-            _require(_hex(wheel[key], 64))
+                _require(
+                    all(provenance["source_hashes"][key] == digest for key, digest in reused["critical_inputs"].items())
+                )
+                _require(reused["cached_runtime"][row["executable"]] == row["python_sha256"])
+                _require(reused["cached_runtime"][row["driver_native"]] == row["driver_native_sha256"])
+
+        for row in (diagnostic, source):
+            _require(PureWindowsPath(row["dll"]).parent.parent == PureWindowsPath(plan["test_root"]))
+            _require(
+                PureWindowsPath(row["product_module"]).is_relative_to(
+                    PureWindowsPath(provenance["source"]) / "src/mordred_hermes"
+                )
+            )
         _require(
             wheel["record_owned_packaged_dll"] is True
             and wheel["test_exports_absent"] is True
             and wheel["env_dll_override"] is None
         )
-        _require(
-            Path(wheel["product_module"]).parent.name == "mordred_hermes"
-            and "site-packages" in Path(wheel["product_module"]).parts
+        # Artifact/bundle closure is validated by the same fixed offline proof
+        # adapter used by phase evidence, never digest-shape or booleans alone.
+        proof_path, proof = _evidence_ref(directory, manifest["wheel_bundle"])
+        bundle = validate_bundle_evidence(proof, directory=proof_path.parent)
+        _require(all(wheel[key] == bundle[key] for key in ("sdist_sha256", "wheel_sha256")))
+        _require(wheel["bundle_manifest_sha256"] == proof["manifest"]["sha256"])
+        _qualified_package_artifacts(proof_path.parent, proof, bundle, wheel, provenance)
+        _validate_exported_import(
+            wheel["product_module"], mode="wheel", platform="win32", bundle=bundle, bundle_path=proof["bundle_path"]
         )
-        return {"manifest_sha256": sha256_file(_root / "manifest.json"), "source": source, "wheel": wheel}
-    except (OSError, ValueError, TypeError, KeyError, AcceptanceRefused) as exc:
+        return {
+            "manifest_sha256": sha256_file(directory / "manifest.json"),
+            "diagnostic": diagnostic,
+            "source": source,
+            "wheel": wheel,
+        }
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        KeyError,
+        IndexError,
+        tarfile.TarError,
+        zipfile.BadZipFile,
+        AcceptanceRefused,
+    ) as exc:
         raise AcceptanceRefused("windows_native_qualification_incomplete") from exc
+
+
+def _qualification_inputs(directory: Path, manifest: dict[str, Any]) -> set[Path]:
+    paths = {directory / "manifest.json"}
+    for key in (
+        "provenance",
+        "source_map",
+        "source_archive",
+        "fixture_plan",
+        "fixture_manifest",
+        "fixture_verify",
+        "configuration",
+    ):
+        paths.add(_artifact_ref(directory, manifest[key]))
+    paths.update(_artifact_ref(directory, value) for value in manifest["headers"].values())
+    for links in manifest["rows"].values():
+        paths.update(_artifact_ref(directory, value) for value in links.values())
+    for row in manifest["artifacts"].values():
+        paths.update(
+            _artifact_ref(directory, row[key])
+            for key in ("dll", "driver_native", "python", "build_stdout", "build_script")
+        )
+    proof_path, proof = _evidence_ref(directory, manifest["wheel_bundle"])
+    paths.add(proof_path)
+    paths.add(_artifact_ref(proof_path.parent, proof["manifest"]))
+    paths.add(_artifact_ref(proof_path.parent, proof["configuration"]))
+    paths.update(_artifact_ref(proof_path.parent, value) for value in proof["artifacts"].values())
+    paths.update(_artifact_ref(proof_path.parent, value) for value in proof["inputs"].values())
+    return paths
+
+
+def _export_windows_qualification(context: dict[str, Any], directory: Path) -> dict[str, str] | None:
+    if not context.get("qualification"):
+        return None
+    source = Path(context["qualification"])
+    manifest = json.loads((source / "manifest.json").read_text())
+    target = directory / "windows-qualification"
+    target.mkdir(mode=0o700)
+    for path in sorted(_qualification_inputs(source, manifest)):
+        relative = path.relative_to(source)
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, destination)
+    path = target / "manifest.json"
+    return {"path": path.relative_to(directory.parent).as_posix(), "sha256": sha256_file(path)}
+
+
+def _phase_qualification(phase: dict[str, Any], directory: Path) -> dict[str, Any] | None:
+    if phase["platform"] != "win32":
+        _require(phase.get("qualification_evidence") is None)
+        return None
+    path, _manifest = _evidence_ref(directory, phase["qualification_evidence"])
+    # The operator runs offline verification from the accepted source tool.
+    # Only read current component bytes; no product import or guest path stat.
+    qualified = validate_windows_qualification(path.parent, checkout=Path(__file__).resolve().parents[1])
+    _require(qualified["manifest_sha256"] == phase["native_facts"]["qualification_manifest_sha256"])
+    observed = qualified["source" if phase["mode"] == "source" else "wheel"]
+    _require(observed["dll_sha256"] == phase["native_facts"]["dll"]["sha256"])
+    if phase["mode"] == "wheel":
+        _require(qualified["wheel"]["bundle_manifest_sha256"] == phase["bundle_manifest_sha256"])
+    return qualified
 
 
 def validate_reopen_continuity(before: dict[str, Any], after: dict[str, Any], observation: str) -> None:
     try:
         _require(all(before[key] == after[key] for key in ("mode", "bundle_manifest_sha256", "fixture", "logical")))
+        if "native_roots" in before or "native_roots" in after:
+            _require(before["native_roots"] == after["native_roots"])
         same_boot = before["boot"]["identity"] == after["boot"]["identity"]
         _require(same_boot if observation == "process_restart" else not same_boot)
         _require(observation in {"process_restart", "os_reboot", "ec2_stop_start"})
@@ -1498,53 +1994,539 @@ def native_acceptance_commands(*, checkout: Path, bundle: Path, platform: str, k
     return rows
 
 
+def _guest_path(value: str, platform: str) -> PurePosixPath | PureWindowsPath:
+    path = PureWindowsPath(value) if platform == "win32" else PurePosixPath(value)
+    _require(path.is_absolute() and ".." not in path.parts)
+    return path
+
+
+def _validate_exported_import(path: str, *, mode: str, platform: str, bundle: dict[str, Any], bundle_path: str) -> None:
+    origin = _guest_path(path, platform)
+    checkout, installed = (_guest_path(value, platform) for value in (bundle["checkout"], bundle_path))
+    expected = checkout / "src/mordred_hermes" if mode == "source" else installed / "wheel-env"
+    _require(origin.is_relative_to(expected) and (mode == "source" or not origin.is_relative_to(checkout)))
+    _require(path == bundle[mode + "_probe"]["product_file"])
+
+
+def _offline_build_records(manifest: dict[str, Any], bundle_path: str) -> None:
+    platform = manifest["source_probe"]["platform"]
+    root, checkout = (_guest_path(value, platform) for value in (bundle_path, manifest["checkout"]))
+    python_name = "Scripts/python.exe" if platform == "win32" else "bin/python"
+    source_python = str(checkout / ".venv" / python_name)
+    build_python = str(root / "build-env" / python_name)
+    wheel_python = str(root / "wheel-env" / python_name)
+    rows = manifest["build_commands"]
+    _require(isinstance(rows, list) and len(rows) == 6)
+    for row in rows:
+        _require(row["cwd"] == str(root) and type(row["returncode"]) is int and row["returncode"] == 0)
+        _require(
+            _timestamp(row["started_at"]) and _timestamp(row["finished_at"]) and row["started_at"] <= row["finished_at"]
+        )
+    _require(rows[0]["argv"] == ["uv", "build", "--sdist", str(checkout), "--out-dir", str(root / "artifacts")])
+    for index, name in ((1, "build-env"), (2, "wheel-env")):
+        argv = rows[index]["argv"]
+        _require(len(argv) == 6 and argv[:4] == ["uv", "venv", "--no-project", "--python"])
+        _require(argv[4] in {source_python, manifest["source_probe"]["interpreter"]} and argv[5] == str(root / name))
+    _require(rows[3]["argv"] == ["uv", "pip", "install", "--python", build_python, "hatchling>=1.18"])
+    _require(
+        rows[4]["argv"]
+        == [
+            "uv",
+            "build",
+            "--wheel",
+            "--no-build-isolation",
+            "--python",
+            build_python,
+            str(root / manifest["extracted_sdist"]),
+            "--out-dir",
+            str(root / "artifacts"),
+        ]
+    )
+    _require(
+        rows[5]["argv"]
+        == [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            wheel_python,
+            "--link-mode",
+            "copy",
+            str(root / manifest["wheel"]) + "[dev,keyvault,extension,dbcrypt,telegram]",
+        ]
+    )
+
+
+def validate_bundle_evidence(value: Any, *, directory: Path) -> dict[str, Any]:
+    """Offline closure over exported preparation manifest, artifacts and test inputs."""
+    proof = _object(
+        value, ("schema_version", "kind", "bundle_path", "manifest", "artifacts", "inputs", "configuration")
+    )
+    _require(
+        type(proof["schema_version"]) is int
+        and proof["schema_version"] == 1
+        and proof["kind"] == "dbcrypt_bundle_evidence"
+    )
+    _, manifest = _evidence_ref(directory, proof["manifest"])
+    _require(
+        type(manifest["schema_version"]) is int and manifest["schema_version"] == 1 and _hex(manifest["commit"], 40)
+    )
+    _offline_build_records(manifest, proof["bundle_path"])
+    files = manifest["files"]
+    _require(isinstance(files, dict) and bool(files) and all(_hex(digest, 64) for digest in files.values()))
+    required = {name for name in files if name.startswith(("tests/", "tools/"))}
+    _require(bool(required) and set(proof["inputs"]) == required)
+    inputs = {}
+    for name in sorted(required):
+        _relative(name)
+        path = _artifact_ref(directory, proof["inputs"][name])
+        _require(sha256_file(path) == files[name])
+        inputs[name] = path
+    for kind in ("sdist", "wheel"):
+        artifact = _artifact_ref(directory, proof["artifacts"][kind])
+        _require(sha256_file(artifact) == manifest[kind + "_sha256"] == files[manifest[kind]])
+    config_name = manifest["extracted_sdist"] + "/pyproject.toml"
+    configuration = _artifact_ref(directory, proof["configuration"])
+    _require(sha256_file(configuration) == files[config_name])
+    with tarfile.open(_artifact_ref(directory, proof["artifacts"]["sdist"]), "r:gz") as archive:
+        member = archive.getmember(Path(manifest["sdist"]).name.removesuffix(".tar.gz") + "/pyproject.toml")
+        _require(member.isfile())
+        stream = archive.extractfile(member)
+        _require(stream is not None)
+        assert stream is not None
+        _require(hashlib.sha256(stream.read()).hexdigest() == files[config_name])
+    platform = manifest["source_probe"]["platform"]
+    _require(platform == manifest["wheel_probe"]["platform"] and platform in {"linux", "win32"})
+    for mode in ("source", "wheel"):
+        probe = manifest[mode + "_probe"]
+        _validate_exported_import(
+            probe["product_file"], mode=mode, platform=platform, bundle=manifest, bundle_path=proof["bundle_path"]
+        )
+        _require(probe["versions"]["hermes-mordred"] == manifest["source_probe"]["versions"]["hermes-mordred"])
+        environment = (
+            _guest_path(manifest["checkout"], platform) / ".venv"
+            if mode == "source"
+            else _guest_path(proof["bundle_path"], platform) / "wheel-env"
+        )
+        _require(_guest_path(probe["driver"]["module"], platform).is_relative_to(environment))
+        _require(
+            probe["driver"]["cipher_version"] == "4.12.0 community"
+            and probe["versions"]["sqlcipher3-wheels"] == "0.5.7"
+        )
+
+    return {**manifest, "_inputs": inputs, "_bundle_path": proof["bundle_path"]}
+
+
+def _export_bundle_evidence(context: dict[str, Any], directory: Path) -> dict[str, str]:
+    target = directory / "bundle-evidence"
+    target.mkdir(mode=0o700)
+    proof: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "dbcrypt_bundle_evidence",
+        "bundle_path": str(context["bundle"]),
+        "inputs": {},
+        "artifacts": {},
+    }
+    manifest = context["manifest"]
+    config_name = manifest["extracted_sdist"] + "/pyproject.toml"
+    names = [
+        "manifest.json",
+        config_name,
+        manifest["sdist"],
+        manifest["wheel"],
+        *(name for name in manifest["files"] if name.startswith(("tests/", "tools/"))),
+    ]
+    for name in names:
+        path = target / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(context["bundle"] / name, path)
+        reference = {"path": name, "sha256": sha256_file(path)}
+        if name == "manifest.json":
+            proof["manifest"] = reference
+        elif name == config_name:
+            proof["configuration"] = reference
+        elif name in (manifest["sdist"], manifest["wheel"]):
+            proof["artifacts"]["sdist" if name == manifest["sdist"] else "wheel"] = reference
+        else:
+            proof["inputs"][name] = reference
+    path = target / "proof.json"
+    _write_new(path, proof)
+    return {"path": path.relative_to(directory.parent).as_posix(), "sha256": sha256_file(path)}
+
+
+def _phase_bundle(phase: dict[str, Any], directory: Path) -> dict[str, Any]:
+    path, proof = _evidence_ref(directory, phase["bundle_evidence"])
+    bundle = validate_bundle_evidence(proof, directory=path.parent)
+    _require(phase["bundle_manifest_sha256"] == proof["manifest"]["sha256"])
+    _require(phase["bundle"] == {key: bundle[key] for key in ("commit", "sdist_sha256", "wheel_sha256")})
+    _require(phase["native_implementation_sha256"] == bundle["files"]["tests/_dbcrypt_acceptance_native.py"])
+    _require(phase["platform"] == bundle["source_probe"]["platform"])
+    return bundle
+
+
+def _exported_probe(phase: dict[str, Any], execution: dict[str, Any], bundle: dict[str, Any]) -> None:
+    probe = execution["import_probe"]
+    _require(probe == bundle[phase["mode"] + "_probe"])
+    _validate_exported_import(
+        probe["product_file"],
+        mode=phase["mode"],
+        platform=phase["platform"],
+        bundle=bundle,
+        bundle_path=bundle["_bundle_path"],
+    )
+    _require(execution["cwd"] == bundle["_bundle_path"] and execution["mode"] == phase["mode"])
+    _require(execution["bundle_manifest_sha256"] == phase["bundle_manifest_sha256"])
+    _require(phase["platform"] != "win32" or probe["token"]["elevated"] is False)
+
+
+def _module_functions(path: Path, relative: str) -> set[str]:
+    tree = ast.parse(path.read_text())
+    result = set()
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+            result.add(relative + "::" + node.name)
+        elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            result.update(
+                relative + "::" + node.name + "::" + child.name
+                for child in node.body
+                if isinstance(child, ast.FunctionDef) and child.name.startswith("test_")
+            )
+    return result
+
+
+def _normalized_node(node: str) -> str:
+    node = node.replace("\\", "/")
+    return node.split("/tests/", 1)[-1].removeprefix("tests/")
+
+
+def _crash_nodes(platform: str) -> set[str]:
+    phases = [
+        (direction, stage)
+        for direction in ("encrypt", "decrypt")
+        for stage in ("prepared", "reserved", "verified", "armed", "swapped", "complete", "removed")
+    ]
+    phases += [("adopt", stage) for stage in ("verified", "armed", "complete")] + [("backup", "published")]
+    if platform == "win32":
+        phases += [
+            (direction, stage) for direction in ("encrypt", "decrypt") for stage in ("retained", "published", "retired")
+        ]
+    return {
+        f"integration/test_dbcrypt_native.py::test_native_crash_subprocess_recovery[{direction}-{stage}]"
+        for direction, stage in phases
+    }
+
+
+def _planned_rows(phase: dict[str, Any], bundle: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    from typing import cast
+
+    checkout = cast(Path, _guest_path(bundle["checkout"], phase["platform"]))
+    root = cast(Path, _guest_path(bundle["_bundle_path"], phase["platform"]))
+    return {
+        row["suite"]: row
+        for row in native_acceptance_commands(
+            checkout=checkout, bundle=root, platform=phase["platform"], kind=phase["acceptance_kind"]
+        )
+        if row["mode"] == phase["mode"] and "argv" in row
+    }
+
+
+def _selected_nodes(
+    phase: dict[str, Any], record: dict[str, Any], plan: dict[str, Any], bundle: dict[str, Any], directory: Path
+) -> dict[str, Any]:
+    configuration = str(
+        _guest_path(bundle["_bundle_path"], phase["platform"]) / bundle["extracted_sdist"] / "pyproject.toml"
+    )
+    expected_argv = [*plan["argv"], "-c", configuration, "-p", "tests._dbcrypt_acceptance_native"]
+    _require(record["argv"] == expected_argv and record["gate_env"] == plan["env"])
+    collection = record["collection"]
+    _require(
+        collection["argv"] == [*expected_argv, "--collect-only"]
+        and type(collection["returncode"]) is int
+        and collection["returncode"] == 0
+    )
+    _, collected = _evidence_ref(directory, collection["report"])
+    _, report = _evidence_ref(directory, record["pytest_report"])
+    _require(collected["exitstatus"] == 0 and collected["reports"] == [] and collected["collection_errors"] == [])
+    _require(
+        report["nodeids"] == collected["nodeids"] == record["nodeids"]
+        and report["deselected"] == collected["deselected"]
+    )
+    parsed = validate_native_test_report(report, platform=phase["platform"], suite=record["suite"])
+    _require(record["counts"] == parsed["counts"] and record["platform_na"] == parsed["platform_na"])
+    nodes = {_normalized_node(node) for node in report["nodeids"]}
+    modules = {arg.replace("\\", "/").split("/tests/", 1)[-1] for arg in plan["argv"] if arg.endswith(".py")}
+    _require({node.split("::", 1)[0] for node in nodes} == modules)
+    functions = set().union(*(_module_functions(bundle["_inputs"]["tests/" + module], module) for module in modules))
+    if record["suite"] != "windows-vfs":
+        _require({node.split("[", 1)[0] for node in nodes} == functions)
+    excluded: set[str] = set()
+    if record["suite"] == "dbcrypt-native":
+        collectors = _module_functions(
+            bundle["_inputs"]["tests/integration/test_dbcrypt_collectors.py"], "integration/test_dbcrypt_collectors.py"
+        )
+        _require(nodes == _crash_nodes(phase["platform"]) | collectors)
+    if record["suite"] == "linux-memory":
+        _require(
+            nodes
+            == {
+                "integration/test_linux_memory_orchestration_tpm.py::test_real_tpm_orchestration_and_armed_shape_b_backup["
+                + entrance
+                + "]"
+                for entrance in ("setup", "all")
+            }
+        )
+    if record["suite"] == "windows-vfs":
+        # AST expansion uses only this reviewed module's literal parametrizations.
+        copied = bundle["_inputs"]["tests/integration/test_dbcrypt_windows_vfs.py"]
+        checkout = copied.parents[2]
+        full = {_normalized_node(node) for node in windows_vfs_required_nodes(checkout, release=False)}
+        release = {_normalized_node(node) for node in windows_vfs_required_nodes(checkout, release=True)}
+        _require(nodes == (full if phase["mode"] == "source" else release))
+        excluded = set() if phase["mode"] == "source" else full - release
+    _require({_normalized_node(node) for node in report["deselected"]} == excluded)
+    return parsed
+
+
+REQUIRED_COMPONENTS = ("sessiondb", "activity", "telegram", "mail", "credentials", "source_memory", "scoped_siblings")
+REQUIRED_PROFILES = ("root", "work", "other")
+
+
+def _public_read(payload: dict[str, Any], phase: dict[str, Any], bundle: dict[str, Any], *, persistence: bool) -> None:
+    _require(
+        set(payload["logical"])
+        == {profile + ":" + component for profile in REQUIRED_PROFILES for component in REQUIRED_COMPONENTS}
+    )
+    _require(
+        all(_hex(value, 64) for value in payload["logical"].values())
+        and set(payload["rows"]) == set(REQUIRED_COMPONENTS)
+    )
+    _require(payload["fixture"]["root"] == payload["fixture"]["source"]["root"])
+    source = payload["fixture"]["source"]
+    _require(_hex(source["generation"], 32) and _hex(source["record_sha256"], 64))
+    _require(
+        source["provider"] == ("cng" if phase["platform"] == "win32" else "tpm")
+        and source["root"]["platform"] == phase["platform"]
+    )
+    _require(payload["facts"]["filesystem"]["identity"] == source["root"])
+    hermes = payload["hermes"]
+    _require(
+        _hex(hermes["sha256"], 64) and hermes["version"] == bundle[phase["mode"] + "_probe"]["versions"]["hermes-agent"]
+    )
+    env = (
+        _guest_path(bundle["checkout"], phase["platform"]) / ".venv"
+        if phase["mode"] == "source"
+        else _guest_path(bundle["_bundle_path"], phase["platform"]) / "wheel-env"
+    )
+    _require(_guest_path(hermes["module"], phase["platform"]).is_relative_to(env))
+    if persistence:
+        _require(payload["credential_continuity"] == "original_native_protected_reference")
+        _require(payload["fixture"] == phase["fixture"] and payload["logical"] == phase["logical"])
+
+
+def _native_payload(payload: dict[str, Any], phase: dict[str, Any]) -> None:
+    _require(payload["schema_version"] == RUN_SCHEMA and payload["status"] == "executed")
+    _require(payload["acceptance_kind"] == phase["acceptance_kind"] and payload["bootstrap"] == phase["bootstrap"])
+    _require(payload["implementation_sha256"] == phase["native_implementation_sha256"])
+    facts = payload["facts"]
+    _require(
+        facts["native_provider"]
+        == ("Microsoft Platform Crypto Provider" if phase["platform"] == "win32" else "EC2 NitroTPM")
+    )
+    _require(_hex(facts["helper"]["sha256"], 64) and _text(facts["helper"]["path"]))
+    _require(facts["helper"] == phase["native_facts"]["helper"] and facts["boot"] == phase["boot"])
+    if phase["platform"] == "win32":
+        _require(
+            facts["elevated"] is False
+            and type(facts["implementation_flags"]) is int
+            and bool(facts["implementation_flags"] & 1)
+            and not facts["implementation_flags"] & 2
+        )
+        _require(facts["filesystem"]["method"] == "checked_confidential_fixed_local_ntfs")
+    else:
+        _require(
+            facts["filesystem"]["method"] == "checked_private_posix" and facts["device"] in {"/dev/tpmrm0", "/dev/tpm0"}
+        )
+        _require(facts["manufacturer"] == "AMZN" and facts["dmi_vendor"] == "Amazon EC2")
+
+
+def _collector_arguments(
+    record: dict[str, Any], phase: dict[str, Any], bundle: dict[str, Any], directory: Path
+) -> None:
+    root = _guest_path(bundle["_bundle_path"], phase["platform"])
+    environment = (
+        _guest_path(bundle["checkout"], phase["platform"]) / ".venv"
+        if phase["mode"] == "source"
+        else root / "wheel-env"
+    )
+    python = str(environment / ("Scripts/python.exe" if phase["platform"] == "win32" else "bin/python"))
+    helper = root / "tests/_dbcrypt_acceptance_native.py"
+    code = f"import runpy; raise SystemExit(runpy.run_path({str(helper)!r})['main']({record['operation']!r}))"
+    if phase["acceptance_kind"] == "candidate":
+        _require(record["argv"] == [python, "-c", code])
+    else:
+        argv = record["argv"]
+        _require(len(argv) == 3 and argv[0] == python and argv[2] == record["operation"])
+        _require(_guest_path(argv[1], phase["platform"]).name == "hermes")
+        expected = (
+            f"import sys, runpy; sys.path.insert(0, {str(root)!r}); "
+            f"raise SystemExit(runpy.run_path({str(helper)!r})['main'](sys.argv[1]))\n"
+        )
+        _require(_artifact_ref(directory, record["driver_ref"]).read_text() == expected)
+
+
+def _provision_fixture_closure(phase: dict[str, Any]) -> None:
+    executions, roots = phase["executions"], phase["native_roots"]
+    provisioned = {
+        row["fixture_path"]: row["payload"]["fixture"] for row in executions if row.get("operation") == "provision"
+    }
+    _require(set(provisioned) == set(roots.values()))
+    _require(len({json.dumps(value["root"], sort_keys=True) for value in provisioned.values()}) == 3)
+    for row in executions:
+        if row.get("operation") in {"seed", "read"}:
+            _require(row["payload"]["fixture"] == provisioned[row["fixture_path"]])
+
+
 def _native_execution_report(phase: dict[str, Any], directory: Path) -> None:
+    bundle = _phase_bundle(phase, directory)
+    qualified = _phase_qualification(phase, directory)
     executions = phase["executions"]
     _require(isinstance(executions, list) and bool(executions))
-    for execution in executions:
-        _require(
-            execution["returncode"] == 0
-            and _timestamp(execution["started_at"])
-            and _timestamp(execution["finished_at"])
-        )
-        if "pytest_report" in execution:
-            _, report = _evidence_ref(directory, execution["pytest_report"])
-            validate_native_test_report(report)
+    plans = _planned_rows(phase, bundle) if phase["observation"] == "provision" else {}
+    suites = [record["suite"] for record in executions if "suite" in record]
+    _require(len(suites) == len(set(suites)) and set(suites) == set(plans))
+    roots = phase["native_roots"]
+    _require(set(roots) == {"persistence", "negative", "crash"} and len(set(roots.values())) == 3)
+    for kind, path in roots.items():
+        _require(_guest_path(path, phase["platform"]).name == f"mordred-dbcrypt-{phase['mode']}-{kind}")
+    operations = []
+    for record in executions:
+        _require(type(record["returncode"]) is int and record["returncode"] == 0)
+        _require(phase["started_at"] <= record["started_at"] <= record["finished_at"] <= phase["finished_at"])
+        _exported_probe(phase, record, bundle)
+        if "suite" in record:
+            _selected_nodes(phase, record, plans[record["suite"]], bundle, directory)
+            if record["suite"] == "windows-vfs":
+                _require(qualified is not None)
+                assert qualified is not None
+                actual = qualified["diagnostic" if phase["mode"] == "source" else "wheel"]
+                _require(
+                    record["windows_library"]
+                    == {"path": actual["dll"], "sha256": actual["dll_sha256"], "kind": actual["target"]}
+                )
         else:
-            payload = execution["payload"]
-            _require(payload["schema_version"] == RUN_SCHEMA and payload["status"] == "executed")
-            _require(
-                payload["acceptance_kind"] == phase["acceptance_kind"] and payload["bootstrap"] == phase["bootstrap"]
-            )
-            _require(payload["implementation_sha256"] == phase["native_implementation_sha256"])
-    required = {"preflight", "read"}
-    _require(required <= {row.get("operation") for row in executions})
+            payload = record["payload"]
+            _collector_arguments(record, phase, bundle, directory)
+            _native_payload(payload, phase)
+            _require(record["operation"] == payload["operation"] and record["fixture_path"] in roots.values())
+            operations.append((record["operation"], record["fixture_path"]))
+            if record["operation"] in {"seed", "read"}:
+                _public_read(payload, phase, bundle, persistence=record["fixture_path"] == roots["persistence"])
+    expected = [("preflight", roots["persistence"]), ("read", roots["persistence"])]
+    if phase["observation"] == "provision":
+        expected += [("provision", path) for path in roots.values()] + [
+            ("seed", roots[kind]) for kind in ("negative", "persistence")
+        ]
+    _require(sorted(operations) == sorted(expected))
+    _require(executions[0].get("operation") == "preflight" and executions[-1].get("operation") == "read")
+    _require(suites == list(plans))
+    _require(all(first["finished_at"] <= second["started_at"] for first, second in itertools.pairwise(executions)))
+    counts = {
+        "passed": sum(row.get("counts", {}).get("passed", 0) for row in executions),
+        "collected": sum(len(row.get("nodeids", [])) for row in executions),
+        "platform_na": sum(row.get("counts", {}).get("platform_na", 0) for row in executions),
+        "failed": 0,
+        "skipped": 0,
+    }
+    _require(phase["test_counts"] == counts and phase["unexpected_skips"] == [])
+
+    if phase["observation"] == "provision":
+        _provision_fixture_closure(phase)
+    read = next(record["payload"] for record in executions if record.get("operation") == "read")
+    _require(read["facts"] == phase["native_facts"] and read["facts"]["boot"] == phase["boot"])
 
 
 def _native_provision_coverage(phase: dict[str, Any], directory: Path) -> None:
-    expected = {row[0] for row in _suites(phase["platform"])} | {"mail-native"}
-    if phase["acceptance_kind"] == "production":
-        expected.add("dbcrypt-activity")
-    if phase["platform"] == "linux" and phase["mode"] == "source":
-        expected.remove("linux-memory")
-    if phase["platform"] == "win32":
-        expected |= {"windows-memory-wizard", "windows-telegram-wizard"}
-    _require(expected <= {row.get("suite") for row in phase["executions"]})
+    bundle = _phase_bundle(phase, directory)
     collector = next(row for row in phase["executions"] if row.get("suite") == "dbcrypt-native")
-    records = [_evidence_ref(directory, reference)[1] for reference in collector["collector_rows"]]
-    for record in records:
-        _require(record["schema_version"] == RUN_SCHEMA and record["status"] == "executed")
-        _require(record["implementation_sha256"] == phase["native_implementation_sha256"])
-        _require(record["acceptance_kind"] == phase["acceptance_kind"] and record["bootstrap"] == phase["bootstrap"])
-    negative = next(row for row in records if row.get("operation") == "negative")
-    _require("fresh_unpatched_native_provider_unavailable" in negative["rows"])
-    validate_helper_withdrawal(negative["owned_helper_withdrawal"])
+    records = {}
+    for reference in collector["collector_rows"]:
+        path, payload = _evidence_ref(directory, reference)
+        _native_payload(payload, phase)
+        _require(path.stem not in records)
+        records[path.stem] = payload
     _require(
-        any(
-            row.get("operation") == "backup_restore_failure" and row["result"] == "restore_incomplete"
-            for row in records
-        )
+        set(records)
+        == {
+            "public-collectors",
+            "before-restore",
+            "backup-restore",
+            "after-restore",
+            "restore-finalization-failure",
+            "negative",
+        }
     )
+    for name in ("public-collectors", "before-restore", "after-restore"):
+        _require(records[name]["operation"] == "read")
+        _public_read(records[name], phase, bundle, persistence=name == "public-collectors")
+    before, after = records["before-restore"], records["after-restore"]
+    _require(before["logical"] == after["logical"] and before["fixture"] == after["fixture"])
+    negative_seed = next(
+        row["payload"]
+        for row in phase["executions"]
+        if row.get("operation") == "seed" and row["fixture_path"] == phase["native_roots"]["negative"]
+    )
+    _require(before["fixture"] == negative_seed["fixture"] and before["logical"] == negative_seed["logical"])
+    restored = records["backup-restore"]
+    _require(
+        restored["operation"] == "backup_restore"
+        and restored["component_generation_before"] != restored["component_generation_after"]
+        and restored["backup_retained"] is True
+    )
+    failure = records["restore-finalization-failure"]
+    _require(
+        failure["operation"] == "backup_restore_failure"
+        and failure["result"] == "restore_incomplete"
+        and failure["backup_and_native_key_retained"] is True
+    )
+    negative = records["negative"]
+    required = {
+        "held_terminality",
+        "unwrap_count",
+        "metadata_loss",
+        "wrong_key",
+        "role_forget",
+        "fresh_unpatched_native_provider_unavailable",
+        "multiprocess_reader_writers",
+        "wrong_profile_key",
+        "holder_uncertainty_injected",
+        "public_encryption_disable",
+        "public_encryption_purge",
+        "public_keyvault_reset",
+        "public_uninstall_helper_guard",
+    }
+    required |= {
+        "broker_helper_guards",
+        "cached_access_failure_injected",
+        "attach_uri_destinations",
+        "wrong_generation",
+        "wrong_root_binding",
+        "missing_source_no_repair",
+        "missing_native_key_observed",
+    }
+    if phase["platform"] != "win32":
+        required.add("public_vault_set-memory-key")
+    _require(negative["operation"] == "negative" and required <= set(negative["rows"]))
+    _require(negative["initial_unwraps"] == 1 and negative["operation_unwraps"] == 0)
+    withdrawal = validate_helper_withdrawal(negative["owned_helper_withdrawal"])
+    _require(
+        collector["started_at"]
+        <= withdrawal["initial_acquisition"]["started_at"]
+        <= withdrawal["missing_helper_acquisition"]["finished_at"]
+        <= collector["finished_at"]
+    )
+
+    _require(withdrawal["copy"]["production_helper_sha256"] == phase["native_facts"]["helper"]["sha256"])
+    _require(withdrawal["initial_acquisition"]["payload"]["source_before"] == before["fixture"]["source"])
 
 
 def _native_phase_coverage(phase: dict[str, Any], directory: Path) -> None:
@@ -1583,9 +2565,9 @@ def validate_native_phase_evidence(value: Any, *, directory: Path) -> dict[str, 
         _require(phase["platform"] in {"linux", "win32"} and _hex(phase["native_implementation_sha256"], 64))
         _require(phase["acceptance_kind"] == "production" and phase["bootstrap"] == "automatic_production")
         _require(phase["fixture"]["root"] == phase["fixture"]["source"]["root"])
-        _require(_hex(phase["fixture"]["source"]["record_sha256"], 64) and bool(phase["logical"]))
+        _require(_hex(phase["fixture"]["source"]["record_sha256"], 64))
         _native_phase_coverage(phase, directory)
-    except (OSError, ValueError, TypeError, KeyError, StopIteration, AcceptanceRefused) as exc:
+    except (OSError, ValueError, TypeError, KeyError, StopIteration, tarfile.TarError, AcceptanceRefused) as exc:
         raise AcceptanceRefused("native_phase_evidence_incomplete") from exc
     return phase
 
@@ -1665,7 +2647,7 @@ def verify_native_spool(root: Path) -> dict[str, Any]:
         result.update(
             status="production_native_passed", live_accepted=True, phases=len(phases), owned_instance_receipts=receipts
         )
-    except (OSError, ValueError, TypeError, KeyError, StopIteration, AcceptanceRefused):
+    except (OSError, ValueError, TypeError, KeyError, StopIteration, tarfile.TarError, AcceptanceRefused):
         result["reasons"] = ["production_matrix_incomplete_or_inconsistent"]
     return result
 
@@ -1760,7 +2742,12 @@ def _collector_child(context: dict[str, Any], root: Path, operation: str, direct
     else:
         argv = [str(_native_python(context)), str(driver), operation]
     result, record = _native_process(context, argv, environment, timeout=900, name=operation)
-    record["operation"] = operation
+    record.update(
+        operation=operation,
+        fixture_path=str(root),
+        mode=context["mode"],
+        bundle_manifest_sha256=sha256_file(context["bundle"] / "manifest.json"),
+    )
     try:
         payload = json.loads(result.stdout)
         _require(result.returncode == 0 and payload["schema_version"] == RUN_SCHEMA and payload["status"] == "executed")
@@ -1775,7 +2762,12 @@ def _collector_child(context: dict[str, Any], root: Path, operation: str, direct
         )
     except (ValueError, KeyError, TypeError) as exc:
         raise AcceptanceRefused("native_child_refused_or_failed:" + operation) from exc
-    record.update(import_probe=probe, payload=payload, status="executed")
+    record.update(
+        import_probe=probe,
+        payload=payload,
+        status="executed",
+        driver_ref={"path": driver.relative_to(directory.parent).as_posix(), "sha256": sha256_file(driver)},
+    )
     return record
 
 
@@ -1805,25 +2797,46 @@ def _native_suite(context: dict[str, Any], row: dict[str, Any], directory: Path,
     row_directory.mkdir(mode=0o700)
     environment["MORDRED_DBCRYPT_ROW_DIRECTORY"] = str(row_directory)
     environment["MORDRED_DBCRYPT_PRODUCTION_DRIVER"] = str(_native_driver(context, directory))
-    argv = [*row["argv"], "-p", "tests._dbcrypt_acceptance_native"]
+    configuration = context["bundle"] / context["manifest"]["extracted_sdist"] / "pyproject.toml"
+    argv = [*row["argv"], "-c", str(configuration), "-p", "tests._dbcrypt_acceptance_native"]
+    selected_library = None
     if row["suite"] == "windows-vfs":
         qualification = validate_windows_qualification(
             Path(context["qualification"]), checkout=Path(context["manifest"]["checkout"])
         )
         if row["mode"] == "source":
-            descriptor = json.loads((Path(context["qualification"]) / "manifest.json").read_text())
-            raw = _qualification_row(
-                Path(context["qualification"]), descriptor["rows"]["checkedtest_source"], "CheckedTest"
-            )
+            raw = qualification["diagnostic"]
             environment["MORDRED_DBCRYPT_CHECKED_LIBRARY"] = raw["dll"]
         for name in ("MORDRED_DBCRYPT_VFS_FIXTURE_ROOT", "MORDRED_DBCRYPT_QUALIFICATION_MANIFEST"):
             if not os.environ.get(name):
                 raise AcceptanceRefused("owned_windows_vfs_fixtures_required")
             environment[name] = os.environ[name]
         environment["MORDRED_DBCRYPT_TEST_ROOT"] = environment["MORDRED_DBCRYPT_VFS_FIXTURE_ROOT"]
-        del qualification
+        selected = qualification["diagnostic" if row["mode"] == "source" else "wheel"]
+        selected_library = {"path": selected["dll"], "sha256": selected["dll_sha256"], "kind": selected["target"]}
+    collect_path = directory / (row["suite"] + ".collection.json")
+    collect_environment = {**environment, "MORDRED_DBCRYPT_PYTEST_REPORT": str(collect_path)}
+    collect_result, collected_record = _native_process(
+        context, [*argv, "--collect-only"], collect_environment, timeout=300, name=row["suite"] + "-collection"
+    )
+    if collect_result.returncode != 0 or not collect_path.is_file():
+        raise AcceptanceRefused("native_complete_collection_failed:" + row["suite"])
+    collection_record = {
+        "argv": collected_record["argv"],
+        "returncode": collect_result.returncode,
+        "report": {"path": collect_path.relative_to(directory.parent).as_posix(), "sha256": sha256_file(collect_path)},
+    }
     result, record = _native_process(context, argv, environment, timeout=3600, name=row["suite"])
-    record.update(suite=row["suite"], mode=context["mode"], import_probe=probe)
+    record.update(
+        suite=row["suite"],
+        mode=context["mode"],
+        import_probe=probe,
+        gate_env=row["env"],
+        bundle_manifest_sha256=sha256_file(context["bundle"] / "manifest.json"),
+        collection=collection_record,
+    )
+    if selected_library is not None:
+        record["windows_library"] = selected_library
     if report.is_file():
         record["pytest_report"] = {
             "path": report.relative_to(directory.parent).as_posix(),
@@ -1831,10 +2844,11 @@ def _native_suite(context: dict[str, Any], row: dict[str, Any], directory: Path,
         }
     if result.returncode or not report.is_file():
         raise AcceptanceRefused("native_module_failed:" + row["suite"])
-    parsed = validate_native_test_report(json.loads(report.read_text()))
+    parsed = validate_native_test_report(json.loads(report.read_text()), platform=sys.platform, suite=row["suite"])
     record.update(
         nodeids=parsed["nodeids"],
-        counts={"passed": len(parsed["nodeids"]), "skipped": 0},
+        counts=parsed["counts"],
+        platform_na=parsed["platform_na"],
         status="executed",
         collector_rows=[
             {"path": path.relative_to(directory.parent).as_posix(), "sha256": sha256_file(path)}
@@ -1857,6 +2871,7 @@ def _native_reopen_prior(context: dict[str, Any], directory: Path) -> dict[str, 
         and prior["bundle_manifest_sha256"] == sha256_file(context["bundle"] / "manifest.json")
     )
     _native_phase_coverage(prior, prior_path.parent)
+    _require(prior["native_roots"] == {key: str(path) for key, path in context["fixtures"].items()})
     return dict(prior)
 
 
@@ -1900,6 +2915,9 @@ def _execute_native_phase(context: dict[str, Any], *, phase: Phase, directory: P
         "logical": actual["logical"],
         "boot": actual["facts"]["boot"],
         "native_facts": actual["facts"],
+        "native_roots": {kind: str(path) for kind, path in context["fixtures"].items()},
+        "bundle_evidence": _export_bundle_evidence(context, directory),
+        "qualification_evidence": _export_windows_qualification(context, directory),
         "observation": context["observation"],
         "executions": executions,
         "bootstrap": "explicit_candidate" if context["kind"] == "candidate" else "automatic_production",
@@ -1920,6 +2938,7 @@ def _execute_native_phase(context: dict[str, Any], *, phase: Phase, directory: P
     result["test_counts"] = {
         "passed": sum(row.get("counts", {}).get("passed", 0) for row in executions),
         "collected": sum(len(row.get("nodeids", [])) for row in executions),
+        "platform_na": sum(row.get("counts", {}).get("platform_na", 0) for row in executions),
         "failed": 0,
         "skipped": 0,
     }
