@@ -31,6 +31,7 @@ from ..activity import peers
 from ..activity.peers import EXTENSION_PRINCIPAL, PeerPrincipal
 
 if TYPE_CHECKING:
+    from ..activity.config import ActivityConfig
     from .api import _Connection
 
 DEFAULT_MAX_BATCH_BYTES = 256 * 1024
@@ -73,16 +74,23 @@ def resolve_max_batch_bytes(home: Path) -> int:
     return max(_MIN_BATCH_BYTES, min(value, _MAX_BATCH_BYTES_CEILING))
 
 
-def read_activity_switches(home: Path) -> tuple[bool, bool] | None:
-    """``(feature_enabled, collection_enabled)`` from the activity config, or ``None``."""
+def _activity_config(home: Path) -> ActivityConfig | None:
     try:
         from ..activity.config import ActivityConfig
 
-        config = ActivityConfig.load(home)
+        return ActivityConfig.load(home)
     except Exception as exc:
         _log.debug("activity config unavailable (%s)", type(exc).__name__)
         return None
-    return config.enabled, config.collecting
+
+
+def read_activity_switches(home: Path) -> tuple[bool, bool] | None:
+    """``(feature_enabled, collecting)`` from the activity config, or ``None``.
+
+    ``collecting`` is false also while ``excluded_sites`` is invalid (the receiver refuses batches then).
+    """
+    config = _activity_config(home)
+    return None if config is None else (config.enabled, config.collecting)
 
 
 def gate_refusal_code(home: Path) -> str | None:
@@ -98,12 +106,14 @@ def gate_refusal_code(home: Path) -> str | None:
 
 
 def collection_status(home: Path) -> tuple[str, str | None]:
-    """``(enabled|disabled|unavailable, reason)`` — content-free."""
-    switches = read_activity_switches(home)
-    if switches is None:
+    """``(enabled|disabled|unavailable, reason)`` — content-free; ``disabled`` carries the receiver's refusal
+    code (``collection_disabled`` or ``excluded_sites_invalid``)."""
+    config = _activity_config(home)
+    if config is None:
         return "unavailable", "store_unavailable"
-    if not switches[1]:
-        return "disabled", "collection_disabled"
+    refusal = config.collection_refusal
+    if refusal is not None:
+        return "disabled", refusal
     code = gate_refusal_code(home)
     return ("enabled", None) if code is None else ("unavailable", code)
 

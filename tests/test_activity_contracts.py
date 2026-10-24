@@ -351,6 +351,101 @@ def test_a_type_event_without_typed_text_has_no_text_exclusion() -> None:
     assert not {"typed_text_dropped", "text_dropped"} & set(event.exclusions)
 
 
+# --- secret-shaped typed values (withheld whatever the field kind) -------------------------------------------
+
+SECRET_VALUES = [
+    pytest.param(JWT, id="jwt"),
+    pytest.param(f"my token is {JWT} thanks", id="jwt-in-sentence"),
+    pytest.param("sk-proj-Ab3dEf6hIj9kLm", id="openai-key"),
+    pytest.param("use sk-live1234abcd5678 here", id="key-prefix-in-sentence"),
+    pytest.param("ghp_" + "a1B2" * 9, id="github-classic"),
+    pytest.param("github_pat_11ABCDEFG0123456789_abcdefghij", id="github-fine-grained"),
+    pytest.param("AKIAIOSFODNN7EXAMPLE", id="aws-access-key-id"),
+    pytest.param("xoxb-123456789012-abcdefghijkl", id="slack-bot"),
+    pytest.param("xoxp-1234-5678-abcdefgh", id="slack-user"),
+    pytest.param("Tr0ub4dor&3horse!", id="mixed-password"),
+    pytest.param("aB3dE5fG7hJ9kL1mN", id="random-alnum"),
+    pytest.param("  correct#horse$battery  ", id="symbols-surrounding-space-ignored"),
+    pytest.param("risk-assessment-2026-final", id="long-identifier-with-digits"),
+    pytest.param("sk_live_51HxAbCdEfGhIjKl", id="stripe-live"),
+    pytest.param("my gitlab token glpat-AbCdEfGh12345678", id="gitlab-in-sentence"),
+    pytest.param("key AIzaSyA1b2C3d4E5f6G7h8I9j0", id="google-api-key-in-sentence"),
+    pytest.param("ya29.a0AfH6SMBxyz12345678", id="google-oauth"),
+    pytest.param("npm_AbCdEfGh1234567890", id="npm"),
+    pytest.param("hf_AbCdEfGhIjKlMnOp", id="hugging-face"),
+    pytest.param("xapp-1-A0123456789-abcdef", id="slack-app"),
+    pytest.param("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n", id="pem"),
+    pytest.param("password: Xk9#mP2", id="labelled-password"),
+    pytest.param("PIN=4821", id="labelled-pin"),
+    pytest.param("4111111111111111", id="card"),
+    pytest.param("4111 1111 1111 1111", id="card-grouped"),
+    pytest.param("5500-0000-0000-0004", id="card-dashed"),
+    pytest.param("Password2024.Autumn", id="host-shaped-password"),
+    pytest.param("MyP4ssw0rd.example", id="host-shaped-mixed-case"),
+    pytest.param("john@Secr3tPass.word", id="email-shaped-password"),
+    pytest.param("login with Xk9mP2vLqR8sT4wY6zA1 now", id="long-token-in-sentence"),
+]
+
+ORDINARY_VALUES = [
+    pytest.param("quarterly report", id="words"),
+    pytest.param("Please send the October invoice to accounting by Friday 5pm", id="sentence"),
+    pytest.param("hunter2", id="short-word-with-digit"),
+    pytest.param("passwordpassword1"[:15], id="fifteen-chars"),
+    pytest.param("12345678901234567890", id="number"),
+    pytest.param("+81 90-1234-5678", id="phone"),
+    pytest.param("2026-10-22", id="date"),
+    pytest.param("2026-10-22T14:02:00+09:00", id="iso-datetime"),
+    pytest.param("https://example.com/reports/2026?month=10&view=full", id="url"),
+    pytest.param("www.example.com/reports/2026", id="host-and-path"),
+    pytest.param("app.example.co.jp:8443/billing", id="host-with-port"),
+    pytest.param("john.doe+billing@example.com", id="email"),
+    pytest.param("/Users/me/Documents/report2026.pdf", id="file-path"),
+    pytest.param("hello-world-again-and-again", id="hyphenated-words"),
+    pytest.param("correcthorsebatterystaple", id="long-letters-only"),
+    pytest.param("ask-me-anything-please", id="sk-inside-a-word"),
+    pytest.param("xoxo-hugs-and-kisses", id="xoxo-is-not-a-slack-token"),
+    pytest.param("月次の経理レポートを出力する", id="cjk-sentence"),
+    pytest.param("2026年10月22日の請求書を経理部に送付する件について", id="cjk-sentence-with-digits"),
+    pytest.param("1234567812345678", id="sixteen-digits-failing-luhn"),
+    pytest.param("call me at 0312345678 tomorrow", id="phone-in-sentence"),
+    pytest.param("the token count is low", id="token-word-without-value"),
+    pytest.param("password manager reviews", id="keyword-before-an-interface-word"),
+    pytest.param("pin the tab to the left", id="pin-as-a-verb"),
+    pytest.param("see https://example.com/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p for details", id="url-in-sentence"),
+]
+
+
+@pytest.mark.parametrize("value", SECRET_VALUES)
+@pytest.mark.parametrize("field_kind", ["text", "search", "other"])
+def test_secret_shaped_typed_text_is_withheld_whatever_the_field(value: str, field_kind: str) -> None:
+    assert contracts.looks_like_secret(value)
+    event = normalize(action={"op": "type", "args": {"field_kind": field_kind}}, text=value)
+    assert event.text is None
+    assert "typed_text_dropped" in event.exclusions
+    assert value.strip() not in repr(event)
+
+
+@pytest.mark.parametrize("value", SECRET_VALUES[:3])
+def test_secret_shaped_values_lifted_from_args_are_withheld(value: str) -> None:
+    event = normalize(action={"op": "search", "args": {"field_kind": "search", "value": value}})
+    assert (event.text, json.loads(event.args_json)) == (None, {"field_kind": "search"})
+    assert "typed_text_dropped" in event.exclusions
+
+
+@pytest.mark.parametrize("value", ORDINARY_VALUES)
+def test_ordinary_typed_text_is_kept(value: str) -> None:
+    assert not contracts.looks_like_secret(value)
+    event = normalize(action={"op": "type", "args": {"field_kind": "text"}}, text=value)
+    assert event.text is not None
+    assert "typed_text_dropped" not in event.exclusions
+
+
+def test_the_value_check_applies_to_typed_text_only() -> None:
+    correction = normalize(phase="correction", action={"op": "other"}, text="aB3dE5fG7hJ9kL1mN")
+    assert correction.text == "aB3dE5fG7hJ9kL1mN"
+    assert contracts.SECRET_TOKEN_MIN_CHARS == 16
+
+
 def test_text_on_a_click_is_still_dropped() -> None:
     event = normalize(action={"op": "click", "args": {"field_kind": "text", "text": "x"}}, text="clicked label")
     assert event.text is None
@@ -586,3 +681,369 @@ def test_config_defaults_are_off_and_bad_values_fall_back() -> None:
     assert config.max_batch_events == 100
     assert config.collection_enabled is True
     assert config.warnings == ("invalid value for enabled", "invalid value for max_batch_events", "unknown key mystery")
+
+
+def test_secret_tokens_are_redacted_for_display() -> None:
+    text = f"use {JWT} or sk-proj-Ab3dEf6hIj9kLm, see -----BEGIN RSA PRIVATE KEY-----"
+    assert contracts.redact_secret_tokens(text) == "use redacted or redacted, see redacted"
+    assert contracts.redact_secret_tokens("nothing secret here") == "nothing secret here"
+
+
+def test_the_secret_rule_is_linear_on_hostile_input() -> None:
+    started = time.monotonic()
+    for text in ("4" * 250_000, "a-" * 125_000, "eyJ" + "a." * 100_000, "password" + " " * 100_000 + "x"):
+        contracts.looks_like_secret(text)
+    assert time.monotonic() - started < 5.0
+
+
+# --- secrets in free text (live finding 2026-10-22) ----------------------------------------------------
+
+#: The operator collector's task text that was stored verbatim before free text was redacted.
+LIVE_TASK = "Log in with the username demo-user and the password Hunter2-fake-pw"
+LIVE_SECRET = "Hunter2-fake-pw"
+FULLWIDTH_COLON = chr(0xFF1A)
+
+REDACTED_TEXTS = [
+    pytest.param(LIVE_TASK, "Log in with the username demo-user and the password redacted", id="live"),
+    pytest.param("password: hunter2", "password: redacted", id="colon"),
+    pytest.param("PIN=4821", "PIN=redacted", id="equals"),
+    pytest.param("my password is Hunter2-fake-pw.", "my password is redacted.", id="is-trailing-dot-kept"),
+    pytest.param("the passcode was 99-red-balloons, okay", "the passcode was redacted, okay", id="was"),
+    pytest.param("my PIN is 4821", "my PIN is redacted", id="pin-is-digits"),
+    pytest.param("passphrase 'correct horse battery staple' please", "passphrase 'redacted' please", id="quoted"),
+    pytest.param('use password="s3cr3t!" here', 'use password="redacted" here', id="label-and-quotes"),
+    pytest.param("API key: abc123def", "API key: redacted", id="api-key"),
+    pytest.param("DB_PASSWORD=xyz", "DB_PASSWORD=redacted", id="env-style"),
+    pytest.param("Your one-time code is 482913", "Your one-time code is redacted", id="one-time-code"),
+    pytest.param("otp 123456 expires soon", "otp redacted expires soon", id="otp-space"),
+    pytest.param("pin code 0000", "pin code redacted", id="pin-code"),
+    pytest.param("access token: abcdef", "access token: redacted", id="access-token"),
+    pytest.param("the secret: swordfish", "the secret: redacted", id="labelled-secret"),
+    pytest.param("(password Hunter2)", "(password redacted)", id="closing-bracket-kept"),
+    pytest.param("パスワードはHunter2です", "パスワードはredactedです", id="ja-no-space"),
+    pytest.param("パスワード「abc123」で", "パスワード「redacted」で", id="ja-brackets"),
+    pytest.param("パスワードは abc123", "パスワードは redacted", id="ja-particle-space"),
+    pytest.param(f"認証コード{FULLWIDTH_COLON}123456", f"認証コード{FULLWIDTH_COLON}redacted", id="ja-fullwidth-colon"),
+    pytest.param("暗証番号は1234です。", "暗証番号はredactedです。", id="ja-pin"),
+    pytest.param("ワンタイムパスワード 482913 を入力", "ワンタイムパスワード redacted を入力", id="ja-otp"),
+    pytest.param("パスコードを『x9y8』に変更", "パスコードを『redacted』に変更", id="ja-passcode-quoted"),
+    pytest.param(f"use {JWT} to call", "use redacted to call", id="jwt"),
+    pytest.param("my key sk-proj-Ab3dEf6hIj9kLm works", "my key redacted works", id="key-prefix"),
+    pytest.param("token ghp_" + "a1B2" * 9, "token redacted", id="keyword-and-key-prefix"),
+]
+
+KEPT_TEXTS = [
+    pytest.param("click the password field", id="password-field"),
+    pytest.param("reset password page", id="reset-password-page"),
+    pytest.param("Open the password manager and pick the work vault", id="password-manager"),
+    pytest.param("パスワード欄に入力する", id="ja-password-field"),
+    pytest.param("パスワードリセット画面を開く", id="ja-reset-screen"),
+    pytest.param("パスワードを忘れた場合はこちら", id="ja-forgot"),
+    pytest.param("Forgot password?", id="forgot"),
+    pytest.param("Email Password Sign in", id="login-labels"),
+    pytest.param("Password: ******** Show", id="masked"),
+    pytest.param("pin the tab to the left", id="pin-verb"),
+    pytest.param("the token count is low", id="token-count"),
+    pytest.param("the secret is out", id="secret-word"),
+    pytest.param("a password of at least 8 characters", id="policy-sentence"),
+    pytest.param("the password was changed yesterday", id="changed"),
+    pytest.param("send the October report on 2026-10-22 for 1234 items", id="dates-and-numbers"),
+    pytest.param("call +81 90-1234-5678 at 10:30", id="phone-and-time"),
+    pytest.param("see https://example.com/reset-password?step=2 for details", id="url"),
+    pytest.param('type "password" in the "Password" box', id="quoted-keyword"),
+    pytest.param("password_reset was clicked", id="identifier"),
+    pytest.param("the password is redacted", id="already-redacted"),
+    pytest.param("月次の経理レポートを出力する", id="ja-sentence"),
+]
+
+
+def _task_start(text: str, **overrides: Any) -> contracts.NormalizedEvent:
+    return normalize(
+        phase="boundary", actor="human", action={"op": "task_start", "site": "example.com"}, text=text, **overrides
+    )
+
+
+def test_the_live_task_text_keeps_everything_but_the_password() -> None:
+    event = _task_start(LIVE_TASK)
+
+    assert event.text == "Log in with the username demo-user and the password redacted"
+    assert "text_secrets_redacted" in event.exclusions
+    assert LIVE_SECRET not in json.dumps(dataclasses.asdict(event))
+    assert event.content_digest == canonical_digest(event)
+
+
+def test_redaction_happens_before_the_digest() -> None:
+    raw = raw_event(phase="boundary", actor="human", action={"op": "task_start", "site": "example.com"})
+    first = normalize_event({**raw, "text": LIVE_TASK}, excluded_sites=SITES)
+    other = normalize_event({**raw, "text": LIVE_TASK.replace(LIVE_SECRET, "Other-pw-99")}, excluded_sites=SITES)
+    # The digest covers the stored (redacted) content, so a replay of the same event still verifies.
+    assert first.content_digest == other.content_digest == canonical_digest(first)
+
+
+@pytest.mark.parametrize(("text", "expected"), REDACTED_TEXTS)
+def test_secrets_in_free_text_are_replaced_and_the_rest_kept(text: str, expected: str) -> None:
+    assert contracts.redact_text_secrets(text) == (expected, True)
+    event = normalize(phase="correction", action={"op": "other"}, text=text)
+    assert event.text == expected
+    assert "text_secrets_redacted" in event.exclusions
+
+
+@pytest.mark.parametrize("text", KEPT_TEXTS)
+def test_interface_talk_and_ordinary_sentences_are_untouched(text: str) -> None:
+    assert contracts.redact_text_secrets(text) == (text, False)
+    event = _task_start(text)
+    assert event.text == text
+    assert "text_secrets_redacted" not in event.exclusions
+
+
+def test_every_free_text_field_is_redacted_at_ingest() -> None:
+    event = normalize(
+        phase="boundary",
+        action={"op": "task_end", "site": "example.com", "target": "submit with password: hunter2"},
+        text="done; the new PIN is 4821",
+        page_title="Welcome, your password is Hunter2-fake-pw",
+        page_text="Your one-time code is 482913. Do not share it.",
+    )
+
+    assert event.target == "submit with password: redacted"
+    assert event.text == "done; the new PIN is redacted"
+    assert event.page_title == "Welcome, your password is redacted"
+    assert event.page_text == "Your one-time code is redacted. Do not share it."
+    assert "text_secrets_redacted" in event.exclusions
+    stored = json.dumps(dataclasses.asdict(event))
+    assert not any(secret in stored for secret in ("hunter2", "4821", LIVE_SECRET, "482913"))
+
+
+def test_a_correction_with_a_password_is_redacted() -> None:
+    event = normalize(
+        phase="correction",
+        source="user_correction",
+        actor="human",
+        action={"op": "other", "site": "example.com"},
+        text="wrong account; the password is Winter-2026 for the finance login",
+    )
+    assert event.text == "wrong account; the password is redacted for the finance login"
+    assert "text_secrets_redacted" in event.exclusions
+
+
+def test_key_prefixes_and_jwts_in_task_text_are_redacted() -> None:
+    event = _task_start(f"call the API with sk-proj-Ab3dEf6hIj9kLm and bearer {JWT}")
+    assert event.text == "call the API with redacted and bearer redacted"
+    assert "text_secrets_redacted" in event.exclusions
+
+
+def test_a_secret_cut_by_the_bound_is_redacted_before_the_cut() -> None:
+    text = "x" * (contracts.MAX_TEXT_CHARS - 20) + " the password is Hunter2-fake-pw-long-enough"
+    event = _task_start(text)
+    assert event.truncated is True
+    assert "Hunter2" not in (event.text or "")
+    assert "text_secrets_redacted" in event.exclusions
+
+
+@pytest.mark.parametrize(
+    "value", ["my password is Hunter2-fake-pw", "パスワードは abc123", "the pin is 4821", "password hunter-2"]
+)
+def test_typed_keyword_and_value_is_withheld_without_a_label(value: str) -> None:
+    assert contracts.looks_like_secret(value)
+    event = normalize(action={"op": "type", "args": {"field_kind": "text"}}, text=value)
+    assert event.text is None
+    assert "typed_text_dropped" in event.exclusions
+    assert "text_secrets_redacted" not in event.exclusions
+
+
+def test_kept_typed_text_is_never_rewritten() -> None:
+    event = normalize(action={"op": "type", "args": {"field_kind": "search"}}, text="password manager reviews")
+    assert event.text == "password manager reviews"
+    assert "text_secrets_redacted" not in event.exclusions
+
+
+def test_the_text_redactor_is_linear_on_hostile_input() -> None:
+    started = time.monotonic()
+    for text in (
+        "password " * 30_000,
+        "pin:" * 60_000,
+        "pin:a://" * 30_000,
+        "pin:1://" * 30_000,
+        'password "' * 25_000,
+        "パスワードは" * 40_000,
+        "token: " + "a" * 250_000,
+    ):
+        contracts.redact_text_secrets(text)
+    assert time.monotonic() - started < 5.0
+
+
+@pytest.mark.parametrize("cut", [0, 1, 255, 256, 257])
+def test_a_long_unquoted_value_is_redacted_to_its_end(cut: int) -> None:
+    blob = ("Ab1" * 200)[:cut] + "." + "Cd2" * 100  # a closing mark at or near the inspection cap
+    assert contracts.redact_text_secrets(f"api key: {blob}. end") == ("api key: redacted. end", True)
+
+
+# --- credential parameters and userinfo ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "x_key",
+        "apiKey",
+        "X-Api-Key",
+        "Access-Key",
+        "auth_code",
+        "authCode",
+        "code_verifier",
+        "client_assertion",
+        "SAMLResponse",
+        "SAMLRequest",
+        "RelayState",
+        "ID_TOKEN",
+        "refresh_token",
+        "user[password]",
+        "password[]",
+        "token[0]",
+        "x-pass",
+        "req_sig",
+        "basicAuth",
+        "aws_credentials",
+        "service_ticket",
+        "passkey",
+    ],
+)
+def test_credential_parameter_names(name: str) -> None:
+    assert contracts.credential_param(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        *("q", "query", "page", "sort", "lang", "monkey", "keyboard", "barcode", "zipcode", "country_code"),
+        *("currencyCode", "sort_key", "sessions", "page[size]", "codename"),
+    ],
+)
+def test_ordinary_parameter_names(name: str) -> None:
+    assert not contracts.credential_param(name)
+
+
+def test_ordinary_search_parameters_stay_while_secret_values_go() -> None:
+    url = (
+        "https://x.example/s?q=red+shoes&query=boots&page=2&sort=price_asc&lang=ja"
+        "&ref=aB3dE5fG7hJ9kL1mN&x_key=s1&SAMLResponse=PHNhbWw%2B&user%5Bpassword%5D=s2"
+    )
+    assert scrub_urls(url) == (
+        "https://x.example/s?q=red+shoes&query=boots&page=2&sort=price_asc&lang=ja"
+        "&ref=redacted&x_key=redacted&SAMLResponse=redacted&user%5Bpassword%5D=redacted"
+    )
+
+
+@pytest.mark.parametrize(
+    ("url", "scrubbed"),
+    [
+        ("https://x.example/s?q=password+is+Hunter2&page=2", "https://x.example/s?q=redacted&page=2"),
+        ("https://x.example/s?q=4111+1111+1111+1111", "https://x.example/s?q=redacted"),
+        (f"https://x.example/s?state=ok&note=use+{JWT}", "https://x.example/s?state=ok&note=redacted"),
+    ],
+)
+def test_a_secret_shaped_value_is_redacted_whatever_its_name(url: str, scrubbed: str) -> None:
+    assert scrub_urls(url) == scrubbed
+    event = normalize(action={"op": "navigate", "site": "x.example", "route": url})
+    assert "url_params_redacted" in event.exclusions
+
+
+@pytest.mark.parametrize(
+    ("url", "scrubbed"),
+    [
+        ("https://ghp_" + "a1B2" * 9 + "@github.com/o/r.git", "https://redacted@github.com/o/r.git"),
+        ("https://x-access-token:ghs_abc123@github.com/o/r", "https://x-access-token:redacted@github.com/o/r"),
+        ("https://0123456789abcdef0123456789abcdef@o1.ingest.example/42", "https://redacted@o1.ingest.example/42"),
+        ("https://glpat-AbCdEfGh12345678:x@gitlab.example/a", "https://redacted:redacted@gitlab.example/a"),
+        ("https://" + "q" * 30 + "@hooks.example/a", "https://redacted@hooks.example/a"),
+    ],
+)
+def test_a_user_name_that_is_a_credential_is_redacted(url: str, scrubbed: str) -> None:
+    assert scrub_urls(url) == scrubbed
+    event = normalize(phase="correction", action={"op": "other"}, text=url)
+    assert event.text == scrubbed
+    assert "url_params_redacted" in event.exclusions
+
+
+@pytest.mark.parametrize("url", ["https://git@github.com/o/r", "https://john.doe@example.com/a"])
+def test_an_ordinary_user_name_is_kept(url: str) -> None:
+    assert scrub_urls(url) == url
+
+
+# --- hosts: the site must agree with its URL, and every named host is checked against exclusions ----------
+
+
+@pytest.mark.parametrize(
+    ("site", "route"),
+    [("safe.example", "https://mail.google.com/mail/u/0"), ("example.com", "https://app.example.com/x")],
+)
+def test_a_site_that_contradicts_its_url_is_malformed(site: str, route: str) -> None:
+    with pytest.raises(EventRejected) as caught:
+        normalize(action={"op": "navigate", "site": site, "route": route})
+    assert caught.value.code == "malformed"
+
+
+@pytest.mark.parametrize(
+    ("site", "route"),
+    [
+        ("www.example.com", "https://example.com/a"),
+        ("Example.COM.", "https://example.com/a"),
+        ("example.com", "https://WWW.example.com./a"),
+    ],
+)
+def test_case_trailing_dots_and_www_are_no_contradiction(site: str, route: str) -> None:
+    assert normalize(action={"op": "navigate", "site": site, "route": route}).route == "/a"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {
+            "action": {
+                "op": "navigate",
+                "site": "accounts.example",
+                "route": "/signin?continue=https%3A%2F%2Fmail.google.com%2Fmail%2F",
+            }
+        },
+        {
+            "action": {"op": "navigate", "site": "accounts.example", "route": "/signin"},
+            "query": "next=https://web.telegram.org/k/",
+        },
+        {"action": {"op": "click", "site": "news.example", "target": "open https://app.slack.com/client/T1"}},
+        {
+            "action": {
+                "op": "navigate",
+                "route": "https://r.example/?u=https%3A%2F%2Fx.example%2F%3Fnext%3Dhttps%253A%252F%252Fmail.google.com",
+            }
+        },
+    ],
+    ids=["redirect-in-route", "top-level-query", "target-label", "nested-redirect"],
+)
+def test_an_excluded_host_anywhere_in_the_event_refuses(overrides: dict[str, Any]) -> None:
+    with pytest.raises(EventRejected) as caught:
+        normalize_event(raw_event(**overrides), excluded_sites=PRIVATE_SITES)
+    assert caught.value.code == "source_excluded"
+    # Without exclusions the same events are stored.
+    normalize_event(raw_event(**overrides), excluded_sites=SITES)
+
+
+def test_a_site_contradicting_an_excluded_url_never_passes() -> None:
+    raw = raw_event(action={"op": "navigate", "site": "safe.example", "route": "https://mail.google.com/mail"})
+    with pytest.raises(EventRejected) as caught:
+        normalize_event(raw, excluded_sites=PRIVATE_SITES)
+    assert caught.value.code == "malformed"
+
+
+def test_hosts_named_by_an_event() -> None:
+    hosts = contracts.event_hosts(
+        {"site": "a.example", "route": "/x?next=https%3A%2F%2Fb.example%2F", "target": "see https://c.example/p"},
+        "?back=https://d.example/",
+    )
+    assert hosts == {"b.example", "c.example", "d.example"}
+
+
+def test_host_collection_is_linear_on_hostile_input() -> None:
+    started = time.monotonic()
+    for text in ("https://x.example/?next=" * 5000 + "done", "a." * 131072, "?u=https%3A%2F%2F" * 20000):
+        contracts.event_hosts({"route": text, "target": text}, text)
+    assert time.monotonic() - started < 5.0

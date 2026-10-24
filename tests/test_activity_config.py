@@ -32,11 +32,34 @@ def test_unknown_site_keys_are_ignored_with_a_warning() -> None:
     assert config.warnings == ("unknown key allowed_sites",)
 
 
-@pytest.mark.parametrize("raw", ["mail.example", [1], [" "], None])
-def test_invalid_excluded_sites_fall_back_with_a_warning(raw: Any) -> None:
-    config = ActivityConfig.from_mapping({"excluded_sites": raw})
-    assert config.excluded_sites == DEFAULT_EXCLUDED_SITES
+@pytest.mark.parametrize(
+    ("raw", "kept"),
+    [
+        ("mail.example", {"mail.example"}),
+        ([1], set()),
+        ([" "], set()),
+        (None, set()),
+        (["bank.example", "not a host"], {"bank.example"}),
+        (["Bank.example", 7, "*.pay.example"], {"bank.example", "pay.example"}),
+    ],
+)
+def test_invalid_excluded_sites_warn_keep_the_named_hosts_and_stop_collection(raw: Any, kept: set[str]) -> None:
+    config = ActivityConfig.from_mapping({"enabled": True, "collection_enabled": True, "excluded_sites": raw})
+    assert config.excluded_sites == DEFAULT_EXCLUDED_SITES | kept
     assert config.warnings == ("invalid value for excluded_sites",)
+    # Never "record what was excluded before": the receiver refuses until the value is fixed.
+    assert (config.collecting, config.collection_refusal) == (False, "excluded_sites_invalid")
+    assert config.history_active is False
+
+
+def test_collection_refusal_codes() -> None:
+    assert ActivityConfig.from_mapping({}).collection_refusal == "collection_disabled"
+    assert ActivityConfig.from_mapping({"enabled": True}).collection_refusal == "collection_disabled"
+    on = ActivityConfig.from_mapping({"enabled": True, "collection_enabled": True, "excluded_sites": ["a.example"]})
+    assert (on.collecting, on.collection_refusal) == (True, None)
+    # Collection off wins over the exclusions: the switch is the reason a collector sees.
+    off = ActivityConfig.from_mapping({"enabled": True, "excluded_sites": "a.example"})
+    assert off.collection_refusal == "collection_disabled"
 
 
 def test_raw_retention_defaults_to_a_year() -> None:
@@ -63,3 +86,125 @@ def test_keys_of_the_removed_lesson_pipeline_are_unknown(key: str) -> None:
     assert config.enabled is True
     assert config.warnings == (f"unknown key {key}",)
     assert not hasattr(config, key)
+
+
+# --- history_* keys ---------------------------------------------------------------------------------------
+
+HISTORY_DEFAULTS = {
+    "history_enabled": True,
+    "history_tools_enabled": True,
+    "history_on_navigate": True,
+    "history_turn_context": True,
+    "history_capture_hermes": True,
+    "history_chat_corrections": True,
+    "history_max_chars": 1500,
+    "history_max_episodes": 3,
+    "history_lookback_days": 90,
+    "history_session_budget_chars": 8000,
+    "history_max_tool_bytes": 4096,
+}
+
+
+def test_history_keys_default_to_on_but_the_feature_stays_off() -> None:
+    config = ActivityConfig.from_mapping({})
+    assert {key: getattr(config, key) for key in HISTORY_DEFAULTS} == HISTORY_DEFAULTS
+    assert config.enabled is False
+    assert config.history_active is False
+    assert ActivityConfig.from_mapping({"enabled": True}).history_active is True
+    assert ActivityConfig.from_mapping({"enabled": True, "history_enabled": False}).history_active is False
+
+
+def test_history_keys_parse_valid_values_without_warnings() -> None:
+    section = {
+        "history_enabled": False,
+        "history_tools_enabled": False,
+        "history_on_navigate": False,
+        "history_turn_context": False,
+        "history_capture_hermes": False,
+        "history_chat_corrections": False,
+        "history_max_chars": 800,
+        "history_max_episodes": 10,
+        "history_lookback_days": 7,
+        "history_session_budget_chars": 0,
+        "history_max_tool_bytes": 65536,
+    }
+    config = ActivityConfig.from_mapping(section)
+    assert {key: getattr(config, key) for key in section} == section
+    assert config.warnings == ()
+
+
+@pytest.mark.parametrize(
+    ("key", "raw"),
+    [
+        ("history_enabled", "yes"),
+        ("history_tools_enabled", "off"),
+        ("history_tools_enabled", 0),
+        ("history_turn_context", 1),
+        ("history_max_chars", 199),
+        ("history_max_chars", 8001),
+        ("history_max_episodes", 0),
+        ("history_max_episodes", 11),
+        ("history_lookback_days", 0),
+        ("history_session_budget_chars", -1),
+        ("history_max_tool_bytes", 1023),
+        ("history_max_tool_bytes", True),
+        ("history_max_tool_bytes", 4096.0),
+    ],
+)
+def test_invalid_history_values_fall_back_with_a_warning(key: str, raw: Any) -> None:
+    config = ActivityConfig.from_mapping({key: raw})
+    assert getattr(config, key) == HISTORY_DEFAULTS[key]
+    assert config.warnings == (f"invalid value for {key}",)
+
+
+def test_the_tools_switch_defaults_to_on_and_needs_the_history() -> None:
+    assert ActivityConfig.from_mapping({}).history_tools_enabled is True
+    assert ActivityConfig.from_mapping({"enabled": True}).history_tools_active is True
+    off = ActivityConfig.from_mapping({"enabled": True, "history_tools_enabled": False})
+    # Off removes only the lookup tools: the automatic blocks stay (history_active).
+    assert (off.history_tools_enabled, off.history_active, off.history_tools_active) == (False, True, False)
+    assert off.warnings == ()
+    for section in ({}, {"enabled": True, "history_enabled": False}, {"enabled": True, "excluded_sites": "x.example"}):
+        assert ActivityConfig.from_mapping(section).history_tools_active is False, section
+
+
+def test_an_invalid_tools_switch_is_warned_and_stays_on() -> None:
+    config = ActivityConfig.from_mapping({"enabled": True, "history_tools_enabled": "no"})
+    assert config.history_tools_enabled is True and config.history_tools_active is True
+    assert config.warnings == ("invalid value for history_tools_enabled",)
+
+
+def test_strict_load_raises_for_an_unparsable_file_and_the_default_load_does_not(tmp_path) -> None:
+    (tmp_path / "config.yaml").write_text("plugins: [unclosed\n", encoding="utf-8")
+    assert ActivityConfig.load(tmp_path) == ActivityConfig()
+    from ruamel.yaml.error import YAMLError
+
+    with pytest.raises(YAMLError):
+        ActivityConfig.load(tmp_path, strict=True)
+    (tmp_path / "config.yaml").unlink()
+    assert ActivityConfig.load(tmp_path, strict=True) == ActivityConfig()  # an absent file is the defaults
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  mordred_activity:\n    history_tools_enabled: false\n", encoding="utf-8"
+    )
+    assert ActivityConfig.load(tmp_path, strict=True).history_tools_enabled is False
+
+
+def test_excluded_sites_are_normalized_to_bare_hosts() -> None:
+    raw = ["https://Bank.example.com/login", "*.mail.example", "shop.example.", "pay.example:443", "bücher.example"]
+    config = ActivityConfig.from_mapping({"enabled": True, "excluded_sites": raw})
+    assert config.excluded_sites == {
+        "bank.example.com",
+        "mail.example",
+        "shop.example",
+        "pay.example",
+        "xn--bcher-kva.example",
+    }
+    assert config.warnings == ()
+    assert config.history_active is True
+
+
+@pytest.mark.parametrize("raw", ["bank.example", ["ok.example", ""], ["ok.example", "not a host"], [None]])
+def test_an_invalid_exclusion_list_switches_the_history_off(raw: Any) -> None:
+    config = ActivityConfig.from_mapping({"enabled": True, "excluded_sites": raw})
+    assert config.excluded_sites_valid is False
+    assert config.history_active is False

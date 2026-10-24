@@ -1,6 +1,8 @@
 # Browser history for Hermes — design
 
-Status: design proposal (2026-10-22), not yet implemented. Builds on the
+Status: design (2026-10-22). Phase B1 (read side) is implemented; the shipped
+contract and its differences from this text are in `docs/dev/SPEC.md`
+§"History for Hermes". Phases B2 and B3 are not built. Builds on the
 browser-activity component shipped by
 [`2026-10-19-browser-activity-learning-design.md`](./2026-10-19-browser-activity-learning-design.md)
 and its 2026-10-22 decision log (record everything except secrets). The
@@ -152,6 +154,25 @@ surface below calls it and nothing else touches the store for this purpose.
   with no whitespace that mixes letters with digits or symbols. It applies to
   every collector, the operator included. It is a safety net, not a
   guarantee: a short password typed into an unlabeled field is still kept.
+  The check also withholds typed text holding a secret keyword and value
+  without `:` or `=` ("my password is ...").
+- Secrets the user writes into free text (live finding 2026-10-22: an
+  operator task text "Log in with the username demo-user and the password
+  ..." was stored verbatim and would have reached the turn-start block,
+  Hermes's `state.db` and the provider). The receiver replaces the value
+  after a password-like keyword (password, passcode, PIN, one-time code,
+  secret, API key, access token, token, and the Japanese words for password,
+  PIN, passcode, one-time password and verification code) with `redacted`
+  in task and correction text, target labels, page titles and page text,
+  plus JWTs, key-prefixed tokens and PEM armour lines, and marks the event
+  `text_secrets_redacted`; interface talk ("the password field", "reset
+  password page") is kept through a stop list. The exact rule is SPEC.md
+  §"Event contract" (`contracts.redact_text_secrets`). Redaction runs before
+  the content digest, so digests stay self-consistent; events stored earlier
+  are not rewritten, and every surface (`history.clean`, which every
+  displayed text passes) applies the same redaction at read time. Typed text
+  an earlier receiver kept that now looks like a secret is shown as
+  `(withheld)` by the episode tool.
 - Anything while the master switch `history_enabled` (§3.3) is off.
 - Page text at turn start (3.1 item 2) — only through the untrusted wrapper
   (item 1 never includes it; item 3 includes bounded excerpts, and tool

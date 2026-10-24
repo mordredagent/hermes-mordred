@@ -111,9 +111,12 @@ versions, or before the first `configure`, keep using `hermes-mordred`.
 With the browser operator paired, Mordred records its actions in an encrypted
 store (`<home>/plugin-data/mordred/mordred.db`; requires macOS database
 encryption, off by default under `plugins.mordred_activity`). Your explicit
-corrections are kept as events next to the actions they concern. Hermes does
-not read this history yet; nothing is written to memory or skills. Commands:
-`hermes-mordred activity status|pair-operator|peers|correct|backup|restore|retention`
+corrections are kept as events next to the actions they concern. Hermes uses
+this history directly: a site's earlier work is added to browser results,
+relevant tasks and corrections to the turn, and two lookup tools answer
+questions about earlier browser work (`activity use on|off` switches this);
+nothing is written to memory or skills. Commands:
+`hermes-mordred activity status|use|pair-operator|peers|correct|backup|restore|retention`
 ([usage](docs/user/USAGE.md)).
 
 ### Verify discovery

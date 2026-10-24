@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 
 import pytest
 
@@ -241,3 +242,300 @@ def test_correct_gate_refusal_exits_one_with_the_code(monkeypatch, capsys):
 
     assert cli.main(["activity", "correct", "--episode", "e", "--text", "t"]) == 1
     assert "refused (not_armed)" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# use on|off and the status line
+# --------------------------------------------------------------------------- #
+
+#: Hermes's own layout (sequences indented under their key), which the round-trip writer keeps byte for byte.
+CONFIG_WITH_COMMENTS = """\
+# operator notes stay
+model:
+  provider: local  # inline comment
+plugins:
+  enabled:
+    - other_plugin
+  mordred_activity:
+    enabled: true   # feature on
+    excluded_sites:
+      - bank.example
+  mordred_network:
+    default_path: tor
+"""
+
+
+def test_parser_wires_use_on_and_off(capsys):
+    parser = argparse.ArgumentParser()
+    cli._setup_subparser(parser)
+    for state in ("on", "off"):
+        ns = parser.parse_args(["activity", "use", state])
+        assert (ns.func, ns.state) == (cli._handle_activity, state)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["activity", "use", "maybe"])
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_use_off_changes_only_history_enabled(_home, capsys):
+    path = _home / "config.yaml"
+    path.write_text(CONFIG_WITH_COMMENTS, encoding="utf-8")
+
+    assert cli.main(["activity", "use", "off"]) == 0
+
+    text = path.read_text(encoding="utf-8")
+    assert text == CONFIG_WITH_COMMENTS.replace(
+        "      - bank.example\n", "      - bank.example\n    history_enabled: false\n"
+    )
+    config = ActivityConfig.load(_home)
+    assert (config.enabled, config.history_enabled, config.excluded_sites) == (True, False, {"bank.example"})
+    assert "off" in capsys.readouterr().out
+
+    assert cli.main(["activity", "use", "on"]) == 0
+    assert path.read_text(encoding="utf-8") == CONFIG_WITH_COMMENTS.replace(
+        "      - bank.example\n", "      - bank.example\n    history_enabled: true\n"
+    )
+
+
+def test_use_on_without_a_config_creates_the_key_and_warns_the_feature_is_off(_home, capsys):
+    assert cli.main(["activity", "use", "on"]) == 0
+
+    config = ActivityConfig.load(_home)
+    assert (config.enabled, config.history_enabled) == (False, True)
+    captured = capsys.readouterr()
+    assert "feature is disabled" in captured.err + captured.out
+    assert "plugins:" in (_home / "config.yaml").read_text(encoding="utf-8")
+
+
+def test_use_refuses_a_malformed_plugins_section_and_leaves_the_file(_home, capsys):
+    path = _home / "config.yaml"
+    path.write_text("plugins:\n- mordred\n", encoding="utf-8")
+
+    assert cli.main(["activity", "use", "off"]) == 1
+
+    assert path.read_text(encoding="utf-8") == "plugins:\n- mordred\n"
+    assert "not changed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("section", "switch", "in_use", "line"),
+    [
+        ({"enabled": True}, True, True, "hermes use:  on"),
+        ({"enabled": True, "history_enabled": False}, False, False, "hermes use:  off (history_enabled: false"),
+        ({}, True, False, "hermes use:  off (the feature is disabled)"),
+    ],
+)
+def test_status_reports_hermes_use_of_the_history(_home, monkeypatch, capsys, section, switch, in_use, line):
+    (_home / "config.yaml").write_text(json.dumps({"plugins": {"mordred_activity": section}}), encoding="utf-8")
+    monkeypatch.setattr(activity_cli, "_gate_refusal", lambda home: "not_armed")
+
+    assert cli.main(["activity", "status", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert (report["history_enabled"], report["history_in_use"]) == (switch, in_use)
+
+    assert cli.main(["activity", "status"]) == 0
+    assert line in capsys.readouterr().out
+
+
+def test_use_refuses_a_section_shared_through_a_yaml_anchor(_home, capsys):
+    path = _home / "config.yaml"
+    text = "base: &shared\n  enabled: true\nplugins:\n  mordred_activity: *shared\n  mordred_network: *shared\n"
+    path.write_text(text, encoding="utf-8")
+
+    assert cli.main(["activity", "use", "off"]) == 1
+
+    assert path.read_text(encoding="utf-8") == text
+    assert "anchor" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # plugins inherits mordred_activity through a merge key: writing through it would change `defaults`.
+        "defaults: &defaults\n  mordred_activity:\n    enabled: true\nplugins:\n  <<: *defaults\n  other: 1\n",
+        # the whole plugins mapping comes from a root-level merge key.
+        "common: &common\n  plugins:\n    mordred_activity:\n      enabled: true\n<<: *common\n",
+        # an alias of a mapping that holds the section.
+        "base: &base\n  mordred_activity:\n    enabled: true\nplugins: *base\n",
+    ],
+)
+def test_use_refuses_sections_shared_through_merge_keys_or_aliases(_home, capsys, text):
+    path = _home / "config.yaml"
+    path.write_text(text, encoding="utf-8")
+
+    assert cli.main(["activity", "use", "off"]) == 1
+
+    assert path.read_text(encoding="utf-8") == text
+    assert "shared with another section" in capsys.readouterr().err
+
+
+def test_use_edits_an_own_section_next_to_a_merge_key(_home):
+    path = _home / "config.yaml"
+    text = "defaults: &defaults\n  other: 1\nplugins:\n  <<: *defaults\n  mordred_activity:\n    enabled: true\n"
+    path.write_text(text, encoding="utf-8")
+
+    assert cli.main(["activity", "use", "off"]) == 0
+
+    assert path.read_text(encoding="utf-8") == text + "    history_enabled: false\n"
+
+
+def test_status_says_an_invalid_exclusion_list_refuses_collection(_home, monkeypatch, capsys):
+    section = {"enabled": True, "collection_enabled": True, "excluded_sites": ["bank.example", "not a host"]}
+    (_home / "config.yaml").write_text(json.dumps({"plugins": {"mordred_activity": section}}), encoding="utf-8")
+    monkeypatch.setattr(activity_cli, "_gate_refusal", lambda home: "not_armed")
+
+    assert cli.main(["activity", "status", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert (report["collection_enabled"], report["collection_refusal"]) == (False, "excluded_sites_invalid")
+
+    assert cli.main(["activity", "status"]) == 0
+    assert "collection:  refused (excluded_sites is invalid" in capsys.readouterr().out
+
+
+def test_use_names_only_the_error_type_for_unparsable_yaml(_home, capsys):
+    path = _home / "config.yaml"
+    path.write_text("plugins: [unclosed\nsecret_line: hunter2\n", encoding="utf-8")
+
+    assert cli.main(["activity", "use", "on"]) == 1
+
+    err = capsys.readouterr().err
+    assert "not changed" in err and "hunter2" not in err and "unclosed" not in err
+
+
+def test_use_takes_the_policy_writer_lock_in_the_mordred_directory(_home, monkeypatch):
+    from mordred_hermes.wizard import policy_writer
+
+    locked: list[Path] = []
+    real = policy_writer._policy_write_lock
+
+    def spy(directory):
+        locked.append(directory)
+        return real(directory)
+
+    monkeypatch.setattr(policy_writer, "_policy_write_lock", spy)
+    assert cli.main(["activity", "use", "off"]) == 0
+    assert locked == [_home / "mordred"]
+
+
+def test_status_names_invalid_exclusions(_home, monkeypatch, capsys):
+    (_home / "config.yaml").write_text(
+        json.dumps({"plugins": {"mordred_activity": {"enabled": True, "excluded_sites": "bank.example"}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(activity_cli, "_gate_refusal", lambda home: "not_armed")
+
+    assert cli.main(["activity", "status", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["history_in_use"] is False
+    assert report["config_warnings"] == ["invalid value for excluded_sites"]
+
+    assert cli.main(["activity", "status"]) == 0
+    captured = capsys.readouterr()
+    assert "excluded_sites is invalid" in captured.out
+    assert "invalid value for excluded_sites" in captured.err + captured.out
+
+
+# --------------------------------------------------------------------------- #
+# tools on|off (history_tools_enabled)
+# --------------------------------------------------------------------------- #
+
+
+def test_parser_wires_tools_on_and_off(capsys):
+    parser = argparse.ArgumentParser()
+    cli._setup_subparser(parser)
+    for state in ("on", "off"):
+        ns = parser.parse_args(["activity", "tools", state])
+        assert (ns.func, ns.activity_command, ns.state) == (cli._handle_activity, "tools", state)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["activity", "tools", "maybe"])
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_tools_off_and_on_change_only_history_tools_enabled(_home, capsys):
+    path = _home / "config.yaml"
+    path.write_text(CONFIG_WITH_COMMENTS, encoding="utf-8")
+
+    assert cli.main(["activity", "tools", "off"]) == 0
+
+    off = CONFIG_WITH_COMMENTS.replace(
+        "      - bank.example\n", "      - bank.example\n    history_tools_enabled: false\n"
+    )
+    assert path.read_text(encoding="utf-8") == off
+    config = ActivityConfig.load(_home)
+    assert (config.history_enabled, config.history_tools_enabled, config.history_active) == (True, False, True)
+    out = capsys.readouterr().out
+    assert "lookup tools: off" in out and "automatic history blocks stay" in out and "reader mode" in out
+
+    assert cli.main(["activity", "tools", "on"]) == 0
+    assert path.read_text(encoding="utf-8") == off.replace(
+        "history_tools_enabled: false", "history_tools_enabled: true"
+    )
+    assert ActivityConfig.load(_home).history_tools_active is True
+    out = capsys.readouterr().out
+    assert "lookup tools: on" in out and "reader mode" in out
+
+
+def test_tools_and_use_set_their_own_keys_side_by_side(_home):
+    path = _home / "config.yaml"
+    path.write_text(CONFIG_WITH_COMMENTS, encoding="utf-8")
+
+    assert cli.main(["activity", "tools", "off"]) == 0
+    assert cli.main(["activity", "use", "off"]) == 0
+
+    assert path.read_text(encoding="utf-8") == CONFIG_WITH_COMMENTS.replace(
+        "      - bank.example\n",
+        "      - bank.example\n    history_tools_enabled: false\n    history_enabled: false\n",
+    )
+
+
+def test_tools_on_warns_while_hermes_does_not_use_the_history(_home, capsys):
+    assert cli.main(["activity", "tools", "on"]) == 0
+
+    captured = capsys.readouterr()
+    assert "does not use the browser history now" in captured.err + captured.out
+    assert ActivityConfig.load(_home).history_tools_enabled is True
+
+
+def test_tools_refuses_a_malformed_plugins_section_and_leaves_the_file(_home, capsys):
+    path = _home / "config.yaml"
+    path.write_text("plugins:\n- mordred\n", encoding="utf-8")
+
+    assert cli.main(["activity", "tools", "off"]) == 1
+
+    assert path.read_text(encoding="utf-8") == "plugins:\n- mordred\n"
+    assert "not changed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("key", "value"), [("enabled", True), ("excluded_sites", False), ("history_enabled", "on")])
+def test_the_writer_sets_only_the_two_history_switches(_home, key, value):
+    path = _home / "config.yaml"
+    path.write_text(CONFIG_WITH_COMMENTS, encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        activity_cli.set_history_switch(path, key, value)
+
+    assert path.read_text(encoding="utf-8") == CONFIG_WITH_COMMENTS
+
+
+@pytest.mark.parametrize(
+    ("section", "enabled", "in_use", "line"),
+    [
+        ({"enabled": True}, True, True, "lookups:     on (history_tools_enabled; `hermes-mordred activity tools off`"),
+        (
+            {"enabled": True, "history_tools_enabled": False},
+            False,
+            False,
+            "lookups:     off (history_tools_enabled: false; `hermes-mordred activity tools on`",
+        ),
+        ({"enabled": True, "history_enabled": False}, True, False, "lookups:     off (Hermes does not use the history"),
+    ],
+)
+def test_status_reports_the_lookup_tools(_home, monkeypatch, capsys, section, enabled, in_use, line):
+    (_home / "config.yaml").write_text(json.dumps({"plugins": {"mordred_activity": section}}), encoding="utf-8")
+    monkeypatch.setattr(activity_cli, "_gate_refusal", lambda home: "not_armed")
+
+    assert cli.main(["activity", "status", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert (report["history_tools_enabled"], report["history_tools_in_use"]) == (enabled, in_use)
+
+    assert cli.main(["activity", "status"]) == 0
+    assert line in capsys.readouterr().out

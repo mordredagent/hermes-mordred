@@ -14,11 +14,12 @@ module's :func:`register` wires every component in a fixed order:
 5. ``dbcrypt``       — the database-encryption monitor and status line.
 6. ``e2e``           — encrypted gateway dispatch, outbound re-encryption and
                         the read-only Telegram tools.
-7. ``activity``      — browser activity history; its ``register`` is a
-                        documented no-op for now (no hooks, tools or skills;
-                        capture runs in the extension server's receiver), and
-                        Hermes-side use of the history arrives in a later
-                        phase.
+7. ``activity``      — browser activity history: capture runs in the
+                        extension server's receiver; ``register`` adds the
+                        history hooks (``transform_tool_result``,
+                        ``pre_llm_call``), the two lookup tools and the
+                        ``browser-history`` skill, all gated per call by
+                        ``plugins.mordred_activity``.
 8. ``wizard``        — the ``hermes mordred`` CLI subcommand.
 
 Components 1-4 and 8 keep the relative order they had as separate plugins
@@ -76,8 +77,9 @@ COMPONENTS: Final[tuple[tuple[str, str], ...]] = (
 
 #: Minimum hook surface each component promises. The integrity gate checks it
 #: per component (recorded here) and, as a union, against Hermes's own ledger
-#: for the ``mordred`` plugin. The wizard is CLI-only; ``activity`` registers
-#: nothing yet (capture runs in the extension server, not in Hermes hooks).
+#: for the ``mordred`` plugin. The wizard is CLI-only; ``activity``'s history
+#: hooks are optional (they fail open and act only when the feature is on), so
+#: their absence is not an integrity failure.
 COMPONENT_REQUIRED_HOOKS: Final[dict[str, frozenset[str]]] = {
     "keyvault": frozenset({"on_session_start", "on_session_end"}),
     "llm_guard": frozenset({"on_session_start", "pre_api_request"}),

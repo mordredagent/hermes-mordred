@@ -35,6 +35,8 @@ def _decide(level: str, tool: str, args: dict[str, Any] | None = None, session: 
         ("read_file", {"path": "/tmp/x"}, True, True, True, True),
         ("memory", {}, True, True, True, True),
         ("apply_layout", {}, True, True, True, True),
+        ("mordred_browser_history", {"query": "invoice"}, True, True, True, True),
+        ("mordred_browser_history_episode", {"episode_id": "e1"}, True, True, True, True),
         ("telegram_ask", {"question": "q"}, True, True, True, True),
         ("web_search", {"query": "weather"}, False, True, True, True),
         ("web_extract", {"urls": ["https://example.com"]}, False, False, True, True),
@@ -395,3 +397,39 @@ def test_pre_tool_call_returns_an_approval_directive(monkeypatch):
     directive = hooks._check_tool_egress(state, "web_extract", {"args": {"urls": ["https://example.com"]}})
     assert directive["action"] == "approve" and "example.com" in directive["message"]
     assert directive["rule_key"].startswith("mordred.egress:web_extract")
+
+
+@pytest.mark.parametrize("tool", ["mordred_browser_history", "mordred_browser_history_episode"])
+@pytest.mark.parametrize("level", ["ask", "search", "lockdown", "blocklist"])
+def test_browser_history_tools_are_allowed_at_every_level_and_taint(tool: str, level: str) -> None:
+    session = f"history-{tool}-{level}"
+    egress.mark_tainted(f"{session}-already")
+    for target in (session, f"{session}-already"):  # a tainted session may still read the history
+        decision = egress.decide(tool, {"query": "invoice"}, target, egress.EgressPolicy(level=level))
+        assert decision.allow and not decision.approve
+        assert decision.taints
+    assert {"mordred_browser_history", "mordred_browser_history_episode"} <= egress.TAINT_SOURCES
+    assert not egress.LOCAL_TOOLS & egress.BROWSER_HISTORY_TOOLS
+
+
+def test_browser_history_tool_taints_through_the_bridge_and_then_locks_the_session(monkeypatch) -> None:
+    from mordred_hermes.privacy_check import hooks
+
+    policy = egress.EgressPolicy(level="search")
+    monkeypatch.setattr(egress, "load_policy", lambda *a, **k: policy)
+    monkeypatch.setattr(hooks, "safe_audit_append", lambda *a, **k: None)
+    state = SimpleNamespace(audit=None)
+    bridged = {"calls": [{"name": "mordred_browser_history_episode", "arguments": {"episode_id": "e1"}}]}
+    assert egress.decide("tool_call", bridged, "history-bridge", policy).taints
+
+    call = {"args": {"query": "invoice"}, "session_id": "history-hook"}
+    assert hooks._check_tool_egress(state, "mordred_browser_history", call) is None
+    assert egress.is_tainted("history-hook")
+    # The session is in reader mode like after a Telegram read: no plaintext persist tools, egress locked down.
+    for tool, args in (("memory", {}), ("write_file", {"path": "/tmp/x"}), ("web_search", {"query": "x"})):
+        assert not egress.decide(tool, args, "history-hook", policy).allow
+    # ...and `taint: false` does not lift reader mode: actions stay refused, web use asks.
+    untainted = egress.EgressPolicy(level="search", taint=False)
+    assert egress.decide("memory", {}, "history-hook", untainted).reason == "egress.reader_locked"
+    web = egress.decide("web_search", {"query": "x"}, "history-hook", untainted)
+    assert web.approve and web.reason == "egress.reader_web"

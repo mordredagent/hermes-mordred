@@ -27,7 +27,7 @@ from ._desktop_support import (
 )
 
 REAL_STORE_REFUSAL = _seams.store_refusal
-V4_KEYS = {"vault", "databases", "imports", "mail", "telegram_archive", "tools"}
+V4_KEYS = {"vault", "databases", "imports", "mail", "telegram_archive", "tools", "activity"}
 VALID_KEY = "hex:" + "11" * 32
 
 
@@ -62,6 +62,7 @@ def test_v3_keeps_its_keys_and_v4_adds_exactly_the_new_sections(desktop: Any) ->
         },
     }
     assert new["mail"] == {"configured": False}
+    assert new["activity"] == {"history": True, "tools": True, "source": "config"}  # no config.yaml: the defaults
     assert set(new["vault"]) == {"exists", "env_enrolled", "env_injecting", "optout", "unattended"}
     assert new["vault"]["unattended"] is None  # the effective policy is not readable: never the requested one
     assert set(new["databases"]) == {
@@ -326,8 +327,9 @@ def test_a_broken_vault_reader_reports_no_vault(desktop: Any, monkeypatch: pytes
 
 @pytest.mark.parametrize("platform", ["linux", "win32", "freebsd"])
 def test_other_platforms_get_fixed_unsupported_sections(platform: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Hermes's tool-call setting is read on every platform (it is Hermes-wide).
+    # Hermes's tool-call setting and the browser-history switches are read on every platform.
     monkeypatch.setattr(_seams, "tools_mode", lambda home: {"direct": True, "source": "config", "raw": "off"})
+    monkeypatch.setattr(_seams, "activity_history", lambda home: {"history": True, "tools": False, "raw": 1})
     sections = asyncio.run(_status_v4.sections(platform, Path("/nonexistent")))
     assert sections == {
         "vault": {"exists": False, "env_enrolled": False, "env_injecting": False, "optout": False, "unattended": None},
@@ -336,6 +338,7 @@ def test_other_platforms_get_fixed_unsupported_sections(platform: str, monkeypat
         "mail": {"configured": False},
         "telegram_archive": {"legacy": None},
         "tools": {"direct": True, "source": "config"},
+        "activity": {"history": True, "tools": False, "source": "config"},
     }
     assert _status_v4.imports_sections(Path("/nonexistent"), platform)["imports"]["code"] == "unsupported_platform"
 

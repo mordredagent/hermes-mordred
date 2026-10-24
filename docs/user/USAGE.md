@@ -631,7 +631,8 @@ hermes-mordred desktop uninstall
 > memory and secrets, encryption of Hermes's databases), **Connect** (the chat
 > model, the question model, Telegram, the Telegram import and mail over IMAP),
 > **Ask Hermes** (what to say in a chat, what Hermes reads, and the commands that
-> stay in the terminal) and **Maintenance** (update, repair, tool calls, uninstall). Each
+> stay in the terminal) and **Maintenance** (update, repair, tool calls, browser history,
+> uninstall). Each
 > step shows whether it is done, next, waiting for an earlier step (with a
 > button that jumps there), running or in need of attention, and a "Why this
 > step?" block that explains the reason in plain words. The Telegram and mail
@@ -654,6 +655,20 @@ hermes-mordred desktop uninstall
 > the card. The page never changes the setting on its own. The card is on the
 > macOS and Linux page; the Windows page is unchanged, so use
 > `hermes-mordred direct-tools` there.
+>
+> **Browser history from the page.** The **Browser history** card, right after
+> Tool calls, shows the two switches of
+> [`activity use` and `activity tools`](#activity--record-browser-work-preview-macos)
+> with a button each: "Hermes uses the browser history" (the automatic hints
+> in browser results and at the start of a turn, which never restrict a chat)
+> and "Lookup tools" (the model searches the stored history itself; a chat that
+> used one is in reader mode until you start a new chat: it can only read, and
+> web use asks first). Turn the lookup tools off to keep the hints without
+> reader mode; the lookup-tools button is disabled while the history is off.
+> A change applies from the next turn, without a restart; a chat keeps the
+> lookup tools it started with, so start a new chat after changing them. Both
+> switches act only while the browser activity feature is enabled and never
+> stop recording. The Windows page is unchanged; use the CLI there.
 >
 > **Database encryption from the page.** The step "Encrypt Hermes databases"
 > lists the plaintext and unreadable (encrypted) database files it finds, and
@@ -795,7 +810,7 @@ hermes-mordred egress taint on               # no plaintext writes after a sessi
 >
 > | Level | Tools may reach the internet |
 > |---|---|
-> | `lockdown` | Never. Local tools and Mordred's own Telegram tools only. |
+> | `lockdown` | Never. Local tools and Mordred's own Telegram and browser-history tools only. |
 > | `search` | Web search only. No URL fetching, browsing, remote APIs, scheduling, or arbitrary commands. |
 > | `ask` (default) | Tools work. Web search and local commands run as usual; any other internet use (a URL, browser, remote API, a command that uses the network, an unknown tool) shows Hermes's approval prompt with where it goes and what it sends. Blocklisted domains and bare IP addresses are refused outright. |
 > | `blocklist` | Everything except blocklisted domains/tools (paste sites, webhooks and tunnels are built in). |
@@ -805,19 +820,21 @@ hermes-mordred egress taint on               # no plaintext writes after a sessi
 > destination cannot be checked, so under `lockdown`/`search` only exact
 > read-only Mordred commands (`hermes-mordred telegram doctor`, `status`, …)
 > may run. Unknown tools count as internet-capable. With taint on (default),
-> a session that has read private data (the Telegram tools) cannot delegate or
+> a session that has read private data (the Telegram tools, the
+> browser-history lookup tools) cannot delegate or
 > write files, skills, memory or kanban (private data stays out of plaintext
 > storage); under `lockdown`/`search`/`blocklist` it is also locked down, and
 > under `ask` every approval prompt warns that the chat has read private data
 > (`lockdown_after_private_data: true` locks it down under `ask` too). Under
 > `ask` Mordred also tells the agent to prefer local work and web search.
-> Mordred's own Telegram tools are not held back by the level (only
+> Mordred's own Telegram and browser-history tools are not held back by the level (only
 > `egress block-tool` can block them). Blocked and prompted calls
 > are audited as `policy.egress.tool_blocked` (`decision` `block` / `ask`).
 > Changes apply on the next tool call.
 >
-> **Reader mode.** A session that has used `telegram_ask`, `telegram_chats` or
-> `mordred_history_search` is restricted at every level, including `off`: it can
+> **Reader mode.** A session that has used `telegram_ask`, `telegram_chats`,
+> `mordred_history_search` or a browser-history lookup tool (`mordred_browser_history`,
+> `mordred_browser_history_episode`) is restricted at every level, including `off`: it can
 > no longer write files, run commands, send messages, schedule jobs, delegate,
 > use wallet or payment tools, MCP tools or unknown tools. Web search and URL
 > tools ask for approval each time. Reading files, `search_files`,
@@ -1179,6 +1196,8 @@ the tool inside a running Hermes can. An HTTP proxy is refused
 
 ```sh
 hermes-mordred activity status                # switches, protection gate, counts, peers (no content)
+hermes-mordred activity use off               # Hermes stops using the history (on: uses it again); next turn
+hermes-mordred activity tools off             # keep the automatic hints, drop the lookup tools (on: offer them)
 hermes-mordred activity pair-operator         # single-use code for the browser operator's collector
 hermes-mordred activity peers list            # peers revoke <peer_id> stops a collector at once
 hermes-mordred activity correct --episode ID --text "Open the official site instead"   # stores one correction event; prints its id
@@ -1193,12 +1212,18 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > Everything the collector reports is recorded except secrets: operations,
 > typed text except in password or sensitive fields, URLs with credential
 > parameters (tokens, keys, session ids, codes) replaced by `redacted`, and the
-> page title and a visible-text excerpt when the collector sends them.
+> page title and a visible-text excerpt when the collector sends them. A
+> password, PIN, one-time code or key written into a task, a correction, a
+> label or a page ("the password Hunter2-x", "PIN: 4821") is replaced by
+> `redacted` before it is stored.
 > No site is excluded by default: messaging and mail sites (Telegram, WhatsApp,
 > Discord, Slack, Gmail, Outlook and others) are recorded too, including what
 > you type there. To keep a site out, list its host in
 > `plugins.mordred_activity.excluded_sites`; events from that host and its
-> subdomains are then refused. Raw events are kept
+> subdomains are then refused. If one entry of that list names no host, the
+> other entries still apply but every batch is refused
+> (`excluded_sites_invalid`; `activity status` shows `collection: refused`)
+> until you fix it, so a typo never records a site you excluded. Raw events are kept
 > for `retention_raw_days` (default 365; `0` keeps them forever);
 > `activity retention` runs or plans one pass, and the receiver runs one at
 > most once an hour.
@@ -1209,11 +1234,56 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > `activity restore` without `--yes` prints the backup's schema version,
 > generation and row counts and exits 2; with it, the content is replaced and
 > Hermes session references are marked unavailable. Stop `extension serve` and
-> Hermes sessions before restoring. Hermes does not read this history yet;
-> that is designed in
-> [browser history for Hermes](../superpowers/specs/2026-10-22-browser-history-for-hermes-design.md).
+> Hermes sessions before restoring.
+>
+> **Hermes uses this history** while the feature is enabled (master switch
+> `history_enabled`, default on; `activity use off` turns it off from the next
+> turn, without a restart, and does not stop recording). After Hermes opens a
+> site with `browser_navigate`, the browser result carries a short block of
+> your earlier work there (tasks, routes, outcomes, page titles, your
+> corrections; never page text or typed text). When your message names a site
+> or matches an earlier task, the turn gets a block with only your own task
+> texts and corrections (the instruction and corrections you typed, never the
+> operator's own summary) plus sites, routes, outcomes and times. Hermes can
+> also look things up with `mordred_browser_history` and
+> `mordred_browser_history_episode` (skill `mordred:browser-history`). Blocks
+> are bounded (`history_max_chars` 1500, `history_max_episodes` 3,
+> `history_lookback_days` 90, `history_session_budget_chars` 8000 per session;
+> tool results `history_max_tool_bytes` 4096), an episode is shown once per
+> session, and nothing from an `excluded_sites` host is ever shown, also when
+> an earlier episode only linked or redirected to it (an invalid
+> `excluded_sites` value switches Hermes's use of the history off;
+> `activity status` says so). The two lookup tools run at every tool-egress
+> level and put the session into reader mode like the Telegram tools (see
+> `egress` above; `taint: false` does not lift it): that session can no longer
+> write files, skills, memory or kanban, run commands, send messages or
+> delegate, web use asks first, and the restriction survives a Hermes restart.
+> The automatic blocks do not enter reader mode (they never carry typed text
+> or page text).
+>
+> **Hints without reader mode.** `activity tools off` sets
+> `history_tools_enabled: false`: Hermes keeps the automatic hints (the
+> browser-result block and the turn block) but is no longer offered the two
+> lookup tools, so a chat never enters reader mode because of the browser
+> history. `activity tools on` offers them again (they still need
+> `history_enabled`). Like `activity use`, it changes only that key of
+> `config.yaml` and applies from the next turn without a restart, but Hermes
+> fixes a chat's tools when the chat starts: a chat opened before `off` may
+> still list them, and calling one there still enters reader mode (the tool
+> itself answers nothing), so start a new chat. `activity status` shows the
+> switch on its `lookups:` line. The **Browser history** card under
+> Maintenance on the Desktop page has the same two switches, "Hermes uses the
+> browser history" and "Lookup tools" (the second is disabled while the first
+> is off), and changes them only when you press one; see
+> [`desktop`](#desktop--mordred-setup-page-in-hermes-desktop).
+>
+> Typed text that looks like a
+> key, password or card number (JWTs, `sk-`, `ghp_`, `AKIA`, `xoxb-` style
+> keys, `password: …`, Luhn-valid card numbers, long random tokens) is never
+> stored.
 > Contract:
-> [SPEC](../dev/SPEC.md#browser-activity-and-conditional-learning-2026-10-20).
+> [SPEC](../dev/SPEC.md#browser-activity-and-conditional-learning-2026-10-20)
+> (§"History for Hermes").
 
 ---
 

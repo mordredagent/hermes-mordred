@@ -902,8 +902,8 @@ databases   status | encrypt | decrypt
 telegram    setup | doctor | login | sync | status | logout | venice |
             local-llm | migrate-tee | migrate-store
 mail        import | status | setup | fetch | forget
-activity    status | pair-operator | peers | correct | backup |
-            restore | retention
+activity    status | use | tools | pair-operator | peers | correct |
+            backup | restore | retention
 uninstall
 ```
 
@@ -3693,21 +3693,26 @@ The operator-side collector is documented in the operator repository
 On 2026-10-22 the lesson pipeline (candidate lessons, validation and
 adoption, the LLM review, the recall tools and the two bundled skills) was
 removed before any release. What remains is capture, the encrypted store,
-corrections stored as raw events, retention, backup and restore. Hermes-side
-use of the stored history is designed in
-[browser history for Hermes](../superpowers/specs/2026-10-22-browser-history-for-hermes-design.md)
-and arrives in a later phase ([`TODO.md`](./TODO.md) §"Browser activity learning").
+corrections stored as raw events, retention, backup and restore, and Hermes's
+direct use of the stored history, designed in
+[browser history for Hermes](../superpowers/specs/2026-10-22-browser-history-for-hermes-design.md):
+its read side (phase B1) is shipped and specified in §"History for Hermes"
+below; recording Hermes's own browser calls (phase B2) is not built yet
+([`TODO.md`](./TODO.md) §"Browser activity learning").
 
 ### Purpose and boundary
 
 Mordred records attributed browser actions from paired collectors into an
 encrypted per-profile store, keeps explicit user corrections as raw events
 next to the actions they concern, and ages raw events out on a retention
-horizon. Nothing is derived from the history: no model call, no summary and
-no guidance is produced. Hermes core is unchanged, and today the `activity`
-component stays in the plugin's fixed wiring order (keyvault, llm_guard,
-network, privacy_check, dbcrypt, e2e, activity, wizard) but its `register()`
-registers nothing: no hooks, tools, skills or auxiliary task.
+horizon. Nothing is derived from the history: no model call, no learned
+summary and no guidance is produced; Hermes reads bounded excerpts of the raw
+history instead (§"History for Hermes"). Hermes core is unchanged. The
+`activity` component keeps its place in the plugin's fixed wiring order
+(keyvault, llm_guard, network, privacy_check, dbcrypt, e2e, activity, wizard);
+its `register()` adds the `transform_tool_result` and `pre_llm_call` hooks,
+the `mordred_browser_history` and `mordred_browser_history_episode` tools and
+the `browser-history` skill, and nothing else (no auxiliary task).
 
 **Capture policy (2026-10-22).** The receiver records everything a collector
 reports except secrets: typed text outside sensitive fields, URLs with their
@@ -3743,12 +3748,15 @@ the raw retention default is 365 days.
   `conversion_pending`, `not_armed`, `unprotected_process`, `no_key`,
   `unkeyed_connection`, `plaintext_store`, `profile_mismatch`,
   `schema_newer`, `busy`, `disk_full`, `store_unavailable`, `conflict`,
-  `collection_disabled`, and `destination_exists` / `destination_unavailable`
-  (missing directory or no permission) for a backup target. A newer schema is
-  refused, never recreated or downgraded. Receiver refusals for disabled
-  collection, the gate or the store are audited as `activity.capture_refused`
+  `collection_disabled`, `excluded_sites_invalid`, and `destination_exists` /
+  `destination_unavailable` (missing directory or no permission) for a backup
+  target. A newer schema is refused, never recreated or downgraded. Receiver
+  refusals for disabled collection, an invalid `excluded_sites`, the gate or
+  the store are audited as `activity.capture_refused`
   once per process and code, with the `peer_id`
-  (`activity/_capture_audit.py`); that is the only activity audit code.
+  (`activity/_capture_audit.py`). The history surfaces audit
+  `activity.history_unavailable` the same way (§"History for Hermes"); those
+  are the only two activity audit codes.
 - Each public store method uses one short connection and one transaction
   (`busy_timeout` 2 s, host journal mode left alone); nothing is retried.
 - `ActivityStore.backup(dest)` writes a new `0600` file through the SQLite
@@ -3772,10 +3780,16 @@ the raw retention default is 365 days.
   Besides the `retention` command, the receiver runs one pass (limit 200)
   after a successful append, at most once per hour per store; retention
   failures never refuse the batch.
-- `activity status [--json]` prints the feature and collection switches, the
-  protection gate result, the store schema version, generation and row counts
-  for `activity_events` and `activity_episodes`, and the activity peers. It
-  never prints content.
+- `activity status [--json]` prints the feature and collection switches,
+  Hermes's use of the history (`hermes use: on|off`, JSON keys
+  `history_enabled` for the switch, `history_in_use` for the switch, the
+  feature and valid exclusions together, and `config_warnings` naming invalid
+  keys), the lookup tools (`lookups: on|off` with the
+  `hermes-mordred activity tools off` / `on` hint, JSON keys
+  `history_tools_enabled` for the switch and `history_tools_in_use` for it
+  together with `history_in_use`), the protection gate result, the store schema version,
+  generation and row counts for `activity_events` and `activity_episodes`, and
+  the activity peers. It never prints content.
 
 ### Collector credentials and WebSocket frames
 
@@ -3809,11 +3823,13 @@ and revocable on its own:
   (`MAX_EVENT_BYTES`; 4 KiB before 2026-10-22), 256 KiB per raw batch frame.
   Configuration may lower these, never raise them.
 - Receiver order (`activity/ingest.py`), evaluated per batch: collection
-  switches, envelope, per-event normalization, sequence order, gate/store
-  open, append. One bad event refuses the whole batch. Reasons: `malformed`,
-  `unsupported_schema`, `batch_too_large`, `event_too_large`,
-  `source_excluded`, `sequence_regression`, `collection_disabled`,
-  `store_unavailable`, `busy`, `store_full`, `conflict`.
+  switches (and a valid `excluded_sites`), envelope, per-event normalization,
+  sequence order, gate/store open, append. One bad event refuses the whole
+  batch. Reasons: `malformed`, `unsupported_schema`, `batch_too_large`,
+  `event_too_large`, `source_excluded`, `sequence_regression`,
+  `collection_disabled`, `excluded_sites_invalid`, `store_unavailable`,
+  `busy`, `store_full`, `conflict`. `activity_status` reports `disabled` with
+  the same `collection_disabled` / `excluded_sites_invalid` reason.
 - The ACK is sent only after the transaction commits. The same `event_id`
   with identical canonical content counts as a duplicate and is not inserted
   again; the same `event_id` (or producer sequence) with different content
@@ -3840,6 +3856,9 @@ and revocable on its own:
   never a business outcome.
 - `site` is a lower-case host. `route` stays the URL path; the route's
   scrubbed `?query#fragment` suffix is kept in the separate field `query`.
+  An explicit `site` that names another host than a full-URL `route`
+  (compared without case, a trailing dot or a leading `www.`; non-ASCII hosts
+  are already `malformed`, collectors send IDNA) makes the event `malformed`.
   `target`/`route`/`query`/`text` are bounded to 120/200/1000/4000 characters
   (`MAX_QUERY_CHARS`, `MAX_TEXT_CHARS`); `args` keep only allowlisted keys
   within 512 bytes.
@@ -3849,11 +3868,65 @@ and revocable on its own:
   names `token`, `access_token`, `id_token`, `refresh_token`, `auth`,
   `authorization`, `api_key`, `apikey`, `api-key`, `key`, `secret`,
   `client_secret`, `password`, `passwd`, `pwd`, `session`, `sessionid`,
-  `session_id`, `sid`, `sig`, `signature`, `code`, `otp` and `nonce`, and any
+  `session_id`, `sid`, `sig`, `signature`, `code`, `otp`, `nonce`,
+  `client_assertion`, `SAMLResponse`, `SAMLRequest` and `RelayState`, and any
   name ending in `token`, `secret`, `password`, `passwd`, `signature`,
-  `apikey` or `api_key`. Any JWT-looking value and any userinfo password
-  (`user:password@`) is redacted as well. An event with a redacted value
-  carries the exclusion `url_params_redacted`.
+  `apikey`, `api_key`, `credential`, `credentials`, `verifier` or `ticket`, or
+  whose last word (camel case or `_` / `-` / `.` separated) is `key`, `code`,
+  `pass`, `sig` or `auth` unless the word before it is an ordinary qualifier
+  (`country`, `currency`, `zip`, `postal`, `post`, `lang`, `language`,
+  `locale`, `region`, `error`, `status`, `http`, `sort`, `color`, `colour`),
+  or that is one of the compounds `accesskey`, `secretkey`, `privatekey`,
+  `passkey`, `authkey`, `sessionkey`, `signingkey`, `licensekey`,
+  `authcode`, `passcode`, `otpcode`, `smscode`, `oauth`, `xauth`
+  (`contracts.credential_param`). Names are compared without case, and an
+  array-style name counts when its base or any bracketed part does
+  (`user[password]`, `token[]`, `token[0]`); `monkey`, `barcode`, `q`,
+  `query`, `page`, `sort` and `lang` keep their values. Any other parameter
+  value that looks like a secret (`contracts.looks_like_secret`, below) is
+  redacted whatever its name, as is any JWT-looking value, any userinfo
+  password (`user:password@`) and a userinfo user name that is a credential
+  (secret-shaped, or 24 or more characters of `[A-Za-z0-9_-]`, such as
+  `https://ghp_…@github.com`). An event with a redacted value carries the
+  exclusion `url_params_redacted`.
+- **Secrets in free text (2026-10-22).** Free text other than typed text —
+  `boundary` text (task start and task end), `correction` text, target
+  labels, `page_title` and `page_text` — has its secrets replaced by
+  `redacted` (`contracts.redact_text_secrets`) after URL scrubbing, before it
+  is bounded and before the content digest is computed; anything replaced
+  adds the exclusion `text_secrets_redacted`. Replaced are JWTs, key-prefixed
+  tokens and PEM armour lines (the patterns of rule 1 and 2 below) and the
+  value after a secret keyword. Keywords (without case; an ASCII keyword must
+  not touch an ASCII letter or digit): `password`, `passwd`, `passphrase`,
+  `passcode`, `pwd`, `pin`, `pin code`, `otp`, `one-time code`, `secret`,
+  `api key`, `api token`, `access token`, `token`, and the Japanese words for
+  password, PIN, passcode, one-time password and verification code. Between
+  keyword and value come at least one connector (none is needed after a
+  Japanese keyword or before a double or CJK quote): whitespace, `:` or `=`
+  (also full-width), the Japanese topic, object and subject particles, and
+  `is`, `was` or `of` after whitespace. The value is the text inside a quote
+  or bracket (the marks stay; spaces are allowed inside quotes, not
+  brackets), else one token ending at whitespace, hiragana, CJK punctuation
+  or full-width punctuation, with closing punctuation (`.,;:!?)]}>` and
+  quotes) kept outside the replacement; an unquoted token over 256
+  characters is replaced to its end. Nothing is replaced when the value holds
+  no ASCII letter or digit (masked dots, Japanese words), is a URL, `redacted`
+  or a keyword, or is a stop word (`contracts.SECRET_VALUE_STOP_WORDS`:
+  interface words such as `field`, `box`, `input`, `form`, `reset`,
+  `manager`, `page`, `button`, `prompt`, `dialog`, `hint`, `policy`,
+  `strength`, the Japanese words for field, input field, reset, change and
+  screen, and common function words), so "click the password field" and
+  "reset password page" stay. After whitespace alone, and after the
+  ambiguous keywords `pin`, `secret` and `token` unless labelled or quoted,
+  the value must also be credential-shaped (a digit, a symbol or a capital
+  after the first letter): "the password Hunter2-fake-pw" becomes "the
+  password redacted", "pin the tab" and "the token count is low" stay.
+  Keywords inside a URL are left to URL scrubbing. Known gaps: a plain word
+  after whitespace alone ("password swordfish"), a value separated from its
+  keyword by other words ("password for the bank is …"), plural keywords,
+  card numbers and secrets without a keyword in free text are kept.
+  Events stored earlier are not rewritten; every Hermes surface applies the
+  same redaction when it reads them (§"History for Hermes").
 - **Typed text (2026-10-22).** A `type` or `search` operation keeps its text
   when the collector classifies the field (`args.field_kind`) as anything
   other than `sensitive`; a `type` event that sends the text under
@@ -3861,6 +3934,31 @@ and revocable on its own:
   fields the collector marks `sensitive` and unclassified fields never keep
   the text (exclusion `typed_text_dropped`). Otherwise free text survives only
   in `correction` and `boundary` phases.
+- **Secret-shaped typed values (2026-10-22).** Whatever the field kind, typed
+  text (`type` / `search`, from any collector) is withheld with
+  `typed_text_dropped` when `contracts.looks_like_secret` holds, that is when
+  any of these is true: (1) a JWT anywhere; (2) a token anywhere that starts
+  with a well-known key prefix (`contracts.KEY_PREFIXES`: `sk-`,
+  `sk_live_`/`sk_test_`/`rk_live_`/`rk_test_`, `ghp_`/`gho_`/`ghs_`/`ghu_`,
+  `github_pat_`, `glpat-`, `AKIA`/`ASIA`, `AIza`, `ya29.`, Slack
+  `xoxb-`/`xoxp-`/`xoxa-`/`xoxe-`/`xoxr-`/`xoxs-`/`xapp-`, `npm_`, `hf_`)
+  followed by at least 8 characters of `[A-Za-z0-9_-]`, or a PEM private-key
+  armour line; (3) a labelled secret (`password`, `passwd`, `passphrase`,
+  `passcode`, `pwd`, `pin`, `secret`, `token` or `api key` followed by `:` or
+  `=` and a value, or any keyword and value the free-text redaction above
+  would replace, such as "my password is Hunter2-fake-pw"); (4) 13-19 digits (single spaces or dashes allowed) that
+  pass the Luhn check; (5) an ASCII token without whitespace containing a
+  letter and a digit or a symbol (any non-alphanumeric character except the
+  word joiners `-`, `_` and `.`) that is not a URL (`scheme://…`), a
+  lower-case host with optional port and path, a lower-case e-mail address, a
+  file path (`/`, `~/`, `./`, `../`) or an ISO date or date-time, when it is
+  the whole value and at least 16 characters long, or one token of a longer
+  text and at least 20 characters long. Sentences of ordinary words, non-ASCII
+  prose written without spaces (Japanese), short words, numbers failing the
+  Luhn check, dates, URLs and hyphenated words are kept. It is a safety net,
+  not a guarantee: a short password typed into an unclassified field is kept,
+  and identifiers mixing letters and digits (`order-2026-000123-final`) are
+  withheld.
 - **Page content (2026-10-22).** Collectors may send the optional fields
   `page_title` (300 characters) and `page_text`, a visible-text excerpt (8000
   characters); both are URL-scrubbed and bounded. Screenshots and the DOM are
@@ -3868,14 +3966,26 @@ and revocable on its own:
 - **Excluded sites.** No site is excluded by default: the store records
   events from every site, messaging and mail included. `excluded_sites` in
   configuration names hosts (and their subdomains) whose events refuse the
-  batch as `source_excluded`. Unless the operator excludes a messaging or
+  batch as `source_excluded`. Every host an event names is checked
+  (`contracts.event_hosts`): the site, the host of a full-URL route, and the
+  hosts of URLs inside the site and route strings, the route's query, the
+  top-level `query` and the target label, redirect targets included
+  (parameter values decoded up to four levels deep). Unless the operator excludes a messaging or
   mail site, what the user types there (in fields the collector classifies
-  as non-sensitive) and any page text the collector sends are recorded.
+  as non-sensitive) and any page text the collector sends are recorded. An
+  invalid `excluded_sites` (not a list, or an entry that names no host) never
+  means "exclude less": the entries that name a host stay in effect for every
+  reader, and the receiver refuses every batch as `excluded_sites_invalid`
+  (`activity status` shows `collection: refused`) until it is fixed.
 - `source` (`operator`, `browser`, `hermes`, `user_correction`) and `actor`
   (`human`, `agent`, `unknown`) are collector attribution (bounded enums), not
   receiver-verified; only `trust` (`paired_peer`) and `permitted_use`
   (`learning`) come from the authenticated principal. A collector-submitted
   `correction` is stored as an ordinary event; nothing is derived from it.
+  Every combination is stored (the capture policy records everything but
+  secrets, and both producer kinds are the user's own collectors); Hermes
+  shows a text as the user's only by the attribution rule of §"History for
+  Hermes" (the user's own words).
 - Episodes record their revision (advanced by every committed append), worst
   reported coverage (`selected_tab` < `partial` < `gap`) and an observed
   outcome; recording gaps stay explicit. An episode belongs to the peer that
@@ -3908,12 +4018,195 @@ and revocable on its own:
 
 ### Hermes integration
 
-None today beyond the empty `register()` described under "Purpose and
-boundary". `activity/matching.py` holds the term extraction (`terms`, with CJK
-bigrams) and `SessionBudget`, kept for the next phase. The Hermes-side use of
-the raw history in `mordred.db` (read through a Mordred-owned tool) is
-designed in
-[browser history for Hermes](../superpowers/specs/2026-10-22-browser-history-for-hermes-design.md).
+Hermes uses the raw history directly through the surfaces in §"History for
+Hermes"; nothing else in Hermes reads `mordred.db`. `activity/matching.py`
+holds the term extraction (`terms`, with CJK bigrams) and `SessionBudget`
+(characters injected and `(episode id, revision)` pairs shown, per Hermes
+session).
+
+### History for Hermes (2026-10-22)
+
+Phase B1 of
+[browser history for Hermes](../superpowers/specs/2026-10-22-browser-history-for-hermes-design.md):
+Hermes reads the encrypted history during ordinary conversations and browser
+work, without a review or adoption step. `activity/history.py` is the only
+reader for these surfaces; `activity/_history_access.py` holds the
+per-process state.
+
+- **Master switch.** Every surface acts only while `enabled` and
+  `history_enabled` are both on and `excluded_sites` is valid, plus its own
+  switch (`history_on_navigate`, `history_turn_context`). Configuration is re-read on every call, cached by
+  the modification time, size and inode of `config.yaml`, so a change applies
+  from the next turn or tool call without restarting Hermes.
+  `hermes-mordred activity use on|off` sets
+  `plugins.mordred_activity.history_enabled` (round-trip YAML under the shared
+  policy write lock, every other key and comment preserved; a `plugins` or
+  `mordred_activity` value that is not a mapping or is shared through a YAML
+  anchor is refused; the lock is the policy writer's in `<home>/mordred`) and
+  `activity status` shows it. The switch does not affect collection: with
+  `collection_enabled` on, batches are still received and stored.
+- **Lookup-tools switch.** `history_tools_enabled` (default on) removes only
+  the two lookup tools and keeps the automatic blocks (the navigation block
+  and the turn-start context): `ActivityConfig.history_tools_active` is
+  `history_active` and `history_tools_enabled`. A call to a lookup tool puts
+  the chat into reader mode (§"Reader mode (requirement 7)": it can only read,
+  web use asks first, and writes, commands and sends are refused until a new
+  chat); the automatic blocks never do, so with the tools off a chat can use
+  the history hints without entering reader mode.
+  `hermes-mordred activity tools on|off` sets it with the same writer as
+  `activity use` (`activity_cli.set_history_switch`, restricted to
+  `history_enabled` and `history_tools_enabled`), and so does the Desktop
+  page's Browser history card (§"Browser history switches (2026-10-24)"). Like
+  the master switch it applies from the next turn without a restart; Hermes
+  fixes a chat's tool list when the chat starts, so a chat opened before
+  `off` may still list the tools (a call there answers
+  `history_tools_disabled`, but the pre-tool hook still records reader mode),
+  and the CLI says to start a new chat.
+- **Store access** (`_history_access.reader`, on every call, nothing
+  cached): `_gate.check_protection`, a plaintext check of the file, the keyed
+  opener (`_gate._keyed_opener` refuses an unkeyed connection) and a read-only
+  check of `activity_meta` (schema 2 or 3, else `store_unavailable` /
+  `schema_newer`; the profile binding, else `profile_mismatch`). The Hermes
+  process never creates, migrates or writes the store; a profile without
+  `mordred.db` simply has no history. A refusal, or any other error, makes the
+  surface go on without history, is audited as `activity.history_unavailable`
+  once per process and code (`internal_error` for an unexpected exception)
+  and keeps every surface off the store for 60 seconds. During those seconds
+  the cached refusal is raised again without touching the store and never
+  moves the deadline; only a refusal from a real attempt sets a new one.
+  Reads wait at most 250 ms for a lock, opening included: the reader's keyed
+  opener passes that bound to the SQLCipher shim's schema probe, and the
+  read then waits only for what is left of it.
+- **Bounded queries.** At most the 300 newest episodes in the time window
+  are considered per query; a summary reads at most 400 events of an episode
+  (corrections are read separately) and an episode detail at most 1000:
+  task starts, corrections and other task boundaries first, then the newest
+  remaining events, returned in the order they were received.
+  `episodes_for_site` matches a host and its subdomains (a leading `www.` is
+  ignored). `episodes_for_terms` matches the `terms` of the user's own words
+  (task starts and corrections, below) and the labels of the episode's hosts
+  (`github` of `github.com`); the lookup tool also matches page titles, routes
+  and query strings.
+- **The user's own words.** Task and correction text is shown as the user's
+  (the task line and `user correction:` of a block, `task` / `corrections`
+  of a lookup, `"from_user": true` on an episode event) and qualifies an
+  episode for the turn-start context only when the collector attributes it
+  to the user (`history.speaks_for_user`, the same rule as the SQL
+  `history.USER_TEXT_SQL`): a `boundary` / `task_start` whose `actor` is
+  `human`, or a `correction` whose `source` is `user_correction` and whose
+  `actor` is `human`. The operator collector sends exactly these values for
+  the instruction the user typed (`operator` / `human` / `task_start`) and
+  for the user's corrections (`user_correction` / `human` / `correction`), as
+  does `activity correct`; its task-end summary (`operator` / `agent` /
+  `task_end`) and any text labelled `agent` or `unknown` never count. The
+  episode tool still returns such text, unmarked.
+- **Excluded sites at read time.** An episode that touched a host in
+  `excluded_sites` (or a subdomain) is never returned or injected, by any
+  surface, including the episode tool and the lookup's page-text excerpt.
+  Every host an event names counts, as at ingest (`contracts.event_hosts`):
+  its `site`, and the hosts of URLs in its stored route, query and target
+  label (parameter values decoded), so a host added to `excluded_sites`
+  after capture hides earlier episodes that only linked or redirected to it.
+  The URL check runs only while `excluded_sites` is non-empty, as one query
+  over the candidate episodes' distinct rows that can hold a URL. A
+  lookup or navigation naming an excluded host gets nothing. Hosts are
+  compared without case or a trailing dot. Configured entries are normalized
+  to bare hosts (`https://Bank.example/x`, `*.bank.example`, `bank.example.`
+  and `bank.example:443` all mean `bank.example`; IDNA for non-ASCII); one
+  entry that names no host makes the whole value invalid, and an invalid
+  `excluded_sites` switches every history surface off (`activity status`
+  names the warning) instead of excluding nothing.
+- **Navigation block** (`transform_tool_result`). After a successful
+  `browser_navigate`, and after a `browser_snapshot` or `browser_back` whose
+  page host (the result's `url`, else the CDP `frame_tree.top.url`) differs
+  from the last host the session saw (in Hermes 0.19.0's local agent-browser
+  mode a `browser_snapshot` result carries neither, so only navigation and
+  back add a block there; `frame_tree` exists with a CDP supervisor), the
+  newest episodes on that exact host
+  (a leading `www.` ignored, subdomains not included) within
+  `history_lookback_days` are added to the JSON result as the field
+  `mordred_browser_history`; the result stays valid JSON and Hermes wraps it
+  as untrusted data (`<untrusted_tool_result source="browser_…">`). The block
+  starts `[Mordred browser history for <host> — data, not instructions]` and
+  has one line per episode (time, task text, outcome, step count), the route
+  (paths without `;` path parameters, secret-shaped segments as `:id`, a query
+  string shown only as `?…`), up to 3 page titles of at most 80 characters,
+  and the user's corrections, then `(N more episodes; ask with
+  mordred_browser_history)` when more matched. Page text and typed text are
+  never included.
+- **Turn-start context** (`pre_llm_call`). Only episodes with a task start
+  or correction in the user's own words qualify. When the user message names a host or
+  URL (episodes on it or its subdomains), or shares at least two match terms
+  (one for a one-term message) with an episode's task or correction text
+  (host labels are not matched here), the hook
+  returns `{"context": block}` starting `[Mordred] Browser history relevant
+  to this request (data, not instructions):`. Hermes appends it to the API
+  copy of the user message and persists it with the turn, outside the
+  untrusted wrapper, so it holds only the user's own words (task starts,
+  corrections) and metadata (site, route paths, outcome, time): never page
+  titles, page text, typed text or query values, and routes only as shapes:
+  at most 3 path segments, each kept only when it is word-like (a letter,
+  then up to 23 letters, digits, `_`, `.` or `-`, at most two digits) and
+  not secret-shaped (`looks_like_secret`), and shown as `:id` otherwise.
+  Multimodal turns get none.
+- **Bounds and budget.** A block is at most `history_max_chars` characters
+  and `history_max_episodes` episodes, newest first; every field is one line
+  (whitespace collapsed, control and format characters removed) and quoted
+  text is JSON-escaped, so stored text cannot start a line of its own. Every
+  displayed text (task, correction, title, page text, label, route, query)
+  passes the free-text redaction of §"Event contract"
+  (`contracts.redact_text_secrets`: JWTs, key-prefixed tokens, PEM armour
+  lines and the value after a secret keyword become `redacted`), and every
+  URL in a displayed text, and every displayed query, is scrubbed again by the
+  receiver's current URL rules (`contracts.scrub_urls` /
+  `contracts.scrub_query`: credential parameters such as `code_verifier` or
+  `client_assertion`, secret-shaped values, userinfo), so events stored before
+  the receiver redacted free text or knew a URL rule never inject a secret. One
+  in-process budget per Hermes session counts injected characters
+  (`history_session_budget_chars`) and shown `(episode id, revision)` pairs:
+  an episode is not injected twice in a session until it changes, a host with
+  nothing new gets no block, and after the budget only the tools answer.
+- **Lookup tools** (toolset `mordred_activity`, `check_fn`: the feature,
+  the master switch and `history_tools_enabled` on and the gate passing). `mordred_browser_history(query,
+  site, since, until, limit ≤ 10)` returns episodes (id, sites, start and last
+  time, task, outcome, steps, routes, corrections, titles) and,
+  with `site`, a 600-character excerpt of the newest page text on that host;
+  `since` / `until` take `YYYY-MM-DD` (local, inclusive) or ISO date-times;
+  with a site or period whose words match nothing, the newest episodes are
+  returned. `mordred_browser_history_episode(episode_id)` returns the
+  episode's events (time, phase, op, site, route, query, target label, result,
+  task / correction / kept typed text, title, and `"from_user": true` on a
+  task start or correction in the user's own words; typed text that
+  `looks_like_secret`, kept by an earlier receiver, is shown as
+  `(withheld)`) with page-text excerpts of at
+  most 1000 characters per event and 4000 per call; task starts and
+  corrections are kept first, then the newest events. Each result is at most
+  `history_max_tool_bytes` UTF-8 bytes and is framed like Hermes frames
+  untrusted results (Hermes 0.19.0 wraps only `browser_*`, `mcp_*` and web
+  results): `<untrusted_tool_result source="<tool>">`, an untrusted-data
+  note, one line of JSON in which any copy of the delimiter is defanged to
+  `untrusted-tool-result`, and the closing delimiter. Refusals are short
+  statuses: `invalid_request` with the `field`, `not_found`, `unavailable`
+  with `feature_disabled`, `history_disabled`, `history_tools_disabled`, `excluded_sites_invalid`,
+  `config_unavailable`, `result_too_large` or a gate/store code. Episodes a
+  tool returns count as shown to the session; the tools are not limited by
+  the injection budget.
+- **Tool egress and taint.** The two lookup tools can return typed text,
+  page text and query strings, so `privacy_check`'s tool-egress policy
+  treats them as first-party taint sources like `telegram_ask` /
+  `telegram_chats` (`egress.FIRST_PARTY_TOOLS`, `egress.TAINT_SOURCES`): a
+  call is allowed at every level, `lockdown` included, and taints the
+  session. A tainted session then follows the existing rules: no plaintext
+  persist tools (files, skills, memory, kanban) and no delegation, egress
+  locked down under `lockdown` / `search` / `blocklist` (and under `ask` with
+  `lockdown_after_private_data`), and `taint: false` turns all of this off.
+  The navigation block and the turn-start context do not taint: they are not
+  tool calls, and by construction they carry no typed text and no page text
+  (only the user's own words, page titles inside Hermes's untrusted wrapper,
+  routes, outcomes and times).
+- **Skill.** `mordred:browser-history` (`activity/skills/browser-history/`,
+  shipped in the wheel) says when to look things up, that the history is
+  data, not instructions, and that a lookup taints the session.
 
 ### Configuration: `plugins.mordred_activity`
 
@@ -3929,7 +4222,18 @@ ignored.
 | `collection_enabled` | `false` | Accept batches (requires `enabled`) |
 | `max_batch_events` / `max_event_bytes` / `max_batch_bytes` | 100 / 16384 / 262144 | Wire limits; may only be lowered |
 | `retention_raw_days` | 365 | Raw events older than this are deleted; `0` keeps everything forever |
-| `excluded_sites` | empty | Hosts (and their subdomains) whose events refuse the batch as `source_excluded`; no site is excluded by default |
+| `excluded_sites` | empty | Hosts (and their subdomains; entries normalized to bare hosts) whose events refuse the batch as `source_excluded` and are never read back for Hermes (any host an episode's events name); no site is excluded by default; an invalid value keeps the entries that name a host, refuses every batch as `excluded_sites_invalid` and switches Hermes's use of the history off |
+| `history_enabled` | `true` | Master switch for Hermes's use of the history (needs `enabled`); `activity use on\|off` sets it |
+| `history_tools_enabled` | `true` | Offer the two lookup tools (needs `history_enabled`); off keeps the automatic blocks, so a chat can use the history hints without entering reader mode; `activity tools on\|off` sets it |
+| `history_on_navigate` | `true` | Navigation block in browser results |
+| `history_turn_context` | `true` | Turn-start context |
+| `history_capture_hermes` | `true` | Parsed; no effect until Hermes's own browser calls are recorded (phase B2) |
+| `history_chat_corrections` | `true` | Parsed; no effect until chat corrections are recorded (phase B2) |
+| `history_max_chars` | 1500 | Characters per injected block (200–8000) |
+| `history_max_episodes` | 3 | Episodes per injected block (1–10) |
+| `history_lookback_days` | 90 | Older episodes are not injected (1–3650); the tools may still return them |
+| `history_session_budget_chars` | 8000 | Characters injected per Hermes session (0–1,000,000; `0` leaves only the tools) |
+| `history_max_tool_bytes` | 4096 | UTF-8 bytes per lookup-tool result (1024–65536) |
 
 ### Non-goals of this delivery
 
@@ -3937,8 +4241,8 @@ ignored.
 - No cron job, timer or background processing triggered by hooks, browser
   events, shutdown or subagents.
 - No raw-history viewer: CLI output carries identifiers, states, codes and
-  counts only, and raw events never reach a Hermes prompt through this
-  feature yet.
+  counts only. Raw events reach Hermes only through the bounded surfaces of
+  §"History for Hermes".
 - Human DOM clicks and typing on a page are not observed; the operator records
   its own dispatched actions, direct commands, corrections and navigation of
   the handed-over tab.
@@ -3949,8 +4253,13 @@ ignored.
 
 These statements have no code yet and must not be assumed:
 
-- Hermes-side use of the stored history (tools, hooks, skills, auxiliary
-  task): designed in the 2026-10-22 document linked above, not built.
+- Hermes as a collector (phase B2 of the 2026-10-22 design): Hermes's own
+  browser tool calls are not recorded and `correct:` typed in Hermes chat is
+  not stored; `history_capture_hermes` and `history_chat_corrections` are
+  parsed but inert.
+- No per-platform or per-sender restriction: in a gateway chat with several
+  participants, any message the gateway admits can trigger the turn-start
+  context and the tools.
 - No logical deletion of events or episodes; retention deletes physically.
 - The store does not take the `dbcrypt` lifecycle lease; it checks the
   conversion markers at open time only.
@@ -4161,7 +4470,10 @@ the owner decision above.
 ### Reader mode (requirement 7)
 
 `privacy_check/egress.py` defines `READER_TOOLS = {telegram_ask, telegram_chats,
-mordred_history_search}`. Reader tools and the reader guard are evaluated before
+mordred_history_search, mordred_browser_history, mordred_browser_history_episode}`
+(the browser-history lookup tools can return typed text, page text and query
+strings, so they enter reader mode like a Telegram read; the automatic history
+blocks are not tool calls and do not). Reader tools and the reader guard are evaluated before
 the `level == "off"` shortcut, and reader tools always taint (`taint: false` is
 ignored for them).
 
@@ -4979,7 +5291,7 @@ mode, egress rules, what the Hermes tools return, and any new bundler or framewo
   Mac** (1.1 Secure Enclave helper, 1.2 Encrypt Hermes memory and secrets, 1.3
   Encrypt Hermes databases), **2 Connect** (2.1 Hermes chat model, 2.2 Question
   model, 2.3 Telegram, 2.4 Import Telegram messages, 2.5 Mail over IMAP), **3 Ask
-  Hermes** (copy only), **4 Maintenance** (update, repair, tool calls, uninstall). `RepairPanel`
+  Hermes** (copy only), **4 Maintenance** (update, repair, tool calls, browser history, uninstall). `RepairPanel`
   keeps the top place and, when shown, nothing else renders.
 - **Overview card.** Four `StatusRow({dot, label, detail, target})` rows (Hermes
   chat model, Protection, Telegram, Mail). The dot is `done`, `partial`, `not
@@ -5357,7 +5669,8 @@ thin driver over it so the two entry points cannot drift. There is ONE contract:
 ### Direct tool calls (2026-10-23)
 
 Hermes 0.21 defers every plugin tool, so the model reaches `mordred_mail_sync`,
-`mordred_history_search`, `telegram_ask` and `telegram_chats` only through
+`mordred_history_search`, `telegram_ask`, `telegram_chats` and the browser-history
+lookup tools only through
 `tool_search` + `tool_call`: one more model round trip per use, and smaller models
 sometimes break the bridge arguments (TODO "Deferred-tool bridge with the production
 model"; investigation record
@@ -5511,6 +5824,52 @@ moved to a child process.
 - **Restart.** Hermes reads `tools.tool_search` when it starts: every change takes
   effect after a restart of Hermes or Hermes Desktop, and both the CLI and the page say
   so.
+
+### Browser history switches (2026-10-24)
+
+The two switches of §"History for Hermes" from the Desktop page: `history_enabled`
+(Hermes uses the browser history at all) and `history_tools_enabled` (the two lookup
+tools; off keeps the automatic blocks, so a chat can use the history hints without
+entering reader mode). Routes in `desktop/_maintenance_routes.py`, seams
+`_seams.activity_history` (`ActivityConfig.load(home, strict=True)`) and
+`_seams.set_history_switch` (`activity_cli.set_history_switch`).
+
+- **Never silent.** The page changes a switch only on an explicit button press; the
+  CLI equivalents are `activity use on|off` and `activity tools on|off`.
+- **API.** `GET /activity/history` answers `{"ok": true, "history": bool, "tools":
+  bool}`, read through the activity config loader only: it never opens the store, runs
+  the protection gate or prompts, and creates no file; a config.yaml that cannot be read
+  or parsed is `config_unreadable` (an absent one is the defaults). `POST
+  /activity/history` reads its body by hand (`read_object`); the body MUST be exactly
+  `{"history": bool}` or `{"tools": bool}` (one key, a JSON boolean, nothing else),
+  otherwise `invalid_body`. The write is the CLI's round-trip writer under the policy
+  write lock (one key changed, every other byte kept; a `plugins` or `mordred_activity`
+  value that is not a mapping or is shared through a YAML anchor is refused) in a worker
+  thread; a refused or failed write is `config_write_failed` (its type name only is
+  logged). Success answers the state read back, `{"ok": true, "history": bool, "tools":
+  bool, "restart_required": false}`: the activity hooks and tools re-read configuration
+  every turn or call. Closed codes: `config_unreadable`, `config_write_failed`.
+- **Status field.** `GET /status?client_version=4` carries `activity: {"history": bool
+  | null, "tools": bool | null, "source": "config" | "unreadable"}` on every platform
+  (`_status_v4.activity_safe`). It never fails the status: an unreadable config is
+  `{"history": null, "tools": null, "source": "unreadable"}`. Versions 1 to 3 do not
+  carry it.
+- **Page.** The Maintenance group shows a "Browser history" card (heading
+  `mordred-history`) right after Tool calls: "Hermes uses the browser history: on|off"
+  with "Turn history off|on", and "Lookup tools: on|off" with "Turn lookup tools
+  off|on" (disabled, with "Turn on the browser history first", while the history is
+  off). The copy says the automatic hints never restrict a chat; the lookup tools let
+  the model search the stored history, and a chat that used one is in reader mode (it
+  can only read, web use asks first) until a new chat; both switches act only while
+  `plugins.mordred_activity.enabled` is on and never stop recording; changes apply from
+  the next turn, and a chat keeps the lookup tools it started with. The state shown is
+  `status.activity` only, never a request's answer; a press sends one key and reads the
+  status again (buttons disabled under "Saving…"), then shows "Saved. Applies from the
+  next turn."; a refusal is a `StepFailure` alert with the card's own sentences
+  (`MESSAGES.history_config_unreadable`, `history_config_write_failed`). Null switches
+  show the unreadable sentence and no buttons; a status without `activity` shows
+  "Update Mordred to use this". The card is on the grouped page (macOS and Linux); the
+  Windows page is unchanged.
 
 ## Imported-message provenance evaluation (2026-10-22)
 

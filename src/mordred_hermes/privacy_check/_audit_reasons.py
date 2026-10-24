@@ -61,6 +61,7 @@ ReasonCode = Literal[
     "mordred.db_encryption.violation",
     "activity.capture_refused",
     "policy.egress.reader_mode",
+    "activity.history_unavailable",
 ]
 
 EgressRule = Literal[

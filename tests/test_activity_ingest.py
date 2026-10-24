@@ -129,6 +129,23 @@ def test_a_configured_excluded_site_refuses_the_whole_batch(tmp_path: Path) -> N
     assert not (tmp_path / "mordred.db").exists()
 
 
+@pytest.mark.parametrize("excluded", [["web.whatsapp.com", "not a host"], "web.whatsapp.com", [None]])
+def test_an_invalid_exclusion_list_refuses_every_batch_instead_of_recording_it(tmp_path: Path, excluded: Any) -> None:
+    write_config(tmp_path, {**ENABLED, "excluded_sites": excluded})
+    whatsapp = raw_event(1, action={"op": "navigate", "site": "web.whatsapp.com"})
+    for sent in (batch(whatsapp), batch(raw_event(2))):
+        reply = receiver(tmp_path).ingest(OPERATOR, sent)
+        assert reply == {"type": "activity_refused", "reason": "excluded_sites_invalid"}
+    assert not (tmp_path / "mordred.db").exists()
+    # Once it is fixed, the valid entry excludes again and everything else is recorded.
+    write_config(tmp_path, {**ENABLED, "excluded_sites": ["web.whatsapp.com"]})
+    assert receiver(tmp_path).ingest(OPERATOR, batch(whatsapp)) == {
+        "type": "activity_refused",
+        "reason": "source_excluded",
+    }
+    assert receiver(tmp_path).ingest(OPERATOR, batch(raw_event(3)))["type"] == "activity_ack"
+
+
 def test_no_site_is_excluded_by_default(tmp_path: Path) -> None:
     write_config(tmp_path, ENABLED)
     mail = raw_event(1, action={"op": "navigate", "site": "mail.google.com"})
@@ -208,7 +225,7 @@ def test_an_operator_correction_is_stored_as_a_raw_event_and_nothing_else(tmp_pa
     assert episode is not None and episode.has_correction is True
 
 
-def test_activity_register_is_a_documented_no_op(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_activity_register_only_wires_the_history_surfaces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import mordred_hermes.activity as activity
 
     calls: list[str] = []
@@ -221,5 +238,6 @@ def test_activity_register_is_a_documented_no_op(tmp_path: Path, monkeypatch: py
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     activity.register(Ctx())
 
-    assert calls == []
+    # The history hooks, the two lookup tools and the skill; no store is created at registration.
+    assert calls == ["register_hook", "register_hook", "register_tool", "register_skill"]
     assert not (tmp_path / "plugin-data").exists()

@@ -9,7 +9,8 @@ internet at the configured level:
 
 =============  ================================================================
 ``lockdown``   No internet from tools. Local tools and Mordred's own Telegram
-               tools (fixed Venice/loopback destination) only.
+               tools (fixed Venice/loopback destination) and browser-history
+               tools (local encrypted store) only.
 ``search``     ``lockdown`` + ``web_search``. No URL fetching,
                browsing, remote APIs, or arbitrary commands.
 ``ask``        (default) Tools work. ``web_search`` and local work run as
@@ -30,7 +31,8 @@ Rules that hold at every restricted level:
   reliably, so under ``lockdown`` and ``search`` only exact first-party
   read-only commands (``hermes-mordred telegram doctor`` ...) may run. A tool
   this module does not know is treated as internet-capable.
-- **Taint.** Once a session has read private data (the Telegram tools), that
+- **Taint.** Once a session has read private data (the Telegram tools, the
+  browser-history lookup tools), that
   session is raised to ``lockdown`` for the rest of its life: a search query
   is an exfiltration channel too. Delegation is refused for a tainted session
   because a child agent would start untainted, and tools that write plaintext
@@ -38,7 +40,8 @@ Rules that hold at every restricted level:
   memory only.
 
 **Reader mode** holds at every level, ``off`` included. Once a session has
-read imported private history (:data:`READER_TOOLS`), text from that history
+read private history (:data:`READER_TOOLS`: imported messages or the browser
+history), text from that history
 must never trigger an action: only the read-only tools in
 :data:`READER_ALLOWED` keep running (under the level's normal rules), web
 access (:data:`READER_WEB_TOOLS`) always asks the user, and every other tool
@@ -121,9 +124,18 @@ LOCAL_TOOLS = frozenset(
         "desktop_project",
     }
 )
-# Tools that read imported private history (Telegram, the imported-message
-# store) into the session. Calling one puts the session into reader mode.
-READER_TOOLS = frozenset({"telegram_ask", "telegram_chats", "mordred_history_search"})
+# Tools that read private history into the session: the Telegram tools, the
+# imported-message search and the browser-history lookup tools (which can
+# return typed text, page text and query strings). Calling one puts the
+# session into reader mode. Mordred's automatic history blocks (the navigation
+# block in a browser result and the turn-start context) are not tool calls and
+# do not enter reader mode: by construction they carry no typed text and no
+# page text (only task and correction text attributed to the user, page titles
+# inside Hermes's untrusted wrapper, routes, outcomes and times; see SPEC
+# "History for Hermes").
+TELEGRAM_TOOLS = frozenset({"telegram_ask", "telegram_chats"})
+BROWSER_HISTORY_TOOLS = frozenset({"mordred_browser_history", "mordred_browser_history_episode"})
+READER_TOOLS = TELEGRAM_TOOLS | frozenset({"mordred_history_search"}) | BROWSER_HISTORY_TOOLS
 # Fetches new mail into the encrypted store; arguments carry no session data
 # and the result carries counts only, so it is not a reader tool.
 MAIL_SYNC_TOOL = "mordred_mail_sync"
@@ -509,7 +521,7 @@ def _preview(value: Any) -> str:
 
 
 def _ask(tool: str, where: str, what: Any, rule_key: str, *, tainted: bool) -> Decision:
-    warning = "This chat has read your private (Telegram) data. " if tainted else ""
+    warning = "This chat has read your private data (Telegram or browser history). " if tainted else ""
     return Decision(
         allow=False,
         approve=True,

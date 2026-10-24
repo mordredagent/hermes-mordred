@@ -4,7 +4,9 @@ Configuration and the protection gate are evaluated on **every** call, so
 disabling collection, disarming encryption or losing the key refuses the next
 batch without touching the WebSocket session. Refusal order:
 
-1. collection disabled (``enabled`` and ``collection_enabled`` both required);
+1. collection disabled (``enabled`` and ``collection_enabled`` both required),
+   or ``excluded_sites_invalid`` (an invalid ``excluded_sites`` refuses every
+   batch rather than recording what it meant to exclude);
 2. batch envelope (schema, producer, event count, canonical size);
 3. per-event normalization — one excluded, oversized or malformed event refuses the batch;
 4. sequence order within the batch;
@@ -19,7 +21,7 @@ Corrections are stored like every other event; nothing is derived from a
 batch. After a successful append the receiver runs one bounded retention
 pass, at most once per ``retention_interval_s`` per store path (design:
 Database and encryption lifecycle); its outcome never changes the ack, which
-is for the append. A collection-disabled or store refusal is audited as
+is for the append. A collection or store refusal is audited as
 ``activity.capture_refused`` once per process and code.
 """
 
@@ -81,9 +83,10 @@ class StoreReceiver:
 
     def ingest(self, principal: PeerPrincipal, batch: Mapping[str, Any]) -> dict[str, Any]:
         config = self._config_loader(self._home)
-        if not config.collecting:
-            audit_capture_refused("collection_disabled", peer_id=principal.peer_id)
-            return _refused("collection_disabled")
+        refusal = config.collection_refusal
+        if refusal is not None:  # off, or an invalid excluded_sites that must never mean "exclude less"
+            audit_capture_refused(refusal, peer_id=principal.peer_id)
+            return _refused(refusal)
         try:
             envelope = check_batch_envelope(
                 batch, max_events=config.max_batch_events, max_bytes_raw=config.max_batch_bytes
