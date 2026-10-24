@@ -148,7 +148,7 @@ with ExitStack() as eligibility:
             eligibility.enter_context(patch('mordred_hermes.dbcrypt._windows_vfs.NATIVE_QUALIFIED', True))
         else:
             from mordred_hermes.dbcrypt._windows_vfs import NATIVE_QUALIFIED
-            assert kind == 'production' and NATIVE_QUALIFIED, 'unpatched production admission required' 
+            assert kind == 'production' and NATIVE_QUALIFIED, 'unpatched production admission required'
     run()
 
 """

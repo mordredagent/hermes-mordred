@@ -12,6 +12,33 @@ import pytest
 from tests._dbcrypt_support import acceptance_tool
 
 
+@pytest.fixture(autouse=True)
+def _native_unit_tripwires(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    from mordred_hermes.keyvault import _memory_key, _seckey_helper, _windows_custody, wrap
+    from mordred_hermes.wizard import memory_cli
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("native entrypoint invoked by a unit contract test")
+
+    monkeypatch.setattr(_seckey_helper, "_run_helper", forbidden)
+    monkeypatch.setattr(_memory_key, "linux_memory_backend", forbidden)
+    monkeypatch.setattr(_windows_custody, "windows_backend", forbidden)
+    monkeypatch.setattr(memory_cli, "enable", forbidden)
+    monkeypatch.setattr(wrap, "generate_wrapping_key", forbidden)
+    monkeypatch.setattr(wrap, "unwrap_dek", forbidden)
+    monkeypatch.setattr(wrap, "get_wrapping_key_public", forbidden)
+    original = subprocess.run
+
+    def guarded(argv, *args, **kwargs):
+        if "_dbcrypt_acceptance_native.py" in " ".join(str(item) for item in argv):
+            forbidden()
+        return original(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", guarded)
+
+
 def bundle_fixture(tmp_path: Path) -> tuple[object, Path, dict]:
     """Internally consistent synthetic files; no package/native proof is claimed."""
     tool = acceptance_tool("dbcrypt_acceptance")
@@ -606,16 +633,32 @@ def test_native_phase_inputs_require_explicit_mode_kind_bundle_and_helper(tmp_pa
 @pytest.mark.parametrize("when,outcome", [("teardown", "failed"), ("setup", "skipped"), ("call", "failed")])
 def test_native_pytest_report_rejects_nonpassing_lifecycle(tmp_path: Path, when: str, outcome: str) -> None:
     tool = acceptance_tool("dbcrypt_acceptance")
-    report = {"nodeids": ["test_x.py::test_native"], "deselected": [], "collection_errors": [], "exitstatus": 0,
-              "reports": [{"nodeid": "test_x.py::test_native", "when": stage, "outcome": outcome if stage == when else "passed"} for stage in ("setup", "call", "teardown")]}
+    report = {
+        "nodeids": ["test_x.py::test_native"],
+        "deselected": [],
+        "collection_errors": [],
+        "exitstatus": 0,
+        "reports": [
+            {"nodeid": "test_x.py::test_native", "when": stage, "outcome": outcome if stage == when else "passed"}
+            for stage in ("setup", "call", "teardown")
+        ],
+    }
     with pytest.raises(tool.AcceptanceRefused, match="native_test_results_incomplete"):
         tool.validate_native_test_report(report)
 
 
 def test_native_pytest_report_requires_all_collected_nodes_and_nonzero_collection() -> None:
     tool = acceptance_tool("dbcrypt_acceptance")
-    for value in ({"nodeids": [], "reports": [], "exitstatus": 0, "collection_errors": [], "deselected": []},
-                  {"nodeids": ["test_x.py::test_native"], "reports": [], "exitstatus": 0, "collection_errors": [], "deselected": []}):
+    for value in (
+        {"nodeids": [], "reports": [], "exitstatus": 0, "collection_errors": [], "deselected": []},
+        {
+            "nodeids": ["test_x.py::test_native"],
+            "reports": [],
+            "exitstatus": 0,
+            "collection_errors": [],
+            "deselected": [],
+        },
+    ):
         with pytest.raises(tool.AcceptanceRefused, match="native_test_results_incomplete"):
             tool.validate_native_test_report(value)
 
@@ -633,8 +676,18 @@ def test_native_roots_are_separate_and_task7_cannot_receive_persistence_root(tmp
 
 def test_native_reopen_requires_mode_boot_and_public_source_continuity() -> None:
     tool = acceptance_tool("dbcrypt_acceptance")
-    baseline = {"mode": "source", "bundle_manifest_sha256": "a" * 64, "fixture": {"root": {"file_id": "1"}, "source": {"generation": "g"}}, "logical": {"session": "b" * 64}, "boot": {"identity": "boot-1"}}
-    for change, observation in [({"mode": "wheel"}, "process_restart"), ({"boot": {"identity": "boot-1"}}, "os_reboot"), ({"logical": {"session": "c" * 64}}, "process_restart")]:
+    baseline = {
+        "mode": "source",
+        "bundle_manifest_sha256": "a" * 64,
+        "fixture": {"root": {"file_id": "1"}, "source": {"generation": "g"}},
+        "logical": {"session": "b" * 64},
+        "boot": {"identity": "boot-1"},
+    }
+    for change, observation in [
+        ({"mode": "wheel"}, "process_restart"),
+        ({"boot": {"identity": "boot-1"}}, "os_reboot"),
+        ({"logical": {"session": "c" * 64}}, "process_restart"),
+    ]:
         with pytest.raises(tool.AcceptanceRefused, match="native_reopen_continuity_failed"):
             tool.validate_reopen_continuity(baseline, {**baseline, **change}, observation)
 
@@ -649,16 +702,25 @@ def test_native_verify_does_not_compare_controller_spool_inode_with_guest(tmp_pa
 
 def test_candidate_command_plans_exclude_production_only_activity_gate(tmp_path: Path) -> None:
     tool = acceptance_tool("dbcrypt_acceptance")
-    rows = tool.native_acceptance_commands(checkout=tmp_path / "checkout", bundle=tmp_path / "bundle", platform="linux", kind="candidate")
+    rows = tool.native_acceptance_commands(
+        checkout=tmp_path / "checkout", bundle=tmp_path / "bundle", platform="linux", kind="candidate"
+    )
     assert not any("test_dbcrypt_activity.py" in " ".join(row.get("argv", [])) for row in rows)
-    assert any(row.get("status") == "not_run_requires_production_activation" and row["suite"] == "dbcrypt-activity" for row in rows)
-    production = tool.native_acceptance_commands(checkout=tmp_path / "checkout", bundle=tmp_path / "bundle", platform="linux", kind="production")
+    assert any(
+        row.get("status") == "not_run_requires_production_activation" and row["suite"] == "dbcrypt-activity"
+        for row in rows
+    )
+    production = tool.native_acceptance_commands(
+        checkout=tmp_path / "checkout", bundle=tmp_path / "bundle", platform="linux", kind="production"
+    )
     assert any(row.get("env", {}).get("MORDRED_DBCRYPT_ACTIVITY_NATIVE_TEST") == "1" for row in production)
 
 
 def test_windows_candidate_requires_raw_qualification_rows_not_a_passed_boolean(tmp_path: Path) -> None:
     tool = acceptance_tool("dbcrypt_acceptance")
-    (tmp_path / "manifest.json").write_text(json.dumps({"schema": 1, "kind": "windows_vfs_qualification", "passed": True}))
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"schema": 1, "kind": "windows_vfs_qualification", "passed": True})
+    )
     with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
         tool.validate_windows_qualification(tmp_path, checkout=tmp_path)
 
@@ -671,7 +733,9 @@ def test_native_helper_digest_accepts_synthetic_rows_only_and_rejects_secret_fie
     spec = importlib.util.spec_from_file_location("native_acceptance_helper", path)
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
-    assert helper.logical_digest([{"id": "synthetic", "text": "日本語"}]) == helper.logical_digest([{"text": "日本語", "id": "synthetic"}])
+    assert helper.logical_digest([{"id": "synthetic", "text": "日本語"}]) == helper.logical_digest(
+        [{"text": "日本語", "id": "synthetic"}]
+    )
     with pytest.raises(ValueError, match="synthetic_record_fields_only"):
         helper.logical_digest([{"id": "synthetic", "app_password": "must-not-hash"}])
 
@@ -683,6 +747,89 @@ def test_native_collector_module_exists_and_has_explicit_integration_optin() -> 
     assert path.is_file(), "real native collector gate is missing"
     source = path.read_text()
     ast.parse(source)
-    assert 'MORDRED_DBCRYPT_COLLECTORS_TEST' in source
+    assert "MORDRED_DBCRYPT_COLLECTORS_TEST" in source
     assert "pytest.mark.integration" in source
     assert "_dbcrypt_acceptance_native" in source
+
+
+def test_missing_native_interface_refuses_before_provider_or_memory_calls(tmp_path: Path, monkeypatch) -> None:
+    import runpy
+
+    from mordred_hermes.keyvault import _database_authority
+
+    helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
+    monkeypatch.setattr(_database_authority, "require_database_memory_enabled", None)
+    with pytest.raises(RuntimeError, match="integrated_native_memory_and_none_conversion_contract_required"):
+        helper["native_facts"](tmp_path)
+
+
+def test_native_child_diagnostics_never_export_exception_secrets(monkeypatch, capsys) -> None:
+    import runpy
+
+    helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
+
+    def secret_failure(_name):
+        raise RuntimeError("mustnotexportsecret")
+
+    helper["main"].__globals__["operation"] = secret_failure
+    assert helper["main"]("read") == 2
+    output = capsys.readouterr().out
+    assert "mustnotexportsecret" not in output and "app_password" not in output
+    assert json.loads(output)["reason"] == "native_operation_failed"
+
+
+def test_damaging_native_operation_refuses_persistence_before_any_product_import(tmp_path, monkeypatch) -> None:
+    import runpy
+
+    helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
+    root = tmp_path / "mordred-dbcrypt-source-persistence"
+    root.mkdir()
+    monkeypatch.setenv("MORDRED_DBCRYPT_COLLECTORS_TEST", "1")
+    monkeypatch.setenv("MORDRED_DBCRYPT_TEST_ROOT", str(root))
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    for operation in ("negative", "backup_restore"):
+        with pytest.raises(RuntimeError, match="damaging_operations_require_separate_negative_root"):
+            helper["operation"](operation)
+
+
+def test_offline_verify_ignores_guest_bundle_environment(tmp_path: Path, monkeypatch) -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    root = tmp_path / "mordred-dbcrypt-private-spool"
+    root.mkdir(mode=0o700)
+    monkeypatch.setenv("DBCRYPT_BUNDLE", "/guest-only-path-not-on-controller")
+    output = tmp_path / "verify.json"
+    assert tool.run_acceptance(root=root, phase="verify", output=output) == 2
+    assert json.loads(output.read_text())["reasons"] == ["missing_production_matrix"]
+
+
+def test_phase_success_boolean_cannot_replace_executed_rows(tmp_path: Path) -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    value = {
+        "schema_version": 2,
+        "status": "production_native_passed",
+        "acceptance_kind": "production",
+        "bootstrap": "automatic_production",
+        "native_rows_complete": True,
+        "executions": [{"returncode": 0}],
+        "mode": "wheel",
+        "platform": "linux",
+        "observation": "provision",
+    }
+    with pytest.raises(tool.AcceptanceRefused, match="native_phase_evidence_incomplete"):
+        tool.validate_native_phase_evidence(value, directory=tmp_path)
+
+
+def test_logical_digest_rejects_nested_data_even_under_a_public_field() -> None:
+    import runpy
+
+    helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
+    with pytest.raises(ValueError, match="synthetic_record_fields_only"):
+        helper["logical_digest"]([{"id": "fixed", "text": {"app_password": "not-synthetic-content"}}])
+
+
+def test_source_native_run_refuses_checkout_head_drift_before_probe(monkeypatch, tmp_path: Path) -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    monkeypatch.setattr(tool, "_git", lambda *_args: "different-source-head")
+    context = {"mode": "source", "manifest": {"checkout": str(tmp_path), "commit": "a" * 40}}
+    with pytest.raises(tool.AcceptanceRefused, match="source_checkout_changed_since_bundle"):
+        tool.require_native_source_checkout(context)
