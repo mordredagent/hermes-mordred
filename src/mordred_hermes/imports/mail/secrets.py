@@ -26,7 +26,7 @@ import secrets as _secrets
 import stat
 import struct
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -78,6 +78,36 @@ class MailSecretsError(RuntimeError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+@contextlib.contextmanager
+def _mail_native_refusals() -> Iterator[None]:
+    """Normalize expected custody refusals without granting or retrying authority.
+
+    Public setup consumers already sanitize MailSecretsError through their
+    MailSetupError/sever_chain boundary. Keep cancellation and corrupt wraps
+    distinct from unavailable native ownership, just as the portable path does.
+    """
+    from ..._config_io import PolicyPendingError
+    from ..._database_contracts import DatabaseRefused
+    from ..._private_fs import PrivateFSError
+    from ...keyvault._exceptions import WrapAuthCancelled, WrapError, WrapIntegrityError, WrapParseError
+    from ...keyvault._windows_profile import CustodyError
+    from ...keyvault.wrap import NativeBackendError
+
+    try:
+        yield
+    except WrapAuthCancelled:
+        code = "tee_auth_cancelled"
+    except (WrapIntegrityError, WrapParseError):
+        code = "secrets_corrupt"
+    except (WrapError, NativeBackendError, DatabaseRefused, CustodyError):
+        code = "tee_unavailable"
+    except (PrivateFSError, PolicyPendingError):
+        code = "store_path_unsafe"
+    else:
+        return
+    raise MailSecretsError(code) from None
 
 
 @dataclass(frozen=True)
@@ -285,6 +315,10 @@ class MailSecretStore:
         return self._windows_store
 
     def load_snapshot(self) -> tuple[MailCredentials | None, Any]:
+        with _mail_native_refusals():
+            return self._load_snapshot()
+
+    def _load_snapshot(self) -> tuple[MailCredentials | None, Any]:
         self._check_platform()
         if self._platform() == "win32":
             return self._windows().load_snapshot()
@@ -315,13 +349,14 @@ class MailSecretStore:
                 self._audit_sink(entry)
 
     def forget_from_snapshot(self, snapshot: tuple[MailCredentials | None, Any]) -> bool:
-        from ...keyvault._mail_custody import check_snapshot_home
-        from .imap_sync import mail_writer_scope
+        with _mail_native_refusals():
+            from ...keyvault._mail_custody import check_snapshot_home
+            from .imap_sync import mail_writer_scope
 
-        home = self._profile_home()
-        check_snapshot_home(snapshot[1], home)
-        with mail_writer_scope(home):
-            return self._forget_from_snapshot(snapshot)
+            home = self._profile_home()
+            check_snapshot_home(snapshot[1], home)
+            with mail_writer_scope(home):
+                return self._forget_from_snapshot(snapshot)
 
     def _forget_from_snapshot(self, snapshot: tuple[MailCredentials | None, Any]) -> bool:
         if self._platform() == "win32":
@@ -369,20 +404,22 @@ class MailSecretStore:
         return self._dir(create=False) / _KEY_RECORD_NAME
 
     def _prepare_setup(self, *, require_presence: bool) -> None:
-        if self._platform() == "win32":
-            if require_presence:
-                raise MailSecretsError("presence_unsupported")
-            self._windows().prepare_setup()
+        with _mail_native_refusals():
+            if self._platform() == "win32":
+                if require_presence:
+                    raise MailSecretsError("presence_unsupported")
+                self._windows().prepare_setup()
 
     def ensure_key(self, *, require_presence: bool = True, replace: bool = False) -> bool | None:
-        self._check_platform()
-        self._prepare_setup(require_presence=require_presence)
-        if self._platform() == "win32" or self._native():
-            from .imap_sync import mail_writer_scope
+        with _mail_native_refusals():
+            self._check_platform()
+            self._prepare_setup(require_presence=require_presence)
+            if self._platform() == "win32" or self._native():
+                from .imap_sync import mail_writer_scope
 
-            with mail_writer_scope(self._profile_home()):
-                return self._ensure_key(require_presence=require_presence, replace=replace)
-        return self._ensure_key(require_presence=require_presence, replace=replace)
+                with mail_writer_scope(self._profile_home()):
+                    return self._ensure_key(require_presence=require_presence, replace=replace)
+            return self._ensure_key(require_presence=require_presence, replace=replace)
 
     def _ensure_key(self, *, require_presence: bool = True, replace: bool = False) -> bool | None:
         """Make sure the Enclave key exists; return its EFFECTIVE Touch ID policy, ``None`` when unknown.
@@ -525,14 +562,17 @@ class MailSecretStore:
         return self.load_snapshot()[0]
 
     def store(self, value: MailCredentials, *, require_presence: bool = True) -> None:
-        self._check_platform()
-        if self._platform() == "win32" or self._native():
-            from .imap_sync import mail_writer_scope
+        with _mail_native_refusals():
+            self._check_platform()
+            if self._platform() == "win32" and require_presence:
+                raise MailSecretsError("presence_unsupported")
+            if self._platform() == "win32" or self._native():
+                from .imap_sync import mail_writer_scope
 
-            with mail_writer_scope(self._profile_home()):
+                with mail_writer_scope(self._profile_home()):
+                    self._store(value, require_presence=require_presence)
+            else:
                 self._store(value, require_presence=require_presence)
-        else:
-            self._store(value, require_presence=require_presence)
 
     def _store(self, value: MailCredentials, *, require_presence: bool = True) -> None:
         """Seal ``value`` (replacing any earlier credentials) and write the non-secret flags.
@@ -595,6 +635,10 @@ class MailSecretStore:
             raise
 
     def flags(self) -> dict[str, Any] | None:
+        with _mail_native_refusals():
+            return self._flags()
+
+    def _flags(self) -> dict[str, Any] | None:
         """Non-secret flags, or ``None`` when no credentials are sealed. Never touches the Enclave.
 
         A sealed file whose flags are missing, unreadable or invalid raises
@@ -687,13 +731,14 @@ class MailSecretStore:
             return True  # cannot tell: never report a clean directory
 
     def forget(self) -> bool:
-        self._check_platform()
-        if self._platform() == "win32" or self._native():
-            from .imap_sync import mail_writer_scope
+        with _mail_native_refusals():
+            self._check_platform()
+            if self._platform() == "win32" or self._native():
+                from .imap_sync import mail_writer_scope
 
-            with mail_writer_scope(self._profile_home()):
-                return self._forget()
-        return self._forget()
+                with mail_writer_scope(self._profile_home()):
+                    return self._forget()
+            return self._forget()
 
     def _forget(self) -> bool:
         """Delete the sealed file, the flags and the Enclave key, whatever the flags say (absent is fine).
@@ -730,6 +775,12 @@ class MailSecretStore:
 
 
 def setup_generation(home: Path) -> str:
+    """Read checked setup metadata through the public mail refusal boundary."""
+    with _mail_native_refusals():
+        return _setup_generation(home)
+
+
+def _setup_generation(home: Path) -> str:
     """Read the checked public setup generation without creating any files."""
     from ..._private_fs import PrivateFSError, open_private_directory
     from ...keyvault._mail_custody import read
@@ -748,6 +799,12 @@ def setup_generation(home: Path) -> str:
 
 
 def new_setup_generation(home: Path) -> str:
+    """Publish checked setup metadata through the public mail refusal boundary."""
+    with _mail_native_refusals():
+        return _new_setup_generation(home)
+
+
+def _new_setup_generation(home: Path) -> str:
     """Publish a checked private random token; it survives credential retirement."""
     from ..._private_fs import open_private_directory
     from ...keyvault._mail_custody import publish

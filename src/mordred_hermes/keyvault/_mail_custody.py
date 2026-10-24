@@ -528,8 +528,10 @@ class WindowsMailStore:
     def store(self, value: MailCredentials, *, require_presence: bool) -> None:
         import secrets
 
-        from ..imports.mail.secrets import _pack, encode
+        from ..imports.mail.secrets import MailSecretsError, _pack, encode
 
+        if require_presence:
+            raise MailSecretsError("presence_unsupported")
         with self._session() as session:
             lease, backend = self._role(session)
             with session.canonical.publication_receipt() as receipt, self._transaction(create=True) as tx:

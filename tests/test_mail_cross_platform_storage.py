@@ -6,7 +6,7 @@ from dataclasses import replace
 import pytest
 
 from mordred_hermes._database_contracts import DatabaseRefused
-from mordred_hermes.imports.mail.secrets import KEY_ID, MailSecretStore
+from mordred_hermes.imports.mail.secrets import KEY_ID, MailSecretsError, MailSecretStore
 from mordred_hermes.keyvault import wrap
 from tests._activity_protection import native_root as native_root
 from tests._activity_protection import protected_runtime as protected_runtime
@@ -71,7 +71,7 @@ def test_forget_stale_setup_preserves_replacement(tmp_path, change):
         from mordred_hermes.keyvault._seckey_backend import _SecKeyBackend
 
         store._native_backend = _SecKeyBackend(ops=native.ops, sw_ops=None, legacy_ops=None)
-    with pytest.raises(DatabaseRefused):
+    with pytest.raises(MailSecretsError, match=r"^tee_unavailable$"):
         store.forget_from_snapshot(snapshot)
     assert "delete" not in native.calls
     assert (tmp_path / "mordred/mail/credentials.sealed").exists()
@@ -150,7 +150,7 @@ def test_windows_mail_stale_authentication_retains_source(fs, change):
         with c.windows_custody_session(home, backend=backend) as session:
             session.enroll_role("mail", retain_current=True)
     calls = list(backend.calls)
-    with pytest.raises(DatabaseRefused):
+    with pytest.raises(MailSecretsError, match=r"^tee_unavailable$"):
         store.forget_from_snapshot(snapshot)
     assert [call for call in backend.calls[len(calls) :] if call[0] == "delete"] == []
     assert store.sealed_path.exists()
@@ -190,7 +190,7 @@ def test_native_policy_record_is_checked_not_followed(tmp_path):
     store, _native = native_store(tmp_path)
     store.ensure_key(require_presence=False)
     os.link(store.key_record_path, tmp_path / "policy-alias")
-    with pytest.raises((OSError, DatabaseRefused)):
+    with pytest.raises(MailSecretsError, match=r"^store_path_unsafe$"):
         store.ensure_key(require_presence=False)
 
 
@@ -371,7 +371,7 @@ def test_deleted_posix_journal_resumes_without_unwrap_or_native_delete(tmp_path,
             raise OSError("injected after acknowledged publication")
 
     monkeypatch.setattr(_mail_custody, "publish", interrupted)
-    with pytest.raises(OSError):
+    with pytest.raises(MailSecretsError, match=r"^store_path_unsafe$"):
         store.forget()
     monkeypatch.setattr(_mail_custody, "publish", original)
     calls = list(native.calls)
@@ -440,7 +440,7 @@ def test_absent_native_key_does_not_hide_orphan_metadata(tmp_path):
     store.forget()
     with open_private_directory(store.meta_path.parent) as directory, directory.transaction() as tx:
         publish(tx, META, b'{"account":"mail"}')
-    with pytest.raises(DatabaseRefused):
+    with pytest.raises(MailSecretsError, match=r"^tee_unavailable$"):
         store.forget()
     assert store.residue()
 
@@ -460,7 +460,7 @@ def test_public_forget_resumes_acknowledged_cleanup(tmp_path, monkeypatch):
             raise OSError("injected after acknowledgement")
 
     monkeypatch.setattr(_mail_custody, "publish", interrupted)
-    with pytest.raises(OSError):
+    with pytest.raises(MailSecretsError, match=r"^store_path_unsafe$"):
         store.forget()
     monkeypatch.setattr(_mail_custody, "publish", original)
     calls = list(native.calls)
@@ -471,3 +471,142 @@ def test_public_forget_resumes_acknowledged_cleanup(tmp_path, monkeypatch):
     done = forget(store, tmp_path, open_store=unavailable)
     assert done.key_gone and not store.residue()
     assert native.calls == calls
+
+
+@pytest.mark.parametrize("failure", ["native", "custody", "flags", "generation"])
+def test_native_setup_refusal_scrubs_password_bearing_inner_frames(tmp_path, monkeypatch, failure):
+    from mordred_hermes.imports.mail.setup_flow import MailSetupError, MailSetupFlows
+    from mordred_hermes.keyvault._exceptions import WrapNativeUnavailable
+    from tests._mail_sync_helpers import PASSWORD, secrets_in_traceback
+
+    store, _native = native_store(tmp_path)
+    error = WrapNativeUnavailable if failure == "native" else DatabaseRefused
+
+    def refused(*args, **kwargs):
+        raise error("synthetic native refusal")
+
+    if failure in {"flags", "generation"}:
+        from mordred_hermes.keyvault import _mail_custody
+
+        original = _mail_custody.read
+
+        def changed(directory, name):
+            if name == (_mail_custody.JOURNAL if failure == "flags" else _mail_custody.GENERATION):
+                raise DatabaseRefused("synthetic changed metadata")
+            return original(directory, name)
+
+        monkeypatch.setattr(_mail_custody, "read", changed)
+    else:
+        monkeypatch.setattr(wrap, "generate_wrapping_key", refused)
+    flow = MailSetupFlows(store, home=lambda: tmp_path)
+    with pytest.raises(MailSetupError) as caught:
+        flow.start(address="owner@example.com", imap_host="imap.example.com", app_password=PASSWORD, presence=False)
+    assert caught.value.code == ("store_path_unsafe" if failure == "generation" else "tee_unavailable")
+    assert secrets_in_traceback(caught.value, PASSWORD) == []
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    frames = []
+    trace = caught.value.__traceback__
+    while trace is not None:
+        frames.append(trace.tb_frame.f_code.co_name)
+        trace = trace.tb_next
+    assert "_start" not in frames and "_fresh_key" not in frames
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        ("WrapAuthCancelled", "tee_auth_cancelled"),
+        ("WrapNativeUnavailable", "tee_unavailable"),
+        ("WrapParseError", "secrets_corrupt"),
+        ("WrapIntegrityError", "secrets_corrupt"),
+    ],
+)
+def test_native_load_and_sync_preserve_refusal_taxonomy(tmp_path, monkeypatch, failure, expected):
+    from mordred_hermes.imports.mail.imap_sync import FetchOptions, run_fetch
+    from mordred_hermes.imports.mail.secrets import MailSecretsError
+    from mordred_hermes.keyvault import _exceptions
+    from tests._mail_sync_helpers import generic_server, make_env, make_store
+
+    store, _native = native_store(tmp_path)
+    store.ensure_key(require_presence=False)
+    store.store(generic_creds())
+    sealed = store.sealed_path.read_bytes()
+
+    def refused(*args, **kwargs):
+        raise getattr(_exceptions, failure)("synthetic private native detail")
+
+    monkeypatch.setattr(wrap, "unwrap_dek", refused)
+    with pytest.raises(MailSecretsError) as caught:
+        store.load()
+    assert caught.value.code == expected and str(caught.value) == expected
+    db = make_store(tmp_path, tmp_path)
+    result = run_fetch(FetchOptions(), make_env(tmp_path, db, generic_server(), store))
+    assert result.error == expected
+    from mordred_hermes.imports.mail.forget import MailForgetError, forget
+
+    with pytest.raises(MailForgetError) as forgotten:
+        forget(store, tmp_path, open_store=lambda _home: db)
+    assert forgotten.value.code == expected
+    assert store.sealed_path.read_bytes() == sealed
+
+
+def test_windows_store_custody_failure_reaches_sanitized_setup_error(fs, monkeypatch):
+    from mordred_hermes.imports.mail.setup_flow import MailSetupError, MailSetupFlows
+    from mordred_hermes.keyvault._mail_custody import WindowsMailStore
+    from mordred_hermes.keyvault._windows_profile import CustodyError
+    from tests._mail_sync_helpers import PASSWORD, gmail_server, secrets_in_traceback
+
+    _c, _, home, backend = fs
+    store = MailSecretStore(
+        home / "mordred/mail", backend_factory=lambda: backend, platform=lambda: "win32", audit_sink=lambda _e: None
+    )
+    store.ensure_key(require_presence=False)
+
+    def refused(*args, **kwargs):
+        raise CustodyError("synthetic custody refusal")
+
+    monkeypatch.setattr(WindowsMailStore, "store", refused)
+    server = gmail_server()
+    flow = MailSetupFlows(store, home=lambda: home, connect=lambda _host, _port: server.session())
+    with pytest.raises(MailSetupError) as caught:
+        flow.start(address="owner@example.com", imap_host="imap.example.com", app_password=PASSWORD, presence=False)
+    assert caught.value.code == "tee_unavailable"
+    assert secrets_in_traceback(caught.value, PASSWORD) == []
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+
+
+@pytest.mark.parametrize("entry", ["public", "internal"])
+def test_windows_store_presence_refuses_before_files_or_native_discovery(tmp_path, entry):
+    from mordred_hermes.keyvault._mail_custody import WindowsMailStore
+
+    if entry == "public":
+        store = MailSecretStore(
+            tmp_path / "mordred/mail",
+            platform=lambda: "win32",
+            backend_factory=lambda: pytest.fail("native discovery preceded presence refusal"),
+        )
+    else:
+        store = WindowsMailStore(tmp_path, backend=None, audit_sink=lambda _e: None)
+    with pytest.raises(MailSecretsError, match=r"^presence_unsupported$"):
+        store.store(generic_creds(), require_presence=True)
+    assert not (tmp_path / "mordred").exists()
+
+
+@pytest.mark.parametrize("entry", ["public", "internal"])
+def test_windows_store_presence_refusal_preserves_source_and_native_calls(fs, entry):
+    _c, _, home, backend = fs
+    store = MailSecretStore(
+        home / "mordred/mail", platform=lambda: "win32", backend_factory=lambda: backend, audit_sink=lambda _e: None
+    )
+    store.ensure_key(require_presence=False)
+    store.store(generic_creds(), require_presence=False)
+    before = {path.name: path.read_bytes() for path in (store.sealed_path, store.meta_path)}
+    calls = list(backend.calls)
+    target = store if entry == "public" else store._windows()
+    with pytest.raises(MailSecretsError, match=r"^presence_unsupported$"):
+        target.store(replace(generic_creds(), app_password="replacement"), require_presence=True)
+    assert backend.calls == calls
+    assert {path.name: path.read_bytes() for path in (store.sealed_path, store.meta_path)} == before
+    replacement = replace(generic_creds(), app_password="explicit-machine-bound-replacement")
+    store.store(replacement, require_presence=False)
+    assert store.load() == replacement
