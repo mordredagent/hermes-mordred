@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -233,3 +234,66 @@ def test_detached_supervisor_survives_worker_exit_and_source_change(tmp_path: Pa
                 process.terminate()
         except psutil.Error:
             pass
+
+
+def test_inflight_start_cannot_outlive_verified_stop(tmp_path: Path) -> None:
+    _module, clock, cloud, control = controller()
+    path = tmp_path / "receipt.json"
+    control.arm(path, instance=INSTANCE, deadline=clock.now() + 180)
+    control.record_heartbeat(path, pid=os.getpid())
+    entered, release, stop_returned = threading.Event(), threading.Event(), threading.Event()
+    original_start = cloud.start
+    errors = []
+
+    def delayed_start(instance: str) -> None:
+        entered.set()
+        assert release.wait(5)
+        original_start(instance)
+
+    def start() -> None:
+        try:
+            control.start(path)
+        except Exception as exc:
+            errors.append(exc)
+
+    def stop() -> None:
+        try:
+            control.stop(path)
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            stop_returned.set()
+
+    cloud.start = delayed_start
+    starter = threading.Thread(target=start)
+    stopper = threading.Thread(target=stop)
+    starter.start()
+    assert entered.wait(5)
+    stopper.start()
+    try:
+        assert not stop_returned.wait(0.2), "stop must not release ownership while start is in flight"
+    finally:
+        release.set()
+        starter.join(5)
+        stopper.join(5)
+    assert not starter.is_alive() and not stopper.is_alive() and not errors
+    assert cloud.state == "stopped" and cloud.owner is None
+
+
+def test_slow_admission_rechecks_deadline_before_start(tmp_path: Path) -> None:
+    module, clock, cloud, control = controller()
+    path = tmp_path / "receipt.json"
+    control.arm(path, instance=INSTANCE, deadline=clock.now() + 180)
+    control.record_heartbeat(path, pid=os.getpid())
+    original_claim = cloud.claim
+
+    def slow_claim(instance: str, owner: str) -> None:
+        original_claim(instance, owner)
+        clock.sleep(121)
+
+    cloud.claim = slow_claim
+    with pytest.raises(module.ControlRefused, match="deadline"):
+        control.start(path)
+    assert cloud.starts == 0
+    control.watch(path)
+    assert cloud.state == "stopped" and cloud.owner is None

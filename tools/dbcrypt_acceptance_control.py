@@ -290,12 +290,15 @@ class Controller:
                 raise ControlRefused("instance_owner_changed")
             value.update(start_requested=True, state="start_intent")
             _write(path, value)  # Durable before the possibly ambiguous start RPC.
-        self.cloud.start(value["instance"])
-        with _receipt_lock(path):
-            value = self._read(path)
-            if value["state"] == "start_intent":
-                value["state"] = "running"
+            if self.now() >= value["deadline"] - STOP_MARGIN:
+                value["state"] = "stopping"
                 _write(path, value)
+                raise ControlRefused("deadline_refuses_start_after_admission")
+            # The bounded RPC remains inside the receipt lock: the supervisor
+            # cannot release ownership and exit before an in-flight start lands.
+            self.cloud.start(value["instance"])
+            value["state"] = "running"
+            _write(path, value)
         return value
 
     def stop(self, path: Path) -> dict[str, Any]:
