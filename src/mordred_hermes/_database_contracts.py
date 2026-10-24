@@ -46,6 +46,12 @@ class Inventory:
     complete: bool
 
 
+class GuardedConnection(Protocol):
+    """Held SQL objects own rollback/close when their authority is revoked."""
+
+    def invalidate(self) -> None: ...
+
+
 class NativeDatabaseLock(Protocol):
     identity: RootIdentity
 

@@ -108,6 +108,38 @@ def register(ctx: object) -> None:
     register_hooks(ctx)
 
 
+def _native_home(home: Path | None) -> tuple[Path, Path]:
+    from .._home import hermes_home
+    from ..keyvault._database_authority import resolve_database_domain
+
+    requested = home or hermes_home()
+    if requested.exists():
+        return requested, resolve_database_domain(requested).root
+    return requested, root_home(requested)
+
+
+def _install_native(base: Path, key_provider: KeyProvider) -> bool:
+    """Admit native intent before any recovery writes; keep its sole runtime lease."""
+    from . import _migrate, _shim
+
+    try:
+        marker_path(base).lstat()
+    except FileNotFoundError:
+        return False
+    # Offline recovery/adoption owns journal and generation changes, before a
+    # runtime is acquired. Unsafe marker entries also pass through checked reads.
+    try:
+        key_provider()
+        if _migrate.journal_path(base).is_file():
+            raise _migrate.MigrationError("database recovery must complete before native startup")
+        module = _shim.build_module(key=key_provider, home=lambda: base, has_key=lambda: key_provider() is not None)
+        _shim.install_module(module)
+        return True
+    except BaseException:
+        key_provider.close()
+        raise
+
+
 def install(*, home: Path | None = None, provider: KeyProvider | None = None) -> bool:
     """Swap ``sqlite3`` for SQLCipher if database encryption is armed. Returns whether it did.
 
@@ -120,7 +152,7 @@ def install(*, home: Path | None = None, provider: KeyProvider | None = None) ->
     # and a lifetime reader lease would prevent their own offline conversion.
     if _maintenance_process():
         return False
-    base = home or _home()
+    base = root_home(home or _home())
     if sys.platform != "darwin":
         if protected_state_present(base):
             raise RuntimeError(
@@ -134,8 +166,15 @@ def install(*, home: Path | None = None, provider: KeyProvider | None = None) ->
     if _shim.is_installed():
         return True
     global _PROVIDER
-    _PROVIDER = provider or KeyProvider()
-    key_provider = _PROVIDER
+    if provider is None:
+        requested_home, base = _native_home(home)
+        _PROVIDER = KeyProvider(home=requested_home)
+        key_provider = _PROVIDER
+        if _install_native(base, key_provider):
+            return True
+    else:
+        _PROVIDER = provider
+        key_provider = provider
     _migrate.resume_at_startup(base)
     _run_pending_conversion(base, key_provider)
     _run_pending_decryption(base, key_provider)
