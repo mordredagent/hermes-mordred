@@ -255,7 +255,7 @@ def _check_database(record: _OwnerRecord, lease: ExclusiveLease | None) -> None:
     if record.facts.database_home is not None:
         if lease is None:
             raise DatabaseRefused("native memory deletion requires a preceding database lease")
-        from mordred_hermes._database_mutation import _assert_memory_database_mutation_safe
+        from ._database_mutation import _assert_memory_database_mutation_safe
 
         _assert_memory_database_mutation_safe(home=record.facts.database_home, database_lease=lease)
 

@@ -12,6 +12,7 @@ import tempfile
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
+from .._custody_order import custody_scope
 from . import _storage, wrap
 from ._exceptions import WrapError, WrapKeyNotFound
 from .memory_crypto import MemoryCryptoError, decode_key, looks_like_magic_line, unseal
@@ -57,6 +58,12 @@ def _private_parent(home: Path, *, create: bool = False) -> Path:
 @contextlib.contextmanager
 def memory_key_lock(home: Path) -> Iterator[None]:
     """Serialize provisioning and lifecycle operations within a profile."""
+    with custody_scope(), _memory_key_lock(home):
+        yield
+
+
+@contextlib.contextmanager
+def _memory_key_lock(home: Path) -> Iterator[None]:
     try:
         parent = memory_key_path(home).parent
         parent.mkdir(parents=True, mode=0o700, exist_ok=True)

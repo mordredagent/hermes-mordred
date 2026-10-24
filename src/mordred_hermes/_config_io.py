@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeVar
 
+from ._custody_order import custody_scope
 from ._private_fs import (
     ConfidentialDirectory,
     ConfidentialTransaction,
@@ -210,6 +211,15 @@ def _nested_session(
 @contextmanager
 def canonical_session(
     paths: CanonicalPaths, *, scope: Literal["home", "policy"], create: bool = False, blocking: bool = True
+) -> Iterator[CanonicalSession]:
+    # Include mutex wait and nested/borrowed canonical sessions in the order.
+    with custody_scope(), _canonical_session(paths, scope=scope, create=create, blocking=blocking) as session:
+        yield session
+
+
+@contextmanager
+def _canonical_session(
+    paths: CanonicalPaths, *, scope: Literal["home", "policy"], create: bool, blocking: bool
 ) -> Iterator[CanonicalSession]:
     if scope not in ("home", "policy"):
         raise ValueError("unknown canonical scope")

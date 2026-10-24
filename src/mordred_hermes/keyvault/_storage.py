@@ -49,6 +49,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from .._custody_order import custody_scope
 from .._home import hermes_home as _hermes_home
 
 _META_VERSION = 1
@@ -838,7 +839,7 @@ def keyvault_lifecycle_lock(root: Path) -> Iterator[None]:
     refuse_unported_on_windows("secret_store", "keyvault_lifecycle_lock")  # before any I/O or mkdir (C5e)
     _refresh_process_lock_state()
     thread_lock = _LIFECYCLE_THREAD_LOCK
-    with thread_lock:
+    with custody_scope(), thread_lock:
         lock_path = root.parent / ".keyvault.lifecycle.lock"
         ensure_lock_file(lock_path)
         with _advisory_file_lock(lock_path, label="keyvault lifecycle lock"):

@@ -168,6 +168,21 @@ def acquire_exclusive(root: Path, *, timeout: float = 0.0) -> Iterator[Exclusive
             native.close()
 
 
+def current_thread_exclusive_leases() -> tuple[ExclusiveLease, ...]:
+    """Observe live EX registry objects only; never call native checks or I/O."""
+    pid, thread = os.getpid(), threading.get_ident()
+    with _LOCK:
+        return tuple(
+            lease
+            for owner, lease, _depth in _WRITERS.values()
+            if owner == thread
+            and lease is not None
+            and not lease._closed
+            and lease._pid == pid
+            and lease._thread == thread
+        )
+
+
 def _after_fork() -> None:
     global _LOCK
     for handle in tuple(_HANDLES):

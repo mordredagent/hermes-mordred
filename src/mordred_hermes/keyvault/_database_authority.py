@@ -15,13 +15,14 @@ import re
 import secrets
 import sys
 from collections.abc import Iterator
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from .._database_contracts import DatabaseRefused, NativeSnapshot, RootIdentity, decode_database_source_binding
 from .._database_lifecycle import ExclusiveLease
 from .._private_fs import PrivateFSError, open_private_directory
+from .._private_fs._types import validate_leaf
 from . import wrap
 
 if TYPE_CHECKING:
@@ -44,20 +45,76 @@ def _refusal() -> Iterator[None]:
 
 
 def _root(root: Path) -> tuple[Path, RootIdentity]:
-    absolute = root.absolute()
-    # Root resolution belongs above this API. Reject both lexical and resolved
-    # child spelling; never silently select a child's independent custody.
-    if absolute.parent.name.casefold() == "profiles":
+    domain = resolve_database_domain(root)
+    if domain.home != domain.root:
         raise DatabaseRefused("database source requires the resolved root home")
-    if absolute != absolute.resolve(strict=True):
-        raise DatabaseRefused("database source requires a canonical physical root")
+    return domain.root, domain.identities[0]
+
+
+@dataclass(frozen=True)
+class CheckedDatabaseDomain:
+    """Physical identity observations; no key material or authority assertions."""
+
+    home: Path
+    root: Path
+    identities: tuple[RootIdentity, ...]
+
+
+def _identify_database_home(path: Path) -> RootIdentity:
     if sys.platform == "win32":
         from .._database_locking_windows import identify_root
     elif sys.platform in {"linux", "darwin"}:
         from .._database_locking_posix import identify_root
     else:
-        raise DatabaseRefused("native database source platform is unsupported")
-    return absolute, identify_root(absolute)
+        raise DatabaseRefused("database domain platform is unsupported")
+    return identify_root(path)
+
+
+def _database_domain_paths(home: Path) -> tuple[Path, ...]:
+    if home.name.casefold() == "profiles":
+        raise DatabaseRefused("profile container is not a database home")
+    if home.parent.name.casefold() != "profiles":
+        return (home,)
+    if home.parent.name != "profiles":
+        raise DatabaseRefused("ambiguous profile container spelling")
+    validate_leaf(home.name)
+    if home.name.endswith((" ", ".")) or "~" in home.name:
+        raise DatabaseRefused("ambiguous profile home component")
+    root = home.parent.parent
+    if any(part.casefold() == "profiles" for part in root.parts):
+        raise DatabaseRefused("ambiguous nested profile domain")
+    return root, home.parent, home
+
+
+def resolve_database_domain(home: Path) -> CheckedDatabaseDomain:
+    """Resolve an existing physical home or checked root/profiles/name domain.
+
+    A profile's physical ownership does not establish historical key independence.
+    All callers therefore guard its actual root until authenticated adoption.
+    """
+    with _refusal():
+        if ".." in home.parts:
+            raise DatabaseRefused("database home contains a parent alias")
+        absolute = home.absolute()
+        if absolute != absolute.resolve(strict=True):
+            raise DatabaseRefused("database home must use its canonical physical path")
+        paths = _database_domain_paths(absolute)
+        root = paths[0]
+        before = tuple(_identify_database_home(path) for path in paths)
+        if root != absolute:
+            binding = absolute / "mordred" / _BINDING
+            # Presence, including an unsafe link, is enough to refuse a child's
+            # attempt to publish root authority. Do not parse it as an exemption.
+            try:
+                binding.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise DatabaseRefused("profile child cannot own a root database source binding")
+        after = tuple(_identify_database_home(path) for path in paths)
+        if after != before or absolute != absolute.resolve(strict=True):
+            raise DatabaseRefused("database home relationship changed")
+        return CheckedDatabaseDomain(absolute, root, before)
 
 
 def _digest(identity: RootIdentity, provider: str, metadata: dict[str, object], wrapped: bytes) -> str:

@@ -353,7 +353,9 @@ def test_owner_requires_final_database_guard_before_delete(owned_native, monkeyp
             raise DatabaseRefused("dependency appeared")
 
     monkeypatch.setitem(
-        sys.modules, "mordred_hermes._database_mutation", SimpleNamespace(_assert_memory_database_mutation_safe=guard)
+        sys.modules,
+        "mordred_hermes.keyvault._database_mutation",
+        SimpleNamespace(_assert_memory_database_mutation_safe=guard),
     )
     with (
         deletion._owned_delete_scope(owner, backend=backend, database_lease=object()) as permit,
