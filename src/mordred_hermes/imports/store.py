@@ -1271,18 +1271,33 @@ class ImportStore:
         rows = [_values(part, _PART_FIELDS) for part in msg.parts]
         conn.executemany(f"INSERT INTO import_parts ({_PART_COLUMNS}) VALUES ({_marks(len(rows[0]))})", rows)
 
-    def delete_source(self, source: Source | str, source_account: str) -> int:
+    def delete_source(
+        self, source: Source | str, source_account: str, *, expected_retired_account: str | None = None
+    ) -> int:
         """Delete one account's conversations, messages, parts, references and own addresses; returns messages deleted.
 
         Runs with ``PRAGMA secure_delete = ON`` and the FTS index's
         ``secure-delete`` option, so freed pages are zeroed and no index tokens remain.
         ``import_mail_refs`` rows of the deleted messages go too (and any left
         without a message), so no referenced Message-ID survives.
+
+        ``expected_retired_account`` binds Telegram storage forget to its
+        observed retirement marker, checked and removed in this transaction.
         """
         value = _source_value(source)
+        if expected_retired_account is not None and (
+            value != Source.TELEGRAM.value or source_account != expected_retired_account
+        ):
+            raise ImportRefused("conflict")
         convs = "SELECT conv_uid FROM import_conversations WHERE source = ? AND source_account = ?"
         key = (value, source_account)
         with self._transaction(secure_delete=True) as conn:
+            if expected_retired_account is not None:
+                marker = conn.execute(
+                    "SELECT value FROM import_meta WHERE key = ?", (TELEGRAM_RETIRED_ACCOUNT,)
+                ).fetchone()
+                if marker != (expected_retired_account,):
+                    raise ImportRefused("conflict")
             for table in ("import_parts", "import_mail_refs"):
                 conn.execute(
                     f"DELETE FROM {table} WHERE source_uid IN "
@@ -1295,6 +1310,8 @@ class ImportStore:
             )
             conn.execute("DELETE FROM import_conversations WHERE source = ? AND source_account = ?", key)
             conn.execute("DELETE FROM import_accounts WHERE source = ? AND account = ?", key)
+            if expected_retired_account is not None:
+                conn.execute("DELETE FROM import_meta WHERE key = ?", (TELEGRAM_RETIRED_ACCOUNT,))
         return int(deleted)
 
     # --- reads (committed runs only) -----------------------------------------------------

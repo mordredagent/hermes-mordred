@@ -61,6 +61,7 @@ from .history import (
     ImportSink,
     ImportStoreOpener,
     dialog_rows,
+    ensure_history_authority,
     list_conversations,
     load_ask_records,
     open_history_store,
@@ -346,7 +347,7 @@ class TelegramService:
         return hermes_home()
 
     def _select_sink(self, store: ArchiveStore, index: ArchiveIndex) -> ArchiveSink | ImportSink:
-        """``ImportSink`` iff the index is retired to ``mordred.db``, or it is fresh on macOS and the gate passes."""
+        """``ImportSink`` iff the index is retired to ``mordred.db``, or it is fresh and the shared gate passes."""
         return select_sink(store, index, home=self._profile_home(), opener=self._import_store_opener)
 
     @property
@@ -407,6 +408,7 @@ class TelegramService:
         return dialog_rows(convs[:_MAX_DIALOGS_LISTED])
 
     async def dialogs(self) -> list[dict[str, Any]]:
+        await asyncio.to_thread(ensure_history_authority, self._profile_home())
         await asyncio.to_thread(self._memory_guard)
         value = await self._load_secrets()
         if value is None:
@@ -467,6 +469,7 @@ class TelegramService:
         try:
             if not self._installed():
                 raise TelegramServiceError("telegram_not_installed")
+            await asyncio.to_thread(ensure_history_authority, self._profile_home())
             await asyncio.to_thread(self._memory_guard)
             value = await self._load_secrets(fresh=True)
             if value is None:
@@ -623,6 +626,7 @@ class TelegramService:
         given) receives the report.
         """
         question = validate_question(request.question)
+        await asyncio.to_thread(ensure_history_authority, self._profile_home())
         await asyncio.to_thread(self._memory_guard)
         # A fresh Enclave unwrap for every question; nothing is cached.
         value = await self._load_secrets(fresh=True)

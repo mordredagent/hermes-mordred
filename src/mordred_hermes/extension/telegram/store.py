@@ -106,6 +106,45 @@ def _checked(call: Callable[[], _T], *, lock: bool = False) -> _T:
         raise _store_error(exc, lock=lock) from exc
 
 
+def _read_private_archive(root: Path, rel: str) -> bytes | None:
+    """A bounded POSIX archive snapshot through checked, pinned directory handles.
+
+    Unlike a transaction, read-only directory admission creates no lock or
+    metadata files. Disappearance/replacement after the first leaf observation
+    is unsafe, while an initially absent archive or segment is ordinary absence.
+    """
+    from ..._private_fs import open_private_directory
+    from ._windows_archive import MAX_FILE_BYTES, _split, missing
+
+    path, name = _split(root, rel)
+    with contextlib.ExitStack() as stack:
+        try:
+            parent = stack.enter_context(open_private_directory(root))
+            parent.directory_identity()
+            directory = parent if path == root else stack.enter_context(open_private_directory(path))
+            directory.directory_identity()
+            before = directory.stat(name)
+        except PrivateFSError as exc:
+            if exc.reason == "missing" and exc.operation == "directory_identity":
+                raise PrivateFSError("unsafe", "telegram_read_changed") from exc
+            if missing(exc):
+                return None
+            raise
+        if before.size > MAX_FILE_BYTES:
+            raise PrivateFSError("unsafe", "telegram_read_limit")
+        try:
+            data = directory.read_bytes(name, max_bytes=MAX_FILE_BYTES)
+            if len(data) != before.size or directory.stat(name) != before:
+                raise PrivateFSError("unsafe", "telegram_read_changed")
+            directory.directory_identity()
+            parent.directory_identity()
+        except PrivateFSError as exc:
+            if missing(exc):
+                raise PrivateFSError("unsafe", "telegram_read_changed") from exc
+            raise
+        return data
+
+
 @dataclass
 class StoredMessage:
     id: int
@@ -142,6 +181,38 @@ def telegram_dir() -> Path:
     from ..._home import hermes_home
 
     return hermes_home() / "mordred" / "telegram"
+
+
+def forget_telegram_storage(*, home: Path, remove_records: bool) -> int:
+    """Delete only the retirement-bound account's imported rows; return messages deleted.
+
+    No record request performs no I/O. Missing/invalid bindings refuse when
+    Telegram history exists. Credentials and the shared database generation
+    belong to separate authorities and are never removed here.
+    """
+    if not remove_records:
+        return 0
+    from ...imports.records import Source
+    from ...imports.store import TELEGRAM_RETIRED_ACCOUNT, ImportRefused, open_import_store
+
+    imported = open_import_store(home)
+    account = imported.get_meta(TELEGRAM_RETIRED_ACCOUNT)
+    with imported.connection() as conn:
+        accounts = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT DISTINCT source_account FROM import_conversations WHERE source = 'telegram'"
+            )
+        }
+    valid = account is not None and account.isascii() and account.isdecimal() and int(account) > 0
+    if not valid:
+        if accounts or account is not None:
+            raise ImportRefused("conflict")
+        return 0
+    assert account is not None
+    if accounts and account not in accounts:
+        raise ImportRefused("conflict")
+    return imported.delete_source(Source.TELEGRAM, account, expected_retired_account=account)
 
 
 _GITIGNORE = b"# Mordred Telegram archive: encrypted, never version-controlled.\n*\n"
@@ -262,14 +333,8 @@ class ArchiveStore:
 
             checked = _checked(lambda: _windows_archive.read_archive_file(self._root, rel))
             return None if checked is None else self._decode(name, checked)
-        path = self._root / rel
-        if path.is_symlink():
-            raise StoreError("store_path_unsafe")
-        try:
-            blob = path.read_bytes()
-        except FileNotFoundError:
-            return None
-        return self._decode(name, blob)
+        blob = _checked(lambda: _read_private_archive(self._root, rel))
+        return None if blob is None else self._decode(name, blob)
 
     # -- naming -------------------------------------------------------------
 

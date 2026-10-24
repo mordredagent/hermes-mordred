@@ -33,8 +33,8 @@ never overwritten: a later sync may have advanced its cursor.
 
 Everything reported is a count or a code, never a dialog id, title, name or
 text. Commit and finalize hold the archive's sync lock (``sync_in_progress``
-while a sync runs). The import store is macOS-only, so the store gate refuses
-every step elsewhere (``unsupported_platform``); :func:`finalize` checks again.
+while a sync runs). Shared database admission decides supported platforms;
+Windows finalization uses checked, identity-bound segment deletion.
 """
 
 from __future__ import annotations
@@ -77,6 +77,7 @@ __all__ = [
     "error_code",
     "execute",
     "finalize",
+    "migrate_telegram_store",
     "open_store",
     "plan_migration",
     "run_migration",
@@ -388,26 +389,83 @@ def run_migration(
     """Write the archive under ONE import run; ``commit=True`` publishes it and retires ``index.enc``."""
     with contextlib.ExitStack() as stack:
         if commit:
-            stack.enter_context(archive.locked())  # no sync appends to .enc meanwhile
-        index = archive.load_index()
-        view = _migratable(index)
-        run_id = store.run_begin(Source.TELEGRAM, dry_run=not commit)
-        totals: Counter[str] = Counter()
-        try:
-            totals, created = _write_dialogs(archive, store, view, run_id, stamp=int(clock()))
-            store.run_commit(run_id, _run_counts(totals))  # a dry run only records its counts
-        except BaseException:
-            with contextlib.suppress(Exception):
-                store.run_fail(run_id, _run_counts(totals))
-            raise
-        retired = index.retired_to is not None
-        if commit:
-            _settle_counts(store, created)
-            if not retired:
-                archive.save_index(replace(index, retired_to=RETIRED_TO_IMPORT_STORE))
-                retired = True
-            _mark_retired(store, view.account_id)
+            stack.enter_context(archive.locked())
+        return _run_migration_locked(archive, store, commit=commit, clock=clock)
+
+
+def _run_migration_locked(
+    archive: ArchiveStore, store: ImportStore, *, commit: bool, clock: Callable[[], float]
+) -> MigrationResult:
+    index = archive.load_index()
+    view = _migratable(index)
+    run_id = store.run_begin(Source.TELEGRAM, dry_run=not commit)
+    totals: Counter[str] = Counter()
+    try:
+        totals, created = _write_dialogs(archive, store, view, run_id, stamp=int(clock()))
+        store.run_commit(run_id, _run_counts(totals))  # a dry run only records its counts
+    except BaseException:
+        with contextlib.suppress(Exception):
+            store.run_fail(run_id, _run_counts(totals))
+        raise
+    retired = index.retired_to is not None
+    if commit:
+        _settle_counts(store, created)
+        if not retired:
+            archive.save_index(replace(index, retired_to=RETIRED_TO_IMPORT_STORE))
+            retired = True
+        _mark_retired(store, view.account_id)
     return MigrationResult(committed=commit, retired=retired, counts=_run_counts(totals))
+
+
+def _migration_secrets(home: Path) -> Any:
+    """Existing credential role, explicitly bound to the requested home; never enroll."""
+    if _platform() == "win32":
+        from .windows_secrets import WindowsCustodySecretStore
+
+        return WindowsCustodySecretStore(home)
+    from .tee import TeeSecretStore
+
+    return TeeSecretStore(home / "mordred" / "telegram")
+
+
+def _verify_source(archive: ArchiveStore) -> None:
+    """Authenticate every indexed encrypted segment before any destination is created."""
+    index = _migratable(archive.load_index())
+    for dialog_id in sorted(index.dialogs):
+        _rows, unreadable = _segments(archive, dialog_id)
+        if unreadable:
+            raise StoreError("store_undecryptable")
+
+
+def migrate_telegram_store(source: Path, *, home: Path) -> int:
+    """Import the home's existing encrypted archive; return newly inserted messages.
+
+    Accepts the canonical archive directory or its index. Root database
+    admission precedes credential custody, while source authentication precedes
+    creating mordred.db. No credentials are written or removed; repeated imports
+    return zero and the legacy migration APIs retain their dry-run behavior.
+    """
+    from ...activity._gate import check_protection, runtime_authority
+
+    root = home / "mordred" / "telegram"
+    if not home.is_absolute() or ".." in home.parts or source not in (root, root / "index.enc"):
+        raise StoreError("store_path_unsafe")
+    refused = check_protection(home)
+    if refused is not None:
+        raise ImportRefused(refused.code)
+    authority = runtime_authority(home)  # root shared lease before credential/archive locks
+    with authority.operation():
+        value = _migration_secrets(home).load(fresh=True)
+        if value is None:
+            raise MigrationError("telegram_not_configured")
+        archive = ArchiveStore(value.store_key, root)
+        del value
+        _verify_source(archive)  # wrong key cannot even create the archive lock
+        with archive.locked():
+            _verify_source(archive)  # recheck after lock acquisition before initializing the store
+            imported = open_store(home)
+            result = _run_migration_locked(archive, imported, commit=True, clock=time.time)
+        return result.counts["inserted"]
 
 
 def _mark_retired(store: ImportStore, account_id: int) -> None:
@@ -446,6 +504,12 @@ def _verify(archive: ArchiveStore, store: ImportStore, index: ArchiveIndex) -> d
 
 def _delete_segments(root: Path) -> int:
     """Delete ``dialogs/*.enc`` (and stale ``*.tmp``) under the held lock; ``index.enc`` is untouched."""
+    from .store import _checked, _windows
+
+    if _windows():
+        from ._windows_archive import delete_segments
+
+        return _checked(lambda: delete_segments(root))
     dialogs = root / "dialogs"
     if dialogs.is_symlink() or not dialogs.is_dir():
         return 0
@@ -461,8 +525,6 @@ def _delete_segments(root: Path) -> int:
 
 def finalize(archive: ArchiveStore, store: ImportStore) -> FinalizeResult:
     """Delete the ``.enc`` message segments once mordred.db holds every archived message."""
-    if _platform() == "win32":
-        raise MigrationError("unsupported_platform")  # the import store is macOS-only
     with archive.locked():
         index = archive.load_index()
         if index.retired_to is None:

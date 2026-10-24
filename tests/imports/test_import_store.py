@@ -864,3 +864,78 @@ def test_readonly_replacement_after_admission_revokes_held_reader(protected_runt
         reader.status()
     assert provider.current_authority.terminal
     reader.close()
+
+
+@pytest.mark.parametrize("marker", [None, "other-account"])
+def test_delete_source_retirement_guard_refuses_before_deletion(tmp_path: Path, marker: str | None) -> None:
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(1, text="guarded history")])
+    if marker is not None:
+        store.set_meta(store_module.TELEGRAM_RETIRED_ACCOUNT, marker)
+    with pytest.raises(ImportRefused):
+        store.delete_source("telegram", OWNER_ID, expected_retired_account=OWNER_ID)
+    assert store.contains([tg_uid(1)]) == {tg_uid(1)}
+    assert store.get_meta(store_module.TELEGRAM_RETIRED_ACCOUNT) == marker
+
+
+def test_delete_source_checks_retirement_marker_inside_transaction(tmp_path: Path, monkeypatch) -> None:
+    from contextlib import contextmanager
+
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(1)])
+    store.set_meta(store_module.TELEGRAM_RETIRED_ACCOUNT, OWNER_ID)
+    original_transaction = store._transaction
+
+    @contextmanager
+    def replacement(**kwargs):
+        # A different writer wins after the caller's observation, before BEGIN.
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE import_meta SET value = 'new-account' WHERE key = ?", (store_module.TELEGRAM_RETIRED_ACCOUNT,)
+            )
+        with original_transaction(**kwargs) as conn:
+            yield conn
+
+    monkeypatch.setattr(store, "_transaction", replacement)
+    with pytest.raises(ImportRefused):
+        store.delete_source("telegram", OWNER_ID, expected_retired_account=OWNER_ID)
+    monkeypatch.setattr(store, "_transaction", original_transaction)
+    assert store.contains([tg_uid(1)]) == {tg_uid(1)}
+    assert store.get_meta(store_module.TELEGRAM_RETIRED_ACCOUNT) == "new-account"
+
+
+def test_delete_source_marker_failure_rolls_back_rows_and_marker(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(1, text="retained history")])
+    store.set_meta(store_module.TELEGRAM_RETIRED_ACCOUNT, OWNER_ID)
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TRIGGER refuse_retirement_delete BEFORE DELETE ON import_meta "
+            "BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END"
+        )
+    with pytest.raises(ImportRefused):
+        store.delete_source("telegram", OWNER_ID, expected_retired_account=OWNER_ID)
+    assert store.contains([tg_uid(1)]) == {tg_uid(1)}
+    assert store.get_meta(store_module.TELEGRAM_RETIRED_ACCOUNT) == OWNER_ID
+
+
+def test_delete_source_removes_retirement_binding_with_rows(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(1)])
+    commit(store, mail_conv(), [mail_message("m1@example.com", "mail stays")])
+    store.set_meta(store_module.TELEGRAM_RETIRED_ACCOUNT, OWNER_ID)
+    assert store.delete_source("telegram", OWNER_ID, expected_retired_account=OWNER_ID) == 1
+    assert store.get_meta(store_module.TELEGRAM_RETIRED_ACCOUNT) is None
+    assert store.contains([mail_uid("m1@example.com")]) == {mail_uid("m1@example.com")}
+
+
+@pytest.mark.parametrize(("source", "account"), [("mail", OWNER_ID), ("telegram", "different")])
+def test_delete_source_retirement_guard_cannot_target_another_source_or_account(
+    tmp_path: Path, source: str, account: str
+) -> None:
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(1)])
+    store.set_meta(store_module.TELEGRAM_RETIRED_ACCOUNT, OWNER_ID)
+    with pytest.raises(ImportRefused):
+        store.delete_source(source, account, expected_retired_account=OWNER_ID)
+    assert store.contains([tg_uid(1)]) == {tg_uid(1)}

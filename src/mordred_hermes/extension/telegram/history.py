@@ -19,11 +19,12 @@ Selection (:func:`select_sink`, called by the service before connecting):
 1. an index retired to ``mordred.db`` (version 2) always uses the import store;
    when the gate or the store refuses, the sync refuses with
    ``import_store_unavailable`` and never falls back to ``.enc``;
-2. an index without dialogs on macOS goes straight to ``mordred.db`` when
+2. an index without dialogs goes straight to ``mordred.db`` when
    :func:`~mordred_hermes.imports.store.open_import_store` succeeds, and the
    index is rewritten as version 2 at once (no dual write);
-3. everything else (Linux, Windows, archives that already hold dialogs) stays
-   on ``.enc`` until ``telegram migrate-store --commit``.
+3. archives that already hold dialogs, and fresh homes whose shared gate is
+   unsupported or not armed, stay on ``.enc`` until migration. Other shared
+   store refusals fail closed instead of selecting a different destination.
 
 Every refusal becomes a content-free :class:`~.store.StoreError` code
 (``import_store_unavailable``, ``account_mismatch``, ``import_record_invalid``);
@@ -98,6 +99,7 @@ __all__ = [
     "StoreProbe",
     "SyncSink",
     "dialog_rows",
+    "ensure_history_authority",
     "forget_imported_history",
     "list_conversations",
     "load_ask_records",
@@ -499,6 +501,26 @@ def _default_opener(home: Path) -> ImportStore:
     return open_import_store(home)
 
 
+def ensure_history_authority(home: Path) -> None:
+    """Foreground admission before memory/Telegram custody; passive checks never call this.
+
+    Unmanaged or unqualified homes retain their legacy archive path. An armed
+    shared store must authenticate the installed provider before acquiring any
+    component custody or archive lock, and an unavailable store cannot fall back.
+    """
+    from ...activity._gate import check_protection, runtime_authority
+
+    found = check_protection(home)
+    if found is not None:
+        if found.code in NO_STORE_CODES:
+            return
+        raise StoreError("import_store_unavailable")
+    try:
+        runtime_authority(home)
+    except Exception:
+        raise StoreError("import_store_unavailable") from None
+
+
 def open_history_store(home: Path, opener: ImportStoreOpener | None = None) -> ImportStore:
     """The gated import store for a retired index; any refusal is ``import_store_unavailable``."""
     probe = probe_history_store(home, opener)
@@ -559,13 +581,16 @@ def select_sink(
     """The sink for this sync (see the module docstring); may rewrite a fresh index as version 2."""
     if index.retired_to is not None:
         return ImportSink(open_history_store(home, opener), clock=clock)
-    if index.dialogs or _platform() != "darwin":
+    if index.dialogs:
         return ArchiveSink(archive)
     try:
         store = (opener or _default_opener)(home)
-    except Exception as exc:  # gate refused (not armed, no key, ...): this account stays on .enc
-        _log.info("telegram sync stays on the archive (%s)", getattr(exc, "code", type(exc).__name__))
-        return ArchiveSink(archive)
+    except Exception as exc:
+        code = getattr(exc, "code", type(exc).__name__)
+        _log.info("telegram shared store refused (%s)", code)
+        if isinstance(exc, ImportRefused) and exc.code in NO_STORE_CODES:
+            return ArchiveSink(archive)
+        raise StoreError("import_store_unavailable") from None
     index.retired_to = RETIRED_TO_IMPORT_STORE
     archive.save_index(index)  # version 2 before the first write: an older Mordred refuses this account
     return ImportSink(store, clock=clock)

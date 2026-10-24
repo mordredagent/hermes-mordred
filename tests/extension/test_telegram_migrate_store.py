@@ -408,12 +408,12 @@ def test_finalize_wipes_segments_only_and_keeps_the_retired_index(
     assert migrate.finalize(archive, imports).segments_deleted == 0  # idempotent
 
 
-def test_finalize_is_refused_on_windows(
+def test_finalize_uses_the_admitted_store_without_an_os_refusal(
     archive: store.ArchiveStore, imports: ImportStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    migrate.run_migration(archive, imports, commit=True)
     monkeypatch.setattr(migrate, "_platform", lambda: "win32")
-    with pytest.raises(migrate.MigrationError, match="unsupported_platform"):
-        migrate.finalize(archive, imports)
+    assert migrate.finalize(archive, imports).messages == 6
 
 
 # -- CLI ---------------------------------------------------------------------------------------

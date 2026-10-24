@@ -514,17 +514,18 @@ def _search_archive(archive: ArchiveStore, request: SearchRequest, home: Path, p
 async def search_service(service: TelegramService, request: SearchRequest) -> SearchResult:
     """Run ``request`` over ``mordred.db`` and, only when needed, the service's ``.enc`` archive.
 
-    The memory guard runs first. The import store is probed without any
+    Root database admission precedes the memory guard. The store is probed without any
     Telegram credential, and the archive directory is only checked for an
     ``index.enc`` file; the credentials are unwrapped afresh (Touch ID unless
     disabled) on the legacy path only, and only the archive handle outlives
     the unwrap.
     """
-    from .history import probe_history_store, retired_account
+    from .history import ensure_history_authority, probe_history_store, retired_account
     from .service import TelegramServiceError
 
-    await asyncio.to_thread(service._memory_guard)
     home = service._profile_home()
+    await asyncio.to_thread(ensure_history_authority, home)
+    await asyncio.to_thread(service._memory_guard)
     probe = await asyncio.to_thread(probe_history_store, home, service._import_store_opener)
     archived = await asyncio.to_thread(_archive_present, service._archive_root)
     if probe.store is not None:
