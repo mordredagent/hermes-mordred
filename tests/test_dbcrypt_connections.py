@@ -641,3 +641,181 @@ def test_only_exact_guarded_factory_is_admitted(native_root, authority):
         assert conn.execute("SELECT 1").connection is conn
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("binding", ["cross-root", "root-to-profile", "profile-to-root"])
+def test_first_install_refuses_provider_from_another_home(native_root, monkeypatch, binding):
+    from mordred_hermes import dbcrypt
+    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes.dbcrypt import _shim
+    from mordred_hermes.dbcrypt._key import KeyProvider
+    from mordred_hermes.keyvault import _database_authority as custody
+    from mordred_hermes.keyvault import _memory_key as memory
+    from tests.test_dbcrypt_marker import encoded, put
+
+    root, backend, _, _ = native_root
+    requested, supplied = root, root / "profiles/work"
+    if binding == "profile-to-root":
+        requested, supplied = supplied, requested
+    elif binding == "cross-root":
+        supplied = root / "other-home"
+        supplied.mkdir(mode=0o700)
+        memory.ensure_linux_memory_key(home=supplied, backend=backend)
+        with acquire_exclusive(supplied) as lease:
+            snapshot = custody.enroll_database_source(root=supplied, lease=lease)
+        put(supplied, encoded(snapshot))
+    provider = KeyProvider(home=supplied)
+    published = []
+    monkeypatch.setattr(dbcrypt.sys, "platform", "darwin")
+    monkeypatch.setattr(dbcrypt.sys, "argv", ["hermes"])
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setattr(_shim, "install_module", published.append)
+    try:
+        with pytest.raises(DatabaseRefused):
+            dbcrypt.install(home=requested, provider=provider)
+        assert published == []
+        assert not (requested / "new.db").exists()
+        assert dbcrypt._PROVIDER is None
+    finally:
+        provider.close()
+
+
+def test_monitor_preserves_same_authority_exclusive_writer(native_root, authority):
+    from mordred_hermes.dbcrypt._monitor import monitor_runtime
+
+    path = native_root[0] / "state.db"
+    conn = opener()(path, authority=authority)
+    try:
+        conn.execute("CREATE TABLE records(value)")
+        assert conn.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
+        conn.execute("BEGIN EXCLUSIVE")
+        conn.execute("INSERT INTO records VALUES (2)")
+        findings = monitor_runtime(authority)
+        assert not authority.terminal
+        assert len(findings) == 1 and findings[0].code == "busy" and not findings[0].violation
+        assert conn.in_transaction
+        conn.commit()
+        assert monitor_runtime(authority) == ()
+        assert conn.execute("SELECT value FROM records").fetchall() == [(2,)]
+    finally:
+        conn.close()
+
+
+def test_monitor_preserves_external_exclusive_writer(native_root, authority):
+    from mordred_hermes.dbcrypt._monitor import monitor_runtime
+
+    root, _, material, _ = native_root
+    path = root / "state.db"
+    conn = opener()(path, authority=authority)
+    conn.execute("CREATE TABLE records(value)")
+    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.close()
+    code = """import sys
+import sqlcipher3.dbapi2 as sc
+from mordred_hermes.dbcrypt._key import derive
+from mordred_hermes.dbcrypt._shim import apply_key
+c = sc.connect(sys.argv[1], timeout=0)
+apply_key(c, derive(bytes.fromhex(sys.argv[2])))
+c.execute('BEGIN EXCLUSIVE')
+c.execute('INSERT INTO records VALUES (3)')
+print('locked', flush=True)
+sys.stdin.readline()
+c.commit()
+c.close()
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", code, str(path), material.hex()],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "HERMES_HOME": str(root)},
+    )
+    try:
+        assert process.stdout.readline().strip() == "locked"
+        findings = monitor_runtime(authority)
+        assert not authority.terminal
+        assert len(findings) == 1 and findings[0].code == "busy" and not findings[0].violation
+        # Admission callers also retain the driver's actual BUSY classification.
+        with pytest.raises(sc.OperationalError) as error:
+            opener()(path, authority=authority, readonly=True, timeout=0)
+        assert error.value.sqlite_errorcode & 255 == sc.SQLITE_BUSY
+    finally:
+        _, stderr = process.communicate("release\n", timeout=20)
+        assert process.returncode == 0, stderr
+    assert monitor_runtime(authority) == ()
+    assert raw_rows(path, derive(material)) == [(3,)]
+
+
+@pytest.mark.parametrize("fetched", [False, True])
+def test_closed_connection_retained_cursor_allows_normal_child_exit(native_root, fetched):
+    if not hasattr(os, "fork"):
+        pytest.skip("POSIX fork only")
+    root, _, material, _ = native_root
+    code = """import gc, os, sys
+from pathlib import Path
+from types import SimpleNamespace
+from mordred_hermes import _database_locking_posix as locks
+from mordred_hermes.keyvault import _database_authority as custody
+from mordred_hermes.dbcrypt import _authority
+from mordred_hermes.dbcrypt._connection import open_protected
+custody.sys = SimpleNamespace(platform='linux')
+locks.sys = SimpleNamespace(platform='linux')
+_authority.load_database_source = lambda **kw: bytes.fromhex(sys.argv[2])
+root = Path(sys.argv[1])
+authority = _authority.Authority.acquire(root)
+c = open_protected(root / 'fork.db', authority=authority)
+c.execute('CREATE TABLE records(value)')
+c.execute('INSERT INTO records VALUES (1)')
+cur = c.execute('SELECT value FROM records')
+if sys.argv[3] == 'True':
+ assert cur.fetchall() == [(1,)]
+c.close()
+authority.close()
+pid = os.fork()
+if pid == 0:
+ del cur, c, authority
+ gc.collect()
+ sys.exit(0)
+_, status = os.waitpid(pid, 0)
+assert os.waitstatus_to_exitcode(status) == 0, status
+print('closed handles permit normal child exit')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(root), material.hex(), str(fetched)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HERMES_HOME": str(root)},
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "closed handles permit normal child exit"
+    assert raw_rows(root / "fork.db", derive(material)) == []
+
+
+def test_vfs_registration_released_when_driver_connect_fails(native_root, authority, monkeypatch):
+    from types import SimpleNamespace
+
+    from mordred_hermes.dbcrypt import _connection, _windows_vfs
+
+    class NativeRegistration:
+        def __init__(self):
+            self.tokens = {17}
+
+        def mordred_vfs_close_root(self, token):
+            self.tokens.remove(token)
+            return 0
+
+    native = NativeRegistration()
+    registration = _windows_vfs.VfsRegistration(native, 17, native_root[0], sc)
+    # Exercise the Python ownership branch, never load/activate a native VFS.
+    # The actual driver rejects the deliberately unregistered VFS name.
+    monkeypatch.setattr(_connection, "os", SimpleNamespace(name="nt", getpid=os.getpid))
+    monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", True)
+    monkeypatch.setattr(_windows_vfs, "classify_windows_database", lambda *a, **kw: native_root[0])
+    monkeypatch.setattr(_windows_vfs, "register_checked_vfs", lambda *a, **kw: registration)
+    with pytest.raises((sc.OperationalError, DatabaseRefused)):
+        opener()(native_root[0] / "state.db", authority=authority)
+    assert native.tokens == set()
+    assert not (native_root[0] / "state.db").exists()
+    assert not authority.terminal

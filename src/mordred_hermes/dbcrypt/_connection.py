@@ -382,7 +382,6 @@ class ProtectedConnection:
         if self._closed:
             return
         self._closed = True
-        _LIVE_CONNECTIONS.discard(self)
         self._authority.unregister_connection(self)
         if self._pid != os.getpid():
             # Do not run inherited transactions, finalizers or C mutexes here.
@@ -393,9 +392,18 @@ class ProtectedConnection:
         try:
             self._raw.rollback()
         finally:
-            self._raw.close()
-            if self._vfs is not None:
-                self._vfs.close()
+            try:
+                # Retained Python cursors must lose their C statements before
+                # we stop treating them as inherited live handles at fork.
+                for cursor in tuple(_LIVE_CURSORS):
+                    if cursor._connection is self:
+                        cursor._cursor.close()
+                        _LIVE_CURSORS.discard(cursor)
+            finally:
+                self._raw.close()
+                _LIVE_CONNECTIONS.discard(self)
+                if self._vfs is not None:
+                    self._vfs.close()
 
     def invalidate(self) -> None:
         self._revoked = True
@@ -578,12 +586,18 @@ def _matches_native_cipher(path: Path, authority: Authority) -> bool:
         probe.close()
 
 
+def _sqlite_busy(error: BaseException) -> bool:
+    """Only the driver's numeric BUSY/LOCKED codes denote transient contention."""
+    import sqlcipher3.dbapi2 as sc
+
+    code = getattr(error, "sqlite_errorcode", None)
+    return isinstance(error, sc.OperationalError) and isinstance(code, int) and code & 255 in (5, 6)
+
+
 def _open(
     path: Path | None, *, authority: Authority, timeout: float, readonly: bool, protected: bool
 ) -> ProtectedConnection:
     import sqlcipher3.dbapi2 as sc
-
-    from ._shim import apply_key
 
     authority.check()
     path = path.absolute() if path is not None else None
@@ -615,31 +629,58 @@ def _open(
             classify_windows_database(str(path), uri=False, root=authority.root)
             vfs = register_checked_vfs(sc, root=authority.root)
             uri += "&vfs=mordred_checked_v1"
-        result = object.__new__(ProtectedConnection)
-        result._authority, result._binding = authority, binding
-        result._pid, result._thread = os.getpid(), threading.get_ident()
-        result._same_thread, result._protected = True, protected
-        result._closed = result._revoked = result._denied = False
-        result._active = 0
-        result._row_factory, result._vfs = None, vfs
-        # Thread policy is enforced at the facade; revocation may close from a
-        # different thread only while holding the shared authority operation lock.
+        return _open_bound(binding, authority, uri, vfs, timeout=timeout, protected=protected)
+
+
+def _open_bound(
+    binding: _PathBinding | _MemoryBinding,
+    authority: Authority,
+    uri: str,
+    vfs: Any,
+    *,
+    timeout: float,
+    protected: bool,
+) -> ProtectedConnection:
+    """Own a registration through driver acquisition and checked admission.
+
+    The caller holds the authority operation mutex for this entire scope.
+    """
+    import sqlcipher3.dbapi2 as sc
+
+    from ._shim import apply_key
+
+    result = object.__new__(ProtectedConnection)
+    result._authority, result._binding = authority, binding
+    result._pid, result._thread = os.getpid(), threading.get_ident()
+    result._same_thread, result._protected = True, protected
+    result._closed = result._revoked = result._denied = False
+    result._active = 0
+    result._row_factory, result._vfs = None, vfs
+    # Thread policy is enforced at the facade; revocation may close from a
+    # different thread only while holding the shared authority operation lock.
+    raw = None
+    try:
         raw = sc.connect(uri, uri=True, timeout=timeout, check_same_thread=False, cached_statements=0)
         result._raw = raw
-        try:
-            binding.check(newly_created=True)
-            if protected:
-                apply_key(raw, authority.key)
-                _verify_database(result)
-            else:
-                # Classification never grants a key to the returned connection.
-                raw.execute("SELECT count(*) FROM sqlite_master").fetchone()
-            authority.register_connection(result)
-            _LIVE_CONNECTIONS.add(result)
-            raw.set_authorizer(result._authorize)
-            raw.set_progress_handler(result._progress, 1000)
-            result._check()
-            return result
-        except BaseException:
+        binding.check(newly_created=True)
+        if protected:
+            apply_key(raw, authority.key)
+            _verify_database(result)
+        else:
+            # Classification never grants a key to the returned connection.
+            raw.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        authority.register_connection(result)
+        _LIVE_CONNECTIONS.add(result)
+        raw.set_authorizer(result._authorize)
+        raw.set_progress_handler(result._progress, 1000)
+        result._check()
+        return result
+    except BaseException as error:
+        if raw is None:
+            if vfs is not None:
+                vfs.close()
+        else:
             result._dispose()
-            raise DatabaseRefused("database admission refused; no replacement was created") from None
+        if _sqlite_busy(error):
+            raise
+        raise DatabaseRefused("database admission refused; no replacement was created") from None

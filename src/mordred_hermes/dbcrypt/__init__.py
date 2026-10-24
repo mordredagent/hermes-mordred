@@ -176,7 +176,8 @@ def _native_home(home: Path | None) -> tuple[Path, Path]:
 
     requested = home or hermes_home()
     if requested.exists():
-        return requested, resolve_database_domain(requested).root
+        domain = resolve_database_domain(requested)
+        return domain.home, domain.root
     return requested, root_home(requested)
 
 
@@ -210,7 +211,7 @@ def _install_native(home: Path | None, provider: KeyProvider | None) -> bool:
         if existing.home != requested_home or (provider is not None and provider is not _PROVIDER):
             raise DatabaseRefused("installed database authority cannot be rebound")
         return True
-    _PROVIDER = provider or KeyProvider(home=requested_home)
+    candidate = provider or KeyProvider(home=requested_home)
     # Offline adoption, recovery and pending conversion stay closed.
     try:
         marker_path(base).lstat()
@@ -224,14 +225,18 @@ def _install_native(home: Path | None, provider: KeyProvider | None) -> bool:
             except FileNotFoundError:
                 return False
             raise DatabaseRefused("database publication changed during startup; restart required") from None
-    authority = _PROVIDER.authority
     try:
+        authority = candidate.authority
+        if authority.home != requested_home or authority.root != base:
+            raise DatabaseRefused("database provider does not match the requested home")
+        authority.check()
         _refuse_deferred_native_state(base)
         module = _shim.build_module(authority=authority)
         _shim.install_module(module)
     except BaseException:
-        _PROVIDER.close()
+        candidate.close()
         raise
+    _PROVIDER = candidate
     return True
 
 

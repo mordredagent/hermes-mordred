@@ -224,17 +224,26 @@ def reset_cache() -> None:
 
 def monitor_runtime(authority: Authority) -> tuple[Finding, ...]:
     """Native runtime verification uses the owning driver with real SQLite locks."""
-    from ._connection import open_protected
+    from ._connection import _sqlite_busy, open_protected
 
+    findings: list[Finding] = []
     try:
         authority.check()
         # Do not use the legacy immutable/plaintext classifier or its raw key.
         candidates = {*_top_level(authority.root), *_deep(authority.root)}
         for path in sorted(candidates):
-            conn = open_protected(path, authority=authority, readonly=True)
+            try:
+                # Never wait for a writer while holding its authority operation
+                # mutex. A later monitor call retries the authenticated scan.
+                conn = open_protected(path, authority=authority, readonly=True, timeout=0)
+            except Exception as error:
+                if not _sqlite_busy(error):
+                    raise
+                findings.append(Finding("busy", "database verification deferred while SQLite is busy"))
+                continue
             conn.close()
         authority.check()
     except Exception:
         authority.invalidate("runtime database verification failed")
         return (Finding("wrong_key", "database runtime authority or authenticated schema is invalid"),)
-    return ()
+    return tuple(findings)
