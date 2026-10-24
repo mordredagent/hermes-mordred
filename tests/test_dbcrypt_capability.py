@@ -1,0 +1,208 @@
+"""Passive capability must never become enrollment or a hardware readiness claim."""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+from mordred_hermes import dbcrypt
+from tests.test_dbcrypt_authority import native_root as native_root
+
+
+def capability():
+    from mordred_hermes.dbcrypt import _capability
+
+    return _capability
+
+
+@pytest.mark.parametrize("marker", [None, b"1\n", b"unknown marker\n"])
+def test_status_never_enrolls_or_unwraps(tmp_path, monkeypatch, marker):
+    from mordred_hermes.dbcrypt import _key, _windows_vfs
+
+    home = tmp_path / "home"
+    (home / "mordred").mkdir(parents=True)
+    if marker is not None:
+        (home / "mordred/db-encryption.marker").write_bytes(marker)
+    before = {p.relative_to(home): p.read_bytes() for p in home.rglob("*") if p.is_file()}
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("passive status performed native, SQL, or write work")
+
+    monkeypatch.setattr(_key, "KeyProvider", forbidden)
+    monkeypatch.setattr(_windows_vfs, "_load_native", forbidden)
+    import sqlcipher3.dbapi2 as driver
+
+    monkeypatch.setattr(driver, "connect", forbidden)
+    monkeypatch.setattr(Path, "mkdir", forbidden)
+    monkeypatch.setattr(Path, "write_bytes", forbidden)
+    monkeypatch.setattr(Path, "write_text", forbidden)
+    assert callable(getattr(dbcrypt, "database_status", None)), "passive status API is missing"
+    status = dbcrypt.database_status(home)
+    assert status.authenticated is False
+    assert status.configured is (marker is not None)
+    assert before == {p.relative_to(home): p.read_bytes() for p in home.rglob("*") if p.is_file()}
+
+
+def test_driver_import_is_not_readiness(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert callable(getattr(dbcrypt, "database_status", None)), "passive status API is missing"
+    status = dbcrypt.database_status(tmp_path)
+    assert status.capability == "unavailable"
+    assert status.authenticated is False
+    assert status.reason and "qualification" in status.reason
+
+
+def test_unknown_platform_and_unsafe_metadata_are_not_available(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "unknown")
+    status = capability().database_status(tmp_path)
+    assert status.capability == "unavailable" and not status.authenticated
+    monkeypatch.setattr(sys, "platform", "darwin")
+    (tmp_path / "mordred").mkdir()
+    (tmp_path / "mordred/db-encryption.marker").symlink_to(tmp_path / "absent")
+    status = capability().database_status(tmp_path)
+    assert status.configured and status.capability == "unknown" and not status.authenticated
+
+
+def test_diagnose_refuses_legacy_and_pending_without_acquiring(tmp_path, monkeypatch):
+    from mordred_hermes.dbcrypt import _key
+
+    monkeypatch.setattr(_key, "KeyProvider", lambda **kwargs: pytest.fail("unadopted authority acquired"))
+    (tmp_path / "mordred").mkdir()
+    (tmp_path / "mordred/db-encryption.marker").write_bytes(b"1\n")
+    status = capability().diagnose_database(tmp_path)
+    assert status.capability == "unavailable" and not status.authenticated
+    (tmp_path / "mordred/db-encryption.pending").write_text("pending")
+    status = capability().diagnose_database(tmp_path)
+    assert not status.authenticated
+
+
+@pytest.mark.skipif(os.name != "posix", reason="uses the POSIX authority fixture; Windows native proof is explicit")
+def test_explicit_diagnosis_authenticates_once_and_releases(native_root):
+    from mordred_hermes._database_lifecycle import acquire_exclusive
+
+    root, backend, _, _ = native_root
+    assert capability().database_status(root).authenticated is False
+    assert backend.calls == []
+    status = capability().diagnose_database(root)
+    assert status.authenticated and status.capability == "available"
+    assert len(backend.calls) == 1
+    with acquire_exclusive(root):
+        pass  # Diagnosis cannot retain a runtime lease.
+
+
+def test_dependency_count_includes_retained_database_objects_without_sql(tmp_path, monkeypatch):
+    from mordred_hermes import _database_lifecycle
+
+    (tmp_path / "mordred").mkdir()
+    for name in ("state.db", "state.db-wal", "state.db.bak", "mordred/db-encryption.pending"):
+        (tmp_path / name).write_bytes(b"opaque")
+    monkeypatch.setattr(_database_lifecycle, "acquire_runtime", lambda *a: pytest.fail("status acquired lease"))
+    real = Path.open
+
+    def metadata_only(path, *args, **kwargs):
+        assert path.name not in {"state.db", "state.db-wal", "state.db.bak"}, "status opened raw database"
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", metadata_only)
+    status = capability().database_status(tmp_path)
+    assert status.dependencies == 4
+
+
+def test_incomplete_inventory_reports_unknown_count(tmp_path):
+    (tmp_path / "foreign.db.unknown").write_bytes(b"opaque")
+    status = capability().database_status(tmp_path)
+    assert status.dependencies is None
+    assert status.reason and "inventory" in status.reason
+
+
+def test_prompt_status_never_runs_monitor_or_acquires_key(tmp_path, monkeypatch):
+    from mordred_hermes.dbcrypt import _hooks
+
+    (tmp_path / "mordred").mkdir()
+    (tmp_path / "mordred/db-encryption.marker").write_bytes(b"1\n")
+    monkeypatch.setattr(_hooks, "_home", lambda: tmp_path)
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setattr(_hooks, "_findings", lambda: pytest.fail("status opened SQL or acquired key"))
+    text = _hooks.status_line()
+    assert "encrypted at rest" not in text
+    assert "not been authenticated" in text
+
+
+@pytest.mark.skipif(os.name != "posix", reason="uses the POSIX authority fixture; Windows native proof is explicit")
+def test_cached_authenticated_prompt_checks_current_source_without_sql(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _hooks, _key, _monitor
+
+    root, backend, _, _ = native_root
+    provider = _key.KeyProvider(home=root)
+    authority = provider.authority
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", provider)
+    monkeypatch.setattr(_hooks, "_home", lambda: root)
+    monkeypatch.setattr(_hooks, "_observation", None)
+    _hooks.evaluate("test_runtime")
+    calls = list(backend.calls)
+    monkeypatch.setattr(_monitor, "monitor_runtime", lambda *a: pytest.fail("render opened SQL"))
+    monkeypatch.setattr(_key.KeyProvider, "__call__", lambda *a: pytest.fail("render acquired key"))
+    assert "encrypted at rest" in _hooks.status_line()
+    assert backend.calls == calls
+    (root / "mordred/db-encryption.marker").write_bytes(b"1\n")
+    text = _hooks.status_line()
+    assert "NOT protected" in text and "encrypted at rest" not in text
+    assert authority.terminal
+    provider.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="uses the POSIX authority fixture; Windows native proof is explicit")
+def test_diagnosis_authentication_failure_releases_lease(native_root, monkeypatch):
+    from mordred_hermes._database_lifecycle import acquire_exclusive
+
+    root, backend, _, _ = native_root
+
+    def failed_hardware(*args, **kwargs):
+        raise RuntimeError("PRIVATE-NATIVE-ERROR")
+
+    monkeypatch.setattr(backend, "enclave_ecdh", failed_hardware)
+    status = capability().diagnose_database(root)
+    assert not status.authenticated and status.capability == "unavailable"
+    assert status.reason and "PRIVATE" not in status.reason
+    with acquire_exclusive(root):
+        pass
+
+
+def test_status_has_zero_os_write_and_raw_database_open_events(tmp_path):
+    import subprocess
+
+    (tmp_path / "mordred").mkdir()
+    (tmp_path / "state.db").write_bytes(b"opaque retained database")
+    (tmp_path / "mordred/db-encryption.marker").write_bytes(b"1\n")
+    code = """
+import os, sys, types
+from pathlib import Path
+audit = types.ModuleType('mordred_hermes._audit_support')
+audit.safe_audit_append = lambda *args, **kwargs: None
+sys.modules[audit.__name__] = audit
+from mordred_hermes.dbcrypt import database_status
+writes = []
+def observe(event, args):
+    if event == 'open':
+        path, mode, flags = args
+        if isinstance(path, (str, bytes)) and os.fsdecode(path).endswith('.db'):
+            raise AssertionError('status opened raw database descriptor')
+        if flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND):
+            writes.append((event, str(path)))
+    elif event in {'os.mkdir', 'os.rename', 'os.remove', 'os.rmdir', 'os.chmod', 'os.truncate', 'ctypes.dlopen'}:
+        writes.append((event, str(args)))
+sys.addaudithook(observe)
+status = database_status(Path(os.environ['HERMES_HOME']))
+assert status.configured and status.dependencies == 2 and not status.authenticated
+assert writes == [], writes
+"""
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", code],
+        env={**os.environ, "HERMES_HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

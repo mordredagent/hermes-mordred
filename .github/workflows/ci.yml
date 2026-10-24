@@ -86,13 +86,13 @@ jobs:
         id: install
         run: |-
           python -m venv .venv
-          .venv/bin/python -m pip install -e ".[dev,keyvault,extension]"
+          .venv/bin/python -m pip install -e ".[dev,keyvault,extension]" uv
       - name: ruff check and format
         id: ruff
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'static') && matrix.python-version == needs.ci-policy.outputs.support_python
         run: |-
-          .venv/bin/python -m ruff check src tests scripts tools
-          .venv/bin/python -m ruff format --check src tests scripts tools
+          .venv/bin/python -m ruff check src tests scripts tools hatch_build.py
+          .venv/bin/python -m ruff format --check src tests scripts tools hatch_build.py
       - name: shellcheck
         id: shellcheck
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'static') && matrix.python-version == needs.ci-policy.outputs.support_python
@@ -103,7 +103,9 @@ jobs:
         run: .venv/bin/hermes-mordred policy dry-run skills/mordred-status
       - name: mypy --strict with reduced extras
         id: mypy
-        run: .venv/bin/python -m mypy --strict src tools scripts/keyvault_offline_digest.py
+        run: .venv/bin/python -m mypy --strict src tools scripts/keyvault_offline_digest.py hatch_build.py
+      - name: Install database driver after lean-extra type checking
+        run: .venv/bin/python -m pip install -e ".[dev,keyvault,extension,dbcrypt]"
       - name: Default suite or draft critical feedback
         id: pytest
         env:
@@ -205,7 +207,7 @@ jobs:
 
           python -m venv "$SMOKE_VENV"
           "$SMOKE_VENV/bin/python" -m pip install --upgrade pip
-          "$SMOKE_VENV/bin/python" -m pip install "${wheel_path}[keyvault,extension]"
+          "$SMOKE_VENV/bin/python" -m pip install "${wheel_path}[keyvault,extension,dbcrypt]"
           cd "$RUNNER_TEMP"
 
           HERMES_HOME="$SMOKE_HOME" "$SMOKE_VENV/bin/python" - <<'PY'
@@ -410,7 +412,7 @@ jobs:
         run: |
           cargo build --locked --manifest-path native/tpmkey-helper/Cargo.toml
           python -m venv "$RUNNER_TEMP/mordred-ci-swtpm"
-          "$RUNNER_TEMP/mordred-ci-swtpm/bin/python" -m pip install -e ".[dev,keyvault,extension,telegram]"
+          "$RUNNER_TEMP/mordred-ci-swtpm/bin/python" -m pip install -e ".[dev,keyvault,extension,dbcrypt,telegram]"
           "$RUNNER_TEMP/mordred-ci-swtpm/bin/python" -m pytest -v -o addopts="" tests/integration/test_linux_telegram_tpm.py
         id: swtpm_python
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'swtpm') && matrix.python-version == needs.ci-policy.outputs.support_python
@@ -455,7 +457,7 @@ jobs:
         run: |-
           python -m venv "$RUNNER_TEMP/mordred-ci-floor"
           "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pip install "hermes-agent==0.13.0"
-          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pip install -e ".[dev,keyvault,extension]"
+          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pip install -e ".[dev,keyvault,extension,dbcrypt]" uv
       - name: Guard — resolver must not have upgraded hermes-agent off the floor
         run: |
           set -euo pipefail
@@ -510,11 +512,11 @@ jobs:
         id: install
         run: |-
           python -m venv .venv
-          .venv/bin/python -m pip install -e ".[dev,keyvault,extension,macos]"
+          .venv/bin/python -m pip install -e ".[dev,keyvault,extension,macos]" uv
       - name: mypy --strict with reduced extras
         id: mypy
         if: needs.ci-policy.outputs.mode != 'critical'
-        run: .venv/bin/python -m mypy --strict src tools scripts/keyvault_offline_digest.py
+        run: .venv/bin/python -m mypy --strict src tools scripts/keyvault_offline_digest.py hatch_build.py
       - name: SKILL.md drift guard (mordred-status)
         id: status
         run: .venv/bin/hermes-mordred policy dry-run skills/mordred-status
@@ -616,12 +618,18 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: ci-policy-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Prepare verified SQLCipher API headers before Windows builds
+        run: |-
+          $headers = Join-Path $env:RUNNER_TEMP "mordred-dbcrypt-headers"
+          python tools/dbcrypt_build_headers.py --output-directory $headers
+          if ($LASTEXITCODE -ne 0) { throw "SQLCipher header preparation failed" }
+          "MORDRED_SQLITE_INCLUDE_DIR=$headers" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Install scoped dependencies in an isolated venv
         id: install
         run: |-
           python -m venv .venv
           if ($LASTEXITCODE -ne 0) { throw "venv creation failed" }
-          .\.venv\Scripts\python.exe -m pip install -e ".[dev,keyvault,extension]" uv
+          .\.venv\Scripts\python.exe -m pip install -e ".[dev,keyvault,extension,dbcrypt]" "sqlcipher3-wheels==0.5.7" uv
           if ($LASTEXITCODE -ne 0) { throw "dependency install failed" }
       - name: Prepare checked Windows feedback home
         run: |
@@ -734,7 +742,15 @@ jobs:
               tests/extension/test_desktop_api.py `
               tests/extension/test_desktop_platform.py `
               tests/extension/test_extension_serve_shutdown.py `
-              tests/test_desktop_capture.py
+              tests/test_desktop_capture.py `
+              tests/test_dbcrypt_contracts.py `
+              tests/test_dbcrypt_inventory.py `
+              tests/test_dbcrypt_windows_paths.py `
+              tests/test_dbcrypt_windows_locking.py `
+              tests/test_dbcrypt_capability.py `
+              tests/test_dbcrypt_packaging.py `
+              tests/test_keyvault_mail_key.py `
+              tests/test_windows_custody_schema_v2.py
           } else {
             .\.venv\Scripts\python.exe tools/run_ci_native_tests.py --policy ci-policy.json --junitxml native-windows.xml
           }

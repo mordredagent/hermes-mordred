@@ -1,10 +1,13 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
-    "python_full_version >= '3.15'",
-    "python_full_version == '3.14.*'",
-    "python_full_version < '3.14'",
+    "python_full_version >= '3.15' and sys_platform == 'win32'",
+    "python_full_version >= '3.15' and sys_platform != 'win32'",
+    "python_full_version == '3.14.*' and sys_platform == 'win32'",
+    "python_full_version == '3.14.*' and sys_platform != 'win32'",
+    "python_full_version < '3.14' and sys_platform == 'win32'",
+    "python_full_version < '3.14' and sys_platform != 'win32'",
 ]
 
 [[package]]
@@ -1356,6 +1359,22 @@ wheels = [
 ]
 
 [[package]]
+name = "hatchling"
+version = "1.32.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+    { name = "pathspec" },
+    { name = "pluggy" },
+    { name = "tomlkit" },
+    { name = "trove-classifiers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f6/97/b5312f01a8c6daf729a9d272dd442e0c546dbcc630495788786c4b567ed0/hatchling-1.32.4.tar.gz", hash = "sha256:c4468f73144c054d2aab4ef0f0378c43b9878bf07f8ffd6b79690e970d375f07", size = 58065, upload-time = "2026-09-20T22:48:45.398Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5f/80/91f51f439c05d4ec4623c22928ce16a938d6d793bf709477830823497859/hatchling-1.32.4-py3-none-any.whl", hash = "sha256:08ecf7548fb48205e7f213d70c71e67b8271b7242093dc3f1da578b42c734a2c", size = 78748, upload-time = "2026-09-20T22:48:44.19Z" },
+]
+
+[[package]]
 name = "hermes-agent"
 version = "0.19.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1407,7 +1426,14 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+dbcrypt = [
+    { name = "argon2-cffi" },
+    { name = "blake3" },
+    { name = "cryptography" },
+    { name = "sqlcipher3-wheels" },
+]
 dev = [
+    { name = "hatchling" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -1476,13 +1502,16 @@ requires-dist = [
     { name = "aiohttp-socks", marker = "extra == 'integration'", specifier = ">=0.10" },
     { name = "aiohttp-socks", marker = "extra == 'telegram'", specifier = ">=0.10" },
     { name = "anthropic", marker = "extra == 'integration'", specifier = ">=0.40" },
+    { name = "argon2-cffi", marker = "extra == 'dbcrypt'", specifier = ">=23" },
     { name = "argon2-cffi", marker = "extra == 'ethereum'", specifier = ">=23" },
     { name = "argon2-cffi", marker = "extra == 'keyvault'", specifier = ">=23" },
     { name = "argon2-cffi", marker = "extra == 'macos'", specifier = ">=23" },
+    { name = "blake3", marker = "extra == 'dbcrypt'", specifier = ">=0.4" },
     { name = "blake3", marker = "extra == 'ethereum'", specifier = ">=0.4" },
     { name = "blake3", marker = "extra == 'keyvault'", specifier = ">=0.4" },
     { name = "blake3", marker = "extra == 'macos'", specifier = ">=0.4" },
     { name = "boto3", marker = "extra == 'integration'", specifier = ">=1.34" },
+    { name = "cryptography", marker = "extra == 'dbcrypt'", specifier = ">=42" },
     { name = "cryptography", marker = "extra == 'ethereum'", specifier = ">=42" },
     { name = "cryptography", marker = "extra == 'extension'", specifier = ">=42" },
     { name = "cryptography", marker = "extra == 'keyvault'", specifier = ">=42" },
@@ -1492,6 +1521,7 @@ requires-dist = [
     { name = "eth-hash", extras = ["pycryptodome"], marker = "extra == 'ethereum'", specifier = ">=0.5" },
     { name = "eth-keys", marker = "extra == 'ethereum'", specifier = ">=0.6" },
     { name = "google-genai", marker = "extra == 'integration'", specifier = ">=1.20" },
+    { name = "hatchling", marker = "extra == 'dev'", specifier = ">=1.18" },
     { name = "hermes-agent", specifier = ">=0.13.0" },
     { name = "httpx", extras = ["socks"], marker = "extra == 'integration'", specifier = ">=0.27" },
     { name = "mypy", marker = "extra == 'dev'", specifier = "==2.1.0" },
@@ -1511,13 +1541,16 @@ requires-dist = [
     { name = "rlp", marker = "extra == 'ethereum'", specifier = ">=4" },
     { name = "ruamel-yaml", specifier = ">=0.18" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.13" },
+    { name = "sqlcipher3-wheels", marker = "sys_platform == 'win32' and extra == 'dbcrypt'", specifier = "==0.5.7" },
+    { name = "sqlcipher3-wheels", marker = "sys_platform == 'win32' and extra == 'macos'", specifier = "==0.5.7" },
+    { name = "sqlcipher3-wheels", marker = "extra == 'dbcrypt'", specifier = ">=0.5.4" },
     { name = "sqlcipher3-wheels", marker = "extra == 'macos'", specifier = ">=0.5.4" },
     { name = "stem", marker = "extra == 'tor-control'", specifier = ">=1.8.0,<2" },
     { name = "telethon", marker = "extra == 'telegram'", specifier = ">=1.40,<2" },
     { name = "urllib3", marker = "extra == 'extension'", specifier = ">=2" },
     { name = "urllib3", marker = "extra == 'telegram'", specifier = ">=2" },
 ]
-provides-extras = ["dev", "ethereum", "extension", "integration", "keyvault", "macos", "messaging", "telegram", "tor-control"]
+provides-extras = ["dbcrypt", "dev", "ethereum", "extension", "integration", "keyvault", "macos", "messaging", "telegram", "tor-control"]
 
 [[package]]
 name = "hexbytes"
@@ -3361,6 +3394,15 @@ wheels = [
 ]
 
 [[package]]
+name = "tomlkit"
+version = "0.15.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/08/72/fc01563df95c189a9f65850096bdc205bc2fe37da6c740cd64afaf18d07e/tomlkit-0.15.2.tar.gz", hash = "sha256:83e32755ba1d20d9340bd069ee97e9f6232ba2346b63ffcba425de01f7e327a6", size = 190522, upload-time = "2026-10-16T04:07:08.166Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/da/46/7d84138a60a8bd796825b2d38ebe92d0d16501ca57d501b7c5d677401bbc/tomlkit-0.15.2-py3-none-any.whl", hash = "sha256:05562412163a3037b94497385fb7f9204c637bc605af7a48199e41cf2272f437", size = 52225, upload-time = "2026-10-16T04:07:09.216Z" },
+]
+
+[[package]]
 name = "toolz"
 version = "1.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3379,6 +3421,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/09/a9/6ba95a270c6f1fbcd8dac228323f2777d886cb206987444e4bce66338dd4/tqdm-4.67.3.tar.gz", hash = "sha256:7d825f03f89244ef73f1d4ce193cb1774a8179fd96f31d7e1dcde62092b960bb", size = 169598, upload-time = "2026-02-03T17:35:53.048Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/16/e1/3079a9ff9b8e11b846c6ac5c8b5bfb7ff225eee721825310c91b3b50304f/tqdm-4.67.3-py3-none-any.whl", hash = "sha256:ee1e4c0e59148062281c49d80b25b67771a127c85fc9676d3be5f243206826bf", size = 78374, upload-time = "2026-02-03T17:35:50.982Z" },
+]
+
+[[package]]
+name = "trove-classifiers"
+version = "2026.9.21.13"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/bf/93/af436dfaa845cab5d96f0adbc1e4f3730532d37fa249e4eb796fb1d7fc82/trove_classifiers-2026.9.21.13.tar.gz", hash = "sha256:0a9ebc8d4e2f3e8a22848c5258033035bec17a3012ac3fea16dbaa764489eb71", size = 17085, upload-time = "2026-09-21T13:29:07.301Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/30/81/0da8afb52a71d0a4f2bd3152357b1a441e393b286374802b9d3addab4ab5/trove_classifiers-2026.9.21.13-py3-none-any.whl", hash = "sha256:8b1ff4f9c191b1040b71c37f1e445ab99732911e3cd91de52838453a854d7a17", size = 14232, upload-time = "2026-09-21T13:29:06.123Z" },
 ]
 
 [[package]]

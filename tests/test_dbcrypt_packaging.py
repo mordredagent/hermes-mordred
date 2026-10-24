@@ -1,0 +1,254 @@
+"""Build artifacts, checked target selection and offline trusted-header admission."""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import tarfile
+import tomllib
+import zipfile
+from email.parser import Parser
+from pathlib import Path
+
+import pytest
+from packaging.requirements import Requirement
+
+ROOT = Path(__file__).resolve().parents[1]
+UV = shutil.which("uv") or str(Path(sys.executable).with_name("uv.exe" if os.name == "nt" else "uv"))
+
+
+def load(path, name):
+    assert path.is_file(), f"missing build interface: {path.name}"
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_dbcrypt_extra_includes_driver_and_preserves_macos_frameworks():
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    extras = project["optional-dependencies"]
+    assert extras.get("dbcrypt", [])[:2] == ["hermes-mordred[keyvault]", "sqlcipher3-wheels>=0.5.4"]
+    pin = Requirement(extras["dbcrypt"][2])
+    assert pin.name == "sqlcipher3-wheels" and str(pin.specifier) == "==0.5.7"
+    assert pin.marker.evaluate({"sys_platform": "win32"})
+    assert not pin.marker.evaluate({"sys_platform": "linux"})
+    assert not pin.marker.evaluate({"sys_platform": "darwin"})
+    assert "hermes-mordred[dbcrypt]" in extras["macos"]
+    assert {
+        "pyobjc-framework-Security>=10.0",
+        "pyobjc-framework-SystemConfiguration>=10.0",
+        "pyobjc-framework-Quartz>=10.0",
+    } <= set(extras["macos"])
+
+
+def hook():
+    return load(ROOT / "hatch_build.py", "dbcrypt_hatch_build")
+
+
+def test_non_windows_build_retains_pure_wheel(tmp_path, monkeypatch):
+    module = hook()
+    monkeypatch.setattr(module.sys, "platform", "linux")
+    data = {"pure_python": True}
+    module.CustomBuildHook(str(ROOT), {}, None, None, str(tmp_path), "wheel").initialize("standard", data)
+    assert data == {"pure_python": True}
+
+
+@pytest.mark.parametrize("machine", ["ARM64", "x86", "unknown"])
+def test_windows_unsupported_architecture_refuses(tmp_path, monkeypatch, machine):
+    module = hook()
+    monkeypatch.setattr(module.sys, "platform", "win32")
+    monkeypatch.setattr(module.platform, "machine", lambda: machine)
+    with pytest.raises(RuntimeError, match="x64"):
+        module.CustomBuildHook(str(ROOT), {}, None, None, str(tmp_path), "wheel").initialize("standard", {})
+
+
+def test_windows_build_requires_verified_headers(tmp_path, monkeypatch):
+    module = hook()
+    monkeypatch.setattr(module.sys, "platform", "win32")
+    monkeypatch.setattr(module.platform, "machine", lambda: "AMD64")
+    monkeypatch.delenv("MORDRED_SQLITE_INCLUDE_DIR", raising=False)
+    with pytest.raises(RuntimeError, match="MORDRED_SQLITE_INCLUDE_DIR"):
+        module.CustomBuildHook(str(ROOT), {}, None, None, str(tmp_path), "wheel").initialize("standard", {})
+
+
+def test_windows_build_selects_checked_and_packages_only_production_asset(tmp_path, monkeypatch):
+    module = hook()
+    monkeypatch.setattr(module.sys, "platform", "win32")
+    monkeypatch.setattr(module.platform, "machine", lambda: "AMD64")
+    monkeypatch.setenv("MORDRED_SQLITE_INCLUDE_DIR", str(tmp_path))
+    for name in ("sqlite3.h", "sqlite3ext.h"):
+        (tmp_path / name).write_bytes(b"controlled header bytes")
+    monkeypatch.setattr(module, "validate_headers", lambda path: None)  # Actual bytes checked separately.
+    commands = []
+
+    def compiler(command, **kwargs):
+        commands.append(command)
+        directory = Path(command[command.index("-OutputDirectory") + 1])
+        directory.mkdir(parents=True, exist_ok=True)
+        image = bytearray(256)
+        image[:2] = b"MZ"
+        struct.pack_into("<I", image, 0x3C, 0x80)
+        image[0x80:0x86] = b"PE\0\0\x64\x86"
+        (directory / "mordred_dbcrypt_checked.dll").write_bytes(image)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(module.subprocess, "run", compiler)
+    data = {}
+    module.CustomBuildHook(str(ROOT), {}, None, None, str(tmp_path), "wheel").initialize("standard", data)
+    assert commands[0][commands[0].index("-Target") + 1] == "Checked"
+    assert data["pure_python"] is False and data["tag"] == "py3-none-win_amd64"
+    assert list(data["force_include"].values()) == ["mordred_hermes/_native/dbcrypt-vfs/mordred_dbcrypt_vfs.dll"]
+    assert Path(next(iter(data["force_include"]))).read_bytes()[0x80:0x86] == b"PE\0\0\x64\x86"
+
+
+def test_header_validation_rejects_arbitrary_caller_headers(tmp_path):
+    module = load(ROOT / "tools/dbcrypt_build_headers.py", "dbcrypt_build_headers")
+    for name in ("sqlite3.h", "sqlite3ext.h"):
+        (tmp_path / name).write_bytes(b"untrusted headers")
+    with pytest.raises(RuntimeError, match="digest"):
+        module.validate_headers(tmp_path)
+
+
+def test_packaged_vfs_locator_never_depends_on_checkout_or_env(tmp_path, monkeypatch):
+    from mordred_hermes.dbcrypt import _windows_vfs
+
+    monkeypatch.setenv("MORDRED_DBCRYPT_CHECKED_LIBRARY", str(tmp_path / "probe.dll"))
+    assert callable(getattr(_windows_vfs, "packaged_library_path", None)), "owned wheel locator is missing"
+    path = _windows_vfs.packaged_library_path()
+    assert path.name == "mordred_dbcrypt_vfs.dll"
+    assert path.parent.parts[-2:] == ("_native", "dbcrypt-vfs")
+
+
+def test_sdist_to_fresh_wheel_has_owned_assets_and_extra_outside_checkout(tmp_path):
+    env = {**os.environ, "HERMES_HOME": str(tmp_path / "isolated-home")}
+    env.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        [UV, "build", "--sdist", str(ROOT), "--out-dir", str(tmp_path / "sdist")],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    archive = next((tmp_path / "sdist").glob("*.tar.gz"))
+    with tarfile.open(archive) as source:
+        names = {"/".join(p.split("/")[1:]) for p in source.getnames()}
+    assert {
+        "hatch_build.py",
+        "tools/dbcrypt_build_headers.py",
+        "native/dbcrypt-vfs/build.ps1",
+        "native/dbcrypt-vfs/vfs.c",
+        "native/dbcrypt-vfs/checked_io.c",
+        "native/dbcrypt-vfs/checked_io.h",
+    } <= names
+    result = subprocess.run(
+        [UV, "build", "--wheel", str(archive), "--out-dir", str(tmp_path / "wheel")],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    wheel = next((tmp_path / "wheel").glob("*.whl"))
+    with zipfile.ZipFile(wheel) as artifact:
+        metadata = artifact.read(next(n for n in artifact.namelist() if n.endswith(".dist-info/METADATA"))).decode()
+        assert "Provides-Extra: dbcrypt" in metadata
+        requirements = [Requirement(value) for value in Parser().parsestr(metadata).get_all("Requires-Dist")]
+        assert any(
+            r.name == "sqlcipher3-wheels" and str(r.specifier) == ">=0.5.4" and r.marker.evaluate({"extra": "dbcrypt"})
+            for r in requirements
+        )
+        native_asset = "mordred_hermes/_native/dbcrypt-vfs/mordred_dbcrypt_vfs.dll"
+        wheel_metadata = artifact.read(next(n for n in artifact.namelist() if n.endswith(".dist-info/WHEEL"))).decode()
+        if os.name == "nt":
+            assert wheel.name.endswith("-py3-none-win_amd64.whl")
+            assert "Root-Is-Purelib: false" in wheel_metadata
+            assert artifact.read(native_asset).startswith(b"MZ")
+        else:
+            assert wheel.name.endswith("-py3-none-any.whl")
+            assert "Root-Is-Purelib: true" in wheel_metadata
+            assert native_asset not in artifact.namelist()
+    venv = tmp_path / "fresh-venv"
+    result = subprocess.run([UV, "venv", str(venv)], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    result = subprocess.run(
+        [UV, "pip", "install", "--python", str(python), "--no-deps", str(wheel)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    code = """
+import sys, types
+from pathlib import Path
+audit = types.ModuleType('mordred_hermes._audit_support')
+audit.safe_audit_append = lambda *args, **kwargs: None
+sys.modules[audit.__name__] = audit
+from mordred_hermes.dbcrypt import _windows_vfs, database_status
+assert Path(_windows_vfs.__file__).resolve().is_relative_to(Path('fresh-venv').resolve())
+assert _windows_vfs.packaged_library_path().name == 'mordred_dbcrypt_vfs.dll'
+if sys.platform == 'win32':
+    assert _windows_vfs.packaged_library_path().is_file()
+assert database_status(Path('isolated-home')).authenticated is False
+"""
+    result = subprocess.run([str(python), "-I", "-c", code], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_source_digest_failure_leaves_header_directory_absent(tmp_path):
+    module = load(ROOT / "tools/dbcrypt_build_headers.py", "dbcrypt_build_headers")
+    destination = tmp_path / "headers"
+    with pytest.raises(RuntimeError, match="digest"):
+        module.prepare_headers(destination, b"tampered source")
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("failure", ["exit", "missing", "wrong-machine"])
+def test_windows_build_failure_never_emits_support_tag(tmp_path, monkeypatch, failure):
+    module = hook()
+    monkeypatch.setattr(module.sys, "platform", "win32")
+    monkeypatch.setattr(module.platform, "machine", lambda: "AMD64")
+    monkeypatch.setenv("MORDRED_SQLITE_INCLUDE_DIR", str(tmp_path))
+    for name in ("sqlite3.h", "sqlite3ext.h"):
+        (tmp_path / name).write_bytes(b"controlled header bytes")
+    monkeypatch.setattr(module, "validate_headers", lambda path: None)
+
+    def compiler(command, **kwargs):
+        if failure == "exit":
+            raise subprocess.CalledProcessError(1, command)
+        if failure == "wrong-machine":
+            directory = Path(command[command.index("-OutputDirectory") + 1])
+            (directory / "mordred_dbcrypt_checked.dll").write_bytes(b"wrong architecture")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(module.subprocess, "run", compiler)
+    data = {}
+    with pytest.raises((RuntimeError, subprocess.CalledProcessError)):
+        module.CustomBuildHook(str(ROOT), {}, None, None, str(tmp_path), "wheel").initialize("standard", data)
+    assert "tag" not in data and "force_include" not in data
+
+
+@pytest.mark.parametrize("installed,expected", [("0.5.7", True), ("0.5.8", False), ("0.5.4", False), (None, False)])
+def test_windows_pair_requires_concrete_qualified_driver_without_import(installed, expected, monkeypatch):
+    from importlib.metadata import PackageNotFoundError
+
+    from mordred_hermes.dbcrypt import _windows_vfs
+
+    def distribution_version(name):
+        assert name == "sqlcipher3-wheels"
+        if installed is None:
+            raise PackageNotFoundError(name)
+        return installed
+
+    assert callable(getattr(_windows_vfs, "driver_distribution_qualified", None)), (
+        "concrete driver pair check is missing"
+    )
+    monkeypatch.setattr(_windows_vfs, "version", distribution_version)
+    assert _windows_vfs.driver_distribution_qualified() is expected

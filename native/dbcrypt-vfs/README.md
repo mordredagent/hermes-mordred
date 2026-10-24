@@ -190,3 +190,41 @@ queries EC2 again. Never delete the receipt/supervisor while a run is active.
 Receipts and supervisor logs contain operational metadata, never exported
 AWS credentials. Live results belong in the existing CI validation log after
 execution; an import or diagnostic probe pass alone is not product support.
+
+## Windows wheel build inputs
+
+Windows x64 wheel and editable builds require MSVC x64 tools and explicitly
+prepared SQLCipher 0.5.7 API headers. The package build hook never downloads
+headers implicitly. Prepare them before installing the package:
+
+```powershell
+python tools/dbcrypt_build_headers.py --output-directory C:\build\mordred-headers
+$env:MORDRED_SQLITE_INCLUDE_DIR = 'C:\build\mordred-headers'
+uv build
+```
+
+The preparation command verifies the locked `sqlcipher3_wheels-0.5.7.tar.gz`
+SHA256 (`5fd344abba62c487c4d857a6fb55cb8dff8a97d4c4fbb4f9394b473e8e315dee`),
+extracts `sqlite3.h` and the `sqlite3ext.h` excerpt from its amalgamation, verifies
+both header hashes, and writes `dbcrypt-headers.json` provenance alongside them.
+For offline preparation, pass `--source-archive <downloaded-source.tar.gz>`;
+verification remains mandatory. No SQLite implementation is extracted or linked.
+
+The build hook validates and pins a private copy of these two headers, invokes
+`build.ps1 -Target Checked`, verifies the resulting PE machine is AMD64, and
+ships only the production bridge as
+`mordred_hermes/_native/dbcrypt-vfs/mordred_dbcrypt_vfs.dll` in a
+`py3-none-win_amd64` wheel. Missing headers/compiler, unsupported architectures,
+compiler failures, missing output, or a wrong PE machine refuse the build.
+The default `Probe` and `CheckedTest` targets never become the shipped bridge.
+Non-Windows wheels retain their existing pure-Python tag. The sdist contains the
+hook, preparation tool and native sources so it can build independently of the
+checkout. Previously built native binaries are excluded from the sdist.
+
+The `dbcrypt` extra retains its cross-platform SQLCipher floor of 0.5.4 and
+constrains Windows to 0.5.7: native acceptance applies to a concrete driver,
+header and bridge pair. The loader also checks that distribution version before
+using a qualified production bridge. This constraint and successful packaging
+do not enable Windows runtime protection. `NATIVE_QUALIFIED` remains false until
+the separate actual Windows qualification is recorded; ordinary capability and
+status do not load the bridge, open SQL, authenticate custody or enroll a home.

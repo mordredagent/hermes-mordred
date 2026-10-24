@@ -54,7 +54,7 @@ def _inventory(path: Path = INVENTORY) -> dict[str, object]:
 
 
 def native_modules() -> tuple[str, ...]:
-    """Original 84 whole-module selector, in the external harness's order."""
+    """Reviewed Windows selector, preserving the original 84 modules first."""
     value = _inventory().get("native_modules")
     if (
         not isinstance(value, list)
@@ -98,6 +98,7 @@ def _sensitive(path: str) -> bool:
     if path.startswith(("native/", "packaging/", ".github/", "tools/", "docs/dev/")) or path in {
         "AGENTS.md",
         "pyproject.toml",
+        "hatch_build.py",
         "uv.lock",
         "scripts/install.sh",
         "scripts/install.ps1",

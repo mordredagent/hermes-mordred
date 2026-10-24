@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import threading
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Final
@@ -62,11 +63,27 @@ def classify_windows_database(path: str, *, uri: bool, root: Path) -> Path:
     return Path("\\".join(parts))
 
 
+def driver_distribution_qualified() -> bool:
+    """Static pair constraint, never an authentication/readiness assertion."""
+    try:
+        return version("sqlcipher3-wheels") == "0.5.7"
+    except PackageNotFoundError:
+        return False
+
+
+def packaged_library_path() -> Path:
+    """Locate only the owned wheel asset; no native library is loaded here."""
+    return Path(__file__).resolve().parent.parent / "_native" / "dbcrypt-vfs" / "mordred_dbcrypt_vfs.dll"
+
+
 def _load_native() -> Any:
-    # Explicit opt-in bootstrap only. Packaging/qualification are separate gates.
-    value = os.environ.get("MORDRED_DBCRYPT_CHECKED_LIBRARY")
+    # Qualification retains its explicit test-library seam. Production ignores
+    # that environment override and selects only the installed owned wheel.
+    if NATIVE_QUALIFIED and not driver_distribution_qualified():
+        raise RuntimeError("Windows checked VFS requires its qualified SQLCipher 0.5.7 driver pair")
+    value = packaged_library_path() if NATIVE_QUALIFIED else os.environ.get("MORDRED_DBCRYPT_CHECKED_LIBRARY")
     if not value or not Path(value).is_absolute() or not Path(value).is_file():
-        raise RuntimeError("an explicit checked VFS library is required")
+        raise RuntimeError("checked VFS library is unavailable")
     path = str(Path(value).resolve(strict=True))
     if path not in _LIBRARIES:
         native = ctypes.CDLL(path)

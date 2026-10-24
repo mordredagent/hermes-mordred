@@ -6,7 +6,7 @@ interpreter-startup bootstrap, before Hermes imports ``sqlite3`` — swaps the
 ``sqlite3`` module for SQLCipher and keys Hermes's own databases with a key
 derived from the existing agent-memory key. When not armed nothing changes.
 
-macOS only, like the vault that holds the key. See
+Native activation is independently gated on each platform. See
 ``docs/dev/STATE_DB_ENCRYPTION.md``.
 """
 
@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 from typing import Final
 
+from ._capability import DatabaseStatus, database_status, diagnose_database
 from ._cli import maintenance_process as _maintenance_process
 from ._key import KeyProvider
 
@@ -295,4 +296,15 @@ def is_installed() -> bool:
     return _shim.is_installed()
 
 
-__all__ = ["arm", "armed", "install", "is_installed", "marker_path", "register", "root_home"]
+__all__ = [
+    "DatabaseStatus",
+    "arm",
+    "armed",
+    "database_status",
+    "diagnose_database",
+    "install",
+    "is_installed",
+    "marker_path",
+    "register",
+    "root_home",
+]

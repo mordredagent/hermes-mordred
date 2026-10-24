@@ -31,6 +31,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(_hooks, "_home", lambda: base)
     monkeypatch.setattr(_hooks, "_reported", set())
+    monkeypatch.setattr(_hooks, "_observation", None)
     monkeypatch.setattr(_hooks, "_audit", lambda *a, **k: None)
     monkeypatch.setattr(_hooks, "_notify", lambda *a, **k: None)
     return base
@@ -39,6 +40,8 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _protected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_shim, "is_installed", lambda: True)
     monkeypatch.setattr(_hooks, "_key_available", lambda: True)
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", _key.KeyProvider(environ={}))
+    _hooks.evaluate("test_protected")
 
 
 def test_clean_state_has_no_findings(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -153,6 +156,8 @@ def test_a_long_violation_still_fits_the_prompt_section(home: Path, monkeypatch:
         "check",
         lambda *_a, **_k: [_monitor.Finding("plaintext", "unencrypted database(s): " + "x.db, " * 200)],
     )
+    monkeypatch.setattr(_hooks, "_policy_mode", lambda: "lenient")
+    _hooks.evaluate("test_long_violation")
     text = _hooks.status_line()
     assert "NOT protected" in text and len(text) <= _hooks._SECTION_MAX_CHARS
 

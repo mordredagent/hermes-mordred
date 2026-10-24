@@ -23,6 +23,7 @@ from . import _monitor, armed
 _LOG = logging.getLogger("mordred.dbcrypt")
 _REASON = "mordred.db_encryption.violation"
 _reported: set[tuple[str, str]] = set()
+_observation: tuple[Path, object, tuple[_monitor.Finding, ...]] | None = None
 _SECTION_MAX_CHARS = 600
 #: Room for the findings in the prompt section, inside ``_SECTION_MAX_CHARS``.
 _SECTION_DETAIL_CHARS = 420
@@ -104,8 +105,15 @@ def _describe(findings: list[_monitor.Finding]) -> str:
 
 def evaluate(event: str) -> str | None:
     """Run the monitor; return a warning for the model, or raise under strict policy."""
+    from . import _PROVIDER
+
+    global _observation
+    _observation = None
     try:
-        findings = [f for f in _findings() if f.violation]
+        checked = tuple(_findings())
+        token = _PROVIDER.current_authority if _PROVIDER is not None and _PROVIDER.runtime_native else _PROVIDER
+        _observation = (_home(), token, checked)
+        findings = [f for f in checked if f.violation]
     except Exception as exc:  # the monitor itself must never take a turn down
         _LOG.warning("database encryption check failed: %s", exc)
         return None
@@ -145,12 +153,29 @@ def status_line(_info: Any = None) -> str:
     Hermes calls a section callable with the session-info mapping.
     """
     try:
+        from . import _PROVIDER
+
         home = _home()
-        findings = _findings()
+        token: object | None = _PROVIDER
+        if _PROVIDER is not None and _PROVIDER.runtime_native:
+            authority = _PROVIDER.current_authority
+            token = authority
+            if authority is not None:
+                authority.check()  # Public metadata only; never authenticate or run SQL.
+        cached = _observation
+        if cached is not None and cached[0] == home and cached[1] is token:
+            findings = list(cached[2])
+        else:
+            findings = [_monitor.Finding("no_key", "database protection has not been authenticated in this process")]
+        if token is None and not any(f.violation for f in findings):
+            findings = [_monitor.Finding("no_key", "database protection has not been authenticated in this process")]
     except Exception:
-        return ""
+        return (
+            "## Hermes's databases (Mordred)\nWARNING: Hermes's conversation history is NOT protected: "
+            "database authority metadata could not be verified. Never say it is encrypted."
+        )
     if not armed(home):
-        if any(f.code == "pending" for f in findings):
+        if any(f.code == "pending" for f in findings) or (home / "mordred/db-encryption.pending").is_file():
             return (
                 "## Hermes's databases (Mordred)\nEncryption of Hermes's databases is scheduled but not active yet: "
                 "the conversation history is stored unencrypted until Hermes restarts."
