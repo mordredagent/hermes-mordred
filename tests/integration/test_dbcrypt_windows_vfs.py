@@ -665,6 +665,7 @@ def test_wal_multiregion_reader_checkpoint_restart(fixture: tuple[Any, Any, Path
         wal = root / "synthetic.db-wal"
         assert (wal.stat().st_size - 32) // (page_size + 24) > 4096
         assert (root / "synthetic.db-shm").stat().st_size >= 65536
+        assert b"multi-region synthetic encrypted payload:" not in wal.read_bytes()
         assert reader.execute("SELECT count(*) FROM data").fetchone() == (1,)
         busy, frames, copied = writer.execute("PRAGMA wal_checkpoint(RESTART)").fetchone()
         assert busy == 1 and frames > 4096 and copied < frames
@@ -675,7 +676,7 @@ def test_wal_multiregion_reader_checkpoint_restart(fixture: tuple[Any, Any, Path
         writer.commit()
         assert writer.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone() == (0, 0, 0)
         assert writer.execute("PRAGMA integrity_check").fetchone() == ("ok",)
-        assert payload.encode() not in (root / "synthetic.db").read_bytes()
+        assert b"multi-region synthetic encrypted payload:" not in (root / "synthetic.db").read_bytes()
     finally:
         reader.close()
         writer.close()
