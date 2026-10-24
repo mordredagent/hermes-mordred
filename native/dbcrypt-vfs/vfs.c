@@ -344,6 +344,7 @@ static int vOpen(sqlite3_vfs *vfs, const char *name, sqlite3_file *file, int fla
   if (!name || (type!=SQLITE_OPEN_MAIN_DB && type!=SQLITE_OPEN_MAIN_JOURNAL && type!=SQLITE_OPEN_WAL) ||
       flags&(SQLITE_OPEN_DELETEONCLOSE|SQLITE_OPEN_MEMORY) || !uri_allowed(name,flags) ||
       ci_utf8(name,f->path)!=SQLITE_OK) return SQLITE_CANTOPEN;
+  if (type==SQLITE_OPEN_MAIN_DB && wcslen(f->path)>CI_PATH-1-8) return SQLITE_CANTOPEN;
   AcquireSRWLockExclusive(&registry_lock);
   root=find_root(f->path);
   if (root) {
@@ -403,7 +404,7 @@ static int vFull(sqlite3_vfs *vfs, const char *name, int size, char *out) {
   CiRoot *root;
   int rc=SQLITE_CANTOPEN;
   (void)vfs;
-  if (size<=0 || ci_utf8(name,path)!=SQLITE_OK) return rc;
+  if (size<=0 || ci_utf8(name,path)!=SQLITE_OK || wcslen(path)>CI_PATH-1-8) return rc;
   AcquireSRWLockExclusive(&registry_lock);
   root=find_root(path);
   if (root && ci_root_check(root)==SQLITE_OK && WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,path,-1,out,size,NULL,NULL)) rc=SQLITE_OK;
