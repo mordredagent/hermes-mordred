@@ -7,7 +7,7 @@ import stat
 from pathlib import Path
 from typing import Final, Literal
 
-from ._database_contracts import DatabaseRefused, Dependency, Inventory, decode_database_source_binding
+from ._database_contracts import DatabaseRefused, Dependency, Inventory, NativeSnapshot, decode_database_source_binding
 from ._database_lifecycle import ExclusiveLease
 from ._private_fs import open_private_directory
 
@@ -81,7 +81,7 @@ def _kind(parts: tuple[str, ...]) -> _Kind | None:
             return "journal" if _database_name(name[: -len(suffix)]) else None
     if not _database_name(name):
         return "backup" if parts[0] == "backups" and name.endswith(_ARCHIVES) else None
-    if name.endswith(".mordred-enc"):
+    if name.endswith(".mordred-enc") or ".mordred-original-" in name:
         return "pending"
     if name.endswith(_DB_SUFFIXES):
         return "database"
@@ -182,8 +182,17 @@ def scan_dependencies(root: Path) -> Inventory:
             # Permission, disappearance, and traversal failures are all unknown,
             # including when an otherwise empty directory could not be listed.
             unknown(directory)
+    return _with_registered_backups(root, entries)
+
+
+def _with_registered_backups(root: Path, entries: dict[Path, Dependency]) -> Inventory:
+    registry_complete = True
+    if root / "mordred/db-backups.json" in entries:
+        registered, registry_complete = _registered_backups(root)
+        for dependency in registered:
+            entries[dependency.path] = dependency
     ordered = tuple(entries[path] for path in sorted(entries))
-    return Inventory(ordered, all(entry.kind != "unknown" for entry in ordered))
+    return Inventory(ordered, registry_complete and all(entry.kind != "unknown" for entry in ordered))
 
 
 def assert_mutation_safe(root: Path, generation: str | None, lease: ExclusiveLease) -> None:
@@ -200,3 +209,90 @@ def assert_mutation_safe(root: Path, generation: str | None, lease: ExclusiveLea
         for entry in inventory.entries
     ):
         raise DatabaseRefused("database dependencies still require this native key generation")
+
+
+def _registered_backups(root: Path) -> tuple[tuple[Dependency, ...], bool]:
+    """Decode public bindings only; never open any registered database file."""
+    import json
+
+    from ._database_contracts import _binding_pairs
+
+    try:
+        with open_private_directory(root / "mordred") as directory:
+            raw = directory.read_bytes("db-backups.json", max_bytes=8 * 1024 * 1024)
+        value = json.loads(raw, object_pairs_hook=_binding_pairs)
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"version", "snapshot", "entries"}
+            or type(value["version"]) is not int
+            or value["version"] != 1
+            or not isinstance(value["snapshot"], dict)
+            or not isinstance(value["entries"], list)
+        ):
+            return (), False
+        snapshot = _backup_snapshot(root, value["snapshot"])
+        entries: list[Dependency] = []
+        seen: set[str] = set()
+        for entry in value["entries"]:
+            if (
+                not isinstance(entry, dict)
+                or set(entry) != {"path", "identity", "format", "verification"}
+                or entry["format"] != "mordred-sqlcipher-v1"
+                or not isinstance(entry["path"], str)
+                or entry["path"] in seen
+            ):
+                return tuple(entries), False
+            seen.add(entry["path"])
+            path = Path(entry["path"])
+            safe = _backup_file_identity(path) == entry["identity"]
+            entries.append(Dependency(path, "backup" if safe else "unknown", snapshot.generation if safe else None))
+        return tuple(entries), all(e.kind != "unknown" for e in entries)
+    except (OSError, ValueError, TypeError, KeyError, DatabaseRefused):
+        return (), False
+
+
+def _backup_snapshot(root: Path, value: dict[str, object]) -> NativeSnapshot:
+    import json
+    import re
+    from dataclasses import asdict
+
+    if os.name == "nt":
+        from ._database_locking_windows import identify_root
+
+        identity = identify_root(root)
+        if (
+            set(value) != {"root", "provider", "generation", "record_sha256"}
+            or value["root"] != asdict(identity)
+            or value["provider"] != "cng"
+            or not isinstance(value["generation"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", value["generation"]) is None
+            or not isinstance(value["record_sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", value["record_sha256"]) is None
+        ):
+            raise DatabaseRefused("invalid registered backup snapshot")
+        return NativeSnapshot(identity, "cng", value["generation"], value["record_sha256"])
+    from ._database_locking_posix import identify_root as posix_identity
+
+    snapshot = decode_database_source_binding(json.dumps({"version": 1, **value}).encode() + b"\n")
+    if snapshot.root != posix_identity(root):
+        raise DatabaseRefused("backup snapshot belongs to another root")
+    return snapshot
+
+
+def _backup_file_identity(path: Path) -> list[int]:
+    if not path.is_absolute() or path != path.resolve(strict=True):
+        raise DatabaseRefused("registered backup path is not canonical")
+    with open_private_directory(path.parent) as directory:
+        if os.name == "nt":
+            identity = directory.stat(path.name).identity
+            return [identity.volume, int.from_bytes(identity.file_id, "big"), 0, 0]
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_mode & 0o777 != 0o600
+            or info.st_uid != os.getuid()
+            or _reparse(info)
+        ):
+            raise DatabaseRefused("registered backup file is not private")
+        return [info.st_dev, info.st_ino, info.st_mode, info.st_uid]

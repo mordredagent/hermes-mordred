@@ -33,15 +33,18 @@ _MAX_SESSION_SCHEMA_VERSION = 22
 _INHERITED: list[Any] = []
 _LIVE_CONNECTIONS: weakref.WeakSet[ProtectedConnection] = weakref.WeakSet()
 _LIVE_CURSORS: weakref.WeakSet[ProtectedCursor] = weakref.WeakSet()
+_LIVE_MAINTENANCE: weakref.WeakSet[_MaintenanceConnection] = weakref.WeakSet()
 _FORKED = [False]
 
 
 def _after_fork() -> None:
     connections, cursors = tuple(_LIVE_CONNECTIONS), tuple(_LIVE_CURSORS)
-    if connections or cursors:
+    maintenance = tuple(_LIVE_MAINTENANCE)
+    if connections or cursors or maintenance:
         _FORKED[0] = True
         _INHERITED.extend(connections)
         _INHERITED.extend(cursors)
+        _INHERITED.extend(maintenance)  # Owners retain every raw cursor before child GC.
 
 
 def _exit_forked_child(state: list[bool] = _FORKED, exit_process: Any = os._exit) -> None:
@@ -503,9 +506,11 @@ class ProtectedConnection:
     def backup(
         self, target: Any, *, pages: int = -1, progress: Any = None, name: str = "main", sleep: float = 0.250
     ) -> None:
-        # Task 7 must supply destination registration under an exclusive lease.
-        # Retain the DB-API call shape but never turn a bare target into a grant.
-        self._unsupported()
+        from ._backup import _Destination
+
+        if type(target) is not _Destination or progress is not None or name != "main" or pages != -1 or sleep != 0.250:
+            self._unsupported()
+        _copy_registered_backup(self, target)
 
     def _unsupported(self, *args: Any, **kwargs: Any) -> Any:
         self._check()
@@ -684,3 +689,182 @@ def _open_bound(
         if _sqlite_busy(error):
             raise
         raise DatabaseRefused("database admission refused; no replacement was created") from None
+
+
+def _copy_registered_backup(source: ProtectedConnection, destination: Any) -> None:
+    """A concrete registry-issued route; no callback or raw-handle export."""
+    import sqlcipher3.dbapi2 as sc
+
+    from . import _migrate
+    from ._shim import apply_key
+
+    with source._operation():
+        destination.check(source)
+        if not source._protected or source._raw.in_transaction:
+            raise DatabaseRefused("backup requires an idle protected source")
+        if source._raw.execute("PRAGMA journal_mode").fetchone() == ("wal",) and _migrate.wal_reset_vulnerable(
+            sc.sqlite_version_info
+        ):
+            raise DatabaseRefused("WAL backup refuses a WAL-reset vulnerable SQLite version")
+        registration = None
+        uri = f"file:{quote(destination.path.as_posix(), safe='/:')}?mode=rw"
+        if os.name == "nt":
+            from ._maintenance_windows import require_qualified
+            from ._windows_vfs import register_checked_vfs
+
+            require_qualified()
+            registration = register_checked_vfs(sc, root=destination.path.parent)
+            uri += "&vfs=mordred_checked_v1"
+        raw = None
+        try:
+            raw = _MaintenanceConnection(sc.connect(uri, uri=True))
+            apply_key(raw, source._authority.key)
+            raw.execute("PRAGMA journal_mode=DELETE")
+            source.execute("BEGIN")
+            # Reading establishes the exact snapshot copied by sqlite3_backup.
+            expected_counts, expected_ids = _migrate._counts(source), _migrate._ids(source)
+            schema_sql = "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name"
+            expected_schema = source.execute(schema_sql).fetchall()
+
+            def check_progress(status: int, remaining: int, total: int) -> None:
+                source._check()
+                destination.check(source)
+                if status & 255 in (5, 6):
+                    raise DatabaseRefused("backup destination is busy")
+
+            source._raw.backup(raw._raw, pages=64, progress=check_progress, sleep=0)
+            source._check()
+            destination.check(source)
+            if (
+                raw.execute("PRAGMA cipher_integrity_check").fetchall()
+                or raw.execute("PRAGMA quick_check").fetchone() != ("ok",)
+                or _migrate._counts(raw) != expected_counts
+                or _migrate._ids(raw) != expected_ids
+                or raw.execute(schema_sql).fetchall() != expected_schema
+            ):
+                raise DatabaseRefused("backup schema/count authentication failed")
+            destination.verification = {
+                "counts": expected_counts,
+                "ids": list(expected_ids),
+                "schema_sha256": _migrate._schema_hash(expected_schema),
+            }
+        finally:
+            if source._pid != os.getpid():
+                raise DatabaseRefused("backup SQL cannot unwind inherited handles")
+            source._raw.rollback()
+            if raw is not None:
+                raw.close()
+            if registration is not None:
+                registration.close()
+
+
+class _MaintenanceCursor:
+    """Internal owned statement; never finalize an inherited SQLite cursor."""
+
+    def __init__(self, owner: _MaintenanceConnection, raw: Any) -> None:
+        self._owner, self._raw = owner, raw
+        self._closed = False
+        owner._cursors.append(self)
+
+    def _check(self) -> None:
+        self._owner._check()
+        if self._closed:
+            raise DatabaseRefused("maintenance cursor is closed")
+
+    def execute(self, sql: str, parameters: Any = ()) -> _MaintenanceCursor:
+        self._check()
+        _check_sql(sql)
+        self._raw.execute(sql, parameters)
+        return self
+
+    def fetchone(self) -> Any:
+        self._check()
+        return self._raw.fetchone()
+
+    def fetchall(self) -> Any:
+        self._check()
+        return self._raw.fetchall()
+
+    def __iter__(self) -> _MaintenanceCursor:
+        self._check()
+        return self
+
+    def __next__(self) -> Any:
+        self._check()
+        return next(self._raw)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._check()
+        self._raw.close()
+        self._closed = True
+        self._owner._cursors.remove(self)
+
+
+class _MaintenanceConnection:
+    """Private same-driver EX SQL owner, sharing runtime's fork quarantine.
+
+    Public maintenance APIs return reports/paths, never this object. Every
+    Python cursor is owned before preparation and closed before its connection.
+    """
+
+    def __init__(self, raw: Any) -> None:
+        self._raw = raw
+        self._pid, self._thread = os.getpid(), threading.get_ident()
+        self._closed = False
+        self._cursors: list[_MaintenanceCursor] = []
+        _LIVE_MAINTENANCE.add(self)
+
+    def _check(self) -> None:
+        if self._pid != os.getpid():
+            raise DatabaseRefused("maintenance SQL cannot survive fork")
+        if self._closed or self._thread != threading.get_ident():
+            raise DatabaseRefused("maintenance SQL owner is closed or belongs to another thread")
+
+    def execute(self, sql: str, parameters: Any = ()) -> _MaintenanceCursor:
+        self._check()
+        cursor = _MaintenanceCursor(self, self._raw.cursor())
+        return cursor.execute(sql, parameters)
+
+    def commit(self) -> None:
+        self._check()
+        self._raw.commit()
+
+    def rollback(self) -> None:
+        self._check()
+        self._raw.rollback()
+
+    def backup(self, target: _MaintenanceConnection) -> None:
+        self._check()
+        if type(target) is not _MaintenanceConnection:
+            raise DatabaseRefused("offline backup requires the same owned driver")
+        target._check()
+
+        def check_progress(status: int, remaining: int, total: int) -> None:
+            self._check()
+            target._check()
+            if status & 255 in (5, 6):
+                raise DatabaseRefused("offline backup is busy")
+
+        self._raw.backup(target._raw, pages=64, progress=check_progress, sleep=0)
+        self._check()
+        target._check()
+
+    def _install_export_policy(self, target: Path | None, alias: str | None) -> None:
+        self._check()
+        from ._maintenance_windows import authorizer
+
+        self._raw.enable_load_extension(False)
+        self._raw.set_authorizer(authorizer(target, alias))
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._check()  # PID refusal precedes locks, cursor finalization and C cleanup.
+        self._raw.rollback()
+        for cursor in tuple(self._cursors):
+            cursor.close()
+        self._raw.close()
+        self._closed = True
+        _LIVE_MAINTENANCE.discard(self)

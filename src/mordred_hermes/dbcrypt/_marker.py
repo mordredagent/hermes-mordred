@@ -177,3 +177,23 @@ def write_marker(root: Path, snapshot: NativeSnapshot, *, lease: ExclusiveLease)
             ExclusiveLease.assert_held(lease, root)
     except PrivateFSError:
         raise DatabaseRefused("database marker cannot be published safely") from None
+
+
+def _adopt_marker(root: Path, snapshot: NativeSnapshot, *, lease: ExclusiveLease) -> None:
+    """Publish only after migration's complete authenticated legacy journal."""
+    from ._migrate import JOURNAL_SUBPATH, _read_json
+
+    if type(lease) is not ExclusiveLease:
+        raise DatabaseRefused("a preceding exclusive database lease is required")
+    ExclusiveLease.assert_held(lease, root)
+    journal = _read_json(root, JOURNAL_SUBPATH[-1])
+    if journal.get("direction") != "adopt" or journal.get("snapshot") != asdict(snapshot):
+        raise DatabaseRefused("legacy marker requires the authenticated adoption journal")
+    if _identity(root) != snapshot.root:
+        raise DatabaseRefused("legacy adoption root changed")
+    with open_private_directory(root / "mordred") as directory, directory.transaction() as tx:
+        previous = _decode(tx.read_bytes(_NAME, max_bytes=_LIMIT))
+        if previous not in (LegacyMarker(b"1\n"), Marker(snapshot)):
+            raise DatabaseRefused("legacy marker changed before adoption")
+        ExclusiveLease.assert_held(lease, root)
+        tx.replace_bytes(_NAME, _json(snapshot))

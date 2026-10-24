@@ -16,6 +16,22 @@ from mordred_hermes.dbcrypt import _key, _migrate, _shim
 from mordred_hermes.dbcrypt._locking import runtime_lease
 
 
+@pytest.fixture(autouse=True)
+def explicit_raw_key_seam(monkeypatch):
+    """Legacy portable SQL tests explicitly replace custody, never production policy."""
+    from mordred_hermes.dbcrypt import _locking
+
+    previous = set(_locking._LEASES)
+    monkeypatch.setattr(
+        _migrate, "_authenticate", lambda root, supplied, lease: (None, supplied or _key.derive(bytes(range(32))))
+    )
+    yield
+    # Fixtures own synthetic lifetimes; installed production shims have no reset.
+    for root in set(_locking._LEASES) - previous:
+        context, _lease = _locking._LEASES.pop(root)
+        context.__exit__(None, None, None)
+
+
 def _database(home: Path) -> Path:
     path = home / "state.db"
     with sqlite3.connect(path) as conn:
@@ -252,7 +268,8 @@ print('ready', flush=True)
         assert child.stdout is not None
         assert child.stdout.readline().strip() == "recovering"
         with _migrate.migration_lock(tmp_path):
-            _migrate.resume(tmp_path)
+            # Simulate the other authenticated recovery completing publication.
+            journal.unlink()
         with runtime_lease(tmp_path):
             # Another startup now owns a lifetime reader lease. The child saw
             # the old journal, but must join this reader instead of needing EX.
@@ -299,11 +316,9 @@ if sys.argv[3] == 'True':
 else:
     assert dbcrypt.install(home=home) is False
     assert _monitor.check(home) == []
-    # Simulated Windows has no checked Win32 storage backend on a POSIX host.
-    # A failed observation must refuse, rather than report an empty home.
-    import os
-    expected = 1 if sys.platform == 'win32' and os.name != 'nt' else 0
-    assert databases_cli.databases_status(home=home) == expected
+    # Offline classification requires the owning SQLCipher driver; absence
+    # reports failure even when the unarmed home has ordinary SQLite bytes.
+    assert databases_cli.databases_status(home=home) == 1
 assert databases_cli.databases_encrypt(home=home) == 1
 assert databases_cli.databases_decrypt(home=home) == 1
 """
@@ -362,3 +377,58 @@ def test_legacy_bootstrap_never_recreates_an_already_observed_root(tmp_path: Pat
     with pytest.raises(DatabaseRefused), runtime_lease(root):
         pytest.fail("legacy startup recreated a root it already knew")
     assert not root.exists()
+    # This test owns no installed shim: explicitly retire its synthetic lifetime.
+    from mordred_hermes.dbcrypt._locking import _LEASES
+
+    context, _lease = _LEASES.pop(root.absolute())
+    context.__exit__(None, None, None)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork lifecycle")
+@pytest.mark.parametrize("closed", [False, True])
+def test_offline_sql_fork_quarantines_cursors_before_child_finalization(tmp_path, closed):
+    script = r"""
+import gc, os, sys
+from pathlib import Path
+from mordred_hermes.keyvault import kek
+kek._noop_audit = lambda entry: None
+import sqlcipher3.dbapi2 as sc
+from mordred_hermes._database_lifecycle import acquire_exclusive
+from mordred_hermes.dbcrypt._migrate import _offline_connection
+root = Path(os.environ['HERMES_HOME'])
+path = root / 'state.db'
+raw = sc.connect(str(path))
+raw.execute('CREATE TABLE data(value TEXT)')
+raw.commit()
+raw.close()
+closed = sys.argv[1] == 'True'
+with acquire_exclusive(root) as lease:
+    with _offline_connection(path) as connection:
+        connection.execute("INSERT INTO data VALUES ('pending parent')")
+        cursor = connection.execute('SELECT value FROM data')
+        if closed:
+            connection.rollback()
+            connection.close()
+        child = os.fork()
+        if child == 0:
+            del connection, cursor
+            gc.collect()
+            sys.exit(0)
+        _, status = os.waitpid(child, 0)
+        assert os.waitstatus_to_exitcode(status) == (0 if closed else 74), status
+        lease.assert_held(root)
+        if not closed:
+            assert cursor.fetchall() == [('pending parent',)]
+            connection.commit()
+with sc.connect(str(path)) as raw:
+    assert raw.execute('SELECT value FROM data').fetchall() == ([] if closed else [('pending parent',)])
+raw.close()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(closed)],
+        env={**os.environ, "HERMES_HOME": str(tmp_path)},
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

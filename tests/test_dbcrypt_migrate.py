@@ -18,6 +18,22 @@ KEY = _key.derive(bytes(range(32)))
 APP_ID = 682968903
 
 
+@pytest.fixture(autouse=True)
+def explicit_raw_key_seam(monkeypatch):
+    """Legacy portable SQL tests explicitly replace custody, never production policy."""
+    from mordred_hermes.dbcrypt import _locking
+
+    previous = set(_locking._LEASES)
+    monkeypatch.setattr(
+        _migrate, "_authenticate", lambda root, supplied, lease: (None, supplied or _key.derive(bytes(range(32))))
+    )
+    yield
+    # Fixtures own synthetic lifetimes; installed production shims have no reset.
+    for root in set(_locking._LEASES) - previous:
+        context, _lease = _locking._LEASES.pop(root)
+        context.__exit__(None, None, None)
+
+
 def _plain_db(path: Path, rows: int = 3, *, fts: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = stdlib_sqlite3.connect(path)
@@ -119,7 +135,7 @@ def test_refuses_when_holders_cannot_be_checked(home: Path) -> None:
         _migrate.migrate(home, KEY, arm=dbcrypt.arm, holders_of=lambda _p: None)
 
 
-def test_a_failure_while_preparing_changes_nothing(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_failure_while_preparing_retains_originals_and_recovery(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     real = _migrate.prepare
     calls: list[str] = []
 
@@ -134,10 +150,12 @@ def test_a_failure_while_preparing_changes_nothing(home: Path, monkeypatch: pyte
         _migrate.migrate(home, KEY, arm=dbcrypt.arm, holders_of=_no_holders)
     assert all(_is_plaintext(home / r) for r in ("state.db", "shared-state.db", "cron/executions.db"))
     assert not dbcrypt.marker_path(home).exists()
-    assert not list(home.rglob(f"*{_migrate.PREPARED_SUFFIX}"))
+    assert list(home.rglob(f"*{_migrate.PREPARED_SUFFIX}"))
+    assert _migrate.journal_path(home).exists()
 
 
-def test_a_run_stopped_before_arming_is_completed_and_armed(home: Path) -> None:
+def test_a_run_stopped_before_arming_is_completed_and_armed(home: Path, monkeypatch) -> None:
+    monkeypatch.setattr(_migrate, "holders", _no_holders)
     """Crash point: the journal is written, the marker not yet; nothing swapped."""
 
     class Crash(Exception):
@@ -164,12 +182,16 @@ def test_an_interrupted_swap_is_completed(home: Path) -> None:
     _migrate.journal_path(home).write_text(
         json.dumps({"swaps": [{"path": str(database.path), "prepared": str(prepared)}]}), encoding="utf-8"
     )
+    _migrate.journal_path(home).chmod(0o600)
+    _migrate.journal_path(home).parent.chmod(0o700)
     dbcrypt.arm(home)  # crash point: armed, not swapped
 
-    assert _migrate.resume(home) is True
-    assert not _is_plaintext(home / "state.db")
-    assert _keyed(home / "state.db").execute("SELECT count(*) FROM messages").fetchone() == (3,)
-    assert not _migrate.journal_path(home).exists()
+    _migrate.journal_path(home).chmod(0o600)
+    before = database.path.read_bytes()
+    with pytest.raises(_migrate.MigrationError, match="legacy journal"):
+        _migrate.resume(home)
+    assert database.path.read_bytes() == before
+    assert prepared.exists() and _migrate.journal_path(home).exists()
 
 
 def test_a_scheduled_conversion_runs_at_startup_then_the_shim_is_installed(
@@ -227,8 +249,12 @@ def test_an_interrupted_decryption_is_completed_and_disarmed(home: Path) -> None
         json.dumps({"direction": "decrypt", "swaps": [{"path": str(database.path), "prepared": str(prepared)}]}),
         encoding="utf-8",
     )
-    assert _migrate.resume(home) is True
-    assert _is_plaintext(home / "state.db") and not dbcrypt.marker_path(home).exists()
+    _migrate.journal_path(home).chmod(0o600)
+    before = database.path.read_bytes()
+    with pytest.raises(_migrate.MigrationError, match="legacy journal"):
+        _migrate.resume(home)
+    assert database.path.read_bytes() == before
+    assert prepared.exists() and dbcrypt.marker_path(home).exists()
 
 
 def test_a_scheduled_decryption_runs_at_startup_and_leaves_sqlite3_alone(
@@ -284,9 +310,9 @@ def test_encrypt_with_another_key_does_not_claim_everything_is_encrypted(
     wrong = _key.derive(bytes(32))
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(_key, "KeyProvider", lambda: lambda: wrong)
-    assert databases_cli.databases_encrypt(home=home) == 0
+    assert databases_cli.databases_encrypt(home=home) == 1
     out = capsys.readouterr()
-    assert "does not open" in out.out + out.err and "state.db" in out.out + out.err
+    assert "unreadable" in out.out + out.err and "state.db" in out.out + out.err
     assert "Every Hermes database is already encrypted" not in out.out
 
 
@@ -297,3 +323,24 @@ def test_files_that_are_not_sqlite_are_not_listed(home: Path) -> None:
     relatives = {d.relative for d in _migrate.discover(home, KEY)}
     assert "state.db.repair-attempts.json" not in relatives and "empty.db" not in relatives
     assert "state.db" in relatives
+
+
+def test_activity_database_keeps_rollback_even_on_safe_wal_version(home, monkeypatch):
+    path = home / "plugin-data/mordred/mordred.db"
+    _plain_db(path)
+    monkeypatch.setattr(_migrate, "wal_reset_vulnerable", lambda version: False)
+    _migrate.migrate(home, KEY, arm=dbcrypt.arm, holders_of=_no_holders)
+    conn = _keyed(path)
+    assert conn.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+    conn.close()
+
+
+def test_sidecar_cleanup_refuses_foreign_symlink(tmp_path):
+    target = tmp_path / "foreign"
+    target.write_bytes(b"keep")
+    target.chmod(0o600)
+    sidecar = tmp_path / "state.db-wal"
+    sidecar.symlink_to(target)
+    with pytest.raises(_migrate.MigrationError):
+        _migrate._cleanup_sidecars(tmp_path / "state.db")
+    assert sidecar.is_symlink() and target.read_bytes() == b"keep"

@@ -349,3 +349,24 @@ def retire_database_source(*, root: Path, expected: NativeSnapshot, lease: Exclu
                 if tx.stat(_BINDING) != observed or tx.read_bytes(_BINDING, max_bytes=4096) != raw:
                     raise DatabaseRefused("database source binding changed during retirement")
                 tx.delete_file(_BINDING, expected_identity=observed.identity)
+
+
+def _load_historical_database_source(*, root: Path, lease: ExclusiveLease) -> tuple[str, bytes]:
+    """Authenticate existing POSIX custody without inventing/publishing a binding.
+
+    Used only by offline legacy adoption before exhaustive ciphertext proof.
+    Enrollment later repeats native authentication before assigning generation.
+    """
+    with _refusal():
+        if type(lease) is not ExclusiveLease:
+            raise DatabaseRefused("a preceding exclusive database lease is required")
+        ExclusiveLease.assert_held(lease, root)
+        root, identity = _root(root)
+        if sys.platform not in {"darwin", "linux"}:
+            raise DatabaseRefused("historical database source is unsupported")
+        provider, digest = _posix_record(root, identity)
+        material = _key(_load_posix(root, identity, digest))
+        if _posix_record(root, identity) != (provider, digest) or _root(root)[1] != identity:
+            raise DatabaseRefused("historical database source changed during authentication")
+        ExclusiveLease.assert_held(lease, root)
+        return digest, material

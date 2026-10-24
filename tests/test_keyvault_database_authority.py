@@ -595,3 +595,44 @@ def test_windows_source_retirement_refuses_without_changing_custody(windows_sour
         authority.retire_database_source(root=root, expected=snapshot, lease=lease)
     assert authority.observe_database_source(root=root) == snapshot
     assert backend.calls == before
+
+
+def test_historical_macos_source_authenticates_without_publishing(mac_source):
+    authority, root, backend, _, _ = mac_source
+    binding = root / "mordred/db-key-source.json"
+    assert not binding.exists()
+    before = list(backend.calls)
+    with acquire_exclusive(root) as lease:
+        digest, material = authority._load_historical_database_source(root=root, lease=lease)
+    assert len(digest) == 64 and material == b"a" * 32
+    assert not binding.exists()
+    assert sum(op == "ecdh" for op, _ in backend.calls[len(before) :]) == 1
+
+
+def test_historical_source_rechecks_actual_ex_before_custody(source, monkeypatch):
+    authority, root, _backend, _ = source
+    calls = []
+    monkeypatch.setattr(authority, "_posix_record", lambda *args: calls.append(args))
+    with acquire_exclusive(root) as lease:
+        pass
+    with pytest.raises(DatabaseRefused):
+        authority._load_historical_database_source(root=root, lease=lease)
+    assert calls == []
+
+
+def test_historical_source_rejects_record_change_without_binding(source, monkeypatch):
+    authority, root, _, _ = source
+    original = authority._load_posix
+
+    def replace_record(*args):
+        material = original(*args)
+        wrapped = root / "mordred/memory-key.wrapped"
+        blob = bytearray(wrapped.read_bytes())
+        blob[-1] ^= 1
+        wrapped.write_bytes(blob)
+        return material
+
+    monkeypatch.setattr(authority, "_load_posix", replace_record)
+    with acquire_exclusive(root) as lease, pytest.raises(DatabaseRefused):
+        authority._load_historical_database_source(root=root, lease=lease)
+    assert not (root / "mordred/db-key-source.json").exists()

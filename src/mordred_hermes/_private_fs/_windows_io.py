@@ -264,6 +264,16 @@ class _Transaction:
     def _mark_mutated(self) -> None:
         self.published = self.directory.published = True
 
+    def flush_file(self, name: str, *, expected_identity: FileIdentity | None = None) -> None:
+        """Flush a checked owned file; share-zero also refuses active holders."""
+        self.check()
+        with self.directory.opened(name, access=0x40120089, share=0) as handle:
+            identity = _check_identity(handle, expected_identity)
+            handle.api.flush(handle)
+            _check_identity(handle, identity)
+        if self.directory.stat(name).identity != identity:
+            raise PrivateFSError("unsafe", "flush_identity")
+
     def delete_file(self, name: str, *, expected_identity: FileIdentity | None = None) -> None:
         self.directory.path(name)
         self.check()
@@ -300,7 +310,7 @@ class _Transaction:
         self.check()
         changed = False
         try:
-            with self.directory.opened(name, access=0x130089, share=0) as handle:
+            with self.directory.opened(name, access=0x40130089, share=0) as handle:
                 identity = _check_identity(handle, expected_identity)
                 changed = True
                 try:
@@ -316,6 +326,7 @@ class _Transaction:
                     else:
                         exc.commit_state = "uncertain"
                     raise
+                handle.api.flush(handle)
                 _check_identity(handle, identity)
                 if handle.api.final_path(handle).casefold() != destination_path.casefold():
                     raise PrivateFSError("unsafe", "renamed_identity")

@@ -500,3 +500,51 @@ def test_posix_raw_body_error_retains_cleanup_uncertainty(tmp_path: Path, monkey
     assert err.value.__cause__ is original
     assert getattr(original, "__notes__", None) or getattr(err.value, "__notes__", None)
     assert (root / "source").exists() is not mutate
+
+
+@pytest.mark.parametrize("damage", ["none", "before", "after", "flush", "sharing"])
+def test_windows_checked_flush_identity_and_faults(windows_fs, monkeypatch, damage):
+    api, _, tx = windows_fs
+    expected = tx.stat("source").identity
+    if damage == "before":
+        expected = fs.FileIdentity(1, b"wrong")
+    elif damage == "flush":
+        api.fail = "flush"
+    elif damage == "sharing":
+        original = api.open
+
+        def busy(path, **kwargs):
+            if kwargs.get("access", 0) & 0x40000000:
+                raise fs.PrivateFSError("busy", "open")
+            return original(path, **kwargs)
+
+        monkeypatch.setattr(api, "open", busy)
+    elif damage == "after":
+        original = api.metadata
+
+        def change_after_flush(handle):
+            value = original(handle)
+            if getattr(api, "flushed", False) and not value.directory:
+                from dataclasses import replace
+
+                value = replace(value, identity=fs.FileIdentity(1, b"changed"))
+            return value
+
+        monkeypatch.setattr(api, "metadata", change_after_flush)
+        monkeypatch.setattr(api, "flush", lambda handle: setattr(api, "flushed", True))
+    if damage == "none":
+        tx.flush_file("source", expected_identity=expected)
+    else:
+        with pytest.raises(fs.PrivateFSError):
+            tx.flush_file("source", expected_identity=expected)
+    assert api.contents["source"] == b"old"
+    assert not api.handles
+
+
+def test_windows_rename_flush_failure_preserves_publication(windows_fs):
+    api, _, tx = windows_fs
+    api.fail = "flush"
+    with pytest.raises(fs.PrivateFSError) as failure:
+        tx.rename_file("source", "target", expected_identity=tx.stat("source").identity)
+    assert failure.value.commit_state == "uncertain"
+    assert "source" not in api.contents and api.contents["target"] == b"old"

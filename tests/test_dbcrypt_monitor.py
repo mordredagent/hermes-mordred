@@ -19,6 +19,12 @@ from mordred_hermes.dbcrypt import _hooks, _key, _migrate, _monitor, _shim
 KEY = _key.derive(bytes(range(32)))
 
 
+@pytest.fixture(autouse=True)
+def explicit_raw_key_maintenance(monkeypatch):
+    """Portable monitor fixtures opt into raw keys without weakening native maintenance."""
+    monkeypatch.setattr(_migrate, "_authenticate", lambda root, supplied, lease: (None, supplied or KEY))
+
+
 @pytest.fixture
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     base = tmp_path / "hermes"

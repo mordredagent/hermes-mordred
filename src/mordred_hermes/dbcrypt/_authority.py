@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .._database_contracts import DatabaseRefused, GuardedConnection, NativeSnapshot
 from .._database_lifecycle import RuntimeLease, acquire_runtime
+from .._private_fs import PrivateFSError, open_private_directory
 from ..keyvault._database_authority import (
     CheckedDatabaseDomain,
     load_database_source,
@@ -50,6 +51,7 @@ class Authority:
             lease = resources.enter_context(acquire_runtime(domain.root))
             if lease.root != domain.identities[0]:
                 raise DatabaseRefused("database runtime root changed during acquisition")
+            _require_recovered(domain.root)
             marker = read_marker(domain.root)
             if not isinstance(marker, Marker):
                 raise DatabaseRefused("database runtime requires an adopted native marker")
@@ -170,3 +172,19 @@ class Authority:
 
     def close(self) -> None:
         self.invalidate("runtime closed")
+
+
+def _require_recovered(root: Path) -> None:
+    """Metadata-only, no-follow admission before any native unwrap."""
+    try:
+        with open_private_directory(root / "mordred") as directory:
+            for name in ("db-encryption.journal.json", "db-encryption.pending", "db-decryption.pending"):
+                try:
+                    directory.stat(name)
+                except PrivateFSError as exc:
+                    if exc.reason == "missing":
+                        continue
+                    raise
+                raise DatabaseRefused("database maintenance must finish before runtime acquisition")
+    except PrivateFSError:
+        raise DatabaseRefused("database recovery state cannot be checked safely") from None

@@ -369,6 +369,17 @@ class _Transaction:
     def _mark_mutated(self) -> None:
         self.published = self.directory.published = True
 
+    def flush_file(self, name: str, *, expected_identity: FileIdentity | None = None) -> None:
+        validate_leaf(name)
+        self._check()
+        with self.directory._open(name) as fd:
+            identity = _identity(_private(fd))
+            if expected_identity is not None and identity != expected_identity:
+                raise PrivateFSError("unsafe", "flush_identity")
+            _flush(fd)
+            if _identity(_private(fd)) != identity or self.directory.stat(name).identity != identity:
+                raise PrivateFSError("unsafe", "flush_identity")
+
     def delete_file(self, name: str, *, expected_identity: FileIdentity | None = None) -> None:
         self._move(name, None, expected_identity)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import os
 import threading
@@ -12,7 +13,7 @@ from typing import Final
 
 from .._database_contracts import DatabaseBusy as MigrationBusy
 from .._database_contracts import DatabaseRefused as MigrationError
-from .._database_lifecycle import RuntimeLease, acquire_exclusive, acquire_runtime
+from .._database_lifecycle import ExclusiveLease, RuntimeLease, acquire_exclusive, acquire_runtime
 
 __all__ = ["LOCK_SUBPATH", "MigrationBusy", "MigrationError", "migration_lock", "runtime_lease"]
 
@@ -54,10 +55,10 @@ def runtime_lease(home: Path, *, timeout: float = 120.0) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def migration_lock(home: Path, *, timeout: float = 0.0) -> Iterator[None]:
+def migration_lock(home: Path, *, timeout: float = 0.0) -> Iterator[ExclusiveLease]:
     """Root exclusion is reentrant only for the thread that acquired it."""
-    with acquire_exclusive(home, timeout=timeout):
-        yield
+    with acquire_exclusive(home, timeout=timeout) as lease:
+        yield lease
 
 
 def _after_fork() -> None:
@@ -79,3 +80,19 @@ def _after_fork() -> None:
 
 if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_after_fork)
+
+
+def _close_legacy_leases() -> None:
+    """Dispose process-lifetime generators before module globals are cleared.
+
+    This is shutdown/test-owner cleanup, never a runtime lease reset API. An
+    installed legacy shim must retain its lease until the process exits.
+    """
+    with _MUTEX:
+        contexts = tuple(_LEASES.values())
+        _LEASES.clear()
+        for context, _lease in contexts:
+            context.__exit__(None, None, None)
+
+
+atexit.register(_close_legacy_leases)
