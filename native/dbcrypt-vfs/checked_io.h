@@ -89,4 +89,11 @@ static __inline int ci_test_observe(int stage, HANDLE handle) {
 #define CI_AFTER_WRITE 9
 #define CI_BEFORE_CLOSE 10
 #define CI_BEFORE_UNMAP 11
+/* Directory-delete ordering/fault boundaries. Post-close has a NULL handle;
+ * every other handle is borrowed only for the synchronous callback. */
+#define CI_AFTER_DISPOSITION 40
+#define CI_AFTER_FILE_CLOSE 41
+#define CI_BEFORE_DIR_FLUSH 42
+#define CI_AFTER_DIR_FLUSH 43
+#define CI_BEFORE_DIR_OPEN 44
 #endif

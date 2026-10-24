@@ -1305,3 +1305,144 @@ def test_native_namespace_uri_refusal_has_zero_data_opens(fixture: tuple[Any, An
     assert stats(registration)["data_opens"] == before["data_opens"]
     assert stats(registration)["created"] == before["created"]
     assert list(root.iterdir()) == []
+
+
+@contextmanager
+def directory_delete_trace(
+    registration: Any, parent: Path, target: Path, *, fail_stage: int = 0
+) -> Iterator[tuple[list[int], list[str]]]:
+    from mordred_hermes._private_fs._windows_api import OwnedHandle, get_api
+    from mordred_hermes._private_fs._windows_security import check_private, validate_private
+
+    api = get_api()
+    # Capture expected physical identity, then close this test handle so it
+    # cannot mask a missing production directory pin during rename attempts.
+    with api.open(str(parent)) as handle:
+        validate_private(handle, directory=True)
+        expected_identity = api.metadata(handle).identity
+        expected_path = api.final_path(handle)
+    events: list[int] = []
+    errors: list[str] = []
+    deleting = False
+
+    def trace(stage: int, handle: int) -> int:
+        nonlocal deleting
+        try:
+            if stage == 40:
+                borrowed = OwnedHandle(api, handle)
+                name = api.final_path(borrowed)
+                if name.casefold() != (expected_path + "\\" + target.name).casefold():
+                    return 0
+                check_private(api.descriptor(borrowed), api.user_sid())
+                deleting = True
+                events.append(stage)
+            elif stage == 41 and deleting:
+                assert not handle, "closed handles cannot be borrowed by an observer"
+                assert not target.exists(), "deletion must complete before the directory barrier"
+                events.append(stage)
+            elif stage in (42, 43, 44):
+                borrowed = OwnedHandle(api, handle)
+                validate_private(borrowed, directory=True)
+                api.validate_volume(borrowed)
+                assert api.metadata(borrowed).identity == expected_identity
+                assert api.final_path(borrowed).casefold() == expected_path.casefold()
+                if stage == 44:
+                    assert not deleting, "supplemental parent admission must precede disposition"
+                else:
+                    assert deleting and 41 in events and not target.exists()
+                    events.append(stage)
+                for selected in dict.fromkeys((registration.root.parent, registration.root, parent)):
+                    moved = selected.with_name(selected.name + "-syncdir-move")
+                    assert not moved.exists()
+                    try:
+                        selected.rename(moved)
+                    except OSError:
+                        pass
+                    else:
+                        moved.rename(selected)
+                        raise AssertionError("original directory pin was not retained")
+            else:
+                return 0
+            return int(stage == fail_stage)
+        except BaseException as error:
+            errors.append(repr(error))
+            return 1
+
+    with native_hook(registration, trace):
+        yield events, errors
+
+
+def directory_delete_target(root: Path, nested: bool) -> tuple[Path, Path]:
+    from mordred_hermes._private_fs import open_private_directory
+
+    parent = root / "nested-delete" if nested else root
+    with open_private_directory(parent, create=nested) as directory, directory.transaction() as transaction:
+        transaction.create_bytes("owned-delete.fixture", b"synthetic checked deletion fixture")
+    return parent, parent / "owned-delete.fixture"
+
+
+def checked_delete(registration: Any, target: Path, sync_dir: int) -> int:
+    delete = registration._native.mordred_vfs_test_delete
+    delete.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    delete.restype = ctypes.c_int
+    return int(delete(str(target).encode("utf-8"), sync_dir))
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("sync_dir", [0, 1])
+def test_checkedtest_directory_delete_flush_order_and_immediate_parent(
+    fixture: tuple[Any, Any, Path], nested: bool, sync_dir: int
+) -> None:
+    _driver, registration, root = fixture
+    parent, target = directory_delete_target(root, nested)
+    with directory_delete_trace(registration, parent, target) as (events, errors):
+        rc = checked_delete(registration, target, sync_dir)
+    assert rc == 0 and not errors, (rc, errors)
+    assert events == ([40, 41, 42, 43] if sync_dir else [40, 41])
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("fail_stage,expected", [(41, 4106), (42, 1290)])
+def test_checkedtest_directory_delete_propagates_close_and_flush_failure(
+    fixture: tuple[Any, Any, Path], nested: bool, fail_stage: int, expected: int
+) -> None:
+    _driver, registration, root = fixture
+    parent, target = directory_delete_target(root, nested)
+    with directory_delete_trace(registration, parent, target, fail_stage=fail_stage) as (events, errors):
+        rc = checked_delete(registration, target, 1)
+    assert not errors, errors
+    assert rc == expected, (rc, events)
+    assert events == ([40, 41] if fail_stage == 41 else [40, 41, 42])
+    # Failure is not a claim that disposition was rolled back. The real handle
+    # closed; neither a close error nor a failed barrier may report success.
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_checkedtest_directory_delete_extra_commit_requests_barrier(
+    fixture: tuple[Any, Any, Path], nested: bool
+) -> None:
+    from mordred_hermes._private_fs import open_private_directory
+
+    driver, registration, root = fixture
+    parent = root / "nested-extra" if nested else root
+    with open_private_directory(parent, create=nested):
+        pass
+    name = "nested-extra/extra.db" if nested else "extra.db"
+    connection = connect(driver, root, name)
+    try:
+        assert connection.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
+        connection.execute("PRAGMA synchronous=EXTRA")
+        assert connection.execute("PRAGMA synchronous").fetchone() == (3,)
+        connection.execute("CREATE TABLE data(value)")
+        connection.commit()
+        with directory_delete_trace(registration, parent, parent / "extra.db-journal") as (events, errors):
+            connection.execute("INSERT INTO data VALUES ('durability fixture')")
+            connection.commit()
+        assert not errors, errors
+        assert events == [40, 41, 42, 43]
+        assert connection.execute("SELECT value FROM data").fetchone() == ("durability fixture",)
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    finally:
+        connection.close()

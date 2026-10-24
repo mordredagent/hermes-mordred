@@ -577,6 +577,14 @@ int mordred_vfs_stats(uint64_t token, char *out, int size) {
 }
 
 #ifdef MORDRED_VFS_TESTING
+/* Call the actual checked xDelete. No alternate file-open path or synthetic
+ * callback result: caller creates an owned synthetic fixture separately. */
+__declspec(dllexport)
+int mordred_vfs_test_delete(const char *path, int sync_dir) {
+  if (!initialized || !path || (sync_dir!=0 && sync_dir!=1)) return SQLITE_MISUSE;
+  return vDelete(&checked_vfs,path,sync_dir);
+}
+
 /* Exercise real callbacks on two independently opened checked handles. Return
  * every observed lock result so the Python gate can distinguish idempotence,
  * exclusion, wrong-mode refusal, and release without a stacked OS lock. */

@@ -367,7 +367,14 @@ int ci_check(CiFile *f) {
 int ci_close(CiFile *f) {
   int rc=SQLITE_OK;
   if (f->handle && f->handle!=INVALID_HANDLE_VALUE && ci_test_observe(CI_BEFORE_CLOSE,f->handle)) rc=SQLITE_IOERR_CLOSE;
-  if (f->handle && f->handle!=INVALID_HANDLE_VALUE && !CloseHandle(f->handle)) rc=SQLITE_IOERR_CLOSE;
+  if (f->handle && f->handle!=INVALID_HANDLE_VALUE) {
+    if (!CloseHandle(f->handle)) rc=SQLITE_IOERR_CLOSE;
+#ifdef MORDRED_VFS_TESTING
+    /* Inject a reported close failure only after the actual handle was closed,
+     * so deterministic error-path tests cannot intentionally leak a handle. */
+    else if (ci_test_stage(CI_AFTER_FILE_CLOSE,NULL)) rc=SQLITE_IOERR_CLOSE;
+#endif
+  }
   f->handle=NULL;
   while (f->count) if (!CloseHandle(f->pins[--f->count].handle)) rc=SQLITE_IOERR_CLOSE;
   return rc;
@@ -375,9 +382,14 @@ int ci_close(CiFile *f) {
 
 int ci_delete(CiFile *f) {
   FILE_DISPOSITION_INFO disposition={TRUE};
+  BOOL marked;
   if (ci_check(f)!=SQLITE_OK || ci_test_stage(CI_BEFORE_DELETE,f->handle) ||
       ci_test_observe(CI_BEFORE_DELETE,f->handle)) return SQLITE_IOERR_DELETE;
-  return SetFileInformationByHandle(f->handle,FileDispositionInfo,&disposition,sizeof(disposition)) ? SQLITE_OK : SQLITE_IOERR_DELETE;
+  marked=SetFileInformationByHandle(f->handle,FileDispositionInfo,&disposition,sizeof(disposition));
+#ifdef MORDRED_VFS_TESTING
+  if (marked && ci_test_stage(CI_AFTER_DISPOSITION,f->handle)) return SQLITE_IOERR_DELETE;
+#endif
+  return marked ? SQLITE_OK : SQLITE_IOERR_DELETE;
 }
 
 int ci_size(CiFile *f, sqlite3_int64 *size) {
