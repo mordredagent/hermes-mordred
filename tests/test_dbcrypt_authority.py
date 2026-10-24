@@ -405,22 +405,58 @@ def test_default_startup_cannot_return_unregistered_live_sql_connection(native_r
 
 
 @pytest.mark.parametrize("installed", [False, True])
-def test_default_profile_startup_refuses_before_sql_or_native(native_root, monkeypatch, installed):
+@pytest.mark.parametrize("damage", ["directory", "mapping"])
+def test_default_profile_startup_refuses_before_sql_or_native(native_root, monkeypatch, installed, damage):
+    """An installed shim cannot bypass admission or rebind a held profile runtime."""
+    import sqlite3
+
     from mordred_hermes import dbcrypt
     from mordred_hermes.dbcrypt import _shim
+    from mordred_hermes.dbcrypt._connection import ProtectedConnection
 
     root, backend, _, _ = native_root
+    profile = root / "profiles/work"
+    before_modules = (dbcrypt.sys.modules["sqlite3"], dbcrypt.sys.modules["sqlite3.dbapi2"])
+    assert before_modules[0] is sqlite3
     monkeypatch.setattr(dbcrypt.sys, "platform", "darwin")
     monkeypatch.setattr(dbcrypt.sys, "argv", ["hermes"])
     monkeypatch.setattr(_shim, "is_installed", lambda: installed)
     monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    modules = []
+    monkeypatch.setattr(_shim, "install_module", modules.append)
     try:
+        assert dbcrypt.install(home=profile)
+        assert len(modules) == 1
+        held = modules[0].connect(profile / "state.db")
+        assert isinstance(held, ProtectedConnection)
+        cursor = held.execute("SELECT 1")
+        assert sum(op == "ecdh" for op, _ in backend.calls) == 1
+        authority = dbcrypt._PROVIDER.current_authority
+        assert authority is not None and authority.home == profile and authority.root == root
+        before_calls = list(backend.calls)
+        if damage == "directory":
+            profile.rename(profile.with_name("retired-work"))
+            profile.mkdir(mode=0o700)
+        else:
+            (profile / "mordred/db-key-source.json").write_bytes(b"foreign root binding")
         with pytest.raises(DatabaseRefused):
-            dbcrypt.install(home=root / "profiles/work")
-        assert backend.calls == []
+            cursor.fetchone()
+        assert authority.terminal
+        with pytest.raises(DatabaseRefused):
+            held.commit()
+        with pytest.raises(DatabaseRefused):
+            modules[0].connect(profile / "state.db")
+        assert backend.calls == before_calls
+        if damage == "directory":
+            assert not (profile / "state.db").exists()
+        else:
+            assert (profile / "state.db").exists()
     finally:
         if dbcrypt._PROVIDER is not None:
             dbcrypt._PROVIDER.close()
+    assert (dbcrypt.sys.modules["sqlite3"], dbcrypt.sys.modules["sqlite3.dbapi2"]) == before_modules
+    with acquire_exclusive(root):
+        pass
 
 
 def test_status_never_acquires_runtime_authority(native_root, monkeypatch):
