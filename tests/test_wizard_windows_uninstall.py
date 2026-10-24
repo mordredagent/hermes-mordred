@@ -308,3 +308,44 @@ def test_purge_warning_names_no_key_without_memory_custody(win, capsys, hermes_f
     assert "permanently deletes" not in captured.err
     assert "delete the Windows CNG memory custody key" not in captured.out
     assert role_current(env, "audit") == audit and env.launches.argv == []
+
+
+@pytest.mark.parametrize("state", ["current", "retained", "pending"])
+def test_uninstall_reports_and_preserves_native_mail_custody(fs, monkeypatch, state):
+    from types import SimpleNamespace
+
+    from mordred_hermes.wizard import _uninstall_windows as windows
+
+    custody, _, home, backend = fs
+    custody.upgrade_manifest_v2(home=home)
+    if state == "pending":
+        generate = backend.generate_enclave_key
+
+        def interrupted(key_id, **kwargs):
+            generate(key_id, **kwargs)
+            raise RuntimeError("simulated lost native creation result")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(backend, "generate_enclave_key", interrupted)
+            with pytest.raises(RuntimeError), custody.windows_custody_session(home, backend=backend) as session:
+                session.enroll_role("mail")
+    else:
+        with custody.windows_custody_session(home, backend=backend) as session:
+            session.enroll_role("mail")
+            if state == "retained":
+                current = session.enroll_role("mail", retain_current=True)
+                session.delete_role(current, erase_authorized=True)
+    with custody.windows_custody_session(home) as session:
+        status = session.role_status("mail")
+        assert (status.current is not None) == (state == "current")
+        assert bool(status.retained) == (state == "retained")
+        assert status.pending == (state == "pending")
+    before = {path: path.read_bytes() for path in (home / "mordred").rglob("*") if path.is_file()}
+    native_calls = list(backend.calls)
+    assert windows.custody_roles(home) == (["mail"], None)
+    keys = windows.device_keys(home, home / "mordred/vault")
+    assert keys == ["Windows CNG mail custody key (TPM-bound, this account and profile)"]
+    assert windows.kept_after_purge(windows.purge_lines(home), keys) == keys
+    assert windows.purge(SimpleNamespace(home=home, vault_root=home / "mordred/vault")) == 0
+    assert {path: path.read_bytes() for path in (home / "mordred").rglob("*") if path.is_file()} == before
+    assert backend.calls == native_calls

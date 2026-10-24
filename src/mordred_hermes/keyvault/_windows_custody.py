@@ -671,6 +671,12 @@ class WindowsCustodySession:
     def enroll_role(self, role: Role, *, retain_current: bool = False) -> GenerationLease:
         if role == "memory":
             raise CustodyError("use explicit memory enrollment")
+        if role == "mail":
+            # Reject before discovery or _ensure_manifest can publish v1 and
+            # turn retained/missing ownership into an apparently valid profile.
+            manifest = self._manifest()
+            if manifest is None or manifest.version != 2:
+                raise CustodyError("mail custody requires explicit schema upgrade")
         backend = self.backend
         manifest, pending = self._begin(role, retain_current=retain_current)
         with self.canonical.publication_receipt() as receipt:

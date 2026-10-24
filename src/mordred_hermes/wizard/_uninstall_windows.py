@@ -53,7 +53,7 @@ PLAN_NOTE = (
     "process inventory is unknown; stop them first. Retained file-vault/seal/secret-store state is excluded or "
     "not ported on Windows and is preserved unchanged."
 )
-_ROLE_LABELS = {"memory": "memory", "audit": "audit", "telegram": "Telegram"}
+_ROLE_LABELS = {"memory": "memory", "audit": "audit", "telegram": "Telegram", "mail": "mail"}
 _DELETE_MEMORY = "delete the Windows CNG memory custody key"
 _UNREADABLE = "Windows custody could not be read"
 _STOPPED = (

@@ -288,3 +288,43 @@ def test_fresh_schema_refuses_lost_ownership_with_sealed_memory(fs):
         c.upgrade_manifest_v2(home=home)
     assert not (home / "mordred" / c.MANIFEST).exists()
     assert backend.calls == []
+
+
+def test_refused_mail_enrollment_cannot_bypass_retained_fresh_state(fs):
+    from mordred_hermes._private_fs import open_private_directory
+
+    c, _, home, backend = fs
+    with open_private_directory(home / "mordred", create=True) as directory, directory.transaction() as tx:
+        tx.create_bytes("unknown-custody.json", b"retain-for-reconciliation")
+    with pytest.raises(c.CustodyError):
+        c.upgrade_manifest_v2(home=home)
+    with c.windows_custody_session(home, backend=backend) as session, pytest.raises(c.CustodyError):
+        session.enroll_role("mail")
+    assert not (home / "mordred" / c.MANIFEST).exists()
+    with pytest.raises(c.CustodyError):
+        c.upgrade_manifest_v2(home=home)
+    assert (home / "mordred/unknown-custody.json").read_bytes() == b"retain-for-reconciliation"
+    assert backend.calls == []
+
+
+@pytest.mark.parametrize("state", ["missing", "v1", "malformed", "pending-schema"])
+def test_mail_enrollment_requires_checked_v2_before_backend_discovery(fs, monkeypatch, state):
+    from mordred_hermes._private_fs import open_private_directory
+
+    c, _, home, backend = fs
+    if state == "v1":
+        _populated(fs)
+    elif state != "missing":
+        name = c.MANIFEST if state == "malformed" else c.SCHEMA_PENDING
+        with open_private_directory(home / "mordred", create=True) as directory, directory.transaction() as tx:
+            tx.create_bytes(name, b"invalid-retained-state")
+    discoveries = []
+
+    def discover():
+        discoveries.append(True)
+        return backend
+
+    monkeypatch.setattr(c, "windows_backend", discover)
+    with c.windows_custody_session(home, create=True) as session, pytest.raises(c.CustodyError):
+        session.enroll_role("mail")
+    assert discoveries == []
