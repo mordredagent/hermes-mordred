@@ -753,6 +753,9 @@ def _reserve_journal_staging(root: Path, data: dict[str, Any], entry: dict[str, 
         identity = _file_identity(staged)
     except FileNotFoundError:
         pass
+    except PrivateFSError as exc:
+        if exc.reason != "missing" or exc.commit_state != "not_committed":
+            raise
     else:
         if entry["prepared_identity"] is None or identity != entry["prepared_identity"]:
             raise MigrationError("unrecorded staging survivor cannot authorize export")
