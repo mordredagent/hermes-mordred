@@ -38,6 +38,7 @@ from cryptography.hazmat.primitives.serialization import (
 
 from mordred_hermes.keyvault._exceptions import WrapKeyAlreadyExists, WrapKeyNotFound
 from mordred_hermes.keyvault.wrap import NativeBackendError, NativeErrorCode
+from tests.test_keyvault_native_deletion import checked_audit_permit
 
 AuditSink = Callable[[dict[str, Any]], None]
 
@@ -404,22 +405,30 @@ class TestKeychainManagement:
 
     def test_delete_then_lookup_raises_key_not_found(self, backend: FakeBackend) -> None:
         from mordred_hermes.keyvault._exceptions import WrapKeyNotFound
+        from mordred_hermes.keyvault._seckey_backend import _SecKeyBackend
         from mordred_hermes.keyvault.wrap import (
             delete_wrapping_key,
             generate_wrapping_key,
             get_wrapping_key_public,
         )
+        from tests.test_keyvault_seckey_backend import _FakeOps
 
+        backend = _SecKeyBackend(ops=_FakeOps(), sw_ops=None)
         generate_wrapping_key("k1", backend=backend)
-        delete_wrapping_key("k1", backend=backend)
+        with checked_audit_permit(backend, "k1") as permit:
+            delete_wrapping_key("k1", backend=backend, deletion=permit)
 
         with pytest.raises(WrapKeyNotFound):
             get_wrapping_key_public("k1", backend=backend)
 
     def test_delete_is_idempotent(self, backend: FakeBackend) -> None:
+        from mordred_hermes.keyvault._seckey_backend import _SecKeyBackend
         from mordred_hermes.keyvault.wrap import delete_wrapping_key
+        from tests.test_keyvault_seckey_backend import _FakeOps
 
-        delete_wrapping_key("never-existed", backend=backend)  # must not raise
+        backend = _SecKeyBackend(ops=_FakeOps(), sw_ops=None)
+        with checked_audit_permit(backend, "never-existed") as permit:
+            delete_wrapping_key("never-existed", backend=backend, deletion=permit)
 
     def test_wrap_for_unknown_key_raises_key_not_found(self, backend: FakeBackend) -> None:
         from mordred_hermes.keyvault._exceptions import WrapKeyNotFound
@@ -438,7 +447,6 @@ class TestKeychainManagement:
         Enclave-lookup boundary, AFTER parse but BEFORE successful ECDH."""
         from mordred_hermes.keyvault._exceptions import WrapKeyNotFound
         from mordred_hermes.keyvault.wrap import (
-            delete_wrapping_key,
             generate_wrapping_key,
             unwrap_dek,
             wrap_dek,
@@ -447,7 +455,7 @@ class TestKeychainManagement:
         _, sink = captured_audit
         generate_wrapping_key("k1", backend=backend)
         blob = wrap_dek(secrets.token_bytes(32), "k1", backend=backend)
-        delete_wrapping_key("k1", backend=backend)
+        backend.delete_enclave_key("k1")
 
         with pytest.raises(WrapKeyNotFound):
             unwrap_dek(blob, "k1", audit_sink=sink, backend=backend)

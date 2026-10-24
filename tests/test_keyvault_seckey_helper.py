@@ -21,8 +21,10 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
+from mordred_hermes._database_contracts import DatabaseRefused
 from mordred_hermes.keyvault import _seckey_helper
 from mordred_hermes.keyvault._exceptions import WrapKeyNotFound
+from mordred_hermes.keyvault._native_deletion import create_wrapping_key_scope, rollback_created_key
 from mordred_hermes.keyvault._seckey_backend import (
     _application_tag,
     _OpsError,
@@ -207,7 +209,17 @@ def test_generate_public_key_delete_roundtrip(fake_helper: str) -> None:
     # public_key returns the same key.
     assert ops.copy_public_key(tag) == pub
 
-    ops.delete_key(tag)
+    # Raw Python transport methods cannot delete even a known tag.
+    with pytest.raises(DatabaseRefused):
+        ops.delete_key(tag)
+    assert ops.copy_public_key(tag) == pub
+    # Exercise acknowledged cleanup through a positive create-only receipt.
+    backend = _SecKeyBackend(ops=ops, sw_ops=None)
+    with create_wrapping_key_scope("fresh-roundtrip", backend=backend) as receipt:
+        rollback_created_key(receipt)
+    from mordred_hermes.keyvault._seckey_errors import _application_tag
+
+    tag = _application_tag("fresh-roundtrip")
     # After delete the key is gone.
     with pytest.raises(_OpsError) as exc:
         ops.copy_public_key(tag)
@@ -232,7 +244,8 @@ def test_ecdh_agrees_with_local_peer(fake_helper: str) -> None:
 def test_delete_is_idempotent(fake_helper: str) -> None:
     ops = _HelperSecKeyOps(fake_helper)
     # Deleting a never-created tag does not raise.
-    ops.delete_key(b"mordred-hermes.wrap.never-existed")
+    with pytest.raises(DatabaseRefused):
+        ops.delete_key(b"mordred-hermes.wrap.never-existed")
 
 
 def test_probe_succeeds(fake_helper: str) -> None:
@@ -329,7 +342,10 @@ def test_backend_generate_get_delete_via_helper(fake_helper: str) -> None:
 
     assert backend.get_enclave_public_key(key_id) == pub
 
-    backend.delete_enclave_key(key_id)
+    from tests.test_keyvault_native_deletion import checked_audit_permit
+
+    with checked_audit_permit(backend, key_id) as permit:
+        backend.delete_enclave_key(key_id, deletion=permit)
     with pytest.raises(WrapKeyNotFound):
         backend.get_enclave_public_key(key_id)
 

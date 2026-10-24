@@ -31,7 +31,8 @@ Internal Python surface (PR3 step-0 freeze, consumed by PR4 ``api.py``):
 
 - :func:`generate_wrapping_key` — create + persist a new Enclave key.
 - :func:`get_wrapping_key_public` — return SEC1 uncompressed public key.
-- :func:`delete_wrapping_key` — remove from Keychain (idempotent).
+- :func:`delete_wrapping_key` — remove under checked deletion authority.
+- :func:`create_wrapping_key_scope` — create with explicit unpublished-key rollback.
 - :func:`wrap_dek` — produce a 127-byte blob (offline, no audit).
 - :func:`unwrap_dek` — verify + decrypt a blob (authorized, emits audit).
 
@@ -61,6 +62,19 @@ from ._exceptions import (
     WrapIntegrityError,
     WrapKeyNotFound,
     WrapParseError,
+)
+from ._native_deletion import (
+    NativeDeletePermit,
+    _check_delete_request,
+)
+from ._native_deletion import (
+    commit_created_key as commit_created_key,
+)
+from ._native_deletion import (
+    create_wrapping_key_scope as create_wrapping_key_scope,
+)
+from ._native_deletion import (
+    rollback_created_key as rollback_created_key,
 )
 
 AuditSink = Callable[[dict[str, Any]], None]
@@ -186,9 +200,10 @@ class NativeBackend(Protocol):
         Raises :class:`WrapKeyNotFound` if the Keychain has no item."""
         ...
 
-    def delete_enclave_key(self, key_id: str) -> None:
-        """Remove the native item for ``key_id``.
+    def delete_enclave_key(self, key_id: str, *, deletion: NativeDeletePermit | None = None) -> None:
+        """Remove the native item under an issuer-backed, single-use permit.
 
+        Missing or invalid ``deletion`` refuses before native I/O.
         Confirmed absence is a no-op where the backend can establish it.
         Windows PCP cannot distinguish absence from inaccessible retained keys;
         an unopenable keyset must refuse deletion, including repeated deletes.
@@ -425,15 +440,22 @@ def delete_wrapping_key(
     *,
     backend: NativeBackend,
     native_key_id: str | None = None,
+    deletion: NativeDeletePermit | None = None,
 ) -> None:
-    """Remove the Keychain item for ``key_id``. Idempotent.
+    """Remove the native item under a live checked deletion permit.
+
+    A missing, expired, or mismatched permit refuses before native deletion.
+    Confirmed absence remains idempotent under valid ownership authority.
 
     Deleted keys cannot be recovered — any wrap blobs produced under
     ``key_id`` become permanently un-unwrappable. The caller is
     responsible for exporting backups (``api.export_backup``, Phase 4
     PR4) before invoking this.
     """
-    backend.delete_enclave_key(native_key_id if native_key_id is not None else key_id)
+    _check_delete_request(
+        backend=backend, native_key_id=native_key_id if native_key_id is not None else key_id, deletion=deletion
+    )
+    backend.delete_enclave_key(native_key_id if native_key_id is not None else key_id, deletion=deletion)
 
 
 def wrap_dek(

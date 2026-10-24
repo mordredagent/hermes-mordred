@@ -17,14 +17,11 @@ imports cleanly on Linux / Windows just like ``native.py``.
 
 from __future__ import annotations
 
-import contextlib
-import os
 from typing import Any, Protocol
 
 from . import native
+from ._native_deletion import _assert_native_tag_delete, _probe_native_ops
 from ._seckey_errors import (
-    _PROBE_TAG_PREFIX,
-    _SW_TAG_PREFIX,
     _OpsError,
     errSecAuthFailed,
     errSecItemNotFound,
@@ -181,6 +178,7 @@ class _PyobjcSecKeyOps:
         return _export_public_key(sec, public_key)
 
     def delete_key(self, tag: bytes) -> None:
+        _assert_native_tag_delete(ops=self, tag=tag)
         sec = self._security()
         status = sec.SecItemDelete(_keychain_query(sec, tag))
         # errSecItemNotFound is success — delete is contractually idempotent.
@@ -203,10 +201,7 @@ class _PyobjcSecKeyOps:
         a random-tagged ``.privateKeyUsage``-only throwaway; re-probes
         never collide because each draws a fresh ``os.urandom`` suffix.
         """
-        tag = _PROBE_TAG_PREFIX + os.urandom(8)
-        self._create(tag, "Mordred capability probe", biometry=False)
-        with contextlib.suppress(_OpsError):
-            self.delete_key(tag)
+        _probe_native_ops(self)
 
 
 def _nserror_code(err: Any) -> int:
@@ -399,6 +394,7 @@ class _SoftwareFallbackOps:
         return _export_public_key(sec, pub)
 
     def delete_key(self, tag: bytes) -> None:
+        _assert_native_tag_delete(ops=self, tag=tag)
         sec = self._security()
         status = sec.SecItemDelete(_sw_keychain_query(sec, tag))
         if status not in (errSecSuccess, errSecItemNotFound):
@@ -411,25 +407,4 @@ class _SoftwareFallbackOps:
 
     def probe(self) -> None:
         """Generate-then-delete a throwaway software key (no biometry flag)."""
-        tag = _SW_TAG_PREFIX + b"__probe__." + os.urandom(8)
-        sec = self._security()
-        key, err = sec.SecKeyCreateRandomKey(
-            {
-                sec.kSecAttrKeyType: sec.kSecAttrKeyTypeECSECPrimeRandom,
-                sec.kSecAttrKeySizeInBits: 256,
-                sec.kSecPrivateKeyAttrs: {
-                    sec.kSecAttrIsPermanent: True,
-                    sec.kSecAttrApplicationTag: tag,
-                    sec.kSecAttrLabel: "Mordred software capability probe",
-                    # Security review H2: same device-binding as the
-                    # persistent software key, so the throwaway probe key
-                    # is never iCloud-syncable either.
-                    sec.kSecAttrAccessible: sec.kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-                },
-            },
-            None,
-        )
-        if key is None:
-            raise _OpsError(_nserror_code(err), _nserror_domain(err), "software probe: SecKeyCreateRandomKey failed")
-        with contextlib.suppress(_OpsError):
-            self.delete_key(tag)
+        _probe_native_ops(self)

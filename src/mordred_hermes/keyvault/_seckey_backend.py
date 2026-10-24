@@ -61,6 +61,7 @@ from pathlib import Path
 from typing import Final
 
 from ._exceptions import WrapError, WrapKeyAlreadyExists, WrapKeyNotFound, WrapNativeUnavailable
+from ._native_deletion import NativeDeletePermit, _validate_delete_invocation
 
 # The Keychain/error foundation (constants, tag/label helpers, neutral failure
 # taxonomy) lives in ``_seckey_errors`` (leaf layer); the pyobjc-touching ops
@@ -321,6 +322,10 @@ class _SecKeyBackend:
     # ----- generate -----
 
     def generate_enclave_key(self, key_id: str, *, unattended: bool | None = None) -> bytes:
+        return self._create_tracked_key(key_id, unattended=unattended)[0]
+
+    def _create_tracked_key(self, key_id: str, *, unattended: bool | None = None) -> tuple[bytes, _SecKeyOps, bytes]:
+        """Return create-only success and its actual winning namespace."""
         resolved = _resolve_unattended(unattended)
         # A helper install changes the primary namespace, not ownership of
         # already-created keys. Refuse to create a helper key that would shadow
@@ -340,7 +345,10 @@ class _SecKeyBackend:
                 "software fallback",
             )
         try:
-            return self._ops.create_keypair(_application_tag(key_id), _keychain_label(key_id), unattended=resolved)
+            tag = _application_tag(key_id)
+            ops = self._ops
+            public_key = ops.create_keypair(tag, _keychain_label(key_id), unattended=resolved)
+            return public_key, ops, tag
         except _OpsError as exc:
             if _is_reason(exc, OPS_EXISTS, errSecDuplicateItem):
                 # An existing tag surfaces as WrapKeyAlreadyExists — still a
@@ -353,7 +361,8 @@ class _SecKeyBackend:
                 # back to a software P-256 key. A reason-carrying helper
                 # (TPM / CNG) never raises this, so the branch is inert
                 # off macOS.
-                return self._generate_software(key_id, unattended=resolved)
+                public_key = self._generate_software(key_id, unattended=resolved)
+                return public_key, self._sw_ops, _sw_application_tag(key_id)
             raise WrapError(f"failed to generate Enclave key for {key_id!r}") from exc
 
     @staticmethod
@@ -408,7 +417,11 @@ class _SecKeyBackend:
 
     # ----- delete -----
 
-    def delete_enclave_key(self, key_id: str) -> None:
+    def delete_enclave_key(self, key_id: str, *, deletion: NativeDeletePermit | None = None) -> None:
+        with _validate_delete_invocation(backend=self, native_key_id=key_id, deletion=deletion):
+            self._delete_namespaces(key_id)
+
+    def _delete_namespaces(self, key_id: str) -> None:
         first_error: _OpsError | None = None
 
         def attempt(ops: _SecKeyOps, tag: bytes) -> None:
