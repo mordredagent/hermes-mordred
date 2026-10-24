@@ -216,7 +216,7 @@ def _suites(platform: str) -> list[tuple[str, tuple[str, ...], dict[str, str], b
 def acceptance_commands(*, checkout: Path, bundle: Path, platform: str) -> list[dict[str, Any]]:
     commands: list[dict[str, Any]] = []
     for suite, modules, gates, integration in _suites(platform):
-        for mode in ("source", "wheel"):
+        for mode in ("wheel",) if suite == "linux-memory" else ("source", "wheel"):
             prefix = (
                 ["uv", "run", "--project", str(checkout), "pytest", "-q"]
                 if mode == "source"
@@ -250,6 +250,12 @@ def acceptance_commands(*, checkout: Path, bundle: Path, platform: str) -> list[
                     else ["import_probe_before_run"],
                 }
             )
+            if suite == "linux-memory":
+                commands[-1]["source_applicability"] = {
+                    "status": "not_applicable",
+                    "reason": "existing_linux_memory_suite_requires_installed_runtime",
+                    "blocked_by": "source_capable_linux_memory_suite_adaptation_pending",
+                }
             if suite == "windows-vfs":
                 commands[-1]["library_kind"] = "CheckedTest" if mode == "source" else "packaged Checked"
                 commands[-1]["requires"].extend(
@@ -426,22 +432,225 @@ def extract_sdist(archive: Path, destination: Path) -> Path:
     return children[0]
 
 
+def _require(condition: bool) -> None:
+    if not condition:
+        raise ValueError("inconsistent bundle provenance")
+
+
+def _object(value: Any, required: tuple[str, ...]) -> dict[str, Any]:
+    _require(isinstance(value, dict) and all(key in value for key in required))
+    return dict(value)
+
+
+def _hex(value: Any, length: int) -> bool:
+    return isinstance(value, str) and len(value) == length and all(char in "0123456789abcdef" for char in value)
+
+
+def _timestamp(value: Any) -> bool:
+    return type(value) in (int, float) and math.isfinite(value) and value > 0
+
+
+def _text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _relative(value: Any) -> Path:
+    _require(_text(value))
+    path = Path(value)
+    _require(
+        not path.is_absolute()
+        and path.as_posix() == value
+        and not any(part in {".", ".."} for part in path.parts)
+        and "\\" not in value
+        and ":" not in value
+    )
+    return path
+
+
+def _absolute(value: Any) -> Path:
+    _require(_text(value))
+    path = Path(value)
+    _require(path.is_absolute() and str(path.resolve(strict=True)) == value)
+    return path
+
+
+def _validate_probe(value: Any, *, mode: Mode, checkout: Path, root: Path) -> dict[str, Any]:
+    probe = _object(
+        value,
+        (
+            "product_file",
+            "interpreter",
+            "python_version",
+            "platform",
+            "versions",
+            "driver",
+            "token",
+            "home_is_temporary",
+            "native_provider",
+            "native_helper",
+            "readiness",
+        ),
+    )
+    _require(probe["platform"] in {"linux", "darwin", "win32"} and _text(probe["python_version"]))
+    environment = checkout / ".venv" if mode == "source" else root / "wheel-env"
+    interpreter = _absolute(probe["interpreter"])
+    _require(interpreter.is_file() and interpreter == _python(environment, probe["platform"]).resolve(strict=True))
+    origin = _absolute(probe["product_file"])
+    _require(origin.name == "__init__.py" and origin.parent.name == "mordred_hermes")
+    validate_import_provenance(origin, checkout=checkout, environment=root / "wheel-env", mode=mode)
+    if mode == "wheel":
+        _require(origin.parent.parent.name == "site-packages")
+    versions = _object(probe["versions"], ("hermes-mordred", "hermes-agent", "sqlcipher3-wheels", "pytest"))
+    _require(all(_text(versions[key]) for key in ("hermes-mordred", "hermes-agent", "sqlcipher3-wheels", "pytest")))
+    driver = _object(probe["driver"], ("module", "sqlite_version", "cipher_version"))
+    _require(all(_text(driver[key]) for key in ("sqlite_version", "cipher_version")))
+    _require(_absolute(driver["module"]).is_relative_to(environment) and Path(driver["module"]).is_file())
+    token = _object(probe["token"], ("elevated", "uid"))
+    _require(type(token["elevated"]) in (bool, type(None)) and (type(token["uid"]) is int or token["uid"] is None))
+    _require(probe["home_is_temporary"] is True and probe["native_provider"] is None and probe["native_helper"] is None)
+    _require(probe["readiness"] == "not_probed_no_native_collector")
+    return probe
+
+
+def _validate_build_records(value: Any, *, root: Path, checkout: Path, extracted: Path, wheel: Path) -> None:
+    _require(isinstance(value, list) and len(value) == 6)
+    for row in value:
+        record = _object(row, ("argv", "cwd", "started_at", "finished_at", "returncode"))
+        _require(
+            isinstance(record["argv"], list) and bool(record["argv"]) and all(_text(arg) for arg in record["argv"])
+        )
+        _require(record["cwd"] == str(root) and type(record["returncode"]) is int and record["returncode"] == 0)
+        _require(
+            _timestamp(record["started_at"])
+            and _timestamp(record["finished_at"])
+            and record["finished_at"] >= record["started_at"]
+        )
+    _require(value[0]["argv"] == ["uv", "build", "--sdist", str(checkout), "--out-dir", str(root / "artifacts")])
+    for index, environment in ((1, root / "build-env"), (2, root / "wheel-env")):
+        _require(
+            value[index]["argv"]
+            == ["uv", "venv", "--no-project", "--python", str(_python(checkout / ".venv")), str(environment)]
+        )
+    _require(
+        value[3]["argv"] == ["uv", "pip", "install", "--python", str(_python(root / "build-env")), "hatchling>=1.18"]
+    )
+    _require(
+        value[4]["argv"]
+        == [
+            "uv",
+            "build",
+            "--wheel",
+            "--no-build-isolation",
+            "--python",
+            str(_python(root / "build-env")),
+            str(extracted),
+            "--out-dir",
+            str(root / "artifacts"),
+        ]
+    )
+    _require(
+        value[5]["argv"]
+        == [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(_python(root / "wheel-env")),
+            "--link-mode",
+            "copy",
+            str(wheel) + "[dev,keyvault,extension,dbcrypt,telegram]",
+        ]
+    )
+
+
+def _validate_manifest(value: Any, root: Path) -> dict[str, Any]:
+    manifest = _object(
+        value,
+        (
+            "schema_version",
+            "commit",
+            "checkout",
+            "created_at",
+            "sdist",
+            "sdist_sha256",
+            "wheel",
+            "wheel_sha256",
+            "extracted_sdist",
+            "source_probe",
+            "wheel_probe",
+            "build_commands",
+            "files",
+            "native_qualification",
+            "native_collectors",
+            "missing_native_hooks",
+        ),
+    )
+    _require(type(manifest["schema_version"]) is int and manifest["schema_version"] == 1)
+    _require(_hex(manifest["commit"], 40) and _timestamp(manifest["created_at"]))
+    checkout = _absolute(manifest["checkout"])
+    _require(checkout.is_dir() and not root.is_relative_to(checkout))
+    files = manifest["files"]
+    _require(isinstance(files, dict) and bool(files))
+    for name, digest in files.items():
+        _relative(name)
+        _require(_hex(digest, 64))
+    source = _validate_probe(manifest["source_probe"], mode="source", checkout=checkout, root=root)
+    wheel_probe = _validate_probe(manifest["wheel_probe"], mode="wheel", checkout=checkout, root=root)
+    _require(source["platform"] == wheel_probe["platform"])
+    version = source["versions"]["hermes-mordred"]
+    _require(version == wheel_probe["versions"]["hermes-mordred"])
+    sdist, wheel = (_relative(manifest[key]) for key in ("sdist", "wheel"))
+    _require(sdist.as_posix() == f"artifacts/hermes_mordred-{version}.tar.gz")
+    _require(
+        wheel.parent == Path("artifacts")
+        and wheel.name.startswith(f"hermes_mordred-{version}-")
+        and wheel.suffix == ".whl"
+    )
+    for kind, path in (("sdist", sdist), ("wheel", wheel)):
+        digest = manifest[kind + "_sha256"]
+        _require(_hex(digest, 64) and files.get(path.as_posix()) == digest and sha256_file(root / path) == digest)
+    extracted = _relative(manifest["extracted_sdist"])
+    _require(extracted.as_posix() == f"extracted-sdist/{sdist.name[:-7]}")
+    required = (
+        "tests/test_dbcrypt.py",
+        "tests/conftest.py",
+        "tools/dbcrypt_acceptance.py",
+        (extracted / "pyproject.toml").as_posix(),
+        Path(wheel_probe["product_file"]).relative_to(root).as_posix(),
+    )
+    _require(all(name in files for name in required))
+    _validate_build_records(
+        manifest["build_commands"], root=root, checkout=checkout, extracted=root / extracted, wheel=root / wheel
+    )
+    _require(manifest["native_qualification"] == "not_run" and manifest["native_collectors"] == "not_integrated")
+    _require(
+        manifest["missing_native_hooks"]
+        == [
+            "provision",
+            "reopen",
+            "verify",
+            "independent_ec2_observations",
+            "collector_records_across_os_reboot_and_stop_start",
+        ]
+    )
+    if source["platform"] in {"linux", "win32"}:
+        _require(
+            manifest.get("acceptance_commands")
+            == acceptance_commands(checkout=checkout, bundle=root, platform=source["platform"])
+        )
+    return manifest
+
+
 def validate_bundle(root: Path) -> dict[str, Any]:
+    root = root.resolve(strict=True)
     if (root / "src").exists() or (root / "mordred_hermes").exists():
         raise AcceptanceRefused("product_source_on_test_path")
     try:
-        manifest = json.loads((root / "manifest.json").read_text())
-        if manifest.get("schema_version") != 1 or not manifest.get("files"):
-            raise ValueError("manifest")
-        for name, expected in manifest["files"].items():
-            path = root / name
-            if not path.resolve().is_relative_to(root.resolve()) or not path.is_file():
-                raise ValueError("path")
-            if sha256_file(path) != expected:
-                raise ValueError("hash")
-    except (OSError, ValueError, TypeError, AttributeError) as exc:
-        raise AcceptanceRefused("bundle_hash_mismatch_or_missing_manifest") from exc
-    return dict(manifest)
+        manifest = _validate_manifest(json.loads(_input_file(root / "manifest.json").read_text()), root)
+        _require(_bundle_hashes(root) == manifest["files"])
+    except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+        raise AcceptanceRefused("bundle_hash_mismatch_or_invalid_provenance") from exc
+    return manifest
 
 
 def _run_build(argv: list[str], *, cwd: Path, environment: dict[str, str], log: list[dict[str, Any]]) -> str:
@@ -545,6 +754,8 @@ def _bundle_build(checkout: Path, output: Path, commands: list[dict[str, Any]], 
             "install",
             "--python",
             str(_python(wheel_env)),
+            "--link-mode",
+            "copy",
             str(wheel) + "[dev,keyvault,extension,dbcrypt,telegram]",
         ],
         cwd=output,
@@ -562,30 +773,95 @@ def _bundle_build(checkout: Path, output: Path, commands: list[dict[str, Any]], 
     if source_probe["versions"]["hermes-mordred"] != wheel_probe["versions"]["hermes-mordred"]:
         raise AcceptanceRefused("source_wheel_version_mismatch")
     return {
-        "sdist": str(sdist.relative_to(output)),
+        "sdist": sdist.relative_to(output).as_posix(),
         "sdist_sha256": sha256_file(sdist),
-        "wheel": str(wheel.relative_to(output)),
+        "wheel": wheel.relative_to(output).as_posix(),
         "wheel_sha256": sha256_file(wheel),
-        "extracted_sdist": str(extracted.relative_to(output)),
+        "extracted_sdist": extracted.relative_to(output).as_posix(),
         "source_probe": source_probe,
         "wheel_probe": wheel_probe,
     }
 
 
+def _input_file(path: Path) -> Path:
+    info = path.lstat()
+    _require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1)
+    return path
+
+
+def _bytecode(directory: Path) -> None:
+    _require(stat.S_ISDIR(directory.lstat().st_mode))
+    for path in directory.iterdir():
+        _require(path.suffix == ".pyc")
+        _input_file(path)
+
+
+def _tree_inputs(directory: Path) -> list[Path]:
+    _require(stat.S_ISDIR(directory.lstat().st_mode))
+    files = []
+    for path in directory.iterdir():
+        if path.name == "__pycache__":
+            _bytecode(path)
+        elif stat.S_ISDIR(path.lstat().st_mode):
+            files.extend(_tree_inputs(path))
+        else:
+            files.append(_input_file(path))
+    return files
+
+
+def _site_packages(output: Path) -> Path:
+    environment = output / "wheel-env"
+    candidates = (
+        [environment / "Lib/site-packages"]
+        if sys.platform == "win32"
+        else [environment / "lib/site-packages", *(environment / "lib").glob("python*/site-packages")]
+    )
+    existing = [path for path in candidates if path.is_dir()]
+    _require(len(existing) == 1)
+    return existing[0]
+
+
+def _input_root_layout(output: Path) -> None:
+    # Only these top-level locations exist in an acceptance bundle. Mutable
+    # evidence belongs under outputs/, never beside copied collection inputs.
+    trees = {"tests", "tools", "extracted-sdist", "artifacts", "build-env", "wheel-env"}
+    for path in output.iterdir():
+        if path.name == "manifest.json":
+            _input_file(path)
+        elif path.name == "__pycache__":
+            _bytecode(path)
+        else:
+            _require(path.name in trees | {".pytest_cache", "outputs"} and stat.S_ISDIR(path.lstat().st_mode))
+    _require(all(stat.S_ISDIR((output / name).lstat().st_mode) for name in trees))
+
+
 def _bundle_hashes(output: Path) -> dict[str, str]:
-    # Pin copied tests/tools, extraction, artifacts and installed product files;
-    # no giant dependency cache, bytecode or credentials enter this inventory.
-    paths = [
-        path
-        for directory in ("tests", "tools", "extracted-sdist", "artifacts")
-        for path in (output / directory).rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts
-    ]
-    installed = list((output / "wheel-env").rglob("mordred_hermes/__init__.py"))
-    if len(installed) != 1:
-        raise AcceptanceRefused("installed_package_inventory_unavailable")
-    paths.extend(path for path in installed[0].parent.rglob("*") if path.is_file() and "__pycache__" not in path.parts)
-    return {str(path.relative_to(output)): sha256_file(path) for path in sorted(paths)}
+    """Inventory only owned trees plus explicit interpreter startup surfaces.
+
+    Bytecode, the root pytest cache and outputs/ are mutable and excluded.
+    Third-party dependency trees and the build environment are not rescanned.
+    Their recorded versions do not claim a dependency-file integrity guarantee.
+    """
+    try:
+        _input_root_layout(output)
+        paths = [
+            path for name in ("tests", "tools", "extracted-sdist", "artifacts") for path in _tree_inputs(output / name)
+        ]
+        site = _site_packages(output)
+        paths.extend(_tree_inputs(site / "mordred_hermes"))
+        paths.append(_input_file(output / "wheel-env/pyvenv.cfg"))
+        paths.extend(
+            _input_file(path)
+            for path in site.iterdir()
+            if path.suffix == ".pth"
+            or (
+                path.name.split(".", 1)[0] in {"sitecustomize", "usercustomize", "mordred_hermes"}
+                and path.name != "mordred_hermes"
+            )
+        )
+        return {path.relative_to(output).as_posix(): sha256_file(path) for path in sorted(paths)}
+    except (OSError, ValueError) as exc:
+        raise AcceptanceRefused("unsafe_bundle_input_inventory") from exc
 
 
 def build_acceptance_bundle(*, checkout: Path, output: Path) -> Path:

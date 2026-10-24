@@ -12,6 +12,125 @@ import pytest
 from tests._dbcrypt_support import acceptance_tool
 
 
+def bundle_fixture(tmp_path: Path) -> tuple[object, Path, dict]:
+    """Internally consistent synthetic files; no package/native proof is claimed."""
+    tool = acceptance_tool("dbcrypt_acceptance")
+    checkout, root = tmp_path / "checkout", tmp_path / "bundle"
+    root.mkdir()
+    source = checkout / "src/mordred_hermes/__init__.py"
+    wheel = root / "wheel-env/lib/site-packages/mordred_hermes/__init__.py"
+    relative_files = (
+        "tests/test_dbcrypt.py",
+        "tests/conftest.py",
+        "tools/dbcrypt_acceptance.py",
+        "artifacts/hermes_mordred-0.3.0a4.tar.gz",
+        "artifacts/hermes_mordred-0.3.0a4-py3-none-any.whl",
+        "extracted-sdist/hermes_mordred-0.3.0a4/pyproject.toml",
+        "extracted-sdist/hermes_mordred-0.3.0a4/src/mordred_hermes/__init__.py",
+        "wheel-env/pyvenv.cfg",
+        "wheel-env/lib/site-packages/mordred_hermes/__init__.py",
+        "wheel-env/lib/site-packages/mordred_hermes_runtime.pth",
+    )
+    for relative in relative_files:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# inert fixture\n")
+    source.parent.mkdir(parents=True)
+    source.write_text("# inert fixture\n")
+    for env in (checkout / ".venv", root / "wheel-env", root / "build-env"):
+        python = tool._python(env)
+        python.parent.mkdir(parents=True, exist_ok=True)
+        python.write_text("fixture interpreter, never executed")
+    probes = {}
+    for mode, env, origin in (("source", checkout / ".venv", source), ("wheel", root / "wheel-env", wheel)):
+        driver = env / "lib/site-packages/sqlcipher3/dbapi2.py"
+        driver.parent.mkdir(parents=True, exist_ok=True)
+        driver.write_text("fixture driver, never executed")
+        probes[mode + "_probe"] = {
+            "product_file": str(origin),
+            "interpreter": str(tool._python(env)),
+            "python_version": "3.13.0",
+            "platform": sys.platform,
+            "versions": {
+                name: "0.3.0a4" if name == "hermes-mordred" else "1.0"
+                for name in ("hermes-mordred", "hermes-agent", "sqlcipher3-wheels", "pytest")
+            },
+            "driver": {"module": str(driver), "sqlite_version": "3.51.1", "cipher_version": "4.12.0 community"},
+            "token": {"elevated": False if os.name == "nt" else None, "uid": None if os.name == "nt" else 501},
+            "home_is_temporary": True,
+            "native_provider": None,
+            "native_helper": None,
+            "readiness": "not_probed_no_native_collector",
+        }
+    artifacts = root / "artifacts"
+    extracted = root / "extracted-sdist/hermes_mordred-0.3.0a4"
+    commands = [
+        ["uv", "build", "--sdist", str(checkout), "--out-dir", str(artifacts)],
+        *[
+            ["uv", "venv", "--no-project", "--python", str(tool._python(checkout / ".venv")), str(root / name)]
+            for name in ("build-env", "wheel-env")
+        ],
+        ["uv", "pip", "install", "--python", str(tool._python(root / "build-env")), "hatchling>=1.18"],
+        [
+            "uv",
+            "build",
+            "--wheel",
+            "--no-build-isolation",
+            "--python",
+            str(tool._python(root / "build-env")),
+            str(extracted),
+            "--out-dir",
+            str(artifacts),
+        ],
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(tool._python(root / "wheel-env")),
+            "--link-mode",
+            "copy",
+            str(artifacts / "hermes_mordred-0.3.0a4-py3-none-any.whl") + "[dev,keyvault,extension,dbcrypt,telegram]",
+        ],
+    ]
+    manifest = {
+        "schema_version": 1,
+        "commit": "a" * 40,
+        "checkout": str(checkout),
+        "created_at": 1000.0,
+        "sdist": "artifacts/hermes_mordred-0.3.0a4.tar.gz",
+        "wheel": "artifacts/hermes_mordred-0.3.0a4-py3-none-any.whl",
+        "extracted_sdist": "extracted-sdist/hermes_mordred-0.3.0a4",
+        **probes,
+        "native_qualification": "not_run",
+        "native_collectors": "not_integrated",
+        "missing_native_hooks": [
+            "provision",
+            "reopen",
+            "verify",
+            "independent_ec2_observations",
+            "collector_records_across_os_reboot_and_stop_start",
+        ],
+        "build_commands": [
+            {"argv": argv, "cwd": str(root), "started_at": 999.0, "finished_at": 1000.0, "returncode": 0}
+            for argv in commands
+        ],
+        "files": {name: tool.sha256_file(root / name) for name in relative_files},
+    }
+    for artifact in ("sdist", "wheel"):
+        manifest[artifact + "_sha256"] = tool.sha256_file(root / manifest[artifact])
+    if sys.platform in {"linux", "win32"}:
+        manifest["acceptance_commands"] = tool.acceptance_commands(
+            checkout=checkout, bundle=root, platform=sys.platform
+        )
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    return tool, root, manifest
+
+
+def write_manifest(root: Path, manifest: dict) -> None:
+    (root / "manifest.json").write_text(json.dumps(manifest))
+
+
 def test_acceptance_rejects_source_import_in_wheel_run(tmp_path: Path) -> None:
     tool = acceptance_tool("dbcrypt_acceptance")
     checkout = tmp_path / "checkout"
@@ -228,19 +347,13 @@ def test_sdist_extraction_refuses_traversal_and_links(tmp_path: Path, name: str,
 
 
 def test_bundle_integrity_rejects_changed_copied_test_and_product_on_import_path(tmp_path: Path) -> None:
-    tool = acceptance_tool("dbcrypt_acceptance")
-    bundle = tmp_path / "bundle"
-    bundle.mkdir()
+    tool, bundle, manifest = bundle_fixture(tmp_path)
     test = bundle / "tests/test_dbcrypt.py"
-    test.parent.mkdir()
-    test.write_text("pass\n")
-    manifest = {"schema_version": 1, "files": {"tests/test_dbcrypt.py": tool.sha256_file(test)}}
-    (bundle / "manifest.json").write_text(json.dumps(manifest))
     assert tool.validate_bundle(bundle)["files"] == manifest["files"]
     test.write_text("changed\n")
     with pytest.raises(tool.AcceptanceRefused, match="bundle_hash_mismatch"):
         tool.validate_bundle(bundle)
-    test.write_text("pass\n")
+    test.write_text("# inert fixture\n")
     (bundle / "src").mkdir()
     with pytest.raises(tool.AcceptanceRefused, match="product_source_on_test_path"):
         tool.validate_bundle(bundle)
@@ -293,20 +406,8 @@ def test_windows_vfs_commands_separate_source_faults_and_release_wheel(tmp_path:
 def test_runner_records_validated_bundle_provenance_even_while_native_hooks_refuse(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    tool = acceptance_tool("dbcrypt_acceptance")
-    bundle = tmp_path / "bundle"
-    bundle.mkdir()
+    tool, bundle, manifest = bundle_fixture(tmp_path)
     test = bundle / "tests/test_dbcrypt.py"
-    test.parent.mkdir()
-    test.write_text("pass\n")
-    manifest = {
-        "schema_version": 1,
-        "commit": "a" * 40,
-        "sdist_sha256": "b" * 64,
-        "wheel_sha256": "c" * 64,
-        "files": {"tests/test_dbcrypt.py": tool.sha256_file(test)},
-    }
-    (bundle / "manifest.json").write_text(json.dumps(manifest))
     root = tmp_path / "mordred-dbcrypt-refusal"
     root.mkdir(mode=0o700)
     monkeypatch.setenv("DBCRYPT_BUNDLE", str(bundle))
@@ -321,3 +422,162 @@ def test_runner_records_validated_bundle_provenance_even_while_native_hooks_refu
     output = tmp_path / "tampered.json"
     assert tool.run_acceptance(root=root, phase="verify", output=output) == 2
     assert "bundle_hash_mismatch" in " ".join(json.loads(output.read_text())["reasons"])
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "commit",
+        "checkout",
+        "sdist",
+        "sdist_sha256",
+        "wheel",
+        "wheel_sha256",
+        "extracted_sdist",
+        "source_probe",
+        "wheel_probe",
+        "created_at",
+        "build_commands",
+        "native_collectors",
+        "missing_native_hooks",
+    ],
+)
+def test_bundle_requires_complete_provenance(tmp_path: Path, field: str) -> None:
+    tool, bundle, manifest = bundle_fixture(tmp_path)
+    del manifest[field]
+    write_manifest(bundle, manifest)
+    with pytest.raises(tool.AcceptanceRefused):
+        tool.validate_bundle(bundle)
+
+
+@pytest.mark.parametrize("artifact", ["sdist", "wheel"])
+def test_bundle_rejects_artifact_digest_diverging_from_inventory(tmp_path: Path, artifact: str) -> None:
+    tool, bundle, manifest = bundle_fixture(tmp_path)
+    manifest[artifact + "_sha256"] = "0" * 64
+    write_manifest(bundle, manifest)
+    with pytest.raises(tool.AcceptanceRefused):
+        tool.validate_bundle(bundle)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("commit", 42),
+        ("commit", "not-a-commit"),
+        ("sdist", "artifacts/../artifacts/hermes_mordred-0.3.0a4.tar.gz"),
+        ("wheel", "/absolute.whl"),
+        ("created_at", True),
+        ("files", []),
+        ("source_probe", True),
+        ("build_commands", [True]),
+    ],
+)
+def test_bundle_rejects_malformed_or_noncanonical_provenance(tmp_path: Path, field: str, value: object) -> None:
+    tool, bundle, manifest = bundle_fixture(tmp_path)
+    manifest[field] = value
+    write_manifest(bundle, manifest)
+    with pytest.raises(tool.AcceptanceRefused):
+        tool.validate_bundle(bundle)
+
+
+@pytest.mark.parametrize("mode", ["source", "wheel"])
+def test_bundle_rejects_recorded_import_from_opposite_boundary(tmp_path: Path, mode: str) -> None:
+    tool, bundle, manifest = bundle_fixture(tmp_path)
+    opposite = "wheel" if mode == "source" else "source"
+    manifest[mode + "_probe"]["product_file"] = manifest[opposite + "_probe"]["product_file"]
+    write_manifest(bundle, manifest)
+    with pytest.raises(tool.AcceptanceRefused):
+        tool.validate_bundle(bundle)
+
+
+def test_bundle_rejects_single_arbitrary_file_as_provenance(tmp_path: Path) -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    path = tmp_path / "arbitrary.txt"
+    path.write_text("arbitrary")
+    write_manifest(tmp_path, {"schema_version": 1, "files": {path.name: tool.sha256_file(path)}})
+    with pytest.raises(tool.AcceptanceRefused):
+        tool.validate_bundle(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "mordred_hermes.py",
+        "sitecustomize.py",
+        "conftest.py",
+        "pytest.ini",
+        "pyproject.toml",
+        "setup.cfg",
+        "tests/conftest_extra.py",
+        "tests/nested/conftest.py",
+        "tools/added.py",
+        "extracted-sdist/hermes_mordred-0.3.0a4/added.py",
+        "wheel-env/lib/site-packages/mordred_hermes/added.py",
+        "wheel-env/lib/site-packages/sitecustomize.py",
+        "wheel-env/lib/site-packages/sitecustomize.cpython-313-x86_64-linux-gnu.so",
+        "wheel-env/lib/site-packages/added.pth",
+    ],
+)
+def test_bundle_rejects_unlisted_import_and_configuration_inputs(tmp_path: Path, relative: str) -> None:
+    tool, bundle, _manifest = bundle_fixture(tmp_path)
+    added = bundle / relative
+    added.parent.mkdir(parents=True, exist_ok=True)
+    added.write_text("raise AssertionError('must never execute added input')\n")
+    with pytest.raises(tool.AcceptanceRefused):
+        tool.validate_bundle(bundle)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink setup requires host privilege on Windows")
+@pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
+def test_bundle_rejects_linked_inputs_even_when_contents_and_hashes_match(tmp_path: Path, link_kind: str) -> None:
+    tool, bundle, _manifest = bundle_fixture(tmp_path)
+    linked = bundle / "tests/test_dbcrypt.py"
+    target = bundle / "tools/dbcrypt_acceptance.py"
+    linked.unlink()
+    if link_kind == "symlink":
+        linked.symlink_to(target)
+    else:
+        os.link(target, linked)
+    with pytest.raises(tool.AcceptanceRefused):
+        tool.validate_bundle(bundle)
+
+
+def test_bundle_allows_only_documented_mutable_outputs_and_bytecode(tmp_path: Path) -> None:
+    tool, bundle, _manifest = bundle_fixture(tmp_path)
+    for relative in (
+        "tests/__pycache__/test_dbcrypt.cpython-313.pyc",
+        "__pycache__/probe.cpython-313.pyc",
+        ".pytest_cache/README.md",
+        "outputs/refused.json",
+    ):
+        path = bundle / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("mutable tooling output")
+    tool.validate_bundle(bundle)
+
+
+def test_existing_linux_memory_suite_is_wheel_only_until_source_adaptation(tmp_path: Path) -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    rows = [
+        row
+        for row in tool.acceptance_commands(
+            checkout=tmp_path / "checkout", bundle=tmp_path / "bundle", platform="linux"
+        )
+        if row["suite"] == "linux-memory"
+    ]
+    assert len(rows) == 1
+    assert rows[0]["mode"] == "wheel"
+    assert rows[0]["source_applicability"] == {
+        "status": "not_applicable",
+        "reason": "existing_linux_memory_suite_requires_installed_runtime",
+        "blocked_by": "source_capable_linux_memory_suite_adaptation_pending",
+    }
+
+
+@pytest.mark.parametrize("index", [1, 2, 3])
+def test_bundle_rejects_build_stage_provenance_pointing_at_unrelated_environment(tmp_path: Path, index: int) -> None:
+    tool, bundle, manifest = bundle_fixture(tmp_path)
+    manifest["build_commands"][index]["argv"][-1] = "unrelated-environment"
+    write_manifest(bundle, manifest)
+    with pytest.raises(tool.AcceptanceRefused):
+        tool.validate_bundle(bundle)
