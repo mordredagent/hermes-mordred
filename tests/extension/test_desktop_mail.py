@@ -166,15 +166,22 @@ def test_finish_type_errors_are_invalid_body(desktop: Any) -> None:
     assert desktop.flows.calls == []
 
 
-def test_setup_needs_macos_and_memory_but_cancel_does_not(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+def test_credential_setup_is_independent_of_memory(
+    desktop: Any, monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
     _memory_off(monkeypatch)
-    refused = {"ok": False, "error": "memory_encryption_required"}
-    assert desktop.post("/mail/setup/start", _start_body()) == refused
-    assert desktop.post("/mail/setup/f/finish", {"selection": None}) == refused
+    monkeypatch.setattr(api, "sys", SimpleNamespace(platform=platform))
+    assert desktop.post("/mail/setup/start", _start_body(touch_id=False))["ok"] is True
+    assert desktop.post("/mail/setup/f/finish", {"selection": None}) == {"ok": True, "step": "done"}
     assert desktop.post("/mail/setup/f/cancel") == {"ok": True}
-    assert desktop.flows.calls == [("cancel", "f")]
-    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="linux"))
+    assert [call[0] for call in desktop.flows.calls] == ["start", "finish", "cancel"]
+
+
+def test_unknown_platform_refuses_setup_before_native_flows(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="freebsd"))
     assert desktop.post("/mail/setup/start", _start_body()) == {"ok": False, "error": "unsupported_platform"}
+    assert desktop.flows.calls == []
 
 
 def test_cancel_is_idempotent_and_never_creates_the_flows(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -297,7 +304,7 @@ def test_fetch_validation(fetch: Any, body: dict[str, Any]) -> None:
 def test_fetch_gates(fetch: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     _memory_off(monkeypatch)
     assert fetch.desktop.post("/mail/fetch", {}) == {"ok": False, "error": "memory_encryption_required"}
-    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="freebsd"))
     assert fetch.desktop.post("/mail/fetch", {}) == {"ok": False, "error": "unsupported_platform"}
     assert fetch.seen["calls"] == []
 
@@ -388,7 +395,7 @@ def test_credential_only_forget_needs_no_memory_but_rows_do(forget: Any, monkeyp
         "error": "memory_encryption_required",
     }
     monkeypatch.setattr(api, "sys", SimpleNamespace(platform="linux"))
-    assert forget.desktop.post("/mail/forget", {"rows": False}) == {"ok": False, "error": "unsupported_platform"}
+    assert forget.desktop.post("/mail/forget", {"rows": False})["ok"] is True
 
 
 def test_forget_without_flows_does_not_create_them(forget: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -623,3 +630,28 @@ def test_shutdown_cancels_a_real_pending_flow(real_flows: Any) -> None:
         _start_pending(http)
         assert _pending(real_flows.flows) == 1
     assert _pending(real_flows.flows) == 0  # the lifespan's exit called cancel_all()
+
+
+def test_native_credential_only_forget_remains_independent_of_database_authority(
+    desktop: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mordred_hermes import dbcrypt
+    from mordred_hermes.imports.mail.forget import forget as native_forget
+    from tests._mail_sync_helpers import generic_creds
+    from tests.test_mail_cross_platform_storage import native_store
+
+    store, native = native_store(desktop.home)
+    store.ensure_key(require_presence=False)
+    store.store(generic_creds(), require_presence=False)
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="linux"))
+    _memory_off(monkeypatch)
+    monkeypatch.setattr(_seams, "mail_secret_store", lambda: store)
+    monkeypatch.setattr(_seams, "forget", native_forget)
+    answer = desktop.post("/mail/forget", {"rows": False})
+    assert answer["ok"] is True and answer["had_credentials"] is True
+    assert answer["deleted_messages"] == 0
+    assert "delete" in native.calls
+    assert not store.residue()
+    assert not (desktop.home / "plugin-data/mordred/mordred.db").exists()
+    assert dbcrypt._PROVIDER is None

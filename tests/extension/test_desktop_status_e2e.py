@@ -1,11 +1,9 @@
-"""The REAL Desktop status chain: ``/status?client_version=4`` and ``/imports/status`` end to end.
+"""Real Desktop status chain is passive even beside an existing encrypted store.
 
-Nothing on the status path is replaced (``_seams.open_store_readonly``, the
-Telegram store, ``run_checks``, the mail flags, ``imap_status``): only native
-boundaries are (the Secure Enclave helper). A real SQLCipher ``mordred.db``
-is written with the key derived from ``HERMES_MEMORY_KEY``; the process
-``sqlite3`` is a real shim whose key provider, like ``dbcrypt._PROVIDER``, the
-shared protection gate and the vault injector, fails the test if called.
+Only native boundaries are replaced. The existing real SQLCipher fixture is
+written through an explicit portable opener; polling never reuses that opener,
+reads SQL counts or acquires shared/native authority. Tripwires fail through
+fallback handlers, and the environment key never proves runtime protection.
 """
 
 from __future__ import annotations
@@ -120,33 +118,32 @@ def _protected_store(home: Path, monkeypatch: pytest.MonkeyPatch, trips: _Tripwi
             plain.close()
 
 
-def test_the_real_status_chain_reads_counts_through_sqlcipher_without_unlocking(
+def test_the_real_status_chain_leaves_counts_unknown_without_sql_or_unlocking(
     cold_home: Path, monkeypatch: pytest.MonkeyPatch, trips: _Tripwires
 ) -> None:
     _protected_store(cold_home, monkeypatch, trips)
     before = _tree(cold_home)
+    from mordred_hermes.dbcrypt import _migrate
+    from mordred_hermes.desktop import _seams
+
+    monkeypatch.setattr(_seams, "open_store_readonly", trips.wire("read-only import SQL"))
+    monkeypatch.setattr(_seams, "imap_status", trips.wire("IMAP cursor SQL"))
+    monkeypatch.setattr(_migrate, "discover", trips.wire("database discovery SQL"))
     with _client() as http:
         status = http.get(f"{PREFIX}/status?client_version=4").json()
         assert trips.calls == []
         light = http.get(f"{PREFIX}/imports/status").json()
         assert trips.calls == []
-    assert status["imports"] == {
-        "available": True,
-        "code": None,
-        "sources": {
-            "telegram": {"conversations": 1, "messages": 2, "parts": 2},
-            "mail": {"conversations": 0, "messages": 0, "parts": 0},
-        },
-    }
+    assert status["imports"] == {"available": False, "code": "store_unavailable", "sources": {}}
     assert light["imports"] == status["imports"] and light["mail"] == {"configured": False}
-    assert status["databases"]["armed"] is True and status["databases"]["runtime_protected"] is True
+    assert status["databases"]["armed"] is True and status["databases"]["runtime_protected"] is False
     assert status["telegram_archive"] == {"legacy": None} and status["telegram_api"] is False
     assert "SECRET" not in str(status) + str(light)
     assert _tree(cold_home) == before  # read-only: no sidecar, no directory, no lock appeared
 
 
 @pytest.mark.parametrize("value", [None, "", "not-a-key", "hex:" + "3c" * 16])
-def test_without_valid_key_material_the_real_chain_answers_no_key(
+def test_environment_keys_do_not_change_passive_protection_observation(
     cold_home: Path, monkeypatch: pytest.MonkeyPatch, trips: _Tripwires, value: str | None
 ) -> None:
     _protected_store(cold_home, monkeypatch, trips)
@@ -157,7 +154,7 @@ def test_without_valid_key_material_the_real_chain_answers_no_key(
     with _client() as http:
         status = http.get(f"{PREFIX}/status?client_version=4").json()
     assert trips.calls == []
-    assert status["imports"] == {"available": False, "code": "no_key", "sources": {}}
+    assert status["imports"] == {"available": False, "code": "store_unavailable", "sources": {}}
     assert status["databases"]["runtime_protected"] is False
 
 
@@ -168,7 +165,7 @@ def test_a_cold_status_creates_nothing_in_a_fresh_home(cold_home: Path, trips: _
         old = http.get(f"{PREFIX}/status").json()
     assert trips.calls == []
     assert status["ok"] is True and old["ok"] is True
-    assert status["imports"]["code"] == "not_armed" and status["mail"] == {"configured": False}
+    assert status["imports"]["code"] == "store_unavailable" and status["mail"] == {"configured": False}
     # The browser-history switches come from config.yaml alone: no activity gate, no store, no file.
     assert status["activity"] == {"history": True, "tools": True, "source": "config"}
     assert _tree(cold_home) == []
@@ -180,13 +177,13 @@ def test_a_tripwire_cannot_be_swallowed_by_a_status_fallback(
     """The tripwires work: a status path that DID call a provider fails the test, whatever it catches."""
     _protected_store(cold_home, monkeypatch, trips)
 
-    def leaky_open(home: Path) -> Any:
+    def leaky_status(home: Path) -> Any:
         dbcrypt._PROVIDER()  # what a regressed opener would do; _status_v4 catches every Exception here
         raise AssertionError("unreachable")
 
-    monkeypatch.setattr("mordred_hermes.desktop._seams.open_store_readonly", leaky_open)
+    monkeypatch.setattr(dbcrypt, "database_status", leaky_status)
     # Never a 200 with a fallback state: the tripwire stops the request (the test client's portal may report
     # the stopped server task as cancelled when it shuts down).
     with pytest.raises((_Tripped, CancelledError)), _client() as http:
-        http.get(f"{PREFIX}/imports/status")
+        http.get(f"{PREFIX}/databases/status")
     assert trips.calls == ["dbcrypt._PROVIDER"]  # and the record names the boundary even if it were caught

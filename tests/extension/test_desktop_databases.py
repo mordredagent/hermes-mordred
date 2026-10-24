@@ -13,7 +13,7 @@ pytest.importorskip("fastapi")
 
 from mordred_hermes import dbcrypt
 from mordred_hermes.dbcrypt import _migrate, _shim
-from mordred_hermes.desktop import _databases, _seams, api
+from mordred_hermes.desktop import _databases, _seams
 
 VALID_KEY = "hex:" + "22" * 32
 
@@ -124,13 +124,13 @@ def test_unknown_status_never_attempts_a_schedule(db: Any, monkeypatch: pytest.M
     assert str(db.home) not in str(db.desktop.logs.lines)
 
 
-def test_unsupported_off_macos_or_without_sqlcipher(db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_seams, "sqlcipher_available", lambda: False)
+def test_shared_unavailability_refuses_before_scheduling(db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        dbcrypt, "database_status", lambda home: dbcrypt.DatabaseStatus(True, 0, "unavailable", False, None)
+    )
     assert _encrypt(db) == {"ok": False, "error": "databases_unsupported"}
-    monkeypatch.setattr(_seams, "sqlcipher_available", lambda: True)
-    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="linux"))
-    assert _encrypt(db) == {"ok": False, "error": "databases_unsupported"}
-    assert db.desktop.get("/databases/status")["runtime_protected"] is False
+    assert db.desktop.get("/databases/status") == {"ok": True, "supported": False}
+    assert db.scheduled == []
 
 
 def test_the_sqlcipher_probe() -> None:

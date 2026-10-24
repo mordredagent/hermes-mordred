@@ -1,4 +1,4 @@
-"""The ``/status`` sections for ``client_version >= 4``: macOS facts, fixed shapes elsewhere.
+"""The ``/status`` sections for ``client_version >= 4``: shared passive storage facts.
 
 ``vault``, ``databases``, ``imports``, ``mail`` and ``telegram_archive``, each
 built from passive database observations and mail flags only: nothing
@@ -42,10 +42,10 @@ async def sections(platform: str, home: Path) -> dict[str, Any]:
     if platform != "darwin":
         return {
             "vault": dict(_UNSUPPORTED_VAULT),
-            "databases": {"supported": False},
-            "imports": _projections.imports_refused("unsupported_platform"),
-            "mail": {"configured": False},
-            "telegram_archive": dict(_TELEGRAM_ARCHIVE),
+            "databases": await asyncio.to_thread(databases_safe, home, platform)
+            if platform in {"linux", "win32"}
+            else {"supported": False},
+            **await asyncio.to_thread(imports_sections, home, platform),
             "tools": await asyncio.to_thread(tools_safe, home),
             "activity": await asyncio.to_thread(activity_safe, home),
         }
@@ -115,7 +115,7 @@ def _mail_flags() -> tuple[Any, bool]:
 
 def imports_sections(home: Path, platform: str) -> dict[str, Any]:
     """Flags only; record counts and cursors remain unknown without foreground SQL authority."""
-    if platform != "darwin":
+    if platform not in {"darwin", "linux", "win32"}:
         return {
             "imports": _projections.imports_refused("unsupported_platform"),
             "mail": {"configured": False},

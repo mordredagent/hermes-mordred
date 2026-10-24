@@ -298,27 +298,36 @@ def test_a_broken_vault_reader_reports_no_vault(desktop: Any, monkeypatch: pytes
 
 
 @pytest.mark.parametrize("platform", ["linux", "win32", "freebsd"])
-def test_other_platforms_get_fixed_unsupported_sections(platform: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_other_platforms_get_fixed_unsupported_sections(
+    platform: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     # Hermes's tool-call setting and the browser-history switches are read on every platform.
+    monkeypatch.setattr("mordred_hermes.dbcrypt._capability.sys", SimpleNamespace(platform=platform))
     monkeypatch.setattr(_seams, "tools_mode", lambda home: {"direct": True, "source": "config", "raw": "off"})
     monkeypatch.setattr(_seams, "activity_history", lambda home: {"history": True, "tools": False, "raw": 1})
-    sections = asyncio.run(_status_v4.sections(platform, Path("/nonexistent")))
+    sections = asyncio.run(_status_v4.sections(platform, tmp_path))
     assert sections == {
         "vault": {"exists": False, "env_enrolled": False, "env_injecting": False, "optout": False, "unattended": None},
         "databases": {"supported": False},
-        "imports": {"available": False, "code": "unsupported_platform", "sources": {}},
+        "imports": {
+            "available": False,
+            "code": "unsupported_platform" if platform == "freebsd" else "store_unavailable",
+            "sources": {},
+        },
         "mail": {"configured": False},
         "telegram_archive": {"legacy": None},
         "tools": {"direct": True, "source": "config"},
         "activity": {"history": True, "tools": False, "source": "config"},
     }
-    assert _status_v4.imports_sections(Path("/nonexistent"), platform)["imports"]["code"] == "unsupported_platform"
+    expected = "unsupported_platform" if platform == "freebsd" else "store_unavailable"
+    assert _status_v4.imports_sections(tmp_path, platform)["imports"]["code"] == expected
 
 
 def test_linux_status_v4_carries_the_unsupported_sections(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(api, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr("mordred_hermes.dbcrypt._capability.sys", SimpleNamespace(platform="linux"))
     status = desktop.get("/status?client_version=4")
-    assert status["databases"] == {"supported": False} and status["imports"]["code"] == "unsupported_platform"
+    assert status["databases"] == {"supported": False} and status["imports"]["code"] == "store_unavailable"
     old = desktop.get("/status?client_version=1")
     assert not V4_KEYS & set(old)
 
