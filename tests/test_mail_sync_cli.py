@@ -1052,6 +1052,7 @@ def test_windows_setup_presence_refuses_before_prompt_or_discovery(setup_env, mo
     )
     code, _, err = run(["mail", "setup"], capsys)
     assert code == 1 and "presence_unsupported" in err and setup_env["prompts"] == []
+    assert "Windows CNG" in err and "--no-touch-id" in err
 
 
 @pytest.mark.usefixtures("fs")
@@ -1082,3 +1083,42 @@ def test_linux_setup_uses_native_capability_instead_of_os_gate(setup_env, monkey
     code, out, err = run(["mail", "setup", "--imap-host", "imap.example.com", "--no-touch-id"], capsys)
     assert code == 0, err
     assert "native key" in out
+    assert setup_env["store"].flags()["touch_id"] is False
+
+
+def test_linux_default_presence_refuses_before_prompts_backend_or_connection(setup_env, monkeypatch, capsys):
+    monkeypatch.setattr(mail_sync_cli, "_platform", lambda: "linux")
+    monkeypatch.setattr(
+        mail_sync_cli, "_secret_store", lambda: pytest.fail("default Linux presence reached native backend")
+    )
+    monkeypatch.setattr(mail_sync_cli, "_input", lambda *a: pytest.fail("default Linux presence prompted"))
+    monkeypatch.setattr(mail_sync_cli, "_connect", lambda *a: pytest.fail("default Linux presence connected"))
+    code, _, err = run(["mail", "setup", "--imap-host", "imap.example.com"], capsys)
+    assert code == 1 and "presence_unsupported" in err and "--no-touch-id" in err
+    assert "Linux TPM" in err and "Windows mail" not in err
+    assert setup_env["prompts"] == [] and setup_env["store"].flags() is None
+
+
+@pytest.mark.parametrize(
+    ("platform", "recorded", "expected"),
+    [
+        ("linux", True, None),
+        ("win32", True, None),
+        ("linux", False, False),
+        ("win32", False, False),
+        ("darwin", True, True),
+        ("darwin", False, False),
+        ("darwin", None, None),
+        ("darwin", "unsupported", None),
+        ("linux", "unknown", None),
+        ("darwin", 0, None),
+        ("darwin", 1, None),
+    ],
+)
+def test_status_never_promotes_unknown_or_unsupported_presence_to_true(monkeypatch, platform, recorded, expected):
+    monkeypatch.setattr(mail_sync_cli, "_platform", lambda: platform)
+    flags = {"account": "mail", "roles": ["inbox"], "touch_id": recorded}
+    before = dict(flags)
+    report = mail_sync_cli.imap_status(None, flags)
+    assert report["touch_id"] is expected
+    assert flags == before  # projection must not rewrite retained policy evidence

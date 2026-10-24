@@ -13,8 +13,8 @@
   usual name, else the operator's pick; other servers: INBOX plus the ``\\Sent``
   special-use folder, or the operator's pick, or none), sealed with the independent
   native key (:mod:`mordred_hermes.imports.mail.secrets`). Capability is checked
-  before prompts; Windows presence requests refuse unless the operator explicitly
-  selects ``--no-touch-id``. It prints the account
+  before prompts; Linux TPM and Windows CNG presence requests refuse unless the
+  operator explicitly selects ``--no-touch-id``. It prints the account
   label and the path, never the address; a refusal prints its code and, for a
   refused login, the hint (``mail refused (imap_auth_failed:
   authentication_failed)``). Sealed credentials are never replaced
@@ -158,8 +158,10 @@ def _audit(entry: Mapping[str, Any]) -> None:
 
 def _refused(code: str, hint: str | None = None) -> int:
     if code == "presence_unsupported" and hint is None:
+        native = {"linux": "Linux TPM", "win32": "Windows CNG"}.get(_platform(), "This native backend")
         hint = (
-            "Windows mail has no per-use presence; explicitly select --no-touch-id to use its machine-bound native key"
+            f"{native} mail has no per-use presence; explicitly select --no-touch-id "
+            "to use its machine-bound native key"
         )
     _term.emit_error(f"mail refused ({code}: {hint})" if hint else f"mail refused ({code})")
     return 1
@@ -236,7 +238,7 @@ def _setup_values(args: argparse.Namespace) -> tuple[str, str, str, list[str]]:
     port = int(getattr(args, "imap_port", IMAPS_PORT) or IMAPS_PORT)
     if port != IMAPS_PORT:
         raise _Usage("--imap-port must be 993 (implicit TLS); other ports are not supported")
-    if _platform() == "win32" and not bool(getattr(args, "no_touch_id", False)):
+    if _platform() in {"linux", "win32"} and not bool(getattr(args, "no_touch_id", False)):
         raise _Refused("presence_unsupported")
     if _platform() not in {"darwin", "linux", "win32"}:
         raise _Refused("unsupported_platform")
@@ -370,12 +372,18 @@ def imap_status(store: Any, flags: Mapping[str, Any] | None) -> dict[str, Any]:
             raw = store.get_meta(last_fetch_key(account))
     attempt, success = last_fetch_status(raw if isinstance(raw, str) else None)
     roles = flags.get("roles")
+    presence = flags.get("touch_id")
+    # Missing/invalid recorded metadata proves no effective presence policy.
+    # TPM/CNG cannot enforce a historical True claim; retain that evidence but
+    # project its effective policy as unknown rather than silently False.
+    if type(presence) is not bool or (_platform() in {"linux", "win32"} and presence):
+        presence = None
     return {
         "configured": True,
         "account": account,
         "gmail": flags.get("gmail") is True,
         "scope": [role for role in _ROLES if isinstance(roles, list) and role in roles],
-        "touch_id": flags.get("touch_id") is not False,
+        "touch_id": presence,
         "last_fetch": attempt,
         "last_success": success,
         "cursors": imap_cursors(store, account) if store is not None else None,
@@ -589,7 +597,9 @@ def add_parsers(msub: Any, handler: Callable[[argparse.Namespace], int]) -> None
     p.add_argument("--imap-port", type=_port, default=993, metavar="P", help="Implicit-TLS port (993 only)")
     p.add_argument("--account", default="mail", metavar="LABEL", help="Short lowercase account label (default mail)")
     p.add_argument(
-        "--no-touch-id", action="store_true", help="Use the native key without per-use presence (explicit on Windows)"
+        "--no-touch-id",
+        action="store_true",
+        help="Use the native key without per-use presence (explicit on Linux/Windows)",
     )
     p.set_defaults(func=handler)
     p_fetch = msub.add_parser("fetch", help="Fetch new mail over IMAP into the encrypted store (counts only)")
