@@ -558,3 +558,28 @@ int mordred_vfs_stats(uint64_t token, char *out, int size) {
   ReleaseSRWLockShared(&registry_lock);
   return rc;
 }
+
+#ifdef MORDRED_VFS_TESTING
+/* Invoke the actual VFS callbacks/Win32 locks for the recovery-only transition
+ * that SQL's ordinary BEGIN EXCLUSIVE reaches through RESERVED instead.
+ * No content is written; the caller supplies a synthetic admitted pathname. */
+__declspec(dllexport)
+int mordred_vfs_test_recovery_lock(const char *path, int *reserved) {
+  CheckedFile *file;
+  int rc, closing;
+  if (!initialized || !reserved) return SQLITE_MISUSE;
+  *reserved=-1;
+  file=(CheckedFile *)sqlite3_malloc64(sizeof(CheckedFile));
+  if (!file) return SQLITE_NOMEM;
+  rc=vOpen(&checked_vfs,path,&file->base,SQLITE_OPEN_MAIN_DB|SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE,NULL);
+  if (rc==SQLITE_OK) {
+    rc=fLock(&file->base,SQLITE_LOCK_SHARED);
+    if (rc==SQLITE_OK) rc=fLock(&file->base,SQLITE_LOCK_EXCLUSIVE);
+    if (rc==SQLITE_OK) rc=fReserved(&file->base,reserved);
+    closing=fClose(&file->base);
+    if (rc==SQLITE_OK) rc=closing;
+  }
+  sqlite3_free(file);
+  return rc;
+}
+#endif
