@@ -103,3 +103,32 @@ else:
 """
     path.write_text(script)
     path.chmod(0o755)
+
+
+DATABASE_LEASE_CHILD = """
+import sys
+from pathlib import Path
+from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._database_lifecycle import acquire_exclusive, acquire_runtime
+operation = sys.argv[2]
+try:
+    context = acquire_exclusive(Path(sys.argv[1])) if operation == 'exclusive' else acquire_runtime(Path(sys.argv[1]), timeout=0)
+    with context:
+        print('acquired', flush=True)
+        if operation == 'hold': sys.stdin.readline()
+except DatabaseRefused:
+    print('busy', flush=True)
+"""
+
+
+def database_lease_child(root: Path, operation: str) -> str:
+    import subprocess
+
+    result = subprocess.run(
+        [sys.executable, "-c", DATABASE_LEASE_CHILD, str(root), operation], text=True, capture_output=True, timeout=10
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result.stdout.strip()
+
+
+database_lease_child.script = DATABASE_LEASE_CHILD
