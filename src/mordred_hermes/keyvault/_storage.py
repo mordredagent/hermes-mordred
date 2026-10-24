@@ -85,12 +85,20 @@ _LOCK_PROCESS_PID = os.getpid()
 _ACTIVE_LOCK_FDS: set[int] = set()
 
 
+@dataclass(frozen=True)
+class _HeldAdvisoryLock:
+    fd: int
+    identity: tuple[int, int, int]
+    process: tuple[int, int]
+
+
 class _ThreadLockState(threading.local):
     """Per-thread advisory-lock recursion depths for this process."""
 
     def __init__(self) -> None:
         self.pid = os.getpid()
         self.depths: dict[str, int] = {}
+        self.held: dict[str, _HeldAdvisoryLock] = {}
 
 
 _THREAD_LOCK_STATE = _ThreadLockState()
@@ -131,6 +139,7 @@ def _thread_lock_depths() -> dict[str, int]:
     if _THREAD_LOCK_STATE.pid != pid:
         _THREAD_LOCK_STATE.pid = pid
         _THREAD_LOCK_STATE.depths = {}
+        _THREAD_LOCK_STATE.held = {}
     return _THREAD_LOCK_STATE.depths
 
 
@@ -789,6 +798,40 @@ def _open_validated_lock_once(path: Path, *, label: str) -> int:
         raise
 
 
+def _checked_advisory_lock(path: Path) -> _HeldAdvisoryLock:
+    """Read authority from this thread's actual descriptor, never a path snapshot."""
+    depths = _thread_lock_depths()
+    key = _lock_path_key(path)
+    record = _THREAD_LOCK_STATE.held.get(key)
+    if (
+        record is None
+        or not depths.get(key)
+        or record.process != (os.getpid(), threading.get_ident())
+        or record.fd not in _ACTIVE_LOCK_FDS
+    ):
+        raise KeyvaultPermissionError(errno.EPERM, "advisory lock is not held by this thread", str(path))
+    try:
+        opened = os.fstat(record.fd)
+        current = path.lstat()
+        _validate_lock_stat(opened, path, label="held advisory lock", from_lstat=False)
+        _validate_lock_stat(current, path, label="held advisory lock", from_lstat=True)
+    except OSError as exc:
+        raise KeyvaultPermissionError(errno.EPERM, "held advisory lock cannot be validated", str(path)) from exc
+    if _lock_inode_identity(opened) != record.identity or _lock_inode_identity(current) != record.identity:
+        raise KeyvaultPermissionError(errno.EAGAIN, "held advisory lock inode changed", str(path))
+    return record
+
+
+def assert_advisory_lock_held(path: Path) -> None:
+    """Require this thread's active opened lock to match its current pathname.
+
+    Raises KeyvaultPermissionError for absent/expired/foreign custody, a changed
+    descriptor, or a replaced pathname. Global active-FD membership alone never
+    proves ownership; it only corroborates the exact thread/path registration.
+    """
+    _checked_advisory_lock(path)
+
+
 @contextlib.contextmanager
 def _advisory_file_lock(path: Path, *, label: str) -> Iterator[None]:
     """Acquire one OS lock per path/thread and make nested use reentrant."""
@@ -796,6 +839,7 @@ def _advisory_file_lock(path: Path, *, label: str) -> Iterator[None]:
     depths = _thread_lock_depths()
     depth = depths.get(key, 0)
     if depth:
+        assert_advisory_lock_held(path)
         depths[key] = depth + 1
         try:
             yield
@@ -807,13 +851,19 @@ def _advisory_file_lock(path: Path, *, label: str) -> Iterator[None]:
     owner_pid = os.getpid()
     _ACTIVE_LOCK_FDS.add(fd)
     try:
+        record = _HeldAdvisoryLock(fd, _lock_inode_identity(os.fstat(fd)), (owner_pid, threading.get_ident()))
         if fcntl is not None:
             fcntl.flock(fd, fcntl.LOCK_EX)
         depths[key] = 1
+        _THREAD_LOCK_STATE.held[key] = record
         try:
+            # flock can block after open-time validation. A replacement during
+            # that wait must not turn the old locked inode into new authority.
+            assert_advisory_lock_held(path)
             yield
         finally:
             depths.pop(key, None)
+            _THREAD_LOCK_STATE.held.pop(key, None)
             # A forked child shares the parent's open-file description. It
             # must never explicitly unlock that description on the parent's
             # behalf; the at-fork callback already closed the child's copy.
@@ -898,18 +948,13 @@ class KeyvaultCustody:
 
         raise DatabaseRefused("keyvault custody cannot be constructed")
 
-    def _check_native_delete_owner(  # noqa: C901 - explicit custody checks fail before authority issuance
-        self, native_key_id: str, backend: NativeBackend
-    ) -> _NativeOwnerFacts:
+    def _check_native_delete_owner(self, native_key_id: str, backend: NativeBackend) -> _NativeOwnerFacts:
         from .._database_contracts import DatabaseRefused
         from . import _native_deletion, _native_key_id
 
         record = _KEYVAULT_CUSTODY.get(self)
         if record is None or record.process != (os.getpid(), threading.get_ident()) or backend is not record.backend:
             raise DatabaseRefused("keyvault custody is closed or belongs to another backend/process")
-        depths = _thread_lock_depths()
-        if not depths.get(_lock_path_key(record.root.parent / ".keyvault.lifecycle.lock")):
-            raise DatabaseRefused("keyvault custody lifecycle lock is not held")
         try:
             current = record.root.lstat()
         except FileNotFoundError:
@@ -919,15 +964,12 @@ class KeyvaultCustody:
             identity = (current.st_dev, current.st_ino)
         if identity != record.identity:
             raise DatabaseRefused("keyvault custody root changed")
-        if identity is not None and not depths.get(_lock_path_key(record.root / ".lock")):
-            raise DatabaseRefused("keyvault custody lock is not held")
         for path, held_identity in record.locks:
             try:
-                lock_stat = path.lstat()
-                _validate_lock_stat(lock_stat, path, label="keyvault custody lock", from_lstat=True)
+                held_lock = _checked_advisory_lock(path)
             except OSError as exc:
                 raise DatabaseRefused("keyvault custody lock changed") from exc
-            if _lock_inode_identity(lock_stat) != held_identity:
+            if held_lock.identity != held_identity:
                 raise DatabaseRefused("keyvault custody lock changed")
         if record.binding != _native_deletion._backend_binding(backend, ""):
             raise DatabaseRefused("keyvault backend/store changed")
@@ -974,7 +1016,7 @@ def keyvault_custody(root: Path, *, backend: NativeBackend, reset: bool = False)
             (os.getpid(), threading.get_ident()),
             reset,
             _backend_binding(backend, ""),
-            tuple((path, _lock_inode_identity(path.lstat())) for path in lock_paths),
+            tuple((path, _checked_advisory_lock(path).identity) for path in lock_paths),
         )
         try:
             yield handle

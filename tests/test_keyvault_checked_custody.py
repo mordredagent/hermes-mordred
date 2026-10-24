@@ -440,3 +440,127 @@ def test_metadata_is_rechecked_at_native_invocation_after_permit_issue(tmp_path,
             with pytest.raises(DatabaseRefused):
                 backend.delete_enclave_key(selector, deletion=permit)
     assert calls == []
+
+
+def _replace_lock(path: Path) -> None:
+    path.rename(path.with_name(path.name + ".old"))
+    path.write_bytes(b"")
+    path.chmod(0o600)
+
+
+@pytest.mark.parametrize("kind", ["keyvault", "lifecycle"])
+def test_replaced_lock_before_nested_custody_never_authorizes_native_delete(tmp_path, monkeypatch, kind):
+    root, selector, backend, calls = _owned(tmp_path, monkeypatch)
+    path = root / ".lock" if kind == "keyvault" else root.parent / ".keyvault.lifecycle.lock"
+    with _storage.keyvault_lock(root):
+        _replace_lock(path)
+        with (
+            pytest.raises((DatabaseRefused, _storage.KeyvaultPermissionError)),
+            _storage.keyvault_custody(root, backend=backend) as custody,
+        ):
+            owner = ids.checked_native_owner(custody, native_key_id=selector, backend=backend)
+            with deletion._owned_delete_scope(owner, backend=backend, database_lease=None) as permit:
+                backend.delete_enclave_key(selector, deletion=permit)
+    assert calls == []
+
+
+@pytest.mark.parametrize("kind", ["keyvault", "lifecycle"])
+def test_replaced_lock_while_initial_flock_waits_never_authorizes_native_delete(tmp_path, monkeypatch, kind):
+    root, selector, backend, calls = _owned(tmp_path, monkeypatch)
+    path = root / ".lock" if kind == "keyvault" else root.parent / ".keyvault.lifecycle.lock"
+    original = _storage.fcntl.flock
+    replaced = []
+
+    def flock(fd, operation):
+        import os
+
+        # Synchronously inject the same pathname replacement possible while a
+        # real flock blocks, without relying on scheduling or native hardware.
+        if operation == _storage.fcntl.LOCK_EX and os.fstat(fd).st_ino == path.stat().st_ino:
+            _replace_lock(path)
+            replaced.append(True)
+        original(fd, operation)
+
+    monkeypatch.setattr(_storage.fcntl, "flock", flock)
+    with (
+        pytest.raises((DatabaseRefused, _storage.KeyvaultPermissionError)),
+        _storage.keyvault_custody(root, backend=backend) as custody,
+    ):
+        owner = ids.checked_native_owner(custody, native_key_id=selector, backend=backend)
+        with deletion._owned_delete_scope(owner, backend=backend, database_lease=None) as permit:
+            backend.delete_enclave_key(selector, deletion=permit)
+    assert replaced == [True]
+    assert calls == []
+
+
+@pytest.mark.parametrize("kind", ["keyvault", "lifecycle"])
+def test_replaced_actual_held_lock_at_native_use_refuses(tmp_path, monkeypatch, kind):
+    root, selector, backend, calls = _owned(tmp_path, monkeypatch)
+    path = root / ".lock" if kind == "keyvault" else root.parent / ".keyvault.lifecycle.lock"
+    with _storage.keyvault_custody(root, backend=backend) as custody:
+        owner = ids.checked_native_owner(custody, native_key_id=selector, backend=backend)
+        with deletion._owned_delete_scope(owner, backend=backend, database_lease=None) as permit:
+            _replace_lock(path)
+            with pytest.raises((DatabaseRefused, _storage.KeyvaultPermissionError)):
+                backend.delete_enclave_key(selector, deletion=permit)
+    assert calls == []
+
+
+@pytest.mark.parametrize("kind", ["keyvault", "lifecycle"])
+def test_replacement_during_actual_blocked_flock_refuses(tmp_path, monkeypatch, kind):
+    import os
+    import subprocess
+    import sys
+
+    root, selector, backend, calls = _owned(tmp_path, monkeypatch)
+    path = root / ".lock" if kind == "keyvault" else root.parent / ".keyvault.lifecycle.lock"
+    script = """
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+fcntl.flock(fd, fcntl.LOCK_EX)
+print("locked", flush=True)
+sys.stdin.readline()
+os.close(fd)
+"""
+    original = _storage.fcntl.flock
+    waiting = threading.Event()
+    outcomes = []
+
+    def flock(fd, operation):
+        if operation == _storage.fcntl.LOCK_EX and os.fstat(fd).st_ino == path.stat().st_ino:
+            waiting.set()
+        original(fd, operation)
+
+    def transaction():
+        try:
+            with _storage.keyvault_custody(root, backend=backend) as custody:
+                owner = ids.checked_native_owner(custody, native_key_id=selector, backend=backend)
+                with deletion._owned_delete_scope(owner, backend=backend, database_lease=None) as permit:
+                    backend.delete_enclave_key(selector, deletion=permit)
+        except (DatabaseRefused, _storage.KeyvaultPermissionError):
+            outcomes.append("refused")
+        else:
+            outcomes.append("admitted")
+
+    with subprocess.Popen(
+        [sys.executable, "-c", script, str(path)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ) as blocker:
+        assert blocker.stdout.readline() == "locked\n"
+        monkeypatch.setattr(_storage.fcntl, "flock", flock)
+        worker = threading.Thread(target=transaction)
+        worker.start()
+        try:
+            assert waiting.wait(5)
+            assert worker.is_alive()
+            _replace_lock(path)
+        finally:
+            blocker.communicate(input="release\n", timeout=5)
+            worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert blocker.returncode == 0
+    assert outcomes == ["refused"]
+    assert calls == []
