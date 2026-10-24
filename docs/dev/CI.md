@@ -656,6 +656,23 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 
 ## Manual live-device validation log
 
+- **2026-10-24 — Import-store shared writes and mail reconciliation: isolated SQLCipher validation.**
+  Source: `refactor/import-store-writes`, based on `5396f0e89`; macOS
+  27.0.1 arm64, Python 3.13.15, editable package verified against its dedicated
+  worktree. A temporary `HERMES_HOME` and a randomly generated synthetic
+  `hex:` memory key armed the real database shim; `open_import_store` passed
+  the production SQLCipher gate. Synthetic RFC 2606 mail verified staged
+  thread invisibility until run commit, atomic batch publication with its
+  cursor, cross-batch parent/reply reconciliation and message counts, dry-run
+  rollback and duplicate replay. Unkeyed stdlib SQLite could not read the
+  resulting store. The home was deleted after the check; no production
+  profile, mailbox credentials or gateway port was used. Explicit
+  `-m integration` selection of `test_provenance_eval.py` and
+  `test_telegram_local_llm.py` completed with three skips because their live
+  model gates were unset. A real IMAP account fetch, Hermes/model provenance
+  evaluation and Telegram live inference were not run. Hardware-key and VPN
+  code paths are unchanged and were not exercised.
+
 - **2026-10-23 — Browser activity and history (B2 stack) final live re-verification after the privacy fixes: operator, receiver and Hermes.**
   Source: branch `feat/browser-history-b2` (runs at `1312612b1`, `efac92a92`
   and `4a89bb602`, the commit before this entry), hermes-mordred 0.3.0a4,
