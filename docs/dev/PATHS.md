@@ -416,6 +416,9 @@ The operator keeps the matching plaintext token in its own
   encryption armed, shim installed, key resolvable, keyed connection, file not
   readable as plain SQLite, and the stored profile binding equal to this home.
   There is no plaintext fallback; on Linux and Windows the store is refused.
+  The [cross-platform proposal](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md)
+  retains this store path and SQLCipher requirement while extending the shared
+  lifecycle. It does not yet change the supported platforms or path handling.
 - **Backup and restore:** `ActivityStore.backup` / `restore` take consistent
   SQLite-backup-API snapshots (a new `0600` file, keyed by the shim, refused if
   plaintext); restore keeps the profile binding, issues a new store

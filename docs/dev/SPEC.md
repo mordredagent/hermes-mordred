@@ -6496,3 +6496,33 @@ result decides the default `label_language`; until then it stays `en`.
   smoke is 42 privacy calls and 126 Hermes calls; standard is 1068 privacy
   calls at 3 repetitions; full is 2136 privacy calls (two styles) and 6408
   Hermes calls.
+
+## Cross-platform database encryption (proposed, 2026-10-24)
+
+The owner selected Approach A: extend the shared SQLCipher database-encryption
+foundation to Linux and Windows, covering Hermes's root/shared/profile databases
+and the Telegram, mail and activity tables in `mordred.db`. The
+[design](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md)
+records that selected direction and the proposed implementation contracts.
+This is future work, not a change to the currently macOS-only support claims.
+
+The proposal preserves the macOS database format and root-owned encryption
+domain. Linux TPM and Windows CNG memory-key custody supply the root database
+key without porting `.env` injection or the file vault. Profile memory custody
+remains distinct from the root database-key dependency. SQLCipher is mandatory;
+an unavailable key, driver, checked storage boundary or unresolved conversion
+must refuse rather than create or replace a plaintext database.
+
+Root/profile ownership, authority generation, process-lifetime migration leases,
+checked Windows SQLite I/O, backup/restore, and key disable/reset/purge/uninstall
+ordering are prerequisite contracts. A native Windows filesystem mediation
+feasibility gate must pass before Windows database support can be enabled.
+Telegram migration, mail credential custody and activity peer/storage consumers
+remain separate component changes; a database-only pass is not their acceptance.
+
+Actual AWS Linux/Windows NitroTPM validation is required by the owner; see
+[the proposed acceptance policy](CI.md#cross-platform-database-encryption-acceptance-proposed).
+Windows Server evidence is separate from Windows 11/Desktop acceptance.
+Session JSONL and text logs remain outside SQLCipher coverage. Touch ID prompt
+reduction, portable key recovery and automatic cross-machine transfer are not
+part of this proposal.

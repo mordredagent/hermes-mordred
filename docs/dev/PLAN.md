@@ -2675,3 +2675,38 @@ Delivered in PRs 11 and 12.
   [`CI.md`](CI.md#provenance-evaluation-runs).
 - Cost control: about 600 calls per header style, so tiers plus resumable JSONL
   output; the header A/B runs on the privacy driver only.
+
+## Cross-platform database encryption rollout (proposed, 2026-10-24)
+
+**Spec:** [Cross-platform database encryption](SPEC.md#cross-platform-database-encryption-proposed-2026-10-24).
+**Design:** [Selected Approach A](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md).
+The design is under review; detailed implementation tasks follow its approval.
+No product code or platform acceptance is delivered by this documentation slice.
+
+Keep independent component PRs in dependency order:
+
+1. Freeze ownership, failure, compatibility and AWS acceptance contracts in
+   documentation before cross-component implementation.
+2. Establish keyvault's root database-key authority and dependency guards for
+   key disable/reset/purge, retaining independent profile memory custody.
+3. Prove the Windows SQLCipher/checked-filesystem bridge with the actual driver
+   before advertising Windows database support; preserve a failing or not-run
+   result if the required boundary cannot be enforced.
+4. Port `dbcrypt` driver capability, startup, locking, migration/decryption,
+   monitoring and backup behavior; preserve existing macOS database bytes and
+   key derivation. Wizard lifecycle and uninstall consumers land separately.
+5. Port activity/import-store protection and checked storage consumers, then
+   Telegram destination selection/migration and mail credentials/collectors in
+   their own component slices. Extend Windows custody schemas explicitly before
+   adding a mail role.
+6. Complete CLI/Desktop capability consumers after their platform prerequisites
+   land, retaining truthful unsupported/pending/error states.
+7. Validate source and fresh installed wheels on the retained AWS Linux and
+   Windows hosts, record independent outcomes in CI's manual log, and perform
+   final regression at integration freeze. Windows 11/Desktop and actual
+   external-service gates remain independently tracked.
+
+The design owns architecture and acceptance boundaries; an implementation plan
+after approval will define exact interfaces and test tasks. This rollout outline
+does not authorize skipping native gates or combining unrelated component
+implementations into one PR.

@@ -654,6 +654,33 @@ slice also covers redirected output under a legacy code page: on a ja-JP
 for a log holding characters outside cp932 and confirm `out.txt` is complete
 UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 
+## Cross-platform database encryption acceptance (proposed)
+
+The owner selected a shared SQLCipher lifecycle for Hermes databases and
+`mordred.db`, with actual Linux and Windows validation on AWS. The
+[design](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md)
+defines the proposed acceptance matrix; it is not an execution result.
+
+Reuse the retained NitroTPM hosts in `ap-southeast-1`: Linux
+`i-095cbe655c196c749` and Windows Server 2025 `i-00f4db5c3a204906b`.
+Before compute starts, recheck identity/state and arm a bounded external
+auto-stop deadline. Use the existing pinned SSH route for Linux and existing
+SSM/credentialed ordinary-user route for Windows; do not assume the Linux
+instance has an SSM role. Keep private access harnesses and credentials out of
+the repository and logs, use fresh synthetic homes, and verify final stopped
+states independently.
+
+Require separate source and out-of-checkout sdist-derived-wheel evidence,
+actual TPM/CNG access under the intended user token, SQLCipher/FTS capability,
+Hermes database and imported-history round trips, concurrency/crash recovery,
+key-lifecycle refusal, encrypted backup/restore, and reboot/stop-start retention.
+Injected tests do not replace native storage or device evidence. Native Windows
+SQLite filesystem mediation is an early feasibility gate, before a Windows
+support claim. Server acceptance does not establish Windows 11 or packaged
+Desktop acceptance, and synthetic collectors do not establish live Telegram,
+IMAP or model acceptance. Record executed outcomes only in the manual log;
+missing gates stay not-run or failed.
+
 ## Manual live-device validation log
 
 - **2026-10-23 — Browser activity and history (B2 stack) final live re-verification after the privacy fixes: operator, receiver and Hermes.**

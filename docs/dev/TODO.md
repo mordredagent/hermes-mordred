@@ -249,6 +249,16 @@ The macOS CLI, startup protection, monitor and uninstall lifecycle are implement
 
 - [ ] Desktop: add database enable/disable/status controls, including scheduled conversion.
 - [ ] Logging: redact message previews (`msg=`) from `logs/agent.log`.
+- [ ] Cross-platform shared SQLCipher lifecycle (owner-selected Approach A):
+  review the [design](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md),
+  then implement component-scoped PRs and validate on the existing AWS Linux
+  and Windows NitroTPM hosts. Protect root/shared/profile databases and
+  `mordred.db`; preserve macOS format compatibility and block key deletion
+  while dependent protected database state remains.
+- [ ] Complete Telegram, mail and activity consumers after their shared database
+  prerequisites land. A database-layer pass alone does not establish collector
+  support or Windows 11/Desktop acceptance. Touch ID prompt reduction is a
+  separate change.
 
 ### Linux private Telegram (proposed)
 
@@ -1017,4 +1027,6 @@ Later (not scheduled):
 - [ ] Label-language decision (`label_language` default `en` or `ja`) after the
   evaluation.
 - [ ] Linux and Windows `mordred.db` stores (today those platforms keep the
-  `.enc` archive and `telegram_ask`).
+  `.enc` archive and `telegram_ask`): tracked under
+  [Hermes database encryption](#hermes-database-encryption), using the shared
+  SQLCipher lifecycle rather than a separate Mordred-only store.

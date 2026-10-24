@@ -7,6 +7,12 @@ line), reverse conversion (`databases decrypt`) and both uninstall modes
 done; the Desktop page step and log-preview redaction remain.
 Track those remaining tasks in [`TODO.md`](./TODO.md#hermes-database-encryption).
 
+The selected cross-platform direction is a shared SQLCipher lifecycle for
+Linux and Windows as well as macOS. Its proposed design is
+[`Cross-platform database encryption`](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md).
+That proposal is not implemented or accepted native validation; the macOS-only
+behavior documented below remains the current contract.
+
 ## Goal
 
 Hermes's databases are plaintext SQLite: the conversation store `state.db`
