@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from mordred_hermes.activity import contracts
+from mordred_hermes.activity import _redaction, contracts
 from mordred_hermes.activity.config import ActivityConfig
 from mordred_hermes.activity.contracts import (
     DEFAULT_EXCLUDED_SITES,
@@ -603,6 +603,32 @@ def test_digest_is_stable_and_covers_content() -> None:
     assert changed.content_digest != first.content_digest
 
 
+def test_redaction_across_fields_keeps_the_persisted_digest() -> None:
+    """Moving the redactor must preserve persisted canonical content, including exclusion order."""
+    event = normalize(
+        event_id="event-redaction",
+        phase="boundary",
+        text="Set the password to Hunter2-x; then use https://example.com/?token=old-token",
+        action={
+            "op": "task_start",
+            "site": "example.com",
+            "route": "/login?api_key=old-key#code=4821",
+            "target": "Password: TargetPass-77",
+        },
+        page_title="PIN=4821",
+        page_text="the password was PagePass-77",
+    )
+    assert (event.target, event.route, event.query) == (
+        "Password: redacted",
+        "/login",
+        "?api_key=redacted#code=redacted",
+    )
+    assert event.text == "Set the password to redacted; then use https://example.com/?token=redacted"
+    assert (event.page_title, event.page_text) == ("PIN=redacted", "the password was redacted")
+    assert event.exclusions == ("url_params_redacted", "text_secrets_redacted")
+    assert event.content_digest == "a6749558f22cca9a4ae7fed9aae2b57204d497e978f66d3337c2c4f16e53f2ad"
+
+
 def test_digest_omits_absent_new_fields_so_earlier_digests_still_verify() -> None:
     event = normalize()
     assert (event.query, event.page_title, event.page_text) == (None, None, None)
@@ -1181,7 +1207,7 @@ def test_every_value_the_base_revision_redacted_stays_redacted(text: str, spans:
     """A newer rule only adds redactions: each value span the base revision (efe9bb27d) replaced lies inside a
     span replaced now (spans of the text after JWTs, key-prefixed tokens and PEM lines are replaced)."""
     clean = contracts.redact_secret_tokens(text)
-    now = contracts._secret_spans(clean)
+    now = _redaction._secret_spans(clean)
     for start, end in spans:
         assert any(lo <= start and end <= hi for lo, hi in now), (clean[start:end], now)
 
