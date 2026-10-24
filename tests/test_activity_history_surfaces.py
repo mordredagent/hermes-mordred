@@ -375,7 +375,7 @@ def test_a_writer_lock_fails_the_history_open_within_the_read_bound(history_home
         holder.close()
 
     assert calls and set(calls) == {history.READ_BUSY_MS / 1000}  # the shim's probe got the read bound
-    # One read bound (250 ms) for opening and reading together, plus scheduling slack; the store's 2 s
-    # write timeout used to apply to the probe (about 2.5 s in all).
-    assert refused_in < 1.0 and navigated_in < 1.0
+    # One read bound (250 ms) for opening and reading together, plus scheduling slack (a loaded CI
+    # runner has taken 1.1 s); the store's 2 s write timeout used to apply to the probe (about 2.5 s in all).
+    assert refused_in < 1.5 and navigated_in < 1.5
     assert [entry["code"] for entry in audit_entries] == ["busy"]  # ...and is audited once
