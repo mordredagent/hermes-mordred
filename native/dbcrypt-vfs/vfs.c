@@ -299,6 +299,7 @@ static int fUnmap(sqlite3_file *file, int remove) {
   wchar_t name[CI_PATH];
   CiFile deletion;
   if (!f->shm.handle) return SQLITE_OK;
+  if (ci_test_observe(CI_BEFORE_UNMAP,f->shm.handle)) rc=SQLITE_IOERR_SHMMAP;
   InterlockedIncrement64(&f->io.root->unmaps);
   for (i=0; i<f->region_count; i++) {
     if (f->regions[i].base && !UnmapViewOfFile(f->regions[i].base)) rc=SQLITE_IOERR_SHMMAP;
@@ -482,11 +483,21 @@ int sqlite3_mordredvfs_init(sqlite3 *db, char **error, const sqlite3_api_routine
   checked_vfs.xDlOpen=vDlOpen; checked_vfs.xDlError=vDlError; checked_vfs.xDlSym=vDlSym; checked_vfs.xDlClose=vDlClose;
   checked_vfs.xRandomness=vRandom; checked_vfs.xSleep=vSleep; checked_vfs.xCurrentTime=vTime;
   checked_vfs.xGetLastError=vError; checked_vfs.xCurrentTimeInt64=vTime64;
+#ifdef MORDRED_VFS_TESTING
+  if (ci_test_stage(20,NULL)) { rc=SQLITE_NOMEM; goto failed; }
+#endif
   rc=sqlite3_vfs_register(&checked_vfs,0);
   if (rc!=SQLITE_OK) goto failed;
   /* No callback is published on the bootstrap connection. Future protected
    * connections cannot exist until roots are registered AFTER permanent load. */
+#ifdef MORDRED_VFS_TESTING
+  if (ci_test_stage(21,NULL)) rc=SQLITE_NOMEM;
+  else
+#endif
   rc=sqlite3_auto_extension((void (*)(void))connection_init);
+#ifdef MORDRED_VFS_TESTING
+  if (rc==SQLITE_OK && ci_test_stage(22,NULL)) rc=SQLITE_NOMEM;
+#endif
   if (rc!=SQLITE_OK) {
     sqlite3_cancel_auto_extension((void (*)(void))connection_init);
     sqlite3_vfs_unregister(&checked_vfs);
