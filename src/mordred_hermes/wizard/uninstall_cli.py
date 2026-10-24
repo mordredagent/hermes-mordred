@@ -676,11 +676,32 @@ def _purge_tpm_memory(ctx: UninstallContext) -> int:
     return rc
 
 
+def _has_database_refusal(error: BaseException) -> bool:
+    """A source refusal remains fatal through explicit and implicit wrappers."""
+    from .._database_contracts import DatabaseRefused
+
+    pending = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, DatabaseRefused):
+            return True
+        for chained in (current.__cause__, current.__context__):
+            if chained is not None:
+                pending.append(chained)
+    return False
+
+
 def _forget_telegram_for_uninstall(ctx: UninstallContext) -> None:
     forget = ctx.telegram_forget or _default_telegram_forget
     try:
         rc = forget()
     except Exception as exc:  # e.g. the optional Telegram extra is missing
+        if _has_database_refusal(exc):
+            raise  # Preserve the original wrapper, cause chain and traceback.
         rc = 1
         _term.emit_warn(f"Telegram logout failed: {exc}")
     if rc != 0:

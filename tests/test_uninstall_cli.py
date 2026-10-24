@@ -1299,3 +1299,117 @@ def test_wrapped_database_refusal_stops_all_later_teardown(installed, monkeypatc
     assert (installed.user_home / ".local/bin/hermes-mordred").exists()
     assert not any(call[0] == "delete" for call in installed.backend.calls)
     assert installed.runner.uninstalls == []
+
+
+def _telegram_database_refusal(kind: str) -> Exception:
+    from mordred_hermes._database_contracts import DatabaseRefused
+    from mordred_hermes.keyvault._memory_key import MemoryKeyError
+
+    refused = DatabaseRefused("Telegram native source still protects database state")
+    if kind == "direct":
+        return refused
+    wrapped = MemoryKeyError("Telegram memory custody refused")
+    if kind == "context":
+        wrapped.__context__ = refused
+        return wrapped
+    if kind == "masked-context":
+        wrapped.__cause__ = OSError("remote logout also failed")
+        wrapped.__context__ = refused
+        wrapped.__suppress_context__ = True
+        return wrapped
+    wrapped.__cause__ = refused
+    if kind == "wrapped":
+        return wrapped
+    outer = RuntimeError("Telegram cleanup could not finish")
+    outer.__cause__ = wrapped
+    return outer
+
+
+@pytest.mark.parametrize("kind", ["direct", "wrapped", "cause-chain", "context", "masked-context"])
+def test_telegram_database_refusal_keeps_original_exception_chain(plain_install, kind):
+    ctx, _ = plain_install
+    failure = _telegram_database_refusal(kind)
+    cause, context = failure.__cause__, failure.__context__
+
+    def refuse():
+        raise failure
+
+    ctx.telegram_forget = refuse
+    with pytest.raises(type(failure)) as caught:
+        uninstall_cli._forget_telegram_for_uninstall(ctx)
+    assert caught.value is failure
+    assert caught.value.__cause__ is cause
+    assert caught.value.__context__ is context
+
+
+@pytest.mark.parametrize("kind", ["direct", "wrapped", "cause-chain", "context", "masked-context"])
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+@pytest.mark.parametrize("erase", [False, True])
+def test_telegram_database_refusal_stops_full_uninstall_before_later_cleanup(plain_install, kind, platform, erase):
+    ctx, runner = plain_install
+    ctx.platform = platform
+    telegram = ctx.home / "mordred/telegram/credentials.sealed"
+    telegram.parent.mkdir()
+    telegram.write_bytes(b"retained Telegram source")
+    keyvault = ctx.home / "mordred/keyvault"
+    keyvault.mkdir()
+    (keyvault / "custody.journal").write_bytes(b"retained native intent")
+    bindir = ctx.user_home / ".local/bin"
+    bindir.mkdir(parents=True)
+    launcher = bindir / "hermes-mordred"
+    launcher.write_text(_LAUNCHER)
+    helper = bindir / "mordred-hermes-sekey"
+    helper.write_bytes(b"native helper")
+    runner.codesign = "Identifier=mordred-hermes-sekey-1\nSignature=adhoc\n"
+    ctx.prompt_io = _TypedPrompt(uninstall_cli.PURGE_PHRASE)
+    before = (ctx.home / "config.yaml").read_bytes(), (ctx.home / ".env").read_bytes()
+    failure = _telegram_database_refusal(kind)
+    events = []
+
+    def refuse():
+        events.append("telegram refusal")
+        raise failure
+
+    ctx.telegram_forget = refuse
+    ctx.keyvault_reset = lambda _home: events.append("later keyvault reset") or 0
+    assert (
+        run_uninstall(ctx, UninstallOptions(yes=True, purge_data=True, remove_helper=True, erase_encrypted=erase)) == 1
+    )
+    assert events == ["telegram refusal"]
+    assert (ctx.home / "config.yaml").read_bytes() == before[0]
+    assert (ctx.home / ".env").read_bytes() == before[1]
+    assert telegram.read_bytes() == b"retained Telegram source"
+    assert (keyvault / "custody.journal").read_bytes() == b"retained native intent"
+    assert launcher.read_text() == _LAUNCHER
+    assert helper.read_bytes() == b"native helper"
+    assert runner.uninstalls == []
+
+
+@pytest.mark.parametrize("failure", ["exception", "nonzero", "exception-cycle"])
+def test_ordinary_telegram_remote_failure_remains_best_effort_during_uninstall(plain_install, failure, capsys):
+    ctx, runner = plain_install
+    ctx.platform = "darwin"
+    telegram = ctx.home / "mordred/telegram/credentials.sealed"
+    telegram.parent.mkdir()
+    telegram.write_bytes(b"ordinary remote session")
+    (ctx.home / "mordred/keyvault").mkdir()
+    ctx.prompt_io = _TypedPrompt(uninstall_cli.PURGE_PHRASE)
+    events = []
+
+    def forget():
+        events.append("telegram remote failure")
+        if failure == "nonzero":
+            return 1
+        error = OSError("remote connection unavailable")
+        if failure == "exception-cycle":
+            wrapper = RuntimeError("remote cleanup incomplete")
+            error.__cause__ = wrapper
+            wrapper.__context__ = error
+        raise error
+
+    ctx.telegram_forget = forget
+    ctx.keyvault_reset = lambda _home: events.append("later keyvault reset") or 0
+    assert run_uninstall(ctx, UninstallOptions(yes=True, purge_data=True)) == 0
+    assert events == ["telegram remote failure", "later keyvault reset"]
+    assert "terminate it in Telegram" in capsys.readouterr().err
+    assert len(runner.uninstalls) == 1

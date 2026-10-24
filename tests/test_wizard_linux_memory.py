@@ -207,20 +207,33 @@ def test_uninstall_data_purge_removes_memory_custody_before_keyvault(linux):
 
     from mordred_hermes.keyvault import _storage
     from mordred_hermes.wizard import uninstall_cli
+    from mordred_hermes.wizard._flow_session import FlowSession
 
     home, backend = linux
     assert memory_cli.enable(home=home, root=home / "vault", platform="linux") == 0
     _storage.ensure_layout(_storage.resolve_keyvault_dir(home))
     assert memory_cli.disable(home=home, root=home / "vault") == 0
+    reset_calls = []
+
+    def reset(_home):
+        assert not mk.memory_key_path(home).exists()
+        assert not backend._ops._keys
+        reset_calls.append("reset")
+        return 0
+
     ctx = SimpleNamespace(
         home=home,
         vault_root=home / "vault",
         backend=backend,
         platform="linux",
-        keyvault_reset=None,
+        keyvault_reset=reset,
         telegram_forget=None,
     )
-    assert uninstall_cli._purge_data(ctx, SimpleNamespace(telegram_configured=False)) == 0
+    plan = SimpleNamespace(telegram_configured=False)
+    with database_key_mutation(root=home, generation=None) as lease, FlowSession() as flow:
+        assert uninstall_cli._purge_sources(ctx, plan, flow, lease) == 0
+        assert uninstall_cli._purge_data(ctx, plan) == 0
+    assert reset_calls == ["reset"]
     assert not mk.memory_key_path(home).exists()
     assert not backend._ops._keys
     assert (home / "memories/MEMORY.md").read_text() == "synthetic private memory"
