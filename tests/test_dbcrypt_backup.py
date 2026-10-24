@@ -481,3 +481,75 @@ def test_reciprocal_backup_recovery_has_no_directory_lock_cycle(tmp_path, parent
         timeout=20,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("operation", ["publish", "delete"])
+def test_uncertain_namespace_barrier_keeps_backup_intent_and_key_dependency(native_root, monkeypatch, operation):
+    from contextlib import contextmanager
+
+    from mordred_hermes._private_fs import PrivateFSError
+    from mordred_hermes.dbcrypt import _backup, _migrate
+
+    root, _, key, snapshot = native_root
+    cipher(root / "state.db", key)
+    destination = root.parent / (root.name + "-barrier.backup")
+    opened = _backup.open_private_directory
+
+    class Transaction:
+        def __init__(self, tx):
+            self.tx = tx
+
+        def __getattr__(self, name):
+            return getattr(self.tx, name)
+
+        def rename_file(self, *args, **kwargs):
+            self.tx.rename_file(*args, **kwargs)
+            if operation == "publish":
+                raise PrivateFSError("io", "directory_flush", commit_state="uncertain")
+
+        def delete_file(self, *args, **kwargs):
+            self.tx.delete_file(*args, **kwargs)
+            if operation == "delete":
+                raise PrivateFSError("io", "directory_flush", commit_state="uncertain")
+
+    class Directory:
+        def __init__(self, directory):
+            self.directory = directory
+
+        def __getattr__(self, name):
+            return getattr(self.directory, name)
+
+        @contextmanager
+        def transaction(self, **kwargs):
+            with self.directory.transaction(**kwargs) as tx:
+                yield Transaction(tx)
+
+    @contextmanager
+    def fail_barrier(path, **kwargs):
+        with opened(path, **kwargs) as directory:
+            yield Directory(directory) if path == destination.parent else directory
+
+    authority = Authority.acquire(root)
+    try:
+        if operation == "delete":
+            _backup.backup_database(root / "state.db", destination, authority=authority)
+        monkeypatch.setattr(_backup, "open_private_directory", fail_barrier)
+        with pytest.raises(PrivateFSError) as error:
+            if operation == "publish":
+                _backup.backup_database(root / "state.db", destination, authority=authority)
+            else:
+                _backup.delete_backup(destination, authority=authority)
+        assert error.value.commit_state == "uncertain"
+    finally:
+        authority.close()
+    assert (root / "mordred/db-backups.journal.json").exists()
+    assert destination.exists() == (operation == "publish")
+    if operation == "delete":
+        assert (root / "mordred/db-backups.json").exists()
+    monkeypatch.setattr(_backup, "open_private_directory", opened)
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
+    with acquire_exclusive(root) as lease:
+        with pytest.raises(DatabaseRefused):
+            assert_mutation_safe(root, snapshot.generation, lease)
+        _backup.recover_backups(root, lease=lease)
+    assert not (root / "mordred/db-backups.journal.json").exists()

@@ -56,15 +56,25 @@ def exclusive_lock(directory: CheckedDirectory, *, blocking: bool) -> Iterator[N
 def _lock_handle(directory: CheckedDirectory) -> OwnedHandle:
     api = directory.handle.api
     path = directory.path + "\\.mordred-fs.lock"
+    created = False
     try:
         handle = api.open(path, access=0xC0020000, create=True)
+        created = True
     except PrivateFSError as exc:
         if exc.reason != "exists":
             raise
         handle = api.open(path, access=0xC0020000)
     try:
         validate_private(handle, directory=False)
-    except BaseException:
-        handle.close()
+        if created:
+            api.flush(handle)
+            directory.flush()
+    except BaseException as exc:
+        if created and isinstance(exc, PrivateFSError):
+            exc.commit_state = "uncertain"
+        try:
+            handle.close()
+        except OSError as cleanup:
+            cleanup_failure(exc, cleanup, committed=created)
         raise
     return handle

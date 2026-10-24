@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import secrets
+import sys
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -16,10 +17,11 @@ from ._types import (
     PrivateDirectory,
     PrivateFSError,
     PrivateTransaction,
+    cleanup_failure,
     reserved,
     validate_limit,
 )
-from ._windows_api import OwnedHandle
+from ._windows_api import NativeAPI, OwnedHandle
 from ._windows_lock import exclusive_lock
 from ._windows_paths import CheckedDirectory, checked_directory, checked_directory_optional, windows_leaf
 from ._windows_security import validate_confidential_file, validate_private
@@ -207,6 +209,7 @@ class _Directory:
         transaction = _Transaction(self)
         try:
             with exclusive_lock(self.checked, blocking=blocking):
+                self.checked.flush()  # Writable parent admission before dependent mutation.
                 try:
                     yield transaction
                 finally:
@@ -264,6 +267,10 @@ class _Transaction:
     def _mark_mutated(self) -> None:
         self.published = self.directory.published = True
 
+    def flush_directory(self) -> None:
+        self.check()
+        self.directory.checked.flush()
+
     def flush_file(self, name: str, *, expected_identity: FileIdentity | None = None) -> None:
         """Flush a checked owned file; share-zero also refuses active holders."""
         self.check()
@@ -279,11 +286,12 @@ class _Transaction:
         self.check()
         attempted = False
         try:
-            with self.directory.opened(name, access=0x130089, share=0) as handle:
+            with self.directory.opened(name, access=0x40130089, share=0) as handle:
                 self.directory.file_identity(handle, expected_identity)
                 attempted = True
                 handle.api.discard(handle)
             self._absent(name)
+            self.flush_directory()  # Disposition takes effect on CLOSE, not before.
         except PrivateFSError as exc:
             if attempted:
                 exc.commit_state = "uncertain"
@@ -333,6 +341,7 @@ class _Transaction:
             self._absent(name)
             if self.directory.stat(destination).identity != identity:
                 raise PrivateFSError("unsafe", "renamed_identity")
+            self.flush_directory()
         except PrivateFSError as exc:
             if changed:
                 exc.commit_state = "uncertain"
@@ -389,12 +398,15 @@ class _Transaction:
                 pass
         temporary = self.directory.checked.path + "\\.mordred-fs-tmp-" + secrets.token_hex(16)
         safe_to_discard = True
+        cleanup_attempted = False
         try:
-            with api.open(temporary, access=0xC0030000, share=0, create=True) as staging:
+            with _created_staging(api, temporary) as staging:
                 try:
                     validate_private(staging, directory=False)
                     identity = api.metadata(staging).identity
                     _write_staging(staging, data)
+                    safe_to_discard = False
+                    self.flush_directory()  # Persist the new staging name before publication.
                     self.directory.check()
                     if replace:
                         with self.directory.opened(name):
@@ -418,11 +430,46 @@ class _Transaction:
                         self.published = True
                         self.directory.published = True
                     if safe_to_discard:
-                        with contextlib.suppress(OSError):
-                            api.discard(staging)
+                        cleanup_attempted = True
+                        _discard_staging(staging, sys.exception())
+            self.flush_directory()
         except PrivateFSError as exc:
+            if cleanup_attempted:
+                self._flush_cleanup(exc)
             if not safe_to_discard and exc.commit_state != "uncertain":
                 exc.commit_state = "uncertain"
+            raise
+
+    def _flush_cleanup(self, error: PrivateFSError) -> None:
+        try:
+            self.flush_directory()
+        except OSError as cleanup:
+            cleanup_failure(error, cleanup, committed=True)
+
+
+def _discard_staging(staging: OwnedHandle, original: BaseException | None) -> None:
+    try:
+        staging.api.discard(staging)
+    except OSError as cleanup:
+        cleanup_failure(original, cleanup, committed=True)
+
+
+@contextlib.contextmanager
+def _created_staging(api: NativeAPI, temporary: str) -> Iterator[OwnedHandle]:
+    staging = api.open(temporary, access=0xC0030000, share=0, create=True)
+    try:
+        yield staging
+    except BaseException as original:
+        try:
+            staging.close()
+        except OSError as cleanup:
+            cleanup_failure(original, cleanup, committed=True)
+        raise
+    else:
+        try:
+            staging.close()
+        except PrivateFSError as exc:
+            exc.commit_state = "uncertain"
             raise
 
 

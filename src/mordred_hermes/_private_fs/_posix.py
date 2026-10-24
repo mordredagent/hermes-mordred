@@ -369,6 +369,10 @@ class _Transaction:
     def _mark_mutated(self) -> None:
         self.published = self.directory.published = True
 
+    def flush_directory(self) -> None:
+        self._check()
+        _flush(self.directory.fd)
+
     def flush_file(self, name: str, *, expected_identity: FileIdentity | None = None) -> None:
         validate_leaf(name)
         self._check()

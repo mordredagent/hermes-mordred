@@ -418,13 +418,13 @@ def _transition(phase: str) -> None:
 
 def _sync_directory(path: Path) -> None:
     if os.name == "nt":
-        # Windows file/journal handles are flushed; its directory/power-loss
-        # contract remains a qualification blocker, not a POSIX fsync claim.
+        # Full checked NTFS directory barrier under the accepted local-flush
+        # mapping; production still requires native qualification.
         from ._maintenance_windows import require_qualified
 
         require_qualified()
-        with open_private_directory(path):
-            pass
+        with open_private_directory(path) as directory, directory.transaction() as tx:
+            tx.flush_directory()
         return
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:

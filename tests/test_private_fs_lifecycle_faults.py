@@ -28,6 +28,12 @@ class FakeAPI:
 
     def open(self, path, *, access=0x120089, share=3, create=False):
         name = path.rsplit("\\", 1)[-1]
+        directory = path == "C:\\private"
+        if directory:
+            assert access == 0xC0000000 and share == 3
+            self.next_handle += 1
+            self.handles[self.next_handle] = "directory"
+            return OwnedHandle(self, self.next_handle)
         if name not in self.contents:
             raise fs.PrivateFSError("missing", "open")
         if access & 0x10000 or access & 0x40000000:
@@ -38,7 +44,7 @@ class FakeAPI:
         return OwnedHandle(self, self.next_handle)
 
     def metadata(self, handle):
-        if handle.value == 1:
+        if handle.value == 1 or self.handles.get(handle.value) == "directory":
             return Metadata(fs.FileIdentity(1, b"directory"), True, False, 1, 0)
         name = self.handles[handle.value]
         return Metadata(fs.FileIdentity(1, b"file"), False, False, 1, len(self.contents[name]))
@@ -52,7 +58,12 @@ class FakeAPI:
     def user_sid(self):
         return b"user"
 
+    def validate_volume(self, handle):
+        assert self.metadata(handle).identity.volume == 1
+
     def final_path(self, handle):
+        if handle.value == 1 or self.handles.get(handle.value) == "directory":
+            return "C:\\private"
         return "C:\\private\\" + self.handles[handle.value]
 
     def CloseHandle(self, value):
@@ -383,7 +394,8 @@ def test_windows_create_postpublication_error_preserves_exception(windows_fs, mo
 
     def flush(handle):
         nonlocal count
-        count += 1
+        if not api.metadata(handle).directory:
+            count += 1
         if count == 2:
             raise api.native_failure
 
