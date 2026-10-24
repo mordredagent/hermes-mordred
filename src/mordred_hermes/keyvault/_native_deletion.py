@@ -67,7 +67,7 @@ class NativeCreateReceipt(_OpaqueAuthority):
 @dataclass(frozen=True)
 class _NativeOwnerFacts:
     home: Path
-    role: Literal["memory", "vault", "main", "audit", "telegram"]
+    role: Literal["memory", "vault", "main", "audit", "telegram", "mail"]
     generation: str | None = None
     database_home: Path | None = None
 

@@ -51,7 +51,7 @@ _NATIVE_OWNERSHIP_META_FIELDS: Final = frozenset(
 """Top-level fields proving or journaling profile-owned native keys."""
 
 _NATIVE_KEY_ID_PREFIX: Final = "mordred-hermes.native.v1."
-_RESERVED_MAIN_KEY_IDS: Final = frozenset({"mordred.audit-log"})
+_RESERVED_MAIN_KEY_IDS: Final = frozenset({"mordred.audit-log", "mordred-hermes.mail.credentials.v1"})
 """Logical ids owned by internal auxiliary keys, never by the main vault."""
 
 
@@ -66,9 +66,9 @@ class InvalidMainKeyId(ValueError):
 def validate_main_key_id(logical_key_id: object) -> str:
     """Validate and return a logical id suitable for the main keyvault key.
 
-    The audit-log wrapping key shares the profile-scoped native namespace
-    with the main wrapping key, so allowing its reserved logical id here
-    would collapse two trust roles onto one physical key.  Empty ids are
+    Auxiliary wrapping keys share native storage with the main wrapping key,
+    so allowing their reserved logical ids here would collapse independent
+    trust roles onto one physical key.  Empty ids are
     rejected as well: they cannot be represented by the durable pending-key
     journal used to recover interrupted provisioning.
     """

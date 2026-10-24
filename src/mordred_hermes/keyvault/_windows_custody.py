@@ -47,12 +47,15 @@ from ._windows_profile import (
     Role,
     RoleRecord,
     RoleState,
+    SchemaUpgrade,
     encode_manifest,
     encode_pending,
+    encode_schema_upgrade,
     new_manifest,
     new_record,
     parse_manifest,
     parse_pending,
+    parse_schema_upgrade,
 )
 from ._windows_profile import (
     CustodyError as CustodyError,
@@ -80,6 +83,7 @@ _sessions: WeakKeyDictionary[WindowsCustodySession, _LiveSession] = WeakKeyDicti
 
 
 MANIFEST = "windows-custody.json"
+SCHEMA_PENDING = "windows-schema.pending.json"
 WRAPPED = "memory-key.wrapped"
 MARKER = "memory-vault.marker"
 OPTOUT = "memory-vault.optout"
@@ -323,12 +327,76 @@ class WindowsCustodySession:
 
     def _manifest(self) -> Manifest | None:
         self.check()
+        if _read(self._tx, SCHEMA_PENDING) is not None:
+            raise CustodyError("custody schema upgrade requires explicit reconciliation")
         data = _read(self._tx, MANIFEST)
         if data is None:
             return None
         if self._identity is None:
             raise CustodyError("retained custody has no checked home")
         return parse_manifest(data, self._identity, self._sid)
+
+    def upgrade_manifest_v2(self) -> None:
+        """Resume a private metadata-only transaction without touching native keys."""
+        self.check()
+        raw = _read(self._tx, MANIFEST)
+        journal_raw = _read(self._tx, SCHEMA_PENDING)
+        if self._identity is None:
+            raise CustodyError("schema upgrade requires a checked home")
+        if raw is None:
+            self._fresh_manifest_v2()
+            return
+        manifest = parse_manifest(raw, self._identity, self._sid)
+        if any(_read(self._tx, _pending_name(role)) is not None for role in ROLES):
+            raise CustodyError("reconcile pending role custody before schema upgrade")
+        if manifest.version == 2 and journal_raw is None:
+            return
+        if manifest.version == 1:
+            before = manifest
+            after = replace(manifest, version=2, roles=(*manifest.roles, RoleState()))
+        else:
+            if manifest.role("mail") != RoleState():
+                raise CustodyError("schema journal conflicts with mail ownership")
+            before = replace(manifest, version=1, roles=manifest.roles[:3])
+            after = manifest
+        expected = SchemaUpgrade(
+            "intent",
+            hashlib.sha256(encode_manifest(before)).hexdigest(),
+            hashlib.sha256(encode_manifest(after)).hexdigest(),
+        )
+        journal = self._schema_upgrade_intent(expected, journal_raw)
+        if manifest.version == 1:
+            if journal.phase != "intent":
+                raise CustodyError("published schema journal conflicts with old manifest")
+            self._save(after)
+        if journal.phase != "published":
+            self._publish(SCHEMA_PENDING, encode_schema_upgrade(replace(expected, phase="published")))
+        self._remove(SCHEMA_PENDING)
+
+    def _fresh_manifest_v2(self) -> None:
+        # A missing manifest alone is not absence. Refuse all non-coordinator
+        # entries, including unknown/staged ownership, source stores and backups.
+        from .._database_inventory import scan_dependencies
+
+        if self._transaction().list_names(max_entries=4096):
+            raise CustodyError("retained custody without a manifest requires reconciliation")
+        self._validate_memory(None)
+        inventory = scan_dependencies(self.home)
+        if not inventory.complete or inventory.entries:
+            raise CustodyError("retained database state without custody requires reconciliation")
+        if self._identity is None:
+            raise CustodyError("schema initialization requires a checked home")
+        manifest = new_manifest(self._identity, self._sid)
+        self._save(replace(manifest, version=2, roles=(*manifest.roles, RoleState())), create=True)
+
+    def _schema_upgrade_intent(self, expected: SchemaUpgrade, raw: bytes | None) -> SchemaUpgrade:
+        if raw is None:
+            self._publish(SCHEMA_PENDING, encode_schema_upgrade(expected), create=True)
+            return expected
+        journal = parse_schema_upgrade(raw)
+        if replace(journal, phase="intent") != expected:
+            raise CustodyError("schema journal conflicts with retained ownership")
+        return journal
 
     def _pending(self, manifest: Manifest, role: Role) -> Pending | None:
         data = _read(self._tx, _pending_name(role))
@@ -831,3 +899,9 @@ def load_windows_memory_key(*, home: Path, backend: NativeBackend | None = None)
 def resolve_windows_memory_key(*, home: Path) -> bytes | None:
     with windows_custody_session(home) as session:
         return session.resolve_memory_key()
+
+
+def upgrade_manifest_v2(*, home: Path) -> None:
+    """Explicitly upgrade or initialize fresh custody; never called by read/status."""
+    with windows_custody_session(home, create=True) as session:
+        session.upgrade_manifest_v2()
