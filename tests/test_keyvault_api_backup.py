@@ -43,6 +43,8 @@ from mordred_hermes.keyvault.recovery import RecoveryDigestMismatch
 # Software Enclave stand-in — see module docstring of test_keyvault_wrap.
 from tests._keyvault_fakes import FakeBackend
 
+pytestmark = pytest.mark.usefixtures("fake_native_creation_receipts")
+
 # Canonical inputs. ASCII so the split-normalization layer is a no-op and
 # the digest is stable regardless of NFKD behavior.
 SEED = "test seed phrase one two three four"

@@ -34,13 +34,25 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from tests._keyvault_receipts import RegisterFakeBackend
 
 if "HERMES_HOME" not in os.environ:
     _home = tempfile.mkdtemp(prefix="mordred-tests-home-")
     os.environ["HERMES_HOME"] = _home
     atexit.register(shutil.rmtree, _home, ignore_errors=True)
+
+
+@pytest.fixture
+def fake_native_creation_receipts(monkeypatch: pytest.MonkeyPatch) -> RegisterFakeBackend:
+    """Explicit legacy-test opt-in; native backends retain production receipts."""
+    from tests._keyvault_receipts import install_fake_creation_receipts
+
+    return install_fake_creation_receipts(monkeypatch)
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:

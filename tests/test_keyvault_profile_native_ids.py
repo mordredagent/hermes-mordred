@@ -19,6 +19,8 @@ from mordred_hermes.wizard import keyvault_cli
 from mordred_hermes.wizard._keyvault_init import _provision_audit_log_key
 from tests._keyvault_fakes import FakeBackend
 
+pytestmark = pytest.mark.usefixtures("fake_native_creation_receipts")
+
 
 def _prepare() -> tuple[api.SeedDisplayHandle, bytes]:
     return api.prepare_generate("profile scoped seed", "passphrase", b"\x42" * 32)
@@ -293,6 +295,11 @@ class _AmbientStoreBackend:
 
     def enclave_ecdh(self, key_id: str, peer_pub: bytes) -> bytes:
         return self.active.enclave_ecdh(key_id, peer_pub)
+
+
+@pytest.fixture(autouse=True)
+def _ambient_creation_receipts(fake_native_creation_receipts: Any) -> None:
+    fake_native_creation_receipts(_AmbientStoreBackend, lambda backend: backend.active)
 
 
 def test_legacy_explicit_home_can_read_key_from_historical_ambient_helper_store(tmp_path: Path) -> None:

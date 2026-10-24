@@ -33,6 +33,8 @@ from mordred_hermes.keyvault.network_fallback import BlackoutNotAsserted
 from mordred_hermes.wizard import keyvault_cli
 from tests._keyvault_fakes import FakeBackend
 
+pytestmark = pytest.mark.usefixtures("fake_native_creation_receipts")
+
 
 def _parse_keyvault(*args: str) -> argparse.Namespace:
     from mordred_hermes.wizard.cli import _setup_subparser
