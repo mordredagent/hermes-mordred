@@ -232,12 +232,30 @@ def backup_database(source: Path, destination: Path, *, authority: Authority) ->
     authority.check()
     source = source.absolute()
     destination = _canonical_destination(destination)
+    if os.name == "nt" and (
+        authority.root.is_relative_to(destination.parent) or destination.parent.is_relative_to(authority.root)
+    ):
+        raise DatabaseRefused("Windows backup requires a separate non-overlapping private directory")
     if not in_scope(source, authority.root) or destination.is_relative_to(authority.root):
         raise DatabaseRefused("backup needs a protected source and separate private destination")
     with (
         authority.operation(),
         contextlib.closing(open_protected(source, authority=authority, readonly=True)) as connection,
+        contextlib.ExitStack() as resources,
     ):
+        if os.name == "nt":
+            from ._windows_vfs import register_checked_vfs
+
+            # Reserve the actual native root before any journal or staging write.
+            # This also detects overlap with another live authority's root. The
+            # copy borrows this exact registration, retaining the preflight proof.
+            try:
+                registration = register_checked_vfs(_migrate._sqlcipher(), root=destination.parent)
+            except (OSError, RuntimeError):
+                raise DatabaseRefused(
+                    "Windows backup destination refused; choose a separate non-overlapping private directory"
+                ) from None
+            resources.callback(registration.close)
         if connection.execute("PRAGMA journal_mode").fetchone() == ("wal",) and _migrate.wal_reset_vulnerable(
             _migrate._sqlcipher().sqlite_version_info
         ):

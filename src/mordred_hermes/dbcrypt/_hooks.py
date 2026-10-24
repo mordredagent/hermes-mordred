@@ -172,22 +172,26 @@ def status_line(_info: Any = None) -> str:
 
         home = _home()
         token: object | None = _PROVIDER
-        if _PROVIDER is not None and _PROVIDER.runtime_native:
+        native_passive = _PROVIDER is not None and _PROVIDER.runtime_native
+        if native_passive:
+            assert _PROVIDER is not None
             authority = _PROVIDER.current_authority
             token = authority
         cached = _observation
         if cached is not None and cached[0] == home and cached[1] is token:
             findings = list(cached[2])
         else:
-            findings = [_monitor.Finding("no_key", "database protection has not been authenticated in this process")]
-        if _PROVIDER is not None and _PROVIDER.runtime_native:
+            findings = (
+                []
+                if native_passive
+                else [_monitor.Finding("no_key", "database protection has not been authenticated in this process")]
+            )
+        if native_passive:
             # Authority.check can revoke connections and roll back SQL on failure.
             # Until authority exposes a pure observation API, never reuse a native
             # protection claim in passive rendering; evaluate owns freshness work.
-            findings = [f for f in findings if f.violation] or [
-                _monitor.Finding("no_key", "native database freshness is not authenticated by passive status")
-            ]
-        if token is None and not any(f.violation for f in findings):
+            findings = [f for f in findings if f.violation]
+        if token is None and not native_passive and not any(f.violation for f in findings):
             findings = [_monitor.Finding("no_key", "database protection has not been authenticated in this process")]
     except Exception:
         return (
@@ -208,8 +212,15 @@ def status_line(_info: Any = None) -> str:
             f"{detail}. Tell the user; never say it is encrypted."
         )
     return (
-        "## Hermes's databases (Mordred)\nHermes's conversation history and its other databases are encrypted "
-        "at rest with SQLCipher (checked when this session started)."
+        (
+            "## Hermes's databases (Mordred)\nNative database protection is not checked by passive status. "
+            "Current protection is unknown; session and turn checks authenticate the runtime."
+        )
+        if native_passive
+        else (
+            "## Hermes's databases (Mordred)\nHermes's conversation history and its other databases are encrypted "
+            "at rest with SQLCipher (checked when this session started)."
+        )
     )
 
 

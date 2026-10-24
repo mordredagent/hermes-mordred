@@ -825,11 +825,62 @@ def test_vfs_registration_released_when_driver_connect_fails(native_root, author
     monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", True)
     monkeypatch.setattr(_windows_vfs, "classify_windows_database", lambda *a, **kw: native_root[0])
     monkeypatch.setattr(_windows_vfs, "register_checked_vfs", lambda *a, **kw: registration)
+    monkeypatch.setattr(
+        _windows_vfs,
+        "checked_path_identity",
+        lambda path, **kw: tuple(getattr(path.lstat(), field) for field in ("st_dev", "st_ino", "st_mode", "st_uid")),
+    )
     with pytest.raises((sc.OperationalError, DatabaseRefused)):
         opener()(native_root[0] / "state.db", authority=authority)
     assert native.tokens == set()
     assert not (native_root[0] / "state.db").exists()
     assert not authority.terminal
+
+
+def test_shared_windows_ownership_survives_monitor_backup_failed_open_and_terminal_close(
+    native_root, authority, monkeypatch
+):
+    from mordred_hermes.dbcrypt._backup import backup_database
+    from mordred_hermes.dbcrypt._monitor import monitor_runtime
+    from tests._dbcrypt_windows_fakes import protected_windows_environment
+
+    root = native_root[0]
+    independent = Authority.acquire(root / "profiles/work")
+    native = protected_windows_environment(monkeypatch)
+    first = opener()(root / "state.db", authority=authority)
+    second = opener()(root / "profiles/work/held.db", authority=independent)
+    try:
+        first.execute("CREATE TABLE records(value)")
+        first.execute("INSERT INTO records VALUES (4)")
+        first.commit()
+        second.execute("CREATE TABLE records(value)")
+        second.execute("INSERT INTO records VALUES (9)")
+        second.commit()
+        cursor = second.execute("SELECT value FROM records")
+        assert monitor_runtime(authority) == ()
+        bad = root / "wrong-key.db"
+        bad.write_bytes(b"not an encrypted database")
+        bad.chmod(0o600)
+        with pytest.raises(DatabaseRefused):
+            opener()(bad, authority=authority)
+        bad.unlink()
+        assert len(native.roots) == 1
+        output = root.parent / "separate-backups"
+        output.mkdir(mode=0o700)
+        backup = backup_database(root / "state.db", output / "held.backup", authority=authority)
+        assert backup.exists() and len(native.roots) == 1
+        authority.close()
+        assert first._closed and len(native.roots) == 1
+        assert cursor.fetchall() == [(9,)]
+        assert second.execute("SELECT value FROM records").fetchall() == [(9,)]
+        second.close()
+        assert native.roots == {}
+        with pytest.raises(DatabaseRefused):
+            cursor.fetchone()
+    finally:
+        first.close()
+        second.close()
+        independent.close()
 
 
 @pytest.mark.parametrize("check_same_thread", [True, False])

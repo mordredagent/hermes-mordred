@@ -68,6 +68,7 @@ def test_real_native_backup_restore_closes_sh_before_ex_and_fresh_reopen() -> No
     before = _run("read", root, "before-restore")
     restored = _run("backup_restore", root, "backup-restore")
     assert restored["component_generation_before"] != restored["component_generation_after"]
+    assert restored["guarded_runtime_monitor_backup"] is True
     after = _run("read", root, "after-restore")
     assert before["logical"] == after["logical"] and before["fixture"] == after["fixture"]
 
@@ -86,6 +87,7 @@ def test_real_native_negative_lifetimes_roles_and_keyless_reads_use_sacrificial_
     assert {
         "held_terminality",
         "role_forget",
+        "mail_retired_sql_failure_named_retry",
         "wrong_key",
         "multiprocess_reader_writers",
         "fresh_unpatched_native_provider_unavailable",

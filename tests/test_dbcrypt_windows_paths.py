@@ -96,3 +96,127 @@ def test_non_cipher_driver_refuses_before_loading_native(monkeypatch: pytest.Mon
     monkeypatch.setattr(module, "_load_native", unexpected)
     with pytest.raises(RuntimeError, match="SQLCipher"):
         module.register_checked_vfs(sqlite3, root=Path(r"C:\private"))
+
+
+def test_same_root_leases_survive_independent_close_and_busy_last_release(monkeypatch):
+    from pathlib import PureWindowsPath
+
+    from tests._dbcrypt_windows_fakes import registration_environment
+
+    module, driver, _api, native = registration_environment(monkeypatch)
+    first = module.register_checked_vfs(driver, root=PureWindowsPath(r"C:\private"))
+    second = None
+    try:
+        second = module.register_checked_vfs(driver, root=PureWindowsPath(r"c:\PRIVATE"))
+        assert first is not second and first._token == second._token
+        first.close()
+        first.close()
+        assert len(native.roots) == 1
+        native.busy.add(second._token)
+        with pytest.raises(RuntimeError, match="busy"):
+            second.close()
+        assert len(native.roots) == 1
+        native.busy.clear()
+        second.close()
+        assert native.roots == {}
+    finally:
+        native.busy.clear()
+        if second is not None:
+            second.close()
+        first.close()
+
+
+def test_concurrent_root_leases_share_one_registration(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from pathlib import PureWindowsPath
+
+    from tests._dbcrypt_windows_fakes import registration_environment
+
+    module, driver, _api, native = registration_environment(monkeypatch)
+    with ThreadPoolExecutor(max_workers=4) as workers:
+        leases = list(
+            workers.map(lambda _: module.register_checked_vfs(driver, root=PureWindowsPath(r"C:\private")), range(8))
+        )
+        assert len(native.roots) == 1
+        list(workers.map(lambda lease: lease.close(), leases))
+    assert native.roots == {}
+
+
+@pytest.mark.parametrize("change", ["identity", "driver", "library", "owner", "overlap"])
+def test_shared_registration_never_reuses_an_incompatible_root(monkeypatch, change):
+    from pathlib import PureWindowsPath
+
+    from mordred_hermes._private_fs import FileIdentity
+    from tests._dbcrypt_windows_fakes import NativeRegistry, registration_environment
+
+    module, driver, api, native = registration_environment(monkeypatch)
+    root = PureWindowsPath(r"C:\private")
+    first = module.register_checked_vfs(driver, root=root)
+    try:
+        if change == "identity":
+            api.change(str(root), identity=FileIdentity(11, b"changed-identity!"))
+        elif change == "driver":
+            other = ModuleType("other_driver")
+            other.connect = driver.connect
+            driver = other
+        elif change == "library":
+            other_native = NativeRegistry()
+            other_native._name = "other DLL"
+            monkeypatch.setattr(module, "_load_native", lambda: other_native)
+        elif change == "owner":
+            api.user = b"other-user"
+        else:
+            root /= "nested"
+            api.add(str(root), True)
+        with pytest.raises((RuntimeError, OSError)):
+            module.register_checked_vfs(driver, root=root)
+        assert len(native.roots) == 1
+    finally:
+        first.close()
+
+
+@pytest.mark.parametrize("directory", [False, True])
+def test_windows_identity_uses_private_dacl_instead_of_synthesized_write_bits(monkeypatch, directory):
+    import os
+    import stat
+    from pathlib import PureWindowsPath
+    from types import SimpleNamespace
+
+    from mordred_hermes.dbcrypt import _connection
+    from tests._dbcrypt_windows_fakes import registration_environment
+
+    _module, _driver, _api, _native = registration_environment(monkeypatch)
+    monkeypatch.setattr(_connection, "os", SimpleNamespace(name="nt", getpid=os.getpid))
+    kind = stat.S_IFDIR if directory else stat.S_IFREG
+
+    class WindowsPath(PureWindowsPath):
+        def lstat(self):
+            return SimpleNamespace(st_mode=kind | 0o666, st_nlink=1, st_ino=4, st_dev=11, st_uid=0)
+
+    path = WindowsPath(r"C:\private" if directory else r"C:\private\state.db")
+    identity = _connection._identity(path, directory=directory)
+    assert identity[:2] == (11, int.from_bytes(bytes([2 if directory else 3]) * 16))
+
+
+@pytest.mark.parametrize("change", ["owner", "dacl", "reparse", "hardlink"])
+def test_windows_identity_still_refuses_unsafe_native_metadata(monkeypatch, change):
+    import os
+    from pathlib import PureWindowsPath
+    from types import SimpleNamespace
+
+    from mordred_hermes._database_contracts import DatabaseRefused
+    from mordred_hermes._private_fs._windows_security import Ace
+    from mordred_hermes.dbcrypt import _connection
+    from tests._dbcrypt_windows_fakes import registration_environment
+
+    _module, _driver, api, _native = registration_environment(monkeypatch)
+    monkeypatch.setattr(_connection, "os", SimpleNamespace(name="nt", getpid=os.getpid))
+    path = r"C:\private\state.db"
+    if change == "owner":
+        api.user = b"foreign"
+    elif change == "dacl":
+        api.descriptors[path.casefold()].aces.append(Ace(0, 0, 1, b"everyone"))
+    else:
+        api.change(path, **({"reparse": True} if change == "reparse" else {"links": 2}))
+    with pytest.raises(DatabaseRefused):
+        _connection._identity(PureWindowsPath(path), directory=False)

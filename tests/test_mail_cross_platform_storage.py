@@ -741,6 +741,62 @@ def test_absent_native_key_does_not_hide_orphan_metadata(tmp_path):
     assert store.residue()
 
 
+@pytest.mark.parametrize("platform", ["posix", "windows"])
+@pytest.mark.parametrize("interruption", ["rows", "cursors", "gap"])
+def test_native_forget_lost_account_requires_named_retry(fs, tmp_path, monkeypatch, capsys, platform, interruption):
+    from mordred_hermes.imports.mail.forget import MailForgetError, forget
+    from mordred_hermes.wizard.mail_sync_cli import _report_forget
+
+    if platform == "windows":
+        _c, _, home, backend = fs
+        credentials = MailSecretStore(
+            home / "mordred/mail", backend_factory=lambda: backend, platform=lambda: "win32", audit_sink=lambda _e: None
+        )
+    else:
+        home = tmp_path / "posix"
+        home.mkdir(mode=0o700)
+        credentials, _native = native_store(home)
+    credentials.ensure_key(require_presence=False)
+    credentials.store(generic_creds(), require_presence=False)
+
+    class Rows:
+        def __init__(self):
+            self.messages = {"mail": 3, "other": 7}
+            self.cursors = {"mail_imap.mail.inbox": "cursor"}
+            self.broken = True
+
+        def delete_source(self, source, account):
+            assert not credentials.residue(), "SQL preceded credential retirement"
+            if self.broken and interruption == "rows":
+                raise OSError("injected SQL failure")
+            return self.messages.pop(account, 0)
+
+        def meta_items(self, prefix):
+            return {key: value for key, value in self.cursors.items() if key.startswith(prefix)}
+
+        def delete_meta(self, key):
+            if self.broken and interruption == "cursors":
+                raise OSError("injected cursor failure")
+            self.cursors.pop(key)
+
+    rows = Rows()
+    if interruption == "gap":
+        credentials.forget()  # Process stopped after acknowledged native cleanup, before SQL.
+    else:
+        with pytest.raises(MailForgetError):
+            forget(credentials, home, rows=True, open_store=lambda _home: rows)
+    rows.broken = False
+    for _ in range(2):
+        done = forget(credentials, home, rows=True, open_store=lambda _home: rows)
+        assert done.warnings == ("account_unknown",)
+        assert _report_forget(done, True) == 1
+        assert "--yes --account LABEL" in capsys.readouterr().err
+        assert rows.cursors and rows.messages["other"] == 7
+    done = forget(credentials, home, rows=True, account="mail", open_store=lambda _home: rows)
+    assert done.warnings == () and done.account == "mail"
+    assert rows.messages == {"other": 7} and rows.cursors == {}
+
+
 def test_public_forget_resumes_acknowledged_cleanup(tmp_path, monkeypatch):
     from mordred_hermes.imports.mail.forget import forget
     from mordred_hermes.keyvault import _mail_custody

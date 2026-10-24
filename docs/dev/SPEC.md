@@ -6540,6 +6540,14 @@ feasibility gate must pass before Windows database support can be enabled.
 Telegram migration, mail credential custody and activity peer/storage consumers
 remain separate component changes; a database-only pass is not their acceptance.
 
+The qualification-gated Windows backup destination must have an existing private
+parent directory that neither contains nor is contained by the protected home
+or another live checked root. A separate sibling backup directory is supported;
+a backup file placed directly in the home's parent directory is refused before
+journaling or staging. Native overlap refusal and POSIX backup policy remain
+unchanged. Broader Windows backup layouts need a separately reviewed publication
+design.
+
 Actual AWS Linux/Windows NitroTPM validation is required by the owner; see
 [the proposed acceptance policy](CI.md#cross-platform-database-encryption-acceptance-proposed).
 Windows Server evidence is separate from Windows 11/Desktop acceptance.

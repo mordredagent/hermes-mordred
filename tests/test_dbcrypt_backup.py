@@ -12,6 +12,61 @@ from tests.test_dbcrypt_adoption import cipher
 from tests.test_dbcrypt_authority import native_root as native_root
 
 
+def test_windows_backup_ancestor_parent_refuses_before_journal_or_staging(native_root, monkeypatch):
+    from types import SimpleNamespace
+
+    from mordred_hermes.dbcrypt import _backup, _windows_vfs
+
+    root, _, key, _ = native_root
+    source = root / "state.db"
+    cipher(source, key)
+    before = source.read_bytes()
+    destination = root.parent / (root.name + "-ancestor.backup")
+    authority = Authority.acquire(root)
+    monkeypatch.setattr(_backup, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", True)
+    try:
+        with pytest.raises(DatabaseRefused, match=r"separate.*directory"):
+            _backup.backup_database(source, destination, authority=authority)
+        assert source.read_bytes() == before
+        assert not destination.exists()
+        assert not list(destination.parent.glob(destination.name + ".mordred-backup-*"))
+        assert not (root / "mordred/db-backups.journal.json").exists()
+        assert not (root / "mordred/backup-registry").exists()
+    finally:
+        authority.close()
+
+
+def test_windows_backup_live_root_overlap_refuses_before_journal(native_root, monkeypatch):
+    import sqlcipher3.dbapi2 as sc
+
+    from mordred_hermes.dbcrypt import _backup, _windows_vfs
+    from tests._dbcrypt_windows_fakes import protected_windows_environment
+
+    root, _, key, _ = native_root
+    source = root / "state.db"
+    cipher(source, key)
+    before = source.read_bytes()
+    parent = root.parent / "other-backups"
+    other = parent / "other-live-root"
+    parent.mkdir(mode=0o700)
+    other.mkdir(mode=0o700)
+    native = protected_windows_environment(monkeypatch)
+    registration = _windows_vfs.register_checked_vfs(sc, root=other)
+    authority = Authority.acquire(root)
+    try:
+        with pytest.raises(DatabaseRefused, match=r"separate.*directory"):
+            _backup.backup_database(source, parent / "refused.backup", authority=authority)
+        assert source.read_bytes() == before
+        assert list(parent.iterdir()) == [other]
+        assert not (root / "mordred/db-backups.journal.json").exists()
+        assert not (root / "mordred/backup-registry").exists()
+        assert len(native.roots) == 1
+    finally:
+        authority.close()
+        registration.close()
+
+
 def test_backup_roundtrip_and_dependency(native_root, monkeypatch):
     from mordred_hermes.dbcrypt import _backup, _migrate
 

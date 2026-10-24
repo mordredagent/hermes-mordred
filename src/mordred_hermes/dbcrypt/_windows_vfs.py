@@ -22,6 +22,29 @@ NATIVE_QUALIFIED: Final = False
 _NAME: Final = "mordred_checked_v1"
 _LOCK = threading.RLock()
 _LIBRARIES: dict[str, Any] = {}
+_ROOTS: dict[str, _RootRegistration] = {}
+
+
+def checked_path_identity(path: Path, *, directory: bool) -> tuple[int, int, int, int]:
+    """Read native identity/security metadata, never DB bytes or POSIX modes."""
+    from .._database_contracts import DatabaseRefused
+    from .._private_fs import PrivateFSError
+    from .._private_fs._windows_io import open_private_directory
+    from .._private_fs._windows_security import current_user_sid
+
+    try:
+        with open_private_directory(path if directory else path.parent) as parent:
+            identity = parent.directory_identity() if directory else parent.stat(path.name).identity
+            return (
+                identity.volume,
+                int.from_bytes(identity.file_id),
+                stat.S_IFDIR if directory else stat.S_IFREG,
+                int.from_bytes(current_user_sid()),
+            )
+    except PrivateFSError as error:
+        if error.reason == "missing":
+            raise FileNotFoundError(os.fspath(path)) from None
+        raise DatabaseRefused("Windows database path identity/security refused") from None
 
 
 def _path_parts(raw: str) -> tuple[str, ...]:
@@ -119,6 +142,13 @@ def _load_native() -> Any:
     return _LIBRARIES[path]
 
 
+class _RootRegistration:
+    def __init__(self, native: Any, token: int, root: Path, driver: ModuleType, identity: tuple[int, ...] = ()) -> None:
+        self.native, self.token, self.root, self.driver = native, token, root, driver
+        self.identity = identity
+        self.references = 0
+
+
 class VfsRegistration:
     """A root lease. Close refuses while database/sidecar handles remain live.
 
@@ -128,18 +158,28 @@ class VfsRegistration:
 
     name: Final = _NAME
 
-    def __init__(self, native: Any, token: int, root: Path, driver: ModuleType) -> None:
+    def __init__(
+        self, native: Any, token: int, root: Path, driver: ModuleType, *, _owner: _RootRegistration | None = None
+    ) -> None:
         self._native = native
         self._token = token
         self.root = root
         self._driver = driver  # Pin the exact loading driver for the lease.
+        self._owner = _owner or _RootRegistration(native, token, root, driver)
+        self._owner.references += 1
 
     def close(self) -> None:
         with _LOCK:
             if not self._token:
                 return
-            if self._native.mordred_vfs_close_root(self._token) != 0:
-                raise RuntimeError("checked VFS root is busy or could not be released")
+            owner = self._owner
+            if owner.references == 1:
+                if self._native.mordred_vfs_close_root(self._token) != 0:
+                    raise RuntimeError("checked VFS root is busy or could not be released")
+                name = os.fspath(owner.root).replace("/", "\\").casefold()
+                if _ROOTS.get(name) is owner:
+                    del _ROOTS[name]
+            owner.references -= 1
             self._token = 0
 
 
@@ -166,7 +206,25 @@ def register_checked_vfs(driver: ModuleType, *, root: Path) -> VfsRegistration:
                 connection.enable_load_extension(False)
         finally:
             connection.close()
+        name = os.fspath(root).replace("/", "\\").casefold()
+        identity = checked_path_identity(root, directory=True)
+        owner = _ROOTS.get(name)
+        if owner is not None:
+            if owner.native is not native or owner.driver is not driver or owner.identity != identity:
+                raise RuntimeError("checked VFS root or driver binding changed")
+            return VfsRegistration(native, owner.token, root, driver, _owner=owner)
         token = ctypes.c_uint64()
         if native.mordred_vfs_register_root(os.fspath(root), ctypes.byref(token)) != 0:
             raise RuntimeError("checked VFS root admission refused")
-        return VfsRegistration(native, token.value, root, driver)
+        owner = _RootRegistration(native, token.value, root, driver, identity)
+        lease = VfsRegistration(native, token.value, root, driver, _owner=owner)
+        # Native pins now prevent namespace replacement. Bind the admitted root
+        # to the same pre-registration observation before publishing a share.
+        try:
+            if checked_path_identity(root, directory=True) != identity:
+                raise RuntimeError("checked VFS root changed during registration")
+        except BaseException:
+            lease.close()
+            raise
+        _ROOTS[name] = owner
+        return lease

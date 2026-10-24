@@ -49,7 +49,7 @@ class Forgotten:
     cursors_deleted: int
     cursors_left: str | None  # the store code that left the cursors behind
     had_credentials: bool
-    unidentified: bool  # credentials were present but their label could not be read
+    unidentified: bool  # the requested row/cursor erasure target could not be identified
     key_gone: bool
 
     @property
@@ -192,7 +192,10 @@ def _native_forget(
         deleted, cursors = 0, 0
         if store is not None and label is not None:
             deleted, cursors, left = _delete_store_rows(store, label, rows)
-        return Forgotten(label, deleted, cursors, left, credentials is not None or pending, pending, key_gone)
+        # Retirement may already have removed its journal/account before SQL
+        # failed or the process stopped. Absence cannot prove requested erasure;
+        # require an explicit named retry when no authenticated target survives.
+        return Forgotten(label, deleted, cursors, left, credentials is not None or pending, label is None, key_gone)
 
 
 def forget(

@@ -210,6 +210,7 @@ def complete_phase(
             "component_generation_before": "old",
             "component_generation_after": "new",
             "backup_retained": True,
+            "guarded_runtime_monitor_backup": True,
         },
         "restore-finalization-failure": {
             **payload("backup_restore_failure", persistence=False),
@@ -227,6 +228,7 @@ def complete_phase(
                 "metadata_loss",
                 "wrong_key",
                 "role_forget",
+                "mail_retired_sql_failure_named_retry",
                 "broker_helper_guards",
                 "fresh_unpatched_native_provider_unavailable",
                 "multiprocess_reader_writers",

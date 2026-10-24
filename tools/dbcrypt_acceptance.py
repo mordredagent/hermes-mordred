@@ -1912,6 +1912,10 @@ def _qualification_inputs(directory: Path, manifest: dict[str, Any]) -> set[Path
             paths.add(result_path)
             paths.update(_artifact_ref(result_path.parent, value[action]["report"]) for action in ("collect", "run"))
             paths.update(_artifact_ref(result_path.parent, ref) for ref in value["artifacts"].values())
+            nested = _artifact_ref(result_path.parent, value["fixtures_descriptor"])
+            _require(sha256_file(nested) == sha256_file(fixture_path))
+            _, nested_files = _fixture_descriptor(nested)
+            paths.update(nested_files)
         proof_path, proof = _evidence_ref(directory, manifest["wheel_bundle"])
         paths.add(proof_path)
         paths.add(_artifact_ref(proof_path.parent, proof["manifest"]))
@@ -2540,6 +2544,7 @@ def _native_provision_coverage(phase: dict[str, Any], directory: Path) -> None:
         restored["operation"] == "backup_restore"
         and restored["component_generation_before"] != restored["component_generation_after"]
         and restored["backup_retained"] is True
+        and restored["guarded_runtime_monitor_backup"] is True
     )
     failure = records["restore-finalization-failure"]
     _require(
@@ -2554,6 +2559,7 @@ def _native_provision_coverage(phase: dict[str, Any], directory: Path) -> None:
         "metadata_loss",
         "wrong_key",
         "role_forget",
+        "mail_retired_sql_failure_named_retry",
         "fresh_unpatched_native_provider_unavailable",
         "multiprocess_reader_writers",
         "wrong_profile_key",
@@ -3354,6 +3360,9 @@ def _validate_packaged_result(
     )
     _require(result["mode"] == mode and result["diagnostic_manifest_sha256"] == diagnostic["manifest_sha256"])
     _require(result["fixtures_sha256"] == fixtures["manifest_sha256"])
+    nested = _artifact_ref(directory, result["fixtures_descriptor"])
+    _require(sha256_file(nested) == fixtures["manifest_sha256"])
+    _fixture_descriptor(nested)
     paths = {key: _artifact_ref(directory, ref) for key, ref in result["artifacts"].items()}
     required = windows_vfs_required_nodes(Path(__file__).resolve().parents[1], release=True)
     full = windows_vfs_required_nodes(Path(__file__).resolve().parents[1], release=False)
@@ -3627,6 +3636,10 @@ def _assemble_windows_qualification(
             *(_artifact_ref(path.parent, value[action]["report"]) for action in ("collect", "run")),
             *(_artifact_ref(path.parent, ref) for ref in value["artifacts"].values()),
         }
+        nested = _artifact_ref(path.parent, value["fixtures_descriptor"])
+        _require(sha256_file(nested) == sha256_file(original_fixtures))
+        _, nested_files = _fixture_descriptor(nested)
+        files.update(nested_files)
         _copy_referenced(path.parent, files, output / mode)
         copied = output / mode / path.name
         refs[mode] = {"path": str(copied.relative_to(output)), "sha256": sha256_file(copied)}

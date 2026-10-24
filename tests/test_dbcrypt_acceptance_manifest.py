@@ -1476,6 +1476,8 @@ def test_complete_synthetic_native_phase_has_required_offline_closure(tmp_path: 
         "wrong_bundle_commit",
         "extra_deselection",
         "missing_operation",
+        "missing_guarded_runtime",
+        "missing_mail_retry",
     ],
 )
 def test_offline_native_evidence_rejects_incomplete_or_relabeled_closure(tmp_path: Path, damage: str) -> None:
@@ -1492,6 +1494,17 @@ def test_offline_native_evidence_rejects_incomplete_or_relabeled_closure(tmp_pat
             "missing_restore_reopen": "after-restore",
         }[damage]
         native["collector_rows"] = [ref for ref in native["collector_rows"] if Path(ref["path"]).stem != name]
+    elif damage in {"missing_guarded_runtime", "missing_mail_retry"}:
+        name = "backup-restore" if damage == "missing_guarded_runtime" else "negative"
+        reference = next(ref for ref in native["collector_rows"] if Path(ref["path"]).stem == name)
+        path = spool / reference["path"]
+        value = json.loads(path.read_text())
+        if damage == "missing_guarded_runtime":
+            value["guarded_runtime_monitor_backup"] = False
+        else:
+            value["rows"].remove("mail_retired_sql_failure_named_retry")
+        path.write_text(json.dumps(value))
+        reference["sha256"] = tool.sha256_file(path)
     elif damage in {"missing_crash", "relabeled_node", "extra_deselection"}:
         report_path = spool / native["pytest_report"]["path"]
         report = json.loads(report_path.read_text())
@@ -1771,6 +1784,23 @@ def test_packaged_pipeline_assembles_real_inert_artifact_closure_with_distinct_d
     historical_plan = json.loads((root / "fixture-plan.json").read_text())["plan"]
     assert actual["fixtures"]["test_root"] != historical_plan["test_root"]
     assert actual["source"]["fixture_root"] == actual["wheel"]["fixture_root"] == actual["fixtures"]["test_root"]
+    export = tmp_path / "exported"
+    export.mkdir()
+    tool._export_windows_qualification({"qualification": str(output)}, export)
+    for retained in (output, export / "windows-qualification"):
+        for mode in ("source", "wheel"):
+            raw = retained / mode / "result.json"
+            assert raw.read_bytes() == (results[mode][0] / "result.json").read_bytes()
+            value = json.loads(raw.read_text())
+            nested = tool._artifact_ref(raw.parent, value["fixtures_descriptor"])
+            assert tool.sha256_file(nested) == tool.sha256_file(retained / "fixtures/manifest.json")
+            tool._fixture_descriptor(nested)
+    damaged = export / "windows-qualification/wheel/fixtures/manifest.json"
+    damaged.unlink()
+    with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
+        tool.validate_windows_qualification(export / "windows-qualification", checkout=checkout)
+    with pytest.raises(OSError):
+        tool._qualification_inputs(export / "windows-qualification", json.loads(path.read_text()))
     with pytest.raises(tool.AcceptanceRefused):
         tool.assemble_windows_qualification(
             bundle=bundle,

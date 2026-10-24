@@ -13,6 +13,14 @@ Linux and Windows as well as macOS. Its proposed design is
 That proposal is not implemented or accepted native validation; the macOS-only
 behavior documented below remains the current contract.
 
+The qualification-gated Windows backup route requires an existing private
+destination directory separate from the protected home: neither directory may
+contain the other. For example, use `C:\MordredBackups\activity.backup` for a
+home at `C:\HermesHome`, rather than writing the backup directly in `C:\`.
+Overlap with another live checked database root is also refused before any
+backup journal or staging file is created. The POSIX destination policy is
+unchanged; this restriction does not establish Windows native acceptance.
+
 ## Goal
 
 Hermes's databases are plaintext SQLite: the conversation store `state.db`

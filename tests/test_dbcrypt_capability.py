@@ -162,11 +162,22 @@ def test_native_prompt_does_not_revoke_registered_sql_on_changed_metadata(native
     authority.register_connection(connection)
     monkeypatch.setattr(_monitor, "monitor_runtime", lambda *a: pytest.fail("render opened SQL"))
     monkeypatch.setattr(_key.KeyProvider, "__call__", lambda *a: pytest.fail("render acquired key"))
+    monkeypatch.setattr(authority, "check", lambda: pytest.fail("render checked/revoked authority"))
     try:
-        (root / "mordred/db-encryption.marker").write_bytes(b"1\n")
-        text = _hooks.status_line()
-        assert raw_calls == [], "passive rendering revoked registered raw SQL"
-        assert "encrypted at rest" not in text
+        for changed in (False, True):
+            if changed:
+                (root / "mordred/db-encryption.marker").write_bytes(b"1\n")
+            text = _hooks.status_line()
+            assert raw_calls == [], "passive rendering revoked registered raw SQL"
+            assert "encrypted at rest" not in text
+            assert "NOT protected" not in text
+            assert "not checked" in text
+        monkeypatch.setattr(_hooks, "_observation", None)
+        assert "not checked" in _hooks.status_line()
+        monkeypatch.setattr(
+            _hooks, "_observation", (root, authority, (_monitor.Finding("wrong_key", "recorded failure"),))
+        )
+        assert "NOT protected" in _hooks.status_line()
         assert backend.calls == calls
         assert not authority.terminal
         assert not connection._closed and not connection._revoked

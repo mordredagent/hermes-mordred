@@ -986,14 +986,41 @@ def backup_restore(root: Path, *, finalization_failure: bool = False) -> dict[st
     from mordred_hermes.activity._gate import open_store
     from mordred_hermes.activity.store import restore_activity_store
     from mordred_hermes.dbcrypt import _migrate
+    from mordred_hermes.dbcrypt._authority import Authority
+    from mordred_hermes.dbcrypt._connection import open_protected
+    from mordred_hermes.dbcrypt._monitor import monitor_runtime
 
     provider = _runtime(root)
     home = root / "profiles/work"
     store = open_store(home)
     expected = store.events_for_episode("native-japanese")
     before = store.meta().store_generation
-    backup = root.parent / (root.name + ("-finalization.backup" if finalization_failure else "-registered.backup"))
-    store.backup(backup)
+    from mordred_hermes._private_fs import open_private_directory
+
+    backup_directory = root.parent / (root.name + "-backups")
+    with open_private_directory(backup_directory, create=True):
+        pass
+    backup = backup_directory / ("finalization.backup" if finalization_failure else "registered.backup")
+    independent = Authority.acquire(home)
+    try:
+        with (
+            contextlib.closing(open_protected(root / "state.db", authority=provider.authority)) as session,
+            contextlib.closing(open_protected(store.path, authority=independent)) as activity,
+        ):
+            # Exercise the actual Python consumers, not only raw C connections.
+            # Windows ordinary writable stat attributes must need no chmod.
+            if sys.platform == "win32":
+                assert root.stat().st_mode & 0o022 and store.path.stat().st_mode & 0o022
+            session.execute("SELECT count(*) FROM messages").fetchone()
+            cursor = activity.execute("SELECT count(*) FROM sqlite_master")
+            assert monitor_runtime(provider.authority) == ()
+            store.backup(backup)
+            provider.close()
+            assert cursor.fetchone()[0] > 0
+            assert activity.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] > 0
+    finally:
+        independent.close()
+        provider.close()
     provider.close()  # All connection methods have already closed their handles.
     assert _migrate.holders([store.path, backup]) == [], "actual native holder proof unavailable"
     if finalization_failure:
@@ -1031,12 +1058,15 @@ def backup_restore(root: Path, *, finalization_failure: bool = False) -> dict[st
         "component_generation_before": before,
         "component_generation_after": result.store_generation,
         "backup_retained": True,
+        "guarded_runtime_monitor_backup": True,
     }
 
 
 def _forget_roles(root: Path) -> None:
+    from unittest.mock import patch
+
     from mordred_hermes.extension.telegram.store import forget_telegram_storage, wipe_archive
-    from mordred_hermes.imports.mail.forget import forget
+    from mordred_hermes.imports.mail.forget import MailForgetError, forget
     from mordred_hermes.imports.mail.secrets import MailSecretStore
     from mordred_hermes.imports.store import open_import_store
     from mordred_hermes.keyvault._database_authority import observe_database_source
@@ -1044,10 +1074,22 @@ def _forget_roles(root: Path) -> None:
     before = observe_database_source(root=root)
     home = root / "profiles/other"
     mail = MailSecretStore(home / "mordred/mail", audit_sink=lambda _entry: None)
-    forget(mail, home, account="native_sync", rows=True)
-    assert mail.load() is None
     store = open_import_store(home)
     try:
+        # Real native retirement must precede this owned SQL failure. A later
+        # unnamed retry cannot turn absent credentials into proof of erasure.
+        with patch.object(store, "delete_source", side_effect=RuntimeError("owned post-retirement SQL fault")):
+            try:
+                forget(mail, home, rows=True, open_store=lambda _home: store)
+            except MailForgetError:
+                pass
+            else:
+                raise AssertionError("owned SQL failure was hidden")
+        assert mail.load() is None
+        unknown = forget(mail, home, rows=True, open_store=lambda _home: store)
+        assert unknown.warnings == ("account_unknown",)
+        completed = forget(mail, home, account="native_sync", rows=True, open_store=lambda _home: store)
+        assert completed.warnings == () and completed.account == "native_sync"
         assert store.search("日本語", source="telegram")
         assert store.search("日本語", source="mail")  # independent native-mbox account remains.
     finally:
@@ -1568,6 +1610,7 @@ def negative(root: Path) -> dict[str, Any]:
             "metadata_loss",
             "wrong_key",
             "role_forget",
+            "mail_retired_sql_failure_named_retry",
             "broker_helper_guards",
             *other_rows,
         ],

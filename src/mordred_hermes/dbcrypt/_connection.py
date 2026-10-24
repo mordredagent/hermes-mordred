@@ -58,6 +58,10 @@ if hasattr(os, "register_at_fork"):
 
 
 def _identity(path: Path, *, directory: bool) -> tuple[int, int, int, int]:
+    if os.name == "nt":
+        from ._windows_vfs import checked_path_identity
+
+        return checked_path_identity(path, directory=directory)
     info = path.lstat()
     kind = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
     if not kind or info.st_mode & 0o022 or (not directory and info.st_nlink != 1):
