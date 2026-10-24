@@ -1,5 +1,6 @@
 """Windows memory mutations require database-before-custody proof."""
 
+import json
 import os
 
 import pytest
@@ -428,3 +429,22 @@ def test_forked_session_cannot_issue_or_use_native_authority(fs):
             finally:
                 os.close(read_fd)
                 os.close(write_fd)
+
+
+def test_memory_create_rechecks_dependencies_after_durable_intent(fs, monkeypatch):
+    c, _, home, backend = fs
+    journal = c.WindowsCustodySession._journal
+
+    def changed(owner, pending, **kwargs):
+        journal(owner, pending, **kwargs)
+        if (pending.role, pending.operation, pending.phase) == ("memory", "create", "intent"):
+            (home / "state.db").write_bytes(b"retained after intent")
+
+    monkeypatch.setattr(c.WindowsCustodySession, "_journal", changed)
+    with pytest.raises(DatabaseRefused), c.windows_custody_session(home, create=True, backend=backend) as owner:
+        owner.enroll_memory(database_lease=backend.database_lease)
+    pending = json.loads((home / "mordred" / "windows-memory.pending.json").read_bytes())
+    assert (pending["operation"], pending["phase"]) == ("create", "intent")
+    assert not (home / "mordred" / c.WRAPPED).exists()
+    assert [call for call in backend.calls if call[0] == "generate"] == []
+    assert not backend._keys

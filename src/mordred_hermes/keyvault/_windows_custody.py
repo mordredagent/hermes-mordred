@@ -577,6 +577,9 @@ class WindowsCustodySession:
         self._fresh_memory(adopted_key)
         backend = self.backend  # Discover the executable before any native intent exists.
         manifest, pending = self._begin("memory", database_lease=database_lease)
+        # The durable intent can expose newly observed database dependencies.
+        # Refuse before creating a native key while retaining that evidence.
+        self._memory_database_guard(database_lease)
         with self.canonical.publication_receipt() as receipt:
             # The native call can publish even if its response is lost. Keep
             # subsequent ledger failures sticky through the owning coordinator.
