@@ -1,36 +1,14 @@
-"""Remove the IMAP mail setup: the account's rows (optional), its cursors, then the credentials and the key (macOS).
+"""Retire mail credentials and optionally erase the authenticated account's rows.
 
-Shared by ``hermes-mordred mail forget`` and the Desktop page (SPEC "Desktop mail and
-ceremony pages (2026-10-23)"). The order makes a failed forget retryable: rows and
-cursors go first, the sealed credentials, their flags and the Enclave key last.
+Native flows capture the protected store's owning database authority before the
+shared mail writer. The actual MMC1 payload supplies the account; flags cannot
+redirect erasure. Under the same writer, checked credential custody invalidates
+pending setup generations and retires the native source first. Database row and
+cursor deletion then occurs after credential custody exits, while the writer
+still excludes replacement setup/import/sync. No root memory key is touched.
 
-- The target is resolved before the per-home mail writer lock
-  (:func:`~.imap_sync.fetch_lock`, ``sync_in_progress`` when held) and re-checked
-  under it: if a ``mail setup`` replaced the credentials meanwhile (``setup_id``),
-  nothing is deleted (``credentials_changed``), so a concurrent setup is never undone.
-- The label whose rows and cursors are deleted is the sealed one; ``account``
-  names it once the credentials are gone (``account_mismatch`` when it names
-  another label than the sealed one; ``invalid_account`` when it is not a label).
-- ``rows=True`` first deletes the account's mail rows (``delete_source``) and stops
-  with the store's code, touching nothing, when the store refuses. Callers ask the
-  owner to confirm that deletion (``mail forget --yes``, the page's
-  ``delete my data`` phrase) BEFORE calling.
-- Under the lock, before anything is deleted, the setup generation
-  (:func:`~.secrets.new_setup_generation`) is rewritten, so a setup flow that
-  started before this forget, in any process, can no longer seal
-  (``mail_setup_stale``).
-- The sealed file, the flags and the Enclave key are deleted whatever the flags
-  say. Credentials whose flags are missing or corrupt are still deleted and
-  reported as unidentified (``account_unknown``: their rows and cursors need
-  ``account``). A sealed file that remains is ``credentials_left`` (never a
-  success); a key that could not be deleted is reported (``key_left``; a retry
-  deletes it).
-
-Pending setup flows are not reached here (they hold the address and the
-password in another object, maybe another process): the generation makes them
-stale, and the Desktop page also calls
-:meth:`~.setup_flow.MailSetupFlows.cancel_all` to drop its own. Failures are
-:class:`MailForgetError` codes; nothing here logs or returns an address.
+The explicit portable secret-store fixture seam retains its original row-first
+contract. All outward failures remain content-free MailForgetError codes.
 """
 
 from __future__ import annotations
@@ -140,6 +118,10 @@ def _forget_store(open_store: OpenStore, home: Path, account: str, rows: bool) -
         if rows:
             raise MailForgetError(_code(exc, "import_store_unavailable")) from None
         return 0, 0, _code(exc, "import_store_unavailable")
+    return _delete_store_rows(store, account, rows)
+
+
+def _delete_store_rows(store: Any, account: str, rows: bool) -> tuple[int, int, str | None]:
     deleted = 0
     try:
         if rows:
@@ -175,6 +157,44 @@ def _locked_forget(
     return Forgotten(label, deleted, cursors, left, sealed is not None, sealed == _UNIDENTIFIED, key_gone)
 
 
+def _native_forget(
+    secret_store: Any, home: Path, account: str | None, rows: bool, open_store: OpenStore, lock: WriterLock
+) -> Forgotten:
+    # Capture the actual owning store (and its lifetime root SH authority)
+    # before writer/custody locks. Never retarget a replacement global provider.
+    if secret_store._profile_home() != home:
+        raise MailForgetError("credentials_changed")
+    try:
+        store = open_store(home)
+        left = None
+    except Exception as exc:
+        if rows:
+            raise MailForgetError(_code(exc, "import_store_unavailable")) from None
+        store, left = None, _code(exc, "import_store_unavailable")
+    from ...keyvault._mail_custody import pending_mail_retirement
+
+    pending = pending_mail_retirement(home)
+    snapshot = (None, None) if pending else secret_store.load_snapshot()
+    credentials = snapshot[0]
+    label = account if credentials is None else credentials.account
+    if account is not None and credentials is not None and account != credentials.account:
+        raise MailForgetError("account_mismatch")
+    from .imap_sync import mail_writer_scope
+
+    with lock(home), mail_writer_scope(home):
+        # This validates the actual MMC1 source, advances generation under its
+        # checked custody, and retires native first. Metadata cannot pick rows.
+        key_gone = secret_store.forget_from_snapshot(snapshot)
+        if secret_store.residue():
+            raise MailForgetError("credentials_left")
+        # Credential custody has exited; every SQL operation reuses the store's
+        # captured authority while this same mail writer remains held.
+        deleted, cursors = 0, 0
+        if store is not None and label is not None:
+            deleted, cursors, left = _delete_store_rows(store, label, rows)
+        return Forgotten(label, deleted, cursors, left, credentials is not None or pending, pending, key_gone)
+
+
 def forget(
     secret_store: Any,
     home: Path,
@@ -188,6 +208,10 @@ def forget(
     if account is not None and (not isinstance(account, str) or not ACCOUNT_RE.fullmatch(account)):
         raise MailForgetError("invalid_account")
     try:
+        from .secrets import MailSecretStore
+
+        if type(secret_store) is MailSecretStore and (secret_store._platform() == "win32" or secret_store._native()):
+            return _native_forget(secret_store, home, account, rows, open_store, lock)
         resolved = _identity(secret_store)  # the target, decided before waiting for the lock
         _target(account, resolved)
         with lock(home):

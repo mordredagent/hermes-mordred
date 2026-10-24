@@ -1,58 +1,18 @@
-"""Hardware-sealed IMAP credentials for the mail collector (macOS only).
+"""Native, independent IMAP credentials with the existing MMC1/AES-GCM format.
 
-The address, the app password, the IMAP host and port, the own addresses and
-the mailboxes chosen at ``mail setup`` live in ONE file,
-``<home>/mordred/mail/credentials.sealed``::
+The mail role uses ``mail_backend(home=...)`` on POSIX and genuine Windows
+custody sessions with explicit v2 enrollment. Native credentials use checked
+private filesystem handles, stable mail writer/custody locks, and fresh unwrap
+on each load. Public metadata never authenticates deletion or chooses an account
+for row erasure. Authenticated retirement journals intent, deletes the native
+key first, records acknowledgement, and only then removes the sealed source.
+Ambiguous deletion retains evidence; acknowledged POSIX cleanup can resume.
 
-    MMC1 || u16 len || wrap_blob || nonce(12) || AES-256-GCM(json)
-
-``wrap_blob`` is the keyvault ECIES wrap (:func:`mordred_hermes.keyvault.wrap.wrap_dek`)
-of a fresh data key under the Secure Enclave key with the logical role
-:data:`KEY_ID`; opening the file is an ECDH inside the Enclave, through the same
-hardware-only backend the Telegram credentials use
-(:func:`mordred_hermes.extension.telegram.tee.hardware_backend`: the signed
-helper, no software key, no legacy fallback). Nothing decrypted is cached:
-every :meth:`MailSecretStore.load` is a fresh unwrap (Touch ID unless the key
-was created with ``--no-touch-id``). Python cannot zero immutable strings; the
-caller keeps the unsealed value in one scope for one fetch and drops it.
-
-``credentials.meta.json`` next to it holds non-secret flags (account label,
-Gmail path, mailbox roles, presence, and a random ``setup_id`` naming this
-setup) so status and the Hermes tool's availability check never touch the
-Enclave and never see the address; ``mail forget`` uses ``setup_id`` to tell
-the credentials it resolved from ones a concurrent ``mail setup`` installed.
-:meth:`MailSecretStore.store` writes both files under staging names first and
-renames them in order (sealed file, then flags); a failure removes whatever it
-wrote. A sealed file without readable flags (a crash between the two renames,
-or a damaged flags file) is a distinct state: :meth:`MailSecretStore.flags`
-raises ``credentials_left`` instead of reporting "not configured".
-:meth:`MailSecretStore.forget` deletes the sealed file, the flags and the
-Enclave key whatever the flags say, and :meth:`MailSecretStore.residue` sees
-any sealed or flags file in any form.
-
-An existing Enclave key keeps the Touch ID policy it was created with, which
-the Enclave cannot report. When this store creates the key it records the
-policy next to the credentials (``enclave-key.json``: the public key's SHA-256
-and the policy, nothing secret), and :meth:`MailSecretStore.ensure_key`
-returns the EFFECTIVE policy: the requested one for a key it created, the
-recorded one for an existing key the record names, ``None`` when unknown. With
-``replace=True`` (``mail setup``, under the writer lock, with no credentials
-sealed: a key left by a failed setup) it deletes an existing key first
-(``touch_id_policy_mismatch`` when that is impossible). The flags record the
-effective policy.
-
-``<home>/mordred/mail/generation`` (0600, a random token, nothing secret) names
-the setup generation: every seal and every ``mail forget`` rewrites it under the
-writer lock and it survives forget, so a setup flow can tell that the mailbox
-was set up or removed while it waited (:func:`setup_generation`,
-:func:`new_setup_generation`).
-
-The sealed payload is validated on every load: port 993 only (implicit TLS),
-a DNS host name, mailbox names that are printable ASCII without control
-characters (they are sent as quoted strings), at least one own address.
-
-Other platforms refuse with ``unsupported_platform`` before any filesystem use
-(``mordred.db`` is macOS-only, and Windows custody roles are frozen by C5a).
+``generation`` survives retirement and invalidates pending setup flows. Existing
+native key policy is preserved; an orphan key is retained for checked repair,
+never deleted without a source proof. Explicit portable backend injection keeps
+the historical fixture seam, without issuing any production native authority.
+No root database key, memory source, credential cache, or plaintext spool is used.
 """
 
 from __future__ import annotations
@@ -69,7 +29,10 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
+
+if TYPE_CHECKING:
+    from ...keyvault._mail_custody import WindowsMailStore
 
 __all__ = [
     "ACCOUNT_RE",
@@ -259,13 +222,9 @@ def _unpack(sealed: bytes) -> tuple[bytes, bytes, bytes]:
 
 
 def _hardware_backend(home: Path | None) -> Any:
-    from ...extension.telegram.secrets import TelegramSecretsError
-    from ...extension.telegram.tee import hardware_backend
+    from ...keyvault._mail_key import mail_backend
 
-    try:
-        return hardware_backend(home)
-    except TelegramSecretsError:
-        raise MailSecretsError("tee_unavailable") from None
+    return mail_backend(home=_home() if home is None else home)
 
 
 def _audit_sink(entry: dict[str, Any]) -> None:
@@ -275,7 +234,7 @@ def _audit_sink(entry: dict[str, Any]) -> None:
 
 
 class MailSecretStore:
-    """Seal, unseal and forget the mail credentials (macOS Secure Enclave custody)."""
+    """Seal, unseal and retire independent native mail credentials."""
 
     def __init__(
         self,
@@ -286,13 +245,109 @@ class MailSecretStore:
         platform: Callable[[], str] | None = None,
     ) -> None:
         self._root = root
-        self._backend_factory = backend_factory or (lambda: _hardware_backend(None))
+        self._backend_factory = backend_factory or (lambda: _hardware_backend(self._profile_home()))
+        self._native_backend: Any = None
+        self._injected = backend_factory is not None
+        self._windows_store: WindowsMailStore | None = None
         self._audit_sink = audit_sink
         self._platform = platform or (lambda: _platform())
 
     def _check_platform(self) -> None:
-        if self._platform() != "darwin":
+        if self._platform() not in {"darwin", "linux", "win32"}:
             raise MailSecretsError("unsupported_platform")
+
+    def _profile_home(self) -> Path:
+        from ...keyvault._mail_custody import checked_home
+
+        return checked_home(self._root if self._root is not None else mail_dir())
+
+    def _backend(self) -> Any:
+        from ...keyvault._mail_key import _MailBackend
+
+        if self._native_backend is None:
+            selected = self._backend_factory()
+            self._native_backend = selected._backend if type(selected) is _MailBackend else selected
+        return self._native_backend
+
+    def _native(self) -> bool:
+        from ...keyvault._seckey_backend import _SecKeyBackend
+
+        return not self._injected or type(self._backend()) is _SecKeyBackend
+
+    def _windows(self) -> WindowsMailStore:
+        from ...keyvault._mail_custody import WindowsMailStore
+
+        home = self._profile_home()
+        if self._windows_store is None or self._windows_store.home != home:
+            self._windows_store = WindowsMailStore(
+                home, backend=self._backend() if self._injected else None, audit_sink=self._audit_sink
+            )
+        return self._windows_store
+
+    def load_snapshot(self) -> tuple[MailCredentials | None, Any]:
+        self._check_platform()
+        if self._platform() == "win32":
+            return self._windows().load_snapshot()
+        if not self._native():
+            sealed = self._read_sealed()
+            return (None if sealed is None else decode(self._unseal(sealed))), None
+        from ..._private_fs import PrivateFSError, open_private_directory
+        from ...keyvault._mail_custody import JOURNAL, SEALED, authenticate_mail_source, read
+
+        home = self._profile_home()
+        try:
+            with open_private_directory(home / "mordred/mail") as directory:
+                if read(directory, JOURNAL) is not None:
+                    from ..._database_contracts import DatabaseRefused
+
+                    raise DatabaseRefused("mail retirement pending; evidence retained")
+                if read(directory, SEALED) is None:
+                    return None, None
+        except PrivateFSError as exc:
+            if exc.reason == "missing":
+                return None, None
+            raise
+        entries: list[dict[str, Any]] = []
+        try:
+            return authenticate_mail_source(home=home, backend=self._backend(), entries=entries)
+        finally:
+            for entry in entries:
+                self._audit_sink(entry)
+
+    def forget_from_snapshot(self, snapshot: tuple[MailCredentials | None, Any]) -> bool:
+        from ...keyvault._mail_custody import check_snapshot_home
+        from .imap_sync import mail_writer_scope
+
+        home = self._profile_home()
+        check_snapshot_home(snapshot[1], home)
+        with mail_writer_scope(home):
+            return self._forget_from_snapshot(snapshot)
+
+    def _forget_from_snapshot(self, snapshot: tuple[MailCredentials | None, Any]) -> bool:
+        if self._platform() == "win32":
+            return bool(self._windows().forget_from_snapshot(snapshot))
+        from ..._database_contracts import DatabaseRefused
+        from ...keyvault._mail_custody import JOURNAL, META, SEALED, mail_credential_transaction, read
+
+        with mail_credential_transaction(
+            home=self._profile_home(), backend=self._backend(), authenticated=snapshot[1], resume=True
+        ) as custody:
+            if read(custody.transaction, JOURNAL) is not None:
+                custody.cleanup()
+            elif read(custody.transaction, SEALED) is not None:
+                custody.retire()
+            else:
+                if read(custody.transaction, META) is not None:
+                    raise DatabaseRefused("mail metadata without a source requires reconciliation")
+                # Absence of a source is never proof authorizing orphan-key deletion.
+                from ...keyvault._exceptions import WrapKeyNotFound
+
+                try:
+                    self._backend().get_enclave_public_key(KEY_ID)
+                except WrapKeyNotFound:
+                    return True
+                raise DatabaseRefused("mail native key has no authenticated source; retained for repair")
+        return True
 
     def _dir(self, *, create: bool) -> Path:
         self._check_platform()
@@ -313,7 +368,23 @@ class MailSecretStore:
     def key_record_path(self) -> Path:
         return self._dir(create=False) / _KEY_RECORD_NAME
 
+    def _prepare_setup(self, *, require_presence: bool) -> None:
+        if self._platform() == "win32":
+            if require_presence:
+                raise MailSecretsError("presence_unsupported")
+            self._windows().prepare_setup()
+
     def ensure_key(self, *, require_presence: bool = True, replace: bool = False) -> bool | None:
+        self._check_platform()
+        self._prepare_setup(require_presence=require_presence)
+        if self._platform() == "win32" or self._native():
+            from .imap_sync import mail_writer_scope
+
+            with mail_writer_scope(self._profile_home()):
+                return self._ensure_key(require_presence=require_presence, replace=replace)
+        return self._ensure_key(require_presence=require_presence, replace=replace)
+
+    def _ensure_key(self, *, require_presence: bool = True, replace: bool = False) -> bool | None:
         """Make sure the Enclave key exists; return its EFFECTIVE Touch ID policy, ``None`` when unknown.
 
         A key created here has the requested policy, recorded and returned. An
@@ -327,6 +398,10 @@ class MailSecretStore:
         from ...keyvault._exceptions import WrapError, WrapKeyNotFound
 
         self._check_platform()
+        if self._platform() == "win32":
+            return self._windows().ensure_key(require_presence=require_presence, replace=replace)
+        if self._native():
+            return self._ensure_posix_key(require_presence=require_presence, replace=replace)
         backend = self._backend_factory()
         try:
             public: bytes | None = wrap.get_wrapping_key_public(KEY_ID, backend=backend)
@@ -338,7 +413,7 @@ class MailSecretStore:
             return self._recorded_policy(public)
         if public is not None:
             try:
-                wrap.delete_wrapping_key(KEY_ID, backend=backend)
+                backend.delete_enclave_key(KEY_ID)
             except Exception:  # never stringified: a Keychain refusal is only a code
                 raise MailSecretsError("touch_id_policy_mismatch") from None
         try:
@@ -350,9 +425,30 @@ class MailSecretStore:
         except (OSError, MailSecretsError):
             # A key whose policy is not recorded would read as "unknown" forever: never leave one behind.
             with contextlib.suppress(Exception):
-                wrap.delete_wrapping_key(KEY_ID, backend=backend)
+                backend.delete_enclave_key(KEY_ID)
             raise MailSecretsError("store_path_unsafe") from None
         return require_presence
+
+    def _ensure_posix_key(self, *, require_presence: bool, replace: bool) -> bool | None:
+        from ..._database_contracts import DatabaseRefused
+        from ...keyvault import wrap
+        from ...keyvault._exceptions import WrapKeyNotFound
+        from ...keyvault._mail_custody import SEALED, mail_credential_transaction, publish, read
+
+        with mail_credential_transaction(home=self._profile_home(), backend=self._backend(), create=True) as custody:
+            try:
+                public = wrap.get_wrapping_key_public(KEY_ID, backend=self._backend())
+            except WrapKeyNotFound:
+                if read(custody.transaction, SEALED) is not None:
+                    raise DatabaseRefused("mail source lacks its native key; retained for repair") from None
+                public = wrap.generate_wrapping_key(KEY_ID, backend=self._backend(), unattended=not require_presence)
+                record = {"public_sha256": hashlib.sha256(public).hexdigest(), "touch_id": require_presence}
+                publish(custody.transaction, _KEY_RECORD_NAME, json.dumps(record).encode())
+                return require_presence
+            policy = self._recorded_policy(public)
+            if replace and policy != require_presence:
+                raise MailSecretsError("touch_id_policy_mismatch")
+            return policy
 
     def _record_policy(self, public: bytes, require_presence: bool) -> None:
         from ...keyvault._storage import atomic_write
@@ -361,12 +457,24 @@ class MailSecretStore:
         atomic_write(self._dir(create=True) / _KEY_RECORD_NAME, json.dumps(record, sort_keys=True).encode("utf-8"))
 
     def _recorded_policy(self, public: bytes) -> bool | None:
-        try:
-            value = json.loads(self.key_record_path.read_text("utf-8"))
-        except (OSError, ValueError):
-            return None
+        if self._native():
+            from ..._private_fs import open_private_directory
+            from ...keyvault._mail_custody import read
+
+            with open_private_directory(self.key_record_path.parent) as directory:
+                item = read(directory, _KEY_RECORD_NAME)
+            raw = None if item is None else item[0]
+            try:
+                value = None if raw is None else json.loads(raw)
+            except ValueError:
+                return None
+        else:
+            try:
+                value = json.loads(self.key_record_path.read_text("utf-8"))
+            except (OSError, ValueError):
+                return None
         if not isinstance(value, dict) or value.get("public_sha256") != hashlib.sha256(public).hexdigest():
-            return None  # no record, or the record of another key
+            return None
         policy = value.get("touch_id")
         return policy if isinstance(policy, bool) else None
 
@@ -378,7 +486,7 @@ class MailSecretStore:
 
         dek = _secrets.token_bytes(32)
         try:
-            blob = wrap.wrap_dek(dek, KEY_ID, backend=self._backend_factory())  # public key only: no prompt
+            blob = wrap.wrap_dek(dek, KEY_ID, backend=self._backend())  # public key only: no prompt
         except WrapError:
             raise MailSecretsError("tee_unavailable") from None
         return _pack(blob, dek, plaintext)
@@ -392,7 +500,7 @@ class MailSecretStore:
 
         blob, nonce, body = _unpack(sealed)
         try:
-            dek = wrap.unwrap_dek(blob, KEY_ID, audit_sink=self._audit_sink, backend=self._backend_factory())
+            dek = wrap.unwrap_dek(blob, KEY_ID, audit_sink=self._audit_sink, backend=self._backend())
         except WrapAuthCancelled:
             raise MailSecretsError("tee_auth_cancelled") from None
         except WrapError:
@@ -414,10 +522,19 @@ class MailSecretStore:
 
     def load(self) -> MailCredentials | None:
         """Unseal through the Enclave (a fresh unwrap every call); ``None`` when not configured."""
-        sealed = self._read_sealed()
-        return None if sealed is None else decode(self._unseal(sealed))
+        return self.load_snapshot()[0]
 
     def store(self, value: MailCredentials, *, require_presence: bool = True) -> None:
+        self._check_platform()
+        if self._platform() == "win32" or self._native():
+            from .imap_sync import mail_writer_scope
+
+            with mail_writer_scope(self._profile_home()):
+                self._store(value, require_presence=require_presence)
+        else:
+            self._store(value, require_presence=require_presence)
+
+    def _store(self, value: MailCredentials, *, require_presence: bool = True) -> None:
         """Seal ``value`` (replacing any earlier credentials) and write the non-secret flags.
 
         ``require_presence`` is recorded as the flags' ``touch_id``: pass the
@@ -427,6 +544,29 @@ class MailSecretStore:
         """
         from ...keyvault._storage import atomic_write
 
+        self._check_platform()
+        if self._platform() == "win32":
+            self._windows().store(value, require_presence=require_presence)
+            return
+        if self._native():
+            from ...keyvault._mail_custody import mail_credential_transaction, publish
+
+            flags = {
+                "version": _SCHEMA_VERSION,
+                "account": value.account,
+                "gmail": value.gmail,
+                "roles": list(value.roles),
+                "touch_id": require_presence,
+                "setup_id": _secrets.token_hex(16),
+            }
+            with mail_credential_transaction(
+                home=self._profile_home(), backend=self._backend(), create=True
+            ) as custody:
+                sealed = self._seal(encode(value))
+                flags["sealed_sha256"] = hashlib.sha256(sealed).hexdigest()
+                publish(custody.transaction, _SEALED_NAME, sealed)
+                publish(custody.transaction, _META_NAME, json.dumps(flags, sort_keys=True).encode())
+            return
         folder = self._dir(create=True)
         sealed = self._seal(encode(value))  # the Enclave wrap first: an Enclave failure writes nothing
         flags = {
@@ -461,6 +601,9 @@ class MailSecretStore:
         ``MailSecretsError("credentials_left")``: it is neither configured nor
         absent (``mail forget`` removes it).
         """
+        root = self._root if self._root is not None else mail_dir()
+        if not self._injected or root.parent.name == "mordred":
+            return self._checked_flags(root)
         try:
             sealed, meta = self.sealed_path, self.meta_path
         except MailSecretsError:
@@ -475,6 +618,36 @@ class MailSecretStore:
         if value is None:
             raise MailSecretsError("credentials_left")
         return value
+
+    def _checked_flags(self, root: Path) -> dict[str, Any] | None:
+        from ..._private_fs import PrivateFSError, open_private_directory
+        from ...keyvault._mail_custody import JOURNAL, read
+
+        try:
+            with open_private_directory(root) as directory:
+                if read(directory, JOURNAL) is not None:
+                    raise MailSecretsError("credentials_left")
+                sealed_item = read(directory, _SEALED_NAME)
+                meta_item = read(directory, _META_NAME)
+                if sealed_item is None:
+                    return None
+                value = None if meta_item is None else json.loads(meta_item[0])
+                if (
+                    not isinstance(value, dict)
+                    or not isinstance(value.get("account"), str)
+                    or not ACCOUNT_RE.fullmatch(value["account"])
+                ):
+                    raise MailSecretsError("credentials_left")
+                digest = value.get("sealed_sha256")
+                if digest is not None and digest != hashlib.sha256(sealed_item[0]).hexdigest():
+                    raise MailSecretsError("credentials_left")
+                return value
+        except PrivateFSError as exc:
+            if exc.reason == "missing":
+                return None
+            raise MailSecretsError("credentials_left") from exc
+        except ValueError as exc:
+            raise MailSecretsError("credentials_left") from exc
 
     def residue(self) -> bool:
         """True while any credential file is left: the sealed file, the flags or a staged copy, in any form.
@@ -514,44 +687,83 @@ class MailSecretStore:
             return True  # cannot tell: never report a clean directory
 
     def forget(self) -> bool:
+        self._check_platform()
+        if self._platform() == "win32" or self._native():
+            from .imap_sync import mail_writer_scope
+
+            with mail_writer_scope(self._profile_home()):
+                return self._forget()
+        return self._forget()
+
+    def _forget(self) -> bool:
         """Delete the sealed file, the flags and the Enclave key, whatever the flags say (absent is fine).
 
         Returns ``False`` when the Enclave key could not be deleted (no helper, a
         Keychain error): the sealed file is gone already, so the key unwraps
         nothing, and a retry deletes it. A file that cannot be removed raises.
         """
-        from ...keyvault import wrap
 
+        self._check_platform()
+        if self._platform() == "win32":
+            return bool(self._windows().forget())
+        if self._native():
+            from ..._private_fs import PrivateFSError, open_private_directory
+            from ...keyvault._mail_custody import JOURNAL, read
+
+            try:
+                with open_private_directory(self._profile_home() / "mordred/mail") as directory:
+                    pending = read(directory, JOURNAL) is not None
+            except PrivateFSError as exc:
+                if exc.reason == "missing":
+                    return True
+                raise
+            return self.forget_from_snapshot((None, None) if pending else self.load_snapshot())
         for path in (self.sealed_path, self.meta_path, self.key_record_path):
             path.unlink(missing_ok=True)
         for path in self.sealed_path.parent.glob(_STAGED_GLOB):  # left by a store() that was killed
             path.unlink(missing_ok=True)
         try:
-            wrap.delete_wrapping_key(KEY_ID, backend=self._backend_factory())  # idempotent: no key is fine
+            self._backend().delete_enclave_key(KEY_ID)  # explicit portable fixture backend only
         except Exception:
             return False
         return True
 
 
 def setup_generation(home: Path) -> str:
-    """The token naming ``home``'s current mail setup generation (:data:`GENERATION_ABSENT` before any)."""
-    path = mail_dir(home) / _GENERATION_NAME
+    """Read the checked public setup generation without creating any files."""
+    from ..._private_fs import PrivateFSError, open_private_directory
+    from ...keyvault._mail_custody import read
+
     try:
-        info = os.lstat(path)
-    except FileNotFoundError:
+        with open_private_directory(mail_dir(home)) as directory:
+            item = read(directory, _GENERATION_NAME)
+    except PrivateFSError as exc:
+        if exc.reason == "missing":
+            return GENERATION_ABSENT
+        raise MailSecretsError("store_path_unsafe") from exc
+    if item is None:
         return GENERATION_ABSENT
-    if not stat.S_ISREG(info.st_mode):
-        raise MailSecretsError("store_path_unsafe")
-    value = path.read_text("ascii", errors="replace").strip()
+    value = item[0].decode("ascii", errors="replace").strip()
     return value if _GENERATION_RE.fullmatch(value) else "unreadable"
 
 
 def new_setup_generation(home: Path) -> str:
-    """Rewrite ``home``'s setup generation (0600, a fresh random token); every seal and every forget does."""
-    from ...keyvault._storage import atomic_write
+    """Publish a checked private random token; it survives credential retirement."""
+    from ..._private_fs import open_private_directory
+    from ...keyvault._mail_custody import publish
 
     token = _secrets.token_hex(16)
-    atomic_write(ensure_private_dir(mail_dir(home)) / _GENERATION_NAME, token.encode("ascii"))
+    folder = mail_dir(home)
+    missing = []
+    cursor = folder
+    while not cursor.exists() and not cursor.is_symlink():
+        missing.append(cursor)
+        cursor = cursor.parent
+    for path in reversed(missing):
+        with open_private_directory(path, create=True):
+            pass
+    with open_private_directory(folder) as directory, directory.transaction() as tx:
+        publish(tx, _GENERATION_NAME, token.encode("ascii"))
     return token
 
 

@@ -147,3 +147,11 @@ def test_package_never_uses_mailbox_tempfile_or_logging() -> None:
     forbidden = re.compile(r"^\s*(?:import|from)\s+(?:mailbox|tempfile|logging)\b", re.MULTILINE)
     for path in sorted(PACKAGE.glob("*.py")):
         assert not forbidden.search(path.read_text(encoding="utf-8")), path.name
+
+
+def test_mail_export_hardlink_never_reads_a_protected_alias(tmp_path: Path) -> None:
+    source = tmp_path / "mail.mbox"
+    source.write_bytes(b"From a Mon Oct  5 10:00:00 2026\nSubject: private\n\nprivate\n")
+    os.link(source, tmp_path / "state.db")
+    with pytest.raises(SourceError):
+        list(iter_raw(MboxSource(source), Counter()))

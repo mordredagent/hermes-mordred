@@ -1,4 +1,4 @@
-"""Step-wise IMAP mail setup shared by ``hermes-mordred mail setup`` and the Desktop page (macOS).
+"""Step-wise IMAP mail setup shared by ``hermes-mordred mail setup`` and the Desktop page.
 
 SPEC "Desktop mail and ceremony pages (2026-10-23)", "Mail setup flow"; modelled on
 :mod:`mordred_hermes.extension.telegram.login_flow`. ``mail setup`` is a thin
@@ -135,6 +135,7 @@ SETUP_ERROR_CODES: Final = frozenset(
         "tee_unavailable",
         "tee_auth_cancelled",
         "touch_id_policy_mismatch",
+        "presence_unsupported",
         "imap_unreachable",
         "imap_auth_failed",
         "imap_protocol",
@@ -154,7 +155,7 @@ _IMAP_CODES: Final = frozenset(
     }
 )
 _SECRET_CODES: Final = frozenset(
-    {"tee_unavailable", "tee_auth_cancelled", "store_path_unsafe", "touch_id_policy_mismatch"}
+    {"tee_unavailable", "tee_auth_cancelled", "store_path_unsafe", "touch_id_policy_mismatch", "presence_unsupported"}
 )
 _LOCK_CODES: Final = frozenset({"sync_in_progress", "store_path_unsafe"})
 
@@ -570,6 +571,13 @@ class MailSetupFlows:
     def _start(self, request: _Request) -> MailSetupFlow:
         self._stage.value = "pre_seal"
         self.reap()
+        from .secrets import MailSecretStore
+
+        if type(self._secret_store) is MailSecretStore:
+            try:
+                self._secret_store._prepare_setup(require_presence=request.presence)
+            except Exception as exc:
+                raise MailSetupError(_secrets_code(exc)) from None
         slot = self._reserve()
         pending = False
         try:

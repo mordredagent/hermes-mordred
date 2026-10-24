@@ -1057,7 +1057,7 @@ def test_mail_setup_error_is_a_closed_code_with_a_closed_hint() -> None:
         "mail_already_configured", "mail_setup_flow_expired", "sync_in_progress", "store_path_unsafe",
         "tee_unavailable", "tee_auth_cancelled", "imap_unreachable", "imap_auth_failed", "imap_protocol",
         "imap_command_refused", "routing_unavailable", "egress_unsupported", "touch_id_policy_mismatch",
-        "mail_setup_busy", "mail_setup_stale", "mail_setup_cancelled", "invalid_selection",
+        "mail_setup_busy", "mail_setup_stale", "mail_setup_cancelled", "invalid_selection", "presence_unsupported",
     }  # fmt: skip
     assert expected == SETUP_ERROR_CODES
     error = MailSetupError("imap_auth_failed", hint="server_alert")
@@ -1227,3 +1227,16 @@ def test_a_key_that_cannot_be_deleted_after_a_failed_seal_is_cleanup_failed(
     with pytest.raises(MailSetupError):
         start(flows)
     assert flows.seal_stage() == "cleanup_failed" and KEY_ID in enclave.keys
+
+
+def test_windows_presence_refusal_is_sanitized_before_setup_files(tmp_path):
+    secret_store = MailSecretStore(
+        tmp_path / "mordred/mail",
+        platform=lambda: "win32",
+        backend_factory=lambda: pytest.fail("presence refusal must precede native discovery"),
+    )
+    flow = MailSetupFlows(secret_store, home=lambda: tmp_path)
+    with pytest.raises(MailSetupError) as raised:
+        flow.start(address=ADDRESS, app_password=PASSWORD, imap_host="imap.example.com", presence=True)
+    assert raised.value.code == "presence_unsupported"
+    assert not (tmp_path / "mordred").exists()

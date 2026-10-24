@@ -1016,7 +1016,8 @@ def test_status_and_forget_handle_staged_leftovers(
 
     monkeypatch.setattr(secrets, "_platform", lambda: "darwin")
     folder = home / "mordred" / "mail"
-    folder.mkdir(parents=True)
+    folder.parent.mkdir(mode=0o700)
+    folder.mkdir(mode=0o700)
     (folder / ".credentials.meta.json.0011223344556677.staged").write_text("{}")  # a seal whose cleanup failed
     code, out, err = run(["mail", "status", "--json"], capsys)
     assert code == 0, err

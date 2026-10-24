@@ -102,7 +102,7 @@ def test_repr_hides_secrets() -> None:
 
 def test_other_platforms_are_refused_before_any_file_use(tmp_path: Path, enclave: FakeEnclave) -> None:
     root = tmp_path / "mail"
-    store = sealed_store(root, enclave, platform="linux")
+    store = sealed_store(root, enclave, platform="unsupported-test-os")
     for call in (store.load, lambda: store.store(gmail_creds()), store.ensure_key, store.forget):
         with pytest.raises(MailSecretsError) as raised:
             call()

@@ -229,6 +229,7 @@ def _checked_owner_facts(scope: object, selector: str, backend: NativeBackend) -
         ("._windows_custody", "WindowsCustodySession"),
         (".vault", "OpenVault"),
         ("._telegram_custody", "PosixTelegramCustody"),
+        ("._mail_custody", "PosixMailCustody"),
     )
     for module_name, name in adapters:
         module = importlib.import_module(module_name, __package__)

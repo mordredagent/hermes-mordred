@@ -21,6 +21,7 @@ Security contract:
 
 from __future__ import annotations
 
+import contextlib
 import io
 import os
 import re
@@ -144,12 +145,13 @@ class TrustedBytes:
 
 MailSource = MboxSource | EmlSource | MboxBytes | EmlBytes | TrustedBytes
 
-_OPEN_FLAGS: Final = (
-    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
-)
 
+@contextlib.contextmanager
+def _open_regular(path: Path) -> Iterator[IO[bytes]]:
+    from ..._home import hermes_home
+    from ...activity._gate import ActivityRefused
+    from .._protected_destination import checked_import_source
 
-def _open_regular(path: Path) -> IO[bytes]:
     try:
         before = os.lstat(path)
     except FileNotFoundError:
@@ -159,17 +161,12 @@ def _open_regular(path: Path) -> IO[bytes]:
     if not stat.S_ISREG(before.st_mode):
         raise SourceError("not_regular_file")
     try:
-        fd = os.open(path, _OPEN_FLAGS)
-    except OSError:
+        # The returned memory snapshot is the checked handle's content. Never
+        # reopen the path after admission, including a protected DB alias.
+        with checked_import_source(path.absolute(), home=hermes_home()) as handle:
+            yield handle
+    except (ActivityRefused, OSError):
         raise SourceError("read_error") from None
-    try:
-        after = os.fstat(fd)
-        if not stat.S_ISREG(after.st_mode) or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
-            raise SourceError("not_regular_file")
-        return os.fdopen(fd, "rb")
-    except BaseException:
-        os.close(fd)
-        raise
 
 
 def _is_blank(line: bytes) -> bool:
