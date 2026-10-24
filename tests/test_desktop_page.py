@@ -3729,6 +3729,7 @@ def test_without_a_known_state_there_are_no_buttons(activity, phrase):
 
 
 def test_the_card_codes_have_their_own_sentences():
+    pytest.importorskip("fastapi")  # the routes module needs it; the hermes-agent floor job has no extension extra
     from mordred_hermes.desktop._maintenance_routes import HISTORY_ERROR_CODES
 
     assert set(HISTORY_CODES) == set(HISTORY_ERROR_CODES)
