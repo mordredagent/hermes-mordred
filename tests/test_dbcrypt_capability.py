@@ -206,3 +206,16 @@ assert writes == [], writes
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_prompt_never_promises_pending_conversion_on_unavailable_platform(tmp_path, monkeypatch):
+    from mordred_hermes.dbcrypt import _hooks
+
+    (tmp_path / "mordred").mkdir()
+    (tmp_path / "mordred/db-encryption.pending").write_bytes(b"pending")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(_hooks, "_home", lambda: tmp_path)
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    text = _hooks.status_line()
+    assert "unavailable" in text
+    assert "until Hermes restarts" not in text

@@ -147,6 +147,21 @@ def pre_llm_call(**_kwargs: Any) -> dict[str, str] | None:
     return {"context": warning} if warning else None
 
 
+def _pending_line(home: Path) -> str:
+    from ._capability import database_status
+
+    status = database_status(home)
+    if status.capability == "unavailable":
+        return (
+            "## Hermes's databases (Mordred)\nPending database encryption is unavailable on this runtime: "
+            f"{status.reason}. The conversation history is not protected."
+        )
+    return (
+        "## Hermes's databases (Mordred)\nEncryption of Hermes's databases is scheduled but not active yet: "
+        "the conversation history remains unencrypted. Pending conversion requires explicit supported maintenance."
+    )
+
+
 def status_line(_info: Any = None) -> str:
     """The ``mordred.databases`` prompt section (empty when encryption is neither on nor scheduled).
 
@@ -176,10 +191,7 @@ def status_line(_info: Any = None) -> str:
         )
     if not armed(home):
         if any(f.code == "pending" for f in findings) or (home / "mordred/db-encryption.pending").is_file():
-            return (
-                "## Hermes's databases (Mordred)\nEncryption of Hermes's databases is scheduled but not active yet: "
-                "the conversation history is stored unencrypted until Hermes restarts."
-            )
+            return _pending_line(home)
         return ""
     violations = [f for f in findings if f.violation]
     if violations:
