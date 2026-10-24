@@ -50,6 +50,11 @@ Use `git show hermes-upstream/main:<path>` or a separate temporary clone.
 
 ## Hook signature drift detection (informational only)
 
+Plugin packaging removes fork synchronization, not the dependency on Hermes's
+hook and storage APIs. Retain read-only compatibility checks for those
+consumed interfaces; upstream development does not create a Mordred feature
+obligation or authorize an upstream PR.
+
 `tools/hook_payload_contract.json` lists the hook names and payload fields
 Mordred actually consumes. The local test checks the installed supported
 Hermes release; `.github/workflows/upstream-check.yml` also compares current
@@ -67,7 +72,19 @@ issue-write authority. See [`CI.md`](./CI.md)
 §`upstream-check.yml` details for the execution and permission boundary.
 
 - Released-Hermes incompatibility can fail normal CI.
-- Upstream-`main` drift opens or updates a local informational issue.
+- A PyPI scan reporting drift/unavailable, or an incomplete check job, makes
+  the local report `actionable`: investigate supported-release compatibility
+  or restore the monitor. A scan failure alone is not proof of a runtime bug.
+- Problems confined to unreleased upstream `main`, including unavailable
+  memory/Journey checks, are advisory and do not block Mordred releases.
+- Static drift must first be checked against the exact upstream commit:
+  distinguish a changed host contract from an unsupported scanner form. The
+  scanner handles sync/async dispatchers, import aliases, and local wrappers
+  that forward the hook name and untouched keyword payload.
+- The reporter updates the bot-owned report body and priority labels without
+  weekly comments, preserves unrelated labels and human issues, and closes
+  open bot reports once every check is `ok` in a successful run. A later
+  recurrence creates a new report.
 - A drift report never patches Hermes or opens an upstream PR.
 - New upstream fields are not a Mordred contract until code, the machine
   contract, tests, and [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) adopt them

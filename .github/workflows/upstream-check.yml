@@ -96,23 +96,40 @@ jobs:
             const normalize = value => value === "ok" || value === "drift" ? value : "unavailable";
             const result = process.env.CHECK_RESULT === "success" ? "success" : "unavailable";
             const statuses = [process.env.PYPI_STATUS, process.env.MAIN_STATUS, process.env.MEMORY_STATUS].map(normalize);
-            if (result === "success" && statuses.every(value => value === "ok")) return;
+            const resolved = result === "success" && statuses.every(value => value === "ok");
+            const actionable = result !== "success" || statuses[0] !== "ok";
+            const priority = resolved ? "resolved" : actionable ? "actionable" : "advisory";
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const body = [
-              "Weekly Hermes compatibility check. Informational only; Mordred does not send upstream PRs.",
+              "Weekly Hermes dependency compatibility check. Mordred does not send upstream PRs.",
               "",
               `Execution: ${result}.`,
               `PyPI hook contract: ${statuses[0]}.`,
               `Main hook contract: ${statuses[1]}.`,
               `Main memory/Journey seams: ${statuses[2]}.`,
               "",
+              `Priority: ${priority}.`,
+              "PyPI incompatibility or an incomplete check job needs operator action. Problems limited to unreleased main are advisory and do not block Mordred releases.",
               "Unavailable means preparation, dependencies or execution could not establish compatibility. Drift means a contract or behavior check failed.",
+              "Static drift needs triage: distinguish a host API change from a scanner limitation before changing the plugin.",
               `Diagnostics and selected source provenance: ${runUrl}`,
             ].join("\n");
             const target = {owner: context.repo.owner, repo: context.repo.repo};
-            const {data} = await github.rest.issues.listForRepo({...target, state: "open", labels: "upstream-drift"});
-            if (data.length) {
-              await github.rest.issues.createComment({...target, issue_number: data[0].number, body});
-            } else {
-              await github.rest.issues.create({...target, title: "Hermes upstream compatibility report", body, labels: ["actionable", "upstream-drift"]});
+            const title = "Hermes upstream compatibility report";
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              ...target, state: "open", labels: "upstream-drift", per_page: 100,
+            });
+            const reports = issues.filter(issue => !issue.pull_request && issue.title === title && issue.user?.login === "github-actions[bot]");
+            if (reports.length) {
+              for (const issue of resolved ? reports : reports.slice(0, 1)) {
+                const labels = issue.labels.map(label => typeof label === "string" ? label : label.name).filter(name => name !== "actionable");
+                if (actionable) labels.push("actionable");
+                await github.rest.issues.update({
+                  ...target, issue_number: issue.number, body, labels,
+                  ...(resolved ? {state: "closed", state_reason: "completed"} : {}),
+                });
+              }
+            } else if (!resolved) {
+              const labels = actionable ? ["upstream-drift", "actionable"] : ["upstream-drift"];
+              await github.rest.issues.create({...target, title, body, labels});
             }
