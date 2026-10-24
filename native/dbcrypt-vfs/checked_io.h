@@ -5,6 +5,10 @@
 #include <stdint.h>
 #include "sqlite3.h"
 
+#ifndef _WIN64
+#error The checked Windows VFS requires the qualified x64 target.
+#endif
+
 #define CI_PATH 240
 #define CI_NATIVE_PATH 320
 #define CI_DEPTH 120
@@ -65,7 +69,9 @@ int ci_unlock(CiFile *file, DWORD offset, DWORD length);
 typedef int (__cdecl *CiTestHook)(int stage, HANDLE handle);
 int ci_test_stage(int stage, HANDLE handle);
 #else
-#define ci_test_stage(stage, handle) 0
+static __inline int ci_test_stage(int stage, HANDLE handle) {
+  (void)stage; (void)handle; return 0;
+}
 #endif
 #define CI_AFTER_CREATE 1
 #define CI_BEFORE_READ 2
