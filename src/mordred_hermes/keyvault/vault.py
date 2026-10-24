@@ -900,6 +900,7 @@ class OpenVault:
         from . import wrap
         from ._identity import _vault_database_home, vault_identity
         from ._native_deletion import _backend_binding, _NativeOwnerFacts
+        from ._storage import assert_advisory_lock_held
 
         checked = self._checked_open()
         if (
@@ -918,6 +919,11 @@ class OpenVault:
         except Exception as exc:
             raise DatabaseRefused("vault native ownership is stale or unauthenticated") from exc
         home = _vault_database_home(checked.root)
+        try:
+            assert_advisory_lock_held(checked.root / _LOCK_NAME)
+            assert_advisory_lock_held(checked.root.parent / ".keyvault.lifecycle.lock")
+        except OSError as exc:
+            raise DatabaseRefused("vault custody lock changed or is no longer held") from exc
         # Distinguish successive custody scopes of the same live handle, so a
         # previously issued owner cannot revive when that handle locks again.
         return _NativeOwnerFacts(home=home, role="vault", generation=checked.scopes[-1][2], database_home=home)

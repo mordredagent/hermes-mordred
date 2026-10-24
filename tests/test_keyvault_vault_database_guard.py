@@ -562,3 +562,36 @@ def test_lost_vault_with_existing_valid_binding_is_not_silently_reinitialized(en
         assert durable(home) == before[0]
         assert not opened._root.exists()
         assert ops.calls == before[1]
+
+
+@pytest.mark.parametrize("lock_kind", ["vault", "lifecycle"])
+@pytest.mark.parametrize("timing", ["after_scope_entry", "after_permit_issuance"])
+def test_replaced_actual_custody_lock_refuses_native_ownership(source, lock_kind, timing):
+    home, opened, backend, _, ops = source
+    with database_key_mutation(root=home, generation=None) as lease, opened._custody_scope():
+        lock = opened._root / ".lock" if lock_kind == "vault" else opened._root.parent / ".keyvault.lifecycle.lock"
+
+        def replace_held_lock():
+            before_identity = lock.stat().st_dev, lock.stat().st_ino
+            retained = lock.with_name(lock.name + ".retained")
+            lock.rename(retained)
+            lock.touch(mode=0o600)
+            assert (retained.stat().st_dev, retained.stat().st_ino) == before_identity
+            assert (lock.stat().st_dev, lock.stat().st_ino) != before_identity
+
+        if timing == "after_scope_entry":
+            replace_held_lock()
+            before_native = list(ops.calls)
+            before_files = durable(home)
+            with pytest.raises(DatabaseRefused):
+                opened._native_delete_owner(backend)
+        else:
+            owner = opened._native_delete_owner(backend)
+            with _owned_delete_scope(owner, backend=backend, database_lease=lease) as permit:
+                replace_held_lock()
+                before_native = list(ops.calls)
+                before_files = durable(home)
+                with pytest.raises(DatabaseRefused):
+                    backend.delete_enclave_key(opened._key_id, deletion=permit)
+        assert ops.calls == before_native
+        assert durable(home) == before_files
