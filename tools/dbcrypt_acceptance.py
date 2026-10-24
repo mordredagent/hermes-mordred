@@ -314,7 +314,9 @@ def load_stop_receipt(path: Path) -> dict[str, Any]:
 
 def acceptance_failures(evidence: dict[str, Any]) -> list[str]:
     """Fail closed: bookkeeping fixtures/booleans can never enable qualification."""
-    failures = ["native_collectors_not_integrated"]
+    failures = []
+    if not evidence.get("executions"):
+        failures.append("missing_native_rows")
     bundle = evidence.get("bundle")
     if not isinstance(bundle, dict) or not all(
         bundle.get(key) for key in ("commit", "sdist_sha256", "wheel_sha256", "source_probe", "wheel_probe")
@@ -383,14 +385,14 @@ def run_acceptance(*, root: Path, phase: Phase, output: Path) -> int:
         "unexpected_skips": [],
         "native_provider": None,
         "owned_instance_receipts": [],
-        "reasons": ["native_collectors_not_integrated"],
+        "reasons": [],
     }
     try:
         if phase not in ("provision", "reopen", "verify"):
             raise AcceptanceRefused("unsupported_phase")
         evidence["root"] = _root_identity(root)
         bundle_text = os.environ.get("DBCRYPT_BUNDLE")
-        if bundle_text:
+        if bundle_text and phase != "verify":
             bundle = Path(bundle_text)
             manifest = validate_bundle(bundle)
             evidence["bundle"] = {
@@ -399,14 +401,21 @@ def run_acceptance(*, root: Path, phase: Phase, output: Path) -> int:
             }
             evidence["bundle_manifest_sha256"] = sha256_file(bundle / "manifest.json")
         receipt = os.environ.get("MORDRED_DBCRYPT_STOP_RECEIPT")
-        if receipt:
+        if receipt and phase != "verify":
             evidence["owned_instance_receipts"] = [load_stop_receipt(Path(receipt))]
-        evidence["reasons"] = acceptance_failures(evidence)
-    except (AcceptanceRefused, OSError) as exc:
+        if phase == "verify":
+            evidence.update(verify_native_spool(root))
+        else:
+            context = native_phase_inputs(root, phase)
+            directory = output.parent / (output.stem + "-files")
+            directory.mkdir(mode=0o700)
+            evidence.update(_execute_native_phase(context, phase=phase, directory=directory))
+            evidence["reasons"] = []
+    except (AcceptanceRefused, OSError, subprocess.SubprocessError) as exc:
         evidence["reasons"].append(str(exc) if isinstance(exc, AcceptanceRefused) else "root_probe_failed")
     evidence["finished_at"] = time.time()
     _write_new(output, evidence)
-    return 2
+    return 0 if evidence["status"] in {"candidate_native_passed", "production_native_passed"} else 2
 
 
 def extract_sdist(archive: Path, destination: Path) -> Path:
@@ -922,6 +931,332 @@ def build_acceptance_bundle(*, checkout: Path, output: Path) -> Path:
         raise
     return output
 
+
+
+RUN_SCHEMA = 2
+ADDITIONAL_MODULES = (
+    "test_activity_store.py", "test_activity_gate.py", "test_activity_schema.py", "imports/test_import_store.py",
+    "test_mail_cross_platform_storage.py", "test_mail_secrets.py", "test_mail_imap_sync.py",
+    "extension/test_telegram_migrate_store.py", "extension/test_telegram_history.py",
+    "extension/test_telegram_service_custody.py", "test_keyvault_database_authority.py",
+    "test_database_mutation_broker.py", "test_database_mutation_canonical.py",
+    "test_wizard_databases_authority.py", "test_runtime_bootstrap.py", "test_pth_bootstrap.py",
+)
+
+
+def native_fixture_paths(root: Path, mode: str) -> dict[str, Path]:
+    if mode not in {"source", "wheel"}:
+        raise AcceptanceRefused("native_mode_required")
+    return {kind: root / f"mordred-dbcrypt-{mode}-{kind}" for kind in ("persistence", "crash", "negative")}
+
+
+def native_phase_inputs(root: Path, phase: Phase) -> dict[str, Any]:
+    names = ("DBCRYPT_BUNDLE", "MORDRED_DBCRYPT_ACCEPTANCE_MODE", "MORDRED_DBCRYPT_ACCEPTANCE_KIND")
+    if os.environ.get("MORDRED_DBCRYPT_COLLECTORS_TEST") != "1" or any(not os.environ.get(name) for name in names):
+        raise AcceptanceRefused("native_phase_inputs_missing")
+    mode, kind = (os.environ[name] for name in names[1:])
+    if mode not in {"source", "wheel"} or kind not in {"candidate", "production"}:
+        raise AcceptanceRefused("native_mode_or_kind_invalid")
+    bundle = Path(os.environ["DBCRYPT_BUNDLE"])
+    manifest = validate_bundle(bundle)
+    helper_name = "MORDRED_WINKEY_HELPER" if sys.platform == "win32" else "MORDRED_TPMKEY_HELPER"
+    helper_text = os.environ.get(helper_name)
+    if sys.platform not in {"linux", "win32"} or not helper_text:
+        raise AcceptanceRefused("actual_native_platform_and_helper_required")
+    helper = _absolute(helper_text)
+    _input_file(helper)
+    forbidden = ("HERMES_MEMORY_KEY", "MORDRED_TPM_TEST", "MORDRED_TPMKEY_STORE", "MORDRED_TEST_INJECT_BACKEND", "TPM2TOOLS_TCTI", "TSS2_TCTI")
+    if any(os.environ.get(name) for name in forbidden):
+        raise AcceptanceRefused("ambient_key_or_native_emulation_forbidden")
+    prior = os.environ.get("MORDRED_DBCRYPT_PRIOR_EVIDENCE")
+    observation = os.environ.get("MORDRED_DBCRYPT_OBSERVATION", "provision")
+    if phase == "reopen" and (not prior or observation not in {"process_restart", "os_reboot", "ec2_stop_start"}):
+        raise AcceptanceRefused("reopen_prior_and_observation_required")
+    qualification = os.environ.get("MORDRED_DBCRYPT_QUALIFICATION_DIRECTORY")
+    if sys.platform == "win32":
+        if not qualification:
+            raise AcceptanceRefused("windows_native_qualification_incomplete")
+        validate_windows_qualification(Path(qualification), checkout=Path(manifest["checkout"]))
+    return {"bundle": bundle, "manifest": manifest, "mode": mode, "kind": kind, "helper": helper,
+            "helper_name": helper_name, "prior": Path(prior) if prior else None,
+            "observation": observation, "fixtures": native_fixture_paths(root, mode), "qualification": qualification}
+
+
+def validate_native_test_report(value: Any) -> dict[str, Any]:
+    try:
+        report = _object(value, ("nodeids", "reports", "exitstatus", "collection_errors", "deselected"))
+        nodes = report["nodeids"]
+        _require(isinstance(nodes, list) and bool(nodes) and all(_text(node) for node in nodes) and len(set(nodes)) == len(nodes))
+        _require(type(report["exitstatus"]) is int and report["exitstatus"] == 0 and report["collection_errors"] == [])
+        _require(isinstance(report["deselected"], list) and all(_text(node) for node in report["deselected"]))
+        expected = {(node, stage) for node in nodes for stage in ("setup", "call", "teardown")}
+        actual = []
+        for row in report["reports"]:
+            _require(row["outcome"] == "passed" and not row.get("wasxfail"))
+            actual.append((row["nodeid"], row["when"]))
+        _require(len(actual) == len(expected) and set(actual) == expected)
+    except (ValueError, TypeError, KeyError) as exc:
+        raise AcceptanceRefused("native_test_results_incomplete") from exc
+    return report
+
+
+def _evidence_ref(directory: Path, value: Any) -> tuple[Path, dict[str, Any]]:
+    reference = _object(value, ("path", "sha256"))
+    path = directory / _relative(reference["path"])
+    _input_file(path)
+    _require(path.resolve().is_relative_to(directory.resolve()) and _hex(reference["sha256"], 64))
+    _require(sha256_file(path) == reference["sha256"])
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    _require(isinstance(payload, dict))
+    return path, payload
+
+
+def _qualification_row(directory: Path, reference: Any, target: str) -> dict[str, Any]:
+    links = _object(reference, ("collect", "run"))
+    _, collected = _evidence_ref(directory, links["collect"])
+    _, run = _evidence_ref(directory, links["run"])
+    _require(collected["action"] == "collect" and run["action"] == "run")
+    _require(collected["target"] == target and run["target"] == target)
+    _require(collected["nodeids"] == run["nodeids"] and collected["pytest_exit_code"] == 0)
+    validate_native_test_report({**run, "exitstatus": run["pytest_exit_code"], "deselected": []})
+    _require(run["collected"] == len(run["nodeids"]) and _hex(run["dll_sha256"], 64))
+    _require(run["driver_version"] == "0.5.7" and run["versions"] == {"sqlite": "3.51.1", "sqlcipher": "4.12.0 community"})
+    return run
+
+
+def validate_windows_qualification(directory: Path, *, checkout: Path) -> dict[str, Any]:
+    try:
+        _root = directory.resolve(strict=True)
+        manifest = json.loads(_input_file(_root / "manifest.json").read_text())
+        _require(manifest["schema"] == 1 and manifest["kind"] == "windows_vfs_qualification")
+        rows = manifest["rows"]
+        diagnostic = _qualification_row(_root, rows["checkedtest_source"], "CheckedTest")
+        source = _qualification_row(_root, rows["checked_source"], "Checked")
+        wheel = _qualification_row(_root, rows["checked_wheel"], "Checked")
+        _require(set(source["nodeids"]) <= set(diagnostic["nodeids"]) and source["nodeids"] == wheel["nodeids"])
+        _, provenance = _evidence_ref(_root, manifest["provenance"])
+        _, fixture = _evidence_ref(_root, manifest["fixture_verify"])
+        _require(fixture["elevated"] is False and _text(fixture["sid"]))
+        critical = [*(checkout / "native/dbcrypt-vfs").glob("*.c"), *(checkout / "native/dbcrypt-vfs").glob("*.h"),
+                    *(checkout / "src/mordred_hermes/_private_fs").glob("*.py"),
+                    checkout / "src/mordred_hermes/dbcrypt/_windows_vfs.py",
+                    checkout / "tests/integration/test_dbcrypt_windows_vfs.py"]
+        _require(all(provenance["source_hashes"].get(path.relative_to(checkout).as_posix()) == sha256_file(path) for path in critical))
+        _require(bool(provenance["headers"]) and all(_hex(value, 64) for value in provenance["headers"].values()))
+        for key in ("bundle_manifest_sha256", "sdist_sha256", "wheel_sha256"):
+            _require(_hex(wheel[key], 64))
+        _require(wheel["record_owned_packaged_dll"] is True and wheel["test_exports_absent"] is True and wheel["env_dll_override"] is None)
+        _require(Path(wheel["product_module"]).parent.name == "mordred_hermes" and "site-packages" in Path(wheel["product_module"]).parts)
+        return {"manifest_sha256": sha256_file(_root / "manifest.json"), "source": source, "wheel": wheel}
+    except (OSError, ValueError, TypeError, KeyError, AcceptanceRefused) as exc:
+        raise AcceptanceRefused("windows_native_qualification_incomplete") from exc
+
+
+def validate_reopen_continuity(before: dict[str, Any], after: dict[str, Any], observation: str) -> None:
+    try:
+        _require(all(before[key] == after[key] for key in ("mode", "bundle_manifest_sha256", "fixture", "logical")))
+        same_boot = before["boot"]["identity"] == after["boot"]["identity"]
+        _require(same_boot if observation == "process_restart" else not same_boot)
+        _require(observation in {"process_restart", "os_reboot", "ec2_stop_start"})
+    except (ValueError, TypeError, KeyError) as exc:
+        raise AcceptanceRefused("native_reopen_continuity_failed") from exc
+
+
+def native_acceptance_commands(*, checkout: Path, bundle: Path, platform: str, kind: str) -> list[dict[str, Any]]:
+    rows = acceptance_commands(checkout=checkout, bundle=bundle, platform=platform)
+    for row in rows:
+        if row["suite"] == "affected":
+            row["argv"].extend(str(bundle / "tests" / name) for name in ADDITIONAL_MODULES)
+    for suite, module, gate in (("dbcrypt-activity", "integration/test_dbcrypt_activity.py", "MORDRED_DBCRYPT_ACTIVITY_NATIVE_TEST"),
+                                ("mail-native", "integration/test_mail_native_custody.py", "MORDRED_MAIL_NATIVE_TEST")):
+        for mode in ("source", "wheel"):
+            if kind == "candidate" and suite == "dbcrypt-activity":
+                rows.append({"suite": suite, "mode": mode, "status": "not_run_requires_production_activation"})
+                continue
+            prototype = next(row for row in rows if row["suite"] == "dbcrypt-native" and row["mode"] == mode)
+            row = {**prototype, "suite": suite, "env": {gate: "1"}}
+            row["argv"] = [*prototype["argv"][:-2], str(bundle / "tests" / module)]
+            rows.append(row)
+    return rows
+
+
+def verify_native_spool(root: Path) -> dict[str, Any]:
+    result: dict[str, Any] = {"schema_version": RUN_SCHEMA, "phase": "verify", "status": "refused", "live_accepted": False, "reasons": []}
+    if not (root / "matrix.json").is_file():
+        result["reasons"] = ["missing_production_matrix"]
+        return result
+    try:
+        matrix = json.loads(_input_file(root / "matrix.json").read_text())
+        _require(matrix["schema_version"] == RUN_SCHEMA)
+        phases = []
+        for reference in matrix["phases"]:
+            _, phase = _evidence_ref(root, reference)
+            _require(phase["acceptance_kind"] == "production" and phase["status"] == "production_native_passed")
+            _require(phase["bootstrap"] == "automatic_production" and phase["live_accepted"] is False)
+            _require(phase["native_rows_complete"] is True and bool(phase["executions"]))
+            for execution in phase["executions"]:
+                _require(execution["returncode"] == 0)
+                if "pytest_report" in execution:
+                    _, report = _evidence_ref(root, execution["pytest_report"])
+                    validate_native_test_report(report)
+            phases.append(phase)
+        for platform in ("linux", "win32"):
+            for mode in ("source", "wheel"):
+                selected = [row for row in phases if row["platform"] == platform and row["mode"] == mode]
+                _require({row["observation"] for row in selected} == {"provision", "process_restart", "os_reboot", "ec2_stop_start"})
+                baseline = next(row for row in selected if row["observation"] == "provision")
+                for row in selected:
+                    if row is not baseline:
+                        validate_reopen_continuity(baseline, row, row["observation"])
+        _require(len(matrix["stop_receipts"]) == 2 and len(matrix["ec2_observations"]) >= 6)
+        receipts = [load_stop_receipt(_evidence_ref(root, ref)[0]) for ref in matrix["stop_receipts"]]
+        _require({row["instance"] for row in receipts} == INSTANCES)
+        observations = [_evidence_ref(root, ref)[1] for ref in matrix["ec2_observations"]]
+        for receipt in receipts:
+            actual = [row for row in observations if row["instance"] == receipt["instance"] and row["controller_run"] == receipt["run"]]
+            _require(any(row["state"] == "stopped" and row["observed_at"] >= receipt["stopped_at"] for row in actual))
+        result.update(status="production_native_passed", live_accepted=True, phases=len(phases), owned_instance_receipts=receipts)
+    except (OSError, ValueError, TypeError, KeyError, AcceptanceRefused):
+        result["reasons"] = ["production_matrix_incomplete_or_inconsistent"]
+    return result
+
+
+def _native_environment(context: dict[str, Any], root: Path) -> dict[str, str]:
+    environment = probe_environment(root)
+    environment.update({
+        "DBCRYPT_BUNDLE": str(context["bundle"]), "DBCRYPT_CHECKOUT": context["manifest"]["checkout"],
+        context["helper_name"]: str(context["helper"]), "MORDRED_DBCRYPT_COLLECTORS_TEST": "1",
+        "MORDRED_DBCRYPT_TEST_ROOT": str(root), "MORDRED_DBCRYPT_ACCEPTANCE_MODE": context["mode"],
+        "MORDRED_DBCRYPT_ACCEPTANCE_KIND": context["kind"],
+        "MORDRED_HERMES_RUNTIME_PYTHON": str(_native_python(context)),
+    })
+    if context.get("qualification"):
+        environment["MORDRED_DBCRYPT_QUALIFICATION_DIRECTORY"] = context["qualification"]
+    return environment
+
+
+def _native_python(context: dict[str, Any]) -> Path:
+    base = Path(context["manifest"]["checkout"]) / ".venv" if context["mode"] == "source" else context["bundle"] / "wheel-env"
+    return _python(base)
+
+
+def _native_driver(context: dict[str, Any], directory: Path) -> Path:
+    path = directory / "hermes"
+    if not path.exists():
+        helper = context["bundle"] / "tests/_dbcrypt_acceptance_native.py"
+        code = f"import sys, runpy; sys.path.insert(0, {str(context['bundle'])!r}); raise SystemExit(runpy.run_path({str(helper)!r})['main'](sys.argv[1]))\n"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(code)
+    return path
+
+
+def _collector_child(context: dict[str, Any], root: Path, operation: str, directory: Path) -> dict[str, Any]:
+    if operation not in {"preflight", "provision", "seed", "read"}:
+        raise AcceptanceRefused("unsupported_fixed_native_operation")
+    validate_bundle(context["bundle"])
+    probe = probe_interpreter(_native_python(context), cwd=context["bundle"])
+    validate_import_provenance(Path(probe["product_file"]), checkout=Path(context["manifest"]["checkout"]),
+                               environment=context["bundle"] / "wheel-env", mode=context["mode"])
+    helper = context["bundle"] / "tests/_dbcrypt_acceptance_native.py"
+    environment = _native_environment(context, root)
+    driver = _native_driver(context, directory)
+    environment["MORDRED_DBCRYPT_PRODUCTION_DRIVER"] = str(driver)
+    if context["kind"] == "candidate":
+        code = f"import runpy; raise SystemExit(runpy.run_path({str(helper)!r})['main']({operation!r}))"
+        argv = [str(_native_python(context)), "-c", code]
+    else:
+        argv = [str(_native_python(context)), str(driver), operation]
+    started = time.time()
+    result = subprocess.run(argv, cwd=context["bundle"], env=environment, capture_output=True, text=True,
+                            timeout=900, check=False, stdin=subprocess.DEVNULL)
+    try:
+        payload = json.loads(result.stdout)
+        _require(result.returncode == 0 and payload["schema_version"] == RUN_SCHEMA and payload["status"] == "executed")
+        _require(payload["operation"] == operation and payload["facts"]["native_provider"] in {"EC2 NitroTPM", "Microsoft Platform Crypto Provider"})
+        _require(_hex(payload["facts"]["helper"]["sha256"], 64))
+    except (ValueError, KeyError, TypeError) as exc:
+        raise AcceptanceRefused("native_child_refused_or_failed:" + operation) from exc
+    return {"operation": operation, "argv": argv, "cwd": str(context["bundle"]), "started_at": started,
+            "finished_at": time.time(), "returncode": result.returncode, "import_probe": probe, "payload": payload}
+
+
+def _native_suite(context: dict[str, Any], row: dict[str, Any], directory: Path, baseline: Path) -> dict[str, Any]:
+    validate_bundle(context["bundle"])
+    probe = probe_interpreter(_native_python(context), cwd=context["bundle"])
+    validate_import_provenance(Path(probe["product_file"]), checkout=Path(context["manifest"]["checkout"]),
+                               environment=context["bundle"] / "wheel-env", mode=context["mode"])
+    environment = _native_environment(context, context["fixtures"]["persistence"])
+    environment.update(row["env"])
+    environment.update(MORDRED_DBCRYPT_BASELINE=str(baseline),
+                       MORDRED_DBCRYPT_PERSISTENCE_ROOT=str(context["fixtures"]["persistence"]),
+                       MORDRED_DBCRYPT_CRASH_ROOT=str(context["fixtures"]["crash"]),
+                       MORDRED_DBCRYPT_NEGATIVE_ROOT=str(context["fixtures"]["negative"]),
+                       MORDRED_WINDOWS_CUSTODY_TEST_ROOT=str(context["fixtures"]["negative"]))
+    report = directory / (row["suite"] + ".pytest.json")
+    environment["MORDRED_DBCRYPT_PYTEST_REPORT"] = str(report)
+    row_directory = directory / (row["suite"] + "-rows")
+    row_directory.mkdir(mode=0o700)
+    environment["MORDRED_DBCRYPT_ROW_DIRECTORY"] = str(row_directory)
+    environment["MORDRED_DBCRYPT_PRODUCTION_DRIVER"] = str(_native_driver(context, directory))
+    argv = [*row["argv"], "-p", "tests._dbcrypt_acceptance_native"]
+    if row["suite"] == "windows-vfs":
+        qualification = validate_windows_qualification(Path(context["qualification"]), checkout=Path(context["manifest"]["checkout"]))
+        if row["mode"] == "source":
+            descriptor = json.loads((Path(context["qualification"]) / "manifest.json").read_text())
+            raw = _qualification_row(Path(context["qualification"]), descriptor["rows"]["checkedtest_source"], "CheckedTest")
+            environment["MORDRED_DBCRYPT_CHECKED_LIBRARY"] = raw["dll"]
+        for name in ("MORDRED_DBCRYPT_VFS_FIXTURE_ROOT", "MORDRED_DBCRYPT_QUALIFICATION_MANIFEST"):
+            if not os.environ.get(name):
+                raise AcceptanceRefused("owned_windows_vfs_fixtures_required")
+            environment[name] = os.environ[name]
+        environment["MORDRED_DBCRYPT_TEST_ROOT"] = environment["MORDRED_DBCRYPT_VFS_FIXTURE_ROOT"]
+        del qualification
+    started = time.time()
+    result = subprocess.run(argv, cwd=context["bundle"], env=environment, capture_output=True, text=True,
+                            timeout=3600, check=False, stdin=subprocess.DEVNULL)
+    if result.returncode or not report.is_file():
+        raise AcceptanceRefused("native_module_failed:" + row["suite"])
+    parsed = validate_native_test_report(json.loads(report.read_text()))
+    return {"suite": row["suite"], "mode": context["mode"], "argv": argv, "cwd": str(context["bundle"]),
+            "started_at": started, "finished_at": time.time(), "returncode": result.returncode,
+            "import_probe": probe, "pytest_report": {"path": report.relative_to(directory.parent).as_posix(), "sha256": sha256_file(report)},
+            "nodeids": parsed["nodeids"], "counts": {"passed": len(parsed["nodeids"]), "skipped": 0},
+            "collector_rows": [{"path": path.relative_to(directory.parent).as_posix(), "sha256": sha256_file(path)} for path in sorted(row_directory.glob("*.json"))]}
+
+
+def _execute_native_phase(context: dict[str, Any], *, phase: Phase, directory: Path) -> dict[str, Any]:
+    persistence = context["fixtures"]["persistence"]
+    executions = [_collector_child(context, persistence, "preflight", directory)]
+    if phase == "provision":
+        for fixture in context["fixtures"].values():
+            executions.append(_collector_child(context, fixture, "provision", directory))
+        executions.append(_collector_child(context, context["fixtures"]["negative"], "seed", directory))
+        executions.append(_collector_child(context, persistence, "seed", directory))
+        baseline = executions[-1]["payload"]
+        baseline_path = directory / "baseline.json"
+        _write_new(baseline_path, baseline)
+        rows = native_acceptance_commands(checkout=Path(context["manifest"]["checkout"]), bundle=context["bundle"], platform=sys.platform, kind=context["kind"])
+        for row in rows:
+            if row["mode"] == context["mode"] and "argv" in row:
+                executions.append(_native_suite(context, row, directory, baseline_path))
+    executions.append(_collector_child(context, persistence, "read", directory))
+    actual = executions[-1]["payload"]
+    result = {"schema_version": RUN_SCHEMA, "mode": context["mode"], "acceptance_kind": context["kind"],
+              "platform": sys.platform, "bundle_manifest_sha256": sha256_file(context["bundle"] / "manifest.json"),
+              "bundle": {key: context["manifest"][key] for key in ("commit", "sdist_sha256", "wheel_sha256")},
+              "fixture": actual["fixture"], "logical": actual["logical"], "boot": actual["facts"]["boot"],
+              "native_facts": actual["facts"], "observation": context["observation"], "executions": executions,
+              "bootstrap": "explicit_candidate" if context["kind"] == "candidate" else "automatic_production",
+              "live_accepted": False, "unexpected_skips": [], "phase": phase,
+              "status": context["kind"] + "_native_passed", "native_rows_complete": False,
+              "limitations": ["public_lifecycle_and_complete_native_failure_matrix_pending", "final_production_selection_pending"]}
+    if phase == "reopen":
+        if context["prior"] is None:
+            raise AcceptanceRefused("native_reopen_prior_missing")
+        prior = json.loads(_input_file(context["prior"]).read_text())
+        validate_reopen_continuity(prior, result, context["observation"])
+    return result
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)

@@ -4,8 +4,8 @@ The operator supplies an existing synthetic, natively provisioned root named
 mordred-dbcrypt-*. Its database source must already be enrolled. Each subprocess
 sets HERMES_HOME before importing Mordred and suppresses the audit sink. Missing
 native/driver/holder prerequisites FAIL after opt-in; they never become skips.
-Windows uses a scoped eligibility patch after real Task5 acceptance; this is
-not production activation or directory/power-loss qualification.
+Windows candidate mode alone permits a scoped eligibility bridge after real
+full C and installed-release-wheel evidence. Production uses no override.
 """
 
 from __future__ import annotations
@@ -139,10 +139,16 @@ with ExitStack() as eligibility:
         assert not ctypes.windll.shell32.IsUserAnAdmin(), 'ordinary-token evidence is required'
         with open_private_directory(root), open_private_directory(root.parent):
             pass
-        # Parent runs this gate only after real Task5 76/41 native acceptance.
-        # Fresh-process eligibility override; actual native/driver I/O stays real.
-        os.environ['MORDRED_DBCRYPT_WINDOWS_VFS_TEST'] = '1'
-        eligibility.enter_context(patch('mordred_hermes.dbcrypt._windows_vfs.NATIVE_QUALIFIED', True))
+        kind = os.environ.get('MORDRED_DBCRYPT_ACCEPTANCE_KIND', 'production')
+        if kind == 'candidate':
+            assert os.environ.get('MORDRED_DBCRYPT_COLLECTORS_TEST') == '1'
+            from tests._dbcrypt_acceptance_native import native_facts
+            native_facts(root)  # Actual full C + release-wheel/provider/helper prerequisites.
+            os.environ['MORDRED_DBCRYPT_WINDOWS_VFS_TEST'] = '1'
+            eligibility.enter_context(patch('mordred_hermes.dbcrypt._windows_vfs.NATIVE_QUALIFIED', True))
+        else:
+            from mordred_hermes.dbcrypt._windows_vfs import NATIVE_QUALIFIED
+            assert kind == 'production' and NATIVE_QUALIFIED, 'unpatched production admission required' 
     run()
 
 """
@@ -150,11 +156,12 @@ with ExitStack() as eligibility:
 
 @pytest.fixture
 def native_root():
-    text = os.environ.get("MORDRED_DBCRYPT_TEST_ROOT")
+    text = os.environ.get("MORDRED_DBCRYPT_CRASH_ROOT") or os.environ.get("MORDRED_DBCRYPT_TEST_ROOT")
     assert text, "opt-in requires an explicit pre-provisioned synthetic root"
     root = Path(text)
     assert root.is_absolute() and root.is_dir() and root == root.resolve(strict=True)
     assert root.name.startswith("mordred-dbcrypt-")
+    assert not root.name.endswith("-persistence"), "destructive Task7 prepare must never receive persistence root"
     assert root != Path.home() / ".hermes"
     assert not root.is_symlink()
     return root

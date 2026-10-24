@@ -226,7 +226,7 @@ def test_live_claim_requires_all_phases_and_stopped_receipt() -> None:
     assert "missing_bundle_provenance" in reasons
     assert "missing_phases" in reasons
     assert "missing_independent_stop_receipt" in reasons
-    assert "native_collectors_not_integrated" in reasons
+    assert "missing_native_rows" in reasons
 
 
 @pytest.mark.parametrize(
@@ -412,15 +412,15 @@ def test_runner_records_validated_bundle_provenance_even_while_native_hooks_refu
     root.mkdir(mode=0o700)
     monkeypatch.setenv("DBCRYPT_BUNDLE", str(bundle))
     output = tmp_path / "refusal.json"
-    assert tool.run_acceptance(root=root, phase="verify", output=output) == 2
+    assert tool.run_acceptance(root=root, phase="provision", output=output) == 2
     evidence = json.loads(output.read_text())
     assert evidence["bundle"]["commit"] == manifest["commit"]
     assert evidence["bundle_manifest_sha256"] == tool.sha256_file(bundle / "manifest.json")
     assert evidence["test_counts"] == {"passed": 0, "failed": 0, "skipped": 0, "collected": 0}
-    assert "native_collectors_not_integrated" in evidence["reasons"]
+    assert "native_phase_inputs_missing" in evidence["reasons"]
     test.write_text("tampered\n")
     output = tmp_path / "tampered.json"
-    assert tool.run_acceptance(root=root, phase="verify", output=output) == 2
+    assert tool.run_acceptance(root=root, phase="provision", output=output) == 2
     assert "bundle_hash_mismatch" in " ".join(json.loads(output.read_text())["reasons"])
 
 
@@ -593,3 +593,96 @@ def test_bundle_accepts_recorded_python_alias_for_same_source_interpreter(tmp_pa
         manifest["build_commands"][index]["argv"][4] = str(alias)
     write_manifest(bundle, manifest)
     tool.validate_bundle(bundle)
+
+
+def test_native_phase_inputs_require_explicit_mode_kind_bundle_and_helper(tmp_path: Path, monkeypatch) -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    monkeypatch.setenv("MORDRED_DBCRYPT_COLLECTORS_TEST", "1")
+    monkeypatch.delenv("DBCRYPT_BUNDLE", raising=False)
+    with pytest.raises(tool.AcceptanceRefused, match="native_phase_inputs_missing"):
+        tool.native_phase_inputs(tmp_path, "provision")
+
+
+@pytest.mark.parametrize("when,outcome", [("teardown", "failed"), ("setup", "skipped"), ("call", "failed")])
+def test_native_pytest_report_rejects_nonpassing_lifecycle(tmp_path: Path, when: str, outcome: str) -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    report = {"nodeids": ["test_x.py::test_native"], "deselected": [], "collection_errors": [], "exitstatus": 0,
+              "reports": [{"nodeid": "test_x.py::test_native", "when": stage, "outcome": outcome if stage == when else "passed"} for stage in ("setup", "call", "teardown")]}
+    with pytest.raises(tool.AcceptanceRefused, match="native_test_results_incomplete"):
+        tool.validate_native_test_report(report)
+
+
+def test_native_pytest_report_requires_all_collected_nodes_and_nonzero_collection() -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    for value in ({"nodeids": [], "reports": [], "exitstatus": 0, "collection_errors": [], "deselected": []},
+                  {"nodeids": ["test_x.py::test_native"], "reports": [], "exitstatus": 0, "collection_errors": [], "deselected": []}):
+        with pytest.raises(tool.AcceptanceRefused, match="native_test_results_incomplete"):
+            tool.validate_native_test_report(value)
+
+
+def test_native_roots_are_separate_and_task7_cannot_receive_persistence_root(tmp_path: Path) -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    root = tmp_path / "mordred-dbcrypt-parent"
+    paths = tool.native_fixture_paths(root, "wheel")
+    assert len(set(paths.values())) == 3
+    assert paths["persistence"].name.endswith("wheel-persistence")
+    assert paths["crash"].name.endswith("wheel-crash")
+    assert paths["negative"].name.endswith("wheel-negative")
+    assert all(path.parent == root for path in paths.values())
+
+
+def test_native_reopen_requires_mode_boot_and_public_source_continuity() -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    baseline = {"mode": "source", "bundle_manifest_sha256": "a" * 64, "fixture": {"root": {"file_id": "1"}, "source": {"generation": "g"}}, "logical": {"session": "b" * 64}, "boot": {"identity": "boot-1"}}
+    for change, observation in [({"mode": "wheel"}, "process_restart"), ({"boot": {"identity": "boot-1"}}, "os_reboot"), ({"logical": {"session": "c" * 64}}, "process_restart")]:
+        with pytest.raises(tool.AcceptanceRefused, match="native_reopen_continuity_failed"):
+            tool.validate_reopen_continuity(baseline, {**baseline, **change}, observation)
+
+
+def test_native_verify_does_not_compare_controller_spool_inode_with_guest(tmp_path: Path) -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    root = tmp_path / "mordred-dbcrypt-controller-spool"
+    root.mkdir(mode=0o700)
+    assert tool.verify_native_spool(root)["live_accepted"] is False
+    assert "missing_production_matrix" in tool.verify_native_spool(root)["reasons"]
+
+
+def test_candidate_command_plans_exclude_production_only_activity_gate(tmp_path: Path) -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    rows = tool.native_acceptance_commands(checkout=tmp_path / "checkout", bundle=tmp_path / "bundle", platform="linux", kind="candidate")
+    assert not any("test_dbcrypt_activity.py" in " ".join(row.get("argv", [])) for row in rows)
+    assert any(row.get("status") == "not_run_requires_production_activation" and row["suite"] == "dbcrypt-activity" for row in rows)
+    production = tool.native_acceptance_commands(checkout=tmp_path / "checkout", bundle=tmp_path / "bundle", platform="linux", kind="production")
+    assert any(row.get("env", {}).get("MORDRED_DBCRYPT_ACTIVITY_NATIVE_TEST") == "1" for row in production)
+
+
+def test_windows_candidate_requires_raw_qualification_rows_not_a_passed_boolean(tmp_path: Path) -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    (tmp_path / "manifest.json").write_text(json.dumps({"schema": 1, "kind": "windows_vfs_qualification", "passed": True}))
+    with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
+        tool.validate_windows_qualification(tmp_path, checkout=tmp_path)
+
+
+def test_native_helper_digest_accepts_synthetic_rows_only_and_rejects_secret_fields() -> None:
+    import importlib.util
+
+    path = Path(__file__).parent / "_dbcrypt_acceptance_native.py"
+    assert path.is_file(), "fixed native operation helper is missing"
+    spec = importlib.util.spec_from_file_location("native_acceptance_helper", path)
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    assert helper.logical_digest([{"id": "synthetic", "text": "日本語"}]) == helper.logical_digest([{"text": "日本語", "id": "synthetic"}])
+    with pytest.raises(ValueError, match="synthetic_record_fields_only"):
+        helper.logical_digest([{"id": "synthetic", "app_password": "must-not-hash"}])
+
+
+def test_native_collector_module_exists_and_has_explicit_integration_optin() -> None:
+    import ast
+
+    path = Path(__file__).parent / "integration/test_dbcrypt_collectors.py"
+    assert path.is_file(), "real native collector gate is missing"
+    source = path.read_text()
+    ast.parse(source)
+    assert 'MORDRED_DBCRYPT_COLLECTORS_TEST' in source
+    assert "pytest.mark.integration" in source
+    assert "_dbcrypt_acceptance_native" in source
