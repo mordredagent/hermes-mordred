@@ -8,6 +8,9 @@ reached through :mod:`._seams` at call time.
 
 ``tools`` (``{direct, source}``, Hermes's direct tool calls read from
 ``config.yaml``) is reported on every platform: the setting is Hermes-wide.
+So is ``activity`` (``{history, tools, source}``, the browser-history switches
+``history_enabled`` / ``history_tools_enabled`` read from ``config.yaml``
+through the activity config loader: no store, no protection gate).
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ from typing import Any
 
 from . import _databases, _projections, _seams, _vault
 
-__all__ = ["databases_safe", "imports_sections", "sections", "tools_safe", "vault_facts_safe"]
+__all__ = ["activity_safe", "databases_safe", "imports_sections", "sections", "tools_safe", "vault_facts_safe"]
 
 _log = logging.getLogger(__name__)
 
@@ -44,14 +47,16 @@ async def sections(platform: str, home: Path) -> dict[str, Any]:
             "mail": {"configured": False},
             "telegram_archive": dict(_TELEGRAM_ARCHIVE),
             "tools": await asyncio.to_thread(tools_safe, home),
+            "activity": await asyncio.to_thread(activity_safe, home),
         }
-    vault, databases, imports, tools = await asyncio.gather(
+    vault, databases, imports, tools, activity = await asyncio.gather(
         asyncio.to_thread(vault_facts_safe, home),
         asyncio.to_thread(databases_safe, home, platform),
         asyncio.to_thread(imports_sections, home, platform),
         asyncio.to_thread(tools_safe, home),
+        asyncio.to_thread(activity_safe, home),
     )
-    return {"vault": vault, "databases": databases, **imports, "tools": tools}
+    return {"vault": vault, "databases": databases, **imports, "tools": tools, "activity": activity}
 
 
 def tools_safe(home: Path) -> dict[str, Any]:
@@ -64,6 +69,19 @@ def tools_safe(home: Path) -> dict[str, Any]:
     except Exception as exc:
         _log.warning("mordred desktop tool-call mode unreadable (%s)", type(exc).__name__)
     return {"direct": None, "source": "unreadable"}
+
+
+def activity_safe(home: Path) -> dict[str, Any]:
+    """``{"history": bool | None, "tools": bool | None, "source": "config" | "unreadable"}``; never fails the
+    status (an unreadable config.yaml is ``unreadable``, with both switches ``None``)."""
+    try:
+        state = _seams.activity_history(home)
+        history, tools = state.get("history"), state.get("tools")
+        if isinstance(history, bool) and isinstance(tools, bool):
+            return {"history": history, "tools": tools, "source": "config"}
+    except Exception as exc:
+        _log.warning("mordred desktop browser-history switches unreadable (%s)", type(exc).__name__)
+    return {"history": None, "tools": None, "source": "unreadable"}
 
 
 def vault_facts_safe(home: Path) -> dict[str, Any]:

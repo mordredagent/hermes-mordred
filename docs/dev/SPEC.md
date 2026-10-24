@@ -902,8 +902,8 @@ databases   status | encrypt | decrypt
 telegram    setup | doctor | login | sync | status | logout | venice |
             local-llm | migrate-tee | migrate-store
 mail        import | status | setup | fetch | forget
-activity    status | use | pair-operator | peers | correct | backup |
-            restore | retention
+activity    status | use | tools | pair-operator | peers | correct |
+            backup | restore | retention
 uninstall
 ```
 
@@ -3784,7 +3784,10 @@ the raw retention default is 365 days.
   Hermes's use of the history (`hermes use: on|off`, JSON keys
   `history_enabled` for the switch, `history_in_use` for the switch, the
   feature and valid exclusions together, and `config_warnings` naming invalid
-  keys), the protection gate result, the store schema version,
+  keys), the lookup tools (`lookups: on|off` with the
+  `hermes-mordred activity tools off` / `on` hint, JSON keys
+  `history_tools_enabled` for the switch and `history_tools_in_use` for it
+  together with `history_in_use`), the protection gate result, the store schema version,
   generation and row counts for `activity_events` and `activity_episodes`, and
   the activity peers. It never prints content.
 
@@ -4042,6 +4045,23 @@ per-process state.
   anchor is refused; the lock is the policy writer's in `<home>/mordred`) and
   `activity status` shows it. The switch does not affect collection: with
   `collection_enabled` on, batches are still received and stored.
+- **Lookup-tools switch.** `history_tools_enabled` (default on) removes only
+  the two lookup tools and keeps the automatic blocks (the navigation block
+  and the turn-start context): `ActivityConfig.history_tools_active` is
+  `history_active` and `history_tools_enabled`. A call to a lookup tool puts
+  the chat into reader mode (§"Reader mode (requirement 7)": it can only read,
+  web use asks first, and writes, commands and sends are refused until a new
+  chat); the automatic blocks never do, so with the tools off a chat can use
+  the history hints without entering reader mode.
+  `hermes-mordred activity tools on|off` sets it with the same writer as
+  `activity use` (`activity_cli.set_history_switch`, restricted to
+  `history_enabled` and `history_tools_enabled`), and so does the Desktop
+  page's Browser history card (§"Browser history switches (2026-10-24)"). Like
+  the master switch it applies from the next turn without a restart; Hermes
+  fixes a chat's tool list when the chat starts, so a chat opened before
+  `off` may still list the tools (a call there answers
+  `history_tools_disabled`, but the pre-tool hook still records reader mode),
+  and the CLI says to start a new chat.
 - **Store access** (`_history_access.reader`, on every call, nothing
   cached): `_gate.check_protection`, a plaintext check of the file, the keyed
   opener (`_gate._keyed_opener` refuses an unkeyed connection) and a read-only
@@ -4146,8 +4166,8 @@ per-process state.
   (`history_session_budget_chars`) and shown `(episode id, revision)` pairs:
   an episode is not injected twice in a session until it changes, a host with
   nothing new gets no block, and after the budget only the tools answer.
-- **Lookup tools** (toolset `mordred_activity`, `check_fn`: the feature and
-  the master switch on and the gate passing). `mordred_browser_history(query,
+- **Lookup tools** (toolset `mordred_activity`, `check_fn`: the feature,
+  the master switch and `history_tools_enabled` on and the gate passing). `mordred_browser_history(query,
   site, since, until, limit ≤ 10)` returns episodes (id, sites, start and last
   time, task, outcome, steps, routes, corrections, titles) and,
   with `site`, a 600-character excerpt of the newest page text on that host;
@@ -4167,7 +4187,7 @@ per-process state.
   note, one line of JSON in which any copy of the delimiter is defanged to
   `untrusted-tool-result`, and the closing delimiter. Refusals are short
   statuses: `invalid_request` with the `field`, `not_found`, `unavailable`
-  with `feature_disabled`, `history_disabled`, `excluded_sites_invalid`,
+  with `feature_disabled`, `history_disabled`, `history_tools_disabled`, `excluded_sites_invalid`,
   `config_unavailable`, `result_too_large` or a gate/store code. Episodes a
   tool returns count as shown to the session; the tools are not limited by
   the injection budget.
@@ -4204,6 +4224,7 @@ ignored.
 | `retention_raw_days` | 365 | Raw events older than this are deleted; `0` keeps everything forever |
 | `excluded_sites` | empty | Hosts (and their subdomains; entries normalized to bare hosts) whose events refuse the batch as `source_excluded` and are never read back for Hermes (any host an episode's events name); no site is excluded by default; an invalid value keeps the entries that name a host, refuses every batch as `excluded_sites_invalid` and switches Hermes's use of the history off |
 | `history_enabled` | `true` | Master switch for Hermes's use of the history (needs `enabled`); `activity use on\|off` sets it |
+| `history_tools_enabled` | `true` | Offer the two lookup tools (needs `history_enabled`); off keeps the automatic blocks, so a chat can use the history hints without entering reader mode; `activity tools on\|off` sets it |
 | `history_on_navigate` | `true` | Navigation block in browser results |
 | `history_turn_context` | `true` | Turn-start context |
 | `history_capture_hermes` | `true` | Parsed; no effect until Hermes's own browser calls are recorded (phase B2) |
@@ -5270,7 +5291,7 @@ mode, egress rules, what the Hermes tools return, and any new bundler or framewo
   Mac** (1.1 Secure Enclave helper, 1.2 Encrypt Hermes memory and secrets, 1.3
   Encrypt Hermes databases), **2 Connect** (2.1 Hermes chat model, 2.2 Question
   model, 2.3 Telegram, 2.4 Import Telegram messages, 2.5 Mail over IMAP), **3 Ask
-  Hermes** (copy only), **4 Maintenance** (update, repair, tool calls, uninstall). `RepairPanel`
+  Hermes** (copy only), **4 Maintenance** (update, repair, tool calls, browser history, uninstall). `RepairPanel`
   keeps the top place and, when shown, nothing else renders.
 - **Overview card.** Four `StatusRow({dot, label, detail, target})` rows (Hermes
   chat model, Protection, Telegram, Mail). The dot is `done`, `partial`, `not
@@ -5803,6 +5824,52 @@ moved to a child process.
 - **Restart.** Hermes reads `tools.tool_search` when it starts: every change takes
   effect after a restart of Hermes or Hermes Desktop, and both the CLI and the page say
   so.
+
+### Browser history switches (2026-10-24)
+
+The two switches of §"History for Hermes" from the Desktop page: `history_enabled`
+(Hermes uses the browser history at all) and `history_tools_enabled` (the two lookup
+tools; off keeps the automatic blocks, so a chat can use the history hints without
+entering reader mode). Routes in `desktop/_maintenance_routes.py`, seams
+`_seams.activity_history` (`ActivityConfig.load(home, strict=True)`) and
+`_seams.set_history_switch` (`activity_cli.set_history_switch`).
+
+- **Never silent.** The page changes a switch only on an explicit button press; the
+  CLI equivalents are `activity use on|off` and `activity tools on|off`.
+- **API.** `GET /activity/history` answers `{"ok": true, "history": bool, "tools":
+  bool}`, read through the activity config loader only: it never opens the store, runs
+  the protection gate or prompts, and creates no file; a config.yaml that cannot be read
+  or parsed is `config_unreadable` (an absent one is the defaults). `POST
+  /activity/history` reads its body by hand (`read_object`); the body MUST be exactly
+  `{"history": bool}` or `{"tools": bool}` (one key, a JSON boolean, nothing else),
+  otherwise `invalid_body`. The write is the CLI's round-trip writer under the policy
+  write lock (one key changed, every other byte kept; a `plugins` or `mordred_activity`
+  value that is not a mapping or is shared through a YAML anchor is refused) in a worker
+  thread; a refused or failed write is `config_write_failed` (its type name only is
+  logged). Success answers the state read back, `{"ok": true, "history": bool, "tools":
+  bool, "restart_required": false}`: the activity hooks and tools re-read configuration
+  every turn or call. Closed codes: `config_unreadable`, `config_write_failed`.
+- **Status field.** `GET /status?client_version=4` carries `activity: {"history": bool
+  | null, "tools": bool | null, "source": "config" | "unreadable"}` on every platform
+  (`_status_v4.activity_safe`). It never fails the status: an unreadable config is
+  `{"history": null, "tools": null, "source": "unreadable"}`. Versions 1 to 3 do not
+  carry it.
+- **Page.** The Maintenance group shows a "Browser history" card (heading
+  `mordred-history`) right after Tool calls: "Hermes uses the browser history: on|off"
+  with "Turn history off|on", and "Lookup tools: on|off" with "Turn lookup tools
+  off|on" (disabled, with "Turn on the browser history first", while the history is
+  off). The copy says the automatic hints never restrict a chat; the lookup tools let
+  the model search the stored history, and a chat that used one is in reader mode (it
+  can only read, web use asks first) until a new chat; both switches act only while
+  `plugins.mordred_activity.enabled` is on and never stop recording; changes apply from
+  the next turn, and a chat keeps the lookup tools it started with. The state shown is
+  `status.activity` only, never a request's answer; a press sends one key and reads the
+  status again (buttons disabled under "Saving…"), then shows "Saved. Applies from the
+  next turn."; a refusal is a `StepFailure` alert with the card's own sentences
+  (`MESSAGES.history_config_unreadable`, `history_config_write_failed`). Null switches
+  show the unreadable sentence and no buttons; a status without `activity` shows
+  "Update Mordred to use this". The card is on the grouped page (macOS and Linux); the
+  Windows page is unchanged.
 
 ## Imported-message provenance evaluation (2026-10-22)
 

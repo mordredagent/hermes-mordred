@@ -5,11 +5,13 @@ injected automatically ("continue the monthly report", "what was that page
 yesterday?"). They take words, an optional host and period, or an episode id;
 nothing accepts SQL, a path or a switch to another profile.
 
-Availability (``check_fn``) is decided offline at session setup: the feature
-and the master switch ``history_enabled`` are on and the protection gate
-passes. Every call re-reads configuration (cached by file modification time)
-and re-runs the gate, so switching the history off or a gate failure refuses
-the next call with a short content-free status.
+Availability (``check_fn``) is decided offline at session setup: the feature,
+the master switch ``history_enabled`` and the tools switch
+``history_tools_enabled`` are on and the protection gate passes. Every call
+re-reads configuration (cached by file modification time) and re-runs the
+gate, so switching the history or the tools off, or a gate failure, refuses
+the next call with a short content-free status. ``history_tools_enabled: false``
+removes only these tools; the automatic blocks (:mod:`.hooks_history`) stay.
 
 Hermes 0.19.0 wraps only ``browser_*`` / ``mcp_*`` / web tool results as
 untrusted data, not these tools'; every successful result is therefore framed
@@ -143,13 +145,13 @@ def _local(value: float) -> str:
 
 
 def tools_available() -> bool:
-    """check_fn (offline): the feature and the master switch are on and the protection gate passes."""
+    """check_fn (offline): the feature, the master switch and the tools switch are on and the gate passes."""
     try:
         from . import _history_access as access
         from ._gate import check_protection
 
         home = access.home()
-        return access.config(home).history_active and check_protection(home) is None
+        return access.config(home).history_tools_active and check_protection(home) is None
     except Exception:
         return False
 
@@ -375,6 +377,8 @@ def _call(session_id: Any, task_id: Any, run: Callable[[ActivityStore, ActivityC
         return _status("unavailable", reason="feature_disabled")
     if not config.history_enabled:
         return _status("unavailable", reason="history_disabled")
+    if not config.history_tools_enabled:
+        return _status("unavailable", reason="history_tools_disabled")
     if not config.history_active:
         return _status("unavailable", reason="excluded_sites_invalid")
     try:

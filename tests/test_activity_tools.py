@@ -92,7 +92,13 @@ def test_invalid_episode_ids_are_refused(seeded, episode_id) -> None:
 
 @pytest.mark.parametrize(
     ("section", "reason"),
-    [({}, "feature_disabled"), ({"enabled": True, "history_enabled": False}, "history_disabled")],
+    [
+        ({}, "feature_disabled"),
+        ({"enabled": True, "history_enabled": False}, "history_disabled"),
+        ({"enabled": True, "history_tools_enabled": False}, "history_tools_disabled"),
+        # The master switch is named first when both are off.
+        ({"enabled": True, "history_enabled": False, "history_tools_enabled": False}, "history_disabled"),
+    ],
 )
 def test_switches_refuse_both_tools(seeded, section, reason) -> None:
     home, _store = seeded
@@ -142,6 +148,15 @@ def test_check_fn_follows_switches_and_gate(seeded, monkeypatch) -> None:
     assert tools.tools_available() is False
     monkeypatch.setattr(_history_access, "config", lambda _h: 1 / 0)
     assert tools.tools_available() is False
+
+
+def test_check_fn_is_false_while_only_the_tools_are_off(seeded, monkeypatch) -> None:
+    home, _store = seeded
+    monkeypatch.setattr("mordred_hermes.activity._gate.check_protection", lambda _h: None)
+    write_config(home, {"enabled": True, "history_tools_enabled": False})
+    assert tools.tools_available() is False
+    write_config(home, {"enabled": True, "history_tools_enabled": True})
+    assert tools.tools_available() is True
 
 
 # --- results ----------------------------------------------------------------------------------------------

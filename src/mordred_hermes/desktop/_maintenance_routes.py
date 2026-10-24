@@ -1,11 +1,16 @@
-"""Package updates, Hermes's tool calls and uninstall from the Desktop page (a sub-router of ``api.router``).
+"""Package updates, Hermes's tool calls, the browser history and uninstall from the Desktop page.
+
+A sub-router of ``api.router``.
 
 ``/update/check`` and ``/update/apply`` drive ``hermes-mordred update`` (never a
 downgrade; refusals before any job starts); ``/uninstall/plan`` and
 ``/uninstall`` drive ``hermes-mordred uninstall`` with the page's answers. The
 two jobs exclude each other. ``/tools/direct`` reads and, on an explicit
 request only, changes Hermes's ``tools.tool_search.enabled`` (the Tool calls
-card; ``hermes-mordred direct-tools``) through :mod:`._seams`. Shared helpers
+card; ``hermes-mordred direct-tools``) through :mod:`._seams`.
+``/activity/history`` reads and, on an explicit request only, changes the two
+browser-history switches of ``plugins.mordred_activity`` (the Browser history
+card; ``hermes-mordred activity use`` / ``activity tools``). Shared helpers
 (``_home``, ``_error``, the job registry) are read from :mod:`.api` at call
 time.
 """
@@ -21,7 +26,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from . import _seams
+from . import _seams, _status_v4
 from ._body import invalid_body, read_object
 from ._capture import captured_output
 from ._jobs import JobBusy
@@ -291,6 +296,66 @@ async def tools_direct_set(request: Request) -> Any:
             code = "config_write_failed"
         return _api()._error(code)
     return {"ok": True, "direct": direct, "restart_required": True}
+
+
+# -- the browser-history switches ---------------------------------------------------------
+
+#: The page's name of each ``plugins.mordred_activity`` switch the card may change.
+HISTORY_SWITCHES = {"history": "history_enabled", "tools": "history_tools_enabled"}
+#: The closed codes of ``/activity/history`` (an unexpected write failure is ``config_write_failed``).
+HISTORY_ERROR_CODES = frozenset({"config_unreadable", "config_write_failed"})
+
+
+async def _history_view(home: Path) -> dict[str, bool] | None:
+    """``{"history": bool, "tools": bool}`` (:func:`._status_v4.activity_safe`), or ``None`` when unreadable."""
+    view = await asyncio.to_thread(_status_v4.activity_safe, home)
+    if view.get("source") != "config":
+        return None
+    return {"history": view["history"], "tools": view["tools"]}
+
+
+@router.get("/activity/history")
+async def activity_history() -> Any:
+    """``{"ok": true, "history": bool, "tools": bool}`` or ``config_unreadable``; read-only.
+
+    ``history`` is ``history_enabled`` (Hermes uses the browser history at all) and ``tools`` is
+    ``history_tools_enabled`` (the two lookup tools). Read through the activity config loader only: it never
+    opens the store, runs the protection gate or prompts.
+    """
+    view = await _history_view(_api()._home())
+    if view is None:
+        return _api()._error("config_unreadable")
+    return {"ok": True, **view}
+
+
+@router.post("/activity/history")
+async def activity_history_set(request: Request) -> Any:
+    """Body ``{"history": true | false}`` or ``{"tools": true | false}``: one key, a JSON boolean, nothing else.
+
+    The CLI's writer (``wizard.activity_cli.set_history_switch``, as ``activity use`` / ``activity tools``)
+    changes that one key of config.yaml, round-trip, under the policy write lock. The activity hooks and
+    the lookup tools re-read configuration on every turn or call (:mod:`..activity.hooks_history`), so no
+    restart is needed: the answer is the new state, ``{"ok": true, "history": bool, "tools": bool,
+    "restart_required": false}``. A refused or failed write is ``config_write_failed``.
+    """
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
+    if len(body) != 1:
+        return invalid_body()
+    [(name, value)] = body.items()
+    if name not in HISTORY_SWITCHES or not isinstance(value, bool):
+        return invalid_body()
+    home = _api()._home()
+    try:
+        await asyncio.to_thread(_seams.set_history_switch, home, HISTORY_SWITCHES[name], value)
+    except Exception as exc:  # a parse error quotes config lines: the type name only
+        _log.warning("mordred desktop browser-history switch change failed (%s)", type(exc).__name__)
+        return _api()._error("config_write_failed")
+    view = await _history_view(home)
+    if view is None:
+        return _api()._error("config_unreadable")
+    return {"ok": True, **view, "restart_required": False}
 
 
 # -- uninstall ----------------------------------------------------------------------------

@@ -387,6 +387,9 @@
     "tests/extension/_desktop_support.py": [
       "extension"
     ],
+    "tests/extension/test_desktop_activity.py": [
+      "extension"
+    ],
     "tests/extension/test_desktop_api.py": [
       "extension"
     ],

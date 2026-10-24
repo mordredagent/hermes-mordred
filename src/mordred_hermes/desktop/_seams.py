@@ -12,7 +12,9 @@ test replaces one attribute here and every route sees it.
   :func:`imap_status`, :func:`run_fetch` and :func:`fetch_env`. The mail
   library is imported only when first used. :func:`tools_mode` and
   :func:`set_direct_tools` reach ``wizard.direct_tools`` (Hermes's
-  ``tools.tool_search.enabled``).
+  ``tools.tool_search.enabled``); :func:`activity_history` and
+  :func:`set_history_switch` the two browser-history switches of
+  ``plugins.mordred_activity`` (``activity.config``, ``wizard.activity_cli``).
 - Registries: ``MAIL_FLOWS`` (the process's ``MailSetupFlows``) and
   ``VAULT_FLOWS`` (:class:`._vault.VaultFlows`).
 - ``CEREMONY_LOCK`` / :func:`run_ceremony`: one vault or memory ceremony at a
@@ -134,6 +136,27 @@ def tools_mode(home: Path) -> dict[str, Any]:
 def set_direct_tools(home: Path, enabled: bool) -> None:
     """``wizard.direct_tools.set_direct``: raises ``DirectToolsError`` with a closed code."""
     library("..wizard.direct_tools", "set_direct")(home, enabled)
+
+
+# -- the browser-history switches (``plugins.mordred_activity``) --------------------------------
+
+
+def activity_history(home: Path) -> dict[str, bool]:
+    """``{"history": history_enabled, "tools": history_tools_enabled}`` through the activity config loader.
+
+    Reads ``<home>/config.yaml`` only: never the activity store, the protection gate or a prompt, and it
+    creates no file. A file that cannot be read or parsed raises (``ActivityConfig.load(strict=True)``).
+    """
+    from ..activity.config import ActivityConfig
+
+    config = ActivityConfig.load(home, strict=True)
+    return {"history": config.history_enabled, "tools": config.history_tools_enabled}
+
+
+def set_history_switch(home: Path, key: str, value: bool) -> None:
+    """``wizard.activity_cli.set_history_switch`` on ``<home>/config.yaml``: ``history_enabled`` or
+    ``history_tools_enabled`` only, round-trip YAML under the policy write lock (raises when refused)."""
+    library("..wizard.activity_cli", "set_history_switch")(home / "config.yaml", key, value)
 
 
 # -- vault and databases --------------------------------------------------------------------------

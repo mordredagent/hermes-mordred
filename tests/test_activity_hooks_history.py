@@ -208,6 +208,17 @@ def test_switches_gate_the_turn_context(seeded, section) -> None:
     assert _turn("open the invoices page on example.com") is None
 
 
+def test_turning_only_the_lookup_tools_off_keeps_the_automatic_blocks(seeded) -> None:
+    home, _store = seeded
+    write_config(home, {**ENABLED, "history_tools_enabled": False})
+
+    assert _navigate() is not None
+    assert _turn("open the invoices page", session="s2") is not None
+    refused = {"status": "unavailable", "reason": "history_tools_disabled"}
+    assert json.loads(browser_history({"query": "invoices"}, session_id="s3")) == refused
+    assert json.loads(browser_history_episode({"episode_id": "ep-1"}, session_id="s3")) == refused
+
+
 def test_master_switch_applies_on_the_next_turn_without_restart(seeded) -> None:
     home, _store = seeded
     write_config(home, {**ENABLED, "history_enabled": False})

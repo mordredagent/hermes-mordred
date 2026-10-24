@@ -766,7 +766,8 @@ console.log(JSON.stringify(paths))
 
 @pytest.mark.parametrize("platform", ["darwin", "linux"])
 def test_backend_answers_version_4_like_version_3(monkeypatch, platform, tmp_path):
-    """Version 4 is version 3 plus the six page keys (vault, databases, imports, mail, telegram_archive, tools)."""
+    """Version 4 is version 3 plus the seven page keys (vault, databases, imports, mail, telegram_archive, tools,
+    activity)."""
     pytest.importorskip("fastapi")
     from mordred_hermes.desktop import api
     from mordred_hermes.wizard import telegram_setup_cli
@@ -783,7 +784,7 @@ def test_backend_answers_version_4_like_version_3(monkeypatch, platform, tmp_pat
     monkeypatch.setattr(api, "_hermes_venice_key", lambda: None)
     v3 = asyncio.run(api.status(client_version=3))
     v4 = asyncio.run(api.status(client_version=4))
-    page_keys = {"vault", "databases", "imports", "mail", "telegram_archive", "tools"}
+    page_keys = {"vault", "databases", "imports", "mail", "telegram_archive", "tools", "activity"}
     assert set(v4) - set(v3) == page_keys
     assert {key: value for key, value in v4.items() if key not in page_keys} == v3
 
@@ -942,11 +943,11 @@ BADGE_TEXT = {
 def test_rendered_page_shows_each_step_in_its_computed_state(name):
     status, sync, expected = STATE_CASES[name]
     rendered = headings(status, sync)
-    # Step headings only: the Tool calls card's heading (`mordred-tools`) is not a numbered step.
+    # Step headings only: the Tool calls and Browser history cards' headings are not numbered steps.
     steps = {key: value for key, value in rendered["steps"].items() if key.startswith("mordred-step-")}
     shown = {key.removeprefix("mordred-step-"): value for key, value in steps.items()}
     assert set(shown) == {key for key, value in expected.items() if value is not None}
-    assert set(rendered["steps"]) - set(steps) == {"mordred-tools"}
+    assert set(rendered["steps"]) - set(steps) == {"mordred-tools", "mordred-history"}
     for key, value in expected.items():
         if value is None:
             continue
@@ -3587,3 +3588,150 @@ def test_the_snippet_is_the_one_the_cli_prints():
 
     page = render_page("console.log(JSON.stringify(DIRECT_TOOLS_SNIPPET))")
     assert page + "\n" == SNIPPET
+
+
+# -- the browser-history switches: the Browser history card under Maintenance ----------------------
+
+HISTORY_ON = {"history": True, "tools": True, "source": "config"}
+TOOLS_ONLY_OFF = {"history": True, "tools": False, "source": "config"}
+HISTORY_OFF = {"history": False, "tools": True, "source": "config"}
+HISTORY_UNREADABLE = {"history": None, "tools": None, "source": "unreadable"}
+# The closed codes of `/activity/history` (`desktop._maintenance_routes.HISTORY_ERROR_CODES`).
+HISTORY_CODES = ("config_unreadable", "config_write_failed")
+
+
+def history_card(
+    activity: dict[str, Any] | None, answers: list[Any], script: str = "", after: dict[str, Any] | None = None
+) -> Any:
+    """The card on `activity`; its refresh makes the next render read `after` (the status read after a save)."""
+    card = (
+        f"(globalThis.statusActivity === undefined ? (globalThis.statusActivity = {json.dumps(activity)}) : 0, "
+        f"BrowserHistoryCard({{activity: globalThis.statusActivity, refresh: async () => {{refresh(); "
+        f"globalThis.statusActivity = {json.dumps(after if after is not None else activity)}}}}}))"
+    )
+    script += "out.buttons = {}\n"
+    script += (
+        "for (const n of ['Turn history off', 'Turn history on', 'Turn lookup tools off', 'Turn lookup tools on'])"
+    )
+    script += " { const b = button(tree, n); if (b) out.buttons[n] = Boolean(b.props.disabled) }\n"
+    return component(card, answers, script)
+
+
+def test_the_history_card_follows_tool_calls_in_maintenance():
+    result = render_page(
+        """
+const tree = PageBody({status: STATUS, health: null, refresh: () => {}})
+const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
+  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
+  : text(node.props && node.props.children)
+const group = find(tree, n => n.type === 'section' && n.props['aria-labelledby'] === 'mordred-group-maintenance')
+const order = [].concat(group.props.children).filter(Boolean).map(n => n.props && n.props['aria-labelledby'] || n.type)
+const card = find(group, n => n.type === 'section' && n.props['aria-labelledby'] === 'mordred-history')
+const heading = find(card, n => n.type === 'h3')
+console.log(JSON.stringify({order, heading: heading.props, card: text(card)}))
+""".replace("STATUS", json.dumps(mac(**v4(), tools=TOOLS_OFF, activity=HISTORY_ON)))
+    )
+    assert result["order"][2:4] == ["mordred-tools", "mordred-history"]  # after Tool calls, before uninstall
+    assert result["heading"]["id"] == "mordred-history" and result["heading"]["tabIndex"] == -1
+    assert result["heading"]["children"] == "Browser history"
+    card = result["card"]
+    for phrase in (
+        "Hermes uses the browser history: on",
+        "Lookup tools: on",
+        "These automatic hints never restrict a chat.",
+        "let the model search the stored history",
+        "A chat that used one is in reader mode until you start a new chat: it can only read, and web use asks first.",
+        "Turn them off to keep only the automatic hints.",
+        "Applies from the next turn",
+        "hermes-mordred activity tools on|off",
+    ):
+        assert phrase in card, phrase
+    assert not re.search(r"[぀-ヿ一-鿿가-힯]", card)
+
+
+def test_the_history_card_is_on_the_linux_page_too():
+    assert "Lookup tools: off" in page_text(linux(tools=TOOLS_OFF, activity=TOOLS_ONLY_OFF))
+
+
+@pytest.mark.parametrize(
+    "activity,texts,buttons",
+    [
+        (HISTORY_ON, (": on", ": on"), {"Turn history off": False, "Turn lookup tools off": False}),
+        (TOOLS_ONLY_OFF, (": on", ": off"), {"Turn history off": False, "Turn lookup tools on": False}),
+        # History off: the tools button is disabled, with the reason.
+        (HISTORY_OFF, (": off", ": on"), {"Turn history on": False, "Turn lookup tools off": True}),
+    ],
+)
+def test_the_switches_show_the_status(activity, texts, buttons):
+    result = history_card(activity, [])
+    assert f"Hermes uses the browser history{texts[0]}" in result["text"]
+    assert f"Lookup tools{texts[1]}" in result["text"]
+    assert result["out"]["buttons"] == buttons
+    assert ("Turn on the browser history first" in result["text"]) is (activity is HISTORY_OFF)
+    assert result["requests"] == [] and "Saved" not in result["text"]
+
+
+@pytest.mark.parametrize(
+    "before,press,body,after",
+    [
+        (HISTORY_ON, "Turn lookup tools off", {"tools": False}, TOOLS_ONLY_OFF),
+        (TOOLS_ONLY_OFF, "Turn lookup tools on", {"tools": True}, HISTORY_ON),
+        (HISTORY_ON, "Turn history off", {"history": False}, HISTORY_OFF),
+        (HISTORY_OFF, "Turn history on", {"history": True}, HISTORY_ON),
+    ],
+)
+def test_a_button_posts_one_key_then_reads_the_status_again(before, press, body, after):
+    answer = {"ok": True, "history": after["history"], "tools": after["tools"], "restart_required": False}
+    result = history_card(before, [answer], f"await press(tree, {json.dumps(press)}); tree = view()\n", after=after)
+    assert result["requests"] == [["/activity/history", body]]
+    assert result["refreshes"] == 1
+    assert "Saved. Applies from the next turn." in result["text"]
+    assert "Restart Hermes Desktop" not in result["buttons"] and result["notifications"] == []
+    assert f"Lookup tools: {'on' if after['tools'] else 'off'}" in result["text"]
+
+
+def test_the_switches_follow_the_status_read_after_a_save():
+    """The status wins over the request's answer (another writer, the CLI)."""
+    answer = {"ok": True, "history": True, "tools": False, "restart_required": False}
+    result = history_card(HISTORY_ON, [answer], "await press(tree, 'Turn lookup tools off'); tree = view()\n")
+    assert "Lookup tools: on" in result["text"] and "Saved." in result["text"]
+
+
+@pytest.mark.parametrize("code", HISTORY_CODES)
+def test_a_refused_change_is_an_alert_with_the_card_sentence(code):
+    result = history_card(
+        HISTORY_ON, [{"ok": False, "error": code}], "await press(tree, 'Turn lookup tools off')\ntree = view()\n"
+    )
+    messages = block("MESSAGES")
+    sentence = re.search(rf"^  history_{code}: '([^']+)',$", messages, re.M).group(1)
+    tool_calls = re.search(rf"^  {code}: '([^']+)',$", messages, re.M).group(1)
+    assert sentence in result["text"] and tool_calls not in result["text"]
+    assert '"role": "alert"' in json.dumps(result["tree"])
+    assert "Saved" not in result["text"] and result["refreshes"] == 1
+
+
+def test_an_answer_without_the_two_booleans_is_invalid_response():
+    result = history_card(
+        HISTORY_ON, [{"ok": True, "tools": False}], "await press(tree, 'Turn lookup tools off')\ntree = view()\n"
+    )
+    assert "answer this page does not understand" in result["text"] and "Saved" not in result["text"]
+
+
+@pytest.mark.parametrize(
+    "activity,phrase",
+    [(HISTORY_UNREADABLE, "config.yaml could not be read"), (None, "Update Mordred to use this")],
+    ids=["unreadable", "older-mordred"],
+)
+def test_without_a_known_state_there_are_no_buttons(activity, phrase):
+    result = history_card(activity, [])
+    assert result["out"]["buttons"] == {} and phrase in result["text"]
+    assert "reader mode" in result["text"]  # the explanation stays
+
+
+def test_the_card_codes_have_their_own_sentences():
+    from mordred_hermes.desktop._maintenance_routes import HISTORY_ERROR_CODES
+
+    assert set(HISTORY_CODES) == set(HISTORY_ERROR_CODES)
+    messages = block("MESSAGES")
+    for code in HISTORY_CODES:
+        assert re.search(rf"^  history_{code}: '", messages, re.M), code

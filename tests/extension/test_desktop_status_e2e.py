@@ -169,6 +169,8 @@ def test_a_cold_status_creates_nothing_in_a_fresh_home(cold_home: Path, trips: _
     assert trips.calls == []
     assert status["ok"] is True and old["ok"] is True
     assert status["imports"]["code"] == "not_armed" and status["mail"] == {"configured": False}
+    # The browser-history switches come from config.yaml alone: no activity gate, no store, no file.
+    assert status["activity"] == {"history": True, "tools": True, "source": "config"}
     assert _tree(cold_home) == []
 
 
