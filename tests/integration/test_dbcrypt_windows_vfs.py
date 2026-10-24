@@ -26,6 +26,63 @@ pytestmark = [
 ]
 
 
+# Test-only fresh-child bootstrap. Parent mode comes from its actual owning module
+# and registration; the wheel gate separately proves distribution/device eligibility.
+_CHECKED_VFS_CHILD_BOOTSTRAP = r"""
+import os, sys
+from pathlib import Path
+if len(sys.argv) != 4 or sys.argv[2] not in ('source', 'packaged'):
+    raise RuntimeError('invalid checked VFS child mode')
+mode = sys.argv[2]
+if mode == 'packaged' and 'MORDRED_DBCRYPT_CHECKED_LIBRARY' in os.environ:
+    raise RuntimeError('packaged checked VFS child forbids DLL override')
+if mode == 'source' and not os.environ.get('MORDRED_DBCRYPT_CHECKED_LIBRARY'):
+    raise RuntimeError('source checked VFS child requires its explicit DLL')
+expected_native = Path(sys.argv[3]).resolve(strict=True)
+assert expected_native.is_file() and Path(sys.argv[3]).is_absolute()
+if mode == 'source':
+    override = Path(os.environ['MORDRED_DBCRYPT_CHECKED_LIBRARY'])
+    if not override.is_absolute() or override.resolve(strict=True) != expected_native:
+        raise RuntimeError('source checked VFS child DLL differs from parent')
+from mordred_hermes.dbcrypt import _windows_vfs as vfs
+if mode == 'packaged':
+    import base64, hashlib
+    from importlib.metadata import distribution
+    assert vfs.driver_distribution_qualified(), 'packaged child requires its SQLCipher driver pair'
+    packaged = vfs.packaged_library_path()
+    assert packaged is not None and packaged.resolve(strict=True) == expected_native
+    installed = distribution('hermes-mordred')
+    entries = [entry for entry in installed.files or ()
+               if str(entry) == 'mordred_hermes/_native/dbcrypt-vfs/mordred_dbcrypt_vfs.dll']
+    assert len(entries) == 1 and Path(entries[0].locate()).resolve(strict=True) == expected_native
+    assert entries[0].hash is not None and entries[0].hash.mode == 'sha256'
+    observed = base64.urlsafe_b64encode(hashlib.sha256(expected_native.read_bytes()).digest()).rstrip(b'=').decode()
+    assert entries[0].hash.value == observed, 'packaged child DLL differs from its distribution RECORD'
+    # Inherit only this test's explicit packaged-parent eligibility choice.
+    # The real production resolver, loader, driver and API-table checks stay intact.
+    vfs.NATIVE_QUALIFIED = True
+else:
+    assert vfs.NATIVE_QUALIFIED is False, 'source child requires the explicit diagnostic path'
+register_checked_vfs = vfs.register_checked_vfs
+"""
+
+
+def checked_vfs_child_args(registration: Any) -> tuple[str, str]:
+    from mordred_hermes.dbcrypt import _windows_vfs
+
+    native = Path(registration._native._name).resolve(strict=True)
+    if _windows_vfs.NATIVE_QUALIFIED is True:
+        assert "MORDRED_DBCRYPT_CHECKED_LIBRARY" not in os.environ
+        packaged = _windows_vfs.packaged_library_path()
+        assert packaged is not None and packaged.resolve(strict=True) == native
+        return "packaged", str(native)
+    if _windows_vfs.NATIVE_QUALIFIED is False:
+        override = os.environ.get("MORDRED_DBCRYPT_CHECKED_LIBRARY")
+        assert override and Path(override).is_absolute() and Path(override).resolve(strict=True) == native
+        return "source", str(native)
+    raise RuntimeError("invalid checked VFS parent mode")
+
+
 @pytest.fixture
 def fixture() -> Iterator[tuple[Any, Any, Path]]:
     import sqlcipher3.dbapi2 as driver
@@ -203,13 +260,15 @@ def test_same_process_and_multiprocess_writer_exclusion(fixture: tuple[Any, Any,
             first.execute("INSERT INTO data VALUES ('uncommitted')")
             with pytest.raises(driver.OperationalError, match="locked"):
                 second.execute("BEGIN IMMEDIATE")
-            child = r"""
+            child = (
+                _CHECKED_VFS_CHILD_BOOTSTRAP
+                + r"""
 import sys
 from pathlib import Path
 import sqlcipher3.dbapi2 as driver
-from mordred_hermes.dbcrypt._windows_vfs import register_checked_vfs
 root = Path(sys.argv[1])
 r = register_checked_vfs(driver, root=root)
+assert Path(r._native._name).resolve(strict=True) == expected_native
 c = driver.connect('file:' + (root / 'synthetic.db').as_posix() + '?vfs=' + r.name, uri=True, timeout=0)
 c.execute("PRAGMA key='synthetic acceptance fixture only'")
 try:
@@ -221,8 +280,12 @@ else:
 c.close()
 r.close()
 """
+            )
             result = subprocess.run(
-                [sys.executable, "-c", child, str(root)], capture_output=True, text=True, timeout=30
+                [sys.executable, "-c", child, str(root), *checked_vfs_child_args(_registration)],
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
             assert result.returncode == 0, (result.stdout, result.stderr)
             first.rollback()
@@ -537,13 +600,15 @@ def test_crash_releases_locks_and_recovers_checked_files(fixture: tuple[Any, Any
     connection.commit()
     connection.execute(f"PRAGMA journal_mode={mode}")
     connection.close()
-    child = r"""
+    child = (
+        _CHECKED_VFS_CHILD_BOOTSTRAP
+        + r"""
 import os, sys
 from pathlib import Path
 import sqlcipher3.dbapi2 as driver
-from mordred_hermes.dbcrypt._windows_vfs import register_checked_vfs
 root = Path(sys.argv[1])
 r = register_checked_vfs(driver, root=root)
+assert Path(r._native._name).resolve(strict=True) == expected_native
 c = driver.connect('file:' + (root / 'synthetic.db').as_posix() + '?vfs=' + r.name, uri=True)
 c.execute("PRAGMA key='synthetic acceptance fixture only'")
 c.execute('PRAGMA cache_size=4')
@@ -551,7 +616,13 @@ c.execute('BEGIN IMMEDIATE')
 c.executemany('INSERT INTO data VALUES (?)', [('uncommitted' * 1000,) for _ in range(200)])
 os._exit(23)
 """
-    result = subprocess.run([sys.executable, "-c", child, str(root)], capture_output=True, text=True, timeout=60)
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", child, str(root), *checked_vfs_child_args(_registration)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
     assert result.returncode == 23, (result.stdout, result.stderr)
     connection = connect(driver, root)
     try:
@@ -1013,19 +1084,21 @@ assert b'initialization recovered' not in (root / 'recovered-init.db').read_byte
 
 def test_distinct_sqlite_library_cannot_replace_checked_api(fixture: tuple[Any, Any, Path]) -> None:
     _driver, _registration, root = fixture
-    child = r"""
+    child = (
+        _CHECKED_VFS_CHILD_BOOTSTRAP
+        + r"""
 import os, sqlite3, sys
 from pathlib import Path
 import sqlcipher3.dbapi2 as cipher
-from mordred_hermes.dbcrypt._windows_vfs import register_checked_vfs
 root = Path(sys.argv[1])
 r = register_checked_vfs(cipher, root=root)
+assert Path(r._native._name).resolve(strict=True) == expected_native
 foreign = sqlite3.connect(':memory:')
 assert foreign.execute('PRAGMA cipher_version').fetchone() is None
 foreign.enable_load_extension(True)
 try:
     foreign.execute('SELECT load_extension(?, ?)',
-                    (os.environ['MORDRED_DBCRYPT_CHECKED_LIBRARY'], 'sqlite3_mordredvfs_init'))
+                    (r._native._name, 'sqlite3_mordredvfs_init'))
 except sqlite3.DatabaseError as error:
     assert 'initialization' in str(error).lower(), str(error)
 else:
@@ -1048,7 +1121,13 @@ for index in range(2):
     c.close()
 r.close()
 """
-    result = subprocess.run([sys.executable, "-c", child, str(root)], capture_output=True, text=True, timeout=60)
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", child, str(root), *checked_vfs_child_args(_registration)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
     assert result.returncode == 0, (result.stdout, result.stderr)
 
 
@@ -1058,13 +1137,15 @@ def test_wal_reader_in_another_process_blocks_restart_until_release(fixture: tup
 
     driver, _registration, root = fixture
     writer = connect(driver, root)
-    child = r"""
+    child = (
+        _CHECKED_VFS_CHILD_BOOTSTRAP
+        + r"""
 import sys
 from pathlib import Path
 import sqlcipher3.dbapi2 as driver
-from mordred_hermes.dbcrypt._windows_vfs import register_checked_vfs
 root = Path(sys.argv[1])
 r = register_checked_vfs(driver, root=root)
+assert Path(r._native._name).resolve(strict=True) == expected_native
 c = driver.connect('file:' + (root / 'synthetic.db').as_posix() + '?vfs=' + r.name, uri=True, timeout=0)
 c.execute("PRAGMA key='synthetic acceptance fixture only'")
 c.execute('BEGIN')
@@ -1078,6 +1159,7 @@ assert c.execute('PRAGMA integrity_check').fetchone() == ('ok',)
 c.close()
 r.close()
 """
+    )
     process = None
     ready: queue.Queue[str] = queue.Queue()
     waiter = None
@@ -1088,7 +1170,7 @@ r.close()
         writer.execute("INSERT INTO data VALUES ('initial')")
         writer.commit()
         process = subprocess.Popen(
-            [sys.executable, "-c", child, str(root)],
+            [sys.executable, "-c", child, str(root), *checked_vfs_child_args(_registration)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1120,13 +1202,15 @@ r.close()
 
 def test_wal_multiregion_commit_survives_process_crash(fixture: tuple[Any, Any, Path]) -> None:
     driver, _registration, root = fixture
-    child = r"""
+    child = (
+        _CHECKED_VFS_CHILD_BOOTSTRAP
+        + r"""
 import os, sys
 from pathlib import Path
 import sqlcipher3.dbapi2 as driver
-from mordred_hermes.dbcrypt._windows_vfs import register_checked_vfs
 root = Path(sys.argv[1])
 r = register_checked_vfs(driver, root=root)
+assert Path(r._native._name).resolve(strict=True) == expected_native
 c = driver.connect('file:' + (root / 'synthetic.db').as_posix() + '?vfs=' + r.name, uri=True)
 c.execute("PRAGMA key='synthetic acceptance fixture only'")
 c.execute('PRAGMA journal_mode=WAL')
@@ -1137,7 +1221,13 @@ c.commit()
 assert (root / 'synthetic.db-shm').stat().st_size >= 65536
 os._exit(23)
 """
-    result = subprocess.run([sys.executable, "-c", child, str(root)], capture_output=True, text=True, timeout=180)
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", child, str(root), *checked_vfs_child_args(_registration)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
     assert result.returncode == 23, (result.stdout, result.stderr)
     assert (root / "synthetic.db-shm").stat().st_size >= 65536
     assert b"committed crash payload:" not in (root / "synthetic.db-wal").read_bytes()
