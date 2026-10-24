@@ -84,7 +84,14 @@ def test_network_change_adds_integration_and_whole_windows_family():
 
 
 @pytest.mark.parametrize(
-    "path", ["src/mordred_hermes/keyvault/api.py", "tests/new_test.py", ".github/workflows/ci.yml"]
+    "path",
+    [
+        "src/mordred_hermes/keyvault/api.py",
+        "src/mordred_hermes/activity/contracts.py",
+        "src/mordred_hermes/activity/_redaction.py",
+        "tests/new_test.py",
+        ".github/workflows/ci.yml",
+    ],
 )
 def test_sensitive_or_unknown_ready_changes_select_all_final_packs(path):
     result = decide(path=path)

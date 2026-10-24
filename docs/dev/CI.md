@@ -656,6 +656,23 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 
 ## Manual live-device validation log
 
+- **2026-10-24 — Activity redaction extraction: isolated SQLCipher validation.**
+  Source: `refactor/activity-redaction` at `1f7ce6c24`; macOS 27.0.1 arm64,
+  Python 3.13.15, editable package verified against its dedicated worktree.
+  A temporary `HERMES_HOME` and a randomly generated synthetic `hex:` memory
+  key armed the real database shim. The production receiver and
+  `open_store` gate normalized and stored a synthetic event with secrets in
+  its user text, page title, page text and URL parameters; none of the secret
+  values appeared in the normalized event, stored fields or history detail.
+  The stored digest matched both normalization and canonical digest
+  calculation, and replay returned a duplicate. Unkeyed stdlib SQLite could
+  not read the resulting store. The home was deleted after the check; no
+  production profile, credentials or gateway port was used. The complete
+  related automated module batch passed (1,606 cases). A real browser
+  operator/receiver/Hermes session and live model acceptance were not run;
+  this records the SQLCipher receiver/store check only. Hardware-key and VPN
+  code paths are unchanged and were not exercised.
+
 - **2026-10-23 — Browser activity and history (B2 stack) final live re-verification after the privacy fixes: operator, receiver and Hermes.**
   Source: branch `feat/browser-history-b2` (runs at `1312612b1`, `efac92a92`
   and `4a89bb602`, the commit before this entry), hermes-mordred 0.3.0a4,
