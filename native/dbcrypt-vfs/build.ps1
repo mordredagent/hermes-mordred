@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
-    [string]$SqliteIncludeDirectory = $env:MORDRED_SQLITE_INCLUDE_DIR
+    [string]$SqliteIncludeDirectory = $env:MORDRED_SQLITE_INCLUDE_DIR,
+    [ValidateSet('Probe', 'Checked', 'CheckedTest')][string]$Target = 'Probe'
 )
 $ErrorActionPreference = 'Stop'
 if (-not $SqliteIncludeDirectory) { throw 'Provide -SqliteIncludeDirectory with matching SQLite API headers.' }
@@ -25,19 +26,29 @@ if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
 }
 $outputPath = [IO.Path]::GetFullPath($OutputDirectory)
 [IO.Directory]::CreateDirectory($outputPath) | Out-Null
-$target = Join-Path $outputPath 'mordred_dbcrypt_probe.dll'
-if (Test-Path -LiteralPath $target) { throw 'Refusing to replace an existing probe DLL.' }
-$staging = Join-Path $outputPath ('.probe-build-' + [guid]::NewGuid().ToString('N'))
+$libraryName = if ($Target -eq 'CheckedTest') {
+    'mordred_dbcrypt_checked_test.dll'
+} elseif ($Target -eq 'Checked') {
+    'mordred_dbcrypt_checked.dll'
+} else { 'mordred_dbcrypt_probe.dll' }
+$targetPath = Join-Path $outputPath $libraryName
+if (Test-Path -LiteralPath $targetPath) { throw 'Refusing to replace an existing VFS DLL.' }
+$staging = Join-Path $outputPath ('.vfs-build-' + [guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($staging) | Out-Null
-$source = Join-Path $PSScriptRoot 'probe.c'
+$sources = if ($Target -ne 'Probe') {
+    @((Join-Path $PSScriptRoot 'vfs.c'), (Join-Path $PSScriptRoot 'checked_io.c'))
+} else {
+    @((Join-Path $PSScriptRoot 'probe.c'))
+}
 $include = [IO.Path]::GetFullPath($SqliteIncludeDirectory)
 Push-Location $staging
 try {
     # sqlite3ext.h resolves APIs through the caller; no SQLite .lib/.dll linkage.
-    & cl.exe /nologo /O2 /LD /W4 /WX /TC "/I$include" $source '/Femordred_dbcrypt_probe.dll' '/Foprobe.obj' /link /INCREMENTAL:NO
-    if ($LASTEXITCODE -ne 0) { throw 'Diagnostic VFS compilation failed.' }
-    [IO.File]::Move((Join-Path $staging 'mordred_dbcrypt_probe.dll'), $target)
-    Get-FileHash -Algorithm SHA256 -LiteralPath $target
+    $testFlags = if ($Target -eq 'CheckedTest') { @('/DMORDRED_VFS_TESTING') } else { @() }
+    & cl.exe /nologo /O2 /LD /W4 /WX /TC /D_WIN32_WINNT=0x0A00 /D_CRT_SECURE_NO_WARNINGS @testFlags "/I$include" @sources "/Fe$libraryName" /link /INCREMENTAL:NO Advapi32.lib
+    if ($LASTEXITCODE -ne 0) { throw 'VFS compilation failed.' }
+    [IO.File]::Move((Join-Path $staging $libraryName), $targetPath)
+    Get-FileHash -Algorithm SHA256 -LiteralPath $targetPath
 } finally {
     Pop-Location
 }

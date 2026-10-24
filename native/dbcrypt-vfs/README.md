@@ -1,5 +1,59 @@
 # SQLCipher VFS feasibility probe
 
+## Checked VFS implementation candidate (UNVERIFIED)
+
+`vfs.c` and `checked_io.c` are a separate owned-handle implementation candidate,
+not the delegating diagnostic probe below. This candidate has **not passed the
+Windows native/security qualification gate**. `NATIVE_QUALIFIED` remains false;
+no runtime, key custody, database consumer, or platform support is activated.
+
+Build with the same pinned headers described below, using `-Target Checked`.
+`-Target CheckedTest` emits a distinct `_test.dll` with deterministic native
+fault/creation-observer hooks; never distribute that artifact as a production
+DLL. The default `-Target Probe` preserves the diagnostic build. All targets use
+the caller's SQLite API table and no SQLite import/static library. The checked
+implementation additionally links the Windows `Advapi32` security API.
+
+```powershell
+& ./native/dbcrypt-vfs/build.ps1 -Target Checked -OutputDirectory $env:DBCRYPT_BUILD_ROOT -SqliteIncludeDirectory $env:DBCRYPT_HEADER_ROOT
+$env:MORDRED_DBCRYPT_CHECKED_LIBRARY = "$env:DBCRYPT_BUILD_ROOT/mordred_dbcrypt_checked.dll"
+$env:MORDRED_DBCRYPT_WINDOWS_VFS_TEST = '1'
+# Existing, isolated ordinary-user root, basename mordred-dbcrypt-*.
+$env:MORDRED_DBCRYPT_TEST_ROOT = $env:DBCRYPT_EVIDENCE_ROOT
+uv run pytest -q -o addopts= -m integration tests/integration/test_dbcrypt_windows_vfs.py
+```
+
+The bootstrap registers `mordred_checked_v1` permanently in the loading driver's
+library. Explicit root leases hold ancestor handles without delete sharing;
+close refuses with live database/sidecar handles. File creation supplies an
+owner-explicit protected security descriptor in `SECURITY_ATTRIBUTES` before
+visibility. Existing objects, all I/O, deletion and shared-memory mappings use
+the validated handles, with no delegation to parent VFS file/SHM callbacks.
+
+User URIs, network/device/drive-relative paths, alternate streams, ambiguous
+names, untrusted ancestors, non-NTFS storage, reparse points, hardlinks and
+non-private files refuse. All subdirectories beneath a root must also have the
+exact private DACL. Memory temporary storage is set at connection creation;
+disk temporary databases, subjournals and super-journals refuse. `ATTACH` and
+`VACUUM` (which internally attaches a scratch database) currently refuse before
+writes. The SQL authorizer forbids changing temporary storage to disk, and
+both the SQL boundary and checked VFS refuse arbitrary extension loading.
+The later connection gateway must prevent callers replacing the authorizer or
+selecting a different VFS through raw driver APIs.
+
+Source references for the locking ABI and Win32 behavior:
+
+- [SQLite 3.51.1 Windows VFS](https://github.com/sqlite/sqlite/blob/version-3.51.1/src/os_win.c)
+  and [rollback lock offsets](https://github.com/sqlite/sqlite/blob/version-3.51.1/src/os.h).
+- [LockFileEx](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex)
+  and [file security](https://learn.microsoft.com/en-us/windows/win32/fileio/file-security-and-access-rights).
+- [MapViewOfFile](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-mapviewoffile)
+  and [SetEndOfFile mapping constraints](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setendoffile).
+
+Portable path tests are evidence only for lexical admission. Native compiler,
+ordinary-token NTFS races, injected failures, crash recovery, multiprocess
+locking and independent security review remain required before qualification.
+
 This is diagnostic instrumentation, not the production Windows checked VFS.
 Normal I/O delegates to SQLCipher's default VFS. The SHM denial experiment
 proves an owned callback can refuse mapping before that delegation, and that
