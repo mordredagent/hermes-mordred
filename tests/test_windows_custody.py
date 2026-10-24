@@ -524,3 +524,37 @@ def test_exhausted_epoch_refuses_before_native_deletion_or_wrapper_cleanup(fs, m
     assert memory.native_key_id in backend._keys
     assert (home / "mordred" / "memory-key.wrapped").exists()
     assert not (home / "mordred" / "windows-memory.pending.json").exists()
+
+
+def test_memory_source_record_is_metadata_only_and_does_not_require_hook_arming(fs):
+    c, _, home, backend = fs
+    with c.windows_custody_session(home, create=True, backend=backend) as session:
+        session.enroll_memory()
+        expected = session.lease("memory")
+    backend.calls.clear()
+    with c.windows_custody_session(home, backend=backend) as session:
+        lease, wrapped = session.memory_source_record()
+        assert lease == expected and len(lease.generation) == 64
+        assert len(wrapped) == c.wrap.HEADER_LEN
+        assert session.memory_state().armed is False
+    assert backend.calls == []
+
+
+@pytest.mark.parametrize("invalid", ["missing", "malformed", "foreign"])
+def test_memory_source_record_refuses_incomplete_or_foreign_wrapper_without_native_lookup(fs, invalid):
+    c, _, home, backend = fs
+    with c.windows_custody_session(home, create=True, backend=backend) as session:
+        session.enroll_memory()
+    path = home / "mordred" / c.WRAPPED
+    if invalid == "missing":
+        path.unlink()
+    elif invalid == "malformed":
+        path.write_bytes(b"X" * c.wrap.HEADER_LEN)
+    else:
+        blob = bytearray(path.read_bytes())
+        blob[6] ^= 1  # The wrapper's key-id hash must match its checked role lease.
+        path.write_bytes(blob)
+    backend.calls.clear()
+    with c.windows_custody_session(home, backend=backend) as session, pytest.raises(c.CustodyError):
+        session.memory_source_record()
+    assert backend.calls == []

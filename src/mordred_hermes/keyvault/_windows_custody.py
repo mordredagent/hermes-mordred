@@ -22,6 +22,7 @@ from .._private_fs import (
     open_optional_confidential_directory,
 )
 from . import wrap
+from ._exceptions import WrapParseError
 from ._memory_storage import inventory_memory_files
 from ._runtime_probe import require_stopped_windows_gateways
 from ._windows_profile import (
@@ -367,6 +368,21 @@ class WindowsCustodySession:
         if _fingerprint(backend.get_enclave_public_key(lease.native_key_id)) != lease.public_sha256:
             raise CustodyError("native public key differs from retained ownership")
         return backend
+
+    def memory_source_record(self) -> tuple[GenerationLease, bytes]:
+        """Observe one committed source without native lookup or hook arming."""
+        manifest = self._manifest()
+        if manifest is None or manifest.role("memory").retained:
+            raise CustodyError("database memory source requires one committed generation")
+        lease = self.lease("memory")
+        wrapped = _read(self._tx, WRAPPED, wrap.HEADER_LEN)
+        if wrapped is None:
+            raise CustodyError("database memory source wrapper is absent")
+        try:
+            wrap._parse_header(wrapped, lease.native_key_id)
+        except WrapParseError as exc:
+            raise CustodyError("database memory source wrapper is invalid") from exc
+        return lease, wrapped
 
     def load_memory_key(self) -> bytes:
         lease = self.lease("memory")
