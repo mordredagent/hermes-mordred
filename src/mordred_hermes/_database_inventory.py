@@ -70,10 +70,10 @@ def _database_name(name: str) -> bool:
 
 def _kind(parts: tuple[str, ...]) -> _Kind | None:
     name = parts[-1].casefold()
-    if name.endswith(".lock"):
-        return None
     if len(parts) == 2 and parts[0].casefold() == "mordred" and name.lstrip(".").startswith("db-key-source"):
         return "unknown"  # Only the exact checked root record can be omitted later.
+    if name.endswith(".lock"):
+        return None
     if parts[0] == "mordred":
         return _STATE_KINDS.get(name, "unknown") if len(parts) == 2 else None
     for suffix in _SIDECARS:

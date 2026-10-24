@@ -552,3 +552,28 @@ import mordred_hermes.keyvault._native_deletion
 """
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_publication_revocation_covers_alias_stores_without_granting_delete_authority():
+    from mordred_hermes.keyvault._native_deletion import _revoke_native_creation_rollbacks
+    from tests.test_keyvault_seckey_backend import _FakeOps
+
+    first_ops, second_ops, unrelated_ops = _FakeOps(), _FakeOps(), _FakeOps()
+    first = _SecKeyBackend(ops=first_ops, sw_ops=None, legacy_ops=None)
+    second = _SecKeyBackend(ops=second_ops, sw_ops=None, legacy_ops=None)
+    unrelated = _SecKeyBackend(ops=unrelated_ops, sw_ops=None, legacy_ops=None)
+    with (
+        wrap.create_wrapping_key_scope("same-selector", backend=first) as first_receipt,
+        wrap.create_wrapping_key_scope("same-selector", backend=second) as second_receipt,
+        wrap.create_wrapping_key_scope("other-selector", backend=unrelated) as unrelated_receipt,
+    ):
+        _revoke_native_creation_rollbacks("same-selector")
+        for receipt in (first_receipt, second_receipt):
+            with pytest.raises(DatabaseRefused):
+                wrap.rollback_created_key(receipt)
+        with pytest.raises(DatabaseRefused):
+            first.delete_enclave_key("same-selector")
+        wrap.rollback_created_key(unrelated_receipt)
+    assert first_ops._keys and second_ops._keys
+    assert not unrelated_ops._keys
+    assert all(command != "delete" for command, _ in first_ops.calls + second_ops.calls)

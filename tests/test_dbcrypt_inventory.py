@@ -398,6 +398,12 @@ def test_invalid_root_source_binding_remains_unknown(tmp_path, monkeypatch, dama
 @pytest.mark.parametrize(
     "relative",
     [
+        "mordred/db-key-source.json.lock",
+        "mordred/.db-key-source.json.lock",
+        "Mordred/db-key-source.json.lock",
+        "profiles/work/mordred/db-key-source.json.lock",
+        "profiles/work/mordred/.db-key-source.json.lock",
+        "profiles/work/Mordred/db-key-source.json.lock",
         "mordred/db-key-source.json.tmp",
         "mordred/.db-key-source.json.tmp",
         "mordred/DB-KEY-SOURCE.JSON",

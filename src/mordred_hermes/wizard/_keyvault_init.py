@@ -673,6 +673,7 @@ def _commit_pending_audit_key(
 
     from ..keyvault import wrap
     from ..keyvault._exceptions import WrapKeyAlreadyExists
+    from ..keyvault._native_deletion import _native_creation_handoff
     from ..keyvault.wrap import get_wrapping_key_public
 
     with ExitStack() as stack:
@@ -704,11 +705,14 @@ def _commit_pending_audit_key(
                     # then starts from a clean, fresh provisioning.
                     _rollback_new_audit_key(root, backend, native_key_id)
                     raise
-                get_wrapping_key_public(
-                    logical_key_id,
-                    backend=backend,
-                    native_key_id=native_key_id,
-                )
+                # A duplicate is a takeover from another creation transaction;
+                # prohibit receipt rollback across the checked adoption proof.
+                with _native_creation_handoff(native_key_id):
+                    get_wrapping_key_public(
+                        logical_key_id,
+                        backend=backend,
+                        native_key_id=native_key_id,
+                    )
 
             ownership_meta = _storage.load_meta(root)
             ownership_pending, ownership_committed = _audit_key_state(root, ownership_meta, logical_key_id)

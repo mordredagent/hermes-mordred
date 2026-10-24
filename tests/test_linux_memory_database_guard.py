@@ -28,12 +28,20 @@ def test_checked_empty_domain_can_delete_native_memory(enrolled):
 
 @pytest.mark.parametrize(
     "dependency",
-    ["state.db", "state.db-wal", "mordred/db-encryption.pending", "backups/snapshot.zip"],
+    [
+        "state.db",
+        "state.db-wal",
+        "mordred/db-encryption.pending",
+        "backups/snapshot.zip",
+        "mordred/db-key-source.json.lock",
+        "mordred/.db-key-source.json.lock",
+        "profiles/work/mordred/db-key-source.json.lock",
+    ],
 )
 def test_database_dependency_preserves_memory_without_native_io(enrolled, dependency):
     home, backend, ops = enrolled
     path = home / dependency
-    path.parent.mkdir(exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.touch()
     before = memory.memory_key_path(home).read_bytes()
     with pytest.raises(DatabaseRefused):
@@ -162,3 +170,94 @@ def test_fresh_memory_checks_dependencies_before_wrapper_publication(tmp_path, m
         memory.ensure_linux_memory_key(home=tmp_path, backend=backend)
     assert len(ops._keys) == 1  # Retain successful/uncertain native creation.
     assert not memory.memory_key_path(tmp_path).exists()
+
+
+@pytest.mark.parametrize("alias", [False, True])
+@pytest.mark.parametrize("outcome", ["published", "uncertain", "source-lost"])
+def test_published_memory_key_revokes_external_creation_receipt(tmp_path, monkeypatch, alias, outcome):
+    from mordred_hermes.keyvault import wrap
+
+    creator_ops = _FakeOps()
+    creator = _SecKeyBackend(ops=creator_ops, sw_ops=None, legacy_ops=None)
+    adopted_ops = _FakeOps() if alias else creator_ops
+    adopted_ops._keys = creator_ops._keys
+    adopted = _SecKeyBackend(ops=adopted_ops, sw_ops=None, legacy_ops=None)
+    if outcome == "uncertain":
+        publish = memory._publish
+
+        def fail_after_link(path, blob):
+            publish(path, blob)
+            raise OSError("publication durability uncertain")
+
+        monkeypatch.setattr(memory, "_publish", fail_after_link)
+    with wrap.create_wrapping_key_scope(memory.memory_key_id(tmp_path), backend=creator) as receipt:
+        if outcome == "uncertain":
+            with pytest.raises(DatabaseRefused):
+                memory.ensure_linux_memory_key(home=tmp_path, backend=adopted)
+        else:
+            memory.ensure_linux_memory_key(home=tmp_path, backend=adopted)
+        assert memory.memory_key_path(tmp_path).exists()
+        (tmp_path / "state.db").touch()
+        if outcome == "source-lost":
+            memory.memory_key_path(tmp_path).unlink()
+            with pytest.raises(DatabaseRefused):
+                memory.ensure_linux_memory_key(home=tmp_path, backend=adopted)
+        with pytest.raises(DatabaseRefused):
+            wrap.rollback_created_key(receipt)
+    assert len(creator_ops._keys) == 1
+    assert all(command != "delete" for command, _ in creator_ops.calls + adopted_ops.calls)
+
+
+def test_adoption_before_receipt_registration_cannot_resurrect_rollback(tmp_path, monkeypatch):
+    from mordred_hermes.keyvault import wrap
+
+    creator_ops = _FakeOps()
+    adopter_ops = _FakeOps()
+    adopter_ops._keys = creator_ops._keys
+    creator = _SecKeyBackend(ops=creator_ops, sw_ops=None, legacy_ops=None)
+    adopter = _SecKeyBackend(ops=adopter_ops, sw_ops=None, legacy_ops=None)
+    create = creator_ops.create_keypair
+
+    def publish_before_response(tag, label, *, unattended=False):
+        public = create(tag, label, unattended=unattended)
+        memory.ensure_linux_memory_key(home=tmp_path, backend=adopter)
+        (tmp_path / "state.db").touch()
+        return public
+
+    monkeypatch.setattr(creator_ops, "create_keypair", publish_before_response)
+    with (
+        pytest.raises(DatabaseRefused),
+        wrap.create_wrapping_key_scope(memory.memory_key_id(tmp_path), backend=creator),
+    ):
+        pytest.fail("ownership handoff was missed before receipt registration")
+    assert memory.memory_key_path(tmp_path).exists()
+    assert creator_ops._keys
+    assert all(command != "delete" for command, _ in creator_ops.calls + adopter_ops.calls)
+
+
+def test_rollback_inflight_refuses_actual_adoption_before_source_visibility(tmp_path, monkeypatch):
+    from mordred_hermes.keyvault import wrap
+
+    creator_ops = _FakeOps()
+    adopter_ops = _FakeOps()
+    adopter_ops._keys = creator_ops._keys
+    creator = _SecKeyBackend(ops=creator_ops, sw_ops=None, legacy_ops=None)
+    adopter = _SecKeyBackend(ops=adopter_ops, sw_ops=None, legacy_ops=None)
+    refused = []
+    copy_public = creator_ops.copy_public_key
+
+    def attempt_adoption_during_rollback(tag):
+        public = copy_public(tag)
+        try:
+            memory.ensure_linux_memory_key(home=tmp_path, backend=adopter)
+        except DatabaseRefused:
+            refused.append(True)
+        return public
+
+    with wrap.create_wrapping_key_scope(memory.memory_key_id(tmp_path), backend=creator) as receipt:
+        monkeypatch.setattr(creator_ops, "copy_public_key", attempt_adoption_during_rollback)
+        wrap.rollback_created_key(receipt)
+    assert refused == [True]
+    assert not memory.memory_key_path(tmp_path).exists()
+    assert not creator_ops._keys
+    assert sum(command == "delete" for command, _ in creator_ops.calls + adopter_ops.calls) == 1

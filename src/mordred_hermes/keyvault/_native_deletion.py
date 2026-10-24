@@ -112,6 +112,10 @@ _owners: WeakKeyDictionary[ValidatedNativeOwner, _OwnerRecord] = WeakKeyDictiona
 _permits: WeakKeyDictionary[NativeDeletePermit, _PermitRecord] = WeakKeyDictionary()
 _receipts: WeakKeyDictionary[NativeCreateReceipt, _ReceiptRecord] = WeakKeyDictionary()
 _invocations = threading.local()
+_receipt_lock = threading.RLock()
+_handoff_epochs: dict[bytes, int] = {}
+_active_handoffs: dict[bytes, int] = {}
+_rollback_inflight: dict[bytes, int] = {}
 
 
 def _process() -> tuple[int, int]:
@@ -247,12 +251,59 @@ def _issue_native_owner(scope: object, *, native_key_id: str, backend: NativeBac
         _backend_binding(backend, native_key_id),
         _process(),
     )
-    # Successful checked ownership handoff ends unpublished-key rollback rights.
-    pairs = _backend_pairs(backend, native_key_id)
-    for receipt in list(_receipts.values()):
-        if receipt.active and any(receipt.ops is ops and receipt.tag == tag for ops, tag in pairs):
-            receipt.consumed = True
+    _revoke_native_creation_rollbacks(native_key_id)
     return owner
+
+
+def _revoke_native_creation_rollbacks(native_key_id: str) -> None:
+    """Retire unpublished-key rights when another transaction adopts the key.
+
+    This grants no native authority and performs no I/O. Match exact existing
+    tag encodings, without guessing role or provider from the selector. Because
+    distinct backend/ops instances can address the same physical key, revoke
+    across all stores conservatively. An unrelated same-selector creation can
+    consequently require explicit checked cleanup instead of receipt rollback.
+    """
+    from ._seckey_errors import _application_tag, _sw_application_tag
+
+    tags = (_application_tag(native_key_id), _sw_application_tag(native_key_id))
+    with _receipt_lock:
+        for tag in tags:
+            _handoff_epochs[tag] = _handoff_epochs.get(tag, 0) + 1
+        for receipt in list(_receipts.values()):
+            if receipt.active and receipt.tag in tags:
+                receipt.consumed = True
+        if any(_rollback_inflight.get(tag, 0) for tag in tags):
+            raise DatabaseRefused("native creation rollback is already in progress; adoption must retain no source")
+
+
+@contextmanager
+def _native_creation_handoff(native_key_id: str) -> Iterator[None]:
+    """Exclude receipt rollback while a different transaction adopts this key.
+
+    This only removes rights. Registry locks are never held over native I/O,
+    database or custody acquisition, and a competing rollback refuses admission
+    instead of waiting for either transaction's locks.
+    """
+    from ._seckey_errors import _application_tag, _sw_application_tag
+
+    tags = (_application_tag(native_key_id), _sw_application_tag(native_key_id))
+    issuing_process = _process()
+    with _receipt_lock:
+        _revoke_native_creation_rollbacks(native_key_id)
+        for tag in tags:
+            _active_handoffs[tag] = _active_handoffs.get(tag, 0) + 1
+    try:
+        yield
+    finally:
+        with _receipt_lock:
+            if issuing_process == _process():
+                for tag in tags:
+                    remaining = _active_handoffs[tag] - 1
+                    if remaining:
+                        _active_handoffs[tag] = remaining
+                    else:
+                        del _active_handoffs[tag]
 
 
 def _owner_record(owner: ValidatedNativeOwner, backend: NativeBackend) -> _OwnerRecord:
@@ -371,6 +422,11 @@ def create_wrapping_key_scope(
     selector = key_id if native_key_id is None else native_key_id
     pairs = _backend_pairs(backend, selector)
     configuration = tuple((_ops_configuration(ops), tag) for ops, tag in pairs)
+    creating_process = _process()
+    with _receipt_lock:
+        if any(_active_handoffs.get(tag, 0) for _, tag in pairs):
+            raise DatabaseRefused("native key adoption is in progress; no new rollback may be created")
+        epochs = {tag: _handoff_epochs.get(tag, 0) for _, tag in pairs}
     if type(backend) is not _SecKeyBackend:
         raise DatabaseRefused("creation receipts require the trusted create-only backend")
     public_key, ops, tag = _SecKeyBackend._create_tracked_key(backend, selector, unattended=unattended)
@@ -380,7 +436,10 @@ def create_wrapping_key_scope(
     backend_binding = _backend_binding(backend, selector)
     receipt = object.__new__(NativeCreateReceipt)
     record = _ReceiptRecord(backend, (_ops_binding(ops), selector, backend_binding), ops, tag, public_key, _process())
-    _receipts[receipt] = record
+    with _receipt_lock:
+        if creating_process != _process() or _active_handoffs.get(tag, 0) or epochs[tag] != _handoff_epochs.get(tag, 0):
+            raise DatabaseRefused("native key was adopted during creation; rollback authority was not issued")
+        _receipts[receipt] = record
     try:
         yield receipt
     finally:
@@ -401,7 +460,8 @@ def _probe_native_ops(ops: _SecKeyOps) -> None:
     _decode_sec1_uncompressed_p256(public_key)
     receipt = object.__new__(NativeCreateReceipt)
     record = _ReceiptRecord(None, (_ops_binding(ops),), ops, tag, public_key, _process())
-    _receipts[receipt] = record
+    with _receipt_lock:
+        _receipts[receipt] = record
     try:
         # A successful probe retains its historical cleanup-failure policy.
         with suppress(_OpsError):
@@ -411,25 +471,42 @@ def _probe_native_ops(ops: _SecKeyOps) -> None:
 
 
 def rollback_created_key(receipt: NativeCreateReceipt) -> None:
-    record = _receipt_record(receipt)
-    record.consumed = True
-    if record.binding[0] != _ops_binding(record.ops):
-        raise DatabaseRefused("created native key store changed")
-    if record.backend is not None and record.binding[2] != _backend_binding(
-        record.backend, cast(str, record.binding[1])
-    ):
-        raise DatabaseRefused("created native backend changed")
-    if record.ops.copy_public_key(record.tag) != record.public_key:
-        raise DatabaseRefused("created native public key changed")
-    with _tag_invocation(((record.ops, record.tag),)):
-        record.ops.delete_key(record.tag)
+    with _receipt_lock:
+        record = _receipt_record(receipt)
+        record.consumed = True
+        _rollback_inflight[record.tag] = _rollback_inflight.get(record.tag, 0) + 1
+    try:
+        if record.binding[0] != _ops_binding(record.ops):
+            raise DatabaseRefused("created native key store changed")
+        if record.backend is not None and record.binding[2] != _backend_binding(
+            record.backend, cast(str, record.binding[1])
+        ):
+            raise DatabaseRefused("created native backend changed")
+        if record.ops.copy_public_key(record.tag) != record.public_key:
+            raise DatabaseRefused("created native public key changed")
+        with _tag_invocation(((record.ops, record.tag),)):
+            record.ops.delete_key(record.tag)
+    finally:
+        with _receipt_lock:
+            if record.process == _process():
+                remaining = _rollback_inflight[record.tag] - 1
+                if remaining:
+                    _rollback_inflight[record.tag] = remaining
+                else:
+                    del _rollback_inflight[record.tag]
 
 
 def commit_created_key(receipt: NativeCreateReceipt) -> None:
-    _receipt_record(receipt).consumed = True
+    with _receipt_lock:
+        _receipt_record(receipt).consumed = True
 
 
 def _after_fork() -> None:
+    global _receipt_lock
+    _receipt_lock = threading.RLock()
+    _handoff_epochs.clear()
+    _active_handoffs.clear()
+    _rollback_inflight.clear()
     _owners.clear()
     _permits.clear()
     _receipts.clear()

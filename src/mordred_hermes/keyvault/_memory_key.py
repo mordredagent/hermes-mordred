@@ -21,7 +21,12 @@ from .._database_contracts import DatabaseBusy, DatabaseRefused
 from .._database_lifecycle import ExclusiveLease
 from . import _storage, wrap
 from ._exceptions import WrapError, WrapKeyNotFound
-from ._native_deletion import _issue_native_owner, _NativeOwnerFacts, _owned_delete_scope
+from ._native_deletion import (
+    _issue_native_owner,
+    _native_creation_handoff,
+    _NativeOwnerFacts,
+    _owned_delete_scope,
+)
 from .memory_crypto import MemoryCryptoError, decode_key, looks_like_magic_line, unseal
 from .wrap import NativeBackend
 
@@ -288,29 +293,30 @@ def _ensure_linux_memory_key(
             _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
         _private_parent(home, create=True)
         selected = backend if backend is not None else linux_memory_backend(home)
-        path = memory_key_path(home)
-        if path.exists() or path.is_symlink():
-            existing = _load(home, selected)
-            _validate_adoption(home, existing)
-            return existing
-        if (path.parent / "memory-vault.marker").exists():
-            raise MemoryKeyError("armed profile has lost its wrapped key; refusing regeneration")
-        _validate_adoption(home, adopted_key)
-        _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
-        key_id = memory_key_id(home)
-        try:
-            selected.get_enclave_public_key(key_id)
-        except WrapKeyNotFound:
+        with _native_creation_handoff(memory_key_id(home)):
+            path = memory_key_path(home)
+            if path.exists() or path.is_symlink():
+                existing = _load(home, selected)
+                _validate_adoption(home, existing)
+                return existing
+            if (path.parent / "memory-vault.marker").exists():
+                raise MemoryKeyError("armed profile has lost its wrapped key; refusing regeneration")
+            _validate_adoption(home, adopted_key)
             _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
-            selected.generate_enclave_key(key_id, unattended=True)
-        key = adopted_key if adopted_key is not None else secrets.token_bytes(32)
-        blob = wrap.wrap_dek(key, key_id, backend=selected)
-        # Verify actual TPM access before publishing: a public-key lookup is insufficient.
-        if wrap.unwrap_dek(blob, key_id, backend=selected, audit_sink=lambda entry: None) != key:
-            raise MemoryKeyError("TPM memory key verification failed")
-        _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
-        _publish(path, blob)
-        return key
+            key_id = memory_key_id(home)
+            try:
+                selected.get_enclave_public_key(key_id)
+            except WrapKeyNotFound:
+                _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
+                selected.generate_enclave_key(key_id, unattended=True)
+            key = adopted_key if adopted_key is not None else secrets.token_bytes(32)
+            blob = wrap.wrap_dek(key, key_id, backend=selected)
+            # Verify actual TPM access before publishing: a public-key lookup is insufficient.
+            if wrap.unwrap_dek(blob, key_id, backend=selected, audit_sink=lambda entry: None) != key:
+                raise MemoryKeyError("TPM memory key verification failed")
+            _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
+            _publish(path, blob)
+            return key
 
 
 def delete_linux_memory_key(

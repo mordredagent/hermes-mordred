@@ -70,6 +70,7 @@ from weakref import WeakKeyDictionary
 
 from .._database_contracts import DatabaseRefused
 from . import anchor, file_container, manifest, vault_master
+from ._native_deletion import _native_creation_handoff, _revoke_native_creation_rollbacks
 from ._storage import atomic_write, ensure_lock_file, keyvault_lock, safe_read
 from ._vault_errors import VaultError as VaultError
 from .anchor import AnchorStore
@@ -155,6 +156,7 @@ def _register_checked_open(
             if identity != expected_identity:
                 raise DatabaseRefused("vault directory changed during authenticated open")
             opened._authenticate_current(store)
+            _revoke_native_creation_rollbacks(opened._key_id)
             _checked_opens[opened] = _CheckedOpen(
                 opened._root,
                 identity,
@@ -453,7 +455,7 @@ def init_vault(
         # The clobber-check and the writes are one critical section: checking
         # the anchor outside the lock would let two concurrent inits both pass
         # it and then race their writes, silently destroying the first vault.
-        with keyvault_lock(root):
+        with keyvault_lock(root), _native_creation_handoff(key_id):
             if _checked_vault_path(root) != identity:
                 raise DatabaseRefused("vault directory changed during initialization")
             if store.read(anchor_label) is not None:
@@ -683,18 +685,19 @@ def recover_to_device(
             _guard_vault_source_change(root, database_lease)
             # Re-key: re-wrap the SAME master under this device's (fresh) key and
             # re-bind the recovery sidecar to the new wmk.
-            sealed = vault_master.reseal_onto_device(
-                recovery_blob, passphrase, old_wmk=untrusted.wmk, key_id=key_id, backend=backend
-            )
-            new_generation = verified.generation + 1
-            new_manifest = manifest.VaultManifest(
-                key_id=key_id, wmk=sealed.wmk, files=dict(verified.files), generation=new_generation
-            )
-            # ---- write the new generation + the re-bound sidecar BEFORE the commit ----
-            atomic_write(_manifest_path(root, new_generation), manifest.encode(new_manifest, master))
-            atomic_write(root / _RECOVERY_NAME, sealed.recovery)
-            # ---- commit: the anchor flip makes the new generation authoritative ----
-            anchor.write_anchor(store, anchor_label, wmk=sealed.wmk, generation=new_generation)
+            with _native_creation_handoff(key_id):
+                sealed = vault_master.reseal_onto_device(
+                    recovery_blob, passphrase, old_wmk=untrusted.wmk, key_id=key_id, backend=backend
+                )
+                new_generation = verified.generation + 1
+                new_manifest = manifest.VaultManifest(
+                    key_id=key_id, wmk=sealed.wmk, files=dict(verified.files), generation=new_generation
+                )
+                # ---- write the new generation + the re-bound sidecar BEFORE the commit ----
+                atomic_write(_manifest_path(root, new_generation), manifest.encode(new_manifest, master))
+                atomic_write(root / _RECOVERY_NAME, sealed.recovery)
+                # ---- commit: the anchor flip makes the new generation authoritative ----
+                anchor.write_anchor(store, anchor_label, wmk=sealed.wmk, generation=new_generation)
         except BaseException:
             master.close()
             raise

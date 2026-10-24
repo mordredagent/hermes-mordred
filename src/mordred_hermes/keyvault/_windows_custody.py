@@ -30,7 +30,13 @@ from .._private_fs import (
 from . import wrap
 from ._exceptions import WrapParseError
 from ._memory_storage import inventory_memory_files
-from ._native_deletion import _backend_binding, _issue_native_owner, _NativeOwnerFacts, _owned_delete_scope
+from ._native_deletion import (
+    _backend_binding,
+    _issue_native_owner,
+    _native_creation_handoff,
+    _NativeOwnerFacts,
+    _owned_delete_scope,
+)
 from ._runtime_probe import require_stopped_windows_gateways
 from ._windows_profile import (
     LIMIT,
@@ -525,25 +531,28 @@ class WindowsCustodySession:
         generated_public: bytes | None = None,
         database_lease: ExclusiveLease | None = None,
     ) -> Pending:
-        public = self.backend.get_enclave_public_key(pending.record.native_key_id)
-        fingerprint = _fingerprint(public)
-        if generated_public is not None and generated_public != public:
-            raise CustodyError("native creation public key changed")
-        if pending.record.public_sha256 is not None and pending.record.public_sha256 != fingerprint:
-            raise CustodyError("journaled native public key changed")
-        # A public lookup is not positive possession; prove exact ECDH in RAM.
-        challenge = secrets.token_bytes(32)
-        proof = wrap.wrap_dek(challenge, pending.record.native_key_id, backend=self.backend)
-        if (
-            wrap.unwrap_dek(proof, pending.record.native_key_id, backend=self.backend, audit_sink=lambda entry: None)
-            != challenge
-        ):
-            raise CustodyError("native possession proof failed")
-        verified = replace(pending, phase="verified", record=replace(pending.record, public_sha256=fingerprint))
-        if pending.role == "memory":
-            self._memory_database_guard(database_lease)
-        self._journal(verified)
-        return verified
+        with _native_creation_handoff(pending.record.native_key_id):
+            public = self.backend.get_enclave_public_key(pending.record.native_key_id)
+            fingerprint = _fingerprint(public)
+            if generated_public is not None and generated_public != public:
+                raise CustodyError("native creation public key changed")
+            if pending.record.public_sha256 is not None and pending.record.public_sha256 != fingerprint:
+                raise CustodyError("journaled native public key changed")
+            # A public lookup is not positive possession; prove exact ECDH in RAM.
+            challenge = secrets.token_bytes(32)
+            proof = wrap.wrap_dek(challenge, pending.record.native_key_id, backend=self.backend)
+            if (
+                wrap.unwrap_dek(
+                    proof, pending.record.native_key_id, backend=self.backend, audit_sink=lambda entry: None
+                )
+                != challenge
+            ):
+                raise CustodyError("native possession proof failed")
+            verified = replace(pending, phase="verified", record=replace(pending.record, public_sha256=fingerprint))
+            if pending.role == "memory":
+                self._memory_database_guard(database_lease)
+            self._journal(verified)
+            return verified
 
     def _commit(
         self, manifest: Manifest, pending: Pending, *, database_lease: ExclusiveLease | None = None
