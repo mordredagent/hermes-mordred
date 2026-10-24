@@ -89,7 +89,7 @@ const MESSAGES = {
   telegram_not_enrolled: 'Telegram custody is not enrolled on this Windows profile. Follow the custody step or recovery remedy below.',
   telegram_custody_unavailable: 'Telegram custody could not be checked on this Windows profile.',
   presence_acknowledgement_required: 'First confirm that Windows asks for no per-use approval (Telegram custody step).',
-  presence_unsupported: 'Per-use presence is unavailable on Windows. Explicitly choose no presence with hermes-mordred mail setup --no-touch-id in Terminal; requested presence is never silently disabled.',
+  presence_unsupported: 'This native backend cannot provide per-use presence. Explicitly choose no presence with hermes-mordred mail setup --no-touch-id in Terminal; requested presence is never silently disabled.',
   custody_unsafe: 'A Mordred custody file or folder is not private to this Windows account. Mordred never repairs it: fix its ownership or ACL by hand.',
   custody_uncertain: 'Custody is busy or has an unresolved journal. Let other Hermes/Mordred processes finish, then retry.',
   custody_broken: 'Custody evidence does not match this profile and Windows account (a copied or restored profile). It is preserved, never adopted.',

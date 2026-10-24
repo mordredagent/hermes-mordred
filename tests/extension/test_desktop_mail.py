@@ -263,6 +263,40 @@ def test_a_result_error_fails_the_job_with_that_code(fetch: Any) -> None:
     )
 
 
+def test_fetch_preserves_native_presence_refusal_in_result_job_and_event(fetch: Any) -> None:
+    # The native policy owner supplies this content-free public refusal. Keep
+    # the entire fixed result shape while testing only the Desktop consumer.
+    data = {**FetchResult().as_dict(), "error": "presence_unsupported"}
+    fetch.seen["result"] = SimpleNamespace(as_dict=lambda: dict(data))
+    started = fetch.desktop.post("/mail/fetch", {})
+    job = fetch.desktop.wait_job(started["job_id"])
+    assert job["state"] == "failed" and job["error"] == "presence_unsupported"
+    assert job["progress"] == {"result": data}
+    assert fetch.desktop.events[-1] == (
+        "job",
+        {"job_id": started["job_id"], "kind": "mail_fetch", "state": "failed", "error": "presence_unsupported"},
+    )
+    assert not fetch.desktop.leaked(started, job)
+
+
+def test_mail_attempt_projection_preserves_native_presence_refusal() -> None:
+    flags = {"account": "mail", "gmail": False, "roles": ["inbox"], "touch_id": True}
+    projected = _projections.mail_projection(
+        flags,
+        {"configured": True, "last_attempt": {"at": 123, "error": "presence_unsupported", "partial": False}},
+    )
+    assert projected == {
+        "configured": True,
+        "account": "mail",
+        "gmail": False,
+        "scope": ["inbox"],
+        "touch_id": True,
+        "last_attempt": {"at": 123, "error": "presence_unsupported", "partial": False},
+        "last_success": None,
+        "cursors": {},
+    }
+
+
 def test_a_crashing_fetch_is_fetch_failed_without_text(fetch: Any) -> None:
     fetch.seen["result"] = RuntimeError(ADDRESS)
     job = fetch.desktop.wait_job(fetch.desktop.post("/mail/fetch", {})["job_id"])

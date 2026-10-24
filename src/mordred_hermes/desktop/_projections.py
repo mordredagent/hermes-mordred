@@ -106,6 +106,7 @@ MAIL_FETCH_CODES: Final = frozenset(
         "store_path_unsafe",
         "tee_unavailable",
         "tee_auth_cancelled",
+        "presence_unsupported",
         "secrets_corrupt",
         "routing_unavailable",
         "egress_unsupported",
