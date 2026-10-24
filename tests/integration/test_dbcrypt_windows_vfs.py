@@ -828,7 +828,8 @@ def test_wal_multiregion_reader_checkpoint_restart(fixture: tuple[Any, Any, Path
         assert reader.execute("SELECT count(*) FROM data").fetchone() == (1,)
         writer.executemany("INSERT INTO data VALUES (?, ?)", [(n, payload) for n in range(1, 4601)])
         writer.commit()
-        page_size = writer.execute("PRAGMA page_size").fetchone()[0]
+        page_size = int(writer.execute("PRAGMA page_size").fetchone()[0])
+        assert 512 <= page_size <= 65536 and page_size & (page_size - 1) == 0
         wal = root / "synthetic.db-wal"
         assert (wal.stat().st_size - 32) // (page_size + 24) > 4096
         assert (root / "synthetic.db-shm").stat().st_size >= 65536
@@ -1233,7 +1234,8 @@ os._exit(23)
     assert b"committed crash payload:" not in (root / "synthetic.db-wal").read_bytes()
     recovered = connect(driver, root)
     try:
-        page_size = recovered.execute("PRAGMA page_size").fetchone()[0]
+        page_size = int(recovered.execute("PRAGMA page_size").fetchone()[0])
+        assert 512 <= page_size <= 65536 and page_size & (page_size - 1) == 0
         assert ((root / "synthetic.db-wal").stat().st_size - 32) // (page_size + 24) > 4096
         assert recovered.execute("SELECT count(*), sum(id) FROM data").fetchone() == (4601, 10582300)
         assert recovered.execute("PRAGMA integrity_check").fetchone() == ("ok",)
