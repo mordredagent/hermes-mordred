@@ -259,6 +259,7 @@ def test_holder_scan_distinguishes_empty_visible_and_live_denied(
     proc = tmp_path / "proc"
     proc.mkdir()
     assert posix.linux_holders_of([database], proc=proc) == []
+
     descriptors = proc / "123" / "fd"
     descriptors.mkdir(parents=True)
     link = descriptors / "3"
@@ -294,3 +295,28 @@ def test_holder_scan_knows_when_a_process_disappeared(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(posix, "_process_holds", vanished)
     assert posix.linux_holders_of([database], proc=proc) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX first-open creation protocol")
+def test_existing_lock_opens_without_nonexclusive_create(tmp_path, monkeypatch):
+    from mordred_hermes import _database_locking_posix as posix
+
+    first = posix.open_lock(tmp_path)
+    first.close()
+    original = posix.os.open
+
+    def concurrent_create(path, flags, *args, **kwargs):
+        # Model the observed concurrent ENOENT on APFS open(O_CREAT).
+        # Atomic create-only admission then opening the existing file avoids
+        # that path while retaining ownership and inode checks.
+        if path == posix.LOCK_NAME and flags & os.O_CREAT and not flags & os.O_EXCL:
+            raise FileNotFoundError(2, "concurrent create lookup", path)
+        return original(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(posix.os, "open", concurrent_create)
+    second = posix.open_lock(tmp_path)
+    try:
+        second.acquire(shared=False, timeout=0)
+        second.check()
+    finally:
+        second.close()

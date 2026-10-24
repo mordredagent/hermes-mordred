@@ -298,11 +298,15 @@ def windows_source(fs, monkeypatch):  # noqa: F811
     from mordred_hermes import _database_locking_windows as locking
     from mordred_hermes._database_contracts import RootIdentity
     from mordred_hermes.keyvault import _database_authority as authority
+    from mordred_hermes.keyvault._database_mutation import database_key_mutation
     from tests.test_windows_custody_profile import SID
 
     custody, _, root, backend = fs
-    with custody.windows_custody_session(root, create=True, backend=backend) as session:
-        key = session.enroll_memory()
+    with (
+        database_key_mutation(root=root, generation=None) as database_lease,
+        custody.windows_custody_session(root, create=True, backend=backend) as session,
+    ):
+        key = session.enroll_memory(database_lease=database_lease)
     monkeypatch.setattr(authority, "sys", SimpleNamespace(platform="win32"))
     identity = RootIdentity("win32", root.stat().st_dev, root.stat().st_ino.to_bytes(16, "little").hex(), SID.hex())
     monkeypatch.setattr(locking, "identify_root", lambda path: identity)

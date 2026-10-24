@@ -32,7 +32,12 @@ class PosixDatabaseLock:
             directory_info = os.fstat(self._directory)
             self._validate(directory_info, directory=True)
             self._directory_id = (directory_info.st_dev, directory_info.st_ino)
-            self._lock = self._open(LOCK_NAME, os.O_RDWR | os.O_CREAT | os.O_NONBLOCK, dir_fd=self._directory)
+            try:
+                self._lock = self._open(
+                    LOCK_NAME, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NONBLOCK, dir_fd=self._directory
+                )
+            except FileExistsError:
+                self._lock = self._open(LOCK_NAME, os.O_RDWR | os.O_NONBLOCK, dir_fd=self._directory)
             lock_info = os.fstat(self._lock)
             self._validate(lock_info, directory=False)
             self._lock_id = (lock_info.st_dev, lock_info.st_ino)
