@@ -55,7 +55,7 @@ def vault_identity(root: Path) -> str:
     return f"mordred-hermes.vault.{digest}"
 
 
-def _vault_database_home(root: Path) -> Path:
+def _vault_database_home(root: Path, *, allow_missing: bool = False) -> Path:
     """Resolve only the supported canonical file-vault source relationship.
 
     An arbitrary custom path is not evidence of an independent native source.
@@ -69,7 +69,7 @@ def _vault_database_home(root: Path) -> Path:
         raise DatabaseRefused("custom vault source independence is not established")
     home = absolute.parent.parent
     domain = resolve_database_domain(home)
-    if absolute != absolute.resolve(strict=True) or domain.home / "mordred" / "vault" != absolute:
+    if absolute != absolute.resolve(strict=not allow_missing) or domain.home / "mordred" / "vault" != absolute:
         raise DatabaseRefused("vault source path is not canonical")
     return domain.home
 

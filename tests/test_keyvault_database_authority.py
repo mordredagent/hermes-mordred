@@ -213,12 +213,20 @@ def mac_source(tmp_path, monkeypatch):
     vault_root = tmp_path / "mordred/vault"
     key_id = _identity.vault_identity(vault_root)
     backend.generate_enclave_key(key_id)
-    opened = vault.init_vault(
-        vault_root, key_id=key_id, passphrase="synthetic-passphrase", backend=backend, store=store, anchor_label=key_id
-    )
     from mordred_hermes.keyvault._database_mutation import database_key_mutation
 
-    with opened, database_key_mutation(root=tmp_path, generation=None) as lease:
+    with (
+        database_key_mutation(root=tmp_path, generation=None) as lease,
+        vault.init_vault(
+            vault_root,
+            key_id=key_id,
+            passphrase="synthetic-passphrase",
+            backend=backend,
+            store=store,
+            anchor_label=key_id,
+            database_lease=lease,
+        ) as opened,
+    ):
         opened.enroll_file(".env", b"HERMES_MEMORY_KEY=hex:" + b"61" * 32 + b"\nAPI_KEY=old\n", database_lease=lease)
 
     def native_only_backend(**kwargs):

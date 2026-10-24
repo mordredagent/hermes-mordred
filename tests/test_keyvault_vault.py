@@ -61,6 +61,19 @@ def store() -> FakeAnchorStore:
 
 def _init(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> vault.OpenVault:
     require_legacy_file_vault()
+    if root.name == "vault" and root.parent.name == "mordred":
+        from mordred_hermes.keyvault._database_mutation import database_key_mutation
+
+        with database_key_mutation(root=root.parent.parent, generation=None) as lease:
+            return vault.init_vault(
+                root,
+                key_id=_KEY_ID,
+                passphrase=_PASSPHRASE,
+                backend=backend,
+                store=store,
+                anchor_label=_LABEL,
+                database_lease=lease,
+            )
     return vault.init_vault(
         root, key_id=_KEY_ID, passphrase=_PASSPHRASE, backend=backend, store=store, anchor_label=_LABEL
     )

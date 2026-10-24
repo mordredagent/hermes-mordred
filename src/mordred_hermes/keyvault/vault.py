@@ -194,6 +194,22 @@ def _guard_vault_source_change(root: Path, database_lease: ExclusiveLease | None
     retire_database_source(root=home, expected=expected, lease=database_lease)
 
 
+def _guard_vault_initialization(root: Path, database_lease: ExclusiveLease | None) -> None:
+    """A missing canonical source is never proof that retained DBs are unrelated."""
+    from ._database_mutation import _assert_memory_database_mutation_safe
+    from ._identity import _vault_database_home
+
+    if root.name != "vault" or root.parent.name != "mordred":
+        return  # Only genuinely fresh custom vaults may reach the write below.
+    home = _vault_database_home(root, allow_missing=True)
+    _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
+    try:
+        (home / "mordred" / "db-key-source.json").lstat()
+    except FileNotFoundError:
+        return
+    raise DatabaseRefused("existing database source binding requires recovery before vault initialization")
+
+
 def _refuse_excluded(capability: ExcludedCapability, operation: str) -> None:
     """Windows excludes the file vault and its recovery: refuse before any I/O (C5e).
 
@@ -270,6 +286,19 @@ def artifacts_present(root: Path) -> bool:
     artifacts stays a clean "no vault at this root").
     """
     return any(root.glob("manifest.*.mvmf"))
+
+
+def _initialization_artifacts_present(root: Path) -> bool:
+    """Include recovery-only and ciphertext-only remnants of interrupted init."""
+    recovery_path = root / _RECOVERY_NAME
+    blobs = root / _BLOBS_DIR
+    return (
+        artifacts_present(root)
+        or recovery_path.exists()
+        or recovery_path.is_symlink()
+        or blobs.is_symlink()
+        or (blobs.is_dir() and any(blobs.iterdir()))
+    )
 
 
 def _load_pinned_unverified(
@@ -383,29 +412,43 @@ def init_vault(
     backend: NativeBackend,
     store: AnchorStore,
     anchor_label: str,
+    database_lease: ExclusiveLease | None = None,
 ) -> OpenVault:
     """Create a fresh, empty vault at ``root`` and return it opened.
 
     Seals one master under the existing Secure-Enclave wrapping key
     ``key_id`` (SE ``wmk`` + passphrase recovery), writes the recovery
     sidecar and the generation-0 manifest, then flips the device-bound
-    anchor to generation 0 — the same commit point an enroll uses, so a
-    crashed init (no anchor) simply allows a clean re-init.
+    anchor to generation 0 — the same commit point an enroll uses. Retained
+    artifacts without an anchor require recovery; initialization never
+    overwrites an orphaned encrypted source or its cold recovery sidecar.
+    Canonical source initialization requires ``database_lease`` acquired before
+    custody, including when all source artifacts have been lost.
 
     Raises:
         VaultError: a vault is already initialized at ``root`` (its anchor
             exists in ``store``).
+        DatabaseRefused: encrypted source artifacts remain without an anchor.
         ValueError: ``passphrase`` is empty.
         WrapKeyNotFound: no SE wrapping key exists for ``key_id``.
     """
     _refuse_excluded("file_vault", "init_vault")
     root = Path(root)
+    _guard_vault_initialization(root, database_lease)
+    if (
+        root.is_dir()
+        and not root.is_symlink()
+        and not (root / _BLOBS_DIR).is_symlink()
+        and _initialization_artifacts_present(root)
+        and store.read(anchor_label) is None
+    ):
+        raise DatabaseRefused("retained vault artifacts require recovery before initialization")
     _ensure_dir(root)
     _ensure_dir(root / _BLOBS_DIR)
     _ensure_lock(root)
 
     identity = _checked_vault_path(root)
-    sealed, master = vault_master.seal(key_id=key_id, passphrase=passphrase, backend=backend)
+    master: MasterKey | None = None
     try:
         # The clobber-check and the writes are one critical section: checking
         # the anchor outside the lock would let two concurrent inits both pass
@@ -415,12 +458,19 @@ def init_vault(
                 raise DatabaseRefused("vault directory changed during initialization")
             if store.read(anchor_label) is not None:
                 raise VaultError(f"a vault is already initialized for anchor label {anchor_label!r}")
+            if _initialization_artifacts_present(root):
+                raise DatabaseRefused("retained vault artifacts require recovery before initialization")
+            _guard_vault_initialization(root, database_lease)
+            # Seal uses the existing device public key, never an interactive
+            # private-key unwrap. Keep it after the orphan-source check.
+            sealed, master = vault_master.seal(key_id=key_id, passphrase=passphrase, backend=backend)
             atomic_write(root / _RECOVERY_NAME, sealed.recovery)
             empty = manifest.VaultManifest(key_id=key_id, wmk=sealed.wmk, files={}, generation=0)
             atomic_write(_manifest_path(root, 0), manifest.encode(empty, master))
             anchor.write_anchor(store, anchor_label, wmk=sealed.wmk, generation=0)
     except BaseException:
-        master.close()
+        if master is not None:
+            master.close()
         raise
     return _register_checked_open(
         OpenVault(

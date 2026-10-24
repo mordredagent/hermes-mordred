@@ -38,9 +38,16 @@ def source(tmp_path, monkeypatch):
     backend = _SecKeyBackend(ops=ops, sw_ops=None)
     backend.generate_enclave_key(selector)
     store = FakeAnchorStore()
-    opened = vault.init_vault(
-        root, key_id=selector, passphrase="synthetic", backend=backend, store=store, anchor_label=selector
-    )
+    with database_key_mutation(root=tmp_path, generation=None) as lease:
+        opened = vault.init_vault(
+            root,
+            key_id=selector,
+            passphrase="synthetic",
+            backend=backend,
+            store=store,
+            anchor_label=selector,
+            database_lease=lease,
+        )
     yield tmp_path, opened, backend, store, ops
     opened.close()
 
@@ -410,3 +417,148 @@ def test_later_explicit_enrollment_gets_fresh_source_generation(enrolled_source)
         new_snapshot = authority.enroll_database_source(root=home, lease=lease)
     assert new_snapshot.generation != snapshot.generation
     assert new_snapshot.record_sha256 == snapshot.record_sha256  # Stable wrapping header, fresh explicit generation.
+
+
+def test_anchor_absent_reinitialization_preserves_retained_source_with_dependencies(source):
+    home, opened, backend, store, ops = source
+    with database_key_mutation(root=home, generation=None) as lease:
+        opened.enroll_file(".env", ENV, database_lease=lease)
+    store.delete(opened._label)
+    (home / "state.db").write_bytes(b"retained database")
+    before = durable(home), list(ops.calls)
+    with pytest.raises(DatabaseRefused):
+        vault.init_vault(
+            opened._root,
+            key_id=opened._key_id,
+            passphrase="new synthetic",
+            backend=backend,
+            store=store,
+            anchor_label=opened._label,
+        )
+    assert durable(home) == before[0]
+    assert not any(call[0] in {"create", "delete"} for call in ops.calls[len(before[1]) :])
+
+
+def test_lost_canonical_vault_cannot_initialize_over_database_dependencies(tmp_path):
+    require_legacy_file_vault()
+    root = tmp_path / "mordred/vault"
+    backend = _SecKeyBackend(ops=_FakeOps(), sw_ops=None)
+    selector = vault_identity(root)
+    backend.generate_enclave_key(selector)
+    (tmp_path / "state.db").write_bytes(b"database with lost native source")
+    before = durable(tmp_path), list(backend._ops.calls)
+    with pytest.raises(DatabaseRefused):
+        vault.init_vault(
+            root,
+            key_id=selector,
+            passphrase="synthetic",
+            backend=backend,
+            store=FakeAnchorStore(),
+            anchor_label=selector,
+        )
+    assert durable(tmp_path) == before[0]
+    assert not root.exists()
+    assert backend._ops.calls == before[1]
+
+
+def test_orphaned_source_cannot_be_reinitialized_even_with_dependency_free_exclusion(source):
+    home, opened, backend, store, ops = source
+    store.delete(opened._label)
+    before = durable(home), list(ops.calls)
+    with database_key_mutation(root=home, generation=None) as lease, pytest.raises(DatabaseRefused, match="retained"):
+        vault.init_vault(
+            opened._root,
+            key_id=opened._key_id,
+            passphrase="new synthetic",
+            backend=backend,
+            store=store,
+            anchor_label=opened._label,
+            database_lease=lease,
+        )
+    assert durable(home) == before[0]
+    assert ops.calls == before[1]
+
+
+@pytest.mark.parametrize(
+    "dependency",
+    [
+        "state.db",
+        "mordred/db-encryption.marker",
+        "mordred/db-encryption.pending",
+        "mordred/db-backups.json",
+        "backups/root.tgz",
+        "mordred/db-key-source.json.tmp",
+        "profiles/work/mordred/db-key-source.json",
+    ],
+)
+def test_lost_source_initialization_with_real_exclusion_preserves_every_dependency(tmp_path, dependency):
+    require_legacy_file_vault()
+    from mordred_hermes._database_lifecycle import acquire_exclusive
+
+    root = tmp_path / "mordred/vault"
+    backend = _SecKeyBackend(ops=_FakeOps(), sw_ops=None)
+    selector = vault_identity(root)
+    backend.generate_enclave_key(selector)
+    with acquire_exclusive(tmp_path) as lease:
+        path = tmp_path / dependency
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.write_bytes(b"retained dependency with lost native source")
+        before = durable(tmp_path), list(backend._ops.calls)
+        with pytest.raises(DatabaseRefused):
+            vault.init_vault(
+                root,
+                key_id=selector,
+                passphrase="synthetic",
+                backend=backend,
+                store=FakeAnchorStore(),
+                anchor_label=selector,
+                database_lease=lease,
+            )
+        assert durable(tmp_path) == before[0]
+        assert not root.exists()
+        assert backend._ops.calls == before[1]
+
+
+def test_custom_orphan_ciphertext_is_not_a_fresh_independent_vault(tmp_path):
+    require_legacy_file_vault()
+    root = tmp_path / "custom"
+    (root / "blobs").mkdir(mode=0o700, parents=True)
+    root.chmod(0o700)
+    (root / "blobs/orphan.blob").write_bytes(b"retained ciphertext")
+    selector = vault_identity(root)
+    backend = _SecKeyBackend(ops=_FakeOps(), sw_ops=None)
+    backend.generate_enclave_key(selector)
+    before = durable(tmp_path), list(backend._ops.calls)
+    with pytest.raises(DatabaseRefused):
+        vault.init_vault(
+            root,
+            key_id=selector,
+            passphrase="synthetic",
+            backend=backend,
+            store=FakeAnchorStore(),
+            anchor_label=selector,
+        )
+    assert durable(tmp_path) == before[0]
+    assert backend._ops.calls == before[1]
+
+
+def test_lost_vault_with_existing_valid_binding_is_not_silently_reinitialized(enrolled_source):
+    import shutil
+
+    home, opened, backend, store, ops, _, _ = enrolled_source
+    shutil.rmtree(opened._root)
+    with database_key_mutation(root=home, generation=None) as lease:
+        before = durable(home), list(ops.calls)
+        with pytest.raises(DatabaseRefused, match="binding"):
+            vault.init_vault(
+                opened._root,
+                key_id=opened._key_id,
+                passphrase="new synthetic",
+                backend=backend,
+                store=store,
+                anchor_label=opened._label,
+                database_lease=lease,
+            )
+        assert durable(home) == before[0]
+        assert not opened._root.exists()
+        assert ops.calls == before[1]
