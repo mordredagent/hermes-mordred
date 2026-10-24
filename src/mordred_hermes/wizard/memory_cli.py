@@ -709,22 +709,24 @@ def purge(
     refuses the purge too. Returns 0 on success, 1 on that refusal or a vault
     open / re-enroll failure.
     """
+    from .._database_contracts import DatabaseRefused
+    from ..keyvault._database_mutation import database_key_mutation
     from ..keyvault._memory_key import MemoryKeyError, delete_linux_memory_key, memory_key_lock, memory_key_path
 
     if _windows_memory.routed(platform):
         return _windows_memory.purge(home=home)
     if memory_key_path(home).exists() or memory_key_path(home).is_symlink() or sys.platform == "linux":
         try:
-            with memory_key_lock(home):
+            with database_key_mutation(root=home, generation=None) as database_lease, memory_key_lock(home):
                 rc = disable(home=home, root=root, backend=backend, store=store)
                 if rc != 0 or _sealed_memory_files(home):
                     return _refuse("purge", "sealed memory remains; stop running gateways before retrying")
-                delete_linux_memory_key(home=home, backend=backend)
+                delete_linux_memory_key(home=home, backend=backend, database_lease=database_lease)
                 memory_marker_path(home).unlink(missing_ok=True)
                 memory_optout_marker_path(home).unlink(missing_ok=True)
             print("TPM memory key purged. Old encrypted backups are no longer recoverable.")
             return 0
-        except MemoryKeyError:
+        except (MemoryKeyError, DatabaseRefused):
             return _refuse("purge", "TPM memory key could not be removed")
 
     from ..keyvault import anchor, vault
@@ -761,6 +763,10 @@ def purge(
 
 
 def _enable_linux(*, home: Path, backend: NativeBackend | None, force_runtime_unverified: bool) -> int:
+    from contextlib import ExitStack
+
+    from .._database_contracts import DatabaseRefused
+    from ..keyvault._database_mutation import database_key_mutation
     from ..keyvault._memory_key import MemoryKeyError, ensure_linux_memory_key, memory_key_lock, memory_key_path
     from ..keyvault._runtime_probe import runtime_memory_key_available
     from ..keyvault.memory_crypto import MemoryCryptoError, decode_key
@@ -771,12 +777,19 @@ def _enable_linux(*, home: Path, backend: NativeBackend | None, force_runtime_un
         "Disable encryption while the TPM is usable to restore plaintext first."
     )
     try:
-        with memory_key_lock(home):
+        with ExitStack() as stack:
             path = memory_key_path(home)
+            database_lease = None
+            if not (path.exists() or path.is_symlink()):
+                home.mkdir(mode=0o700, parents=True, exist_ok=True)
+                database_lease = stack.enter_context(database_key_mutation(root=home, generation=None))
+            stack.enter_context(memory_key_lock(home))
             # Ambient input is only for initial adoption, never an existing TPM key.
             value = None if path.exists() or path.is_symlink() else os.environ.get(_MEMORY_KEY_ENV)
             adopted = decode_key(value) if value else None
-            key = ensure_linux_memory_key(home=home, adopted_key=adopted, backend=backend)
+            key = ensure_linux_memory_key(
+                home=home, adopted_key=adopted, backend=backend, database_lease=database_lease
+            )
             # The generic capability gate already ran before provisioning. This second
             # gate proves unwrapping in the installed Hermes and identified gateways.
             gate = runtime_gate(
@@ -794,5 +807,5 @@ def _enable_linux(*, home: Path, backend: NativeBackend | None, force_runtime_un
                 return gate
             _arm(home)
             return _finish_enable(home=home, key=key)
-    except (MemoryKeyError, MemoryCryptoError):
+    except (MemoryKeyError, MemoryCryptoError, DatabaseRefused):
         return _refuse("enable", "TPM memory key unavailable or invalid; existing memory and markers are preserved")

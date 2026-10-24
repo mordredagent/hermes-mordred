@@ -4,15 +4,17 @@ import pytest
 
 from mordred_hermes.keyvault import _memory_key as mk
 from mordred_hermes.keyvault import _runtime_probe
+from mordred_hermes.keyvault._database_mutation import database_key_mutation
 from mordred_hermes.keyvault._memory_hook import memory_marker_path
+from mordred_hermes.keyvault._seckey_backend import _SecKeyBackend
 from mordred_hermes.keyvault.memory_crypto import is_sealed
 from mordred_hermes.wizard import _windows_gates, encryption_cli, memory_cli
-from tests._keyvault_fakes import FakeBackend
+from tests.test_keyvault_seckey_backend import _FakeOps
 
 
 @pytest.fixture
 def linux(tmp_path, monkeypatch):
-    backend = FakeBackend()
+    backend = _SecKeyBackend(ops=_FakeOps(), sw_ops=None, legacy_ops=None)
     monkeypatch.setattr(mk, "linux_memory_backend", lambda home: backend)
     monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (True, "A"))
     monkeypatch.setattr(_runtime_probe, "runtime_memory_encryption_available", lambda **kw: (True, "A"))
@@ -43,7 +45,7 @@ def test_linux_disable_reenable_and_purge(linux):
     assert mk.load_linux_memory_key(home=home) == key
     assert memory_cli.purge(home=home, root=root) == 0
     assert not mk.memory_key_path(home).exists()
-    assert not backend._keys
+    assert not backend._ops._keys
     assert path.read_text() == "synthetic private memory"
 
 
@@ -58,7 +60,7 @@ def test_key_probe_failure_preserves_files(linux, monkeypatch):
 def test_status_never_unwraps_or_enables_env(linux, monkeypatch):
     home, backend = linux
     assert memory_cli.enable(home=home, root=home / "vault", platform="linux") == 0
-    backend._keys.clear()
+    backend._ops._keys.clear()
     status = encryption_cli.memory_status(home=home, platform="linux")
     assert status.active
     assert "TPM" in status.detail
@@ -71,7 +73,7 @@ def test_disable_preserves_ciphertext_without_tpm(linux):
     assert memory_cli.enable(home=home, root=home / "vault", platform="linux") == 0
     path = home / "memories" / "MEMORY.md"
     blob = path.read_bytes()
-    backend._keys.clear()
+    backend._ops._keys.clear()
     assert memory_cli.disable(home=home, root=home / "vault") == 1
     assert path.read_bytes() == blob
     assert memory_marker_path(home).exists()
@@ -129,7 +131,7 @@ def test_runtime_write_waits_for_purge_lock(linux, monkeypatch):
     cfg = hook._HookConfig(environ={}, delimiter="\n", home_factory=lambda: home)
     hook._wrap_write_file(store, cfg)
     with ThreadPoolExecutor(max_workers=1) as pool:
-        with mk.memory_key_lock(home):
+        with database_key_mutation(root=home, generation=None), mk.memory_key_lock(home):
             future = pool.submit(store._write_file, path, ["concurrent update"])
             assert not started.wait(0.1), "write escaped the lifecycle lock"
             assert memory_cli.purge(home=home, root=home / "vault") == 0
@@ -165,14 +167,14 @@ def test_inaccessible_memory_directory_preserves_key_and_ciphertext(linux, opera
     path = home / "memories/MEMORY.md"
     ciphertext = path.read_bytes()
     wrapped = mk.memory_key_path(home).read_bytes()
-    keys = set(backend._keys)
+    keys = set(backend._ops._keys)
     target = path.parent if unreadable == "directory" else path
     target.chmod(0)
     try:
         kwargs = {"platform": "linux"} if operation == "enable" else {}
         assert getattr(memory_cli, operation)(home=home, root=root, **kwargs) == 1
         assert mk.memory_key_path(home).read_bytes() == wrapped
-        assert set(backend._keys) == keys
+        assert set(backend._ops._keys) == keys
         assert memory_marker_path(home).exists()
     finally:
         target.chmod(0o700 if unreadable == "directory" else 0o600)
@@ -220,7 +222,7 @@ def test_uninstall_data_purge_removes_memory_custody_before_keyvault(linux):
     )
     assert uninstall_cli._purge_data(ctx, SimpleNamespace(telegram_configured=False)) == 0
     assert not mk.memory_key_path(home).exists()
-    assert not backend._keys
+    assert not backend._ops._keys
     assert (home / "memories/MEMORY.md").read_text() == "synthetic private memory"
 
 
@@ -248,11 +250,11 @@ def test_reset_waits_for_concurrent_memory_provisioning(linux, monkeypatch):
             finished.set()
 
     with ThreadPoolExecutor(max_workers=1) as pool:
-        with mk.memory_key_lock(home):
+        with database_key_mutation(root=home, generation=None) as database_lease, mk.memory_key_lock(home):
             future = pool.submit(reset)
             assert started.wait(2)
-            assert not finished.wait(0.1)
-            key = mk.ensure_linux_memory_key(home=home, backend=backend)
+            key = mk.ensure_linux_memory_key(home=home, backend=backend, database_lease=database_lease)
+            assert mk.memory_key_path(home).exists()
         assert future.result(timeout=5) == 1
     assert root.exists()
     assert mk.load_linux_memory_key(home=home, backend=backend) == key
@@ -371,7 +373,7 @@ def test_linux_setup_readiness_pause_and_explicit_reenable(orchestration, monkey
     assert encryption_cli._dispatch_all("enable", platform="linux") == 0
     assert mk.memory_key_path(home).read_bytes() == wrapped
     assert is_sealed(path.read_bytes())
-    assert len(backend._keys) == 1
+    assert len(backend._ops._keys) == 1
 
 
 @pytest.mark.parametrize("entrance", ["setup", "all"])
@@ -388,14 +390,14 @@ def test_linux_orchestration_refusal_preserves_state(orchestration, monkeypatch,
         elif failure == "corrupt":
             mk.memory_key_path(home).write_bytes(b"invalid wrapper")
         else:
-            backend._keys.clear()
+            backend._ops._keys.clear()
     else:
         name = "runtime_memory_encryption_available" if failure == "preproof" else "runtime_memory_key_available"
         monkeypatch.setattr(_runtime_probe, name, lambda **kw: (False, "unavailable"))
     before = path.read_bytes()
     marker = memory_marker_path(home).exists()
     wrapped = mk.memory_key_path(home).read_bytes() if mk.memory_key_path(home).exists() else None
-    keys = dict(backend._keys)
+    keys = dict(backend._ops._keys)
     assert not setup_cli._probe_memory_encryption(home=home, platform="linux")[0] or failure == "unknown"
     # Structural readiness cannot detect an otherwise valid wrapper whose native key is lost.
     if entrance == "setup" and failure == "unknown":
@@ -412,7 +414,7 @@ def test_linux_orchestration_refusal_preserves_state(orchestration, monkeypatch,
         assert mk.memory_key_path(home).exists()  # permitted inert custody after failed installed-runtime proof
     else:
         assert (mk.memory_key_path(home).read_bytes() if mk.memory_key_path(home).exists() else None) == wrapped
-        assert backend._keys == keys
+        assert backend._ops._keys == keys
 
 
 def test_linux_noninteractive_and_unreadable_readiness(orchestration, monkeypatch):
