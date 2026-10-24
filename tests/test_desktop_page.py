@@ -398,7 +398,7 @@ STATE_CASES = {
             "question_model": "done",
             "telegram": "done",
             "telegram_import": "blocked:needs_databases",
-            "mail": "blocked:needs_databases",
+            "mail": "todo",
         },
     ),
     "v4, conversion scheduled": (
@@ -413,7 +413,7 @@ STATE_CASES = {
             "question_model": "done",
             "telegram": "done",
             "telegram_import": "blocked:needs_restart",
-            "mail": "blocked:needs_restart",
+            "mail": "todo",
         },
     ),
     "v4, armed but Hermes not restarted": (
@@ -428,7 +428,7 @@ STATE_CASES = {
             "question_model": "done",
             "telegram": "done",
             "telegram_import": "blocked:needs_restart",
-            "mail": "blocked:needs_restart",
+            "mail": "todo",
         },
     ),
     "v4, databases need memory": (
@@ -443,7 +443,7 @@ STATE_CASES = {
             "question_model": "done",
             "telegram": "blocked:needs_memory",
             "telegram_import": "blocked:needs_memory",
-            "mail": "blocked:needs_memory",
+            "mail": "todo",
         },
     ),
     "v4, store counts, mail not set up": (
@@ -518,7 +518,7 @@ STATE_CASES = {
             "question_model": "done",
             "telegram": "done",
             "telegram_import": "blocked:needs_databases",
-            "mail": "blocked:needs_databases",
+            "mail": "next",
         },
     ),
     "linux, no databases and no mail": (
@@ -569,7 +569,7 @@ STATE_CASES.update(
                 "question_model": "done",
                 "telegram": "blocked:needs_memory",
                 "telegram_import": "blocked:needs_memory",
-                "mail": "blocked:needs_memory",
+                "mail": "todo",
             },
         ),
         "v4, vault created, Hermes not restarted": (
@@ -584,7 +584,7 @@ STATE_CASES.update(
                 "question_model": "done",
                 "telegram": "blocked:needs_memory",
                 "telegram_import": "blocked:needs_memory",
-                "mail": "blocked:needs_memory",
+                "mail": "next",
             },
         ),
         "v4, .env encryption opted out": (
@@ -599,7 +599,7 @@ STATE_CASES.update(
                 "question_model": "done",
                 "telegram": "blocked:needs_memory",
                 "telegram_import": "blocked:needs_memory",
-                "mail": "blocked:needs_memory",
+                "mail": "next",
             },
         ),
         "v4, memory already on from an older ceremony": (
@@ -655,7 +655,7 @@ STATE_CASES.update(
         "v4, nothing plaintext but not armed": (
             mac(**v4(armed=False, rows=(), available=False, code="not_armed")),
             None,
-            ready_but(databases="next", telegram_import="blocked:needs_databases", mail="blocked:needs_databases"),
+            ready_but(databases="next", telegram_import="blocked:needs_databases", mail="todo"),
         ),
     }
 )
@@ -2261,6 +2261,74 @@ for (const key in out.fields) out.fields[key] = out.fields[key] ? out.fields[key
 """
 DONE = {"ok": True, "flow_id": "m1", "step": "done", "question": None, "gmail": True, "account": "mail"}
 CLEARED = {"address": "", "others": "", "server": "", "account": "mail", "password": ""}
+
+
+def credential_only_mail_status(*, memory: bool = False, armed: bool = False) -> dict[str, Any]:
+    status = mac(memory=memory, **v4(armed=armed, protected=False, available=False, code="store_unavailable", rows=()))
+    status["databases"].update(encrypt_pending=None, decrypt_pending=None, journal=None, plaintext_backups=None)
+    return status
+
+
+def derived_mail_step(status: dict[str, Any]) -> str:
+    return (
+        "(() => {const status = (globalThis.mailStatus ??= " + json.dumps(status) + ");"
+        "return MailStep({id:'mail', n:'2.5', ...stepStates(status).mail, status, refresh})})()"
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [credential_only_mail_status(), credential_only_mail_status(memory=True), credential_only_mail_status(armed=True)],
+    ids=["memory-disabled-no-intent", "no-database-intent", "no-authenticated-provider"],
+)
+def test_credential_only_mail_setup_form_is_usable_without_storage(status):
+    initial = component(derived_mail_step(status), [])
+    assert "Connect mailbox" in initial["buttons"]
+    assert field_value(initial["tree"], "Mail address") == ""
+    connected = component(derived_mail_step(status), [DONE], FILL + CONNECT)
+    assert connected["requests"][0][0] == "/mail/setup/start"
+    assert len(connected["requests"]) == 1
+    assert "Mailbox connected (read-only)." in connected["text"]
+
+
+def test_pending_credential_finish_survives_memory_and_database_prerequisite_loss():
+    script = (
+        FILL
+        + CONNECT
+        + "globalThis.mailStatus = "
+        + json.dumps(credential_only_mail_status())
+        + "; tree = view();\n"
+        + "effects.slice().forEach(f => f()); tree = view();\n"
+        + "out.finishVisible = Boolean(button(tree, 'Finish'));\n"
+        + "find(find(tree, n => n.type === 'label' && text(n) === 'Gesendet'), "
+        + "n => n.props && n.props.type === 'radio').props.onChange(); tree = view();\n"
+        + "await press(tree, 'Finish'); tree = view();\n"
+    )
+    result = component(derived_mail_step(MAIL_V4), [FOLDERS, {"ok": True, "step": "done"}], script)
+    assert result["out"]["finishVisible"] is True
+    assert result["requests"][1:] == [["/mail/setup/m7/finish", {"selection": "f-sent"}]]
+    assert "Mailbox connected (read-only)." in result["text"]
+
+
+@pytest.mark.parametrize("memory", [False, True], ids=["memory-disabled", "no-database-intent"])
+def test_mail_data_operations_stay_guarded_while_credential_removal_is_available(memory):
+    status = credential_only_mail_status(memory=memory)
+    status["mail"] = copy.deepcopy(MAIL_SET_UP)
+    script = (
+        "out.fetchDisabled = button(tree, 'Fetch new mail').props.disabled;\n"
+        + "await press(tree, 'Fetch new mail'); tree = view();\n"
+        + f"tick(tree, {json.dumps(PURGE_LABEL)}); tree = view();\n"
+        + "type(tree, 'Type delete my data to confirm', 'delete my data'); tree = view();\n"
+        + "out.rowsDisabled = button(tree, 'Remove mailbox and delete its mail').props.disabled;\n"
+        + REMOVE_ALL
+        + f"tick(tree, {json.dumps(PURGE_LABEL)}, false); tree = view();\n"
+        + "out.credentialsEnabled = !button(tree, 'Remove mailbox').props.disabled;\n"
+        + "await press(tree, 'Remove mailbox'); tree = view();\n"
+    )
+    answer = {"ok": True, "had_credentials": True, "deleted_messages": 0, "cursors_deleted": 0, "warnings": []}
+    result = component(derived_mail_step(status), [answer], script)
+    assert result["out"] == {"fetchDisabled": True, "rowsDisabled": True, "credentialsEnabled": True}
+    assert result["requests"] == [["/mail/forget", {"rows": False}]]
 
 
 def test_mail_setup_sends_the_form_and_prefills_the_gmail_server():

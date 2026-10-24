@@ -1009,7 +1009,8 @@ function stepStates(status, sync = null) {
     decide('mail', {
       done: Boolean(mail.configured) && !lastError && !residue,
       fact: residue || lastError,
-      blocker: firstBlocker([hardware, 'needs_enclave'], [memory, 'needs_memory'], [!store, store]),
+      // Credential setup/finish uses the native mail role independently of memory and SQL.
+      blocker: firstBlocker([hardware, 'needs_enclave']),
       job: runningJob('mail_fetch'),
     })
   }
@@ -2454,6 +2455,14 @@ const hint = (text) => jsx('span', { key: 'hint', style: { fontSize: 12, color: 
 // and folder names only in the folder question.
 function MailStep({ id, n, state, blocker = null, goto = null, code = null, status, refresh }) {
   const mail = status.mail || {}
+  const checks = status.checks || {}
+  const store = storeBlocker(status)
+  // Apply storage prerequisites to data operations, never to credential setup/finish or removal.
+  const dataBlocker = firstBlocker(
+    [Boolean(checks.hardware && checks.hardware.ok), 'needs_enclave'],
+    [Boolean(checks.memory_encryption && checks.memory_encryption.ok), 'needs_memory'],
+    [!store, store],
+  )
   const [address, setAddress] = useState('')
   const [others, setOthers] = useState('')
   const [server, setServer] = useState('')
@@ -2653,6 +2662,7 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
     setFailure(null)
   }
   const fetchMail = async () => {
+    if (dataBlocker) return
     if (!validMax(maxText) || (older && !validDate(since))) return
     // A new attempt: the previous failure and result are gone at once, before the job id arrives.
     setBusy('fetch')
@@ -2682,6 +2692,7 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
   const accountUnknown = Boolean(forgotten && forgotten.warnings.includes('account_unknown')) || Boolean(failure && failure.code === 'account_unknown')
   const askAccount = residue || accountUnknown
   const remove = async () => {
+    if (purge && dataBlocker) return
     setFailure(null)
     setForgotten(null)
     setNote(null)
@@ -2746,12 +2757,13 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
         : null,
       jsx(Row, {
         key: 'go',
-        children: jsx(Button, { variant: 'outline', disabled: Boolean(busy), onClick: remove, children: purge ? 'Remove mailbox and delete its mail' : 'Remove mailbox' }),
+        children: jsx(Button, { variant: 'outline', disabled: Boolean(busy) || Boolean(purge && dataBlocker), onClick: remove, children: purge ? 'Remove mailbox and delete its mail' : 'Remove mailbox' }),
       }),
     ],
   })
   const fetchReady = validMax(maxText) && (!older || validDate(since))
   const setUpCard = [
+    dataBlocker ? jsx('p', { key: 'storage', children: `${BLOCKERS[dataBlocker].text} This is required to fetch mail or delete stored messages.` }) : null,
     shown === 'done' ? null : jsx('p', { key: 'account', children: accountLine }),
     ...mailHistory(mail).map((line, index) => jsx('p', { key: `history-${index}`, style: { margin: '4px 0' }, children: line })),
     sources ? jsx('p', { key: 'count', style: { margin: '4px 0' }, children: `${plural(Number(sources.mail && sources.mail.messages) || 0, 'message')} in Mordred’s store (all accounts).` }) : null,
@@ -2768,7 +2780,7 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
     jsx(Row, {
       key: 'fetch',
       children: [
-        jsx(Button, { key: 'go', disabled: fetching || !fetchReady, onClick: fetchMail, children: fetching ? 'Fetching…' : 'Fetch new mail' }),
+        jsx(Button, { key: 'go', disabled: fetching || !fetchReady || Boolean(dataBlocker), onClick: fetchMail, children: fetching ? 'Fetching…' : 'Fetch new mail' }),
         mail.touch_id === false ? null : hint('May show a Touch ID prompt.'),
       ],
     }),
