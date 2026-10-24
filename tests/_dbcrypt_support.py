@@ -112,7 +112,10 @@ from mordred_hermes._database_contracts import DatabaseRefused
 from mordred_hermes._database_lifecycle import acquire_exclusive, acquire_runtime
 operation = sys.argv[2]
 try:
-    context = acquire_exclusive(Path(sys.argv[1])) if operation == 'exclusive' else acquire_runtime(Path(sys.argv[1]), timeout=0)
+    if operation == 'exclusive':
+        context = acquire_exclusive(Path(sys.argv[1]))
+    else:
+        context = acquire_runtime(Path(sys.argv[1]), timeout=0)
     with context:
         print('acquired', flush=True)
         if operation == 'hold': sys.stdin.readline()

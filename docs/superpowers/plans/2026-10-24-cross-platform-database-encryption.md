@@ -48,6 +48,13 @@ extension using `sqlite3_api_routines`.
 
 ## File map, PR ownership, and execution order
 
+**Execution amendment (owner follow-up, 2026-10-24):** Consolidate all tasks in
+PR #270. The PR slices below remain logical ownership and validation checkpoints,
+not separate delivery PRs. Use isolated subagent worktrees for independent
+implementation tasks; the primary agent integrates them and maintains this
+plan’s ledger across context compactions. This supersedes the earlier Native-only
+execution and one-component-per-PR delivery preference for this approved change.
+
 Paths below are exact intended files; new paths are inline code deliberately. Tests listed in tasks are complete-module acceptance sets, not permission to run only new test functions.
 Module paths starting with a component name are relative to
 `src/mordred_hermes/`; bare sibling filenames in a task's file row belong to

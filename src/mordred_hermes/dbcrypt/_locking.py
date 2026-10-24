@@ -1,116 +1,69 @@
-"""Exclude offline conversions from Hermes processes, including before their first DB open.
-
-Runtimes keep a shared lease until exit. Converters take an exclusive lock;
-the maintenance CLI skips the runtime lease so it can convert explicitly.
-The POSIX primitive is loaded only when used on the supported platform.
-"""
+"""Compatibility boundary over the no-SQL root database lifecycle contracts."""
 
 from __future__ import annotations
 
 import contextlib
 import os
-import stat
 import threading
-import time
 from collections.abc import Iterator
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Final
 
+from .._database_contracts import DatabaseBusy as MigrationBusy
+from .._database_contracts import DatabaseRefused as MigrationError
+from .._database_lifecycle import RuntimeLease, acquire_exclusive, acquire_runtime
+
+__all__ = ["LOCK_SUBPATH", "MigrationBusy", "MigrationError", "migration_lock", "runtime_lease"]
+
 LOCK_SUBPATH: Final = ("mordred", "db-encryption.lock")
 _MUTEX = threading.RLock()
-_LEASES: dict[Path, int] = {}
-_EXCLUSIVE: dict[Path, int] = {}
-
-
-class MigrationError(RuntimeError):
-    """Conversion could not safely complete; retain protection and key material."""
-
-
-class MigrationBusy(MigrationError):
-    """Another runtime or converter is using this home."""
-
-
-def _open(home: Path) -> int:
-    path = home.joinpath(*LOCK_SUBPATH)
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-    metadata = os.fstat(fd)
-    if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
-        os.close(fd)
-        raise MigrationError("database conversion lock must be a private regular file")
-    return fd
-
-
-def _acquire(fd: int, *, shared: bool, timeout: float) -> None:
-    import fcntl
-
-    operation = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            fcntl.flock(fd, operation | fcntl.LOCK_NB)
-            return
-        except BlockingIOError:
-            if time.monotonic() >= deadline:
-                raise MigrationBusy("Hermes is running or another process is converting the databases") from None
-            time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+_LEASES: dict[Path, tuple[AbstractContextManager[RuntimeLease], RuntimeLease]] = {}
 
 
 @contextlib.contextmanager
 def runtime_lease(home: Path, *, timeout: float = 120.0) -> Iterator[None]:
-    """Wait for conversions, then keep the format stable for this runtime's lifetime."""
-    base = home.resolve()
+    """Preserve the installed shim's process-lifetime shared lease convention."""
+    base = home.absolute()
     with _MUTEX:
-        if base in _LEASES:
+        existing = _LEASES.get(base)
+        if existing is not None:
+            existing[1].check()
             yield
             return
-        fd = _open(base)
+        context = acquire_runtime(base, timeout=timeout)
+        lease = context.__enter__()
         try:
-            _acquire(fd, shared=True, timeout=timeout)
             yield
-            _LEASES[base] = fd
-            fd = -1
-        finally:
-            if fd >= 0:
-                os.close(fd)
+        except BaseException:
+            context.__exit__(None, None, None)
+            raise
+        else:
+            _LEASES[base] = (context, lease)
 
 
 @contextlib.contextmanager
 def migration_lock(home: Path, *, timeout: float = 0.0) -> Iterator[None]:
-    """Take exclusive custody, reentrant for one thread's uninstall/restore transaction.
-
-    A process that has already entered normal runtime cannot convert its own
-    databases: its threads may open a new connection at any time. Maintenance
-    runs in a separate CLI process instead.
-    """
-    base = home.resolve()
-    with _MUTEX:
-        if base in _LEASES:
-            raise MigrationBusy("this Hermes process is running; stop it and use the standalone maintenance CLI")
-        if base in _EXCLUSIVE:
-            yield
-            return
-        fd = _open(base)
-        try:
-            _acquire(fd, shared=False, timeout=timeout)
-            _EXCLUSIVE[base] = fd
-            try:
-                yield
-            finally:
-                del _EXCLUSIVE[base]
-        finally:
-            os.close(fd)
+    """Root exclusion is reentrant only for the thread that acquired it."""
+    with acquire_exclusive(home, timeout=timeout):
+        yield
 
 
 def _after_fork() -> None:
-    # A forked runtime inherits sqlite3 and may outlive its parent: retain its
-    # shared lease too. Exec closes it via O_CLOEXEC and bootstraps a new one.
-    # A fork cannot inherit ownership of an in-progress conversion transaction.
     global _MUTEX
-    for fd in _EXCLUSIVE.values():
-        os.close(fd)
-    _EXCLUSIVE.clear()
+    # The core discarded inherited handles/authority in its earlier callback.
+    # Installed legacy shims still need exclusion before child Python resumes.
+    homes = tuple(_LEASES)
+    _LEASES.clear()
     _MUTEX = threading.RLock()
+    try:
+        for home in homes:
+            context = acquire_runtime(home)
+            _LEASES[home] = (context, context.__enter__())
+    except BaseException:
+        # A fork hook exception would otherwise be ignored, leaving an installed
+        # legacy shim running without exclusion. Refuse that unsafe child.
+        os._exit(74)
 
 
 if hasattr(os, "register_at_fork"):

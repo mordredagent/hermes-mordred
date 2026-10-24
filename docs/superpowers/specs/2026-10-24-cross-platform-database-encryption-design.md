@@ -22,6 +22,9 @@ The repository source of truth remains [SPEC](../../dev/SPEC.md),
 [STATE_DB_ENCRYPTION](../../dev/STATE_DB_ENCRYPTION.md). Component changes land
 separately under the repository's one-component-per-PR rule, targeting `dev`.
 No Hermes upstream PR, fork, or upstream implementation dependency is proposed.
+The owner subsequently requested one consolidated PR (#270) and isolated
+subagent implementation. Component boundaries remain validation checkpoints;
+this delivery amendment does not change the encryption/security contracts.
 
 ## Goals, non-goals, and approaches
 
