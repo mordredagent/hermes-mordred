@@ -326,3 +326,90 @@ def test_mutation_guard_rechecks_the_lease_after_scan(tmp_path: Path, monkeypatc
         monkeypatch.setattr(inventory, "scan_dependencies", replaced_root)
         with pytest.raises(DatabaseRefused):
             inventory.assert_mutation_safe(tmp_path, None, lease)
+
+
+def write_source_binding(root, *, relative="mordred/db-key-source.json", bound_root=None):
+    import dataclasses
+    import json
+
+    from mordred_hermes._database_locking_posix import identify_root
+
+    identity = identify_root(root if bound_root is None else bound_root)
+    path = root / relative
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "root": dataclasses.asdict(identity),
+                "provider": "secure-enclave" if identity.platform == "darwin" else "tpm",
+                "generation": "a" * 32,
+                "record_sha256": "b" * 64,
+            }
+        )
+        + "\n"
+    )
+    path.chmod(0o600)
+    return path
+
+
+def test_only_valid_checked_root_source_binding_is_not_a_dependency(tmp_path):
+    from mordred_hermes._database_inventory import scan_dependencies
+
+    write_source_binding(tmp_path)
+    result = scan_dependencies(tmp_path)
+    assert result.complete and result.entries == ()
+
+
+@pytest.mark.parametrize(
+    "damage", ["malformed", "wrong-root", "mode", "parent-mode", "symlink", "hardlink", "unreadable"]
+)
+def test_invalid_root_source_binding_remains_unknown(tmp_path, monkeypatch, damage):
+    from mordred_hermes import _database_inventory as inventory
+
+    path = write_source_binding(tmp_path)
+    if damage == "malformed":
+        path.write_bytes(b"{}\n")
+    elif damage == "wrong-root":
+        other = tmp_path / "other"
+        other.mkdir(mode=0o700)
+        write_source_binding(tmp_path, bound_root=other)
+    elif damage == "mode":
+        path.chmod(0o644)
+    elif damage == "parent-mode":
+        path.parent.chmod(0o755)
+    elif damage == "symlink":
+        outside = tmp_path / "outside"
+        path.rename(outside)
+        path.symlink_to(outside)
+    elif damage == "hardlink":
+        os.link(path, tmp_path / "alias")
+    else:
+
+        def denied(*args, **kwargs):
+            raise PermissionError("synthetic source read denied")
+
+        monkeypatch.setattr(inventory, "open_private_directory", denied)
+    result = inventory.scan_dependencies(tmp_path)
+    assert not result.complete
+    assert any(entry.path == path and entry.kind == "unknown" for entry in result.entries)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "mordred/db-key-source.json.tmp",
+        "mordred/.db-key-source.json.tmp",
+        "mordred/DB-KEY-SOURCE.JSON",
+        "Mordred/db-key-source.json",
+        "profiles/work/Mordred/db-key-source.json",
+        "profiles/work/mordred/db-key-source.json",
+    ],
+)
+def test_source_binding_exemption_is_exact_root_path_only(tmp_path, relative):
+    from mordred_hermes._database_inventory import scan_dependencies
+
+    path = write_source_binding(tmp_path, relative=relative)
+    result = scan_dependencies(tmp_path)
+    assert not result.complete
+    assert any(entry.path == path and entry.kind == "unknown" for entry in result.entries)

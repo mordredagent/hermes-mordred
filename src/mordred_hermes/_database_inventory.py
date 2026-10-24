@@ -7,8 +7,9 @@ import stat
 from pathlib import Path
 from typing import Final, Literal
 
-from ._database_contracts import DatabaseRefused, Dependency, Inventory
+from ._database_contracts import DatabaseRefused, Dependency, Inventory, decode_database_source_binding
 from ._database_lifecycle import ExclusiveLease
+from ._private_fs import open_private_directory
 
 # Keep these scope/name rules aligned with dbcrypt._policy. Importing that
 # package here would execute dbcrypt.__init__ below the custody boundary.
@@ -54,7 +55,12 @@ def _home_parts(parts: tuple[str, ...]) -> tuple[str, ...]:
 def _excluded(parts: tuple[str, ...]) -> bool:
     if parts[0] == "mordred":
         # Inspect only database lifecycle records in this otherwise denied tree.
-        return len(parts) > 1 and (len(parts) != 2 or not parts[1].casefold().startswith("db-"))
+        return len(parts) > 1 and (
+            len(parts) != 2
+            or not (
+                parts[1].casefold().startswith("db-") or parts[1].casefold().lstrip(".").startswith("db-key-source")
+            )
+        )
     return parts[0] in _DENY_DIRS
 
 
@@ -66,6 +72,8 @@ def _kind(parts: tuple[str, ...]) -> _Kind | None:
     name = parts[-1].casefold()
     if name.endswith(".lock"):
         return None
+    if len(parts) == 2 and parts[0].casefold() == "mordred" and name.lstrip(".").startswith("db-key-source"):
+        return "unknown"  # Only the exact checked root record can be omitted later.
     if parts[0] == "mordred":
         return _STATE_KINDS.get(name, "unknown") if len(parts) == 2 else None
     for suffix in _SIDECARS:
@@ -110,12 +118,34 @@ def _inspect(child: os.DirEntry[str], path: Path, kind: _Kind | None) -> tuple[D
     return (Dependency(path, kind, None), False) if kind is not None else (None, False)
 
 
+def _source_binding_metadata(root: Path, path: Path) -> bool:
+    """Omit only one checked root-local POSIX authority record, never its copies."""
+    if path.relative_to(root).parts != ("mordred", "db-key-source.json") or os.name != "posix":
+        return False
+    from ._database_locking_posix import identify_root
+
+    try:
+        identity = identify_root(root)
+        with open_private_directory(root / "mordred") as directory:
+            before = directory.stat("db-key-source.json")
+            data = directory.read_bytes("db-key-source.json", max_bytes=4096)
+            source = decode_database_source_binding(data)
+            return (
+                directory.stat("db-key-source.json") == before
+                and identify_root(root) == identity
+                and source.root == identity
+            )
+    except (OSError, DatabaseRefused):
+        return False
+
+
 def scan_dependencies(root: Path) -> Inventory:
     """Scan names/metadata only; absence is trusted only after complete discovery.
 
     Generations remain unknown until the registered-backup/binding protocol is
     implemented. This deliberately retains every discovered dependency, without
     opening a live database, parsing its header, or authenticating native keys.
+    Only the exact checked root source binding is decoded as public metadata.
     """
     entries: dict[Path, Dependency] = {}
     directories = [root]
@@ -137,7 +167,7 @@ def scan_dependencies(root: Path) -> Inventory:
                     if _excluded(parts):
                         continue
                     dependency, descend = _inspect(child, path, _kind(parts))
-                    if dependency is not None:
+                    if dependency is not None and not _source_binding_metadata(root, path):
                         entries[path] = dependency
                     if descend:
                         directories.append(path)

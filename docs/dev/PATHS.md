@@ -31,6 +31,7 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/memory-key.wrapped` | Linux memory provider | 127-byte TPM-wrapped memory key; private `0600`, no portable recovery |
 | `<home>/mordred/memory-key.lock` | Linux memory lifecycle | private interprocess provisioning/lifecycle lock |
 | `<home>/mordred/memory-vault.marker` | encryption CLI | arms the agent-memory at-rest encryption runtime |
+| `<root>/mordred/db-key-source.json` | explicit database source enrollment (Linux/macOS only) | private `0600` v1 metadata binding: checked physical root/provider, random 32-hex generation, and public wrapped-source/header digest; no key or plaintext-key digest. Only this validated root-local record is omitted from dependency inventory; copies, variants, and temporary records block cleanup. Retirement requires the existing exclusive root lease and a clean all-generations inventory before checked durable unlink; Windows uses its checked native memory-role generation without this file. |
 | `<home>/mordred/db-encryption.marker` | `databases encrypt` / startup conversion | arms SQLCipher for every Hermes database (`mordred_hermes.dbcrypt`) |
 | `<home>/mordred/db-encryption.pending` | `databases encrypt` while Hermes runs | converts the databases at the next Hermes start |
 | `<home>/mordred/db-decryption.pending` | `databases decrypt` while Hermes runs | turns the databases back into plain SQLite at the next Hermes start |

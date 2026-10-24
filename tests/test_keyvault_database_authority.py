@@ -433,3 +433,131 @@ def test_enrollment_refuses_forged_exclusive_subclass(source):
     with pytest.raises(DatabaseRefused):
         authority.enroll_database_source(root=root, lease=ForgedLease())
     assert not (root / "mordred/db-key-source.json").exists()
+
+
+def test_valid_source_only_binding_can_retire_without_unwrap(source):
+    authority, root, backend, _ = source
+    snapshot = enroll(authority, root)
+    before = list(backend.calls)
+    with acquire_exclusive(root) as lease:
+        authority.retire_database_source(root=root, expected=snapshot, lease=lease)
+    assert not (root / "mordred/db-key-source.json").exists()
+    assert memory.memory_key_path(root).exists()
+    assert backend.calls == before
+    with pytest.raises(DatabaseRefused):
+        authority.observe_database_source(root=root)
+
+
+@pytest.mark.parametrize(
+    "dependency",
+    [
+        "state.db",
+        "mordred/db-encryption.marker",
+        "mordred/db-encryption.pending",
+        "mordred/db-backups.json",
+        "backups/root.tgz",
+        "mordred/db-key-source.json.tmp",
+        "profiles/work/mordred/db-key-source.json",
+    ],
+)
+def test_retirement_preserves_binding_when_any_dependency_remains(source, dependency):
+    authority, root, backend, _ = source
+    snapshot = enroll(authority, root)
+    binding = root / "mordred/db-key-source.json"
+    original = binding.read_bytes()
+    path = root / dependency
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    path.write_bytes(b"retained dependency")
+    before = list(backend.calls)
+    with acquire_exclusive(root) as lease, pytest.raises(DatabaseRefused):
+        authority.retire_database_source(root=root, expected=snapshot, lease=lease)
+    assert binding.read_bytes() == original
+    assert backend.calls == before
+
+
+def test_retirement_refuses_missing_wrong_or_expired_authority(source):
+    authority, root, _, _ = source
+    snapshot = enroll(authority, root)
+    binding = root / "mordred/db-key-source.json"
+    original = binding.read_bytes()
+    with acquire_exclusive(root) as expired:
+        pass
+    with pytest.raises(DatabaseRefused):
+        authority.retire_database_source(root=root, expected=snapshot, lease=expired)
+    with acquire_exclusive(root) as lease, pytest.raises(DatabaseRefused):
+        authority.retire_database_source(root=root, expected=replace(snapshot, generation="f" * 32), lease=lease)
+    assert binding.read_bytes() == original
+    binding.unlink()
+    with acquire_exclusive(root) as lease, pytest.raises(DatabaseRefused):
+        authority.retire_database_source(root=root, expected=snapshot, lease=lease)
+
+
+def test_retirement_refuses_binding_replaced_before_unlink(source, monkeypatch):
+    from mordred_hermes._private_fs import _posix
+
+    authority, root, _, _ = source
+    snapshot = enroll(authority, root)
+    binding = root / "mordred/db-key-source.json"
+    original = binding.read_bytes()
+    real_delete = _posix._Transaction.delete_file
+
+    def replace_before_delete(tx, name, *, expected_identity=None):
+        replacement = binding.with_suffix(".replacement")
+        replacement.write_bytes(original)
+        replacement.chmod(0o600)
+        replacement.replace(binding)
+        return real_delete(tx, name, expected_identity=expected_identity)
+
+    monkeypatch.setattr(_posix._Transaction, "delete_file", replace_before_delete)
+    with acquire_exclusive(root) as lease, pytest.raises(DatabaseRefused):
+        authority.retire_database_source(root=root, expected=snapshot, lease=lease)
+    assert binding.read_bytes() == original
+
+
+def test_retirement_preserves_malformed_binding(source):
+    authority, root, _, _ = source
+    snapshot = enroll(authority, root)
+    binding = root / "mordred/db-key-source.json"
+    binding.write_bytes(b"malformed source record\n")
+    with acquire_exclusive(root) as lease, pytest.raises(DatabaseRefused):
+        authority.retire_database_source(root=root, expected=snapshot, lease=lease)
+    assert binding.read_bytes() == b"malformed source record\n"
+
+
+def test_retirement_guard_includes_other_known_generations(source, monkeypatch):
+    from mordred_hermes import _database_inventory as inventory
+    from mordred_hermes._database_contracts import Dependency, Inventory
+
+    authority, root, _, _ = source
+    snapshot = enroll(authority, root)
+    binding = root / "mordred/db-key-source.json"
+    original = binding.read_bytes()
+    monkeypatch.setattr(
+        inventory,
+        "scan_dependencies",
+        lambda path: Inventory((Dependency(root / "older.db", "database", "different-generation"),), True),
+    )
+    with acquire_exclusive(root) as lease, pytest.raises(DatabaseRefused):
+        authority.retire_database_source(root=root, expected=snapshot, lease=lease)
+    assert binding.read_bytes() == original
+
+
+def test_macos_source_retirement_does_not_open_native_or_anchor(mac_source):
+    authority, root, backend, store, _ = mac_source
+    snapshot = enroll(authority, root)
+    before = list(backend.calls), list(store.calls)
+    with acquire_exclusive(root) as lease:
+        authority.retire_database_source(root=root, expected=snapshot, lease=lease)
+    assert (backend.calls, store.calls) == before
+    assert not (root / "mordred/db-key-source.json").exists()
+    assert (root / "mordred/vault").is_dir()
+
+
+def test_windows_source_retirement_refuses_without_changing_custody(windows_source):
+    authority, _, root, backend, _ = windows_source
+    snapshot = enroll(authority, root)
+    before = list(backend.calls)
+    with acquire_exclusive(root) as lease, pytest.raises(DatabaseRefused):
+        authority.retire_database_source(root=root, expected=snapshot, lease=lease)
+    assert authority.observe_database_source(root=root) == snapshot
+    assert backend.calls == before

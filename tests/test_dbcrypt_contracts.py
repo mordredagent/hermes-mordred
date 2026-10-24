@@ -39,3 +39,78 @@ import mordred_hermes._database_lifecycle
 """
     result = subprocess.run([sys.executable, "-c", child], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def source_binding(**updates):
+    import json
+
+    value = {
+        "version": 1,
+        "root": {"platform": "linux", "volume": 1, "file_id": "2", "owner": "1000"},
+        "provider": "tpm",
+        "generation": "a" * 32,
+        "record_sha256": "b" * 64,
+    }
+    value.update(updates)
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+
+
+def test_source_binding_decoder_is_pure_and_returns_posix_snapshot():
+    from mordred_hermes._database_contracts import NativeSnapshot, RootIdentity, decode_database_source_binding
+
+    assert decode_database_source_binding(source_binding()) == NativeSnapshot(
+        RootIdentity("linux", 1, "2", "1000"), "tpm", "a" * 32, "b" * 64
+    )
+    assert (
+        decode_database_source_binding(
+            source_binding(
+                root={"platform": "darwin", "volume": 3, "file_id": "4", "owner": "501"}, provider="secure-enclave"
+            )
+        ).provider
+        == "secure-enclave"
+    )
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"version": True},
+        {"version": 2},
+        {"extra": 1},
+        {"provider": "cng"},
+        {"provider": "secure-enclave"},
+        {"generation": "A" * 32},
+        {"generation": "a" * 64},
+        {"record_sha256": "B" * 64},
+        {"root": {"platform": "linux", "volume": 1.0, "file_id": "2", "owner": "1000"}},
+        {"root": {"platform": "linux", "volume": -1, "file_id": "2", "owner": "1000"}},
+        {"root": {"platform": "linux", "volume": 1, "file_id": "02", "owner": "1000"}},
+        {"root": {"platform": "linux", "volume": 1, "file_id": "2", "owner": "+1000"}},
+        {"root": {"platform": "linux", "volume": 1, "file_id": "2", "owner": "01000"}},
+        {"root": {"platform": "win32", "volume": 1, "file_id": "0" * 32, "owner": "0101"}},
+    ],
+)
+def test_source_binding_decoder_refuses_noncanonical_fields(updates):
+    from mordred_hermes._database_contracts import DatabaseRefused, decode_database_source_binding
+
+    with pytest.raises(DatabaseRefused):
+        decode_database_source_binding(source_binding(**updates))
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"",
+        b"{}\n",
+        b"x" * 4097,
+        b"\xff\n",
+        b'{"version":1,"version":1}\n',
+        source_binding()[:-1],
+        source_binding().decode().encode("utf-16"),
+    ],
+)
+def test_source_binding_decoder_refuses_malformed_or_unbounded_data(data):
+    from mordred_hermes._database_contracts import DatabaseRefused, decode_database_source_binding
+
+    with pytest.raises(DatabaseRefused):
+        decode_database_source_binding(data)

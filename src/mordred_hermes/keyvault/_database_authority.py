@@ -19,7 +19,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from .._database_contracts import DatabaseRefused, NativeSnapshot, RootIdentity
+from .._database_contracts import DatabaseRefused, NativeSnapshot, RootIdentity, decode_database_source_binding
 from .._database_lifecycle import ExclusiveLease
 from .._private_fs import PrivateFSError, open_private_directory
 from . import wrap
@@ -28,7 +28,6 @@ if TYPE_CHECKING:
     from ._windows_custody import WindowsCustodySession
 
 _BINDING = "db-key-source.json"
-_HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -76,33 +75,11 @@ def _json(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8") + b"\n"
 
 
-def _pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise DatabaseRefused("duplicate database source metadata field")
-        result[key] = value
-    return result
-
-
 def _binding(raw: bytes, identity: RootIdentity, provider: str, digest: str) -> NativeSnapshot:
-    data = json.loads(raw, object_pairs_hook=_pairs)
-    if (
-        not raw.endswith(b"\n")
-        or not isinstance(data, dict)
-        or set(data) != {"version", "root", "provider", "generation", "record_sha256"}
-        or type(data["version"]) is not int
-        or data["version"] != 1
-        or not isinstance(data["root"], dict)
-        or type(data["root"].get("volume")) is not int
-        or data["root"] != asdict(identity)
-        or data["provider"] != provider
-        or not isinstance(data["generation"], str)
-        or _HEX32.fullmatch(data["generation"]) is None
-        or data["record_sha256"] != digest
-    ):
+    result = decode_database_source_binding(raw)
+    if result.root != identity or result.provider != provider or result.record_sha256 != digest:
         raise DatabaseRefused("database source binding changed or is malformed")
-    return NativeSnapshot(identity, "tpm" if provider == "tpm" else "secure-enclave", data["generation"], digest)
+    return result
 
 
 def _posix_record(root: Path, identity: RootIdentity) -> tuple[Literal["tpm", "secure-enclave"], str]:
@@ -286,3 +263,37 @@ def enroll_database_source(*, root: Path, lease: ExclusiveLease) -> NativeSnapsh
         if _observe_posix(root, identity) != result:
             raise DatabaseRefused("database source changed during enrollment publication")
         return result
+
+
+def retire_database_source(*, root: Path, expected: NativeSnapshot, lease: ExclusiveLease) -> None:
+    """Retire only the observed POSIX binding after a fresh all-generation guard.
+
+    The caller owns native custody and retains the preceding database lease
+    through its subsequent native operation. This takes only the checked-file
+    metadata transaction; it never acquires database or native custody locks.
+    Successful retirement is not silently undone if that later operation fails.
+    """
+    from .._database_inventory import assert_mutation_safe
+
+    with _refusal():
+        root, identity = _root(root)
+        if type(lease) is not ExclusiveLease:
+            raise DatabaseRefused("a preceding exclusive database lease is required")
+        ExclusiveLease.assert_held(lease, root)
+        if identity.platform == "win32":
+            raise DatabaseRefused("Windows has no independent database source binding")
+        if _observe_posix(root, identity) != expected:
+            raise DatabaseRefused("database source changed before retirement")
+        with open_private_directory(root / "mordred") as directory:
+            observed = directory.stat(_BINDING)
+            raw = directory.read_bytes(_BINDING, max_bytes=4096)
+            if directory.stat(_BINDING) != observed or decode_database_source_binding(raw) != expected:
+                raise DatabaseRefused("database source binding changed before retirement")
+            assert_mutation_safe(root, None, lease)
+            if _observe_posix(root, identity) != expected:
+                raise DatabaseRefused("database source changed during retirement")
+            with directory.transaction() as tx:
+                ExclusiveLease.assert_held(lease, root)
+                if tx.stat(_BINDING) != observed or tx.read_bytes(_BINDING, max_bytes=4096) != raw:
+                    raise DatabaseRefused("database source binding changed during retirement")
+                tx.delete_file(_BINDING, expected_identity=observed.identity)
