@@ -730,7 +730,26 @@ def _bundle_build(checkout: Path, output: Path, commands: list[dict[str, Any]], 
     artifacts.mkdir()
     if sys.platform == "win32":
         receipts = artifacts / "native-build/wheel"
-        receipts.mkdir(mode=0o700, parents=True)
+        receipts.parent.mkdir(parents=True, exist_ok=True)
+        if receipts.exists() or receipts.is_symlink():
+            raise AcceptanceRefused("bundle_receipt_directory_already_exists")
+        previous_home = os.environ.get("HERMES_HOME")
+        os.environ["HERMES_HOME"] = str(home)
+        try:
+            from mordred_hermes._private_fs import PrivateFSError, open_private_directory
+
+            try:
+                # Python's Windows mkdir(0700) uses OW, not the explicit user
+                # SID required by the unchanged build-hook receipt validator.
+                with open_private_directory(receipts, create=True):
+                    pass
+            except PrivateFSError as exc:
+                raise AcceptanceRefused("bundle_receipt_directory_unavailable") from exc
+        finally:
+            if previous_home is None:
+                os.environ.pop("HERMES_HOME", None)
+            else:
+                os.environ["HERMES_HOME"] = previous_home
         environment["MORDRED_DBCRYPT_BUILD_RECEIPT_DIR"] = str(receipts)
     _run_build(
         ["uv", "build", "--sdist", str(checkout), "--out-dir", str(artifacts)],

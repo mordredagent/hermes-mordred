@@ -1982,6 +1982,125 @@ def test_packaged_producer_reaches_only_fixed_children_without_custody_and_retai
     assert json.loads((output / "result.json").read_text())["status"] == "failed"
 
 
+@pytest.mark.parametrize(
+    ("existing", "native_failure"),
+    [(None, False), (None, True), ("directory", False), ("file", False), ("link", False), ("dangling-link", False)],
+)
+def test_bundle_build_windows_receipt_constructor(tmp_path: Path, monkeypatch, existing, native_failure) -> None:
+    """Python 3.11's observed OW ACL must never reach the strict build hook."""
+    import ast
+    import ctypes
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from mordred_hermes import _private_fs
+
+    tool = acceptance_tool("dbcrypt_acceptance")
+    # Load only the pure admission predicate, without requiring the build-time
+    # hatchling dependency or importing/executing any build entrypoint.
+    hook_path = Path(__file__).resolve().parents[1] / "hatch_build.py"
+    hook_ast = ast.parse(hook_path.read_text())
+    predicate = next(
+        node for node in hook_ast.body if isinstance(node, ast.FunctionDef) and node.name == "_receipt_dacl_allowed"
+    )
+    hook = {"Any": object}
+    exec(compile(ast.Module(body=[predicate], type_ignores=[]), str(hook_path), "exec"), hook)
+    output, checkout, home = tmp_path / "bundle", tmp_path / "checkout", tmp_path / "synthetic-home"
+    output.mkdir()
+    home.mkdir()
+    receipts = output / "artifacts/native-build/wheel"
+    user = "S-1-5-21-128634620-2103407742-3662938906-1010"
+    allowed = {user, "S-1-5-18", "S-1-5-32-544"}
+    trustees = []
+    python_leaf_creations = []
+    native_creations = []
+    closed = []
+    original_mkdir = Path.mkdir
+
+    def mkdir(path, *args, **kwargs):
+        result = original_mkdir(path, *args, **kwargs)
+        if path == output / "artifacts" and existing is not None:
+            original_mkdir(receipts.parent)
+            if existing == "directory":
+                original_mkdir(receipts)
+            elif existing == "file":
+                receipts.write_bytes(b"retained failure")
+            else:
+                target = tmp_path / "link-target"
+                if existing == "link":
+                    original_mkdir(target)
+                receipts.symlink_to(target, target_is_directory=True)
+        if path == receipts:
+            python_leaf_creations.append(path)
+            trustees[:] = ["S-1-3-4", "S-1-5-18", "S-1-5-32-544"]
+        return result
+
+    @contextmanager
+    def native_directory(path, *, create=False):
+        assert path == receipts and create is True
+        assert os.environ["HERMES_HOME"] == str(home)
+        assert not path.exists() and not path.is_symlink()
+        native_creations.append(path)
+        if native_failure:
+            raise _private_fs.PrivateFSError("access_denied", "private diagnostic must not escape")
+        original_mkdir(path)
+        trustees[:] = [user, "S-1-5-18", "S-1-5-32-544"]
+        try:
+            yield None
+        finally:
+            closed.append(path)
+
+    class FirstPackageCommand(Exception):
+        pass
+
+    def first_build(argv, *, cwd, environment, log):
+        assert existing is None and not native_failure, "package command after constructor refusal"
+        assert argv == ["uv", "build", "--sdist", str(checkout), "--out-dir", str(output / "artifacts")]
+        assert cwd == output and log == []
+        assert environment["HERMES_HOME"] == str(home)
+        assert environment["MORDRED_DBCRYPT_BUILD_RECEIPT_DIR"] == str(receipts)
+        # Exercise the unchanged hook predicate using inert ACE buffers. No
+        # Windows API, package manager, compiler, helper or custody operation.
+        aces = [ctypes.create_string_buffer(b"\0" * 9) for _ in trustees]
+        sid_names = {ctypes.addressof(ace) + 8: sid for ace, sid in zip(aces, trustees, strict=True)}
+
+        def get_ace(_dacl, index, pointer):
+            ctypes.cast(pointer, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.addressof(aces[index])
+            return True
+
+        assert hook["_receipt_dacl_allowed"](
+            SimpleNamespace(GetAce=get_ace), None, len(aces), allowed, lambda pointer: sid_names[pointer.value]
+        ), "strict hook rejects the observed Owner Rights ACL"
+        assert closed == [receipts]
+        raise FirstPackageCommand
+
+    monkeypatch.setattr(tool, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    monkeypatch.setattr(_private_fs, "open_private_directory", native_directory)
+    monkeypatch.setattr(tool, "_run_build", first_build)
+    prior_home = os.environ.get("HERMES_HOME")
+    if existing is not None:
+        with pytest.raises(tool.AcceptanceRefused, match=r"^bundle_receipt_directory_already_exists$"):
+            tool._bundle_build(checkout, output, [], home)
+        assert native_creations == []
+        if existing == "file":
+            assert receipts.read_bytes() == b"retained failure"
+        elif existing in {"link", "dangling-link"}:
+            assert receipts.is_symlink()
+        else:
+            assert receipts.is_dir() and list(receipts.iterdir()) == []
+    elif native_failure:
+        with pytest.raises(tool.AcceptanceRefused, match=r"^bundle_receipt_directory_unavailable$"):
+            tool._bundle_build(checkout, output, [], home)
+        assert native_creations == [receipts] and not receipts.exists()
+    else:
+        with pytest.raises(FirstPackageCommand):
+            tool._bundle_build(checkout, output, [], home)
+        assert native_creations == [receipts]
+    assert python_leaf_creations == []
+    assert os.environ.get("HERMES_HOME") == prior_home
+
+
 def test_outer_package_manager_output_is_not_compiler_receipt(tmp_path: Path, monkeypatch) -> None:
     from types import SimpleNamespace
 
