@@ -1628,6 +1628,89 @@ def test_known_na_node_without_a_matching_raw_reason_still_refuses(monkeypatch) 
     assert reporter.reports[0]["reason_code"] == "unrecognized_skip"
 
 
+@pytest.mark.parametrize("root_kind", ["symlink", "missing", "file"])
+def test_windows_inventory_na_applies_only_to_the_actual_symlink_parameter(monkeypatch, root_kind: str) -> None:
+    import runpy
+    from types import SimpleNamespace
+
+    tool = acceptance_tool("dbcrypt_acceptance")
+    helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
+    reporter = helper["NativeReport"]()
+    # Reporting/parser contract only: no Windows/native fixture is invoked.
+    monkeypatch.setitem(reporter.pytest_runtest_logreport.__globals__, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setenv("MORDRED_DBCRYPT_RUN_SUITE", "affected")
+    node = "tests/test_dbcrypt_inventory.py::test_invalid_root_is_incomplete[" + root_kind + "]"
+    reason = "POSIX alias/rename semantics; Windows sharing/rename qualification is Task 5's gate"
+    for stage in ("setup", "teardown"):
+        reporter.pytest_runtest_logreport(
+            SimpleNamespace(
+                nodeid=node,
+                when=stage,
+                outcome="skipped" if stage == "setup" else "passed",
+                longrepr=("tests/test_dbcrypt_inventory.py", 259, "Skipped: " + reason),
+            )
+        )
+    report = {
+        "nodeids": [node],
+        "deselected": [],
+        "collection_errors": [],
+        "exitstatus": 0,
+        "reports": reporter.reports,
+    }
+    if root_kind == "symlink":
+        assert reporter.reports[0]["reason_code"] == "windows_posix_dbcrypt_inventory"
+        actual = tool.validate_native_test_report(report, platform="win32", suite="affected")
+        assert actual["counts"] == {"passed": 0, "platform_na": 1, "skipped": 0}
+    else:
+        assert reporter.reports[0]["reason_code"] == "unrecognized_skip"
+        # Even a relabelled safe code cannot admit a skip of these required cases.
+        for code in ("unrecognized_skip", "windows_posix_dbcrypt_inventory"):
+            report["reports"][0]["reason_code"] = code
+            with pytest.raises(tool.AcceptanceRefused, match="native_test_results_incomplete"):
+                tool.validate_native_test_report(report, platform="win32", suite="affected")
+
+
+@pytest.mark.parametrize("platform,generation_length", [("linux", 32), ("win32", 64), ("linux", 64), ("win32", 32)])
+def test_public_read_generation_follows_the_actual_provider_contract(platform: str, generation_length: int) -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    identity = {"platform": platform, "volume": 1, "file_id": "100", "owner": "ordinary-owner"}
+    fixture = {
+        "root": identity,
+        "source": {
+            "root": identity,
+            "provider": "cng" if platform == "win32" else "tpm",
+            "generation": "a" * generation_length,
+            "record_sha256": "b" * 64,
+        },
+    }
+    logical = {
+        profile + ":" + component: "c" * 64
+        for profile in tool.REQUIRED_PROFILES
+        for component in tool.REQUIRED_COMPONENTS
+    }
+    checkout = r"C:\source" if platform == "win32" else "/source"
+    module = (
+        r"C:\source\.venv\Lib\site-packages\hermes\__init__.py"
+        if platform == "win32"
+        else "/source/.venv/lib/site-packages/hermes/__init__.py"
+    )
+    bundle = {"checkout": checkout, "source_probe": {"versions": {"hermes-agent": "1.0"}}}
+    phase = {"platform": platform, "mode": "source", "fixture": fixture, "logical": logical}
+    payload = {
+        "logical": logical,
+        "rows": dict.fromkeys(tool.REQUIRED_COMPONENTS),
+        "fixture": fixture,
+        "facts": {"filesystem": {"identity": identity}},
+        "hermes": {"module": module, "version": "1.0", "sha256": "d" * 64},
+        "credential_continuity": "original_native_protected_reference",
+    }
+    if generation_length == (64 if platform == "win32" else 32):
+        tool._public_read(payload, phase, bundle, persistence=True)
+    else:
+        with pytest.raises(ValueError, match="inconsistent bundle provenance"):
+            tool._public_read(payload, phase, bundle, persistence=True)
+
+
 def test_full8_explicit_reviewed_source_configuration_is_bound(tmp_path: Path, monkeypatch) -> None:
     tool, root, checkout, manifest = full_qualification_fixture(tmp_path, monkeypatch)
     actual = tool.validate_windows_qualification(root, checkout=checkout)

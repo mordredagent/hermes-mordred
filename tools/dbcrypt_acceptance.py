@@ -1446,6 +1446,10 @@ WINDOWS_PLATFORM_NA = {
         "POSIX alias/rename semantics; Windows sharing/rename qualification is Task 5's gate",
         "windows_posix_dbcrypt_inventory",
     ),
+    "test_dbcrypt_inventory.py::test_invalid_root_is_incomplete[symlink]": (
+        "POSIX alias/rename semantics; Windows sharing/rename qualification is Task 5's gate",
+        "windows_posix_dbcrypt_inventory",
+    ),
     "test_dbcrypt_lifecycle.py::test_a_forked_runtime_keeps_its_lease_after_the_parent_exits": (
         "POSIX fork lifetime",
         "windows_posix_fork",
@@ -1524,7 +1528,7 @@ def platform_na_reason(
     if identity.startswith("extension/test_telegram_migrate_store.py::"):
         expected: tuple[str, str] | None = (WINDOWS_TELEGRAM_MIGRATION_REASON, "windows_telegram_migration_module")
     else:
-        expected = WINDOWS_PLATFORM_NA.get(identity)
+        expected = WINDOWS_PLATFORM_NA.get(_normalized_node(nodeid), WINDOWS_PLATFORM_NA.get(identity))
     if expected is None or (reason is not None and reason != expected[0]):
         return None
     return expected[1]
@@ -2302,7 +2306,8 @@ def _public_read(payload: dict[str, Any], phase: dict[str, Any], bundle: dict[st
     )
     _require(payload["fixture"]["root"] == payload["fixture"]["source"]["root"])
     source = payload["fixture"]["source"]
-    _require(_hex(source["generation"], 32) and _hex(source["record_sha256"], 64))
+    generation_length = 64 if phase["platform"] == "win32" else 32
+    _require(_hex(source["generation"], generation_length) and _hex(source["record_sha256"], 64))
     _require(
         source["provider"] == ("cng" if phase["platform"] == "win32" else "tpm")
         and source["root"]["platform"] == phase["platform"]
