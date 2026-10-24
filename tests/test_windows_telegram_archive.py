@@ -405,8 +405,8 @@ def test_ambiguous_native_deletion_stays_journaled_and_blocks_the_next_forget(ar
     leases = seed(home, backend, root, c)
     real_delete = backend.delete_enclave_key
 
-    def lost(key_id):
-        real_delete(key_id)
+    def lost(key_id, **kwargs):
+        real_delete(key_id, **kwargs)
         raise RuntimeError("native deletion result lost")
 
     monkeypatch.setattr(backend, "delete_enclave_key", lost)

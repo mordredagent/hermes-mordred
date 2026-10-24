@@ -13,6 +13,7 @@ from mordred_hermes._audit_session import AuditSession, audit_session
 from mordred_hermes._config_io import PublicationReceipt
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
 from mordred_hermes.keyvault import log_encryption as log
+from mordred_hermes.keyvault._database_mutation import database_key_mutation
 from mordred_hermes.keyvault._exceptions import WrapKeyNotFound, WrapNativeUnavailable
 from tests import test_windows_custody
 from tests._private_files import write_private
@@ -328,14 +329,20 @@ def test_audit_retained_history_survives_memory_purge_and_reenroll(fs, monkeypat
     path = home / "mordred" / "audit.log"
     provider(a, home, backend).writer(path).append({"event": "retained"})
     monkeypatch.setattr(c, "require_stopped_windows_gateways", lambda home: None)
-    with c.windows_custody_session(home, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
         memory = session.lease("memory")
     with open_private_directory(home / "mordred") as directory, directory.transaction() as tx:
         tx.create_bytes("memory-vault.optout", b"1\n")
-    with c.windows_custody_session(home, backend=backend) as session:
-        session.delete_role(memory)
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
+        session.delete_role(memory, database_lease=database_lease)
+        session.enroll_memory(database_lease=database_lease)
     assert (
         a.decrypt_windows_log_file(path, home=home, backend=backend, audit_sink=lambda event: None)[0]["event"]
         == "retained"

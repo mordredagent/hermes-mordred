@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -92,7 +93,13 @@ def _enroll_one(home: Path, role: NativeRole) -> tuple[GenerationLease, bool]:
     """Enroll ``role`` when absent, in its own custody scope; report an existing one."""
     from ..keyvault._windows_custody import windows_custody_session
 
-    with windows_custody_session(home, create=True) as custody:
+    with ExitStack() as stack:
+        database_lease = None
+        if role == "memory":
+            from ..keyvault._database_mutation import database_key_mutation
+
+            database_lease = stack.enter_context(database_key_mutation(root=home, generation=None))
+        custody = stack.enter_context(windows_custody_session(home, create=True))
         # Memory ownership is read through memory_state(), which also fails
         # closed on retained memory evidence without committed ownership.
         current = custody.memory_state().lease if role == "memory" else custody.role_status(role).current
@@ -101,7 +108,7 @@ def _enroll_one(home: Path, role: NativeRole) -> tuple[GenerationLease, bool]:
             return current, False
         if role == "memory":
             # The returned key bytes are discarded at once: enrollment is inert.
-            custody.enroll_memory()
+            custody.enroll_memory(database_lease=database_lease)
             return custody.lease("memory"), True
         return custody.enroll_role(role), True
 

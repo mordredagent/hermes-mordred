@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+from .._custody_order import custody_scope
 from .._private_fs import (
     ConfidentialTransaction,
     FileIdentity,
@@ -121,7 +122,7 @@ def windows_memory_session(
     from ._windows_custody import CustodyError, windows_custody_session
 
     admitted = windows_memory_runtime_admitted()  # before filesystem locks
-    with ExitStack() as owner_stack:
+    with custody_scope(), ExitStack() as owner_stack:
         if custody is None:
             custody = owner_stack.enter_context(windows_custody_session(home, create=create))
         else:

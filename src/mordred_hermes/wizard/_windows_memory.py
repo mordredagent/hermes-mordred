@@ -335,6 +335,7 @@ _PURGE_HINTS: dict[str, str] = {
 
 def purge(*, home: Path) -> int:
     """capabilities -> gate -> verify_memory_purge_candidates -> reset_role("memory")."""
+    from ..keyvault._database_mutation import database_key_mutation
     from ..keyvault._windows_custody import windows_custody_session
 
     if _capability_refusal("purge", home) is not None:
@@ -355,9 +356,12 @@ def purge(*, home: Path) -> int:
         hints = "; ".join(dict.fromkeys(_PURGE_HINTS.get(reason, reason) for reason in report.reasons))
         return _refused("purge", "verification", "not-purgeable", "; ".join(report.reasons), hints)
     try:
-        with windows_custody_session(home) as custody:
+        with (
+            database_key_mutation(root=home, generation=None) as database_lease,
+            windows_custody_session(home) as custody,
+        ):
             # Memory reset ignores erasure authorization: seals always refuse.
-            reset = custody.reset_role("memory", erase_authorized=False)
+            reset = custody.reset_role("memory", erase_authorized=False, database_lease=database_lease)
     except _errors() as exc:
         notes = " ".join(getattr(exc, "__notes__", ()))
         reason = classify_exception(exc)

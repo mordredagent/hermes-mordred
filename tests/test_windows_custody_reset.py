@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
+from mordred_hermes.keyvault._database_mutation import database_key_mutation
 from tests.test_windows_custody import fs, opt_out  # noqa: F401
 
 
@@ -15,10 +16,13 @@ def deletes(backend):
 
 def enrolled(c, home, backend, *roles):
     leases = {}
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
         for role in roles:
             if role == "memory":
-                session.enroll_memory()
+                session.enroll_memory(database_lease=database_lease)
                 leases[role] = session.lease("memory")
             else:
                 leases[role] = session.enroll_role(role)
@@ -53,8 +57,11 @@ def test_memory_reset_preserves_audit_telegram_and_memory_files(stopped, monkeyp
     write_memory(home, "MEMORY.md", b"plaintext memory")
     opt_out(home)
     forbid_unwrap(monkeypatch)
-    with c.windows_custody_session(home, backend=backend) as session:
-        result = session.reset_role("memory")
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
+        result = session.reset_role("memory", database_lease=database_lease)
         assert result == c.RoleReset("memory", (leases["memory"].generation,))
         session.validate_lease(leases["audit"])
         session.validate_lease(leases["telegram"])
@@ -75,16 +82,19 @@ def test_memory_reset_preserves_audit_telegram_and_memory_files(stopped, monkeyp
 def test_audit_reset_requires_erasure_and_deletes_retained_before_current(stopped):
     c, _, home, backend, _ = stopped
     leases = enrolled(c, home, backend, "memory", "telegram")
-    with c.windows_custody_session(home, backend=backend) as session:
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
         old = session.enroll_role("audit")
         new = session.enroll_role("audit", retain_current=True)
         with pytest.raises(c.CustodyError):
-            session.reset_role("audit")
+            session.reset_role("audit", database_lease=database_lease)
         assert deletes(backend) == 0
         assert not (home / "mordred" / "windows-audit.pending.json").exists()
         status = session.role_status("audit")
         assert status.current == new and status.retained == (old,) and not status.pending
-        result = session.reset_role("audit", erase_authorized=True)
+        result = session.reset_role("audit", erase_authorized=True, database_lease=database_lease)
         assert result == c.RoleReset("audit", (old.generation, new.generation))
         session.validate_lease(leases["memory"])
         session.validate_lease(leases["telegram"])
@@ -96,8 +106,12 @@ def test_audit_reset_requires_erasure_and_deletes_retained_before_current(stoppe
 def test_telegram_reset_without_erasure_refuses_before_journal(stopped):
     c, _, home, backend, _ = stopped
     lease = enrolled(c, home, backend, "telegram")["telegram"]
-    with c.windows_custody_session(home, backend=backend) as session, pytest.raises(c.CustodyError):
-        session.reset_role("telegram")
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+        pytest.raises(c.CustodyError),
+    ):
+        session.reset_role("telegram", database_lease=database_lease)
     assert deletes(backend) == 0
     assert lease.native_key_id in backend._keys
     assert not (home / "mordred" / "windows-telegram.pending.json").exists()
@@ -105,14 +119,17 @@ def test_telegram_reset_without_erasure_refuses_before_journal(stopped):
 
 def test_reset_refuses_absent_or_empty_ownership(stopped):
     c, _, home, backend, _ = stopped
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
         with pytest.raises(c.CustodyError):
-            session.reset_role("memory", erase_authorized=True)
+            session.reset_role("memory", erase_authorized=True, database_lease=database_lease)
         session.enroll_role("audit")
         with pytest.raises(c.CustodyError):
-            session.reset_role("telegram", erase_authorized=True)
+            session.reset_role("telegram", erase_authorized=True, database_lease=database_lease)
         with pytest.raises(c.CustodyError):
-            session.reset_role("unknown", erase_authorized=True)
+            session.reset_role("unknown", erase_authorized=True, database_lease=database_lease)
     assert deletes(backend) == 0
 
 
@@ -129,10 +146,13 @@ def test_reset_refuses_pending_role_journal_without_native_action(stopped, monke
     journal = home / "mordred" / "windows-audit.pending.json"
     before = journal.read_bytes()
     calls = list(backend.calls)
-    with c.windows_custody_session(home, backend=backend) as session:
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
         assert session.role_status("audit").pending
         with pytest.raises(c.CustodyError):
-            session.reset_role("audit", erase_authorized=True)
+            session.reset_role("audit", erase_authorized=True, database_lease=database_lease)
     assert journal.read_bytes() == before
     assert backend.calls == calls
 
@@ -143,8 +163,12 @@ def test_reset_validates_every_role_journal_before_mutation(stopped):
     opt_out(home)
     with open_private_directory(home / "mordred") as directory, directory.transaction() as tx:
         tx.create_bytes("windows-audit.pending.json", b"{not json")
-    with c.windows_custody_session(home, backend=backend) as session, pytest.raises(c.CustodyError):
-        session.reset_role("memory")
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+        pytest.raises(c.CustodyError),
+    ):
+        session.reset_role("memory", database_lease=database_lease)
     assert deletes(backend) == 0
     assert lease.native_key_id in backend._keys
     assert (home / "mordred" / "memory-key.wrapped").exists()
@@ -163,14 +187,22 @@ def test_memory_reset_refuses_marker_and_sealed_inventory_without_touching_files
     forbid_unwrap(monkeypatch)
     with open_private_directory(home / "mordred") as directory, directory.transaction() as tx:
         tx.create_bytes("memory-vault.marker", b"1\n")
-    with c.windows_custody_session(home, backend=backend) as session, pytest.raises(c.CustodyError):
-        session.reset_role("memory", erase_authorized=erase_authorized)
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+        pytest.raises(c.CustodyError),
+    ):
+        session.reset_role("memory", erase_authorized=erase_authorized, database_lease=database_lease)
     assert gates == []  # a marker refuses before even the gateway inventory gate
     # An opt-out does not authorize crypto-shredding retained seals either.
     (home / "mordred" / "memory-vault.marker").unlink()
     opt_out(home)
-    with c.windows_custody_session(home, backend=backend) as session, pytest.raises(c.CustodyError):
-        session.reset_role("memory", erase_authorized=erase_authorized)
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+        pytest.raises(c.CustodyError),
+    ):
+        session.reset_role("memory", erase_authorized=erase_authorized, database_lease=database_lease)
     assert deletes(backend) == 0
     assert lease.native_key_id in backend._keys
     assert (home / "memories" / "MEMORY.md").read_bytes() == sealed
@@ -180,8 +212,12 @@ def test_memory_reset_refuses_marker_and_sealed_inventory_without_touching_files
 def test_memory_reset_requires_explicit_opt_out(stopped):
     c, _, home, backend, _ = stopped
     enrolled(c, home, backend, "memory")
-    with c.windows_custody_session(home, backend=backend) as session, pytest.raises(c.CustodyError):
-        session.reset_role("memory", erase_authorized=True)
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+        pytest.raises(c.CustodyError),
+    ):
+        session.reset_role("memory", erase_authorized=True, database_lease=database_lease)
     assert deletes(backend) == 0
 
 
@@ -208,8 +244,12 @@ def retained_memory(stopped):
 def test_memory_reset_refuses_retained_memory_generations(retained_memory):
     c, home, backend = retained_memory
     before = (home / "mordred" / "windows-custody.json").read_bytes()
-    with c.windows_custody_session(home, backend=backend) as session, pytest.raises(c.CustodyError):
-        session.reset_role("memory", erase_authorized=True)
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+        pytest.raises(c.CustodyError),
+    ):
+        session.reset_role("memory", erase_authorized=True, database_lease=database_lease)
     assert deletes(backend) == 0
     assert (home / "mordred" / "windows-custody.json").read_bytes() == before
     assert (home / "mordred" / "memory-key.wrapped").exists()
@@ -224,26 +264,33 @@ def test_ambiguous_native_deletion_stays_unresolved_and_refuses_next_reset(stopp
         current = session.enroll_role("audit", retain_current=True)
     delete = backend.delete_enclave_key
 
-    def ambiguous(key_id):
-        delete(key_id)
+    def ambiguous(key_id, **kwargs):
+        delete(key_id, **kwargs)
         if key_id == second.native_key_id:
             raise c.CustodyError("native response lost")
 
     monkeypatch.setattr(backend, "delete_enclave_key", ambiguous)
-    with pytest.raises(c.CustodyError) as failed, c.windows_custody_session(home, backend=backend) as session:
-        session.reset_role("audit", erase_authorized=True)
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        pytest.raises(c.CustodyError) as failed,
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
+        session.reset_role("audit", erase_authorized=True, database_lease=database_lease)
     assert any("1 confirmed deletion" in note for note in getattr(failed.value, "__notes__", ()))
     journal = home / "mordred" / "windows-audit.pending.json"
     before = journal.read_bytes()
     assert json.loads(before)["phase"] == "intent"
-    with c.windows_custody_session(home, backend=backend) as session:
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
         status = session.role_status("audit")
         assert status.pending
         assert status.current == current and status.retained == (second,)
         with pytest.raises(c.CustodyError):
-            session.reset_role("audit", erase_authorized=True)
+            session.reset_role("audit", erase_authorized=True, database_lease=database_lease)
         with pytest.raises(c.CustodyError):
-            session.reconcile_pending("audit", erase_authorized=True)
+            session.reconcile_pending("audit", erase_authorized=True, database_lease=database_lease)
         session.validate_lease(leases["memory"])
     assert journal.read_bytes() == before
     assert [key for op, key in backend.calls if op == "delete"] == [first.native_key_id, second.native_key_id]
@@ -261,14 +308,21 @@ def test_crash_between_native_delete_and_journal_commit_is_unresolved_on_reload(
         journal(session, pending, **kwargs)
 
     monkeypatch.setattr(c.WindowsCustodySession, "_journal", crash)
-    with pytest.raises(PrivateFSError) as failed, c.windows_custody_session(home, backend=backend) as session:
-        session.reset_role("telegram", erase_authorized=True)
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        pytest.raises(PrivateFSError) as failed,
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
+        session.reset_role("telegram", erase_authorized=True, database_lease=database_lease)
     assert failed.value.commit_state == "uncertain"
     monkeypatch.setattr(c.WindowsCustodySession, "_journal", journal)
-    with c.windows_custody_session(home, backend=backend) as session:
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
         assert session.role_status("telegram").pending
         with pytest.raises(c.CustodyError):
-            session.reset_role("telegram", erase_authorized=True)
+            session.reset_role("telegram", erase_authorized=True, database_lease=database_lease)
         with pytest.raises(c.CustodyError):
             session.lease("telegram")
     assert deletes(backend) == 1
@@ -299,10 +353,11 @@ def test_memory_reset_fails_closed_on_lost_wrapper(stopped):
     manifest = (home / "mordred" / "windows-custody.json").read_bytes()
     (home / "mordred" / "memory-key.wrapped").unlink()
     with (
+        database_key_mutation(root=home, generation=None) as database_lease,
         c.windows_custody_session(home, backend=backend) as session,
         pytest.raises(c.CustodyError, match="lost its wrapper"),
     ):
-        session.reset_role("memory", erase_authorized=True)
+        session.reset_role("memory", erase_authorized=True, database_lease=database_lease)
     assert gates == []
     assert deletes(backend) == 0
     assert lease.native_key_id in backend._keys
@@ -319,8 +374,12 @@ def test_failure_before_any_journal_is_noted_without_claiming_a_journal(stopped,
         raise RuntimeError("unknown gateway inventory")
 
     monkeypatch.setattr(c, "require_stopped_windows_gateways", unknown)
-    with pytest.raises(RuntimeError) as failed, c.windows_custody_session(home, backend=backend) as session:
-        session.reset_role("memory")
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        pytest.raises(RuntimeError) as failed,
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
+        session.reset_role("memory", database_lease=database_lease)
     notes = getattr(failed.value, "__notes__", ())
     assert any("0 confirmed deletion" in note and "no deletion journal" in note for note in notes)
     assert not (home / "mordred" / "windows-memory.pending.json").exists()
@@ -344,8 +403,12 @@ def test_memory_reset_refusals_name_the_c6_ceremony_not_erasure(stopped, state, 
                 tx.create_bytes("memory-vault.marker", b"1\n")
         else:
             write_memory(home, "MEMORY.md", seal(b"sealed memory", key=b"K" * 32, name="MEMORY.md"))
-    with c.windows_custody_session(home, backend=backend) as session, pytest.raises(c.CustodyError) as refused:
-        session.reset_role("memory", erase_authorized=True)
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+        pytest.raises(c.CustodyError) as refused,
+    ):
+        session.reset_role("memory", erase_authorized=True, database_lease=database_lease)
     assert "C6" in str(refused.value)
     assert "erasure authorization" not in str(refused.value)
     assert deletes(backend) == 0

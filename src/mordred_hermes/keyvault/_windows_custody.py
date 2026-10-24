@@ -7,13 +7,19 @@ lookups never generate, import ambient keys, infer native absence, or repair ACL
 from __future__ import annotations
 
 import hashlib
+import os
 import secrets
+import threading
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
+from weakref import WeakKeyDictionary
 
 from .._config_io import CanonicalPaths, CanonicalSession, canonical_session
+from .._custody_order import custody_scope
+from .._database_contracts import DatabaseRefused
 from .._private_fs import (
     FileIdentity,
     PrivateFSError,
@@ -24,6 +30,7 @@ from .._private_fs import (
 from . import wrap
 from ._exceptions import WrapParseError
 from ._memory_storage import inventory_memory_files
+from ._native_deletion import _backend_binding, _issue_native_owner, _NativeOwnerFacts, _owned_delete_scope
 from ._runtime_probe import require_stopped_windows_gateways
 from ._windows_profile import (
     LIMIT,
@@ -46,6 +53,25 @@ from ._windows_profile import (
 )
 from .memory_crypto import MemoryCryptoError, looks_like_magic_line, unseal
 from .wrap import NativeBackend
+
+if TYPE_CHECKING:
+    from .._database_lifecycle import ExclusiveLease
+
+
+@dataclass
+class _LiveSession:
+    home: Path
+    canonical: CanonicalSession
+    tx: PrivateTransaction | None
+    identity: FileIdentity | None
+    sid: bytes
+    process: tuple[int, int]
+    backend: NativeBackend | None
+    binding: tuple[object, ...] | None = None
+
+
+_sessions: WeakKeyDictionary[WindowsCustodySession, _LiveSession] = WeakKeyDictionary()
+
 
 MANIFEST = "windows-custody.json"
 WRAPPED = "memory-key.wrapped"
@@ -155,7 +181,7 @@ def windows_custody_session(
     backend: NativeBackend | None = None,
 ) -> Iterator[WindowsCustodySession]:
     """Own home -> mordred, or join an explicitly supplied checked coordinator."""
-    with ExitStack() as stack:
+    with custody_scope(), ExitStack() as stack:
         if canonical is None:
             canonical = stack.enter_context(canonical_session(CanonicalPaths(home), scope="policy", create=create))
         else:
@@ -173,11 +199,16 @@ def windows_custody_session(
                 if exc.reason != "missing" or create:
                     raise
         session = WindowsCustodySession(home, canonical, tx, identity, current_principal_id(), backend)
+        _sessions[session] = _LiveSession(
+            home, canonical, tx, identity, session._sid, (os.getpid(), threading.get_ident()), backend
+        )
+        session._bind_backend()
         try:
             yield session
             session.check()
         finally:
             session._live = False
+            _sessions.pop(session, None)
 
 
 class WindowsCustodySession:
@@ -199,8 +230,26 @@ class WindowsCustodySession:
         self._live = True
 
     def check(self) -> None:
-        if not self._live:
-            raise RuntimeError("Windows custody session is closed")
+        record = _sessions.get(self)
+        if not self._live or record is None:
+            raise RuntimeError("Windows custody session is closed or unregistered")
+        if record.process != (os.getpid(), threading.get_ident()):
+            raise DatabaseRefused("Windows custody session changed process or thread")
+        if (
+            record.home != self.home
+            or record.canonical is not self.canonical
+            or record.tx is not self._tx
+            or record.identity != self._identity
+            or record.sid != self._sid
+            or record.backend is not self._backend
+        ):
+            raise DatabaseRefused("Windows custody session binding changed")
+        if (
+            record.binding is not None
+            and self._backend is not None
+            and record.binding != _backend_binding(self._backend, "")
+        ):
+            raise DatabaseRefused("Windows native backend or store binding changed")
         if self.canonical.home_directory_identity() != self._identity or current_principal_id() != self._sid:
             raise CustodyError("Windows custody session identity changed")
         if self._tx is not None:
@@ -211,7 +260,54 @@ class WindowsCustodySession:
         self.check()
         if self._backend is None:
             self._backend = windows_backend()
+            _sessions[self].backend = self._backend
+            self._bind_backend()
         return self._backend
+
+    def _bind_backend(self) -> None:
+        # Only the concrete production backend can establish deletion-store
+        # evidence. Other protocol implementations cannot receive authority.
+        from ._seckey_backend import _SecKeyBackend
+
+        if type(self._backend) is _SecKeyBackend:
+            _sessions[self].binding = _backend_binding(self._backend, "")
+
+    def _check_native_delete_owner(self, native_key_id: str, backend: NativeBackend) -> _NativeOwnerFacts:
+        self.check()
+        registered = _sessions[self]
+        if backend is not self.backend or registered.binding != _backend_binding(backend, ""):
+            raise DatabaseRefused("Windows native backend or store binding changed")
+        manifest = self._manifest()
+        if manifest is None:
+            raise DatabaseRefused("Windows native ownership is absent")
+        matches: list[tuple[Role, RoleRecord]] = []
+        for role in ROLES:
+            pending = self._pending(manifest, role)
+            if pending is not None:
+                if pending.record.native_key_id == native_key_id and pending.record.public_sha256 is not None:
+                    matches.append((role, pending.record))
+                # An unresolved role cannot authorize an unrelated generation.
+                continue
+            state = manifest.role(role)
+            for record in state.retained + (() if state.current is None else (state.current,)):
+                if record.native_key_id == native_key_id:
+                    self.validate_lease(self.lease_for_native(role, native_key_id))
+                    matches.append((role, record))
+        if len(matches) != 1:
+            raise DatabaseRefused("Windows native selector lacks exact checked ownership")
+        role, record = matches[0]
+        return _NativeOwnerFacts(
+            home=self.home,
+            role=role,
+            generation=record.generation,
+            database_home=self.home if role == "memory" else None,
+        )
+
+    def _memory_database_guard(self, database_lease: ExclusiveLease | None) -> None:
+        self.check()
+        from ._database_mutation import _assert_memory_database_mutation_safe
+
+        _assert_memory_database_mutation_safe(home=self.home, database_lease=database_lease)
 
     def _transaction(self) -> PrivateTransaction:
         self.check()
@@ -403,7 +499,11 @@ class WindowsCustodySession:
             raise CustodyError("orphan custody state")
         return None
 
-    def _begin(self, role: Role, *, retain_current: bool = False) -> tuple[Manifest, Pending]:
+    def _begin(
+        self, role: Role, *, retain_current: bool = False, database_lease: ExclusiveLease | None = None
+    ) -> tuple[Manifest, Pending]:
+        if role == "memory":
+            self._memory_database_guard(database_lease)
         manifest = self._ensure_manifest()
         if self._pending(manifest, role) is not None:
             raise CustodyError("pending custody enrollment requires explicit reconciliation")
@@ -418,7 +518,13 @@ class WindowsCustodySession:
         self._journal(pending, create=True)
         return manifest, pending
 
-    def _verify(self, pending: Pending, *, generated_public: bytes | None = None) -> Pending:
+    def _verify(
+        self,
+        pending: Pending,
+        *,
+        generated_public: bytes | None = None,
+        database_lease: ExclusiveLease | None = None,
+    ) -> Pending:
         public = self.backend.get_enclave_public_key(pending.record.native_key_id)
         fingerprint = _fingerprint(public)
         if generated_public is not None and generated_public != public:
@@ -434,10 +540,16 @@ class WindowsCustodySession:
         ):
             raise CustodyError("native possession proof failed")
         verified = replace(pending, phase="verified", record=replace(pending.record, public_sha256=fingerprint))
+        if pending.role == "memory":
+            self._memory_database_guard(database_lease)
         self._journal(verified)
         return verified
 
-    def _commit(self, manifest: Manifest, pending: Pending) -> GenerationLease:
+    def _commit(
+        self, manifest: Manifest, pending: Pending, *, database_lease: ExclusiveLease | None = None
+    ) -> GenerationLease:
+        if pending.role == "memory":
+            self._memory_database_guard(database_lease)
         state = manifest.role(pending.role)
         if state.current != pending.record:
             retained = state.retained + (() if state.current is None else (state.current,))
@@ -448,29 +560,32 @@ class WindowsCustodySession:
         self._remove(_pending_name(pending.role))
         return self.lease(pending.role)
 
-    def _publish_memory_key(self, pending: Pending, key: bytes) -> None:
+    def _publish_memory_key(
+        self, pending: Pending, key: bytes, *, database_lease: ExclusiveLease | None = None
+    ) -> None:
         blob = wrap.wrap_dek(key, pending.record.native_key_id, backend=self.backend)
         if (
             wrap.unwrap_dek(blob, pending.record.native_key_id, backend=self.backend, audit_sink=lambda entry: None)
             != key
         ):
             raise CustodyError("memory wrap verification failed")
+        self._memory_database_guard(database_lease)
         self._publish(WRAPPED, blob, create=True)
 
-    def enroll_memory(self, *, adopted_key: bytes | None = None) -> bytes:
-        self.check()
+    def enroll_memory(self, *, adopted_key: bytes | None = None, database_lease: ExclusiveLease | None = None) -> bytes:
+        self._memory_database_guard(database_lease)
         self._fresh_memory(adopted_key)
         backend = self.backend  # Discover the executable before any native intent exists.
-        manifest, pending = self._begin("memory")
+        manifest, pending = self._begin("memory", database_lease=database_lease)
         with self.canonical.publication_receipt() as receipt:
             # The native call can publish even if its response is lost. Keep
             # subsequent ledger failures sticky through the owning coordinator.
             receipt.mark_published()
             public = backend.generate_enclave_key(pending.record.native_key_id, unattended=True)
-            pending = self._verify(pending, generated_public=public)
+            pending = self._verify(pending, generated_public=public, database_lease=database_lease)
             key = secrets.token_bytes(32) if adopted_key is None else adopted_key
-            self._publish_memory_key(pending, key)
-            self._commit(manifest, pending)
+            self._publish_memory_key(pending, key, database_lease=database_lease)
+            self._commit(manifest, pending, database_lease=database_lease)
             return key
 
     def enroll_role(self, role: Role, *, retain_current: bool = False) -> GenerationLease:
@@ -492,7 +607,15 @@ class WindowsCustodySession:
         elif not erase_authorized:
             raise CustodyError("retained audit or Telegram history requires explicit erasure authorization")
 
-    def delete_role(self, lease: GenerationLease, *, erase_authorized: bool = False) -> None:
+    def delete_role(
+        self,
+        lease: GenerationLease,
+        *,
+        erase_authorized: bool = False,
+        database_lease: ExclusiveLease | None = None,
+    ) -> None:
+        if lease.role == "memory":
+            self._memory_database_guard(database_lease)
         self.validate_lease(lease)
         self._delete_guard(lease.role, erase_authorized=erase_authorized)
         manifest = self._manifest()
@@ -501,19 +624,30 @@ class WindowsCustodySession:
             raise CustodyError("custody lifecycle epoch exhausted; refusing irreversible deletion")
         record = RoleRecord(lease.generation, lease.epoch, lease.key_id, lease.native_key_id, lease.public_sha256)
         pending = Pending(manifest.profile_nonce, lease.role, "delete", "intent", record)
-        backend = self.backend_for(lease)
+        backend = self.backend
+        owner = _issue_native_owner(self, native_key_id=lease.native_key_id, backend=backend)
+        self.backend_for(lease)
+        # Check final inventory before publishing even the deletion intent.
+        with _owned_delete_scope(owner, backend=backend, database_lease=database_lease):
+            pass
         self._journal(pending, create=True)
         with self.canonical.publication_receipt() as receipt:
             receipt.mark_published()
-            backend.delete_enclave_key(lease.native_key_id)
+            with _owned_delete_scope(owner, backend=backend, database_lease=database_lease) as deletion:
+                backend.delete_enclave_key(lease.native_key_id, deletion=deletion)
             pending = replace(pending, phase="deleted")
+            if pending.role == "memory":
+                self._memory_database_guard(database_lease)
             self._journal(pending)
-            self._finish_delete(manifest, pending)
+            self._finish_delete(manifest, pending, database_lease=database_lease)
 
-    def _finish_delete(self, manifest: Manifest, pending: Pending) -> None:
+    def _finish_delete(
+        self, manifest: Manifest, pending: Pending, *, database_lease: ExclusiveLease | None = None
+    ) -> None:
         if pending.phase != "deleted":
             raise CustodyError("native deletion has not been positively recorded")
         if pending.role == "memory":
+            self._memory_database_guard(database_lease)
             if _read(self._tx, WRAPPED, wrap.HEADER_LEN) is not None:
                 self._remove(WRAPPED)
             if _read(self._tx, OPTOUT) is not None:
@@ -592,7 +726,13 @@ class WindowsCustodySession:
                 "memory reset refuses while sealed memory remains; decrypt it through the C6 disable ceremony first"
             ) from exc
 
-    def reset_role(self, role: Role, *, erase_authorized: bool = False) -> RoleReset:
+    def reset_role(
+        self,
+        role: Role,
+        *,
+        erase_authorized: bool = False,
+        database_lease: ExclusiveLease | None = None,
+    ) -> RoleReset:
         """Delete every owned generation of exactly one role through ``delete_role``.
 
         All refusals happen before the first deletion journal. Each generation
@@ -602,11 +742,13 @@ class WindowsCustodySession:
         or deleted; other roles and the permanent directory lock are untouched.
         Audit/Telegram reset does not consult the gateway inventory (callers gate).
         """
+        if role == "memory":
+            self._memory_database_guard(database_lease)
         leases = self._reset_leases(role, erase_authorized=erase_authorized)
         deleted: list[str] = []
         for lease in leases:
             try:
-                self.delete_role(lease, erase_authorized=erase_authorized)
+                self.delete_role(lease, erase_authorized=erase_authorized, database_lease=database_lease)
             except BaseException as exc:
                 exc.add_note(
                     f"Windows {role} custody reset stopped after {len(deleted)} confirmed deletion(s); "
@@ -623,7 +765,10 @@ class WindowsCustodySession:
         *,
         adopted_key: bytes | None = None,
         erase_authorized: bool = False,
+        database_lease: ExclusiveLease | None = None,
     ) -> GenerationLease | None:
+        if role == "memory":
+            self._memory_database_guard(database_lease)
         manifest = self._manifest()
         if manifest is None:
             raise CustodyError("journal cannot be reconciled without bound profile ownership")
@@ -636,7 +781,7 @@ class WindowsCustodySession:
                 # A missing key after a lost deletion result is ambiguous. Do not
                 # retry an irreversible native action or infer successful absence.
                 raise CustodyError("native deletion outcome is unresolved; preserve the intent journal")
-            self._finish_delete(manifest, pending)
+            self._finish_delete(manifest, pending, database_lease=database_lease)
             return None
         current = manifest.role(role).current
         if current is not None and current.generation == pending.record.generation and current != pending.record:
@@ -645,10 +790,12 @@ class WindowsCustodySession:
         key = adopted_key
         if role == "memory":
             key = self._recovery_memory_key(pending, blob, adopted_key)
-        pending = self._verify(pending)
+        pending = self._verify(pending, database_lease=database_lease)
         if role == "memory" and blob is None:
-            self._publish_memory_key(pending, secrets.token_bytes(32) if key is None else key)
-        return self._commit(manifest, pending)
+            self._publish_memory_key(
+                pending, secrets.token_bytes(32) if key is None else key, database_lease=database_lease
+            )
+        return self._commit(manifest, pending, database_lease=database_lease)
 
     def _recovery_memory_key(self, pending: Pending, blob: bytes | None, adopted_key: bytes | None) -> bytes | None:
         key = adopted_key

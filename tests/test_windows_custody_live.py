@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from mordred_hermes.keyvault._database_mutation import database_key_mutation
+
 pytestmark = pytest.mark.integration
 
 
@@ -36,9 +38,14 @@ def test_real_cng_memory_and_independent_audit_custody_survive_new_session():
         pass
     home = root / ("custody-" + uuid.uuid4().hex)
     require_stopped_windows_gateways(home)
+    with open_confidential_directory(home, create=True):
+        pass
     print(f"Isolated custody fixture: {home}")
-    with windows_custody_session(home, create=True) as session:
-        key = session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        windows_custody_session(home, create=True) as session,
+    ):
+        key = session.enroll_memory(database_lease=database_lease)
         memory = session.lease("memory")
         audit = session.enroll_role("audit")
         matches = hmac.compare_digest(session.load_memory_key(), key)
@@ -52,8 +59,8 @@ def test_real_cng_memory_and_independent_audit_custody_survive_new_session():
     # the same checked purge precondition a completed disable ceremony supplies.
     with open_private_directory(home / "mordred") as directory, directory.transaction() as tx:
         tx.create_bytes("memory-vault.optout", b"1\n")
-    with windows_custody_session(home) as session:
-        session.delete_role(memory)
+    with database_key_mutation(root=home, generation=None) as database_lease, windows_custody_session(home) as session:
+        session.delete_role(memory, database_lease=database_lease)
         assert session.resolve_memory_key() is None
         session.validate_lease(audit)
         session.delete_role(audit, erase_authorized=True)

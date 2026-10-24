@@ -22,6 +22,7 @@ from mordred_hermes import _config_io
 from mordred_hermes._private_fs import open_private_directory
 from mordred_hermes.extension.telegram import secrets, store, tee
 from mordred_hermes.keyvault import wrap
+from mordred_hermes.keyvault._database_mutation import database_key_mutation
 from tests import test_windows_custody
 from tests.test_private_fs_processes import _child, _line
 from tests.test_windows_custody_profile import SID
@@ -66,10 +67,13 @@ def windows_store(home, backend, audit=None):
 
 def enroll(c, home, backend, *roles):
     leases = {}
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
         for role in roles:
             if role == "memory":
-                session.enroll_memory()
+                session.enroll_memory(database_lease=database_lease)
                 leases[role] = session.lease("memory")
             else:
                 leases[role] = session.enroll_role(role)
@@ -327,7 +331,7 @@ def test_unresolved_role_journal_refuses_as_uncertain(tg, monkeypatch):
     windows_store(home, backend).store(_value())
     lease = enroll_retained(c, home, backend)
 
-    def lost(key_id):
+    def lost(key_id, **kwargs):
         raise RuntimeError("native deletion outcome lost")
 
     monkeypatch.setattr(backend, "delete_enclave_key", lost)
@@ -479,8 +483,11 @@ def test_memory_purge_leaves_telegram_credentials_decryptable(tg, monkeypatch):
     monkeypatch.setattr(c, "require_stopped_windows_gateways", lambda path: None)
     with open_private_directory(home / "mordred") as directory, directory.transaction() as tx:
         tx.create_bytes("memory-vault.optout", b"1\n")
-    with c.windows_custody_session(home, backend=backend) as session:
-        session.reset_role("memory")
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
+        session.reset_role("memory", database_lease=database_lease)
         session.validate_lease(leases["audit"])
         session.validate_lease(leases["telegram"])
     assert vault.load() == _value()
