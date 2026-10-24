@@ -77,6 +77,27 @@ def test_round_trip_unseals_fresh_every_time(tmp_path: Path, enclave: FakeEnclav
     assert (tmp_path / "mail" / ".gitignore").exists()
 
 
+def test_explicit_portable_linux_seam_cannot_reuse_unknown_presence(tmp_path: Path, enclave: FakeEnclave) -> None:
+    store = sealed_store(tmp_path / "mail", enclave, platform="linux")
+    assert store.ensure_key(require_presence=False) is False
+    store.store(generic_creds(), require_presence=False)
+    assert store.load() == generic_creds() and store.flags()["touch_id"] is False
+    record = json.loads(store.key_record_path.read_bytes())
+    record["touch_id"] = True
+    store.key_record_path.write_text(json.dumps(record))
+    before = [p.read_bytes() for p in (store.sealed_path, store.meta_path, store.key_record_path)]
+    unwraps, keys = enclave.ecdh_calls, dict(enclave.keys)
+    for operation in (
+        store.load,
+        lambda: store.ensure_key(require_presence=False, replace=True),
+        lambda: store.store(generic_creds(), require_presence=False),
+    ):
+        with pytest.raises(MailSecretsError, match=r"^presence_unsupported$"):
+            operation()
+    assert enclave.ecdh_calls == unwraps and enclave.keys == keys
+    assert [p.read_bytes() for p in (store.sealed_path, store.meta_path, store.key_record_path)] == before
+
+
 def test_flags_never_hold_the_address_host_or_password(tmp_path: Path, enclave: FakeEnclave) -> None:
     store = sealed_store(tmp_path / "mail", enclave)
     store.ensure_key()

@@ -315,6 +315,7 @@ class MailSecretStore:
         return self._windows_store
 
     def load_snapshot(self) -> tuple[MailCredentials | None, Any]:
+        """Authenticate the source for explicit retirement, without asserting presence policy."""
         with _mail_native_refusals():
             return self._load_snapshot()
 
@@ -405,9 +406,9 @@ class MailSecretStore:
 
     def _prepare_setup(self, *, require_presence: bool) -> None:
         with _mail_native_refusals():
+            if self._platform() in {"linux", "win32"} and require_presence:
+                raise MailSecretsError("presence_unsupported")
             if self._platform() == "win32":
-                if require_presence:
-                    raise MailSecretsError("presence_unsupported")
                 self._windows().prepare_setup()
 
     def ensure_key(self, *, require_presence: bool = True, replace: bool = False) -> bool | None:
@@ -426,19 +427,23 @@ class MailSecretStore:
 
         A key created here has the requested policy, recorded and returned. An
         existing key keeps its own policy: the recorded one is returned when the
-        record names this very key (its public key), else ``None``.
+        record names this very key (its public key), else ``None``. Linux refuses
+        unsupported or unknown existing policy instead of treating it as opt-in.
         ``replace=True`` deletes an existing key first (only when no credentials
         are sealed and the caller holds the writer lock, as ``mail setup`` does)
         and raises ``touch_id_policy_mismatch`` when it cannot be deleted.
         """
-        from ...keyvault import wrap
-        from ...keyvault._exceptions import WrapError, WrapKeyNotFound
-
         self._check_platform()
         if self._platform() == "win32":
             return self._windows().ensure_key(require_presence=require_presence, replace=replace)
         if self._native():
             return self._ensure_posix_key(require_presence=require_presence, replace=replace)
+        return self._ensure_portable_key(require_presence=require_presence, replace=replace)
+
+    def _ensure_portable_key(self, *, require_presence: bool, replace: bool) -> bool | None:
+        from ...keyvault import wrap
+        from ...keyvault._exceptions import WrapError, WrapKeyNotFound
+
         backend = self._backend_factory()
         try:
             public: bytes | None = wrap.get_wrapping_key_public(KEY_ID, backend=backend)
@@ -446,6 +451,9 @@ class MailSecretStore:
             public = None
         except WrapError:
             raise MailSecretsError("tee_unavailable") from None
+        if public is not None and self._platform() == "linux":
+            self._check_portable_linux_policy(public)
+            return False
         if public is not None and not replace:
             return self._recorded_policy(public)
         if public is not None:
@@ -478,11 +486,20 @@ class MailSecretStore:
             except WrapKeyNotFound:
                 if read(custody.transaction, SEALED) is not None:
                     raise DatabaseRefused("mail source lacks its native key; retained for repair") from None
+                if self._platform() == "linux" and (
+                    read(custody.transaction, _KEY_RECORD_NAME) is not None
+                    or read(custody.transaction, _META_NAME) is not None
+                ):
+                    raise MailSecretsError("presence_unsupported") from None
                 public = wrap.generate_wrapping_key(KEY_ID, backend=self._backend(), unattended=not require_presence)
                 record = {"public_sha256": hashlib.sha256(public).hexdigest(), "touch_id": require_presence}
                 publish(custody.transaction, _KEY_RECORD_NAME, json.dumps(record).encode())
                 return require_presence
             policy = self._recorded_policy(public)
+            if self._platform() == "linux":
+                from ...keyvault._mail_custody import require_linux_no_presence_policy
+
+                require_linux_no_presence_policy(custody.transaction, hashlib.sha256(public).hexdigest())
             if replace and policy != require_presence:
                 raise MailSecretsError("touch_id_policy_mismatch")
             return policy
@@ -513,7 +530,15 @@ class MailSecretStore:
         if not isinstance(value, dict) or value.get("public_sha256") != hashlib.sha256(public).hexdigest():
             return None
         policy = value.get("touch_id")
+        if self._platform() == "linux" and policy is not False:
+            return None
         return policy if isinstance(policy, bool) else None
+
+    def _check_portable_linux_policy(self, public: bytes) -> None:
+        """Keep the explicit portable test seam subject to the same Linux policy refusal."""
+        flags = self.flags()
+        if self._recorded_policy(public) is not False or (flags is not None and flags.get("touch_id") is not False):
+            raise MailSecretsError("presence_unsupported")
 
     # -- seal / unseal ----------------------------------------------------------------------
 
@@ -558,13 +583,43 @@ class MailSecretStore:
         return path.read_bytes()
 
     def load(self) -> MailCredentials | None:
-        """Unseal through the Enclave (a fresh unwrap every call); ``None`` when not configured."""
+        """Read usable credentials with their policy checked; ``None`` when not configured."""
+        try:
+            with _mail_native_refusals():
+                return self._load_credentials()
+        except MailSecretsError as exc:
+            code = exc.code
+        # A post-unwrap refusal must not retain inner frames containing credentials.
+        raise MailSecretsError(code) from None
+
+    def _load_credentials(self) -> MailCredentials | None:
+        self._check_platform()
+        if self._platform() == "linux":
+            flags = self.flags()
+            if flags is None:
+                return None
+            if flags.get("touch_id") is not False:
+                raise MailSecretsError("presence_unsupported")
+            if self._native():
+                from ...keyvault._mail_custody import load_linux_mail_credentials
+
+                entries: list[dict[str, Any]] = []
+                try:
+                    return load_linux_mail_credentials(
+                        home=self._profile_home(), backend=self._backend(), entries=entries
+                    )
+                finally:
+                    for entry in entries:
+                        self._audit_sink(entry)
+            from ...keyvault import wrap
+
+            self._check_portable_linux_policy(wrap.get_wrapping_key_public(KEY_ID, backend=self._backend()))
         return self.load_snapshot()[0]
 
     def store(self, value: MailCredentials, *, require_presence: bool = True) -> None:
         with _mail_native_refusals():
             self._check_platform()
-            if self._platform() == "win32" and require_presence:
+            if self._platform() in {"linux", "win32"} and require_presence:
                 raise MailSecretsError("presence_unsupported")
             if self._platform() == "win32" or self._native():
                 from .imap_sync import mail_writer_scope
@@ -602,11 +657,21 @@ class MailSecretStore:
             with mail_credential_transaction(
                 home=self._profile_home(), backend=self._backend(), create=True
             ) as custody:
+                if self._platform() == "linux":
+                    from ...keyvault import wrap
+                    from ...keyvault._mail_custody import require_linux_no_presence_policy
+
+                    public = wrap.get_wrapping_key_public(KEY_ID, backend=self._backend())
+                    require_linux_no_presence_policy(custody.transaction, hashlib.sha256(public).hexdigest())
                 sealed = self._seal(encode(value))
                 flags["sealed_sha256"] = hashlib.sha256(sealed).hexdigest()
                 publish(custody.transaction, _SEALED_NAME, sealed)
                 publish(custody.transaction, _META_NAME, json.dumps(flags, sort_keys=True).encode())
             return
+        if self._platform() == "linux":
+            from ...keyvault import wrap
+
+            self._check_portable_linux_policy(wrap.get_wrapping_key_public(KEY_ID, backend=self._backend()))
         folder = self._dir(create=True)
         sealed = self._seal(encode(value))  # the Enclave wrap first: an Enclave failure writes nothing
         flags = {
@@ -636,7 +701,10 @@ class MailSecretStore:
 
     def flags(self) -> dict[str, Any] | None:
         with _mail_native_refusals():
-            return self._flags()
+            value = self._flags()
+            if value is not None and self._platform() == "linux":
+                return {**value, "touch_id": False if value.get("touch_id") is False else None}
+            return value
 
     def _flags(self) -> dict[str, Any] | None:
         """Non-secret flags, or ``None`` when no credentials are sealed. Never touches the Enclave.

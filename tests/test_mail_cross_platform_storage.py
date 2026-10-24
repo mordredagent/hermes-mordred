@@ -21,13 +21,309 @@ def native_store(home):
     return store, native
 
 
+@pytest.mark.parametrize("entry", ["prepare", "ensure", "store", "setup"])
+def test_linux_presence_admission_precedes_writer_discovery_and_probe(tmp_path, monkeypatch, entry):
+    """Synthetic platform policy test; no native helper or account is used."""
+    from mordred_hermes.imports.mail import imap_sync
+    from mordred_hermes.imports.mail.setup_flow import MailSetupError, MailSetupFlows
+    from tests._mail_sync_helpers import PASSWORD, secrets_in_traceback
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unsupported presence reached writer/native/credential probe")
+
+    monkeypatch.setattr(imap_sync, "mail_writer_scope", forbidden)
+    store = MailSecretStore(
+        tmp_path / "mordred/mail", platform=lambda: "linux", backend_factory=forbidden, audit_sink=forbidden
+    )
+    error = MailSetupError if entry == "setup" else MailSecretsError
+    with pytest.raises(error, match=r"^presence_unsupported$") as caught:
+        if entry == "prepare":
+            store._prepare_setup(require_presence=True)
+        elif entry == "ensure":
+            store.ensure_key(require_presence=True)
+        elif entry == "store":
+            store.store(generic_creds(), require_presence=True)
+        else:
+            flow = MailSetupFlows(store, home=lambda: tmp_path, lock=forbidden, connect=forbidden)
+            flow.start(address="owner@example.com", imap_host="imap.example.com", app_password=PASSWORD, presence=True)
+    assert caught.value.code == "presence_unsupported"
+    if entry == "setup":
+        assert secrets_in_traceback(caught.value, PASSWORD) == []
+        assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_linux_explicit_no_presence_setup_uses_machine_bound_policy(tmp_path):
+    """The synthetic helper ignores unattended, just like the TPM capability; NOT native acceptance."""
+    from mordred_hermes.imports.mail.setup_flow import MailSetupFlows
+    from tests._mail_sync_helpers import PASSWORD, gmail_server
+
+    store, native = native_store(tmp_path)
+    store._platform = lambda: "linux"
+    server = gmail_server()
+    flow = MailSetupFlows(store, home=lambda: tmp_path, connect=lambda _host, _port: server.session())
+    done = flow.start(address="owner@example.com", imap_host="imap.example.com", app_password=PASSWORD, presence=False)
+    assert done.presence is False
+    assert store.flags()["touch_id"] is False
+    assert json.loads(store.key_record_path.read_bytes())["touch_id"] is False
+    assert store.load().app_password == PASSWORD
+    assert native.calls.count("generate") == 1
+
+
+@pytest.mark.parametrize("entry", ["prepare", "ensure", "store", "setup"])
+def test_linux_presence_refusal_preserves_existing_credential_state(tmp_path, entry):
+    from mordred_hermes.imports.mail.secrets import new_setup_generation
+    from mordred_hermes.imports.mail.setup_flow import MailSetupError, MailSetupFlows
+    from tests._mail_sync_helpers import PASSWORD
+
+    store, native = native_store(tmp_path)
+    store._platform = lambda: "linux"
+    store.ensure_key(require_presence=False)
+    store.store(generic_creds(), require_presence=False)
+    new_setup_generation(tmp_path)
+    paths = [store.sealed_path, store.meta_path, store.key_record_path, tmp_path / "mordred/mail/generation"]
+    before = [p.read_bytes() for p in paths]
+    calls, keys = list(native.calls), dict(native.keys)
+    error = MailSetupError if entry == "setup" else MailSecretsError
+    with pytest.raises(error, match=r"^presence_unsupported$"):
+        if entry == "prepare":
+            store._prepare_setup(require_presence=True)
+        elif entry == "ensure":
+            store.ensure_key(require_presence=True, replace=True)
+        elif entry == "store":
+            store.store(replace(generic_creds(), app_password="replacement"), require_presence=True)
+        else:
+            MailSetupFlows(store, home=lambda: tmp_path).start(
+                address="owner@example.com", imap_host="imap.example.com", app_password=PASSWORD, presence=True
+            )
+    assert [p.read_bytes() for p in paths] == before
+    assert native.calls == calls and native.keys == keys
+
+
+@pytest.mark.parametrize("policy", [True, None, "missing", "unverified"])
+def test_linux_legacy_flags_are_unknown_and_block_read_reuse_without_mutation(tmp_path, policy):
+    from mordred_hermes.imports.mail.secrets import new_setup_generation
+
+    store, native = native_store(tmp_path)
+    store._platform = lambda: "linux"
+    store.ensure_key(require_presence=False)
+    store.store(generic_creds(), require_presence=False)
+    new_setup_generation(tmp_path)
+    flags = json.loads(store.meta_path.read_bytes())
+    if policy == "missing":
+        flags.pop("touch_id")
+    else:
+        flags["touch_id"] = policy
+    store.meta_path.write_text(json.dumps(flags))
+    paths = [store.sealed_path, store.meta_path, store.key_record_path, tmp_path / "mordred/mail/generation"]
+    before, calls, keys = [p.read_bytes() for p in paths], list(native.calls), dict(native.keys)
+    assert store.flags()["touch_id"] is None
+    assert native.calls == calls  # status is passive
+    for operation in (
+        store.load,
+        lambda: store.ensure_key(require_presence=False),
+        lambda: store.store(replace(generic_creds(), app_password="replacement"), require_presence=False),
+    ):
+        with pytest.raises(MailSecretsError, match=r"^presence_unsupported$"):
+            operation()
+    assert native.ecdh_calls == 0 and "delete" not in native.calls
+    assert [p.read_bytes() for p in paths] == before and native.keys == keys
+
+
+@pytest.mark.parametrize("policy", [True, None, "missing", "wrong_public", "absent", "invalid_json"])
+def test_linux_unknown_key_policy_cannot_become_explicit_false(tmp_path, policy):
+    store, native = native_store(tmp_path)
+    store._platform = lambda: "linux"
+    store.ensure_key(require_presence=False)
+    store.store(generic_creds(), require_presence=False)
+    record = json.loads(store.key_record_path.read_bytes())
+    if policy == "missing":
+        record.pop("touch_id")
+    elif policy == "wrong_public":
+        record["public_sha256"] = "0" * 64
+    else:
+        record["touch_id"] = policy
+    store.key_record_path.write_text(json.dumps(record))
+    if policy == "absent":
+        store.key_record_path.unlink()
+    elif policy == "invalid_json":
+        store.key_record_path.write_text("{")
+    paths = [p for p in (store.sealed_path, store.meta_path, store.key_record_path) if p.exists()]
+    before, keys = [p.read_bytes() for p in paths], dict(native.keys)
+    assert store._recorded_policy(wrap.get_wrapping_key_public(KEY_ID, backend=native.backend)) is None
+    for operation in (
+        store.load,
+        lambda: store.ensure_key(require_presence=False),
+        lambda: store.ensure_key(require_presence=False, replace=True),
+        lambda: store.store(generic_creds(), require_presence=False),
+    ):
+        with pytest.raises(MailSecretsError, match=r"^presence_unsupported$"):
+            operation()
+    assert native.ecdh_calls == 0 and "delete" not in native.calls
+    assert [p.read_bytes() for p in paths] == before and native.keys == keys
+
+
+@pytest.mark.parametrize("change", ["flags", "key_policy", "key_rewritten", "after_authentication"])
+def test_linux_read_rechecks_policy_after_authentication_without_secret_traceback(tmp_path, monkeypatch, change):
+    from tests._mail_sync_helpers import PASSWORD, secrets_in_traceback
+
+    store, native = native_store(tmp_path)
+    store._platform = lambda: "linux"
+    store.ensure_key(require_presence=False)
+    store.store(generic_creds(), require_presence=False)
+
+    def changed():
+        path = store.meta_path if change in {"flags", "after_authentication"} else store.key_record_path
+        value = json.loads(path.read_bytes())
+        value["touch_id"] = change != "key_rewritten"
+        path.write_text(json.dumps(value))
+
+    if change == "after_authentication":
+        from mordred_hermes.keyvault import _mail_custody
+
+        original = _mail_custody.authenticate_mail_source
+
+        def changed_after_authentication(**kwargs):
+            result = original(**kwargs)
+            changed()
+            return result
+
+        monkeypatch.setattr(_mail_custody, "authenticate_mail_source", changed_after_authentication)
+    else:
+        native.on_unwrap = changed
+    with pytest.raises(MailSecretsError) as caught:
+        store.load()
+    assert caught.value.code == ("presence_unsupported" if change == "key_policy" else "tee_unavailable")
+    assert secrets_in_traceback(caught.value, PASSWORD) == []
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert native.ecdh_calls == 1 and "delete" not in native.calls
+
+
+@pytest.mark.parametrize("policy", [True, None, "missing"])
+def test_linux_legacy_policy_does_not_authorize_or_strand_native_first_retirement(tmp_path, policy):
+    from mordred_hermes.imports.mail.forget import forget
+
+    store, native = native_store(tmp_path)
+    store._platform = lambda: "linux"
+    store.ensure_key(require_presence=False)
+    store.store(generic_creds(), require_presence=False)
+    flags = json.loads(store.meta_path.read_bytes())
+    flags["account"] = "forged"
+    if policy == "missing":
+        flags.pop("touch_id")
+    else:
+        flags["touch_id"] = policy
+    store.meta_path.write_text(json.dumps(flags))
+    record = json.loads(store.key_record_path.read_bytes())
+    record["touch_id"] = None
+    store.key_record_path.write_text(json.dumps(record))
+    events = []
+
+    class Rows:
+        def delete_source(self, source, account):
+            assert native.calls.count("delete") == 1
+            assert not store.sealed_path.exists()
+            events.append((source, account))
+            return 3
+
+        def meta_items(self, prefix):
+            return {}
+
+    done = forget(store, tmp_path, rows=True, open_store=lambda _home: Rows())
+    assert done.key_gone and done.deleted_messages == 3
+    assert events == [("mail", generic_creds().account)]
+    assert native.ecdh_calls == 1
+    assert store.ensure_key(require_presence=False) is False
+    store.store(generic_creds(), require_presence=False)
+    assert store.load() == generic_creds() and store.flags()["touch_id"] is False
+
+
+def test_linux_legacy_policy_sync_refuses_before_login_with_policy_code(tmp_path):
+    from mordred_hermes.imports.mail.imap_sync import FetchOptions, run_fetch
+    from tests._mail_sync_helpers import generic_server, make_env, make_store
+
+    store, native = native_store(tmp_path)
+    store._platform = lambda: "linux"
+    store.ensure_key(require_presence=False)
+    store.store(generic_creds(), require_presence=False)
+    flags = json.loads(store.meta_path.read_bytes())
+    flags["touch_id"] = True
+    store.meta_path.write_text(json.dumps(flags))
+    db = make_store(tmp_path, tmp_path)
+    env = make_env(tmp_path, db, generic_server(), store, platform="linux")
+    env.connect = lambda *args: pytest.fail("legacy policy reached IMAP connection")
+    result = run_fetch(FetchOptions(), env)
+    assert result.error == "presence_unsupported"
+    assert native.ecdh_calls == 0 and store.sealed_path.exists()
+
+
+def test_linux_unknown_unsealed_key_policy_setup_refuses_without_replacement_or_probe(tmp_path):
+    from mordred_hermes.imports.mail.setup_flow import MailSetupError, MailSetupFlows
+    from tests._mail_sync_helpers import PASSWORD, secrets_in_traceback
+
+    store, native = native_store(tmp_path)
+    store._platform = lambda: "linux"
+    store.ensure_key(require_presence=False)
+    record = json.loads(store.key_record_path.read_bytes())
+    record["touch_id"] = None
+    store.key_record_path.write_text(json.dumps(record))
+    before, keys = store.key_record_path.read_bytes(), dict(native.keys)
+    flow = MailSetupFlows(
+        store, home=lambda: tmp_path, connect=lambda *args: pytest.fail("unknown key policy reached probe")
+    )
+    with pytest.raises(MailSetupError, match=r"^presence_unsupported$") as caught:
+        flow.start(address="owner@example.com", imap_host="imap.example.com", app_password=PASSWORD, presence=False)
+    assert secrets_in_traceback(caught.value, PASSWORD) == []
+    assert store.key_record_path.read_bytes() == before and native.keys == keys
+    assert native.calls.count("generate") == 1 and "delete" not in native.calls
+    assert not store.sealed_path.exists()
+
+
+def test_linux_orphan_policy_record_is_not_repaired_by_ensure(tmp_path):
+    store, native = native_store(tmp_path)
+    store._platform = lambda: "linux"
+    store.ensure_key(require_presence=False)
+    before = store.key_record_path.read_bytes()
+    native.keys.clear()  # synthetic missing TPM object; preserve the recorded evidence
+    with pytest.raises(MailSecretsError, match=r"^presence_unsupported$"):
+        store.ensure_key(require_presence=False)
+    assert native.keys == {} and native.calls.count("generate") == 1
+    assert store.key_record_path.read_bytes() == before
+
+
+def test_linux_legacy_policy_uncertain_retirement_retains_source_and_rows(tmp_path):
+    from mordred_hermes.imports.mail.forget import MailForgetError, forget
+
+    store, native = native_store(tmp_path)
+    store._platform = lambda: "linux"
+    store.ensure_key(require_presence=False)
+    store.store(generic_creds(), require_presence=False)
+    flags = json.loads(store.meta_path.read_bytes())
+    flags["touch_id"] = True
+    store.meta_path.write_text(json.dumps(flags))
+    before = store.sealed_path.read_bytes()
+    native.fail_delete = True
+
+    class Rows:
+        def delete_source(self, source, account):
+            pytest.fail("rows deleted before native acknowledgement")
+
+        def meta_items(self, prefix):
+            return {}
+
+    with pytest.raises(MailForgetError, match=r"^tee_unavailable$"):
+        forget(store, tmp_path, rows=True, open_store=lambda _home: Rows())
+    assert store.sealed_path.read_bytes() == before and native.keys
+    assert json.loads((tmp_path / "mordred/mail/mail-forget.json").read_bytes())["phase"] == "intent"
+
+
 def test_native_mail_credential_roundtrip_distinct_roles(tmp_path):
     store, native = native_store(tmp_path)
     other = "mordred-hermes.telegram.credentials.v1"
     wrap.generate_wrapping_key(other, backend=native.backend)
     public = wrap.get_wrapping_key_public(other, backend=native.backend)
     store.ensure_key(require_presence=False)
-    store.store(generic_creds())
+    store.store(generic_creds(), require_presence=False)
     (tmp_path / "state.db").write_bytes(b"unrelated encrypted root database")
     loaded = store.load()
     assert loaded.app_password == generic_creds().app_password
@@ -40,7 +336,7 @@ def test_native_mail_credential_roundtrip_distinct_roles(tmp_path):
 def test_native_failure_preserves_authenticated_source(tmp_path):
     store, native = native_store(tmp_path)
     store.ensure_key(require_presence=False)
-    store.store(generic_creds())
+    store.store(generic_creds(), require_presence=False)
     sealed = store.sealed_path.read_bytes()
     native.fail_delete = True
     from mordred_hermes.imports.mail.secrets import MailSecretsError
@@ -56,11 +352,11 @@ def test_native_failure_preserves_authenticated_source(tmp_path):
 def test_forget_stale_setup_preserves_replacement(tmp_path, change):
     store, native = native_store(tmp_path)
     store.ensure_key(require_presence=False)
-    store.store(generic_creds())
+    store.store(generic_creds(), require_presence=False)
     assert hasattr(store, "load_snapshot"), "mail needs an issued authenticated snapshot"
     snapshot = store.load_snapshot()
     if change == "source":
-        store.store(replace(generic_creds(), app_password="replacement"))
+        store.store(replace(generic_creds(), app_password="replacement"), require_presence=False)
     elif change == "generation":
         from mordred_hermes.imports.mail.secrets import new_setup_generation
 
@@ -80,7 +376,7 @@ def test_forget_stale_setup_preserves_replacement(tmp_path, change):
 def test_corrupt_authenticated_source_never_retires_key(tmp_path):
     store, native = native_store(tmp_path)
     store.ensure_key(require_presence=False)
-    store.store(generic_creds())
+    store.store(generic_creds(), require_presence=False)
     sealed = store.sealed_path.read_bytes()
     store.sealed_path.write_bytes(sealed[:-1] + bytes([sealed[-1] ^ 1]))
     from mordred_hermes.imports.mail.secrets import MailSecretsError
@@ -163,7 +459,7 @@ def test_passive_native_mail_flags_reject_hardlinked_metadata(tmp_path):
 
     store, native = native_store(tmp_path)
     store.ensure_key(require_presence=False)
-    store.store(generic_creds())
+    store.store(generic_creds(), require_presence=False)
     os.link(store.meta_path, tmp_path / "metadata-alias")
     calls = list(native.calls)
     with pytest.raises((MailSecretsError, OSError, DatabaseRefused)):
@@ -201,13 +497,13 @@ def test_native_setup_cannot_publish_while_another_writer_is_held(tmp_path):
 
     store, _native = native_store(tmp_path)
     store.ensure_key(require_presence=False)
-    store.store(generic_creds())
+    store.store(generic_creds(), require_presence=False)
     before = store.sealed_path.read_bytes()
     failures = []
 
     def replace_source():
         try:
-            store.store(replace(generic_creds(), app_password="concurrent"))
+            store.store(replace(generic_creds(), app_password="concurrent"), require_presence=False)
         except Exception as exc:
             failures.append(exc)
 
@@ -225,7 +521,7 @@ def test_native_forget_advances_setup_generation_before_retirement(tmp_path):
 
     store, _native = native_store(tmp_path)
     store.ensure_key(require_presence=False)
-    store.store(generic_creds())
+    store.store(generic_creds(), require_presence=False)
     before = setup_generation(tmp_path)
     store.forget()
     assert setup_generation(tmp_path) != before
@@ -236,7 +532,7 @@ def test_foreground_forget_authenticates_label_and_retires_before_rows(tmp_path)
 
     store, native = native_store(tmp_path)
     store.ensure_key(require_presence=False)
-    store.store(generic_creds())
+    store.store(generic_creds(), require_presence=False)
     # Flags cannot redirect deletion to another account.
     flags = json.loads(store.meta_path.read_bytes())
     flags["account"] = "other"
@@ -353,7 +649,7 @@ def test_first_native_generation_keeps_checked_store_binding(tmp_path):
 
     native.ops._invoke = create_like_native_helper
     assert store.ensure_key(require_presence=False) is False
-    store.store(generic_creds())
+    store.store(generic_creds(), require_presence=False)
     assert store.load() == generic_creds()
 
 
@@ -362,7 +658,7 @@ def test_deleted_posix_journal_resumes_without_unwrap_or_native_delete(tmp_path,
 
     store, native = native_store(tmp_path)
     store.ensure_key(require_presence=False)
-    store.store(generic_creds())
+    store.store(generic_creds(), require_presence=False)
     original = _mail_custody.publish
 
     def interrupted(tx, name, data):
@@ -422,7 +718,7 @@ def test_mail_forget_rows_preserves_live_root_database_authority(protected_runti
     before = observe_database_source(root=home)
     credentials, _native = native_store(home)
     credentials.ensure_key(require_presence=False)
-    credentials.store(generic_creds())
+    credentials.store(generic_creds(), require_presence=False)
     done = forget(credentials, home, rows=True)
     assert done.key_gone and done.account == generic_creds().account
     assert observe_database_source(root=home) == before
@@ -436,7 +732,7 @@ def test_absent_native_key_does_not_hide_orphan_metadata(tmp_path):
 
     store, _native = native_store(tmp_path)
     store.ensure_key(require_presence=False)
-    store.store(generic_creds())
+    store.store(generic_creds(), require_presence=False)
     store.forget()
     with open_private_directory(store.meta_path.parent) as directory, directory.transaction() as tx:
         publish(tx, META, b'{"account":"mail"}')
@@ -451,7 +747,7 @@ def test_public_forget_resumes_acknowledged_cleanup(tmp_path, monkeypatch):
 
     store, native = native_store(tmp_path)
     store.ensure_key(require_presence=False)
-    store.store(generic_creds())
+    store.store(generic_creds(), require_presence=False)
     original = _mail_custody.publish
 
     def interrupted(tx, name, data):
@@ -529,7 +825,7 @@ def test_native_load_and_sync_preserve_refusal_taxonomy(tmp_path, monkeypatch, f
 
     store, _native = native_store(tmp_path)
     store.ensure_key(require_presence=False)
-    store.store(generic_creds())
+    store.store(generic_creds(), require_presence=False)
     sealed = store.sealed_path.read_bytes()
 
     def refused(*args, **kwargs):

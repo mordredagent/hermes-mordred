@@ -379,6 +379,7 @@ def mail_credential_transaction(
 def authenticate_mail_source(
     *, home: Path, backend: NativeBackend, entries: list[dict[str, Any]]
 ) -> tuple[MailCredentials | None, MailAuthentication | None]:
+    """Authenticate MMC1 ownership for retirement; this is not a presence-policy proof."""
     with mail_credential_transaction(home=home, backend=backend) as custody:
         item = read(custody.transaction, SEALED)
         if item is None:
@@ -391,6 +392,54 @@ def authenticate_mail_source(
         proof = object.__new__(MailAuthentication)
         _proofs[proof] = observed, backend, _process()
     return value, proof
+
+
+def require_linux_no_presence_policy(tx: PrivateTransaction, public: str) -> tuple[bytes, FileMetadata]:
+    """Read existing policy without relabeling an unsupported or unknown TPM claim."""
+    from ..imports.mail.secrets import _KEY_RECORD_NAME, MailSecretsError
+
+    record = read(tx, _KEY_RECORD_NAME)
+    meta = read(tx, META)
+    try:
+        key_policy = None if record is None else json.loads(record[0])
+        flags = None if meta is None else json.loads(meta[0])
+    except ValueError:
+        raise MailSecretsError("presence_unsupported") from None
+    if (
+        record is None
+        or not isinstance(key_policy, dict)
+        or key_policy.get("public_sha256") != public
+        or key_policy.get("touch_id") is not False
+    ):
+        raise MailSecretsError("presence_unsupported")
+    if (meta is not None or read(tx, SEALED) is not None) and (
+        not isinstance(flags, dict) or flags.get("touch_id") is not False
+    ):
+        raise MailSecretsError("presence_unsupported")
+    return record
+
+
+def load_linux_mail_credentials(
+    *, home: Path, backend: NativeBackend, entries: list[dict[str, Any]]
+) -> MailCredentials | None:
+    """Refuse legacy policy before unwrap and recheck against the issued source afterward."""
+    with mail_credential_transaction(home=home, backend=backend) as custody:
+        if read(custody.transaction, SEALED) is None:
+            return None
+        observed = _observe(custody)
+        policy = require_linux_no_presence_policy(custody.transaction, observed.public)
+    value, proof = authenticate_mail_source(home=home, backend=backend, entries=entries)
+    try:
+        with mail_credential_transaction(home=home, backend=backend, authenticated=proof) as custody:
+            if _validate(custody, proof) != observed:
+                raise DatabaseRefused("mail source changed during credential read")
+            current = require_linux_no_presence_policy(custody.transaction, observed.public)
+            if current != policy:
+                raise DatabaseRefused("mail key policy changed during credential read")
+    except BaseException:
+        del value
+        raise
+    return value
 
 
 class _WindowsAuthentication(_Opaque):
