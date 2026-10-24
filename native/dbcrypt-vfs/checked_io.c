@@ -161,7 +161,11 @@ static int metadata(CiRoot *r, HANDLE handle, int directory, const wchar_t *path
 static int pin_open(CiRoot *r, CiPin *pin, const wchar_t *path, int private_acl) {
   DWORD n;
   memset(pin,0,sizeof(*pin));
-  pin->handle=CreateFileW(path,READ_CONTROL|FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,
+  /* Metadata-only access does not participate in Windows share accounting.
+   * Include directory-list (FILE_READ_DATA) access so withholding SHARE_DELETE
+   * actually prevents rename for this pin's entire lifetime. This is also the
+   * FILE_GENERIC_READ access used by the existing private-FS directory pins. */
+  pin->handle=CreateFileW(path,FILE_GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,
                           NULL,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,NULL);
   if (pin->handle==INVALID_HANDLE_VALUE) { pin->handle=NULL; return SQLITE_CANTOPEN; }
   pin->private_acl=private_acl;
