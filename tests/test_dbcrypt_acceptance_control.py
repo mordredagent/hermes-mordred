@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -202,7 +201,10 @@ def test_detached_supervisor_survives_worker_exit_and_source_change(tmp_path: Pa
     fake_bin.mkdir()
     fake_aws_executable(fake_bin / "aws", state)
     source = tmp_path / "operator.py"
-    shutil.copy2(module.__file__, source)
+    source_text = Path(module.__file__).read_text()
+    default = 'self.admission_directory = Path.home() / ".cache" / "mordred-dbcrypt-control"'
+    assert source_text.count(default) == 1, "keep the detached fixture isolated from the real controller directory"
+    source.write_text(source_text.replace(default, f"self.admission_directory = Path({str(tmp_path / 'admission')!r})"))
     worker = (
         "import importlib.util; from pathlib import Path; "
         f"s=importlib.util.spec_from_file_location('operator_control', {str(source)!r}); "

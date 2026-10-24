@@ -2347,6 +2347,43 @@ completion acceptance matrix track later work and current open gates.
   protection problem was resolved keeps repeating the old warning because Hermes
   freezes plugin prompt sections at session start ("Stale protection notice…").
 
+- **2026-10-24 — Cross-platform database P1 Windows VFS feasibility passed.**
+  Candidate `0365ee8dcd21a8caabadbafb534bdc842862f0e2` ran on the existing
+  Windows Server 2025 x64 host as a new credentialed, non-elevated batch user
+  with its own loaded profile. Python 3.11.16, `sqlcipher3-wheels==0.5.7`,
+  SQLite 3.51.1, SQLCipher 4.12.0 community and MSVC 19.44.35229.0 were recorded.
+  Source and a fresh sdist-built installed wheel outside the checkout each
+  passed **29 unit tests and four native tests**, with two explained unit
+  skips: ordinary-user symlink creation lacked privilege; the detached-process
+  supervisor harness is POSIX-only and passed on the controller host.
+
+  Both environments proved same-library extension loading, bootstrap-close
+  persistence, encrypted rollback/WAL and Japanese trigram FTS, keyless refusal,
+  observed `xOpen/xDelete/xShmMap/xShmUnmap`, and a denied SHM write without
+  delegation or committed rows. Three subprocess cases also verified that
+  a reserved-name collision during initialization leaves no callbacks or
+  VFS on bootstrap/later connections. DLL SHA-256:
+  `5ecf615e6bd6b7a828b15a61b1bf3b3f35c947d24f26fe568351b8f1d765fee9`.
+  Installed driver PYDs matched the hash-verified upstream wheel. The private
+  final evidence archive SHA-256 is
+  `be2b50f7df6724c1a5c1b497d636589da1373a45d72cb9333b20fda33c2912e5`.
+
+  Astra's whole-branch review found four Important defects. RED-to-GREEN
+  regressions cover uncertain starts, evidence-write failure, partial C
+  registration, and competing receipts/stale EC2 describes. The controller
+  retains uncertain starts, cleans up despite failed evidence writes, and uses
+  canonical per-instance admission across receipts. Its supported deployment
+  is one awake/connected controller host and OS identity; an unresolved AWS
+  result keeps its guard beyond the requested stop deadline until settlement.
+
+  Cleanup removed the owned user, task, profile, stage and explicit batch-logon
+  rights. A cold boot was needed after Windows retained the test profile;
+  no ordinary test process remained. Each run used a separate frozen guard and
+  receipt; the final controller stop/verify and independent EC2 query confirmed
+  both retained hosts stopped. Linux was not started. This is diagnostic
+  feasibility; production checked-filesystem, custody, consumer and Desktop
+  acceptance remain gated by the later implementation tasks.
+
 After changing a live-gated path, rerun the relevant command and append a dated
 result here. Do not replace the previous result without recording the new date.
 Tor and TPM use hermetic CI coverage and do not belong in this manual log.
