@@ -88,6 +88,11 @@ class KeyProvider:
         self._cached: DatabaseKey | None = None
         self._injected = False
 
+    @property
+    def runtime_native(self) -> bool:
+        """Whether this provider requires runtime-native integration by its caller."""
+        return self._native
+
     def __call__(self) -> DatabaseKey | None:
         if self._native:
             from .._database_contracts import DatabaseRefused

@@ -59,9 +59,34 @@ def protected_state_present(home: Path) -> bool:
 
 
 def arm(home: Path) -> None:
-    path = marker_path(home)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("1\n", encoding="utf-8")
+    """Legacy publication seam: never overwrite native or unknown marker bytes."""
+    from .._database_contracts import DatabaseRefused
+    from .._database_lifecycle import acquire_exclusive
+    from .._private_fs import PrivateFSError, open_private_directory
+
+    with acquire_exclusive(home) as lease:
+        # Preserve the explicit legacy seam for older 0755 Mordred directories.
+        # Exclusive creation cannot replace a concurrently published v2 marker.
+        try:
+            with marker_path(home).open("xb") as stream:
+                stream.write(b"1\n")
+            marker_path(home).chmod(0o600)
+            return
+        except FileExistsError:
+            pass
+        try:
+            with open_private_directory(home / "mordred") as directory, directory.transaction() as tx:
+                lease.assert_held(home)
+                try:
+                    existing = tx.read_bytes(MARKER_SUBPATH[-1], max_bytes=4096)
+                except PrivateFSError as exc:
+                    if exc.reason != "missing":
+                        raise
+                    existing = None
+                if existing != b"1\n":
+                    raise DatabaseRefused("legacy publication cannot replace native or unknown database intent")
+        except PrivateFSError:
+            raise DatabaseRefused("legacy database marker cannot be published safely") from None
 
 
 def _run_pending_conversion(base: Path, key_provider: KeyProvider) -> None:
@@ -118,26 +143,21 @@ def _native_home(home: Path | None) -> tuple[Path, Path]:
     return requested, root_home(requested)
 
 
-def _install_native(base: Path, key_provider: KeyProvider) -> bool:
-    """Admit native intent before any recovery writes; keep its sole runtime lease."""
-    from . import _migrate, _shim
+def _refuse_deferred_native_state(base: Path) -> None:
+    """Interim Task 6/7 gate: no raw SQL facade or legacy recovery for native callers."""
+    from .._database_contracts import DatabaseRefused
 
-    try:
-        marker_path(base).lstat()
-    except FileNotFoundError:
-        return False
-    # Offline recovery/adoption owns journal and generation changes, before a
-    # runtime is acquired. Unsafe marker entries also pass through checked reads.
-    try:
-        key_provider()
-        if _migrate.journal_path(base).is_file():
-            raise _migrate.MigrationError("database recovery must complete before native startup")
-        module = _shim.build_module(key=key_provider, home=lambda: base, has_key=lambda: key_provider() is not None)
-        _shim.install_module(module)
-        return True
-    except BaseException:
-        key_provider.close()
-        raise
+    for name in (
+        "db-encryption.marker",
+        "db-encryption.journal.json",
+        "db-encryption.pending",
+        "db-decryption.pending",
+    ):
+        try:
+            (base / "mordred" / name).lstat()
+        except FileNotFoundError:
+            continue
+        raise DatabaseRefused("native database startup is unavailable in this version; database files were not opened")
 
 
 def install(*, home: Path | None = None, provider: KeyProvider | None = None) -> bool:
@@ -163,18 +183,20 @@ def install(*, home: Path | None = None, provider: KeyProvider | None = None) ->
     from . import _migrate, _shim
     from ._locking import runtime_lease
 
+    global _PROVIDER
+    if provider is None or provider.runtime_native:
+        requested_home, base = _native_home(home)
+        _PROVIDER = provider or KeyProvider(home=requested_home)
+        # Do not enter legacy recovery, even without a marker. Task 6 will
+        # replace this gate with guarded SQL admission; Task 7 owns recovery.
+        _refuse_deferred_native_state(base)
+        with runtime_lease(base):
+            _refuse_deferred_native_state(base)
+        return False
     if _shim.is_installed():
         return True
-    global _PROVIDER
-    if provider is None:
-        requested_home, base = _native_home(home)
-        _PROVIDER = KeyProvider(home=requested_home)
-        key_provider = _PROVIDER
-        if _install_native(base, key_provider):
-            return True
-    else:
-        _PROVIDER = provider
-        key_provider = provider
+    _PROVIDER = provider
+    key_provider = provider
     _migrate.resume_at_startup(base)
     _run_pending_conversion(base, key_provider)
     _run_pending_decryption(base, key_provider)

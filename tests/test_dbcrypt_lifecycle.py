@@ -227,7 +227,7 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 from mordred_hermes import dbcrypt
-from mordred_hermes.dbcrypt import _migrate
+from mordred_hermes.dbcrypt import _migrate, _key
 sys.platform = 'darwin'
 original = _migrate.migration_lock
 @contextmanager
@@ -237,7 +237,8 @@ def delayed(*args, **kwargs):
     with original(*args, **kwargs):
         yield
 _migrate.migration_lock = delayed
-dbcrypt.install(home=Path(sys.argv[1]))
+provider = _key.KeyProvider(environ={"HERMES_MEMORY_KEY": "hex:" + bytes(range(32)).hex()}, inject=lambda: 0)
+dbcrypt.install(home=Path(sys.argv[1]), provider=provider)
 print('ready', flush=True)
 """
     child = subprocess.Popen(

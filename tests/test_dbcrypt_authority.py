@@ -375,60 +375,54 @@ def test_default_provider_never_injects_ambient_key(tmp_path, monkeypatch):
     provider.close()
 
 
-def test_failed_default_install_releases_authority(native_root, monkeypatch):
-    from mordred_hermes import dbcrypt
-    from mordred_hermes.dbcrypt import _shim
+def test_default_startup_cannot_return_unregistered_live_sql_connection(native_root, monkeypatch):
+    import sqlite3
 
-    root, _, _, _ = native_root
+    from mordred_hermes import dbcrypt
+
+    pytest.importorskip("sqlcipher3")
+    root, backend, _, _ = native_root
     monkeypatch.setattr(dbcrypt.sys, "platform", "darwin")
     monkeypatch.setattr(dbcrypt.sys, "argv", ["hermes"])
-    monkeypatch.setattr(_shim, "is_installed", lambda: False)
+    monkeypatch.setitem(dbcrypt.sys.modules, "sqlite3", sqlite3)
+    monkeypatch.setitem(dbcrypt.sys.modules, "sqlite3.dbapi2", sqlite3.dbapi2)
     monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
-
-    def fail_build(**kwargs):
-        raise RuntimeError("SQLCipher unavailable")
-
-    monkeypatch.setattr(_shim, "build_module", fail_build)
-    with pytest.raises(RuntimeError, match="SQLCipher unavailable"):
-        dbcrypt.install(home=root)
+    held = None
     try:
-        with acquire_exclusive(root):
-            pass
+        with pytest.raises(DatabaseRefused):
+            if dbcrypt.install(home=root):
+                import sqlite3 as installed
+
+                held = installed.connect(str(root / "state.db"))
+                held.execute("CREATE TABLE leaked (value)")
+                held.commit()
+        assert held is None
+        assert dbcrypt.sys.modules["sqlite3"] is sqlite3
+        assert not (root / "state.db").exists()
+        assert backend.calls == []
     finally:
+        if held is not None:
+            held.close()
         if dbcrypt._PROVIDER is not None:
             dbcrypt._PROVIDER.close()
+    with acquire_exclusive(root):
+        pass
 
 
-def test_default_install_uses_original_checked_profile_domain(native_root, monkeypatch):
+@pytest.mark.parametrize("installed", [False, True])
+def test_default_profile_startup_refuses_before_sql_or_native(native_root, monkeypatch, installed):
     from mordred_hermes import dbcrypt
     from mordred_hermes.dbcrypt import _shim
 
-    root, backend, key, _ = native_root
-    child = root / "profiles/work"
+    root, backend, _, _ = native_root
     monkeypatch.setattr(dbcrypt.sys, "platform", "darwin")
     monkeypatch.setattr(dbcrypt.sys, "argv", ["hermes"])
-    monkeypatch.setattr(_shim, "is_installed", lambda: False)
+    monkeypatch.setattr(_shim, "is_installed", lambda: installed)
     monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
-    installed = []
-    module = SimpleNamespace()
-
-    def build(*, key, home, has_key):
-        assert home() == root
-        assert has_key()
-        assert key() == derive(root_key)
-        return module
-
-    root_key = key
-    monkeypatch.setattr(_shim, "build_module", build)
-    monkeypatch.setattr(_shim, "install_module", installed.append)
     try:
-        assert dbcrypt.install(home=child)
-        assert installed == [module]
-        assert sum(op == "ecdh" for op, _ in backend.calls) == 1
-        child.rename(child.with_name("old"))
-        child.mkdir(mode=0o700)
         with pytest.raises(DatabaseRefused):
-            dbcrypt._PROVIDER()
+            dbcrypt.install(home=root / "profiles/work")
+        assert backend.calls == []
     finally:
         if dbcrypt._PROVIDER is not None:
             dbcrypt._PROVIDER.close()
@@ -521,4 +515,63 @@ def test_fork_refuses_before_entering_inherited_thread_lock(native_root, operati
     finally:
         if authority is not None:
             authority.close()
+        provider.close()
+
+
+@pytest.mark.parametrize("kind", ["journal", "encrypt-pending", "decrypt-pending"])
+def test_default_startup_without_marker_preserves_recovery_state(tmp_path, monkeypatch, kind):
+    from mordred_hermes import dbcrypt
+    from mordred_hermes.dbcrypt import _migrate, _shim
+
+    root = tmp_path
+    directory = root / "mordred"
+    directory.mkdir(mode=0o700)
+    original, prepared = root / "state.db", root / "state.db.prepared"
+    original.write_bytes(b"original database bytes")
+    prepared.write_bytes(b"prepared database bytes")
+    state = {
+        "journal": _migrate.journal_path(root),
+        "encrypt-pending": _migrate.pending_path(root),
+        "decrypt-pending": _migrate.decrypt_pending_path(root),
+    }[kind]
+    state.write_text(
+        json.dumps({"direction": "encrypt", "swaps": [{"path": str(original), "prepared": str(prepared)}]})
+    )
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    resumed = []
+    resume = _migrate.resume_at_startup
+
+    def observe_resume(*args, **kwargs):
+        resumed.append(True)
+        return resume(*args, **kwargs)
+
+    monkeypatch.setattr(dbcrypt.sys, "platform", "darwin")
+    monkeypatch.setattr(dbcrypt.sys, "argv", ["hermes"])
+    monkeypatch.setattr(_shim, "is_installed", lambda: False)
+    monkeypatch.setattr(_migrate, "resume_at_startup", observe_resume)
+    try:
+        with pytest.raises(DatabaseRefused):
+            dbcrypt.install(home=root)
+        assert not resumed
+        assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+        assert not dbcrypt.marker_path(root).exists()
+    finally:
+        if dbcrypt._PROVIDER is not None:
+            dbcrypt._PROVIDER.close()
+
+
+def test_explicit_native_provider_cannot_enter_legacy_install(native_root, monkeypatch):
+    from mordred_hermes import dbcrypt
+    from mordred_hermes.dbcrypt import _shim
+
+    root, backend, _, _ = native_root
+    monkeypatch.setattr(dbcrypt.sys, "platform", "darwin")
+    monkeypatch.setattr(dbcrypt.sys, "argv", ["hermes"])
+    monkeypatch.setattr(_shim, "is_installed", lambda: False)
+    provider = KeyProvider(home=root)
+    try:
+        with pytest.raises(DatabaseRefused):
+            dbcrypt.install(home=root, provider=provider)
+        assert backend.calls == []
+    finally:
         provider.close()

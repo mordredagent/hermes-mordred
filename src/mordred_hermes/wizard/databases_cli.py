@@ -12,6 +12,10 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..dbcrypt._key import KeyProvider
 
 from . import _term
 
@@ -87,16 +91,29 @@ def _preflight() -> str | None:
     return None
 
 
-def databases_encrypt(*, dry_run: bool = False, home: Path | None = None) -> int:
-    from ..dbcrypt import _migrate, arm
+def _offline_provider() -> KeyProvider | None:
     from ..dbcrypt._key import KeyProvider
 
     refusal = _preflight()
     if refusal:
         _term.emit_error(refusal)
+        return None
+    provider = KeyProvider()
+    if getattr(provider, "runtime_native", False):
+        # Task 7 must supply offline EX custody; runtime SH keys cannot authorize it.
+        _term.emit_error("native database offline operations are unavailable in this version; nothing was changed.")
+        return None
+    return provider
+
+
+def databases_encrypt(*, dry_run: bool = False, home: Path | None = None) -> int:
+    from ..dbcrypt import _migrate, arm
+
+    key_provider = _offline_provider()
+    if key_provider is None:
         return 1
     base = home or _home()
-    key = KeyProvider()()
+    key = key_provider()
     if key is None:
         _term.emit_error(
             "the database key comes from the agent-memory key, which is not set up: run "
@@ -143,14 +160,12 @@ def databases_encrypt(*, dry_run: bool = False, home: Path | None = None) -> int
 def databases_decrypt(*, dry_run: bool = False, home: Path | None = None) -> int:
     """Turn every encrypted Hermes database back into plain SQLite and switch encryption off."""
     from ..dbcrypt import _migrate, armed
-    from ..dbcrypt._key import KeyProvider
 
-    refusal = _preflight()
-    if refusal:
-        _term.emit_error(refusal)
+    key_provider = _offline_provider()
+    if key_provider is None:
         return 1
     base = home or _home()
-    key = KeyProvider()()
+    key = key_provider()
     if key is None:
         _term.emit_error("the database key is not available (the vault could not be opened); nothing was changed.")
         return 1
