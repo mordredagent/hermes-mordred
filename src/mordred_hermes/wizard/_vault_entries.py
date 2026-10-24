@@ -23,6 +23,8 @@ imports stay function-local so this module imports on any platform.
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -30,7 +32,9 @@ from . import _term
 from ._vault_open import _display_name, _open_cold_path, _open_hot_path_or_report
 
 if TYPE_CHECKING:
+    from .._database_lifecycle import ExclusiveLease
     from ..keyvault.anchor import AnchorStore
+    from ..keyvault.vault import OpenVault
     from ..keyvault.wrap import NativeBackend
     from ._flow_session import FlowSession
     from .configure import PromptIO
@@ -38,6 +42,31 @@ if TYPE_CHECKING:
 # Upper bound for a manifest read in `status` (real manifests are a few KBs;
 # the bytes are parsed unauthenticated, so refuse absurd sizes outright).
 _MAX_MANIFEST_BYTES = 8 * 1024 * 1024
+
+
+@contextmanager
+def _source_change_lease(
+    root: Path, opened: OpenVault, name: str, plaintext: bytes | None
+) -> Iterator[ExclusiveLease | None]:
+    """Broker only effective memory-key changes, outside actual vault custody.
+
+    The producer repeats this comparison and the all-generations guard under
+    custody. An open RAM handle is not itself a held custody lock.
+    """
+    from ..keyvault._database_mutation import database_key_mutation
+    from ..keyvault._identity import _vault_database_home
+    from ..keyvault._memory_env import effective_memory_key
+
+    if name != ".env":
+        yield None
+        return
+    previous = opened.read_file(name) if name in opened.list_files() else None
+    if effective_memory_key(previous) == effective_memory_key(plaintext):
+        yield None
+        return
+    home = _vault_database_home(root)
+    with database_key_mutation(root=home, generation=None) as lease:
+        yield lease
 
 
 def status(*, root: Path, prompt_io: PromptIO | None = None, as_json: bool = False) -> int:
@@ -177,6 +206,7 @@ def _enroll_one(
     With a ``flow_session`` the flow's already open vault is reused (no unlock
     at all), or the one opened here is kept for the flow's later steps.
     """
+    from .._database_contracts import DatabaseRefused
     from ..keyvault import anchor, vault
     from ..keyvault._exceptions import WrapError
 
@@ -186,10 +216,11 @@ def _enroll_one(
 
     with opened:
         try:
-            opened.enroll_file(name, plaintext)
+            with _source_change_lease(root, opened, name, plaintext) as lease:
+                opened.enroll_file(name, plaintext, database_lease=lease)
             generation = opened.generation
             enrolled = opened.read_file(name) if read_back else None
-        except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
+        except (DatabaseRefused, vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
             _term.emit_error(f"cannot add {name!r}: {exc}")
             return 1, None, None
 
@@ -339,6 +370,7 @@ def migrate(
             _term.emit_error(f"cannot read source file {source}: {exc}")
             return 1
 
+    from .._database_contracts import DatabaseRefused
     from ..keyvault import anchor, vault
     from ..keyvault._exceptions import WrapError
 
@@ -350,10 +382,11 @@ def migrate(
     with opened:
         try:
             for name, plaintext in plaintexts:
-                opened.enroll_file(name, plaintext)
+                with _source_change_lease(root, opened, name, plaintext) as lease:
+                    opened.enroll_file(name, plaintext, database_lease=lease)
                 enrolled += 1
             generation = opened.generation
-        except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
+        except (DatabaseRefused, vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
             # `enrolled` is the index of the file that failed (incremented only after
             # a successful enroll). Bounds-guard the lookup so a failure raised
             # anywhere in the try — even after the loop — still fails closed with a

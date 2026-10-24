@@ -413,30 +413,33 @@ def purge(
     refusal = excluded_refusal("env_config_workspace_seals", "encryption purge env")
     if refusal is not None:
         return refusal
+    from .._database_contracts import DatabaseRefused
     from ..keyvault import _storage, anchor, vault
     from . import vault_cli
+    from ._vault_entries import _source_change_lease
 
     env_path = home / _ENV_NAME
 
     if _vault_present(root):
         opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store)
         if opened is None:
-            return 0 if env_path.exists() else 1
+            return 1
         with opened:
             try:
                 if _ENV_NAME in opened.list_files():
-                    vault_bytes = opened.read_file(_ENV_NAME)
-                    if not env_path.exists():
-                        _storage.atomic_write(env_path, vault_bytes)  # restore the only copy
-                    elif env_path.read_bytes() != vault_bytes:
-                        backup = home / ".env.vault-purged"
-                        _storage.atomic_write(backup, vault_bytes)
-                        _term.emit_warn(
-                            f"on-disk .env differs from the vault copy — saved the vault copy to {backup} "
-                            "before purging (nothing is lost)."
-                        )
-                    opened.unenroll_file(_ENV_NAME)
-            except (vault.VaultError, anchor.AnchorError, OSError) as exc:
+                    with _source_change_lease(root, opened, _ENV_NAME, None) as lease:
+                        vault_bytes = opened.read_file(_ENV_NAME)
+                        if not env_path.exists():
+                            _storage.atomic_write(env_path, vault_bytes)  # restore the only copy
+                        elif env_path.read_bytes() != vault_bytes:
+                            backup = home / ".env.vault-purged"
+                            _storage.atomic_write(backup, vault_bytes)
+                            _term.emit_warn(
+                                f"on-disk .env differs from the vault copy — saved the vault copy to {backup} "
+                                "before purging (nothing is lost)."
+                            )
+                        opened.unenroll_file(_ENV_NAME, database_lease=lease)
+            except (DatabaseRefused, vault.VaultError, anchor.AnchorError, OSError) as exc:
                 _term.emit_error(f"cannot purge .env from the vault: {exc}")
                 return 1
 

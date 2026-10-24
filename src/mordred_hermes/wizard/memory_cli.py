@@ -693,7 +693,7 @@ def _disable(
     return 0
 
 
-def purge(
+def purge(  # noqa: C901 - platform lifecycle branches retain explicit stop points
     *,
     home: Path,
     root: Path,
@@ -731,27 +731,34 @@ def purge(
 
     from ..keyvault import anchor, vault
     from . import vault_cli
+    from ._flow_session import FlowSession
+    from ._vault_entries import _source_change_lease
 
-    rc = disable(home=home, root=root, backend=backend, store=store)
-    if rc != 0:
-        _term.emit_error(
-            "encryption purge memory: refusing to strip the key while sealed memory files remain (see above) — "
-            "a purged key cannot decrypt them."
-        )
-        return rc
-
-    if _vault_present(root):
-        opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store)
-        if opened is None:
-            return 1
-        with opened:
-            try:
+    try:
+        with FlowSession() as flow:
+            if _vault_present(root):
+                opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store, flow_session=flow)
+                if opened is None:
+                    return 1
+                plaintext = None
                 if ".env" in opened.list_files():
-                    stripped = _strip_memory_key(opened.read_file(".env").decode("utf-8"))
-                    opened.enroll_file(".env", stripped.encode("utf-8"))
-            except (vault.VaultError, anchor.AnchorError, OSError, UnicodeDecodeError) as exc:
-                _term.emit_error(f"cannot strip {_MEMORY_KEY_ENV} from the vault .env: {exc}")
-                return 1
+                    plaintext = _strip_memory_key(opened.read_file(".env").decode("utf-8")).encode("utf-8")
+                with _source_change_lease(root, opened, ".env", plaintext) as lease:
+                    rc = disable(home=home, root=root, backend=backend, store=store, flow_session=flow)
+                    if rc != 0:
+                        _term.emit_error(
+                            "encryption purge memory: refusing to strip the key while sealed memory files remain"
+                        )
+                        return rc
+                    if plaintext is not None:
+                        opened.enroll_file(".env", plaintext, database_lease=lease)
+            else:
+                rc = disable(home=home, root=root, backend=backend, store=store, flow_session=flow)
+                if rc != 0:
+                    return rc
+    except (DatabaseRefused, vault.VaultError, anchor.AnchorError, OSError, UnicodeDecodeError) as exc:
+        _term.emit_error(f"cannot strip {_MEMORY_KEY_ENV} from the vault .env: {exc}")
+        return 1
 
     memory_marker_path(home).unlink(missing_ok=True)
     memory_optout_marker_path(home).unlink(missing_ok=True)

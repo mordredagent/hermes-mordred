@@ -209,15 +209,17 @@ def ensure_memory_key(
 
     - **Already usable** (the effective value decodes to 32 bytes) and no
       ``rotate`` → no-op; the ``.env`` is left untouched.
-    - **No usable key** → write one and re-enroll, collapsing the file to a single
+    - **Absent key** → write one and re-enroll, collapsing the file to a single
       assignment. Without ``rotate`` it **adopts** a key the user is already using
       (live env, then the plaintext home ``.env``) so migrating into the vault
       keeps existing encrypted memories readable; otherwise it mints a fresh key.
     - **Malformed** (the effective value is invalid but an earlier assignment is a
       valid key) and no ``rotate`` → **refuse** (rc 1) rather than guess which key
       encrypted existing memories.
-    - ``rotate`` → always mint a fresh key, warning that memories encrypted under
-      the previous key can no longer be decrypted.
+    - **Invalid enrolled key** → refuse automatic replacement; retain the
+      authenticated source for explicit repair/recovery.
+    - ``rotate`` → mint a fresh key only from a valid source under preceding
+      database exclusion, warning that older memories cannot be decrypted.
 
     ``backend`` / ``store`` default to the production implementations; tests inject
     fakes. Returns 0 on success (no-op, store, or adoption), 1 on an uninitialised
@@ -228,8 +230,10 @@ def ensure_memory_key(
     ``enable env`` in one setup run) the flow's already open vault is reused,
     so this costs no second unlock / Touch ID.
     """
+    from .._database_contracts import DatabaseRefused
     from ..keyvault import anchor, vault
     from ..keyvault._exceptions import WrapError
+    from ._vault_entries import _source_change_lease
 
     opened = _open_hot_path_or_report(root, backend=backend, store=store, flow_session=flow_session)
     if opened is None:
@@ -261,8 +265,8 @@ def ensure_memory_key(
             _term.emit_error(
                 f"the vault .env at {root} has a {_MEMORY_KEY_ENV} whose effective (last) value is not a "
                 f"usable 32-byte key, but an earlier assignment is. Refusing to guess which key encrypted "
-                f"existing memories: fix the .env by hand, or pass --rotate to replace it (which orphans "
-                f"memories encrypted under the old key)."
+                f"existing memories: restore an authenticated valid source before retrying. Automatic "
+                f"replacement is refused, including with --rotate."
             )
             return 1, None
 
@@ -279,9 +283,11 @@ def ensure_memory_key(
 
         new_text = _env_with_memory_key(existing, chosen)
         try:
-            opened.enroll_file(".env", new_text.encode("utf-8"))
+            plaintext = new_text.encode("utf-8")
+            with _source_change_lease(root, opened, ".env", plaintext) as lease:
+                opened.enroll_file(".env", plaintext, database_lease=lease)
             generation = opened.generation
-        except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
+        except (DatabaseRefused, vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
             _term.emit_error(f"cannot store {_MEMORY_KEY_ENV}: {exc}")
             return 1, None
 

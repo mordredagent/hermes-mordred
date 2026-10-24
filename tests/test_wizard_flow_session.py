@@ -47,9 +47,15 @@ from mordred_hermes.wizard import (
 from mordred_hermes.wizard._flow_session import FlowSession
 
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend
+from ._wizard_vault_cli_helpers import _native_backend
 
 _PASSPHRASE = "one passphrase for the whole setup run"
 _FIXED_SEED = _bip39.entropy_to_mnemonic(bytes(range(1, 33)))
+
+
+@pytest.fixture(autouse=True)
+def _canonical_home(tmp_path: Path) -> None:
+    (tmp_path / "home").mkdir(mode=0o700, exist_ok=True)
 
 
 class _RecordingBackend(FakeBackend):
@@ -165,7 +171,7 @@ def make_fresh_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
     The keyvault ceremony, vault creation, .env enrollment and memory sealing run
     for real against software fakes.
     """
-    home, root = tmp_path / "home", tmp_path / "vault"
+    home, root = tmp_path / "home", tmp_path / "home" / "mordred" / "vault"
     _plaintext_home(home)
 
     for resolver in ("_resolve_step_hermes", "_resolve_step_configure", "_resolve_step_network"):
@@ -182,7 +188,7 @@ def make_fresh_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
     monkeypatch.setattr(_bip39, "generate_mnemonic", lambda: _FIXED_SEED)
     monkeypatch.setattr(setup_cli, "_keyvault_preflight", lambda **_kw: None)
     monkeypatch.setattr("mordred_hermes.keyvault.network_fallback.resolve_blackout_assert", lambda: lambda **_kw: None)
-    kv_backend = _RecordingBackend()
+    kv_backend = _native_backend()
     monkeypatch.setattr(
         _keyvault_init,
         "init_keyvault",
@@ -314,7 +320,7 @@ class TestVaultUnlocks:
     def test_env_then_memory_share_one_unlock(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """The Telegram-setup / Desktop pattern: env then memory in one flow."""
         _stub_runtime_probes(monkeypatch)
-        home, root = tmp_path / "home", tmp_path / "v"
+        home, root = tmp_path / "home", tmp_path / "home" / "mordred" / "vault"
         _plaintext_home(home)
         backend, store = FakeBackend(), FakeAnchorStore()
         _existing_vault(root, backend, store)
@@ -339,7 +345,7 @@ class TestVaultUnlocks:
         """Standalone `encryption enable env` / `enable memory` (separate commands)
         are unchanged: one unlock each."""
         _stub_runtime_probes(monkeypatch)
-        home, root = tmp_path / "home", tmp_path / "v"
+        home, root = tmp_path / "home", tmp_path / "home" / "mordred" / "vault"
         _plaintext_home(home)
         backend, store = FakeBackend(), FakeAnchorStore()
         _existing_vault(root, backend, store)
@@ -357,7 +363,7 @@ class TestVaultUnlocks:
         home = tmp_path / "home"
         _plaintext_home(home)
         monkeypatch.setattr(encryption_cli, "_hermes_home", lambda: home)
-        monkeypatch.setattr(encryption_cli, "resolve_root", lambda _r: tmp_path / "v")
+        monkeypatch.setattr(encryption_cli, "resolve_root", lambda _r: tmp_path / "home" / "mordred" / "vault")
         backend, store = FakeBackend(), FakeAnchorStore()
         prompt_io = _CountingPromptIO()
         for module in (env_decrypt_cli, config_decrypt_cli, memory_cli):
@@ -379,9 +385,9 @@ class TestVaultUnlocks:
         home = tmp_path / "home"
         _plaintext_home(home)
         monkeypatch.setattr(encryption_cli, "_hermes_home", lambda: home)
-        monkeypatch.setattr(encryption_cli, "resolve_root", lambda _r: tmp_path / "v")
+        monkeypatch.setattr(encryption_cli, "resolve_root", lambda _r: tmp_path / "home" / "mordred" / "vault")
         backend, store = FakeBackend(), FakeAnchorStore()
-        _existing_vault(tmp_path / "v", backend, store)
+        _existing_vault(tmp_path / "home" / "mordred" / "vault", backend, store)
         for module in (env_decrypt_cli, config_decrypt_cli, memory_cli):
             monkeypatch.setattr(module, "enable", functools.partial(module.enable, backend=backend, store=store))
         assert encryption_cli._dispatch_all("enable", platform="darwin", on_path=lambda _n: False) == 0
@@ -402,7 +408,7 @@ class TestVaultUnlocks:
         _as_macos(monkeypatch)
         _stub_runtime_probes(monkeypatch)
         monkeypatch.delenv("MORDRED_SEKEY_UNATTENDED", raising=False)
-        home, root = tmp_path / "home", tmp_path / "v"
+        home, root = tmp_path / "home", tmp_path / "home" / "mordred" / "vault"
         _plaintext_home(home)
         backend, store = _RecordingBackend(), FakeAnchorStore()
         monkeypatch.setattr(vault_cli, "_resolve_root", lambda _r: root)
@@ -437,7 +443,7 @@ class TestVaultUnlocks:
 
         _as_macos(monkeypatch)
         _stub_runtime_probes(monkeypatch)
-        home, root = tmp_path / "home", tmp_path / "v"
+        home, root = tmp_path / "home", tmp_path / "home" / "mordred" / "vault"
         _plaintext_home(home)
         backend, store = _RecordingBackend(), FakeAnchorStore()
         monkeypatch.setattr(vault_cli, "_resolve_root", lambda _r: root)
@@ -488,7 +494,7 @@ class TestVaultKeyPolicy:
 
     def test_standalone_vault_init_keeps_the_backend_default(self, tmp_path: Path) -> None:
         backend = _RecordingBackend()
-        root = tmp_path / "v"
+        root = tmp_path / "home" / "mordred" / "vault"
         assert vault_cli.init(root=root, prompt_io=_CountingPromptIO(), backend=backend, store=FakeAnchorStore()) == 0
         assert backend.unattended[_identity.vault_identity(root)] is None
 
@@ -502,7 +508,7 @@ class TestVaultInitWithFlow:
         with FlowSession() as flow:
             flow.remember_passphrase(_PASSPHRASE)
             rc = vault_cli.init(
-                root=tmp_path / "v",
+                root=tmp_path / "home" / "mordred" / "vault",
                 prompt_io=prompt_io,
                 backend=FakeBackend(),
                 store=FakeAnchorStore(),
@@ -510,14 +516,14 @@ class TestVaultInitWithFlow:
             )
         assert rc == 0
         assert prompt_io.password_labels == []
-        vault.recover_vault(tmp_path / "v", _PASSPHRASE).close()
+        vault.recover_vault(tmp_path / "home" / "mordred" / "vault", _PASSPHRASE).close()
 
     def test_remembers_a_new_passphrase_and_keeps_the_vault_open(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         with FlowSession() as flow:
             rc = vault_cli.init(
-                root=tmp_path / "v",
+                root=tmp_path / "home" / "mordred" / "vault",
                 prompt_io=_CountingPromptIO(),
                 backend=FakeBackend(),
                 store=FakeAnchorStore(),
@@ -525,7 +531,7 @@ class TestVaultInitWithFlow:
             )
             assert rc == 0
             assert flow.passphrase == _PASSPHRASE
-            lent = flow.lend_vault(tmp_path / "v")
+            lent = flow.lend_vault(tmp_path / "home" / "mordred" / "vault")
             assert lent is not None
             with lent:  # a lent handle survives the borrower's `with`
                 pass
@@ -538,8 +544,10 @@ class TestVaultInitWithFlow:
             for module in (_vault_lifecycle, _vault_open):
                 for name in ("resolve_backend", "resolve_store", "resolve_prompt_io"):
                     monkeypatch.setattr(module, name, forbidden)
-            assert vault_cli.ensure_initialised(root=tmp_path / "v", flow_session=flow) == 0
-            with _vault_open._open_hot_path_or_report(tmp_path / "v", flow_session=flow) as cached:
+            assert vault_cli.ensure_initialised(root=tmp_path / "home" / "mordred" / "vault", flow_session=flow) == 0
+            with _vault_open._open_hot_path_or_report(
+                tmp_path / "home" / "mordred" / "vault", flow_session=flow
+            ) as cached:
                 cached.enroll_file(".env", b"CACHED=1\n")
             assert lent.read_file(".env") == b"CACHED=1\n"
 
@@ -551,7 +559,7 @@ class TestVaultInitWithFlow:
 
         with FlowSession() as flow:
             rc = vault_cli.init(
-                root=tmp_path / "v",
+                root=tmp_path / "home" / "mordred" / "vault",
                 prompt_io=_Mismatch(),
                 backend=FakeBackend(),
                 store=FakeAnchorStore(),
@@ -576,22 +584,24 @@ class TestFlowSession:
 
     def test_close_drops_the_passphrase_and_closes_the_vault(self, tmp_path: Path) -> None:
         backend, store = FakeBackend(), FakeAnchorStore()
-        _existing_vault(tmp_path / "v", backend, store)
-        opened = _open(tmp_path / "v", backend, store)
+        _existing_vault(tmp_path / "home" / "mordred" / "vault", backend, store)
+        opened = _open(tmp_path / "home" / "mordred" / "vault", backend, store)
         with FlowSession() as flow:
             flow.remember_passphrase(_PASSPHRASE)
-            flow.keep_vault(tmp_path / "v", opened)
+            flow.keep_vault(tmp_path / "home" / "mordred" / "vault", opened)
         assert flow.passphrase is None
         with pytest.raises(vault.VaultError):
             opened.list_files()  # the real handle is closed
 
     def test_lends_only_for_the_same_root(self, tmp_path: Path) -> None:
         backend, store = FakeBackend(), FakeAnchorStore()
-        _existing_vault(tmp_path / "v", backend, store)
+        _existing_vault(tmp_path / "home" / "mordred" / "vault", backend, store)
         with FlowSession() as flow:
-            flow.keep_vault(tmp_path / "v", _open(tmp_path / "v", backend, store))
+            flow.keep_vault(
+                tmp_path / "home" / "mordred" / "vault", _open(tmp_path / "home" / "mordred" / "vault", backend, store)
+            )
             assert flow.lend_vault(tmp_path / "other") is None
-            assert flow.lend_vault(tmp_path / "v") is not None
+            assert flow.lend_vault(tmp_path / "home" / "mordred" / "vault") is not None
 
     def test_empty_passphrase_is_ignored(self) -> None:
         flow = FlowSession()

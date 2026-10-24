@@ -19,6 +19,7 @@ imports stay function-local so this module imports on any platform.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -29,10 +30,27 @@ from ._vault_open import _build_device_auth, _vault_identity
 from ._windows_gates import excluded_refusal
 
 if TYPE_CHECKING:
+    from .._database_lifecycle import ExclusiveLease
     from ..keyvault.anchor import AnchorStore
     from ..keyvault.wrap import NativeBackend
     from ._flow_session import FlowSession
     from .configure import PromptIO
+
+
+@contextlib.contextmanager
+def _initialization_lease(root: Path) -> Iterator[ExclusiveLease | None]:
+    from .._database_contracts import DatabaseRefused
+    from ..keyvault import vault
+    from ..keyvault._database_mutation import database_key_mutation
+    from ..keyvault._identity import _vault_database_home
+
+    if vault._initialization_artifacts_present(root):
+        raise DatabaseRefused("retained vault artifacts require recovery before initialization")
+    if root.name != "vault" or root.parent.name != "mordred":
+        yield None  # Producer permits only genuinely fresh custom initialization.
+        return
+    with database_key_mutation(root=_vault_database_home(root, allow_missing=True), generation=None) as lease:
+        yield lease
 
 
 def init(
@@ -79,6 +97,7 @@ def init(
         if not eligible:
             _term.emit_error(f"Cannot initialise the vault at {root}: {reason}")
             return 1
+    from .._database_contracts import DatabaseRefused
     from ..keyvault import anchor, vault
     from ..keyvault._exceptions import WrapError, WrapKeyNotFound
 
@@ -120,11 +139,19 @@ def init(
         # pre-existing key from a crashed earlier init is reused — not an error.
         # (A pre-existing key keeps the policy it was created with.)
         unattended = flow_session.unattended if flow_session is not None else None
-        with contextlib.suppress(WrapKeyNotFound):
-            backend.generate_enclave_key(key_id, unattended=unattended)
-        created = vault.init_vault(
-            root, key_id=key_id, passphrase=passphrase, backend=backend, store=store, anchor_label=anchor_label
-        )
+        with _initialization_lease(root) as lease:
+            vault._guard_vault_initialization(root, lease)
+            with contextlib.suppress(WrapKeyNotFound):
+                backend.generate_enclave_key(key_id, unattended=unattended)
+            created = vault.init_vault(
+                root,
+                key_id=key_id,
+                passphrase=passphrase,
+                backend=backend,
+                store=store,
+                anchor_label=anchor_label,
+                database_lease=lease,
+            )
         if flow_session is not None:
             # Keep it open for the flow's next steps (closed when the flow ends):
             # enrolling through it needs no second unwrap / Touch ID.
@@ -132,7 +159,7 @@ def init(
         else:
             # Standalone: init enrolls nothing; close now so the in-RAM master is zeroed.
             created.close()
-    except vault.VaultError as exc:
+    except (DatabaseRefused, vault.VaultError) as exc:
         # A concurrent init won the anchor race after our pre-check.
         _term.emit_error(f"Vault init refused: {exc}")
         return 1
@@ -370,8 +397,11 @@ def recover(
         return refusal
     from cryptography.exceptions import InvalidTag
 
+    from .._database_contracts import DatabaseRefused
     from ..keyvault import anchor, backup, manifest, recovery, vault
+    from ..keyvault._database_mutation import database_key_mutation
     from ..keyvault._exceptions import WrapError
+    from ..keyvault._identity import _vault_database_home
 
     key_id = anchor_label = _vault_identity(root)
 
@@ -390,15 +420,17 @@ def recover(
     passphrase = prompt_io.ask_password("Vault recovery passphrase")
 
     try:
-        opened = vault.recover_to_device(
-            root,
-            passphrase,
-            backend=device_backend,
-            store=device_store,
-            key_id=key_id,
-            anchor_label=anchor_label,
-        )
-    except vault.VaultError as exc:
+        with database_key_mutation(root=_vault_database_home(root), generation=None) as lease:
+            opened = vault.recover_to_device(
+                root,
+                passphrase,
+                backend=device_backend,
+                store=device_store,
+                key_id=key_id,
+                anchor_label=anchor_label,
+                database_lease=lease,
+            )
+    except (DatabaseRefused, vault.VaultError) as exc:
         _term.emit_error(f"Not a recoverable vault at {root}: {exc}")
         return 1
     except recovery.RecoveryDigestMismatch:

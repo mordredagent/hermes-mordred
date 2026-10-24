@@ -129,3 +129,44 @@ def _build_vault(root: Path, *, files: dict[str, bytes] | None = None) -> None:
             opened.enroll_file(name, plaintext)
     finally:
         opened.close()
+
+
+def _legacy_env(root: Path, backend: FakeBackend, store: FakeAnchorStore, plaintext: bytes) -> None:
+    """Manufacture an authenticated legacy source rejected by current writers."""
+    import hashlib
+
+    from mordred_hermes.keyvault import anchor, file_container, manifest
+    from mordred_hermes.keyvault._identity import vault_identity
+
+    selector = vault_identity(root)
+    with vault.open_vault(root, key_id=selector, backend=backend, store=store, anchor_label=selector) as opened:
+        blob = file_container.encode(opened._master, plaintext, key_id=selector, wmk=opened._wmk, name=".env")
+        digest = hashlib.sha256(blob).hexdigest()
+        vault.atomic_write(root / "blobs" / f"{digest}.blob", blob)
+        generation = opened.generation + 1
+        files = dict(opened._manifest.files)
+        files[".env"] = digest
+        legacy = manifest.VaultManifest(key_id=selector, wmk=opened._wmk, files=files, generation=generation)
+        vault.atomic_write(root / f"manifest.{generation}.mvmf", manifest.encode(legacy, opened._master))
+        anchor.write_anchor(store, selector, wmk=opened._wmk, generation=generation)
+
+
+def _native_backend():
+    """Genuine production capability backend with native I/O replaced below it."""
+    from mordred_hermes.keyvault._seckey_backend import _SecKeyBackend
+    from tests.test_keyvault_seckey_backend import _FakeOps
+
+    class RecordingOps(_FakeOps):
+        def __init__(self):
+            super().__init__()
+            self.unattended = {}
+
+        def create_keypair(self, tag, label, *, unattended=False):
+            self.unattended[tag] = unattended
+            return super().create_keypair(tag, label, unattended=unattended)
+
+    ops = RecordingOps()
+    backend = _SecKeyBackend(ops=ops, sw_ops=None)
+    backend.calls = ops.calls
+    backend.unattended = ops.unattended
+    return backend

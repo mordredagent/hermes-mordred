@@ -29,9 +29,18 @@ _PASSPHRASE = "correct horse battery staple"
 def _init_empty_vault(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
     key_id = anchor_label = _identity.vault_identity(root)
     backend.generate_enclave_key(key_id)
-    vault.init_vault(
-        root, key_id=key_id, passphrase=_PASSPHRASE, backend=backend, store=store, anchor_label=anchor_label
-    ).close()
+    from mordred_hermes.wizard._vault_lifecycle import _initialization_lease
+
+    with _initialization_lease(root) as lease:
+        vault.init_vault(
+            root,
+            key_id=key_id,
+            passphrase=_PASSPHRASE,
+            backend=backend,
+            store=store,
+            anchor_label=anchor_label,
+            database_lease=lease,
+        ).close()
 
 
 def _writer(tmp_path: Path) -> PolicyWriter:
