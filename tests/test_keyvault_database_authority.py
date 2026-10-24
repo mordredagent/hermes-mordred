@@ -200,11 +200,13 @@ def test_explicit_child_home_is_rejected_before_native_access(source):
 def mac_source(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
+    from mordred_hermes import _database_locking_posix
     from mordred_hermes.keyvault import _database_authority as authority
     from mordred_hermes.keyvault import _identity, _seckey_backend, vault
     from tests._keyvault_fakes import FakeAnchorStore
 
     monkeypatch.setattr(authority, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(_database_locking_posix, "sys", SimpleNamespace(platform="darwin"))
     backend = FakeBackend()
     store = FakeAnchorStore()
     (tmp_path / "mordred").mkdir(mode=0o700)
@@ -214,8 +216,10 @@ def mac_source(tmp_path, monkeypatch):
     opened = vault.init_vault(
         vault_root, key_id=key_id, passphrase="synthetic-passphrase", backend=backend, store=store, anchor_label=key_id
     )
-    with opened:
-        opened.enroll_file(".env", b"HERMES_MEMORY_KEY=hex:" + b"61" * 32 + b"\nAPI_KEY=old\n")
+    from mordred_hermes.keyvault._database_mutation import database_key_mutation
+
+    with opened, database_key_mutation(root=tmp_path, generation=None) as lease:
+        opened.enroll_file(".env", b"HERMES_MEMORY_KEY=hex:" + b"61" * 32 + b"\nAPI_KEY=old\n", database_lease=lease)
 
     def native_only_backend(**kwargs):
         assert kwargs == {"sw_ops": None}

@@ -55,6 +55,25 @@ def vault_identity(root: Path) -> str:
     return f"mordred-hermes.vault.{digest}"
 
 
+def _vault_database_home(root: Path) -> Path:
+    """Resolve only the supported canonical file-vault source relationship.
+
+    An arbitrary custom path is not evidence of an independent native source.
+    No ambient home or absence of an enrollment record grants an exemption.
+    """
+    from .._database_contracts import DatabaseRefused
+    from ._database_authority import resolve_database_domain
+
+    absolute = root.absolute()
+    if absolute.name != "vault" or absolute.parent.name != "mordred":
+        raise DatabaseRefused("custom vault source independence is not established")
+    home = absolute.parent.parent
+    domain = resolve_database_domain(home)
+    if absolute != absolute.resolve(strict=True) or domain.home / "mordred" / "vault" != absolute:
+        raise DatabaseRefused("vault source path is not canonical")
+    return domain.home
+
+
 def resolve_backend(backend: NativeBackend | None) -> NativeBackend:
     """Return ``backend``, or build the production Secure-Enclave backend.
 

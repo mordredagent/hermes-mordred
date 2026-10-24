@@ -572,14 +572,24 @@ def _fresh_machine() -> tuple[FakeBackend, FakeAnchorStore]:
     return FakeBackend(), FakeAnchorStore()
 
 
+def _recover_to_device(root: Path, passphrase: str, **kwargs: object) -> vault.OpenVault:
+    """Model an unlocked rekey caller that acquires database exclusion first."""
+    from mordred_hermes.keyvault._database_mutation import database_key_mutation
+
+    with database_key_mutation(root=root.parent.parent, generation=None) as lease:
+        return vault.recover_to_device(root, passphrase, database_lease=lease, **kwargs)
+
+
 def test_recover_to_device_restores_hot_path(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
     """After re-keying, the vault opens on the device hot path and enroll/read work."""
+    tmp_path = tmp_path / "mordred" / "vault"
+    tmp_path.parent.mkdir(mode=0o700)
     v = _init(tmp_path, backend, store)
     v.enroll_file(".env", b"ANTHROPIC_API_KEY=sk-secret\n")
     v.close()
 
     new_backend, new_store = _fresh_machine()
-    rekeyed = vault.recover_to_device(
+    rekeyed = _recover_to_device(
         tmp_path, _PASSPHRASE, backend=new_backend, store=new_store, key_id=_KEY_ID, anchor_label=_LABEL
     )
     try:
@@ -596,13 +606,15 @@ def test_recover_to_device_reopenable_on_new_machine(
     tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore
 ) -> None:
     """The re-keyed vault re-opens via the standard device hot path (open_vault)."""
+    tmp_path = tmp_path / "mordred" / "vault"
+    tmp_path.parent.mkdir(mode=0o700)
     v = _init(tmp_path, backend, store)
     v.enroll_file(".env", b"v1")
     v.enroll_file("config.yaml", b"cfg")  # gen 2 on the source machine
     v.close()
 
     new_backend, new_store = _fresh_machine()
-    vault.recover_to_device(
+    _recover_to_device(
         tmp_path, _PASSPHRASE, backend=new_backend, store=new_store, key_id=_KEY_ID, anchor_label=_LABEL
     ).close()
 
@@ -619,6 +631,8 @@ def test_recover_to_device_reopenable_on_new_machine(
 
 def test_recover_to_device_changes_wmk_and_anchor(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
     """Re-keying mints a new wmk and a NEW generation; the new anchor pins them."""
+    tmp_path = tmp_path / "mordred" / "vault"
+    tmp_path.parent.mkdir(mode=0o700)
     v = _init(tmp_path, backend, store)
     v.enroll_file(".env", b"value")  # gen 1
     old_gen = v.generation
@@ -626,7 +640,7 @@ def test_recover_to_device_changes_wmk_and_anchor(tmp_path: Path, backend: FakeB
     old_wmk = manifest.parse_unverified((tmp_path / f"manifest.{old_gen}.mvmf").read_bytes()).wmk
 
     new_backend, new_store = _fresh_machine()
-    rekeyed = vault.recover_to_device(
+    rekeyed = _recover_to_device(
         tmp_path, _PASSPHRASE, backend=new_backend, store=new_store, key_id=_KEY_ID, anchor_label=_LABEL
     )
     new_gen = rekeyed.generation
@@ -644,12 +658,14 @@ def test_recover_to_device_rebinds_recovery_sidecar(
 ) -> None:
     """The recovery sidecar is re-bound to the new wmk, so plain cold recovery on
     the new machine still works after the re-key."""
+    tmp_path = tmp_path / "mordred" / "vault"
+    tmp_path.parent.mkdir(mode=0o700)
     v = _init(tmp_path, backend, store)
     v.enroll_file(".env", b"value")
     v.close()
 
     new_backend, new_store = _fresh_machine()
-    vault.recover_to_device(
+    _recover_to_device(
         tmp_path, _PASSPHRASE, backend=new_backend, store=new_store, key_id=_KEY_ID, anchor_label=_LABEL
     ).close()
 
@@ -672,6 +688,8 @@ def test_recover_survives_crash_between_manifest_and_sidecar_rewrite(
     fully intact on disk. Recovery is now digest-guided and opens the matching
     older generation instead.
     """
+    tmp_path = tmp_path / "mordred" / "vault"
+    tmp_path.parent.mkdir(mode=0o700)
     v = _init(tmp_path, backend, store)
     v.enroll_file(".env", b"v1")  # gen 1, wmk_A
     v.close()
@@ -680,7 +698,7 @@ def test_recover_survives_crash_between_manifest_and_sidecar_rewrite(
 
     # Drive a real re-key to mint a valid manifest.2 bound to a NEW wmk_B.
     new_backend, new_store = _fresh_machine()
-    vault.recover_to_device(
+    _recover_to_device(
         tmp_path, _PASSPHRASE, backend=new_backend, store=new_store, key_id=_KEY_ID, anchor_label=_LABEL
     ).close()
     assert (tmp_path / "manifest.2.mvmf").exists()  # new-gen manifest is durable
@@ -811,6 +829,8 @@ def test_change_passphrase_rekey_race_fails_closed(
     would replace that sidecar with one digest-bound to the superseded (and
     GC'd) wmk — bricking the cold path. The rotation must detect the moved
     wmk under the lock and fail closed instead."""
+    tmp_path = tmp_path / "mordred" / "vault"
+    tmp_path.parent.mkdir(mode=0o700)
     v = _init(tmp_path, backend, store)
     v.enroll_file(".env", b"KEEP=1\n")
     v.close()
@@ -825,7 +845,7 @@ def test_change_passphrase_rekey_race_fails_closed(
             if not _probe_lock_free(tmp_path):
                 pytest.fail("vault lock held across the device unwrap (a concurrent re-key would deadlock)")
             # The concurrent re-key wins the race during the prompt window.
-            vault.recover_to_device(
+            _recover_to_device(
                 tmp_path, _PASSPHRASE, backend=backend, store=store, key_id=_KEY_ID, anchor_label=_LABEL
             ).close()
         return secret
