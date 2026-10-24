@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 import sys
 import time
 
@@ -209,15 +210,14 @@ def test_unsafe_peer_source_cannot_authenticate_or_record(tmp_path, monkeypatch,
         source.rename(tmp_path / "peer-original.json")
         source.symlink_to(tmp_path / "peer-original.json")
     else:
-        real_open = os.open
+        real_popen = subprocess.Popen
 
-        def swap(path, flags, *args, **kwargs):
-            if str(path) == str(source):
-                source.rename(tmp_path / "peer-original.json")
-                source.write_bytes((tmp_path / "peer-original.json").read_bytes())
-                source.chmod(0o600)
-            return real_open(path, flags, *args, **kwargs)
+        def swap(args, *pargs, **kwargs):
+            source.rename(tmp_path / "peer-original.json")
+            source.write_bytes((tmp_path / "peer-original.json").read_bytes())
+            source.chmod(0o600)
+            return real_popen(args, *pargs, **kwargs)
 
-        monkeypatch.setattr(os, "open", swap)
+        monkeypatch.setattr(subprocess, "Popen", swap)
     assert peers.authenticate(paired["peer_token"]) is None
     assert not (tmp_path / "plugin-data").exists()

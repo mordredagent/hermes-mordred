@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import stat
+import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import BinaryIO
@@ -39,8 +42,24 @@ def checked_store_destination(path: Path, *, home: Path) -> Path:
     return expected
 
 
-def _file_fact(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
-    return info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_size, info.st_mtime_ns
+def _file_fact(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_uid,
+        info.st_gid,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _parent_fact(info: os.stat_result) -> tuple[int, ...]:
+    if not stat.S_ISDIR(info.st_mode):
+        raise ActivityRefused(refusal("store_unavailable"))
+    return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid
 
 
 def _source_file(info: os.stat_result) -> None:
@@ -55,36 +74,42 @@ def _source_file(info: os.stat_result) -> None:
 
 
 def _posix_source(path: Path) -> bytes:
-    with contextlib.ExitStack() as stack:
-        parents: list[tuple[Path, int, tuple[int, int]]] = []
-        for parent in reversed(path.parents):
-            descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-            stack.callback(os.close, descriptor)
-            info = os.fstat(descriptor)
-            parents.append((parent, descriptor, (info.st_dev, info.st_ino)))
-        before = path.lstat()
-        _source_file(before)  # in particular, refuse hardlinks before acquiring a raw file fd
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
-        with os.fdopen(descriptor, "rb") as source:
-            opened = os.fstat(source.fileno())
-            _source_file(opened)
-            if _file_fact(opened) != _file_fact(before):
-                raise ActivityRefused(refusal("store_unavailable"))
-            data = source.read(_MAX_SOURCE + 1)
-            after = os.fstat(source.fileno())
-            if len(data) != before.st_size or _file_fact(after) != _file_fact(before):
-                raise ActivityRefused(refusal("store_unavailable"))
-            if _file_fact(path.lstat()) != _file_fact(before):
-                raise ActivityRefused(refusal("store_unavailable"))
-            for parent, held, identity in parents:
-                named, pinned = parent.lstat(), os.fstat(held)
-                if (
-                    not stat.S_ISDIR(named.st_mode)
-                    or (named.st_dev, named.st_ino) != identity
-                    or (pinned.st_dev, pinned.st_ino) != identity
-                ):
-                    raise ActivityRefused(refusal("store_unavailable"))
-            return data
+    # Metadata only in this PID: even a rejected source can alias a live DB,
+    # and closing any raw fd for that inode would release our SQLite locks.
+    before = path.lstat()
+    _source_file(before)
+    parents = [_parent_fact(parent.lstat()) for parent in reversed(path.parents)]
+    executable = Path(sys.executable)
+    if not executable.is_absolute():
+        raise ActivityRefused(refusal("store_unavailable"))
+    request = json.dumps(
+        {
+            "path": str(path),
+            "limit": _MAX_SOURCE,
+            "file": _file_fact(before),
+            "parents": parents,
+        }
+    ).encode("utf-8")
+    worker = Path(__file__).resolve().with_name("_posix_source.py")
+    try:
+        result = subprocess.run(
+            [str(executable), "-I", "-S", str(worker)],
+            input=request,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env={},
+            close_fds=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise ActivityRefused(refusal("store_unavailable")) from None
+    if result.returncode != 0 or len(result.stdout) > _MAX_SOURCE or len(result.stdout) != before.st_size:
+        raise ActivityRefused(refusal("store_unavailable"))
+    if _file_fact(path.lstat()) != _file_fact(before):
+        raise ActivityRefused(refusal("store_unavailable"))
+    if [_parent_fact(parent.lstat()) for parent in reversed(path.parents)] != parents:
+        raise ActivityRefused(refusal("store_unavailable"))
+    return result.stdout
 
 
 def _windows_source(path: Path) -> bytes:

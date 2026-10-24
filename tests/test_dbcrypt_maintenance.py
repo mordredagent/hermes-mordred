@@ -269,3 +269,53 @@ def test_releasing_actual_lease_revokes_open_scope_before_sql(native_root):
         assert backend.calls == calls
     finally:
         lease_context.__exit__(None, None, None)
+
+
+@pytest.mark.parametrize("changed_values", [False, True])
+def test_registered_identity_survives_registry_to_sql_handoff(native_root, monkeypatch, changed_values):
+    import shutil
+
+    import sqlcipher3.dbapi2 as sc
+
+    from mordred_hermes.dbcrypt import _backup
+    from mordred_hermes.dbcrypt._key import derive
+    from mordred_hermes.dbcrypt._maintenance import maintenance_scope
+    from mordred_hermes.dbcrypt._shim import apply_key
+
+    root, _, material, _ = native_root
+    path = seed(root)
+    backup = root.parent / (root.name + "-registered.backup")
+    replacement = root.parent / (root.name + "-replacement.backup")
+    authority = Authority.acquire(root)
+    try:
+        _backup.backup_database(path, backup, authority=authority)
+    finally:
+        authority.close()
+    shutil.copyfile(backup, replacement)
+    replacement.chmod(0o600)
+    if changed_values:
+        raw = sc.connect(str(replacement))
+        try:
+            apply_key(raw, derive(material))
+            raw.execute("UPDATE records SET value='unregistered changed value'")
+            raw.commit()
+        finally:
+            raw.close()
+    registered_identity = backup.stat().st_ino
+    real_find = _backup._find
+
+    def swapped_after_find(home, source, snapshot):
+        entry = real_find(home, source, snapshot)
+        assert source == backup
+        os.replace(replacement, backup)
+        assert backup.stat().st_ino != registered_identity
+        return entry
+
+    monkeypatch.setattr(_backup, "_find", swapped_after_find)
+    with (
+        acquire_exclusive(root) as lease,
+        maintenance_scope(root, lease=lease) as scope,
+        pytest.raises(DatabaseRefused),
+        scope.connection(backup, readonly=True),
+    ):
+        pytest.fail("a replacement inode was admitted using the original inode's registration")

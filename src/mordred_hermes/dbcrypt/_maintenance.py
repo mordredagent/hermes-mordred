@@ -41,6 +41,12 @@ class MaintenanceRows:
         return iter(self.rows)
 
 
+def _check_binding(binding: _PathBinding, registered_identity: tuple[int, ...] | None) -> None:
+    binding.check()
+    if registered_identity is not None and tuple(_migrate._file_identity(binding.path)) != registered_identity:
+        raise DatabaseRefused("registered backup physical identity changed")
+
+
 class MaintenanceConnection:
     """Factory-issued statement/transaction facade; never a database authority input."""
 
@@ -50,6 +56,7 @@ class MaintenanceConnection:
     _scope: MaintenanceScope
     _owner: _MaintenanceConnection
     _binding: _PathBinding
+    _registered_identity: tuple[int, ...] | None
     _closed: bool
     _denied: bool
 
@@ -59,7 +66,7 @@ class MaintenanceConnection:
             raise DatabaseRefused("maintenance connection is closed")
         self._owner._check()
         try:
-            self._binding.check()
+            _check_binding(self._binding, self._registered_identity)
         except Exception:
             self._scope._invalidate()
             raise DatabaseRefused("maintenance destination changed") from None
@@ -222,20 +229,23 @@ class MaintenanceScope:
             with _backup._registry(root):
                 _backup._no_pending(root)
                 entry = _backup._find(root, path, self._snapshot)
+        registered_identity = tuple(entry["identity"]) if entry is not None else None
         binding = _PathBinding(path, root if protected else path.parent, protected=protected)
         if binding.leaf is None:
             raise DatabaseRefused("maintenance never creates a missing database")
+        _check_binding(binding, registered_identity)
         self._check()
         self._active = True
         try:
             with _migrate._offline_connection(path, readonly=readonly, root=root) as owner:
-                binding.check()
+                _check_binding(binding, registered_identity)
                 self._check()
                 apply_key(owner, key)  # private bootstrap; never a caller SQL surface
-                binding.check()
+                _check_binding(binding, registered_identity)
                 self._check()
                 connection = object.__new__(MaintenanceConnection)
                 connection._scope, connection._owner, connection._binding = self, owner, binding
+                connection._registered_identity = registered_identity
                 connection._closed = connection._denied = False
                 connection._check()
                 owner._install_component_policy(connection)
