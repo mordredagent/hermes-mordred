@@ -273,11 +273,15 @@ static int fShmLock(sqlite3_file *file, int offset, int count, int flags) {
   mask=((1U<<count)-1)<<offset;
   if (flags&SQLITE_SHM_UNLOCK) {
     unsigned int held=exclusive ? f->shm_exclusive : f->shm_shared;
+    if (((f->shm_shared|f->shm_exclusive)&mask)==0) return SQLITE_OK;
     if ((held&mask)!=mask) return SQLITE_IOERR_SHMLOCK;
     rc=ci_unlock(&f->shm,SHM_BASE+(DWORD)offset,(DWORD)count);
     if (rc==SQLITE_OK) { f->shm_shared&=~mask; f->shm_exclusive&=~mask; }
     return rc;
   }
+  /* Repeated SHARED requests are idempotent. A second LockFileEx would stack
+   * ownership and leave the byte locked after SQLite's single unlock. */
+  if (!exclusive && (f->shm_shared&mask)==mask && !(f->shm_exclusive&mask)) return SQLITE_OK;
   if ((f->shm_shared|f->shm_exclusive)&mask) return SQLITE_IOERR_SHMLOCK;
   rc=ci_lock(&f->shm,SHM_BASE+(DWORD)offset,(DWORD)count,exclusive);
   if (rc==SQLITE_OK) {
