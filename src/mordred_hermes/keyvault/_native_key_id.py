@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Final, cast
 from ._exceptions import WrapKeyNotFound
 
 if TYPE_CHECKING:
+    from ._native_deletion import NativeDeletePermit
     from .wrap import NativeBackend
 
 NATIVE_KEY_ID_FIELD: Final = "native_key_id"
@@ -346,8 +347,8 @@ class _LegacyReadFallbackBackend:
         except WrapKeyNotFound:
             return self._fallback.get_enclave_public_key(key_id)
 
-    def delete_enclave_key(self, key_id: str) -> None:
-        self._primary.delete_enclave_key(key_id)
+    def delete_enclave_key(self, key_id: str, *, deletion: NativeDeletePermit | None = None) -> None:
+        self._primary.delete_enclave_key(key_id, deletion=deletion)
 
     def enclave_ecdh(self, key_id: str, peer_pub: bytes) -> bytes:
         try:

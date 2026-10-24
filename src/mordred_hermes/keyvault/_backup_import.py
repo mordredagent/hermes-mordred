@@ -236,6 +236,7 @@ def _rollback_import(
     imported_key_id: str,
     native_key_id: str,
     backend: NativeBackend,
+    creation: wrap.NativeCreateReceipt,
     remove_ciphertext_tree: bool = True,
 ) -> None:
     """Best-effort rollback of a failed provisioning transaction.
@@ -263,7 +264,7 @@ def _rollback_import(
       row if it landed (codex P2).
     """
     try:
-        backend.delete_enclave_key(native_key_id)
+        wrap.rollback_created_key(creation)
     except Exception:
         # Retain the pending ownership journal (and every other artifact) so a
         # later reset can retry the exact scoped id. Removing metadata here
@@ -414,9 +415,9 @@ def import_backup(
     # commit share one lock hold. This serializes import with init and other
     # imports, and — crucially — rejects existing state BEFORE asking a
     # possibly-different backend namespace to generate a same-named key.
-    with _storage.keyvault_lock(root):
+    with _storage.keyvault_lock(root), contextlib.ExitStack() as native_keys:
         _assert_fresh_import_destination(root)
-        generated = False
+        creation: wrap.NativeCreateReceipt | None = None
         pending_meta = _storage.load_meta(root)
         pending_native_key_id = _native_key_id.add_pending_native_key(root, pending_meta, imported_key_id)
         if pending_native_key_id != native_key_id:  # pragma: no cover - deterministic invariant
@@ -425,8 +426,9 @@ def import_backup(
         try:
             # If generate raises (including duplicate), the key belongs to
             # pre-existing state and must not be deleted by rollback.
-            backend.generate_enclave_key(native_key_id)
-            generated = True
+            creation = native_keys.enter_context(
+                wrap.create_wrapping_key_scope(imported_key_id, backend=backend, native_key_id=native_key_id)
+            )
 
             # 7. Rebuild every envelope against this device's Enclave key.
             for entry in envelopes:
@@ -455,7 +457,7 @@ def import_backup(
             # Roll back only a key this transaction observed as successfully
             # generated. A duplicate/error from generate itself may refer to
             # pre-existing backend state and must never trigger deletion.
-            if generated:
+            if creation is not None:
                 _rollback_import(
                     root,
                     new_key_id_hash_hex=new_key_id_hash_hex,
@@ -463,9 +465,11 @@ def import_backup(
                     imported_key_id=imported_key_id,
                     native_key_id=native_key_id,
                     backend=backend,
+                    creation=creation,
                 )
             raise
 
+        wrap.commit_created_key(creation)
         _clear_pending_native_key_after_commit(
             root,
             key_id=imported_key_id,

@@ -64,6 +64,9 @@ from ._exceptions import (
     WrapParseError,
 )
 from ._native_deletion import (
+    NativeCreateReceipt as NativeCreateReceipt,
+)
+from ._native_deletion import (
     NativeDeletePermit,
     _check_delete_request,
 )

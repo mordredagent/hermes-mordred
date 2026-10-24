@@ -146,6 +146,29 @@ def checked_audit_permit(backend, selector):
             yield permit
 
 
+def test_legacy_read_adapter_keeps_delete_on_checked_primary(monkeypatch, tmp_path):
+    from mordred_hermes.keyvault import _native_deletion as deletion
+    from mordred_hermes.keyvault._native_key_id import _LegacyReadFallbackBackend
+
+    calls = []
+    primary_ops = _HelperSecKeyOps("/isolated-primary")
+    fallback_ops = _HelperSecKeyOps("/isolated-fallback")
+    monkeypatch.setattr(primary_ops, "_invoke", lambda payload: calls.append("primary") or {"ok": True})
+    monkeypatch.setattr(fallback_ops, "_invoke", lambda payload: calls.append("fallback") or {"ok": True})
+    primary = _SecKeyBackend(ops=primary_ops, sw_ops=None)
+    fallback = _SecKeyBackend(ops=fallback_ops, sw_ops=None)
+    adapter = _LegacyReadFallbackBackend(primary, fallback)
+    with pytest.raises(DatabaseRefused):
+        adapter.delete_enclave_key("audit", deletion=None)
+    assert calls == []
+    facts = deletion._NativeOwnerFacts(home=tmp_path, role="audit")
+    monkeypatch.setattr(deletion, "_checked_owner_facts", lambda scope, selector, backend: facts)
+    owner = deletion._issue_native_owner(object(), native_key_id="audit", backend=primary)
+    with deletion._owned_delete_scope(owner, backend=primary, database_lease=None) as permit:
+        adapter.delete_enclave_key("audit", deletion=permit)
+    assert calls == ["primary"]
+
+
 @pytest.fixture
 def owned_native(monkeypatch: pytest.MonkeyPatch, tmp_path):
     from mordred_hermes.keyvault import _native_deletion as deletion
