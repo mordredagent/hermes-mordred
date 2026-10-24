@@ -170,7 +170,7 @@ static int fReserved(sqlite3_file *file, int *out) {
   int rc;
   *out=0;
   if (ci_check(&f->io)!=SQLITE_OK) return SQLITE_IOERR_CHECKRESERVEDLOCK;
-  if (f->reserved) { *out=1; return SQLITE_OK; }
+  if (f->lock>=SQLITE_LOCK_RESERVED) { *out=1; return SQLITE_OK; }
   rc=ci_lock(&f->io,RESERVED_BYTE,1,1);
   if (rc==SQLITE_BUSY) { *out=1; return SQLITE_OK; }
   if (rc!=SQLITE_OK) return SQLITE_IOERR_CHECKRESERVEDLOCK;
@@ -201,8 +201,10 @@ static int shm_open(CheckedFile *f) {
   wchar_t name[CI_PATH];
   int rc, release;
   if (f->shm.handle) return ci_check(&f->shm);
-  if (!(f->flags&SQLITE_OPEN_MAIN_DB) || f->io.readonly || wcslen(f->path)+4>=CI_PATH) return SQLITE_IOERR_SHMOPEN;
+  if (!(f->flags&SQLITE_OPEN_MAIN_DB) || wcslen(f->path)+4>=CI_PATH) return SQLITE_IOERR_SHMOPEN;
   wcscpy_s(name,CI_PATH,f->path); wcscat_s(name,CI_PATH,L"-shm");
+  /* A read-only main handle still needs a writable, independently checked
+   * WAL index. Main database writes remain refused by its handle and fLock. */
   rc=ci_open(f->io.root,name,1,0,0,&f->shm);
   if (rc!=SQLITE_OK) return SQLITE_IOERR_SHMOPEN;
   /* The deadman byte belongs to this owned handle. Exclusive means there are
