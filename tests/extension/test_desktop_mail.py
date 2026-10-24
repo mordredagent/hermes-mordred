@@ -111,6 +111,15 @@ def test_every_setup_code_passes_through(desktop: Any, code: str) -> None:
     assert desktop.post("/mail/setup/start", _start_body()) == {"ok": False, "error": code}
 
 
+def test_requested_presence_refusal_is_actionable_without_silent_downgrade(desktop: Any) -> None:
+    desktop.flows.start_result = FakeSetupError("presence_unsupported")
+    assert desktop.post("/mail/setup/start", _start_body(touch_id=True)) == {
+        "ok": False,
+        "error": "presence_unsupported",
+    }
+    assert len(desktop.flows.calls) == 1 and desktop.flows.calls[0][1]["presence"] is True
+
+
 @pytest.mark.parametrize("hint", sorted(_projections.IMAP_HINTS))
 def test_hints_pass_through(desktop: Any, hint: str) -> None:
     desktop.flows.start_result = FakeSetupError("imap_auth_failed", hint)

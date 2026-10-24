@@ -2144,7 +2144,7 @@ def test_encrypt_databases_schedules_and_offers_the_restart():
         ({"ok": False, "error": "decrypt_pending"}, "Database decryption is pending"),
         ({"ok": False, "error": "journal"}, "left its journal. Run hermes-mordred databases status"),
         ({"ok": False, "error": "databases_failed"}, "The step shows the current state again"),
-        ({"ok": False, "error": "databases_unsupported"}, "Database encryption needs macOS with SQLCipher"),
+        ({"ok": False, "error": "databases_unsupported"}, "Protected storage is unavailable for this runtime"),
     ],
 )
 def test_encrypt_databases_failures_are_explained_and_the_status_is_read_again(answer, phrase):

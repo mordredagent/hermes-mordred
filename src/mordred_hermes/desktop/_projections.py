@@ -70,6 +70,7 @@ MAIL_SETUP_CODES: Final = frozenset(
         "mail_setup_cancelled",
         "invalid_selection",
         "touch_id_policy_mismatch",
+        "presence_unsupported",
         "sync_in_progress",
         "store_path_unsafe",
         "tee_unavailable",

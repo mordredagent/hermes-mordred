@@ -21,7 +21,6 @@ from ._desktop_support import (
     EXTRA,
     FOLDER,
     FakeMailSecrets,
-    FakeReadonlyStore,
     FakeRefused,
     store_status,
 )
@@ -53,14 +52,7 @@ def test_v3_keeps_its_keys_and_v4_adds_exactly_the_new_sections(desktop: Any) ->
     assert not V4_KEYS & set(old)
     assert set(new) - set(old) == V4_KEYS
     assert new["telegram_archive"] == {"legacy": None}
-    assert new["imports"] == {
-        "available": True,
-        "code": None,
-        "sources": {
-            "telegram": {"conversations": 3, "messages": 25, "parts": 25},
-            "mail": {"conversations": 0, "messages": 0, "parts": 0},
-        },
-    }
+    assert new["imports"] == {"available": False, "code": "store_unavailable", "sources": {}}
     assert new["mail"] == {"configured": False}
     assert new["activity"] == {"history": True, "tools": True, "source": "config"}  # no config.yaml: the defaults
     assert set(new["vault"]) == {"exists", "env_enrolled", "env_injecting", "optout", "unattended"}
@@ -78,27 +70,13 @@ def test_v3_keeps_its_keys_and_v4_adds_exactly_the_new_sections(desktop: Any) ->
 
 
 @pytest.mark.parametrize("code", sorted(_projections.IMPORT_STATE_CODES))
-def test_every_store_refusal_is_a_state(desktop: Any, monkeypatch: pytest.MonkeyPatch, code: str) -> None:
-    monkeypatch.setattr(_seams, "store_refusal", REAL_STORE_REFUSAL)
-
-    def refuse(home: Path) -> Any:
-        raise FakeRefused(code)
-
-    monkeypatch.setattr(_seams, "open_store_readonly", refuse)
-    status = desktop.get("/status?client_version=4")
-    assert status["imports"] == {"available": False, "code": code, "sources": {}}
+def test_every_store_refusal_is_a_state(code: str) -> None:
+    assert _projections.imports_refused(code) == {"available": False, "code": code, "sources": {}}
 
 
 @pytest.mark.parametrize("code", ["conflict", "run_not_open", "Some free text", None])
-def test_unknown_refusals_map_to_store_unavailable(desktop: Any, monkeypatch: pytest.MonkeyPatch, code: Any) -> None:
-    monkeypatch.setattr(_seams, "store_refusal", REAL_STORE_REFUSAL)
-
-    def refuse(home: Path) -> Any:
-        raise FakeRefused(code) if code is not None else RuntimeError(ADDRESS)
-
-    monkeypatch.setattr(_seams, "open_store_readonly", refuse)
-    imports = desktop.get("/imports/status")["imports"]
-    assert imports == {"available": False, "code": "store_unavailable", "sources": {}}
+def test_unknown_refusals_map_to_store_unavailable(code: Any) -> None:
+    assert _projections.imports_refused(code) == {"available": False, "code": "store_unavailable", "sources": {}}
 
 
 def test_store_refusal_uses_the_store_mapping_when_present(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -112,15 +90,13 @@ def test_store_refusal_uses_the_store_mapping_when_present(monkeypatch: pytest.M
     assert REAL_STORE_REFUSAL(FakeRefused("x")) == "disk_full" and len(calls) == 1
 
 
-def test_projections_drop_canary_fields_and_corrupt_values(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_projections_drop_canary_fields_and_corrupt_values(desktop: Any) -> None:
     status = store_status(mail=(1, 2, 3))
     status["sources"]["telegram"]["title"] = ADDRESS
     status["sources"]["canary"] = {"conversations": 9, "note": EXTRA}
     status["sources"]["mail"]["messages"] = "lots"  # corrupt: not an int
     status["address"] = ADDRESS
-    monkeypatch.setattr(_seams, "open_store_readonly", lambda home: FakeReadonlyStore(status))
     flags = _flags(address=ADDRESS, gmail="yes", touch_id=None)
-    monkeypatch.setattr(_seams, "mail_secret_store", lambda: FakeMailSecrets(flags))
 
     def imap_status(store: Any, seen: Any) -> Any:
         assert seen is flags
@@ -137,8 +113,12 @@ def test_projections_drop_canary_fields_and_corrupt_values(desktop: Any, monkeyp
             "folder": FOLDER,
         }
 
-    monkeypatch.setattr(_seams, "imap_status", imap_status)
-    result = desktop.get("/imports/status")
+    result = {
+        "ok": True,
+        "imports": _projections.imports_projection(status),
+        "mail": _projections.mail_projection(flags, imap_status(None, flags)),
+        "telegram_archive": {"legacy": None},
+    }
     assert result == {
         "ok": True,
         "imports": {
@@ -164,23 +144,16 @@ def test_projections_drop_canary_fields_and_corrupt_values(desktop: Any, monkeyp
     assert not desktop.leaked(result, desktop.get("/status?client_version=4"))
 
 
-def test_last_fetch_is_the_last_attempt_and_last_success_is_kept(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_seams, "mail_secret_store", lambda: FakeMailSecrets(_flags()))
+def test_last_fetch_is_the_last_attempt_and_last_success_is_kept() -> None:
     attempt = {"at": 200, "error": "imap_auth_failed", "partial": False}
-    monkeypatch.setattr(
-        _seams,
-        "imap_status",
-        lambda store, flags: {"configured": True, "last_fetch": attempt, "last_success": {"at": 100}, "cursors": {}},
+    mail = _projections.mail_projection(
+        _flags(), {"configured": True, "last_fetch": attempt, "last_success": {"at": 100}, "cursors": {}}
     )
-    mail = desktop.get("/status?client_version=4")["mail"]
     assert mail["last_attempt"] == attempt and mail["last_success"] == {"at": 100}
-    # An imap_status of an older Mordred: one flat record, a success when it had no error.
-    monkeypatch.setattr(
-        _seams,
-        "imap_status",
-        lambda store, flags: {"configured": True, "last_fetch": {"at": 50, "error": None, "partial": True}},
+    # Older metadata had one flat record, a success when it carried no error.
+    mail = _projections.mail_projection(
+        _flags(), {"configured": True, "last_fetch": {"at": 50, "error": None, "partial": True}}
     )
-    mail = desktop.get("/imports/status")["mail"]
     assert mail["last_attempt"] == {"at": 50, "error": None, "partial": True} and mail["last_success"] == {"at": 50}
 
 
@@ -195,7 +168,7 @@ def test_mail_from_flags_only_when_the_store_is_unavailable(desktop: Any, monkey
     monkeypatch.setattr(_seams, "imap_status", never)
     monkeypatch.setattr(_seams, "mail_secret_store", lambda: FakeMailSecrets(_flags()))
     result = desktop.get("/imports/status")
-    assert result["imports"]["code"] == "no_key"
+    assert result["imports"] == {"available": False, "code": "store_unavailable", "sources": {}}
     assert result["mail"] == {"configured": True, "account": "work", "gmail": True, "scope": ["all"], "touch_id": True}
 
 
@@ -227,7 +200,7 @@ def test_a_broken_flags_reader_is_not_configured_and_logs_no_text(
     ("value", "valid"),
     [(None, False), ("", False), ("not-a-key", False), ("hex:" + "11" * 16, False), (VALID_KEY, True)],
 )
-def test_status_never_unlocks_and_checks_key_material_by_value(
+def test_status_never_unlocks_or_treats_environment_keys_as_authority(
     desktop: Any, monkeypatch: pytest.MonkeyPatch, value: str | None, valid: bool
 ) -> None:
     """Absent, empty, malformed and valid keys: no provider, no gate, no Keychain is ever called."""
@@ -252,8 +225,8 @@ def test_status_never_unlocks_and_checks_key_material_by_value(
     before = _tree(desktop.home)
     status = desktop.get("/status?client_version=4")
     assert status["databases"]["armed"] is True
-    assert status["databases"]["runtime_protected"] is valid
-    assert desktop.get("/databases/status")["runtime_protected"] is valid
+    assert status["databases"]["runtime_protected"] is False
+    assert desktop.get("/databases/status")["runtime_protected"] is False
     assert _tree(desktop.home) == before  # nothing created: no directory, no store, no lock
 
 
@@ -271,10 +244,12 @@ def test_pending_work_means_not_runtime_protected(desktop: Any, monkeypatch: pyt
     key = {"db-encryption.pending": "encrypt_pending", "db-decryption.pending": "decrypt_pending"}.get(
         marker, "journal"
     )
-    assert databases[key] is True
+    assert databases[key] is None  # pending state is not classified by DatabaseStatus
 
 
-def test_databases_status_discovers_without_a_key(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_databases_status_leaves_classification_and_backup_counts_unknown(
+    desktop: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(_seams, "sqlcipher_available", lambda: True)
     with sqlite3.connect(desktop.home / "state.db") as conn:
         conn.execute("CREATE TABLE t (x)")
@@ -283,18 +258,15 @@ def test_databases_status_discovers_without_a_key(desktop: Any, monkeypatch: pyt
     (desktop.home / "backups" / "hermes-1.zip").write_bytes(b"zip")
     databases = desktop.get("/databases/status")
     assert databases["ok"] is True and databases["supported"] is True and databases["armed"] is False
-    assert sorted((d["relative"], d["state"]) for d in databases["databases"]) == [
-        ("kanban.db", "unreadable"),
-        ("state.db", "plaintext"),
-    ]
-    assert databases["plaintext_backups"] == 1 and databases["runtime_protected"] is False
+    assert databases["databases"] == []  # unknown, never a verified empty inventory
+    assert databases["plaintext_backups"] is None and databases["runtime_protected"] is False
 
 
-def test_a_failing_discovery_is_a_code_not_a_500(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    def boom(home: Path, key: Any) -> Any:
+def test_a_failing_shared_observation_is_a_code_not_a_500(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(home: Path) -> Any:
         raise PermissionError(str(desktop.home))
 
-    monkeypatch.setattr("mordred_hermes.dbcrypt._migrate.discover", boom)
+    monkeypatch.setattr("mordred_hermes.dbcrypt.database_status", boom)
     databases = desktop.get("/status?client_version=4")["databases"]
     assert databases["code"] == "databases_failed"
 

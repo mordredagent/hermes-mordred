@@ -12,7 +12,7 @@ import pytest
 pytest.importorskip("fastapi")
 
 from mordred_hermes import dbcrypt
-from mordred_hermes.dbcrypt import _migrate, _monitor, _shim
+from mordred_hermes.dbcrypt import _migrate, _shim
 from mordred_hermes.desktop import _databases, _seams, api
 
 VALID_KEY = "hex:" + "22" * 32
@@ -61,34 +61,31 @@ def _encrypt(db: Any, body: Any = None) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("plaintext", [False, True])
-def test_not_armed_schedules_even_without_plaintext(db: Any, plaintext: bool) -> None:
+def test_not_armed_unknown_status_refuses_scheduling_even_without_plaintext(db: Any, plaintext: bool) -> None:
     if plaintext:
         _plaintext(db.home)
-    assert _encrypt(db) == {"ok": True, "action": "scheduled", "restart_required": True}
-    assert db.scheduled == [db.home] and _migrate.pending_path(db.home).is_file()
-    # Idempotent: already pending answers the same and writes nothing again.
-    assert _encrypt(db) == {"ok": True, "action": "scheduled", "restart_required": True}
-    assert db.scheduled == [db.home]
+    assert _encrypt(db) == {"ok": True, "action": "attention", "code": "databases_failed"}
+    assert db.scheduled == [] and not _migrate.pending_path(db.home).exists()
 
 
-def test_armed_and_protected_is_done(db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_environment_key_never_makes_passive_status_done(db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     _armed(db.home)
     monkeypatch.setattr(_shim, "is_installed", lambda: True)
     monkeypatch.setenv("HERMES_MEMORY_KEY", VALID_KEY)
-    assert _encrypt(db) == {"ok": True, "action": "done"}
+    assert _encrypt(db) == {"ok": True, "action": "attention", "code": "databases_failed"}
     assert db.scheduled == []
 
 
-def test_armed_but_not_protected_needs_a_restart(db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_configured_intent_is_not_runtime_authentication(db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     _armed(db.home)
     monkeypatch.delenv("HERMES_MEMORY_KEY", raising=False)
-    assert _encrypt(db) == {"ok": True, "action": "needs_restart", "restart_required": True}
+    assert _encrypt(db) == {"ok": True, "action": "attention", "code": "databases_failed"}
 
 
-def test_plaintext_in_an_armed_home_needs_the_terminal(db: Any) -> None:
+def test_existing_database_is_not_classified_by_polling(db: Any) -> None:
     _armed(db.home)
     _plaintext(db.home, "new.db")
-    assert _encrypt(db) == {"ok": True, "action": "attention", "code": "plaintext_in_armed_home"}
+    assert _encrypt(db) == {"ok": True, "action": "attention", "code": "databases_failed"}
     assert db.scheduled == []  # startup skips a pending conversion once armed: scheduling would be useless
 
 
@@ -102,12 +99,12 @@ def test_plaintext_in_an_armed_home_needs_the_terminal(db: Any) -> None:
         (False, "db-encryption.journal.json", "journal"),
     ],
 )
-def test_pending_work_and_journals_are_attention(db: Any, armed: bool, marker: str, code: str) -> None:
+def test_pending_state_never_implicitly_schedules_recovery(db: Any, armed: bool, marker: str, code: str) -> None:
     if armed:
         _armed(db.home)
     _marker(db.home, marker)
     _plaintext(db.home)
-    assert _encrypt(db) == {"ok": True, "action": "attention", "code": code}
+    assert _encrypt(db) == {"ok": True, "action": "attention", "code": "databases_failed"}
     assert db.scheduled == []
 
 
@@ -118,12 +115,12 @@ def test_dry_run_changes_nothing(db: Any) -> None:
     assert _encrypt(db, {"dry_run": "yes"}) == {"ok": False, "error": "invalid_body"}
 
 
-def test_a_failed_schedule_is_databases_failed(db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unknown_status_never_attempts_a_schedule(db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     def broken(home: Path) -> None:
         raise PermissionError(str(home))
 
     monkeypatch.setattr(_migrate, "schedule", broken)
-    assert _encrypt(db) == {"ok": False, "error": "databases_failed"}
+    assert _encrypt(db) == {"ok": True, "action": "attention", "code": "databases_failed"}
     assert str(db.home) not in str(db.desktop.logs.lines)
 
 
@@ -133,19 +130,15 @@ def test_unsupported_off_macos_or_without_sqlcipher(db: Any, monkeypatch: pytest
     monkeypatch.setattr(_seams, "sqlcipher_available", lambda: True)
     monkeypatch.setattr(api, "sys", SimpleNamespace(platform="linux"))
     assert _encrypt(db) == {"ok": False, "error": "databases_unsupported"}
-    assert db.desktop.get("/databases/status") == {"ok": True, "supported": False}
+    assert db.desktop.get("/databases/status")["runtime_protected"] is False
 
 
 def test_the_sqlcipher_probe() -> None:
     assert isinstance(_seams.sqlcipher_available(), bool)
 
 
-def test_status_object_probes_through_the_process_library_inside_a_runtime(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Inside Hermes (the shim installed) discovery never runs the offline classifier, which opens
-    the files directly and would drop Hermes's own SQLite locks; each file is probed through the
-    process's own library, so plaintext is still reported and the rest stays ``unreadable``."""
+def test_status_object_never_probes_sql_inside_a_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neither an offline classifier nor the process SQL library is allowed in passive polling."""
     home = tmp_path / "home"
     (home / "cron").mkdir(parents=True)
     plain = sqlite3.connect(home / "state.db")
@@ -158,17 +151,15 @@ def test_status_object_probes_through_the_process_library_inside_a_runtime(
     (home / "cron" / "executions.db").write_bytes(b"")  # empty: omitted, as the classifier omits it
     (home / "state.db.repair-attempts.json").write_text("{}", encoding="utf-8")  # metadata: omitted
     monkeypatch.setattr(_shim, "is_installed", lambda: True)
-    monkeypatch.setattr(_monitor, "_own_sqlite", lambda: (sqlite3, False))
 
     def refused(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("the offline classifier ran inside the runtime")
 
     monkeypatch.setattr(_migrate, "discover", refused)
+    monkeypatch.setattr("mordred_hermes.dbcrypt._monitor._own_sqlite", refused)
 
     status = _databases.status_object(home, platform="darwin", sqlcipher=True, environ={})
 
-    assert status["databases"] == [
-        {"relative": "shared-state.db", "state": "unreadable"},
-        {"relative": "state.db", "state": "plaintext"},
-    ]
+    assert status["databases"] == []
+    assert status["plaintext_backups"] is None
     assert status["armed"] is False and status["runtime_protected"] is False

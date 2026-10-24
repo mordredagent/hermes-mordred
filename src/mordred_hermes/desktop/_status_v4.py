@@ -1,7 +1,7 @@
 """The ``/status`` sections for ``client_version >= 4``: macOS facts, fixed shapes elsewhere.
 
 ``vault``, ``databases``, ``imports``, ``mail`` and ``telegram_archive``, each
-built from files, the read-only import store and the mail flags only: nothing
+built from passive database observations and mail flags only: nothing
 here unlocks the vault, prompts, initialises a schema or creates a file. A
 failure in one section is a state of that section, never a 500. The seams are
 reached through :mod:`._seams` at call time.
@@ -94,10 +94,10 @@ def vault_facts_safe(home: Path) -> dict[str, Any]:
 
 def databases_safe(home: Path, platform: str) -> dict[str, Any]:
     try:
-        return _databases.status_object(home, platform=platform, sqlcipher=_seams.sqlcipher_available())
+        return _databases.status_object(home)
     except Exception as exc:
         _log.warning("mordred desktop database status unreadable (%s)", type(exc).__name__)
-        return {"supported": _seams.sqlcipher_available(), "code": "databases_failed"}
+        return {"supported": True, "code": "databases_failed"}
 
 
 def _mail_flags() -> tuple[Any, bool]:
@@ -114,38 +114,18 @@ def _mail_flags() -> tuple[Any, bool]:
 
 
 def imports_sections(home: Path, platform: str) -> dict[str, Any]:
-    """``imports``, ``mail`` and ``telegram_archive``: read-only store, flags only, nothing unlocked."""
+    """Flags only; record counts and cursors remain unknown without foreground SQL authority."""
     if platform != "darwin":
         return {
             "imports": _projections.imports_refused("unsupported_platform"),
             "mail": {"configured": False},
             "telegram_archive": dict(_TELEGRAM_ARCHIVE),
         }
-    store: Any = None
-    opened: Any = None
-    try:
-        store = opened = _seams.open_store_readonly(home)
-        imports = _projections.imports_projection(store.status())
-    except Exception as exc:  # a gate or store refusal is a state (ImportRefused carries the code)
-        imports = _projections.imports_refused(_seams.store_refusal(exc))
-    if not imports["available"]:
-        store = None
+    # Counts and cursors require SQL authority. A passive poll never acquires
+    # that authority, including when a runtime provider happens to exist.
     flags, residue = _mail_flags()
-    mail_status: Any = None
-    try:
-        if store is not None and flags:
-            try:
-                mail_status = _seams.imap_status(store, flags)
-            except Exception as exc:
-                _log.warning("mordred desktop mail status unreadable (%s)", type(exc).__name__)
-    finally:
-        # The read-only store keeps one SQLCipher connection for its life: close it here,
-        # not in a finaliser, so a status poll never leaves a reader open.
-        closer = getattr(opened, "close", None)
-        if callable(closer):
-            closer()
     return {
-        "imports": imports,
-        "mail": _projections.mail_projection(flags, mail_status, residue=residue),
+        "imports": _projections.imports_refused("store_unavailable"),
+        "mail": _projections.mail_projection(flags, None, residue=residue),
         "telegram_archive": dict(_TELEGRAM_ARCHIVE),
     }
