@@ -58,11 +58,48 @@ def protected_state_present(home: Path) -> bool:
     )
 
 
+def _check_legacy_marker_posix(path: Path) -> None:
+    """Read an unchanged private legacy leaf under the preceding root EX lease."""
+    from contextlib import ExitStack
+
+    from .._database_contracts import DatabaseRefused
+    from .._private_fs._posix import _ancestor, _private
+
+    with ExitStack() as resources:
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        resources.callback(os.close, directory)
+        _ancestor(directory)  # Owned 0755 is allowed, unsafe permissions/ACLs are not.
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+        resources.callback(os.close, fd)
+        before = _private(fd)
+        if before.st_size != 2 or os.read(fd, 3) != b"1\n":
+            raise DatabaseRefused("legacy publication cannot replace native or unknown database intent")
+        expected = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        for observed in (_private(fd), os.stat(path.name, dir_fd=directory, follow_symlinks=False)):
+            current = (
+                observed.st_dev,
+                observed.st_ino,
+                observed.st_mode,
+                observed.st_size,
+                observed.st_mtime_ns,
+                observed.st_ctime_ns,
+            )
+            if current != expected:
+                raise DatabaseRefused("legacy database marker changed during observation")
+
+
 def arm(home: Path) -> None:
     """Legacy publication seam: never overwrite native or unknown marker bytes."""
     from .._database_contracts import DatabaseRefused
     from .._database_lifecycle import acquire_exclusive
-    from .._private_fs import PrivateFSError, open_private_directory
+    from .._private_fs import open_private_directory
 
     with acquire_exclusive(home) as lease:
         # Preserve the explicit legacy seam for older 0755 Mordred directories.
@@ -75,17 +112,17 @@ def arm(home: Path) -> None:
         except FileExistsError:
             pass
         try:
-            with open_private_directory(home / "mordred") as directory, directory.transaction() as tx:
-                lease.assert_held(home)
-                try:
-                    existing = tx.read_bytes(MARKER_SUBPATH[-1], max_bytes=4096)
-                except PrivateFSError as exc:
-                    if exc.reason != "missing":
-                        raise
-                    existing = None
-                if existing != b"1\n":
-                    raise DatabaseRefused("legacy publication cannot replace native or unknown database intent")
-        except PrivateFSError:
+            lease.assert_held(home)
+            if os.name == "posix":
+                # The legacy lease admits an owned 0755 directory; the leaf
+                # still needs the exact private-file policy and pinned identity.
+                _check_legacy_marker_posix(marker_path(home))
+            else:
+                with open_private_directory(home / "mordred") as directory, directory.transaction() as tx:
+                    if tx.read_bytes(MARKER_SUBPATH[-1], max_bytes=4096) != b"1\n":
+                        raise DatabaseRefused("legacy publication cannot replace native or unknown database intent")
+            lease.assert_held(home)
+        except OSError:
             raise DatabaseRefused("legacy database marker cannot be published safely") from None
 
 
