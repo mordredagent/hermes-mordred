@@ -12,35 +12,61 @@
 #ifdef MORDRED_VFS_TESTING
 static CiTestHook test_hook;
 static CiTestObserver test_observer;
+static volatile LONG observer_failures;
 __declspec(dllexport) void mordred_vfs_test_hook(CiTestHook hook) { test_hook=hook; }
-__declspec(dllexport) void mordred_vfs_test_observer(CiTestObserver observer) { test_observer=observer; }
+__declspec(dllexport) void mordred_vfs_test_observer(CiTestObserver observer) {
+  /* Clearing a callback must not clear evidence. Only a new observing session
+   * resets the sticky counter; install/clear with no concurrent VFS calls. */
+  if (observer) InterlockedExchange(&observer_failures,0);
+  test_observer=observer;
+}
+__declspec(dllexport) LONG mordred_vfs_test_observer_failures(void) {
+  return InterlockedCompareExchange(&observer_failures,0,0);
+}
 int ci_test_stage(int stage, HANDLE handle) { return test_hook ? test_hook(stage,handle) : 0; }
 /* Synchronous bounded snapshots of the exact borrowed I/O handle. No pathname
  * opens, persistent copies, or arbitrary exported read primitive. The observer
- * consumes chunks only during this call. -1/-2 bracket a complete snapshot. */
+ * consumes chunks only during this call. -1 begins with expected size in count;
+ * -2 means complete success with that same size; -3 means failed/incomplete.
+ * All errors also increment a sticky counter, including failures before begin
+ * and errors returned by the observer itself. SQLite's permitted I/O refusal
+ * cannot erase or substitute for this independent acceptance failure.
+ * Fault hook families 3000/3100/3200 plus the snapshot stage target size/read/
+ * short-read errors at an exact lifetime boundary (e.g. 3010 at close). */
 int ci_test_observe(int stage, HANDLE handle) {
   LARGE_INTEGER size;
   sqlite3_int64 offset=0;
-  unsigned char *buffer;
-  int failed=0;
+  unsigned char *buffer=NULL;
   if (!test_observer) return 0;
-  if (!GetFileSizeEx(handle,&size) || size.QuadPart<0 || size.QuadPart>64*1024*1024 ||
-      test_observer(stage,handle,-1,NULL,0)) return 1;
+  if (ci_test_stage(3000+stage,handle) || !GetFileSizeEx(handle,&size) || size.QuadPart<0 ||
+      size.QuadPart>64*1024*1024) goto failed;
+  if (test_observer(stage,handle,-1,NULL,(int)size.QuadPart)) goto failed;
   buffer=(unsigned char *)HeapAlloc(GetProcessHeap(),0,65536);
-  if (!buffer) return 1;
+  if (!buffer) goto failed;
   while (offset<size.QuadPart) {
     OVERLAPPED position;
     DWORD got=0, wanted=(DWORD)((size.QuadPart-offset)>65536 ? 65536 : size.QuadPart-offset);
     memset(&position,0,sizeof(position));
     position.Offset=(DWORD)offset; position.OffsetHigh=(DWORD)((uint64_t)offset>>32);
-    if (!ReadFile(handle,buffer,wanted,&got,&position) || got!=wanted ||
-        test_observer(stage,handle,offset,buffer,(int)got)) { failed=1; break; }
+    if (ci_test_stage(3100+stage,handle) || !ReadFile(handle,buffer,wanted,&got,&position)) goto failed;
+    /* Deterministically exercise the real short-read rejection after a native
+     * read, without inventing successful snapshot data or callback results. */
+    if (ci_test_stage(3200+stage,handle) && got) got--;
+    if (got!=wanted || test_observer(stage,handle,offset,buffer,(int)got)) goto failed;
     offset+=got;
   }
   SecureZeroMemory(buffer,65536);
-  HeapFree(GetProcessHeap(),0,buffer);
-  if (test_observer(stage,handle,-2,NULL,0)) failed=1;
-  return failed;
+  HeapFree(GetProcessHeap(),0,buffer); buffer=NULL;
+  if (test_observer(stage,handle,-2,NULL,(int)size.QuadPart)) goto failed;
+  return 0;
+failed:
+  if (buffer) {
+    SecureZeroMemory(buffer,65536);
+    HeapFree(GetProcessHeap(),0,buffer);
+  }
+  InterlockedIncrement(&observer_failures);
+  (void)test_observer(stage,handle,-3,NULL,0);
+  return 1;
 }
 #endif
 
