@@ -31,7 +31,10 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
+
+if TYPE_CHECKING:
+    from ._authority import Authority
 from urllib.parse import quote
 
 from . import _migrate, _shim, armed, protected_state_present
@@ -217,3 +220,21 @@ def check(home: Path, *, key_available: Any = None, key: Any = None) -> list[Fin
 def reset_cache() -> None:
     with _LOCK:
         _DEEP_CACHE.clear()
+
+
+def monitor_runtime(authority: Authority) -> tuple[Finding, ...]:
+    """Native runtime verification uses the owning driver with real SQLite locks."""
+    from ._connection import open_protected
+
+    try:
+        authority.check()
+        # Do not use the legacy immutable/plaintext classifier or its raw key.
+        candidates = {*_top_level(authority.root), *_deep(authority.root)}
+        for path in sorted(candidates):
+            conn = open_protected(path, authority=authority, readonly=True)
+            conn.close()
+        authority.check()
+    except Exception:
+        authority.invalidate("runtime database verification failed")
+        return (Finding("wrong_key", "database runtime authority or authenticated schema is invalid"),)
+    return ()

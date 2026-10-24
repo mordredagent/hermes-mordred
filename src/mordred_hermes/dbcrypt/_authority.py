@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 import threading
-from contextlib import ExitStack
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from .._database_contracts import DatabaseRefused, GuardedConnection, NativeSnapshot
@@ -37,6 +38,7 @@ class Authority:
         self._resources = resources
         self._pid = os.getpid()
         self._terminal = False
+        self._operations = 0
         self._connections: list[GuardedConnection] = []
         self._lock = threading.RLock()
 
@@ -62,6 +64,10 @@ class Authority:
                 result.close()
                 raise
             return result
+
+    @property
+    def home(self) -> Path:
+        return self._domain.home
 
     @property
     def root(self) -> Path:
@@ -113,6 +119,29 @@ class Authority:
             if not any(existing is connection for existing in self._connections):
                 self._connections.append(connection)
 
+    @contextmanager
+    def operation(self, *, check: bool = True) -> Iterator[None]:
+        """Serialize SQL and revocation, checking fork before the inherited lock."""
+        if self._pid != os.getpid() or check:
+            self.check()
+        with self._lock:
+            if check:
+                self.check()
+            self._operations += 1
+            try:
+                yield
+            finally:
+                self._operations -= 1
+                if self._terminal and not self._operations:
+                    self._resources.close()
+
+    def unregister_connection(self, connection: GuardedConnection) -> None:
+        # Called during terminal invalidation as well as normal close.
+        if self._pid != os.getpid():
+            self._lock = threading.RLock()
+        with self._lock:
+            self._connections = [existing for existing in self._connections if existing is not connection]
+
     def invalidate(self, reason: str) -> None:
         """Refuse permanently, invalidate all held objects, then release exclusion.
 
@@ -136,7 +165,8 @@ class Authority:
                         continue
             finally:
                 # RuntimeLease.close is PID-bound and cannot unlock the parent.
-                self._resources.close()
+                if not self._operations or self._pid != os.getpid():
+                    self._resources.close()
 
     def close(self) -> None:
         self.invalidate("runtime closed")

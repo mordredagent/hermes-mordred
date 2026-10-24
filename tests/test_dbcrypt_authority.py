@@ -376,33 +376,28 @@ def test_default_provider_never_injects_ambient_key(tmp_path, monkeypatch):
 
 
 def test_default_startup_cannot_return_unregistered_live_sql_connection(native_root, monkeypatch):
-    import sqlite3
-
     from mordred_hermes import dbcrypt
+    from mordred_hermes.dbcrypt import _shim
+    from mordred_hermes.dbcrypt._connection import ProtectedConnection
 
-    pytest.importorskip("sqlcipher3")
     root, backend, _, _ = native_root
     monkeypatch.setattr(dbcrypt.sys, "platform", "darwin")
     monkeypatch.setattr(dbcrypt.sys, "argv", ["hermes"])
-    monkeypatch.setitem(dbcrypt.sys.modules, "sqlite3", sqlite3)
-    monkeypatch.setitem(dbcrypt.sys.modules, "sqlite3.dbapi2", sqlite3.dbapi2)
     monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
-    held = None
+    installed = []
+    monkeypatch.setattr(_shim, "install_module", installed.append)
     try:
+        assert dbcrypt.install(home=root)
+        held = installed[0].connect(root / "state.db")
+        assert isinstance(held, ProtectedConnection)
+        cursor = held.execute("SELECT 1")
+        assert sum(op == "ecdh" for op, _ in backend.calls) == 1
+        (root / "mordred/db-encryption.marker").unlink()
         with pytest.raises(DatabaseRefused):
-            if dbcrypt.install(home=root):
-                import sqlite3 as installed
-
-                held = installed.connect(str(root / "state.db"))
-                held.execute("CREATE TABLE leaked (value)")
-                held.commit()
-        assert held is None
-        assert dbcrypt.sys.modules["sqlite3"] is sqlite3
-        assert not (root / "state.db").exists()
-        assert backend.calls == []
+            cursor.fetchone()
+        with pytest.raises(DatabaseRefused):
+            held.commit()
     finally:
-        if held is not None:
-            held.close()
         if dbcrypt._PROVIDER is not None:
             dbcrypt._PROVIDER.close()
     with acquire_exclusive(root):
@@ -562,16 +557,27 @@ def test_default_startup_without_marker_preserves_recovery_state(tmp_path, monke
 
 def test_explicit_native_provider_cannot_enter_legacy_install(native_root, monkeypatch):
     from mordred_hermes import dbcrypt
-    from mordred_hermes.dbcrypt import _shim
+    from mordred_hermes.dbcrypt import _migrate, _shim
 
     root, backend, _, _ = native_root
     monkeypatch.setattr(dbcrypt.sys, "platform", "darwin")
     monkeypatch.setattr(dbcrypt.sys, "argv", ["hermes"])
-    monkeypatch.setattr(_shim, "is_installed", lambda: False)
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    installed = []
+    monkeypatch.setattr(_shim, "install_module", installed.append)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("native runtime entered legacy recovery")
+
+    monkeypatch.setattr(_migrate, "resume_at_startup", forbidden)
     provider = KeyProvider(home=root)
     try:
+        assert dbcrypt.install(home=root, provider=provider)
+        held = installed[0].connect(root / "state.db")
+        held.execute("SELECT 1")
+        assert sum(op == "ecdh" for op, _ in backend.calls) == 1
+        provider.close()
         with pytest.raises(DatabaseRefused):
-            dbcrypt.install(home=root, provider=provider)
-        assert backend.calls == []
+            held.commit()
     finally:
         provider.close()

@@ -53,6 +53,17 @@ def _key() -> Any:
         return None
 
 
+def _findings() -> list[_monitor.Finding]:
+    from . import _PROVIDER
+
+    if _PROVIDER is not None and _PROVIDER.runtime_native:
+        authority = _PROVIDER.current_authority
+        if authority is None:
+            return [_monitor.Finding("no_key", "native database authority has not been acquired")]
+        return list(_monitor.monitor_runtime(authority))
+    return _monitor.check(_home(), key_available=_key_available, key=_key)
+
+
 def _policy_mode() -> str:
     with contextlib.suppress(Exception):
         from ..privacy_check import _runtime
@@ -94,7 +105,7 @@ def _describe(findings: list[_monitor.Finding]) -> str:
 def evaluate(event: str) -> str | None:
     """Run the monitor; return a warning for the model, or raise under strict policy."""
     try:
-        findings = [f for f in _monitor.check(_home(), key_available=_key_available, key=_key) if f.violation]
+        findings = [f for f in _findings() if f.violation]
     except Exception as exc:  # the monitor itself must never take a turn down
         _LOG.warning("database encryption check failed: %s", exc)
         return None
@@ -135,7 +146,7 @@ def status_line(_info: Any = None) -> str:
     """
     try:
         home = _home()
-        findings = _monitor.check(home, key_available=_key_available, key=_key)
+        findings = _findings()
     except Exception:
         return ""
     if not armed(home):

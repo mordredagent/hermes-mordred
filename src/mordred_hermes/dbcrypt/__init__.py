@@ -181,11 +181,10 @@ def _native_home(home: Path | None) -> tuple[Path, Path]:
 
 
 def _refuse_deferred_native_state(base: Path) -> None:
-    """Interim Task 6/7 gate: no raw SQL facade or legacy recovery for native callers."""
+    """Native recovery/adoption remain closed until the offline transaction layer."""
     from .._database_contracts import DatabaseRefused
 
     for name in (
-        "db-encryption.marker",
         "db-encryption.journal.json",
         "db-encryption.pending",
         "db-decryption.pending",
@@ -194,7 +193,46 @@ def _refuse_deferred_native_state(base: Path) -> None:
             (base / "mordred" / name).lstat()
         except FileNotFoundError:
             continue
-        raise DatabaseRefused("native database startup is unavailable in this version; database files were not opened")
+        raise DatabaseRefused("native database recovery is unavailable; database files were not opened")
+
+
+def _install_native(home: Path | None, provider: KeyProvider | None) -> bool:
+    from .._database_contracts import DatabaseRefused
+    from . import _shim
+    from ._locking import runtime_lease
+
+    global _PROVIDER
+    requested_home, base = _native_home(home)
+    _refuse_deferred_native_state(base)
+    if _PROVIDER is not None and _PROVIDER.runtime_native and _PROVIDER.current_authority is not None:
+        existing = _PROVIDER.current_authority
+        existing.check()
+        if existing.home != requested_home or (provider is not None and provider is not _PROVIDER):
+            raise DatabaseRefused("installed database authority cannot be rebound")
+        return True
+    _PROVIDER = provider or KeyProvider(home=requested_home)
+    # Offline adoption, recovery and pending conversion stay closed.
+    try:
+        marker_path(base).lstat()
+    except FileNotFoundError:
+        # Preserve plain-runtime exclusion and first-time home initialization.
+        # This lease uses no native custody and never enters offline recovery.
+        with runtime_lease(base):
+            _refuse_deferred_native_state(base)
+            try:
+                marker_path(base).lstat()
+            except FileNotFoundError:
+                return False
+            raise DatabaseRefused("database publication changed during startup; restart required") from None
+    authority = _PROVIDER.authority
+    try:
+        _refuse_deferred_native_state(base)
+        module = _shim.build_module(authority=authority)
+        _shim.install_module(module)
+    except BaseException:
+        _PROVIDER.close()
+        raise
+    return True
 
 
 def install(*, home: Path | None = None, provider: KeyProvider | None = None) -> bool:
@@ -222,14 +260,7 @@ def install(*, home: Path | None = None, provider: KeyProvider | None = None) ->
 
     global _PROVIDER
     if provider is None or provider.runtime_native:
-        requested_home, base = _native_home(home)
-        _PROVIDER = provider or KeyProvider(home=requested_home)
-        # Do not enter legacy recovery, even without a marker. Task 6 will
-        # replace this gate with guarded SQL admission; Task 7 owns recovery.
-        _refuse_deferred_native_state(base)
-        with runtime_lease(base):
-            _refuse_deferred_native_state(base)
-        return False
+        return _install_native(home, provider)
     if _shim.is_installed():
         return True
     _PROVIDER = provider

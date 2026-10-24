@@ -122,6 +122,22 @@ class KeyProvider:
                     self._cached = derive(memory_key)
         return self._cached
 
+    @property
+    def authority(self) -> Authority:
+        """Acquire once for the guarded runtime; never export a temporary bare key."""
+        from .._database_contracts import DatabaseRefused
+
+        if not self._native:
+            raise DatabaseRefused("injected providers have no native authority")
+        self()
+        assert self._authority is not None
+        return self._authority
+
+    @property
+    def current_authority(self) -> Authority | None:
+        """Observation only: status must not authenticate or acquire a runtime."""
+        return self._authority
+
     def close(self) -> None:
         """Release a native runtime and refuse its reuse."""
         if self._pid != os.getpid():
