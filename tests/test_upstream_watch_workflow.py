@@ -45,7 +45,18 @@ def test_report_candidate_values_reach_exact_javascript_boundary_unchanged():
     }
 
 
-def _report_calls(values, existing):
+def _managed_issue(**overrides):
+    return {
+        "number": 42,
+        "title": "Hermes upstream compatibility report",
+        "user": {"login": "github-actions[bot]"},
+        "labels": [{"name": name} for name in ("actionable", "upstream-drift", "ci")],
+        "state": "open",
+        **overrides,
+    }
+
+
+def _report_calls(values, existing, *, repeat=1):
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node is required to execute the github-script boundary")
@@ -53,13 +64,18 @@ def _report_calls(values, existing):
     harness = """
 const calls = [];
 const context = {repo:{owner:"mordredagent",repo:"hermes-mordred"},serverUrl:"https://github.com",runId:123};
-const github = {rest:{issues:{
-listForRepo: async arg => {calls.push(["list",arg]);return {data: EXISTING ? [{number:42}]:[]};},
-create: async arg => calls.push(["create",arg]),
+const issues = EXISTING;
+const github = {paginate: async (method, arg) => (await method(arg)).data, rest:{issues:{
+listForRepo: async arg => {calls.push(["list",arg]);return {data: issues.filter(i=>i.state!=="closed")};},
+create: async arg => {calls.push(["create",arg]);issues.push({...arg,number:43,user:{login:"github-actions[bot]"}});},
+update: async arg => {calls.push(["update",arg]);Object.assign(issues.find(i=>i.number===arg.issue_number),arg);},
 createComment: async arg => calls.push(["comment",arg])}}};
-(async () => { SCRIPT })().then(()=>process.stdout.write(JSON.stringify(calls)))
+(async () => {for (let run = 0; run < REPEAT; run++) {context.runId = 123 + run; await (async () => { SCRIPT })();}})()
+.then(()=>process.stdout.write(JSON.stringify(calls)))
 .catch(e=>{console.error(e);process.exit(1)});
-""".replace("EXISTING", json.dumps(existing)).replace("SCRIPT", script)
+"""
+    issues = [_managed_issue()] if existing is True else [] if existing is False else existing
+    harness = harness.replace("EXISTING", json.dumps(issues)).replace("REPEAT", str(repeat)).replace("SCRIPT", script)
     keys = ("CHECK_RESULT", "PYPI_STATUS", "MAIN_STATUS", "MEMORY_STATUS")
     env = {k: v for k, v in os.environ.items() if k not in keys}
     env.update({k: v for k, v in values.items() if v is not None})
@@ -69,31 +85,30 @@ createComment: async arg => calls.push(["comment",arg])}}};
     return json.loads(proc.stdout)
 
 
-def _assert_issue(calls, existing, expected_lines):
-    assert [call[0] for call in calls] == ["list", "comment" if existing else "create"]
+def _assert_issue(calls, existing, expected_lines, *, actionable=True):
+    assert [call[0] for call in calls] == ["list", "update" if existing else "create"]
     target = calls[-1][1]
     assert target["owner"] == "mordredagent"
     assert target["repo"] == "hermes-mordred"
     if existing:
         assert target["issue_number"] == 42
     else:
-        assert target["labels"] == ["actionable", "upstream-drift"]
+        assert set(target["labels"]) == ({"upstream-drift", "actionable"} if actionable else {"upstream-drift"})
+    assert ("actionable" in target["labels"]) is actionable
     body = target["body"]
     assert body.splitlines()[2:6] == expected_lines
     assert "https://github.com/mordredagent/hermes-mordred/actions/runs/123" in body
 
 
 @pytest.mark.parametrize("existing", [False])
-def test_exact_success_all_ok_makes_zero_issue_api_calls(existing):
-    assert (
-        _report_calls(
-            {"CHECK_RESULT": "success", "PYPI_STATUS": "ok", "MAIN_STATUS": "ok", "MEMORY_STATUS": "ok"}, existing
-        )
-        == []
+def test_exact_success_all_ok_without_report_makes_no_issue_mutations(existing):
+    calls = _report_calls(
+        {"CHECK_RESULT": "success", "PYPI_STATUS": "ok", "MAIN_STATUS": "ok", "MEMORY_STATUS": "ok"}, existing
     )
+    assert [call[0] for call in calls] == ["list"]
 
 
-@pytest.mark.parametrize("existing", [False])
+@pytest.mark.parametrize("existing", [False, True])
 @pytest.mark.parametrize("field,index", [("PYPI_STATUS", 1), ("MAIN_STATUS", 2), ("MEMORY_STATUS", 3)])
 @pytest.mark.parametrize(
     "candidate,want",
@@ -127,7 +142,7 @@ def test_each_candidate_status_is_exact_before_issue_inputs(existing, field, ind
         "MEMORY_STATUS": "Main memory/Journey seams",
     }
     expected[index] = prefixes[field] + ": " + want + "."
-    _assert_issue(_report_calls(values, existing), existing, expected)
+    _assert_issue(_report_calls(values, existing), existing, expected, actionable=field == "PYPI_STATUS")
 
 
 @pytest.mark.parametrize("existing", [False])
@@ -167,9 +182,7 @@ def test_execution_requires_exact_success_even_with_all_ok(existing, result):
     )
 
 
-# Normalization and body construction precede the create/comment branch.
-# All status permutations above exercise create; this pins the other consumer.
-def test_existing_issue_receives_normalized_comment():
+def test_existing_issue_receives_normalized_update():
     calls = _report_calls(
         {
             "CHECK_RESULT": "INJECTED_UNTRUSTED_TEXT",
@@ -189,6 +202,69 @@ def test_existing_issue_receives_normalized_comment():
             "Main memory/Journey seams: unavailable.",
         ],
     )
+
+
+@pytest.mark.parametrize("field", ["MAIN_STATUS", "MEMORY_STATUS"])
+@pytest.mark.parametrize("status", ["drift", "unavailable"])
+def test_main_only_report_removes_actionable_and_preserves_other_labels(field, status):
+    values = {"CHECK_RESULT": "success", "PYPI_STATUS": "ok", "MAIN_STATUS": "ok", "MEMORY_STATUS": "ok"}
+    values[field] = status
+    calls = _report_calls(values, True)
+    assert [call[0] for call in calls] == ["list", "update"]
+    target = calls[-1][1]
+    assert target["labels"] == ["upstream-drift", "ci"]
+    assert "Priority: advisory" in target["body"]
+    assert "unreleased main" in target["body"]
+    assert "state" not in target
+
+
+def test_released_problem_escalates_advisory_report():
+    issue = _managed_issue(labels=[{"name": "upstream-drift"}, {"name": "ci"}])
+    calls = _report_calls(
+        {"CHECK_RESULT": "success", "PYPI_STATUS": "drift", "MAIN_STATUS": "ok", "MEMORY_STATUS": "ok"}, [issue]
+    )
+    assert [call[0] for call in calls] == ["list", "update"]
+    assert set(calls[-1][1]["labels"]) == {"actionable", "upstream-drift", "ci"}
+    assert "Priority: actionable" in calls[-1][1]["body"]
+
+
+def test_all_ok_recovery_closes_only_owned_reports():
+    issues = [
+        _managed_issue(),
+        _managed_issue(number=43, user={"login": "maintainer"}),
+        _managed_issue(number=44, title="Unrelated compatibility investigation"),
+        _managed_issue(number=45, pull_request={"url": "https://github.com/example/pull/45"}),
+        _managed_issue(number=46),
+    ]
+    calls = _report_calls(
+        {"CHECK_RESULT": "success", "PYPI_STATUS": "ok", "MAIN_STATUS": "ok", "MEMORY_STATUS": "ok"}, issues
+    )
+    assert [call[0] for call in calls] == ["list", "update", "update"]
+    assert [call[1]["issue_number"] for call in calls[1:]] == [42, 46]
+    for _, target in calls[1:]:
+        assert target["state"] == "closed"
+        assert target["state_reason"] == "completed"
+        assert target["labels"] == ["upstream-drift", "ci"]
+        assert "Priority: resolved" in target["body"]
+
+
+def test_repeated_advisory_updates_body_without_adding_comments_or_issues():
+    calls = _report_calls(
+        {"CHECK_RESULT": "success", "PYPI_STATUS": "ok", "MAIN_STATUS": "drift", "MEMORY_STATUS": "ok"},
+        False,
+        repeat=2,
+    )
+    assert [call[0] for call in calls] == ["list", "create", "list", "update"]
+    assert calls[-1][1]["issue_number"] == 43
+    assert "actions/runs/124" in calls[-1][1]["body"]
+
+
+def test_unrelated_labeled_issue_does_not_receive_report_updates():
+    calls = _report_calls(
+        {"CHECK_RESULT": "success", "PYPI_STATUS": "ok", "MAIN_STATUS": "drift", "MEMORY_STATUS": "ok"},
+        [_managed_issue(user={"login": "maintainer"})],
+    )
+    assert [call[0] for call in calls] == ["list", "create"]
 
 
 @pytest.mark.parametrize(

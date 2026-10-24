@@ -51,6 +51,16 @@ Phase 0 is complete. Its rules remain the baseline for every change.
 - The optional `hermes-upstream` remote is for source inspection only.
 - `.github/workflows/upstream-check.yml` checks both the latest PyPI release and
   upstream `main` for hook-name and consumed-payload drift.
+- The AST scanner recognizes `invoke_hook` and `ainvoke_hook`, their imported
+  aliases, and module-level wrappers that forward the first parameter and
+  untouched `**kwargs` to either dispatcher. Modified payloads and hook names
+  are not treated as transparent wrappers.
+- The isolated reporter normalizes exact status tokens before constructing
+  Issue API inputs. It paginates open `upstream-drift` issues and manages only
+  its fixed-title `github-actions[bot]` reports. PyPI drift/unavailability or
+  an incomplete check job sets `actionable`; main-only problems remove it.
+  Repeated reports replace the body while preserving unrelated labels; an
+  all-ok run closes managed reports. No weekly comments or upstream PRs.
 
 ### 0.3 Mordred-owned paths (kept in sync with PATHS.md)
 

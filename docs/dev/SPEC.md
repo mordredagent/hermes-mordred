@@ -861,6 +861,13 @@ Agent-memory follow-up contracts:
   Hermes floor. Missing dependencies/provenance are unavailable, not success.
   Untrusted upstream execution must have no issue-write token; a separate
   report job may publish only normalized status and fixed diagnostic context.
+  Released-PyPI drift/unavailability or an incomplete check job requires
+  operator action; problems limited to unreleased `main` are advisory and do
+  not block Mordred releases. Static drift requires source-level triage before
+  concluding that Hermes changed its contract. Reports update a bot-owned
+  issue without weekly comments, preserve human issues and unrelated labels,
+  and close automatically only after a successful all-ok run. Plugin-only
+  packaging does not remove this dependency compatibility obligation.
 - Linux general `setup` and enable-all skip macOS env/config enrollment
   and use the existing dedicated memory engine. Setup respects opt-out,
   requires active, non-drift status without unwrap (live TPM access is not
