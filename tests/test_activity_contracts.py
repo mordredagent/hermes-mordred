@@ -7,6 +7,7 @@ import hashlib
 import json
 import time
 import uuid
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -25,6 +26,7 @@ from mordred_hermes.activity.contracts import (
     normalize_event,
     scrub_urls,
 )
+from tests._activity_redaction_baseline import BASE_SPANS
 
 SITES = DEFAULT_EXCLUDED_SITES
 #: A JWT-shaped value (header ``{"alg":"HS256"}``, payload ``{"sub":"1"}``).
@@ -857,25 +859,815 @@ def test_kept_typed_text_is_never_rewritten() -> None:
     assert "text_secrets_redacted" not in event.exclusions
 
 
-def test_the_text_redactor_is_linear_on_hostile_input() -> None:
+def _assert_linear(shapes: list[Callable[[int], str]]) -> None:
+    """Each hostile shape redacted at a quarter of its size (``shape(4)``) and at its full size (``shape(1)``):
+    linear work costs 4 times as much, quadratic work 16 times, so the full size must cost under 8 times the
+    quarter (a floor absorbs timer noise on tiny times). The ratio, not an absolute time, is the check: coverage
+    tracing on Python 3.11 CI runners made these linear shapes take 5.9 s; the ceiling only catches a hang."""
     started = time.monotonic()
-    for text in (
-        "password " * 30_000,
-        "pin:" * 60_000,
-        "pin:a://" * 30_000,
-        "pin:1://" * 30_000,
-        'password "' * 25_000,
-        "パスワードは" * 40_000,
-        "token: " + "a" * 250_000,
-    ):
-        contracts.redact_text_secrets(text)
-    assert time.monotonic() - started < 5.0
+    slow = []
+    for shape in shapes:
+        times = []
+        for part in (4, 1):
+            text = shape(part)
+            begun = time.perf_counter()
+            contracts.redact_text_secrets(text)
+            times.append(time.perf_counter() - begun)
+        if times[1] >= 8 * max(times[0], 0.02):
+            slow.append((shape(400)[:40], times))
+    assert not slow, slow
+    assert time.monotonic() - started < 120.0
+
+
+def test_the_text_redactor_is_linear_on_hostile_input() -> None:
+    _assert_linear(
+        [
+            lambda part: "password " * (30_000 // part),
+            lambda part: "pin:" * (60_000 // part),
+            lambda part: "pin:a://" * (30_000 // part),
+            lambda part: "pin:1://" * (30_000 // part),
+            lambda part: 'password "' * (25_000 // part),
+            lambda part: "パスワードは" * (40_000 // part),
+            lambda part: "token: " + "a" * (250_000 // part),
+        ]
+    )
 
 
 @pytest.mark.parametrize("cut", [0, 1, 255, 256, 257])
 def test_a_long_unquoted_value_is_redacted_to_its_end(cut: int) -> None:
     blob = ("Ab1" * 200)[:cut] + "." + "Cd2" * 100  # a closing mark at or near the inspection cap
     assert contracts.redact_text_secrets(f"api key: {blob}. end") == ("api key: redacted. end", True)
+
+
+# --- a value named before its keyword (B2 live check 2026-10-22, D1) --------------------------------------
+
+#: Hermes's user message that the B2 live check found stored verbatim in a task start and shown to later sessions.
+B2_LIVE_MESSAGE = (
+    "Open http://127.0.0.1:8499/login.html, type demo-user as the username and Hunter2-fake-pw as the password, "
+    "then log in."
+)
+
+VALUE_FIRST_TEXTS = [
+    pytest.param(
+        B2_LIVE_MESSAGE,
+        "Open http://127.0.0.1:8499/login.html, type demo-user as the username and redacted as the password, "
+        "then log in.",
+        id="b2-live",
+    ),
+    pytest.param("use Hunter2-fake-pw for the password", "use redacted for the password", id="for-the"),
+    pytest.param("Hunter2-fake-pw as my password", "redacted as my password", id="as-my-no-verb"),
+    pytest.param("enter 4821 for the PIN", "enter redacted for the PIN", id="pin-after-a-verb"),
+    pytest.param("type Hunter2-fake-pw into the password field", "type redacted into the password field", id="into"),
+    pytest.param("put Winter-2026 in the passcode box.", "put redacted in the passcode box.", id="in-box"),
+    pytest.param("use swordfish as the password", "use redacted as the password", id="plain-word-after-a-verb"),
+    pytest.param(
+        "I used Spring-2026 for my password, then logged in",
+        "I used redacted for my password, then logged in",
+        id="past-tense",
+    ),
+    pytest.param("enter 482913 for the one-time code.", "enter redacted for the one-time code.", id="one-time-code"),
+    pytest.param(
+        "fill in 'correct horse battery' as the passphrase",
+        "fill in 'redacted' as the passphrase",
+        id="quoted-with-spaces",
+    ),
+    pytest.param('paste "s3cr3t!" into the API key field', 'paste "redacted" into the API key field', id="api-key"),
+    pytest.param("(Hunter2) as the password", "(redacted) as the password", id="bracketed"),
+    pytest.param(
+        "type X9-ab into the field for the password",
+        "type redacted into the field for the password",
+        id="field-for-the",
+    ),
+    pytest.param("enter gh0st-7 for the token", "enter redacted for the token", id="token-after-a-verb"),
+    pytest.param("Hunter2-fake-pwをパスワードに入力して", "redactedをパスワードに入力して", id="ja-object-target"),
+    pytest.param("Hunter2 を パスワード欄に入力", "redacted を パスワード欄に入力", id="ja-object-field-spaces"),
+    pytest.param("abc123をパスワードとして使う", "redactedをパスワードとして使う", id="ja-object-as"),
+    pytest.param(
+        "ログイン画面でHunter2をパスワードに入れる", "ログイン画面でredactedをパスワードに入れる", id="ja-ascii-run"
+    ),
+    pytest.param("Hunter2というパスワード", "redactedというパスワード", id="ja-called"),
+    pytest.param("「Hunter2 x」というパスコードで", "「redacted」というパスコードで", id="ja-called-quoted"),
+    pytest.param("パスワードにHunter2を入力", "パスワードにredactedを入力", id="ja-keyword-target-object"),
+    pytest.param("パスワード欄にHunter2-xを入れて", "パスワード欄にredactedを入れて", id="ja-field-target-object"),
+    pytest.param("暗証番号に「1234」を入力", "暗証番号に「redacted」を入力", id="ja-target-quoted"),
+    pytest.param("次にパスワードとしてHunter2を入力", "次にパスワードとしてredactedを入力", id="ja-keyword-as-object"),
+    pytest.param("1234をPINに入力", "redactedをPINに入力", id="ja-ascii-keyword-value-first"),
+    pytest.param("PIN欄に「0000」を入力", "PIN欄に「redacted」を入力", id="ja-ascii-keyword-target-object"),
+]
+
+VALUE_FIRST_KEPT = [
+    pytest.param("I forgot my password", id="forgot-my"),
+    pytest.param("reset the password for my account", id="reset-for"),
+    pytest.param("click Forgot password", id="click-forgot"),
+    pytest.param("the password field is empty", id="field-empty"),
+    pytest.param("change your password", id="change-your"),
+    pytest.param("use the search box for the query", id="no-keyword"),
+    pytest.param("type demo-user as the username", id="username"),
+    pytest.param("pin the tab", id="pin-verb"),
+    pytest.param("the token count", id="token-count"),
+    pytest.param("log in as admin with the password redacted", id="already-redacted"),
+    pytest.param("use swordfish as the token", id="plain-word-ambiguous-keyword"),
+    pytest.param("add v2 to the token list", id="token-list"),
+    pytest.param("Add 2FA to the password manager", id="password-manager"),
+    pytest.param("set up 2FA in the password settings", id="password-settings"),
+    pytest.param("same as the password", id="same-as"),
+    pytest.param("type it into the password field", id="pronoun"),
+    pytest.param("type something into the password field", id="something"),
+    pytest.param("click in the password field", id="click-in"),
+    pytest.param("type a value into the password field", id="a-value"),
+    pytest.param("Welcome to the password reset page", id="welcome-to"),
+    pytest.param("Type your password into the password field", id="your-password-into"),
+    pytest.param("open https://example.com/a?b=1 as the password page", id="url"),
+    pytest.param("Use Face-ID as the password alternative", id="password-alternative"),
+    pytest.param("Add Bob-2 to the password sharing group", id="password-sharing-group"),
+    pytest.param("After you log in, as the password expires, change it", id="clause-before-as"),
+    pytest.param("ログインしてパスワードを変更する", id="ja-change"),
+    pytest.param("メールアドレスをパスワードに含めない", id="ja-japanese-value"),
+    pytest.param("パスワードに関する設定", id="ja-about"),
+    pytest.param("名前というパスワード", id="ja-called-japanese-word"),
+    pytest.param("パスワードリセット画面を開く", id="ja-reset-screen"),
+    pytest.param("abcをtokenに変換", id="ja-ambiguous-ascii-keyword-plain-value"),
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), VALUE_FIRST_TEXTS)
+def test_a_value_named_before_its_keyword_is_replaced(text: str, expected: str) -> None:
+    assert contracts.redact_text_secrets(text) == (expected, True)
+    event = _task_start(text)
+    assert event.text == expected
+    assert "text_secrets_redacted" in event.exclusions
+
+
+@pytest.mark.parametrize("text", VALUE_FIRST_KEPT)
+def test_ordinary_text_with_a_keyword_after_a_word_is_untouched(text: str) -> None:
+    assert contracts.redact_text_secrets(text) == (text, False)
+    assert "text_secrets_redacted" not in _task_start(text).exclusions
+
+
+def test_the_b2_live_message_keeps_the_username_and_drops_the_password() -> None:
+    event = _task_start(B2_LIVE_MESSAGE)
+    assert event.text is not None and "demo-user" in event.text
+    assert LIVE_SECRET not in json.dumps(dataclasses.asdict(event))
+    assert event.content_digest == canonical_digest(event)
+
+
+@pytest.mark.parametrize(
+    "value", ["Hunter2-fake-pw as the password", "use swordfish for my password", "Hunter2をパスワードに"]
+)
+def test_typed_value_first_secrets_are_withheld(value: str) -> None:
+    assert contracts.looks_like_secret(value)
+    event = normalize(action={"op": "type", "args": {"field_kind": "text"}}, text=value)
+    assert event.text is None and "typed_text_dropped" in event.exclusions
+
+
+def test_both_values_around_one_keyword_are_replaced() -> None:
+    text = "use Hunter2-x as the password, not the password Hunter3-y"
+    assert contracts.redact_text_secrets(text) == ("use redacted as the password, not the password redacted", True)
+    # the keyword before the value names no frame of its own, so the value is read back over it (privacy first)
+    assert contracts.redact_text_secrets("password Hunter2-x as the password") == ("redacted as the password", True)
+
+
+def test_value_first_redaction_is_linear_on_hostile_input() -> None:
+    _assert_linear(
+        [
+            lambda part: "x as the password " * (20_000 // part),
+            lambda part: "a" * (250_000 // part) + " as the password",
+            lambda part: "as " * (100_000 // part) + "password",
+            lambda part: "type '" + "a " * (100_000 // part) + "' as the password",
+            lambda part: '"' * (100_000 // part) + " as the password",
+            lambda part: "aをパスワードに" * (40_000 // part),
+            lambda part: "a" * (250_000 // part) + "をパスワードに",
+            lambda part: "パスワードにa" * (40_000 // part),
+            lambda part: "パスワードに" + "a" * (250_000 // part) + "を",
+            lambda part: "」というパスワード" * (30_000 // part),
+        ]
+    )
+
+
+# --- a value after "to" or after a short qualifier (follow-up to D1) ------------------------------------------
+
+QUALIFIED_TEXTS = [
+    pytest.param("set the password to Hunter2-x", "set the password to redacted", id="set-to"),
+    pytest.param("change my password to 'abc def'", "change my password to 'redacted'", id="change-to-quoted"),
+    pytest.param("update the PIN to 4821", "update the PIN to redacted", id="update-pin-digits"),
+    pytest.param(
+        "I changed the admin password to Spring-2026 yesterday",
+        "I changed the admin password to redacted yesterday",
+        id="changed-qualified-keyword",
+    ),
+    pytest.param("reset the token to abc123def456", "reset the token to redacted", id="reset-token-long"),
+    pytest.param(
+        "the password for the bank is Hunter2-x", "the password for the bank is redacted", id="for-the-bank-is"
+    ),
+    pytest.param(
+        "my password on example.com is: abc123!", "my password on example.com is: redacted!", id="on-host-is-colon"
+    ),
+    pytest.param("password for admin = s3cr3t!", "password for admin = redacted!", id="for-admin-equals"),
+    pytest.param("My password for GitHub: Github2024!", "My password for GitHub: redacted!", id="for-colon"),
+    pytest.param(
+        'the passcode of my work account was "x y z"',
+        'the passcode of my work account was "redacted"',
+        id="of-four-words-quoted",
+    ),
+    pytest.param("the PIN for my card is 4821.", "the PIN for my card is redacted.", id="pin-for-is-digits"),
+    pytest.param("パスワードをHunter2-xに変更して", "パスワードをredactedに変更して", id="ja-object-to-change"),
+    pytest.param("パスワードを 「abc def」 に設定", "パスワードを 「redacted」 に設定", id="ja-object-quoted-set"),
+    pytest.param("PINを1234に変更", "PINをredactedに変更", id="ja-ascii-pin-change"),
+]
+
+QUALIFIED_KEPT = [
+    pytest.param("set the password to expire", id="set-to-expire"),
+    pytest.param("change your password to something stronger", id="something-stronger"),
+    pytest.param("the password for the account is required", id="is-required"),
+    pytest.param("the password for the bank is in my notes", id="is-in-notes"),
+    pytest.param("update the token to the latest version", id="token-latest"),
+    pytest.param("password for admin is redacted", id="already-redacted"),
+    pytest.param("set the pin to the top", id="pin-top"),
+    pytest.param("change the password to 12 characters", id="length-unit"),
+    pytest.param("the password for this site is 8-64 characters", id="range-unit"),
+    pytest.param("set the token to v2", id="token-short"),
+    pytest.param("the PIN for the map is A1", id="pin-short"),
+    pytest.param("Add the password to 1Password", id="no-set-verb"),
+    pytest.param("send the password to alice@example.com", id="send-to"),
+    pytest.param("reset the password to default", id="plain-default"),
+    pytest.param("set the PIN to ABCD", id="pin-letters"),
+    pytest.param("the password for the bank, is Hunter2-x", id="comma-in-qualifier"),
+    pytest.param("the password for my old work account at home is Hunter2-x", id="qualifier-too-long"),
+    pytest.param("a password of at least 8 characters", id="policy"),
+    pytest.param("the password for your account is now changed", id="now-changed"),
+    pytest.param("set it up so the password to Hunter2-x works", id="verb-too-far"),
+    pytest.param("パスワードを変更する", id="ja-change"),
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), QUALIFIED_TEXTS)
+def test_a_value_after_to_or_a_short_qualifier_is_replaced(text: str, expected: str) -> None:
+    assert contracts.redact_text_secrets(text) == (expected, True)
+    assert _task_start(text).text == expected
+
+
+@pytest.mark.parametrize("text", QUALIFIED_KEPT)
+def test_ordinary_text_after_to_or_a_qualifier_is_untouched(text: str) -> None:
+    assert contracts.redact_text_secrets(text) == (text, False)
+
+
+def test_qualified_redaction_is_linear_on_hostile_input() -> None:
+    _assert_linear(
+        [
+            lambda part: "set the password to " * (20_000 // part),
+            lambda part: "the password for a b c is " * (20_000 // part),
+            lambda part: "password for " + "a" * (250_000 // part) + " is x1",
+            lambda part: "set " + "a" * (250_000 // part) + " password to x1",
+            lambda part: "password for: " * (30_000 // part),
+            lambda part: "update the PIN to " + "1" * (250_000 // part),
+        ]
+    )
+
+
+# --- every keyword is read on its own: no match hides another (Codex review P1) ------------------------------
+
+NESTED_TEXTS = [
+    pytest.param(
+        "password for account PIN=4821 is Hunter2-x",
+        "password for account PIN=redacted is redacted",
+        id="qualifier-holds-a-pin",
+    ),
+    pytest.param(
+        "set the password for PIN=4821 to Hunter2-x",
+        "set the password for PIN=redacted to redacted",
+        id="to-form-qualifier-holds-a-pin",
+    ),
+    pytest.param(
+        "type Hunter2-x as the password for token=abcd1234efgh",
+        "type redacted as the password for token=redacted",
+        id="value-first-then-a-token",
+    ),
+    pytest.param(
+        "set the password for the bank to Hunter2-x", "set the password for the bank to redacted", id="to-qualified"
+    ),
+    pytest.param("update the PIN for my card to 4821", "update the PIN for my card to redacted", id="to-qualified-pin"),
+    pytest.param(
+        "password: pin=4821 token=x9y8z7w6", "password: redacted token=redacted", id="keywords-inside-a-value"
+    ),
+    # A keyword inside a long value is skipped only when it cannot name anything outside the value; each way out
+    # is still read: an opening quote, a Japanese field word, a label mark the value ends in. (A plain word after
+    # the value on its line is part of a value of several words, so these clauses end at a line break or a dot.)
+    pytest.param('password: abcdefgh-token"x y" end', 'password: redacted" end', id="inner-quote-with-a-space"),
+    pytest.param(
+        "password: abcdefgh-パスワード欄にxyz12を入力", "password: redactedにredactedを入力", id="inner-japanese-field"
+    ),
+    pytest.param(
+        "password: abcdefgh-pin=\n4821. end", "password: redacted\nredacted. end", id="inner-label-at-the-end"
+    ),
+    pytest.param("password: abcdefgh-pin:4821-token:abcd. end", "password: redacted. end", id="inner-closed"),
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), NESTED_TEXTS)
+def test_a_credential_inside_another_match_is_redacted_too(text: str, expected: str) -> None:
+    assert contracts.redact_text_secrets(text) == (expected, True)
+    assert _task_start(text).text == expected
+
+
+@pytest.mark.parametrize(
+    "text", ["set the password for 30 days to expire", "change the password for your account to something stronger"]
+)
+def test_a_qualified_to_form_needs_a_secret_value(text: str) -> None:
+    assert contracts.redact_text_secrets(text) == (text, False)
+
+
+@pytest.mark.parametrize(("text", "spans"), sorted(BASE_SPANS.items()))
+def test_every_value_the_base_revision_redacted_stays_redacted(text: str, spans: tuple[tuple[int, int], ...]) -> None:
+    """A newer rule only adds redactions: each value span the base revision (efe9bb27d) replaced lies inside a
+    span replaced now (spans of the text after JWTs, key-prefixed tokens and PEM lines are replaced)."""
+    clean = contracts.redact_secret_tokens(text)
+    now = contracts._secret_spans(clean)
+    for start, end in spans:
+        assert any(lo <= start and end <= hi for lo, hi in now), (clean[start:end], now)
+
+
+def test_nested_keyword_redaction_is_linear_on_hostile_input() -> None:
+    _assert_linear(  # "pin:" * 60_000 (every keyword inside one long value) is in the test above
+        [
+            lambda part: "password for a pin=1 is " * (10_000 // part),
+            lambda part: "set the password for a pin=1 to " * (7_500 // part),
+            lambda part: "token=" * (40_000 // part),
+            lambda part: "password: " + "x" * 300 + "-pin:" * (40_000 // part),
+        ]
+    )
+
+
+# --- the user's own words: secret-shaped tokens without a keyword (live B2 re-run, N4) ----------------------
+
+USER_WORDS_REDACTED = [
+    pytest.param(
+        "log in as demo-user with Kx9-Hunter2-fake-pw-77 please",
+        "log in as demo-user with redacted please",
+        id="no-keyword",
+    ),
+    pytest.param("(use Kx9Hunter2fakepw77xyz!)", "(use redacted!)", id="marks-kept"),
+    pytest.param("トークンはAbC123dEf456GhI789jKl0です", "トークンはredactedです", id="ja-ascii-run"),
+    # the trade-off, as for typed text: a long identifier mixing letters and digits is redacted too
+    pytest.param("find order-2026-000123-final", "find redacted", id="identifier"),
+]
+
+USER_WORDS_KEPT = [
+    pytest.param("log in as demo-user at http://127.0.0.1:8499/login.html", id="username-and-url"),
+    pytest.param("send the report to alice.smith@example-corp.com tomorrow", id="email"),
+    pytest.param("open /Users/me/Documents/report-2026-final.pdf", id="path"),
+    pytest.param("meet on 2026-10-22T10:00:00+09:00", id="date-time"),
+    pytest.param("the project-management-dashboard-overview page", id="hyphenated-words"),
+    pytest.param("check www.example.com/reports?id=1234 again", id="host-path"),
+    pytest.param("Hunter2-fake-pw is short", id="under-twenty-characters"),
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), USER_WORDS_REDACTED)
+def test_a_secret_shaped_token_in_the_users_words_is_redacted(text: str, expected: str) -> None:
+    assert contracts.redact_secret_shaped_tokens(text) == (expected, True)
+    event = _task_start(text)
+    assert event.text == expected and "text_secrets_redacted" in event.exclusions
+    correction = normalize(
+        phase="correction", source="user_correction", actor="human", action={"op": "other"}, text=text
+    )
+    assert correction.text == expected
+
+
+@pytest.mark.parametrize("text", USER_WORDS_KEPT)
+def test_ordinary_tokens_in_the_users_words_are_kept(text: str) -> None:
+    assert contracts.redact_secret_shaped_tokens(text) == (text, False)
+    assert _task_start(text).text == text
+
+
+def test_secret_shaped_tokens_are_kept_outside_the_users_words() -> None:
+    text = "log in as demo-user with Kx9-Hunter2-fake-pw-77 please"
+    agent = normalize(phase="boundary", actor="agent", action={"op": "task_start", "site": "example.com"}, text=text)
+    page = normalize(action={"op": "navigate", "site": "example.com"}, page_text=text)
+    assert agent.text == text and page.page_text == text
+
+
+# --- a two-word keyword joined by any same-line whitespace (operator parity, 2026-10-22) -------------------
+
+SPACED_KEYWORD_TEXTS = [
+    pytest.param("api key: abc123def", "api key: redacted", id="one-space"),
+    pytest.param("api  key: abc123def", "api  key: redacted", id="two-spaces"),
+    pytest.param("api\tkey: abc123def", "api\tkey: redacted", id="tab"),
+    pytest.param("api\xa0key: abc123def", "api\xa0key: redacted", id="nbsp"),
+    pytest.param("api\u3000key: abc123def", "api\u3000key: redacted", id="ideographic-space"),
+    pytest.param("access\t\ttoken = abcdef", "access\t\ttoken = redacted", id="access-token"),
+    pytest.param("one time  code 482913", "one time  code redacted", id="one-time-code"),
+    pytest.param("pin  code 0000", "pin  code redacted", id="pin-code"),
+    # the first word read on its own too: the base revision read "code=1234" as the value after "pin"
+    pytest.param("pin  code=1234", "pin  redacted", id="pin-reading-kept"),
+    pytest.param("パスワードにHun\x01ter2-xを入力", "パスワードにredactedを入力", id="ja-forward-control-character"),
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), SPACED_KEYWORD_TEXTS)
+def test_a_two_word_keyword_is_joined_by_any_same_line_whitespace(text: str, expected: str) -> None:
+    assert contracts.redact_text_secrets(text) == (expected, True)
+    assert contracts.looks_like_secret(text)
+
+
+def test_a_keyword_never_spans_a_line_break() -> None:
+    assert contracts.redact_text_secrets("api\nkey: abc123def") == ("api\nkey: abc123def", False)
+
+
+# --- a value of several words, as speech recognition writes a spoken password (live speech test 2026-10-23) ----
+
+SPOKEN_TEXTS = [
+    pytest.param(
+        "Log in with demo-user as the username and Hunter2-fake-pw as the password",
+        "Log in with demo-user as the username and redacted as the password",
+        id="typed",
+    ),
+    pytest.param(
+        "Log in with demo user as the username and hunter 2 fake pw as the password",
+        "Log in with demo user as the username and redacted as the password",
+        id="value-first-spoken",
+    ),
+    pytest.param(
+        "Log in with demo user as the username and hunter two fake PW as the password",
+        "Log in with demo user as the username and redacted as the password",
+        id="value-first-number-word",
+    ),
+    pytest.param(
+        "Log in with demo user as the username and hunter two fake pw as the password",
+        "Log in with demo user as the username and redacted as the password",
+        id="value-first-plain-words",
+    ),
+    # Voxtral heard "and" as "in" and ended the sentence; Moonshine wrote "is the password"
+    pytest.param(
+        "Log in with demo user as the username in Hunter 2 Fake PW as the password.",
+        "Log in with demo user as the username in redacted as the password.",
+        id="voxtral",
+    ),
+    pytest.param(
+        "Log in with demo user as the username and hunter 2 fake pw is the password",
+        "Log in with demo user as the username and redacted is the password",
+        id="moonshine-is-the-password",
+    ),
+    pytest.param("Hunter 2 Fake PW was my password", "redacted was my password", id="was-my-password"),
+    pytest.param("4821 is the PIN", "redacted is the PIN", id="is-the-pin"),
+    pytest.param("type hunter two fake pw as the password", "type redacted as the password", id="after-a-verb"),
+    pytest.param("enter 4 8 2 1 for the PIN", "enter redacted for the PIN", id="spaced-pin-after-a-verb"),
+    pytest.param("The password is hunter 2 fake pw", "The password is redacted", id="is"),
+    pytest.param(
+        "The password is hunter 2 fake pw and then click Login",
+        "The password is redacted and then click Login",
+        id="is-then-and",
+    ),
+    pytest.param(
+        "Log in as demo user, password hunter 2 fake pw", "Log in as demo user, password redacted", id="no-copula"
+    ),
+    pytest.param("password hunter two fake pw", "password redacted", id="no-copula-plain-words"),
+    pytest.param("my PIN is 4 8 2 1", "my PIN is redacted", id="spaced-pin"),
+    pytest.param("PIN: 4 8 2 1, then OK", "PIN: redacted, then OK", id="labelled-spaced-pin"),
+    pytest.param("password: hunter 2 fake pw please log in", "password: redacted please log in", id="label-please"),
+    pytest.param("set the password to hunter 2 fake pw", "set the password to redacted", id="set-to"),
+    pytest.param("update the PIN to 4 8 2 1", "update the PIN to redacted", id="set-to-spaced-pin"),
+    pytest.param(
+        "the password for the bank is hunter two fake pw",
+        "the password for the bank is redacted",
+        id="qualified",
+    ),
+    pytest.param("the PIN for my card is 4 8 2 1.", "the PIN for my card is redacted.", id="qualified-spaced-pin"),
+    pytest.param("the password is hunter at fake dot pw", "the password is redacted", id="spoken-at"),
+    pytest.param(
+        "the password is hunter 2 for the bank", "the password is redacted for the bank", id="for-the-ends-it"
+    ),
+    pytest.param(
+        "set the password to hunter 2 to log in", "set the password to redacted to log in", id="to-log-in-ends-it"
+    ),
+    pytest.param(
+        "set the password for PIN=4821 to Hunter2-x",
+        "set the password for PIN=redacted to redacted",
+        id="to-before-a-typed-value-ends-it",
+    ),
+    pytest.param("パスワードは Hunter2-fake-pw でログインして", "パスワードは redacted でログインして", id="ja-typed"),
+    pytest.param("パスワード は ハンター ツー フェイク です", "パスワード は redacted です", id="ja-spaced-katakana"),
+    pytest.param(
+        "ユーザー名 デモユーザー パスワード ハンター2 でログイン",
+        "ユーザー名 デモユーザー パスワード redacted でログイン",
+        id="ja-no-particle",
+    ),
+    # Voxtral (macOS say -v Kyoko) wrote the digit 2 as the particle-like reading in the middle of the value
+    pytest.param(
+        "ユーザー名はデモユーザー、パスワードはハンターにフェイクPWでログインして",
+        "ユーザー名はデモユーザー、パスワードはredactedでログインして",
+        id="ja-voxtral-joint",
+    ),
+    pytest.param("ハンターにフェイクPWをパスワードにして", "redactedをパスワードにして", id="ja-value-first-joint"),
+    pytest.param(
+        "ハンター ツー フェイク をパスワードに入力", "redacted をパスワードに入力", id="ja-value-first-katakana"
+    ),
+    pytest.param("hunter 2 fake pw をパスワードに入力", "redacted をパスワードに入力", id="ja-value-first-ascii-words"),
+    pytest.param("パスワードに ハンター ツー を入力", "パスワードに redacted を入力", id="ja-target-katakana"),
+    pytest.param("パスワードにhunter 2 fake pwを入力", "パスワードにredactedを入力", id="ja-target-ascii-words"),
+    pytest.param("パスワードは hunter 2 fake pw です", "パスワードは redacted です", id="ja-ascii-words"),
+    pytest.param("パスワードはハンターさんフェイクです", "パスワードはredactedです", id="ja-digit-reading"),
+    pytest.param("PINは 4 8 2 1 です", "PINは redacted です", id="ja-ascii-keyword-spaced-pin"),
+    pytest.param(
+        "パスワードをHunter2に変更して", "パスワードをredactedに変更して", id="ja-joint-before-a-verb-ends-it"
+    ),
+]
+
+SPOKEN_KEPT = [
+    pytest.param("Log in to the site with demo user slash hunter 2 fake pw", id="no-keyword-known-limit"),
+    pytest.param("Open the password reset page", id="reset"),
+    pytest.param("Type into the password field", id="field"),
+    pytest.param("password hunter", id="one-plain-word"),
+    pytest.param("Enter the password you received by email", id="pronoun"),
+    pytest.param("Password Keep me signed in", id="login-page"),
+    pytest.param("Change password every 90 days", id="quantifier"),
+    pytest.param("Use at least 8 characters for the password", id="length-before"),
+    pytest.param("Open the password vault app", id="head"),
+    pytest.param("the secret sauce recipe", id="ambiguous-plain-words"),
+    pytest.param("pin tab two", id="ambiguous-plain-words-pin"),
+    pytest.param("What is the password", id="question"),
+    pytest.param("This is the password field", id="this-is"),
+    pytest.param("パスワード マネージャー アプリ", id="ja-manager-app"),
+    pytest.param("パスワードは安全に管理してください", id="ja-kanji-description"),
+    pytest.param("パスワードはメールで送信されます", id="ja-one-word-then-particle"),
+    pytest.param("パスワードはランダムに生成されます", id="ja-joint-before-a-verb"),
+    pytest.param("パスワードは他人に教えないでください", id="ja-kanji-joint"),
+]
+
+#: Typed phrasings next to a value: a keyword that starts a frame of its own and a link before a typed word end a value
+#: of several words; a separator, a keyword without a frame of its own and a username before a separator are read
+#: through (privacy first: when unsure, the rest of the clause goes).
+TYPED_NEIGHBOURS = [
+    pytest.param(
+        "pin code 0000 access token: abcdef", "pin code redacted access token: redacted", id="two-word-keyword"
+    ),
+    pytest.param("pin\u3000code 0000 as the password", "redacted as the password", id="keyword-without-a-frame"),
+    pytest.param("access\ttoken = abcdef as the password", "access\ttoken = redacted as the password", id="separator"),
+    pytest.param("the password for PIN=4821 = s3cr3t!", "the password for PIN=redacted!", id="equals-read-through"),
+    pytest.param("API key: abc123def DB_PASSWORD=xyz", "API key: redacted DB_PASSWORD=redacted", id="keyword-inside"),
+    pytest.param(
+        "set the password for the bank to Hunter2-x as the password",
+        "set the password for redacted as the password",
+        id="link-after-a-keyword",
+    ),
+    pytest.param("the password is api key: abc123def", "the password is redacted: redacted", id="api-key"),
+    pytest.param(
+        "set the password for PIN=4821 to Hunter2-x", "set the password for PIN=redacted to redacted", id="typed"
+    ),
+    pytest.param("password: hunter2 user: demo", "password: redacted user: demo", id="field-label"),
+    pytest.param("password: hunter2 user = demo", "password: redacted user = demo", id="field-label-separator"),
+    pytest.param("user = demo hunter 2 fake pw as the password", "user = redacted as the password", id="label-before"),
+    pytest.param("demo-user / hunter 2 fake pw as the password", "redacted as the password", id="slash-separator"),
+]
+
+#: The automated security review of 748e431a0: a separator, a link, a URL or a word holding a keyword inside a value
+#: once ended it and left the rest visible.
+REVIEW_TEXTS = [
+    *(
+        pytest.param(f"The password is hunter {mark} 2 fake pw", "The password is redacted", id=f"separator-{mark}")
+        for mark in "/|:="
+    ),
+    pytest.param("hunter / 2 fake pw as the password", "redacted as the password", id="separator-before"),
+    pytest.param("The password is my secret sauce 42", "The password is redacted", id="determiner-and-keyword"),
+    pytest.param("The password is red pin cushion 7", "The password is redacted", id="keyword-inside"),
+    pytest.param("The password is blue https://x.example fake pw", "The password is redacted", id="url-inside"),
+    pytest.param("パスワードは ハンター / ツー でログイン", "パスワードは redacted でログイン", id="ja-separator"),
+    pytest.param("The password is hunter / s3cr3t!", "The password is redacted!", id="separator-typed-word"),
+    pytest.param("password: blue | s3cr3t!", "password: redacted!", id="label-pipe"),
+    pytest.param("token: abc / s3cr3t!", "token: redacted!", id="ambiguous-keyword-slash"),
+    pytest.param("set the password to my dog rex 7", "set the password to redacted", id="to-determiner"),
+    pytest.param("the password for the bank is my dog rex 7", "the password for the bank is redacted", id="qualified"),
+]
+
+#: Passphrase words holding a keyword's letters: none of them names a value of its own, so none ends the value.
+PASSPHRASE_WORDS = ["spinach", "tokenize", "passwordless", "pinned", "secretary", "otpx", "tokens", "pins", "pwd2"]
+
+#: A field or feature noun right after the keyword: never a value (:data:`contracts.SECRET_VALUE_STOP_WORDS`).
+FIELD_NOUNS = ["field", "box", "reset", "manager", "page", "form", "hint", "button", "settings", "policy", "link"]
+
+#: Where a clause ends after a value of several words, and the text that follows it.
+VALUE_ENDS = [
+    *(", next", ". Next", "; next", "! next", "? next", "\nnext", ") next", '" next'),
+    *(" and next", " then next", " also next", " please next", " after that", " before noon", " with care"),
+    *(" in the box", " on the page", " into the box", " as a test", " for the bank", " to log in", " at the top"),
+    *(" yesterday", " now", " is wrong", " expires soon", " https://example.com/x", " PIN 4821"),
+]
+
+
+#: Values in kana only, as speech recognition writes a spoken password and its digits (live microphone test,
+#: 2026-10-23): after a Japanese topic or label frame, before the object particle and between the target and object
+#: particles, to the clause's end.
+KANA_TEXTS = [
+    pytest.param("パスワードはハンターツーフェイクでログインして", "パスワードはredactedでログインして", id="katakana"),
+    pytest.param(
+        "ユーザー名はデモユーザー、パスワードはハンターツーフェイクでログインして",
+        "ユーザー名はデモユーザー、パスワードはredactedでログインして",
+        id="katakana-after-a-username",
+    ),
+    pytest.param(
+        "ユーザー名はデモユーザーパスワードはハンターツーフェイクでログインして",
+        "ユーザー名はデモユーザーパスワードはredactedでログインして",
+        id="live-no-comma",
+    ),
+    pytest.param("パスワードはハンターでログインして", "パスワードはredactedでログインして", id="one-katakana-word"),
+    pytest.param("パスワードはひみつのあいことばでログインして", "パスワードはredactedでログインして", id="hiragana"),
+    pytest.param(
+        "パスワードはハンター2フェイクでログインして", "パスワードはredactedでログインして", id="katakana-digit"
+    ),
+    pytest.param("パスワードは山田太郎123でログインして", "パスワードはredactedでログインして", id="kanji-digits"),
+    pytest.param(
+        f"パスワード{FULLWIDTH_COLON}ハンターツーフェイク", f"パスワード{FULLWIDTH_COLON}redacted", id="label"
+    ),
+    pytest.param("パスワード: ハンターツーフェイク", "パスワード: redacted", id="ascii-label"),
+    pytest.param("パスワード は ハンター です", "パスワード は redacted です", id="spaced"),
+    pytest.param("暗証番号はいちにさんよんです", "暗証番号はredactedです", id="pin-digit-readings"),
+    pytest.param("パスワードはハンター2ふぇいくでログイン", "パスワードはredactedでログイン", id="mixed-kana"),
+    pytest.param("ハンターツーフェイクをパスワードに入力", "redactedをパスワードに入力", id="value-first-katakana"),
+    pytest.param(
+        "ひみつのあいことばをパスワードに入力して", "redactedをパスワードに入力して", id="value-first-hiragana"
+    ),
+    pytest.param(
+        "ユーザー名はデモユーザー、ひみつのあいことばをパスワードに入力",
+        "ユーザー名はデモユーザー、redactedをパスワードに入力",
+        id="value-first-after-a-username",
+    ),
+    pytest.param("ハンターというパスワード", "redactedというパスワード", id="called"),
+    pytest.param("パスワードにハンターツーフェイクを入力", "パスワードにredactedを入力", id="target-katakana"),
+    pytest.param("パスワードにひみつのあいことばを入力", "パスワードにredactedを入力", id="target-hiragana"),
+    pytest.param("the password is hunter", "the password is redacted", id="english-one-word"),
+    # a Japanese interface noun at the start of a value names no field (security review of 5d14b1a97)
+    pytest.param(
+        "パスワードは Hunter2 アカウント9 でログイン",
+        "パスワードは redacted でログイン",
+        id="noun-with-a-digit-in-a-run",
+    ),
+    pytest.param("パスワードはランダムキーです", "パスワードはredactedです", id="noun-prefix-random"),
+    pytest.param("パスワードはアカウントバンクでログイン", "パスワードはredactedでログイン", id="noun-prefix-account"),
+    pytest.param(
+        "パスワードはランダムキー7でログインして", "パスワードはredactedでログインして", id="noun-prefix-digit"
+    ),
+    pytest.param("パスワードはメールボックス99です", "パスワードはredactedです", id="noun-prefix-mail"),
+    pytest.param("パスワードはページキーです", "パスワードはredactedです", id="noun-prefix-page"),
+    pytest.param("パスワード は アカウント バンク です", "パスワード は redacted です", id="noun-word-then-space"),
+]
+
+#: A field or feature noun, a verb or a statement after the keyword, and Japanese words before it, stay.
+KANA_KEPT = [
+    *("パスワード欄に入力する", "パスワードを忘れた場合はこちら", "パスワードを変更", "パスワードリセット画面を開く"),
+    *("パスワードマネージャー", "パスワードを入力してください", "パスワードは正しくありません", "パスワードはこちら"),
+    *(
+        "パスワードはありません",
+        "パスワードをお忘れの方",
+        "パスワードが違います",
+        "メールアドレスをパスワードに含めない",
+    ),
+    *("パスワードはメールで送信されます", "パスワードはランダムに生成されます", "名前というパスワード"),
+    *("パスワードに関する設定", "ログインしてパスワードを変更する", "パスワードは安全に管理してください"),
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), KANA_TEXTS)
+def test_a_value_in_kana_is_replaced_to_the_end_of_its_clause(text: str, expected: str) -> None:
+    assert contracts.redact_text_secrets(text) == (expected, True)
+    assert _task_start(text).text == expected
+
+
+@pytest.mark.parametrize("text", KANA_KEPT)
+def test_japanese_interface_words_verbs_and_statements_after_a_keyword_stay(text: str) -> None:
+    assert contracts.redact_text_secrets(text) == (text, False)
+
+
+def test_kana_value_redaction_is_linear_on_hostile_input() -> None:
+    _assert_linear(
+        [
+            lambda part: "パスワードは" + "あ" * (250_000 // part),
+            lambda part: "あ" * (250_000 // part) + "をパスワードに",
+            lambda part: "ひみつをパスワードに" * (25_000 // part),
+            lambda part: "パスワードはあ " * (30_000 // part),
+            lambda part: "パスワードにひみつを" * (25_000 // part),
+        ]
+    )
+
+
+@pytest.mark.parametrize(("text", "expected"), SPOKEN_TEXTS)
+def test_a_value_of_several_words_is_replaced_to_the_end_of_its_clause(text: str, expected: str) -> None:
+    assert contracts.redact_text_secrets(text) == (expected, True)
+    event = _task_start(text)
+    assert event.text == expected and "text_secrets_redacted" in event.exclusions
+
+
+@pytest.mark.parametrize(("text", "expected"), REVIEW_TEXTS)
+def test_a_value_of_several_words_is_read_through_separators_links_urls_and_keywords(text: str, expected: str) -> None:
+    clean, replaced = contracts.redact_text_secrets(text)
+    assert (clean, replaced) == (expected, True)
+    assert "s3cr3t" not in clean and "fake" not in clean and "cushion" not in clean and "sauce" not in clean
+
+
+@pytest.mark.parametrize("word", PASSPHRASE_WORDS)
+def test_passphrase_words_holding_a_keywords_letters_stay_inside_the_value(word: str) -> None:
+    assert contracts.redact_text_secrets(f"the password is red {word} mango 4")[0] == "the password is redacted"
+    assert contracts.redact_text_secrets(f"red {word} mango 4 as the password")[0] == "redacted as the password"
+
+
+@pytest.mark.parametrize(("text", "expected"), TYPED_NEIGHBOURS)
+def test_typed_neighbours_end_a_value_of_several_words(text: str, expected: str) -> None:
+    assert contracts.redact_text_secrets(text) == (expected, True)
+
+
+@pytest.mark.parametrize("text", SPOKEN_KEPT)
+def test_ordinary_words_after_or_before_a_keyword_are_no_value(text: str) -> None:
+    assert contracts.redact_text_secrets(text) == (text, False)
+
+
+@pytest.mark.parametrize("noun", FIELD_NOUNS)
+def test_a_field_noun_after_the_keyword_is_no_value(noun: str) -> None:
+    for text in (f"click the password {noun} below", f"the password {noun} then the next page"):
+        assert contracts.redact_text_secrets(text) == (text, False)
+
+
+@pytest.mark.parametrize("end", VALUE_ENDS, ids=repr)
+def test_a_value_of_several_words_ends_at_its_clause(end: str) -> None:
+    redacted = contracts.redact_text_secrets(f"the password is hunter 2 fake pw{end}")[0]
+    # reading on, a URL and a keyword without a frame of its own are read through (when unsure, the clause goes)
+    reads_on = "PIN" in end or "://" in end
+    assert redacted == ("the password is redacted" if reads_on else f"the password is redacted{end}")
+    before = contracts.redact_text_secrets(f"{end.strip()} hunter 2 fake pw as the password")[0]
+    assert before.endswith("redacted as the password") and "hunter" not in before and "fake" not in before
+
+
+def test_japanese_values_end_at_punctuation_particles_and_verbs() -> None:
+    for end in ("、ユーザー名はdemo", "。次へ", "でログイン", "を入力", "です", "だ", "\n次へ", "に変更", "と入力"):
+        text = f"パスワードはハンターにフェイクPW{end}"
+        assert contracts.redact_text_secrets(text) == (f"パスワードはredacted{end}", True), end
+
+
+def test_a_value_of_several_words_is_bounded() -> None:
+    words = " ".join(f"w{number}" for number in range(1, 12))
+    capped = contracts.MAX_SECRET_VALUE_WORDS
+    rest = " ".join(f"w{number}" for number in range(capped + 1, 12))
+    assert contracts.redact_text_secrets(f"the password is {words}") == (f"the password is redacted {rest}", True)
+    assert contracts.redact_text_secrets(f"{words} as the password") == (
+        " ".join(f"w{number}" for number in range(1, 12 - capped)) + " redacted as the password",
+        True,
+    )
+    long_word = "x1" * contracts.MAX_SECRET_VALUE_CHARS  # a long word is taken to its end and ends the value
+    assert contracts.redact_text_secrets(f"the password is hunter {long_word} after") == (
+        "the password is redacted after",
+        True,
+    )
+
+
+def test_the_values_of_several_words_are_named_whole_and_without_their_spaces() -> None:
+    found = contracts.secret_values("Log in with demo user as the username and hunter 2 fake pw as the password")
+    assert found.complete and found.values == ("hunter 2 fake pw", "hunter2fakepw")
+    assert contracts.contains_values("hunter2fakepw", found.values)
+    assert not contracts.contains_values("demo user", found.values)
+    japanese = contracts.secret_values("パスワード は ハンター ツー フェイク です")
+    assert japanese.values == ("ハンター ツー フェイク", "ハンターツーフェイク")
+
+
+def test_value_of_several_words_redaction_is_linear_on_hostile_input() -> None:
+    _assert_linear(
+        [
+            lambda part: "the password is hunter 2 fake pw " * (10_000 // part),
+            lambda part: "password: " + "a1 " * (100_000 // part),
+            lambda part: "a1 " * (100_000 // part) + "x as the password",
+            lambda part: "パスワードは" + "ハンターに" * (60_000 // part),
+            lambda part: "ハンターに" * (60_000 // part) + "フェイクをパスワードに",
+            lambda part: "パスワードにa" * (40_000 // part),
+            lambda part: ("pin=" * 60 + "1" + " x1" * 8 + ". ") * (1_000 // part),
+        ]
+    )
+
+
+# --- the values the redactor replaces, and replacing given values (live B2 re-run, N1 / N5) -------------------
+
+
+def test_secret_values_are_the_values_the_redactor_replaces() -> None:
+    text = f"type Zebra-77-fake as the password, PIN: 4821, key sk-proj-Ab3dEf6hIj9kLm and {JWT}"
+    found = contracts.secret_values(text)
+    assert found.complete
+    assert {"Zebra-77-fake", "4821", "sk-proj-Ab3dEf6hIj9kLm", JWT} <= set(found.values)
+    assert contracts.REDACTED not in found.values
+    assert contracts.secret_values("pin the tab to the left") == contracts.SecretValues((), complete=True)
+    # each reading's value, not only the merged span (Codex review of 6da5ccad2)
+    assert {"code=1234", "1234"} <= set(contracts.secret_values("PIN code=1234").values)
+    # also a value inside another value, which the redaction itself need not read again
+    assert {"abcdefgh-pin:4821", "4821"} <= set(contracts.secret_values("password: abcdefgh-pin:4821").values)
+
+
+def test_given_values_are_replaced_as_whole_words_also_inside_urls() -> None:
+    text = "sign in at https://example.com/example?u=example with example, not xexample or example2 or EXAMPLE."
+    assert contracts.redact_values(text, ["example"]) == (
+        "sign in at https://redacted.com/redacted?u=redacted with redacted, not xexample or example2 or redacted.",
+        True,
+    )
+    # no part of a URL is exempt: userinfo, host labels
+    assert contracts.redact_values("http://Swordfish-9@h/ https://Swordfish-9.example.com", ["swordfish-9"]) == (
+        "http://redacted@h/ https://redacted.example.com",
+        True,
+    )
+    assert contracts.redact_values("nothing here", ["example"]) == ("nothing here", False)
+    assert contracts.redact_values("a-b+c", ["b+c", "a-b+c"]) == ("redacted", True)  # the longest first
 
 
 # --- credential parameters and userinfo ------------------------------------------------------------------
@@ -1032,6 +1824,89 @@ def test_a_site_contradicting_an_excluded_url_never_passes() -> None:
     with pytest.raises(EventRejected) as caught:
         normalize_event(raw, excluded_sites=PRIVATE_SITES)
     assert caught.value.code == "malformed"
+
+
+#: What an event without a page host carries about the page it may have been on.
+PAGE_CONTENT: dict[str, Any] = {
+    "page_title": "Acme Portal Home",
+    "page_text": "HOME-PAGE-TEXT-7731 Search invoices; the password: Hunter2-fake-pw",
+    "query": "?q=Contoso",
+}
+#: (phase, op, source, actor, the text is the user's own words): the attribution rule of the history surfaces.
+HOSTLESS_TEXTS = [
+    ("boundary", "task_start", "operator", "human", True),
+    ("boundary", "task_start", "hermes", "agent", False),
+    ("boundary", "task_end", "operator", "agent", False),
+    ("boundary", "task_end", "operator", "human", False),
+    ("correction", "other", "user_correction", "human", True),
+    ("correction", "other", "operator", "human", False),
+    ("correction", "other", "user_correction", "unknown", False),
+]
+
+
+def _hostless(phase: str, op: str, source: str, actor: str) -> dict[str, Any]:
+    """A boundary or correction event as an operator sends it for the page a task started or ended on: no site,
+    no route, the page's title and text (D1 of the 2026-10-22 live check)."""
+    action = {"op": op, "target": "link Invoice INV-1001", "site": None, "route": None, "args": {}}
+    return raw_event(phase=phase, source=source, actor=actor, action=action, text="Search for Contoso", **PAGE_CONTENT)
+
+
+@pytest.mark.parametrize(("phase", "op", "source", "actor", "own"), HOSTLESS_TEXTS)
+def test_an_event_without_a_page_host_keeps_only_the_users_words_while_sites_are_excluded(
+    phase: str, op: str, source: str, actor: str, own: bool
+) -> None:
+    event = normalize_event(_hostless(phase, op, source, actor), excluded_sites=PRIVATE_SITES)
+
+    assert contracts.EXCLUSION_PAGE_HOST_UNKNOWN == "page_host_unknown"
+    assert (event.page_title, event.page_text, event.query, event.target) == (None, None, None, None)
+    assert event.text == ("Search for Contoso" if own else None)
+    # Only the drop is marked: nothing that was dropped leaves a redaction or truncation mark behind.
+    assert event.exclusions == ("page_host_unknown",)
+    assert not event.truncated
+    assert (event.phase, event.op, event.site, event.route) == (phase, op, None, None)  # the boundary itself stays
+
+
+def test_without_exclusions_an_event_without_a_page_host_keeps_its_content() -> None:
+    event = normalize_event(_hostless("boundary", "task_end", "operator", "agent"), excluded_sites=SITES)
+
+    assert (event.page_title, event.query, event.target, event.text) == (
+        "Acme Portal Home",
+        "?q=Contoso",
+        "link Invoice INV-1001",
+        "Search for Contoso",
+    )
+    assert event.page_text is not None and "HOME-PAGE-TEXT-7731" in event.page_text
+    assert "page_host_unknown" not in event.exclusions
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        {"op": "task_end", "site": "example.com"},
+        {"op": "task_end", "route": "https://example.com/search?q=Contoso"},
+    ],
+    ids=["site", "full-url-route"],
+)
+def test_an_event_on_a_known_host_keeps_its_content_while_other_sites_are_excluded(action: dict[str, Any]) -> None:
+    raw = raw_event(phase="boundary", action=action, text="I searched for Contoso", page_title="Invoice Search Results")
+
+    event = normalize_event(raw, excluded_sites=PRIVATE_SITES)
+
+    assert (event.site, event.text, event.page_title) == (
+        "example.com",
+        "I searched for Contoso",
+        "Invoice Search Results",
+    )
+    assert "page_host_unknown" not in event.exclusions
+
+
+def test_an_event_without_a_page_host_and_without_content_is_not_marked() -> None:
+    gap = raw_event(phase="gap", action={"op": "other", "args": {"reason": "source_excluded"}})
+
+    event = normalize_event(gap, excluded_sites=PRIVATE_SITES)
+
+    assert event.exclusions == ()
+    assert json.loads(event.args_json) == {"reason": "source_excluded"}
 
 
 def test_hosts_named_by_an_event() -> None:

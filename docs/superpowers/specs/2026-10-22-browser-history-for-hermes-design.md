@@ -1,8 +1,9 @@
 # Browser history for Hermes — design
 
-Status: design (2026-10-22). Phase B1 (read side) is implemented; the shipped
-contract and its differences from this text are in `docs/dev/SPEC.md`
-§"History for Hermes". Phases B2 and B3 are not built. Builds on the
+Status: design (2026-10-22). Phases B1 (read side) and B2 (Hermes as a
+collector) are implemented; the shipped contract and its differences from
+this text are in `docs/dev/SPEC.md` §"History for Hermes". Phase B3 (live
+validation) is open. Builds on the
 browser-activity component shipped by
 [`2026-10-19-browser-activity-learning-design.md`](./2026-10-19-browser-activity-learning-design.md)
 and its 2026-10-22 decision log (record everything except secrets). The
@@ -133,6 +134,16 @@ surface below calls it and nothing else touches the store for this purpose.
      whose text is the turn's user message (captured at `pre_llm_call`, kept
      in a bounded per-session map); `post_llm_call` is not needed because the
      next turn's first event closes nothing — episodes are append-only.
+     (Amended after the B2 live check, 2026-10-22, D1: the task start and a
+     chat correction are now held until the turn ends, `post_llm_call` or
+     the next `pre_llm_call`, and written with every value Hermes typed into
+     a secret field replaced by `redacted`; SPEC.md §"History for Hermes".)
+     The task start is the user's words only for a turn whose `platform` is
+     in `history_human_platforms` (default the local surfaces `cli`, `tui`,
+     `desktop`; security review 2026-10-22: a gateway, an API client or an
+     unknown platform is not assumed to be the owner). The shipped rules for
+     the open page, stale snapshots, page-text secrets, attempt ids, batch
+     limits and per-profile state are in SPEC.md §"History for Hermes".
    - Corrections in chat: a user message starting with `correct:` or its
      Japanese equivalent (the operator's convention) records a `correction`
      event with `source: user_correction`, `actor: human`, `attempt_id` = the
@@ -160,7 +171,8 @@ surface below calls it and nothing else touches the store for this purpose.
   operator task text "Log in with the username demo-user and the password
   ..." was stored verbatim and would have reached the turn-start block,
   Hermes's `state.db` and the provider). The receiver replaces the value
-  after a password-like keyword (password, passcode, PIN, one-time code,
+  after (and, since the B2 live check, before: "Hunter2-x as the password")
+  a password-like keyword (password, passcode, PIN, one-time code,
   secret, API key, access token, token, and the Japanese words for password,
   PIN, passcode, one-time password and verification code) with `redacted`
   in task and correction text, target labels, page titles and page text,
@@ -191,6 +203,7 @@ surface below calls it and nothing else touches the store for this purpose.
 | `history_turn_context` | `true` | item 2 |
 | `history_capture_hermes` | `true` | item 4 (requires `collection_enabled`) |
 | `history_chat_corrections` | `true` | `correct:` (or its Japanese equivalent) in chat |
+| `history_human_platforms` | `[cli, tui, desktop]` | item 4: Hermes platforms whose turns are the user's own words (task starts in the user's words, chat corrections); any other or a missing platform never is. Add a gateway platform (`telegram`, `slack`, …) only for a single-user gateway (security review 2026-10-22) |
 | `history_max_chars` | 1500 | per injected block |
 | `history_max_episodes` | 3 | per injected block |
 | `history_lookback_days` | 90 | episodes older than this are not injected (tools may still query them) |

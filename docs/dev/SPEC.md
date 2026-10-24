@@ -119,7 +119,14 @@ Current defenses include:
   enforced in `privacy_check`'s `pre_tool_call`: free-form code tools are
   refused below `blocklist` except exact first-party read-only commands,
   unknown tools count as internet-capable, and a session that read private
-  data is locked down (taint).
+  data is locked down (taint). The `ask` approval prompt, which Hermes also
+  writes to its plaintext `logs/agent.log` (and quotes in the denial when no
+  one can approve), shows an argument whose name has a free-text word
+  (`text`, `value`, `password`, `secret`, `token`, `content`, `message`,
+  `prompt`, … : `egress.free_text_argument`) only as `<N characters>`, and
+  every other value and a network command with URL credentials scrubbed and
+  free-text secrets redacted (the activity receiver's
+  `contracts.scrub_urls` / `contracts.redact_text_secrets`).
 
 Accepted limitations include:
 
@@ -3696,8 +3703,9 @@ removed before any release. What remains is capture, the encrypted store,
 corrections stored as raw events, retention, backup and restore, and Hermes's
 direct use of the stored history, designed in
 [browser history for Hermes](../superpowers/specs/2026-10-22-browser-history-for-hermes-design.md):
-its read side (phase B1) is shipped and specified in §"History for Hermes"
-below; recording Hermes's own browser calls (phase B2) is not built yet
+its read side (phase B1) and Hermes as a collector of its own browser calls
+and of the user's chat corrections (phase B2) are shipped and specified in
+§"History for Hermes" below; the live validation (phase B3) is open
 ([`TODO.md`](./TODO.md) §"Browser activity learning").
 
 ### Purpose and boundary
@@ -3710,9 +3718,11 @@ summary and no guidance is produced; Hermes reads bounded excerpts of the raw
 history instead (§"History for Hermes"). Hermes core is unchanged. The
 `activity` component keeps its place in the plugin's fixed wiring order
 (keyvault, llm_guard, network, privacy_check, dbcrypt, e2e, activity, wizard);
-its `register()` adds the `transform_tool_result` and `pre_llm_call` hooks,
-the `mordred_browser_history` and `mordred_browser_history_episode` tools and
-the `browser-history` skill, and nothing else (no auxiliary task).
+its `register()` adds the `transform_tool_result` and `pre_llm_call` history
+hooks, the `mordred_browser_history` and `mordred_browser_history_episode`
+tools, the `browser-history` skill and the capture hooks `post_tool_call`, a
+second `pre_llm_call` and `post_llm_call` (§"History for Hermes"), and nothing
+else (no auxiliary task).
 
 **Capture policy (2026-10-22).** The receiver records everything a collector
 reports except secrets: typed text outside sensitive fields, URLs with their
@@ -3755,10 +3765,12 @@ the raw retention default is 365 days.
   the store are audited as `activity.capture_refused`
   once per process and code, with the `peer_id`
   (`activity/_capture_audit.py`). The history surfaces audit
-  `activity.history_unavailable` the same way (§"History for Hermes"); those
-  are the only two activity audit codes.
+  `activity.history_unavailable` the same way, and Hermes's own capture audits
+  `activity.capture_suspended` once per suspended session (§"History for
+  Hermes"); those are the only three activity audit codes.
 - Each public store method uses one short connection and one transaction
-  (`busy_timeout` 2 s, host journal mode left alone); nothing is retried.
+  (`busy_timeout` 2 s, 250 ms when Hermes records its own browser calls; host
+  journal mode left alone); nothing is retried.
 - `ActivityStore.backup(dest)` writes a new `0600` file through the SQLite
   backup API (keyed by the shim) and refuses a plaintext result.
   `restore(src)` keeps the current profile binding, writes a new
@@ -3818,7 +3830,10 @@ and revocable on its own:
   `extension`; the localhost page principal cannot.
 - Trust (`paired_peer`) and permitted use (`learning`) come from the
   principal, never from the payload; a batch's `producer_kind` must match the
-  credential's kind.
+  credential's kind (`operator`, or `browser` for the extension). The kind
+  `hermes` belongs to the in-process principal of Hermes's own capture
+  (§"History for Hermes"); a peer credential record naming it is refused as
+  `invalid_token`.
 - Limits: at most 100 events per batch, 16 KiB normalized per event
   (`MAX_EVENT_BYTES`; 4 KiB before 2026-10-22), 256 KiB per raw batch frame.
   Configuration may lower these, never raise them.
@@ -3899,7 +3914,10 @@ and revocable on its own:
   value after a secret keyword. Keywords (without case; an ASCII keyword must
   not touch an ASCII letter or digit): `password`, `passwd`, `passphrase`,
   `passcode`, `pwd`, `pin`, `pin code`, `otp`, `one-time code`, `secret`,
-  `api key`, `api token`, `access token`, `token`, and the Japanese words for
+  `api key`, `api token`, `access token`, `token` (the words of a two-word
+  keyword joined by up to 32 same-line whitespace characters, `_` or `-`,
+  never across a line break; its first word, when a keyword itself, is read
+  on its own too), and the Japanese words for
   password, PIN, passcode, one-time password and verification code. Between
   keyword and value come at least one connector (none is needed after a
   Japanese keyword or before a double or CJK quote): whitespace, `:` or `=`
@@ -3909,7 +3927,8 @@ and revocable on its own:
   brackets), else one token ending at whitespace, hiragana, CJK punctuation
   or full-width punctuation, with closing punctuation (`.,;:!?)]}>` and
   quotes) kept outside the replacement; an unquoted token over 256
-  characters is replaced to its end. Nothing is replaced when the value holds
+  characters is replaced to its end (a value of several words runs on, see
+  below). Nothing is replaced when a value of one word holds
   no ASCII letter or digit (masked dots, Japanese words), is a URL, `redacted`
   or a keyword, or is a stop word (`contracts.SECRET_VALUE_STOP_WORDS`:
   interface words such as `field`, `box`, `input`, `form`, `reset`,
@@ -3921,12 +3940,187 @@ and revocable on its own:
   the value must also be credential-shaped (a digit, a symbol or a capital
   after the first letter): "the password Hunter2-fake-pw" becomes "the
   password redacted", "pin the tab" and "the token count is low" stay.
+  A value named before its keyword is replaced too (B2 live check
+  2026-10-22: "type demo-user as the username and Hunter2-fake-pw as the
+  password" was stored verbatim). In English the value is followed by at
+  most five words from `as`, `for`, `in`, `into`, `to`, `is`, `was` (at least
+  one of these), `the`, `a`, `an`, the possessive pronouns, `this`, `that`,
+  `field`, `box` and `input`, then the keyword: "Hunter2-fake-pw as the
+  password", "use X for my PIN", "type X into the password field", "X is the
+  password" (after `is` / `was`, `pin`, `secret` and `token` need no verb:
+  "4821 is the PIN"). The value is quoted
+  (the opening mark starting a word) or one whitespace-free token that does
+  not end in `.,;:!?`. Nothing is replaced when the word after the keyword
+  makes the keyword a modifier (`contracts._KEYWORD_HEADS`, such as
+  `manager`, `settings`, `reset`, `page`, `list` or `count`: "add 2FA in the
+  password settings"). The value must be quoted, credential-shaped or follow
+  a verb that puts a value somewhere (`type`, `enter`, `use`, `input`, `put`,
+  `paste`, `insert` and their inflections, `fill in`, `key in`): "use
+  swordfish as the password" becomes "use redacted as the password", while
+  "same as the password", "click in the password field" and "type it into
+  the password field" stay. Before `pin`, `secret` and `token` it must
+  follow such a verb and be quoted or credential-shaped: "enter 4821 for the
+  PIN" is replaced, "use swordfish as the token" and "add v2 to the token
+  list" stay. In Japanese the value (quoted, or one run of ASCII
+  characters) comes before the object particle, followed by the keyword, an
+  optional word for field and the target or direction particle or the word
+  for "as"; or before the word for "called" followed by the keyword; and a
+  value between the target particle (or the word for "as") after a keyword
+  and the object particle is replaced as well. These Japanese forms hold
+  for an ASCII keyword in a Japanese sentence too ("PIN"); with `pin`,
+  `secret` or `token` the value must then be quoted or credential-shaped.
+  These newer forms (and the two below) never take a placeholder as the
+  value (`something`, `anything`, `nothing`, `everything`, `whatever`,
+  `same`, `value`, `values`, `text`, `case-sensitive`, `case-insensitive`;
+  `contracts._PLACEHOLDER_WORDS`); the rule after a keyword keeps its own
+  stop words only, so it replaces no less than before.
+  Two more forms name the value after its keyword. "Set the password (for
+  the bank) to Hunter2-x": the keyword, optionally a qualifier as in the
+  next form, `to`, the value, with a verb that sets it (`set`,
+  `change`, `update`, `reset`, `modify` and their inflections) at most three
+  words before the keyword and no sentence punctuation between; the value is
+  quoted or credential-shaped, after `pin` an unquoted value must be 4-12
+  digits and after `token` or `secret` credential-shaped and at least 8
+  characters ("update the PIN to 4821" is replaced; "set the password to
+  expire", "update the token to the latest version", "set the token to v2"
+  and "add the password to 1Password" stay). "The password for the bank is
+  Hunter2-x": the keyword, one of `for`, `on`, `at`, `of`, `in` and one to
+  three more words (none ending in `.,;!?`), then `is` / `was` or `:` / `=`,
+  then the value, quoted or credential-shaped (after `pin`, `secret` and
+  `token`: quoted, or at least 4 characters holding a digit): "my password
+  on example.com is: abc123!" and "password for admin = s3cr3t!" are
+  replaced, "the password for the account is required" and "the password for
+  the bank is in my notes" stay. In both forms an unquoted value followed by
+  a unit word (`characters`, `digits`, `days` ...) is a length, not a secret
+  ("change the password to 12 characters"). The Japanese "password, object
+  particle, value, target particle, set/change" order is covered by the
+  particle rule above. Every keyword outside a URL is read on its own, also
+  one inside another keyword's value or qualifier; every form is read for
+  each keyword, and all the values found are merged before they are
+  replaced, so no form hides another: "password for account PIN=4821 is
+  Hunter2-x" and "change the password for bank is Hunter2-x to OtherPw-3"
+  lose both values (Codex reviews). A keyword inside a found value that is
+  one unquoted run, holds no opening quote or bracket and no first character
+  of a Japanese form, and is followed only by closing marks cannot name
+  anything outside it and is not read again (`contracts._closed_part`). The
+  word that makes a keyword a modifier or a number a length is looked for on
+  the same line only. Each per-keyword question about the text (where a run,
+  a token or a run of marks ends) is answered by bisecting positions found
+  once per text (`contracts._TextIndex`), so a text costs O(n log n) at
+  worst. Tests check that every value the redactor of `efe9bb27d` replaced
+  is still replaced (a frozen copy of it in
+  `tests/_activity_redaction_baseline.py`), that whatever one form finds for
+  one keyword alone is replaced, also in generated pairs, triples and nested
+  phrasings (`tests/test_activity_redaction_properties.py`), that the index
+  stops at exactly the characters the scans it replaced stopped at (every
+  BMP code point; an ASCII run is ASCII without whitespace, control
+  characters included) and redacts generated text with control characters,
+  other spaces, zero-width characters and other scripts exactly as those
+  scans did, that every word of the corpus values written as speech writes
+  them ("Hunter 2 fake pw") is replaced in every keyword frame, and that 38
+  adversarial shapes stay near-linear between 10 KB and 40 KB.
+  A value of several words (live speech test 2026-10-23: speech recognition
+  writes a spoken password as words, and "log in with demo user as the
+  username and hunter 2 fake pw as the password" kept all but "pw"). Wherever
+  a form above takes an unquoted value, the value runs on over the words after
+  it (keyword first) or back over the words before it (value first) to the end
+  of its clause, at most eight words (`contracts.MAX_SECRET_VALUE_WORDS`),
+  each read for at most 256 characters: "the password is hunter 2 fake pw and
+  then click Login" becomes "the password is redacted and then click Login",
+  "... and hunter 2 fake pw as the password" becomes "... and redacted as the
+  password" (the username before `and` stays). The words are joined by
+  same-line whitespace; the clause ends at closing punctuation (kept outside
+  the replacement), a line break, an opening quote or bracket, CJK
+  punctuation, hiragana that is no joint (below), or a word that starts
+  another part: a stop word other than the articles, possessives and
+  demonstratives (`and`, `then`, `please`, `with`, `in`, `on`, `as`, `is`,
+  `expires` ...; a passphrase may hold "my" or "the"), `also`, `after`,
+  `before`, `because`, `which`, words of time (`now`, `today`, `yesterday`
+  ...), a verb that puts or sets a value, or a keyword that starts a frame of
+  its own (followed by a label, `is` / `was`, a particle or a direct quote:
+  "PIN: 4821", "DB_PASSWORD=xyz"). Privacy first, when unsure the rest of
+  the clause goes (security review of `748e431a0`): a word that only holds
+  or starts a keyword ("red pin cushion 7", "spinach", "tokenize",
+  "passwordless") stays inside the value, a separator word (`=`, `:`, `/`,
+  `|`) is read through ("hunter / 2 fake pw"; it ends the value only after a
+  field label such as `user` or `email`: "hunter2 user = demo"), and reading
+  on a URL is read through too (reading back it ends the value). `at`, `to`
+  and `for` may be a spoken symbol or digit ("hunter at fake dot pw"), so
+  they end the value only when the word on their far side starts another
+  part, is typed (holds a symbol), is a keyword or is missing ("for the
+  bank", "to log in", "PIN=4821 to Hunter2-x"). After `is` / `was` or a
+  label, a value of several words may start with an article or possessive
+  ("the password is my secret sauce 42"). In a
+  Japanese reading (a Japanese keyword or particle after the keyword) a
+  joint may stand between two words: the particles for "to", "of" and "and"
+  and the readings of digits, which speech recognition writes for a spoken
+  digit (romanized: in "pasuwaado wa hantaa ni feiku PW de roguin shite",
+  where speech wrote the digit 2 as "ni", "hantaa ni feiku PW" is replaced
+  and the username clause before the comma stays), unless a verb or a
+  Japanese interface word follows the joint ("ni henkou", to change). When the
+  word next to the frame is accepted alone, its further words are replaced
+  with it. When it is not ("password hunter 2 fake pw", "hunter 2 fake pw as
+  the password", spaced katakana words after the Japanese password keyword),
+  the words are one value when there are at least two, the word next to the
+  frame may start a value (no stop word, head, placeholder, unit, pronoun
+  such as "you", keyword or URL: "the password you received", "the password
+  field" and "the password reset page" stay), some word holds an ASCII letter
+  or digit or every word is katakana (Japanese words in kanji describe, they
+  stay), and after `pin`, `secret` and `token` some word is credential-shaped
+  (after "set the PIN to" the words are 4-12 digits in all: "update the PIN
+  to 4 8 2 1"). The first word of a two-word keyword read on its own never
+  takes such a value ("pin code 0000" keeps "code"). `secret_values` lists a
+  value of several words whole and also without its whitespace
+  ("hunter2fakepw"), as a spoken password is likely typed. A value written
+  only in kana (live microphone test 2026-10-23: speech recognition writes a
+  spoken password and its digits in katakana or hiragana, with no ASCII
+  letter or digit) is replaced too: after a Japanese keyword joined by the
+  topic particle or a label (not the object or subject particle), before the
+  object particle or the word for "called", and between the target and
+  object particles, a value that starts with kana runs, hiragana and spaces
+  included, to its clause's end: punctuation, a line break, a keyword, a
+  copula, a verb ending ("shite", "kudasai") or a particle before a verb or
+  an interface word ("de roguin", "wo nyuuryoku"); reading back, also a
+  clause ending or a particle after a word. It never starts with a statement
+  ("kochira", "arimasen", "nai", an honorific before kanji as in "o-wasure"),
+  a verb or a Japanese interface word (field, reset, manager, e-mail
+  address, random ...), so "the password field", "forgot the password" and
+  "the password is incorrect" stay; a value in kanji still needs an ASCII
+  letter or digit.
   Keywords inside a URL are left to URL scrubbing. Known gaps: a plain word
-  after whitespace alone ("password swordfish"), a value separated from its
-  keyword by other words ("password for the bank is …"), plural keywords,
-  card numbers and secrets without a keyword in free text are kept.
+  after whitespace alone ("password swordfish"), a plain word after `to` or
+  after a qualifier ("set the password to swordfish", "the password for the
+  bank is swordfish"), a qualifier of more than four words or holding
+  sentence punctuation ("the password for my old work account at home is
+  …"), a value before its keyword that is joined to it by other words ("log
+  in with Hunter2-x, that is the password") or is a plain word without such
+  a verb ("admin for the password"), plural keywords, card numbers and
+  secrets without a keyword in free text are kept, except long secret-shaped
+  tokens in the user's own words (below); a spoken value without any keyword
+  ("log in with demo user slash hunter 2 fake pw") is kept, and one of more
+  than eight words, or holding a word that ends a value ("the", "and", "in"),
+  loses only the words up to there. Hermes's own
+  capture additionally replaces, whatever the phrasing, every value it typed
+  into a secret field in its turn's task start and correction
+  (§"History for Hermes").
   Events stored earlier are not rewritten; every Hermes surface applies the
   same redaction when it reads them (§"History for Hermes").
+- **Secret-shaped tokens in the user's own words (live B2 re-run, N4).** In a
+  task start or correction that is the user's own words
+  (`contracts.speaks_for_user`), each run of ASCII without whitespace whose
+  core (opening and closing marks left out) is a secret-shaped token of at
+  least 20 characters (rule 5 of the typed-text check below: a letter and a
+  digit or a symbol other than `-`, `_`, `.`; not a URL, host, e-mail
+  address, file path or date) is also replaced by `redacted`
+  (`contracts.redact_secret_shaped_tokens`, exclusion
+  `text_secrets_redacted`), at ingest and whenever a surface shows the
+  user's words, so a password without a keyword ("my login is demo-user /
+  Kx9-Hunter2-fake-pw-77") is not kept. Usernames such as `demo-user`, URLs,
+  dates and ordinary words are kept. The trade-off is that of typed text: a
+  long identifier mixing letters and digits in the user's words
+  (`order-2026-000123-final`) is replaced too. Known gap: a keyword-less
+  password shorter than 20 characters (the live check's `Hunter2-fake-pw`,
+  15) is kept unless Hermes types it into a secret field in the same turn.
 - **Typed text (2026-10-22).** A `type` or `search` operation keeps its text
   when the collector classifies the field (`args.field_kind`) as anything
   other than `sensitive`; a `type` event that sends the text under
@@ -3972,18 +4166,35 @@ and revocable on its own:
   top-level `query` and the target label, redirect targets included
   (parameter values decoded up to four levels deep). Unless the operator excludes a messaging or
   mail site, what the user types there (in fields the collector classifies
-  as non-sensitive) and any page text the collector sends are recorded. An
+  as non-sensitive) and any page text the collector sends are recorded.
+  **Events without a page host (2026-10-22).** While `excluded_sites` is
+  non-empty, an event whose page host is unknown (no `site` and no
+  full-URL `route`: a task start or end, a correction, a gap marker, an
+  action on a page the collector did not name) could be an excluded host's,
+  which the receiver cannot check. It is stored (an episode keeps its
+  boundaries) without its site-controlled content: `target`, `query`,
+  `page_title`, `page_text`, and `text` unless the text is the user's own
+  words (`contracts.speaks_for_user`, the rule of §"History for Hermes": a
+  `task_start` whose `actor` is `human`, or a `correction` whose `source` is
+  `user_correction` and whose `actor` is `human`). Anything dropped adds the
+  exclusion `page_host_unknown`; the route path, `args` and the event's
+  metadata stay. So a receiver-only exclusion keeps the title, text and
+  completion summary of an excluded page out of the store even when a
+  collector (an older operator) names no host on its task boundaries. A
+  host named only in free text (a task instruction naming the excluded
+  site) is not checked. Without exclusions nothing changes. An
   invalid `excluded_sites` (not a list, or an entry that names no host) never
   means "exclude less": the entries that name a host stay in effect for every
   reader, and the receiver refuses every batch as `excluded_sites_invalid`
   (`activity status` shows `collection: refused`) until it is fixed.
 - `source` (`operator`, `browser`, `hermes`, `user_correction`) and `actor`
   (`human`, `agent`, `unknown`) are collector attribution (bounded enums), not
-  receiver-verified; only `trust` (`paired_peer`) and `permitted_use`
-  (`learning`) come from the authenticated principal. A collector-submitted
+  receiver-verified; only `trust` (`paired_peer`, or `local` for Hermes's own
+  capture) and `permitted_use` (`learning`) come from the authenticated
+  principal. A collector-submitted
   `correction` is stored as an ordinary event; nothing is derived from it.
   Every combination is stored (the capture policy records everything but
-  secrets, and both producer kinds are the user's own collectors); Hermes
+  secrets, and every producer kind is one of the user's own collectors); Hermes
   shows a text as the user's only by the attribution rule of §"History for
   Hermes" (the user's own words).
 - Episodes record their revision (advanced by every committed append), worst
@@ -4013,7 +4224,8 @@ and revocable on its own:
   appends one `user_correction` / `human` / `correction` event, linked to the
   attempt when given, to an existing episode (also one a paired peer wrote)
   and prints the event id. A correction sent by the operator collector (for
-  example its "correct:" input) is stored the same way. There is no
+  example its "correct:" input) is stored the same way, and so is one typed
+  in Hermes chat (`correct: …` or its Japanese equivalent, §"History for Hermes"). There is no
   candidate, no lesson and no model call.
 
 ### Hermes integration
@@ -4043,8 +4255,11 @@ per-process state.
   policy write lock, every other key and comment preserved; a `plugins` or
   `mordred_activity` value that is not a mapping or is shared through a YAML
   anchor is refused; the lock is the policy writer's in `<home>/mordred`) and
-  `activity status` shows it. The switch does not affect collection: with
-  `collection_enabled` on, batches are still received and stored.
+  `activity status` shows it. The switch does not affect the collectors: with
+  `collection_enabled` on, their batches are still received and stored; only
+  Hermes's own capture (below: its browser calls and the user's chat
+  corrections) stops with it and restarts when it is set again, as `use off`
+  and `use on` say.
 - **Lookup-tools switch.** `history_tools_enabled` (default on) removes only
   the two lookup tools and keeps the automatic blocks (the navigation block
   and the turn-start context): `ActivityConfig.history_tools_active` is
@@ -4066,9 +4281,10 @@ per-process state.
   cached): `_gate.check_protection`, a plaintext check of the file, the keyed
   opener (`_gate._keyed_opener` refuses an unkeyed connection) and a read-only
   check of `activity_meta` (schema 2 or 3, else `store_unavailable` /
-  `schema_newer`; the profile binding, else `profile_mismatch`). The Hermes
-  process never creates, migrates or writes the store; a profile without
-  `mordred.db` simply has no history. A refusal, or any other error, makes the
+  `schema_newer`; the profile binding, else `profile_mismatch`). The history
+  surfaces never create, migrate or write the store; a profile without
+  `mordred.db` simply has no history. Only the capture hooks below write, and
+  only through the receiver. A refusal, or any other error, makes the
   surface go on without history, is audited as `activity.history_unavailable`
   once per process and code (`internal_error` for an unexpected exception)
   and keeps every surface off the store for 60 seconds. During those seconds
@@ -4078,10 +4294,17 @@ per-process state.
   opener passes that bound to the SQLCipher shim's schema probe, and the
   read then waits only for what is left of it.
 - **Bounded queries.** At most the 300 newest episodes in the time window
-  are considered per query; a summary reads at most 400 events of an episode
-  (corrections are read separately) and an episode detail at most 1000:
-  task starts, corrections and other task boundaries first, then the newest
-  remaining events, returned in the order they were received.
+  are considered per query; a summary reads at most 400 events of an episode,
+  the earliest in time (`observed_at`, then the order they were received: a
+  collector sends a task start when its task or turn ends, with the time it
+  started, so the start page still leads the route, the titles and the
+  episode's hosts; the user's first task start and last corrections are read
+  separately, so a task start Hermes writes after a long turn's calls is never
+  cut off) and an episode detail at most 1000: task starts, corrections and
+  other task boundaries first, then the newest remaining events, returned in
+  time order (`observed_at`, then the order they were received; a task start
+  or correction Hermes writes when its turn ends carries the turn's start, so
+  it leads the turn's calls).
   `episodes_for_site` matches a host and its subdomains (a leading `www.` is
   ignored). `episodes_for_terms` matches the `terms` of the user's own words
   (task starts and corrections, below) and the labels of the episode's hosts
@@ -4107,9 +4330,24 @@ per-process state.
   its `site`, and the hosts of URLs in its stored route, query and target
   label (parameter values decoded), so a host added to `excluded_sites`
   after capture hides earlier episodes that only linked or redirected to it.
-  The URL check runs only while `excluded_sites` is non-empty, as one query
-  over the candidate episodes' distinct rows that can hold a URL. A
-  lookup or navigation naming an excluded host gets nothing. Hosts are
+  An episode holding either marker of an excluded host is hidden the same
+  way whatever `excluded_sites` holds at read time: a refusal marker, an
+  event whose `args.reason` is `source_excluded` (the `gap` the operator
+  records for a batch the receiver refused as an excluded host's;
+  `history.REFUSED_SQL`), or the collector's exclusion mark, an event whose
+  `exclusions` hold `site_excluded` (the operator sends an event on a host
+  excluded in the collector itself, `--activity-exclude-site`, with its
+  position only: no site, route, target or content;
+  `history.COLLECTOR_EXCLUDED_SQL` matches that whole token of the stored
+  JSON array). Such an episode touched an excluded host the marker does not
+  name: a receiver older than the rule for events without a page host
+  (§"Event contract") kept the page content of its host-less task
+  boundaries, and its `human` task start keeps the user's instruction for
+  that host (2026-10-22). Hermes's own capture never records either marker
+  (a call on an unknown page is dropped, not marked). One query over the
+  candidate episodes' distinct rows checks both: the rows holding a marker
+  and, only while `excluded_sites` is non-empty, the rows that can hold a
+  URL. A lookup or navigation naming an excluded host gets nothing. Hosts are
   compared without case or a trailing dot. Configured entries are normalized
   to bare hosts (`https://Bank.example/x`, `*.bank.example`, `bank.example.`
   and `bank.example:443` all mean `bank.example`; IDNA for non-ASCII); one
@@ -4135,7 +4373,12 @@ per-process state.
   mordred_browser_history)` when more matched. Page text and typed text are
   never included.
 - **Turn-start context** (`pre_llm_call`). Only episodes with a task start
-  or correction in the user's own words qualify. When the user message names a host or
+  or correction in the user's own words qualify, and never one without a site
+  and without a successfully dispatched call (an event in phase `dispatched`
+  or `observed` whose result is not a failure): every call refused,
+  cancelled, timed out or failed on a page nobody can name is no work to
+  pick up (`history._with_work`; the navigation block, which needs a site,
+  never shows one either; the lookup tools still return it). When the user message names a host or
   URL (episodes on it or its subdomains), or shares at least two match terms
   (one for a one-term message) with an episode's task or correction text
   (host labels are not matched here), the hook
@@ -4165,12 +4408,28 @@ per-process state.
   in-process budget per Hermes session counts injected characters
   (`history_session_budget_chars`) and shown `(episode id, revision)` pairs:
   an episode is not injected twice in a session until it changes, a host with
-  nothing new gets no block, and after the budget only the tools answer.
+  nothing new gets no block, and after the budget only the tools answer. The
+  episodes Hermes's own capture recorded for the session (below; the newest 64
+  per session, `capture_hermes.own_episodes`) are never injected into that
+  session's blocks: they are its own work, already in its conversation, and
+  Hermes calls `post_tool_call` before `transform_tool_result`, so the episode
+  a navigation has just recorded would otherwise take the newest slot and be
+  shown again on every later navigation. That memory is per process and the
+  history hooks run before the capture's, so the same reads also leave out,
+  in one more bounded query, every episode holding an event of this profile's
+  Hermes principal (`hermes:<profile>`) with the session's
+  `hermes_session_id` (`capture_hermes.own_session`; B2 live check N3: after
+  `hermes chat --resume` the first turn's block showed the session's own
+  episode). Only the principal's events count, since a paired collector can
+  send any `hermes_session_id`, and only while the episode's session reference
+  is `bound` (a restore marks it `unavailable`: the restored conversation may
+  no longer hold that work).
 - **Lookup tools** (toolset `mordred_activity`, `check_fn`: the feature,
   the master switch and `history_tools_enabled` on and the gate passing). `mordred_browser_history(query,
   site, since, until, limit ≤ 10)` returns episodes (id, sites, start and last
   time, task, outcome, steps, routes, corrections, titles) and,
-  with `site`, a 600-character excerpt of the newest page text on that host;
+  with `site`, a 600-character excerpt of the newest page text on that host
+  (newest by `observed_at`, then receipt);
   `since` / `until` take `YYYY-MM-DD` (local, inclusive) or ISO date-times;
   with a site or period whose words match nothing, the newest episodes are
   returned. `mordred_browser_history_episode(episode_id)` returns the
@@ -4203,7 +4462,269 @@ per-process state.
   The navigation block and the turn-start context do not taint: they are not
   tool calls, and by construction they carry no typed text and no page text
   (only the user's own words, page titles inside Hermes's untrusted wrapper,
-  routes, outcomes and times).
+  routes, outcomes and times). Under `ask` the approval prompt for a browser
+  call, and the denial quoting it that Hermes writes to the plaintext
+  `logs/agent.log`, show typed text only as its length
+  (`"text": "<N characters>"`), so a denied `browser_type` into a password
+  field leaks nothing (`egress.free_text_argument`, §"Threat Model &
+  Accepted Limitations").
+- **Hermes as a collector** (phase B2, `activity/capture_hermes.py`).
+  Hermes's own browser tool calls and the user's chat corrections are
+  recorded through the receiver (`ingest.StoreReceiver`, the same path as a
+  paired collector's batches: configuration read per call, contract, size
+  limits, secret redaction, excluded sites, episode ownership, the protection
+  gate) as the in-process principal `hermes:<profile>` (`default` for the root
+  home; producer kind `hermes`, trust `local`, permitted use `learning`, one
+  producer id per process). Nothing is sent over the network. Recording needs
+  `enabled`, `collection_enabled` and `history_enabled`, plus
+  `history_capture_hermes` (calls) or `history_chat_corrections`
+  (corrections); an invalid `excluded_sites` is refused and audited like any
+  batch (`excluded_sites_invalid`).
+  - `post_tool_call`: every `browser_*` call is one event with `source`
+    `hermes`, `actor` `agent`, `hermes_session_id`, `turn_id` (Hermes's own,
+    when it passes one; never a made-up id) and an `attempt_id` of its own:
+    `tool_call_id` (as is when it fits the identifier alphabet, else with
+    other characters replaced by `-` (`call_abc` → `call-abc`), else `tc-` and
+    32 hex of its SHA-256; at most 51 characters of it) followed by `-` and 12
+    random hex digits. A provider may repeat a `tool_call_id` across turns
+    and sessions, and the store moves a correction into the episode of the
+    first attempt with its id, so no two calls share one. `browser_navigate` →
+    `navigate` (route from the final URL in the result, the requested one only
+    for a failed navigation; `page_title` from the result; `page_text` the
+    first 8000 characters of its `snapshot`, every line that the typed-text
+    rule below calls `sensitive` cut after its role and accessible name, since
+    a filled-in PIN or card number is part of the line, then the free-text
+    redaction of §"Event contract", `contracts.redact_text_secrets`), `browser_click` →
+    `click`, `browser_type` → `type`, `browser_press` → `key`,
+    `browser_scroll` → `scroll`, `browser_back` → `back`, any other browser
+    tool → `other` with the tool name as target (no arguments, no text). Only
+    `http(s)` URLs with an ASCII host become routes. A click or type names its
+    element by the ref's line in the snapshot of the page now open (below; at
+    most 60,000 characters kept per session): role and accessible name
+    (`textbox "Email"`), never the value after the name. A ref is read only
+    from its element's own annotation (`[ref=e5]` after the role and quoted
+    name, or a leading `[e5]`), never from text inside an accessible name or
+    a value, which the page writes; a ref that several lines claim, or that
+    is also written anywhere else in the snapshot (a page could spoof it),
+    takes the most sensitive kind (`sensitive` > `other` > `text`;
+    `_browser_results._snapshot_refs`, shared by the line lookup and the
+    remembered kinds below). Hermes's `status` `ok` (or none, as on the 0.13.0 floor) is
+    `dispatched` / `claimed_success` unless the result reports `success: false`
+    or an `error`, `error` is `claimed_failure`, `blocked` and `cancelled` are
+    the `cancelled` phase (`args.reason`) and `timeout` the `timed_out` phase.
+  - The open page. A call carries the URL of the page it acted on, so an
+    excluded host is refused for actions on its pages too. `browser_navigate`
+    and `browser_back` set the URL from their result's `url` (an `about:` page
+    has none; a missing URL, or one whose host the receiver's rules do not
+    take, leaves the page unknown) and the snapshot refs point into (the
+    result's `snapshot`; without one the snapshot is stale). A successful
+    `browser_snapshot` refreshes the snapshot and, when it reports one (the
+    CDP `frame_tree.top.url`), the URL, and its event carries that URL. Every
+    call that may leave the page makes the URL unknown and the snapshot stale
+    unless its result reports them: `browser_click`, `browser_press`, a
+    `browser_type` whose text holds a line break, `browser_console`,
+    `browser_cdp`, `browser_dialog` and any other browser tool, and every
+    failed, cancelled or timed-out call except one Hermes blocked before it
+    ran (`status` `blocked`). `browser_type`, `browser_scroll`,
+    `browser_vision` and `browser_get_images` keep both. In hermes-agent
+    0.19.0 (and on the 0.13.0 floor) click, key-press and type results report
+    neither (`{"success": true, "clicked": "@e7"}`), except the Camofox
+    backend's click result, which reports the URL the click reached (empty
+    when unknown). A session starts on an unknown page without a snapshot.
+    While the page is unknown and any `excluded_sites` is configured, a call
+    is not recorded at all (it could be on an excluded host's page; logged as
+    `source_excluded`, like the receiver's refusal, and the turn's task start
+    waits for the next recorded call); without exclusions it is recorded
+    without a route. With exclusions configured, Hermes's actions after a
+    click or key press are therefore recorded again only after a navigate, a
+    back or a snapshot that reports its URL.
+  - Typed text: the ref line is `sensitive` when it names a password (also
+    `Passwort`, and the Japanese words), passcode, passphrase, PIN, one-time
+    code, OTP, 2FA/MFA, secret, token, card or card security code, or a
+    verification or authentication code; its text is not sent (marks
+    `sensitive_field`, `typed_text_dropped`). A line that names nothing (no
+    accessible name) is `other`, a named field `text`; both keep what was
+    typed (owner decision 2026-10-22), unless the receiver's value check
+    withholds it (`looks_like_secret`). While the snapshot is stale (above)
+    the field is `sensitive` whatever its ref: its line may describe another
+    page's field. A ref that the session's most recent snapshot in this
+    process does not write (before its first snapshot too; an empty snapshot
+    writes none) is `sensitive`, as for the scrub below, like a target that is
+    no ref (`browser_type` takes only a snapshot ref, required in hermes-agent
+    0.19.0 and on the 0.13.0 floor; there is no selector form). This fails
+    closed like the scrub below (B2 final live check 2026-10-22,
+    M2: after `hermes chat --resume` Hermes typed a keyword-less password into
+    the transcript's password-field ref before any snapshot, and it was stored
+    as `other` typed text next to the scrubbed task text). A fresh session
+    cannot hold a valid ref before its first snapshot, so there this only
+    withholds a guessed ref. A withheld value is also scrubbed from the turn's
+    own text (below). A single character pressed with
+    `browser_press` is not kept (`typed_text_dropped`); named keys are.
+  - Episodes: one per Hermes session turn with browser calls. Once its first
+    call is recorded, the episode gets a `boundary` / `task_start` whose text
+    is the turn's user message (from `pre_llm_call`, at most 4000 characters),
+    with `source` `hermes`, written when the turn ends (below; its time is the
+    turn's start, its receipt after the turn's calls). Its `actor` is `human`,
+    so it counts as the user's
+    words for every surface above, only when the turn's `platform` is one of
+    `history_human_platforms` (compared without case or surrounding spaces).
+    The default holds hermes-agent 0.19.0's local interactive surfaces: `cli`
+    (the classic CLI, `hermes -z`, `/background`, and a gateway session on the
+    local platform), `tui` (`hermes --tui`, also in the desktop app's terminal
+    pane) and `desktop` (the desktop app's chat panel); the 0.13.0 floor
+    passes `cli` and `tui`. Every other platform records `actor` `agent`: a
+    gateway's (its platform key, such as `telegram`, `discord`, `slack`,
+    `whatsapp`, `signal`, `matrix` or `email`; the TUI resuming a gateway
+    session takes that session's), `api_server`, `webhook`, `acp`, `webui`,
+    `subagent`, `cron`, `curator`, an unknown value and a missing or empty
+    one. A turn without a text message gets no task start. A task start
+    names no page, so while `excluded_sites` is non-empty the receiver keeps
+    its text only when its `actor` is `human` (an `agent` task start is
+    stored without text, `page_host_unknown`; §"Event contract"). A call the
+    receiver refused (busy store, excluded host) does not start the episode:
+    the task start follows the turn's first acknowledged call, so it is never
+    stored without a call, and is written once. An event too large for
+    `max_batch_bytes` on its own is shortened first (page text, then text,
+    then title; marked truncated). Every write is one event in one batch.
+    Episodes are append-only; nothing closes them.
+    A turn whose message is a chat correction (below) has no task start, so
+    a correction never counts as a task in the user's words: the turn's
+    browser calls join the corrected episode while it is still the session's
+    last episode (the last one it recorded into), and otherwise (also when no
+    correction is held for the turn) start an episode without a task start.
+  - Chat corrections (`pre_llm_call`): a message of a turn whose platform is
+    one of `history_human_platforms` (above) starting with
+    `correct:` or the Japanese word for correction ("teisei", U+8A02 U+6B63)
+    and a colon (also a full-width one; any case; the operator's convention)
+    records its text after the prefix as `correction` with `source`
+    `user_correction`, `actor` `human`, `attempt_id` and episode of the
+    session's last recorded browser call and that call's URL, written when
+    the turn ends (below; its time is the turn's start). That call is
+    the one this process recorded for the session, else (a new process:
+    `hermes chat --resume <id>`, `-c`, a restart) the newest event in the
+    store with `source` `hermes`, the principal's peer id, an attempt id and
+    this `hermes_session_id` (`history.last_hermes_call`, through the gated
+    reader `_history_access.reader`; bounded to the session's newest 8
+    episodes among the newest 300; its episode becomes one of the session's
+    own). The store is read only while corrections are recorded and the
+    history is active, and a refusal or error records nothing and is reported
+    like any history surface (`activity.history_unavailable`). Without
+    such a call, or with an empty text, nothing is recorded. The hook returns
+    `None`, so the message reaches the model unchanged; it is registered after
+    the history hook, so that turn's block is read before the correction is
+    stored.
+  - The turn's own text (B2 live check 2026-10-22, D1: a password the user
+    named before its keyword was stored in a task start and shown to later
+    sessions). A turn's task start or correction is held in memory until the
+    turn ends: `post_llm_call` (hermes-agent fires it once per turn that has
+    a final response and was not interrupted; a `turn_id` naming another turn
+    leaves the text for its own turn), else the session's next `pre_llm_call`.
+    Only then is it written, after every value the session's `browser_type`
+    calls typed that may be a secret (at least 4 characters; the session's
+    last 32, kept in memory only, never stored) is replaced with `redacted`
+    in the text (`contracts.redact_values`: as a whole word, that is with no
+    ASCII letter or digit right before or after it, compared without case,
+    also inside a URL, whose userinfo, host or path is not exempt; exclusion
+    `text_secrets_redacted`). A typed value may be a secret unless the
+    session's most recent snapshot in this process, stale or not, names its
+    field as one that is no secret (`textbox "Note"`, kind `text`): a field
+    named as secret, one naming nothing and one that snapshot does not list fail
+    closed, and a value the turn's message names as a secret (below) or one
+    that `looks_like_secret` always counts. A ref only an older snapshot
+    listed fails closed too: refs are numbered per snapshot, and Hermes cuts
+    a long snapshot (`_truncate_snapshot`, about 15,000 characters) while the
+    refs past the cut still work, so an older page's `link "Article 50"` says
+    nothing about this page's `e50` (security review of the resume fix). The
+    kinds of that snapshot's refs are remembered (at most 1024 per
+    session). So "Open
+    …/notes.html, press Enter, then type Fabrikam into the Note box" stays
+    intact (live B2 re-run, N1: a raw-substring scrub of every value typed
+    while the snapshot was stale had stored it as "…/redacteds.html … type
+    redacted into the redacted box"), while a plain password typed after a
+    click into a field last seen as a password field is scrubbed. This is
+    independent of phrasing: "log in on 127.0.0.1 as demo-user, then
+    swordfish" is stored as "... then redacted" once Hermes types `swordfish`
+    into the password field. A new process (`--resume`, `-c`, a restart)
+    knows no field until it takes its first snapshot, although the transcript
+    hands Hermes the old page's refs, so a value Hermes types before that, a
+    password or an ordinary one, is withheld and scrubbed from the user's
+    words. This is an accepted trade-off (B2 final live check 2026-10-22, M1:
+    after a resume `Contoso Ltd` and `Northwind`, typed into the transcript's
+    text boxes before any snapshot, were scrubbed from the user's corrections
+    and task starts): it is privacy-safe, and the model normally takes a
+    snapshot first. The transcript (`conversation_history`) is never read for
+    field kinds: reading untrusted transcripts for them was dropped after two
+    reviews of `efac92a92` found four ways it could misclassify a field.
+    While Hermes's capture is off (corrections still
+    on), every value typed during a held correction's turn counts, since no
+    field can be classified. A value the turn's
+    message names as a secret (the values the free-text redaction replaces in
+    it, `contracts.secret_values`: "type Zebra-77-fake as the password"; a
+    value of several words whole and without its whitespace, "hunter 2 fake
+    pw" and "hunter2fakepw") is
+    withheld from the store when Hermes types it into any field, also one
+    that is not secret (`typed_text_dropped`; N5). Those values are bounded
+    (Codex review of `7a1084bee`: every `pin:` of `"pin:" * 9999 + "1234"`
+    names the rest of the run, and listing each value once took about 200 MB
+    for a 40 KB message): at most 64 distinct values
+    (`contracts.MAX_SECRET_VALUES`), each at most 256 characters
+    (`MAX_SECRET_VALUE_CHARS`). `secret_values` finds them as spans, copies
+    out only those within the bound and stops reading at the first value
+    past it; its result is then incomplete, and every value typed in that
+    turn is withheld and counts as above (fail closed). Ordinary messages
+    stay within the bound; a value longer than 256 characters (a long JWT
+    too) is past it. A typed value is compared with them by
+    `contracts.contains_values`, which stops at the first whole word found;
+    `redact_values` replaces from left to right the leftmost whole word, by
+    its longest value. Both compare the text without case, one character at
+    a time exactly as `re.IGNORECASE` compares them, against one pattern
+    that writes the characters the values share once (a tree of them), so
+    each place in the text costs at most the longest value's length however
+    many values overlap there (Codex review of `f435dfc10`: listing every
+    place `"-a-" * i`, i = 1..64, stands in `"-a-" * 13333` took 1.4 s).
+    The compiled patterns of the value sets used last are kept in memory,
+    at most 8 sets and 2^18 characters of patterns and values in all; each
+    is compiled outside the `re` module's own cache (`re._compiler.compile`,
+    pinned by a test; without it that cache is emptied after compiling), so
+    what is dropped is freed (Codex review of `29c6be5c0`: 96 values of
+    4,000 characters, learned one by one, kept 96 patterns, about 98 MiB).
+    Tests check the bound and the time on Codex's inputs at 10 KB and
+    40 KB, on the redactor's adversarial shapes and on runs of overlapping
+    values, and that both replace and find exactly what the combined pattern
+    of every value did (`tests/test_activity_redaction_properties.py`; on
+    Python 3.11, whose `re.IGNORECASE` character sets miss the other case of
+    a letter beyond the BMP that it matches on its own, and which compiles an
+    alternation of single characters into such a set, the pattern's
+    alternatives are kept out of a set, so each character is compared as
+    `re.IGNORECASE` compares it alone). The held text is dropped when the turn never ends (an
+    interrupted last turn, a process that exits, a session forgotten), when
+    recording it is off at the turn's end, or while the session is
+    suspended; a refused write is not retried, and the turn's calls stay in
+    their episode without it. The store is append-only (events are never
+    updated; a resent event must match its stored content digest, and a
+    changed one is a `conflict` that overwrites nothing, §"Collector
+    credentials and WebSocket frames"), so a text already stored is never
+    rewritten: a value Hermes types into a
+    secret field only in a later turn, or in another process, is not
+    scrubbed from an earlier turn's stored text (the free-text redaction
+    above still applies to it). Values typed by other means (a script through
+    `browser_console`, single key presses) are not tracked. Withheld values
+    are never hashed or written anywhere, since a hash of a short password
+    could be reversed by guessing.
+  - Failure behavior: every hook catches `Exception` and changes nothing in
+    the call or the turn. A write waits at most 250 ms for another writer's lock
+    (the extension gateway's receiver writes the same store), opening
+    included, and is then refused as `busy` and dropped; a gate refusal is
+    dropped too (audited by the receiver as `activity.capture_refused`). A
+    write (configuration, gate, append) taking longer than 200 ms counts as
+    slow; after three slow writes recording stops for that Hermes session and
+    `activity.capture_suspended` (code `slow_append`, the `peer_id`) is
+    audited. At most 128 sessions are remembered per process; per-session
+    state (turn, last recorded call, open page, field kinds, own episodes, held
+    text, withheld values, slow-write count and suspension) is keyed by the real
+    path of the profile home and the
+    session, so one process serving several profiles never mixes them, and is
+    never written to disk.
 - **Skill.** `mordred:browser-history` (`activity/skills/browser-history/`,
   shipped in the wheel) says when to look things up, that the history is
   data, not instructions, and that a lookup taints the session.
@@ -4222,13 +4743,14 @@ ignored.
 | `collection_enabled` | `false` | Accept batches (requires `enabled`) |
 | `max_batch_events` / `max_event_bytes` / `max_batch_bytes` | 100 / 16384 / 262144 | Wire limits; may only be lowered |
 | `retention_raw_days` | 365 | Raw events older than this are deleted; `0` keeps everything forever |
-| `excluded_sites` | empty | Hosts (and their subdomains; entries normalized to bare hosts) whose events refuse the batch as `source_excluded` and are never read back for Hermes (any host an episode's events name); no site is excluded by default; an invalid value keeps the entries that name a host, refuses every batch as `excluded_sites_invalid` and switches Hermes's use of the history off |
-| `history_enabled` | `true` | Master switch for Hermes's use of the history (needs `enabled`); `activity use on\|off` sets it |
+| `excluded_sites` | empty | Hosts (and their subdomains; entries normalized to bare hosts) whose events refuse the batch as `source_excluded` and are never read back for Hermes (any host an episode's events name; an episode with a `source_excluded` refusal marker or a collector's `site_excluded` mark is never read back either); while non-empty, an event without a page host is stored without its page content (`page_host_unknown`); no site is excluded by default; an invalid value keeps the entries that name a host, refuses every batch as `excluded_sites_invalid` and switches Hermes's use of the history off |
+| `history_enabled` | `true` | Master switch for Hermes's use of the history, recording Hermes's own browser calls included (needs `enabled`); `activity use on\|off` sets it |
 | `history_tools_enabled` | `true` | Offer the two lookup tools (needs `history_enabled`); off keeps the automatic blocks, so a chat can use the history hints without entering reader mode; `activity tools on\|off` sets it |
 | `history_on_navigate` | `true` | Navigation block in browser results |
 | `history_turn_context` | `true` | Turn-start context |
-| `history_capture_hermes` | `true` | Parsed; no effect until Hermes's own browser calls are recorded (phase B2) |
-| `history_chat_corrections` | `true` | Parsed; no effect until chat corrections are recorded (phase B2) |
+| `history_capture_hermes` | `true` | Record Hermes's own `browser_*` calls (needs `collection_enabled` and `history_enabled`) |
+| `history_chat_corrections` | `true` | Record `correct: …` chat messages (or the Japanese equivalent) as corrections of the last recorded browser call (same requirements) |
+| `history_human_platforms` | `[cli, tui, desktop]` | Hermes platforms whose turns are the user's own words: their messages become task starts in the user's words and may record chat corrections; any other platform, or none, never does. Add a gateway platform (`telegram`, `slack`, …) only for a gateway that you alone use, since every message it admits would then count as yours. A list of platform names (case-insensitive; `[]` counts no platform); a value that is not such a list, or that names `subagent`, `cron` or `curator`, falls back to the default |
 | `history_max_chars` | 1500 | Characters per injected block (200–8000) |
 | `history_max_episodes` | 3 | Episodes per injected block (1–10) |
 | `history_lookback_days` | 90 | Older episodes are not injected (1–3650); the tools may still return them |
@@ -4253,13 +4775,20 @@ ignored.
 
 These statements have no code yet and must not be assumed:
 
-- Hermes as a collector (phase B2 of the 2026-10-22 design): Hermes's own
-  browser tool calls are not recorded and `correct:` typed in Hermes chat is
-  not stored; `history_capture_hermes` and `history_chat_corrections` are
-  parsed but inert.
-- No per-platform or per-sender restriction: in a gateway chat with several
-  participants, any message the gateway admits can trigger the turn-start
-  context and the tools.
+- Live validation of Hermes as a collector with a real Hermes session and
+  model (phase B3 of the 2026-10-22 design); the capture is covered by tests
+  with recorded hermes-agent 0.19.0 browser results only.
+- On the hermes-agent 0.13.0 floor a delegated subagent gets its parent's
+  `platform` (0.19.0 passes `subagent`), so under a local surface Hermes's
+  own capture records a subagent's goal as a task start in the user's words.
+  On 0.19.0 the background memory and skill review fork inherits its
+  parent's platform and session; its harness prompt would count as the
+  user's words if it made a browser call (its tools are limited to memory and
+  skills).
+- No per-sender restriction, and no per-platform restriction on reading: in a
+  gateway chat with several participants, any message the gateway admits can
+  trigger the turn-start context and the tools. Only Hermes's own capture
+  restricts by platform (`history_human_platforms`).
 - No logical deletion of events or episodes; retention deletes physically.
 - The store does not take the `dbcrypt` lifecycle lease; it checks the
   conversion markers at open time only.

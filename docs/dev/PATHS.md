@@ -442,6 +442,13 @@ The operator keeps the matching plaintext token in its own
   or tool result (SPEC §"History for Hermes"). The master switch is
   `plugins.mordred_activity.history_enabled` in the profile's `config.yaml`;
   `history_tools_enabled` there turns off only the lookup tools.
+- **Hermes writes:** with `enabled`, `collection_enabled`, `history_enabled`
+  and `history_capture_hermes` on, the Hermes process records its own
+  browser calls and the user's chat corrections into this file through the
+  receiver and the same gate (creating the store, like the receiver, when it
+  is absent), waiting at most 250 ms for another writer's lock (SPEC
+  §"History for Hermes", "Hermes as a collector"). Per-session capture state
+  stays in memory.
 
 ## `<home>/mordred/telegram/`
 

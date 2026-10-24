@@ -62,6 +62,7 @@ ReasonCode = Literal[
     "activity.capture_refused",
     "policy.egress.reader_mode",
     "activity.history_unavailable",
+    "activity.capture_suspended",
 ]
 
 EgressRule = Literal[

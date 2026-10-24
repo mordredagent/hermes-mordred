@@ -812,7 +812,7 @@ hermes-mordred egress taint on               # no plaintext writes after a sessi
 > |---|---|
 > | `lockdown` | Never. Local tools and Mordred's own Telegram and browser-history tools only. |
 > | `search` | Web search only. No URL fetching, browsing, remote APIs, scheduling, or arbitrary commands. |
-> | `ask` (default) | Tools work. Web search and local commands run as usual; any other internet use (a URL, browser, remote API, a command that uses the network, an unknown tool) shows Hermes's approval prompt with where it goes and what it sends. Blocklisted domains and bare IP addresses are refused outright. |
+> | `ask` (default) | Tools work. Web search and local commands run as usual; any other internet use (a URL, browser, remote API, a command that uses the network, an unknown tool) shows Hermes's approval prompt with where it goes and what it sends (typed text, messages, passwords and other free-text arguments only as `<N characters>`, since Hermes also writes the prompt to `logs/agent.log`). Blocklisted domains and bare IP addresses are refused outright. |
 > | `blocklist` | Everything except blocklisted domains/tools (paste sites, webhooks and tunnels are built in). |
 > | `off` | No restriction from Mordred. |
 >
@@ -1196,7 +1196,7 @@ the tool inside a running Hermes can. An HTTP proxy is refused
 
 ```sh
 hermes-mordred activity status                # switches, protection gate, counts, peers (no content)
-hermes-mordred activity use off               # Hermes stops using the history (on: uses it again); next turn
+hermes-mordred activity use off               # Hermes stops using the history and recording its own browser work (on: both again); next turn
 hermes-mordred activity tools off             # keep the automatic hints, drop the lookup tools (on: offer them)
 hermes-mordred activity pair-operator         # single-use code for the browser operator's collector
 hermes-mordred activity peers list            # peers revoke <peer_id> stops a collector at once
@@ -1214,13 +1214,32 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > parameters (tokens, keys, session ids, codes) replaced by `redacted`, and the
 > page title and a visible-text excerpt when the collector sends them. A
 > password, PIN, one-time code or key written into a task, a correction, a
-> label or a page ("the password Hunter2-x", "PIN: 4821") is replaced by
-> `redacted` before it is stored.
+> label or a page ("the password Hunter2-x", "PIN: 4821", "use Hunter2-x as
+> the password") is replaced by `redacted` before it is stored. A value of
+> several words, as speech recognition writes a spoken password ("the
+> password is hunter 2 fake pw", "hunter 2 fake pw as the password"), is
+> replaced up to the end of its clause: a comma or full stop, a line break,
+> or a word such as "and", "then" or "please" that starts the next part, at
+> most eight words. In Japanese the same holds for a value written only in
+> kana, as speech recognition writes a spoken password and its digits; in your own
+> task and correction texts, so is a long password-like token without any
+> keyword (20 or more characters mixing letters with digits or symbols).
 > No site is excluded by default: messaging and mail sites (Telegram, WhatsApp,
 > Discord, Slack, Gmail, Outlook and others) are recorded too, including what
 > you type there. To keep a site out, list its host in
 > `plugins.mordred_activity.excluded_sites`; events from that host and its
-> subdomains are then refused. If one entry of that list names no host, the
+> subdomains are then refused. While any site is excluded, an event that names
+> no page host (a collector's task start or end, for example) is kept without
+> the page's title, text, labels and query and without any text other than
+> the instruction or correction you typed (`page_host_unknown`), since it
+> could come from an excluded page; an episode in which the collector marked
+> a batch as refused for an excluded host (`source_excluded`) or an event as
+> on a host excluded in the collector itself (`site_excluded`) is never shown
+> to Hermes, also after you remove the exclusion. Your own instruction is still stored, so do not name the
+> excluded site's private details in it. Also exclude the host in the
+> collector itself when it can (the operator's `--activity-exclude-site`):
+> then nothing from that host leaves the collector but where its events fall
+> in the episode (marked `site_excluded`). If one entry of that list names no host, the
 > other entries still apply but every batch is refused
 > (`excluded_sites_invalid`; `activity status` shows `collection: refused`)
 > until you fix it, so a typo never records a site you excluded. Raw events are kept
@@ -1238,7 +1257,9 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 >
 > **Hermes uses this history** while the feature is enabled (master switch
 > `history_enabled`, default on; `activity use off` turns it off from the next
-> turn, without a restart, and does not stop recording). After Hermes opens a
+> turn, without a restart, and `activity use on` back on; operator collection
+> is not affected, while Hermes's own capture of its browser calls and your
+> chat corrections stops and restarts with the switch). After Hermes opens a
 > site with `browser_navigate`, the browser result carries a short block of
 > your earlier work there (tasks, routes, outcomes, page titles, your
 > corrections; never page text or typed text). When your message names a site
@@ -1281,6 +1302,37 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > key, password or card number (JWTs, `sk-`, `ghp_`, `AKIA`, `xoxb-` style
 > keys, `password: …`, Luhn-valid card numbers, long random tokens) is never
 > stored.
+>
+> **Hermes's own browser work is recorded too** while collection is on
+> (`history_capture_hermes`, default on; needs `collection_enabled` and
+> `history_enabled`): every `browser_*` call Hermes makes becomes an event in
+> the same encrypted store, one episode per turn, with your message for that
+> turn as the task. Your message (and a `correct: …` message) is stored when
+> the turn ends, and anything Hermes typed during it into a password or other
+> secret field, or into a field it could not identify as an ordinary one, is
+> replaced by `redacted` in that message as a whole word,
+> however you worded it (a message of an earlier turn that is already stored
+> is not changed). A value your message calls a password is not stored as
+> typed text either, whichever field Hermes types it into. Elements are named by their label, never their
+> value; text Hermes types into a password, PIN, card, one-time-code, secret
+> or token field is never stored, and neither is text typed after a click or
+> key press before Hermes takes a new snapshot (the field may be on another
+> page); other typed text is (unless it looks like a key or password). The
+> page text kept from a navigation drops what is filled into such fields.
+> With `excluded_sites` set, Hermes's actions after a click or key press are
+> recorded again only once Hermes navigates (or a snapshot reports the page's
+> address), because the click may have opened an excluded site. Only turns
+> from the local CLI, TUI and desktop app count as your words
+> (`history_human_platforms`, default `[cli, tui, desktop]`); a message
+> arriving through a gateway, the API server or an unknown platform is
+> recorded as the agent's task, not yours, and cannot record a correction.
+> Add a gateway platform (for example `telegram`) only if that gateway is
+> used by you alone. Type `correct: …` (or the Japanese "teisei:", the operator's prefix) in Hermes chat to record
+> a correction of Hermes's last browser action (`history_chat_corrections`,
+> default on); the message still goes to Hermes as usual. Recording never
+> slows or breaks a tool call: a write waits at most 250 ms for the store,
+> and after three slow writes recording stops for that session (audited as
+> `activity.capture_suspended`).
 > Contract:
 > [SPEC](../dev/SPEC.md#browser-activity-and-conditional-learning-2026-10-20)
 > (§"History for Hermes").

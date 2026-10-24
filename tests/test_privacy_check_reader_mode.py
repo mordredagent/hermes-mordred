@@ -254,7 +254,9 @@ def test_reader_session_asks_before_web_use_at_level_off(hook: _Hook) -> None:
     assert hook("telegram_ask", {"question": "q"}, session) is None
     result = hook("web_search", {"query": "weather"}, session)
     assert result is not None and result["action"] == "approve"
-    assert "imported private history" in result["message"] and "weather" in result["message"]
+    # The prompt names the tool and the query only as its length (B2 "Prompt text").
+    assert "imported private history" in result["message"] and "<7 characters>" in result["message"]
+    assert "weather" not in result["message"]
     assert result["rule_key"].startswith("mordred.egress.reader_web:web_search:")
     assert hook.rules()[-1] == "egress.reader_web"
     fetch = hook("web_extract", {"urls": ["https://docs.example.com/a"]}, session)
@@ -358,7 +360,8 @@ def test_bridge_batch_in_a_reader_session_lists_every_web_call(hook: _Hook) -> N
     single = egress.decide("tool_call", _bridge(("web_search", {"query": "alpha-query"})), session, hook.policy)
     result = hook("tool_call", searches, session)
     assert result is not None and result["action"] == "approve"
-    assert "alpha-query" in result["message"] and "beta-query" in result["message"]
+    assert "<11 characters>" in result["message"] and "<10 characters>" in result["message"]
+    assert "alpha-query" not in result["message"] and "beta-query" not in result["message"]
     assert result["rule_key"].startswith("mordred.egress.batch:") and result["rule_key"] != single.rule_key
     assert hook.rules()[-1] == "egress.reader_web"
     fetches = _bridge(

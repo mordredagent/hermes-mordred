@@ -656,6 +656,133 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 
 ## Manual live-device validation log
 
+- **2026-10-23 — Browser activity and history (B2 stack) final live re-verification after the privacy fixes: operator, receiver and Hermes.**
+  Source: branch `feat/browser-history-b2` (runs at `1312612b1`, `efac92a92`
+  and `4a89bb602`, the commit before this entry), hermes-mordred 0.3.0a4,
+  hermes-agent 0.19.0, Python 3.12.14, macOS 27.0.1 arm64. Operator: worktree
+  `mordred-browser-os-oparator-capture`, branch
+  `feat/activity-capture-extended` at `90f9f7e` (its later display-masking
+  commits `58e0288`/`ca2ce76` were unit-tested only), Playwright Chromium 134
+  headless, Fara1.5-4B on llama-server b10087. Hermes model: Ollama's
+  `qwen2.5:7b` GGUF on llama-server b10087 (`-c 65536 -np 2`, 127.0.0.1,
+  `provider: custom`); Hermes's own browser: agent-browser 0.39.1 with Chrome
+  155 headless. Fresh armed throwaway homes with synthetic `hex:` keys; no run
+  used `~/.hermes`. A first pass at `efe9bb27d` found two high-severity leaks:
+  with a host excluded only in the receiver's `excluded_sites`, the operator's
+  `task_start` / `task_end` named no host and were stored with the excluded
+  page's title, page text and Fara's summary, which both history tools served;
+  and a password named before its keyword ("Hunter2-fake-pw as the password")
+  was stored verbatim in Hermes's own `task_start` and re-sent to every later
+  session. Fixed since: host-less events lose site-controlled content while
+  sites are excluded (`page_host_unknown`); an episode holding a
+  `source_excluded` gap or a collector `site_excluded` mark is hidden on every
+  surface; the operator names the page on task boundaries and holds its task
+  start until the task ends; value-first, `to` and qualifier phrasings are
+  redacted (property tests against a frozen copy of the base redactor, near-
+  linear time); Hermes holds each turn's text until the turn ends and scrubs
+  every value its `browser_type` withheld; secret-shaped tokens of 20+
+  characters in the user's own words are redacted; a secret the message names
+  is withheld wherever it is typed; one snapshot-ref parser classifies fields
+  and fails closed. Operator pass (`1312612b1` + operator `90f9f7e`,
+  `excluded_sites: [localhost]`): the search task's start arrived with its end
+  yet carried site `127.0.0.1` and route `/index.html` and sorted first (route
+  `/index.html -> /search.html`); the value-first login was stored as "... and
+  redacted as the password"; a keyword-less login ("demo-user /
+  Hunter2-fake-pw") was stored as "... redacted / redacted" after Fara typed
+  the password into the password field; the receiver-only exclusion stored 7
+  `source_excluded` gaps in the task's own episode and `localhost` in no
+  column; the operator-side exclusion stored position-only `site_excluded`
+  events. Hermes named Contoso and the visited pages, did not reveal the
+  password, and no history surface returned either excluded episode (40
+  offline probe calls). 0 password hits in every column of the decrypted
+  `mordred.db` and `state.db` and in every file under the home; the operator
+  console still printed a keyword-less password until it was typed (fixed in
+  `ca2ce76`). B2 pass (`1312612b1`, 9 scenarios, all passed): typed `Contoso`
+  kept; value-first password redacted; `notes.html` and `Fabrikam` intact (no
+  over-scrub); a keyword-less password scrubbed once typed into the password
+  field; a 24-character secret-shaped token redacted at ingest; a named secret
+  typed into an ordinary field withheld; English and Japanese correction
+  prefixes linked, also after `--resume`, whose first block no longer showed
+  the session's own episode; exclusion and `activity use off` / `on`. One
+  defect: after `--resume`, a password typed before any snapshot into a field
+  remembered from the old page was stored as `other` with its text. Fixed: a
+  ref the session's latest snapshot in this process does not list is
+  `sensitive` (withheld and scrubbed); a transcript-seeding variant
+  (`efac92a92`) was dropped after review found four ways it could fail open.
+  Resume re-check at `4a89bb602`: typing before any snapshot after `--resume`
+  (also into a ref a pre-resume click had made stale) was withheld and
+  scrubbed (`Kiwi7-fake-pw`, `Plum4-fake-pw`: 0 hits in `mordred.db`; in
+  `state.db` only in the sessions whose own messages held them); after a
+  snapshot in the new process `Contoso Ltd` was kept as typed and task text.
+  Known gaps kept: a keyword-less password under 20 characters that is never
+  typed; a value typed before the first snapshot after `--resume` is scrubbed
+  from the user's words too (accepted trade-off). Seen outside Mordred:
+  Hermes writes REPL input to `.hermes_history` (0644) and `logs/agent.log` in
+  plaintext, and Fara's `runs/` keep the raw task text. One resumed Hermes
+  process crashed with SIGBUS; it was traced to dbcrypt's in-process
+  `_classify` opening the live `state.db` through a second SQLite library,
+  which drops the process's POSIX locks on close (pre-existing, fixed
+  separately); the re-check harness never opened a database while Hermes ran.
+
+- **2026-10-22 — Browser history for Hermes (B2) live: Hermes records its own browser calls and chat corrections; a later session reads them.**
+  Source: branch `feat/browser-history-b2` at `628b17bcc` (hermes-mordred
+  0.3.0a4), macOS 27.0.1 arm64, the worktree's dev venv (Python 3.12.14,
+  `sqlcipher3-wheels` 0.5.7, hermes-agent 0.19.0), agent-browser 0.39.1
+  installed in the home's `node_modules`. Model: Ollama's `qwen2.5:7b` GGUF
+  served by llama-server b10087 with `-c 65536` on 127.0.0.1
+  (`provider: custom`). Home: a rebound copy of the B1 browser-check home
+  (schema 3 store, 11 episodes / 80 events, one pre-fix operator `task_start`
+  holding the fake password). `activity status`: protection ok, schema 3,
+  hermes use on. Test site on 127.0.0.1:8499. One-shot runs used `hermes -z`
+  from an empty directory with `-t browser,mordred_activity,todo,clarify`. (1)
+  "Open …/index.html, search for 'Contoso invoice' …, then open the notes page
+  and type 'Call the accountant on Friday' into the note field": 120 events in
+  one episode, all with `hermes_session_id`, Hermes's `turn_id` and
+  `attempt_id` = `tool_call_id`: a `task_start` (actor `human`, the message
+  verbatim), 3 navigates with titles and page text (359/364/222 characters),
+  and 39 type, 53 click, 11 key and 13 scroll events; typed text was kept for
+  named fields (`searchbox "Search invoices"` → `Contoso invoice`); the model
+  looped to Hermes's 90-call cap; 117 events kept route `/index.html` after
+  Enter and a link click had loaded `/search.html?q=…` and `/notes.html`, and
+  no `query` was recorded. (2) The login request naming `Hunter2-fake-pw`: the
+  `task_start` reads `… and the password redacted` (`text_secrets_redacted`);
+  the username was kept; the password field was `field_kind: sensitive` with
+  no text (`sensitive_field`, `typed_text_dropped`); the password was in no
+  new store row; in the decrypted `state.db` it appeared only in that
+  session's own messages (user message and API copy, `browser_type` arguments
+  and result, three replies) and their full-text index rows, and in no file
+  under the home. (3) Corrections: `-z` ignores `--resume`;
+  `hermes chat -Q -q "correct: …" --resume <id>` recorded no correction (new
+  process), and its browser calls were refused by privacy_check's `ask` prompt
+  (no TTY) and recorded as `cancelled` / `blocked`; in the classic REPL
+  (`chat --cli --yolo`, two turns in one process, driven through a pty) the
+  correction was stored as `user_correction` / `human` / `correction` in the
+  previous turn's episode with that call's `attempt_id` and URL, and appeared
+  in the next navigation block as `user correction: …`. (4) "What did I do on
+  127.0.0.1 earlier?": the turn-start block and one `mordred_browser_history`
+  call returned the Hermes-recorded episodes with the correction, and the
+  answer named them. (5) `activity use off` changed only `history_enabled`; a
+  browser task then recorded nothing and got no blocks; `activity use on`
+  restored `config.yaml` byte for byte and the next task was recorded. Found:
+  every navigation block led with the session's own in-progress episode
+  (capture writes before the block is read); a `correct:` turn with browser
+  calls also started a new episode whose task text is the whole `correct: …`
+  message; a correction in a resumed process was not recorded; an episode of
+  refused calls has no site but still entered the turn-start context;
+  privacy_check's denial text quoted typed arguments into plaintext
+  `logs/agent.log`. This branch's later commits fix each of these findings:
+  the session's own episode is left out of its navigation block and events
+  after Enter or a click carry no route until a result reports the page
+  (`e62f2f5cb`); a `correct:` turn's browser calls join the corrected episode,
+  or start one without a task start, instead of making the correction a second
+  task; a correction in a resumed process is linked to the session's last
+  Hermes-recorded call found in the store; an episode without a site and
+  without a successfully dispatched call stays out of the turn-start and
+  navigation blocks; privacy_check's prompt and denial show typed and other
+  free-text arguments only as `<N characters>`; and `activity use on|off` now
+  says that Hermes's own capture stops and restarts with the switch while
+  operator collection is unaffected.
+
 - **2026-10-22 — Browser history for Hermes (B1): navigation block in a live Hermes browser session.**
   Source: branch `feat/browser-history-b1` at `9faa10374` (hermes-mordred
   0.3.0a4), macOS 27.0.1 arm64, the worktree's dev venv (Python 3.12.14,

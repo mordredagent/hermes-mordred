@@ -7,7 +7,11 @@ tools in :mod:`.tools`). It never opens the store itself: callers pass an
 (:mod:`._history_access`). Every query is bounded: at most
 :data:`SCAN_EPISODES` of the newest episodes in the requested window are
 considered, and at most :data:`MAX_SUMMARY_EVENTS` events are read per
-summarized episode.
+summarized episode, the earliest in time (``observed_at``, then the order
+received: collectors send a task start when the task or turn ends, with the
+time it started); its first task start and last corrections in the user's
+words are read separately (Hermes's own capture writes a task start when its
+turn ends, after the turn's calls).
 
 Two kinds of text come out of the store and they are kept apart:
 
@@ -33,7 +37,28 @@ An episode that touched an excluded host (``excluded_sites`` at read time) is
 dropped whole, wherever it appears: on any event's ``site``, or named by a URL
 in any event's route, query or target label (:func:`.contracts.event_hosts`,
 the extraction the receiver applies at ingest), so an exclusion added after
-capture hides earlier episodes too.
+capture hides earlier episodes too. So is an episode holding either marker of
+an excluded host, whatever ``excluded_sites`` holds at read time: a refusal
+marker (:data:`REFUSED_SQL`: an event whose ``args.reason`` is
+``source_excluded``, the ``gap`` a collector records for a batch the receiver
+refused as an excluded host's) or the collector's own exclusion mark
+(:data:`COLLECTOR_EXCLUDED_SQL`: ``site_excluded`` in an event's
+``exclusions``, sent for an event on a host excluded in the collector itself,
+with no site, route or content). Such an episode touched an excluded host the
+marker does not name; a receiver older than the page-host rule
+(:mod:`.contracts`) kept the content of its events that named no host, and
+its task start still holds the user's instruction for that host.
+
+The automatic blocks (``require_work``) also skip an episode with no site and
+no successfully dispatched call (:func:`_with_work`: every call refused,
+cancelled, timed out or failed on a page nobody can name); the lookup tools
+still return it. They never show a Hermes session its own work either: the
+episodes its capture recorded in this process (``omit``) and, through the
+store, in any process (``session``, :func:`_not_own`).
+
+:func:`last_hermes_call` is the one read for Hermes's own capture: the newest
+browser call Hermes recorded for a session, which a chat correction in a new
+process (``--resume``, ``-c``, a restart) refers to.
 """
 
 from __future__ import annotations
@@ -53,17 +78,22 @@ from .contracts import (
     TYPED_OPS,
     event_hosts,
     looks_like_secret,
+    redact_secret_shaped_tokens,
     redact_text_secrets,
     scrub_query,
     scrub_urls,
     site_excluded,
+    speaks_for_user,
 )
 from .matching import terms
 from .store import ActivityStore
 
 __all__ = [
+    "COLLECTOR_EXCLUDED_MARK",
+    "COLLECTOR_EXCLUDED_SQL",
     "MAX_SUMMARY_EVENTS",
     "NAVIGATION_HEADER",
+    "REFUSED_SQL",
     "SCAN_EPISODES",
     "TURN_HEADER",
     "USER_TEXT_SQL",
@@ -71,7 +101,9 @@ __all__ = [
     "EpisodeDetail",
     "EpisodeEvent",
     "EpisodeSummary",
+    "HermesSession",
     "Hop",
+    "LastCall",
     "Matches",
     "clean",
     "clean_query",
@@ -81,6 +113,7 @@ __all__ = [
     "episodes_for_terms",
     "host_of",
     "hosts_in",
+    "last_hermes_call",
     "latest_page_text",
     "read_meta",
     "render_block",
@@ -91,7 +124,14 @@ __all__ = [
 
 #: Newest episodes considered by one query (inside its time window).
 SCAN_EPISODES: Final = 300
-#: Events read to summarize one episode (task, routes, titles, outcome).
+#: :func:`last_hermes_call` looks at the newest this many episodes, and among them at the session's newest
+#: :data:`LAST_CALL_SESSION_EPISODES`.
+LAST_CALL_SCAN_EPISODES: Final = SCAN_EPISODES
+LAST_CALL_SESSION_EPISODES: Final = 8
+#: Phases of a call that ran, and the results that say it failed (:func:`_with_work`).
+_RAN_PHASES: Final = ("dispatched", "observed")
+_FAILED_RESULTS: Final = ("claimed_failure", "verified_failure")
+#: Events read to summarize one episode (routes, titles, outcome): the earliest in time (:func:`_summary`).
 MAX_SUMMARY_EVENTS: Final = 400
 #: Events read for :func:`episode_detail`: task starts, corrections and other boundaries first, then the newest.
 MAX_DETAIL_EVENTS: Final = 1000
@@ -114,6 +154,18 @@ _URL_FIELDS_SQL: Final = (
     "(instr(target, '://') > 0 OR instr(route, ':') > 0 OR instr(lower(route), '%3a') > 0 "
     "OR instr(query, ':') > 0 OR instr(lower(query), '%3a') > 0)"
 )
+#: Events marking a batch the receiver refused as an excluded host's: ``args.reason`` ``source_excluded`` (the
+#: operator's ``gap`` marker) in the canonical ``args_json`` the receiver writes (sorted keys, no spaces, quotes
+#: inside values escaped, so only the key itself matches).
+REFUSED_SQL: Final = """(instr(args_json, '"reason":"source_excluded"') > 0)"""
+#: A collector's quality exclusion for an event on a host excluded in the collector itself (the operator's
+#: ``--activity-exclude-site``): sent with the event's position only (no site, route, target or content).
+COLLECTOR_EXCLUDED_MARK: Final = "site_excluded"
+#: Events holding :data:`COLLECTOR_EXCLUDED_MARK` in ``exclusions``, the JSON array of tokens (``[a-z0-9_]``
+#: only) the receiver writes: the quoted token matches that whole entry and no other code.
+COLLECTOR_EXCLUDED_SQL: Final = f"""(instr(exclusions, '"{COLLECTOR_EXCLUDED_MARK}"') > 0)"""
+#: Events marking an episode that touched an excluded host it does not name (:func:`_hidden`).
+_MARKED_SQL: Final = f"({REFUSED_SQL} OR {COLLECTOR_EXCLUDED_SQL})"
 #: A read waits this long for a writer's lock before the surface goes on without history, opening included
 #: (the keyed opener's schema probe gets the same bound: :data:`._history_access.OPENER`).
 READ_BUSY_MS: Final = 250
@@ -176,7 +228,7 @@ class EpisodeSummary:
     #: The user's own words (:func:`speaks_for_user`): the task start text and the user's corrections.
     tasks: tuple[str, ...]
     corrections: tuple[str, ...]
-    #: Metadata: the pages in order, consecutive repeats collapsed.
+    #: Metadata: the pages in time order, consecutive repeats collapsed.
     route: tuple[Hop, ...]
     #: Site-controlled: page titles in first-seen order (never in a turn-start block).
     titles: tuple[str, ...]
@@ -228,6 +280,26 @@ class EpisodeDetail:
 
 
 @dataclass(frozen=True)
+class LastCall:
+    """A browser call Hermes recorded (:func:`last_hermes_call`): what a chat correction refers to."""
+
+    attempt_id: str
+    episode_id: str
+    site: str | None
+    #: The stored route path with its stored (already scrubbed) query, or ``None``.
+    route: str | None
+
+
+@dataclass(frozen=True)
+class HermesSession:
+    """A Hermes session as its capture records it (:mod:`.capture_hermes`): the profile's principal ``peer_id``
+    (``hermes:<profile>``) and the ``hermes_session_id`` on every event that capture writes for the session."""
+
+    peer_id: str
+    session_id: str
+
+
+@dataclass(frozen=True)
 class _Head:
     episode_id: str
     revision: int
@@ -238,15 +310,6 @@ class _Head:
     @property
     def key(self) -> tuple[str, int]:
         return (self.episode_id, self.revision)
-
-
-def speaks_for_user(phase: str, op: str, source: str, actor: str) -> bool:
-    """The event's text is the user's own words, by the collector's attribution (the rule of
-    :data:`USER_TEXT_SQL`): a task start whose ``actor`` is ``human``, or a correction whose ``source`` is
-    ``user_correction`` and whose ``actor`` is ``human``. Text labelled ``agent`` or ``unknown`` never is."""
-    if actor != "human":
-        return False
-    return (phase == "boundary" and op == "task_start") or (phase == "correction" and source == "user_correction")
 
 
 # --------------------------------------------------------------------------- #
@@ -412,16 +475,18 @@ def _in(ids: Sequence[str]) -> str:
 
 
 def _sites(conn: sqlite3.Connection, ids: Sequence[str]) -> dict[str, list[str]]:
-    """Hosts per episode, in first-seen order (one row per episode and host)."""
+    """Hosts per episode, in first-seen order: each host by its earliest event in time (``observed_at``, then
+    receipt), so a task start sent when its task ended still names the first host (one row per episode and host)."""
     if not ids:
         return {}
     rows = conn.execute(
-        "SELECT episode_id, site, MIN(receipt) FROM activity_events WHERE site IS NOT NULL "
-        f"AND episode_id IN ({_in(ids)}) GROUP BY episode_id, site",
+        "SELECT episode_id, site FROM (SELECT episode_id, site, observed_at, receipt, ROW_NUMBER() OVER "
+        "(PARTITION BY episode_id, site ORDER BY observed_at, receipt) AS nth FROM activity_events "
+        f"WHERE site IS NOT NULL AND episode_id IN ({_in(ids)})) WHERE nth = 1 ORDER BY observed_at, receipt",
         tuple(ids),
-    ).fetchall()
+    )
     sites: dict[str, list[str]] = {}
-    for episode_id, site, _first in sorted(rows, key=lambda row: (row[0], row[2])):
+    for episode_id, site in rows:
         sites.setdefault(str(episode_id), []).append(str(site))
     return sites
 
@@ -430,28 +495,32 @@ def _hidden(
     conn: sqlite3.Connection, ids: Sequence[str], sites: Mapping[str, Sequence[str]], excluded_sites: frozenset[str]
 ) -> set[str]:
     """The episodes among ``ids`` that touched an excluded host: an event's ``site`` (``sites``, per episode),
-    or a host named by a URL in an event's route, query or target label (:func:`.contracts.event_hosts`, the
-    receiver's ingest extraction), so an exclusion added after capture hides earlier episodes too.
+    a host named by a URL in an event's route, query or target label (:func:`.contracts.event_hosts`, the
+    receiver's ingest extraction), so an exclusion added after capture hides earlier episodes too, or, whatever
+    ``excluded_sites`` holds, a marker among their events: a refusal marker (:data:`REFUSED_SQL`) or the
+    collector's exclusion mark (:data:`COLLECTOR_EXCLUDED_SQL`).
 
-    Nothing is read without exclusions; otherwise one query over these episodes' events, limited to the
-    distinct rows whose route, query or target may hold a URL (:data:`_URL_FIELDS_SQL`).
+    One query over the episodes no site hides: their distinct rows holding either marker and, only while sites
+    are excluded, those whose route, query or target may hold a URL (:data:`_URL_FIELDS_SQL`).
     """
-    if not excluded_sites or not ids:
+    if not ids:
         return set()
     hidden = {i for i in ids if any(site_excluded(site, excluded_sites) for site in sites.get(i, ()))}
     rest = [i for i in dict.fromkeys(ids) if i not in hidden]
     if not rest:
         return hidden
+    where = f"({_MARKED_SQL} OR {_URL_FIELDS_SQL})" if excluded_sites else _MARKED_SQL
     rows = conn.execute(
-        "SELECT DISTINCT episode_id, route, query, target FROM activity_events "
-        f"WHERE episode_id IN ({_in(rest)}) AND {_URL_FIELDS_SQL}",
+        f"SELECT DISTINCT episode_id, route, query, target, {_MARKED_SQL} FROM activity_events "
+        f"WHERE episode_id IN ({_in(rest)}) AND {where}",
         tuple(rest),
     )
-    for episode_id, route, query, target in rows:
+    for episode_id, route, query, target, marked in rows:
         if str(episode_id) in hidden:
             continue
-        hosts = event_hosts({"route": route, "target": target}, query)
-        if any(site_excluded(host, excluded_sites) for host in hosts):
+        if marked or any(
+            site_excluded(host, excluded_sites) for host in event_hosts({"route": route, "target": target}, query)
+        ):
             hidden.add(str(episode_id))
     return hidden
 
@@ -507,36 +576,39 @@ def _scan(conn: sqlite3.Connection, window: tuple[float, float], *, texts: bool,
     )
 
 
-_SUMMARY_COLUMNS: Final = "phase, op, source, actor, site, route, query, text, page_title"
+_SUMMARY_COLUMNS: Final = "phase, site, route, query, page_title"
 
 
 def _summary(conn: sqlite3.Connection, head: _Head, sites: Sequence[str]) -> EpisodeSummary:
+    # In time order (``observed_at``, then receipt): a collector sends a task start when its task or turn ends,
+    # with the time it started, so the start page still leads the route and the cap keeps the earliest events.
     rows = conn.execute(
-        f"SELECT {_SUMMARY_COLUMNS} FROM activity_events WHERE episode_id = ? ORDER BY receipt LIMIT ?",
+        f"SELECT {_SUMMARY_COLUMNS} FROM activity_events WHERE episode_id = ? ORDER BY observed_at, receipt LIMIT ?",
         (head.episode_id, MAX_SUMMARY_EVENTS),
     ).fetchall()
-    # Corrections are what the user said was wrong; read them even past the event cap.
-    corrections = [
-        str(row[0])
-        for row in conn.execute(
-            "SELECT text FROM activity_events WHERE episode_id = ? AND phase = 'correction' AND text IS NOT NULL "
-            f"AND {USER_TEXT_SQL} ORDER BY receipt DESC LIMIT ?",
-            (head.episode_id, MAX_CORRECTIONS),
-        )
-    ][::-1]
+    # The user's own words are read even past the event cap: the first task starts (Hermes's own capture writes
+    # a task start when its turn ends, after the turn's calls) and the last corrections, in one query.
+    words = conn.execute(
+        "SELECT 0, text, receipt FROM (SELECT text, receipt FROM activity_events WHERE episode_id = ? "
+        f"AND phase = 'boundary' AND op = 'task_start' AND text <> '' AND {USER_TEXT_SQL} "
+        "ORDER BY receipt LIMIT ?) UNION ALL SELECT 1, text, receipt FROM (SELECT text, receipt "
+        "FROM activity_events WHERE episode_id = ? AND phase = 'correction' AND text IS NOT NULL "
+        f"AND {USER_TEXT_SQL} ORDER BY receipt DESC LIMIT ?) ORDER BY 1, 3",
+        (head.episode_id, MAX_TASKS, head.episode_id, MAX_CORRECTIONS),
+    ).fetchall()
+    # Shown with the secret-shaped tokens of the user's words replaced, as the receiver stores them now.
+    tasks = [redact_secret_shaped_tokens(str(text))[0] for kind, text, _receipt in words if kind == 0]
+    corrections = [redact_secret_shaped_tokens(str(text))[0] for kind, text, _receipt in words if kind == 1]
     steps_row = conn.execute(
         "SELECT COUNT(DISTINCT attempt_id), COALESCE(SUM(attempt_id IS NULL), 0) FROM activity_events "
         f"WHERE episode_id = ? AND phase IN ({', '.join('?' * len(_STEP_PHASES))})",
         (head.episode_id, *_STEP_PHASES),
     ).fetchone()
-    tasks: list[str] = []
     titles: list[str] = []
     queries: list[str] = []
     hops: list[Hop] = []
     last_stop = None
-    for phase, op, source, actor, site, route, query, text, title in rows:
-        if op == "task_start" and text and len(tasks) < MAX_TASKS and speaks_for_user(phase, op, source, actor):
-            tasks.append(str(text))
+    for phase, site, route, query, title in rows:
         if title and title not in titles:
             titles.append(str(title))
         if query and query not in queries:
@@ -572,6 +644,48 @@ def _visible(conn: sqlite3.Connection, heads: list[_Head], scan: _Scan, excluded
     return [head for head in heads if head.episode_id not in hidden]
 
 
+def _with_work(conn: sqlite3.Connection, heads: list[_Head], sites: Mapping[str, Sequence[str]]) -> list[_Head]:
+    """``heads`` without the episodes that have no site and no successfully dispatched call, in order.
+
+    Such an episode holds only calls that were refused, cancelled, timed out or failed on a page nobody can
+    name (and boundaries): no work the user could pick up again. A call counts when its phase is ``dispatched``
+    or ``observed`` and its result is not a failure. One query, over the episodes without a site only.
+    """
+    siteless = [head.episode_id for head in heads if not sites.get(head.episode_id)]
+    if not siteless:
+        return heads
+    rows = conn.execute(
+        f"SELECT DISTINCT episode_id FROM activity_events WHERE episode_id IN ({_in(siteless)}) "
+        f"AND phase IN ({_in(_RAN_PHASES)}) AND result_status NOT IN ({_in(_FAILED_RESULTS)})",
+        (*siteless, *_RAN_PHASES, *_FAILED_RESULTS),
+    )
+    worked = {str(row[0]) for row in rows}
+    return [head for head in heads if sites.get(head.episode_id) or head.episode_id in worked]
+
+
+def _not_own(conn: sqlite3.Connection, heads: list[_Head], session: HermesSession | None) -> list[_Head]:
+    """``heads`` without the episodes ``session`` recorded, in order: those holding an event of its principal
+    with its session id, so a new process (``--resume``, ``-c``, a restart) knows them as the session's own too.
+
+    Only the principal's own events count (a paired collector can send any ``hermes_session_id``, and an episode
+    belongs to the peer that first wrote to it), and only while the episode's session reference is ``bound``: a
+    restore marks every reference ``unavailable``, since the restored conversation may no longer hold that work.
+    One query, over the episodes with a session reference only (an episode keeps the first one its events
+    carried); each is looked up through the episode index.
+    """
+    ids = [head.episode_id for head in heads]
+    if session is None or not ids:
+        return heads
+    rows = conn.execute(
+        f"SELECT p.episode_id FROM activity_episodes p WHERE p.episode_id IN ({_in(ids)}) "
+        "AND p.hermes_session_id IS NOT NULL AND p.session_ref_state = 'bound' AND EXISTS (SELECT 1 "
+        "FROM activity_events e WHERE e.episode_id = p.episode_id AND +e.peer_id = ? AND e.hermes_session_id = ?)",
+        (*ids, session.peer_id, session.session_id),
+    )
+    own = {str(row[0]) for row in rows}
+    return [head for head in heads if head.episode_id not in own]
+
+
 def episodes_for_sites(
     store: ActivityStore,
     sites: Sequence[str],
@@ -583,11 +697,16 @@ def episodes_for_sites(
     shown: frozenset[tuple[str, int]] = frozenset(),
     subdomains: bool = True,
     require_human_text: bool = False,
+    omit: frozenset[str] = frozenset(),
+    require_work: bool = False,
+    session: HermesSession | None = None,
 ) -> Matches:
     """Newest episodes that touched any of ``sites`` (with ``subdomains``, also their subdomains).
 
-    ``shown`` episodes, episodes that touched an excluded host (:func:`_hidden`) and, with
-    ``require_human_text``, episodes without a task start or correction in the user's own words are skipped.
+    ``shown`` episodes, the ``omit`` episode ids and the episodes ``session`` recorded (a session's own work,
+    :func:`_not_own`), episodes that touched an excluded host (:func:`_hidden`), with ``require_human_text``
+    episodes without a task start or correction in the user's own words and with ``require_work`` episodes
+    without a site and a successfully dispatched call (:func:`_with_work`) are skipped.
     """
     wanted = [site for site in sites if not site_excluded(site, excluded_sites)]
     if not wanted:
@@ -603,9 +722,12 @@ def episodes_for_sites(
                 for s in scan.sites.get(head.episode_id, ())
             )
             and head.key not in shown
+            and head.episode_id not in omit
             and (not require_human_text or head.episode_id in scan.texts)
         ]
-        matched = _visible(conn, matched, scan, excluded_sites)
+        matched = _visible(conn, _not_own(conn, matched, session), scan, excluded_sites)
+        if require_work:
+            matched = _with_work(conn, matched, scan.sites)
         chosen = [_summary(conn, head, scan.sites.get(head.episode_id, ())) for head in matched[: max(0, limit)]]
     return Matches(tuple(chosen), len(matched) - len(chosen))
 
@@ -629,6 +751,9 @@ def episodes_for_terms(
     host_labels: bool = True,
     shown: frozenset[tuple[str, int]] = frozenset(),
     newest_if_none: bool = False,
+    omit: frozenset[str] = frozenset(),
+    require_work: bool = False,
+    session: HermesSession | None = None,
 ) -> Matches:
     """Episodes sharing at least ``min_shared`` terms with ``wanted``, best match first, then newest.
 
@@ -636,8 +761,10 @@ def episodes_for_terms(
     ``host_labels`` adds the labels of their hosts (``github`` of ``github.com``) and ``page_fields`` (lookup
     tools only) page titles, routes and query strings. With ``site`` only episodes on that host count.
     ``newest_if_none`` returns the newest admissible episodes when nothing shares a term (a lookup by site
-    or period whose words match nothing). Episodes that touched an excluded host (:func:`_hidden`) are
-    skipped; only the matching ones are checked.
+    or period whose words match nothing). The ``omit`` episode ids and the episodes ``session`` recorded (a
+    session's own work, :func:`_not_own`) are skipped, and so are episodes that touched an excluded host
+    (:func:`_hidden`; only the matching ones are checked) and, with ``require_work``, episodes without a site
+    and a successfully dispatched call (:func:`_with_work`).
     """
     if site is not None and site_excluded(site, excluded_sites):
         return Matches((), 0)
@@ -647,6 +774,7 @@ def episodes_for_terms(
             head
             for head in scan.heads
             if head.key not in shown
+            and head.episode_id not in omit
             and (site is None or any(site_matches(site, s) for s in scan.sites.get(head.episode_id, ())))
         ]
         scored: list[tuple[int, _Head]] = []
@@ -657,13 +785,40 @@ def episodes_for_terms(
             shared = len(wanted & own)
             if wanted and shared >= max(1, min_shared):
                 scored.append((shared, head))
-        visible = set(_visible(conn, [head for _score, head in scored], scan, excluded_sites))
-        scored = [(score, head) for score, head in scored if head in visible]
+        visible = _visible(conn, _not_own(conn, [head for _score, head in scored], session), scan, excluded_sites)
+        kept = set(_with_work(conn, visible, scan.sites) if require_work else visible)
+        scored = [(score, head) for score, head in scored if head in kept]
         if not scored and newest_if_none:
-            scored = [(0, head) for head in _visible(conn, candidates, scan, excluded_sites)]
+            newest = _visible(conn, _not_own(conn, candidates, session), scan, excluded_sites)
+            scored = [(0, head) for head in (_with_work(conn, newest, scan.sites) if require_work else newest)]
         scored.sort(key=lambda pair: (-pair[0], -pair[1].last_event_at))
         chosen = [_summary(conn, head, scan.sites.get(head.episode_id, ())) for _score, head in scored[: max(0, limit)]]
     return Matches(tuple(chosen), len(scored) - len(chosen))
+
+
+def last_hermes_call(store: ActivityStore, *, peer_id: str, session_id: str) -> LastCall | None:
+    """The newest browser call Hermes recorded as ``peer_id`` for the Hermes session ``session_id``: an event with
+    ``source`` ``hermes``, that ``hermes_session_id`` and an attempt id, newest receipt first; ``None`` without one.
+
+    Bounded: only the session's newest :data:`LAST_CALL_SESSION_EPISODES` episodes among the newest
+    :data:`LAST_CALL_SCAN_EPISODES` (by last event) are read, through the episode index (the unary ``+`` keeps
+    SQLite from walking all of the peer's events by ``activity_events_producer_seq`` or the whole table in
+    receipt order instead).
+    """
+    with _reading(store) as conn:
+        row = conn.execute(
+            "SELECT attempt_id, episode_id, site, route, query FROM activity_events WHERE episode_id IN ("
+            "SELECT episode_id FROM (SELECT episode_id, hermes_session_id, last_event_at FROM activity_episodes "
+            "ORDER BY last_event_at DESC LIMIT ?) WHERE hermes_session_id = ? ORDER BY last_event_at DESC LIMIT ?) "
+            "AND +peer_id = ? AND source = 'hermes' AND hermes_session_id = ? AND attempt_id IS NOT NULL "
+            "ORDER BY +receipt DESC LIMIT 1",
+            (LAST_CALL_SCAN_EPISODES, session_id, LAST_CALL_SESSION_EPISODES, peer_id, session_id),
+        ).fetchone()
+    if row is None:
+        return None
+    attempt, episode, site, route, query = row
+    path = f"{route}{query or ''}" if route else None
+    return LastCall(str(attempt), str(episode), str(site) if site else None, path)
 
 
 def read_meta(store: ActivityStore) -> dict[str, str]:
@@ -678,8 +833,8 @@ def read_meta(store: ActivityStore) -> dict[str, str]:
 def episode_detail(
     store: ActivityStore, episode_id: str, *, excluded_sites: frozenset[str], excerpt_chars: int = 1000
 ) -> EpisodeDetail | None:
-    """One episode's events in order; ``None`` when it is unknown or touched an excluded host (:func:`_hidden`:
-    any event's site, or a URL in any event's route, query or target label).
+    """One episode's events in time order (``observed_at``, then receipt); ``None`` when it is unknown or touched an
+    excluded host (:func:`_hidden`: any event's site, or a URL in any event's route, query or target label).
 
     Page text is read as an excerpt of at most ``excerpt_chars`` characters per event.
     """
@@ -692,24 +847,20 @@ def episode_detail(
         if row is None:
             return None
         head = _Head(str(row[0]), int(row[1]), float(row[2]), float(row[3]), str(row[4]))
-        sites: list[str] = []
-        for (site,) in conn.execute(
-            "SELECT site FROM activity_events WHERE episode_id = ? AND site IS NOT NULL ORDER BY receipt",
-            (episode_id,),
-        ):
-            if site not in sites:
-                sites.append(str(site))
+        sites = _sites(conn, [episode_id]).get(episode_id, [])
         if _hidden(conn, [episode_id], {episode_id: sites}, excluded_sites):
             return None
         summary = _summary(conn, head, sites)
         count = conn.execute("SELECT COUNT(*) FROM activity_events WHERE episode_id = ?", (episode_id,)).fetchone()
         total = int(count[0])
         # Past the cap the task boundaries and corrections still come first, then the newest events (the
-        # task end, the last pages); they are returned in the order they were received.
+        # task end, the last pages); they are returned in time order, then the order they were received (a
+        # task start Hermes wrote when its turn ended carries the turn's start: it leads that turn's calls).
         rows = conn.execute(
             "SELECT observed_at, phase, op, site, route, query, target, result_status, text, page_title, "
             "substr(page_text, 1, ?), source, actor FROM activity_events WHERE receipt IN (SELECT receipt FROM "
-            f"activity_events WHERE episode_id = ? ORDER BY {_DETAIL_PRIORITY}, receipt DESC LIMIT ?) ORDER BY receipt",
+            f"activity_events WHERE episode_id = ? ORDER BY {_DETAIL_PRIORITY}, receipt DESC LIMIT ?) "
+            "ORDER BY observed_at, receipt",
             (max(0, excerpt_chars), episode_id, MAX_DETAIL_EVENTS),
         ).fetchall()
     events = tuple(
@@ -722,7 +873,7 @@ def episode_detail(
             query=r[5],
             target=r[6],
             result=str(r[7]),
-            text=_shown_text(str(r[2]), r[8]),
+            text=_shown_text(str(r[2]), r[8], user=speaks_for_user(str(r[1]), str(r[2]), str(r[11]), str(r[12]))),
             title=r[9],
             page_text=r[10] or None,
             from_user=bool(r[8]) and speaks_for_user(str(r[1]), str(r[2]), str(r[11]), str(r[12])),
@@ -732,19 +883,21 @@ def episode_detail(
     return EpisodeDetail(summary, events, max(0, total - len(events)))
 
 
-def _shown_text(op: str, text: Any) -> str | None:
-    """Stored text as shown; typed text that looks like a secret is withheld (an earlier receiver kept it)."""
+def _shown_text(op: str, text: Any, *, user: bool = False) -> str | None:
+    """Stored text as shown; typed text that looks like a secret is withheld and, in the user's own words
+    (``user``), secret-shaped tokens are replaced (an earlier receiver kept them)."""
     if not isinstance(text, str) or not text:
         return None
     if op in TYPED_OPS and looks_like_secret(text):
         return WITHHELD_TEXT
-    return text
+    return redact_secret_shaped_tokens(text)[0] if user else text
 
 
 def latest_page_text(
     store: ActivityStore, episode_ids: Sequence[str], site: str, chars: int, *, excluded_sites: frozenset[str]
 ) -> dict[str, str]:
-    """Per episode, an excerpt (at most ``chars`` characters) of the newest page text recorded on ``site``.
+    """Per episode, an excerpt (at most ``chars`` characters) of the newest page text recorded on ``site``: newest
+    in time (``observed_at``, then receipt), not the start page of a task start sent when its task ended.
 
     Episodes that touched an excluded host (:func:`_hidden`, checked again in this transaction) get none.
     """
@@ -758,7 +911,7 @@ def latest_page_text(
                 continue
             rows = conn.execute(
                 "SELECT site, substr(page_text, 1, ?) FROM activity_events WHERE episode_id = ? "
-                "AND page_text IS NOT NULL AND site IS NOT NULL ORDER BY receipt DESC LIMIT 50",
+                "AND page_text IS NOT NULL AND site IS NOT NULL ORDER BY observed_at DESC, receipt DESC LIMIT 50",
                 (max(0, chars), episode_id),
             )
             for event_site, text in rows:
