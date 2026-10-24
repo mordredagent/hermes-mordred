@@ -132,8 +132,11 @@ def test_prompt_status_never_runs_monitor_or_acquires_key(tmp_path, monkeypatch)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="uses the POSIX authority fixture; Windows native proof is explicit")
-def test_cached_authenticated_prompt_checks_current_source_without_sql(native_root, monkeypatch):
+def test_native_prompt_does_not_revoke_registered_sql_on_changed_metadata(native_root, monkeypatch):
+    from types import SimpleNamespace
+
     from mordred_hermes.dbcrypt import _hooks, _key, _monitor
+    from mordred_hermes.dbcrypt._connection import ProtectedConnection
 
     root, backend, _, _ = native_root
     provider = _key.KeyProvider(home=root)
@@ -143,15 +146,32 @@ def test_cached_authenticated_prompt_checks_current_source_without_sql(native_ro
     monkeypatch.setattr(_hooks, "_observation", None)
     _hooks.evaluate("test_runtime")
     calls = list(backend.calls)
+    raw_calls = []
+    connection = object.__new__(ProtectedConnection)
+    connection._authority = authority
+    connection._raw = SimpleNamespace(
+        **{
+            name: lambda *args, name=name: raw_calls.append(name)
+            for name in ("set_authorizer", "set_progress_handler", "rollback", "close")
+        }
+    )
+    connection._pid = os.getpid()
+    connection._closed = connection._revoked = False
+    connection._active = 0
+    connection._vfs = None
+    authority.register_connection(connection)
     monkeypatch.setattr(_monitor, "monitor_runtime", lambda *a: pytest.fail("render opened SQL"))
     monkeypatch.setattr(_key.KeyProvider, "__call__", lambda *a: pytest.fail("render acquired key"))
-    assert "encrypted at rest" in _hooks.status_line()
-    assert backend.calls == calls
-    (root / "mordred/db-encryption.marker").write_bytes(b"1\n")
-    text = _hooks.status_line()
-    assert "NOT protected" in text and "encrypted at rest" not in text
-    assert authority.terminal
-    provider.close()
+    try:
+        (root / "mordred/db-encryption.marker").write_bytes(b"1\n")
+        text = _hooks.status_line()
+        assert raw_calls == [], "passive rendering revoked registered raw SQL"
+        assert "encrypted at rest" not in text
+        assert backend.calls == calls
+        assert not authority.terminal
+        assert not connection._closed and not connection._revoked
+    finally:
+        provider.close()  # Explicit operational cleanup remains responsible for revocation.
 
 
 @pytest.mark.skipif(os.name != "posix", reason="uses the POSIX authority fixture; Windows native proof is explicit")

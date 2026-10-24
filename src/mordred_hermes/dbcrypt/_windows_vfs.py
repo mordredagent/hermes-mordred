@@ -10,9 +10,10 @@ from __future__ import annotations
 import ctypes
 import os
 import re
+import stat
 import sys
 import threading
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import PackageNotFoundError, distribution, version
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Final
@@ -71,9 +72,32 @@ def driver_distribution_qualified() -> bool:
         return False
 
 
-def packaged_library_path() -> Path:
-    """Locate only the owned wheel asset; no native library is loaded here."""
-    return Path(__file__).resolve().parent.parent / "_native" / "dbcrypt-vfs" / "mordred_dbcrypt_vfs.dll"
+def packaged_library_path() -> Path | None:
+    """Find the exact installed distribution-owned asset, including editables.
+
+    Editable Python modules live in the checkout while forced native resources
+    live in site-packages. Module __file__ and diagnostic environment paths are
+    therefore never resource ownership proofs.
+    """
+    parts = ("mordred_hermes", "_native", "dbcrypt-vfs", "mordred_dbcrypt_vfs.dll")
+    try:
+        installed = distribution("hermes-mordred")
+        owned = [entry for entry in installed.files or () if str(entry) == "/".join(parts)]
+        if len(owned) != 1:
+            return None
+        root = Path(str(installed.locate_file(""))).resolve(strict=True)
+        candidate = root.joinpath(*parts)
+        if Path(str(installed.locate_file(owned[0]))).resolve(strict=True) != candidate:
+            return None
+        current = root
+        for part in parts:
+            current /= part
+            metadata = current.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & 0x400:
+                return None
+        return candidate if stat.S_ISREG(metadata.st_mode) else None
+    except (PackageNotFoundError, OSError, ValueError):
+        return None
 
 
 def _load_native() -> Any:

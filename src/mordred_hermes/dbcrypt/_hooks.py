@@ -175,13 +175,18 @@ def status_line(_info: Any = None) -> str:
         if _PROVIDER is not None and _PROVIDER.runtime_native:
             authority = _PROVIDER.current_authority
             token = authority
-            if authority is not None:
-                authority.check()  # Public metadata only; never authenticate or run SQL.
         cached = _observation
         if cached is not None and cached[0] == home and cached[1] is token:
             findings = list(cached[2])
         else:
             findings = [_monitor.Finding("no_key", "database protection has not been authenticated in this process")]
+        if _PROVIDER is not None and _PROVIDER.runtime_native:
+            # Authority.check can revoke connections and roll back SQL on failure.
+            # Until authority exposes a pure observation API, never reuse a native
+            # protection claim in passive rendering; evaluate owns freshness work.
+            findings = [f for f in findings if f.violation] or [
+                _monitor.Finding("no_key", "native database freshness is not authenticated by passive status")
+            ]
         if token is None and not any(f.violation for f in findings):
             findings = [_monitor.Finding("no_key", "database protection has not been authenticated in this process")]
     except Exception:

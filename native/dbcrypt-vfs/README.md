@@ -228,3 +228,20 @@ using a qualified production bridge. This constraint and successful packaging
 do not enable Windows runtime protection. `NATIVE_QUALIFIED` remains false until
 the separate actual Windows qualification is recorded; ordinary capability and
 status do not load the bridge, open SQL, authenticate custody or enroll a home.
+
+Editable Python modules are imported from the checkout, while the forced native
+asset is installed under site-packages. The locator therefore resolves only the
+exact asset listed by the installed `hermes-mordred` distribution's file inventory,
+validates its installation-root location, and refuses links/reparse points. It
+returns unavailable when that owned artifact is absent; a source-tree DLL or a
+diagnostic environment override cannot supply the production resource.
+
+Normal `uv sync` / `uv run` tracks the packaging metadata, custom hook, header
+preparation recipe, owned VFS C/header/PowerShell files, and the explicit
+`MORDRED_SQLITE_INCLUDE_DIR` value as cache inputs, retaining the default source
+directory presence key. Changing these inputs rebuilds the editable bridge.
+External headers must still match the locked recipe. To force a rebuild after
+replacing external inputs at the same location, use
+`uv sync --refresh-package hermes-mordred --reinstall-package hermes-mordred`.
+These cache/resource checks do not compile, load or qualify native code during
+ordinary status rendering.

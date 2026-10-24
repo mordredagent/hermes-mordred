@@ -195,6 +195,21 @@ Source = "https://github.com/mordredagent/hermes-mordred"
 [tool.mordred]
 min-hermes-version = "0.13.0"
 
+# Editable native assets must follow every owned compiler/header input rather
+# than retaining a bridge while Python code changes in place. Keep uv's default
+# packaging/source-directory keys when defining this explicit cache policy.
+[tool.uv]
+cache-keys = [
+  { file = "pyproject.toml" },
+  { dir = "src" },
+  { file = "hatch_build.py" },
+  { file = "tools/dbcrypt_build_headers.py" },
+  { file = "native/dbcrypt-vfs/*.c" },
+  { file = "native/dbcrypt-vfs/*.h" },
+  { file = "native/dbcrypt-vfs/build.ps1" },
+  { env = "MORDRED_SQLITE_INCLUDE_DIR" },
+]
+
 # Dynamic version source. Hatchling's built-in regex source reads the
 # `__version__ = "..."` assignment from the file below. It must live under
 # src/ (shipped in both sdist and wheel) so a wheel built from the sdist —

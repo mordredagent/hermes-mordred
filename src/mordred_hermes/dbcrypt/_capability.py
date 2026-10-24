@@ -103,7 +103,7 @@ def database_status(home: Path) -> DatabaseStatus:
             return DatabaseStatus(
                 configured, dependencies, "unavailable", False, "Windows SQLCipher driver pair is unqualified"
             )
-        if not packaged_library_path().is_file():
+        if packaged_library_path() is None:
             return DatabaseStatus(
                 configured, dependencies, "unavailable", False, "owned Windows VFS asset is unavailable"
             )

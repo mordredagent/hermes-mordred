@@ -120,8 +120,12 @@ def test_packaged_vfs_locator_never_depends_on_checkout_or_env(tmp_path, monkeyp
     monkeypatch.setenv("MORDRED_DBCRYPT_CHECKED_LIBRARY", str(tmp_path / "probe.dll"))
     assert callable(getattr(_windows_vfs, "packaged_library_path", None)), "owned wheel locator is missing"
     path = _windows_vfs.packaged_library_path()
-    assert path.name == "mordred_dbcrypt_vfs.dll"
-    assert path.parent.parts[-2:] == ("_native", "dbcrypt-vfs")
+    if os.name == "nt":
+        assert path is not None and path.name == "mordred_dbcrypt_vfs.dll"
+        assert path.parent.parts[-2:] == ("_native", "dbcrypt-vfs")
+        assert not path.is_relative_to(ROOT / "src")
+    else:
+        assert path is None
 
 
 def test_sdist_to_fresh_wheel_has_owned_assets_and_extra_outside_checkout(tmp_path):
@@ -193,9 +197,11 @@ audit.safe_audit_append = lambda *args, **kwargs: None
 sys.modules[audit.__name__] = audit
 from mordred_hermes.dbcrypt import _windows_vfs, database_status
 assert Path(_windows_vfs.__file__).resolve().is_relative_to(Path('fresh-venv').resolve())
-assert _windows_vfs.packaged_library_path().name == 'mordred_dbcrypt_vfs.dll'
+asset = _windows_vfs.packaged_library_path()
 if sys.platform == 'win32':
-    assert _windows_vfs.packaged_library_path().is_file()
+    assert asset is not None and asset.name == 'mordred_dbcrypt_vfs.dll' and asset.is_file()
+else:
+    assert asset is None
 assert database_status(Path('isolated-home')).authenticated is False
 """
     result = subprocess.run([str(python), "-I", "-c", code], cwd=tmp_path, env=env, capture_output=True, text=True)
@@ -252,3 +258,198 @@ def test_windows_pair_requires_concrete_qualified_driver_without_import(installe
     )
     monkeypatch.setattr(_windows_vfs, "version", distribution_version)
     assert _windows_vfs.driver_distribution_qualified() is expected
+
+
+def test_actual_editable_install_finds_owned_asset_outside_source(tmp_path):
+    source = tmp_path / "editable-source"
+    package = source / "src/mordred_hermes/dbcrypt"
+    package.mkdir(parents=True)
+    (package.parent / "__init__.py").write_text("")
+    (package / "__init__.py").write_text("")
+    shutil.copyfile(ROOT / "src/mordred_hermes/dbcrypt/_windows_vfs.py", package / "_windows_vfs.py")
+    # A controlled non-executable resource exercises real Hatch editable layout.
+    (source / "owned-resource.dll").write_bytes(b"owned editable resource")
+    unowned = package.parent / "_native/dbcrypt-vfs/mordred_dbcrypt_vfs.dll"
+    unowned.parent.mkdir(parents=True)
+    unowned.write_bytes(b"unowned source-tree resource")
+    (source / "pyproject.toml").write_text("""
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+[project]
+name = "hermes-mordred"
+version = "0.0.0"
+[tool.hatch.build.targets.wheel]
+packages = ["src/mordred_hermes"]
+[tool.hatch.build.targets.wheel.force-include]
+"owned-resource.dll" = "mordred_hermes/_native/dbcrypt-vfs/mordred_dbcrypt_vfs.dll"
+""")
+    env = {
+        **os.environ,
+        "HERMES_HOME": str(tmp_path / "isolated-home"),
+        "MORDRED_DBCRYPT_CHECKED_LIBRARY": str(unowned),
+    }
+    env.pop("PYTHONPATH", None)
+    venv = tmp_path / "editable-venv"
+    result = subprocess.run([UV, "venv", str(venv)], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    result = subprocess.run(
+        [UV, "pip", "install", "--python", str(python), "--no-deps", "--editable", str(source)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    code = """
+from pathlib import Path
+from mordred_hermes.dbcrypt import _windows_vfs
+assert Path(_windows_vfs.__file__).resolve().is_relative_to(Path('editable-source').resolve())
+asset = _windows_vfs.packaged_library_path()
+assert asset is not None and asset.is_file()
+assert asset.is_relative_to(Path('editable-venv').resolve()), asset
+assert not asset.is_relative_to(Path('editable-source').resolve()), asset
+assert asset.read_bytes() == b'owned editable resource'
+"""
+    result = subprocess.run(
+        [str(python), "-I", "-B", "-c", code], cwd=tmp_path, env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("ownership", ["not-recorded", "foreign-location"])
+def test_locator_refuses_unowned_or_foreign_distribution_asset(tmp_path, monkeypatch, ownership):
+    from importlib.metadata import PackagePath
+    from types import SimpleNamespace
+
+    from mordred_hermes.dbcrypt import _windows_vfs
+
+    asset = "mordred_hermes/_native/dbcrypt-vfs/mordred_dbcrypt_vfs.dll"
+    root = tmp_path / "site-packages"
+    (root / asset).parent.mkdir(parents=True)
+    (root / asset).write_bytes(b"unowned resource")
+    foreign = tmp_path / "foreign.dll"
+    foreign.write_bytes(b"foreign resource")
+    installed = SimpleNamespace(
+        files=[PackagePath(asset)] if ownership == "foreign-location" else [],
+        locate_file=lambda entry: root if not str(entry) else foreign,
+    )
+    # This metadata provider boundary must exist before it can be replaced.
+    assert hasattr(_windows_vfs, "distribution"), "installed distribution ownership is not consulted"
+    monkeypatch.setattr(_windows_vfs, "distribution", lambda name: installed)
+    assert _windows_vfs.packaged_library_path() is None
+
+
+def test_uv_sync_rebuilds_for_owned_native_inputs_and_header_location(tmp_path):
+    import json
+
+    source = tmp_path / "cache-source"
+    source.mkdir()
+    inputs = ["pyproject.toml", "hatch_build.py", "tools/dbcrypt_build_headers.py"]
+    inputs += sorted(
+        str(path.relative_to(ROOT)).replace("\\", "/")
+        for pattern in ("*.c", "*.h", "build.ps1")
+        for path in (ROOT / "native/dbcrypt-vfs").glob(pattern)
+    )
+    for name in inputs[1:]:
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("initial controlled input")
+    settings = tomllib.loads((ROOT / "pyproject.toml").read_text()).get("tool", {}).get("uv", {})
+    keys = settings.get("cache-keys", [])
+    cache_table = ""
+    if keys:
+        entries = [
+            "{ " + ", ".join(f"{key} = {json.dumps(value)}" for key, value in item.items()) + " }" for item in keys
+        ]
+        cache_table = "\n[tool.uv]\ncache-keys = [" + ", ".join(entries) + "]\n"
+    (source / "pyproject.toml").write_text(
+        """
+[build-system]
+requires = []
+build-backend = "backend"
+backend-path = ["."]
+[project]
+name = "task8-cache-probe"
+version = "0.0.0"
+requires-python = ">=3.11"
+"""
+        + cache_table
+    )
+    (source / "backend.py").write_text(
+        """
+import hashlib, os, zipfile
+from pathlib import Path
+INPUTS = """
+        + repr(inputs)
+        + """
+def build_editable(wheel_directory, config_settings=None, metadata_directory=None):
+    digest = hashlib.sha256(b"\\0".join(Path(name).read_bytes() for name in INPUTS)
+        + os.environ.get("MORDRED_SQLITE_INCLUDE_DIR", "").encode()).hexdigest()
+    name = "task8_cache_probe-0.0.0-py3-none-any.whl"
+    prefix = "task8_cache_probe-0.0.0.dist-info/"
+    data = {
+        "task8_cache_probe_build.txt": digest,
+        prefix + "METADATA": "Metadata-Version: 2.1\\nName: task8-cache-probe\\nVersion: 0.0.0\\n",
+        prefix + "WHEEL": "Wheel-Version: 1.0\\nRoot-Is-Purelib: true\\nTag: py3-none-any\\n",
+    }
+    data[prefix + "RECORD"] = "".join(item + ",,\\n" for item in [*data, prefix + "RECORD"])
+    with zipfile.ZipFile(Path(wheel_directory) / name, "w") as wheel:
+        for path, value in data.items():
+            wheel.writestr(path, value)
+    with Path("build-calls.txt").open("a") as calls:
+        calls.write(digest + "\\n")
+    return name
+build_wheel = build_editable
+"""
+    )
+    venv = tmp_path / "cache-venv"
+    env = {
+        **os.environ,
+        "HERMES_HOME": str(tmp_path / "isolated-home"),
+        "UV_PROJECT_ENVIRONMENT": str(venv),
+        "MORDRED_SQLITE_INCLUDE_DIR": str(tmp_path / "headers-one"),
+        "UV_PYTHON_DOWNLOADS": "never",
+    }
+    env.pop("PYTHONPATH", None)
+    env.pop("VIRTUAL_ENV", None)
+    python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+    def sync_payload():
+        result = subprocess.run(
+            [UV, "sync", "--no-build-isolation", "--offline", "--python", sys.executable],
+            cwd=source,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        result = subprocess.run(
+            [
+                str(python),
+                "-I",
+                "-c",
+                "from importlib.metadata import distribution; "
+                "print(distribution('task8-cache-probe').locate_file('task8_cache_probe_build.txt').read_text())",
+            ],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip()
+
+    previous = sync_payload()
+    builds = (source / "build-calls.txt").read_text()
+    assert sync_payload() == previous
+    assert (source / "build-calls.txt").read_text() == builds, "unchanged sync unnecessarily rebuilt"
+    for name in [*inputs[1:], "pyproject.toml"]:
+        path = source / name
+        path.write_text(path.read_text() + "\n# changed controlled build input\n")
+        current = sync_payload()
+        assert current != previous, f"uv retained a stale editable after {name} changed"
+        previous = current
+    env["MORDRED_SQLITE_INCLUDE_DIR"] = str(tmp_path / "headers-two")
+    assert sync_payload() != previous, "uv retained a stale editable after the explicit header location changed"
