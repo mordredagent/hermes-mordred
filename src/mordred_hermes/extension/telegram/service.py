@@ -490,6 +490,7 @@ class TelegramService:
 
     async def _run_sync(self, value: TelegramSecrets, store: ArchiveStore, lock: Any, options: SyncOptions) -> None:
         client: Any = None
+        revoked_session = False
         try:
             # Chosen before connecting: a retired index whose store refuses never reaches Telegram.
             index = await asyncio.to_thread(store.load_index)
@@ -513,8 +514,7 @@ class TelegramService:
         except Exception as exc:
             code = error_code(exc, "telegram_sync_failed")
             self._last_error = code
-            if code == "telegram_session_revoked":
-                await self._forget_revoked_session()
+            revoked_session = code == "telegram_session_revoked"
             if code == "telegram_sync_failed":
                 # Type name only: an exception message or traceback locals
                 # could carry message text.
@@ -529,6 +529,12 @@ class TelegramService:
             except StoreError as exc:
                 # A classified lock-release failure is reported, never lost.
                 self._last_error = self._last_error or exc.code
+            else:
+                # A fresh credential update may await hardware authentication.
+                # The archive scope must actually exit before that unwrap;
+                # failed release defers this best-effort cleanup to a retry.
+                if revoked_session:
+                    await self._forget_revoked_session()
             finally:
                 self._progress.finished_at = int(time.time())
 
