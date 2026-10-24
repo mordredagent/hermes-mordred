@@ -419,6 +419,20 @@ def test_readonly_wal_reader_uses_owned_shm(fixture: tuple[Any, Any, Path]) -> N
         writer.close()
 
 
+def test_recovery_exclusive_lock_reports_own_reserved_state(fixture: tuple[Any, Any, Path]) -> None:
+    _driver, registration, root = fixture
+    native = registration._native
+    assert hasattr(native, "mordred_vfs_test_recovery_lock"), "run callback gates using -Target CheckedTest"
+    check = native.mordred_vfs_test_recovery_lock
+    check.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_int)]
+    check.restype = ctypes.c_int
+    reserved = ctypes.c_int(-1)
+    assert check(str(root / "recovery-lock.db").encode("utf-8"), ctypes.byref(reserved)) == 0
+    # Recovery may jump from SHARED to EXCLUSIVE without acquiring a separate
+    # RESERVED-byte lock. SQLite still requires this own lock to report true.
+    assert reserved.value == 1
+
+
 def test_inherited_dacl_race_cannot_broaden_a_created_journal(fixture: tuple[Any, Any, Path]) -> None:
     from mordred_hermes._private_fs._windows_api import OwnedHandle, get_api
     from mordred_hermes._private_fs._windows_security import validate_private
