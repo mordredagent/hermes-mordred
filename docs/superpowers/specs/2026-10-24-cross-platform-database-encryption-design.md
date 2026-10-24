@@ -2,7 +2,8 @@
 
 Date: 2026-10-24
 
-Status: Proposed design; independent builder review completed, user approval pending.
+Status: Architecture approved by the user on 2026-10-24 after independent
+builder review; implementation and native acceptance remain pending.
 
 ## Intent and decisions
 
@@ -293,8 +294,10 @@ support, fail-closed VFS feasibility, independent mail credentials, and no porta
 Linux/Windows recovery in this scope. Builders may select internal APIs and native
 packaging details consistent with these boundaries. VFS viability and actual AWS
 guest access remain evidence questions; failure narrows claimed support rather
-than relaxing the security boundary. After user approval, write the implementation
-plan with concrete tests, file ownership, and the independently reviewable PR slices.
+than relaxing the security boundary. The user approved proceeding with this
+architecture on 2026-10-24. The [implementation plan](../plans/2026-10-24-cross-platform-database-encryption.md)
+defines concrete tests, file ownership, and independently reviewable PR slices;
+approval of the architecture is not evidence that any runtime gate has passed.
 
 Independent builder review identified one material ambiguity: metadata/generation
 validation versus repeated native authentication. The runtime-authority section

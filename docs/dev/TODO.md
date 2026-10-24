@@ -250,8 +250,10 @@ The macOS CLI, startup protection, monitor and uninstall lifecycle are implement
 - [ ] Desktop: add database enable/disable/status controls, including scheduled conversion.
 - [ ] Logging: redact message previews (`msg=`) from `logs/agent.log`.
 - [ ] Cross-platform shared SQLCipher lifecycle (owner-selected Approach A):
-  review the [design](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md),
-  then implement component-scoped PRs and validate on the existing AWS Linux
+  the [design](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md)
+  was approved on 2026-10-24; follow the
+  [implementation plan](../superpowers/plans/2026-10-24-cross-platform-database-encryption.md)
+  for component-scoped PRs and validate on the existing AWS Linux
   and Windows NitroTPM hosts. Protect root/shared/profile databases and
   `mordred.db`; preserve macOS format compatibility and block key deletion
   while dependent protected database state remains.

@@ -6504,6 +6504,9 @@ foundation to Linux and Windows, covering Hermes's root/shared/profile databases
 and the Telegram, mail and activity tables in `mordred.db`. The
 [design](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md)
 records that selected direction and the proposed implementation contracts.
+The user approved the architecture on 2026-10-24; the
+[implementation plan](../superpowers/plans/2026-10-24-cross-platform-database-encryption.md)
+tracks its gated execution.
 This is future work, not a change to the currently macOS-only support claims.
 
 The proposal preserves the macOS database format and root-owned encryption
