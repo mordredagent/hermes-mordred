@@ -71,9 +71,10 @@ class MemoryKeyCustody:
             or native_key_id != memory_key_id(record.home)
         ):
             raise DatabaseRefused("memory native ownership is no longer held")
-        lock = _storage._lock_path_key(record.home / "mordred" / "memory-key.lock")
-        if not _storage._thread_lock_depths().get(lock):
-            raise DatabaseRefused("memory native ownership requires its live custody lock")
+        try:
+            _storage.assert_advisory_lock_held(record.home / "mordred" / "memory-key.lock")
+        except OSError as exc:
+            raise DatabaseRefused("memory native ownership requires its live custody lock") from exc
         path = memory_key_path(record.home)
         observed = path.lstat()
         if (observed.st_dev, observed.st_ino) != record.identity or _storage.safe_read(path) != record.wrapper:
@@ -295,16 +296,19 @@ def _ensure_linux_memory_key(
         if (path.parent / "memory-vault.marker").exists():
             raise MemoryKeyError("armed profile has lost its wrapped key; refusing regeneration")
         _validate_adoption(home, adopted_key)
+        _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
         key_id = memory_key_id(home)
         try:
             selected.get_enclave_public_key(key_id)
         except WrapKeyNotFound:
+            _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
             selected.generate_enclave_key(key_id, unattended=True)
         key = adopted_key if adopted_key is not None else secrets.token_bytes(32)
         blob = wrap.wrap_dek(key, key_id, backend=selected)
         # Verify actual TPM access before publishing: a public-key lookup is insufficient.
         if wrap.unwrap_dek(blob, key_id, backend=selected, audit_sink=lambda entry: None) != key:
             raise MemoryKeyError("TPM memory key verification failed")
+        _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
         _publish(path, blob)
         return key
 

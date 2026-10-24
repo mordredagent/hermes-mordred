@@ -222,14 +222,10 @@ def _load_posix(root: Path, identity: RootIdentity, digest: str) -> bytes:
         from ._memory_key import load_linux_memory_key
 
         return load_linux_memory_key(home=root)
-    import io
-
-    from dotenv import dotenv_values
-
     from . import vault
     from ._identity import resolve_store, vault_identity
+    from ._memory_env import effective_memory_key
     from ._seckey_backend import _SecKeyBackend
-    from .memory_crypto import decode_key
 
     vault_root = root / "mordred" / "vault"
     key_id = vault_identity(vault_root)
@@ -242,11 +238,10 @@ def _load_posix(root: Path, identity: RootIdentity, digest: str) -> bytes:
         if _digest(identity, "secure-enclave", {"key_id": key_id, "role": "memory"}, opened._wmk) != digest:
             raise DatabaseRefused("observed vault device header is not the authenticated authority")
         plaintext = opened.read_file(".env")
-    values = dotenv_values(stream=io.StringIO(plaintext.decode("utf-8")), interpolate=False)
-    value = values.get("HERMES_MEMORY_KEY")
-    if not value:
+    material = effective_memory_key(plaintext)
+    if material is None:
         raise DatabaseRefused("root vault memory key is absent")
-    return decode_key(value)
+    return material
 
 
 def _key(material: bytes) -> bytes:

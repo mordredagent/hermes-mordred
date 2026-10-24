@@ -103,3 +103,62 @@ def test_cli_dependency_refusal_precedes_memory_disable(enrolled, monkeypatch):
     assert memory_cli.purge(home=home, root=home / "vault", backend=backend, platform="linux") == 1
     assert memory.memory_key_path(home).exists()
     assert ops.calls == []
+
+
+@pytest.mark.parametrize("after_permit", [False, True])
+def test_native_memory_owner_checks_actual_lock_at_use(enrolled, after_permit):
+    from contextlib import ExitStack
+
+    from mordred_hermes.keyvault._native_deletion import _issue_native_owner, _owned_delete_scope
+
+    home, backend, ops = enrolled
+    with (
+        database_key_mutation(root=home, generation=None) as lease,
+        memory.memory_key_lock(home),
+        memory._native_memory_custody(home, backend) as scope,
+        ExitStack() as permits,
+    ):
+        owner = _issue_native_owner(scope, native_key_id=memory.memory_key_id(home), backend=backend)
+        if after_permit:
+            permit = permits.enter_context(_owned_delete_scope(owner, backend=backend, database_lease=lease))
+        lock = home / "mordred" / "memory-key.lock"
+        lock.rename(lock.with_name("retired-memory-key.lock"))
+        lock.touch(mode=0o600)
+        with pytest.raises(DatabaseRefused):
+            if not after_permit:
+                permit = permits.enter_context(_owned_delete_scope(owner, backend=backend, database_lease=lease))
+            backend.delete_enclave_key(memory.memory_key_id(home), deletion=permit)
+    assert ops.calls == []
+
+
+def test_fresh_memory_checks_dependencies_after_adoption_inspection(tmp_path, monkeypatch):
+    ops = _FakeOps()
+    backend = _SecKeyBackend(ops=ops, sw_ops=None, legacy_ops=None)
+    original = memory._validate_adoption
+
+    def inspect(home, key):
+        original(home, key)
+        (home / "state.db").touch()
+
+    monkeypatch.setattr(memory, "_validate_adoption", inspect)
+    with pytest.raises(DatabaseRefused):
+        memory.ensure_linux_memory_key(home=tmp_path, backend=backend)
+    assert ops.calls == []
+    assert not memory.memory_key_path(tmp_path).exists()
+
+
+def test_fresh_memory_checks_dependencies_before_wrapper_publication(tmp_path, monkeypatch):
+    ops = _FakeOps()
+    backend = _SecKeyBackend(ops=ops, sw_ops=None, legacy_ops=None)
+    original = memory.wrap.unwrap_dek
+
+    def verify(*args, **kwargs):
+        result = original(*args, **kwargs)
+        (tmp_path / "state.db").touch()
+        return result
+
+    monkeypatch.setattr(memory.wrap, "unwrap_dek", verify)
+    with pytest.raises(DatabaseRefused):
+        memory.ensure_linux_memory_key(home=tmp_path, backend=backend)
+    assert len(ops._keys) == 1  # Retain successful/uncertain native creation.
+    assert not memory.memory_key_path(tmp_path).exists()

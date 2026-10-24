@@ -255,6 +255,24 @@ def test_unrelated_macos_vault_update_preserves_database_source_binding(mac_sour
     assert authority.load_database_source(root=root, expected=snapshot) == b"a" * 32
 
 
+def test_macos_source_load_rejects_legacy_malformed_dotenv(mac_source, monkeypatch):
+    from mordred_hermes.keyvault import vault
+
+    authority, root, _, _, _ = mac_source
+    snapshot = enroll(authority, root)
+    original = vault.OpenVault.read_file
+
+    def legacy_payload(opened, name):
+        if name == ".env":
+            # Simulate a legacy authenticated payload rejected by new writers.
+            return b"bad key =ignored\nHERMES_MEMORY_KEY=hex:" + b"61" * 32 + b"\n"
+        return original(opened, name)
+
+    monkeypatch.setattr(vault.OpenVault, "read_file", legacy_payload)
+    with pytest.raises(DatabaseRefused):
+        authority.load_database_source(root=root, expected=snapshot)
+
+
 def test_macos_uncommitted_wrapping_header_cannot_be_enrolled(mac_source):
     from mordred_hermes.keyvault import manifest, wrap
     from mordred_hermes.keyvault.kek import MasterKey
