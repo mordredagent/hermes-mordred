@@ -666,6 +666,8 @@ def _commit_pending_audit_key(
     logical_key_id: str,
     native_key_id: str,
     allow_duplicate_adoption: bool,
+    custody: _storage.KeyvaultCustody,
+    fresh_pending: bool,
 ) -> None:
     """Generate/adopt the exact pending key and durably commit ownership."""
 
@@ -680,13 +682,19 @@ def _commit_pending_audit_key(
         receipt = None
         try:
             try:
-                receipt = stack.enter_context(
-                    wrap.create_wrapping_key_scope(
-                        logical_key_id,
-                        backend=backend,
-                        native_key_id=native_key_id,
+                if fresh_pending:
+                    receipt = stack.enter_context(
+                        wrap.create_wrapping_key_scope(
+                            logical_key_id,
+                            backend=backend,
+                            custody=custody,
+                            native_key_id=native_key_id,
+                        )
                     )
-                )
+                else:
+                    # A resumed owner has no new rollback capability. Any
+                    # uncertain native outcome remains owned by its journal.
+                    wrap.generate_wrapping_key(logical_key_id, backend=backend, native_key_id=native_key_id)
             except WrapKeyAlreadyExists:
                 # The durable exact pending record proves this profile owns the
                 # deterministic scoped selector. Adoption is still limited to a
@@ -740,30 +748,33 @@ def _commit_pending_audit_key(
 def _provision_audit_log_key_locked(root: Path, backend: NativeBackend, logical_key_id: str) -> None:
     """Run resumable two-phase audit-key provisioning under keyvault_lock."""
 
-    meta = _storage.load_meta(root)
-    _require_scoped_main_key_for_audit(root, meta)
-    native_key_id = _native_key_id.scoped_native_key_id(root, logical_key_id)
-    pending, committed = _audit_key_state(root, meta, logical_key_id)
-    if committed is not None and pending is None:
-        return
-    pending_was_present = pending is not None
-    if pending is None:
-        pending = _native_key_id.add_pending_audit_key(root, meta, logical_key_id)
-        _storage.save_meta(root, meta)
-    if pending != native_key_id:
-        raise _storage.KeyvaultCorruptError("pending audit key does not belong to this profile")
-    _commit_pending_audit_key(
-        root,
-        backend=backend,
-        logical_key_id=logical_key_id,
-        native_key_id=native_key_id,
-        allow_duplicate_adoption=not pending_was_present or committed is not None,
-    )
-    _clear_pending_audit_key_after_commit(
-        root,
-        logical_key_id=logical_key_id,
-        native_key_id=native_key_id,
-    )
+    with _storage.keyvault_custody(root, backend=backend) as custody:
+        meta = _storage.load_meta(root)
+        _require_scoped_main_key_for_audit(root, meta)
+        native_key_id = _native_key_id.scoped_native_key_id(root, logical_key_id)
+        pending, committed = _audit_key_state(root, meta, logical_key_id)
+        if committed is not None and pending is None:
+            return
+        pending_was_present = pending is not None
+        if pending is None:
+            pending = _native_key_id.add_pending_audit_key(root, meta, logical_key_id)
+            _storage.save_meta(root, meta)
+        if pending != native_key_id:
+            raise _storage.KeyvaultCorruptError("pending audit key does not belong to this profile")
+        _commit_pending_audit_key(
+            root,
+            backend=backend,
+            logical_key_id=logical_key_id,
+            native_key_id=native_key_id,
+            allow_duplicate_adoption=not pending_was_present or committed is not None,
+            custody=custody,
+            fresh_pending=not pending_was_present,
+        )
+        _clear_pending_audit_key_after_commit(
+            root,
+            logical_key_id=logical_key_id,
+            native_key_id=native_key_id,
+        )
 
 
 def _provision_audit_log_key(

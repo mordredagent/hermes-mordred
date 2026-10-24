@@ -415,7 +415,7 @@ def import_backup(
     # commit share one lock hold. This serializes import with init and other
     # imports, and — crucially — rejects existing state BEFORE asking a
     # possibly-different backend namespace to generate a same-named key.
-    with _storage.keyvault_lock(root), contextlib.ExitStack() as native_keys:
+    with _storage.keyvault_custody(root, backend=backend) as custody, contextlib.ExitStack() as native_keys:
         _assert_fresh_import_destination(root)
         creation: wrap.NativeCreateReceipt | None = None
         pending_meta = _storage.load_meta(root)
@@ -427,7 +427,9 @@ def import_backup(
             # If generate raises (including duplicate), the key belongs to
             # pre-existing state and must not be deleted by rollback.
             creation = native_keys.enter_context(
-                wrap.create_wrapping_key_scope(imported_key_id, backend=backend, native_key_id=native_key_id)
+                wrap.create_wrapping_key_scope(
+                    imported_key_id, backend=backend, custody=custody, native_key_id=native_key_id
+                )
             )
 
             # 7. Rebuild every envelope against this device's Enclave key.

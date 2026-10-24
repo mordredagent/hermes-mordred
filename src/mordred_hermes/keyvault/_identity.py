@@ -116,3 +116,13 @@ def resolve_backend_store(
     each production default.
     """
     return resolve_backend(backend), resolve_store(store)
+
+
+def _assert_vault_publication_identity(root: Path, key_id: str, anchor_label: str) -> None:
+    """Admit only this physical vault's derived native and anchor selectors."""
+    from .._database_contracts import DatabaseRefused
+
+    absolute = root.absolute()
+    checked = root.resolve()
+    if absolute != checked or key_id != vault_identity(checked) or anchor_label != vault_identity(checked):
+        raise DatabaseRefused("vault publication requires its exact physical-root native and anchor identity")

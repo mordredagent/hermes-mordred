@@ -118,11 +118,14 @@ def _build_vault(root: Path, *, files: dict[str, bytes] | None = None) -> None:
     ``recovery.mrkv`` + ``manifest.<gen>`` the cold path reads back are
     genuine. The returned vault is closed; callers open it via the CLI.
     """
+    from mordred_hermes.keyvault._identity import vault_identity
+
+    ident = vault_identity(root)
     backend = FakeBackend()
-    backend.generate_enclave_key(_KEY_ID)
+    backend.generate_enclave_key(ident)
     store = FakeAnchorStore()
     opened = vault.init_vault(
-        root, key_id=_KEY_ID, passphrase=_PASSPHRASE, backend=backend, store=store, anchor_label=_LABEL
+        root, key_id=ident, passphrase=_PASSPHRASE, backend=backend, store=store, anchor_label=ident
     )
     try:
         for name, plaintext in (files or {}).items():

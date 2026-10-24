@@ -31,7 +31,7 @@ def _owned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     calls = []
     ops = _HelperSecKeyOps("/not/executed")
     monkeypatch.setattr(_HelperSecKeyOps, "_invoke", lambda self, payload: calls.append(payload) or {"ok": True})
-    backend = _SecKeyBackend(ops=ops, sw_ops=None)
+    backend = _SecKeyBackend(ops=ops, sw_ops=None)._for_keyvault_root(root)
     return root, selector, backend, calls
 
 

@@ -436,6 +436,9 @@ def init_vault(
     """
     _refuse_excluded("file_vault", "init_vault")
     root = Path(root)
+    from ._identity import _assert_vault_publication_identity
+
+    _assert_vault_publication_identity(root, key_id, anchor_label)
     _guard_vault_initialization(root, database_lease)
     if (
         root.is_dir()
@@ -664,6 +667,9 @@ def recover_to_device(
     """
     _refuse_excluded("recovery", "recover_to_device")
     root = Path(root)
+    from ._identity import _assert_vault_publication_identity
+
+    _assert_vault_publication_identity(root, key_id, anchor_label)
     _ensure_lock(root)
     with keyvault_lock(root):
         recovery_blob = _read_recovery_blob(root, action="cannot re-key this vault")

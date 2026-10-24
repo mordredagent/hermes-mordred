@@ -1,162 +1,113 @@
-"""Checked source adoption revokes another transaction's rollback rights."""
+"""Actual process exclusion is the provisioning-receipt safety boundary."""
+
+import json
+import select
+import subprocess
+import sys
 
 import pytest
 
 from mordred_hermes._database_contracts import DatabaseRefused
 from mordred_hermes.keyvault import wrap
-from mordred_hermes.keyvault._database_mutation import database_key_mutation
-from mordred_hermes.keyvault._seckey_backend import _SecKeyBackend
-from tests._platform_test_helpers import legacy_file_vault as legacy_file_vault
-from tests.test_keyvault_seckey_backend import _FakeOps
-from tests.test_windows_custody import fs as fs
+from tests._keyvault_receipt_ipc import make_backend
+from tests._platform_test_helpers import legacy_secret_store as legacy_secret_store
 
 
-def backend_pair():
-    creator_ops = _FakeOps()
-    adopter_ops = _FakeOps()
-    adopter_ops._keys = creator_ops._keys
-    return (
-        _SecKeyBackend(ops=creator_ops, sw_ops=None, legacy_ops=None),
-        _SecKeyBackend(ops=adopter_ops, sw_ops=None, legacy_ops=None),
-        creator_ops,
-        adopter_ops,
+def start(home, worker, role="main", stage="live"):
+    return subprocess.Popen(
+        [sys.executable, "-m", "tests._keyvault_receipt_ipc", str(home), worker, role, stage],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
 
 
-@pytest.mark.parametrize("role", ["memory", "audit", "telegram"])
-@pytest.mark.parametrize("uncertain", [False, True])
-def test_windows_reconciliation_revokes_external_receipt(fs, monkeypatch, role, uncertain):
-    custody, _, home, _ = fs
-    creator, adopter, creator_ops, adopter_ops = backend_pair()
-    with (
-        database_key_mutation(root=home, generation=None) as lease,
-        custody.windows_custody_session(home, create=True, backend=adopter) as session,
-    ):
-        # Stage a genuine interrupted native-create intent; reconciliation is
-        # the supported adoption path for a key created after this journal.
-        _, pending = session._begin(role, database_lease=lease)
-        if uncertain:
-            journal = session._journal
-
-            def fail_verified(record, **kwargs):
-                journal(record, **kwargs)
-                if record.phase == "verified":
-                    raise OSError("verified journal durability uncertain")
-
-            monkeypatch.setattr(session, "_journal", fail_verified)
-        with wrap.create_wrapping_key_scope(pending.record.native_key_id, backend=creator) as receipt:
-            if uncertain:
-                with pytest.raises(OSError):
-                    session.reconcile_pending(role, database_lease=lease)
-            else:
-                session.reconcile_pending(role, database_lease=lease)
-                assert session.lease(role).native_key_id == pending.record.native_key_id
-            (home / "state.db").touch()
-            with pytest.raises(DatabaseRefused):
-                wrap.rollback_created_key(receipt)
-    assert creator_ops._keys
-    assert all(command != "delete" for command, _ in creator_ops.calls + adopter_ops.calls)
+def read(process):
+    assert select.select([process.stdout], [], [], 10)[0], "worker did not reach IPC boundary"
+    line = process.stdout.readline()
+    assert line, process.stderr.read()
+    return json.loads(line)
 
 
-@pytest.mark.parametrize("operation", ["init", "recover"])
-@pytest.mark.parametrize("uncertain", [False, True])
-def test_vault_publication_revokes_external_receipt(tmp_path, monkeypatch, legacy_file_vault, operation, uncertain):
-    from mordred_hermes.keyvault import vault
-    from tests._keyvault_fakes import FakeAnchorStore
-
-    root = tmp_path / "mordred" / "vault"
-    selector = "vault-receipt-adoption"
-    store = FakeAnchorStore()
-    creator, adopter, creator_ops, adopter_ops = backend_pair()
-    with database_key_mutation(root=tmp_path, generation=None) as lease:
-        if operation == "recover":
-            old = _SecKeyBackend(ops=_FakeOps(), sw_ops=None, legacy_ops=None)
-            old.generate_enclave_key(selector)
-            vault.init_vault(
-                root,
-                key_id=selector,
-                passphrase="passphrase",
-                backend=old,
-                store=store,
-                anchor_label="vault-receipts",
-                database_lease=lease,
-            ).close()
-        if uncertain:
-            write = vault.atomic_write
-
-            def fail_manifest(path, data):
-                write(path, data)
-                if path.name.startswith("manifest."):
-                    raise OSError("manifest durability uncertain")
-
-            monkeypatch.setattr(vault, "atomic_write", fail_manifest)
-        with wrap.create_wrapping_key_scope(selector, backend=creator) as receipt:
-
-            def publish():
-                if operation == "init":
-                    return vault.init_vault(
-                        root,
-                        key_id=selector,
-                        passphrase="passphrase",
-                        backend=adopter,
-                        store=store,
-                        anchor_label="vault-receipts",
-                        database_lease=lease,
-                    )
-                return vault.recover_to_device(
-                    root,
-                    "passphrase",
-                    key_id=selector,
-                    backend=adopter,
-                    store=store,
-                    anchor_label="vault-receipts",
-                    database_lease=lease,
-                )
-
-            if uncertain:
-                with pytest.raises(OSError):
-                    publish()
-            else:
-                publish().close()
-            assert tuple(root.glob("manifest.*"))
-            (tmp_path / "state.db").touch()
-            with pytest.raises(DatabaseRefused):
-                wrap.rollback_created_key(receipt)
-    assert creator_ops._keys
-    assert all(command != "delete" for command, _ in creator_ops.calls + adopter_ops.calls)
+def send(process, command):
+    process.stdin.write(command + "\n")
+    process.stdin.flush()
 
 
-@pytest.mark.parametrize("uncertain", [False, True])
-def test_audit_duplicate_adoption_revokes_external_receipt(tmp_path, monkeypatch, uncertain):
-    from mordred_hermes.keyvault import _native_key_id as ids
-    from mordred_hermes.keyvault import _storage
-    from mordred_hermes.keyvault._seckey_helper import _HelperSecKeyOps
-    from mordred_hermes.keyvault.log_encryption import AUDIT_LOG_KEY_ID
-    from mordred_hermes.wizard import _keyvault_init as init
-    from tests.test_keyvault_checked_custody import _audit_backend, _owned
+def finish(process):
+    assert process.wait(timeout=10) == 0, process.stderr.read()
 
-    root, _, adopter, _ = _owned(tmp_path, monkeypatch)
-    keys, calls = _audit_backend(adopter, monkeypatch)
-    creator = _SecKeyBackend(ops=_HelperSecKeyOps("/not/executed"), sw_ops=None, legacy_ops=None)
-    selector = ids.scoped_native_key_id(root, AUDIT_LOG_KEY_ID)
-    if uncertain:
-        save = _storage.save_meta
 
-        def fail_visible_ownership(root, meta):
-            save(root, meta)
-            if ids.AUDIT_KEY_FIELD in meta:
-                raise OSError("audit ownership durability uncertain")
+@pytest.mark.parametrize("role", ["main", "audit"])
+@pytest.mark.parametrize("schedule", ["rollback", "commit", "expiry", "create-return", "rollback-lookup", "alias"])
+def test_os_custody_excludes_second_real_producer(tmp_path, legacy_secret_store, role, schedule):
+    a = start(tmp_path, "A", role, schedule)
+    b = None
+    alias = None
+    try:
+        if schedule == "create-return":
+            assert read(a) == {"paused": schedule}
+        else:
+            original = read(a)
+            assert original["ready"]
+        if schedule == "rollback-lookup":
+            send(a, "rollback")
+            assert read(a) == {"paused": schedule}
+        b_home = tmp_path
+        if schedule == "alias":
+            alias = tmp_path.with_name(tmp_path.name + "-alias")
+            alias.symlink_to(tmp_path, target_is_directory=True)
+            b_home = alias
+        b = start(b_home, "B", role)
+        assert read(b) == {"attempting": True}
+        assert not select.select([b.stdout], [], [], 0.25)[0], "producer passed live OS custody"
+        if schedule == "create-return":
+            send(a, "continue")
+            original = read(a)
+            assert original["ready"]
+            send(a, "rollback")
+        elif schedule == "rollback-lookup":
+            send(a, "continue")
+        else:
+            send(a, "exit" if schedule == "expiry" else "rollback" if schedule == "alias" else schedule)
+        assert read(a) == {"old_rollback": "refused", "native_deletes": 0}
+        finish(a)
+        result = read(b)
+        if schedule in ("rollback", "create-return", "rollback-lookup", "alias"):
+            assert result == {"result": "published"}
+            from mordred_hermes.keyvault import _native_key_id, _storage
+            from mordred_hermes.keyvault.log_encryption import AUDIT_LOG_KEY_ID
 
-        monkeypatch.setattr(_storage, "save_meta", fail_visible_ownership)
-    with wrap.create_wrapping_key_scope(selector, backend=creator) as receipt:
-        with _storage.keyvault_lock(root):
-            if uncertain:
-                with pytest.raises(OSError):
-                    init._provision_audit_log_key_locked(root, adopter, AUDIT_LOG_KEY_ID)
-            else:
-                init._provision_audit_log_key_locked(root, adopter, AUDIT_LOG_KEY_ID)
-        assert ids.AUDIT_KEY_FIELD in _storage.load_meta(root)
-        with pytest.raises(DatabaseRefused):
-            wrap.rollback_created_key(receipt)
-    assert keys
-    assert not any(call["cmd"] == "delete" for call in calls)
+            latest, _ = make_backend(tmp_path)
+            logical = "default" if role == "main" else AUDIT_LOG_KEY_ID
+            physical = _native_key_id.scoped_native_key_id(_storage.resolve_keyvault_dir(tmp_path), logical)
+            assert latest.get_enclave_public_key(physical).hex() != original["public"]
+        finish(b)
+    finally:
+        for process in (a, b):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait()
+        if alias is not None:
+            alias.unlink()
+
+
+def test_linux_cross_process_adoption_has_no_arbitrary_receipt(tmp_path, legacy_secret_store):
+    from mordred_hermes.keyvault import _memory_key as memory
+
+    backend, ops = make_backend(tmp_path)
+    selector = memory.memory_key_id(tmp_path)
+    with pytest.raises(TypeError), wrap.create_wrapping_key_scope(selector, backend=backend):
+        pytest.fail("arbitrary memory creation obtained a receipt")
+    assert ops.calls == []
+    backend.generate_enclave_key(selector, unattended=True)
+    b = start(tmp_path, "linux")
+    assert read(b) == {"published": True}
+    finish(b)
+    (tmp_path / "state.db").touch()
+    with pytest.raises(DatabaseRefused):
+        backend.delete_enclave_key(selector)
+    assert memory.memory_key_path(tmp_path).exists()
+    assert tuple((tmp_path / "native-store").iterdir())
+    assert all(command != "delete" for command, _ in ops.calls)

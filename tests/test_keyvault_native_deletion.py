@@ -13,6 +13,7 @@ from mordred_hermes.keyvault import wrap
 from mordred_hermes.keyvault._seckey_backend import _SecKeyBackend
 from mordred_hermes.keyvault._seckey_helper import _HelperSecKeyOps
 from mordred_hermes.keyvault._seckey_ops import _PyobjcSecKeyOps, _SoftwareFallbackOps
+from tests._keyvault_creation_context import creation_scope
 
 _PUBLIC_KEY = bytes.fromhex(
     "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"
@@ -102,7 +103,7 @@ def test_create_receipt_rolls_back_only_winning_namespace(monkeypatch: pytest.Mo
     monkeypatch.setattr(primary, "_invoke", invoke_primary)
     monkeypatch.setattr(software, "_invoke", invoke_sw)
     backend = _SecKeyBackend(ops=primary, sw_ops=software)
-    with wrap.create_wrapping_key_scope("key", backend=backend) as receipt:
+    with creation_scope("key", backend=backend) as receipt:
         assert receipt.public_key == _PUBLIC_KEY
         deletion.rollback_created_key(receipt)
         with pytest.raises(DatabaseRefused):
@@ -321,7 +322,7 @@ def test_permit_cannot_be_reconstituted(owned_native, method):
 @pytest.mark.parametrize("end", ["commit", "expiry", "fingerprint", "store", "backend"])
 def test_receipt_expiry_or_substitution_never_deletes(owned_native, monkeypatch, end):
     deletion, backend, _owner, calls, keys, *_ = owned_native
-    with deletion.create_wrapping_key_scope("fresh", backend=backend) as receipt:
+    with creation_scope("fresh", backend=backend) as receipt:
         if end == "commit":
             deletion.commit_created_key(receipt)
         elif end == "fingerprint":
@@ -345,7 +346,7 @@ def test_create_failure_has_no_receipt_or_cleanup(owned_native, monkeypatch, err
     from mordred_hermes.keyvault._exceptions import WrapError
     from mordred_hermes.keyvault._seckey_errors import _OpsError, errSecDuplicateItem
 
-    deletion, backend, _owner, calls, *_ = owned_native
+    _deletion, backend, _owner, calls, *_ = owned_native
 
     def fail(payload):
         calls.append(payload["cmd"])
@@ -353,7 +354,7 @@ def test_create_failure_has_no_receipt_or_cleanup(owned_native, monkeypatch, err
 
     monkeypatch.setattr(backend._ops, "_invoke", fail)
     entered = False
-    with pytest.raises(WrapError), deletion.create_wrapping_key_scope("key", backend=backend):
+    with pytest.raises(WrapError), creation_scope("key", backend=backend):
         entered = True
     assert not entered
     assert calls == ["generate"]
@@ -392,8 +393,8 @@ def test_owner_requires_final_database_guard_before_delete(owned_native, monkeyp
 
 def test_checked_ownership_handoff_revokes_creation_rollback(owned_native):
     deletion, backend, _owner, calls, keys, *_ = owned_native
-    with deletion.create_wrapping_key_scope("fresh", backend=backend) as receipt:
-        deletion._issue_native_owner(object(), native_key_id="fresh", backend=backend)
+    with creation_scope("fresh", backend=backend) as receipt:
+        deletion._issue_native_owner(object(), native_key_id=deletion._receipts[receipt].binding[1], backend=backend)
         with pytest.raises(DatabaseRefused):
             deletion.rollback_created_key(receipt)
     assert "delete" not in calls
@@ -401,7 +402,7 @@ def test_checked_ownership_handoff_revokes_creation_rollback(owned_native):
 
 
 def test_store_change_during_create_retains_key_without_receipt(owned_native, monkeypatch):
-    deletion, backend, _owner, calls, keys, *_ = owned_native
+    _deletion, backend, _owner, calls, keys, *_ = owned_native
     original = backend._ops._invoke
 
     def changed(payload):
@@ -411,7 +412,7 @@ def test_store_change_during_create_retains_key_without_receipt(owned_native, mo
         return result
 
     monkeypatch.setattr(backend._ops, "_invoke", changed)
-    with pytest.raises(DatabaseRefused), deletion.create_wrapping_key_scope("fresh", backend=backend):
+    with pytest.raises(DatabaseRefused), creation_scope("fresh", backend=backend):
         pytest.fail("changed store issued a receipt")
     assert calls == ["generate"]
     assert keys
@@ -519,7 +520,7 @@ def test_forked_permission_refuses_without_native_io(owned_native):
 def test_malformed_create_public_key_never_issues_receipt(owned_native, monkeypatch):
     from mordred_hermes.keyvault._exceptions import WrapError
 
-    deletion, backend, _owner, calls, keys, *_ = owned_native
+    _deletion, backend, _owner, calls, keys, *_ = owned_native
     original = backend._ops._invoke
 
     def malformed(payload):
@@ -529,7 +530,7 @@ def test_malformed_create_public_key_never_issues_receipt(owned_native, monkeypa
         return result
 
     monkeypatch.setattr(backend._ops, "_invoke", malformed)
-    with pytest.raises(WrapError), deletion.create_wrapping_key_scope("fresh", backend=backend):
+    with pytest.raises(WrapError), creation_scope("fresh", backend=backend):
         pytest.fail("malformed create result issued a receipt")
     assert "delete" not in calls
     assert keys
@@ -563,17 +564,19 @@ def test_publication_revocation_covers_alias_stores_without_granting_delete_auth
     second = _SecKeyBackend(ops=second_ops, sw_ops=None, legacy_ops=None)
     unrelated = _SecKeyBackend(ops=unrelated_ops, sw_ops=None, legacy_ops=None)
     with (
-        wrap.create_wrapping_key_scope("same-selector", backend=first) as first_receipt,
-        wrap.create_wrapping_key_scope("same-selector", backend=second) as second_receipt,
-        wrap.create_wrapping_key_scope("other-selector", backend=unrelated) as unrelated_receipt,
+        creation_scope("same-selector", backend=first) as first_receipt,
+        creation_scope("same-selector", backend=second) as second_receipt,
+        creation_scope("other-selector", backend=unrelated) as unrelated_receipt,
     ):
-        _revoke_native_creation_rollbacks("same-selector")
-        for receipt in (first_receipt, second_receipt):
-            with pytest.raises(DatabaseRefused):
-                wrap.rollback_created_key(receipt)
+        from mordred_hermes.keyvault import _native_deletion
+
+        _revoke_native_creation_rollbacks(_native_deletion._receipts[first_receipt].binding[1])
+        with pytest.raises(DatabaseRefused):
+            wrap.rollback_created_key(first_receipt)
+        wrap.rollback_created_key(second_receipt)
         with pytest.raises(DatabaseRefused):
             first.delete_enclave_key("same-selector")
         wrap.rollback_created_key(unrelated_receipt)
-    assert first_ops._keys and second_ops._keys
+    assert first_ops._keys and not second_ops._keys
     assert not unrelated_ops._keys
-    assert all(command != "delete" for command, _ in first_ops.calls + second_ops.calls)
+    assert all(command != "delete" for command, _ in first_ops.calls)

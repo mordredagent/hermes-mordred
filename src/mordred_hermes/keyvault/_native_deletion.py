@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from mordred_hermes._database_lifecycle import ExclusiveLease
 
     from ._seckey_ops import _SecKeyOps
+    from ._storage import KeyvaultCustody, _NativeCreationOwner
     from .wrap import NativeBackend
 
 
@@ -100,6 +101,9 @@ class _ReceiptRecord:
     process: tuple[int, int]
     active: bool = True
     consumed: bool = False
+    custody: KeyvaultCustody | None = None
+    creation_owner: _NativeCreationOwner | None = None
+    logical_key_id: str | None = None
 
 
 @dataclass
@@ -413,14 +417,47 @@ def _receipt_record(receipt: NativeCreateReceipt) -> _ReceiptRecord:
     return record
 
 
+def _checked_creation_owner(
+    custody: KeyvaultCustody, key_id: str, selector: str, backend: NativeBackend
+) -> _NativeCreationOwner:
+    from ._storage import KeyvaultCustody
+
+    if type(custody) is not KeyvaultCustody:
+        raise DatabaseRefused("creation receipts require genuine keyvault provisioning custody")
+    return KeyvaultCustody._check_native_creation_owner(custody, key_id, selector, backend)
+
+
+def _check_receipt_creation_owner(record: _ReceiptRecord) -> None:
+    if record.backend is None:  # Internal random, disjoint probe only.
+        return
+    if record.custody is None or record.logical_key_id is None:
+        raise DatabaseRefused("creation receipt has no provisioning transaction")
+    owner = _checked_creation_owner(record.custody, record.logical_key_id, cast(str, record.binding[1]), record.backend)
+    if owner is not record.creation_owner:
+        raise DatabaseRefused("creation receipt belongs to another provisioning transaction")
+
+
+def _expire_native_creation_receipts(custody: KeyvaultCustody) -> None:
+    with _receipt_lock:
+        for record in list(_receipts.values()):
+            if record.custody is custody:
+                record.active = False
+
+
 @contextmanager
 def create_wrapping_key_scope(
-    key_id: str, *, backend: NativeBackend, unattended: bool | None = None, native_key_id: str | None = None
+    key_id: str,
+    *,
+    backend: NativeBackend,
+    custody: KeyvaultCustody,
+    unattended: bool | None = None,
+    native_key_id: str | None = None,
 ) -> Iterator[NativeCreateReceipt]:
     from ._seckey_backend import _SecKeyBackend
     from .wrap import _decode_sec1_uncompressed_p256
 
     selector = key_id if native_key_id is None else native_key_id
+    creation_owner = _checked_creation_owner(custody, key_id, selector, backend)
     pairs = _backend_pairs(backend, selector)
     configuration = tuple((_ops_configuration(ops), tag) for ops, tag in pairs)
     creating_process = _process()
@@ -433,10 +470,13 @@ def create_wrapping_key_scope(
     public_key, ops, tag = _SecKeyBackend._create_tracked_key(backend, selector, unattended=unattended)
     if configuration != tuple((_ops_configuration(ops), tag) for ops, tag in _backend_pairs(backend, selector)):
         raise DatabaseRefused("native backend or store changed during create")
+    if _checked_creation_owner(custody, key_id, selector, backend) is not creation_owner:
+        raise DatabaseRefused("native creation transaction changed during create")
     _decode_sec1_uncompressed_p256(public_key)
     backend_binding = _backend_binding(backend, selector)
     receipt = object.__new__(NativeCreateReceipt)
     record = _ReceiptRecord(backend, (_ops_binding(ops), selector, backend_binding), ops, tag, public_key, _process())
+    record.custody, record.creation_owner, record.logical_key_id = custody, creation_owner, key_id
     with _receipt_lock:
         if creating_process != _process() or _active_handoffs.get(tag, 0) or epochs[tag] != _handoff_epochs.get(tag, 0):
             raise DatabaseRefused("native key was adopted during creation; rollback authority was not issued")
@@ -477,6 +517,7 @@ def rollback_created_key(receipt: NativeCreateReceipt) -> None:
         record.consumed = True
         _rollback_inflight[record.tag] = _rollback_inflight.get(record.tag, 0) + 1
     try:
+        _check_receipt_creation_owner(record)
         if record.binding[0] != _ops_binding(record.ops):
             raise DatabaseRefused("created native key store changed")
         if record.backend is not None and record.binding[2] != _backend_binding(
@@ -485,6 +526,7 @@ def rollback_created_key(receipt: NativeCreateReceipt) -> None:
             raise DatabaseRefused("created native backend changed")
         if record.ops.copy_public_key(record.tag) != record.public_key:
             raise DatabaseRefused("created native public key changed")
+        _check_receipt_creation_owner(record)
         with _tag_invocation(((record.ops, record.tag),)):
             record.ops.delete_key(record.tag)
     finally:
@@ -499,7 +541,14 @@ def rollback_created_key(receipt: NativeCreateReceipt) -> None:
 
 def commit_created_key(receipt: NativeCreateReceipt) -> None:
     with _receipt_lock:
+        record = _receipt_record(receipt)
+    _check_receipt_creation_owner(record)
+    with _receipt_lock:
         _receipt_record(receipt).consumed = True
+        if record.custody is not None and record.creation_owner is not None:
+            from ._storage import _complete_native_creation_owner
+
+            _complete_native_creation_owner(record.custody, record.creation_owner)
 
 
 def _after_fork() -> None:

@@ -46,7 +46,7 @@ except ImportError:  # pragma: no cover — non-POSIX platform (Windows)
     fcntl = None  # type: ignore[assignment]
 
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from weakref import WeakKeyDictionary
@@ -927,7 +927,7 @@ def keyvault_lock(root: Path) -> Iterator[None]:
             yield
 
 
-@dataclass(frozen=True)
+@dataclass
 class _CustodyRecord:
     root: Path
     backend: NativeBackend
@@ -935,7 +935,38 @@ class _CustodyRecord:
     process: tuple[int, int]
     reset: bool
     binding: tuple[object, ...]
-    locks: tuple[tuple[Path, tuple[int, int, int]], ...]
+    locks: tuple[tuple[Path, _HeldAdvisoryLock], ...]
+    initial_meta: bytes
+    creations: dict[tuple[str, str], _NativeCreationOwner] = field(default_factory=dict)
+    completed_creations: set[_NativeCreationOwner] = field(default_factory=set)
+
+
+def _only_created_store_directories(before: object, after: object) -> bool:
+    """Allow only create-only helper directory materialization, never replacement."""
+    if before == after:
+        return True
+    if not isinstance(before, tuple) or not isinstance(after, tuple):
+        return False
+    if len(before) == 2 and isinstance(before[0], str) and before[1] is None and after and after[0] == before[0]:
+        try:
+            _check_dir_mode(Path(before[0]))
+        except OSError:
+            return False
+        return True
+    return len(before) == len(after) and all(
+        _only_created_store_directories(a, b) for a, b in zip(before, after, strict=True)
+    )
+
+
+class _NativeCreationOwner:
+    """Issued identity belonging only to one live checked provisioning scope."""
+
+    __slots__ = ()
+
+    def __new__(cls) -> _NativeCreationOwner:
+        from .._database_contracts import DatabaseRefused
+
+        raise DatabaseRefused("native creation ownership cannot be constructed")
 
 
 class KeyvaultCustody:
@@ -964,12 +995,12 @@ class KeyvaultCustody:
             identity = (current.st_dev, current.st_ino)
         if identity != record.identity:
             raise DatabaseRefused("keyvault custody root changed")
-        for path, held_identity in record.locks:
+        for path, held_registration in record.locks:
             try:
                 held_lock = _checked_advisory_lock(path)
             except OSError as exc:
                 raise DatabaseRefused("keyvault custody lock changed") from exc
-            if held_lock.identity != held_identity:
+            if held_lock is not held_registration:
                 raise DatabaseRefused("keyvault custody lock changed")
         if record.binding != _native_deletion._backend_binding(backend, ""):
             raise DatabaseRefused("keyvault backend/store changed")
@@ -979,8 +1010,59 @@ class KeyvaultCustody:
             raise DatabaseRefused("keyvault ownership cannot be validated") from exc
         return _native_deletion._NativeOwnerFacts(home=record.root, role=role)
 
+    def _check_native_creation_owner(
+        self,
+        key_id: str,
+        native_key_id: str,
+        backend: NativeBackend,
+    ) -> _NativeCreationOwner:
+        from .._database_contracts import DatabaseRefused
+        from . import _native_key_id
+
+        record = _KEYVAULT_CUSTODY.get(self)
+        if record is None:
+            raise DatabaseRefused("native creation custody is closed")
+        pair = (key_id, native_key_id)
+        if pair in record.creations:
+            from ._native_deletion import _backend_binding
+
+            observed_binding = _backend_binding(backend, "")
+            if record.binding != observed_binding and _only_created_store_directories(record.binding, observed_binding):
+                record.binding = observed_binding
+        # Fixed implementation validates real held descriptor registrations,
+        # not a reopened handle or a caller's snapshot of a lock pathname.
+        KeyvaultCustody._check_native_delete_owner(self, native_key_id, backend)
+        if record.reset or record.identity is None or len(record.locks) != 2 or fcntl is None:
+            raise DatabaseRefused("native creation requires both POSIX provisioning locks")
+        _native_key_id._assert_creation_backend_bound(backend, record.root)
+        pair = (key_id, native_key_id)
+        issued = record.creations.get(pair)
+        if issued in record.completed_creations:
+            raise DatabaseRefused("committed native ownership cannot obtain new creation rollback")
+        try:
+            _native_key_id._checked_creation_pending(
+                record.root,
+                key_id,
+                native_key_id,
+                initial_meta=record.initial_meta,
+                allow_intermediate=issued is not None,
+            )
+        except (OSError, ValueError) as exc:
+            raise DatabaseRefused("native creation requires fresh exact pending ownership") from exc
+        if issued is None:
+            issued = object.__new__(_NativeCreationOwner)
+            record.creations[pair] = issued
+        return issued
+
 
 _KEYVAULT_CUSTODY: WeakKeyDictionary[KeyvaultCustody, _CustodyRecord] = WeakKeyDictionary()
+
+
+def _complete_native_creation_owner(custody: KeyvaultCustody, owner: _NativeCreationOwner) -> None:
+    """Pure rights retirement, called after trusted validation at commit."""
+    record = _KEYVAULT_CUSTODY.get(custody)
+    if record is not None and owner in record.creations.values():
+        record.completed_creations.add(owner)
 
 
 @contextlib.contextmanager
@@ -990,7 +1072,7 @@ def keyvault_custody(root: Path, *, backend: NativeBackend, reset: bool = False)
     Reset may resume an absent tree from its durable parent journal. It still
     holds the stable lifecycle lock; an existing tree also holds its own lock.
     """
-    from ._native_deletion import _backend_binding
+    from ._native_deletion import _backend_binding, _expire_native_creation_receipts
 
     with keyvault_lifecycle_lock(root), contextlib.ExitStack() as stack:
         try:
@@ -1016,11 +1098,13 @@ def keyvault_custody(root: Path, *, backend: NativeBackend, reset: bool = False)
             (os.getpid(), threading.get_ident()),
             reset,
             _backend_binding(backend, ""),
-            tuple((path, _checked_advisory_lock(path).identity) for path in lock_paths),
+            tuple((path, _checked_advisory_lock(path)) for path in lock_paths),
+            safe_read(root / "meta.json") if (root / "meta.json").exists() else b"",
         )
         try:
             yield handle
         finally:
+            _expire_native_creation_receipts(handle)
             _KEYVAULT_CUSTODY.pop(handle, None)
 
 

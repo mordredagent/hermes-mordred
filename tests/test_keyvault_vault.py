@@ -37,6 +37,7 @@ import pytest
 from cryptography.exceptions import InvalidTag
 
 from mordred_hermes.keyvault import anchor, manifest, recovery, vault
+from mordred_hermes.keyvault._identity import vault_identity
 from tests._platform_test_helpers import require_legacy_file_vault
 
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend
@@ -47,7 +48,9 @@ _PASSPHRASE = "correct horse battery staple"
 
 
 @pytest.fixture
-def backend() -> FakeBackend:
+def backend(tmp_path, monkeypatch) -> FakeBackend:
+    monkeypatch.setitem(globals(), "_KEY_ID", vault_identity(tmp_path))
+    monkeypatch.setitem(globals(), "_LABEL", vault_identity(tmp_path))
     require_legacy_file_vault()  # before generating any fixture key
     b = FakeBackend()
     b.generate_enclave_key(_KEY_ID)
@@ -61,6 +64,9 @@ def store() -> FakeAnchorStore:
 
 def _init(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> vault.OpenVault:
     require_legacy_file_vault()
+    globals().update(_KEY_ID=vault_identity(root), _LABEL=vault_identity(root))
+    if _KEY_ID not in backend._keys:
+        backend.generate_enclave_key(_KEY_ID)
     if root.name == "vault" and root.parent.name == "mordred":
         from mordred_hermes.keyvault._database_mutation import database_key_mutation
 
@@ -495,7 +501,9 @@ def test_init_rejects_symlinked_root(tmp_path: Path, backend: FakeBackend, store
     root = tmp_path / "vault"
     root.symlink_to(target, target_is_directory=True)
 
-    with pytest.raises(vault.VaultError):
+    from mordred_hermes._database_contracts import DatabaseRefused
+
+    with pytest.raises(DatabaseRefused):
         _init(root, backend, store)
 
 

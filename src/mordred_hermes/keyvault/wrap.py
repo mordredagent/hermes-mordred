@@ -32,7 +32,8 @@ Internal Python surface (PR3 step-0 freeze, consumed by PR4 ``api.py``):
 - :func:`generate_wrapping_key` — create + persist a new Enclave key.
 - :func:`get_wrapping_key_public` — return SEC1 uncompressed public key.
 - :func:`delete_wrapping_key` — remove under checked deletion authority.
-- :func:`create_wrapping_key_scope` — create with explicit unpublished-key rollback.
+- :func:`create_wrapping_key_scope` — create with rollback under held POSIX
+  main/audit provisioning custody; arbitrary selectors have no rollback API.
 - :func:`wrap_dek` — produce a 127-byte blob (offline, no audit).
 - :func:`unwrap_dek` — verify + decrypt a blob (authorized, emits audit).
 
