@@ -145,16 +145,14 @@ def test_planted_activity_parent_refuses_before_any_directory_write(protected_ru
     assert list(elsewhere.iterdir()) == []
 
 
-def test_protected_backup_and_restore_stay_closed_before_task7(protected_runtime, monkeypatch):
+def test_live_protected_restore_does_not_upgrade_or_touch_files(protected_runtime, monkeypatch):
     root, _, _ = protected_runtime
     store = open_store(root)
 
     def forbidden(*args, **kwargs):
-        raise AssertionError("pending offline integration must refuse before raw file access")
+        raise AssertionError("live restore must refuse before raw file access")
 
     monkeypatch.setattr("os.open", forbidden)
-    with pytest.raises(ActivityRefused):
-        store.backup(root / "snapshot.db")
     with pytest.raises(ActivityRefused):
         store.restore(root / "snapshot.db")
     assert not (root / "snapshot.db").exists()

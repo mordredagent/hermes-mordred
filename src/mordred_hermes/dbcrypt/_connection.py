@@ -160,6 +160,31 @@ def _parameters(values: Any) -> Any:
     return tuple(safe(v) for v in values)
 
 
+def _sql_action_denied(action: int, first: Any, second: Any) -> bool:
+    """Shared runtime/component SQL escape policy; admission remains owner-specific."""
+    import sqlcipher3.dbapi2 as sc
+
+    prohibited = action in (sc.SQLITE_ATTACH, sc.SQLITE_DETACH)
+    if action == sc.SQLITE_PRAGMA:
+        name = (first or "").lower()
+        prohibited |= (
+            name.startswith("cipher") and not (name in {"cipher_version", "cipher_integrity_check"} and second is None)
+        ) or name in {
+            "key",
+            "rekey",
+            "hexkey",
+            "hexrekey",
+            "writable_schema",
+            "temp_store_directory",
+            "data_store_directory",
+        }
+        # OFF/MEMORY disables durable rollback; ordinary Hermes WAL is allowed.
+        prohibited |= name == "journal_mode" and (second or "").lower() in {"off", "memory"}
+    if action == sc.SQLITE_FUNCTION:
+        prohibited |= (second or "").lower() in {"load_extension", "sqlcipher_export", "writefile", "readfile"}
+    return prohibited
+
+
 class ProtectedCursor:
     """Every fetch/iteration step returns through the owning connection guard."""
 
@@ -346,25 +371,7 @@ class ProtectedConnection:
 
         try:
             self._check()
-            prohibited = action in (sc.SQLITE_ATTACH, sc.SQLITE_DETACH)
-            if action == sc.SQLITE_PRAGMA:
-                name = (first or "").lower()
-                prohibited |= (
-                    name.startswith("cipher")
-                    and not (name in {"cipher_version", "cipher_integrity_check"} and second is None)
-                ) or name in {
-                    "key",
-                    "rekey",
-                    "hexkey",
-                    "hexrekey",
-                    "writable_schema",
-                    "temp_store_directory",
-                    "data_store_directory",
-                }
-                # OFF/MEMORY disables durable rollback; ordinary Hermes WAL is allowed.
-                prohibited |= name == "journal_mode" and (second or "").lower() in {"off", "memory"}
-            if action == sc.SQLITE_FUNCTION:
-                prohibited |= (second or "").lower() in {"load_extension", "sqlcipher_export", "writefile", "readfile"}
+            prohibited = _sql_action_denied(action, first, second)
             if prohibited:
                 self._denied = True
                 return int(sc.SQLITE_DENY)
@@ -875,6 +882,25 @@ class _MaintenanceConnection:
 
         self._raw.enable_load_extension(False)
         self._raw.set_authorizer(authorizer(target, alias))
+
+    def _install_component_policy(self, connection: Any) -> None:
+        from ._maintenance import MaintenanceConnection
+
+        self._check()
+        if type(connection) is not MaintenanceConnection or connection._owner is not self:
+            raise DatabaseRefused("component policy requires its exact checked owner")
+        # Key pragmas are private bootstrap statements. Finalize them before
+        # component DDL/transactions rather than retaining live C statements.
+        for cursor in tuple(self._cursors):
+            cursor.close()
+        self._raw.enable_load_extension(False)
+        self._raw.set_authorizer(connection._authorize)
+        self._raw.set_progress_handler(connection._progress, 1000)
+
+    def _clear_component_policy(self) -> None:
+        self._check()  # Never touch inherited C handles, even for cleanup.
+        self._raw.set_authorizer(None)
+        self._raw.set_progress_handler(None, 0)
 
     def close(self) -> None:
         if self._closed:

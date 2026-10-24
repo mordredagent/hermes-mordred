@@ -36,7 +36,9 @@ from ._gate import ActivityRefused, Refusal, refusal
 from .contracts import COVERAGE_RANK, NormalizedEvent, canonical_digest
 
 if TYPE_CHECKING:
+    from .._database_lifecycle import ExclusiveLease
     from ..dbcrypt._authority import Authority
+    from ..dbcrypt._maintenance import MaintenanceConnection
 
 __all__ = [
     "ATTEMPT_PHASES",
@@ -49,6 +51,7 @@ __all__ = [
     "RetentionReport",
     "StoreMeta",
     "StoreStatus",
+    "restore_activity_store",
 ]
 
 SUPPORTED_SCHEMA_VERSION: Final = _schema.SCHEMA_VERSION
@@ -256,7 +259,7 @@ class ActivityStore:
     # --- schema and binding -----------------------------------------------------------------
 
     @staticmethod
-    def _read_meta(conn: sqlite3.Connection) -> dict[str, str] | None:
+    def _read_meta(conn: sqlite3.Connection | MaintenanceConnection) -> dict[str, str] | None:
         exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'activity_meta'").fetchone()
         if exists is None:
             return None
@@ -285,7 +288,7 @@ class ActivityStore:
             return self._upgraded(conn, checked)
 
     @staticmethod
-    def _upgraded(conn: sqlite3.Connection, meta: StoreMeta) -> StoreMeta:
+    def _upgraded(conn: sqlite3.Connection | MaintenanceConnection, meta: StoreMeta) -> StoreMeta:
         """Run :data:`._schema.MIGRATIONS` from ``meta.schema_version`` up to the supported version."""
         steps = range(meta.schema_version, SUPPORTED_SCHEMA_VERSION)
         if not steps:
@@ -595,9 +598,16 @@ class ActivityStore:
     def backup(self, dest: Path) -> None:
         """A consistent snapshot (SQLite backup API, WAL included) to a new ``0600`` rollback-journal file."""
         if self._authority is not None:
-            # Closed until the reviewed offline backup registry is integrated;
-            # never enter the portable raw-copy path with a live native store.
-            raise ActivityRefused(refusal("store_unavailable"))
+            from ..dbcrypt._backup import backup_database
+
+            try:
+                with _refusing():
+                    backup_database(self.path, dest, authority=self._authority)
+            except ActivityRefused:
+                raise
+            except Exception:
+                raise ActivityRefused(refusal("store_unavailable")) from None
+            return
         try:
             fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         except FileExistsError:
@@ -637,7 +647,7 @@ class ActivityStore:
             return self._upgraded(conn, self._checked_meta(self._read_meta(conn)))
 
     @staticmethod
-    def _after_restore(conn: sqlite3.Connection, bound: str) -> None:
+    def _after_restore(conn: sqlite3.Connection | MaintenanceConnection, bound: str) -> None:
         conn.executemany(
             "INSERT OR REPLACE INTO activity_meta (key, value) VALUES (?, ?)",
             [("profile_home", bound), ("store_generation", secrets.token_hex(16))],
@@ -692,3 +702,58 @@ class ActivityStore:
                 ).fetchall()
             )
         return RetentionReport(events, episodes, complete=events < limit and episodes < limit)
+
+
+def restore_activity_store(source: Path, *, home: Path, lease: ExclusiveLease) -> StoreMeta:
+    """Offline component restore under the caller's actual EX lease.
+
+    The controller closes the old runtime first and starts a fresh one only
+    after this helper and EX exit. Published data followed by failed component
+    finalization is incomplete; no rollback is claimed. Backup/key are retained.
+    """
+    from ..dbcrypt._backup import restore_database
+    from ..dbcrypt._maintenance import maintenance_scope
+    from ..imports._protected_destination import checked_store_destination
+
+    destination = checked_store_destination(home / "plugin-data/mordred/mordred.db", home=home)
+    published = False
+    try:
+        with _refusing(), maintenance_scope(home, lease=lease) as scope:
+            # Authenticate the retained scope before the real restore's second
+            # authentication and publication. No preflight SQL crosses the copy.
+            with scope.connection(destination, readonly=True) as current:
+                target_meta = ActivityStore._checked_meta(ActivityStore._read_meta(current))
+                if target_meta.profile_home != str(home):
+                    raise ActivityRefused(refusal("profile_mismatch"))
+            with scope.connection(source, readonly=True) as backup:
+                backup_meta = ActivityStore._checked_meta(ActivityStore._read_meta(backup))
+                if any(
+                    step not in _schema.MIGRATIONS
+                    for step in range(backup_meta.schema_version, SUPPORTED_SCHEMA_VERSION)
+                ):
+                    raise ActivityRefused(refusal("store_unavailable"))
+            restore_database(source, destination, lease=lease)
+            published = True
+            with scope.connection(destination) as restored:
+                restored.execute("BEGIN IMMEDIATE")
+                ActivityStore._checked_meta(ActivityStore._read_meta(restored))
+                ActivityStore._after_restore(restored, target_meta.profile_home)
+                result = ActivityStore._upgraded(
+                    restored, ActivityStore._checked_meta(ActivityStore._read_meta(restored))
+                )
+                if result.profile_home != str(home) or result.schema_version != SUPPORTED_SCHEMA_VERSION:
+                    raise ActivityRefused(refusal("profile_mismatch"))
+                restored.commit()
+        return result
+    except Exception as error:
+        if published:
+            raise ActivityRefused(
+                Refusal(
+                    "restore_incomplete",
+                    "the database copy was restored but activity finalization is incomplete; "
+                    "retain the registered backup and native key",
+                )
+            ) from None
+        if isinstance(error, ActivityRefused):
+            raise
+        raise ActivityRefused(refusal("store_unavailable")) from None

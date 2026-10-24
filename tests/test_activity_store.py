@@ -606,3 +606,158 @@ def test_activity_roundtrip_dedup_search_restart(protected_runtime, monkeypatch)
         assert restarted.status().counts["activity_events"] == 1
     finally:
         fresh.close()
+
+
+@pytest.mark.parametrize("profile", ["", "profiles/work"])
+def test_activity_roundtrip_dedup_search_restart_backup(protected_runtime, monkeypatch, profile):
+    from mordred_hermes import dbcrypt
+    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes.activity import history
+    from mordred_hermes.activity._gate import open_store
+    from mordred_hermes.activity.store import restore_activity_store
+    from mordred_hermes.dbcrypt import _migrate
+    from mordred_hermes.dbcrypt._key import KeyProvider
+
+    root, provider, backend = protected_runtime
+    home = root / profile
+    store = open_store(home)
+    item = event(
+        1,
+        event_id="70b341b1-9980-46ba-83f1-21c133021fc2",
+        phase="boundary",
+        actor="human",
+        action={"op": "task_start", "site": "example.com"},
+        text="今日は東京で日本語を勉強します",
+        session_ref={"hermes_session_id": "old-session"},
+    )
+    assert store.append_batch(PEER, PRODUCER, [item]).accepted == 1
+    assert store.append_batch(PEER, PRODUCER, [item]).accepted == 0
+    matched = history.episodes_for_terms(store, {"日本", "本語"}, excluded_sites=frozenset(), since=0, until=2000)
+    assert [episode.episode_id for episode in matched.episodes] == ["ep-1"]
+    search_ids = [event.event_id for event in store.events_for_episode(matched.episodes[0].episode_id)]
+    assert search_ids == ["70b341b1-9980-46ba-83f1-21c133021fc2"]
+    original = rows(store, "SELECT event_id,text FROM activity_events ORDER BY receipt")
+    generation = store.meta().store_generation
+    backup = root.parent / (root.name + "-activity.backup")
+    store.backup(backup)
+    store.append_batch(PEER, PRODUCER, [event(2, episode="later")])
+    provider.close()
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])  # portable fixture, never native acceptance
+    before = list(backend.calls)
+    with acquire_exclusive(root) as lease:
+        restored_meta = restore_activity_store(backup, home=home, lease=lease)
+    assert sum(operation == "ecdh" for operation, _ in backend.calls[len(before) :]) == 2
+    fresh = KeyProvider(home=home)
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", fresh)
+    try:
+        restarted = open_store(home)
+        assert rows(restarted, "SELECT event_id,text FROM activity_events ORDER BY receipt") == original
+        assert restored_meta.profile_home == str(home)
+        assert restored_meta.store_generation != generation
+        assert restarted.episode("ep-1").session_ref_state == "unavailable"
+        assert backup.is_file()
+    finally:
+        fresh.close()
+
+
+def test_offline_restore_preflight_rejects_newer_schema_without_replacement(protected_runtime, monkeypatch):
+    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes.activity._gate import open_store
+    from mordred_hermes.activity.store import restore_activity_store
+    from mordred_hermes.dbcrypt import _migrate
+
+    home, provider, _ = protected_runtime
+    store = open_store(home)
+    with store.connection() as conn:
+        conn.execute("UPDATE activity_meta SET value='9999' WHERE key='schema_version'")
+        conn.commit()
+    backup = home.parent / (home.name + "-future.backup")
+    store.backup(backup)
+    with store.connection() as conn:
+        conn.execute("UPDATE activity_meta SET value='3' WHERE key='schema_version'")
+        conn.commit()
+    provider.close()
+    before = store.path.read_bytes()  # no runtime or live SQL handle remains
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
+    with acquire_exclusive(home) as lease, pytest.raises(ActivityRefused) as caught:
+        restore_activity_store(backup, home=home, lease=lease)
+    assert caught.value.code == "schema_newer"
+    assert store.path.read_bytes() == before
+
+
+def test_offline_postfinalization_failure_reports_incomplete_and_retains_backup(protected_runtime, monkeypatch):
+    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes.activity._gate import open_store
+    from mordred_hermes.activity.store import restore_activity_store
+    from mordred_hermes.dbcrypt import _migrate
+
+    home, provider, _ = protected_runtime
+    store = open_store(home)
+    backup = home.parent / (home.name + "-incomplete.backup")
+    store.backup(backup)
+    provider.close()
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
+
+    def failed(conn, bound):
+        raise RuntimeError("component finalization failed")
+
+    monkeypatch.setattr(ActivityStore, "_after_restore", failed)
+    with acquire_exclusive(home) as lease, pytest.raises(ActivityRefused) as caught:
+        restore_activity_store(backup, home=home, lease=lease)
+    assert caught.value.code == "restore_incomplete"
+    assert backup.is_file()
+    assert (home / "mordred/db-key-source.json").is_file()
+    assert "incomplete" in caught.value.refusal.detail
+
+
+def test_restore_authentication_denial_precedes_database_mutation(protected_runtime):
+    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes.activity._gate import open_store
+    from mordred_hermes.activity.store import restore_activity_store
+
+    home, provider, backend = protected_runtime
+    store = open_store(home)
+    backup = home.parent / (home.name + "-denied.backup")
+    store.backup(backup)
+    provider.close()
+    before = store.path.read_bytes()
+    backend.denied_reason = "user_cancelled"
+    with acquire_exclusive(home) as lease, pytest.raises(ActivityRefused) as caught:
+        restore_activity_store(backup, home=home, lease=lease)
+    assert caught.value.code != "restore_incomplete"
+    assert store.path.read_bytes() == before
+    assert backup.is_file()
+
+
+def test_offline_restore_upgrades_older_activity_schema_under_ex(protected_runtime, monkeypatch):
+    from mordred_hermes import dbcrypt
+    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes.activity._gate import open_store
+    from mordred_hermes.activity.store import restore_activity_store
+    from mordred_hermes.dbcrypt import _migrate
+    from mordred_hermes.dbcrypt._key import KeyProvider
+
+    home, provider, _ = protected_runtime
+    store = open_store(home)
+    with store.connection() as conn:
+        conn.execute("UPDATE activity_meta SET value='2' WHERE key='schema_version'")
+        conn.execute("CREATE TABLE activity_lessons(legacy TEXT)")
+        conn.commit()
+    backup = home.parent / (home.name + "-old-schema.backup")
+    store.backup(backup)
+    with store.connection() as conn:
+        conn.execute("UPDATE activity_meta SET value='3' WHERE key='schema_version'")
+        conn.execute("DROP TABLE activity_lessons")
+        conn.commit()
+    provider.close()
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
+    with acquire_exclusive(home) as lease:
+        restored = restore_activity_store(backup, home=home, lease=lease)
+    assert restored.schema_version == 3
+    fresh = KeyProvider(home=home)
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", fresh)
+    try:
+        reopened = open_store(home)
+        assert rows(reopened, "SELECT name FROM sqlite_master WHERE name='activity_lessons'") == []
+    finally:
+        fresh.close()
