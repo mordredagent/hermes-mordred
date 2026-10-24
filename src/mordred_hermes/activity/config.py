@@ -19,6 +19,10 @@ fixed, so a typo never means "record or show what was excluded before".
 
 The ``history_*`` keys govern Hermes's use of the stored history
 (:mod:`.history`): ``history_enabled`` is the master switch over every surface;
+``history_tools_enabled`` turns off only the two lookup tools and keeps the
+automatic blocks, so a chat can use the history hints without entering reader
+mode (a lookup-tool call puts the chat into reader mode,
+:mod:`mordred_hermes.privacy_check.egress`; the automatic blocks never do);
 ``history_capture_hermes`` and ``history_chat_corrections`` switch recording
 Hermes's own browser calls and the user's chat corrections
 (:mod:`.capture_hermes`), which also needs ``collection_enabled``.
@@ -76,6 +80,9 @@ class ActivityConfig:
     excluded_sites: frozenset[str] = DEFAULT_EXCLUDED_SITES
     #: Master switch: Hermes uses the history in ordinary conversations and browser work (needs ``enabled``).
     history_enabled: bool = True
+    #: Offer the two lookup tools (needs ``history_enabled``). Off keeps the automatic blocks and removes only the
+    #: lookup tools, so a chat can use the history hints without entering reader mode.
+    history_tools_enabled: bool = True
     #: Append a site's history to successful ``browser_navigate`` results.
     history_on_navigate: bool = True
     #: Add the user's own task and correction texts (and metadata) to the turn when the message names a host or
@@ -124,6 +131,16 @@ class ActivityConfig:
         """Hermes may use the history: the feature and the master switch are on and the exclusions are valid."""
         return self.enabled and self.history_enabled and self.excluded_sites_valid
 
+    @property
+    def history_tools_active(self) -> bool:
+        """The lookup tools are offered: :attr:`history_active` and ``history_tools_enabled``.
+
+        ``history_tools_enabled: false`` keeps the automatic blocks (the navigation block and the turn-start
+        context) and removes only the lookup tools, so a chat can use the history hints without entering reader
+        mode (calling a lookup tool puts the chat into reader mode; the automatic blocks never do).
+        """
+        return self.history_active and self.history_tools_enabled
+
     @classmethod
     def from_mapping(cls, section: Mapping[str, Any]) -> ActivityConfig:
         values: dict[str, Any] = {}
@@ -150,11 +167,16 @@ class ActivityConfig:
         return cls(**values, warnings=tuple(warnings))
 
     @classmethod
-    def load(cls, home: Path) -> ActivityConfig:
-        """Read ``<home>/config.yaml``; an absent or unreadable file yields the (disabled) defaults."""
+    def load(cls, home: Path, *, strict: bool = False) -> ActivityConfig:
+        """Read ``<home>/config.yaml``; an absent or unreadable file yields the (disabled) defaults.
+
+        With ``strict`` a file that exists but cannot be read or parsed raises instead, so a caller that shows
+        the switches (the Desktop page) can say so rather than show the defaults as the owner's choice.
+        """
         from .._yaml_io import load_plugin_section
 
-        return cls.from_mapping(load_plugin_section(home / "config.yaml", SECTION) or {})
+        section = load_plugin_section(home / "config.yaml", SECTION, catch=() if strict else None)
+        return cls.from_mapping(section or {})
 
 
 _INVALID: Final = object()
@@ -237,6 +259,7 @@ _PARSERS: Final[Mapping[str, Callable[[Any], Any]]] = {
     "max_event_bytes": _capped_int(MAX_EVENT_BYTES),
     "max_batch_bytes": _capped_int(MAX_BATCH_BYTES),
     "history_enabled": _bool,
+    "history_tools_enabled": _bool,
     "history_on_navigate": _bool,
     "history_turn_context": _bool,
     "history_capture_hermes": _bool,

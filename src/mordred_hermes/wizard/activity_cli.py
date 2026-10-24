@@ -1,13 +1,16 @@
 """``hermes-mordred activity …`` — browser activity history administration.
 
 - ``status [--json]``                         — feature / collection switches, Hermes's use of the
-  history (``history_enabled``), protection gate result, store identifiers and row counts, and
-  activity peers. Never event content.
+  history (``history_enabled``) and of the lookup tools (``history_tools_enabled``), protection
+  gate result, store identifiers and row counts, and activity peers. Never event content.
 - ``use on|off``                              — set ``plugins.mordred_activity.history_enabled`` (the
   master switch for Hermes's use of the history, Hermes's own capture of its browser calls and the
   user's chat corrections included; operator collection is not affected) in the profile's
   ``config.yaml``; every other key, comment and section is preserved. Hermes picks it up from the
   next turn.
+- ``tools on|off``                            — set ``plugins.mordred_activity.history_tools_enabled``
+  the same way: on offers the two lookup tools, off keeps the automatic history blocks only (a
+  lookup puts the chat into reader mode; the automatic blocks never do).
 - ``pair-operator [--label L] [--timeout S]`` — mint a single-use activity pair code for the
   operator collector and wait until it is used (exit 0 paired, 1 failed/expired/cancelled,
   2 pairing storage unavailable).
@@ -30,7 +33,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping, MutableMapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from .. import _term
 
@@ -71,9 +74,9 @@ def _switches(home: Path) -> tuple[bool, bool] | None:
     return read_activity_switches(home)
 
 
-def _history_switches(home: Path) -> tuple[bool, bool, tuple[str, ...], str | None] | None:
-    """``(feature enabled, history_enabled, config warnings, collection refusal)`` from the activity config, or
-    ``None``.
+def _history_switches(home: Path) -> tuple[bool, bool, bool, tuple[str, ...], str | None] | None:
+    """``(feature enabled, history_enabled, history_tools_enabled, config warnings, collection refusal)`` from
+    the activity config, or ``None``.
 
     Warnings name keys only (``invalid value for excluded_sites``), never values; the collection refusal is
     the receiver's code (``collection_disabled``, ``excluded_sites_invalid``) or ``None`` while it collects.
@@ -84,7 +87,13 @@ def _history_switches(home: Path) -> tuple[bool, bool, tuple[str, ...], str | No
         config = ActivityConfig.load(home)
     except Exception:
         return None
-    return config.enabled, config.history_enabled, config.warnings, config.collection_refusal
+    return (
+        config.enabled,
+        config.history_enabled,
+        config.history_tools_enabled,
+        config.warnings,
+        config.collection_refusal,
+    )
 
 
 def _gate_refusal(home: Path) -> str | None:
@@ -134,15 +143,19 @@ def collect_status(home: Path) -> dict[str, Any]:
     feature, collection = switches if switches is not None else (False, False)
     history = _history_switches(home)
     history_switch = history[1] if history is not None else False
-    warnings = list(history[2]) if history is not None else []
+    tools_switch = history[2] if history is not None else False
+    warnings = list(history[3]) if history is not None else []
     exclusions_ok = "invalid value for excluded_sites" not in warnings
+    in_use = feature and history_switch and exclusions_ok
     gate = _gate_refusal(home)
     report: dict[str, Any] = {
         "feature_enabled": feature,
         "collection_enabled": collection,
-        "collection_refusal": None if collection else (history[3] if history is not None else "store_unavailable"),
+        "collection_refusal": None if collection else (history[4] if history is not None else "store_unavailable"),
         "history_enabled": history_switch,
-        "history_in_use": feature and history_switch and exclusions_ok,
+        "history_in_use": in_use,
+        "history_tools_enabled": tools_switch,
+        "history_tools_in_use": in_use and tools_switch,
         "config_warnings": warnings,
         "config_available": switches is not None,
         "protection": "ok" if gate is None else gate,
@@ -192,6 +205,14 @@ def _history_line(report: Mapping[str, Any]) -> str:
     return "off (excluded_sites is invalid; fix it so no excluded site can be shown)"
 
 
+def _tools_line(report: Mapping[str, Any]) -> str:
+    if report["history_tools_in_use"]:
+        return "on (history_tools_enabled; `hermes-mordred activity tools off` keeps only the automatic blocks)"
+    if not report["history_tools_enabled"]:
+        return "off (history_tools_enabled: false; `hermes-mordred activity tools on` to offer them)"
+    return "off (Hermes does not use the history; see hermes use)"
+
+
 def _collection_line(report: Mapping[str, Any]) -> str:
     if report["collection_enabled"]:
         return "enabled"
@@ -208,6 +229,7 @@ def _print_status(report: Mapping[str, Any]) -> None:
     print(f"  feature:     {'enabled' if report['feature_enabled'] else 'disabled'}")
     print(f"  collection:  {_collection_line(report)}")
     print(f"  hermes use:  {_history_line(report)}")
+    print(f"  lookups:     {_tools_line(report)}")
     for warning in report["config_warnings"]:
         _term.emit_warn(f"plugins.mordred_activity: {_display(warning, 120)}")
     protection = report["protection"]
@@ -375,31 +397,47 @@ def cmd_correct(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# use on|off
+# use on|off, tools on|off
 # --------------------------------------------------------------------------- #
 
+#: The ``plugins.mordred_activity`` switches the writer may set (``activity use`` / ``activity tools`` and the
+#: Desktop page's Browser history card); any other key is refused.
+HISTORY_SWITCHES: Final = frozenset({"history_enabled", "history_tools_enabled"})
 
-def set_history_enabled(config_path: Path, value: bool) -> None:
-    """Set ``plugins.mordred_activity.history_enabled`` only; everything else in the file is kept.
+
+def set_history_switch(config_path: Path, key: str, value: bool) -> None:
+    """Set one history switch (``history_enabled`` or ``history_tools_enabled``) of ``plugins.mordred_activity``
+    only; everything else in the file is kept.
 
     Round-trip YAML (comments and order preserved), written atomically under the policy write lock in
-    ``<home>/mordred`` (the one :class:`PolicyWriter` takes for ``network use`` and ``configure``). A
-    ``plugins`` or ``mordred_activity`` value that is not a mapping, or one shared with another part of
-    the file (a YAML anchor, an alias, or a ``<<:`` merge key that inherits it: writing through it would
-    change the other section too), is refused (:class:`ValueError`) rather than replaced.
+    ``<home>/mordred`` (the one :class:`PolicyWriter` takes for ``network use`` and ``configure``). Any other
+    key, or a value that is not a boolean, is refused (:class:`ValueError`) before the file is read. A
+    ``plugins`` or ``mordred_activity`` value that is not a mapping, or one shared with another part of the
+    file (a YAML anchor, an alias, or a ``<<:`` merge key that inherits it: writing through it would change
+    the other section too), is refused (:class:`ValueError`) rather than replaced.
     """
     from .policy_writer import PolicyWriter, _windows
+
+    if key not in HISTORY_SWITCHES:
+        raise ValueError("only history_enabled and history_tools_enabled can be set here")
+    if not isinstance(value, bool):
+        raise ValueError("a history switch is true or false")
 
     def edit(root: Any) -> None:
         plugins = _mapping(root, root, "plugins")
         section = _mapping(root, plugins, "mordred_activity")
-        section["history_enabled"] = value
+        section[key] = value
 
     if _windows():
         mordred = config_path.parent / "mordred"
         PolicyWriter(config_path, mordred / "policy.json", mordred).transform_config(edit)
         return
     _edit_posix(config_path, edit)
+
+
+def set_history_enabled(config_path: Path, value: bool) -> None:
+    """Set ``plugins.mordred_activity.history_enabled`` only (:func:`set_history_switch`)."""
+    set_history_switch(config_path, "history_enabled", value)
 
 
 def _mapping(root: Any, parent: MutableMapping[str, Any], key: str) -> MutableMapping[str, Any]:
@@ -458,17 +496,24 @@ def _edit_posix(config_path: Path, edit: Callable[[Any], None]) -> None:
         _atomic_write_text(config_path, buffer.getvalue())
 
 
+def _write_switch(home: Path, key: str, value: bool) -> bool:
+    """:func:`set_history_switch` with the commands' refusal output; ``False`` when nothing was changed."""
+    try:
+        set_history_switch(home / "config.yaml", key, value)
+    except ValueError as exc:  # our own content-free refusals
+        _term.emit_error(f"config.yaml was not changed: {_display(exc, 120)}")
+        return False
+    except Exception as exc:  # parse errors quote config lines: name the error type only
+        _term.emit_error(f"config.yaml was not changed ({_display(type(exc).__name__, 64)})")
+        return False
+    return True
+
+
 def cmd_use(args: argparse.Namespace) -> int:
     """``activity use on|off``: the master switch for Hermes's use of the browser history and its own capture."""
     value = str(args.state) == "on"
     home = _home()
-    try:
-        set_history_enabled(home / "config.yaml", value)
-    except ValueError as exc:  # our own content-free refusals
-        _term.emit_error(f"config.yaml was not changed: {_display(exc, 120)}")
-        return 1
-    except Exception as exc:  # parse errors quote config lines: name the error type only
-        _term.emit_error(f"config.yaml was not changed ({_display(type(exc).__name__, 64)})")
+    if not _write_switch(home, "history_enabled", value):
         return 1
     switches = _history_switches(home)
     feature = switches[0] if switches is not None else False
@@ -495,10 +540,42 @@ def cmd_use(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tools(args: argparse.Namespace) -> int:
+    """``activity tools on|off``: offer the lookup tools, or keep only the automatic history blocks."""
+    value = str(args.state) == "on"
+    home = _home()
+    if not _write_switch(home, "history_tools_enabled", value):
+        return 1
+    switches = _history_switches(home)
+    feature, history = (switches[0], switches[1]) if switches is not None else (False, False)
+    if value:
+        print(
+            "Browser-history lookup tools: on (mordred_browser_history, mordred_browser_history_episode). "
+            "A chat that calls one is in reader mode until a new chat: it can only read, and web use asks first."
+        )
+        if not (feature and history):
+            _term.emit_warn(
+                "Hermes does not use the browser history now (plugins.mordred_activity.enabled or "
+                "history_enabled is off); the lookup tools are offered only while it does"
+            )
+        print("Applies without a restart; chats started from now on get the tools.")
+        return 0
+    print(
+        "Browser-history lookup tools: off. The automatic history blocks stay; they never put a chat into reader mode."
+    )
+    print(
+        "Applies from the next turn without a restart: the tools refuse while the switch is off. A chat "
+        "opened earlier may still list them, and calling one there still puts that chat into reader mode; "
+        "start a new chat."
+    )
+    return 0
+
+
 # The store-maintenance subcommands (backup, restore, retention) live in ``activity_store_cli``.
 _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "status": cmd_status,
     "use": cmd_use,
+    "tools": cmd_tools,
     "pair-operator": cmd_pair_operator,
     "correct": cmd_correct,
 }

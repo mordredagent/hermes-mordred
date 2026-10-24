@@ -440,7 +440,8 @@ The operator keeps the matching plaintext token in its own
   Hermes process through the same gate (never creating it when it is absent)
   and keep no copy on disk; what they inject is bounded text inside the turn
   or tool result (SPEC §"History for Hermes"). The master switch is
-  `plugins.mordred_activity.history_enabled` in the profile's `config.yaml`.
+  `plugins.mordred_activity.history_enabled` in the profile's `config.yaml`;
+  `history_tools_enabled` there turns off only the lookup tools.
 - **Hermes writes:** with `enabled`, `collection_enabled`, `history_enabled`
   and `history_capture_hermes` on, the Hermes process records its own
   browser calls and the user's chat corrections into this file through the

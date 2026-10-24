@@ -29,7 +29,8 @@ mail) come from :mod:`._status_v4` and never unlock anything. The macOS
 routes of the new steps are sub-routers included at the end of this module:
 :mod:`._ceremony_routes` (``/vault/*``, ``/databases/*``) and
 :mod:`._mail_routes` (``/mail/*``, ``/imports/status``); package updates and
-uninstall (and Hermes's direct tool calls, ``/tools/direct``) are
+uninstall (and Hermes's direct tool calls, ``/tools/direct``, and the
+browser-history switches, ``/activity/history``) are
 :mod:`._maintenance_routes`. The mail library, the
 read-only import-store opener, the flow registries, the ceremony lock and the
 router's lifespan (the flow reaper) live in :mod:`._seams`, read at call time.
@@ -189,8 +190,8 @@ async def status(client_version: int = 1) -> dict[str, Any]:
     """Setup progress from metadata only (no Touch ID, no secrets, no content).
 
     ``client_version >= 4`` adds ``vault``, ``databases``, ``imports``, ``mail``,
-    ``telegram_archive`` and ``tools`` (:func:`._status_v4.sections`); older
-    clients get exactly the keys they always got.
+    ``telegram_archive``, ``tools`` and ``activity`` (:func:`._status_v4.sections`);
+    older clients get exactly the keys they always got.
     """
     if sys.platform == "win32" and client_version >= 3:
         return await _windows_status(client_version)

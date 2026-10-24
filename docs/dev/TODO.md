@@ -706,9 +706,21 @@ injection channels are `transform_tool_result` and `pre_llm_call`).
   the secret-shaped typed-text check; hook payload contract, HOOK_PAYLOADS.md,
   SPEC §"History for Hermes" and USAGE.
 - [x] `privacy_check`: `mordred_browser_history` and
-  `mordred_browser_history_episode` are first-party taint sources like the
-  Telegram tools (allowed at every level; a call taints the session); the
-  injected blocks do not taint (no typed text or page text).
+  `mordred_browser_history_episode` are reader tools like the Telegram tools
+  (`READER_TOOLS`: a call puts the chat into reader mode, which holds at every
+  level and survives a restart); the injected blocks do not (no typed text or
+  page text). Decided 2026-10-24 when B1 met the merged dev.
+- [x] `history_tools_enabled` (`activity tools on|off`, the Desktop Browser
+  history card, `GET/POST /activity/history`): removes only the lookup tools
+  and keeps the automatic blocks, so a chat can use the hints without entering
+  reader mode (2026-10-24).
+- [ ] Reader mode after `activity tools off`: Hermes fixes a chat's tool list
+  when the chat starts and caches `check_fn` for about a minute, so a chat
+  opened just after the switch may still list the tools, and the pre-tool hook
+  records reader mode before the handler refuses `history_tools_disabled`.
+  Closing it means `privacy_check` reading the activity switch (skip reader
+  mode for a refused, switched-off lookup) in its own PR; until then the CLI,
+  the card and USAGE say to start a new chat.
 - [ ] Live LLM check of B1 with a real Hermes session on a throwaway home
   (navigation block, turn-start context, both tools), recorded in
   [`CI.md`](./CI.md) §"Manual live-device validation log".

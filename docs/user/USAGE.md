@@ -631,7 +631,8 @@ hermes-mordred desktop uninstall
 > memory and secrets, encryption of Hermes's databases), **Connect** (the chat
 > model, the question model, Telegram, the Telegram import and mail over IMAP),
 > **Ask Hermes** (what to say in a chat, what Hermes reads, and the commands that
-> stay in the terminal) and **Maintenance** (update, repair, tool calls, uninstall). Each
+> stay in the terminal) and **Maintenance** (update, repair, tool calls, browser history,
+> uninstall). Each
 > step shows whether it is done, next, waiting for an earlier step (with a
 > button that jumps there), running or in need of attention, and a "Why this
 > step?" block that explains the reason in plain words. The Telegram and mail
@@ -654,6 +655,20 @@ hermes-mordred desktop uninstall
 > the card. The page never changes the setting on its own. The card is on the
 > macOS and Linux page; the Windows page is unchanged, so use
 > `hermes-mordred direct-tools` there.
+>
+> **Browser history from the page.** The **Browser history** card, right after
+> Tool calls, shows the two switches of
+> [`activity use` and `activity tools`](#activity--record-browser-work-preview-macos)
+> with a button each: "Hermes uses the browser history" (the automatic hints
+> in browser results and at the start of a turn, which never restrict a chat)
+> and "Lookup tools" (the model searches the stored history itself; a chat that
+> used one is in reader mode until you start a new chat: it can only read, and
+> web use asks first). Turn the lookup tools off to keep the hints without
+> reader mode; the lookup-tools button is disabled while the history is off.
+> A change applies from the next turn, without a restart; a chat keeps the
+> lookup tools it started with, so start a new chat after changing them. Both
+> switches act only while the browser activity feature is enabled and never
+> stop recording. The Windows page is unchanged; use the CLI there.
 >
 > **Database encryption from the page.** The step "Encrypt Hermes databases"
 > lists the plaintext and unreadable (encrypted) database files it finds, and
@@ -1182,6 +1197,7 @@ the tool inside a running Hermes can. An HTTP proxy is refused
 ```sh
 hermes-mordred activity status                # switches, protection gate, counts, peers (no content)
 hermes-mordred activity use off               # Hermes stops using the history and recording its own browser work (on: both again); next turn
+hermes-mordred activity tools off             # keep the automatic hints, drop the lookup tools (on: offer them)
 hermes-mordred activity pair-operator         # single-use code for the browser operator's collector
 hermes-mordred activity peers list            # peers revoke <peer_id> stops a collector at once
 hermes-mordred activity correct --episode ID --text "Open the official site instead"   # stores one correction event; prints its id
@@ -1264,7 +1280,25 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > write files, skills, memory or kanban, run commands, send messages or
 > delegate, web use asks first, and the restriction survives a Hermes restart.
 > The automatic blocks do not enter reader mode (they never carry typed text
-> or page text). Typed text that looks like a
+> or page text).
+>
+> **Hints without reader mode.** `activity tools off` sets
+> `history_tools_enabled: false`: Hermes keeps the automatic hints (the
+> browser-result block and the turn block) but is no longer offered the two
+> lookup tools, so a chat never enters reader mode because of the browser
+> history. `activity tools on` offers them again (they still need
+> `history_enabled`). Like `activity use`, it changes only that key of
+> `config.yaml` and applies from the next turn without a restart, but Hermes
+> fixes a chat's tools when the chat starts: a chat opened before `off` may
+> still list them, and calling one there still enters reader mode (the tool
+> itself answers nothing), so start a new chat. `activity status` shows the
+> switch on its `lookups:` line. The **Browser history** card under
+> Maintenance on the Desktop page has the same two switches, "Hermes uses the
+> browser history" and "Lookup tools" (the second is disabled while the first
+> is off), and changes them only when you press one; see
+> [`desktop`](#desktop--mordred-setup-page-in-hermes-desktop).
+>
+> Typed text that looks like a
 > key, password or card number (JWTs, `sk-`, `ghp_`, `AKIA`, `xoxb-` style
 > keys, `password: …`, Luhn-valid card numbers, long random tokens) is never
 > stored.

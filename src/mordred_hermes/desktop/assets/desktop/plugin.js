@@ -197,6 +197,9 @@ const MESSAGES = {
   hermes_cli_missing: 'Hermes’s own hermes command was not found, so nothing was changed. Add the lines below to config.yaml by hand.',
   config_unsupported_shape: 'Hermes’s config.yaml shares the tools or tool_search mapping with another setting through a YAML anchor/alias, so changing it would change that setting too. Nothing was changed. Edit config.yaml by hand.',
   hermes_cli_unsupported: 'This Hermes’s hermes config command has no get/unset (hermes-agent before 0.19), so nothing was changed. Such a Hermes may not defer tools at all (Hermes 0.21 is the release that defers every plugin tool); to set it anyway, add the lines below to config.yaml by hand.',
+  // The browser-history switches (`/activity/history`, the Browser history card; see historyError).
+  history_config_unreadable: 'Hermes’s config.yaml could not be read, so the browser history switches cannot be shown or changed here. Nothing was changed. Run hermes-mordred activity status in Terminal.',
+  history_config_write_failed: 'config.yaml was not changed: it could not be read or written, or its plugins or mordred_activity section is not a plain mapping (for example one shared through a YAML anchor). Run hermes-mordred activity tools (or activity use) in Terminal to see why.',
 }
 
 // `imap_auth_failed` refined by the server's response code (never its text).
@@ -1296,6 +1299,125 @@ function DirectToolsCard({ tools, refresh }) {
             ],
           })
         : null,
+    ],
+  })
+}
+
+// -- Hermes's use of the browser history (the Browser history card under Maintenance) ---------
+
+const HISTORY_ANCHOR = 'mordred-history'
+// The card's two switches: `status.activity.<key>`, changed with `{<key>: bool}` on `/activity/history`.
+const HISTORY_SWITCHES = [
+  {
+    key: 'history',
+    label: 'Hermes uses the browser history',
+    on: 'Turn history off',
+    off: 'Turn history on',
+    text: 'Hermes adds short hints from your earlier browser work to a chat: a note about a site when it opens that site, and your own earlier tasks and corrections when your message names a site or task. These automatic hints never restrict a chat.',
+  },
+  {
+    key: 'tools',
+    label: 'Lookup tools',
+    on: 'Turn lookup tools off',
+    off: 'Turn lookup tools on',
+    text: 'The lookup tools let the model search the stored history itself, page text and what you typed included. A chat that used one is in reader mode until you start a new chat: it can only read, and web use asks first. Turn them off to keep only the automatic hints.',
+  },
+]
+const HISTORY_TOOLS_NEED_HISTORY = 'Turn on the browser history first: the lookup tools are offered only while Hermes uses it.'
+const HISTORY_SCOPE = 'Both switches act only while Mordred’s browser activity feature is enabled (plugins.mordred_activity.enabled) and never stop recording. In Terminal: hermes-mordred activity use on|off and hermes-mordred activity tools on|off.'
+const HISTORY_APPLIES = 'Applies from the next turn, without a restart. A chat keeps the lookup tools it started with, so start a new chat after changing them.'
+const HISTORY_SAVED = 'Saved. Applies from the next turn.'
+
+// A Browser history failure under the card's `history_<code>` wording when there is one (the
+// plain config_* sentences belong to the Tool calls card); nothing else of the answer is kept.
+function historyError(error) {
+  const e = asMordredError(error)
+  return own(MESSAGES, `history_${e.code}`) ? new MordredError(`history_${e.code}`, {}) : e
+}
+
+// One switch: its name and state with a button that flips it (when the state is known), then what it does.
+function HistorySwitch({ item, value, disabled, note = null, onChange }) {
+  const known = typeof value === 'boolean'
+  return jsxs('div', {
+    style: { marginTop: 12 },
+    children: [
+      jsxs(Row, {
+        key: 'row',
+        children: [
+          jsxs('span', {
+            key: 'state',
+            style: { flex: 1 },
+            children: [jsx('strong', { key: 'label', children: item.label }), known ? (value ? ': on' : ': off') : null],
+          }),
+          known
+            ? jsx(Button, { key: 'toggle', variant: 'outline', disabled, onClick: () => onChange(item.key, !value), children: value ? item.on : item.off })
+            : null,
+        ],
+      }),
+      jsx('p', { key: 'text', style: { margin: '4px 0 0' }, children: item.text }),
+      note ? jsx('p', { key: 'note', style: { margin: '4px 0 0', color: MUTED_TEXT }, children: note }) : null,
+    ],
+  })
+}
+
+// `activity` is `status.activity` ({history, tools, source}); missing from an older Mordred, `null`
+// switches when config.yaml cannot be read. A change sends one {<key>: bool} and nothing else.
+function BrowserHistoryCard({ activity, refresh }) {
+  // Saving: the request and the status read after it are in flight (buttons disabled).
+  const [busy, setBusy] = useState(false)
+  const [failure, setFailure] = useState(null)
+  const [saved, setSaved] = useState(null)
+  const noteRef = useFocusOn(failure)
+  const resultRef = useFocusOn(saved)
+  const known = Boolean(activity) && typeof activity.history === 'boolean' && typeof activity.tools === 'boolean'
+  // The state shown is the status only, never a request's answer.
+  const historyOff = known && !activity.history
+  const change = async (key, value) => {
+    if (busy) return
+    setBusy(true)
+    setFailure(null)
+    setSaved(null)
+    try {
+      const r = await call('/activity/history', { [key]: value })
+      if (typeof r.history !== 'boolean' || typeof r.tools !== 'boolean') throw new MordredError('invalid_response', {})
+      setSaved({ key, value })
+    } catch (e) {
+      setFailure(historyError(e))
+    } finally {
+      try {
+        await refresh()
+      } catch (_) {
+        // the page's own status read reports its failures
+      }
+      setBusy(false)
+    }
+  }
+  const state = !activity
+    ? jsx('p', { key: 'state', role: 'status', children: MESSAGES.mordred_update_required })
+    : !known
+      ? jsx('p', { key: 'state', role: 'status', children: explain('history_config_unreadable') })
+      : null
+  return jsxs('section', {
+    'aria-labelledby': HISTORY_ANCHOR,
+    style: { border: `1px solid ${STROKE}`, borderRadius: 10, padding: 16, marginBottom: 12 },
+    children: [
+      jsx('h3', { key: 'title', id: HISTORY_ANCHOR, tabIndex: -1, style: { margin: '0 0 8px' }, children: 'Browser history' }),
+      failure ? jsx(StepFailure, { key: 'failure', error: failure, noteRef }) : null,
+      state,
+      ...HISTORY_SWITCHES.map((item) =>
+        jsx(HistorySwitch, {
+          key: item.key,
+          item,
+          value: known ? activity[item.key] : null,
+          disabled: busy || (item.key === 'tools' && historyOff),
+          note: item.key === 'tools' && historyOff ? HISTORY_TOOLS_NEED_HISTORY : null,
+          onChange: change,
+        }),
+      ),
+      busy ? jsx('p', { key: 'busy', role: 'status', 'aria-live': 'polite', children: '⟳ Saving…' }) : null,
+      jsx('p', { key: 'scope', style: { margin: '10px 0 0' }, children: HISTORY_SCOPE }),
+      jsx('p', { key: 'applies', style: { margin: '8px 0 0' }, children: HISTORY_APPLIES }),
+      saved ? jsx('p', { key: 'saved', ref: resultRef, tabIndex: -1, role: 'status', style: { marginTop: 10 }, children: HISTORY_SAVED }) : null,
     ],
   })
 }
@@ -3661,6 +3783,7 @@ function GroupedSetup({ status, health, sync = null, onSync = null, onImportStar
         children: [
           jsx(UpdatePanel, { key: 'update', health, onInfo: onUpdateInfo }),
           jsx(DirectToolsCard, { key: 'tools', tools: status.tools || null, refresh }),
+          jsx(BrowserHistoryCard, { key: 'history', activity: status.activity || null, refresh }),
           jsx(UninstallSection, { key: 'uninstall', platform: status.uninstall || null }),
         ],
       }),

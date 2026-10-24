@@ -92,6 +92,7 @@ def test_keys_of_the_removed_lesson_pipeline_are_unknown(key: str) -> None:
 
 HISTORY_DEFAULTS = {
     "history_enabled": True,
+    "history_tools_enabled": True,
     "history_on_navigate": True,
     "history_turn_context": True,
     "history_capture_hermes": True,
@@ -117,6 +118,7 @@ def test_history_keys_default_to_on_but_the_feature_stays_off() -> None:
 def test_history_keys_parse_valid_values_without_warnings() -> None:
     section = {
         "history_enabled": False,
+        "history_tools_enabled": False,
         "history_on_navigate": False,
         "history_turn_context": False,
         "history_capture_hermes": False,
@@ -136,6 +138,8 @@ def test_history_keys_parse_valid_values_without_warnings() -> None:
     ("key", "raw"),
     [
         ("history_enabled", "yes"),
+        ("history_tools_enabled", "off"),
+        ("history_tools_enabled", 0),
         ("history_turn_context", 1),
         ("history_max_chars", 199),
         ("history_max_chars", 8001),
@@ -160,6 +164,38 @@ def test_invalid_history_values_fall_back_with_a_warning(key: str, raw: Any) -> 
     config = ActivityConfig.from_mapping({key: raw})
     assert getattr(config, key) == HISTORY_DEFAULTS[key]
     assert config.warnings == (f"invalid value for {key}",)
+
+
+def test_the_tools_switch_defaults_to_on_and_needs_the_history() -> None:
+    assert ActivityConfig.from_mapping({}).history_tools_enabled is True
+    assert ActivityConfig.from_mapping({"enabled": True}).history_tools_active is True
+    off = ActivityConfig.from_mapping({"enabled": True, "history_tools_enabled": False})
+    # Off removes only the lookup tools: the automatic blocks stay (history_active).
+    assert (off.history_tools_enabled, off.history_active, off.history_tools_active) == (False, True, False)
+    assert off.warnings == ()
+    for section in ({}, {"enabled": True, "history_enabled": False}, {"enabled": True, "excluded_sites": "x.example"}):
+        assert ActivityConfig.from_mapping(section).history_tools_active is False, section
+
+
+def test_an_invalid_tools_switch_is_warned_and_stays_on() -> None:
+    config = ActivityConfig.from_mapping({"enabled": True, "history_tools_enabled": "no"})
+    assert config.history_tools_enabled is True and config.history_tools_active is True
+    assert config.warnings == ("invalid value for history_tools_enabled",)
+
+
+def test_strict_load_raises_for_an_unparsable_file_and_the_default_load_does_not(tmp_path) -> None:
+    (tmp_path / "config.yaml").write_text("plugins: [unclosed\n", encoding="utf-8")
+    assert ActivityConfig.load(tmp_path) == ActivityConfig()
+    from ruamel.yaml.error import YAMLError
+
+    with pytest.raises(YAMLError):
+        ActivityConfig.load(tmp_path, strict=True)
+    (tmp_path / "config.yaml").unlink()
+    assert ActivityConfig.load(tmp_path, strict=True) == ActivityConfig()  # an absent file is the defaults
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  mordred_activity:\n    history_tools_enabled: false\n", encoding="utf-8"
+    )
+    assert ActivityConfig.load(tmp_path, strict=True).history_tools_enabled is False
 
 
 def test_excluded_sites_are_normalized_to_bare_hosts() -> None:

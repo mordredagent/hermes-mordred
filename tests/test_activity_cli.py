@@ -439,3 +439,110 @@ def test_status_names_invalid_exclusions(_home, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "excluded_sites is invalid" in captured.out
     assert "invalid value for excluded_sites" in captured.err + captured.out
+
+
+# --------------------------------------------------------------------------- #
+# tools on|off (history_tools_enabled)
+# --------------------------------------------------------------------------- #
+
+
+def test_parser_wires_tools_on_and_off(capsys):
+    parser = argparse.ArgumentParser()
+    cli._setup_subparser(parser)
+    for state in ("on", "off"):
+        ns = parser.parse_args(["activity", "tools", state])
+        assert (ns.func, ns.activity_command, ns.state) == (cli._handle_activity, "tools", state)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["activity", "tools", "maybe"])
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_tools_off_and_on_change_only_history_tools_enabled(_home, capsys):
+    path = _home / "config.yaml"
+    path.write_text(CONFIG_WITH_COMMENTS, encoding="utf-8")
+
+    assert cli.main(["activity", "tools", "off"]) == 0
+
+    off = CONFIG_WITH_COMMENTS.replace(
+        "      - bank.example\n", "      - bank.example\n    history_tools_enabled: false\n"
+    )
+    assert path.read_text(encoding="utf-8") == off
+    config = ActivityConfig.load(_home)
+    assert (config.history_enabled, config.history_tools_enabled, config.history_active) == (True, False, True)
+    out = capsys.readouterr().out
+    assert "lookup tools: off" in out and "automatic history blocks stay" in out and "reader mode" in out
+
+    assert cli.main(["activity", "tools", "on"]) == 0
+    assert path.read_text(encoding="utf-8") == off.replace(
+        "history_tools_enabled: false", "history_tools_enabled: true"
+    )
+    assert ActivityConfig.load(_home).history_tools_active is True
+    out = capsys.readouterr().out
+    assert "lookup tools: on" in out and "reader mode" in out
+
+
+def test_tools_and_use_set_their_own_keys_side_by_side(_home):
+    path = _home / "config.yaml"
+    path.write_text(CONFIG_WITH_COMMENTS, encoding="utf-8")
+
+    assert cli.main(["activity", "tools", "off"]) == 0
+    assert cli.main(["activity", "use", "off"]) == 0
+
+    assert path.read_text(encoding="utf-8") == CONFIG_WITH_COMMENTS.replace(
+        "      - bank.example\n",
+        "      - bank.example\n    history_tools_enabled: false\n    history_enabled: false\n",
+    )
+
+
+def test_tools_on_warns_while_hermes_does_not_use_the_history(_home, capsys):
+    assert cli.main(["activity", "tools", "on"]) == 0
+
+    captured = capsys.readouterr()
+    assert "does not use the browser history now" in captured.err + captured.out
+    assert ActivityConfig.load(_home).history_tools_enabled is True
+
+
+def test_tools_refuses_a_malformed_plugins_section_and_leaves_the_file(_home, capsys):
+    path = _home / "config.yaml"
+    path.write_text("plugins:\n- mordred\n", encoding="utf-8")
+
+    assert cli.main(["activity", "tools", "off"]) == 1
+
+    assert path.read_text(encoding="utf-8") == "plugins:\n- mordred\n"
+    assert "not changed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("key", "value"), [("enabled", True), ("excluded_sites", False), ("history_enabled", "on")])
+def test_the_writer_sets_only_the_two_history_switches(_home, key, value):
+    path = _home / "config.yaml"
+    path.write_text(CONFIG_WITH_COMMENTS, encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        activity_cli.set_history_switch(path, key, value)
+
+    assert path.read_text(encoding="utf-8") == CONFIG_WITH_COMMENTS
+
+
+@pytest.mark.parametrize(
+    ("section", "enabled", "in_use", "line"),
+    [
+        ({"enabled": True}, True, True, "lookups:     on (history_tools_enabled; `hermes-mordred activity tools off`"),
+        (
+            {"enabled": True, "history_tools_enabled": False},
+            False,
+            False,
+            "lookups:     off (history_tools_enabled: false; `hermes-mordred activity tools on`",
+        ),
+        ({"enabled": True, "history_enabled": False}, True, False, "lookups:     off (Hermes does not use the history"),
+    ],
+)
+def test_status_reports_the_lookup_tools(_home, monkeypatch, capsys, section, enabled, in_use, line):
+    (_home / "config.yaml").write_text(json.dumps({"plugins": {"mordred_activity": section}}), encoding="utf-8")
+    monkeypatch.setattr(activity_cli, "_gate_refusal", lambda home: "not_armed")
+
+    assert cli.main(["activity", "status", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert (report["history_tools_enabled"], report["history_tools_in_use"]) == (enabled, in_use)
+
+    assert cli.main(["activity", "status"]) == 0
+    assert line in capsys.readouterr().out
