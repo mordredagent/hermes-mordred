@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -88,7 +89,7 @@ def probe_environment(home: Path) -> dict[str, str]:
         if not key.startswith(("MORDRED_", "HERMES_", "PYTEST_", "TPM2TOOLS_", "TSS2_"))
         and key not in {"PYTHONPATH", "PYTHONHOME", "UV_PROJECT", "VIRTUAL_ENV"}
     }
-    environment.update(HERMES_HOME=str(home), PYTHONNOUSERSITE="1", UV_NO_PROGRESS="1")
+    environment.update(HERMES_HOME=str(home), PYTHONNOUSERSITE="1", PYTHONOPTIMIZE="0", UV_NO_PROGRESS="1")
     return environment
 
 
@@ -412,6 +413,8 @@ def run_acceptance(*, root: Path, phase: Phase, output: Path) -> int:
             directory.mkdir(mode=0o700)
             evidence.update(_execute_native_phase(context, phase=phase, directory=directory))
             evidence["reasons"] = ["native_coverage_incomplete"] if not evidence["native_rows_complete"] else []
+    except (ValueError, TypeError, KeyError, StopIteration):
+        evidence["reasons"].append("native_evidence_invalid")
     except (AcceptanceRefused, OSError, subprocess.SubprocessError) as exc:
         if context is not None:
             evidence["executions"] = context.get("execution_log", [])
@@ -971,6 +974,324 @@ def require_native_source_checkout(context: dict[str, Any]) -> None:
             raise AcceptanceRefused("source_checkout_changed_since_bundle")
 
 
+def _private_evidence_file(path: Path) -> Path:
+    _input_file(path)
+    info = path.stat()
+    _require(os.name == "nt" or (info.st_uid == os.getuid() and info.st_mode & 0o077 == 0))
+    return path
+
+
+def _owned_copy_directories(parent: Path, copied: Path) -> None:
+    current = parent
+    for part in (None, *copied.parent.relative_to(parent).parts):
+        if part is not None:
+            current /= part
+        info = current.lstat()
+        _require(stat.S_ISDIR(info.st_mode) and not getattr(info, "st_file_attributes", 0) & 0x400)
+        _require(os.name == "nt" or (info.st_uid == os.getuid() and info.st_mode & 0o077 == 0))
+
+
+def validate_withdrawable_helper(manifest: Path, *, production: Path, parent: Path) -> dict[str, Any]:
+    """Admit only the declared private copy of the actual helper, never create it."""
+    try:
+        parent, production = _absolute(str(parent)), _absolute(str(production))
+        value = _object(
+            json.loads(_private_evidence_file(manifest).read_text()),
+            ("schema_version", "kind", "path", "sha256", "production_helper_sha256", "identity"),
+        )
+        _require(type(value["schema_version"]) is int and value["schema_version"] == 1)
+        _require(value["kind"] == "dbcrypt_withdrawable_helper")
+        copied = _absolute(value["path"])
+        _require(copied.is_relative_to(parent) and copied != production and not copied.samefile(production))
+        _private_evidence_file(copied)
+        _owned_copy_directories(parent, copied)
+        _require(os.name == "nt" or bool(copied.stat().st_mode & stat.S_IXUSR))
+        _require(copied.suffix.lower() == production.suffix.lower())
+        expected = _object(value["identity"], ("device", "inode", "size"))
+        _require(
+            set(expected) == {"device", "inode", "size"}
+            and all(type(item) is int and item >= 0 for item in expected.values())
+        )
+        info = copied.stat()
+        _require(expected == {"device": info.st_dev, "inode": info.st_ino, "size": info.st_size})
+        _require(_hex(value["sha256"], 64) and value["sha256"] == value["production_helper_sha256"])
+        _require(sha256_file(copied) == value["sha256"] == sha256_file(production))
+        retained = copied.with_name(copied.name + ".task15-withdrawn")
+        _require(not retained.exists() and not retained.is_symlink())
+        return {**value, "manifest_sha256": sha256_file(manifest), "retained_path": str(retained)}
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise AcceptanceRefused("owned_withdrawable_helper_prerequisite_invalid") from exc
+
+
+def validate_helper_withdrawal(value: Any) -> dict[str, Any]:
+    try:
+        row = _object(value, ("kind", "copy", "initial_acquisition", "missing_helper_acquisition", "restored"))
+        _require(row["kind"] == "owned_helper_withdrawal")
+        copied = row["copy"]
+        _require(_hex(copied["sha256"], 64) and copied["sha256"] == copied["production_helper_sha256"])
+        _require(_hex(copied["manifest_sha256"], 64) and _text(copied["path"]))
+        first, missing = row["initial_acquisition"], row["missing_helper_acquisition"]
+        _require(first["returncode"] == 0 and missing["returncode"] == 2)
+        for observed, outcome in ((first, "acquired"), (missing, "refused")):
+            payload = observed["payload"]
+            _require(payload["operation"] == "fresh_unpatched_authority" and payload["outcome"] == outcome)
+            _require(payload["bootstrap"] == "direct_unpatched_authority")
+            _require(payload["source_before"] == payload["source_after"])
+            _require(_hex(payload["source_before"]["record_sha256"], 64))
+            _require(_timestamp(observed["started_at"]) and observed["finished_at"] >= observed["started_at"])
+        _require(first["payload"]["helper_found"] == copied["path"] and missing["payload"]["helper_found"] is None)
+        _require(first["payload"]["source_before"] == missing["payload"]["source_before"])
+        _require(first["finished_at"] <= missing["started_at"])
+        _require(row["restored"]["sha256"] == copied["sha256"] and row["restored"]["identity"] == copied["identity"])
+    except (ValueError, TypeError, KeyError) as exc:
+        raise AcceptanceRefused("helper_withdrawal_evidence_incomplete") from exc
+    return row
+
+
+CONTROL_MARGIN = 60.0  # Existing dbcrypt_acceptance_control.STOP_MARGIN.
+PLATFORM_INSTANCE = {"linux": "i-095cbe655c196c749", "win32": "i-00f4db5c3a204906b"}
+
+
+def _controller_snapshot(directory: Path, reference: Any, stage: str) -> tuple[dict[str, Any], float]:
+    path, row = _evidence_ref(directory, reference)
+    _private_evidence_file(path)
+    captured = reference["captured_at"]
+    _require(_timestamp(captured) and type(row["version"]) is int and row["version"] == 1)
+    _require(row["instance"] in INSTANCES and _hex(row["run"], 32))
+    _require(
+        isinstance(row["account"], str)
+        and len(row["account"]) == 12
+        and row["account"].isascii()
+        and row["account"].isdecimal()
+    )
+    _require(_timestamp(row["created"]) and _timestamp(row["deadline"]))
+    _require(120 <= row["deadline"] - row["created"] <= 7200 and row["created"] <= captured)
+    expected_state = "armed" if stage in {"armed", "ready"} else "stopped" if stage == "stopped" else "running"
+    _require(row["state"] == expected_state and row["start_requested"] is (expected_state != "armed"))
+    if stage != "armed":
+        _require(type(row["supervisor_pid"]) is int and row["supervisor_pid"] > 0)
+        _require(_timestamp(row["heartbeat"]) and row["created"] <= row["heartbeat"] <= captured)
+    if expected_state != "armed":
+        _require(row["start_uncertain"] is False)
+    if stage == "stopped":
+        load_stop_receipt(path)
+        _require(row["stopped_at"] <= captured)
+    return row, float(captured)
+
+
+def _same_controller_run(first: dict[str, Any], second: dict[str, Any]) -> None:
+    _require(all(first[key] == second[key] for key in ("version", "instance", "run", "account", "created", "deadline")))
+
+
+def _control_start(
+    action: dict[str, Any], directory: Path, armed: dict[str, Any], before: dict[str, Any], mode: str
+) -> str | None:
+    started, captured = _controller_snapshot(directory, action["started"], "started")
+    _same_controller_run(armed, started)
+    _require(started["supervisor_pid"] == before["supervisor_pid"] and action["action_at"] <= captured)
+    initial = _cloud_observation(directory, action["initial_stopped"])
+    running = _cloud_observation(directory, action["running"])
+    _require(initial["instance"] == armed["instance"] and initial["controller_run"] == armed["run"])
+    _require(initial["state"] == "stopped" and initial["_owner"] is None and initial["_account"] == armed["account"])
+    _require(armed["created"] <= initial["observed_at"] <= action["action_at"] <= captured <= running["observed_at"])
+    previous_run = None
+    if action["operation"] == "stop_start" or action["sequence"] > 1:
+        stopped, stopped_capture = _controller_snapshot(directory, action["previous_stop"], "stopped")
+        observed = _cloud_observation(directory, action["previous_independent_stop"])
+        _require(stopped["instance"] == armed["instance"] and stopped["account"] == armed["account"])
+        _require(stopped["run"] != armed["run"] and observed["controller_run"] == stopped["run"])
+        _require(
+            observed["instance"] == armed["instance"] and observed["state"] == "stopped" and observed["_owner"] is None
+        )
+        _require(
+            observed["_account"] == armed["account"] and stopped_capture <= observed["observed_at"] <= armed["created"]
+        )
+        previous_run = str(stopped["run"])
+    return previous_run
+
+
+def _control_reboot(action: dict[str, Any], directory: Path, armed: dict[str, Any], mode: str) -> None:
+    path, anchor = _evidence_ref(directory, action["start_action"])
+    _require(anchor["operation"] in {"start", "stop_start"})
+    observation = "provision" if anchor["operation"] == "start" else "ec2_stop_start"
+    prior = validate_control_action(path, platform=action["platform"], mode=mode, observation=observation)
+    anchor_armed, _captured = _controller_snapshot(path.parent, anchor["armed"], "armed")
+    _same_controller_run(armed, anchor_armed)
+    _require(prior["sequence"] < action["sequence"] and prior["running_at"] < action["action_at"])
+    _require(set(action["modes"]) <= set(prior["modes"]))
+
+
+def validate_control_action(path: Path, *, platform: str, mode: str, observation: str) -> dict[str, Any]:
+    """Validate frozen existing-controller and raw-state evidence; never call AWS."""
+    try:
+        action = _object(
+            json.loads(_private_evidence_file(path).read_text()),
+            (
+                "schema_version",
+                "kind",
+                "platform",
+                "instance",
+                "modes",
+                "sequence",
+                "operation",
+                "action_at",
+                "armed",
+                "before_action",
+                "running",
+            ),
+        )
+        _require(
+            type(action["schema_version"]) is int
+            and action["schema_version"] == 1
+            and action["kind"] == "dbcrypt_control_action"
+        )
+        _require(action["platform"] == platform and action["instance"] == PLATFORM_INSTANCE[platform])
+        _require(
+            action["operation"]
+            == {
+                "provision": "start",
+                "process_restart": "start",
+                "os_reboot": "reboot",
+                "ec2_stop_start": "stop_start",
+            }[observation]
+        )
+        _require(
+            isinstance(action["modes"], list)
+            and mode in action["modes"]
+            and action["modes"] == sorted(set(action["modes"]))
+        )
+        _require(
+            set(action["modes"]) <= {"source", "wheel"} and type(action["sequence"]) is int and action["sequence"] > 0
+        )
+        _require(_timestamp(action["action_at"]))
+        armed, armed_capture = _controller_snapshot(path.parent, action["armed"], "armed")
+        stage = "active" if action["operation"] == "reboot" else "ready"
+        before, before_capture = _controller_snapshot(path.parent, action["before_action"], stage)
+        _same_controller_run(armed, before)
+        _require(armed["instance"] == action["instance"])
+        _require(armed_capture <= before_capture <= action["action_at"] < armed["deadline"] - CONTROL_MARGIN)
+        _require(0 <= action["action_at"] - before["heartbeat"] <= 10)
+        previous = None
+        if action["operation"] == "reboot":
+            _control_reboot(action, path.parent, armed, mode)
+        else:
+            previous = _control_start(action, path.parent, armed, before, mode)
+        running = _cloud_observation(path.parent, action["running"])
+        _require(running["instance"] == action["instance"] and running["controller_run"] == armed["run"])
+        _require(
+            running["state"] == "running"
+            and running["_owner"] == armed["run"]
+            and running["_account"] == armed["account"]
+        )
+        _require(action["action_at"] <= running["observed_at"] < armed["deadline"])
+        return {
+            "platform": platform,
+            "instance": action["instance"],
+            "controller_run": armed["run"],
+            "modes": action["modes"],
+            "sequence": action["sequence"],
+            "operation": action["operation"],
+            "action_at": action["action_at"],
+            "running_at": running["observed_at"],
+            "created": armed["created"],
+            "deadline": armed["deadline"],
+            "previous_run": previous,
+            "sha256": sha256_file(path),
+        }
+    except (OSError, ValueError, TypeError, KeyError, AcceptanceRefused) as exc:
+        raise AcceptanceRefused("controller_action_incomplete") from exc
+
+
+def validate_phase_control_binding(phase: dict[str, Any], *, directory: Path) -> dict[str, Any]:
+    try:
+        path, _record = _evidence_ref(directory, phase["control_action"])
+        action = validate_control_action(
+            path, platform=phase["platform"], mode=phase["mode"], observation=phase["observation"]
+        )
+        _require(phase["instance"] == action["instance"] and phase["controller_run"] == action["controller_run"])
+        _require(phase["control_sequence"] == action["sequence"])
+        _require(
+            action["running_at"] <= phase["started_at"] <= phase["finished_at"] < action["deadline"] - CONTROL_MARGIN
+        )
+    except (OSError, ValueError, TypeError, KeyError, AcceptanceRefused) as exc:
+        raise AcceptanceRefused("controller_phase_binding_incomplete") from exc
+    return action
+
+
+def _settled_control_cycle(root: Path, value: Any) -> dict[str, Any]:
+    cycle = _object(value, ("action", "stopped", "independent_stopped"))
+    path, raw = _evidence_ref(root, cycle["action"])
+    observation = {"start": "provision", "reboot": "os_reboot", "stop_start": "ec2_stop_start"}[raw["operation"]]
+    _require(isinstance(raw["modes"], list) and bool(raw["modes"]))
+    action = validate_control_action(path, platform=raw["platform"], mode=raw["modes"][0], observation=observation)
+    armed, _capture = _controller_snapshot(path.parent, raw["armed"], "armed")
+    stopped, stopped_capture = _controller_snapshot(root, cycle["stopped"], "stopped")
+    _same_controller_run(armed, stopped)
+    observed = _cloud_observation(root, cycle["independent_stopped"])
+    _require(observed["instance"] == action["instance"] and observed["controller_run"] == action["controller_run"])
+    _require(observed["state"] == "stopped" and observed["_owner"] is None and observed["_account"] == armed["account"])
+    _require(action["running_at"] <= stopped["stopped_at"] <= stopped_capture <= observed["observed_at"])
+    return {
+        **action,
+        "stopped_at": stopped["stopped_at"],
+        "independent_stopped_at": observed["observed_at"],
+        "stopped_sha256": cycle["stopped"]["sha256"],
+        "independent_stopped_sha256": cycle["independent_stopped"]["sha256"],
+        "action_path": path,
+        "action_record": raw,
+    }
+
+
+def _ordered_control_cycles(cycles: list[dict[str, Any]]) -> None:
+    for platform in {row["platform"] for row in cycles}:
+        ordered = sorted((row for row in cycles if row["platform"] == platform), key=lambda row: row["sequence"])
+        _require([row["sequence"] for row in ordered] == list(range(1, len(ordered) + 1)))
+        _require(ordered[0]["operation"] == "start")
+        for before, after in itertools.pairwise(ordered):
+            _require(before["action_at"] < after["action_at"])
+            if after["operation"] == "reboot":
+                _require(
+                    before["controller_run"] == after["controller_run"]
+                    and before["stopped_sha256"] == after["stopped_sha256"]
+                )
+            else:
+                _require(after["previous_run"] == before["controller_run"])
+                record = after["action_record"]
+                _require(record["previous_stop"]["sha256"] == before["stopped_sha256"])
+                _require(record["previous_independent_stop"]["sha256"] == before["independent_stopped_sha256"])
+                _require(before["independent_stopped_at"] <= after["created"])
+
+
+def validate_control_cycles(root: Path, values: Any, phases: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    try:
+        _require(isinstance(values, list) and bool(values))
+        cycles = [_settled_control_cycle(root, row) for row in values]
+        by_hash = {row["sha256"]: row for row in cycles}
+        _require(
+            len(by_hash) == len(cycles) and set(by_hash) == {phase["control_action"]["sha256"] for phase in phases}
+        )
+        _ordered_control_cycles(cycles)
+        for phase in phases:
+            action = by_hash[phase["control_action"]["sha256"]]
+            _require(phase["platform"] == action["platform"] and phase["instance"] == action["instance"])
+            _require(phase["mode"] in action["modes"] and phase["control_sequence"] == action["sequence"])
+            _require(phase["controller_run"] == action["controller_run"])
+            _require(action["running_at"] <= phase["started_at"] <= phase["finished_at"] <= action["stopped_at"])
+    except (OSError, ValueError, TypeError, KeyError, AcceptanceRefused) as exc:
+        raise AcceptanceRefused("controller_cycle_correlation_incomplete") from exc
+    return by_hash
+
+
+def _native_observation_inputs(phase: Phase) -> tuple[str | None, str]:
+    prior = os.environ.get("MORDRED_DBCRYPT_PRIOR_EVIDENCE")
+    observation = os.environ.get("MORDRED_DBCRYPT_OBSERVATION", "provision")
+    if phase == "reopen" and (not prior or observation not in {"process_restart", "os_reboot", "ec2_stop_start"}):
+        raise AcceptanceRefused("reopen_prior_and_observation_required")
+    if phase == "provision" and observation != "provision":
+        raise AcceptanceRefused("provision_observation_required")
+    return prior, observation
+
+
 def native_phase_inputs(root: Path, phase: Phase) -> dict[str, Any]:
     names = ("DBCRYPT_BUNDLE", "MORDRED_DBCRYPT_ACCEPTANCE_MODE", "MORDRED_DBCRYPT_ACCEPTANCE_KIND")
     if os.environ.get("MORDRED_DBCRYPT_COLLECTORS_TEST") != "1" or any(not os.environ.get(name) for name in names):
@@ -996,10 +1317,18 @@ def native_phase_inputs(root: Path, phase: Phase) -> dict[str, Any]:
     )
     if any(os.environ.get(name) for name in forbidden):
         raise AcceptanceRefused("ambient_key_or_native_emulation_forbidden")
-    prior = os.environ.get("MORDRED_DBCRYPT_PRIOR_EVIDENCE")
-    observation = os.environ.get("MORDRED_DBCRYPT_OBSERVATION", "provision")
-    if phase == "reopen" and (not prior or observation not in {"process_restart", "os_reboot", "ec2_stop_start"}):
-        raise AcceptanceRefused("reopen_prior_and_observation_required")
+    copy_manifest = os.environ.get("MORDRED_DBCRYPT_WITHDRAWABLE_HELPER_MANIFEST")
+    if not copy_manifest:
+        raise AcceptanceRefused("owned_withdrawable_helper_manifest_required")
+    helper_copy = validate_withdrawable_helper(Path(copy_manifest), production=helper, parent=root)
+    prior, observation = _native_observation_inputs(phase)
+    action_text = os.environ.get("MORDRED_DBCRYPT_CONTROL_ACTION")
+    if not action_text:
+        raise AcceptanceRefused("frozen_controller_action_required")
+    action_path = _absolute(action_text)
+    control_action = validate_control_action(action_path, platform=sys.platform, mode=mode, observation=observation)
+    if not control_action["running_at"] <= time.time() < control_action["deadline"] - CONTROL_MARGIN:
+        raise AcceptanceRefused("controller_guard_window_not_active")
     qualification = os.environ.get("MORDRED_DBCRYPT_QUALIFICATION_DIRECTORY")
     if sys.platform == "win32":
         if not qualification:
@@ -1013,10 +1342,15 @@ def native_phase_inputs(root: Path, phase: Phase) -> dict[str, Any]:
         "helper": helper,
         "helper_name": helper_name,
         "helper_sha256": sha256_file(helper),
-        "prior": Path(prior) if prior else None,
+        "helper_copy_manifest": Path(copy_manifest),
+        "helper_copy": helper_copy,
+        "parent": root,
+        "prior": _absolute(prior) if prior else None,
         "observation": observation,
         "fixtures": native_fixture_paths(root, mode),
         "qualification": qualification,
+        "control_action_path": action_path,
+        "control_action": control_action,
     }
 
 
@@ -1188,7 +1522,9 @@ def _native_execution_report(phase: dict[str, Any], directory: Path) -> None:
 
 
 def _native_provision_coverage(phase: dict[str, Any], directory: Path) -> None:
-    expected = {row[0] for row in _suites(phase["platform"])} | {"dbcrypt-activity", "mail-native"}
+    expected = {row[0] for row in _suites(phase["platform"])} | {"mail-native"}
+    if phase["acceptance_kind"] == "production":
+        expected.add("dbcrypt-activity")
     if phase["platform"] == "linux" and phase["mode"] == "source":
         expected.remove("linux-memory")
     if phase["platform"] == "win32":
@@ -1196,20 +1532,32 @@ def _native_provision_coverage(phase: dict[str, Any], directory: Path) -> None:
     _require(expected <= {row.get("suite") for row in phase["executions"]})
     collector = next(row for row in phase["executions"] if row.get("suite") == "dbcrypt-native")
     records = [_evidence_ref(directory, reference)[1] for reference in collector["collector_rows"]]
+    for record in records:
+        _require(record["schema_version"] == RUN_SCHEMA and record["status"] == "executed")
+        _require(record["implementation_sha256"] == phase["native_implementation_sha256"])
+        _require(record["acceptance_kind"] == phase["acceptance_kind"] and record["bootstrap"] == phase["bootstrap"])
     negative = next(row for row in records if row.get("operation") == "negative")
-    # This exact real-provider row is still pending the operator-owned helper
-    # copy/withdrawal probe. Standalone missing selectors and injected access
-    # failures cannot satisfy it. No input success flag closes this gap.
     _require("fresh_unpatched_native_provider_unavailable" in negative["rows"])
-    _require(negative["owned_helper_withdrawal"]["initial_acquisition"]["returncode"] == 0)
-    _require(negative["owned_helper_withdrawal"]["missing_helper_acquisition"]["returncode"] != 0)
-    _require(negative["owned_helper_withdrawal"]["native_metadata_unchanged"] is True)
+    validate_helper_withdrawal(negative["owned_helper_withdrawal"])
     _require(
         any(
             row.get("operation") == "backup_restore_failure" and row["result"] == "restore_incomplete"
             for row in records
         )
     )
+
+
+def _native_phase_coverage(phase: dict[str, Any], directory: Path) -> None:
+    validate_phase_control_binding(phase, directory=directory)
+    _native_execution_report(phase, directory)
+    if phase["observation"] == "provision":
+        _native_provision_coverage(phase, directory)
+    else:
+        path, prior = _evidence_ref(directory, phase["provision_reference"])
+        _require(prior["observation"] == "provision" and prior["acceptance_kind"] == phase["acceptance_kind"])
+        _require(prior["status"] == prior["acceptance_kind"] + "_native_passed")
+        _native_phase_coverage(prior, path.parent)
+        validate_reopen_continuity(prior, phase, phase["observation"])
 
 
 def validate_native_phase_evidence(value: Any, *, directory: Path) -> dict[str, Any]:
@@ -1236,14 +1584,7 @@ def validate_native_phase_evidence(value: Any, *, directory: Path) -> dict[str, 
         _require(phase["acceptance_kind"] == "production" and phase["bootstrap"] == "automatic_production")
         _require(phase["fixture"]["root"] == phase["fixture"]["source"]["root"])
         _require(_hex(phase["fixture"]["source"]["record_sha256"], 64) and bool(phase["logical"]))
-        _native_execution_report(phase, directory)
-        if phase["observation"] == "provision":
-            _native_provision_coverage(phase, directory)
-        else:
-            _, prior = _evidence_ref(directory, phase["provision_reference"])
-            _require(prior["observation"] == "provision")
-            validate_native_phase_evidence(prior, directory=directory)
-            validate_reopen_continuity(prior, phase, phase["observation"])
+        _native_phase_coverage(phase, directory)
     except (OSError, ValueError, TypeError, KeyError, StopIteration, AcceptanceRefused) as exc:
         raise AcceptanceRefused("native_phase_evidence_incomplete") from exc
     return phase
@@ -1261,6 +1602,10 @@ def _verify_mode_sequences(phases: list[dict[str, Any]]) -> None:
             for row in ordered[1:]:
                 validate_reopen_continuity(baseline, row, row["observation"])
             _require(ordered[2]["boot"]["identity"] != ordered[3]["boot"]["identity"])
+            _require(ordered[0]["control_action"]["sha256"] == ordered[1]["control_action"]["sha256"])
+            for before, after in itertools.pairwise(ordered[1:]):
+                _require(before["finished_at"] < after["_control"]["action_at"])
+                _require(before["control_sequence"] < after["control_sequence"])
 
 
 def _cloud_observation(root: Path, reference: Any) -> dict[str, Any]:
@@ -1271,28 +1616,28 @@ def _cloud_observation(root: Path, reference: Any) -> dict[str, Any]:
     _require(len(rows) == 1 and rows[0]["InstanceId"] == observation["instance"])
     _require(rows[0]["State"]["Name"] == observation["state"] and _timestamp(observation["observed_at"]))
     _require(_hex(observation["controller_run"], 32))
-    return observation
+    owners = [tag["Value"] for tag in rows[0].get("Tags", []) if tag.get("Key") == "mordred:dbcrypt-validation"]
+    _require(len(owners) <= 1)
+    account = raw["Reservations"][0]["OwnerId"]
+    return {**observation, "_owner": owners[0] if owners else None, "_account": account}
 
 
 def _verify_native_stops(root: Path, matrix: dict[str, Any], phases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cycles = validate_control_cycles(root, matrix["control_cycles"], phases)
     _require(len(matrix["stop_receipts"]) == 2)
-    receipts = [load_stop_receipt(_evidence_ref(root, ref)[0]) for ref in matrix["stop_receipts"]]
+    receipts = []
+    for reference in matrix["stop_receipts"]:
+        path, _raw = _evidence_ref(root, reference)
+        receipt = load_stop_receipt(path)
+        last = max(
+            (row for row in cycles.values() if row["instance"] == receipt["instance"]), key=lambda row: row["sequence"]
+        )
+        _require(receipt["run"] == last["controller_run"] and reference["sha256"] == last["stopped_sha256"])
+        _require(
+            receipt["stopped_at"] >= max(row["finished_at"] for row in phases if row["instance"] == receipt["instance"])
+        )
+        receipts.append(receipt)
     _require({row["instance"] for row in receipts} == INSTANCES)
-    observations = [_cloud_observation(root, ref) for ref in matrix["ec2_observations"]]
-    for receipt in receipts:
-        actual = [row for row in observations if row["instance"] == receipt["instance"]]
-        matching = [row for row in actual if row["controller_run"] == receipt["run"]]
-        _require(any(row["state"] == "stopped" and row["observed_at"] >= receipt["stopped_at"] for row in matching))
-        cycles = [
-            row for row in phases if row["instance"] == receipt["instance"] and row["observation"] == "ec2_stop_start"
-        ]
-        _require(len(cycles) == 2)
-        for phase in cycles:
-            cycle = [row for row in actual if row["controller_run"] == phase["controller_run"]]
-            stopped = [row["observed_at"] for row in cycle if row["state"] == "stopped"]
-            running = [row["observed_at"] for row in cycle if row["state"] == "running"]
-            _require(bool(stopped) and bool(running) and min(stopped) < min(running) <= phase["started_at"])
-            _require(receipt["stopped_at"] >= phase["finished_at"])
     return receipts
 
 
@@ -1312,13 +1657,15 @@ def verify_native_spool(root: Path) -> dict[str, Any]:
         phases = []
         for reference in matrix["phases"]:
             path, phase = _evidence_ref(root, reference)
-            phases.append(validate_native_phase_evidence(phase, directory=path.parent))
+            validated = validate_native_phase_evidence(phase, directory=path.parent)
+            action = validate_phase_control_binding(validated, directory=path.parent)
+            phases.append({**validated, "_control": action})
         _verify_mode_sequences(phases)
         receipts = _verify_native_stops(root, matrix, phases)
         result.update(
             status="production_native_passed", live_accepted=True, phases=len(phases), owned_instance_receipts=receipts
         )
-    except (OSError, ValueError, TypeError, KeyError, AcceptanceRefused):
+    except (OSError, ValueError, TypeError, KeyError, StopIteration, AcceptanceRefused):
         result["reasons"] = ["production_matrix_incomplete_or_inconsistent"]
     return result
 
@@ -1336,6 +1683,8 @@ def _native_environment(context: dict[str, Any], root: Path) -> dict[str, str]:
             "MORDRED_DBCRYPT_ACCEPTANCE_KIND": context["kind"],
             "MORDRED_HERMES_RUNTIME_PYTHON": str(_native_python(context)),
             "MORDRED_HERMES_PYTHON": str(_native_python(context)),
+            "MORDRED_DBCRYPT_WITHDRAWABLE_HELPER_MANIFEST": str(context["helper_copy_manifest"]),
+            "MORDRED_DBCRYPT_PARENT": str(context["parent"]),
         }
     )
     if context.get("qualification"):
@@ -1495,8 +1844,31 @@ def _native_suite(context: dict[str, Any], row: dict[str, Any], directory: Path,
     return record
 
 
+def _native_reopen_prior(context: dict[str, Any], directory: Path) -> dict[str, Any]:
+    if context["prior"] is None:
+        raise AcceptanceRefused("native_reopen_prior_missing")
+    prior_path = context["prior"]
+    if not prior_path.is_relative_to(directory.parent):
+        raise AcceptanceRefused("prior_evidence_must_share_private_spool")
+    prior = json.loads(_private_evidence_file(prior_path).read_text())
+    _require(prior["status"] == context["kind"] + "_native_passed" and prior["observation"] == "provision")
+    _require(
+        prior["mode"] == context["mode"]
+        and prior["bundle_manifest_sha256"] == sha256_file(context["bundle"] / "manifest.json")
+    )
+    _native_phase_coverage(prior, prior_path.parent)
+    return dict(prior)
+
+
 def _execute_native_phase(context: dict[str, Any], *, phase: Phase, directory: Path) -> dict[str, Any]:
     persistence = context["fixtures"]["persistence"]
+    action_path = context["control_action_path"]
+    try:
+        action_relative = action_path.relative_to(directory.parent)
+    except ValueError as exc:
+        raise AcceptanceRefused("controller_action_must_share_private_spool") from exc
+    action_reference = {"path": action_relative.as_posix(), "sha256": context["control_action"]["sha256"]}
+    prior = _native_reopen_prior(context, directory) if phase == "reopen" else None
     executions = [_collector_child(context, persistence, "preflight", directory)]
     if phase == "provision":
         for fixture in context["fixtures"].values():
@@ -1534,12 +1906,16 @@ def _execute_native_phase(context: dict[str, Any], *, phase: Phase, directory: P
         "live_accepted": False,
         "unexpected_skips": [],
         "phase": phase,
-        "status": context["kind"] + "_native_partial",
+        "status": context["kind"] + "_native_passed",
         "native_rows_complete": False,
         "native_implementation_sha256": context["manifest"]["files"]["tests/_dbcrypt_acceptance_native.py"],
         "instance": "i-095cbe655c196c749" if sys.platform == "linux" else "i-00f4db5c3a204906b",
-        "controller_run": os.environ.get("MORDRED_DBCRYPT_CONTROLLER_RUN"),
-        "limitations": ["owned_helper_withdrawal_and_fresh_unpatched_acquisition_probe_pending"],
+        "controller_run": context["control_action"]["controller_run"],
+        "control_sequence": context["control_action"]["sequence"],
+        "control_action": action_reference,
+        "started_at": executions[0]["started_at"],
+        "finished_at": time.time(),
+        "limitations": ["cached_access_failure_is_injected_not_physical_tpm_disable"],
     }
     result["test_counts"] = {
         "passed": sum(row.get("counts", {}).get("passed", 0) for row in executions),
@@ -1547,16 +1923,13 @@ def _execute_native_phase(context: dict[str, Any], *, phase: Phase, directory: P
         "failed": 0,
         "skipped": 0,
     }
-    if phase == "reopen":
-        if context["prior"] is None:
-            raise AcceptanceRefused("native_reopen_prior_missing")
-        prior = json.loads(_input_file(context["prior"]).read_text())
-        try:
-            relative = context["prior"].relative_to(directory.parent)
-        except ValueError as exc:
-            raise AcceptanceRefused("prior_evidence_must_share_private_spool") from exc
+    if prior is not None:
+        relative = context["prior"].relative_to(directory.parent)
         result["provision_reference"] = {"path": relative.as_posix(), "sha256": sha256_file(context["prior"])}
         validate_reopen_continuity(prior, result, context["observation"])
+    _require(sha256_file(action_path) == action_reference["sha256"])
+    _native_phase_coverage(result, directory.parent)
+    result["native_rows_complete"] = True
     return result
 
 

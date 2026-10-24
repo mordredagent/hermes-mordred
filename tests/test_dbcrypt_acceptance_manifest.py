@@ -790,6 +790,8 @@ def test_damaging_native_operation_refuses_persistence_before_any_product_import
     for operation in ("negative", "backup_restore"):
         with pytest.raises(RuntimeError, match="damaging_operations_require_separate_negative_root"):
             helper["operation"](operation)
+    with pytest.raises(RuntimeError, match="damaging_operations_require_separate_negative_root"):
+        helper["real_helper_unavailability"](root)
 
 
 def test_offline_verify_ignores_guest_bundle_environment(tmp_path: Path, monkeypatch) -> None:
@@ -833,3 +835,379 @@ def test_source_native_run_refuses_checkout_head_drift_before_probe(monkeypatch,
     context = {"mode": "source", "manifest": {"checkout": str(tmp_path), "commit": "a" * 40}}
     with pytest.raises(tool.AcceptanceRefused, match="source_checkout_changed_since_bundle"):
         tool.require_native_source_checkout(context)
+
+
+def helper_copy_fixture(tmp_path: Path):
+    """File-safety fixture only; these bytes are never executed as a helper."""
+    tool = acceptance_tool("dbcrypt_acceptance")
+    parent = tmp_path / "mordred-dbcrypt-parent"
+    directory = parent / "owned-helper"
+    directory.mkdir(mode=0o700, parents=True)
+    parent.chmod(0o700)
+    production = tmp_path / "production-helper"
+    production.write_bytes(b"inert byte fixture; never executable by a unit test")
+    production.chmod(0o700)
+    copied = directory / production.name
+    copied.write_bytes(production.read_bytes())
+    copied.chmod(0o700)
+    info = copied.stat()
+    value = {
+        "schema_version": 1,
+        "kind": "dbcrypt_withdrawable_helper",
+        "path": str(copied),
+        "sha256": tool.sha256_file(copied),
+        "production_helper_sha256": tool.sha256_file(production),
+        "identity": {"device": info.st_dev, "inode": info.st_ino, "size": info.st_size},
+    }
+    manifest = parent / "helper-copy.json"
+    manifest.write_text(json.dumps(value))
+    manifest.chmod(0o600)
+    return tool, parent, production, copied, manifest, value
+
+
+def test_owned_helper_copy_requires_declared_exact_private_identity(tmp_path: Path) -> None:
+    tool, parent, production, copied, manifest, value = helper_copy_fixture(tmp_path)
+    result = tool.validate_withdrawable_helper(manifest, production=production, parent=parent)
+    assert result["path"] == str(copied) and result["identity"] == value["identity"]
+    copied.rename(copied.with_name("retained-original-inode"))
+    copied.write_bytes(production.read_bytes())
+    copied.chmod(0o700)
+    with pytest.raises(tool.AcceptanceRefused, match="withdrawable_helper"):
+        tool.validate_withdrawable_helper(manifest, production=production, parent=parent)
+
+
+@pytest.mark.parametrize(
+    "damage", ["hash", "identity", "primary", "outside", "public_parent", "public_file", "retained_exists"]
+)
+def test_owned_helper_copy_refuses_unsafe_or_nonowned_target(tmp_path: Path, damage: str) -> None:
+    if os.name == "nt" and damage in {"public_parent", "public_file"}:
+        pytest.skip("POSIX mode privacy; Windows uses the actual confidential-directory preflight")
+    tool, parent, production, copied, manifest, value = helper_copy_fixture(tmp_path)
+    if damage == "hash":
+        copied.write_bytes(b"different bytes")
+    elif damage == "identity":
+        value["identity"]["inode"] += 1
+    elif damage == "primary":
+        value["path"] = str(production)
+    elif damage == "outside":
+        value["path"] = str(tmp_path / "unowned-copy")
+    elif damage == "public_parent":
+        copied.parent.chmod(0o755)
+    elif damage == "public_file":
+        copied.chmod(0o755)
+    else:
+        copied.with_name(copied.name + ".task15-withdrawn").write_bytes(b"do not overwrite")
+    manifest.write_text(json.dumps(value))
+    with pytest.raises(tool.AcceptanceRefused, match="withdrawable_helper"):
+        tool.validate_withdrawable_helper(manifest, production=production, parent=parent)
+
+
+def test_owned_helper_withdrawal_restores_only_copy_on_body_failure(tmp_path: Path) -> None:
+    import runpy
+
+    tool, parent, production, copied, manifest, _value = helper_copy_fixture(tmp_path)
+    helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
+    before = production.read_bytes()
+    with (
+        pytest.raises(RuntimeError, match="unit body failure"),
+        helper["withdraw_owned_helper"](manifest, production=production, parent=parent),
+    ):
+        assert not copied.exists()
+        assert production.read_bytes() == before
+        raise RuntimeError("unit body failure")
+    assert copied.read_bytes() == before and production.read_bytes() == before
+    tool.validate_withdrawable_helper(manifest, production=production, parent=parent)
+
+
+def test_owned_helper_withdrawal_never_overwrites_reappeared_copy(tmp_path: Path) -> None:
+    import runpy
+
+    _tool, parent, production, copied, manifest, _value = helper_copy_fixture(tmp_path)
+    helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
+    with pytest.raises(OSError), helper["withdraw_owned_helper"](manifest, production=production, parent=parent):
+        copied.write_bytes(b"unexpected replacement; retain both artifacts")
+        copied.chmod(0o600)
+    assert copied.read_bytes().startswith(b"unexpected replacement")
+    assert copied.with_name(copied.name + ".task15-withdrawn").read_bytes() == production.read_bytes()
+
+
+def test_owned_helper_probe_boolean_does_not_replace_actual_acquisition_observations() -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    with pytest.raises(tool.AcceptanceRefused, match="helper_withdrawal_evidence_incomplete"):
+        tool.validate_helper_withdrawal({"passed": True, "native_metadata_unchanged": True})
+
+
+def test_native_children_keep_assertions_enabled(monkeypatch, tmp_path: Path) -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    monkeypatch.setenv("PYTHONOPTIMIZE", "2")
+    assert tool.probe_environment(tmp_path)["PYTHONOPTIMIZE"] == "0"
+
+
+def control_action_fixture(tmp_path: Path):
+    """Synthetic controller/EC2 records exercise parsing, never cloud or native execution."""
+    tool = acceptance_tool("dbcrypt_acceptance")
+    root = tmp_path / "control-evidence"
+    root.mkdir(mode=0o700)
+    instance, run = "i-095cbe655c196c749", "a" * 32
+
+    def saved(name, value, captured=None):
+        path = root / name
+        path.write_text(json.dumps(value))
+        path.chmod(0o600)
+        ref = {"path": name, "sha256": tool.sha256_file(path)}
+        if captured is not None:
+            ref["captured_at"] = captured
+        return ref
+
+    def cloud(name, state, observed, controller_run=run):
+        raw = {
+            "Reservations": [
+                {
+                    "OwnerId": "123456789012",
+                    "Instances": [
+                        {
+                            "InstanceId": instance,
+                            "State": {"Name": state},
+                            "Tags": [{"Key": "mordred:dbcrypt-validation", "Value": controller_run}]
+                            if state == "running"
+                            else [],
+                        }
+                    ],
+                }
+            ]
+        }
+        raw_ref = saved(name + "-raw.json", raw)
+        return saved(
+            name + ".json",
+            {
+                "schema": 1,
+                "kind": "ec2_state_observation",
+                "instance": instance,
+                "controller_run": controller_run,
+                "observed_at": observed,
+                "state": state,
+                "raw": raw_ref,
+            },
+        )
+
+    armed = {
+        "version": 1,
+        "instance": instance,
+        "run": run,
+        "account": "123456789012",
+        "created": 1000.0,
+        "deadline": 1300.0,
+        "state": "armed",
+        "start_requested": False,
+        "supervisor_pid": None,
+        "heartbeat": None,
+    }
+    ready = {**armed, "supervisor_pid": 99, "heartbeat": 1018.0}
+    started = {**ready, "state": "running", "start_requested": True, "start_uncertain": False}
+    action = {
+        "schema_version": 1,
+        "kind": "dbcrypt_control_action",
+        "platform": "linux",
+        "instance": instance,
+        "modes": ["source", "wheel"],
+        "sequence": 1,
+        "operation": "start",
+        "action_at": 1020.0,
+        "armed": saved("armed.json", armed, 1001.0),
+        "before_action": saved("before.json", ready, 1019.0),
+        "started": saved("started.json", started, 1021.0),
+        "initial_stopped": cloud("initial-stop", "stopped", 1019.5),
+        "running": cloud("running", "running", 1022.0),
+    }
+    path = root / "action.json"
+    path.write_text(json.dumps(action))
+    path.chmod(0o600)
+    return tool, root, path, action, armed, started, saved, cloud
+
+
+def test_controller_action_binds_real_receipt_shape_and_mode_without_exposing_account(tmp_path: Path) -> None:
+    tool, _root, path, _action, _armed, _started, _saved, _cloud = control_action_fixture(tmp_path)
+    result = tool.validate_control_action(path, platform="linux", mode="source", observation="provision")
+    assert result["controller_run"] == "a" * 32 and result["sequence"] == 1
+    assert result["running_at"] == 1022 and "123456789012" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "late_arm",
+        "stale_supervisor",
+        "missing_supervisor",
+        "wrong_run",
+        "wrong_instance",
+        "wrong_mode",
+        "uncertain_start",
+        "deadline",
+        "unowned_running",
+        "late_capture",
+    ],
+)
+def test_controller_action_refuses_missing_or_out_of_order_arm_evidence(tmp_path: Path, damage: str) -> None:
+    tool, root, path, action, armed, started, saved, cloud = control_action_fixture(tmp_path)
+    if damage == "late_arm":
+        action["armed"] = saved("armed-late.json", {**armed, "created": 1021.0}, 1021.0)
+    elif damage == "stale_supervisor":
+        before = json.loads((root / "before.json").read_text())
+        action["before_action"] = saved("before-stale.json", {**before, "heartbeat": 1001.0}, 1019.0)
+    elif damage == "missing_supervisor":
+        action["before_action"] = saved("no-supervisor.json", armed, 1019.0)
+    elif damage == "wrong_run":
+        action["started"] = saved("wrong-run.json", {**started, "run": "b" * 32}, 1021.0)
+    elif damage == "wrong_instance":
+        action["instance"] = "i-00f4db5c3a204906b"
+    elif damage == "wrong_mode":
+        action["modes"] = ["wheel"]
+    elif damage == "uncertain_start":
+        action["started"] = saved("uncertain.json", {**started, "start_uncertain": True}, 1021.0)
+    elif damage == "deadline":
+        action["action_at"] = 1240.0
+    elif damage == "unowned_running":
+        reference = cloud("unowned", "running", 1022.0)
+        observation = json.loads((root / reference["path"]).read_text())
+        raw = json.loads((root / observation["raw"]["path"]).read_text())
+        raw["Reservations"][0]["Instances"][0]["Tags"] = []
+        observation["raw"] = saved("unowned-changed-raw.json", raw)
+        action["running"] = saved("unowned-changed.json", observation)
+    else:
+        action["before_action"]["captured_at"] = 1020.5
+    path.write_text(json.dumps(action))
+    with pytest.raises(tool.AcceptanceRefused, match="controller_action_incomplete"):
+        tool.validate_control_action(path, platform="linux", mode="source", observation="provision")
+
+
+def test_reboot_reuses_the_same_bounded_guard_with_fresh_active_heartbeat(tmp_path: Path) -> None:
+    tool, _root, _path, action, _armed, started, saved, cloud = control_action_fixture(tmp_path)
+    start_ref = saved("start-action.json", action)
+    reboot = {
+        **{key: action[key] for key in ("schema_version", "kind", "platform", "instance", "modes", "armed")},
+        "sequence": 2,
+        "operation": "reboot",
+        "action_at": 1060.0,
+        "start_action": start_ref,
+        "before_action": saved("before-reboot.json", {**started, "heartbeat": 1058.0}, 1059.0),
+        "running": cloud("after-reboot", "running", 1070.0),
+    }
+    reference = saved("reboot-action.json", reboot)
+    result = tool.validate_control_action(
+        _root / reference["path"], platform="linux", mode="source", observation="os_reboot"
+    )
+    assert result["controller_run"] == "a" * 32 and result["operation"] == "reboot"
+    reboot["before_action"] = action["started"]
+    reference = saved("stale-reboot-action.json", reboot)
+    with pytest.raises(tool.AcceptanceRefused, match="controller_action_incomplete"):
+        tool.validate_control_action(
+            _root / reference["path"], platform="linux", mode="source", observation="os_reboot"
+        )
+
+
+def test_stop_start_requires_independent_previous_stop_before_new_arm(tmp_path: Path) -> None:
+    tool, root, _path, action, armed, started, saved, cloud = control_action_fixture(tmp_path)
+    stopped = {**started, "state": "stopped", "stopped_at": 1101.0}
+    previous = saved("previous-stopped.json", stopped, 1101.5)
+    observed = cloud("previous-stop", "stopped", 1102.0)
+    current = {**armed, "run": "b" * 32, "created": 1110.0, "deadline": 1410.0}
+    before = {**current, "supervisor_pid": 100, "heartbeat": 1118.0}
+    restarted = {**before, "state": "running", "start_requested": True, "start_uncertain": False}
+    cycle = {
+        **{key: action[key] for key in ("schema_version", "kind", "platform", "instance", "modes")},
+        "sequence": 3,
+        "operation": "stop_start",
+        "action_at": 1120.0,
+        "armed": saved("new-armed.json", current, 1111.0),
+        "before_action": saved("new-before.json", before, 1119.0),
+        "started": saved("new-started.json", restarted, 1121.0),
+        "initial_stopped": cloud("new-initial-stop", "stopped", 1119.5, "b" * 32),
+        "running": cloud("new-running", "running", 1122.0, "b" * 32),
+        "previous_stop": previous,
+        "previous_independent_stop": observed,
+    }
+    reference = saved("stop-start.json", cycle)
+    result = tool.validate_control_action(
+        root / reference["path"], platform="linux", mode="source", observation="ec2_stop_start"
+    )
+    assert result["controller_run"] == "b" * 32 and result["previous_run"] == "a" * 32
+    cycle["previous_independent_stop"] = cloud("late-stop", "stopped", 1111.0)
+    reference = saved("late-stop-start.json", cycle)
+    with pytest.raises(tool.AcceptanceRefused, match="controller_action_incomplete"):
+        tool.validate_control_action(
+            root / reference["path"], platform="linux", mode="source", observation="ec2_stop_start"
+        )
+
+
+def test_controller_cycle_settlement_requires_matching_stop_and_complete_phase_window(tmp_path: Path) -> None:
+    tool, root, _path, action, _armed, started, saved, cloud = control_action_fixture(tmp_path)
+    reference = saved("frozen-action.json", action)
+    stop = saved("final-controller.json", {**started, "state": "stopped", "stopped_at": 1101.0}, 1101.5)
+    observed = cloud("final-stop", "stopped", 1102.0)
+    cycles = [{"action": reference, "stopped": stop, "independent_stopped": observed}]
+    phase = {
+        "platform": "linux",
+        "instance": "i-095cbe655c196c749",
+        "mode": "source",
+        "observation": "provision",
+        "controller_run": "a" * 32,
+        "control_sequence": 1,
+        "control_action": reference,
+        "started_at": 1023.0,
+        "finished_at": 1030.0,
+    }
+    rows = tool.validate_control_cycles(root, cycles, [phase])
+    assert rows[reference["sha256"]]["stopped_at"] == 1101.0
+    with pytest.raises(tool.AcceptanceRefused, match="controller_cycle_correlation_incomplete"):
+        tool.validate_control_cycles(root, cycles, [{**phase, "finished_at": 1102.0}])
+    wrong = saved("wrong-final.json", {**started, "run": "b" * 32, "state": "stopped", "stopped_at": 1101.0}, 1101.5)
+    with pytest.raises(tool.AcceptanceRefused, match="controller_cycle_correlation_incomplete"):
+        tool.validate_control_cycles(root, [{**cycles[0], "stopped": wrong}], [phase])
+
+
+def test_controller_phase_binding_rejects_mode_sequence_or_run_relabel(tmp_path: Path) -> None:
+    tool, root, _path, action, _armed, _started, saved, _cloud = control_action_fixture(tmp_path)
+    reference = saved("frozen-action.json", action)
+    phase = {
+        "platform": "linux",
+        "instance": "i-095cbe655c196c749",
+        "mode": "source",
+        "observation": "provision",
+        "controller_run": "a" * 32,
+        "control_sequence": 1,
+        "control_action": reference,
+        "started_at": 1023.0,
+        "finished_at": 1030.0,
+    }
+    for change in ({"controller_run": "b" * 32}, {"control_sequence": 2}, {"started_at": 1021.0}):
+        with pytest.raises(tool.AcceptanceRefused, match="controller_phase_binding_incomplete"):
+            tool.validate_phase_control_binding({**phase, **change}, directory=root)
+
+
+@pytest.mark.parametrize("prior_text", ["{", "{}", '{"status":"candidate_native_passed","observation":"provision"}'])
+def test_reopen_malformed_prior_refuses_before_native_child(tmp_path: Path, monkeypatch, prior_text: str) -> None:
+    tool = acceptance_tool("dbcrypt_acceptance")
+    root = tmp_path / "mordred-dbcrypt-private"
+    root.mkdir(mode=0o700)
+    action = tmp_path / "action.json"
+    action.write_text("{}")
+    action.chmod(0o600)
+    prior = tmp_path / "prior.json"
+    prior.write_text(prior_text)
+    prior.chmod(0o600)
+    context = {
+        "fixtures": {"persistence": root / "mordred-dbcrypt-source-persistence"},
+        "control_action_path": action,
+        "control_action": {"sha256": tool.sha256_file(action)},
+        "prior": prior,
+        "kind": "candidate",
+        "mode": "source",
+    }
+    monkeypatch.setattr(tool, "native_phase_inputs", lambda *_args: context)
+    monkeypatch.delenv("DBCRYPT_BUNDLE", raising=False)
+    monkeypatch.delenv("MORDRED_DBCRYPT_STOP_RECEIPT", raising=False)
+    output = tmp_path / "refused.json"
+    assert tool.run_acceptance(root=root, phase="reopen", output=output) == 2
+    evidence = json.loads(output.read_text())
+    assert evidence["status"] == "refused" and evidence["live_accepted"] is False
+    assert evidence["reasons"] == ["native_evidence_invalid"]

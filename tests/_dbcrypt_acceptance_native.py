@@ -14,8 +14,10 @@ import io
 import json
 import os
 import runpy
+import stat
 import subprocess
 import sys
+import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -198,6 +200,11 @@ def native_facts(root: Path) -> dict[str, Any]:
     if not found or helper.resolve(strict=True) != Path(found).resolve(strict=True) or not helper.is_file():
         raise RuntimeError("explicit_production_native_helper_required")
     tool = _tool()
+    copied = tool["validate_withdrawable_helper"](
+        Path(os.environ["MORDRED_DBCRYPT_WITHDRAWABLE_HELPER_MANIFEST"]),
+        production=helper,
+        parent=Path(os.environ["MORDRED_DBCRYPT_PARENT"]),
+    )
     if sys.platform == "win32":
         directory = Path(os.environ["MORDRED_DBCRYPT_QUALIFICATION_DIRECTORY"])
         qualification = tool["validate_windows_qualification"](directory, checkout=Path(os.environ["DBCRYPT_CHECKOUT"]))
@@ -207,7 +214,10 @@ def native_facts(root: Path) -> dict[str, Any]:
         from mordred_hermes._private_fs import open_confidential_directory
 
         observed_root = root if root.exists() else root.parent
-        with open_confidential_directory(observed_root):
+        # Stat/mode cannot establish Windows privacy. Check the actual owned
+        # executable directory with the same native confidential-FS contract
+        # before any memory enable/provisioning operation can run.
+        with open_confidential_directory(observed_root), open_confidential_directory(Path(copied["path"]).parent):
             identity = identify_root(observed_root)
         facts["filesystem"] = {"method": "checked_confidential_fixed_local_ntfs", "identity": asdict(identity)}
     else:
@@ -1033,6 +1043,168 @@ def _holder_uncertainty(root: Path) -> None:
     assert observe_database_source(root=root) == before
 
 
+def _move_owned_helper(source: Path, destination: Path, value: dict[str, Any]) -> None:
+    info = source.lstat()
+    if {"device": info.st_dev, "inode": info.st_ino, "size": info.st_size} != value["identity"]:
+        raise RuntimeError("owned_helper_identity_changed")
+    if sys.platform == "win32":
+        from mordred_hermes._private_fs import open_confidential_directory, open_private_directory
+
+        with (
+            open_confidential_directory(source.parent),
+            open_private_directory(source.parent) as directory,
+            directory.transaction() as transaction,
+        ):
+            identity = transaction.stat(source.name).identity
+            transaction.rename_file(source.name, destination.name, expected_identity=identity)
+        return
+    # PrivateFS deliberately admits mode-0600 data files, not executable
+    # binaries. Keep that product contract unchanged. This fixed binary-only
+    # move uses no-replace link/unlink under the already checked private parent.
+    fd = os.open(source.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.stat(source.name, dir_fd=fd, follow_symlinks=False)
+        expected = value["identity"]
+        assert {"device": info.st_dev, "inode": info.st_ino, "size": info.st_size} == expected
+        if not (
+            stat.S_ISREG(info.st_mode)
+            and info.st_nlink == 1
+            and info.st_uid == os.getuid()
+            and info.st_mode & 0o077 == 0
+        ):
+            raise RuntimeError("owned_helper_identity_changed")
+        os.link(source.name, destination.name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+        current = os.stat(source.name, dir_fd=fd, follow_symlinks=False)
+        assert (current.st_dev, current.st_ino) == (info.st_dev, info.st_ino)
+        os.unlink(source.name, dir_fd=fd)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def withdraw_owned_helper(manifest: Path, *, production: Path, parent: Path) -> Iterator[dict[str, Any]]:
+    """Withdraw/restore only one declared owned binary, never replace a path."""
+    tool = _tool()
+    value = tool["validate_withdrawable_helper"](manifest, production=production, parent=parent)
+    copied, retained = Path(value["path"]), Path(value["retained_path"])
+    _move_owned_helper(copied, retained, value)
+    try:
+        assert not copied.exists()
+        yield value
+    finally:
+        if _digest(retained) != value["sha256"]:
+            raise RuntimeError("owned_withdrawn_helper_changed_retain_for_operator")
+        _move_owned_helper(retained, copied, value)
+    tool["validate_withdrawable_helper"](manifest, production=production, parent=parent)
+
+
+def fresh_unpatched_authority_probe() -> int:
+    """A fresh process calls actual Authority; no eligibility context or runtime patch."""
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            root = _root()
+            if sys.platform not in {"linux", "win32"}:
+                raise RuntimeError("native_platform_required")
+            from mordred_hermes.keyvault import _seckey_helper, kek
+
+            kek._noop_audit = lambda _entry: None
+            from mordred_hermes._database_contracts import DatabaseRefused
+            from mordred_hermes.dbcrypt._authority import Authority
+            from mordred_hermes.keyvault._database_authority import observe_database_source
+
+            before = asdict(observe_database_source(root=root))
+            found = (
+                _seckey_helper.find_winkey_helper() if sys.platform == "win32" else _seckey_helper.find_tpmkey_helper()
+            )
+            authority = None
+            try:
+                authority = Authority.acquire(root)
+                authority.check()
+                outcome = "acquired"
+            except DatabaseRefused:
+                outcome = "refused"
+            finally:
+                if authority is not None:
+                    authority.close()
+            after = asdict(observe_database_source(root=root))
+        payload = {
+            "schema_version": 2,
+            "operation": "fresh_unpatched_authority",
+            "outcome": outcome,
+            "bootstrap": "direct_unpatched_authority",
+            "helper_found": found,
+            "source_before": before,
+            "source_after": after,
+        }
+        print(json.dumps(payload, sort_keys=True))
+        return 0 if outcome == "acquired" else 2
+    except BaseException:
+        print(json.dumps({"schema_version": 2, "operation": "fresh_unpatched_authority", "outcome": "probe_failed"}))
+        return 3
+
+
+def _fresh_authority_call(root: Path, copy: Path) -> dict[str, Any]:
+    helper_name = "MORDRED_WINKEY_HELPER" if sys.platform == "win32" else "MORDRED_TPMKEY_HELPER"
+    environment = {
+        **os.environ,
+        helper_name: str(copy),
+        "HERMES_HOME": str(root),
+        "MORDRED_DBCRYPT_TEST_ROOT": str(root),
+    }
+    code = (
+        f"import runpy; raise SystemExit(runpy.run_path({str(Path(__file__).resolve())!r})"
+        "['fresh_unpatched_authority_probe']())"
+    )
+    argv = [sys.executable, "-c", code]
+    started = time.time()
+    result = subprocess.run(
+        argv,
+        env=environment,
+        cwd=Path(__file__).resolve().parents[1],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    payload = json.loads(result.stdout)
+    return {
+        "argv": argv,
+        "returncode": result.returncode,
+        "started_at": started,
+        "finished_at": time.time(),
+        "payload": payload,
+    }
+
+
+def real_helper_unavailability(root: Path) -> dict[str, Any]:
+    if not root.name.endswith("-negative"):
+        raise RuntimeError("damaging_operations_require_separate_negative_root")
+    tool = _tool()
+    manifest = Path(os.environ["MORDRED_DBCRYPT_WITHDRAWABLE_HELPER_MANIFEST"])
+    production_name = "MORDRED_WINKEY_HELPER" if sys.platform == "win32" else "MORDRED_TPMKEY_HELPER"
+    production = Path(os.environ[production_name])
+    parent = Path(os.environ["MORDRED_DBCRYPT_PARENT"])
+    copied = tool["validate_withdrawable_helper"](manifest, production=production, parent=parent)
+    path = Path(copied["path"])
+    first = _fresh_authority_call(root, path)
+    if first["returncode"] != 0 or first["payload"].get("outcome") != "acquired":
+        raise RuntimeError("owned_helper_initial_unpatched_acquisition_failed")
+    with withdraw_owned_helper(manifest, production=production, parent=parent):
+        missing = _fresh_authority_call(root, path)
+    restored = tool["validate_withdrawable_helper"](manifest, production=production, parent=parent)
+    result = {
+        "kind": "owned_helper_withdrawal",
+        "copy": copied,
+        "initial_acquisition": first,
+        "missing_helper_acquisition": missing,
+        "restored": {"sha256": restored["sha256"], "identity": restored["identity"]},
+    }
+    tool["validate_helper_withdrawal"](result)
+    return result
+
+
 def _public_lifecycle_guards(root: Path) -> list[str]:
     from unittest.mock import patch
 
@@ -1172,8 +1344,11 @@ def negative(root: Path) -> dict[str, Any]:
                 raise AssertionError("keyless/wrong-key ciphertext read succeeded")
         finally:
             offline.close()
+    withdrawal = real_helper_unavailability(root)
+    other_rows.append("fresh_unpatched_native_provider_unavailable")
     other_rows.extend(_public_lifecycle_guards(root))
     return {
+        "owned_helper_withdrawal": withdrawal,
         "rows": [
             "held_terminality",
             "unwrap_count",

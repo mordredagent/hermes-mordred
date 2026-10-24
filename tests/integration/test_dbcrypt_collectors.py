@@ -82,4 +82,13 @@ def test_real_native_negative_lifetimes_roles_and_keyless_reads_use_sacrificial_
     assert root.name.endswith("-negative")
     actual = _run("negative", root, "negative")
     assert actual["initial_unwraps"] == 1 and actual["operation_unwraps"] == 0
-    assert {"held_terminality", "role_forget", "wrong_key", "multiprocess_reader_writers"} <= set(actual["rows"])
+    assert {
+        "held_terminality",
+        "role_forget",
+        "wrong_key",
+        "multiprocess_reader_writers",
+        "fresh_unpatched_native_provider_unavailable",
+    } <= set(actual["rows"])
+    copied = actual["owned_helper_withdrawal"]
+    assert copied["restored"]["identity"] == copied["copy"]["identity"]
+    assert copied["missing_helper_acquisition"]["payload"]["helper_found"] is None
