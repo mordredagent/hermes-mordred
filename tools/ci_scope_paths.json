@@ -104,6 +104,9 @@
     "docs/user/USAGE.md": [
       "docs"
     ],
+    "native/dbcrypt-vfs/README.md": [],
+    "native/dbcrypt-vfs/build.ps1": [],
+    "native/dbcrypt-vfs/probe.c": [],
     "src/mordred_hermes/desktop/__init__.py": [
       "extension"
     ],
@@ -383,6 +386,7 @@
       "features"
     ],
     "src/mordred_hermes/wizard/policy_explainer.py": [],
+    "tests/_dbcrypt_support.py": [],
     "tests/_desktop_page.py": [
       "extension"
     ],
@@ -464,9 +468,12 @@
     "tests/fixtures/desktop/windows_scenarios.js": [
       "extension"
     ],
+    "tests/integration/test_dbcrypt_windows_vfs_probe.py": [],
     "tests/test_audit.py": [],
     "tests/test_audit_reasons_phase3.py": [],
     "tests/test_audit_reasons_phase4.py": [],
+    "tests/test_dbcrypt_acceptance_control.py": [],
+    "tests/test_dbcrypt_vfs_probe.py": [],
     "tests/test_desktop_capture.py": [
       "extension",
       "macos"
@@ -664,6 +671,8 @@
     "tests/test_wizard_extension_pair_cli.py": [
       "features"
     ],
-    "tests/test_wizard_term.py": []
+    "tests/test_wizard_term.py": [],
+    "tools/dbcrypt_acceptance_control.py": [],
+    "tools/dbcrypt_vfs_probe.py": []
   }
 }
