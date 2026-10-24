@@ -247,3 +247,17 @@ def test_env_purge_unverified_vault_refuses_even_with_existing_plaintext(source)
     before = durable(home)
     assert env_decrypt_cli.purge(home=home, root=opened._root, backend=FakeBackend(), store=store) == 1
     assert durable(home) == before
+
+
+def test_explicit_reseal_source_change_reports_refusal_and_preserves_plaintext(source):
+    from mordred_hermes.wizard import env_decrypt_cli
+
+    home, opened, backend, store, _ = source
+    with database_key_mutation(root=home, generation=None) as lease:
+        opened.enroll_file(".env", ENV, database_lease=lease)
+    plaintext = b"HERMES_MEMORY_KEY=hex:" + (b"b" * 32).hex().encode() + b"\n"
+    (home / ".env").write_bytes(plaintext)
+    before = durable(home)
+    assert env_decrypt_cli.reseal(home=home, root=opened._root, backend=backend, store=store) == 1
+    assert durable(home) == before
+    assert opened.read_file(".env") == ENV

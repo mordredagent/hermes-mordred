@@ -211,9 +211,14 @@ def reseal(
     refusal = excluded_refusal("env_config_workspace_seals", "encryption enable env (reseal)")
     if refusal is not None:
         return refusal
+    from .._database_contracts import DatabaseRefused
     from ..keyvault._env_reseal import reseal_env
 
-    return reseal_env(home=home, root=root, backend=backend, store=store)
+    try:
+        return reseal_env(home=home, root=root, backend=backend, store=store)
+    except DatabaseRefused as exc:
+        _term.emit_error(f"cannot reseal .env into the vault: {exc} — leaving the plaintext in place.")
+        return 1
 
 
 def _should_reseal_instead(*, platform: str, home: Path, root: Path) -> bool:
