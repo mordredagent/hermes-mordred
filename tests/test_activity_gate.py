@@ -1,163 +1,175 @@
-"""The protection gate refuses every unprotected path to the activity store; there is no plaintext fallback."""
+"""Shared activity authority: passive observation and real guarded SQLCipher access."""
 
 from __future__ import annotations
 
 import sqlite3
-import sys
-from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
 
 import pytest
 
 from mordred_hermes import dbcrypt
 from mordred_hermes.activity import _gate
-from mordred_hermes.activity._gate import ActivityRefused, check_protection, open_store, verify_keyed_connection
-from mordred_hermes.activity._paths import store_path
-from mordred_hermes.dbcrypt import _monitor, _shim
+from mordred_hermes.activity._gate import ActivityRefused, check_protection, open_store
+from mordred_hermes.dbcrypt import _capability, _shim
+from mordred_hermes.dbcrypt._key import KeyProvider
+from tests._activity_protection import native_root as native_root
+from tests._activity_protection import protected_runtime as protected_runtime
 
 
-@pytest.fixture
-def protected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A home that passes every process/home-level check (armed, shim loaded, key resolves)."""
-    monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setattr(_shim, "is_installed", lambda: True)
-    # The plaintext probe goes through the process's own SQLite library; here that is the stdlib
-    # (the fakes below are plain sqlite3), and sqlcipher3 need not be importable.
-    monkeypatch.setattr(_monitor, "_own_sqlite", lambda: (sqlite3, False))
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", lambda: object())
-    dbcrypt.arm(tmp_path)
-    return tmp_path
-
-
-def code(home: Path) -> str | None:
-    found = check_protection(home)
-    return None if found is None else found.code
-
-
-def test_protected_home_passes(protected: Path) -> None:
-    assert check_protection(protected) is None
-
-
-def test_non_macos_is_refused(protected: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "platform", "linux")
-    assert code(protected) == "unsupported_platform"
-
-
-def test_unarmed_home_is_refused(protected: Path) -> None:
-    dbcrypt.marker_path(protected).unlink()
-    assert code(protected) == "not_armed"
-
-
-def test_profile_home_uses_the_root_marker(protected: Path) -> None:
-    profile = protected / "profiles" / "work"
-    profile.mkdir(parents=True)
-    assert check_protection(profile) is None
-    dbcrypt.marker_path(protected).unlink()
-    assert code(profile) == "not_armed"
-
-
-def test_process_without_the_shim_is_refused(protected: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_shim, "is_installed", lambda: False)
-    assert code(protected) == "unprotected_process"
-
-
-@pytest.mark.parametrize("provider", [None, lambda: None])
-def test_missing_key_is_refused(protected: Path, monkeypatch: pytest.MonkeyPatch, provider: Any) -> None:
+def test_passive_gate_does_not_acquire_key_sql_or_create_state(native_root, monkeypatch):
+    root = native_root[0]
+    provider = KeyProvider(home=root)
     monkeypatch.setattr(dbcrypt, "_PROVIDER", provider)
-    assert code(protected) == "no_key"
+    monkeypatch.setattr(_capability, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(_shim, "is_installed", lambda: True)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("passive observation authenticated or opened SQL")
+
+    monkeypatch.setattr(KeyProvider, "__call__", forbidden)
+    monkeypatch.setattr(sqlite3, "connect", forbidden)
+    before = tuple(root.rglob("*"))
+    assert check_protection(root) is None
+    assert provider.current_authority is None
+    assert tuple(root.rglob("*")) == before
 
 
-def test_unopenable_vault_is_no_key(protected: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    def broken() -> None:
-        raise RuntimeError("vault locked")
-
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", broken)
-    assert code(protected) == "no_key"
-
-
-@pytest.mark.parametrize("marker", ["db-encryption.journal.json", "db-encryption.pending", "db-decryption.pending"])
-def test_pending_conversion_is_refused(protected: Path, marker: str) -> None:
-    (protected / "mordred" / marker).write_text("{}", encoding="utf-8")
-    assert code(protected) == "conversion_pending"
+def test_missing_authority_no_store_created(protected_runtime, monkeypatch):
+    root, _, _ = protected_runtime
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setenv("HERMES_MEMORY_KEY", "hex:" + "11" * 32)
+    with pytest.raises(ActivityRefused) as caught:
+        open_store(root)
+    assert caught.value.code == "no_key"
+    assert not (root / "plugin-data").exists()
 
 
-def test_unkeyed_connection_is_refused(tmp_path: Path) -> None:
-    conn = sqlite3.connect(tmp_path / "x.db")
+def test_environment_provider_is_not_runtime_authority(protected_runtime, monkeypatch):
+    root, _, _ = protected_runtime
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", KeyProvider(environ={"HERMES_MEMORY_KEY": "hex:" + "11" * 32}))
+    with pytest.raises(ActivityRefused) as caught:
+        open_store(root)
+    assert caught.value.code == "no_key"
+    assert not (root / "plugin-data").exists()
+
+
+def test_activity_uses_existing_runtime_one_unwrap(protected_runtime):
+    root, provider, backend = protected_runtime
+    authority = provider.authority
+    calls = list(backend.calls)
+    store = open_store(root)
+    assert store.meta().profile_home == str(root)
+    assert store.status().counts["activity_events"] == 0
+    assert provider.current_authority is authority
+    assert backend.calls == calls
+    with store.connection() as conn:
+        assert conn.execute("PRAGMA temp_store").fetchone() == (2,)
+        assert conn.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+
+
+def test_terminal_authority_never_reacquires_or_creates(protected_runtime):
+    root, provider, backend = protected_runtime
+    provider.authority.close()
+    calls = list(backend.calls)
+    with pytest.raises(ActivityRefused):
+        open_store(root)
+    assert backend.calls == calls
+    assert not (root / "plugin-data").exists()
+
+
+@pytest.mark.parametrize("name", ["db-encryption.journal.json", "db-encryption.pending", "db-decryption.pending"])
+def test_pending_state_refuses_without_creating_store(protected_runtime, name):
+    root, _, _ = protected_runtime
+    (root / "mordred" / name).write_text("{}")
+    with pytest.raises(ActivityRefused) as caught:
+        open_store(root)
+    assert caught.value.code == "conversion_pending"
+    assert not (root / "plugin-data").exists()
+
+
+def test_activity_profile_uses_root_authority(protected_runtime):
+    root, provider, _ = protected_runtime
+    authority = provider.authority
+    child = root / "profiles/work"
+    store = open_store(child)
+    assert store.meta().profile_home == str(child)
+    assert provider.current_authority is authority
+
+
+def test_foreign_home_refuses_before_directory_creation(protected_runtime, tmp_path):
+    _, provider, _ = protected_runtime
+    assert provider.authority.root == tmp_path
+    foreign = tmp_path / "foreign"
+    foreign.mkdir(mode=0o700)
+    with pytest.raises(ActivityRefused):
+        open_store(foreign)
+    assert not (foreign / "plugin-data").exists()
+
+
+def test_guarded_store_refuses_plaintext_without_raw_probe(protected_runtime, monkeypatch):
+    root, _, _ = protected_runtime
+    path = root / "plugin-data/mordred/mordred.db"
+    path.parent.mkdir(mode=0o700, parents=True)
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE planted(x)")
+    from mordred_hermes.dbcrypt import _monitor
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("activity must not open a second raw DB handle")
+
+    monkeypatch.setattr(_monitor, "is_plaintext", forbidden)
+    with pytest.raises(ActivityRefused):
+        open_store(root)
+
+
+def test_unqualified_platform_is_closed(native_root, monkeypatch):
+    monkeypatch.setattr(_capability, "sys", SimpleNamespace(platform="linux"))
+    assert check_protection(native_root[0]).code == "unsupported_platform"
+
+
+def test_unkeyed_connection_cannot_claim_protection(tmp_path):
+    conn = sqlite3.connect(":memory:")
     try:
-        found = verify_keyed_connection(conn, tmp_path / "x.db")
+        assert _gate.verify_keyed_connection(conn, tmp_path / "x.db").code == "unkeyed_connection"
     finally:
         conn.close()
-    assert found is not None and found.code == "unkeyed_connection"
 
 
-class _ClaimsKey(sqlite3.Connection):
-    """Plain SQLite pretending to be keyed: the file check must still catch it."""
-
-    mordred_key: Any = "pretend"
-
-
-class _ClaimsKeyModule:
-    @staticmethod
-    def connect(database: str, **kwargs: Any) -> sqlite3.Connection:
-        return sqlite3.connect(database, factory=_ClaimsKey, **kwargs)
-
-
-def test_open_store_refuses_before_creating_anything_when_unprotected(tmp_path: Path) -> None:
-    dbcrypt.marker_path(tmp_path).unlink(missing_ok=True)
+def test_planted_activity_parent_refuses_before_any_directory_write(protected_runtime):
+    root, _, _ = protected_runtime
+    elsewhere = root / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    (root / "plugin-data").symlink_to(elsewhere, target_is_directory=True)
     with pytest.raises(ActivityRefused):
-        open_store(tmp_path)
-    assert not (tmp_path / "plugin-data").exists()
+        open_store(root)
+    assert list(elsewhere.iterdir()) == []
 
 
-def test_open_store_refuses_an_unkeyed_process_connection(protected: Path) -> None:
-    # The gate passed (patched), but the process sqlite3 is the stdlib: no key on the connection.
-    with pytest.raises(ActivityRefused) as caught:
-        open_store(protected)
-    assert caught.value.code == "unkeyed_connection"
-    path = store_path(protected)
-    assert not path.exists() or path.stat().st_size == 0
+def test_protected_backup_and_restore_stay_closed_before_task7(protected_runtime, monkeypatch):
+    root, _, _ = protected_runtime
+    store = open_store(root)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("pending offline integration must refuse before raw file access")
+
+    monkeypatch.setattr("os.open", forbidden)
+    with pytest.raises(ActivityRefused):
+        store.backup(root / "snapshot.db")
+    with pytest.raises(ActivityRefused):
+        store.restore(root / "snapshot.db")
+    assert not (root / "snapshot.db").exists()
 
 
-def test_open_store_refuses_a_readable_plaintext_store(protected: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_gate, "_process_sqlite", lambda: _ClaimsKeyModule)
-    with pytest.raises(ActivityRefused) as caught:
-        open_store(protected)
-    assert caught.value.code == "plaintext_store"
+def test_authority_revoked_before_directory_creation_is_content_free_refusal(protected_runtime, monkeypatch):
+    root, _, _ = protected_runtime
+    real_authority = _gate.runtime_authority
 
+    def revoked(home):
+        authority = real_authority(home)
+        authority.close()
+        return authority
 
-def test_open_store_refuses_a_planted_plaintext_store_before_opening_it(protected: Path) -> None:
-    path = store_path(protected)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    planted = sqlite3.connect(path)
-    try:
-        planted.execute("CREATE TABLE planted (x INTEGER)")
-        planted.commit()
-    finally:
-        planted.close()
-
-    with pytest.raises(ActivityRefused) as caught:
-        open_store(protected)
-    assert caught.value.code == "plaintext_store"
-
-
-def test_open_store_refuses_a_store_bound_to_another_profile(protected: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_gate, "_process_sqlite", lambda: _ClaimsKeyModule)
-    # The planted store stands in for a keyed one: skip the pre-open plaintext probe.
-    monkeypatch.setattr(_monitor, "is_plaintext", lambda _path: False)
-    other = protected / "elsewhere"
-    other.mkdir()
-    from mordred_hermes.activity.store import ActivityStore
-
-    ActivityStore(store_path(protected), sqlite3.connect).initialize(other)
-
-    with pytest.raises(ActivityRefused) as caught:
-        open_store(protected)
-    assert caught.value.code == "profile_mismatch"
-
-
-def test_refusals_are_content_free(protected: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_shim, "is_installed", lambda: False)
-    with pytest.raises(ActivityRefused) as caught:
-        open_store(protected)
-    assert str(caught.value) == "unprotected_process"
-    assert str(protected) not in caught.value.refusal.detail
+    monkeypatch.setattr(_gate, "runtime_authority", revoked)
+    with pytest.raises(ActivityRefused):
+        open_store(root)
+    assert not (root / "plugin-data").exists()

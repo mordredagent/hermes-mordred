@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-import types
 from typing import Any
 
 import pytest
@@ -697,27 +696,6 @@ def test_a_secret_shaped_route_segment_never_reaches_the_turn_block(history_home
 # --- the read bound under a writer's lock -----------------------------------------------------------------
 
 
-class _Keyed(sqlite3.Connection):
-    mordred_key: object = None
-
-
-def _shim_like(calls: list[float]) -> types.SimpleNamespace:
-    """The SQLCipher shim's ``connect`` shape: open with ``timeout``, probe the schema (a lock is no key
-    problem), mark the connection keyed."""
-
-    def connect(path: str, *, timeout: float) -> sqlite3.Connection:
-        calls.append(timeout)
-        conn = sqlite3.connect(path, timeout=timeout, factory=_Keyed)
-        try:
-            conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
-        except sqlite3.OperationalError as exc:
-            assert "locked" in str(exc)
-        conn.mordred_key = object()
-        return conn
-
-    return types.SimpleNamespace(connect=connect)
-
-
 def test_a_writer_lock_fails_the_history_open_within_the_read_bound(history_home, monkeypatch, audit_entries) -> None:
     home, store = history_home
     write_config(home, ENABLED)
@@ -727,8 +705,14 @@ def test_a_writer_lock_fails_the_history_open_within_the_read_bound(history_home
     monkeypatch.setattr("mordred_hermes.activity._history_access.check_protection", lambda _h: None)
     monkeypatch.setattr("mordred_hermes.activity._history_access.STORE_NAME", store.path.name)
     monkeypatch.setattr("mordred_hermes.activity._history_access.PLUGIN_DATA_SUBPATH", ())
-    monkeypatch.setattr("mordred_hermes.activity._history_access._plaintext", lambda _p: False)
-    monkeypatch.setattr("mordred_hermes.activity._gate._process_sqlite", lambda: _shim_like(calls))
+
+    def bounded_plain_opener(path):
+        # Explicit portable opener seam: the production guarded open has its
+        # own real-SQLCipher admission tests in test_activity_history_access.
+        calls.append(history.READ_BUSY_MS / 1000)
+        return sqlite3.connect(path, timeout=history.READ_BUSY_MS / 1000)
+
+    monkeypatch.setattr(_history_access, "OPENER", bounded_plain_opener)
     holder = sqlite3.connect(store.path, isolation_level=None)
     holder.execute("BEGIN EXCLUSIVE")
     try:

@@ -25,12 +25,13 @@ import contextlib
 import hashlib
 import json
 import secrets
+import stat
 import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from ..extension import pairing
+from ..extension import _windows_storage, pairing
 from ..extension._windows_storage import ExtensionStorageError
 from ..extension.crypto import b64u_encode
 from .contracts import PeerPrincipal as PeerPrincipal
@@ -68,6 +69,31 @@ def _pending_path() -> Path:
 
 def _peers_path() -> Path:
     return pairing._ext_dir() / _PEERS_FILE
+
+
+def _read(path: Path) -> dict[str, Any]:
+    """Read peer state from an identity-bound source, never precheck then reopen."""
+    if _windows_storage.enabled():
+        # The existing Windows store owns checked read handles, reparse/link
+        # policy and genuinely absent-state classification.
+        return pairing._read_json(path)
+    from ..imports._protected_destination import checked_import_source
+    from ._gate import ActivityRefused
+
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return {}
+    try:
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            raise RuntimeError("activity peer storage is unavailable")
+        with checked_import_source(path, home=path.parent.parent) as source:
+            value = json.load(source)
+        if not isinstance(value, dict):
+            raise RuntimeError("activity peer storage is unavailable")
+        return value
+    except (OSError, ValueError, ActivityRefused):
+        raise RuntimeError("activity peer storage is unavailable") from None
 
 
 def _write(path: Path, data: dict[str, Any]) -> None:
@@ -113,7 +139,7 @@ def generate_peer_code(label: str = _DEFAULT_LABEL) -> tuple[str, float]:
     expires_at = now + CODE_TTL_SECONDS
     path = _pending_path()
     with pairing._state_lock():
-        pending = pairing._read_json(path)
+        pending = _read(path)
         pending = {
             k: v
             for k, v in pending.items()
@@ -154,7 +180,7 @@ def handle_pair_init(code: object, label: object = None) -> dict[str, str]:
     digest = _code_digest(code)
     pending_path = _pending_path()
     with _storage_guard(), pairing._state_lock():
-        pending = pairing._read_json(pending_path)
+        pending = _read(pending_path)
         now = time.time()
         try:
             entry = _claim_code(pending, digest, now)
@@ -169,7 +195,7 @@ def handle_pair_init(code: object, label: object = None) -> dict[str, str]:
         peer_token = b64u_encode(secrets.token_bytes(32))
         try:
             peers_path = _peers_path()
-            peers = pairing._read_json(peers_path)
+            peers = _read(peers_path)
             peers[peer_id] = {
                 "token_sha256": _sha256(peer_token),
                 "label": entry.get("label") or _DEFAULT_LABEL,
@@ -194,7 +220,7 @@ def revoke_peer_code(code: str) -> bool:
     """Burn a pending code that has not been used (CLI cancel/timeout)."""
     path = _pending_path()
     with pairing._state_lock():
-        pending = pairing._read_json(path)
+        pending = _read(path)
         entry = pending.get(_code_digest(code))
         if not isinstance(entry, dict) or entry.get("outcome") is not None:
             return False
@@ -207,7 +233,7 @@ def revoke_peer_code(code: str) -> bool:
 def pair_outcome(code: str) -> tuple[str, str | None]:
     """CLI polling: ``(state, reason)`` with state pending | paired | failed | expired."""
     with pairing._state_lock():
-        entry = pairing._read_json(_pending_path()).get(_code_digest(code))
+        entry = _read(_pending_path()).get(_code_digest(code))
     if not isinstance(entry, dict):
         return ("expired", None)
     outcome = entry.get("outcome")
@@ -235,7 +261,7 @@ def check_token(peer_token: object) -> tuple[PeerPrincipal | None, str | None]:
     if not isinstance(peer_token, str) or not peer_token:
         return None, "invalid_token"
     try:
-        peers = pairing._read_json(_peers_path())
+        peers = _read(_peers_path())
     except (OSError, RuntimeError):
         return None, "invalid_token"
     digest = _sha256(peer_token)
@@ -264,7 +290,7 @@ def revoke(peer_id: str) -> bool:
     """Revoke a peer. Idempotent: ``False`` when unknown or already revoked."""
     path = _peers_path()
     with pairing._state_lock():
-        peers = pairing._read_json(path)
+        peers = _read(path)
         record = peers.get(peer_id)
         if not isinstance(record, dict) or record.get("revoked_at") is not None:
             return False
@@ -275,7 +301,7 @@ def revoke(peer_id: str) -> bool:
 
 def list_peers() -> list[dict[str, Any]]:
     """Peer metadata (never token digests), oldest first."""
-    peers = pairing._read_json(_peers_path())
+    peers = _read(_peers_path())
     rows = [
         {
             "peer_id": peer_id,
@@ -298,7 +324,7 @@ def fingerprint(peer_id: str | None = None) -> bytes | None:
     absent or revoked), so pairing or revoking *another* peer does not drop
     this peer's open session, while revoking or re-pairing this one does.
     """
-    peers = pairing._read_json(_peers_path())
+    peers = _read(_peers_path())
     if peer_id is None:
         if not peers:
             return None

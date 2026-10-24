@@ -18,21 +18,35 @@ STORE_NAME: Final = "mordred.db"
 
 
 def activity_dir(home: Path) -> Path:
-    """``<home>/plugin-data/mordred``, created ``0700``; a symlink or non-directory is refused."""
+    """Create private physical directories using pinned parent handles, never chmod a path."""
     directory = home.joinpath(*PLUGIN_DATA_SUBPATH)
-    try:
-        metadata = directory.lstat()
-    except FileNotFoundError:
-        directory.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with contextlib.suppress(FileExistsError):
-            directory.mkdir(mode=0o700)
-        metadata = directory.lstat()
-    # A planted symlink would move the encrypted store (and its sidecars) to a
-    # location this profile does not own.
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-        raise OSError("activity data directory must be a real directory")
-    if stat.S_IMODE(metadata.st_mode) != 0o700:
-        os.chmod(directory, 0o700)  # lstat above: not a symlink
+    from ..imports._protected_destination import checked_store_destination
+
+    checked_store_destination(directory / STORE_NAME, home=home)
+    if os.name == "nt":
+        from .._private_fs import open_private_directory
+
+        # Windows admission/creation owns the real directory handles and ACLs.
+        with (
+            open_private_directory(home / PLUGIN_DATA_SUBPATH[0], create=True),
+            open_private_directory(directory, create=True),
+        ):
+            pass
+        return directory
+    with contextlib.ExitStack() as stack:
+        parent = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        stack.callback(os.close, parent)
+        for component in PLUGIN_DATA_SUBPATH:
+            with contextlib.suppress(FileExistsError):
+                os.mkdir(component, mode=0o700, dir_fd=parent)
+            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+            stack.callback(os.close, child)
+            info = os.fstat(child)
+            if info.st_uid != os.getuid() or info.st_mode & 0o022:
+                raise OSError("activity data directory is not private")
+            if component == PLUGIN_DATA_SUBPATH[-1] and stat.S_IMODE(info.st_mode) != 0o700:
+                os.fchmod(child, 0o700)
+            parent = child
     return directory
 
 

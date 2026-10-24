@@ -559,9 +559,18 @@ class _MemoryBinding:
 
 
 def open_protected(
-    path: Path, *, authority: Authority, timeout: float = 5.0, readonly: bool = False
+    path: Path, *, authority: Authority, timeout: float = 5.0, readonly: bool = False, check_same_thread: bool = True
 ) -> ProtectedConnection:
-    return _open(path, authority=authority, timeout=timeout, readonly=readonly, protected=True)
+    if type(check_same_thread) is not bool:
+        raise DatabaseRefused("thread policy must be a boolean")
+    return _open(
+        path,
+        authority=authority,
+        timeout=timeout,
+        readonly=readonly,
+        protected=True,
+        check_same_thread=check_same_thread,
+    )
 
 
 def _open_unprotected(
@@ -600,7 +609,13 @@ def _sqlite_busy(error: BaseException) -> bool:
 
 
 def _open(
-    path: Path | None, *, authority: Authority, timeout: float, readonly: bool, protected: bool
+    path: Path | None,
+    *,
+    authority: Authority,
+    timeout: float,
+    readonly: bool,
+    protected: bool,
+    check_same_thread: bool = True,
 ) -> ProtectedConnection:
     import sqlcipher3.dbapi2 as sc
 
@@ -634,7 +649,9 @@ def _open(
             classify_windows_database(str(path), uri=False, root=authority.root)
             vfs = register_checked_vfs(sc, root=authority.root)
             uri += "&vfs=mordred_checked_v1"
-        return _open_bound(binding, authority, uri, vfs, timeout=timeout, protected=protected)
+        return _open_bound(
+            binding, authority, uri, vfs, timeout=timeout, protected=protected, check_same_thread=check_same_thread
+        )
 
 
 def _open_bound(
@@ -645,6 +662,7 @@ def _open_bound(
     *,
     timeout: float,
     protected: bool,
+    check_same_thread: bool = True,
 ) -> ProtectedConnection:
     """Own a registration through driver acquisition and checked admission.
 
@@ -657,7 +675,7 @@ def _open_bound(
     result = object.__new__(ProtectedConnection)
     result._authority, result._binding = authority, binding
     result._pid, result._thread = os.getpid(), threading.get_ident()
-    result._same_thread, result._protected = True, protected
+    result._same_thread, result._protected = check_same_thread, protected
     result._closed = result._revoked = result._denied = False
     result._active = 0
     result._row_factory, result._vfs = None, vfs

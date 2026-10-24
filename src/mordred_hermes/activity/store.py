@@ -28,11 +28,15 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
+from .._database_contracts import DatabaseRefused
 from . import _schema
 from ._gate import ActivityRefused, Refusal, refusal
 from .contracts import COVERAGE_RANK, NormalizedEvent, canonical_digest
+
+if TYPE_CHECKING:
+    from ..dbcrypt._authority import Authority
 
 __all__ = [
     "ATTEMPT_PHASES",
@@ -128,7 +132,11 @@ _EPISODE_COLUMNS: Final = (
 def _db_errors() -> tuple[type[BaseException], ...]:
     """The stdlib's and, once installed, the SQLCipher replacement's error base classes."""
     current = sys.modules.get("sqlite3", sqlite3)
-    return (sqlite3.Error, getattr(current, "Error", sqlite3.Error))
+    try:
+        import sqlcipher3.dbapi2 as sc
+    except ImportError:
+        return (sqlite3.Error, getattr(current, "Error", sqlite3.Error))
+    return (sqlite3.Error, getattr(current, "Error", sqlite3.Error), sc.Error)
 
 
 def _wal_header(path: Path) -> bool:
@@ -154,6 +162,8 @@ def _classify(exc: BaseException) -> Refusal:
 def _refusing() -> Iterator[None]:
     try:
         yield
+    except DatabaseRefused:
+        raise ActivityRefused(refusal("store_unavailable")) from None
     except _db_errors() as exc:
         raise ActivityRefused(_classify(exc)) from None
 
@@ -203,9 +213,13 @@ class ActivityStore:
         copy_opener: Opener | None = None,
         verify_copy: CopyCheck | None = None,
         busy_timeout_s: float = BUSY_TIMEOUT_S,
+        authority: Authority | None = None,
     ) -> None:
         self.path = path
         self._opener = opener
+        # Borrowed runtime lifetime, never closed/replaced by the store. The
+        # portable explicit opener seam has no production native authority.
+        self._authority = authority
         #: How long a statement waits for another connection's lock before the store refuses as ``busy``.
         self._busy_timeout_ms = max(1, int(busy_timeout_s * 1000))
         # Backups live outside the store; production opens them through the
@@ -580,6 +594,10 @@ class ActivityStore:
 
     def backup(self, dest: Path) -> None:
         """A consistent snapshot (SQLite backup API, WAL included) to a new ``0600`` rollback-journal file."""
+        if self._authority is not None:
+            # Closed until the reviewed offline backup registry is integrated;
+            # never enter the portable raw-copy path with a live native store.
+            raise ActivityRefused(refusal("store_unavailable"))
         try:
             fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         except FileExistsError:
@@ -602,6 +620,9 @@ class ActivityStore:
         A backup in WAL mode is refused (``backup_wal_unsupported``) and the store
         is left in rollback-journal mode whatever the copy carried.
         """
+        if self._authority is not None:
+            # A shared runtime cannot upgrade itself into the offline EX lease.
+            raise ActivityRefused(refusal("store_unavailable"))
         if not src.is_file():
             raise ActivityRefused(refusal("store_unavailable"))
         self._check_copy(src)

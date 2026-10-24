@@ -4,9 +4,8 @@
   file's modification time, size and inode, so ``activity use on|off`` (or a
   hand edit) applies from the next turn without restarting Hermes.
 - :func:`reader` returns the profile's store only through the protection gate,
-  on every call: :func:`._gate.check_protection`, a plaintext check of the
-  file, the keyed opener (:func:`._gate.keyed_opener` refuses an unkeyed
-  connection; :data:`OPENER` gives it the read bound
+  on every call: passive :func:`._gate.check_protection` and the guarded opener
+  (:func:`._gate.keyed_opener` refuses an unkeyed connection; :data:`OPENER` gives it the read bound
   :data:`.history.READ_BUSY_MS`, so the shim's schema probe never waits
   longer for a writer's lock) and a read-only check of the schema version and
   profile binding.
@@ -35,11 +34,12 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
 from ._capture_audit import audit_history_unavailable
-from ._gate import ActivityRefused, check_protection, keyed_opener, refusal
+from ._gate import ActivityRefused, _open_guarded, check_protection, keyed_opener, refusal, runtime_authority
 from ._paths import PLUGIN_DATA_SUBPATH, STORE_NAME
 from .config import ActivityConfig
 from .matching import SessionBudget
@@ -134,12 +134,6 @@ def config(home: Path) -> ActivityConfig:
     return loaded
 
 
-def _plaintext(path: Path) -> bool:
-    from ..dbcrypt import _monitor
-
-    return path.stat().st_size > 0 and _monitor.is_plaintext(path)
-
-
 def _check_binding(store: ActivityStore, home: Path) -> None:
     """Schema version and profile binding, read without a write lock; raises :class:`ActivityRefused`."""
     from .history import read_meta
@@ -167,9 +161,18 @@ def reader(home: Path) -> ActivityStore:
     path = home.joinpath(*PLUGIN_DATA_SUBPATH, STORE_NAME)
     if not path.is_file():
         raise NoHistory
-    if _plaintext(path):
-        raise ActivityRefused(refusal("plaintext_store"))
-    store = ActivityStore(path, OPENER)
+    opener: Callable[[Path], sqlite3.Connection] = OPENER
+    authority = None
+    if opener is _read_opener:
+        from .history import READ_BUSY_MS
+
+        authority = runtime_authority(home)
+
+        def bound_opener(target: Path) -> sqlite3.Connection:
+            return _open_guarded(target, authority=authority, timeout=READ_BUSY_MS / 1000, readonly=True)
+
+        opener = bound_opener
+    store = ActivityStore(path, opener, authority=authority)
     _check_binding(store, home)
     return store
 

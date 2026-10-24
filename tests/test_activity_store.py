@@ -21,6 +21,8 @@ from mordred_hermes.activity.contracts import (
 )
 from mordred_hermes.activity.corrections import CORRECTION_PEER
 from mordred_hermes.activity.store import SUPPORTED_SCHEMA_VERSION, ActivityStore, BatchConflict
+from tests._activity_protection import native_root as native_root
+from tests._activity_protection import protected_runtime as protected_runtime
 
 PEER = "operator:peer-a"
 PEER_B = "operator:peer-b"
@@ -568,3 +570,39 @@ def test_query_and_page_fields_round_trip(tmp_path: Path) -> None:
     assert (stored.page_title, stored.page_text) == ("Monthly reports", "Totals for May")
     assert stored.content_digest == canonical_digest(stored)
     assert store.append_batch(PEER, PRODUCER, [sent]).duplicates == 1
+
+
+def test_activity_roundtrip_dedup_search_restart(protected_runtime, monkeypatch):
+    """Portable adapter proof: fake native custody and the real guarded SQLCipher driver."""
+    from mordred_hermes import dbcrypt
+    from mordred_hermes.activity import history
+    from mordred_hermes.activity._gate import open_store
+    from mordred_hermes.dbcrypt._key import KeyProvider
+
+    home, provider, _ = protected_runtime
+    store = open_store(home)
+    expected = event(
+        1,
+        event_id="cd2b767f-a0db-422f-b0ac-154ad8b57701",
+        phase="boundary",
+        actor="human",
+        action={"op": "task_start", "site": "example.com"},
+        text="今日は東京で日本語を勉強します",
+    )
+    first = store.append_batch(PEER, PRODUCER, [expected])
+    second = store.append_batch(PEER, PRODUCER, [expected])
+    assert first.accepted == 1
+    assert second.accepted == 0
+    matched = history.episodes_for_terms(store, {"日本", "本語"}, excluded_sites=frozenset(), since=0, until=2000)
+    assert [item.episode_id for item in matched.episodes] == ["ep-1"]
+    assert [item.event_id for item in store.events_for_episode("ep-1")] == ["cd2b767f-a0db-422f-b0ac-154ad8b57701"]
+    original_rows = rows(store, "SELECT event_id, text FROM activity_events")
+    provider.close()
+    fresh = KeyProvider(home=home)
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", fresh)
+    try:
+        restarted = open_store(home)
+        assert rows(restarted, "SELECT event_id, text FROM activity_events") == original_rows
+        assert restarted.status().counts["activity_events"] == 1
+    finally:
+        fresh.close()

@@ -613,12 +613,21 @@ def test_actual_activity_keyed_opener_accepts_guarded_connection(native_root, au
     profile = root / "profiles/work"
     path = profile / "plugin-data/mordred/mordred.db"
     path.parent.mkdir(parents=True, mode=0o700)
-    monkeypatch.setattr(_gate, "_process_sqlite", lambda: native_module(authority))
-    store = ActivityStore(path, _gate.keyed_opener)
-    meta = store.initialize(profile)
-    assert meta.profile_home == str(profile)
-    with store.connection() as conn:
-        assert conn.execute("SELECT value FROM activity_meta WHERE key='profile_home'").fetchone() == (str(profile),)
+    from mordred_hermes import dbcrypt
+    from mordred_hermes.dbcrypt._key import KeyProvider
+
+    provider = KeyProvider(home=profile)
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", provider)
+    try:
+        store = ActivityStore(path, _gate.keyed_opener)
+        meta = store.initialize(profile)
+        assert meta.profile_home == str(profile)
+        with store.connection() as conn:
+            assert conn.execute("SELECT value FROM activity_meta WHERE key='profile_home'").fetchone() == (
+                str(profile),
+            )
+    finally:
+        provider.close()
     memory = native_module(authority).connect(":memory:")
     try:
         assert memory.mordred_key is None
@@ -819,3 +828,40 @@ def test_vfs_registration_released_when_driver_connect_fails(native_root, author
     assert native.tokens == set()
     assert not (native_root[0] / "state.db").exists()
     assert not authority.terminal
+
+
+@pytest.mark.parametrize("check_same_thread", [True, False])
+def test_explicit_thread_policy_keeps_authority_admission(authority, check_same_thread):
+    import threading
+
+    conn = opener()(authority.root / "thread-policy.db", authority=authority, check_same_thread=check_same_thread)
+    conn.execute("CREATE TABLE records(value TEXT)")
+    conn.execute("INSERT INTO records VALUES ('日本語')")
+    conn.commit()
+    rows, failures = [], []
+
+    def read():
+        try:
+            rows.extend(conn.execute("SELECT value FROM records").fetchall())
+        except BaseException as error:
+            failures.append(error)
+
+    worker = threading.Thread(target=read)
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    if check_same_thread:
+        assert rows == []
+        assert len(failures) == 1 and isinstance(failures[0], sc.ProgrammingError)
+    else:
+        assert failures == []
+        assert rows == [("日本語",)]
+    conn.close()
+
+
+@pytest.mark.parametrize("invalid", [None, 0, 1, "false"])
+def test_invalid_thread_policy_refuses_before_creating(authority, invalid):
+    path = authority.root / "invalid-thread-policy.db"
+    with pytest.raises(DatabaseRefused):
+        opener()(path, authority=authority, check_same_thread=invalid)
+    assert not path.exists()

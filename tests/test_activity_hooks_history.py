@@ -278,13 +278,12 @@ def test_the_real_reader_runs_the_protection_gate_first(seeded, monkeypatch, aud
     assert [entry["code"] for entry in audit_entries] == ["no_key"]
 
 
-def _real_reader_on(monkeypatch, store, *, plaintext: bool = False) -> None:
+def _real_reader_on(monkeypatch, store) -> None:
     """The real reader over the plain test store: gate passed, keyed opener replaced by the test opener."""
     monkeypatch.setattr(_history_access, "reader", REAL_READER)
     monkeypatch.setattr("mordred_hermes.activity._history_access.check_protection", lambda _h: None)
     monkeypatch.setattr("mordred_hermes.activity._history_access.STORE_NAME", store.path.name)
     monkeypatch.setattr("mordred_hermes.activity._history_access.PLUGIN_DATA_SUBPATH", ())
-    monkeypatch.setattr("mordred_hermes.activity._history_access._plaintext", lambda _p: plaintext)
     monkeypatch.setattr(_history_access, "OPENER", store._opener)
 
 
@@ -299,14 +298,6 @@ def test_the_real_reader_opens_read_only_after_the_gate(seeded, monkeypatch) -> 
     assert opened.path == store.path
     assert store.path.stat().st_mtime_ns == before  # nothing was written (no initialize, no migration)
     assert _navigate() is not None
-
-
-def test_the_real_reader_refuses_a_plaintext_file(seeded, monkeypatch) -> None:
-    home, store = seeded
-    _real_reader_on(monkeypatch, store, plaintext=True)
-    with pytest.raises(ActivityRefused) as refused:
-        REAL_READER(home)
-    assert refused.value.code == "plaintext_store"
 
 
 @pytest.mark.parametrize(
