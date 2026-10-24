@@ -110,9 +110,12 @@ def register_checked_vfs(driver: ModuleType, *, root: Path) -> VfsRegistration:
         raise RuntimeError("checked VFS requires Windows")
     _path_parts(os.fspath(root))
     with _LOCK:
-        native = _load_native()
         connection = driver.connect(":memory:")
         try:
+            version = connection.execute("PRAGMA cipher_version").fetchone()
+            if not version or not isinstance(version[0], str) or not version[0]:
+                raise RuntimeError("checked VFS requires a SQLCipher driver")
+            native = _load_native()
             connection.enable_load_extension(True)
             try:
                 connection.execute("SELECT load_extension(?, ?)", (native._name, "sqlite3_mordredvfs_init"))
