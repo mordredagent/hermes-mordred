@@ -219,3 +219,78 @@ def test_other_user_writable_root_refuses_without_repair(tmp_path: Path, change_
         assert root.stat().st_mode & 0o777 == 0o777
     finally:
         root.chmod(0o700)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX replacement admission; Windows denies native rename")
+@pytest.mark.parametrize("replace_directory", [False, True])
+def test_exclusive_reentry_revalidates_the_original_proof(tmp_path: Path, replace_directory: bool) -> None:
+    from mordred_hermes._database_contracts import DatabaseRefused
+    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes.dbcrypt._locking import migration_lock
+
+    entered = []
+    with acquire_exclusive(tmp_path) as outer:
+        folder = tmp_path / "mordred"
+        if replace_directory:
+            folder.rename(tmp_path / "retired-mordred")
+            folder.mkdir(mode=0o700)
+        else:
+            (folder / "db-encryption.lock").unlink()
+        (folder / "db-encryption.lock").touch(mode=0o600)
+        with pytest.raises(DatabaseRefused):
+            outer.assert_held(tmp_path)
+        # An independent process uses the new inode; stale reentry must refuse.
+        assert database_lease_child(tmp_path, "exclusive") == "acquired"
+        with pytest.raises(DatabaseRefused), migration_lock(tmp_path):
+            entered.append("unsafe nested maintenance")
+    assert entered == []
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX proc metadata model; actual Linux holder qualification is a native gate"
+)
+def test_holder_scan_distinguishes_empty_visible_and_live_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mordred_hermes import _database_locking_posix as posix
+
+    database = tmp_path / "state.db"
+    database.write_bytes(b"opaque")
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    assert posix.linux_holders_of([database], proc=proc) == []
+    descriptors = proc / "123" / "fd"
+    descriptors.mkdir(parents=True)
+    link = descriptors / "3"
+    link.symlink_to(database)
+    assert posix.linux_holders_of([database], proc=proc) == [123]
+    link.unlink()
+    assert posix.linux_holders_of([database], proc=proc) == []
+    real = os.scandir
+
+    def denied(path):
+        if Path(path) == descriptors:
+            raise PermissionError("live process visibility denied")
+        return real(path)
+
+    monkeypatch.setattr(os, "scandir", denied)
+    assert posix.linux_holders_of([database], proc=proc) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX proc disappearance model")
+def test_holder_scan_knows_when_a_process_disappeared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from mordred_hermes import _database_locking_posix as posix
+
+    database = tmp_path / "state.db"
+    database.write_bytes(b"opaque")
+    proc = tmp_path / "proc"
+    process = proc / "123"
+    process.mkdir(parents=True)
+    original = posix._process_holds
+
+    def vanished(path, identities):
+        path.rmdir()
+        return original(path, identities)
+
+    monkeypatch.setattr(posix, "_process_holds", vanished)
+    assert posix.linux_holders_of([database], proc=proc) == []

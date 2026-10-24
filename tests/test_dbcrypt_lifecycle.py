@@ -316,3 +316,48 @@ assert databases_cli.databases_decrypt(home=home) == 1
     assert result.returncode == 0, result.stdout + result.stderr
     assert "unsupported" in result.stdout.lower()
     assert path.read_bytes() == before
+
+
+def test_fresh_home_setup_bootstrap_initializes_only_the_legacy_boundary(tmp_path: Path) -> None:
+    home = tmp_path / "fresh-hermes"
+    script = r"""
+import sys
+from pathlib import Path
+sys.platform = 'darwin'
+sys.argv = ['hermes', 'setup']
+from mordred_hermes._runtime_bootstrap import run
+run()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "HERMES_HOME": str(home)},
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert home.is_dir() and (home / "mordred/db-encryption.lock").is_file()
+    assert not (home / "state.db").exists()
+
+
+def test_missing_identified_root_is_not_silently_recreated(tmp_path: Path) -> None:
+    from mordred_hermes._database_contracts import DatabaseRefused
+    from mordred_hermes._database_lifecycle import acquire_runtime
+
+    missing = tmp_path / "missing-managed-root"
+    with pytest.raises(DatabaseRefused), acquire_runtime(missing):
+        pytest.fail("core authority recreated a missing identified root")
+    assert not missing.exists()
+
+
+def test_legacy_bootstrap_never_recreates_an_already_observed_root(tmp_path: Path) -> None:
+    from mordred_hermes._database_contracts import DatabaseRefused
+
+    root = tmp_path / "observed"
+    root.mkdir()
+    with runtime_lease(root):
+        pass
+    root.rename(tmp_path / "retired-observed")
+    with pytest.raises(DatabaseRefused), runtime_lease(root):
+        pytest.fail("legacy startup recreated a root it already knew")
+    assert not root.exists()

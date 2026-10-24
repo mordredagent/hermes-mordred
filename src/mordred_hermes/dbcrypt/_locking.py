@@ -31,6 +31,17 @@ def runtime_lease(home: Path, *, timeout: float = 120.0) -> Iterator[None]:
             existing[1].check()
             yield
             return
+        # Legacy bootstrap also runs before first-time Hermes setup. Initialize
+        # that previously unobserved home here, not in the identified-root core.
+        # An existing lifetime lease is checked above before any creation, so
+        # losing a root already known to this process always refuses.
+        try:
+            base.lstat()
+        except FileNotFoundError:
+            try:
+                base.mkdir(mode=0o700, parents=True, exist_ok=True)
+            except OSError as exc:
+                raise MigrationError("fresh Hermes home could not be initialized safely") from exc
         context = acquire_runtime(base, timeout=timeout)
         lease = context.__enter__()
         try:

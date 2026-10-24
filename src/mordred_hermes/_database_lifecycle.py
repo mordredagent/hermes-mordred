@@ -148,6 +148,7 @@ def acquire_exclusive(root: Path, *, timeout: float = 0.0) -> Iterator[Exclusive
                 reserved = True
         if lease is not None:
             native.close()
+            lease.assert_held(root)
             yield lease
         else:
             native.acquire(shared=False, timeout=timeout)
