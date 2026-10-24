@@ -169,6 +169,30 @@ def test_legacy_read_adapter_keeps_delete_on_checked_primary(monkeypatch, tmp_pa
     assert calls == ["primary"]
 
 
+@pytest.mark.parametrize("store_name", ["sekey", "tpm"])
+def test_owner_detects_replacement_of_helper_default_store(monkeypatch, tmp_path, store_name):
+    from mordred_hermes.keyvault import _native_deletion as deletion
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("MORDRED_SEKEY_STORE", raising=False)
+    monkeypatch.delenv("MORDRED_TPMKEY_STORE", raising=False)
+    store = tmp_path / "mordred" / "keyvault" / store_name
+    store.mkdir(mode=0o700, parents=True)
+    ops = _HelperSecKeyOps("/isolated-helper")
+    calls = []
+    monkeypatch.setattr(ops, "_invoke", lambda payload: calls.append(payload) or {"ok": True})
+    backend = _SecKeyBackend(ops=ops, sw_ops=None, legacy_ops=None)
+    facts = deletion._NativeOwnerFacts(home=tmp_path, role="audit")
+    monkeypatch.setattr(deletion, "_checked_owner_facts", lambda scope, selector, backend: facts)
+    owner = deletion._issue_native_owner(object(), native_key_id="audit", backend=backend)
+    with deletion._owned_delete_scope(owner, backend=backend, database_lease=None) as permit:
+        store.rename(store.with_name(store.name + "-old"))
+        store.mkdir(mode=0o700)
+        with pytest.raises(DatabaseRefused):
+            backend.delete_enclave_key("audit", deletion=permit)
+    assert calls == []
+
+
 @pytest.fixture
 def owned_native(monkeypatch: pytest.MonkeyPatch, tmp_path):
     from mordred_hermes.keyvault import _native_deletion as deletion

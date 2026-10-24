@@ -137,20 +137,43 @@ def _path_identity(value: str) -> tuple[object, ...]:
     return (os.fspath(path), stat.st_dev, stat.st_ino, stat.st_mode, stat.st_uid, target_identity)
 
 
+def _helper_store_paths(ops: object) -> tuple[tuple[str, Path], ...]:
+    from ._seckey_helper import _HelperSecKeyOps
+
+    if not isinstance(ops, _HelperSecKeyOps):
+        return ()
+    override = ops._env_override
+
+    def expand(value: str, leaf: str) -> Path:
+        if leaf == "tpm":
+            # Match the Rust helper: only ~ and ~/ expand; ~user is literal.
+            user_home = Path(os.environ.get("HOME", "."))
+            if value == "~":
+                return user_home
+            if value.startswith("~/"):
+                return user_home / value[2:]
+            return Path(value)
+        return Path(value).expanduser()
+
+    home = os.environ.get("HERMES_HOME")
+    stores = []
+    for name, leaf in (("MORDRED_SEKEY_STORE", "sekey"), ("MORDRED_TPMKEY_STORE", "tpm")):
+        selected = override[1] if override and override[0] == name else os.environ.get(name)
+        if selected:
+            path = expand(selected, leaf)
+        else:
+            base = expand(home, leaf) if home else expand("~", leaf) / ".hermes"
+            path = base / "mordred" / "keyvault" / leaf
+        stores.append((name, path.absolute()))
+    return tuple(stores)
+
+
 def _ops_configuration(ops: object) -> tuple[object, ...]:
     from ._seckey_helper import _HelperSecKeyOps
 
     if isinstance(ops, _HelperSecKeyOps):
         override = ops._env_override
-        stores = tuple(
-            (
-                name,
-                os.fspath(
-                    Path(override[1] if override and override[0] == name else os.environ.get(name, "")).absolute()
-                ),
-            )
-            for name in ("MORDRED_SEKEY_STORE", "MORDRED_TPMKEY_STORE")
-        )
+        stores = tuple((name, os.fspath(path)) for name, path in _helper_store_paths(ops))
         return (
             id(ops),
             _path_identity(ops._binary),
@@ -167,11 +190,7 @@ def _ops_binding(ops: object) -> tuple[object, ...]:
     from ._seckey_helper import _HelperSecKeyOps
 
     if isinstance(ops, _HelperSecKeyOps):
-        override = ops._env_override
-        stores = tuple(
-            (name, _path_identity(override[1] if override and override[0] == name else os.environ.get(name, "")))
-            for name in ("MORDRED_SEKEY_STORE", "MORDRED_TPMKEY_STORE")
-        )
+        stores = tuple((name, _path_identity(os.fspath(path))) for name, path in _helper_store_paths(ops))
         return (configuration, stores)
     return (configuration,)
 
