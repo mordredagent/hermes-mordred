@@ -250,16 +250,47 @@ def test_update_none_cannot_remove_ownership(owned):
     assert vault.sealed_path.read_bytes() == before
 
 
-def test_live_creation_receipt_revoked_before_publication(owned):
-    vault, native = owned
-    # An unpublished receipt on an independent backend with the same selector
-    # loses rollback rights before this transaction republishes the source.
-    second = NativeTelegram(native.home)
-    with wrap.create_wrapping_key_scope(tee.KEY_ID, backend=second.backend) as receipt:
-        vault.store(value())
-        with pytest.raises(DatabaseRefused):
-            deletion.rollback_created_key(receipt)
-    assert "delete" not in second.calls
+def test_telegram_receipt_refuses_before_native_calls_and_raw_publication_succeeds(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    from mordred_hermes.keyvault import _native_key_id
+    from mordred_hermes.keyvault._telegram_custody import telegram_credential_transaction
+
+    vault, native = native_store(tmp_path)
+    root = tmp_path / "mordred/keyvault"
+    _storage.ensure_layout(root)
+    with _storage.keyvault_custody(root, backend=native.backend) as custody:
+        meta = _storage.load_meta(root)
+        main_selector = _native_key_id.add_pending_native_key(root, meta, "default")
+        _storage.save_meta(root, meta)
+        before = _storage.safe_read(root / "meta.json")
+        # This is genuine live, correctly bound main provisioning custody,
+        # rather than a missing argument or a fabricated custody object.
+        _storage.KeyvaultCustody._check_native_creation_owner(custody, "default", main_selector, native.backend)
+        assert native.calls == []
+        for selector in (tee.KEY_ID, main_selector):
+            with (
+                pytest.raises(DatabaseRefused),
+                wrap.create_wrapping_key_scope(
+                    tee.KEY_ID, backend=native.backend, custody=custody, native_key_id=selector
+                ),
+            ):
+                pytest.fail("main custody cannot issue a Telegram creation receipt")
+            assert native.calls == []  # no public lookup, generation, ECDH, or deletion
+            assert _storage.safe_read(root / "meta.json") == before
+
+    # Telegram still uses ordinary raw generation and authenticated source
+    # publication. No main/audit receipt or caller-selected role is needed.
+    vault.ensure_key()
+    vault.store(value())
+    current, proof = vault.load_snapshot()
+    assert current == value() and proof is not None
+    assert native.calls.count("generate") == 1 and native.ecdh_calls == 1
+    with telegram_credential_transaction(home=tmp_path, backend=native.backend, authenticated=proof) as custody:
+        owner = deletion._issue_native_owner(custody, native_key_id=tee.KEY_ID, backend=native.backend)
+        with deletion._owned_delete_scope(owner, backend=native.backend, database_lease=None):
+            pass
+    assert native.ecdh_calls == 1 and "delete" not in native.calls
+    assert vault.sealed_path.exists()
 
 
 def test_issuer_detects_publication_during_unwrap_without_minting_proof(owned):
