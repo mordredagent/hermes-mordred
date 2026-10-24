@@ -499,8 +499,21 @@ unknown, uppercase or missing statuses and an unsuccessful job become
 `unavailable`. GitHub expression comparisons must not filter or normalize
 candidates because they ignore case. Only fixed text, normalized tokens and
 the context-derived run URL reach local issues; detailed upstream diagnostics
-remain in unprivileged logs. Successful all-ok runs make no Issue API calls. Whenever GitHub can run the reporter, failed
-preparation and missing outputs produce a local informational report. Production
+remain in unprivileged logs. The reporter paginates open `upstream-drift`
+issues and manages only fixed-title reports created by `github-actions[bot]`,
+never human issues or pull requests. A successful all-ok run closes all open
+managed reports with `completed` and removes `actionable`; with no managed
+report, it only lists issues. Otherwise the existing report body is replaced,
+preserving unrelated labels, without adding weekly comments. A recurrence
+after closure creates a new report.
+
+PyPI drift/unavailability or an incomplete check job sets `actionable` for
+supported-release investigation or monitor repair. Main-only hook or
+memory/Journey problems are advisory, remove `actionable`, and do not block
+Mordred releases. Static drift is a triage signal, not proof of runtime
+breakage: inspect the recorded upstream commit to distinguish host changes
+from scanner limitations. Whenever GitHub can run the reporter, failed
+preparation and missing outputs produce a local report. Production
 probes continue stripping
 `PYTHONPATH`, `PYTHONHOME` and `HERMES_MEMORY_KEY`; no runtime selection change
 ships with the CI overlay.
@@ -671,6 +684,23 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
   `test_telegram_local_llm.py` completed with three skips because their live
   model gates were unset. A real IMAP account fetch, Hermes/model provenance
   evaluation and Telegram live inference were not run. Hardware-key and VPN
+  code paths are unchanged and were not exercised.
+
+- **2026-10-24 — Activity redaction extraction: isolated SQLCipher validation.**
+  Source: `refactor/activity-redaction` at `1f7ce6c24`; macOS 27.0.1 arm64,
+  Python 3.13.15, editable package verified against its dedicated worktree.
+  A temporary `HERMES_HOME` and a randomly generated synthetic `hex:` memory
+  key armed the real database shim. The production receiver and
+  `open_store` gate normalized and stored a synthetic event with secrets in
+  its user text, page title, page text and URL parameters; none of the secret
+  values appeared in the normalized event, stored fields or history detail.
+  The stored digest matched both normalization and canonical digest
+  calculation, and replay returned a duplicate. Unkeyed stdlib SQLite could
+  not read the resulting store. The home was deleted after the check; no
+  production profile, credentials or gateway port was used. The complete
+  related automated module batch passed (1,606 cases). A real browser
+  operator/receiver/Hermes session and live model acceptance were not run;
+  this records the SQLCipher receiver/store check only. Hardware-key and VPN
   code paths are unchanged and were not exercised.
 
 - **2026-10-23 — Browser activity and history (B2 stack) final live re-verification after the privacy fixes: operator, receiver and Hermes.**
@@ -2347,10 +2377,17 @@ Tor and TPM use hermetic CI coverage and do not belong in this manual log.
 - Checks both the latest PyPI `hermes-agent` and a shallow clone of upstream
   `main`.
 - `tools/check_hook_payload_drift.py` statically verifies `VALID_HOOKS` and the
-  fields in literal `invoke_hook(...)` dispatches against
+  fields in literal `invoke_hook(...)` / `ainvoke_hook(...)` dispatches against
   `tools/hook_payload_contract.json`.
-- A mismatch opens or updates an `actionable` + `upstream-drift` issue. It never
-  patches Hermes or opens an upstream PR.
+  Imports under aliases and module-level wrappers forwarding the hook name and
+  untouched keyword payload are recognized; payload-altering wrappers are not.
+- PyPI drift/unavailability or an incomplete check job opens or updates an
+  `actionable` + `upstream-drift` bot report. Main-only problems are advisory
+  (`upstream-drift` without `actionable`) and do not block Mordred releases.
+  Inspect source before treating static drift as an actual host API change.
+- Existing bot report bodies are updated without weekly comments, human issues
+  and unrelated labels are preserved, and successful all-ok runs close open
+  managed reports. The workflow never patches Hermes or opens an upstream PR.
 - `tests/test_hook_payload_drift.py` runs the same contract against the locally
   installed package and ensures contract keys match Mordred registrations.
 

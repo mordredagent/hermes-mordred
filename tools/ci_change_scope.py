@@ -174,6 +174,8 @@ def _sensitive(path: str) -> bool:
     if rel in {
         "imports/store.py",
         "imports/_mail_reconcile.py",
+        "activity/contracts.py",
+        "activity/_redaction.py",
         "extension/crypto.py",
         "extension/e2e.py",
         "extension/pairing.py",

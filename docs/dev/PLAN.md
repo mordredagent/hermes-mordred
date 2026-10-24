@@ -51,6 +51,16 @@ Phase 0 is complete. Its rules remain the baseline for every change.
 - The optional `hermes-upstream` remote is for source inspection only.
 - `.github/workflows/upstream-check.yml` checks both the latest PyPI release and
   upstream `main` for hook-name and consumed-payload drift.
+- The AST scanner recognizes `invoke_hook` and `ainvoke_hook`, their imported
+  aliases, and module-level wrappers that forward the first parameter and
+  untouched `**kwargs` to either dispatcher. Modified payloads and hook names
+  are not treated as transparent wrappers.
+- The isolated reporter normalizes exact status tokens before constructing
+  Issue API inputs. It paginates open `upstream-drift` issues and manages only
+  its fixed-title `github-actions[bot]` reports. PyPI drift/unavailability or
+  an incomplete check job sets `actionable`; main-only problems remove it.
+  Repeated reports replace the body while preserving unrelated labels; an
+  all-ok run closes managed reports. No weekly comments or upstream PRs.
 
 ### 0.3 Mordred-owned paths (kept in sync with PATHS.md)
 
@@ -2302,6 +2312,7 @@ implementation plan:
 |---|---|
 | Operator and extension collectors | operator repository (`src/mordred/activity.py`, `activity_cli.py`, `docs/activity.md`); no collector code in this repository |
 | Authenticated receiver | `activity/peers.py` (peer credentials), `extension/activity_api.py` (frames, principal revalidation), `activity/contracts.py` (normalization, `PeerPrincipal`), `activity/ingest.py` (`build_receiver`, hourly bounded retention after append), `activity/_capture_audit.py` (`activity.capture_refused`, once per process and code) |
+| Secret redaction | `activity/_redaction.py` (standard-library-only masking, bounded scanning and caches); `activity/contracts.py` explicitly re-exports its public redaction functions, constants and type alongside event validation, serialization and digests |
 | Activity store | `activity/_paths.py`, `activity/_gate.py` (protection gate, keyed opener), `activity/_schema.py` (schema v3, in-place v1→v2→v3 migration), `activity/store.py` (append, episodes, status, backup/restore, `plan_retention`/`apply_retention`) |
 | Corrections | `activity/corrections.py` (record-only: one `user_correction` event appended to an existing episode; nothing derived) |
 | Term matching helpers | `activity/matching.py` (`terms` with CJK bigrams, `SessionBudget` counting characters and shown episodes per session) |

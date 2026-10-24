@@ -87,6 +87,8 @@ def test_empty_malformed_duplicate_scope_fails_closed(changes):
         "src/mordred_hermes/keyvault/api.py",
         "src/mordred_hermes/imports/store.py",
         "src/mordred_hermes/imports/_mail_reconcile.py",
+        "src/mordred_hermes/activity/contracts.py",
+        "src/mordred_hermes/activity/_redaction.py",
     ],
 )
 def test_sensitive_overrides_win_even_if_inventory_accidentally_allowlists_them(tmp_path, source):

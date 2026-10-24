@@ -89,6 +89,8 @@ def test_network_change_adds_integration_and_whole_windows_family():
         "src/mordred_hermes/keyvault/api.py",
         "src/mordred_hermes/imports/store.py",
         "src/mordred_hermes/imports/_mail_reconcile.py",
+        "src/mordred_hermes/activity/contracts.py",
+        "src/mordred_hermes/activity/_redaction.py",
         "tests/new_test.py",
         ".github/workflows/ci.yml",
     ],

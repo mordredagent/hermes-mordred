@@ -354,6 +354,10 @@ def test_old_rows_never_put_a_secret_into_a_tool_result(history_home, monkeypatc
             typed="4111 1111 1111 1111",
         )
 
+    with store.connection() as conn:
+        stored = repr(conn.execute("SELECT * FROM activity_events").fetchall())
+    assert all(secret in stored for secret in secrets)  # exercise legacy rows, not already-redacted data
+
     lookup = _lookup(query="", site="example.com")
     episode = browser_history_episode({"episode_id": "ep-old"}, session_id="s1")
 
