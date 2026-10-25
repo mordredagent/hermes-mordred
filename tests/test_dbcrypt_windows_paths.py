@@ -73,9 +73,25 @@ def test_invalid_root_is_refused(root: str) -> None:
         implementation().classify_windows_database(r"C:\private\state.db", uri=False, root=Path(root))
 
 
-def test_unqualified_registration_cannot_enable_runtime_support() -> None:
-    # Building or loading an adapter cannot qualify production by accident.
-    assert implementation().NATIVE_QUALIFIED is False
+def test_unqualified_registration_cannot_enable_runtime_support(tmp_path: Path, monkeypatch) -> None:
+    # A supported adapter still refuses an unqualified driver pair before
+    # selecting or loading any library, including an ambient override.
+    module = implementation()
+    library = tmp_path / "unchecked.dll"
+    library.write_bytes(b"inert fixture; never loaded")
+    monkeypatch.setenv("MORDRED_DBCRYPT_CHECKED_LIBRARY", str(library))
+    monkeypatch.setattr(module, "driver_distribution_qualified", lambda: False)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unqualified driver reached native library selection or loading")
+
+    monkeypatch.setattr(module, "packaged_library_path", forbidden)
+    monkeypatch.setattr(module.ctypes, "CDLL", forbidden)
+    with pytest.raises(
+        RuntimeError, match=r"^Windows checked VFS requires its qualified SQLCipher 0\.5\.7 driver pair$"
+    ):
+        module._load_native()
+    assert library.read_bytes() == b"inert fixture; never loaded"
 
 
 def test_other_platform_registration_does_not_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:

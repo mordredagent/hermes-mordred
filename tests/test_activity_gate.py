@@ -123,8 +123,23 @@ def test_guarded_store_refuses_plaintext_without_raw_probe(protected_runtime, mo
 
 
 def test_unqualified_platform_is_closed(native_root, monkeypatch):
-    monkeypatch.setattr(_capability, "sys", SimpleNamespace(platform="linux"))
-    assert check_protection(native_root[0]).code == "unsupported_platform"
+    root, backend, _, _ = native_root
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    calls = list(backend.calls)
+    monkeypatch.setattr(_capability, "sys", SimpleNamespace(platform="unknown"))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unsupported platform authenticated or opened SQL")
+
+    monkeypatch.setattr(KeyProvider, "__call__", forbidden)
+    monkeypatch.setattr(sqlite3, "connect", forbidden)
+    assert check_protection(root).code == "unsupported_platform"
+    with pytest.raises(ActivityRefused) as caught:
+        open_store(root)
+    assert caught.value.code == "unsupported_platform"
+    assert backend.calls == calls
+    assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+    assert not (root / "plugin-data").exists()
 
 
 def test_unkeyed_connection_cannot_claim_protection(tmp_path):
