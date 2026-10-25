@@ -607,11 +607,11 @@ assert evidence["unexpected_skips"] == []
 - [ ] Run `MORDRED_DBCRYPT_NATIVE_TEST=1` and `MORDRED_DBCRYPT_COLLECTORS_TEST=1` with `MORDRED_DBCRYPT_TEST_ROOT` using `uv run pytest -q -o addopts= -m integration
   tests/integration/test_dbcrypt_native.py tests/integration/test_dbcrypt_collectors.py`. Windows also runs Task 5 native VFS suite; Linux existing memory/Telegram gates and Windows existing
   custody/memory/Telegram gates remain explicit. Set `MORDRED_TEST_WINDOWS_MEMORY_LIVE=1` for `tests/test_windows_memory_live.py` as CI.md prescribes.
-- [ ] Execute copied tests through these exact environment boundaries (set shell variables to absolute private paths first). POSIX: source `uv run --project "$DBCRYPT_CHECKOUT" pytest -q
+- [ ] Execute copied tests through these exact environment boundaries (set shell variables to absolute private paths first). POSIX: source `uv run --project "$DBCRYPT_CHECKOUT" python -m pytest -q
   "$DBCRYPT_BUNDLE/tests/test_dbcrypt.py"`; wheel `uv run --no-project --python "$DBCRYPT_BUNDLE/wheel-env/bin/python" python -m pytest -q "$DBCRYPT_BUNDLE/tests/test_dbcrypt.py"`. PowerShell: source
-  `uv run --project $env:DBCRYPT_CHECKOUT pytest -q "$env:DBCRYPT_BUNDLE/tests/test_dbcrypt.py"`; wheel `uv run --no-project --python "$env:DBCRYPT_BUNDLE/wheel-env/Scripts/python.exe" python -m
+  `uv run --project $env:DBCRYPT_CHECKOUT python -m pytest -q "$env:DBCRYPT_BUNDLE/tests/test_dbcrypt.py"`; wheel `uv run --no-project --python "$env:DBCRYPT_BUNDLE/wheel-env/Scripts/python.exe" python -m
   pytest -q "$env:DBCRYPT_BUNDLE/tests/test_dbcrypt.py"`. Replace the final test operand with each complete module set and gate module in its task; native gates also pass `-o addopts= -m integration`.
-  Set gate environment variables in that shell, use bundle cwd for wheel runs, unset PYTHONPATH, and assert installed product path before each run. The runner executes these same argument arrays and
+  Set gate environment variables in that shell, use bundle cwd for source and wheel runs, unset PYTHONPATH, and assert installed product path before each run. The runner executes these same argument arrays and
   records them.
 - [ ] Require all acceptance rows: real Hermes SessionDB/FTS/Japanese; every scoped root/sibling/profile DB and activity/Telegram/mail import/search; wrong/missing key/profile/generation;
   held-connection terminality and unwrap counts; cached hardware-loss limit; sidecars/URI/ATTACH/destinations; multiprocess writers/reader/migration exclusion and uncertain holders; every durable

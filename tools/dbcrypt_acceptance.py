@@ -224,7 +224,7 @@ def acceptance_commands(*, checkout: Path, bundle: Path, platform: str) -> list[
     for suite, modules, gates, integration in _suites(platform):
         for mode in ("wheel",) if suite == "linux-memory" else ("source", "wheel"):
             prefix = (
-                ["uv", "run", "--project", str(checkout), "pytest", "-q"]
+                ["uv", "run", "--project", str(checkout), "python", "-m", "pytest", "-q"]
                 if mode == "source"
                 else [
                     "uv",
@@ -3251,7 +3251,7 @@ def windows_package_commands(
 ) -> list[dict[str, Any]]:
     _require(mode in {"source", "wheel"})
     prefix = (
-        ["uv", "run", "--project", str(checkout), "pytest"]
+        ["uv", "run", "--project", str(checkout), "python", "-m", "pytest"]
         if mode == "source"
         else [
             "uv",

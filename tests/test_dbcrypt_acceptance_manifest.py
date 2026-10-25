@@ -206,7 +206,7 @@ def test_commands_preserve_installed_package_boundary_and_explicit_native_gates(
     checkout, bundle = tmp_path / "checkout", tmp_path / "bundle"
     commands = tool.acceptance_commands(checkout=checkout, bundle=bundle, platform="linux")
     source, wheel = commands[0:2]
-    assert source["argv"][:6] == ["uv", "run", "--project", str(checkout), "pytest", "-q"]
+    assert source["argv"][:8] == ["uv", "run", "--project", str(checkout), "python", "-m", "pytest", "-q"]
     assert wheel["argv"][:8] == [
         "uv",
         "run",
@@ -231,6 +231,82 @@ def test_commands_preserve_installed_package_boundary_and_explicit_native_gates(
     assert all("Scripts/python.exe" in row["argv"][4] for row in windows if row["mode"] == "wheel")
     with pytest.raises(tool.AcceptanceRefused, match="unsupported_platform"):
         tool.acceptance_commands(checkout=checkout, bundle=bundle, platform="darwin")
+
+
+@pytest.mark.parametrize("command_kind", ["linux-acceptance", "windows-acceptance", "windows-package"])
+def test_source_commands_preload_copied_plugin_outside_checkout(tmp_path: Path, command_kind: str) -> None:
+    """A console-script launch loses the bundle before pytest preloads -p plugins."""
+    import subprocess
+
+    tool = acceptance_tool("dbcrypt_acceptance")
+    checkout = Path(__file__).resolve().parents[1]
+    bundle = tmp_path / "bundle"
+    copied_tests = bundle / "tests"
+    (copied_tests / "integration").mkdir(parents=True)
+    (copied_tests / "__init__.py").touch()
+    configuration = bundle / "pyproject.toml"
+    configuration.write_text('[tool.pytest.ini_options]\nmarkers = ["integration: inert collection"]\n')
+    observation = bundle / "plugin-startup.json"
+    plugin = copied_tests / "_dbcrypt_acceptance_native.py"
+    plugin.write_text(
+        "import importlib.util, json, os, sys\n"
+        "from pathlib import Path\n"
+        f"Path({str(observation)!r}).write_text(json.dumps({{\n"
+        "    'plugin': __file__, 'cwd': os.getcwd(), 'interpreter': sys.executable, 'environment': sys.prefix,\n"
+        "    'product': importlib.util.find_spec('mordred_hermes').origin,\n"
+        "    'pythonpath': os.environ.get('PYTHONPATH'), 'pythonhome': os.environ.get('PYTHONHOME'),\n"
+        "}))\n"
+    )
+    for name in ("test_dbcrypt_native.py", "test_dbcrypt_collectors.py", "test_dbcrypt_windows_vfs.py"):
+        (copied_tests / "integration" / name).write_text(
+            "import pytest\npytestmark = pytest.mark.integration\n"
+            "def test_synthetic_collection():\n    raise AssertionError('collection only')\n"
+        )
+    if command_kind == "windows-package":
+        command = tool.windows_package_commands(
+            checkout=checkout,
+            bundle=bundle,
+            mode="source",
+            basetemp=tmp_path / "pytest-temp",
+            configuration=configuration,
+        )[0]
+        argv = command["argv"]
+        cwd = bundle
+    else:
+        command = next(
+            row
+            for row in tool.acceptance_commands(
+                checkout=checkout,
+                bundle=bundle,
+                platform="linux" if command_kind == "linux-acceptance" else "win32",
+            )
+            if row["mode"] == "source" and row["suite"] == "dbcrypt-native"
+        )
+        argv = [*command["argv"], "-c", str(configuration), "-p", "tests._dbcrypt_acceptance_native", "--collect-only"]
+        cwd = Path(command["cwd"])
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"PYTHONPATH", "PYTHONHOME", "PYTEST_ADDOPTS", "PYTEST_PLUGINS"}
+    }
+    environment.update(
+        UV_NO_SYNC="1",
+        UV_OFFLINE="1",
+        UV_PROJECT_ENVIRONMENT=sys.prefix,
+        PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
+        PYTHONDONTWRITEBYTECODE="1",
+        HERMES_HOME=str(tmp_path / "unused-hermes-home"),
+    )
+    result = subprocess.run(argv, cwd=cwd, env=environment, capture_output=True, text=True, check=False, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    observed = json.loads(observation.read_text())
+    assert Path(observed["plugin"]).resolve() == plugin.resolve()
+    assert Path(observed["cwd"]).resolve() == bundle.resolve()
+    assert Path(observed["interpreter"]).samefile(sys.executable)
+    assert Path(observed["environment"]).resolve() == Path(sys.prefix).resolve()
+    assert Path(observed["product"]).resolve() == checkout / "src/mordred_hermes/__init__.py"
+    assert observed["pythonpath"] is None and observed["pythonhome"] is None
+    assert not (tmp_path / "unused-hermes-home").exists()
 
 
 @pytest.mark.parametrize("phase", ["provision", "reopen", "verify"])
