@@ -438,6 +438,9 @@ def _memory_probe(seed: bool) -> dict[str, Any]:
         assert _memory_hook.memory_hook_installed(memory_tool)
         bootstrap = "automatic_native_memory_hook"
     store = memory_tool.MemoryStore(memory_char_limit=2048)
+    # Upstream's public lifecycle initializes the directory and loads sealed
+    # entries through the already-installed hook before either seed or read.
+    store.load_from_disk()
     path = home / "memories/MEMORY.md"
     if seed:
         store._write_file(path, [TEXT])
