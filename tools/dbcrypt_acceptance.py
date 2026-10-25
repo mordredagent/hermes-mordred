@@ -100,7 +100,7 @@ def probe_environment(home: Path) -> dict[str, str]:
 
 _PROBE = r"""
 import importlib.metadata as metadata
-import json, os, platform, sys
+import hashlib, json, os, platform, sys
 from pathlib import Path
 # HERMES_HOME is set in the parent before interpreter startup and all imports.
 assert Path(os.environ['HERMES_HOME']).name.startswith('mordred-dbcrypt-probe-')
@@ -123,7 +123,12 @@ if os.name == 'nt':
     token['elevated'] = bool(ctypes.windll.shell32.IsUserAnAdmin())
 else:
     token['uid'] = os.getuid()
+entrypoint = Path(sys.prefix) / ('Scripts/hermes-mordred.exe' if os.name == 'nt' else 'bin/hermes-mordred')
+entries = tuple(metadata.distribution('hermes-mordred').entry_points.select(
+    group='console_scripts', name='hermes-mordred'))
+assert len(entries) == 1 and entries[0].value == 'mordred_hermes.wizard.cli:main'
 print(json.dumps({
+    'maintenance_entrypoint': {'path': str(entrypoint), 'sha256': hashlib.sha256(entrypoint.read_bytes()).hexdigest()},
     'product_file': str(Path(mordred_hermes.__file__).resolve()),
     'interpreter': str(Path(sys.executable).resolve()),
     'python_version': platform.python_version(), 'platform': sys.platform,
@@ -509,10 +514,13 @@ def _validate_probe(value: Any, *, mode: Mode, checkout: Path, root: Path) -> di
             "native_provider",
             "native_helper",
             "readiness",
+            "maintenance_entrypoint",
         ),
     )
     _require(probe["platform"] in {"linux", "darwin", "win32"} and _text(probe["python_version"]))
     environment = checkout / ".venv" if mode == "source" else root / "wheel-env"
+    entrypoint = environment / ("Scripts/hermes-mordred.exe" if probe["platform"] == "win32" else "bin/hermes-mordred")
+    _require(probe["maintenance_entrypoint"] == {"path": str(entrypoint), "sha256": sha256_file(entrypoint)})
     interpreter = _absolute(probe["interpreter"])
     _require(interpreter.is_file() and interpreter == _python(environment, probe["platform"]).resolve(strict=True))
     origin = _absolute(probe["product_file"])
@@ -2449,9 +2457,116 @@ def _public_read(payload: dict[str, Any], phase: dict[str, Any], bundle: dict[st
         _require(payload["fixture"] == phase["fixture"] and payload["logical"] == phase["logical"])
 
 
+NATIVE_REFUSAL_REASONS = {
+    "integrated_native_memory_and_none_conversion_contract_required",
+    "native_platform_required",
+    "explicit_native_collector_optin_required",
+    "canonical_synthetic_native_root_required",
+    "isolated_native_home_required_before_import",
+    "ordinary_windows_token_required",
+    "native_cng_provider_unavailable",
+    "native_cng_implementation_unobservable",
+    "hardware_only_cng_provider_required",
+    "real_ec2_tpm_device_required",
+    "amazon_tpm_manufacturer_unobservable",
+    "native_emulator_and_ambient_keys_forbidden",
+    "explicit_production_native_helper_required",
+    "candidate_driver_or_inventory_unavailable",
+    "owned_checked_distribution_required",
+    "native_provision_requires_new_root_no_repair",
+    "native_memory_enable_failed_retain_root",
+    "requested_presence_must_refuse_before_writes",
+    "damaging_operations_require_separate_negative_root",
+    "unsupported_fixed_native_operation",
+}
+
+
+def native_operation_bootstrap(kind: str, operation: str) -> str:
+    _require(
+        kind in {"candidate", "production"}
+        and operation
+        in {
+            "preflight",
+            "provision",
+            "seed",
+            "read",
+            "negative",
+            "backup_restore",
+            "backup_restore_failure",
+            "writer_a",
+            "writer_b",
+        }
+    )
+    if operation == "preflight":
+        return "passive_prerequisite"
+    if kind == "candidate":
+        return "explicit_candidate"
+    return "explicit_native_maintenance" if operation == "provision" else "automatic_production"
+
+
+def native_refusal_payload(stdout: str, operation: str, returncode: int) -> dict[str, Any] | None:
+    """Retain only the existing finite child refusal, never arbitrary output."""
+    if returncode != 2 or len(stdout.encode("utf-8")) > 4096:
+        return None
+    try:
+        value = json.loads(stdout)
+        if (
+            isinstance(value, dict)
+            and set(value) == {"schema_version", "operation", "status", "reason"}
+            and type(value["schema_version"]) is int
+            and value["schema_version"] == RUN_SCHEMA
+            and value["operation"] == operation
+            and value["status"] == "refused"
+            and isinstance(value["reason"], str)
+            and value["reason"] in NATIVE_REFUSAL_REASONS | {"native_operation_failed"}
+        ):
+            return value
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def _native_operation_evidence(
+    record: dict[str, Any], phase: dict[str, Any], bundle: dict[str, Any], directory: Path
+) -> None:
+    payload, operation = record["payload"], record["operation"]
+    root = _guest_path(record["fixture_path"], phase["platform"])
+    filesystem = payload["facts"]["filesystem"]
+    scope = filesystem["scope"]
+    _require(scope in {"root", "parent"})
+    _require(filesystem["observed_path"] == str(root if scope == "root" else root.parent))
+    _require(operation == "preflight" or scope == ("parent" if operation == "provision" else "root"))
+    if operation != "provision" or phase["acceptance_kind"] != "production":
+        return
+    probe = bundle[phase["mode"] + "_probe"]
+    environment = (
+        _guest_path(bundle["checkout"], phase["platform"]) / ".venv"
+        if phase["mode"] == "source"
+        else _guest_path(bundle["_bundle_path"], phase["platform"]) / "wheel-env"
+    )
+    path = environment / ("Scripts/hermes-mordred.exe" if phase["platform"] == "win32" else "bin/hermes-mordred")
+    entrypoint = probe["maintenance_entrypoint"]
+    _require(entrypoint["path"] == str(path) and _hex(entrypoint["sha256"], 64))
+    _require(sha256_file(_artifact_ref(directory, record["maintenance_entrypoint_ref"])) == entrypoint["sha256"])
+    homes = [root] if root.name.endswith("-crash") else [root, root / "profiles/work", root / "profiles/other"]
+    expected = [(str(home), [str(path), "encryption", "enable", "memory"]) for home in homes]
+    expected.append((str(root), [str(path), "databases", "encrypt"]))
+    ceremonies = payload["ceremonies"]
+    _require(isinstance(ceremonies, list) and len(ceremonies) == len(expected))
+    previous = record["started_at"]
+    for row, (home, argv) in zip(ceremonies, expected, strict=True):
+        _require(set(row) == {"home", "argv", "entrypoint_sha256", "started_at", "finished_at", "returncode"})
+        _require(row["home"] == home and row["argv"] == argv and row["entrypoint_sha256"] == entrypoint["sha256"])
+        _require(type(row["returncode"]) is int and row["returncode"] == 0)
+        _require(_timestamp(row["started_at"]) and _timestamp(row["finished_at"]))
+        _require(previous <= row["started_at"] <= row["finished_at"] <= record["finished_at"])
+        previous = row["finished_at"]
+
+
 def _native_payload(payload: dict[str, Any], phase: dict[str, Any]) -> None:
     _require(payload["schema_version"] == RUN_SCHEMA and payload["status"] == "executed")
-    _require(payload["acceptance_kind"] == phase["acceptance_kind"] and payload["bootstrap"] == phase["bootstrap"])
+    _require(payload["acceptance_kind"] == phase["acceptance_kind"])
+    _require(payload["bootstrap"] == native_operation_bootstrap(phase["acceptance_kind"], payload["operation"]))
     _require(payload["implementation_sha256"] == phase["native_implementation_sha256"])
     facts = payload["facts"]
     _require(
@@ -2492,7 +2607,10 @@ def _collector_arguments(
     else:
         argv = record["argv"]
         _require(len(argv) == 3 and argv[0] == python and argv[2] == record["operation"])
-        _require(_guest_path(argv[1], phase["platform"]).name == "hermes")
+        _require(
+            _guest_path(argv[1], phase["platform"]).name
+            == ("native-collector" if record["operation"] in {"preflight", "provision"} else "hermes")
+        )
         expected = (
             f"import sys, runpy; sys.path.insert(0, {str(root)!r}); "
             f"raise SystemExit(runpy.run_path({str(helper)!r})['main'](sys.argv[1]))\n"
@@ -2547,6 +2665,7 @@ def _native_execution_report(phase: dict[str, Any], directory: Path) -> None:
             payload = record["payload"]
             _collector_arguments(record, phase, bundle, directory)
             _native_payload(payload, phase)
+            _native_operation_evidence(record, phase, bundle, directory)
             _require(record["operation"] == payload["operation"] and record["fixture_path"] in roots.values())
             operations.append((record["operation"], record["fixture_path"]))
             if record["operation"] in {"seed", "read"}:
@@ -2815,8 +2934,8 @@ def _native_python(context: dict[str, Any]) -> Path:
     return _python(base)
 
 
-def _native_driver(context: dict[str, Any], directory: Path) -> Path:
-    path = directory / "hermes"
+def _native_driver(context: dict[str, Any], directory: Path, *, passive: bool = False) -> Path:
+    path = directory / ("native-collector" if passive else "hermes")
     if not path.exists():
         helper = context["bundle"] / "tests/_dbcrypt_acceptance_native.py"
         code = (
@@ -2868,6 +2987,8 @@ def _collector_child(context: dict[str, Any], root: Path, operation: str, direct
     environment = _native_environment(context, root)
     driver = _native_driver(context, directory)
     environment["MORDRED_DBCRYPT_PRODUCTION_DRIVER"] = str(driver)
+    if operation in {"preflight", "provision"}:
+        driver = _native_driver(context, directory, passive=True)
     if context["kind"] == "candidate":
         code = f"import runpy; raise SystemExit(runpy.run_path({str(helper)!r})['main']({operation!r}))"
         argv = [str(_native_python(context)), "-c", code]
@@ -2880,6 +3001,9 @@ def _collector_child(context: dict[str, Any], root: Path, operation: str, direct
         mode=context["mode"],
         bundle_manifest_sha256=sha256_file(context["bundle"] / "manifest.json"),
     )
+    refusal = native_refusal_payload(result.stdout, operation, result.returncode)
+    if refusal is not None:
+        record["refusal"] = refusal
     try:
         payload = json.loads(result.stdout)
         _require(result.returncode == 0 and payload["schema_version"] == RUN_SCHEMA and payload["status"] == "executed")
@@ -2894,6 +3018,18 @@ def _collector_child(context: dict[str, Any], root: Path, operation: str, direct
         )
     except (ValueError, KeyError, TypeError) as exc:
         raise AcceptanceRefused("native_child_refused_or_failed:" + operation) from exc
+    if operation == "provision" and context["kind"] == "production":
+        entrypoint = Path(probe["maintenance_entrypoint"]["path"])
+        _require(sha256_file(entrypoint) == probe["maintenance_entrypoint"]["sha256"])
+        copied = directory / "maintenance-entrypoint"
+        if not copied.exists():
+            shutil.copyfile(entrypoint, copied)
+            copied.chmod(0o600)
+        _require(sha256_file(copied) == probe["maintenance_entrypoint"]["sha256"])
+        record["maintenance_entrypoint_ref"] = {
+            "path": copied.relative_to(directory.parent).as_posix(),
+            "sha256": sha256_file(copied),
+        }
     record.update(
         import_probe=probe,
         payload=payload,

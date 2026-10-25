@@ -73,7 +73,11 @@ def bundle_fixture(tmp_path: Path) -> tuple[object, Path, dict]:
         driver = env / "lib/site-packages/sqlcipher3/dbapi2.py"
         driver.parent.mkdir(parents=True, exist_ok=True)
         driver.write_text("fixture driver, never executed")
+        entrypoint = env / ("Scripts/hermes-mordred.exe" if sys.platform == "win32" else "bin/hermes-mordred")
+        entrypoint.parent.mkdir(parents=True, exist_ok=True)
+        entrypoint.write_bytes(b"synthetic installed entrypoint; never executed")
         probes[mode + "_probe"] = {
+            "maintenance_entrypoint": {"path": str(entrypoint), "sha256": tool.sha256_file(entrypoint)},
             "product_file": str(origin),
             "interpreter": str(tool._python(env)),
             "python_version": "3.13.0",
@@ -2811,3 +2815,60 @@ def test_startup_posix_fixture_skip_precedes_fixture_setup(name):
     assert {kw.arg: ast.literal_eval(kw.value) for kw in skips[0].keywords} == {
         "reason": "uses the POSIX authority fixture; Windows native proof is explicit",
     }
+
+
+def test_offline_native_evidence_rejects_runtime_label_on_passive_preflight(tmp_path):
+    tool, spool, phase = complete_native_phase_fixture(tmp_path)
+    phase["executions"][0]["payload"]["bootstrap"] = "automatic_production"
+    with pytest.raises(tool.AcceptanceRefused):
+        tool.validate_native_phase_evidence(phase, directory=spool)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "runtime_provision",
+        "passive_read",
+        "runtime_preflight_driver",
+        "missing_ceremony",
+        "extra_ceremony",
+        "wrong_home",
+        "fake_command",
+        "wrong_entrypoint_hash",
+        "wrong_entrypoint_bytes",
+        "nonzero_ceremony",
+        "out_of_order",
+        "fabricated_root",
+    ],
+)
+def test_native_ceremony_evidence_rejects_role_or_entrypoint_substitution(tmp_path, damage):
+    tool, spool, phase = complete_native_phase_fixture(tmp_path)
+    provision = next(row for row in phase["executions"] if row.get("operation") == "provision")
+    preflight = phase["executions"][0]
+    read = phase["executions"][-1]
+    if damage == "runtime_provision":
+        provision["payload"]["bootstrap"] = "automatic_production"
+    elif damage == "passive_read":
+        read["payload"]["bootstrap"] = "passive_prerequisite"
+    elif damage == "runtime_preflight_driver":
+        preflight["argv"][1] = str(Path(preflight["argv"][1]).with_name("hermes"))
+    elif damage == "missing_ceremony":
+        provision["payload"]["ceremonies"].pop()
+    elif damage == "extra_ceremony":
+        provision["payload"]["ceremonies"].append(provision["payload"]["ceremonies"][0])
+    elif damage == "wrong_home":
+        provision["payload"]["ceremonies"][0]["home"] += "-other"
+    elif damage == "fake_command":
+        provision["payload"]["ceremonies"][0]["argv"] = ["hermes", "provision"]
+    elif damage == "wrong_entrypoint_hash":
+        provision["payload"]["ceremonies"][0]["entrypoint_sha256"] = "0" * 64
+    elif damage == "wrong_entrypoint_bytes":
+        (spool / provision["maintenance_entrypoint_ref"]["path"]).write_bytes(b"substituted console code")
+    elif damage == "nonzero_ceremony":
+        provision["payload"]["ceremonies"][0]["returncode"] = 1
+    elif damage == "out_of_order":
+        provision["payload"]["ceremonies"].reverse()
+    elif damage == "fabricated_root":
+        provision["payload"]["facts"]["filesystem"]["scope"] = "root"
+    with pytest.raises(tool.AcceptanceRefused):
+        tool.validate_native_phase_evidence(phase, directory=spool)

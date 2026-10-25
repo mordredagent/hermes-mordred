@@ -118,16 +118,42 @@ def complete_phase(
         f"raise SystemExit(runpy.run_path({str(helper_path)!r})['main'](sys.argv[1]))\n"
     )
     driver_ref = {"path": driver.relative_to(spool).as_posix(), "sha256": tool.sha256_file(driver)}
+    passive_driver = outputs / "native-collector"
+    passive_driver.write_bytes(driver.read_bytes())
+    passive_ref = {"path": passive_driver.relative_to(spool).as_posix(), "sha256": tool.sha256_file(passive_driver)}
+    entrypoint = manifest[mode + "_probe"]["maintenance_entrypoint"]
+    entrypoint_copy = outputs / "maintenance-entrypoint"
+    entrypoint_copy.write_bytes(Path(entrypoint["path"]).read_bytes())
+    entrypoint_ref = {
+        "path": entrypoint_copy.relative_to(spool).as_posix(),
+        "sha256": tool.sha256_file(entrypoint_copy),
+    }
 
     def payload(operation: str, *, persistence: bool = True, kind: str | None = None) -> dict[str, Any]:
         selected = kind or ("persistence" if persistence else "negative")
-        own_facts = {**facts, "filesystem": {"method": "checked_private_posix", "identity": fixtures[selected]["root"]}}
+        own_facts = {
+            **facts,
+            "filesystem": {
+                "method": "checked_private_posix",
+                "identity": fixtures[selected]["root"],
+                "scope": "parent" if operation in {"preflight", "provision"} else "root",
+                "observed_path": str(
+                    Path(roots[selected]).parent if operation in {"preflight", "provision"} else Path(roots[selected])
+                ),
+            },
+        }
         return {
             "schema_version": 2,
             "status": "executed",
             "operation": operation,
             "acceptance_kind": "production",
-            "bootstrap": "automatic_production",
+            "bootstrap": (
+                "passive_prerequisite"
+                if operation == "preflight"
+                else "explicit_native_maintenance"
+                if operation == "provision"
+                else "automatic_production"
+            ),
             "implementation_sha256": phase["native_implementation_sha256"],
             "facts": own_facts,
             "fixture": fixtures[selected],
@@ -171,12 +197,30 @@ def complete_phase(
                         (Path(manifest["checkout"]) / ".venv" if mode == "source" else bundle_path / "wheel-env")
                         / "bin/python"
                     ),
-                    str(driver),
+                    str(passive_driver if operation in {"preflight", "provision"} else driver),
                     operation,
                 ],
-                "driver_ref": driver_ref,
+                "driver_ref": passive_ref if operation in {"preflight", "provision"} else driver_ref,
             }
         )
+    for record in phase["executions"]:
+        if record["operation"] != "provision":
+            continue
+        root = Path(record["fixture_path"])
+        homes = [root] if root.name.endswith("-crash") else [root, root / "profiles/work", root / "profiles/other"]
+        commands = [(home, ["encryption", "enable", "memory"]) for home in homes] + [(root, ["databases", "encrypt"])]
+        record["payload"]["ceremonies"] = [
+            {
+                "home": str(home),
+                "argv": [entrypoint["path"], *args],
+                "entrypoint_sha256": entrypoint["sha256"],
+                "started_at": 1024.0 + i / 10,
+                "finished_at": 1024.05 + i / 10,
+                "returncode": 0,
+            }
+            for i, (home, args) in enumerate(commands)
+        ]
+        record["maintenance_entrypoint_ref"] = entrypoint_ref
     source = fixtures["negative"]["source"]
     owned_copy = tool.validate_withdrawable_helper(copy_manifest, production=production, parent=parent)
     withdrawal = {
@@ -326,6 +370,10 @@ def complete_phase(
     for index, record in enumerate(phase["executions"]):
         record["started_at"] = 1024.0 + index if index < 6 else 1030.0 + (index - 6) * 10
         record["finished_at"] = record["started_at"] + (0.5 if index < 6 else 9.0)
+        for i, ceremony in enumerate(record.get("payload", {}).get("ceremonies", [])):
+            ceremony["started_at"] = record["started_at"] + i / 10
+            ceremony["finished_at"] = ceremony["started_at"] + 0.05
+    phase["native_facts"] = phase["executions"][-1]["payload"]["facts"]
     phase["test_counts"] = {
         "passed": sum(row.get("counts", {}).get("passed", 0) for row in phase["executions"]),
         "collected": sum(len(row.get("nodeids", [])) for row in phase["executions"]),

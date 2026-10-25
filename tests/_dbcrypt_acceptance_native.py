@@ -355,6 +355,7 @@ def native_facts(root: Path) -> dict[str, Any]:
         with open_private_directory(observed_root):
             identity = identify_root(observed_root)
         facts["filesystem"] = {"method": "checked_private_posix", "identity": asdict(identity)}
+    facts["filesystem"].update(observed_path=str(observed_root), scope="root" if observed_root == root else "parent")
     facts.update(
         helper={
             "path": str(helper.resolve()),
@@ -477,6 +478,48 @@ def _fresh_memory(home: Path, *, seed: bool) -> dict[str, Any]:
     return dict(json.loads(result.stdout))
 
 
+def _maintenance(home: Path, arguments: list[str]) -> dict[str, Any]:
+    """Execute the installed, genuine public ceremony; never imitate its argv."""
+    from importlib.metadata import distribution
+
+    entry = tuple(distribution("hermes-mordred").entry_points.select(group="console_scripts", name="hermes-mordred"))
+    assert len(entry) == 1 and entry[0].value == "mordred_hermes.wizard.cli:main"
+    executable = Path(sys.prefix) / ("Scripts/hermes-mordred.exe" if sys.platform == "win32" else "bin/hermes-mordred")
+    digest = _digest(executable)
+    manifest = json.loads((Path(os.environ["DBCRYPT_BUNDLE"]) / "manifest.json").read_text())
+    expected = manifest[os.environ["MORDRED_DBCRYPT_ACCEPTANCE_MODE"] + "_probe"]["maintenance_entrypoint"]
+    if expected != {"path": str(executable), "sha256": digest}:
+        raise RuntimeError("owned_checked_distribution_required")
+    if arguments not in (["encryption", "enable", "memory"], ["databases", "encrypt"]):
+        raise RuntimeError("unsupported_fixed_native_operation")
+    argv = [str(executable), *arguments]
+    started = time.time()
+    result = subprocess.run(
+        argv,
+        env={**os.environ, "HERMES_HOME": str(home)},
+        cwd=Path(__file__).resolve().parents[1],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=180,
+        check=False,
+    )
+    finished = time.time()
+    if result.returncode != 0:
+        raise RuntimeError(
+            "native_memory_enable_failed_retain_root" if arguments[0] == "encryption" else "native_operation_failed"
+        )
+    assert _digest(executable) == digest, "native maintenance entrypoint changed"
+    return {
+        "home": str(home),
+        "argv": argv,
+        "entrypoint_sha256": digest,
+        "started_at": started,
+        "finished_at": finished,
+        "returncode": result.returncode,
+    }
+
+
 def provision(root: Path) -> dict[str, Any]:
     from mordred_hermes import dbcrypt
     from mordred_hermes._database_lifecycle import acquire_exclusive
@@ -495,22 +538,29 @@ def provision(root: Path) -> dict[str, Any]:
         with opening(root / "profiles", create=True):
             pass
     require_enabled = _interfaces()
+    ceremonies = []
+    production = os.environ["MORDRED_DBCRYPT_ACCEPTANCE_KIND"] == "production"
     for _name, home in homes:
         with opening(home, create=True):
             pass
-        if memory_cli.enable(home=home, root=home / "mordred/keyvault/vault", platform=sys.platform) != 0:
+        if production:
+            ceremonies.append(_maintenance(home, ["encryption", "enable", "memory"]))
+        elif memory_cli.enable(home=home, root=home / "mordred/keyvault/vault", platform=sys.platform) != 0:
             raise RuntimeError("native_memory_enable_failed_retain_root")
         require_enabled(root=home)
         _fresh_memory(home, seed=True)
         _fresh_memory(home, seed=False)
-    with acquire_exclusive(root) as lease:
-        enroll_database_source(root=root, lease=lease)
-    # Entry point owns its own EX; never upgrade a live SH or pass a raw key.
-    _migrate.migrate(root, None, arm=dbcrypt.arm)
+    if production:
+        ceremonies.append(_maintenance(root, ["databases", "encrypt"]))
+    else:
+        with acquire_exclusive(root) as lease:
+            enroll_database_source(root=root, lease=lease)
+        # Candidate entry point owns its EX; never upgrade a live SH.
+        _migrate.migrate(root, None, arm=dbcrypt.arm)
     from mordred_hermes.keyvault._database_authority import observe_database_source
 
     snapshot = observe_database_source(root=root)
-    return {"fixture": {"root": asdict(snapshot.root), "source": asdict(snapshot)}}
+    return {"fixture": {"root": asdict(snapshot.root), "source": asdict(snapshot)}, "ceremonies": ceremonies}
 
 
 def _telegram_store(home: Path) -> Any:
@@ -820,14 +870,11 @@ def _telegram(home: Path, seed: bool) -> str:
     assert reopened_archive.load_index().account_id == 7
     assert [(message.id, message.text) for message in reopened_archive.load_messages(11)] == [(1, TEXT)]
     store = open_import_store(home)
-    try:
-        hits = store.search("日本語", source="telegram")
-        assert len(hits) == 1
-        parts = store.parts_for(hit.part_uid for hit in hits)
-        assert [item.part.text for item in parts.values()] == [TEXT]
-        return logical_digest([{"id": hit.source_uid, "text": TEXT} for hit in hits])
-    finally:
-        store.close()
+    hits = store.search("日本語", source="telegram")
+    assert len(hits) == 1
+    parts = store.parts_for(hit.part_uid for hit in hits)
+    assert [item.part.text for item in parts.values()] == [TEXT]
+    return logical_digest([{"id": hit.source_uid, "text": TEXT} for hit in hits])
 
 
 def _mail(home: Path, seed: bool) -> str:
@@ -851,20 +898,17 @@ def _mail(home: Path, seed: bool) -> str:
     )
     if seed:
         store = open_import_store(home)
-        try:
-            request = mail_cli._Request(
-                (MboxBytes(b"From synthetic Thu Oct 1 12:00:00 2026\n" + data),),
-                "native-mbox",
-                (credentials.address,),
-                "Sent",
-                False,
-                True,
-                0,
-            )
-            with mail_cli._writer_lock(home):
-                assert mail_cli._locked_import(store, request) == 0
-        finally:
-            store.close()
+        request = mail_cli._Request(
+            (MboxBytes(b"From synthetic Thu Oct 1 12:00:00 2026\n" + data),),
+            "native-mbox",
+            (credentials.address,),
+            "Sent",
+            False,
+            True,
+            0,
+        )
+        with mail_cli._writer_lock(home):
+            assert mail_cli._locked_import(store, request) == 0
         server = FakeImapServer(
             {"INBOX": FakeMailbox(11, messages={1: FakeMessage(data)})},
             user=credentials.address,
@@ -879,14 +923,11 @@ def _mail(home: Path, seed: bool) -> str:
         assert first.inserted == 1 and second.inserted == 0 and not first.partial and not second.partial
         assert not server.violations
     store = open_import_store(home)
-    try:
-        found = store.search("日本語", source="mail")
-        assert len(found) == 2
-        hydrated = store.parts_for(hit.part_uid for hit in found)
-        assert all(item.part.text == TEXT for item in hydrated.values())
-        return logical_digest([{"id": hit.source_uid, "text": TEXT} for hit in found])
-    finally:
-        store.close()
+    found = store.search("日本語", source="mail")
+    assert len(found) == 2
+    hydrated = store.parts_for(hit.part_uid for hit in found)
+    assert all(item.part.text == TEXT for item in hydrated.values())
+    return logical_digest([{"id": hit.source_uid, "text": TEXT} for hit in found])
 
 
 def _scoped_siblings(home: Path, authority: Any, seed: bool) -> str:
@@ -1085,25 +1126,22 @@ def _forget_roles(root: Path) -> None:
     home = root / "profiles/other"
     mail = MailSecretStore(home / "mordred/mail", audit_sink=lambda _entry: None)
     store = open_import_store(home)
-    try:
-        # Real native retirement must precede this owned SQL failure. A later
-        # unnamed retry cannot turn absent credentials into proof of erasure.
-        with patch.object(store, "delete_source", side_effect=RuntimeError("owned post-retirement SQL fault")):
-            try:
-                forget(mail, home, rows=True, open_store=lambda _home: store)
-            except MailForgetError:
-                pass
-            else:
-                raise AssertionError("owned SQL failure was hidden")
-        assert mail.load() is None
-        unknown = forget(mail, home, rows=True, open_store=lambda _home: store)
-        assert unknown.warnings == ("account_unknown",)
-        completed = forget(mail, home, account="native_sync", rows=True, open_store=lambda _home: store)
-        assert completed.warnings == () and completed.account == "native_sync"
-        assert store.search("日本語", source="telegram")
-        assert store.search("日本語", source="mail")  # independent native-mbox account remains.
-    finally:
-        store.close()
+    # Real native retirement must precede this owned SQL failure. A later
+    # unnamed retry cannot turn absent credentials into proof of erasure.
+    with patch.object(store, "delete_source", side_effect=RuntimeError("owned post-retirement SQL fault")):
+        try:
+            forget(mail, home, rows=True, open_store=lambda _home: store)
+        except MailForgetError:
+            pass
+        else:
+            raise AssertionError("owned SQL failure was hidden")
+    assert mail.load() is None
+    unknown = forget(mail, home, rows=True, open_store=lambda _home: store)
+    assert unknown.warnings == ("account_unknown",)
+    completed = forget(mail, home, account="native_sync", rows=True, open_store=lambda _home: store)
+    assert completed.warnings == () and completed.account == "native_sync"
+    assert store.search("日本語", source="telegram")
+    assert store.search("日本語", source="mail")  # independent native-mbox account remains.
     assert forget_telegram_storage(home=home, remove_records=True) == 1
     telegram = _telegram_store(home)
     if sys.platform == "win32":
@@ -1675,28 +1713,7 @@ def main(name: str) -> int:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             payload = operation(name)
     except BaseException as exc:
-        safe = {
-            "integrated_native_memory_and_none_conversion_contract_required",
-            "native_platform_required",
-            "explicit_native_collector_optin_required",
-            "canonical_synthetic_native_root_required",
-            "isolated_native_home_required_before_import",
-            "ordinary_windows_token_required",
-            "native_cng_provider_unavailable",
-            "native_cng_implementation_unobservable",
-            "hardware_only_cng_provider_required",
-            "real_ec2_tpm_device_required",
-            "amazon_tpm_manufacturer_unobservable",
-            "native_emulator_and_ambient_keys_forbidden",
-            "explicit_production_native_helper_required",
-            "candidate_driver_or_inventory_unavailable",
-            "owned_checked_distribution_required",
-            "native_provision_requires_new_root_no_repair",
-            "native_memory_enable_failed_retain_root",
-            "requested_presence_must_refuse_before_writes",
-            "damaging_operations_require_separate_negative_root",
-            "unsupported_fixed_native_operation",
-        }
+        safe = _tool()["NATIVE_REFUSAL_REASONS"]
         reason = str(exc) if type(exc) is RuntimeError and str(exc) in safe else "native_operation_failed"
         print(json.dumps({"schema_version": 2, "operation": name, "status": "refused", "reason": reason}))
         return 2
@@ -1707,9 +1724,7 @@ def main(name: str) -> int:
                 "operation": name,
                 "status": "executed",
                 "acceptance_kind": os.environ["MORDRED_DBCRYPT_ACCEPTANCE_KIND"],
-                "bootstrap": "explicit_candidate"
-                if os.environ["MORDRED_DBCRYPT_ACCEPTANCE_KIND"] == "candidate"
-                else "automatic_production",
+                "bootstrap": _tool()["native_operation_bootstrap"](os.environ["MORDRED_DBCRYPT_ACCEPTANCE_KIND"], name),
                 "implementation_sha256": _digest(Path(__file__)),
                 **payload,
             },
