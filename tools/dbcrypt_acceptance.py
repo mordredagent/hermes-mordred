@@ -3292,6 +3292,17 @@ def windows_package_commands(
     ]
 
 
+def canonical_windows_owner_sid(owner: str) -> str:
+    """Render RootIdentity's binary SID hex as canonical evidence text (MS-DTYP 2.4.2)."""
+    _require(isinstance(owner, str) and 24 <= len(owner) <= 136 and len(owner) % 2 == 0 and _hex(owner, len(owner)))
+    sid = bytes.fromhex(owner)
+    _require(sid[0] == 1 and 1 <= sid[1] <= 15 and len(sid) == 8 + 4 * sid[1])
+    authority = int.from_bytes(sid[2:8], "big")
+    authority_text = str(authority) if authority < 2**32 else f"0x{authority:012x}"
+    subauthorities = [str(int.from_bytes(sid[offset : offset + 4], "little")) for offset in range(8, len(sid), 4)]
+    return "S-1-" + authority_text + "-" + "-".join(subauthorities)
+
+
 def validate_package_observation(
     observed: dict[str, Any],
     *,
@@ -3333,7 +3344,7 @@ def validate_package_observation(
         and observed["versions"] == {"sqlite": "3.51.1", "sqlcipher": "4.12.0 community"}
     )
     _require(observed["filesystem"]["method"] == "checked_confidential_fixed_local_ntfs")
-    _require(observed["filesystem"]["identity"]["owner"] == observed["sid"])
+    _require(canonical_windows_owner_sid(observed["filesystem"]["identity"]["owner"]) == observed["sid"])
     expected = _package_build_inputs(bundle, directory, proof, headers)
     root = (
         bundle["checkout"]

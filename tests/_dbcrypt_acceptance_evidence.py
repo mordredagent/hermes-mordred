@@ -481,7 +481,7 @@ def complete_qualification(
     proof_path.write_text(json.dumps(proof))
     reference["sha256"] = tool.sha256_file(proof_path)
     fixture_plan = {
-        "owner_sid": "S-1-synthetic-ordinary",
+        "owner_sid": "S-1-5-21-128634620-2103407742-3662938906-1010",
         "test_root": r"C:\qualified",
         "non_ntfs_root": r"Q:\owned",
         "reparse_root": r"C:\qualified\reparse",
@@ -770,11 +770,14 @@ def packaged_pipeline_fixture(prepared: tuple[Any, ...], bundle_path: Path, monk
             "test_exports_absent": True,
             "driver_version": "0.5.7",
             "versions": {"sqlite": "3.51.1", "sqlcipher": "4.12.0 community"},
-            "sid": "S-1-synthetic-ordinary",
+            "sid": "S-1-5-21-128634620-2103407742-3662938906-1010",
             "fixture_root": wrapper["plan"]["test_root"],
             "filesystem": {
                 "method": "checked_confidential_fixed_local_ntfs",
-                "identity": {"owner": "S-1-synthetic-ordinary", "platform": "win32"},
+                "identity": {
+                    "owner": "010500000000000515000000fcceaa077e745f7d1a0354daf2030000",
+                    "platform": "win32",
+                },
             },
             "build_receipts": [str((receipt_dir / "receipt.json").relative_to(bundle_path)).replace("\\", "/")],
         }

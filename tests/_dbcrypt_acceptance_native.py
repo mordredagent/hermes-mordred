@@ -236,7 +236,8 @@ def package_qualification_observation() -> dict[str, Any]:
     assert str(root) == plan["test_root"]
     with open_confidential_directory(root):
         identity = asdict(identify_root(root))
-    assert identity["owner"] == plan["owner_sid"]
+    sid = tool["canonical_windows_owner_sid"](identity["owner"])
+    assert sid == plan["owner_sid"]
     mode = os.environ["MORDRED_DBCRYPT_VFS_PACKAGE_MODE"]
     dll = _observe_packaged_dll()
     connection = driver.connect(":memory:")
@@ -271,7 +272,7 @@ def package_qualification_observation() -> dict[str, Any]:
         "driver_version": importlib.metadata.version("sqlcipher3-wheels"),
         "versions": versions,
         "elevated": False,
-        "sid": identity["owner"],
+        "sid": sid,
         "fixture_root": str(root),
         "filesystem": {"method": "checked_confidential_fixed_local_ntfs", "identity": identity},
         "test_exports_absent": True,

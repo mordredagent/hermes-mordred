@@ -1854,6 +1854,175 @@ def packaged_pipeline_fixture(tmp_path: Path, monkeypatch):
     return (*prepare(old, bundle[1], monkeypatch), bundle[1])
 
 
+# Exact public owner bytes/text from the Run30 Windows collection failure.
+_WINDOWS_OWNER_HEX = "010500000000000515000000fcceaa077e745f7d1a0354daf2030000"
+_WINDOWS_OWNER_SID = "S-1-5-21-128634620-2103407742-3662938906-1010"
+
+
+@pytest.mark.parametrize("damage", [None, "wrong_rid", "truncated", "text_owner", "private_root_refused"])
+def test_package_collector_preserves_binary_owner_and_emits_canonical_sid(tmp_path, monkeypatch, damage):
+    import contextlib
+    import ctypes
+    import importlib.metadata
+    from types import SimpleNamespace
+
+    import sqlcipher3.dbapi2 as driver
+
+    from mordred_hermes import _database_locking_windows, _private_fs
+    from mordred_hermes._database_contracts import RootIdentity
+    from mordred_hermes.keyvault import kek
+    from tests import _dbcrypt_acceptance_native as collector
+
+    monkeypatch.setattr(kek, "_noop_audit", kek._noop_audit)
+    tool = acceptance_tool("dbcrypt_acceptance")
+    owner = _WINDOWS_OWNER_HEX
+    if damage == "truncated":
+        owner = owner[:-2]
+    elif damage == "text_owner":
+        owner = _WINDOWS_OWNER_SID
+    root = tmp_path / "physical-root"
+    fixture = tmp_path / "fixtures.json"
+    fixture.write_text("{}")
+    plan = {"test_root": str(root), "owner_sid": _WINDOWS_OWNER_SID}
+    if damage == "wrong_rid":
+        plan["owner_sid"] = _WINDOWS_OWNER_SID[:-4] + "1011"
+    identity = RootIdentity("win32", 17, "01" * 16, owner)
+
+    @contextlib.contextmanager
+    def checked_directory(path):
+        assert path == root
+        if damage == "private_root_refused":
+            raise _private_fs.PrivateFSError("unsafe", "test_root")
+        yield None
+
+    monkeypatch.setattr(_private_fs, "open_confidential_directory", checked_directory)
+    monkeypatch.setattr(_database_locking_windows, "identify_root", lambda path: identity)
+    monkeypatch.setattr(
+        ctypes, "windll", SimpleNamespace(shell32=SimpleNamespace(IsUserAnAdmin=lambda: 0)), raising=False
+    )
+    monkeypatch.setattr(collector, "sys", SimpleNamespace(platform="win32", executable=sys.executable))
+    for name in (
+        "MORDRED_DBCRYPT_COLLECTORS_TEST",
+        "MORDRED_DBCRYPT_ACCEPTANCE_KIND",
+        "MORDRED_WINKEY_HELPER",
+        "HERMES_MEMORY_KEY",
+        "MORDRED_DBCRYPT_CHECKED_LIBRARY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in {
+        "DBCRYPT_BUNDLE": str(tmp_path),
+        "MORDRED_DBCRYPT_VFS_DIAGNOSTIC": str(tmp_path / "diagnostic.json"),
+        "MORDRED_DBCRYPT_VFS_FIXTURES_DESCRIPTOR": str(fixture),
+        "MORDRED_DBCRYPT_TEST_ROOT": str(root),
+        "MORDRED_DBCRYPT_VFS_PACKAGE_MODE": "source",
+    }.items():
+        monkeypatch.setenv(name, value)
+    # Unavailable Windows/package IO boundaries; SID conversion and collector stay real.
+    boundary = {
+        **vars(tool),
+        "validate_bundle": lambda path: {"checkout": str(tmp_path), "commit": "a" * 40},
+        "_local_bundle_proof": lambda *args: {},
+        "validate_windows_diagnostic": lambda *args, **kwargs: {
+            "provenance": {"headers": {}},
+            "diagnostic": {"driver_native_sha256": "b" * 64},
+        },
+        "_qualification_fixture": lambda *args: plan,
+        "matching_build_receipts": lambda *args, **kwargs: [],
+        "validate_package_observation": lambda *args, **kwargs: None,
+    }
+    monkeypatch.setattr(collector, "_tool", lambda: boundary)
+    monkeypatch.setattr(collector, "_digest", lambda path: "a" * 64)
+    monkeypatch.setattr(
+        collector,
+        "_observe_packaged_dll",
+        lambda: dict.fromkeys(
+            (
+                "path",
+                "sha256",
+                "driver_native",
+                "driver_native_sha256",
+                "record",
+                "record_sha256",
+                "record_size",
+                "installed_at",
+            ),
+            "b" * 64,
+        ),
+    )
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.5.7")
+    monkeypatch.setattr(
+        driver,
+        "connect",
+        lambda path: SimpleNamespace(
+            execute=lambda query: SimpleNamespace(fetchone=lambda: ("4.12.0 community",)),
+            close=lambda: None,
+        ),
+    )
+    if damage is not None:
+        with pytest.raises((AssertionError, ValueError, _private_fs.PrivateFSError)):
+            collector.package_qualification_observation()
+    else:
+        observed = collector.package_qualification_observation()
+        assert observed["sid"] == _WINDOWS_OWNER_SID
+        assert observed["filesystem"]["identity"] == {
+            "platform": "win32",
+            "volume": 17,
+            "file_id": "01" * 16,
+            "owner": _WINDOWS_OWNER_HEX,
+        }
+
+
+@pytest.mark.parametrize(
+    ("owner", "sid", "valid"),
+    [
+        pytest.param(_WINDOWS_OWNER_HEX, _WINDOWS_OWNER_SID, True, id="actual_windows_owner"),
+        pytest.param("010100000000000512000000", "S-1-5-18", True, id="system_sid"),
+        pytest.param("01010000ffffffffffffffff", "S-1-4294967295-4294967295", True, id="uint32_max"),
+        pytest.param("010100010000000000000000", "S-1-0x000100000000-0", True, id="hex_authority"),
+        pytest.param(_WINDOWS_OWNER_HEX, _WINDOWS_OWNER_SID[:-4] + "1011", False, id="wrong_rid"),
+        pytest.param(_WINDOWS_OWNER_HEX, _WINDOWS_OWNER_SID.replace("S-1-5", "S-1-6"), False, id="wrong_authority"),
+        pytest.param(_WINDOWS_OWNER_HEX, _WINDOWS_OWNER_SID + "-0", False, id="extra_subauthority"),
+        pytest.param(_WINDOWS_OWNER_HEX, _WINDOWS_OWNER_SID.replace("-1010", "-01010"), False, id="leading_zero"),
+        pytest.param(_WINDOWS_OWNER_HEX, _WINDOWS_OWNER_SID.replace("-1010", "-4294967296"), False, id="rid_overflow"),
+        pytest.param(_WINDOWS_OWNER_HEX, "S-1-281474976710656-0", False, id="authority_overflow"),
+        pytest.param(_WINDOWS_OWNER_HEX, _WINDOWS_OWNER_SID + " ", False, id="trailing_text"),
+        pytest.param(_WINDOWS_OWNER_SID, _WINDOWS_OWNER_SID, False, id="text_owner_alias"),
+        pytest.param("S-1-synthetic-ordinary", "S-1-synthetic-ordinary", False, id="fake_alias"),
+        *[
+            pytest.param(owner, owner, False, id=name)
+            for name, owner in (
+                ("empty", ""),
+                ("invalid_hex", "gg"),
+                ("short_header", "0105"),
+                ("odd_hex", _WINDOWS_OWNER_HEX[:-1]),
+                ("truncated", _WINDOWS_OWNER_HEX[:-2]),
+                ("trailing_bytes", _WINDOWS_OWNER_HEX + "00"),
+                ("wrong_revision", "02" + _WINDOWS_OWNER_HEX[2:]),
+                ("wrong_count", "0104" + _WINDOWS_OWNER_HEX[4:]),
+                ("excess_count", "0110000000000005" + "00000000" * 16),
+                ("zero_count", "0100000000000005"),
+                ("uppercase_hex", _WINDOWS_OWNER_HEX.upper()),
+                ("hex_whitespace", "01 " + _WINDOWS_OWNER_HEX[2:]),
+            )
+        ],
+    ],
+)
+def test_package_validator_requires_canonical_sid_equivalence(tmp_path, monkeypatch, owner, sid, valid):
+    tool, root, _checkout, manifest, results, _fixtures, bundle = packaged_pipeline_fixture(tmp_path, monkeypatch)
+    observed = json.loads((results["source"][0] / "run.json").read_text())["qualification"]
+    observed["filesystem"]["identity"]["owner"] = owner
+    observed["sid"] = sid
+    proof = tool._local_bundle_proof(bundle, manifest)
+    proof["bundle_path"] = r"C:\bundle"
+    diagnostic = json.loads((root / "provenance.json").read_text())
+    kwargs = dict(mode="source", bundle=manifest, proof=proof, directory=bundle, headers=diagnostic["headers"])
+    if valid:
+        tool.validate_package_observation(observed, **kwargs)
+    else:
+        with pytest.raises(ValueError, match="inconsistent bundle provenance"):
+            tool.validate_package_observation(observed, **kwargs)
+
+
 def test_packaged_pipeline_assembles_real_inert_artifact_closure_with_distinct_dlls(
     tmp_path: Path, monkeypatch
 ) -> None:
