@@ -1813,28 +1813,133 @@ def test_public_read_generation_follows_the_actual_provider_contract(platform: s
             tool._public_read(payload, phase, bundle, persistence=True)
 
 
-def test_packaged_qualification_has_fixed_commands_without_native_custody_gate() -> None:
+@pytest.mark.parametrize("mode", ["source", "wheel"])
+def test_packaged_qualification_has_fixed_commands_without_native_custody_gate(mode: str) -> None:
     tool = acceptance_tool("dbcrypt_acceptance")
     rows = tool.windows_package_commands(
         checkout=Path("/checkout"),
         bundle=Path("/bundle"),
-        mode="wheel",
+        mode=mode,
         basetemp=Path("/private/temp"),
         configuration=Path("/bundle/sdist/pyproject.toml"),
     )
     assert len(rows) == 2
     assert rows[0]["argv"] == [*rows[1]["argv"], "--collect-only"]
-    assert rows[1]["argv"][:7] == [
-        "uv",
-        "run",
-        "--no-project",
-        "--python",
-        "/bundle/wheel-env/Scripts/python.exe",
-        "python",
-        "-m",
+    prefix = (
+        ["uv", "run", "--project", "/checkout", "python", "-m", "pytest"]
+        if mode == "source"
+        else [
+            "uv",
+            "run",
+            "--no-project",
+            "--python",
+            "/bundle/wheel-env/Scripts/python.exe",
+            "python",
+            "-m",
+            "pytest",
+        ]
+    )
+    for row in rows:
+        assert row["argv"] == [*prefix, *row["pytest_argv"]]
+        args = row["pytest_argv"]
+        assert args[args.index("--rootdir") + 1] == "/bundle"
+        assert args[args.index("-c") + 1] == "/bundle/sdist/pyproject.toml"
+        assert args[args.index("--basetemp") + 1] == "/private/temp"
+        assert args[args.index("-k") + 1] == tool.WINDOWS_RELEASE_SELECTION
+        assert args[args.index("-p") + 1] == "tests._dbcrypt_acceptance_native"
+        assert row["env"] == {"MORDRED_DBCRYPT_WINDOWS_VFS_TEST": "1", "MORDRED_DBCRYPT_VFS_PACKAGE_QUALIFY": "1"}
+
+
+@pytest.mark.parametrize("mode", ["source", "wheel"])
+def test_packaged_pytest_preserves_module_identity_outside_sdist_config(tmp_path: Path, mode: str) -> None:
+    """The shared command tail must retain identity for sibling bundle tests."""
+    import subprocess
+
+    tool = acceptance_tool("dbcrypt_acceptance")
+    bundle = tmp_path / "bundle"
+    configuration = bundle / "extracted-sdist/package/pyproject.toml"
+    configuration.parent.mkdir(parents=True)
+    configuration.write_text(
+        '[tool.pytest.ini_options]\nmarkers = ["integration: inert identity probe"]\nxfail_strict = true\n'
+    )
+    module = bundle / "tests/integration/test_dbcrypt_windows_vfs.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "import pytest\npytestmark = pytest.mark.integration\n"
+        "def test_first():\n    pass\n"
+        "def test_second():\n    pass\n"
+        "def test_checkedtest_excluded():\n    raise AssertionError('must be deselected')\n"
+    )
+    (bundle / "inert_identity.py").write_text(
+        "import json, os\nfrom pathlib import Path\n"
+        "evidence = {'deselected': [], 'reports': []}\n"
+        "def pytest_configure(config):\n"
+        "    evidence.update(root=str(config.rootpath), configuration=str(config.inipath),\n"
+        "                    xfail_strict=config.getini('xfail_strict'))\n"
+        "def pytest_collection_finish(session):\n"
+        "    evidence['nodeids'] = [item.nodeid for item in session.items]\n"
+        "def pytest_deselected(items):\n"
+        "    evidence['deselected'].extend(item.nodeid for item in items)\n"
+        "def pytest_runtest_logreport(report):\n"
+        "    evidence['reports'].append([report.nodeid, report.when, report.outcome])\n"
+        "def pytest_sessionfinish(session, exitstatus):\n"
+        "    evidence['exitstatus'] = int(exitstatus)\n"
+        "    Path(os.environ['IDENTITY_REPORT']).write_text(json.dumps(evidence))\n"
+    )
+    home, temporary = tmp_path / "home", tmp_path / "temporary"
+    home.mkdir()
+    temporary.mkdir()
+    environment = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT", "WINDIR") if key in os.environ}
+    environment.update(
+        HOME=str(home),
+        USERPROFILE=str(home),
+        HERMES_HOME=str(home / "unused-hermes"),
+        TMPDIR=str(temporary),
+        TMP=str(temporary),
+        TEMP=str(temporary),
+        PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
+        PYTHONDONTWRITEBYTECODE="1",
+    )
+    rows = tool.windows_package_commands(
+        checkout=tmp_path / "unused-checkout",
+        bundle=bundle,
+        mode=mode,
+        basetemp=temporary / "pytest",
+        configuration=configuration,
+    )
+    expected = [
+        "tests/integration/test_dbcrypt_windows_vfs.py::test_first",
+        "tests/integration/test_dbcrypt_windows_vfs.py::test_second",
     ]
-    assert rows[1]["argv"][rows[1]["argv"].index("-k") + 1] == tool.WINDOWS_RELEASE_SELECTION
-    assert rows[1]["env"] == {"MORDRED_DBCRYPT_WINDOWS_VFS_TEST": "1", "MORDRED_DBCRYPT_VFS_PACKAGE_QUALIFY": "1"}
+    for row in rows:
+        args = list(row["pytest_argv"])
+        # Replace only the native plugin; retain the factory's shared pytest tail.
+        args[args.index("-p") + 1] = "inert_identity"
+        report = tmp_path / f"{row['action']}.json"
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", *args, "--noconftest", "-p", "no:cacheprovider"],
+            cwd=bundle,
+            env={**environment, **row["env"], "IDENTITY_REPORT": str(report)},
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        observed = json.loads(report.read_text())
+        assert observed["configuration"] == str(configuration)
+        assert observed["xfail_strict"] is True
+        assert observed["nodeids"] == expected
+        assert observed["root"] == str(bundle)
+        assert observed["deselected"] == ["tests/integration/test_dbcrypt_windows_vfs.py::test_checkedtest_excluded"]
+        assert all(not node.startswith("::") for node in observed["nodeids"] + observed["deselected"])
+        assert observed["exitstatus"] == 0
+        assert observed["reports"] == (
+            []
+            if row["action"] == "collect"
+            else [[node, phase, "passed"] for node in expected for phase in ("setup", "call", "teardown")]
+        )
+    assert not (home / "unused-hermes").exists()
 
 
 def test_legacy_complete_descriptor_cannot_admit_packaged_candidate(tmp_path: Path, monkeypatch) -> None:

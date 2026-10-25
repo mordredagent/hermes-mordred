@@ -3266,6 +3266,8 @@ def windows_package_commands(
     )
     args = [
         "-q",
+        "--rootdir",
+        str(bundle),
         "-c",
         str(configuration),
         "-o",
