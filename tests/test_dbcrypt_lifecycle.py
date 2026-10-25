@@ -283,46 +283,98 @@ print('ready', flush=True)
 
 
 @pytest.mark.parametrize("platform", ["linux", "win32"])
-@pytest.mark.parametrize("encrypted", [False, True])
-def test_unsupported_platform_without_posix_or_sqlcipher(tmp_path: Path, platform: str, encrypted: bool) -> None:
+@pytest.mark.parametrize("configured", [False, True])
+def test_native_platform_missing_prerequisites_refuses_before_sql_or_auth(
+    tmp_path: Path, platform: str, configured: bool
+) -> None:
     path = _database(tmp_path)
     before = path.read_bytes()
-    if encrypted:
+    if configured:
         dbcrypt.arm(tmp_path)
+    marker = dbcrypt.marker_path(tmp_path)
+    marker_before = marker.read_bytes() if configured else None
     script = """
 import importlib.abc
+import os
+import sqlite3
+import _sqlite3
 import sys
 from pathlib import Path
+from unittest.mock import patch
+# POSIX hosts exercise the real missing-fcntl boundary for Linux. Cross-host
+# native domain adapters are unavailable dependencies, never mocked successes.
+if sys.argv[2] == 'win32':
+    missing_lock = 'mordred_hermes._database_locking_windows'
+elif os.name == 'nt':
+    missing_lock = 'mordred_hermes._database_locking_posix'
+else:
+    missing_lock = 'fcntl'
 class Unavailable(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname == 'fcntl' or fullname.startswith('sqlcipher3'):
-            raise ModuleNotFoundError(fullname)
-sys.modules.pop('fcntl', None)
+        if fullname == missing_lock or fullname == 'fcntl' or fullname.startswith('sqlcipher3'):
+            raise ModuleNotFoundError(fullname, name=fullname)
+for name in (missing_lock, 'fcntl'):
+    sys.modules.pop(name, None)
 sys.meta_path.insert(0, Unavailable())
 sys.platform = sys.argv[2]
 from mordred_hermes import dbcrypt
-from mordred_hermes.dbcrypt import _monitor
+from mordred_hermes import _database_lifecycle
+from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes.dbcrypt._authority import Authority
 from mordred_hermes.wizard import databases_cli
 home = Path(sys.argv[1])
-if sys.argv[3] == 'True':
+configured = sys.argv[3] == 'True'
+forbidden_calls = []
+def forbidden(*args, **kwargs):
+    forbidden_calls.append('SQL, native authentication or passive lease acquisition')
+    raise AssertionError('unavailable capability must not authenticate or open SQL')
+sqlite3.connect = _sqlite3.connect = forbidden
+Authority.acquire = forbidden
+# Status must remain metadata-only even when the lock and SQLCipher cannot load.
+with patch.object(_database_lifecycle, '_open', forbidden):
+    status = dbcrypt.database_status(home)
+    assert status.configured is configured
+    assert status.capability == 'unavailable'
+    assert status.authenticated is False
+    assert status.dependencies == 1 + int(configured)
+    reasons = {'SQLCipher driver extra is unavailable'}
+    if sys.platform == 'win32':
+        reasons |= {
+            'Windows VFS native qualification is incomplete',
+            'Windows SQLCipher driver pair is unqualified',
+            'owned Windows VFS asset is unavailable',
+        }
+    assert status.reason in reasons, status
+    assert databases_cli.databases_status(home=home) == 0
+assert forbidden_calls == []
+if configured:
     try:
         dbcrypt.install(home=home)
     except RuntimeError as exc:
-        assert 'macOS' in str(exc), str(exc)
+        assert str(exc) == 'database runtime unavailable: ' + status.reason
     else:
-        raise AssertionError('encrypted home was admitted on unsupported platform')
-    assert any(f.code == 'unsupported_platform' for f in _monitor.check(home))
-    assert databases_cli.databases_status(home=home) == 0
+        raise AssertionError('configured native runtime admitted unavailable capability')
 else:
-    assert dbcrypt.install(home=home) is False
-    assert _monitor.check(home) == []
-    # Passive status projects unavailable capability without SQL or native auth.
-    assert databases_cli.databases_status(home=home) == 0
+    # A plain native runtime still needs checked domain identity and lifetime
+    # SH; the missing native adapter or fcntl must refuse before opening SQL.
+    try:
+        dbcrypt.install(home=home)
+    except ModuleNotFoundError as exc:
+        assert missing_lock == 'fcntl'
+        assert exc.name == missing_lock, exc
+    except DatabaseRefused as exc:
+        assert missing_lock != 'fcntl'
+        assert str(exc) == 'native database source is unavailable or invalid'
+        assert isinstance(exc.__cause__, ModuleNotFoundError)
+        assert exc.__cause__.name == missing_lock
+    else:
+        raise AssertionError('plain native runtime started without its lock dependency')
 assert databases_cli.databases_encrypt(home=home) == 1
 assert databases_cli.databases_decrypt(home=home) == 1
+assert forbidden_calls == []
 """
     result = subprocess.run(
-        [sys.executable, "-c", script, str(tmp_path), platform, str(encrypted)],
+        [sys.executable, "-c", script, str(tmp_path), platform, str(configured)],
         env={**os.environ, "HERMES_HOME": str(tmp_path)},
         capture_output=True,
         text=True,
@@ -330,7 +382,9 @@ assert databases_cli.databases_decrypt(home=home) == 1
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "capability: unavailable" in result.stdout.lower()
+    assert "authenticated: not checked" in result.stdout.lower()
     assert path.read_bytes() == before
+    assert (marker.read_bytes() if marker.exists() else None) == marker_before
 
 
 def test_fresh_home_setup_bootstrap_initializes_only_the_legacy_boundary(tmp_path: Path) -> None:
