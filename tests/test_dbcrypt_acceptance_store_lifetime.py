@@ -126,12 +126,16 @@ def test_telegram_underlying_store_failure_is_not_masked_by_fake_close(collector
         helper["_telegram"](home, False)
 
 
-def test_role_retirement_continues_after_real_writable_store_operations(collector_store, monkeypatch):
+@pytest.mark.parametrize("collector_platform", ["linux", "win32"])
+def test_role_retirement_continues_after_real_writable_store_operations(
+    collector_store, monkeypatch, collector_platform
+):
     from mordred_hermes.extension.telegram import store as archive
     from mordred_hermes.keyvault import _database_authority, _mail_custody
 
     helper, home, store, old_secret, _connections = collector_store
-    prepare_telegram(helper, home, store, monkeypatch)
+    telegram_secret = prepare_telegram(helper, home, store, monkeypatch)
+    monkeypatch.setitem(helper["_forget_roles"].__globals__, "sys", SimpleNamespace(platform=collector_platform))
     seed_mail(store, helper)
 
     class NativeSecretBoundary:
@@ -165,9 +169,16 @@ def test_role_retirement_continues_after_real_writable_store_operations(collecto
     monkeypatch.setattr(_database_authority, "observe_database_source", lambda **_kw: "unchanged-root")
     retired = []
     monkeypatch.setattr(archive, "forget_telegram_storage", lambda **_kw: retired.append("telegram") or 1)
-    monkeypatch.setattr(archive, "wipe_archive", lambda *_a, **_kw: None)
+
+    def wipe_archive(path, *, forget):
+        assert path == home / "mordred/telegram"
+        assert forget is True
+        telegram_secret.forget_from_snapshot(telegram_secret.load_snapshot())
+
+    monkeypatch.setattr(archive, "wipe_archive", wipe_archive)
     monkeypatch.setitem(helper["_forget_roles"].__globals__, "_session", lambda *_a: True)
     helper["_forget_roles"](home.parents[1])
+    assert telegram_secret.load(fresh=True) is None
     assert retired == ["telegram"]
     assert len(store.search("日本語", source="mail")) == 1
     assert store.search("日本語", source="telegram")
