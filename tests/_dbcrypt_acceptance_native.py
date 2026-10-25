@@ -60,6 +60,44 @@ def _tool() -> dict[str, Any]:
     return runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/dbcrypt_acceptance.py"))
 
 
+class _NativeFailure(RuntimeError):
+    """Only fixed diagnostic fields cross main's public refusal boundary."""
+
+    def __init__(self, reason: str, failure: dict[str, Any]) -> None:
+        super().__init__(reason)
+        self.failure = failure
+
+
+@contextlib.contextmanager
+def _failure_scope(stage: str, home: str = "unknown") -> Iterator[dict[str, Any]]:
+    # Per-call state, not a last-stage global: successful children cannot leave
+    # a stale returncode for a later failure or a subsequent main invocation.
+    failure = {"stage": stage, "home": home, "child_returncode": None, "exception_category": "other"}
+    try:
+        yield failure
+    except _NativeFailure as exc:
+        if exc.failure["home"] == "unknown" and home != "unknown":
+            exc.failure = {**exc.failure, "home": home}
+        raise
+    except BaseException as exc:
+        category = "other"
+        for kind, label in (
+            (subprocess.TimeoutExpired, "timeout"),
+            (AssertionError, "assertion"),
+            (OSError, "os_error"),
+            (ValueError, "value"),
+            (TypeError, "type"),
+            (RuntimeError, "runtime"),
+        ):
+            if isinstance(exc, kind):
+                category = label
+                break
+        failure["exception_category"] = category
+        safe = _tool()["NATIVE_REFUSAL_REASONS"]
+        reason = str(exc) if type(exc) is RuntimeError and str(exc) in safe else "native_operation_failed"
+        raise _NativeFailure(reason, failure) from exc
+
+
 def _root() -> Path:
     selected = os.environ.get("MORDRED_DBCRYPT_TEST_ROOT")
     if os.environ.get("MORDRED_DBCRYPT_COLLECTORS_TEST") != "1" or not selected:
@@ -450,77 +488,92 @@ def _memory_probe(seed: bool) -> dict[str, Any]:
 
 
 def _fresh_memory(home: Path, *, seed: bool) -> dict[str, Any]:
-    helper = Path(__file__).resolve()
-    code = f"import runpy, json; print(json.dumps(runpy.run_path({str(helper)!r})['_memory_probe']({seed!r})))"
-    environment = {**os.environ, "HERMES_HOME": str(home)}
-    if os.environ["MORDRED_DBCRYPT_ACCEPTANCE_KIND"] == "candidate":
-        command = [sys.executable, "-c", code]
-    else:
-        directory = home / "native-memory-driver"
-        directory.mkdir(mode=0o700, exist_ok=True)
-        driver = directory / ("hermes-seed" if seed else "hermes-read")
-        # argv[0] must be named exactly hermes for the production startup gate.
-        driver_directory = directory / ("seed" if seed else "read")
-        driver_directory.mkdir(mode=0o700, exist_ok=True)
-        driver = driver_directory / "hermes"
-        if driver.exists():
-            assert driver.read_text() == code
+    with _failure_scope("memory_seed" if seed else "memory_read") as failure:
+        helper = Path(__file__).resolve()
+        code = f"import runpy, json; print(json.dumps(runpy.run_path({str(helper)!r})['_memory_probe']({seed!r})))"
+        environment = {**os.environ, "HERMES_HOME": str(home)}
+        if os.environ["MORDRED_DBCRYPT_ACCEPTANCE_KIND"] == "candidate":
+            command = [sys.executable, "-c", code]
         else:
-            driver.write_text(code)
-        command = [sys.executable, str(driver)]
-    result = subprocess.run(
-        command,
-        env=environment,
-        cwd=Path(__file__).resolve().parents[1],
-        capture_output=True,
-        text=True,
-        timeout=180,
-        check=False,
-    )
-    assert result.returncode == 0, "fresh native memory subprocess failed"
-    return dict(json.loads(result.stdout))
+            directory = home / "native-memory-driver"
+            directory.mkdir(mode=0o700, exist_ok=True)
+            driver = directory / ("hermes-seed" if seed else "hermes-read")
+            # argv[0] must be named exactly hermes for the production startup gate.
+            driver_directory = directory / ("seed" if seed else "read")
+            driver_directory.mkdir(mode=0o700, exist_ok=True)
+            driver = driver_directory / "hermes"
+            if driver.exists():
+                assert driver.read_text() == code
+            else:
+                driver.write_text(code)
+            command = [sys.executable, str(driver)]
+        result = subprocess.run(
+            command,
+            env=environment,
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        failure["child_returncode"] = result.returncode
+        assert result.returncode == 0, "fresh native memory subprocess failed"
+        return dict(json.loads(result.stdout))
 
 
 def _maintenance(home: Path, arguments: list[str]) -> dict[str, Any]:
     """Execute the installed, genuine public ceremony; never imitate its argv."""
-    from importlib.metadata import distribution
-
-    entry = tuple(distribution("hermes-mordred").entry_points.select(group="console_scripts", name="hermes-mordred"))
-    assert len(entry) == 1 and entry[0].value == "mordred_hermes.wizard.cli:main"
-    executable = Path(sys.prefix) / ("Scripts/hermes-mordred.exe" if sys.platform == "win32" else "bin/hermes-mordred")
-    digest = _digest(executable)
-    manifest = json.loads((Path(os.environ["DBCRYPT_BUNDLE"]) / "manifest.json").read_text())
-    expected = manifest[os.environ["MORDRED_DBCRYPT_ACCEPTANCE_MODE"] + "_probe"]["maintenance_entrypoint"]
-    if expected != {"path": str(executable), "sha256": digest}:
-        raise RuntimeError("owned_checked_distribution_required")
-    if arguments not in (["encryption", "enable", "memory"], ["databases", "encrypt"]):
-        raise RuntimeError("unsupported_fixed_native_operation")
-    argv = [str(executable), *arguments]
-    started = time.time()
-    result = subprocess.run(
-        argv,
-        env={**os.environ, "HERMES_HOME": str(home)},
-        cwd=Path(__file__).resolve().parents[1],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=180,
-        check=False,
+    stage = (
+        "memory_enable"
+        if arguments == ["encryption", "enable", "memory"]
+        else "database_encrypt"
+        if arguments == ["databases", "encrypt"]
+        else "operation"
     )
-    finished = time.time()
-    if result.returncode != 0:
-        raise RuntimeError(
-            "native_memory_enable_failed_retain_root" if arguments[0] == "encryption" else "native_operation_failed"
+    with _failure_scope(stage) as failure:
+        from importlib.metadata import distribution
+
+        entry = tuple(
+            distribution("hermes-mordred").entry_points.select(group="console_scripts", name="hermes-mordred")
         )
-    assert _digest(executable) == digest, "native maintenance entrypoint changed"
-    return {
-        "home": str(home),
-        "argv": argv,
-        "entrypoint_sha256": digest,
-        "started_at": started,
-        "finished_at": finished,
-        "returncode": result.returncode,
-    }
+        assert len(entry) == 1 and entry[0].value == "mordred_hermes.wizard.cli:main"
+        executable = Path(sys.prefix) / (
+            "Scripts/hermes-mordred.exe" if sys.platform == "win32" else "bin/hermes-mordred"
+        )
+        digest = _digest(executable)
+        manifest = json.loads((Path(os.environ["DBCRYPT_BUNDLE"]) / "manifest.json").read_text())
+        expected = manifest[os.environ["MORDRED_DBCRYPT_ACCEPTANCE_MODE"] + "_probe"]["maintenance_entrypoint"]
+        if expected != {"path": str(executable), "sha256": digest}:
+            raise RuntimeError("owned_checked_distribution_required")
+        if arguments not in (["encryption", "enable", "memory"], ["databases", "encrypt"]):
+            raise RuntimeError("unsupported_fixed_native_operation")
+        argv = [str(executable), *arguments]
+        started = time.time()
+        result = subprocess.run(
+            argv,
+            env={**os.environ, "HERMES_HOME": str(home)},
+            cwd=Path(__file__).resolve().parents[1],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=180,
+            check=False,
+        )
+        failure["child_returncode"] = result.returncode
+        finished = time.time()
+        if result.returncode != 0:
+            raise RuntimeError(
+                "native_memory_enable_failed_retain_root" if arguments[0] == "encryption" else "native_operation_failed"
+            )
+        assert _digest(executable) == digest, "native maintenance entrypoint changed"
+        return {
+            "home": str(home),
+            "argv": argv,
+            "entrypoint_sha256": digest,
+            "started_at": started,
+            "finished_at": finished,
+            "returncode": result.returncode,
+        }
 
 
 def provision(root: Path) -> dict[str, Any]:
@@ -543,23 +596,27 @@ def provision(root: Path) -> dict[str, Any]:
     require_enabled = _interfaces()
     ceremonies = []
     production = os.environ["MORDRED_DBCRYPT_ACCEPTANCE_KIND"] == "production"
-    for _name, home in homes:
-        with opening(home, create=True):
-            pass
+    for name, home in homes:
+        with _failure_scope("home_setup", name):
+            with opening(home, create=True):
+                pass
+            with _failure_scope("memory_enable", name):
+                if production:
+                    ceremonies.append(_maintenance(home, ["encryption", "enable", "memory"]))
+                elif memory_cli.enable(home=home, root=home / "mordred/keyvault/vault", platform=sys.platform) != 0:
+                    raise RuntimeError("native_memory_enable_failed_retain_root")
+            with _failure_scope("memory_authority_check", name):
+                require_enabled(root=root)
+            _fresh_memory(home, seed=True)
+            _fresh_memory(home, seed=False)
+    with _failure_scope("database_encrypt", "root"):
         if production:
-            ceremonies.append(_maintenance(home, ["encryption", "enable", "memory"]))
-        elif memory_cli.enable(home=home, root=home / "mordred/keyvault/vault", platform=sys.platform) != 0:
-            raise RuntimeError("native_memory_enable_failed_retain_root")
-        require_enabled(root=root)
-        _fresh_memory(home, seed=True)
-        _fresh_memory(home, seed=False)
-    if production:
-        ceremonies.append(_maintenance(root, ["databases", "encrypt"]))
-    else:
-        with acquire_exclusive(root) as lease:
-            enroll_database_source(root=root, lease=lease)
-        # Candidate entry point owns its EX; never upgrade a live SH.
-        _migrate.migrate(root, None, arm=dbcrypt.arm)
+            ceremonies.append(_maintenance(root, ["databases", "encrypt"]))
+        else:
+            with acquire_exclusive(root) as lease:
+                enroll_database_source(root=root, lease=lease)
+            # Candidate entry point owns its EX; never upgrade a live SH.
+            _migrate.migrate(root, None, arm=dbcrypt.arm)
     from mordred_hermes.keyvault._database_authority import observe_database_source
 
     snapshot = observe_database_source(root=root)
@@ -977,30 +1034,32 @@ def collect(root: Path, *, seed: bool) -> dict[str, Any]:
     logical = {}
     try:
         for profile, home in _homes(root):
-            # The actual installed provider owns Root SH before credential custody.
-            authority = dbcrypt._PROVIDER.authority
-            assert authority.snapshot == observe_database_source(root=root)
-            original = _seed_credentials(home) if seed else None
-            _role_isolation(home)
-            _fresh_memory(home, seed=False)
-            key = resolve_memory_key(home=home, platform=sys.platform, environ={})
-            assert (
-                key is not None
-                and unseal(seal(TEXT.encode(), key=key, name="MEMORY.md"), key=key, name="MEMORY.md") == TEXT.encode()
-            )
-            logical[profile + ":source_memory"] = logical_digest([{"id": profile, "text": TEXT}])
-            logical[profile + ":sessiondb"] = _session(home, profile, seed)
-            if root.name.endswith("-persistence"):
-                _credential_reference(root, home, authority, original)
-                if original is not None and profile == "work":
-                    _credential_replacement_probe(root, home, authority, original)
-            logical[profile + ":scoped_siblings"] = _scoped_siblings(home, authority, seed)
-            logical[profile + ":activity"] = _activity(home, seed)
-            logical[profile + ":telegram"] = _telegram(home, seed)
-            logical[profile + ":mail"] = _mail(home, seed)
-            logical[profile + ":credentials"] = logical_digest(
-                [{"id": profile, "component": "real_native_sealed_reload", "count": 2}]
-            )
+            with _failure_scope("collect", profile):
+                # The actual installed provider owns Root SH before credential custody.
+                authority = dbcrypt._PROVIDER.authority
+                assert authority.snapshot == observe_database_source(root=root)
+                original = _seed_credentials(home) if seed else None
+                _role_isolation(home)
+                _fresh_memory(home, seed=False)
+                key = resolve_memory_key(home=home, platform=sys.platform, environ={})
+                assert (
+                    key is not None
+                    and unseal(seal(TEXT.encode(), key=key, name="MEMORY.md"), key=key, name="MEMORY.md")
+                    == TEXT.encode()
+                )
+                logical[profile + ":source_memory"] = logical_digest([{"id": profile, "text": TEXT}])
+                logical[profile + ":sessiondb"] = _session(home, profile, seed)
+                if root.name.endswith("-persistence"):
+                    _credential_reference(root, home, authority, original)
+                    if original is not None and profile == "work":
+                        _credential_replacement_probe(root, home, authority, original)
+                logical[profile + ":scoped_siblings"] = _scoped_siblings(home, authority, seed)
+                logical[profile + ":activity"] = _activity(home, seed)
+                logical[profile + ":telegram"] = _telegram(home, seed)
+                logical[profile + ":mail"] = _mail(home, seed)
+                logical[profile + ":credentials"] = logical_digest(
+                    [{"id": profile, "component": "real_native_sealed_reload", "count": 2}]
+                )
         import importlib.metadata
 
         import hermes_state
@@ -1672,7 +1731,8 @@ def negative(root: Path) -> dict[str, Any]:
 
 
 def operation(name: str) -> dict[str, Any]:
-    root = _root()
+    with _failure_scope("root_validation"):
+        root = _root()
     if name in {
         "negative",
         "backup_restore",
@@ -1684,7 +1744,8 @@ def operation(name: str) -> dict[str, Any]:
     from mordred_hermes.keyvault import kek
 
     kek._noop_audit = lambda _entry: None
-    facts = native_facts(root)
+    with _failure_scope("native_facts", "root"):
+        facts = native_facts(root)
     from mordred_hermes.extension.telegram import migrate, service
     from mordred_hermes.wizard import mail_cli
 
@@ -1693,17 +1754,22 @@ def operation(name: str) -> dict[str, Any]:
     migrate.audit_event = lambda *_args, **_kwargs: None
     if name == "preflight":
         return {"facts": facts}
-    with candidate_eligibility(root):
+    with _failure_scope("candidate_eligibility", "root"), candidate_eligibility(root):
         if name == "provision":
-            payload = provision(root)
+            with _failure_scope("provision"):
+                payload = provision(root)
         elif name in {"seed", "read"}:
-            payload = collect(root, seed=name == "seed")
+            with _failure_scope("collect"):
+                payload = collect(root, seed=name == "seed")
         elif name in {"backup_restore", "backup_restore_failure"}:
-            payload = backup_restore(root, finalization_failure=name == "backup_restore_failure")
+            with _failure_scope("backup_restore"):
+                payload = backup_restore(root, finalization_failure=name == "backup_restore_failure")
         elif name == "negative":
-            payload = negative(root)
+            with _failure_scope("negative"):
+                payload = negative(root)
         elif name in {"writer_a", "writer_b"}:
-            payload = _writer(root, name)
+            with _failure_scope("writer"):
+                payload = _writer(root, name)
         else:
             raise RuntimeError("unsupported_fixed_native_operation")
     return {**payload, "facts": facts}
@@ -1713,12 +1779,21 @@ def main(name: str) -> int:
     # Arbitrary library/native logs never enter exported evidence, including
     # secret-bearing exception text or pytest locals. No plaintext log spool.
     try:
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+            _failure_scope("operation"),
+        ):
             payload = operation(name)
     except BaseException as exc:
         safe = _tool()["NATIVE_REFUSAL_REASONS"]
-        reason = str(exc) if type(exc) is RuntimeError and str(exc) in safe else "native_operation_failed"
-        print(json.dumps({"schema_version": 2, "operation": name, "status": "refused", "reason": reason}))
+        reason = (
+            str(exc) if type(exc) in (RuntimeError, _NativeFailure) and str(exc) in safe else "native_operation_failed"
+        )
+        refusal = {"schema_version": 2, "operation": name, "status": "refused", "reason": reason}
+        if isinstance(exc, _NativeFailure) and _tool()["native_failure_descriptor"](exc.failure):
+            refusal["failure"] = exc.failure
+        print(json.dumps(refusal))
         return 2
     print(
         json.dumps(

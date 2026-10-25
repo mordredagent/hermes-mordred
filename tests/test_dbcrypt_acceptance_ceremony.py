@@ -311,7 +311,8 @@ def test_existing_provision_root_stays_untouched_before_any_ceremony(tmp_path, m
 
 
 @pytest.mark.parametrize("operation", ["preflight", "provision", "seed", "read"])
-def test_failed_collector_retains_only_safe_refusal_in_execution_record(tmp_path, monkeypatch, operation):
+@pytest.mark.parametrize("with_failure", [False, True])
+def test_failed_collector_retains_only_safe_refusal_in_execution_record(tmp_path, monkeypatch, operation, with_failure):
     tool = acceptance_tool("dbcrypt_acceptance")
     bundle = tmp_path / "bundle"
     bundle.mkdir()
@@ -325,6 +326,13 @@ def test_failed_collector_retains_only_safe_refusal_in_execution_record(tmp_path
     monkeypatch.setattr(tool, "validate_import_provenance", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(tool, "_native_environment", lambda *_: {})
     payload = {"schema_version": 2, "operation": operation, "status": "refused", "reason": "native_operation_failed"}
+    if with_failure:
+        payload["failure"] = {
+            "stage": "memory_read",
+            "home": "work",
+            "child_returncode": 9,
+            "exception_category": "assertion",
+        }
     record = {}
     monkeypatch.setattr(
         tool,

@@ -179,11 +179,20 @@ provision.__globals__['_maintenance'] = maintenance
 provision.__globals__['_fresh_memory'] = fresh_memory
 try:
     provision(root)
-except DatabaseBoundaryReached:
-    assert case == 'all_profiles'
-except _database_authority.DatabaseRefused as exc:
-    assert case in {'root_disabled', 'root_optout'}, str(exc)
-    assert str(exc) == 'root native memory must be explicitly enabled first'
+except helper['_NativeFailure'] as failure:
+    # The collector adds only sanitized public context. The original product
+    # refusal (or explicit test boundary) remains the exact private cause.
+    exc = failure.__cause__
+    if case == 'all_profiles':
+        assert type(exc) is DatabaseBoundaryReached
+        assert failure.failure == {'stage': 'database_encrypt', 'home': 'root',
+                                   'child_returncode': None, 'exception_category': 'other'}
+    else:
+        assert case in {'root_disabled', 'root_optout'}
+        assert type(exc) is _database_authority.DatabaseRefused
+        assert str(exc) == 'root native memory must be explicitly enabled first'
+        assert failure.failure == {'stage': 'memory_authority_check', 'home': 'work',
+                                   'child_returncode': None, 'exception_category': 'runtime'}
 else:
     raise AssertionError('provision crossed the declared database boundary')
 expected = [['.', 'enabled'], ['.', 'seed'], ['.', 'read'], ['profiles/work', 'enabled']]

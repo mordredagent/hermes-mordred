@@ -2504,15 +2504,56 @@ def native_operation_bootstrap(kind: str, operation: str) -> str:
     return "explicit_native_maintenance" if operation == "provision" else "automatic_production"
 
 
+NATIVE_FAILURE_STAGES = {
+    "operation",
+    "root_validation",
+    "native_facts",
+    "candidate_eligibility",
+    "provision",
+    "home_setup",
+    "memory_authority_check",
+    "memory_enable",
+    "memory_seed",
+    "memory_read",
+    "database_encrypt",
+    "collect",
+    "backup_restore",
+    "negative",
+    "writer",
+}
+NATIVE_FAILURE_CATEGORIES = {"assertion", "timeout", "os_error", "value", "type", "runtime", "other"}
+
+
+def native_failure_descriptor(value: Any) -> bool:
+    """A closed, content-free location; never an acceptance or authorization."""
+    if not isinstance(value, dict) or set(value) != {"stage", "home", "child_returncode", "exception_category"}:
+        return False
+    code = value["child_returncode"]
+    return (
+        isinstance(value["stage"], str)
+        and value["stage"] in NATIVE_FAILURE_STAGES
+        and isinstance(value["home"], str)
+        and value["home"] in {"root", "work", "other", "unknown"}
+        and isinstance(value["exception_category"], str)
+        and value["exception_category"] in NATIVE_FAILURE_CATEGORIES
+        and (code is None or (type(code) is int and -(2**31) <= code < 2**32))
+    )
+
+
 def native_refusal_payload(stdout: str, operation: str, returncode: int) -> dict[str, Any] | None:
-    """Retain only the existing finite child refusal, never arbitrary output."""
+    """Retain finite refusals and optional closed diagnostics, never arbitrary output."""
     if returncode != 2 or len(stdout.encode("utf-8")) > 4096:
         return None
     try:
         value = json.loads(stdout)
         if (
             isinstance(value, dict)
-            and set(value) == {"schema_version", "operation", "status", "reason"}
+            and set(value)
+            in (
+                {"schema_version", "operation", "status", "reason"},
+                {"schema_version", "operation", "status", "reason", "failure"},
+            )
+            and ("failure" not in value or native_failure_descriptor(value["failure"]))
             and type(value["schema_version"]) is int
             and value["schema_version"] == RUN_SCHEMA
             and value["operation"] == operation
