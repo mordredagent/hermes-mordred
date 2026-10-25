@@ -44,6 +44,12 @@ if mode == 'source':
     override = Path(os.environ['MORDRED_DBCRYPT_CHECKED_LIBRARY'])
     if not override.is_absolute() or override.resolve(strict=True) != expected_native:
         raise RuntimeError('source checked VFS child DLL differs from parent')
+if mode == 'source' and (
+    os.environ.get('MORDRED_DBCRYPT_WINDOWS_VFS_TEST') != '1'
+    or os.environ.get('MORDRED_DBCRYPT_ACCEPTANCE_KIND')
+    or os.environ.get('MORDRED_DBCRYPT_VFS_PACKAGE_QUALIFY')
+):
+    raise RuntimeError('diagnostic child forbids Native storage eligibility')
 from mordred_hermes.dbcrypt import _windows_vfs as vfs
 if mode == 'packaged':
     import base64, hashlib
@@ -58,11 +64,21 @@ if mode == 'packaged':
     assert entries[0].hash is not None and entries[0].hash.mode == 'sha256'
     observed = base64.urlsafe_b64encode(hashlib.sha256(expected_native.read_bytes()).digest()).rstrip(b'=').decode()
     assert entries[0].hash.value == observed, 'packaged child DLL differs from its distribution RECORD'
-    # Inherit only this test's explicit packaged-parent eligibility choice.
-    # The real production resolver, loader, driver and API-table checks stay intact.
-    vfs.NATIVE_QUALIFIED = True
+    # Production children observe the source-controlled gate without assigning it.
+    import ast
+    assignments = [node for node in ast.parse(Path(vfs.__file__).read_text()).body
+                   if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+                   and node.target.id == 'NATIVE_QUALIFIED']
+    assert len(assignments) == 1 and isinstance(assignments[0].value, ast.Constant)
+    declared = assignments[0].value.value
+    assert type(declared) is bool and vfs.NATIVE_QUALIFIED is declared
+    if not declared:
+        assert os.environ.get('MORDRED_DBCRYPT_VFS_PACKAGE_QUALIFY') == '1'
+        assert not os.environ.get('MORDRED_DBCRYPT_ACCEPTANCE_KIND')
+        vfs.NATIVE_QUALIFIED = True  # Explicit preactivation package test only.
 else:
-    assert vfs.NATIVE_QUALIFIED is False, 'source child requires the explicit diagnostic path'
+    # The independently labeled CheckedTest diagnostic never becomes a storage row.
+    vfs.NATIVE_QUALIFIED = False
 register_checked_vfs = vfs.register_checked_vfs
 """
 
@@ -81,6 +97,29 @@ def checked_vfs_child_args(registration: Any) -> tuple[str, str]:
         assert override and Path(override).is_absolute() and Path(override).resolve(strict=True) == native
         return "source", str(native)
     raise RuntimeError("invalid checked VFS parent mode")
+
+
+@pytest.fixture(autouse=True)
+def diagnostic_eligibility() -> Iterator[None]:
+    """Retain the explicit full CheckedTest gate separately from production rows."""
+    from mordred_hermes.dbcrypt import _windows_vfs
+
+    override = os.environ.get("MORDRED_DBCRYPT_CHECKED_LIBRARY")
+    if override is None:
+        if os.environ.get("MORDRED_DBCRYPT_ACCEPTANCE_KIND") == "production":
+            assert _windows_vfs.NATIVE_QUALIFIED is True, "production VFS requires activated eligibility"
+        yield
+        return
+    assert os.environ.get("MORDRED_DBCRYPT_WINDOWS_VFS_TEST") == "1"
+    assert not os.environ.get("MORDRED_DBCRYPT_ACCEPTANCE_KIND"), "diagnostic gate forbids Native storage eligibility"
+    assert not os.environ.get("MORDRED_DBCRYPT_VFS_PACKAGE_QUALIFY")
+    assert Path(override).is_absolute() and Path(override).is_file()
+    previous = _windows_vfs.NATIVE_QUALIFIED
+    _windows_vfs.NATIVE_QUALIFIED = False
+    try:
+        yield
+    finally:
+        _windows_vfs.NATIVE_QUALIFIED = previous
 
 
 @pytest.fixture
@@ -1029,12 +1068,14 @@ def test_checkedtest_initialization_failure_rolls_back_in_fresh_process(
     fixture: tuple[Any, Any, Path], failure_stage: int
 ) -> None:
     _driver, _registration, root = fixture
-    child = r"""
+    child = (
+        "import sys\nfailure_stage = int(sys.argv.pop())\n"
+        + _CHECKED_VFS_CHILD_BOOTSTRAP
+        + r"""
 import ctypes, os, sys
 from pathlib import Path
 import sqlcipher3.dbapi2 as driver
-from mordred_hermes.dbcrypt._windows_vfs import register_checked_vfs
-root, stage = Path(sys.argv[1]), int(sys.argv[2])
+root, stage = Path(sys.argv[1]), failure_stage
 native = ctypes.CDLL(os.environ['MORDRED_DBCRYPT_CHECKED_LIBRARY'])
 signature = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_void_p)
 hits = []
@@ -1077,8 +1118,12 @@ c.close()
 r.close()
 assert b'initialization recovered' not in (root / 'recovered-init.db').read_bytes()
 """
+    )
     result = subprocess.run(
-        [sys.executable, "-c", child, str(root), str(failure_stage)], capture_output=True, text=True, timeout=60
+        [sys.executable, "-c", child, str(root), *checked_vfs_child_args(_registration), str(failure_stage)],
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     assert result.returncode == 0, (result.stdout, result.stderr)
 

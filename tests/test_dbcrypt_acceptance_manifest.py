@@ -2261,7 +2261,7 @@ def test_candidate_windows_consumes_prerequisite_instead_of_executing_vfs_again(
     assert all("argv" in row for row in production if row["suite"] == "windows-vfs")
 
 
-def test_qualification_plugin_never_enters_custody_or_candidate_branch(monkeypatch) -> None:
+def test_qualification_plugin_never_enters_custody_or_candidate_branch(tmp_path, monkeypatch) -> None:
     import runpy
     from types import SimpleNamespace
 
@@ -2281,6 +2281,9 @@ def test_qualification_plugin_never_enters_custody_or_candidate_branch(monkeypat
     monkeypatch.setitem(configure.__globals__, "_digest", lambda path: "a" * 64)
     monkeypatch.setenv("MORDRED_DBCRYPT_VFS_PACKAGE_QUALIFY", "1")
     monkeypatch.setenv("MORDRED_DBCRYPT_VFS_FIXTURES_DESCRIPTOR", "/fixture/manifest.json")
+    loader = tmp_path / "_windows_vfs.py"
+    loader.write_text("NATIVE_QUALIFIED: bool = False\n")
+    monkeypatch.setattr(_windows_vfs, "__file__", str(loader))
     monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", False)
     cleanups, reports = [], []
     config = SimpleNamespace(
@@ -2620,3 +2623,117 @@ def test_full8_reused_source_builds_bind_actual_artifacts_and_all_critical_input
     (root / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
         tool._validate_legacy_windows_qualification(root, checkout=checkout)
+
+
+def test_production_vfs_plans_execute_both_owned_release_selections():
+    tool = acceptance_tool("dbcrypt_acceptance")
+    rows = tool.native_acceptance_commands(
+        checkout=Path("/source"), bundle=Path("/bundle"), platform="win32", kind="production"
+    )
+    vfs = [row for row in rows if row["suite"] == "windows-vfs"]
+    assert {row["mode"] for row in vfs} == {"source", "wheel"}
+    for row in vfs:
+        assert row["argv"][row["argv"].index("-k") + 1] == tool.WINDOWS_RELEASE_SELECTION
+
+
+def test_activated_qualification_never_assigns_runtime_eligibility(monkeypatch):
+    import runpy
+    from types import ModuleType, SimpleNamespace
+
+    import mordred_hermes.dbcrypt as package
+    from mordred_hermes.dbcrypt import _windows_vfs
+
+    class NoEligibilityAssignment(ModuleType):
+        def __setattr__(self, name, value):
+            if name == "NATIVE_QUALIFIED":
+                raise AssertionError("activated qualification assigned eligibility")
+            super().__setattr__(name, value)
+
+    actual = NoEligibilityAssignment(_windows_vfs.__name__)
+    actual.__dict__.update(_windows_vfs.__dict__)
+    actual.__dict__["NATIVE_QUALIFIED"] = True
+    monkeypatch.setattr(package, "_windows_vfs", actual)
+    helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
+    configure = helper["pytest_configure"]
+    monkeypatch.setitem(
+        configure.__globals__,
+        "package_qualification_observation",
+        lambda: {"eligibility": {"bootstrap": "automatic_production"}},
+    )
+    monkeypatch.setitem(configure.__globals__, "_digest", lambda path: "a" * 64)
+    monkeypatch.setenv("MORDRED_DBCRYPT_VFS_PACKAGE_QUALIFY", "1")
+    monkeypatch.setenv("MORDRED_DBCRYPT_VFS_FIXTURES_DESCRIPTOR", "/fixture/manifest.json")
+    cleanups, reports = [], []
+    configure(
+        SimpleNamespace(
+            invocation_params=SimpleNamespace(args=()),
+            add_cleanup=cleanups.append,
+            pluginmanager=SimpleNamespace(register=lambda reporter, name: reports.append(reporter)),
+        )
+    )
+    assert actual.NATIVE_QUALIFIED is True and cleanups == []
+    assert reports[0].qualification["eligibility"]["bootstrap"] == "automatic_production"
+
+
+@pytest.mark.parametrize("damage", ["missing", "candidate", "observed_false", "declared_false", "extra_field"])
+def test_package_observation_rejects_missing_or_promoted_eligibility(tmp_path, monkeypatch, damage):
+    tool, root, _checkout, manifest, results, _fixtures, bundle = packaged_pipeline_fixture(tmp_path, monkeypatch)
+    observed = json.loads((results["source"][0] / "run.json").read_text())["qualification"]
+    eligibility = {"declared_qualified": True, "observed_qualified": True, "bootstrap": "automatic_production"}
+    if damage == "candidate":
+        eligibility["bootstrap"] = "explicit_candidate"
+    elif damage == "observed_false":
+        eligibility["observed_qualified"] = False
+    elif damage == "declared_false":
+        eligibility["declared_qualified"] = False
+    elif damage == "extra_field":
+        eligibility["approved"] = True
+    if damage != "missing":
+        observed["eligibility"] = eligibility
+    else:
+        observed.pop("eligibility", None)
+    proof = tool._local_bundle_proof(bundle, manifest)
+    proof["bundle_path"] = r"C:\bundle"
+    headers = json.loads((root / "provenance.json").read_text())["headers"]
+    with pytest.raises((ValueError, KeyError)):
+        tool.validate_package_observation(
+            observed, mode="source", bundle=manifest, proof=proof, directory=bundle, headers=headers
+        )
+
+
+@pytest.mark.parametrize("mode", ["source", "wheel"])
+@pytest.mark.parametrize("damage", ["candidate", "missing", "integer_flag"])
+def test_production_qualification_refuses_candidate_or_untyped_package_rows(mode, damage):
+    tool = acceptance_tool("dbcrypt_acceptance")
+    eligible = {"declared_qualified": True, "observed_qualified": True, "bootstrap": "automatic_production"}
+    qualified = {name: {"eligibility": dict(eligible)} for name in ("source", "wheel")}
+    tool.require_production_qualification(qualified)
+    if damage == "candidate":
+        qualified[mode]["eligibility"] = {
+            "declared_qualified": False,
+            "observed_qualified": True,
+            "bootstrap": "explicit_candidate",
+        }
+    elif damage == "missing":
+        del qualified[mode]["eligibility"]
+    else:
+        qualified[mode]["eligibility"]["observed_qualified"] = 1
+    with pytest.raises((ValueError, KeyError)):
+        tool.require_production_qualification(qualified)
+
+
+@pytest.mark.parametrize("declared,observed", [(True, False), (False, True)])
+def test_qualification_rejects_handpatched_initial_eligibility(tmp_path, monkeypatch, declared, observed):
+    import runpy
+    from types import SimpleNamespace
+
+    from mordred_hermes.dbcrypt import _windows_vfs
+
+    loader = tmp_path / "_windows_vfs.py"
+    loader.write_text(f"NATIVE_QUALIFIED: bool = {declared!r}\n")
+    monkeypatch.setattr(_windows_vfs, "__file__", str(loader))
+    monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", observed)
+    monkeypatch.setenv("MORDRED_DBCRYPT_VFS_PACKAGE_QUALIFY", "1")
+    helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
+    with pytest.raises(AssertionError, match="runtime eligibility differs"):
+        helper["pytest_configure"](SimpleNamespace())

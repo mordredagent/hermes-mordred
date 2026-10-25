@@ -751,6 +751,11 @@ def packaged_pipeline_fixture(prepared: tuple[Any, ...], bundle_path: Path, monk
             )
         }
         obs = {
+            "eligibility": {
+                "declared_qualified": True,
+                "observed_qualified": True,
+                "bootstrap": "automatic_production",
+            },
             "mode": mode,
             "role": "packaged_editable" if mode == "source" else "packaged_wheel",
             "commit": manifest["commit"],

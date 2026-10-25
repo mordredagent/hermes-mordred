@@ -1365,7 +1365,9 @@ def native_phase_inputs(root: Path, phase: Phase) -> dict[str, Any]:
     if sys.platform == "win32":
         if not qualification:
             raise AcceptanceRefused("windows_native_qualification_incomplete")
-        qualified = validate_windows_qualification(_absolute(qualification), checkout=Path(manifest["checkout"]))
+        qualified = _native_windows_qualification(
+            _absolute(qualification), checkout=Path(manifest["checkout"]), kind=kind
+        )
         _require(os.environ.get("MORDRED_DBCRYPT_VFS_FIXTURE_ROOT") == qualified["fixtures"]["test_root"])
         fixture_input = os.environ.get("MORDRED_DBCRYPT_QUALIFICATION_MANIFEST")
         _require(bool(fixture_input))
@@ -1997,6 +1999,8 @@ def _phase_qualification(phase: dict[str, Any], directory: Path) -> dict[str, An
     # The operator runs offline verification from the accepted source tool.
     # Only read current component bytes; no product import or guest path stat.
     qualified = validate_windows_qualification(path.parent, checkout=Path(__file__).resolve().parents[1])
+    if phase["acceptance_kind"] == "production":
+        require_production_qualification(qualified)
     _require(qualified["manifest_sha256"] == phase["native_facts"]["qualification_manifest_sha256"])
     observed = qualified["source" if phase["mode"] == "source" else "wheel"]
     _require(observed["dll_sha256"] == phase["native_facts"]["dll"]["sha256"])
@@ -2017,15 +2021,26 @@ def validate_reopen_continuity(before: dict[str, Any], after: dict[str, Any], ob
         raise AcceptanceRefused("native_reopen_continuity_failed") from exc
 
 
+def _native_windows_vfs_rows(rows: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
+    result = []
+    for row in rows:
+        if row["suite"] == "windows-vfs":
+            if kind == "candidate":
+                row = {
+                    "suite": row["suite"],
+                    "mode": row["mode"],
+                    "status": "satisfied_by_qualified_artifact_reference",
+                }
+            elif row["mode"] == "source":
+                row = {**row, "argv": [*row["argv"][:-1], "-k", WINDOWS_RELEASE_SELECTION, row["argv"][-1]]}
+        result.append(row)
+    return result
+
+
 def native_acceptance_commands(*, checkout: Path, bundle: Path, platform: str, kind: str) -> list[dict[str, Any]]:
     rows = acceptance_commands(checkout=checkout, bundle=bundle, platform=platform)
-    if platform == "win32" and kind == "candidate":
-        rows = [
-            {"suite": row["suite"], "mode": row["mode"], "status": "satisfied_by_qualified_artifact_reference"}
-            if row["suite"] == "windows-vfs"
-            else row
-            for row in rows
-        ]
+    if platform == "win32":
+        rows = _native_windows_vfs_rows(rows, kind)
     for row in rows:
         if row["suite"] == "affected":
             row["argv"].extend(str(bundle / "tests" / name) for name in ADDITIONAL_MODULES)
@@ -2358,8 +2373,8 @@ def _selected_nodes(
         checkout = copied.parents[2]
         full = {_normalized_node(node) for node in windows_vfs_required_nodes(checkout, release=False)}
         release = {_normalized_node(node) for node in windows_vfs_required_nodes(checkout, release=True)}
-        _require(nodes == (full if phase["mode"] == "source" else release))
-        excluded = set() if phase["mode"] == "source" else full - release
+        _require(phase["acceptance_kind"] == "production" and nodes == release)
+        excluded = full - release
     _require({_normalized_node(node) for node in report["deselected"]} == excluded)
     return parsed
 
@@ -2490,7 +2505,7 @@ def _native_execution_report(phase: dict[str, Any], directory: Path) -> None:
             if record["suite"] == "windows-vfs":
                 _require(qualified is not None)
                 assert qualified is not None
-                actual = qualified["diagnostic" if phase["mode"] == "source" else "wheel"]
+                actual = qualified[phase["mode"]]
                 _require(
                     record["windows_library"]
                     == {"path": actual["dll"], "sha256": actual["dll_sha256"], "kind": actual["target"]}
@@ -2888,15 +2903,15 @@ def _native_suite(context: dict[str, Any], row: dict[str, Any], directory: Path,
         qualification = validate_windows_qualification(
             Path(context["qualification"]), checkout=Path(context["manifest"]["checkout"])
         )
-        if row["mode"] == "source":
-            raw = qualification["diagnostic"]
-            environment["MORDRED_DBCRYPT_CHECKED_LIBRARY"] = raw["dll"]
+        _require(context["kind"] == "production")
+        require_production_qualification(qualification)
         for name in ("MORDRED_DBCRYPT_VFS_FIXTURE_ROOT", "MORDRED_DBCRYPT_QUALIFICATION_MANIFEST"):
             if not os.environ.get(name):
                 raise AcceptanceRefused("owned_windows_vfs_fixtures_required")
             environment[name] = os.environ[name]
         environment["MORDRED_DBCRYPT_TEST_ROOT"] = environment["MORDRED_DBCRYPT_VFS_FIXTURE_ROOT"]
-        selected = qualification["diagnostic" if row["mode"] == "source" else "wheel"]
+        _require("MORDRED_DBCRYPT_CHECKED_LIBRARY" not in environment)
+        selected = qualification[row["mode"]]
         selected_library = {"path": selected["dll"], "sha256": selected["dll_sha256"], "kind": selected["target"]}
     collect_path = directory / (row["suite"] + ".collection.json")
     collect_environment = {**environment, "MORDRED_DBCRYPT_PYTEST_REPORT": str(collect_path)}
@@ -3305,6 +3320,59 @@ def canonical_windows_owner_sid(owner: str) -> str:
     return "S-1-" + authority_text + "-" + "-".join(subauthorities)
 
 
+def windows_activation_declaration(source: str) -> bool:
+    """Read the frozen loader's literal admission, without executing its code."""
+    values = []
+    for node in ast.parse(source).body:
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "NATIVE_QUALIFIED"
+        ) or (
+            isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "NATIVE_QUALIFIED" for target in node.targets)
+        ):
+            values.append(node.value)
+    _require(len(values) == 1 and isinstance(values[0], ast.Constant) and type(values[0].value) is bool)
+    value = values[0]
+    assert isinstance(value, ast.Constant)
+    return bool(value.value)
+
+
+def _native_windows_qualification(directory: Path, *, checkout: Path, kind: str) -> dict[str, Any]:
+    qualified = validate_windows_qualification(directory, checkout=checkout)
+    if kind == "production":
+        require_production_qualification(qualified)
+    return qualified
+
+
+def require_production_qualification(qualified: dict[str, Any]) -> None:
+    """Candidate package eligibility never admits a production Native phase."""
+    for mode in ("source", "wheel"):
+        _validate_windows_eligibility(qualified[mode]["eligibility"], declared=True)
+
+
+def _validate_windows_eligibility(value: Any, *, declared: bool) -> None:
+    _require(isinstance(value, dict) and set(value) == {"declared_qualified", "observed_qualified", "bootstrap"})
+    _require(value["declared_qualified"] is declared and value["observed_qualified"] is True)
+    _require(value["bootstrap"] == ("automatic_production" if declared else "explicit_candidate"))
+
+
+def _validate_package_eligibility(
+    observed: dict[str, Any], *, bundle: dict[str, Any], proof: dict[str, Any], directory: Path
+) -> None:
+    path = _artifact_ref(directory, proof["artifacts"]["sdist"])
+    member_name = Path(bundle["sdist"]).name.removesuffix(".tar.gz") + "/src/mordred_hermes/dbcrypt/_windows_vfs.py"
+    with tarfile.open(path, "r:gz") as archive:
+        members = [member for member in archive.getmembers() if member.name == member_name]
+        _require(len(members) == 1 and members[0].isfile())
+        stream = archive.extractfile(members[0])
+        _require(stream is not None)
+        assert stream is not None
+        declared = windows_activation_declaration(stream.read().decode())
+    _validate_windows_eligibility(observed["eligibility"], declared=declared)
+
+
 def validate_package_observation(
     observed: dict[str, Any],
     *,
@@ -3327,6 +3395,7 @@ def validate_package_observation(
         and observed["env_dll_override"] is None
         and observed["test_exports_absent"] is True
     )
+    _validate_package_eligibility(observed, bundle=bundle, proof=proof, directory=directory)
     _validate_exported_import(
         observed["product_module"], mode=mode, platform="win32", bundle=bundle, bundle_path=proof["bundle_path"]
     )
@@ -3474,6 +3543,7 @@ def _validate_packaged_result(
         "product_module",
         "installed_at",
         "build_receipts",
+        "eligibility",
         "filesystem",
         "sid",
     )

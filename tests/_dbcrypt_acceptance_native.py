@@ -248,7 +248,16 @@ def package_qualification_observation() -> dict[str, Any]:
         }
     finally:
         connection.close()
+    from mordred_hermes.dbcrypt import _windows_vfs
+
+    declared = tool["windows_activation_declaration"](Path(_windows_vfs.__file__).read_text())
+    assert _windows_vfs.NATIVE_QUALIFIED is True
     observed = {
+        "eligibility": {
+            "declared_qualified": declared,
+            "observed_qualified": True,
+            "bootstrap": "automatic_production" if declared else "explicit_candidate",
+        },
         "mode": mode,
         "role": "packaged_editable" if mode == "source" else "packaged_wheel",
         "commit": bundle["commit"],
@@ -1775,14 +1784,16 @@ class NativeReport:
 def pytest_configure(config: Any) -> None:
     reporter = NativeReport()
     if os.environ.get("MORDRED_DBCRYPT_VFS_PACKAGE_QUALIFY") == "1":
+        from mordred_hermes.dbcrypt import _windows_vfs
+
+        declared = _tool()["windows_activation_declaration"](Path(_windows_vfs.__file__).read_text())
+        assert _windows_vfs.NATIVE_QUALIFIED is declared, "runtime eligibility differs from installed declaration"
+        if not declared:
+            _windows_vfs.NATIVE_QUALIFIED = True
+            config.add_cleanup(lambda: setattr(_windows_vfs, "NATIVE_QUALIFIED", False))
         reporter.qualification = package_qualification_observation()
         reporter.pytest_argv = list(config.invocation_params.args)
         reporter.fixture_manifest_sha256 = _digest(Path(os.environ["MORDRED_DBCRYPT_VFS_FIXTURES_DESCRIPTOR"]))
-        from mordred_hermes.dbcrypt import _windows_vfs
-
-        assert _windows_vfs.NATIVE_QUALIFIED is False
-        _windows_vfs.NATIVE_QUALIFIED = True
-        config.add_cleanup(lambda: setattr(_windows_vfs, "NATIVE_QUALIFIED", False))
         config.pluginmanager.register(reporter, "dbcrypt-safe-native-report")
         return
     if (

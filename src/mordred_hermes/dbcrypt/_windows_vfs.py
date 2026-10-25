@@ -1,4 +1,4 @@
-"""Explicit, unqualified Windows checked-VFS bootstrap (no runtime activation).
+"""Windows checked-VFS bootstrap for the qualified distribution-owned driver pair.
 
 Lexical classification is deliberately separate from native admission. Only the
 native adapter holds and validates the handles used for SQLite I/O. This module
@@ -18,7 +18,9 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Final
 
-NATIVE_QUALIFIED: Final = False
+# Release admission is source-controlled, never granted by an environment flag.
+# Actual platform acceptance is recorded separately by the production matrix.
+NATIVE_QUALIFIED: Final = True
 _NAME: Final = "mordred_checked_v1"
 _LOCK = threading.RLock()
 _LIBRARIES: dict[str, Any] = {}

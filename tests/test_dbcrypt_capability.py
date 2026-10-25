@@ -47,6 +47,9 @@ def test_status_never_enrolls_or_unwraps(tmp_path, monkeypatch, marker):
 
 
 def test_driver_import_is_not_readiness(tmp_path, monkeypatch):
+    from mordred_hermes.dbcrypt import _windows_vfs
+
+    monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", False)
     monkeypatch.setattr(sys, "platform", "win32")
     assert callable(getattr(dbcrypt, "database_status", None)), "passive status API is missing"
     status = dbcrypt.database_status(tmp_path)
@@ -250,3 +253,94 @@ def test_prompt_never_promises_pending_conversion_on_unavailable_platform(tmp_pa
     text = _hooks.status_line()
     assert "unavailable" in text
     assert "until Hermes restarts" not in text
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_automatic_native_startup_installs_real_guarded_shim(native_root, monkeypatch, platform):
+    """The public bootstrap must reach native custody, not its old platform refusal."""
+    from types import SimpleNamespace
+
+    from mordred_hermes import _runtime_bootstrap
+    from mordred_hermes.dbcrypt import _shim, _windows_vfs
+
+    root, backend, _, _ = native_root
+    monkeypatch.setattr(dbcrypt, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(capability(), "sys", SimpleNamespace(platform=platform))
+    # Platform-specific distribution metadata only; real Authority/lease/shim remain.
+    monkeypatch.setattr(_windows_vfs, "driver_distribution_qualified", lambda: True)
+    monkeypatch.setattr(_windows_vfs, "packaged_library_path", lambda: root / "owned.dll")
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setitem(sys.modules, "sqlite3", __import__("sqlite3"))
+    monkeypatch.setitem(sys.modules, "sqlite3.dbapi2", sys.modules.get("sqlite3.dbapi2"))
+    before = (root / "mordred/db-key-source.json").read_bytes()
+    try:
+        _runtime_bootstrap._install_database_encryption()
+        assert _shim.is_installed()
+        assert dbcrypt._PROVIDER.authority.root == root
+        assert sum(op == "ecdh" for op, _ in backend.calls) == 1
+        assert (root / "mordred/db-key-source.json").read_bytes() == before
+    finally:
+        if dbcrypt._PROVIDER is not None:
+            dbcrypt._PROVIDER.close()
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_native_passive_eligibility_is_unauthenticated_and_requires_driver(tmp_path, monkeypatch, platform):
+    from types import SimpleNamespace
+
+    from mordred_hermes.dbcrypt import _key, _windows_vfs
+
+    module = capability()
+    monkeypatch.setattr(module, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(_windows_vfs, "driver_distribution_qualified", lambda: True)
+    monkeypatch.setattr(_windows_vfs, "packaged_library_path", lambda: tmp_path / "owned.dll")
+    monkeypatch.setattr(_key, "KeyProvider", lambda **kw: pytest.fail("passive custody acquisition"))
+    monkeypatch.setattr(module, "_driver_present", lambda: True)
+    before = list(tmp_path.iterdir())
+    status = module.database_status(tmp_path)
+    assert status.capability == "unknown" and not status.authenticated
+    assert list(tmp_path.iterdir()) == before
+    monkeypatch.setattr(module, "_driver_present", lambda: False)
+    status = module.database_status(tmp_path)
+    assert status.capability == "unavailable" and not status.authenticated
+
+
+def test_windows_activation_still_refuses_unqualified_driver_or_missing_owned_asset(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from mordred_hermes.dbcrypt import _windows_vfs
+
+    monkeypatch.setattr(capability(), "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(_windows_vfs, "driver_distribution_qualified", lambda: False)
+    status = capability().database_status(tmp_path)
+    assert "driver pair" in status.reason
+    monkeypatch.setattr(_windows_vfs, "driver_distribution_qualified", lambda: True)
+    monkeypatch.setattr(_windows_vfs, "packaged_library_path", lambda: None)
+    assert "owned Windows VFS asset" in capability().database_status(tmp_path).reason
+
+
+@pytest.mark.parametrize("failure", ["driver", "asset", "qualification"])
+def test_automatic_windows_startup_refuses_unavailable_prerequisite_before_custody(native_root, monkeypatch, failure):
+    from types import SimpleNamespace
+
+    from mordred_hermes import _runtime_bootstrap
+    from mordred_hermes.dbcrypt import _windows_vfs
+
+    root, backend, _, _ = native_root
+    monkeypatch.setattr(dbcrypt, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(capability(), "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", failure != "qualification")
+    monkeypatch.setattr(_windows_vfs, "driver_distribution_qualified", lambda: failure != "driver")
+    monkeypatch.setattr(
+        _windows_vfs, "packaged_library_path", lambda: None if failure == "asset" else root / "owned.dll"
+    )
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setitem(sys.modules, "sqlite3", __import__("sqlite3"))
+    monkeypatch.setitem(sys.modules, "sqlite3.dbapi2", sys.modules.get("sqlite3.dbapi2"))
+    try:
+        with pytest.raises(RuntimeError, match="database runtime unavailable"):
+            _runtime_bootstrap._install_database_encryption()
+        assert backend.calls == []
+    finally:
+        if dbcrypt._PROVIDER is not None:
+            dbcrypt._PROVIDER.close()

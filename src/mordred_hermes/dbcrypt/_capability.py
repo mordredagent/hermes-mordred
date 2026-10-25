@@ -107,7 +107,7 @@ def database_status(home: Path) -> DatabaseStatus:
             return DatabaseStatus(
                 configured, dependencies, "unavailable", False, "owned Windows VFS asset is unavailable"
             )
-    elif sys.platform != "darwin":
+    elif sys.platform not in {"darwin", "linux"}:
         return DatabaseStatus(
             configured,
             dependencies,

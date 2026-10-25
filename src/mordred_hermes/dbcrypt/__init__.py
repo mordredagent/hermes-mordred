@@ -241,6 +241,14 @@ def _install_native(home: Path | None, provider: KeyProvider | None) -> bool:
     return True
 
 
+def _require_native_runtime_capability(base: Path) -> None:
+    """Refuse known-unavailable prerequisites before authenticating a protected home."""
+    if protected_state_present(base):
+        status = database_status(base)
+        if status.capability == "unavailable":
+            raise RuntimeError("database runtime unavailable: " + (status.reason or "native prerequisites missing"))
+
+
 def install(*, home: Path | None = None, provider: KeyProvider | None = None) -> bool:
     """Swap ``sqlite3`` for SQLCipher if database encryption is armed. Returns whether it did.
 
@@ -254,6 +262,9 @@ def install(*, home: Path | None = None, provider: KeyProvider | None = None) ->
     if _maintenance_process():
         return False
     base = root_home(home or _home())
+    if sys.platform in {"linux", "win32"}:
+        _require_native_runtime_capability(base)
+        return _install_native(home, provider)
     if sys.platform != "darwin":
         if protected_state_present(base):
             raise RuntimeError(
