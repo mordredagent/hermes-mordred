@@ -51,6 +51,16 @@ Phase 0 is complete. Its rules remain the baseline for every change.
 - The optional `hermes-upstream` remote is for source inspection only.
 - `.github/workflows/upstream-check.yml` checks both the latest PyPI release and
   upstream `main` for hook-name and consumed-payload drift.
+- The AST scanner recognizes `invoke_hook` and `ainvoke_hook`, their imported
+  aliases, and module-level wrappers that forward the first parameter and
+  untouched `**kwargs` to either dispatcher. Modified payloads and hook names
+  are not treated as transparent wrappers.
+- The isolated reporter normalizes exact status tokens before constructing
+  Issue API inputs. It paginates open `upstream-drift` issues and manages only
+  its fixed-title `github-actions[bot]` reports. PyPI drift/unavailability or
+  an incomplete check job sets `actionable`; main-only problems remove it.
+  Repeated reports replace the body while preserving unrelated labels; an
+  all-ok run closes managed reports. No weekly comments or upstream PRs.
 
 ### 0.3 Mordred-owned paths (kept in sync with PATHS.md)
 
@@ -2302,6 +2312,7 @@ implementation plan:
 |---|---|
 | Operator and extension collectors | operator repository (`src/mordred/activity.py`, `activity_cli.py`, `docs/activity.md`); no collector code in this repository |
 | Authenticated receiver | `activity/peers.py` (peer credentials), `extension/activity_api.py` (frames, principal revalidation), `activity/contracts.py` (normalization, `PeerPrincipal`), `activity/ingest.py` (`build_receiver`, hourly bounded retention after append), `activity/_capture_audit.py` (`activity.capture_refused`, once per process and code) |
+| Secret redaction | `activity/_redaction.py` (standard-library-only masking, bounded scanning and caches); `activity/contracts.py` explicitly re-exports its public redaction functions, constants and type alongside event validation, serialization and digests |
 | Activity store | `activity/_paths.py`, `activity/_gate.py` (protection gate, keyed opener), `activity/_schema.py` (schema v3, in-place v1→v2→v3 migration), `activity/store.py` (append, episodes, status, backup/restore, `plan_retention`/`apply_retention`) |
 | Corrections | `activity/corrections.py` (record-only: one `user_correction` event appended to an existing episode; nothing derived) |
 | Term matching helpers | `activity/matching.py` (`terms` with CJK bigrams, `SessionBudget` counting characters and shown episodes per session) |
@@ -2366,7 +2377,7 @@ collector and the Hermes tool are thin consumers. Everything lives in
 | 0 | Precondition (other session) | commit the `activity` work on `feat/browser-activity-learning` and reconcile SPEC activity schema v2 versus code v1; then `git worktree add ../hermes-mordred-provenance -b feat/imported-message-provenance feat/browser-activity-learning`; rebase onto `dev` after the activity PR merges | none |
 | 1 | Docs | SPEC, PLAN, TODO, PATHS, HOOK_PAYLOADS, CI, design-doc revision note | existing doc-contract tests |
 | 2 | Records, render, evidence | `imports/records.py`, `imports/render.py`, `imports/evidence.py` | `tests/imports/test_records.py`, `test_render.py`, `test_evidence.py` |
-| 3 | Store | `imports/store.py`, `imports/_schema.py`, `imports/legacy_enc.py`; `activity/_gate.py` renames `_keyed_opener` to public `keyed_opener` | `tests/imports/test_import_store.py` (plain-sqlite seam) |
+| 3 | Store | `imports/store.py`, `imports/_mail_reconcile.py`, `imports/_schema.py`, `imports/legacy_enc.py`; `activity/_gate.py` renames `_keyed_opener` to public `keyed_opener` | `tests/imports/test_import_store.py` (plain-sqlite seam) |
 | 4 | Telegram conversion and sync | `extension/telegram/client.py` (`convert_import_message`), `history.py` sinks, `service.py`, `store.py` index version 2 | extend `tests/extension/test_telegram_import.py`, `tests/test_windows_telegram_archive.py` |
 | 5 | `telegram migrate-store` | `wizard/` migrate-store command and parser | `tests/extension/test_telegram_migrate_store.py` |
 | 6 | Ask rendering and evidence | `extension/telegram/ask.py`, `service.py` (`on_evidence`), `api.py` (`telegram_ask_evidence` frame) | extend `test_telegram_local_llm.py`, `test_telegram_api.py`, `test_telegram_hermes_tools.py`, `tests/integration/test_telegram_local_llm.py` |
@@ -2379,6 +2390,16 @@ collector and the Hermes tool are thin consumers. Everything lives in
 
 Step 11 may start in parallel with step 9. Steps 4 and 6 are end-to-end changes
 and must keep the Linux and Windows `.enc` paths unchanged.
+
+`ImportStore` owns connections, transaction boundaries, writer guards, cursor
+updates and publication. Its shared `_write_messages` path handles copy
+selection, reference persistence, message writes and counts for both thread
+and batch imports. Thread staging (including dry-run rollback) and batch
+publication retain their separate caller boundaries. Mail thread reconciliation
+lives in `_mail_reconcile.py`, using the caller's connection and participant
+decoder/conversation merger without opening or committing a connection.
+Conversation updates and merges share metadata calculation inside `store.py`;
+each caller explicitly chooses its existing cursor precedence.
 
 ### Landed steps (2026-10-22)
 

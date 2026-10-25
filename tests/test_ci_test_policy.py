@@ -84,7 +84,16 @@ def test_network_change_adds_integration_and_whole_windows_family():
 
 
 @pytest.mark.parametrize(
-    "path", ["src/mordred_hermes/keyvault/api.py", "tests/new_test.py", ".github/workflows/ci.yml"]
+    "path",
+    [
+        "src/mordred_hermes/keyvault/api.py",
+        "src/mordred_hermes/imports/store.py",
+        "src/mordred_hermes/imports/_mail_reconcile.py",
+        "src/mordred_hermes/activity/contracts.py",
+        "src/mordred_hermes/activity/_redaction.py",
+        "tests/new_test.py",
+        ".github/workflows/ci.yml",
+    ],
 )
 def test_sensitive_or_unknown_ready_changes_select_all_final_packs(path):
     result = decide(path=path)
@@ -94,7 +103,7 @@ def test_sensitive_or_unknown_ready_changes_select_all_final_packs(path):
     assert result["linux_packs"] == ["main", "static", "features", "floor", "package", "tor", "tpm", "swtpm"]
     assert result["macos_packs"] == ["main", "swift", "tpm"]
     assert result["windows_packs"] == ["main", "winkey", "windows-wheel"]
-    assert len(result["windows_modules"]) == 84
+    assert len(result["windows_modules"]) == 92
 
 
 @pytest.mark.parametrize("action", ["opened", "synchronize", "reopened", "converted_to_draft"])
@@ -248,7 +257,7 @@ def test_standalone_bootstrap_cli_writes_exact_contract_without_site_packages(tm
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert values["mode"] == "final" and values["windows"] == "true"
     assert json.loads(values["linux_versions"]) == ["3.11", "3.13"]
-    assert len(json.loads(values["windows_modules"])) == 84
+    assert len(json.loads(values["windows_modules"])) == 92
 
 
 @pytest.fixture

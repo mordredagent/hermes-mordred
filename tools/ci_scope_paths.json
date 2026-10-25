@@ -120,6 +120,7 @@
     "native/dbcrypt-vfs/probe.c": [],
     "native/dbcrypt-vfs/vfs.c": [],
     "src/mordred_hermes/dbcrypt/_capability.py": [],
+    "src/mordred_hermes/activity/_redaction.py": [],
     "src/mordred_hermes/desktop/__init__.py": [
       "extension"
     ],
@@ -239,6 +240,7 @@
     "src/mordred_hermes/extension/web/index.html": [
       "package"
     ],
+    "src/mordred_hermes/imports/_mail_reconcile.py": [],
     "src/mordred_hermes/imports/mail/forget.py": [
       "macos"
     ],

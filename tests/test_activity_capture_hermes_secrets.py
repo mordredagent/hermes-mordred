@@ -25,6 +25,7 @@ import pytest
 from mordred_hermes.activity import (
     _browser_results,
     _history_access,
+    _redaction,
     capture_hermes,
     contracts,
     history,
@@ -495,15 +496,15 @@ def test_patterns_of_withheld_values_are_freed_when_evicted(monkeypatch) -> None
     patterns (about 98 MiB) in the ``re`` module's own cache. Each pattern is now kept only by this module's bounded
     cache: what it evicts is freed, and the module cache gains nothing."""
     compiled: list[weakref.ref[re.Pattern[str]]] = []
-    compile_uncached = contracts._compile_uncached
+    compile_uncached = _redaction._compile_uncached
 
     def recorded(source: str) -> re.Pattern[str]:
         pattern = compile_uncached(source)
         compiled.append(weakref.ref(pattern))
         return pattern
 
-    monkeypatch.setattr(contracts, "_compile_uncached", recorded)
-    contracts._VALUE_PATTERNS.clear()
+    monkeypatch.setattr(_redaction, "_compile_uncached", recorded)
+    _redaction._VALUE_PATTERNS.clear()
     module_cache = {key for name in ("_cache", "_cache2") for key in getattr(re, name, {})}
     state = capture_hermes._Session()
     values = _codex_withheld_values()
@@ -518,12 +519,12 @@ def test_patterns_of_withheld_values_are_freed_when_evicted(monkeypatch) -> None
     kept = tracemalloc.get_traced_memory()[0]
     tracemalloc.stop()
     alive = [pattern for ref in compiled if (pattern := ref()) is not None]
-    assert len(compiled) == len(values) and len(alive) <= contracts._MAX_VALUE_PATTERNS
+    assert len(compiled) == len(values) and len(alive) <= _redaction._MAX_VALUE_PATTERNS
     assert sum(sys.getsizeof(pattern) + len(pattern.pattern) for pattern in alive) < 1_000_000
     assert kept < 512 * 1024, kept  # 16 patterns of 32 such values took about 16 MiB
     assert {key for name in ("_cache", "_cache2") for key in getattr(re, name, {})} <= module_cache
     assert capture_hermes._scrubbed(text, state.withheld) == ("held text naming redacted once", True)
-    contracts._VALUE_PATTERNS.clear()
+    _redaction._VALUE_PATTERNS.clear()
 
 
 # --- a secret-shaped token in the user's own words (live B2 re-run, N4) -------------------------------------------

@@ -81,10 +81,20 @@ def test_empty_malformed_duplicate_scope_fails_closed(changes):
     assert scope_tool().classify_changes(changes).final
 
 
-def test_sensitive_overrides_win_even_if_inventory_accidentally_allowlists_them(tmp_path):
+@pytest.mark.parametrize(
+    "source",
+    [
+        "src/mordred_hermes/keyvault/api.py",
+        "src/mordred_hermes/imports/store.py",
+        "src/mordred_hermes/imports/_mail_reconcile.py",
+        "src/mordred_hermes/activity/contracts.py",
+        "src/mordred_hermes/activity/_redaction.py",
+    ],
+)
+def test_sensitive_overrides_win_even_if_inventory_accidentally_allowlists_them(tmp_path, source):
     path = tmp_path / "inventory.json"
-    path.write_text(json.dumps({"schema_version": 1, "paths": {"src/mordred_hermes/keyvault/api.py": []}}))
-    assert scope_tool().classify_changes([change("src/mordred_hermes/keyvault/api.py")], inventory_path=path).final
+    path.write_text(json.dumps({"schema_version": 1, "paths": {source: []}}))
+    assert scope_tool().classify_changes([change(source)], inventory_path=path).final
 
 
 @pytest.mark.parametrize("path", ["docs/dev/CI.md", "src/mordred_hermes/llm_guard/health.py", "docs/user/example.py"])

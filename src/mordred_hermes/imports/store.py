@@ -122,7 +122,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, NamedTuple
+from typing import Any, Final, NamedTuple
 
 from .._database_contracts import DatabaseRefused
 from ..activity._gate import (
@@ -134,7 +134,7 @@ from ..activity._gate import (
     runtime_authority,
 )
 from ..activity.store import BUSY_TIMEOUT_S
-from . import _schema
+from . import _mail_reconcile, _schema
 from .records import (
     ConversationKind,
     ImportConversation,
@@ -151,9 +151,6 @@ from .records import (
     validate_conversation,
     validate_message,
 )
-
-if TYPE_CHECKING:  # the mail package imports this module; the guard is imported where it is used
-    from .mail.merge_guard import GroupFacts
 
 __all__ = [
     "MAX_NEIGHBORS",
@@ -195,19 +192,9 @@ _META_KEY_RE: Final = re.compile(r"[a-z][a-z0-9_]{0,31}(?:\.[a-z][a-z0-9_]{0,31}
 _MAX_META_VALUE: Final = 256
 #: Upper bound on participants kept on a merged conversation row.
 _MAX_MERGED_PARTICIPANTS: Final = 256
-#: A mail conversation keyed by a Gmail thread id (``mail.threading.default_thread_key``) is never folded away.
-_GMAIL_THREAD_PREFIX: Final = "g."
 _MAX_REF_CHARS: Final = 1024
-#: Joins of message ``m`` onto its run ``r`` and conversation ``c``, and the scopes a reconciliation looks in:
-#: parents among rows of committed runs or of the run being written, replies among committed rows (a reply
-#: of the batch itself is weighed from its own side), of one source and account.
-_RUN_AND_CONV: Final = (
-    "JOIN import_runs r ON r.run_id = m.run_id JOIN import_conversations c ON c.conv_uid = m.conv_uid"
-)
 #: What :func:`_decision` weighs of a stored row ``m`` (then: written by the same run, and its run's state ``r``).
 _DECISION_COLUMNS: Final = "m.source_revision, m.content_digest, m.provenance_quality, m.owner_evidence"
-_IN_SCOPE: Final = "(r.state = 'committed' OR m.run_id = ?) AND c.source = ? AND c.source_account = ?"
-_COMMITTED_SCOPE: Final = "r.state = 'committed' AND c.source = ? AND c.source_account = ?"
 #: Owner evidence of a sent copy, by strength ("Sent evidence wins", rule 4 above): Gmail's
 #: ``\Sent`` system label (the server vouches for authorship) over a generic server's sent
 #: folder (it names its purpose); every other evidence ranks 0. Mirrors ``mail.owner.SENT_EVIDENCE``.
@@ -495,6 +482,29 @@ def _meta_value(value: object) -> str:
 
 def _participant_key(participant: Participant) -> tuple[str, str]:
     return (str(participant.owner_class), participant.stable_id or f"name:{participant.display_name}")
+
+
+def _conversation_metadata(
+    base: ImportConversation, conversations: Sequence[ImportConversation], *, sync_cursor: str | None
+) -> ImportConversation:
+    """Merge ordered metadata onto ``base``; the caller chooses cursor precedence.
+
+    The first non-empty title and first occurrence of each participant win.
+    Updates pass stored then incoming metadata; conversation folds pass the
+    survivor then the folded rows. Non-metadata fields remain those of ``base``.
+    """
+    people: dict[tuple[str, str], Participant] = {}
+    for conv in conversations:
+        for participant in conv.participants:
+            people.setdefault(_participant_key(participant), participant)
+    dates = [conv.last_message_at for conv in conversations if conv.last_message_at is not None]
+    return replace(
+        base,
+        title=next((conv.title for conv in conversations if conv.title), ""),
+        participants=tuple(people.values())[:_MAX_MERGED_PARTICIPANTS],
+        last_message_at=max(dates) if dates else None,
+        sync_cursor=sync_cursor,
+    )
 
 
 def _meta_updates(updates: Mapping[str, str | None]) -> dict[str, str | None]:
@@ -866,7 +876,9 @@ class ImportStore:
             tally, accepted = self._write_messages(conn, run_id, source, messages, links, touched)
             skipped = 0
             if links is not None:
-                survivors, dropped, skipped = self._reconcile(conn, run_id, messages, accepted)
+                survivors, dropped, skipped = _mail_reconcile.reconcile(
+                    conn, run_id, messages, accepted, decode_participants=_participants, merge_into=self._merge_into
+                )
                 touched = (touched - dropped) | survivors
             result = BatchResult(tally["inserted"], tally["duplicates"], tally["revised"], tally["conflicts"], skipped)
             self._publish(conn, run_id, _counts_json({**extra, **result.counts()}))
@@ -912,18 +924,18 @@ class ImportStore:
         when the stored message has none yet (a row written before schema v2). A
         rejected different copy (a weaker duplicate, a conflict) contributes none.
         """
-        from .mail.merge_guard import nearest_refs
-
         tally: Counter[str] = Counter()
         accepted: dict[str, tuple[str, ...]] = {}
         for msg in messages:
             self._check_target(conn, msg, source)
-            identical = self._identical_copy(conn, msg)
+            identical = links is not None and self._identical_copy(conn, msg)
             outcome = self._outcome(conn, run_id, msg)
             if outcome in _WRITES:
                 touched.update(self._stored_conversations(conn, msg.source_uid))
                 self._store_message(conn, run_id, msg)
             if links is not None and (outcome in _WRITES or identical):
+                from .mail.merge_guard import nearest_refs
+
                 ids = nearest_refs(links.get(msg.source_uid, ()))
                 self._store_refs(conn, msg.source_uid, ids, replace=outcome in _WRITES)
                 accepted[msg.source_uid] = ids
@@ -953,120 +965,6 @@ class ImportStore:
             "INSERT OR IGNORE INTO import_mail_refs (source_uid, ref_message_id) VALUES (?, ?)",
             [(source_uid, ref) for ref in ids],
         )
-
-    def _reconcile(
-        self,
-        conn: sqlite3.Connection,
-        run_id: str,
-        messages: Sequence[ImportMessage],
-        links: Mapping[str, Sequence[str]],
-    ) -> tuple[set[str], set[str], int]:
-        """Merge the conversations the batch's reference edges connect; (survivors, dropped conv uids, skipped)."""
-        from .mail.merge_guard import fold_plan
-
-        survivors: set[str] = set()
-        dropped: set[str] = set()
-        skipped = 0
-        facts: dict[str, GroupFacts] = {}  # per batch: a conversation changes here only by a merge
-        owners: dict[tuple[str, str], frozenset[str]] = {}
-        for msg in messages:
-            linked = self._linked_conversations(conn, run_id, msg.source_uid, links.get(msg.source_uid, ()))
-            if linked is None or len(linked[1]) < 2:
-                continue
-            home, involved, scope = linked
-            if scope not in owners:
-                owners[scope] = self._own_addresses(conn, *scope)
-            for conv_uid in involved - facts.keys():
-                facts[conv_uid] = self._conv_facts(conn, run_id, conv_uid, owners[scope])
-            survivor, others, guarded = fold_plan(home, {uid: facts[uid] for uid in involved})
-            skipped += guarded
-            if others:
-                self._merge_into(conn, run_id, survivor, others)
-                facts[survivor] = facts[survivor].joined([facts.pop(uid) for uid in others])
-                dropped.update(others)
-                survivors.difference_update(others)
-                survivors.add(survivor)
-        return survivors, dropped, skipped
-
-    @staticmethod
-    def _own_addresses(conn: sqlite3.Connection, source: str, account: str) -> frozenset[str]:
-        """The account's recorded own addresses (``import_accounts``), case-folded; empty when unreadable."""
-        row = conn.execute(
-            "SELECT own_addresses_json FROM import_accounts WHERE source = ? AND account = ?", (source, account)
-        ).fetchone()
-        try:
-            value = json.loads(str(row[0])) if row is not None else []
-        except ValueError:
-            return frozenset()
-        if not isinstance(value, list):
-            return frozenset()
-        return frozenset(item.casefold() for item in value if isinstance(item, str))
-
-    @staticmethod
-    def _conv_facts(conn: sqlite3.Connection, run_id: str, conv_uid: str, own: frozenset[str]) -> GroupFacts:
-        """Age, Gmail key, message count and non-owner participants of ``conv_uid`` (committed rows and the run's)."""
-        from .mail.merge_guard import GroupFacts
-
-        key = conn.execute("SELECT conversation_id FROM import_conversations WHERE conv_uid = ?", (conv_uid,))
-        gmail = str(key.fetchone()[0]).startswith(_GMAIL_THREAD_PREFIX)
-        rows = conn.execute(
-            "SELECT m.sent_at, m.sender_id, m.owner_class, m.recipients_json FROM import_messages m "
-            "JOIN import_runs r ON r.run_id = m.run_id "
-            "WHERE m.conv_uid = ? AND (r.state = 'committed' OR m.run_id = ?)",
-            (conv_uid, run_id),
-        ).fetchall()
-        dates = [int(row[0]) for row in rows if row[0] is not None]
-        people: set[str] = set()
-        owner = OwnerClass.ACCOUNT_OWNER.value
-        for _sent_at, sender_id, owner_class, recipients in rows:
-            if sender_id and owner_class != owner:
-                people.add(str(sender_id).casefold())
-            people.update(
-                item.stable_id.casefold()
-                for item in _participants(str(recipients))
-                if item.stable_id and item.owner_class is not OwnerClass.ACCOUNT_OWNER
-            )
-        return GroupFacts(
-            age=(not dates, min(dates) if dates else 0, conv_uid),
-            gmail=gmail,
-            messages=len(rows),
-            people=frozenset(people - own),
-        )
-
-    @staticmethod
-    def _linked_conversations(
-        conn: sqlite3.Connection, run_id: str, source_uid: str, parents: Sequence[str]
-    ) -> tuple[str, set[str], tuple[str, str]] | None:
-        """(``source_uid``'s conversation, it with its parents' and the committed replies', (source, account))."""
-        row = conn.execute(
-            "SELECT m.conv_uid, m.message_id, c.source, c.source_account FROM import_messages m "
-            "JOIN import_conversations c ON c.conv_uid = m.conv_uid WHERE m.source_uid = ?",
-            (source_uid,),
-        ).fetchone()
-        if row is None:
-            return None
-        conv_uid, message_id, source, account = (str(value) for value in row)
-        scope = (run_id, source, account)
-        involved = {conv_uid}
-        if parents:
-            involved.update(
-                str(found[0])
-                for found in conn.execute(
-                    f"SELECT DISTINCT m.conv_uid FROM import_messages m {_RUN_AND_CONV} "
-                    f"WHERE {_IN_SCOPE} AND m.message_id IN ({_marks(len(parents))})",
-                    (*scope, *parents),
-                )
-            )
-        involved.update(
-            str(found[0])
-            for found in conn.execute(
-                f"SELECT DISTINCT m.conv_uid FROM import_mail_refs f "
-                f"JOIN import_messages m ON m.source_uid = f.source_uid {_RUN_AND_CONV} "
-                f"WHERE f.ref_message_id = ? AND {_COMMITTED_SCOPE}",
-                (message_id, source, account),
-            )
-        )
-        return conv_uid, involved, (source, account)
 
     def merge_conversations(self, survivor: str, others: Iterable[str]) -> int:
         """Fold ``others`` into ``survivor`` in ONE transaction; returns how many message rows moved.
@@ -1099,18 +997,8 @@ class ImportStore:
         folded = [rows[uid] for uid in others]
         if any((conv.source, conv.source_account) != (target.source, target.source_account) for conv in folded):
             raise ImportRefused("conflict")
-        people: dict[tuple[str, str], Participant] = {}
-        for participant in (*target.participants, *(p for conv in folded for p in conv.participants)):
-            people.setdefault(_participant_key(participant), participant)
-        dates = [conv.last_message_at for conv in (target, *folded) if conv.last_message_at is not None]
         cursors = [conv.sync_cursor for conv in (target, *folded) if conv.sync_cursor is not None]
-        merged = replace(
-            target,
-            title=target.title or next((conv.title for conv in folded if conv.title), ""),
-            participants=tuple(people.values())[:_MAX_MERGED_PARTICIPANTS],
-            last_message_at=max(dates) if dates else None,
-            sync_cursor=cursors[0] if cursors else None,
-        )
+        merged = _conversation_metadata(target, (target, *folded), sync_cursor=cursors[0] if cursors else None)
         moved = 0
         for start in range(0, len(others), _CHUNK):
             chunk = list(others[start : start + _CHUNK])
@@ -1186,7 +1074,6 @@ class ImportStore:
             validate_conversation(conversation)
         for msg in messages:
             validate_message(msg)
-        counts: Counter[str] = Counter()
         with self._transaction() as conn:
             source, state = self._open_run(conn, run_id)
             if conversation is not None:
@@ -1194,13 +1081,9 @@ class ImportStore:
                     raise RecordError("source_mismatch")
                 merged = self._merged(conn, conversation) if merge_conversation else conversation
                 self._upsert_conversation(conn, merged)
-            for msg in messages:
-                self._check_target(conn, msg, source)
-                outcome = self._outcome(conn, run_id, msg)
-                if outcome in _WRITES:
-                    self._store_message(conn, run_id, msg)
-                counts[outcome] += 1
+            counts, _ = self._write_messages(conn, run_id, source, messages, None, set())
             if merge_conversation:
+                # Thread staging recounts incoming targets; batches also recount rows moved away.
                 for conv_uid in sorted({msg.conv_uid for msg in messages}):
                     self._recount(conn, run_id, conv_uid)
             if state == "dry_run":
@@ -1216,15 +1099,9 @@ class ImportStore:
         if row is None:
             return conv
         stored = ImportConversation(**_decoded(_CONV_FIELDS, row))
-        people: dict[tuple[str, str], Participant] = {}
-        for participant in (*stored.participants, *conv.participants):
-            people.setdefault(_participant_key(participant), participant)
-        dates = [value for value in (stored.last_message_at, conv.last_message_at) if value is not None]
-        return replace(
+        return _conversation_metadata(
             conv,
-            title=stored.title or conv.title,
-            participants=tuple(people.values())[:_MAX_MERGED_PARTICIPANTS],
-            last_message_at=max(dates) if dates else None,
+            (stored, conv),
             sync_cursor=conv.sync_cursor if conv.sync_cursor is not None else stored.sync_cursor,
         )
 

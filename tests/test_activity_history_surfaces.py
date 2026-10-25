@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.activity import _history_access, contracts, history
+from mordred_hermes.activity import _history_access, _redaction, contracts, history
 from mordred_hermes.activity._gate import ActivityRefused
 from mordred_hermes.activity.config import ActivityConfig
 from mordred_hermes.activity.hooks_history import RESULT_KEY, pre_llm_call, transform_tool_result
@@ -642,8 +642,8 @@ def test_old_url_credentials_are_scrubbed_again_on_every_surface(history_home, m
     write_config(home, ENABLED)
     seq = Seq()
     with monkeypatch.context() as patch:  # a receiver that knew neither parameter nor the opaque user name
-        patch.setattr(contracts, "credential_param", lambda _name: False)
-        patch.setattr(contracts, "_secret_username", lambda _name: False)
+        patch.setattr(_redaction, "credential_param", lambda _name: False)
+        patch.setattr(_redaction, "_secret_username", lambda _name: False)
         seed_episode(
             store,
             seq,
