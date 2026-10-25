@@ -39,10 +39,32 @@ def test_open_pins_root_without_acquiring_lock_or_reading_database(api: WindowsA
     assert all(share == 3 for _, _, share, _ in api.opens)
     assert any(path.endswith("db-encryption.lock") and create for path, _, _, create in api.opens)
     assert not any(path.endswith(".db") for path, _, _, _ in api.opens)
+    assert [api._path(path) for path in api.flushes] == [
+        HOME.casefold(),
+        (HOME + "\\mordred").casefold(),
+        HOME.casefold(),
+    ]
     lock.close()
     lock.close()
     assert api.handles == {}
     assert api.unlocks == []
+
+
+@pytest.mark.parametrize("failed_barrier", [0, 1, 2], ids=["parent-before", "created-child", "parent-after"])
+def test_directory_flush_failure_refuses_before_lock_creation_and_closes_handles(
+    api: WindowsAPI, failed_barrier: int
+) -> None:
+    api.flush_errors = [None] * failed_barrier + [1117]
+    with pytest.raises(DatabaseRefused):
+        adapter().open_lock(Path(HOME))
+    assert len(api.flushes) == failed_barrier + 1
+    assert api.handles == {}
+    assert api.handle_requests == {}
+    assert api.lock_flags == []
+    assert api._path(LOCK) not in api.nodes
+    # The first durability refusal prevents creation; later failures retain the
+    # newly created directory without proceeding to a lock or repairing it.
+    assert (api._path(HOME + "\\mordred") in api.nodes) is (failed_barrier > 0)
 
 
 @pytest.mark.parametrize(("shared", "flags"), [(True, 1), (False, 3)])

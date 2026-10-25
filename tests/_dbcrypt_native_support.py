@@ -28,7 +28,10 @@ class WindowsAPI:
         self.sid = USER
         self.nodes: dict[str, Node] = {}
         self.handles: dict[int, Node] = {}
+        self.handle_requests: dict[int, tuple[int, int]] = {}
         self.opens: list[tuple[str, int, int, bool]] = []
+        self.flushes: list[str] = []
+        self.flush_errors: list[int | None] = []
         self.locks: dict[int, bool] = {}
         self.lock_flags: list[int] = []
         self.unlocks: list[int] = []
@@ -76,6 +79,7 @@ class WindowsAPI:
         value = self._next_handle
         self._next_handle += 1
         self.handles[value] = self.nodes[key]
+        self.handle_requests[value] = (access, share)
         return OwnedHandle(cast(NativeAPI, self), value)
 
     def mkdir(self, path: str) -> None:
@@ -108,6 +112,16 @@ class WindowsAPI:
     def validate_volume(self, handle: OwnedHandle) -> None:
         assert self.metadata(handle).identity.volume == 7
 
+    def flush(self, handle: OwnedHandle) -> None:
+        assert handle.value is not None
+        node = self.handles[handle.value]
+        assert node.metadata.directory
+        assert self.handle_requests[handle.value] == (0xC0000000, 3)
+        self.flushes.append(node.path)
+        error = self.flush_errors.pop(0) if self.flush_errors else None
+        if error is not None:
+            raise native_error(error, "flush")
+
     def Lock(self, value: int, flags: int, reserved: int, low: int, high: int, overlap: Any) -> bool:
         assert reserved == high == 0 and low == 1
         assert overlap._obj.offset == overlap._obj.offset_high == 0
@@ -137,5 +151,6 @@ class WindowsAPI:
 
     def CloseHandle(self, value: int) -> bool:
         del self.handles[value]
+        del self.handle_requests[value]
         self.locks.pop(value, None)
         return True
