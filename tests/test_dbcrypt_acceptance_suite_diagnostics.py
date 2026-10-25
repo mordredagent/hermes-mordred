@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -99,6 +100,7 @@ def test_failed_suite_keeps_safe_test_hashes_in_original_execution_record(suite_
             {
                 "module": "tests/test_dbcrypt.py",
                 "node_base_sha256": hashlib.sha256(b"tests/test_dbcrypt.py::test_open").hexdigest(),
+                "node_suffix_sha256": hashlib.sha256(b"test_open").hexdigest(),
                 "outcome": "failed",
                 "when": "call",
             }
@@ -161,10 +163,17 @@ def test_collection_module_only_windows_path_and_unknown_node_are_sanitized(suit
         {
             "module": "tests/test_windows_memory_live.py",
             "node_base_sha256": hashlib.sha256(b"tests/test_windows_memory_live.py").hexdigest(),
+            "node_suffix_sha256": None,
             "outcome": "failed",
             "when": "collection",
         },
-        {"module": "unrecognized_nodeid", "node_base_sha256": None, "outcome": "failed", "when": "collection"},
+        {
+            "module": "unrecognized_nodeid",
+            "node_base_sha256": None,
+            "node_suffix_sha256": None,
+            "outcome": "failed",
+            "when": "collection",
+        },
     ]
 
 
@@ -218,6 +227,7 @@ def test_reader_rejects_special_or_unowned_report_metadata(tmp_path, damage):
         "truncated",
         "module",
         "hash",
+        "suffix",
         "outcome",
         "when",
         "available_without_details",
@@ -235,7 +245,13 @@ def test_outer_descriptor_contract_rejects_nonclosed_or_inconsistent_fields(dama
             "finding_count": 1,
             "truncated": False,
             "findings": [
-                {"module": "tests/test_dbcrypt.py", "node_base_sha256": "b" * 64, "outcome": "failed", "when": "call"}
+                {
+                    "module": "tests/test_dbcrypt.py",
+                    "node_base_sha256": "b" * 64,
+                    "node_suffix_sha256": "c" * 64,
+                    "outcome": "failed",
+                    "when": "call",
+                }
             ],
         },
     }
@@ -255,7 +271,13 @@ def test_outer_descriptor_contract_rejects_nonclosed_or_inconsistent_fields(dama
     elif damage == "available_without_details":
         summary["details"] = None
     else:
-        field = {"module": "module", "hash": "node_base_sha256", "outcome": "outcome", "when": "when"}[damage]
+        field = {
+            "module": "module",
+            "hash": "node_base_sha256",
+            "suffix": "node_suffix_sha256",
+            "outcome": "outcome",
+            "when": "when",
+        }[damage]
         summary["details"]["findings"][0][field] = SECRET
     assert tool.native_test_failure_descriptor(summary) is False
 
@@ -281,3 +303,77 @@ def test_module_allowlist_covers_current_cross_platform_suite_selection(tmp_path
                 if str(arg).startswith(str(bundle / "tests")) and str(arg).endswith(".py"):
                     selected.add(Path(arg).relative_to(bundle).as_posix())
     assert selected <= tool.NATIVE_TEST_FAILURE_MODULES
+
+
+@pytest.mark.parametrize(
+    "node,suffix",
+    [
+        ("::test_example", "test_example"),
+        ("::TestThing::test_example[" + SECRET + "]", "TestThing::test_example"),
+        ("::test_example[" + SECRET + "::fake]", "test_example"),
+    ],
+)
+def test_empty_module_node_retains_parameter_free_suffix_hash(node, suffix):
+    tool = acceptance_tool("dbcrypt_acceptance")
+    details = tool._project_native_test_failure({"reports": [{"nodeid": node, "outcome": "failed", "when": "call"}]})
+    finding = details["findings"][0]
+    assert finding["module"] == "unrecognized_nodeid" and finding["node_base_sha256"] is None
+    assert finding["node_suffix_sha256"] == hashlib.sha256(suffix.encode()).hexdigest()
+    assert SECRET not in json.dumps(details)
+
+
+def test_real_external_pytest_collection_keeps_identifiable_suffix(tmp_path):
+    """One real collect-only child, with no .pth, product or auto-loaded plugins."""
+    config = tmp_path / "sdist/pyproject.toml"
+    config.parent.mkdir()
+    config.write_text('[tool.pytest.ini_options]\naddopts = ""\n')
+    test = tmp_path / "external/test_example.py"
+    test.parent.mkdir()
+    test.write_text("def test_example():\n    raise AssertionError('collect-only must not run this body')\n")
+    output = tmp_path / "nodes.json"
+    code = r"""
+import json, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+import pytest
+nodes = []
+class Capture:
+    def pytest_collection_finish(self, session):
+        nodes.extend(item.nodeid for item in session.items)
+result = pytest.main(['--collect-only', '-q', '-c', sys.argv[2], sys.argv[3]], plugins=[Capture()])
+assert not any(name == 'mordred_hermes' or name.startswith('mordred_hermes.') for name in sys.modules)
+pathlib.Path(sys.argv[4]).write_text(json.dumps(nodes))
+raise SystemExit(result)
+"""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            code,
+            str(Path(pytest.__file__).parent.parent),
+            str(config),
+            str(test),
+            str(output),
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTEST_ADDOPTS": ""},
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    nodes = json.loads(output.read_text())
+    assert nodes == ["::test_example"]
+    tool = acceptance_tool("dbcrypt_acceptance")
+    details = tool._project_native_test_failure(
+        {"reports": [{"nodeid": nodes[0], "outcome": "failed", "when": "call"}]}
+    )
+    assert details["findings"][0] == {
+        "module": "unrecognized_nodeid",
+        "node_base_sha256": None,
+        "node_suffix_sha256": hashlib.sha256(b"test_example").hexdigest(),
+        "outcome": "failed",
+        "when": "call",
+    }

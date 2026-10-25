@@ -3142,7 +3142,7 @@ def _native_test_failure_details(details: Any) -> bool:
     ):
         return False
     for row in findings:
-        if type(row) is not dict or set(row) != {"module", "node_base_sha256", "outcome", "when"}:
+        if type(row) is not dict or set(row) != {"module", "node_base_sha256", "node_suffix_sha256", "outcome", "when"}:
             return False
         if row["outcome"] not in ("failed", "skipped") or row["when"] not in (
             "setup",
@@ -3151,6 +3151,8 @@ def _native_test_failure_details(details: Any) -> bool:
             "collection",
             "unknown",
         ):
+            return False
+        if row["node_suffix_sha256"] is not None and not _hex(row["node_suffix_sha256"], 64):
             return False
         module = row["module"]
         if type(module) is not str or not (
@@ -3187,10 +3189,18 @@ def _project_native_test_failure(value: Any) -> dict[str, Any]:
             "when": "collection" if is_collection else when if when in ("setup", "call", "teardown") else "unknown",
             "module": "unrecognized_nodeid",
             "node_base_sha256": None,
+            "node_suffix_sha256": None,
         }
         node = row.get("nodeid")
-        if type(node) is str and len(node) <= 4096:
-            module, separator, rest = node.replace("\\", "/").partition("::")
+        # External files collected with an sdist -c can have ::test_name IDs.
+        # Strip parameters before any identity operation, independently of
+        # whether the report supplies a recognizable module component.
+        base = node.split("[", 1)[0] if type(node) is str else None
+        if base is not None and len(base) <= 4096:
+            module, separator, rest = base.partition("::")
+            if rest:
+                item["node_suffix_sha256"] = hashlib.sha256(rest.encode()).hexdigest()
+            module = module.replace("\\", "/")
             matches = [
                 known
                 for known in NATIVE_TEST_FAILURE_MODULES
@@ -3198,7 +3208,7 @@ def _project_native_test_failure(value: Any) -> dict[str, Any]:
             ]
             if len(matches) == 1:
                 item["module"] = matches[0]
-                base = matches[0] + ("::" + rest.split("[", 1)[0] if separator else "")
+                base = matches[0] + ("::" + rest if separator else "")
                 item["node_base_sha256"] = hashlib.sha256(base.encode()).hexdigest()
         result["findings"].append(item)
     return result
