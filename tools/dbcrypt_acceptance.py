@@ -643,6 +643,7 @@ def _validate_manifest(value: Any, root: Path) -> dict[str, Any]:
         "tests/test_dbcrypt.py",
         "tests/conftest.py",
         "tools/dbcrypt_acceptance.py",
+        *_PTH_TEST_INPUTS,
         (extracted / "pyproject.toml").as_posix(),
         Path(wheel_probe["product_file"]).relative_to(root).as_posix(),
     )
@@ -709,8 +710,14 @@ def _git(checkout: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+_PTH_TEST_INPUTS = (
+    "packaging/pth/mordred_hermes_config_decrypt.pth",
+    "packaging/pth/mordred_hermes_runtime.pth",
+)
+
+
 def _copy_inputs(checkout: Path, output: Path) -> None:
-    names = _git(checkout, "ls-files", "-z", "--", "tests", "tools").split("\0")
+    names = _git(checkout, "ls-files", "-z", "--", "tests", "tools", *_PTH_TEST_INPUTS).split("\0")
     for name in names:
         if not name:
             continue
@@ -875,7 +882,7 @@ def _site_packages(output: Path) -> Path:
 def _input_root_layout(output: Path) -> None:
     # Only these top-level locations exist in an acceptance bundle. Mutable
     # evidence belongs under outputs/, never beside copied collection inputs.
-    trees = {"tests", "tools", "extracted-sdist", "artifacts", "build-env", "wheel-env"}
+    trees = {"tests", "tools", "packaging", "extracted-sdist", "artifacts", "build-env", "wheel-env"}
     for path in output.iterdir():
         if path.name == "manifest.json":
             _input_file(path)
@@ -896,7 +903,9 @@ def _bundle_hashes(output: Path) -> dict[str, str]:
     try:
         _input_root_layout(output)
         paths = [
-            path for name in ("tests", "tools", "extracted-sdist", "artifacts") for path in _tree_inputs(output / name)
+            path
+            for name in ("tests", "tools", "packaging", "extracted-sdist", "artifacts")
+            for path in _tree_inputs(output / name)
         ]
         site = _site_packages(output)
         paths.extend(_tree_inputs(site / "mordred_hermes"))
@@ -2199,7 +2208,7 @@ def validate_bundle_evidence(value: Any, *, directory: Path) -> dict[str, Any]:
     _offline_build_records(manifest, proof["bundle_path"])
     files = manifest["files"]
     _require(isinstance(files, dict) and bool(files) and all(_hex(digest, 64) for digest in files.values()))
-    required = {name for name in files if name.startswith(("tests/", "tools/"))}
+    required = {name for name in files if name.startswith(("tests/", "tools/")) or name in _PTH_TEST_INPUTS}
     _require(bool(required) and set(proof["inputs"]) == required)
     inputs = {}
     for name in sorted(required):
@@ -2264,7 +2273,7 @@ def _export_bundle_evidence(context: dict[str, Any], directory: Path) -> dict[st
         config_name,
         manifest["sdist"],
         manifest["wheel"],
-        *(name for name in manifest["files"] if name.startswith(("tests/", "tools/"))),
+        *(name for name in manifest["files"] if name.startswith(("tests/", "tools/")) or name in _PTH_TEST_INPUTS),
         *(name for name in manifest["files"] if name.startswith("artifacts/native-build/")),
     ]
     for name in names:
@@ -3576,7 +3585,11 @@ def _local_bundle_proof(path: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         "manifest": ref("manifest.json"),
         "configuration": ref(manifest["extracted_sdist"] + "/pyproject.toml"),
         "artifacts": {kind: ref(manifest[kind]) for kind in ("sdist", "wheel")},
-        "inputs": {name: ref(name) for name in manifest["files"] if name.startswith(("tests/", "tools/"))},
+        "inputs": {
+            name: ref(name)
+            for name in manifest["files"]
+            if name.startswith(("tests/", "tools/")) or name in _PTH_TEST_INPUTS
+        },
         "native_build": {name: ref(name) for name in manifest["files"] if name.startswith("artifacts/native-build/")},
     }
 

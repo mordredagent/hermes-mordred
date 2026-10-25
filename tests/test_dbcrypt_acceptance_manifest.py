@@ -50,6 +50,8 @@ def bundle_fixture(tmp_path: Path) -> tuple[object, Path, dict]:
         "tests/test_dbcrypt.py",
         "tests/conftest.py",
         "tools/dbcrypt_acceptance.py",
+        "packaging/pth/mordred_hermes_config_decrypt.pth",
+        "packaging/pth/mordred_hermes_runtime.pth",
         "artifacts/hermes_mordred-0.3.0a4.tar.gz",
         "artifacts/hermes_mordred-0.3.0a4-py3-none-any.whl",
         "extracted-sdist/hermes_mordred-0.3.0a4/pyproject.toml",
@@ -160,6 +162,48 @@ def bundle_fixture(tmp_path: Path) -> tuple[object, Path, dict]:
 
 def write_manifest(root: Path, manifest: dict) -> None:
     (root / "manifest.json").write_text(json.dumps(manifest))
+
+
+def test_copied_bundle_preserves_real_pth_gate_test_inputs(tmp_path: Path) -> None:
+    import runpy
+
+    tool = acceptance_tool("dbcrypt_acceptance")
+    checkout = Path(__file__).resolve().parents[1]
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    tool._copy_inputs(checkout, bundle)
+    assert not (bundle / "src").exists()
+    assert not (bundle / "mordred_hermes").exists()
+    for name in ("test_pth_bootstrap.py", "test_runtime_bootstrap.py"):
+        copied = runpy.run_path(str(bundle / "tests" / name))
+        assert copied["_eval_pth_engages"]("/opt/venv/bin/hermes") is True
+        assert copied["_eval_pth_engages"]("/opt/venv/bin/pytest") is False
+
+
+@pytest.mark.parametrize("name", ["mordred_hermes_runtime.pth", "mordred_hermes_config_decrypt.pth"])
+def test_bundle_pth_gate_inputs_are_required_hash_bound_and_exported(tmp_path: Path, name: str) -> None:
+    tool, bundle, manifest = bundle_fixture(tmp_path)
+    relative = "packaging/pth/" + name
+    path = bundle / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# inert startup gate fixture\n")
+    manifest["files"][relative] = tool.sha256_file(path)
+    write_manifest(bundle, manifest)
+    assert tool.validate_bundle(bundle)["files"][relative] == tool.sha256_file(path)
+    assert relative in tool._local_bundle_proof(bundle, manifest)["inputs"]
+    phase = tmp_path / "phase"
+    phase.mkdir()
+    proof_ref = tool._export_bundle_evidence({"bundle": bundle, "manifest": manifest}, phase)
+    proof = json.loads((tmp_path / proof_ref["path"]).read_text())
+    assert proof["inputs"][relative]["sha256"] == manifest["files"][relative]
+    path.write_text("# changed gate\n")
+    with pytest.raises(tool.AcceptanceRefused):
+        tool.validate_bundle(bundle)
+    path.unlink()
+    del manifest["files"][relative]
+    write_manifest(bundle, manifest)
+    with pytest.raises(tool.AcceptanceRefused):
+        tool.validate_bundle(bundle)
 
 
 def test_acceptance_rejects_source_import_in_wheel_run(tmp_path: Path) -> None:
