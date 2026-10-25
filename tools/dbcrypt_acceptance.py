@@ -3080,6 +3080,212 @@ def _collector_child(context: dict[str, Any], root: Path, operation: str, direct
     return record
 
 
+NATIVE_TEST_FAILURE_MODULES = frozenset(
+    "tests/" + relative
+    for relative in (
+        *AFFECTED_MODULES,
+        *ADDITIONAL_MODULES,
+        "integration/test_dbcrypt_native.py",
+        "integration/test_dbcrypt_collectors.py",
+        "integration/test_linux_memory_orchestration_tpm.py",
+        "integration/test_linux_telegram_tpm.py",
+        "integration/test_dbcrypt_windows_vfs.py",
+        "test_windows_custody_live.py",
+        "test_windows_memory_live.py",
+        "test_windows_telegram_live.py",
+        "integration/test_dbcrypt_activity.py",
+        "integration/test_mail_native_custody.py",
+        "test_wizard_windows_memory_live.py",
+        "test_wizard_windows_telegram_live.py",
+    )
+)
+NATIVE_TEST_FAILURE_HASH_SCHEME = "sha256_canonical_unparameterized_node_base_utf8"
+
+
+def native_test_failure_descriptor(value: Any) -> bool:
+    """Validate only diagnostic data; this never admits a failed suite."""
+    if type(value) is not dict or set(value) != {"status", "report_bytes", "report_sha256", "details"}:
+        return False
+    status, size, digest, details = (value[key] for key in ("status", "report_bytes", "report_sha256", "details"))
+    if status in ("missing", "unavailable"):
+        return size is None and digest is None and details is None
+    if type(size) is not int or not 0 <= size < 2**63:
+        return False
+    if status == "oversized":
+        return size > 8 * 1024 * 1024 and digest is None and details is None
+    if size > 8 * 1024 * 1024 or not _hex(digest, 64):
+        return False
+    if status == "invalid":
+        return details is None
+    return status == "available" and _native_test_failure_details(details)
+
+
+def _native_test_failure_details(details: Any) -> bool:
+    if type(details) is not dict or set(details) != {
+        "hash_scheme",
+        "exitstatus",
+        "finding_count",
+        "truncated",
+        "findings",
+    }:
+        return False
+    code, count, findings = (details[key] for key in ("exitstatus", "finding_count", "findings"))
+    if (
+        details["hash_scheme"] != NATIVE_TEST_FAILURE_HASH_SCHEME
+        or not (code is None or (type(code) is int and -(2**31) <= code < 2**32))
+        or type(count) is not int
+        or not 0 <= count <= 100000
+        or type(details["truncated"]) is not bool
+        or details["truncated"] != (count > 16)
+        or type(findings) is not list
+        or len(findings) != min(count, 16)
+    ):
+        return False
+    for row in findings:
+        if type(row) is not dict or set(row) != {"module", "node_base_sha256", "outcome", "when"}:
+            return False
+        if row["outcome"] not in ("failed", "skipped") or row["when"] not in (
+            "setup",
+            "call",
+            "teardown",
+            "collection",
+            "unknown",
+        ):
+            return False
+        module = row["module"]
+        if type(module) is not str or not (
+            (module == "unrecognized_nodeid" and row["node_base_sha256"] is None)
+            or (module in NATIVE_TEST_FAILURE_MODULES and _hex(row["node_base_sha256"], 64))
+        ):
+            return False
+    return True
+
+
+def _project_native_test_failure(value: Any) -> dict[str, Any]:
+    if type(value) is not dict:
+        raise ValueError("report_shape")
+    reports, collection = value.get("reports", []), value.get("collection_errors", [])
+    if type(reports) is not list or type(collection) is not list or len(reports) + len(collection) > 100000:
+        raise ValueError("report_bound")
+    ordered = (
+        [(row, False) for row in reports if type(row) is dict and row.get("outcome") == "failed"]
+        + [(row, True) for row in collection if type(row) is dict and row.get("outcome") in ("failed", "skipped")]
+        + [(row, False) for row in reports if type(row) is dict and row.get("outcome") == "skipped"]
+    )
+    code = value.get("exitstatus")
+    result: dict[str, Any] = {
+        "hash_scheme": NATIVE_TEST_FAILURE_HASH_SCHEME,
+        "exitstatus": code if type(code) is int and -(2**31) <= code < 2**32 else None,
+        "finding_count": len(ordered),
+        "truncated": len(ordered) > 16,
+        "findings": [],
+    }
+    for row, is_collection in ordered[:16]:
+        when = row.get("when")
+        item = {
+            "outcome": row["outcome"],
+            "when": "collection" if is_collection else when if when in ("setup", "call", "teardown") else "unknown",
+            "module": "unrecognized_nodeid",
+            "node_base_sha256": None,
+        }
+        node = row.get("nodeid")
+        if type(node) is str and len(node) <= 4096:
+            module, separator, rest = node.replace("\\", "/").partition("::")
+            matches = [
+                known
+                for known in NATIVE_TEST_FAILURE_MODULES
+                if module in (known, known.removeprefix("tests/")) or module.endswith("/" + known)
+            ]
+            if len(matches) == 1:
+                item["module"] = matches[0]
+                base = matches[0] + ("::" + rest.split("[", 1)[0] if separator else "")
+                item["node_base_sha256"] = hashlib.sha256(base.encode()).hexdigest()
+        result["findings"].append(item)
+    return result
+
+
+def native_test_failure_summary(report: Path) -> dict[str, Any]:
+    """Read one known failed-suite report, with no raw field or exception export."""
+    unavailable = {"status": "unavailable", "report_bytes": None, "report_sha256": None, "details": None}
+    try:
+        parent, observed = report.parent.lstat(), report.lstat()
+        if (
+            not stat.S_ISDIR(parent.st_mode)
+            or not stat.S_ISREG(observed.st_mode)
+            or observed.st_nlink != 1
+            or any(getattr(info, "st_file_attributes", 0) & 0x400 for info in (parent, observed))
+            or (
+                os.name != "nt"
+                and (
+                    parent.st_uid != os.getuid()
+                    or observed.st_uid != os.getuid()
+                    or stat.S_IMODE(parent.st_mode) != 0o700
+                    or stat.S_IMODE(observed.st_mode) != 0o600
+                )
+            )
+        ):
+            return unavailable
+        if observed.st_size > 8 * 1024 * 1024:
+            return (
+                {**unavailable, "status": "oversized", "report_bytes": observed.st_size}
+                if observed.st_size < 2**63
+                else unavailable
+            )
+        fd = os.open(report, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        try:
+            before = os.fstat(fd)
+            if (observed.st_dev, observed.st_ino, observed.st_size, observed.st_mtime_ns) != (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+            ):
+                return unavailable
+            with os.fdopen(fd, "rb", closefd=False) as handle:
+                raw = handle.read(8 * 1024 * 1024 + 1)
+            after = os.fstat(fd)
+            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+            ) or len(raw) != before.st_size:
+                return unavailable
+        finally:
+            os.close(fd)
+    except FileNotFoundError:
+        return {**unavailable, "status": "missing"}
+    except (OSError, ValueError):
+        return unavailable
+    result = {
+        "status": "invalid",
+        "report_bytes": len(raw),
+        "report_sha256": hashlib.sha256(raw).hexdigest(),
+        "details": None,
+    }
+    try:
+        details = _project_native_test_failure(json.loads(raw))
+    except (ValueError, TypeError, RecursionError):
+        return result
+    return {**result, "status": "available", "details": details}
+
+
+def _record_native_test_failure(record: dict[str, Any], report: Path, directory: Path) -> None:
+    try:
+        summary = native_test_failure_summary(report)
+        if not native_test_failure_descriptor(summary):
+            raise ValueError("invalid_failure_descriptor")
+    except Exception:
+        # A diagnostic can never replace the original known suite failure.
+        summary = {"status": "unavailable", "report_bytes": None, "report_sha256": None, "details": None}
+    record["test_failure_summary"] = summary
+    if summary["report_sha256"] is not None:
+        record["pytest_report"] = {
+            "path": report.relative_to(directory.parent).as_posix(),
+            "sha256": summary["report_sha256"],
+        }
+
+
 def _native_suite(context: dict[str, Any], row: dict[str, Any], directory: Path, baseline: Path) -> dict[str, Any]:
     validate_bundle(context["bundle"])
     require_native_source_checkout(context)
@@ -3146,13 +3352,10 @@ def _native_suite(context: dict[str, Any], row: dict[str, Any], directory: Path,
     )
     if selected_library is not None:
         record["windows_library"] = selected_library
-    if report.is_file():
-        record["pytest_report"] = {
-            "path": report.relative_to(directory.parent).as_posix(),
-            "sha256": sha256_file(report),
-        }
     if result.returncode or not report.is_file():
+        _record_native_test_failure(record, report, directory)
         raise AcceptanceRefused("native_module_failed:" + row["suite"])
+    record["pytest_report"] = {"path": report.relative_to(directory.parent).as_posix(), "sha256": sha256_file(report)}
     parsed = validate_native_test_report(json.loads(report.read_text()), platform=sys.platform, suite=row["suite"])
     record.update(
         nodeids=parsed["nodeids"],
