@@ -331,7 +331,16 @@ def test_source_commands_preload_copied_plugin_outside_checkout(tmp_path: Path, 
             )
             if row["mode"] == "source" and row["suite"] == "dbcrypt-native"
         )
-        argv = [*command["argv"], "-c", str(configuration), "-p", "tests._dbcrypt_acceptance_native", "--collect-only"]
+        argv = [
+            *command["argv"],
+            "--rootdir",
+            str(bundle),
+            "-c",
+            str(configuration),
+            "-p",
+            "tests._dbcrypt_acceptance_native",
+            "--collect-only",
+        ]
         cwd = Path(command["cwd"])
     environment = {
         key: value
@@ -972,6 +981,157 @@ def test_source_native_run_refuses_checkout_head_drift_before_probe(monkeypatch,
     context = {"mode": "source", "manifest": {"checkout": str(tmp_path), "commit": "a" * 40}}
     with pytest.raises(tool.AcceptanceRefused, match="source_checkout_changed_since_bundle"):
         tool.require_native_source_checkout(context)
+
+
+def test_native_suite_retains_module_coverage_outside_sdist_configuration(tmp_path: Path, monkeypatch) -> None:
+    """Run the emitted collection tail, then bind its identities to strict evidence validation."""
+    import subprocess
+
+    tool = acceptance_tool("dbcrypt_acceptance")
+    bundle = tmp_path / "bundle"
+    configuration = bundle / "sdist/pyproject.toml"
+    configuration.parent.mkdir(parents=True)
+    configuration.write_text('[tool.pytest.ini_options]\naddopts = ""\nxfail_strict = true\n')
+    module = bundle / "tests/test_example.py"
+    module.parent.mkdir()
+    module.write_text("def test_example():\n    raise AssertionError('collection must not execute this body')\n")
+    monkeypatch.setattr(tool, "validate_bundle", lambda *_: None)
+    monkeypatch.setattr(tool, "require_native_source_checkout", lambda *_: None)
+    monkeypatch.setattr(tool, "probe_interpreter", lambda *_a, **_k: {"product_file": str(tmp_path)})
+    monkeypatch.setattr(tool, "validate_import_provenance", lambda *_a, **_k: None)
+    monkeypatch.setattr(tool, "_native_environment", lambda *_: {})
+    monkeypatch.setattr(tool, "_native_driver", lambda *_: tmp_path / "unused-driver")
+    captured = []
+
+    class CollectedCommand(Exception):
+        pass
+
+    def capture(_context, argv, _environment, **kwargs):
+        assert kwargs["name"] == "affected-collection"
+        captured.append(argv)
+        raise CollectedCommand
+
+    monkeypatch.setattr(tool, "_native_process", capture)
+    plan = {"suite": "affected", "env": {}, "argv": ["unused-python", "-m", "pytest", str(module)]}
+    for mode in ("source", "wheel"):
+        directory = tmp_path / mode
+        directory.mkdir()
+        context = {
+            "bundle": bundle,
+            "manifest": {"checkout": str(tmp_path), "extracted_sdist": "sdist"},
+            "mode": mode,
+            "kind": "production",
+            "fixtures": {kind: tmp_path / kind for kind in ("persistence", "crash", "negative")},
+        }
+        with pytest.raises(CollectedCommand):
+            tool._native_suite(context, plan, directory, tmp_path / "unused-baseline")
+    assert captured[0] == captured[1]
+    args = captured[0][3:]
+    plugin = args.index("-p")
+    assert args[plugin + 1] == "tests._dbcrypt_acceptance_native"
+    del args[plugin : plugin + 2]  # Only replace the native reporter with the inert capture below.
+    output = tmp_path / "collection.json"
+    code = """
+import json, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+import pytest
+observed = {}
+class Capture:
+    def pytest_collection_finish(self, session):
+        observed.update(nodeids=[item.nodeid for item in session.items],
+                        root=str(session.config.rootpath), configuration=str(session.config.inipath),
+                        xfail_strict=session.config.getini('xfail_strict'))
+result = pytest.main(sys.argv[3:], plugins=[Capture()])
+assert not any(name == 'mordred_hermes' or name.startswith('mordred_hermes.') for name in sys.modules)
+pathlib.Path(sys.argv[2]).write_text(json.dumps(observed))
+raise SystemExit(result)
+"""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            code,
+            str(Path(pytest.__file__).parent.parent),
+            str(output),
+            *args,
+            "--noconftest",
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=bundle,
+        env={**tool.probe_environment(tmp_path / "unused-home"), "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    observed = json.loads(output.read_text())
+    assert observed == {
+        "nodeids": ["tests/test_example.py::test_example"],
+        "root": str(bundle),
+        "configuration": str(configuration),
+        "xfail_strict": True,
+    }
+    collection = {
+        "nodeids": observed["nodeids"],
+        "reports": [],
+        "exitstatus": 0,
+        "collection_errors": [],
+        "deselected": [],
+    }
+    # Synthetic passing phases test the evidence consumer; no test body/native code ran.
+    report = {
+        **collection,
+        "reports": [
+            {"nodeid": observed["nodeids"][0], "when": when, "outcome": "passed"}
+            for when in ("setup", "call", "teardown")
+        ],
+    }
+    references = {}
+    for name, value in (("collection", collection), ("report", report)):
+        path = tmp_path / (name + ".json")
+        path.write_text(json.dumps(value))
+        references[name] = {"path": path.name, "sha256": tool.sha256_file(path)}
+    record = {
+        "argv": captured[0][:-1],
+        "gate_env": {},
+        "suite": "affected",
+        "nodeids": observed["nodeids"],
+        "counts": {"passed": 1, "platform_na": 0, "skipped": 0},
+        "platform_na": [],
+        "collection": {"argv": captured[0], "returncode": 0, "report": references["collection"]},
+        "pytest_report": references["report"],
+    }
+    manifest = {"_bundle_path": str(bundle), "extracted_sdist": "sdist", "_inputs": {"tests/test_example.py": module}}
+    tool._selected_nodes({"platform": "linux"}, record, plan, manifest, tmp_path)
+    windows_plan = {**plan, "argv": ["unused-python", "-m", "pytest", r"C:\bundle\tests\test_example.py"]}
+    windows_argv = [
+        *windows_plan["argv"],
+        "--rootdir",
+        r"C:\bundle",
+        "-c",
+        r"C:\bundle\sdist\pyproject.toml",
+        "-p",
+        "tests._dbcrypt_acceptance_native",
+    ]
+    windows_record = {
+        **record,
+        "argv": windows_argv,
+        "collection": {**record["collection"], "argv": [*windows_argv, "--collect-only"]},
+    }
+    tool._selected_nodes(
+        {"platform": "win32"}, windows_record, windows_plan, {**manifest, "_bundle_path": r"C:\bundle"}, tmp_path
+    )
+    for root in (str(configuration.parent), str(tmp_path / "foreign-root")):
+        wrong = json.loads(json.dumps(record))
+        for argv in (wrong["argv"], wrong["collection"]["argv"]):
+            argv[argv.index("--rootdir") + 1] = root
+        with pytest.raises(ValueError, match="inconsistent bundle provenance"):
+            tool._selected_nodes({"platform": "linux"}, wrong, plan, manifest, tmp_path)
 
 
 def helper_copy_fixture(tmp_path: Path):

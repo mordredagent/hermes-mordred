@@ -2379,7 +2379,15 @@ def _selected_nodes(
     configuration = str(
         _guest_path(bundle["_bundle_path"], phase["platform"]) / bundle["extracted_sdist"] / "pyproject.toml"
     )
-    expected_argv = [*plan["argv"], "-c", configuration, "-p", "tests._dbcrypt_acceptance_native"]
+    expected_argv = [
+        *plan["argv"],
+        "--rootdir",
+        bundle["_bundle_path"],
+        "-c",
+        configuration,
+        "-p",
+        "tests._dbcrypt_acceptance_native",
+    ]
     _require(record["argv"] == expected_argv and record["gate_env"] == plan["env"])
     collection = record["collection"]
     _require(
@@ -3333,7 +3341,15 @@ def _native_suite(context: dict[str, Any], row: dict[str, Any], directory: Path,
     environment["MORDRED_DBCRYPT_ROW_DIRECTORY"] = str(row_directory)
     environment["MORDRED_DBCRYPT_PRODUCTION_DRIVER"] = str(_native_driver(context, directory))
     configuration = context["bundle"] / context["manifest"]["extracted_sdist"] / "pyproject.toml"
-    argv = [*row["argv"], "-c", str(configuration), "-p", "tests._dbcrypt_acceptance_native"]
+    argv = [
+        *row["argv"],
+        "--rootdir",
+        str(context["bundle"]),
+        "-c",
+        str(configuration),
+        "-p",
+        "tests._dbcrypt_acceptance_native",
+    ]
     selected_library = None
     if row["suite"] == "windows-vfs":
         qualification = validate_windows_qualification(

@@ -334,6 +334,8 @@ def complete_phase(
         parsed = tool.validate_native_test_report(report, platform="linux", suite=plan["suite"])
         argv = [
             *plan["argv"],
+            "--rootdir",
+            str(bundle_path),
             "-c",
             str(bundle_path / manifest["extracted_sdist"] / "pyproject.toml"),
             "-p",
