@@ -236,6 +236,7 @@ def test_commands_preserve_installed_package_boundary_and_explicit_native_gates(
 @pytest.mark.parametrize("command_kind", ["linux-acceptance", "windows-acceptance", "windows-package"])
 def test_source_commands_preload_copied_plugin_outside_checkout(tmp_path: Path, command_kind: str) -> None:
     """A console-script launch loses the bundle before pytest preloads -p plugins."""
+    import shutil
     import subprocess
 
     tool = acceptance_tool("dbcrypt_acceptance")
@@ -298,7 +299,18 @@ def test_source_commands_preload_copied_plugin_outside_checkout(tmp_path: Path, 
         PYTHONDONTWRITEBYTECODE="1",
         HERMES_HOME=str(tmp_path / "unused-hermes-home"),
     )
-    result = subprocess.run(argv, cwd=cwd, env=environment, capture_output=True, text=True, check=False, timeout=60)
+    uv_executable = shutil.which("uv", path=environment["PATH"])
+    assert uv_executable is not None, "uv must be installed in the selected test environment or PATH"
+    result = subprocess.run(
+        argv,
+        executable=str(Path(uv_executable).resolve()),
+        cwd=cwd,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
     assert result.returncode == 0, result.stdout + result.stderr
     observed = json.loads(observation.read_text())
     assert Path(observed["plugin"]).resolve() == plugin.resolve()
