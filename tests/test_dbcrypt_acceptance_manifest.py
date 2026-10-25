@@ -2634,6 +2634,7 @@ def test_production_vfs_plans_execute_both_owned_release_selections():
     assert {row["mode"] for row in vfs} == {"source", "wheel"}
     for row in vfs:
         assert row["argv"][row["argv"].index("-k") + 1] == tool.WINDOWS_RELEASE_SELECTION
+        assert row["library_kind"] == "packaged Checked"
 
 
 def test_activated_qualification_never_assigns_runtime_eligibility(monkeypatch):
@@ -2737,3 +2738,76 @@ def test_qualification_rejects_handpatched_initial_eligibility(tmp_path, monkeyp
     helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
     with pytest.raises(AssertionError, match="runtime eligibility differs"):
         helper["pytest_configure"](SimpleNamespace())
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "test_automatic_native_startup_installs_real_guarded_shim[linux]",
+        "test_automatic_native_startup_installs_real_guarded_shim[win32]",
+        "test_automatic_windows_startup_refuses_unavailable_prerequisite_before_custody[driver]",
+        "test_automatic_windows_startup_refuses_unavailable_prerequisite_before_custody[asset]",
+        "test_automatic_windows_startup_refuses_unavailable_prerequisite_before_custody[qualification]",
+    ],
+)
+def test_startup_posix_fixture_na_is_exact_and_never_native(case, monkeypatch):
+    tool = acceptance_tool("dbcrypt_acceptance")
+    identity = "test_dbcrypt_capability.py::" + case
+    node = "tests/" + identity
+    reason = "uses the POSIX authority fixture; Windows native proof is explicit"
+    assert tool.WINDOWS_PLATFORM_NA[identity] == (reason, "windows_posix_authority_fixture")
+    assert tool.platform_na_reason(node, reason) == "windows_posix_authority_fixture"
+    for rejected in (node.split("[")[0], node + "[extra]", node.replace(case, "test_unrecognized")):
+        assert tool.platform_na_reason(rejected, reason) is None
+    assert tool.platform_na_reason(node, reason + " extra") is None
+    assert tool.platform_na_reason(node, reason, platform="linux") is None
+    assert tool.platform_na_reason(node, reason, suite="native-storage") is None
+    report = {
+        "nodeids": [node],
+        "deselected": [],
+        "collection_errors": [],
+        "exitstatus": 0,
+        "reports": [
+            {"nodeid": node, "when": "setup", "outcome": "skipped", "reason_code": "windows_posix_authority_fixture"},
+            {"nodeid": node, "when": "teardown", "outcome": "passed", "reason_code": None},
+        ],
+    }
+    assert tool.validate_native_test_report(report, platform="win32", suite="affected")["counts"] == {
+        "passed": 0,
+        "platform_na": 1,
+        "skipped": 0,
+    }
+    for suite in ("native-storage", "windows-vfs"):
+        with pytest.raises(tool.AcceptanceRefused, match="native_test_results_incomplete"):
+            tool.validate_native_test_report(report, platform="win32", suite=suite)
+    report["reports"][0]["reason_code"] = "unrecognized_skip"
+    with pytest.raises(tool.AcceptanceRefused, match="native_test_results_incomplete"):
+        tool.validate_native_test_report(report, platform="win32", suite="affected")
+    report["reports"][0]["reason_code"] = "windows_posix_authority_fixture"
+    monkeypatch.delitem(tool.WINDOWS_PLATFORM_NA, identity)
+    with pytest.raises(tool.AcceptanceRefused, match="native_test_results_incomplete"):
+        tool.validate_native_test_report(report, platform="win32", suite="affected")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "test_automatic_native_startup_installs_real_guarded_shim",
+        "test_automatic_windows_startup_refuses_unavailable_prerequisite_before_custody",
+    ],
+)
+def test_startup_posix_fixture_skip_precedes_fixture_setup(name):
+    import ast
+
+    source = ast.parse((Path(__file__).parent / "test_dbcrypt_capability.py").read_text())
+    function = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    skips = [
+        node
+        for node in function.decorator_list
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "skipif"
+    ]
+    assert len(skips) == 1
+    assert ast.dump(skips[0].args[0]) == ast.dump(ast.parse('os.name != "posix"', mode="eval").body)
+    assert {kw.arg: ast.literal_eval(kw.value) for kw in skips[0].keywords} == {
+        "reason": "uses the POSIX authority fixture; Windows native proof is explicit",
+    }

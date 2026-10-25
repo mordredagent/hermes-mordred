@@ -242,20 +242,46 @@ assert writes == [], writes
     assert result.returncode == 0, result.stderr
 
 
-def test_prompt_never_promises_pending_conversion_on_unavailable_platform(tmp_path, monkeypatch):
-    from mordred_hermes.dbcrypt import _hooks
+@pytest.mark.parametrize("eligible", [False, True], ids=["unavailable", "eligible"])
+def test_pending_prompt_is_passive_and_requires_explicit_maintenance(tmp_path, monkeypatch, eligible):
+    import sqlcipher3.dbapi2 as driver
+
+    from mordred_hermes.dbcrypt import _hooks, _key, _migrate, _windows_vfs
 
     (tmp_path / "mordred").mkdir()
     (tmp_path / "mordred/db-encryption.pending").write_bytes(b"pending")
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
     monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", True)
+    monkeypatch.setattr(_windows_vfs, "driver_distribution_qualified", lambda: eligible)
+    monkeypatch.setattr(_windows_vfs, "packaged_library_path", lambda: tmp_path / "owned.dll")
+    monkeypatch.setattr(capability(), "_driver_present", lambda: True)
     monkeypatch.setattr(_hooks, "_home", lambda: tmp_path)
     monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("passive pending status performed native, SQL, discovery, or conversion work")
+
+    monkeypatch.setattr(_key, "KeyProvider", forbidden)
+    monkeypatch.setattr(_windows_vfs, "_load_native", forbidden)
+    monkeypatch.setattr(driver, "connect", forbidden)
+    monkeypatch.setattr(_migrate, "discover", forbidden)
+    status = capability().database_status(tmp_path)
+    assert status.capability == ("unknown" if eligible else "unavailable")
+    assert not status.authenticated
     text = _hooks.status_line()
-    assert "unavailable" in text
+    if eligible:
+        assert "explicit supported maintenance" in text and "not active yet" in text
+        assert "unavailable" not in text
+    else:
+        assert "unavailable" in text and "driver pair is unqualified" in text
     assert "until Hermes restarts" not in text
+    assert "runs the next time Hermes starts" not in text
+    assert before == {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
 
 
 @pytest.mark.parametrize("platform", ["linux", "win32"])
+@pytest.mark.skipif(os.name != "posix", reason="uses the POSIX authority fixture; Windows native proof is explicit")
 def test_automatic_native_startup_installs_real_guarded_shim(native_root, monkeypatch, platform):
     """The public bootstrap must reach native custody, not its old platform refusal."""
     from types import SimpleNamespace
@@ -320,6 +346,7 @@ def test_windows_activation_still_refuses_unqualified_driver_or_missing_owned_as
 
 
 @pytest.mark.parametrize("failure", ["driver", "asset", "qualification"])
+@pytest.mark.skipif(os.name != "posix", reason="uses the POSIX authority fixture; Windows native proof is explicit")
 def test_automatic_windows_startup_refuses_unavailable_prerequisite_before_custody(native_root, monkeypatch, failure):
     from types import SimpleNamespace
 

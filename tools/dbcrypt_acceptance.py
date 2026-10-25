@@ -1395,6 +1395,35 @@ def native_phase_inputs(root: Path, phase: Phase) -> dict[str, Any]:
 # Reviewed platform-only N/A surface. Exact cases and original reasons only;
 # collection and all applicable cases still execute. Native gates never use it.
 WINDOWS_PLATFORM_NA = {
+    "test_dbcrypt_capability.py::test_automatic_native_startup_installs_real_guarded_shim[linux]": (
+        "uses the POSIX authority fixture; Windows native proof is explicit",
+        "windows_posix_authority_fixture",
+    ),
+    "test_dbcrypt_capability.py::test_automatic_native_startup_installs_real_guarded_shim[win32]": (
+        "uses the POSIX authority fixture; Windows native proof is explicit",
+        "windows_posix_authority_fixture",
+    ),
+    (
+        "test_dbcrypt_capability.py::"
+        "test_automatic_windows_startup_refuses_unavailable_prerequisite_before_custody[driver]"
+    ): (
+        "uses the POSIX authority fixture; Windows native proof is explicit",
+        "windows_posix_authority_fixture",
+    ),
+    (
+        "test_dbcrypt_capability.py::"
+        "test_automatic_windows_startup_refuses_unavailable_prerequisite_before_custody[asset]"
+    ): (
+        "uses the POSIX authority fixture; Windows native proof is explicit",
+        "windows_posix_authority_fixture",
+    ),
+    (
+        "test_dbcrypt_capability.py::"
+        "test_automatic_windows_startup_refuses_unavailable_prerequisite_before_custody[qualification]"
+    ): (
+        "uses the POSIX authority fixture; Windows native proof is explicit",
+        "windows_posix_authority_fixture",
+    ),
     "test_dbcrypt_authority.py::test_fork_invalidates_without_releasing_parent_lease": (
         "POSIX fork lifetime",
         "windows_posix_fork",
@@ -2032,7 +2061,11 @@ def _native_windows_vfs_rows(rows: list[dict[str, Any]], kind: str) -> list[dict
                     "status": "satisfied_by_qualified_artifact_reference",
                 }
             elif row["mode"] == "source":
-                row = {**row, "argv": [*row["argv"][:-1], "-k", WINDOWS_RELEASE_SELECTION, row["argv"][-1]]}
+                row = {
+                    **row,
+                    "library_kind": "packaged Checked",
+                    "argv": [*row["argv"][:-1], "-k", WINDOWS_RELEASE_SELECTION, row["argv"][-1]],
+                }
         result.append(row)
     return result
 
