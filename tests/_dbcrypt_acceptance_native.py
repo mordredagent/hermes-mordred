@@ -550,7 +550,7 @@ def provision(root: Path) -> dict[str, Any]:
             ceremonies.append(_maintenance(home, ["encryption", "enable", "memory"]))
         elif memory_cli.enable(home=home, root=home / "mordred/keyvault/vault", platform=sys.platform) != 0:
             raise RuntimeError("native_memory_enable_failed_retain_root")
-        require_enabled(root=home)
+        require_enabled(root=root)
         _fresh_memory(home, seed=True)
         _fresh_memory(home, seed=False)
     if production:
