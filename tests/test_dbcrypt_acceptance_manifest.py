@@ -290,6 +290,7 @@ def test_source_commands_preload_copied_plugin_outside_checkout(tmp_path: Path, 
         if key not in {"PYTHONPATH", "PYTHONHOME", "PYTEST_ADDOPTS", "PYTEST_PLUGINS"}
     }
     environment.update(
+        PATH=os.pathsep.join((str(Path(sys.executable).parent), environment.get("PATH", ""))),
         UV_NO_SYNC="1",
         UV_OFFLINE="1",
         UV_PROJECT_ENVIRONMENT=sys.prefix,
