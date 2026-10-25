@@ -2208,6 +2208,7 @@ def validate_bundle_evidence(value: Any, *, directory: Path) -> dict[str, Any]:
     _offline_build_records(manifest, proof["bundle_path"])
     files = manifest["files"]
     _require(isinstance(files, dict) and bool(files) and all(_hex(digest, 64) for digest in files.values()))
+    _require(all(name in files for name in _PTH_TEST_INPUTS))
     required = {name for name in files if name.startswith(("tests/", "tools/")) or name in _PTH_TEST_INPUTS}
     _require(bool(required) and set(proof["inputs"]) == required)
     inputs = {}

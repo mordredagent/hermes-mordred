@@ -2585,6 +2585,23 @@ def test_offline_wheel_phase_refuses_the_source_import_probe(tmp_path: Path) -> 
         tool.validate_native_phase_evidence(phase, directory=spool)
 
 
+@pytest.mark.parametrize("removed", ["runtime", "config_decrypt", "both"])
+def test_offline_bundle_refuses_consistently_omitted_pth_inputs(tmp_path: Path, removed: str) -> None:
+    tool, spool, phase = complete_native_phase_fixture(tmp_path)
+    proof_path, proof = tool._evidence_ref(spool, phase["bundle_evidence"])
+    manifest_path, manifest = tool._evidence_ref(proof_path.parent, proof["manifest"])
+    tool.validate_bundle_evidence(proof, directory=proof_path.parent)
+    names = ("runtime", "config_decrypt") if removed == "both" else (removed,)
+    for name in names:
+        relative = f"packaging/pth/mordred_hermes_{name}.pth"
+        del manifest["files"][relative]
+        del proof["inputs"][relative]
+    manifest_path.write_text(json.dumps(manifest))
+    proof["manifest"]["sha256"] = tool.sha256_file(manifest_path)
+    with pytest.raises(ValueError, match="inconsistent bundle provenance"):
+        tool.validate_bundle_evidence(proof, directory=proof_path.parent)
+
+
 def test_offline_exported_input_hash_update_cannot_hide_inventory_drift(tmp_path: Path) -> None:
     tool, spool, phase = complete_native_phase_fixture(tmp_path)
     path, proof = tool._evidence_ref(spool, phase["bundle_evidence"])
