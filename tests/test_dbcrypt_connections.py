@@ -15,6 +15,7 @@ from mordred_hermes._database_contracts import DatabaseRefused
 from mordred_hermes.dbcrypt._authority import Authority
 from mordred_hermes.dbcrypt._key import derive
 from mordred_hermes.dbcrypt._shim import apply_key
+from tests._dbcrypt_platform_support import policy_sys
 from tests.test_dbcrypt_authority import native_root as _native_root
 
 native_root = _native_root
@@ -280,8 +281,8 @@ def test_native_install_owns_one_guarded_authority(native_root, monkeypatch):
     from mordred_hermes.dbcrypt import _hooks, _shim
 
     root, backend, _, _ = native_root
-    monkeypatch.setattr(dbcrypt.sys, "platform", "darwin")
-    monkeypatch.setattr(dbcrypt.sys, "argv", ["hermes"])
+    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(sys, "argv", ["hermes"])
     monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
     installed = []
     monkeypatch.setattr(_shim, "install_module", installed.append)
@@ -518,8 +519,8 @@ def test_native_install_cannot_reacquire_or_rebind(native_root, monkeypatch):
     from mordred_hermes.dbcrypt import _shim
 
     root, backend, _, _ = native_root
-    monkeypatch.setattr(dbcrypt.sys, "platform", "darwin")
-    monkeypatch.setattr(dbcrypt.sys, "argv", ["hermes"])
+    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(sys, "argv", ["hermes"])
     monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
     monkeypatch.setattr(_shim, "install_module", lambda module: None)
     assert dbcrypt.install(home=root)
@@ -677,8 +678,8 @@ def test_first_install_refuses_provider_from_another_home(native_root, monkeypat
         put(supplied, encoded(snapshot))
     provider = KeyProvider(home=supplied)
     published = []
-    monkeypatch.setattr(dbcrypt.sys, "platform", "darwin")
-    monkeypatch.setattr(dbcrypt.sys, "argv", ["hermes"])
+    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(sys, "argv", ["hermes"])
     monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
     monkeypatch.setattr(_shim, "install_module", published.append)
     try:

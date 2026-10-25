@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ from mordred_hermes._database_lifecycle import acquire_exclusive
 from mordred_hermes.dbcrypt._key import KeyProvider, derive
 from mordred_hermes.keyvault import _database_authority as custody
 from mordred_hermes.keyvault import _memory_key as memory
+from tests._dbcrypt_platform_support import policy_sys
 from tests._keyvault_fakes import FakeBackend
 from tests.test_dbcrypt_marker import encoded, put
 
@@ -291,8 +293,8 @@ def test_default_install_refuses_legacy_without_adoption(native_root, monkeypatc
 
     root, backend, key, _ = native_root
     marker = put(root, b"1\n")
-    monkeypatch.setattr(dbcrypt.sys, "platform", "darwin")
-    monkeypatch.setattr(dbcrypt.sys, "argv", ["hermes"])
+    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(sys, "argv", ["hermes"])
     monkeypatch.setattr(_shim, "is_installed", lambda: False)
     monkeypatch.setenv("HERMES_MEMORY_KEY", "hex:" + key.hex())
     before = list(backend.calls)
@@ -383,8 +385,8 @@ def test_default_startup_cannot_return_unregistered_live_sql_connection(native_r
     from mordred_hermes.dbcrypt._connection import ProtectedConnection
 
     root, backend, _, _ = native_root
-    monkeypatch.setattr(dbcrypt.sys, "platform", "darwin")
-    monkeypatch.setattr(dbcrypt.sys, "argv", ["hermes"])
+    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(sys, "argv", ["hermes"])
     monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
     installed = []
     monkeypatch.setattr(_shim, "install_module", installed.append)
@@ -420,8 +422,8 @@ def test_default_profile_startup_refuses_before_sql_or_native(native_root, monke
     profile = root / "profiles/work"
     before_modules = (dbcrypt.sys.modules["sqlite3"], dbcrypt.sys.modules["sqlite3.dbapi2"])
     assert before_modules[0] is sqlite3
-    monkeypatch.setattr(dbcrypt.sys, "platform", "darwin")
-    monkeypatch.setattr(dbcrypt.sys, "argv", ["hermes"])
+    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(sys, "argv", ["hermes"])
     monkeypatch.setattr(_shim, "is_installed", lambda: installed)
     monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
     modules = []
@@ -488,8 +490,8 @@ def test_default_install_refuses_unsafe_marker_entry(native_root, monkeypatch, d
         marker.symlink_to(root / "missing")
     else:
         marker.mkdir(mode=0o700)
-    monkeypatch.setattr(dbcrypt.sys, "platform", "darwin")
-    monkeypatch.setattr(dbcrypt.sys, "argv", ["hermes"])
+    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(sys, "argv", ["hermes"])
     monkeypatch.setattr(_shim, "is_installed", lambda: False)
     before = list(backend.calls)
     with pytest.raises(DatabaseRefused):
@@ -578,8 +580,8 @@ def test_default_startup_without_marker_preserves_recovery_state(tmp_path, monke
         resumed.append(True)
         return resume(*args, **kwargs)
 
-    monkeypatch.setattr(dbcrypt.sys, "platform", "darwin")
-    monkeypatch.setattr(dbcrypt.sys, "argv", ["hermes"])
+    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(sys, "argv", ["hermes"])
     monkeypatch.setattr(_shim, "is_installed", lambda: False)
     monkeypatch.setattr(_migrate, "resume_at_startup", observe_resume)
     try:
@@ -598,8 +600,8 @@ def test_explicit_native_provider_cannot_enter_legacy_install(native_root, monke
     from mordred_hermes.dbcrypt import _migrate, _shim
 
     root, backend, _, _ = native_root
-    monkeypatch.setattr(dbcrypt.sys, "platform", "darwin")
-    monkeypatch.setattr(dbcrypt.sys, "argv", ["hermes"])
+    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(sys, "argv", ["hermes"])
     monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
     installed = []
     monkeypatch.setattr(_shim, "install_module", installed.append)

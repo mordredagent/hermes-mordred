@@ -14,6 +14,7 @@ import pytest
 from mordred_hermes import dbcrypt
 from mordred_hermes.dbcrypt import _key, _migrate, _shim
 from mordred_hermes.dbcrypt._locking import runtime_lease
+from tests._dbcrypt_platform_support import policy_sys
 
 
 @pytest.fixture(autouse=True)
@@ -148,7 +149,7 @@ def test_enabling_an_empty_home_waits_for_existing_runtimes(tmp_path: Path, monk
     pytest.importorskip("sqlcipher3")
     from mordred_hermes.wizard import databases_cli
 
-    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
     monkeypatch.setattr(sys, "argv", ["hermes"])
     assert dbcrypt.install(home=tmp_path) is False
     key = _key.derive(bytes(range(32)))
@@ -208,7 +209,7 @@ def test_maintenance_startup_does_not_execute_pending_conversions(
     pytest.importorskip("sqlcipher3")
     path = _database(tmp_path)
     before = path.read_bytes()
-    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
     monkeypatch.setattr(sys, "argv", argv)
     monkeypatch.setitem(sys.modules, "sqlite3", sqlite3)
     monkeypatch.setitem(sys.modules, "sqlite3.dbapi2", sqlite3.dbapi2)
@@ -230,6 +231,34 @@ def test_maintenance_startup_does_not_execute_pending_conversions(
 def test_agent_arguments_do_not_bypass_database_protection(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> None:
     monkeypatch.setattr(sys, "argv", argv)
     assert dbcrypt._maintenance_process() is False
+
+
+def test_legacy_policy_fixture_preserves_linux_acl_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A simulated startup OS must not select a foreign filesystem ABI.
+
+    Model the shared Linux sys object at just these module boundaries so this
+    regression also runs on macOS, without changing the interpreter's platform.
+    The existing maintenance test still schedules real files and checks bytes.
+    """
+    from types import SimpleNamespace
+
+    from mordred_hermes._private_fs import _macos_acl, _posix
+    from mordred_hermes.dbcrypt import _cli
+
+    host = SimpleNamespace(**{**vars(sys), "platform": "linux"})
+    monkeypatch.setattr(sys.modules[__name__], "sys", host)
+    monkeypatch.setattr(dbcrypt, "sys", host)
+    monkeypatch.setattr(_cli, "sys", host)
+    monkeypatch.setattr(_posix, "sys", host)
+
+    def foreign_acl(_fd: int) -> None:
+        raise AssertionError("startup policy simulation reached the Darwin ACL ABI on Linux")
+
+    monkeypatch.setattr(_macos_acl, "validate_acl", foreign_acl)
+    test_maintenance_startup_does_not_execute_pending_conversions(
+        tmp_path, monkeypatch, ["hermes-mordred", "databases", "status"]
+    )
+    assert host.platform == "linux"
 
 
 def test_startup_joins_runtime_that_already_recovered_the_journal(tmp_path: Path) -> None:

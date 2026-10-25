@@ -15,6 +15,7 @@ pytest.importorskip("sqlcipher3")
 
 from mordred_hermes import dbcrypt
 from mordred_hermes.dbcrypt import _hooks, _key, _migrate, _monitor, _shim
+from tests._dbcrypt_platform_support import policy_sys
 
 KEY = _key.derive(bytes(range(32)))
 
@@ -34,7 +35,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     conn.close()
     _migrate.migrate(base, KEY, arm=dbcrypt.arm, holders_of=lambda _p: [])
     _monitor.reset_cache()
-    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(_monitor, "sys", policy_sys("darwin"))
     monkeypatch.setattr(_hooks, "_home", lambda: base)
     monkeypatch.setattr(_hooks, "_reported", set())
     monkeypatch.setattr(_hooks, "_observation", None)
@@ -90,7 +91,7 @@ def test_missing_key_and_interrupted_conversion_are_findings(home: Path, monkeyp
 
 
 def test_unarmed_homes_report_only_a_scheduled_conversion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(_monitor, "sys", policy_sys("darwin"))
     monkeypatch.setattr(_hooks, "_home", lambda: tmp_path)
     assert _monitor.check(tmp_path) == [] and _hooks.status_line() == ""
     _migrate.schedule(tmp_path)
@@ -332,7 +333,7 @@ def test_a_fresh_encrypted_database_is_not_reported_as_plaintext(
     base = tmp_path / "fresh"
     base.mkdir()
     dbcrypt.arm(base)
-    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(_monitor, "sys", policy_sys("darwin"))
     monkeypatch.setattr(_hooks, "_home", lambda: base)
     _protected_with_key(monkeypatch)
     live = _live(_hermes_sqlite3(base), base / "state.db", tables=tables)
