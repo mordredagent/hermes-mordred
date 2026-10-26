@@ -514,3 +514,55 @@ raw.close()
         timeout=15,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        [],
+        ["--non-interactive"],
+        ["--with-hermes-setup"],
+        ["--skip-hermes-setup"],
+        ["--unattended-keys"],
+        ["--attended-keys"],
+        ["--store-seed-for-hd"],
+        ["--paper-only"],
+        ["--non-interactive", "--skip-hermes-setup", "--attended-keys", "--paper-only"],
+    ],
+)
+def test_setup_startup_preserves_pending_conversion(tmp_path, monkeypatch, options):
+    test_maintenance_startup_does_not_execute_pending_conversions(
+        tmp_path, monkeypatch, ["hermes-mordred", "setup", *options]
+    )
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["hermes-mordred", "setup", "--with-hermes-setup", "--skip-hermes-setup"],
+        ["hermes-mordred", "setup", "--unattended-keys", "--attended-keys"],
+        ["hermes-mordred", "setup", "--store-seed-for-hd", "--paper-only"],
+        ["hermes-mordred", "setup", "--unknown"],
+        ["hermes-mordred", "setup", "--non-interactive", "false"],
+        ["hermes", "setup"],
+        ["hermes", "--oneshot", "mordred setup", "mordred", "setup"],
+        ["hermes", "--model", "mordred", "setup"],
+        ["hermes", "--profile", "--bad", "mordred", "setup"],
+    ],
+)
+def test_invalid_setup_arguments_keep_runtime_protection(argv):
+    from mordred_hermes.dbcrypt._cli import maintenance_process
+
+    assert maintenance_process(argv) is False
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["hermes-mordred", "--no-color", "setup"],
+        ["hermes", "--profile", "work", "mordred", "setup"],
+        ["hermes", "mordred", "setup", "--profile", "work", "--paper-only"],
+    ],
+)
+def test_setup_plugin_startup_preserves_pending_conversion(tmp_path, monkeypatch, argv):
+    test_maintenance_startup_does_not_execute_pending_conversions(tmp_path, monkeypatch, argv)

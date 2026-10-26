@@ -66,6 +66,21 @@ class _ObservationParser(argparse.ArgumentParser):
         raise ValueError("not a recognized offline command")
 
 
+def _setup_options(setup: _ObservationParser) -> None:
+    # Keep this finite startup grammar aligned with wizard._cli_parsers._add_setup.
+    # Setup owns database mutation; it must not first acquire a runtime lease.
+    setup.add_argument("--non-interactive", action="store_true")
+    hermes_setup = setup.add_mutually_exclusive_group()
+    hermes_setup.add_argument("--with-hermes-setup", action="store_true")
+    hermes_setup.add_argument("--skip-hermes-setup", action="store_true")
+    attended = setup.add_mutually_exclusive_group()
+    attended.add_argument("--unattended-keys", action="store_true")
+    attended.add_argument("--attended-keys", action="store_true")
+    seed = setup.add_mutually_exclusive_group()
+    seed.add_argument("--store-seed-for-hd", action="store_true")
+    seed.add_argument("--paper-only", action="store_true")
+
+
 def _passive_or_maintenance(args: list[str], *, profiles: bool = False) -> bool:  # noqa: C901 - finite CLI grammar
     """Parse only reviewed metadata/ceremony commands, without importing Hermes.
 
@@ -88,6 +103,7 @@ def _passive_or_maintenance(args: list[str], *, profiles: bool = False) -> bool:
     def child(owner: argparse._SubParsersAction[_ObservationParser], name: str) -> _ObservationParser:
         return owner.add_parser(name, parents=[parser()], add_help=False, exit_on_error=False)
 
+    _setup_options(child(sub, "setup"))
     database = child(sub, "databases").add_subparsers(required=True)
     for verb in ("status", "diagnose", "encrypt", "decrypt"):
         item = child(database, verb)

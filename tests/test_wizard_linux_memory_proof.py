@@ -175,3 +175,73 @@ def test_ordinary_installed_runtime_still_excludes_database_exclusive(runtime_pr
     assert process.returncode == 0
     with acquire_exclusive(home):
         pass
+
+
+@pytest.mark.parametrize(
+    "ordinary,noninteractive,expected",
+    [
+        (False, False, "ran:"),
+        (True, False, "failed:"),
+        (False, True, "manual:"),
+    ],
+)
+def test_installed_setup_startup_memory_composition(
+    runtime_proof, tmp_path, monkeypatch, ordinary, noninteractive, expected
+):
+    """Real .pth/startup/leases/setup/proofs, with only native custody replaced."""
+    import json
+
+    from tests.integration import test_linux_memory_orchestration_tpm as orchestration
+
+    home, _backend = runtime_proof
+    original_run = orchestration._run
+    prefix = f"""
+import sys, json
+sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})
+from pathlib import Path
+from cryptography.hazmat.primitives.asymmetric import ec
+from mordred_hermes.keyvault import _memory_key as mk, _runtime_probe, _seckey_helper
+from tests._keyvault_fakes import FakeBackend
+backend = FakeBackend()
+backend._keys[mk.memory_key_id(Path({str(home)!r}))] = ec.derive_private_key(7, ec.SECP256R1())
+mk.linux_memory_backend = lambda home: backend
+_runtime_probe._MEMORY_KEY_PROBE_SRC = {_runtime_probe._MEMORY_KEY_PROBE_SRC!r}
+helper_calls = []
+def refuse_helper(*args, **kwargs):
+    helper_calls.append(True)
+    raise AssertionError('native helper forbidden')
+_seckey_helper._run_helper = refuse_helper
+"""
+    results = []
+
+    def software_run(home, script, source, env, **kwargs):
+        if ordinary:
+            script = script.with_name("hermes")
+            if "args" in kwargs:
+                kwargs["args"] = ()
+        result = original_run(
+            home,
+            script,
+            prefix + source + "\nprint('CUSTODY:' + json.dumps([len(backend.calls), len(helper_calls)]))\n",
+            env,
+            **kwargs,
+        )
+        results.append(result)
+        return result
+
+    monkeypatch.setattr(orchestration, "_run", software_run)
+    result = orchestration._setup(home, tmp_path / "hermes", dict(os.environ), noninteractive=noninteractive)
+    assert result.startswith(expected), result
+    calls, helper_calls = json.loads(
+        next(line.removeprefix("CUSTODY:") for line in results[0].stdout.splitlines() if line.startswith("CUSTODY:"))
+    )
+    assert helper_calls == 0
+    if expected == "ran:":
+        assert calls > 0
+        assert memory_marker_path(home).is_file()
+        assert is_sealed((home / "memories/MEMORY.md").read_bytes())
+    else:
+        assert calls == 0
+        assert not mk.memory_key_path(home).exists()
+        assert not memory_marker_path(home).exists()
+        assert (home / "memories/MEMORY.md").read_text() == "synthetic memory"
