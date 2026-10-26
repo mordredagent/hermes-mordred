@@ -4214,7 +4214,7 @@ def _assemble_windows_qualification(
         files.update(nested_files)
         _copy_referenced(path.parent, files, output / mode)
         copied = output / mode / path.name
-        refs[mode] = {"path": str(copied.relative_to(output)), "sha256": sha256_file(copied)}
+        refs[mode] = {"path": copied.relative_to(output).as_posix(), "sha256": sha256_file(copied)}
     export_directory = output / "export"
     export_directory.mkdir(mode=0o700)
     proof = _export_bundle_evidence({"bundle": bundle, "manifest": manifest}, export_directory)
@@ -4225,7 +4225,7 @@ def _assemble_windows_qualification(
         "diagnostic": {"path": "diagnostic/manifest.json", "sha256": sha256_file(diagnostic)},
         "fixtures": {"path": "fixtures/manifest.json", "sha256": sha256_file(original_fixtures)},
         "results": refs,
-        "wheel_bundle": {"path": str(proof_file.relative_to(output)), "sha256": sha256_file(proof_file)},
+        "wheel_bundle": {"path": proof_file.relative_to(output).as_posix(), "sha256": sha256_file(proof_file)},
     }
     try:
         _validate_qualification_payload(output, descriptor, checkout=checkout)

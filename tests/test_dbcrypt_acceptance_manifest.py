@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -2334,6 +2334,27 @@ def test_package_validator_requires_canonical_sid_equivalence(tmp_path, monkeypa
     else:
         with pytest.raises(ValueError, match="inconsistent bundle provenance"):
             tool.validate_package_observation(observed, **kwargs)
+
+
+def test_packaged_pipeline_assembly_serializes_windows_relative_paths_portably(tmp_path: Path, monkeypatch) -> None:
+    class WindowsRelativePath(type(tmp_path)):
+        def relative_to(self, *args):
+            return PureWindowsPath(super().relative_to(*args).as_posix())
+
+    tool, root, checkout, _manifest, results, _fixtures, bundle = packaged_pipeline_fixture(tmp_path, monkeypatch)
+    output = WindowsRelativePath(tmp_path / "portable-assembled")
+    path = tool.assemble_windows_qualification(
+        bundle=bundle,
+        diagnostic=root / "manifest.json",
+        source_result=results["source"][0] / "result.json",
+        wheel_result=results["wheel"][0] / "result.json",
+        output=output,
+    )
+    descriptor = json.loads(path.read_text())
+    assert descriptor["results"]["source"]["path"] == "source/result.json"
+    assert descriptor["results"]["wheel"]["path"] == "wheel/result.json"
+    assert "\\" not in descriptor["wheel_bundle"]["path"]
+    tool.validate_windows_qualification(path.parent, checkout=checkout)
 
 
 def test_packaged_pipeline_assembles_real_inert_artifact_closure_with_distinct_dlls(
