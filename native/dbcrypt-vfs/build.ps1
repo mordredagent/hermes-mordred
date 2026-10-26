@@ -81,7 +81,22 @@ try {
     & cl.exe @compilerArguments
     if ($LASTEXITCODE -ne 0) { throw 'VFS compilation failed.' }
     [IO.File]::Move((Join-Path $staging $libraryName), $targetPath)
-    Get-FileHash -Algorithm SHA256 -LiteralPath $targetPath
+    # A PS5 build launched by PS7 may inherit a module path without PS5's
+    # utility cmdlets. Hash through .NET without changing that environment.
+    $artifactStream = $null
+    $artifactHasher = $null
+    try {
+        $artifactStream = [IO.File]::OpenRead($targetPath)
+        $artifactHasher = [Security.Cryptography.SHA256]::Create()
+        $artifactHash = [BitConverter]::ToString($artifactHasher.ComputeHash($artifactStream)).Replace('-', '')
+    } finally {
+        try {
+            if ($null -ne $artifactStream) { $artifactStream.Dispose() }
+        } finally {
+            if ($null -ne $artifactHasher) { $artifactHasher.Dispose() }
+        }
+    }
+    [pscustomobject]@{ Algorithm = 'SHA256'; Hash = $artifactHash; Path = $targetPath }
 } finally {
     Pop-Location
 }
