@@ -45,7 +45,9 @@ from typing import Any
 
 from ..._database_contracts import DatabaseRefused
 from ...keyvault._telegram_custody import (
-    KEY_ID,
+    KEY_ID as KEY_ID,
+)
+from ...keyvault._telegram_custody import (
     TelegramAuthentication,
     TelegramSnapshotChanged,
     assert_no_pending_forget,

@@ -42,11 +42,11 @@ def authorizer(target: Path | None, alias: str | None) -> Any:
 
     def authorize(action: int, first: Any, second: Any, database: Any, trigger: Any) -> int:
         if action == sc.SQLITE_ATTACH:
-            return sc.SQLITE_OK if target is not None and first == str(target) else sc.SQLITE_DENY
+            return int(sc.SQLITE_OK) if target is not None and first == str(target) else int(sc.SQLITE_DENY)
         if action == sc.SQLITE_DETACH:
-            return sc.SQLITE_OK if alias is not None and first == alias else sc.SQLITE_DENY
+            return int(sc.SQLITE_OK) if alias is not None and first == alias else int(sc.SQLITE_DENY)
         if action == sc.SQLITE_FUNCTION and str(second).casefold() == "load_extension":
-            return sc.SQLITE_DENY
+            return int(sc.SQLITE_DENY)
         if action == sc.SQLITE_PRAGMA and second is not None:
             name, value = str(first).casefold(), str(second).casefold()
             if (
@@ -54,8 +54,8 @@ def authorizer(target: Path | None, alias: str | None) -> Any:
                 or (name == "temp_store" and value not in {"memory", "2"})
                 or (name == "mmap_size" and value != "0")
             ):
-                return sc.SQLITE_DENY
-        return sc.SQLITE_OK
+                return int(sc.SQLITE_DENY)
+        return int(sc.SQLITE_OK)
 
     return authorize
 
