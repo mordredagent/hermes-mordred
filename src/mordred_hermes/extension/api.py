@@ -19,6 +19,9 @@ Message protocol: ``Mordred-Extension/SPEC.ja.md`` §6 and the extension's
   ``telegram_ask_chunk*`` + ``telegram_ask_end`` (or ``telegram_ask_error``); a request
   carrying ``"evidence": true`` also gets one sealed ``telegram_ask_evidence`` frame
   (validated source cards) right before ``telegram_ask_end``
+- ``recall_query`` / ``recall_open`` / ``recall_dismiss`` → :mod:`mordred_hermes.recall` over
+  ``mordred.db``'s import tables; the selection arrives sealed and the cards and context
+  leave sealed with K_extchat (``recall_result`` / ``recall_opened`` / ``recall_dismissed``)
 - ``activity_pair_init`` / ``activity_auth`` (pre-auth), ``activity_batch`` / ``activity_status``
   → :mod:`mordred_hermes.extension.activity_api`. An ``activity_auth`` socket is an
   activity principal limited to those two authed frames; the page principal never
@@ -92,13 +95,23 @@ _SLACK_APP_TOKEN_RE = re.compile(r"xapp-[A-Za-z0-9-]+")
 # ``test_page_allowlist_entries_are_all_used_by_the_shipped_page`` pins each
 # entry to a call site in the shipped bundle.
 _PAGE_ALLOWED = frozenset({"chat", "accounts_request", "history_get", "history_clear"})
-_EXTENSION_CAPABILITIES = ["discord_channel_resolve_v1", "telegram_import_v1", activity_api.ACTIVITY_CAPABILITY]
+_EXTENSION_CAPABILITIES = [
+    "discord_channel_resolve_v1",
+    "telegram_import_v1",
+    activity_api.ACTIVITY_CAPABILITY,
+    "recall_v1",
+]
 
 # A sign_request entry leaves _pending_sign only on approve/reject (or when the
 # socket dies), so an authed client that never approves would grow it without
 # bound. Cap it and evict the oldest (dicts keep insertion order) — a stale
 # prompt the user never answered is the right thing to drop.
 _MAX_PENDING_SIGN = 32
+
+# Part and conversation uids are opaque store ids (a mail one embeds the
+# normalised Message-ID, so the alphabet is open); they only ever reach a bound
+# SQL parameter. Bound the length and refuse control characters.
+_RECALL_UID_RE = re.compile(r"[^\x00-\x1f\x7f]{1,512}")
 
 _log = logging.getLogger(__name__)
 
@@ -253,6 +266,7 @@ class ExtensionAPIServer:
         chat_handler: ChatHandler | None = None,
         discord_resolver: DiscordResolver | None = None,
         telegram_service: Any = None,
+        recall_service: Any = None,
         keepalive_interval: float = DEFAULT_KEEPALIVE_INTERVAL,
         activity_receiver: Any = None,
         activity_max_batch_bytes: int = activity_api.DEFAULT_MAX_BATCH_BYTES,
@@ -266,6 +280,7 @@ class ExtensionAPIServer:
         # One importer per server process (it owns the single running sync).
         # Built lazily so a server without the Telegram extra never imports it.
         self._telegram_service = telegram_service
+        self._recall_service = recall_service
         self.keepalive_interval = keepalive_interval
         # ``None`` → every activity_batch answers ``activity_refused: store_unavailable``.
         self.activity_receiver = activity_receiver
@@ -288,6 +303,14 @@ class ExtensionAPIServer:
 
             self._telegram_service = TelegramService()
         return self._telegram_service
+
+    @property
+    def recall_service(self) -> Any:
+        if self._recall_service is None:
+            from ..recall.service import RecallService
+
+            self._recall_service = RecallService()
+        return self._recall_service
 
     @property
     def page_url(self) -> str:
@@ -370,6 +393,7 @@ class ExtensionAPIServer:
             self.chat_handler,
             discord_resolver=self.discord_resolver,
             telegram_service=self.telegram_service,
+            recall_service=self.recall_service,
             page_token=page_token,
             client_origin=origin,
             activity_receiver=self.activity_receiver,
@@ -399,6 +423,7 @@ class _Connection:
         *,
         discord_resolver: DiscordResolver = resolve_discord_channel,
         telegram_service: Any = None,
+        recall_service: Any = None,
         page_token: str | None = None,
         client_origin: str | None = None,
         activity_receiver: Any = None,
@@ -408,6 +433,7 @@ class _Connection:
         self.chat_handler = chat_handler
         self.discord_resolver = discord_resolver
         self.telegram_service = telegram_service
+        self.recall_service = recall_service
         self.page_token = page_token  # set only for local-origin (page) sockets
         self.client_origin = client_origin
         self.authed = False
@@ -523,6 +549,9 @@ class _Connection:
             "telegram_ask_cancel": self._on_telegram_ask_cancel,
             "activity_batch": self._on_activity_batch,
             "activity_status": self._on_activity_status,
+            "recall_query": self._on_recall_query,
+            "recall_open": self._on_recall_open,
+            "recall_dismiss": self._on_recall_dismiss,
         }
         try:
             if mtype in pre_auth:
@@ -1028,6 +1057,99 @@ class _Connection:
 
         extension_history.clear()
         await self._send({"id": msg.get("id"), "type": "history_cleared", "ok": True})
+
+    # -- Recall over the import store ----------------------------------------
+    #
+    # The selection and everything returned from the store is personal content,
+    # so it crosses the wire sealed with K_extchat, like Telegram. A plaintext
+    # selection is refused, not downgraded. Page sessions never reach these
+    # handlers (not in _PAGE_ALLOWED). Errors are content-free codes.
+
+    def _recall_ready(self) -> Any:
+        if self.recall_service is None:
+            from ..recall.service import RecallService
+
+            self.recall_service = RecallService()
+        return self.recall_service
+
+    async def _recall_call(self, run: Callable[[Any], Any]) -> tuple[Any, str | None]:
+        """Run ``run(service)`` off the loop: ``(result, None)`` or ``(None, error code)``."""
+        from ..recall.service import RecallError
+
+        service = self._recall_ready()
+        try:
+            return await asyncio.get_event_loop().run_in_executor(None, run, service), None
+        except RecallError as exc:
+            return None, exc.code
+        except Exception:
+            _log.exception("recall request failed")
+            return None, "recall_unavailable"
+
+    async def _on_recall_query(self, msg: dict[str, Any]) -> None:
+        from ..recall.service import MAX_LIMIT
+
+        mid = msg.get("id")
+        ek = self._telegram_key()
+        if ek is None:
+            await self._send({"id": mid, "type": "recall_result", "ok": False, "error": "encryption_key_unavailable"})
+            return
+        sealed = msg.get("text")
+        limit = msg.get("limit", 8)
+        if (
+            not isinstance(sealed, str)
+            or not is_encrypted(sealed)
+            or not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= MAX_LIMIT
+        ):
+            await self._send({"id": mid, "type": "recall_result", "ok": False, "error": "invalid_request"})
+            return
+        try:
+            text = decrypt_message(ek, sealed)
+        except DecryptError:
+            await self._send({"id": mid, "type": "recall_result", "ok": False, "error": "undecryptable"})
+            return
+        result, error = await self._recall_call(lambda svc: svc.query(text, limit=limit))
+        if error is not None:
+            await self._send({"id": mid, "type": "recall_result", "ok": False, "error": error})
+        else:
+            content = self._telegram_seal(ek, json.dumps(result, ensure_ascii=False))
+            await self._send({"id": mid, "type": "recall_result", "ok": True, "content": content})
+
+    async def _on_recall_open(self, msg: dict[str, Any]) -> None:
+        from ..recall.service import MAX_CONTEXT
+
+        mid = msg.get("id")
+        ek = self._telegram_key()
+        if ek is None:
+            await self._send({"id": mid, "type": "recall_opened", "ok": False, "error": "encryption_key_unavailable"})
+            return
+        part_uid = msg.get("part_uid")
+        before, after = msg.get("before", 2), msg.get("after", 2)
+        bounds_ok = all(
+            isinstance(n, int) and not isinstance(n, bool) and 0 <= n <= MAX_CONTEXT for n in (before, after)
+        )
+        if not isinstance(part_uid, str) or not _RECALL_UID_RE.fullmatch(part_uid) or not bounds_ok:
+            await self._send({"id": mid, "type": "recall_opened", "ok": False, "error": "invalid_request"})
+            return
+        parts, error = await self._recall_call(lambda svc: svc.open(part_uid, before=before, after=after))
+        if error is not None:
+            await self._send({"id": mid, "type": "recall_opened", "ok": False, "error": error})
+        else:
+            content = self._telegram_seal(ek, json.dumps({"parts": parts}, ensure_ascii=False))
+            await self._send({"id": mid, "type": "recall_opened", "ok": True, "content": content})
+
+    async def _on_recall_dismiss(self, msg: dict[str, Any]) -> None:
+        mid = msg.get("id")
+        conv_uid = msg.get("conv_uid")
+        if not isinstance(conv_uid, str) or not _RECALL_UID_RE.fullmatch(conv_uid):
+            await self._send({"id": mid, "type": "recall_dismissed", "ok": False, "error": "invalid_request"})
+            return
+        _, error = await self._recall_call(lambda svc: svc.dismiss(conv_uid))
+        if error is not None:
+            await self._send({"id": mid, "type": "recall_dismissed", "ok": False, "error": error})
+        else:
+            await self._send({"id": mid, "type": "recall_dismissed", "ok": True})
 
     # -- Telegram import (read-only) -----------------------------------------
     #

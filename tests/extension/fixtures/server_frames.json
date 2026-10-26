@@ -153,5 +153,11 @@
     "type": "accounts_result",
     "accounts": ["0x0000000000000000000000000000000000000001"],
     "chainId": "0x1"
-  }
+  },
+  {"id": "recall-query", "type": "recall_result", "ok": true, "content": "\ud83d\udd12ENC:v2:a2lk:bm9uY2U:Y2lwaGVy"},
+  {"id": "recall-query-fail", "type": "recall_result", "ok": false, "error": "import_store_unavailable"},
+  {"id": "recall-open", "type": "recall_opened", "ok": true, "content": "\ud83d\udd12ENC:v2:a2lk:bm9uY2U:Y2lwaGVy"},
+  {"id": "recall-open-fail", "type": "recall_opened", "ok": false, "error": "invalid_request"},
+  {"id": "recall-dismiss", "type": "recall_dismissed", "ok": true},
+  {"id": "recall-dismiss-fail", "type": "recall_dismissed", "ok": false, "error": "recall_unavailable"}
 ]

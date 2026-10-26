@@ -124,8 +124,8 @@ and provider messages) is written to the Hermes log instead of the reply.
 
 ## Supported messages
 
-`auth_ok.capabilities` currently advertises `discord_channel_resolve_v1` and
-`telegram_import_v1`. These names describe protocol support; they do not prove
+`auth_ok.capabilities` currently advertises `discord_channel_resolve_v1`,
+`telegram_import_v1`, `activity_batch_v1` and `recall_v1`. These names describe protocol support; they do not prove
 that Discord credentials, Telegram extras/login/private LLM, memory custody,
 or a particular platform's native/live acceptance gates are ready.
 
@@ -146,6 +146,7 @@ or a particular platform's native/live acceptance gates are ready.
 | `sign_request` | Produces a frozen approval prompt before any keyvault signing. |
 | `sign_approve` | Signs only the request captured by the matching prompt. |
 | `history_get` / `history_clear` | Reads or clears encrypted-at-rest conversation history. |
+| `recall_query` / `recall_open` / `recall_dismiss` | Finds the user's own stored messages (`mordred.db` import tables) that match a page selection, opens a part with its neighbours, or hides a conversation from recall for seven days. Return `recall_result` / `recall_opened` / `recall_dismissed`. The selection must arrive sealed to the extension key and cards and context leave sealed; there is no model in the path, and excerpts are substrings of stored text. Page sessions are refused. |
 
 Large history reads return the newest complete suffix with `truncated: true`;
 stored history is not modified. `history_result` also carries `status`
