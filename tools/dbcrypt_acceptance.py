@@ -3314,7 +3314,14 @@ def _record_native_test_failure(record: dict[str, Any], report: Path, directory:
         }
 
 
-def _native_suite(context: dict[str, Any], row: dict[str, Any], directory: Path, baseline: Path) -> dict[str, Any]:
+def _native_suite(
+    context: dict[str, Any],
+    row: dict[str, Any],
+    directory: Path,
+    baseline: Path,
+    *,
+    native_facts: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     validate_bundle(context["bundle"])
     require_native_source_checkout(context)
     probe = probe_interpreter(_native_python(context), cwd=context["bundle"])
@@ -3326,6 +3333,16 @@ def _native_suite(context: dict[str, Any], row: dict[str, Any], directory: Path,
     )
     environment = _native_environment(context, context["fixtures"]["persistence"])
     environment.update(row["env"])
+    if row["suite"] == "linux-memory":
+        # These required test metadata are scrubbed with all ambient MORDRED_*
+        # values. Bind them to the validated bundle and successful seed facts.
+        _require(sys.platform == "linux" and _hex(context["manifest"]["commit"], 40))
+        _require(native_facts is not None and native_facts.get("native_provider") == "EC2 NitroTPM")
+        assert native_facts is not None
+        environment.update(
+            MORDRED_ACCEPTANCE_COMMIT=context["manifest"]["commit"],
+            MORDRED_LINUX_TPM_PROVIDER=native_facts["native_provider"],
+        )
     environment["MORDRED_DBCRYPT_RUN_SUITE"] = row["suite"]
     environment.update(
         MORDRED_DBCRYPT_BASELINE=str(baseline),
@@ -3449,7 +3466,7 @@ def _execute_native_phase(context: dict[str, Any], *, phase: Phase, directory: P
         )
         for row in rows:
             if row["mode"] == context["mode"] and "argv" in row:
-                executions.append(_native_suite(context, row, directory, baseline_path))
+                executions.append(_native_suite(context, row, directory, baseline_path, native_facts=baseline["facts"]))
     executions.append(_collector_child(context, persistence, "read", directory))
     actual = executions[-1]["payload"]
     result = {

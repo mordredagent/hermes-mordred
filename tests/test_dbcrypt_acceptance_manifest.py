@@ -3093,3 +3093,145 @@ def test_native_ceremony_evidence_rejects_role_or_entrypoint_substitution(tmp_pa
         provision["payload"]["facts"]["filesystem"]["scope"] = "root"
     with pytest.raises(tool.AcceptanceRefused):
         tool.validate_native_phase_evidence(phase, directory=spool)
+
+
+@pytest.fixture
+def native_suite_environment_boundary(tmp_path, monkeypatch):
+    """Keep the real scrub/build path; stop at the first subprocess boundary."""
+    from types import SimpleNamespace
+
+    tool = acceptance_tool("dbcrypt_acceptance")
+    monkeypatch.setattr(tool, "sys", SimpleNamespace(platform="linux"))
+    for name in (
+        "MORDRED_ACCEPTANCE_COMMIT",
+        "MORDRED_LINUX_TPM_PROVIDER",
+        "MORDRED_PRIVATE_SECRET",
+        "MORDRED_TPM_TEST",
+    ):
+        monkeypatch.setenv(name, "untrusted-ambient")
+    context = {
+        "bundle": tmp_path / "bundle",
+        "manifest": {"checkout": str(tmp_path / "checkout"), "extracted_sdist": "sdist", "commit": "a" * 40},
+        "mode": "wheel",
+        "kind": "production",
+        "fixtures": {kind: tmp_path / kind for kind in ("persistence", "crash", "negative")},
+        "helper_name": "MORDRED_TPMKEY_HELPER",
+        "helper": tmp_path / "never-executed-helper",
+        "helper_copy_manifest": tmp_path / "helper.json",
+        "parent": tmp_path,
+    }
+    monkeypatch.setattr(tool, "validate_bundle", lambda *_: None)
+    monkeypatch.setattr(tool, "require_native_source_checkout", lambda *_: None)
+    monkeypatch.setattr(tool, "probe_interpreter", lambda *_a, **_k: {"product_file": str(tmp_path)})
+    monkeypatch.setattr(tool, "validate_import_provenance", lambda *_a, **_k: None)
+    monkeypatch.setattr(tool, "_native_driver", lambda *_: tmp_path / "hermes")
+    captured = []
+
+    class ReachedCollection(Exception):
+        pass
+
+    def capture(_context, argv, environment, **kwargs):
+        captured.append((argv, environment, kwargs))
+        raise ReachedCollection
+
+    monkeypatch.setattr(tool, "_native_process", capture)
+    directory = tmp_path / "evidence"
+    directory.mkdir()
+    row = {"suite": "linux-memory", "env": {"MORDRED_LINUX_ORCHESTRATION_TEST": "1"}, "argv": ["inert-pytest"]}
+    return tool, context, row, directory, captured, ReachedCollection
+
+
+def test_linux_memory_suite_supplies_observed_metadata_after_environment_scrub(
+    native_suite_environment_boundary, monkeypatch
+):
+    tool, context, row, directory, captured, stopped = native_suite_environment_boundary
+    context.update(control_action_path=directory.parent / "action.json", control_action={"sha256": "b" * 64})
+    facts = {"native_provider": "EC2 NitroTPM"}
+    monkeypatch.setattr(tool, "_collector_child", lambda *_: {"payload": {"facts": facts}})
+    monkeypatch.setattr(tool, "_write_new", lambda *_: None)
+    row["mode"] = "wheel"
+    monkeypatch.setattr(tool, "native_acceptance_commands", lambda **_: [row])
+    with pytest.raises(stopped):
+        tool._execute_native_phase(context, phase="provision", directory=directory)
+    argv, environment, call = captured[0]
+    assert environment["MORDRED_ACCEPTANCE_COMMIT"] == context["manifest"]["commit"]
+    assert environment["MORDRED_LINUX_TPM_PROVIDER"] == "EC2 NitroTPM"
+    assert environment["MORDRED_LINUX_ORCHESTRATION_TEST"] == "1"
+    assert environment["MORDRED_TPMKEY_HELPER"] == str(context["helper"])
+    assert environment["HERMES_HOME"] == str(context["fixtures"]["persistence"])
+    assert "MORDRED_PRIVATE_SECRET" not in environment and "MORDRED_TPM_TEST" not in environment
+    assert argv[-1] == "--collect-only" and call["name"] == "linux-memory-collection"
+    assert argv[argv.index("--rootdir") + 1] == str(context["bundle"])
+
+
+@pytest.mark.parametrize(
+    "facts", [None, {}, {"native_provider": "software TPM"}, {"native_provider": "Microsoft Platform Crypto Provider"}]
+)
+def test_linux_memory_suite_refuses_unobserved_or_wrong_provider(native_suite_environment_boundary, facts):
+    tool, context, row, directory, captured, _ = native_suite_environment_boundary
+    with pytest.raises(ValueError, match="inconsistent bundle provenance"):
+        tool._native_suite(context, row, directory, directory / "baseline", native_facts=facts)
+    assert captured == []
+
+
+@pytest.mark.parametrize("damage", ["commit", "platform"])
+def test_linux_memory_suite_refuses_invalid_metadata_context(native_suite_environment_boundary, damage):
+    tool, context, row, directory, captured, _ = native_suite_environment_boundary
+    if damage == "commit":
+        context["manifest"]["commit"] = "unverified"
+    else:
+        tool.sys.platform = "win32"
+    with pytest.raises(ValueError, match="inconsistent bundle provenance"):
+        tool._native_suite(
+            context, row, directory, directory / "baseline", native_facts={"native_provider": "EC2 NitroTPM"}
+        )
+    assert captured == []
+
+
+def test_other_native_suite_does_not_inherit_linux_metadata(native_suite_environment_boundary):
+    tool, context, row, directory, captured, stopped = native_suite_environment_boundary
+    row.update(suite="affected", env={})
+    with pytest.raises(stopped):
+        tool._native_suite(context, row, directory, directory / "baseline")
+    environment = captured[0][1]
+    assert (
+        not {"MORDRED_ACCEPTANCE_COMMIT", "MORDRED_LINUX_TPM_PROVIDER", "MORDRED_PRIVATE_SECRET", "MORDRED_TPM_TEST"}
+        & environment.keys()
+    )
+
+
+def test_native_phase_supplies_successful_seed_facts_to_suite(tmp_path, monkeypatch):
+    tool = acceptance_tool("dbcrypt_acceptance")
+    facts = {"native_provider": "EC2 NitroTPM", "boot": "observed-seed"}
+    fixtures = {kind: tmp_path / kind for kind in ("persistence", "crash", "negative")}
+    context = {
+        "fixtures": fixtures,
+        "control_action_path": tmp_path / "action.json",
+        "control_action": {"sha256": "a" * 64},
+        "manifest": {"checkout": str(tmp_path)},
+        "bundle": tmp_path / "bundle",
+        "kind": "production",
+        "mode": "wheel",
+    }
+    monkeypatch.setattr(
+        tool,
+        "_collector_child",
+        lambda _c, root, op, _d: {
+            "payload": {
+                "facts": facts if root == fixtures["persistence"] and op == "seed" else {"native_provider": "other"}
+            }
+        },
+    )
+    monkeypatch.setattr(tool, "_write_new", lambda *_: None)
+    monkeypatch.setattr(tool, "native_acceptance_commands", lambda **_: [{"mode": "wheel", "argv": ["unused"]}])
+
+    class ReachedSuite(Exception):
+        pass
+
+    def suite(_context, _row, _directory, _baseline, **kwargs):
+        assert kwargs["native_facts"] is facts
+        raise ReachedSuite
+
+    monkeypatch.setattr(tool, "_native_suite", suite)
+    with pytest.raises(ReachedSuite):
+        tool._execute_native_phase(context, phase="provision", directory=tmp_path / "evidence")
