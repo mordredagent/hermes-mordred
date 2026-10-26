@@ -1368,6 +1368,19 @@ def _missing_and_generation(root: Path) -> list[str]:
     return ["wrong_generation", "wrong_root_binding", "missing_source_no_repair", "missing_native_key_observed"]
 
 
+def _require_ciphertext_read_refused(connection: Any, message: str) -> None:
+    import sqlcipher3.dbapi2 as driver
+
+    from mordred_hermes.dbcrypt._shim import wrong_key_errors
+
+    try:
+        connection.execute("SELECT count(*) FROM messages").fetchone()
+    except wrong_key_errors(driver):
+        pass
+    else:
+        raise AssertionError(message)
+
+
 def _wrong_profile_key(root: Path) -> None:
     import sqlcipher3.dbapi2 as driver
 
@@ -1383,12 +1396,7 @@ def _wrong_profile_key(root: Path) -> None:
     connection = driver.connect(str(root / "state.db"))
     try:
         apply_key(connection, wrong)
-        try:
-            connection.execute("SELECT count(*) FROM messages").fetchone()
-        except driver.DatabaseError:
-            pass
-        else:
-            raise AssertionError("independent profile memory key decrypted Root database")
+        _require_ciphertext_read_refused(connection, "independent profile memory key decrypted Root database")
     finally:
         connection.close()
 
@@ -1701,12 +1709,7 @@ def negative(root: Path) -> dict[str, Any]:
         try:
             if key is not None:
                 offline.execute("PRAGMA key='owned-negative-wrong-key'")
-            try:
-                offline.execute("SELECT count(*) FROM messages").fetchone()
-            except driver.DatabaseError:
-                pass
-            else:
-                raise AssertionError("keyless/wrong-key ciphertext read succeeded")
+            _require_ciphertext_read_refused(offline, "keyless/wrong-key ciphertext read succeeded")
         finally:
             offline.close()
     withdrawal = real_helper_unavailability(root)
