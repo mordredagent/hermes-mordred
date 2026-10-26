@@ -16,8 +16,31 @@ if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
     $vsInstall = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
     if (-not $vsInstall) { throw 'MSVC x64 build tools are unavailable.' }
     $devCmd = Join-Path $vsInstall 'Common7\Tools\VsDevCmd.bat'
-    $environmentLines = & $env:ComSpec /d /s /c "`"`"$devCmd`" -arch=x64 -host_arch=x64 >nul && set`""
-    if ($LASTEXITCODE -ne 0) { throw 'MSVC environment initialization failed.' }
+    # Pass cmd.exe its command line directly. Windows PowerShell's native
+    # argument serializer otherwise rewrites the nested batch-path quotes.
+    $environmentStart = [Diagnostics.ProcessStartInfo]::new()
+    $environmentStart.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    $environmentStart.Arguments = '/d /s /c ""{0}" -arch=x64 -host_arch=x64 >nul && set"' -f $devCmd
+    $environmentStart.UseShellExecute = $false
+    $environmentStart.CreateNoWindow = $true
+    $environmentStart.RedirectStandardOutput = $true
+    $environmentStart.RedirectStandardError = $true
+    $environmentProcess = [Diagnostics.Process]::new()
+    $environmentProcess.StartInfo = $environmentStart
+    try {
+        if (-not $environmentProcess.Start()) { throw 'MSVC environment process did not start.' }
+        $environmentOutput = $environmentProcess.StandardOutput.ReadToEndAsync()
+        $environmentError = $environmentProcess.StandardError.ReadToEndAsync()
+        if (-not $environmentProcess.WaitForExit(60000)) { throw 'MSVC environment initialization timed out.' }
+        if ($environmentProcess.ExitCode -ne 0) { throw 'MSVC environment initialization failed.' }
+        if (-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($environmentOutput, $environmentError), 10000)) {
+            throw 'MSVC environment output did not close.'
+        }
+        $environmentLines = $environmentOutput.GetAwaiter().GetResult() -split "`r?`n"
+        $null = $environmentError.GetAwaiter().GetResult()
+    } finally {
+        $environmentProcess.Dispose()
+    }
     foreach ($line in $environmentLines) {
         if ($line -match '^([^=]+)=(.*)$') {
             [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')

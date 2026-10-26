@@ -494,7 +494,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 60
     env:
-      HERMES_HOME: /tmp/mordred-ci-macos-home
+      HERMES_HOME: /private/tmp/mordred-ci-macos-home
     defaults:
       run:
         shell: bash
