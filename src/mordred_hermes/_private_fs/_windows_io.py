@@ -523,6 +523,11 @@ class _CustodyReadScope:
             except BaseException as exc:
                 if failure is None:
                     failure = exc
+        try:
+            self.check_lifetime()
+        except BaseException as exc:
+            if failure is None:
+                failure = exc
         if failure is not None:
             raise failure from original
 

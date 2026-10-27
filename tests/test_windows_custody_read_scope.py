@@ -277,6 +277,35 @@ def test_read_and_exit_errors_retain_body_cause(custody_read):
     assert caught.value.__cause__ is original
 
 
+@pytest.mark.parametrize("body_error", [False, True])
+def test_final_traversal_handle_reuse_refuses_before_result_escape(custody_read, monkeypatch, body_error):
+    api, home, policy, _, loan, traversals = custody_read
+    descriptor = api.descriptor
+    original = PrivateFSError("io", "read_failure")
+
+    def late_reuse(handle):
+        result = descriptor(handle)
+        if len(traversals) == 4 and handle is policy.checked.handle:
+            pinned = home.checked.handle
+            value, path = pinned.value, api.paths[pinned.value]
+            pinned.close()
+            pinned.value = value
+            api.paths[value] = path
+        return result
+
+    def fail_read():
+        raise original
+
+    monkeypatch.setattr(api, "descriptor", late_reuse)
+    if body_error:
+        api.on_read = fail_read
+    with pytest.raises(RuntimeError, match="pinned handle lifetime changed") as caught:
+        _read(loan, "source")
+    assert traversals == [home.checked, policy.checked, home.checked, policy.checked]
+    assert caught.value.__cause__ is (original if body_error else None)
+    assert home._custody_read is None and policy._custody_read is None
+
+
 def test_pending_marker_appearing_during_read_refuses(custody_read):
     api, _, _, _, loan, _ = custody_read
 
