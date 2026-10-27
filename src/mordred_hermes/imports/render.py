@@ -69,8 +69,20 @@ __all__ = [
     "truncate_part",
 ]
 
-SOURCE_LABELS: Final = {Source.TELEGRAM: "Telegram", Source.MAIL: "Mail"}
-SOURCE_ICONS: Final = {Source.TELEGRAM: "✈", Source.MAIL: "✉"}
+SOURCE_LABELS: Final = {
+    Source.TELEGRAM: "Telegram",
+    Source.MAIL: "Mail",
+    Source.CODEX: "Codex",
+    Source.CLAUDE_CODE: "Claude Code",
+    Source.GROK_BOT: "Grok Bot",
+}
+SOURCE_ICONS: Final = {
+    Source.TELEGRAM: "✈",
+    Source.MAIL: "✉",
+    Source.CODEX: "⌘",
+    Source.CLAUDE_CODE: "⌘",
+    Source.GROK_BOT: "⌘",
+}
 BODY_INDENT: Final = "  "
 TRUNCATION_MARKER: Final = "…[truncated]"
 _MAX_LISTED_NAMES: Final = 3

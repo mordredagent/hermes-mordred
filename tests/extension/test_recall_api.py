@@ -45,8 +45,8 @@ class _FakeRecall:
         if self.fail is not None:
             raise RecallError(self.fail)
 
-    def query(self, text: str, *, limit: int = 8) -> dict[str, Any]:
-        self.calls.append(("query", (text, limit)))
+    def query(self, text: str, *, limit: int = 8, words: bool = False) -> dict[str, Any]:
+        self.calls.append(("query_words" if words else "query", (text, limit)))
         self._check()
         return {"query": text, "confidence": "high", "cards": [{"uid": "tg:-1:1#a", "excerpt": "経費精算は27日"}]}
 
@@ -158,3 +158,12 @@ def test_page_sessions_cannot_recall() -> None:
         [frame] = _dispatch(conn, payload)
         assert frame == {"id": payload["id"], "type": "error", "reason": "page_session_forbidden"}
     assert svc.calls == []
+
+
+def test_word_mode_reaches_the_word_search_and_bad_modes_are_refused() -> None:
+    svc = _FakeRecall()
+    payload = {"id": "q", "type": "recall_query", "text": _sealed("経費 締め切り"), "mode": "words"}
+    [frame] = _dispatch(_conn(svc), payload)
+    assert frame["ok"] is True and svc.calls == [("query_words", ("経費 締め切り", 8))]
+    [bad] = _dispatch(_conn(_FakeRecall()), {**payload, "mode": "regex"})
+    assert bad == {"id": "q", "type": "recall_result", "ok": False, "error": "invalid_request"}

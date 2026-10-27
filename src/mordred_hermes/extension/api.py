@@ -65,6 +65,7 @@ from .discord_context import (
     resolve_discord_channel,
 )
 from .errors import wire_error_code
+from .imports_api import IMPORTS_CAPABILITY, ImportsRefusal
 from .wallet import _do_sign, _get_account_snapshot, _prepare_sign, analyze_sign
 from .webauthn import InvalidWebAuthnPublicKey
 
@@ -100,6 +101,9 @@ _EXTENSION_CAPABILITIES = [
     "telegram_import_v1",
     activity_api.ACTIVITY_CAPABILITY,
     "recall_v1",
+    # ``recall_query`` with ``mode: "words"``: every typed word, as typed (``RecallIndex.search_words``).
+    "recall_words_v1",
+    IMPORTS_CAPABILITY,
 ]
 
 # A sign_request entry leaves _pending_sign only on approve/reject (or when the
@@ -267,6 +271,7 @@ class ExtensionAPIServer:
         discord_resolver: DiscordResolver | None = None,
         telegram_service: Any = None,
         recall_service: Any = None,
+        imports_api: Any = None,
         keepalive_interval: float = DEFAULT_KEEPALIVE_INTERVAL,
         activity_receiver: Any = None,
         activity_max_batch_bytes: int = activity_api.DEFAULT_MAX_BATCH_BYTES,
@@ -281,6 +286,8 @@ class ExtensionAPIServer:
         # Built lazily so a server without the Telegram extra never imports it.
         self._telegram_service = telegram_service
         self._recall_service = recall_service
+        # One per process: it owns the login/setup flows and the import jobs.
+        self._imports_api = imports_api
         self.keepalive_interval = keepalive_interval
         # ``None`` → every activity_batch answers ``activity_refused: store_unavailable``.
         self.activity_receiver = activity_receiver
@@ -311,6 +318,14 @@ class ExtensionAPIServer:
 
             self._recall_service = RecallService()
         return self._recall_service
+
+    @property
+    def imports_api(self) -> Any:
+        if self._imports_api is None:
+            from .imports_api import ImportsApi
+
+            self._imports_api = ImportsApi(telegram_service=lambda: self.telegram_service)
+        return self._imports_api
 
     @property
     def page_url(self) -> str:
@@ -394,6 +409,7 @@ class ExtensionAPIServer:
             discord_resolver=self.discord_resolver,
             telegram_service=self.telegram_service,
             recall_service=self.recall_service,
+            imports_api=self.imports_api,
             page_token=page_token,
             client_origin=origin,
             activity_receiver=self.activity_receiver,
@@ -424,6 +440,7 @@ class _Connection:
         discord_resolver: DiscordResolver = resolve_discord_channel,
         telegram_service: Any = None,
         recall_service: Any = None,
+        imports_api: Any = None,
         page_token: str | None = None,
         client_origin: str | None = None,
         activity_receiver: Any = None,
@@ -434,6 +451,7 @@ class _Connection:
         self.discord_resolver = discord_resolver
         self.telegram_service = telegram_service
         self.recall_service = recall_service
+        self.imports_api = imports_api
         self.page_token = page_token  # set only for local-origin (page) sockets
         self.client_origin = client_origin
         self.authed = False
@@ -552,6 +570,8 @@ class _Connection:
             "recall_query": self._on_recall_query,
             "recall_open": self._on_recall_open,
             "recall_dismiss": self._on_recall_dismiss,
+            "imports_status": self._on_imports_status,
+            "imports_call": self._on_imports_call,
         }
         try:
             if mtype in pre_auth:
@@ -1095,12 +1115,14 @@ class _Connection:
             return
         sealed = msg.get("text")
         limit = msg.get("limit", 8)
+        mode = msg.get("mode", "selection")
         if (
             not isinstance(sealed, str)
             or not is_encrypted(sealed)
             or not isinstance(limit, int)
             or isinstance(limit, bool)
             or not 1 <= limit <= MAX_LIMIT
+            or mode not in ("selection", "words")
         ):
             await self._send({"id": mid, "type": "recall_result", "ok": False, "error": "invalid_request"})
             return
@@ -1109,7 +1131,8 @@ class _Connection:
         except DecryptError:
             await self._send({"id": mid, "type": "recall_result", "ok": False, "error": "undecryptable"})
             return
-        result, error = await self._recall_call(lambda svc: svc.query(text, limit=limit))
+        words = mode == "words"
+        result, error = await self._recall_call(lambda svc: svc.query(text, limit=limit, words=words))
         if error is not None:
             await self._send({"id": mid, "type": "recall_result", "ok": False, "error": error})
         else:
@@ -1150,6 +1173,67 @@ class _Connection:
             await self._send({"id": mid, "type": "recall_dismissed", "ok": False, "error": error})
         else:
             await self._send({"id": mid, "type": "recall_dismissed", "ok": True})
+
+    # -- Imports (the Desktop plugin's import screens) -------------------------
+    #
+    # Both directions are sealed with K_extchat: the requests carry phone
+    # numbers, login codes, addresses and app passwords, the answers account
+    # labels and folder names. A plaintext body is refused. Page sessions never
+    # reach these handlers (not in _PAGE_ALLOWED). See :mod:`.imports_api`.
+
+    async def _on_imports_status(self, msg: dict[str, Any]) -> None:
+        mid = msg.get("id")
+        ek = self._telegram_key()
+        if ek is None:
+            await self._send(
+                {"id": mid, "type": "imports_status_result", "ok": False, "error": "encryption_key_unavailable"}
+            )
+            return
+        if self.imports_api is None:
+            await self._send({"id": mid, "type": "imports_status_result", "ok": False, "error": "imports_unavailable"})
+            return
+        try:
+            status = await self.imports_api.status()
+        except Exception:
+            _log.exception("imports status failed")
+            await self._send({"id": mid, "type": "imports_status_result", "ok": False, "error": "imports_unavailable"})
+            return
+        content = self._telegram_seal(ek, json.dumps(status, ensure_ascii=False))
+        await self._send({"id": mid, "type": "imports_status_result", "ok": True, "content": content})
+
+    async def _on_imports_call(self, msg: dict[str, Any]) -> None:
+        mid = msg.get("id")
+        ek = self._telegram_key()
+        if ek is None:
+            await self._send(
+                {"id": mid, "type": "imports_call_result", "ok": False, "error": "encryption_key_unavailable"}
+            )
+            return
+        sealed = msg.get("content")
+        if not isinstance(sealed, str) or not is_encrypted(sealed):
+            await self._send({"id": mid, "type": "imports_call_result", "ok": False, "error": "invalid_request"})
+            return
+        try:
+            body = json.loads(decrypt_message(ek, sealed))
+        except (DecryptError, ValueError):
+            await self._send({"id": mid, "type": "imports_call_result", "ok": False, "error": "undecryptable"})
+            return
+        if not isinstance(body, dict) or self.imports_api is None:
+            await self._send({"id": mid, "type": "imports_call_result", "ok": False, "error": "invalid_request"})
+            return
+        try:
+            result = await self.imports_api.call(body)
+        except ImportsRefusal as exc:
+            await self._send({"id": mid, "type": "imports_call_result", "ok": False, "error": exc.code})
+            return
+        except Exception:
+            _log.exception("imports call failed (op=%s)", body.get("op") if isinstance(body.get("op"), str) else "?")
+            await self._send({"id": mid, "type": "imports_call_result", "ok": False, "error": "imports_failed"})
+            return
+        finally:
+            del body
+        content = self._telegram_seal(ek, json.dumps(result, ensure_ascii=False))
+        await self._send({"id": mid, "type": "imports_call_result", "ok": True, "content": content})
 
     # -- Telegram import (read-only) -----------------------------------------
     #

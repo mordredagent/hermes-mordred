@@ -23,6 +23,8 @@ from .derive import Derived, derive
 _SCAN_LIMIT = 80
 #: Parts shown per conversation.
 _PER_CONVERSATION = 2
+#: Words a word search ANDs together.
+_MAX_WORDS = 8
 #: Dismissed conversations stay hidden for this long.
 _SUPPRESS_DAYS = 7
 
@@ -121,7 +123,36 @@ class RecallIndex:
             return SearchResult([], "none", "", 0, derived)
 
         terms = list(derived.keywords) or terms_of(derived.summary)[:8]
-        hits = self._multi_hits(derived.queries)
+        return self._ranked(self._multi_hits(derived.queries), terms, derived, limit=limit, now=now, started=started)
+
+    def search_words(self, text: str, *, limit: int = 8, now: float | None = None) -> SearchResult:
+        """The parts containing EVERY whitespace-separated word of ``text``, ranked like :meth:`search`.
+
+        The words are used exactly as typed: no keyword derivation and no
+        normalisation (stored text is not normalised either), so one kanji, a
+        hiragana word or a mixed phrase is searched as it was written.
+        ``derived.queries`` is the single AND query that ran.
+        """
+        started = time.monotonic()
+        now = time.time() if now is None else now
+        words = list(dict.fromkeys(text.split()))[:_MAX_WORDS]
+        query = " ".join(words)
+        derived = Derived(summary=query, keywords=tuple(words), queries=(query,) if query else (), chars=len(query))
+        if not words:
+            return SearchResult([], "none", "", 0, derived)
+        hits = sorted(self.store.search(query, limit=_SCAN_LIMIT), key=lambda hit: hit.rank)
+        return self._ranked(hits, words, derived, limit=limit, now=now, started=started)
+
+    def _ranked(
+        self,
+        hits: Sequence[_Hit],
+        terms: list[str],
+        derived: Derived,
+        *,
+        limit: int,
+        now: float,
+        started: float,
+    ) -> SearchResult:
         parts = self._hydrate([hit.part_uid for hit in hits])
         suppressed = self._suppressed(now)
 

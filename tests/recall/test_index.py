@@ -108,3 +108,19 @@ def test_service_maps_a_refused_store_to_a_content_free_code(tmp_path: Path) -> 
 def test_service_cuts_the_selection(store: ImportStore, tmp_path: Path) -> None:
     result = RecallService(opener=lambda _home: store, home=tmp_path).query("経" * 5000)
     assert len(result["query"]) == 4000
+
+
+def test_word_search_ands_every_word_as_typed(store: ImportStore) -> None:
+    index = RecallIndex(store)
+    both = index.search_words("経費精算 前倒し", now=NOW)
+    assert {card.source for card in both.cards} == {"telegram"}
+    assert both.derived.queries == ("経費精算 前倒し",)
+    # A hiragana word and a single kanji are searched as written (selection recall drops them).
+    assert [c.source for c in index.search_words("了解です", now=NOW).cards] == ["telegram"]
+    assert {c.source for c in index.search_words("固 経費精算", now=NOW).cards} == {"mail"}
+    assert index.search_words("経費精算 存在しない語", now=NOW).cards == []
+
+
+def test_word_search_of_nothing_is_empty(store: ImportStore) -> None:
+    result = RecallIndex(store).search_words(" 　 ", now=NOW)
+    assert (result.cards, result.confidence, result.derived.queries) == ([], "none", ())

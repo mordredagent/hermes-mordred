@@ -67,9 +67,13 @@ class RecallService:
             _log.info("recall: store refused (%s)", exc.code)
             raise RecallError("import_store_unavailable") from None
 
-    def query(self, text: str, *, limit: int = 8) -> dict[str, Any]:
+    def query(self, text: str, *, limit: int = 8, words: bool = False) -> dict[str, Any]:
+        """A selection's recall, or with ``words`` the parts containing every typed word."""
         cut = text[:MAX_TEXT_CHARS]
-        result = self._guarded(lambda index: index.search(cut, limit=limit))
+        if words:
+            result = self._guarded(lambda index: index.search_words(cut, limit=limit))
+        else:
+            result = self._guarded(lambda index: index.search(cut, limit=limit))
         return result.as_dict(cut)
 
     def open(self, part_uid: str, *, before: int = 2, after: int = 2) -> list[dict[str, Any]]:

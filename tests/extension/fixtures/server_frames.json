@@ -159,5 +159,9 @@
   {"id": "recall-open", "type": "recall_opened", "ok": true, "content": "\ud83d\udd12ENC:v2:a2lk:bm9uY2U:Y2lwaGVy"},
   {"id": "recall-open-fail", "type": "recall_opened", "ok": false, "error": "invalid_request"},
   {"id": "recall-dismiss", "type": "recall_dismissed", "ok": true},
-  {"id": "recall-dismiss-fail", "type": "recall_dismissed", "ok": false, "error": "recall_unavailable"}
+  {"id": "recall-dismiss-fail", "type": "recall_dismissed", "ok": false, "error": "recall_unavailable"},
+  {"id": "imports-status", "type": "imports_status_result", "ok": true, "content": "\ud83d\udd12ENC:v2:a2lk:bm9uY2U:Y2lwaGVy"},
+  {"id": "imports-status-fail", "type": "imports_status_result", "ok": false, "error": "imports_unavailable"},
+  {"id": "imports-call", "type": "imports_call_result", "ok": true, "content": "\ud83d\udd12ENC:v2:a2lk:bm9uY2U:Y2lwaGVy"},
+  {"id": "imports-call-fail", "type": "imports_call_result", "ok": false, "error": "mail_already_configured"}
 ]

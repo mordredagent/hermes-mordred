@@ -1,4 +1,4 @@
-"""Canonical records for imported messages (Telegram, mail).
+"""Canonical records for imported messages (Telegram, mail, local agent transcripts).
 
 Security contract:
 
@@ -40,6 +40,10 @@ class RecordError(ValueError):
 class Source(StrEnum):
     TELEGRAM = "telegram"
     MAIL = "mail"
+    # Local agent transcripts read from files on this machine (``imports.local``).
+    CODEX = "codex"
+    CLAUDE_CODE = "claude_code"
+    GROK_BOT = "grok_bot"
 
 
 class ConversationKind(StrEnum):
@@ -98,6 +102,20 @@ _TG_SOURCE_RE: Final = re.compile(rf"tg:(?P<dialog>{_TG_DIALOG_PATTERN}):{_TG_ME
 _MAIL_CONV_RE: Final = re.compile(rf"mail:(?P<account>{_ACCOUNT_PATTERN}):t:[A-Za-z0-9._~@+=$!/-]{{1,128}}")
 _MAIL_SOURCE_RE: Final = re.compile(rf"mail:(?P<account>{_ACCOUNT_PATTERN}):(?:h:[0-9a-f]{{32}}|{_MESSAGE_ID_PATTERN})")
 _PART_SUFFIX_RE: Final = re.compile(r"#(?:a|q[1-9]\d{0,3}|f[1-9]\d{0,3})")
+
+# Local transcripts: ``<prefix>:<conversation key>`` and ``<prefix>:<conversation key>:<item key>``.
+# Keys come from file names and transcript ids, never from transcript text.
+_LOCAL_KEY_PATTERN: Final = r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
+_LOCAL_KEY_RE: Final = re.compile(_LOCAL_KEY_PATTERN)
+LOCAL_PREFIX: Final = {Source.CODEX: "codex", Source.CLAUDE_CODE: "claude", Source.GROK_BOT: "grok"}
+_LOCAL_CONV_RE: Final = re.compile(rf"(?P<prefix>codex|claude|grok):(?P<conv>{_LOCAL_KEY_PATTERN})")
+_LOCAL_SOURCE_RE: Final = re.compile(
+    rf"(?P<prefix>codex|claude|grok):(?P<conv>{_LOCAL_KEY_PATTERN}):{_LOCAL_KEY_PATTERN}"
+)
+_SOURCE_OF_PREFIX: Final = {prefix: source for source, prefix in LOCAL_PREFIX.items()}
+_CONV_PREFIX: Final = {Source.TELEGRAM: "tg:", Source.MAIL: "mail:"} | {
+    source: f"{prefix}:" for source, prefix in LOCAL_PREFIX.items()
+}
 
 _PART_PREFIX: Final = {PartKind.AUTHORED: "a", PartKind.QUOTED: "q", PartKind.FORWARDED: "f"}
 
@@ -246,6 +264,26 @@ def mail_conv_uid(account: str, thread_key: str) -> str:
     return f"mail:{_checked_account(account)}:t:{thread_key}"
 
 
+def _checked_local(source: Source, key: object, code: str) -> tuple[str, str]:
+    prefix = LOCAL_PREFIX.get(source)
+    if prefix is None or not isinstance(key, str) or not _LOCAL_KEY_RE.fullmatch(key):
+        raise RecordError(code)
+    return prefix, key
+
+
+def local_conv_uid(source: Source, conversation_key: str) -> str:
+    """``codex:<session>`` / ``claude:<session>`` / ``grok:<agent>`` for a local transcript."""
+    prefix, key = _checked_local(source, conversation_key, "bad_conv_uid")
+    return f"{prefix}:{key}"
+
+
+def local_source_uid(source: Source, conversation_key: str, item_key: str) -> str:
+    """``<prefix>:<conversation key>:<item key>``: one transcript entry, stable across re-imports."""
+    prefix, key = _checked_local(source, conversation_key, "bad_source_uid")
+    _, item = _checked_local(source, item_key, "bad_source_uid")
+    return f"{prefix}:{key}:{item}"
+
+
 def part_uid(source_uid: str, kind: PartKind, n: int = 1) -> str:
     """``<source_uid>#a`` / ``#q<n>`` / ``#f<n>``; the authored part is always ``#a``."""
     if source_of(source_uid) is None:
@@ -274,6 +312,8 @@ def source_of(source_uid: str) -> Source | None:
         return Source.TELEGRAM
     if _MAIL_SOURCE_RE.fullmatch(source_uid):
         return Source.MAIL
+    if (local := _LOCAL_SOURCE_RE.fullmatch(source_uid)) is not None:
+        return _SOURCE_OF_PREFIX[local.group("prefix")]
     return None
 
 
@@ -313,13 +353,22 @@ def _conv_matches(source_uid: str, conv_uid: str) -> bool:
     if (tg := _TG_SOURCE_RE.fullmatch(source_uid)) is not None:
         conv = _TG_CONV_RE.fullmatch(conv_uid)
         return conv is not None and conv.group("dialog") == tg.group("dialog")
+    if (local := _LOCAL_SOURCE_RE.fullmatch(source_uid)) is not None:
+        lconv = _LOCAL_CONV_RE.fullmatch(conv_uid)
+        return (
+            lconv is not None
+            and lconv.group("prefix") == local.group("prefix")
+            and lconv.group("conv") == local.group("conv")
+        )
     mail = _MAIL_SOURCE_RE.fullmatch(source_uid)
     conv = _MAIL_CONV_RE.fullmatch(conv_uid)
     return mail is not None and conv is not None and conv.group("account") == mail.group("account")
 
 
 def _check_conv_uid(conv_uid: object) -> None:
-    if not isinstance(conv_uid, str) or not (_TG_CONV_RE.fullmatch(conv_uid) or _MAIL_CONV_RE.fullmatch(conv_uid)):
+    if not isinstance(conv_uid, str) or not (
+        _TG_CONV_RE.fullmatch(conv_uid) or _MAIL_CONV_RE.fullmatch(conv_uid) or _LOCAL_CONV_RE.fullmatch(conv_uid)
+    ):
         raise RecordError("bad_conv_uid")
 
 
@@ -336,7 +385,7 @@ def validate_conversation(conv: ImportConversation) -> None:
     source = _checked_enum(conv.source, Source)
     _checked_enum(conv.kind, ConversationKind)
     _check_conv_uid(conv.conv_uid)
-    if not conv.conv_uid.startswith("tg:" if source is Source.TELEGRAM else "mail:"):
+    if not conv.conv_uid.startswith(_CONV_PREFIX[source]):
         raise RecordError("conv_mismatch")
     _check_timestamp(conv.last_message_at)
     _check_no_escape(conv.title, conv.source_account, conv.conversation_id)
