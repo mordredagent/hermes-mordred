@@ -696,6 +696,92 @@ missing gates stay not-run or failed.
 
 ## Manual live-device validation log
 
+- **2026-10-28 — Cross-platform database: Windows read optimization reviewed; remaining lifecycle validation deferred.**
+  The owner requested a shorter completion path. Draft PR
+  [#270](https://github.com/mordredagent/hermes-mordred/pull/270) records the
+  implementation, verified results and remaining work; it is not a release or
+  full cross-platform lifecycle acceptance.
+
+  Retained runtime `e01c19a9437336f3ab0cd760d95e9f2f54bb75f3`, tree
+  `c71027399e795e4ba03333eff72d87af6658c1be`, passed all eight Linux source/wheel
+  provision, process restart, OS reboot and EC2 stop/start observations, six
+  reopen continuity checks and three settled control cycles. Linux was not
+  rerun and this evidence is not relabelled as a newer runtime.
+
+  The same e01 runtime passed Windows Server 2025 native PowerShell parsing,
+  14 guards, U66 attachment, 86 selected test bodies, source/wheel
+  qualification, assembly and the production package gate. Recovery of the
+  complete 639-file public graph passed the unchanged local qualification and
+  bundle consumers, source pins and actual bundle-byte checks. Archive SHA256:
+  `18b185b41bbb494cbb81af6c5681a58efd4465f8f073a8cd822a8fd8b35a571a`.
+
+  The new Windows read optimization is runtime
+  `38f31cd405d9e3f5740ccd5de25cb06bc342e6c6`, tree
+  `28fcc577bf4e481d020eaf91ef80573796f09d36`. It coalesces repeated full
+  directory traversals only within one fixed custody stat/read operation on
+  exact live held directories. Fresh entry/exit validation, leaf checks,
+  pending/coordinator checks and every SQL authorization/progress/API boundary
+  remain. Handle closure/reuse and nested reads refuse. Transient changes
+  reverted between the boundary checks are sampled less often; this does not
+  claim identical intermediate sampling or a session/cross-read cache.
+
+  The initial implementation passed the complete 883-case affected command
+  with platform-gated skips. After the lifetime and fixture fixes, all 58
+  focused regressions and scoped lint/formatting/strict typing passed. Independent SOL review found a late exit-lifetime gap; its fix and
+  regression passed scoped re-review. Astra reviewed the boundary design.
+  The final test-only change makes the synthetic fixture drive-absolute on
+  Windows. Native gates skipped on Darwin do not establish Windows acceptance.
+
+  Actual Windows metadata measurements on the identical production source
+  bytes at 2363 reduced median observation time from 0.26638 to 0.11181 seconds
+  and per-observation metadata/descriptor calls from 3166/1556 to 1366/656.
+  Three observations performed no SQL, native key operation or new fixture
+  write. The new measurement forwarded six reads, file validations and read
+  verifications each; old leaf counters were not recorded. This is a metadata
+  result, not a prediction of full lifecycle timing.
+
+  An expanded Windows run at 2363 reported 425 passes, 118 failures, 58 setup
+  errors and 15 skips. The 58 setup errors came from the new test's nonabsolute
+  Windows path and are corrected in 38f. The actual Windows rerun at 38f
+  passed all 58 cases in 1.17 seconds, with source origin and raw hashes
+  verified and no native-key opt-in. The latest mapped draft CI also passed
+  on Linux, macOS and Windows
+  ([run](https://github.com/mordredagent/hermes-mordred/actions/runs/40557561423)).
+  Five exact e01 representatives reproduced the other failure groups,
+  including POSIX-only keyvault refusal, direct snapshot permission failures,
+  private-ACL fixtures and stale flush-boundary expectations. Those existing
+  test failures remain recorded and unfixed; the expanded run is not green.
+
+  A separate e01 focused diagnostic removed a scheduled stack-dump timer and
+  enabled fatal handling only. Genuine provision passed in 33.1 seconds and
+  the unchanged protected SessionDB save/read/FTS/trigram checks passed in
+  265.8 seconds (273.0-second child, exit zero, empty stderr). The logical
+  digest was checked in memory, not retained. Earlier timer-enabled runs
+  encountered access violations. This supports a timer-associated diagnostic
+  failure without proving its cause; it is not a full collector/lifecycle pass.
+
+  Codex CLI 0.163.0 authentication and actual SOL tool work passed on both
+  dedicated ordinary-user guest environments. Development wrappers reuse
+  existing SDK dependencies and isolated synthetic Hermes homes. No process
+  inventory or private-file policy was widened for development. Owned jobs
+  and forwarders closed, with all five restoration checks passing after the
+  latest crypto diagnostic. Final independent AWS observations confirmed both
+  instances stopped, the original Windows profile retained, Linux without a
+  profile or association, and development/formal ownership released. The
+  original disabled Password/Limited task, worker bytes and descriptor were
+  verified. The ordinary account remains nonadministrator with its SSH group
+  membership retained; the development CLI disabled it before stopping Windows.
+  Authentication, old SDK/workspaces and current development routes remain
+  preserved. No active owned job, target SSM session or transport remains.
+
+  Fresh source/wheel qualification for the new runtime, all eight Windows
+  lifecycle observations and the combined final16 consumer are deliberately
+  deferred. Windows lifecycle acceptance remains zero of eight. Preparation
+  artifacts remain in the private local ledger; no new SDK build or old-root
+  replay is inferred from preparation. Windows 11/Desktop/Hello, real
+  Telegram/IMAP accounts, live model behavior and measured macOS Touch ID
+  counts also remain unverified.
+
 - **2026-10-24 — Import-store shared writes and mail reconciliation: isolated SQLCipher validation.**
   Source: `refactor/import-store-writes`, based on `5396f0e89`; macOS
   27.0.1 arm64, Python 3.13.15, editable package verified against its dedicated

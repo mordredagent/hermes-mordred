@@ -257,6 +257,19 @@ The macOS CLI, startup protection, monitor and uninstall lifecycle are implement
   and Windows NitroTPM hosts. Protect root/shared/profile databases and
   `mordred.db`; preserve macOS format compatibility and block key deletion
   while dependent protected database state remains.
+  Checkpoint (2026-10-28): retained e01 Linux source/wheel lifecycle passed
+  eight observations; e01 Windows qualification, 86 selected bodies and the
+  complete 639-file graph passed. The reviewed Windows read optimization at
+  38f passed local focused checks and reduced actual metadata observation cost
+  by about 58%; it does not establish new source/wheel or lifecycle acceptance.
+  The owner chose a shorter Draft PR completion path. New-runtime Windows
+  qualification, Windows8, final16 and unresolved baseline Windows test groups
+  remain follow-up work. Do not mark this item complete or relabel old evidence.
+  Both Codex SOL development environments are prepared. Retain failed roots
+  without replay and reuse the accepted Linux8/qualification records.
+  Windows Desktop/Hello, live accounts/model behavior and measured Touch ID
+  counts remain separate. See [the validation log](CI.md#manual-live-device-validation-log)
+  and Draft PR [#270](https://github.com/mordredagent/hermes-mordred/pull/270).
 - [ ] Complete Telegram, mail and activity consumers after their shared database
   prerequisites land. A database-layer pass alone does not establish collector
   support or Windows 11/Desktop acceptance. Touch ID prompt reduction is a
