@@ -12,7 +12,7 @@ import re
 import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeVar
@@ -507,6 +507,45 @@ class _MordredTransaction:
 
     def assert_private_admission(self) -> None:
         self._check()
+
+    def _read_windows_custody(self, name: str, limit: int) -> bytes | None:
+        """One stat/read, with Windows-only held-directory traversal coalescing.
+
+        Keep this bridge private and fixed: no caller code, SQL, writes or
+        native key operations execute while directory traversal is deferred.
+        The public stat/read APIs and all their guard/leaf checks are retained.
+        """
+        from ._private_fs._windows_io import _CustodyReadScope, _Directory, _Transaction
+
+        state = self._session._state
+        scope: _CustodyReadScope | nullcontext[None] = nullcontext()
+        if type(self._transaction) is _Transaction:
+            home, policy = state.home, state.policy
+            home_tx, policy_tx = state.home_tx, state.policy_tx
+            if (
+                type(home) is not _Directory
+                or type(policy) is not _Directory
+                or type(home_tx) is not _Transaction
+                or policy_tx is not self._transaction
+                or home_tx.directory is not home
+                or self._transaction.directory is not policy
+                or home is policy
+            ):
+                raise RuntimeError("custody read requires the canonical held directories")
+            scope = _CustodyReadScope(home_tx, self._transaction)
+        with scope:
+            try:
+                try:
+                    self.stat(name)
+                except PrivateFSError as exc:
+                    if exc.reason == "missing":
+                        return None
+                    raise
+                return self.read_bytes(name, max_bytes=limit)
+            finally:
+                # Also run the unchanged coordinator/pending-marker guard on
+                # exceptional and missing reads, before fresh directory exit.
+                self._check()
 
     def directory_identity(self) -> FileIdentity:
         return self._invoke(self._transaction.directory_identity)

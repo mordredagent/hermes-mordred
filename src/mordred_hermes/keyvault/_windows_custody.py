@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary
 
-from .._config_io import CanonicalPaths, CanonicalSession, canonical_session
+from .._config_io import CanonicalPaths, CanonicalSession, _MordredTransaction, canonical_session
 from .._custody_order import custody_scope
 from .._database_contracts import DatabaseRefused
 from .._private_fs import (
@@ -154,6 +154,8 @@ def windows_backend() -> NativeBackend:
 def _read(tx: PrivateTransaction | None, name: str, limit: int = LIMIT) -> bytes | None:
     if tx is None:
         return None
+    if type(tx) is _MordredTransaction:
+        return tx._read_windows_custody(name, limit)
     try:
         tx.stat(name)
     except PrivateFSError as exc:

@@ -94,11 +94,15 @@ class _Directory:
         self.published = False
         self.pid = os.getpid()
         self.thread = threading.get_ident()
+        self._custody_read: _CustodyReadScope | None = None
 
     def check(self) -> None:
         if not self.active or self.pid != os.getpid() or self.thread != threading.get_ident():
             raise RuntimeError("private directory is closed")
-        self.checked.check()
+        if self._custody_read is None:
+            self.checked.check()
+        else:
+            self._custody_read.check_lifetime()
 
     def directory_identity(self) -> FileIdentity:
         self.check()
@@ -231,6 +235,11 @@ class _Transaction:
             raise RuntimeError("private transaction is closed or belongs to another thread")
         self.directory.check()
 
+    def _check_write(self) -> None:
+        self.check()
+        if self.directory._custody_read is not None:
+            raise RuntimeError("mutation inside custody read")
+
     def assert_private_admission(self) -> None:
         """Validate lifetime/security and require exact-private admission."""
         self.check()
@@ -267,12 +276,12 @@ class _Transaction:
         self.published = self.directory.published = True
 
     def flush_directory(self) -> None:
-        self.check()
+        self._check_write()
         self.directory.checked.flush()
 
     def flush_file(self, name: str, *, expected_identity: FileIdentity | None = None) -> None:
         """Flush a checked owned file; share-zero also refuses active holders."""
-        self.check()
+        self._check_write()
         with self.directory.opened(name, access=0x40120089, share=0) as handle:
             identity = _check_identity(handle, expected_identity)
             handle.api.flush(handle)
@@ -282,7 +291,7 @@ class _Transaction:
 
     def delete_file(self, name: str, *, expected_identity: FileIdentity | None = None) -> None:
         self.directory.path(name)
-        self.check()
+        self._check_write()
         attempted = False
         try:
             with self.directory.opened(name, access=0x40130089, share=0) as handle:
@@ -315,7 +324,7 @@ class _Transaction:
     def rename_file(self, name: str, destination: str, *, expected_identity: FileIdentity | None = None) -> None:
         source_path = self.directory.path(name)
         destination_path = self.directory.path(destination)
-        self.check()
+        self._check_write()
         changed = False
         try:
             with self.directory.opened(name, access=0x40130089, share=0) as handle:
@@ -353,7 +362,7 @@ class _Transaction:
 
     def append_bytes(self, name: str, data: bytes) -> None:
         path = self.directory.path(name)
-        self.check()
+        self._check_write()
         changed = False
         try:
             with self.directory.opened(name, access=0xC0020000, share=0) as handle:
@@ -392,7 +401,7 @@ class _Transaction:
         self.write(name, data, replace=True)
 
     def write(self, name: str, data: bytes, *, replace: bool) -> None:
-        self.check()
+        self._check_write()
         destination = self.directory.path(name)
         api = self.directory.checked.handle.api
         if replace:
@@ -448,6 +457,74 @@ class _Transaction:
             self.flush_directory()
         except OSError as cleanup:
             cleanup_failure(error, cleanup, committed=True)
+
+
+class _CustodyReadScope:
+    """Coalesce only the canonical loan's held home/policy traversals.
+
+    The coordinator owns these directory/transaction lifetimes across the
+    entire read. This is not a path or HANDLE cache: every skipped traversal
+    checks the exact enrolled objects and each pinned handle's open lifetime.
+    Leaf and coordinator checks still run, with fresh directory validation
+    before entry and on every exit (including exceptional/missing reads).
+    """
+
+    def __init__(self, home: _Transaction, policy: _Transaction) -> None:
+        self.transactions = (home, policy)
+        self.directories = (home.directory, policy.directory)
+        self.checked = tuple(directory.checked for directory in self.directories)
+        self.handles = tuple(
+            (handle, handle.api, handle.value, handle._lifetime)
+            for checked in self.checked
+            for handle in (checked.handle, *(handle for handle, _ in checked.ancestors))
+        )
+        self.pid, self.thread = os.getpid(), threading.get_ident()
+
+    def check_lifetime(self) -> None:
+        if self.pid != os.getpid() or self.thread != threading.get_ident():
+            raise RuntimeError("custody read belongs to another process or thread")
+        for transaction, directory, checked in zip(self.transactions, self.directories, self.checked, strict=True):
+            if (
+                not transaction.active
+                or transaction.thread != self.thread
+                or transaction.directory is not directory
+                or not directory.active
+                or directory.pid != self.pid
+                or directory.thread != self.thread
+                or directory.checked is not checked
+            ):
+                raise RuntimeError("custody read directory or transaction lifetime changed")
+        for handle, api, value, lifetime in self.handles:
+            if value is None or handle.api is not api or handle.value != value or handle._lifetime is not lifetime:
+                raise RuntimeError("custody read pinned handle lifetime changed")
+
+    def __enter__(self) -> None:
+        if any(directory._custody_read is not None for directory in self.directories):
+            raise RuntimeError("nested custody read")
+        self.check_lifetime()
+        for directory in self.directories:
+            directory.check()
+        for directory in self.directories:
+            directory._custody_read = self
+
+    def __exit__(self, kind: object, original: BaseException | None, traceback: object) -> None:
+        # Never let nesting or a failed body erase the outer scope's checks.
+        failure: BaseException | None = None
+        try:
+            self.check_lifetime()
+        except BaseException as exc:
+            failure = exc
+        finally:
+            for directory in self.directories:
+                directory._custody_read = None
+        for directory in self.directories:
+            try:
+                directory.check()
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+        if failure is not None:
+            raise failure from original
 
 
 def _discard_staging(staging: OwnedHandle, original: BaseException | None) -> None:

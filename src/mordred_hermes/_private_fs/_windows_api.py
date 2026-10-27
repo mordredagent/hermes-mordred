@@ -73,8 +73,10 @@ class OwnedHandle:
     def __init__(self, api: NativeAPI, value: int) -> None:
         self.api = api
         self.value: int | None = value
+        self._lifetime = object()
 
     def close(self) -> None:
+        self._lifetime = object()
         value, self.value = self.value, None
         if value is not None:
             self.api.checked(self.api.CloseHandle(value), "close")
