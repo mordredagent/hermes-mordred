@@ -97,7 +97,7 @@ def custody_read(monkeypatch):
     policy = win._Directory(
         CheckedDirectory(policy_handle, api.metadata(policy_handle).identity, api.paths[3], False, (root_pin, home_pin))
     )
-    state = cio._State(cio.CanonicalPaths(Path("/synthetic")), ExitStack())
+    state = cio._State(cio.CanonicalPaths(Path(Path.cwd().anchor) / "synthetic"), ExitStack())
     state.home, state.policy = home, policy
     state.home_identity, state.policy_identity = home.checked.identity, policy.checked.identity
     state.home_tx, state.policy_tx = win._Transaction(home), win._Transaction(policy)
