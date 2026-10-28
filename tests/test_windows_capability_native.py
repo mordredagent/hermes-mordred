@@ -109,10 +109,12 @@ def test_native_copied_home_refuses_capabilities_and_reset(native_custody):
     for name in SUPPORTED:
         assert result[name] == (False, "custody-broken")
     for role in ("memory", "audit"):
+        # A missing lease is refused first; hold one so foreign custody itself refuses.
         with (
+            database_key_mutation(root=copied, generation=None) as database_lease,
             pytest.raises(custody.CustodyError),
             custody.windows_custody_session(copied, backend=backend) as session,
         ):
-            session.reset_role(role, erase_authorized=True)
+            session.reset_role(role, erase_authorized=True, database_lease=database_lease)
     assert backend.calls == calls
     assert {name: (copied / "mordred" / name).read_bytes() for name in before} == before

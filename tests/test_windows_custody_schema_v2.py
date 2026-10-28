@@ -5,6 +5,7 @@ from contextlib import ExitStack
 
 import pytest
 
+from mordred_hermes._private_fs import open_private_directory
 from mordred_hermes.keyvault._database_mutation import database_key_mutation
 from tests.test_windows_custody import fs as fs
 
@@ -101,9 +102,9 @@ def test_upgrade_refuses_unknown_schema_and_pending_role_without_native(fs):
     with pytest.raises(c.CustodyError):
         c.upgrade_manifest_v2(home=home)
     path.write_bytes(original)
-    pending = home / "mordred/windows-audit.pending.json"
-    pending.write_bytes(b"uncertain")
-    pending.chmod(0o600)
+    # Publish the journal as custody does; a plain write is not private on Windows.
+    with open_private_directory(home / "mordred") as directory, directory.transaction() as tx:
+        tx.create_bytes("windows-audit.pending.json", b"uncertain")
     calls = list(backend.calls)
     with pytest.raises(c.CustodyError):
         c.upgrade_manifest_v2(home=home)

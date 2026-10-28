@@ -9,8 +9,14 @@ from types import SimpleNamespace
 
 import pytest
 
+# Windows leases require a current-user-owned root; an elevated runner's tmp_path is Administrators-owned.
+from tests._checked_fixture_helpers import tmp_path as tmp_path
+
 _POSIX_PATHS = pytest.mark.skipif(
     os.name != "posix", reason="POSIX alias/rename semantics; Windows sharing/rename qualification is Task 5's gate"
+)
+_POSIX_SOURCE_BINDING = pytest.mark.skipif(
+    os.name != "posix", reason="the checked root source-binding exemption is POSIX-only (_source_binding_metadata)"
 )
 
 
@@ -353,6 +359,7 @@ def write_source_binding(root, *, relative="mordred/db-key-source.json", bound_r
     return path
 
 
+@_POSIX_SOURCE_BINDING
 def test_only_valid_checked_root_source_binding_is_not_a_dependency(tmp_path):
     from mordred_hermes._database_inventory import scan_dependencies
 
@@ -361,6 +368,7 @@ def test_only_valid_checked_root_source_binding_is_not_a_dependency(tmp_path):
     assert result.complete and result.entries == ()
 
 
+@_POSIX_SOURCE_BINDING
 @pytest.mark.parametrize(
     "damage", ["malformed", "wrong-root", "mode", "parent-mode", "symlink", "hardlink", "unreadable"]
 )
@@ -412,6 +420,7 @@ def test_invalid_root_source_binding_remains_unknown(tmp_path, monkeypatch, dama
         "profiles/work/mordred/db-key-source.json",
     ],
 )
+@_POSIX_SOURCE_BINDING
 def test_source_binding_exemption_is_exact_root_path_only(tmp_path, relative):
     from mordred_hermes._database_inventory import scan_dependencies
 

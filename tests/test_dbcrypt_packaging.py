@@ -18,8 +18,17 @@ from pathlib import Path
 import pytest
 from packaging.requirements import Requirement
 
+from tests._checked_fixture_helpers import seed_private_directory
+
 ROOT = Path(__file__).resolve().parents[1]
 UV = shutil.which("uv") or str(Path(sys.executable).with_name("uv.exe" if os.name == "nt" else "uv"))
+
+
+def private_receipt_root(path: Path) -> Path:
+    # A plain mkdir by an elevated Windows token is Administrators-owned, which
+    # the hook refuses; the checked creator yields the user-owned private root.
+    seed_private_directory(path)
+    return path
 
 
 def load(path, name):
@@ -119,7 +128,7 @@ def test_opt_in_hook_retains_actual_compiler_receipt_before_staging_cleanup(tmp_
     monkeypatch.setattr(module, "validate_headers", lambda path: None)
     monkeypatch.setenv("MORDRED_SQLITE_INCLUDE_DIR", str(headers))
     receipts = tmp_path / "receipts"
-    receipts.mkdir(mode=0o700)
+    private_receipt_root(receipts)
     monkeypatch.setenv("MORDRED_DBCRYPT_BUILD_RECEIPT_DIR", str(receipts))
 
     def compiler(argv, **kwargs):
@@ -168,7 +177,7 @@ def test_captured_compiler_failure_retains_failed_receipt_without_package_tag(tm
     for name in ("sqlite3.h", "sqlite3ext.h"):
         (headers / name).write_bytes(b"controlled header")
     receipts = tmp_path / "receipts"
-    receipts.mkdir(mode=0o700)
+    private_receipt_root(receipts)
     monkeypatch.setenv("MORDRED_SQLITE_INCLUDE_DIR", str(headers))
     monkeypatch.setenv("MORDRED_DBCRYPT_BUILD_RECEIPT_DIR", str(receipts))
     monkeypatch.setattr(module, "validate_headers", lambda path: None)
@@ -199,7 +208,7 @@ def test_build_receipt_output_rejects_unsafe_or_duplicate_paths(tmp_path, monkey
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     output = tmp_path / "receipts"
-    output.mkdir(mode=0o700)
+    private_receipt_root(output)
     if unsafe == "relative":
         output = Path("relative")
     elif unsafe == "checkout":

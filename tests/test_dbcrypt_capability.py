@@ -328,6 +328,9 @@ def observe(event, args):
             writes.append((event, str(path)))
     elif event in {'os.mkdir', 'os.rename', 'os.remove', 'os.rmdir', 'os.chmod', 'os.truncate', 'ctypes.dlopen'}:
         writes.append((event, str(args)))
+# Importing ctypes on Windows binds windll.kernel32.GetLastError (a stdlib
+# ctypes.dlopen); every explicit WinDLL/CDLL load after this stays observed.
+import ctypes
 sys.addaudithook(observe)
 status = database_status(Path(os.environ['HERMES_HOME']))
 assert status.configured and status.dependencies == 2 and not status.authenticated
