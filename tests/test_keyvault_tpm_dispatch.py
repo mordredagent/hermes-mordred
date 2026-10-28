@@ -63,6 +63,7 @@ from mordred_hermes.keyvault._seckey_helper import (
     find_tpmkey_helper,
     find_winkey_helper,
 )
+from tests.test_keyvault_native_deletion import checked_audit_permit
 
 
 def _pub(priv: ec.EllipticCurvePrivateKey) -> bytes:
@@ -203,7 +204,8 @@ def test_delete_fail_closed_skips_software_namespace() -> None:
     ops.create_keypair(b"tag", "label")
     backend = _SecKeyBackend(ops=ops, sw_ops=None)
     # Must not raise and must not attempt any software-namespace delete.
-    backend.delete_enclave_key("k")
+    with checked_audit_permit(backend, "k") as permit:
+        backend.delete_enclave_key("k", deletion=permit)
     assert [c[0] for c in ops.calls].count("delete") == 1
 
 
@@ -211,8 +213,8 @@ def test_delete_propagates_reason_error() -> None:
     ops = _ReasonOps()
     ops.delete_error = _OpsError(-1, "tpm", "tpm busy", reason=OPS_UNAVAILABLE)
     backend = _SecKeyBackend(ops=ops, sw_ops=None)
-    with pytest.raises(WrapError):
-        backend.delete_enclave_key("k")
+    with checked_audit_permit(backend, "k") as permit, pytest.raises(WrapError):
+        backend.delete_enclave_key("k", deletion=permit)
 
 
 def test_wrap_unwrap_roundtrip_fail_closed_backend() -> None:

@@ -610,7 +610,8 @@ def test_the_real_ceremony_creates_a_vault_that_the_prepared_phrase_recovers(
 
     monkeypatch.setattr("sys.platform", "darwin")
     _stub_runtime_probes(monkeypatch)
-    home, root = desktop.home, tmp_path / "vault"
+    home = desktop.home
+    root = home / "mordred" / "vault"
     _plaintext_home(home)
     backend, store = _RecordingBackend(), FakeAnchorStore()
     monkeypatch.setattr(_seams, "vault_root", lambda: root)

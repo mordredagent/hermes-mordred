@@ -303,6 +303,7 @@ def test_other_platforms_get_fixed_unsupported_sections(
 ) -> None:
     # Hermes's tool-call setting and the browser-history switches are read on every platform.
     monkeypatch.setattr("mordred_hermes.dbcrypt._capability.sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr("mordred_hermes.dbcrypt._capability._driver_present", lambda: False)
     monkeypatch.setattr(_seams, "tools_mode", lambda home: {"direct": True, "source": "config", "raw": "off"})
     monkeypatch.setattr(_seams, "activity_history", lambda home: {"history": True, "tools": False, "raw": 1})
     sections = asyncio.run(_status_v4.sections(platform, tmp_path))
@@ -326,6 +327,7 @@ def test_other_platforms_get_fixed_unsupported_sections(
 def test_linux_status_v4_carries_the_unsupported_sections(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(api, "sys", SimpleNamespace(platform="linux"))
     monkeypatch.setattr("mordred_hermes.dbcrypt._capability.sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr("mordred_hermes.dbcrypt._capability._driver_present", lambda: False)
     status = desktop.get("/status?client_version=4")
     assert status["databases"] == {"supported": False} and status["imports"]["code"] == "store_unavailable"
     old = desktop.get("/status?client_version=1")
