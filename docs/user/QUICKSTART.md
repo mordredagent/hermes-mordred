@@ -109,6 +109,7 @@ added later by rerunning the installer.
 | `messaging` | Terminal QR codes for extension pairing |
 | `tor-control` | Deep Tor liveness checks |
 | `telegram` | Read-only import of your own Telegram account for private questions (Telethon) |
+| `dbcrypt` (automatic) | SQLCipher driver for database encryption; installed for you on every platform, not selectable with `--extras` |
 
 </details>
 
