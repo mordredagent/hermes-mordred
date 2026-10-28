@@ -23,7 +23,6 @@ from .._database_contracts import DatabaseRefused, NativeSnapshot, RootIdentity,
 from .._database_lifecycle import ExclusiveLease
 from .._private_fs import PrivateFSError, open_private_directory
 from .._private_fs._types import validate_leaf
-from . import wrap
 
 if TYPE_CHECKING:
     from ._windows_custody import WindowsCustodySession
@@ -140,6 +139,8 @@ def _binding(raw: bytes, identity: RootIdentity, provider: str, digest: str) -> 
 
 
 def _posix_record(root: Path, identity: RootIdentity) -> tuple[Literal["tpm", "secure-enclave"], str]:
+    from . import wrap
+
     if sys.platform == "linux":
         from ._memory_key import memory_key_id
 
@@ -185,6 +186,8 @@ def _observe_posix(root: Path, identity: RootIdentity) -> NativeSnapshot:
 
 
 def _observe_windows(session: WindowsCustodySession, identity: RootIdentity) -> NativeSnapshot:
+    from . import wrap
+
     lease, wrapped = session.memory_source_record()
     if lease.role != "memory" or _HEX64.fullmatch(lease.generation) is None:
         raise DatabaseRefused("database source memory generation is invalid")
