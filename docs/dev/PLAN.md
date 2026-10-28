@@ -237,7 +237,7 @@ regressing silently.
 Database encryption is implemented in `dbcrypt`: the startup shim selects
 SQLCipher, conversion uses journals and process-lifetime locks, and hooks check
 protection each turn. The CLI owns conversion and uninstall ordering; see
-[`STATE_DB_ENCRYPTION.md`](./STATE_DB_ENCRYPTION.md) for the macOS-only lifecycle.
+[`STATE_DB_ENCRYPTION.md`](./STATE_DB_ENCRYPTION.md) for the lifecycle and its admitted platforms.
 
 ### Documentation
 
@@ -2704,7 +2704,8 @@ Delivered in PRs 11 and 12.
 The user approved the architecture on 2026-10-24. The
 [implementation plan](../superpowers/plans/2026-10-24-cross-platform-database-encryption.md)
 defines the stage gate, exact interfaces, test tasks and component PR boundaries.
-No product code or platform acceptance is delivered by this documentation slice.
+Product code is delivered by PR #270; platform acceptance is still recorded
+separately in docs/dev/CI.md's manual validation log.
 
 Keep independent component PRs in dependency order:
 

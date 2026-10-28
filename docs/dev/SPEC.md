@@ -59,7 +59,8 @@ compatibility policy.
   See [Linux Private Telegram Design](#linux-private-telegram-design) and
   [Windows dedicated custody and memory lifecycle](#windows-dedicated-custody-and-memory-lifecycle).
 - SQLite database encryption (`state.db` and sibling/profile stores) is
-  macOS-only, enabled separately with `databases encrypt` after memory setup.
+  admitted on macOS, Linux and Windows Server (workstation editions are refused
+  at runtime), enabled separately with `databases encrypt` after memory setup.
   It derives its key from the memory key; `setup` and `encryption enable all`
   do not enable it. JSONL/text logs and existing ZIP backups are not converted.
   Protected homes must be decrypted on macOS before migration to Linux/Windows.
@@ -932,8 +933,13 @@ scheduling. Decryption retains source and backup evidence. Uninstall and native
 key teardown recheck all generations and refuse while database dependencies
 remain, including plaintext files after restoration. External/offline encrypted
 backups may become unrecoverable after an explicit destructive source operation;
-their absence is never proven. Platform activation still requires native
-qualification; a platform name or marker alone does not admit storage.
+their absence is never proven. Native database storage admission is
+source-controlled: Linux, and Windows Server x64 with the qualified
+sqlcipher3-wheels 0.5.7 driver pair and the distribution-owned checked-VFS DLL,
+are admitted; Windows workstation editions are refused at runtime. Admission is
+not acceptance: native platform acceptance evidence is recorded separately in
+docs/dev/CI.md's manual validation log, and the Windows native acceptance matrix
+is still pending.
 
 `hermes-mordred --version` and the registered Hermes-host compatibility alias
 print the invoked command name and the Mordred package version, then exit successfully.
@@ -3353,16 +3359,21 @@ retained secret store or file vault, and the `<home>\mordred` and
 recursive removal yet. The plan lists exactly that. `--erase-encrypted`
 refuses on Windows, including `--dry-run`.
 
-Native database activation remains qualified separately; Windows VFS
-qualification is incomplete. Windows `databases status` uses the passive
+Native database storage admission is source-controlled: Linux, and Windows
+Server x64 with the qualified sqlcipher3-wheels 0.5.7 driver pair and the
+distribution-owned checked-VFS DLL, are admitted; Windows workstation editions
+are refused at runtime. Admission is not acceptance: native platform acceptance
+evidence is recorded separately in docs/dev/CI.md's manual validation log, and
+the Windows native acceptance matrix is still pending. Windows `databases status` uses the passive
 capability API to project intent, bounded dependency facts and reasons without
 SQL, native authentication or writes. Markers and driver presence do not prove
 usable authority, and no conversion is promised for the next startup. Retained
 protection state blocks Windows uninstall before memory disable, custody purge
 or teardown while restoration is unavailable. Checked root/profile relationships
 and all-generation mutation guards apply again at the actual owning boundaries.
-Unknown or unsafe storage never proves absence. This adds no Windows SQLCipher
-activation or native qualification.
+Unknown or unsafe storage never proves absence. This paragraph adds no Windows
+SQLCipher admission or acceptance evidence; the admission and acceptance split
+stated above applies.
 
 Purge ordering on Windows uninstall: purge requires an explicit disable (the
 opt-out marker) and no seal, broken seal or staging entry. With `--purge-data`
@@ -6531,7 +6542,12 @@ records that selected direction and the proposed implementation contracts.
 The user approved the architecture on 2026-10-24; the
 [implementation plan](../superpowers/plans/2026-10-24-cross-platform-database-encryption.md)
 tracks its gated execution.
-This is future work, not a change to the currently macOS-only support claims.
+Native database storage admission is source-controlled: Linux, and Windows Server
+x64 with the qualified sqlcipher3-wheels 0.5.7 driver pair and the
+distribution-owned checked-VFS DLL, are admitted; Windows workstation editions
+are refused at runtime. Admission is not acceptance: native platform acceptance
+evidence is recorded separately in docs/dev/CI.md's manual validation log, and
+the Windows native acceptance matrix is still pending.
 
 The proposal preserves the macOS database format and root-owned encryption
 domain. Linux TPM and Windows CNG memory-key custody supply the root database
@@ -6543,7 +6559,7 @@ must refuse rather than create or replace a plaintext database.
 Root/profile ownership, authority generation, process-lifetime migration leases,
 checked Windows SQLite I/O, backup/restore, and key disable/reset/purge/uninstall
 ordering are prerequisite contracts. A native Windows filesystem mediation
-feasibility gate must pass before Windows database support can be enabled.
+feasibility gate must pass before Windows database support is claimed as accepted.
 Telegram migration, mail credential custody and activity peer/storage consumers
 remain separate component changes; a database-only pass is not their acceptance.
 

@@ -3,9 +3,13 @@
 ## Checked VFS implementation candidate (UNVERIFIED)
 
 `vfs.c` and `checked_io.c` are a separate owned-handle implementation candidate,
-not the delegating diagnostic probe below. This candidate has **not passed the
-Windows native/security qualification gate**. `NATIVE_QUALIFIED` remains false;
-no runtime, key custody, database consumer, or platform support is activated.
+not the delegating diagnostic probe below. Native database storage admission is
+source-controlled: Linux, and Windows Server x64 with the qualified
+sqlcipher3-wheels 0.5.7 driver pair and the distribution-owned checked-VFS DLL,
+are admitted; Windows workstation editions are refused at runtime. Admission is
+not acceptance: native platform acceptance evidence is recorded separately in
+docs/dev/CI.md's manual validation log, and the Windows native acceptance matrix
+is still pending.
 
 Build with the same pinned headers described below, using `-Target Checked`.
 `-Target CheckedTest` emits a distinct `_test.dll` with deterministic native
@@ -225,9 +229,10 @@ The `dbcrypt` extra retains its cross-platform SQLCipher floor of 0.5.4 and
 constrains Windows to 0.5.7: native acceptance applies to a concrete driver,
 header and bridge pair. The loader also checks that distribution version before
 using a qualified production bridge. This constraint and successful packaging
-do not enable Windows runtime protection. `NATIVE_QUALIFIED` remains false until
-the separate actual Windows qualification is recorded; ordinary capability and
-status do not load the bridge, open SQL, authenticate custody or enroll a home.
+are necessary but not sufficient for Windows runtime protection. The admission
+statement in this file's introduction applies: `NATIVE_QUALIFIED` is true in
+source, and acceptance is recorded separately. Ordinary capability and status do
+not load the bridge, open SQL, authenticate custody or enroll a home.
 
 Editable Python modules are imported from the checkout, while the forced native
 asset is installed under site-packages. The locator therefore resolves only the

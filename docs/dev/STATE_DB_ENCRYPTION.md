@@ -10,8 +10,12 @@ Track those remaining tasks in [`TODO.md`](./TODO.md#hermes-database-encryption)
 The selected cross-platform direction is a shared SQLCipher lifecycle for
 Linux and Windows as well as macOS. Its proposed design is
 [`Cross-platform database encryption`](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md).
-That proposal is not implemented or accepted native validation; the macOS-only
-behavior documented below remains the current contract.
+Native database storage admission is source-controlled: Linux, and Windows Server
+x64 with the qualified sqlcipher3-wheels 0.5.7 driver pair and the
+distribution-owned checked-VFS DLL, are admitted; Windows workstation editions
+are refused at runtime. Admission is not acceptance: native platform acceptance
+evidence is recorded separately in docs/dev/CI.md's manual validation log, and
+the Windows native acceptance matrix is still pending.
 
 The qualification-gated Windows backup route requires an existing private
 destination directory separate from the protected home: neither directory may
@@ -33,7 +37,7 @@ Encrypt all of them with SQLCipher, keyed from the key Mordred already
 manages, without forking Hermes. Only Python opens them (no Node/Electron
 SQLite access in Hermes Desktop or the TUI).
 
-This is a separate macOS-only opt-in: `setup` and `encryption enable all` do
+This is a separate opt-in on the admitted platforms: `setup` and `encryption enable all` do
 not arm database encryption. Session JSONL, text logs and existing ZIP backups
 are not converted. Decrypt databases before removing their memory key or vault;
 retain recovery material for encrypted backups.
@@ -72,7 +76,8 @@ plugin's later injection is skipped (one vault unlock per process).
   elsewhere). Without the key an in-scope database is refused rather than
   opened, so Hermes can never create a plaintext replacement.
 - Armed by `<home>/mordred/db-encryption.marker` (phase 3 writes it after
-  converting every database). Database encryption is macOS-only. Ordinary
+  converting every database). Database encryption is admitted on macOS, Linux and Windows Server only (see the
+admission statement above). Ordinary
   unarmed Linux/Windows homes retain plain SQLite; enabling memory encryption
   there does not encrypt databases. A marker or interrupted conversion copied
   to an unsupported OS causes startup to refuse before opening the databases.

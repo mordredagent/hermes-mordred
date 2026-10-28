@@ -689,7 +689,10 @@ Hermes database and imported-history round trips, concurrency/crash recovery,
 key-lifecycle refusal, encrypted backup/restore, and reboot/stop-start retention.
 Injected tests do not replace native storage or device evidence. Native Windows
 SQLite filesystem mediation is an early feasibility gate, before a Windows
-support claim. Server acceptance does not establish Windows 11 or packaged
+support claim: its admission half is satisfied in source (Windows Server x64
+only; workstation editions are refused at runtime), and its acceptance half is
+tracked in the manual validation log (§Manual live-device validation log), where
+it remains pending. Server acceptance does not establish Windows 11 or packaged
 Desktop acceptance, and synthetic collectors do not establish live Telegram,
 IMAP or model acceptance. Record executed outcomes only in the manual log;
 missing gates stay not-run or failed.

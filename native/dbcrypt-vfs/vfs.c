@@ -1,4 +1,4 @@
-/* Checked SQLCipher VFS, deliberately unavailable to production activation.
+/* Windows checked VFS; admission is source-controlled (Windows Server only), acceptance is recorded separately.
  * Linked only to Win32. SQLite calls use the loading driver's API table.
  * No default-VFS file, SHM, dlopen or system-call callback is delegated.
  */
