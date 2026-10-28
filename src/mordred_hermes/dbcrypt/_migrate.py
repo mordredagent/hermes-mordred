@@ -414,8 +414,9 @@ def _checkpoint_source(database: Database, key: DatabaseKey | None) -> None:
 
     ``prepare``/``prepare_plain`` checkpoint (TRUNCATE) again. After this
     their checkpoint copies nothing, so the main file's size/mtime/ctime stay
-    as the journal records them and a failed export remains resumable. Closing
-    the read-write connection also removes the emptied ``-wal``/``-shm``.
+    as the journal records them: a failed export remains resumable, and a change
+    across an export proves a foreign write. Closing the read-write connection
+    also removes the emptied ``-wal``/``-shm``.
     """
     with _offline_connection(database.path) as conn:
         if key is not None:
@@ -831,18 +832,30 @@ def _complete_preparation(root: Path, data: dict[str, Any], key: DatabaseKey, de
             staged = root / entry["prepared"]
             if _file_identity(path) != entry["source_identity"] or _revision(path) != entry["source_revision"]:
                 raise MigrationError("unprepared source identity or contents changed")
+            # The revision was recorded with an empty WAL (_checkpoint_source),
+            # so frames now are a commit made after it, not yet in the main file.
+            _refuse_committed_wal(path, entry["relative"])
             if _schema(path, key if decrypting else None) != entry["verification"]:
                 raise MigrationError("unprepared source schema changed")
             _reserve_journal_staging(root, data, entry)
             database = Database(path, entry["relative"], "encrypted" if decrypting else "plaintext")
             (prepare_plain if decrypting else prepare)(database, key, _reserved_identity=entry["prepared_identity"])
+            # With the WAL empty, prepare()'s open, no-op checkpoint, reads and
+            # close leave the main file untouched (on Windows too: the checked
+            # VFS's close only unlocks and closes). A change means another process
+            # committed during the export and our close folded it into the
+            # original, which the staged copy lacks: refuse before it is armed.
+            if _revision(path) != entry["source_revision"]:
+                raise MigrationError(
+                    f"{entry['relative']} changed during export (another process wrote without the database "
+                    "lease); originals retained"
+                )
             if (
                 _file_identity(staged) != entry["prepared_identity"]
                 or _schema(staged, target_key) != entry["verification"]
             ):
                 raise MigrationError("reserved staged file is not a verified target")
             _fsync_file(staged)
-            entry["source_revision"] = _revision(path)
             # prepare() truncated the source's WAL. From here on WAL content is a
             # commit the staged copy lacks, which the swap must not discard.
             # Restore entries (_backup) never pass here: they replace by design.

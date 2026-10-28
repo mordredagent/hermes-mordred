@@ -611,3 +611,47 @@ def test_the_swap_guards_wal_content_only_after_an_export_truncated_it(tmp_path:
         _migrate._replace_swap(root, entry, _no_holders)
         assert not staged.exists() and not Path(f"{path}-wal").exists()
         assert _plain_rows(path) == _BASE_ROWS[:1]
+
+
+def test_a_commit_during_the_export_refuses_before_arming(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Our close folds a lease-less writer's mid-export commit into the original; the copy lacks it."""
+    import sqlcipher3.dbapi2 as sc
+
+    base = tmp_path / "hermes"
+    path = base / "state.db"
+    _plain_db(path)
+    real_vulnerable = _migrate.wal_reset_vulnerable
+    commits: list[bool] = []
+
+    def foreign_commit_mid_export(version: tuple[int, ...]) -> bool:
+        # prepare() asks this after its checkpoint and sqlcipher_export, with the
+        # source still open. No Python read of the main file here: closing any
+        # descriptor would drop this process's SQLite locks on it.
+        if not commits:
+            commits.append(True)
+            subprocess.run([sys.executable, "-c", _WAL_WRITER, "plain", str(path)], check=True, timeout=60)
+            assert _wal_size(path) > 0
+        return real_vulnerable(version)
+
+    monkeypatch.setattr(_migrate, "wal_reset_vulnerable", foreign_commit_mid_export)
+    with pytest.raises(_migrate.MigrationError, match="changed during export"):
+        _migrate.migrate(base, KEY, arm=dbcrypt.arm, holders_of=_no_holders)
+    assert commits == [True]
+
+    staged = Path(f"{path}{_migrate.PREPARED_SUFFIX}")
+    (entry,) = _journal_files(base)
+    assert entry["phase"] == "prepared" and "wal_checkpointed" not in entry
+    assert not dbcrypt.marker_path(base).exists() and staged.is_file()
+    state = {p: p.read_bytes() for p in (path, staged, _migrate.journal_path(base))}
+
+    # resume() re-prepares a "prepared" entry only after re-proving the source
+    # against the recorded revision, which the folded commit changed: it stays
+    # fail-closed rather than export again from a source the journal never proved.
+    with pytest.raises(_migrate.MigrationError, match="unprepared source identity or contents changed"):
+        _migrate.resume(base, holders_of=_no_holders)
+    assert {p: p.read_bytes() for p in state} == state
+
+    assert _plain_rows(path) == _BASE_ROWS + _WAL_ROWS  # the original kept the foreign commit
+    with closing(sc.connect(f"{staged.as_uri()}?mode=ro", uri=True)) as copy:
+        _shim.apply_key(copy, KEY)
+        assert copy.execute("SELECT count(*) FROM messages").fetchone() == (len(_BASE_ROWS),)  # the copy lacks it
