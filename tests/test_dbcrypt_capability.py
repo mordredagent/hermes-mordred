@@ -187,10 +187,12 @@ def test_prompt_status_never_runs_monitor_or_acquires_key(tmp_path, monkeypatch)
 
 @pytest.mark.skipif(os.name != "posix", reason="uses the POSIX authority fixture; Windows native proof is explicit")
 def test_native_prompt_does_not_revoke_registered_sql_on_changed_metadata(native_root, monkeypatch):
+    import threading
+    import weakref
     from types import SimpleNamespace
 
     from mordred_hermes.dbcrypt import _hooks, _key, _monitor
-    from mordred_hermes.dbcrypt._connection import ProtectedConnection
+    from mordred_hermes.dbcrypt._connection import ProtectedConnection, _RawOwner
 
     root, backend, _, _ = native_root
     provider = _key.KeyProvider(home=root)
@@ -212,7 +214,11 @@ def test_native_prompt_does_not_revoke_registered_sql_on_changed_metadata(native
     connection._pid = os.getpid()
     connection._closed = connection._revoked = False
     connection._active = 0
-    connection._vfs = None
+    connection._state_lock = threading.Lock()
+    connection._cursors = weakref.WeakSet()
+    connection._owner = _RawOwner(authority, None, connection)
+    connection._owner._raw = connection._raw
+    connection._finalizer = weakref.finalize(connection, lambda: None)
     authority.register_connection(connection)
     monkeypatch.setattr(_monitor, "monitor_runtime", lambda *a: pytest.fail("render opened SQL"))
     monkeypatch.setattr(_key.KeyProvider, "__call__", lambda *a: pytest.fail("render acquired key"))

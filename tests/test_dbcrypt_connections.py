@@ -286,6 +286,99 @@ def test_close_unregisters_connection(native_root, authority):
     authority.check()
 
 
+def _owned_handles(authority):
+    from mordred_hermes.dbcrypt._connection import _LIVE_OWNERS
+
+    return [owner for owner in tuple(_LIVE_OWNERS) if owner._authority is authority]
+
+
+def test_readiness_probe_without_close_releases_every_handle(native_root, authority):
+    # Hermes's gateway readiness poll commits through ``with`` but never closes.
+    path = native_root[0] / "state.db"
+    conn = opener()(path, authority=authority)
+    conn.execute("CREATE TABLE records(value)")
+    conn.commit()
+    conn.close()
+    uri = f"file:{path.as_posix()}?mode=ro"
+    gc.disable()  # Reference counting alone must release each abandoned handle.
+    try:
+        for _ in range(20):
+            with native_module(authority).connect(uri, uri=True, timeout=1.0) as conn:
+                conn.execute("PRAGMA query_only = ON")
+                conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+            ref = weakref.ref(conn)
+            del conn
+            assert ref() is None
+            assert len(authority._connections) <= 1
+            assert len(_owned_handles(authority)) <= 1  # The previous probe's raw handle is closed.
+    finally:
+        gc.enable()
+
+
+def test_abandoned_uncommitted_write_is_rolled_back_before_lease_release(native_root, authority):
+    from mordred_hermes._database_lifecycle import acquire_exclusive
+
+    root, _, material, _ = native_root
+    path = root / "state.db"
+    conn = opener()(path, authority=authority)
+    conn.execute("CREATE TABLE records(value)")
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("INSERT INTO records VALUES (1)")
+    ref = weakref.ref(conn)
+    del conn
+    assert ref() is None
+    authority.close()
+    assert _owned_handles(authority) == []
+    with acquire_exclusive(root):
+        writer = sc.connect(str(path), timeout=0)
+        try:
+            apply_key(writer, derive(material))
+            writer.execute("BEGIN IMMEDIATE")  # The abandoned write lock is gone.
+            writer.rollback()
+        finally:
+            writer.close()
+    assert raw_rows(path, derive(material)) == []
+
+
+def test_next_admission_reclaims_abandoned_immediate_writer(native_root, authority):
+    path = native_root[0] / "state.db"
+    conn = opener()(path, authority=authority)
+    conn.execute("CREATE TABLE records(value)")
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("INSERT INTO records VALUES (1)")
+    del conn
+    second = opener()(path, authority=authority, timeout=0)
+    try:
+        second.execute("BEGIN IMMEDIATE")
+        second.execute("INSERT INTO records VALUES (2)")
+        second.commit()
+        assert second.execute("SELECT value FROM records").fetchall() == [(2,)]
+        assert len(authority._connections) == 1
+    finally:
+        second.close()
+    assert authority._connections == [] and _owned_handles(authority) == []
+
+
+@pytest.mark.parametrize("custom_rows", [False, True])
+def test_live_cursor_pins_connection_until_dropped(native_root, authority, custom_rows):
+    gc.disable()
+    try:
+        conn = opener()(native_root[0] / "state.db", authority=authority)
+        if custom_rows:
+            conn.row_factory = lambda cursor, values: ("row", *values)
+        cursor = conn.execute("SELECT 1")
+        ref = weakref.ref(conn)
+        del conn
+        assert ref() is not None
+        assert cursor.fetchone() == (("row", 1) if custom_rows else (1,))
+        del cursor
+        assert ref() is None
+    finally:
+        gc.enable()
+
+
 def test_monitor_preserves_other_connection_locks(native_root, authority):
     from mordred_hermes.dbcrypt._monitor import monitor_runtime
 
@@ -563,6 +656,55 @@ print('parent transaction intact; child shutdown refused')
     assert result.stdout.strip() == "parent transaction intact; child shutdown refused"
 
 
+def test_fork_quarantines_abandoned_handle_pending_release(native_root):
+    if not hasattr(os, "fork"):
+        pytest.skip("POSIX fork only")
+    root, _, material, _ = native_root
+    code = """import gc, os, sys
+from pathlib import Path
+from types import SimpleNamespace
+from mordred_hermes import _database_locking_posix as locks
+from mordred_hermes.keyvault import _database_authority as custody
+from mordred_hermes.dbcrypt import _authority
+from mordred_hermes.dbcrypt._connection import _ABANDONED, _LIVE_CONNECTIONS, _LIVE_CURSORS, open_protected
+custody.sys = SimpleNamespace(platform='linux')
+locks.sys = SimpleNamespace(platform='linux')
+_authority.load_database_source = lambda **kw: bytes.fromhex(sys.argv[2])
+root = Path(sys.argv[1])
+authority = _authority.Authority.acquire(root)
+c = open_protected(root / 'fork.db', authority=authority)
+c.execute('CREATE TABLE records(value)')
+c.execute('INSERT INTO records VALUES (1)')
+del c  # Abandoned with an open transaction; queued, not yet released.
+assert len(_ABANDONED) == 1 and not _LIVE_CONNECTIONS and not _LIVE_CURSORS
+pid = os.fork()
+if pid == 0:
+ del authority
+ gc.collect()
+ sys.exit(0)
+_, status = os.waitpid(pid, 0)
+assert os.waitstatus_to_exitcode(status) == 74, status
+c = open_protected(root / 'fork.db', authority=authority, timeout=0)
+assert not _ABANDONED
+c.execute('BEGIN IMMEDIATE')
+assert c.execute('SELECT value FROM records').fetchall() == []
+c.rollback()
+c.close()
+authority.close()
+print('abandoned handle quarantined; parent reclaimed it')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(root), material.hex()],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HERMES_HOME": str(root)},
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "abandoned handle quarantined; parent reclaimed it"
+    assert raw_rows(root / "fork.db", derive(material)) == []
+
+
 def test_native_install_cannot_reacquire_or_rebind(native_root, monkeypatch):
     from mordred_hermes import dbcrypt
     from mordred_hermes.dbcrypt import _shim
@@ -625,6 +767,98 @@ def test_reentrant_revocation_retains_lease_until_rollback(native_root, authorit
     with acquire_exclusive(root):
         pass
     assert raw_rows(root / "state.db", derive(native_root[2])) == []
+
+
+@pytest.mark.parametrize("journal_mode", ["delete", "wal"])
+def test_writer_commits_while_another_connection_busy_waits(native_root, authority, journal_mode):
+    import threading
+    import time
+
+    path = native_root[0] / "state.db"
+    x = opener()(path, authority=authority)
+    y = None
+    try:
+        assert x.execute(f"PRAGMA journal_mode={journal_mode}").fetchone() == (journal_mode,)
+        x.execute("CREATE TABLE records(value)")
+        x.commit()
+        y = opener()(path, authority=authority, timeout=3, check_same_thread=False)
+        x.execute("BEGIN IMMEDIATE")
+        x.execute("INSERT INTO records VALUES (1)")
+        waited, failures = [], []
+
+        def write():
+            started = time.monotonic()
+            try:
+                y.execute("BEGIN IMMEDIATE")  # Busy-waits for X inside SQLite.
+                waited.append(time.monotonic() - started)
+                y.execute("INSERT INTO records VALUES (2)")
+                y.commit()
+            except BaseException as error:
+                failures.append(error)
+
+        worker = threading.Thread(target=write)
+        worker.start()
+        time.sleep(0.2)
+        started = time.monotonic()
+        x.commit()
+        committed = time.monotonic() - started
+        worker.join(5)
+        assert not worker.is_alive()
+        assert failures == []
+        assert committed < 1.0
+        assert len(waited) == 1 and waited[0] < 2.0
+        assert x.execute("SELECT value FROM records ORDER BY value").fetchall() == [(1,), (2,)]
+    finally:
+        if y is not None:
+            y.close()
+        x.close()
+
+
+def test_cross_thread_revocation_defers_lease_for_in_flight_operation(native_root, authority):
+    import threading
+
+    from mordred_hermes._database_contracts import DatabaseBusy
+    from mordred_hermes._database_lifecycle import acquire_exclusive
+
+    root = native_root[0]
+    x = opener()(root / "state.db", authority=authority)
+    y = opener()(root / "state.db", authority=authority, check_same_thread=False)
+    entered, release = threading.Event(), threading.Event()
+    outcome = []
+
+    def row(cursor, values):
+        entered.set()
+        release.wait(10)
+        return values
+
+    y.row_factory = row
+
+    def read():
+        try:
+            outcome.append(y.execute("SELECT 1").fetchone())
+        except BaseException as error:
+            outcome.append(error)
+
+    worker = threading.Thread(target=read)
+    worker.start()
+    try:
+        assert entered.wait(3)
+        revoker = threading.Thread(target=authority.invalidate, args=("test revocation",))
+        revoker.start()
+        revoker.join(2)
+        assert not revoker.is_alive()  # Revocation never waits behind Y's SQL.
+        assert authority.terminal and x._closed
+        assert y._revoked and not y._closed  # Disposal is deferred to Y's own scope.
+        with pytest.raises(DatabaseBusy), acquire_exclusive(root):
+            pass
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert len(outcome) == 1 and isinstance(outcome[0], DatabaseRefused)
+    assert y._closed
+    with acquire_exclusive(root):
+        pass
 
 
 def test_empty_schema_encrypted_foreign_copy_is_not_plaintext(native_root, authority):

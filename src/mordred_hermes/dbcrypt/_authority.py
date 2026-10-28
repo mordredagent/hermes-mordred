@@ -123,16 +123,24 @@ class Authority:
 
     @contextmanager
     def operation(self, *, check: bool = True) -> Iterator[None]:
-        """Serialize SQL and revocation, checking fork before the inherited lock."""
+        """Count work in flight so terminal invalidation defers the lease release.
+
+        The lock covers only admission and the counter. SQL, busy waits and the
+        caller's workflow run outside it, so connections progress independently
+        and revocation never waits behind them. Fork is checked before the lock.
+        """
         if self._pid != os.getpid() or check:
             self.check()
         with self._lock:
             if check:
                 self.check()
             self._operations += 1
-            try:
-                yield
-            finally:
+        try:
+            yield
+        finally:
+            if self._pid != os.getpid():
+                self._lock = threading.RLock()  # Never wait on a vanished parent thread.
+            with self._lock:
                 self._operations -= 1
                 if self._terminal and not self._operations:
                     self._resources.close()

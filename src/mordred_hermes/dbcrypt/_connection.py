@@ -9,6 +9,7 @@ in the offline registry layer, not an ambient filename or environment exemption.
 from __future__ import annotations
 
 import atexit
+import collections
 import contextlib
 import os
 import stat
@@ -34,17 +35,24 @@ _INHERITED: list[Any] = []
 _LIVE_CONNECTIONS: weakref.WeakSet[ProtectedConnection] = weakref.WeakSet()
 _LIVE_CURSORS: weakref.WeakSet[ProtectedCursor] = weakref.WeakSet()
 _LIVE_MAINTENANCE: weakref.WeakSet[_MaintenanceConnection] = weakref.WeakSet()
+# Every raw handle not yet closed, including ones whose facade was dropped
+# without close() and awaits _reap(); an owner leaves only after raw.close().
+_LIVE_OWNERS: weakref.WeakSet[_RawOwner] = weakref.WeakSet()
+# Facade finalizers only queue here: no SQLite, VFS or lock work may run in a
+# GC/refcount callback. _reap() releases the queue where no lock is held.
+_ABANDONED: collections.deque[_RawOwner] = collections.deque()
 _FORKED = [False]
 
 
 def _after_fork() -> None:
     connections, cursors = tuple(_LIVE_CONNECTIONS), tuple(_LIVE_CURSORS)
-    maintenance = tuple(_LIVE_MAINTENANCE)
-    if connections or cursors or maintenance:
+    maintenance, owners = tuple(_LIVE_MAINTENANCE), tuple(_LIVE_OWNERS)
+    if connections or cursors or maintenance or owners:
         _FORKED[0] = True
         _INHERITED.extend(connections)
         _INHERITED.extend(cursors)
         _INHERITED.extend(maintenance)  # Owners retain every raw cursor before child GC.
+        _INHERITED.extend(owners)  # Covers abandoned handles still queued for _reap().
 
 
 def _exit_forked_child(state: list[bool] = _FORKED, exit_process: Any = os._exit) -> None:
@@ -215,6 +223,7 @@ class ProtectedCursor:
         self._row_factory: Any = connection.row_factory
         self._install_row_factory()
         _LIVE_CURSORS.add(self)
+        connection._cursors.add(self)
 
     @property
     def connection(self) -> ProtectedConnection:
@@ -227,11 +236,17 @@ class ProtectedCursor:
         if factory is None or factory is sc.Row:
             self._cursor.row_factory = factory
         else:
+            # The raw cursor is not GC-tracked: a strong link back to this
+            # facade would form a cycle only an explicit close could break.
+            facade = weakref.ref(self)
 
             def row(_raw: Any, values: Any) -> Any:
-                self._connection._check()
-                result = factory(self, values)
-                self._connection._check()
+                cursor = facade()
+                if cursor is None:
+                    raise DatabaseRefused("database cursor is no longer held")
+                cursor._connection._check()
+                result = factory(cursor, values)
+                cursor._connection._check()
                 return result
 
             self._cursor.row_factory = row
@@ -299,6 +314,7 @@ class ProtectedCursor:
             with self._connection._operation():
                 self._cursor.close()
                 _LIVE_CURSORS.discard(self)
+                self._connection._cursors.discard(self)
 
     @property
     def arraysize(self) -> int:
@@ -335,11 +351,19 @@ class ProtectedCursor:
 
 
 class ProtectedConnection:
-    """Composition, not C inheritance: base descriptors cannot bypass guards."""
+    """Composition, not C inheritance: base descriptors cannot bypass guards.
+
+    Locks, in acquisition order: ``_io_lock`` (held across every raw call on
+    this handle) -> ``Authority._lock`` (briefly, inside checks) -> either the
+    leaf ``_state_lock`` or the owner lock -> the VFS lock. Revocation never
+    takes ``_io_lock``: whoever observes the handle idle under ``_state_lock``
+    claims it by setting ``_closed`` and is the one caller that disposes it.
+    """
 
     _authority: Authority
     _binding: _PathBinding | _MemoryBinding
     _raw: Any
+    _owner: _RawOwner
     _pid: int
     _thread: int
     _same_thread: bool
@@ -349,7 +373,10 @@ class ProtectedConnection:
     _active: int
     _denied: bool
     _row_factory: Any
-    _vfs: Any
+    _io_lock: threading.RLock
+    _state_lock: threading.Lock
+    _cursors: weakref.WeakSet[ProtectedCursor]
+    _finalizer: weakref.finalize[Any, Any]
 
     def __init__(self) -> None:
         raise DatabaseRefused("protected connections must be opened through their authority")
@@ -371,9 +398,16 @@ class ProtectedConnection:
 
     @contextlib.contextmanager
     def _operation(self) -> Iterator[None]:
-        with self._authority.operation():
+        # The authority counter defers its lease release past this scope; the
+        # per-handle lock serializes raw calls without blocking other handles.
+        with self._authority.operation(), self._io_lock:
             self._check()
-            self._active += 1
+            with self._state_lock:
+                admitted = not (self._closed or self._revoked)
+                if admitted:
+                    self._active += 1
+            if not admitted:
+                raise DatabaseRefused("database connection is closed or revoked")
             self._denied = False
             try:
                 yield
@@ -383,9 +417,17 @@ class ProtectedConnection:
                     raise DatabaseRefused("database operation refused by authority policy") from None
                 raise
             finally:
-                self._active -= 1
-                if self._revoked and not self._active:
-                    self._dispose()
+                self._leave()
+
+    def _leave(self) -> None:
+        """End one admitted scope; the last scope of a revoked handle disposes it."""
+        with self._state_lock:
+            self._active -= 1
+            claimed = self._revoked and not self._active and not self._closed
+            if claimed:
+                self._closed = True
+        if claimed:
+            self._dispose()
 
     def _authorize(self, action: int, first: Any, second: Any, database: Any, trigger: Any) -> int:
         import sqlcipher3.dbapi2 as sc
@@ -410,44 +452,54 @@ class ProtectedConnection:
             return 1
 
     def _dispose(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._authority.unregister_connection(self)
+        """Run once by the caller that claimed the handle (set ``_closed``)."""
         if self._pid != os.getpid():
             # Do not run inherited transactions, finalizers or C mutexes here.
             _INHERITED.append(self._raw)
+            self._authority.unregister_connection(self._owner)
             return
-        self._raw.set_authorizer(None)
-        self._raw.set_progress_handler(None, 0)
+        cursors = tuple(self._cursors)
         try:
-            self._raw.rollback()
+            # Retained Python cursors must lose their C statements before we
+            # stop treating them as inherited live handles at fork.
+            self._owner.release(tuple(cursor._cursor for cursor in cursors))
         finally:
-            try:
-                # Retained Python cursors must lose their C statements before
-                # we stop treating them as inherited live handles at fork.
-                for cursor in tuple(_LIVE_CURSORS):
-                    if cursor._connection is self:
-                        cursor._cursor.close()
-                        _LIVE_CURSORS.discard(cursor)
-            finally:
-                self._raw.close()
-                _LIVE_CONNECTIONS.discard(self)
-                if self._vfs is not None:
-                    self._vfs.close()
+            for cursor in cursors:
+                _LIVE_CURSORS.discard(cursor)
+                self._cursors.discard(cursor)
+            _LIVE_CONNECTIONS.discard(self)
+            self._finalizer.detach()
+            # Unregister last: until the raw handle is closed, terminal
+            # invalidation must still find its owner before the lease goes.
+            self._authority.unregister_connection(self._owner)
 
     def invalidate(self) -> None:
-        self._revoked = True
-        if not self._active or self._pid != os.getpid():
+        if self._pid != os.getpid():
+            # Inherited locks may be held by a vanished parent thread.
+            self._revoked = True
+            if not self._closed:
+                self._closed = True
+                self._dispose()
+            return
+        with self._state_lock:
+            self._revoked = True
+            claimed = not self._active and not self._closed
+            if claimed:
+                self._closed = True
+        if claimed:
             self._dispose()
 
     def close(self) -> None:
         if self._pid != os.getpid():
             self._authority.check()
-        with self._authority.operation(check=False):
-            if self._active:
-                self._revoked = True
-            else:
+        with self._authority.operation(check=False), self._io_lock:
+            with self._state_lock:
+                claimed = not self._active and not self._closed
+                if claimed:
+                    self._closed = True
+                elif not self._closed:
+                    self._revoked = True  # The innermost open scope disposes.
+            if claimed:
                 self._dispose()
 
     def cursor(self, factory: Any = None) -> ProtectedCursor:
@@ -552,6 +604,97 @@ class ProtectedConnection:
     autocommit = property(_unsupported, _unsupported)
 
 
+class _RawOwner:
+    """The authority's strong registry entry: owns one raw handle and its VFS.
+
+    The driver's Connection/Cursor are not GC-tracked, so a raw -> callback ->
+    facade link would form a cycle that only an explicit close could break.
+    The raw handle's callbacks therefore reference this owner, which holds the
+    facade only weakly: dropping the facade without close() frees it by
+    reference count, and its finalizer queues this owner for ``_reap()``.
+    """
+
+    __slots__ = ("__weakref__", "_authority", "_facade", "_lock", "_pid", "_raw", "_released", "_vfs")
+
+    def __init__(self, authority: Authority, vfs: Any, facade: ProtectedConnection) -> None:
+        self._authority = authority
+        self._raw: Any = None
+        self._vfs = vfs
+        self._pid = os.getpid()
+        self._lock = threading.Lock()
+        self._released = False
+        self._facade = weakref.ref(facade)
+        _LIVE_OWNERS.add(self)
+
+    def authorize(self, action: int, first: Any, second: Any, database: Any, trigger: Any) -> int:
+        facade = self._facade()
+        if facade is None:
+            import sqlcipher3.dbapi2 as sc
+
+            return int(sc.SQLITE_DENY)
+        return facade._authorize(action, first, second, database, trigger)
+
+    def progress(self) -> int:
+        facade = self._facade()
+        return 1 if facade is None else facade._progress()
+
+    def invalidate(self) -> None:
+        facade = self._facade()
+        if facade is not None:
+            facade.invalidate()
+        else:
+            self.release()
+
+    def release(self, cursors: tuple[Any, ...] = ()) -> None:
+        """Roll back and close exactly once; never touch an inherited handle."""
+        if self._pid != os.getpid():
+            if not self._released:
+                self._released = True
+                _INHERITED.append(self)  # Retains the raw handle and its VFS.
+            return
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+            raw, vfs = self._raw, self._vfs
+            try:
+                if raw is not None:
+                    raw.set_authorizer(None)
+                    raw.set_progress_handler(None, 0)
+                    raw.rollback()
+            finally:
+                try:
+                    for cursor in cursors:
+                        cursor.close()
+                finally:
+                    if raw is not None:
+                        raw.close()
+                    _LIVE_OWNERS.discard(self)
+                    if vfs is not None:
+                        vfs.close()
+
+
+def _reap() -> None:
+    """Release handles whose facades were dropped without close().
+
+    Runs where the caller holds no lock (each admission, after its authority
+    check), so a never-closed probe is reclaimed by the next one.
+    """
+    while True:
+        try:
+            owner = _ABANDONED.popleft()
+        except IndexError:
+            return
+        if owner._pid != os.getpid():
+            _INHERITED.append(owner)
+            continue
+        try:
+            with contextlib.suppress(Exception):
+                owner.release()
+        finally:
+            owner._authority.unregister_connection(owner)
+
+
 def _verify_database(connection: ProtectedConnection) -> None:
     """Read schema and authenticated pages through the exact owning SQLCipher."""
     # Admission before the public authorizer is installed permits cipher checks.
@@ -648,6 +791,7 @@ def _open(
     import sqlcipher3.dbapi2 as sc
 
     authority.check()
+    _reap()
     path = path.absolute() if path is not None else None
     if os.name == "nt" and path is not None:
         from ._windows_vfs import NATIVE_QUALIFIED, windows_edition_admitted
@@ -703,7 +847,10 @@ def _open_bound(
 ) -> ProtectedConnection:
     """Own a registration through driver acquisition and checked admission.
 
-    The caller holds the authority operation mutex for this entire scope.
+    The caller holds an authority operation (counter) for this entire scope.
+    Admission counts as one open scope (``_active = 1``), so a concurrent
+    revocation only marks the handle and this function disposes it; no
+    per-authority open lock serializes opens behind integrity checks.
     """
     import sqlcipher3.dbapi2 as sc
 
@@ -714,14 +861,19 @@ def _open_bound(
     result._pid, result._thread = os.getpid(), threading.get_ident()
     result._same_thread, result._protected = check_same_thread, protected
     result._closed = result._revoked = result._denied = False
-    result._active = 0
-    result._row_factory, result._vfs = None, vfs
-    # Thread policy is enforced at the facade; revocation may close from a
-    # different thread only while holding the shared authority operation lock.
-    raw = None
+    result._active = 1
+    result._row_factory, result._raw = None, None
+    # Thread policy is enforced at the facade; raw calls serialize on the
+    # per-handle lock, and revocation closes only a claimed idle handle.
+    result._io_lock, result._state_lock = threading.RLock(), threading.Lock()
+    result._cursors = weakref.WeakSet()
+    owner = result._owner = _RawOwner(authority, vfs, result)
+    finalizer: Any = weakref.finalize(result, _ABANDONED.append, owner)
+    finalizer.atexit = False  # Shutdown never closes SQLite from a finalizer.
+    result._finalizer = finalizer
     try:
         raw = sc.connect(uri, uri=True, timeout=timeout, check_same_thread=False, cached_statements=0)
-        result._raw = raw
+        result._raw = owner._raw = raw
         binding.check(newly_created=True)
         if protected:
             apply_key(raw, authority.key)
@@ -729,21 +881,23 @@ def _open_bound(
         else:
             # Classification never grants a key to the returned connection.
             raw.execute("SELECT count(*) FROM sqlite_master").fetchone()
-        authority.register_connection(result)
+        authority.register_connection(owner)  # A terminal authority refuses.
         _LIVE_CONNECTIONS.add(result)
-        raw.set_authorizer(result._authorize)
-        raw.set_progress_handler(result._progress, 1000)
+        raw.set_authorizer(owner.authorize)
+        raw.set_progress_handler(owner.progress, 1000)
         result._check()
-        return result
     except BaseException as error:
-        if raw is None:
-            if vfs is not None:
-                vfs.close()
-        else:
-            result._dispose()
+        with result._state_lock:
+            result._active -= 1
+            result._closed = True  # Unconditional: no other caller can claim an open scope.
+        result._dispose()
         if _sqlite_busy(error):
             raise
         raise DatabaseRefused("database admission refused; no replacement was created") from None
+    result._leave()  # Disposes here if revocation raced the final check.
+    if result._closed:
+        raise DatabaseRefused("database admission refused; no replacement was created")
+    return result
 
 
 def _copy_registered_backup(source: ProtectedConnection, destination: Any) -> None:
