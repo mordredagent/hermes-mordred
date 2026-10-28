@@ -157,6 +157,14 @@ def test_forget_removes_the_files_and_the_key(tmp_path: Path, enclave: FakeEncla
     assert store.forget() is True  # absent is fine
 
 
+def test_portable_force_orphan_is_the_unconditional_fixture_forget(tmp_path: Path, enclave: FakeEnclave) -> None:
+    """The explicit portable seam has no source proof to bypass: the flag grants nothing extra."""
+    store = sealed_store(tmp_path / "mail", enclave)
+    store.ensure_key()  # a key left without credentials
+    assert store.forget(force_orphan=True) is True
+    assert KEY_ID not in enclave.keys and not store.key_record_path.exists() and not store.residue()
+
+
 @pytest.mark.parametrize("damage", ["corrupt", "missing", "symlink"])
 def test_forget_and_residue_ignore_unreadable_flags(tmp_path: Path, enclave: FakeEnclave, damage: str) -> None:
     store = sealed_store(tmp_path / "mail", enclave)

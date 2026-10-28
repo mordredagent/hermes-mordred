@@ -962,3 +962,298 @@ def test_windows_store_presence_refusal_preserves_source_and_native_calls(fs, en
     replacement = replace(generic_creds(), app_password="explicit-machine-bound-replacement")
     store.store(replacement, require_presence=False)
     assert store.load() == replacement
+
+
+# --- the explicit orphan repair (`mail forget --yes --force-orphan`) ----------------------------------
+
+
+def darwin_store(home):
+    store, native = native_store(home)
+    store._platform = lambda: "darwin"  # Secure Enclave policy semantics on every host
+    return store, native
+
+
+def orphan_after_refused_login(home, *, presence=True):
+    """`mail setup` creates the native key before its login probe; a refused login leaves it behind."""
+    from mordred_hermes.imports.mail.setup_flow import MailSetupError, MailSetupFlows
+    from tests._mail_sync_helpers import PASSWORD, gmail_server
+
+    store, native = darwin_store(home)
+    server = gmail_server(password="not-the-app-password")
+    flows = MailSetupFlows(store, home=lambda: home, connect=lambda _host, _port: server.session())
+    with pytest.raises(MailSetupError, match=r"^imap_auth_failed$"):
+        flows.start(address="owner@example.com", imap_host="imap.example.com", app_password=PASSWORD, presence=presence)
+    assert native.keys and store.key_record_path.exists()
+    assert not store.residue() and not (home / "mordred/mail/mail-forget.json").exists()
+    return store, native
+
+
+@pytest.mark.parametrize("retry", ["other_policy", "unknown_policy"])
+def test_refused_login_orphan_key_refuses_setup_retry_and_plain_forget(tmp_path, retry):
+    from mordred_hermes.imports.mail.forget import MailForgetError, forget
+    from mordred_hermes.imports.mail.setup_flow import MailSetupError, MailSetupFlows
+    from tests._mail_sync_helpers import PASSWORD, secrets_in_traceback
+
+    store, native = orphan_after_refused_login(tmp_path)
+    presence = False
+    if retry == "unknown_policy":
+        store.key_record_path.write_text("{")  # a record that names no key: its policy is unknown
+        presence = True
+    keys, record, calls = dict(native.keys), store.key_record_path.read_bytes(), list(native.calls)
+    with pytest.raises(MailSecretsError, match=r"^mail_orphan_key$"):
+        store.ensure_key(require_presence=presence, replace=True)
+    flows = MailSetupFlows(store, home=lambda: tmp_path, connect=lambda *args: pytest.fail("orphan reached the probe"))
+    with pytest.raises(MailSetupError) as caught:
+        flows.start(address="owner@example.com", imap_host="imap.example.com", app_password=PASSWORD, presence=presence)
+    assert caught.value.code == "mail_orphan_key"
+    assert secrets_in_traceback(caught.value, PASSWORD) == []
+    with pytest.raises(MailForgetError, match=r"^mail_orphan_key$"):
+        forget(store, tmp_path, open_store=lambda _home: None)
+    assert native.keys == keys and store.key_record_path.read_bytes() == record
+    assert "delete" not in native.calls[len(calls) :] and "generate" not in native.calls[len(calls) :]
+
+
+def test_force_orphan_retires_the_orphan_key_and_setup_succeeds(tmp_path):
+    from mordred_hermes.imports.mail.forget import forget
+    from mordred_hermes.imports.mail.secrets import setup_generation
+    from mordred_hermes.imports.mail.setup_flow import MailSetupFlows
+    from tests._mail_sync_helpers import PASSWORD, gmail_server
+
+    store, native = orphan_after_refused_login(tmp_path)
+    before = setup_generation(tmp_path)
+    done = forget(store, tmp_path, force_orphan=True, open_store=lambda _home: pytest.fail("repair opened rows"))
+    assert done.key_gone and not done.had_credentials and done.warnings == ()
+    assert native.keys == {} and native.calls.count("delete") == 1 and native.ecdh_calls == 0
+    assert not store.key_record_path.exists() and not store.residue()
+    assert not (tmp_path / "mordred/mail/mail-forget.json").exists()
+    assert setup_generation(tmp_path) != before
+    server = gmail_server()
+    flows = MailSetupFlows(store, home=lambda: tmp_path, connect=lambda _host, _port: server.session())
+    flow = flows.start(address="owner@example.com", imap_host="imap.example.com", app_password=PASSWORD, presence=False)
+    assert flow.step == "done" and flow.presence is False
+    assert store.load().app_password == PASSWORD and native.calls.count("generate") == 2
+
+
+def test_force_orphan_makes_a_pending_setup_flow_stale(tmp_path):
+    from mordred_hermes.imports.mail.forget import forget
+    from mordred_hermes.imports.mail.setup_flow import MailSetupError, MailSetupFlows
+    from tests._fake_imap import FakeImapServer, FakeMailbox
+    from tests._mail_sync_helpers import PASSWORD
+
+    store, native = darwin_store(tmp_path)
+    server = FakeImapServer({"INBOX": FakeMailbox(1), "Archive": FakeMailbox(2)})  # no \Sent: a question
+    flows = MailSetupFlows(store, home=lambda: tmp_path, connect=lambda _host, _port: server.session())
+    flow = flows.start(address="owner@example.com", imap_host="imap.example.com", app_password=PASSWORD, presence=False)
+    assert flow.step == "folders" and native.keys
+    forget(store, tmp_path, force_orphan=True)
+    with pytest.raises(MailSetupError, match=r"^mail_setup_stale$"):
+        flows.finish(flow.flow_id, selection=None)
+    assert native.keys == {} and not store.residue()
+
+
+@pytest.mark.parametrize("record", ["missing", "wrong_public", "invalid_json"])
+def test_force_orphan_requires_the_recorded_public_key(tmp_path, record):
+    from mordred_hermes.imports.mail.forget import MailForgetError, forget
+
+    store, native = orphan_after_refused_login(tmp_path)
+    if record == "missing":
+        store.key_record_path.unlink()
+    elif record == "wrong_public":
+        value = json.loads(store.key_record_path.read_bytes())
+        store.key_record_path.write_text(json.dumps({**value, "public_sha256": "0" * 64}))
+    else:
+        store.key_record_path.write_text("{")
+    keys = dict(native.keys)
+    with pytest.raises(MailForgetError, match=r"^tee_unavailable$"):
+        forget(store, tmp_path, force_orphan=True)
+    assert native.keys == keys and "delete" not in native.calls
+    assert not (tmp_path / "mordred/mail/mail-forget.json").exists()
+
+
+def test_force_orphan_native_failure_retains_the_intent(tmp_path):
+    from mordred_hermes.imports.mail.forget import MailForgetError, forget
+
+    store, native = orphan_after_refused_login(tmp_path)
+    native.fail_delete = True
+    with pytest.raises(MailForgetError, match=r"^tee_unavailable$"):
+        forget(store, tmp_path, force_orphan=True)
+    assert native.keys and store.key_record_path.exists()
+    assert json.loads((tmp_path / "mordred/mail/mail-forget.json").read_bytes())["phase"] == "intent"
+
+
+def test_force_orphan_resumes_an_acknowledged_retirement_like_a_plain_forget(tmp_path, monkeypatch):
+    from mordred_hermes.imports.mail.forget import forget
+    from mordred_hermes.keyvault import _mail_custody
+
+    store, native = orphan_after_refused_login(tmp_path)
+    original = _mail_custody.publish
+
+    def interrupted(tx, name, data):
+        original(tx, name, data)
+        if name == _mail_custody.JOURNAL and json.loads(data)["phase"] == "deleted":
+            raise OSError("injected after acknowledgement")
+
+    monkeypatch.setattr(_mail_custody, "publish", interrupted)
+    with pytest.raises(MailSecretsError, match=r"^store_path_unsafe$"):
+        store.forget(force_orphan=True)
+    monkeypatch.setattr(_mail_custody, "publish", original)
+    calls = list(native.calls)
+    assert forget(store, tmp_path, force_orphan=True).key_gone
+    assert native.calls == calls and not store.key_record_path.exists()
+    assert not (tmp_path / "mordred/mail/mail-forget.json").exists()
+
+
+def test_orphan_proof_is_unforgeable_and_scoped_to_the_repair(tmp_path):
+    from mordred_hermes.imports.mail.imap_sync import FetchStop
+    from mordred_hermes.keyvault import _mail_custody
+    from mordred_hermes.keyvault._native_deletion import _issue_native_owner
+
+    _store, native = orphan_after_refused_login(tmp_path)
+    with pytest.raises(DatabaseRefused):
+        _mail_custody.OrphanKeyAuthentication()
+    with _mail_custody.mail_credential_transaction(home=tmp_path, backend=native.backend) as custody:
+        with pytest.raises(DatabaseRefused):
+            _issue_native_owner(custody, native_key_id=KEY_ID, backend=native.backend)
+        record = _mail_custody._custodies[custody]
+        record.orphan = object.__new__(_mail_custody.OrphanKeyAuthentication)  # never issued
+        with pytest.raises(DatabaseRefused):
+            _issue_native_owner(custody, native_key_id=KEY_ID, backend=native.backend)
+        record.orphan = None
+        with pytest.raises(FetchStop):  # the repair joins only an actually held mail writer
+            custody.retire_orphan(linux=False)
+    assert native.keys and "delete" not in native.calls
+    assert not (tmp_path / "mordred/mail/mail-forget.json").exists()
+
+
+@pytest.mark.parametrize("kwargs", [{"rows": True}, {"account": "mail"}])
+def test_force_orphan_never_combines_with_row_erasure(tmp_path, kwargs):
+    from mordred_hermes.imports.mail.forget import MailForgetError, forget
+
+    store, native = orphan_after_refused_login(tmp_path)
+    with pytest.raises(MailForgetError, match=r"^force_orphan_exclusive$"):
+        forget(store, tmp_path, force_orphan=True, open_store=lambda _home: pytest.fail("rows opened"), **kwargs)
+    assert native.keys and "delete" not in native.calls
+
+
+def test_force_orphan_removes_a_sealed_source_whose_key_is_gone(tmp_path):
+    from mordred_hermes.imports.mail.forget import MailForgetError, forget
+    from mordred_hermes.imports.mail.secrets import setup_generation
+
+    store, native = native_store(tmp_path)
+    store.ensure_key(require_presence=False)
+    store.store(generic_creds(), require_presence=False)
+    native.keys.clear()  # e.g. the home moved to another machine: the native key is definitively absent
+    sealed = store.sealed_path.read_bytes()
+    with pytest.raises(MailForgetError, match=r"^tee_unavailable$"):
+        forget(store, tmp_path, open_store=lambda _home: None)
+    assert store.sealed_path.read_bytes() == sealed
+    before = setup_generation(tmp_path)
+    done = forget(store, tmp_path, force_orphan=True, open_store=lambda _home: pytest.fail("repair opened rows"))
+    assert done.had_credentials and done.key_gone and done.warnings == ("account_unknown",)
+    assert not any(p.exists() for p in (store.sealed_path, store.meta_path, store.key_record_path))
+    assert "delete" not in native.calls and native.ecdh_calls == 0
+    assert setup_generation(tmp_path) != before
+    assert store.ensure_key(require_presence=False) is False
+    store.store(generic_creds(), require_presence=False)
+    assert store.load() == generic_creds()
+
+
+@pytest.mark.parametrize("failure", ["helper", "already_exists"])
+def test_force_orphan_refuses_unless_the_key_is_definitively_absent(tmp_path, monkeypatch, failure):
+    from mordred_hermes.imports.mail.forget import MailForgetError, forget
+    from mordred_hermes.keyvault._exceptions import WrapKeyAlreadyExists
+    from mordred_hermes.keyvault._seckey_errors import _OpsError
+
+    store, native = native_store(tmp_path)
+    store.ensure_key(require_presence=False)
+    store.store(generic_creds(), require_presence=False)
+    if failure == "helper":
+        invoke = native.invoke
+
+        def unavailable(payload):
+            if payload["cmd"] == "public_key":
+                raise _OpsError(-1, "helper", "transport response lost")
+            return invoke(payload)
+
+        native.ops._invoke = unavailable
+    else:
+
+        def exists(*args, **kwargs):
+            raise WrapKeyAlreadyExists("synthetic: a subclass is not an absence")
+
+        monkeypatch.setattr(wrap, "get_wrapping_key_public", exists)
+    paths = (store.sealed_path, store.meta_path, store.key_record_path)
+    before = [p.read_bytes() for p in paths]
+    with pytest.raises(MailForgetError, match=r"^tee_unavailable$"):
+        forget(store, tmp_path, force_orphan=True)
+    assert [p.read_bytes() for p in paths] == before
+    assert native.keys and "delete" not in native.calls and native.ecdh_calls == 0
+
+
+def test_force_orphan_never_retires_an_authenticatable_source(tmp_path):
+    from mordred_hermes.imports.mail.forget import MailForgetError, forget
+
+    store, native = native_store(tmp_path)
+    store.ensure_key(require_presence=False)
+    store.store(generic_creds(), require_presence=False)
+    sealed = store.sealed_path.read_bytes()
+    with pytest.raises(MailForgetError, match=r"^tee_unavailable$"):
+        forget(store, tmp_path, force_orphan=True)
+    assert store.sealed_path.read_bytes() == sealed and native.keys
+    assert "delete" not in native.calls and native.ecdh_calls == 0
+
+
+def test_linux_force_orphan_keeps_the_no_presence_policy(tmp_path):
+    from mordred_hermes.imports.mail.forget import MailForgetError, forget
+
+    store, native = native_store(tmp_path)
+    store._platform = lambda: "linux"
+    store.ensure_key(require_presence=False)  # an unsealed key, as a refused login leaves it
+    record = json.loads(store.key_record_path.read_bytes())
+    store.key_record_path.write_text(json.dumps({**record, "touch_id": None}))
+    with pytest.raises(MailForgetError, match=r"^presence_unsupported$"):
+        forget(store, tmp_path, force_orphan=True)
+    assert native.keys and "delete" not in native.calls
+    store.key_record_path.write_text(json.dumps(record))
+    assert forget(store, tmp_path, force_orphan=True).key_gone
+    assert native.keys == {} and native.calls.count("delete") == 1 and not store.key_record_path.exists()
+
+
+def test_linux_orphan_policy_record_is_removed_only_by_force_orphan(tmp_path):
+    from mordred_hermes.imports.mail.forget import forget
+
+    store, native = native_store(tmp_path)
+    store._platform = lambda: "linux"
+    store.ensure_key(require_presence=False)
+    native.keys.clear()  # synthetic missing TPM object
+    forget(store, tmp_path, open_store=lambda _home: None)
+    with pytest.raises(MailSecretsError, match=r"^presence_unsupported$"):
+        store.ensure_key(require_presence=False)  # the plain forget keeps the recorded evidence
+    forget(store, tmp_path, force_orphan=True)
+    assert not store.key_record_path.exists() and "delete" not in native.calls
+    assert store.ensure_key(require_presence=False) is False
+
+
+def test_windows_force_orphan_retires_a_sourceless_mail_role(fs):
+    from mordred_hermes._private_fs import open_private_directory
+
+    c, _, home, backend = fs
+    store = MailSecretStore(
+        home / "mordred/mail", backend_factory=lambda: backend, platform=lambda: "win32", audit_sink=lambda _e: None
+    )
+    assert store.ensure_key(require_presence=False) is False  # a refused login leaves the enrolled role
+    with open_private_directory(home / "mordred/mail", create=True):
+        pass
+    with pytest.raises(MailSecretsError, match=r"^mail_orphan_key$"):
+        store.forget()
+    with c.windows_custody_session(home, backend=backend) as session:
+        assert session.role_status("mail").current is not None
+    assert store.forget(force_orphan=True) is True
+    with c.windows_custody_session(home, backend=backend) as session:
+        assert session.role_status("mail").current is None
+    assert store.ensure_key(require_presence=False) is False
+    store.store(generic_creds(), require_presence=False)
+    sealed = store.sealed_path.read_bytes()
+    with pytest.raises(MailSecretsError, match=r"^tee_unavailable$"):
+        store.forget(force_orphan=True)  # a source with its role keeps the authenticated retirement
+    assert store.sealed_path.read_bytes() == sealed and store.load() == generic_creds()

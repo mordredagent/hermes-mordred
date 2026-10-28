@@ -5,6 +5,7 @@
     hermes-mordred mail setup [--imap-host H] [--imap-port 993] [--account LABEL] [--no-touch-id]
     hermes-mordred mail fetch [--max N] [--mailbox all|inbox|sent] [--since YYYY-MM-DD] [--dry-run] [--json]
     hermes-mordred mail forget [--rows] [--account LABEL] --yes
+    hermes-mordred mail forget --yes --force-orphan
 
 - ``setup`` reads the address and the app password on a TTY (never from argv or
   the environment) and drives :class:`~mordred_hermes.imports.mail.setup_flow.MailSetupFlows`,
@@ -38,6 +39,11 @@
   and refuses; public flags never authorize native deletion or choose an account
   for row erasure. ``--rows`` restricts deletion to the authenticated account;
   ``--account LABEL`` resolves retained account work once credentials are gone.
+  ``--yes --force-orphan`` is the one explicit repair for a native key left
+  without sealed credentials (``mail_orphan_key``, e.g. after a refused login)
+  or sealed credentials whose native key no longer exists (a home moved to
+  another machine). It touches credential custody only, so it is refused with
+  ``--rows``/``--account``: their named retry follows it.
 
 Nothing here prints a subject, name, address, label or body.
 """
@@ -156,6 +162,10 @@ def _audit(entry: Mapping[str, Any]) -> None:
         _LOG.debug("mail audit append failed (%s)", type(exc).__name__)
 
 
+#: The explicit repair of a native key without sealed credentials (or credentials without their key).
+_FORCE_ORPHAN: Final = "`hermes-mordred mail forget --yes --force-orphan`"
+
+
 def _refused(code: str, hint: str | None = None) -> int:
     if code == "presence_unsupported" and hint is None:
         native = {"linux": "Linux TPM", "win32": "Windows CNG"}.get(_platform(), "This native backend")
@@ -163,6 +173,8 @@ def _refused(code: str, hint: str | None = None) -> int:
             f"{native} mail has no per-use presence; explicitly select --no-touch-id "
             "to use its machine-bound native key"
         )
+    if code == "mail_orphan_key" and hint is None:
+        hint = f"a native mail key has no sealed credentials; run {_FORCE_ORPHAN}"
     _term.emit_error(f"mail refused ({code}: {hint})" if hint else f"mail refused ({code})")
     return 1
 
@@ -517,11 +529,21 @@ def _print_cursors(env: FetchEnv) -> None:
 def cmd_forget(args: argparse.Namespace) -> int:
     from ..imports.mail import forget as forget_module
 
+    force_orphan = bool(getattr(args, "force_orphan", False))
     if not getattr(args, "yes", False):
-        _term.emit_error("mail forget deletes the sealed mail credentials; confirm with --yes")
+        if force_orphan:
+            _term.emit_error("mail forget --force-orphan retires a key without a source proof; confirm with --yes")
+        else:
+            _term.emit_error("mail forget deletes the sealed mail credentials; confirm with --yes")
         return 2
     rows = bool(getattr(args, "rows", False))
     named = getattr(args, "account", None)
+    if force_orphan and (rows or named is not None):
+        _term.emit_error(
+            "--force-orphan repairs only the native key and credential files; run it alone, then "
+            "`hermes-mordred mail forget [--rows] --yes --account LABEL` for the rows and cursors"
+        )
+        return 2
     try:
         done = forget_module.forget(
             _secret_store(),
@@ -530,13 +552,19 @@ def cmd_forget(args: argparse.Namespace) -> int:
             rows=rows,
             open_store=_open_store,
             lock=_lock,
+            force_orphan=force_orphan,
         )
     except forget_module.MailForgetError as exc:
         if exc.code == "invalid_account":
             _term.emit_error("--account must be 1-32 lowercase letters, digits or '_', starting with a letter")
             return 2
-        return _refused(exc.code)
+        hint = None
+        if exc.code == "tee_unavailable" and not force_orphan:
+            hint = f"if the native mail key no longer exists on this machine, run {_FORCE_ORPHAN}"
+        return _refused(exc.code, hint)
     _audit(forget_module.audit_entry(done, rows=rows))
+    if force_orphan:
+        print("Orphan repair done: no native mail key or credential file is left without its pair.")
     return _report_forget(done, rows)
 
 
@@ -545,7 +573,10 @@ def _report_forget(done: Forgotten, rows: bool) -> int:
     print("Mail credentials removed." if done.had_credentials else "No mail credentials were set up.")
     status = 0
     if not done.key_gone:  # whatever files there were: a key left behind is reported until a retry deletes it
-        _term.emit_error("the native key could not be deleted (key_left); run `hermes-mordred mail forget --yes` again")
+        _term.emit_error(
+            "the native key could not be deleted (key_left); run `hermes-mordred mail forget --yes` again, "
+            f"or {_FORCE_ORPHAN} once no sealed credentials remain"
+        )
         status = 1
     if done.unidentified and done.account is None:
         what = "rows and cursors were" if rows else "cursors were"
@@ -615,4 +646,12 @@ def add_parsers(msub: Any, handler: Callable[[argparse.Namespace], int]) -> None
         "--account", metavar="LABEL", help="The label whose rows and cursors to delete when its credentials are gone"
     )
     p_forget.add_argument("--yes", action="store_true", help="Confirm the deletion")
+    p_forget.add_argument(
+        "--force-orphan",
+        action="store_true",
+        help=(
+            "Repair (needs --yes; not with --rows/--account): retire a native key left without sealed "
+            "credentials, or credentials whose native key no longer exists"
+        ),
+    )
     p_forget.set_defaults(func=handler)

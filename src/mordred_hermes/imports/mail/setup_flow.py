@@ -13,11 +13,13 @@ forget or another setup holds it), so admission and sealing are one decision:
 1. sealed credentials, or any residue of them, refuse (``mail_already_configured``:
    the owner removes them first with ``mail forget``);
 2. the setup generation (:func:`~.secrets.setup_generation`) is noted, and the
-   Enclave key is made fresh with the requested Touch ID policy BEFORE the server
-   is contacted: with no credentials sealed, a key left by a failed setup protects
-   nothing and is replaced (``touch_id_policy_mismatch`` when it cannot be
-   deleted); the flow keeps the EFFECTIVE policy :meth:`~.secrets.MailSecretStore.ensure_key`
-   returned;
+   Enclave key is ensured with the requested Touch ID policy BEFORE the server
+   is contacted: a key left by a failed setup is reused when its recorded policy
+   matches; otherwise it is never replaced here but reported as ``mail_orphan_key``
+   and removed only by ``hermes-mordred mail forget --yes --force-orphan`` (the
+   explicit portable fixture seam still replaces it, ``touch_id_policy_mismatch``
+   when it cannot be deleted); the flow keeps the EFFECTIVE policy
+   :meth:`~.secrets.MailSecretStore.ensure_key` returned;
 3. one read-only login (``LOGIN``, ``LIST``, ``LOGOUT``) and the mailboxes:
 
    - Gmail (``X-GM-EXT-1``): All Mail (its ``\\All`` special use, else its usual
@@ -135,6 +137,7 @@ SETUP_ERROR_CODES: Final = frozenset(
         "tee_unavailable",
         "tee_auth_cancelled",
         "touch_id_policy_mismatch",
+        "mail_orphan_key",
         "presence_unsupported",
         "imap_unreachable",
         "imap_auth_failed",
@@ -155,7 +158,14 @@ _IMAP_CODES: Final = frozenset(
     }
 )
 _SECRET_CODES: Final = frozenset(
-    {"tee_unavailable", "tee_auth_cancelled", "store_path_unsafe", "touch_id_policy_mismatch", "presence_unsupported"}
+    {
+        "tee_unavailable",
+        "tee_auth_cancelled",
+        "store_path_unsafe",
+        "touch_id_policy_mismatch",
+        "mail_orphan_key",
+        "presence_unsupported",
+    }
 )
 _LOCK_CODES: Final = frozenset({"sync_in_progress", "store_path_unsafe"})
 

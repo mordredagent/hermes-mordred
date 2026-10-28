@@ -2209,6 +2209,7 @@ MAIL_CODES = (
     "tee_unavailable",
     "tee_auth_cancelled",
     "touch_id_policy_mismatch",
+    "mail_orphan_key",
     "imap_unreachable",
     "imap_auth_failed",
     "imap_protocol",

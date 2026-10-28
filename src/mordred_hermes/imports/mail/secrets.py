@@ -9,10 +9,15 @@ key first, records acknowledgement, and only then removes the sealed source.
 Ambiguous deletion retains evidence; acknowledged POSIX cleanup can resume.
 
 ``generation`` survives retirement and invalidates pending setup flows. Existing
-native key policy is preserved; an orphan key is retained for checked repair,
-never deleted without a source proof. Explicit portable backend injection keeps
-the historical fixture seam, without issuing any production native authority.
-No root database key, memory source, credential cache, or plaintext spool is used.
+native key policy is preserved; an orphan key (no sealed source) refuses with
+``mail_orphan_key`` and is retained until the explicit
+``hermes-mordred mail forget --yes --force-orphan`` repair, whose distinct
+in-transaction proof binds it to its recorded public key; it is never deleted by
+setup or a plain forget. The same repair removes a sealed source whose native
+key is definitively absent, deleting nothing natively. Explicit portable backend
+injection keeps the historical fixture seam, without issuing any production
+native authority. No root database key, memory source, credential cache, or
+plaintext spool is used.
 """
 
 from __future__ import annotations
@@ -92,11 +97,14 @@ def _mail_native_refusals() -> Iterator[None]:
     from ..._database_contracts import DatabaseRefused
     from ..._private_fs import PrivateFSError
     from ...keyvault._exceptions import WrapAuthCancelled, WrapError, WrapIntegrityError, WrapParseError
+    from ...keyvault._mail_custody import MailOrphanKey
     from ...keyvault._windows_profile import CustodyError
     from ...keyvault.wrap import NativeBackendError
 
     try:
         yield
+    except MailOrphanKey:
+        code = "mail_orphan_key"  # retained; only `mail forget --yes --force-orphan` repairs it
     except WrapAuthCancelled:
         code = "tee_auth_cancelled"
     except (WrapIntegrityError, WrapParseError):
@@ -363,7 +371,7 @@ class MailSecretStore:
         if self._platform() == "win32":
             return bool(self._windows().forget_from_snapshot(snapshot))
         from ..._database_contracts import DatabaseRefused
-        from ...keyvault._mail_custody import JOURNAL, META, SEALED, mail_credential_transaction, read
+        from ...keyvault._mail_custody import JOURNAL, META, SEALED, MailOrphanKey, mail_credential_transaction, read
 
         with mail_credential_transaction(
             home=self._profile_home(), backend=self._backend(), authenticated=snapshot[1], resume=True
@@ -382,7 +390,15 @@ class MailSecretStore:
                     self._backend().get_enclave_public_key(KEY_ID)
                 except WrapKeyNotFound:
                     return True
-                raise DatabaseRefused("mail native key has no authenticated source; retained for repair")
+                raise MailOrphanKey("mail native key has no authenticated source; retained for the orphan repair")
+        return True
+
+    def _retire_orphan(self) -> bool:
+        """``forget(force_orphan=True)`` on POSIX: the custody's explicit orphan repair, never a retirement."""
+        from ...keyvault._mail_custody import mail_credential_transaction
+
+        with mail_credential_transaction(home=self._profile_home(), backend=self._backend()) as custody:
+            custody.retire_orphan(linux=self._platform() == "linux")
         return True
 
     def _dir(self, *, create: bool) -> Path:
@@ -431,7 +447,10 @@ class MailSecretStore:
         unsupported or unknown existing policy instead of treating it as opt-in.
         ``replace=True`` deletes an existing key first (only when no credentials
         are sealed and the caller holds the writer lock, as ``mail setup`` does)
-        and raises ``touch_id_policy_mismatch`` when it cannot be deleted.
+        and raises ``touch_id_policy_mismatch`` when it cannot be deleted. Native
+        POSIX keys are never deleted here: a differing or unknown policy refuses
+        with ``mail_orphan_key`` when no source is sealed (``touch_id_policy_mismatch``
+        otherwise), and only ``mail forget --yes --force-orphan`` retires it.
         """
         self._check_platform()
         if self._platform() == "win32":
@@ -478,7 +497,7 @@ class MailSecretStore:
         from ..._database_contracts import DatabaseRefused
         from ...keyvault import wrap
         from ...keyvault._exceptions import WrapKeyNotFound
-        from ...keyvault._mail_custody import SEALED, mail_credential_transaction, publish, read
+        from ...keyvault._mail_custody import SEALED, MailOrphanKey, mail_credential_transaction, publish, read
 
         with mail_credential_transaction(home=self._profile_home(), backend=self._backend(), create=True) as custody:
             try:
@@ -501,6 +520,9 @@ class MailSecretStore:
 
                 require_linux_no_presence_policy(custody.transaction, hashlib.sha256(public).hexdigest())
             if replace and policy != require_presence:
+                if read(custody.transaction, SEALED) is None:
+                    # Never deleted here: only the explicit `mail forget --force-orphan` repair retires it.
+                    raise MailOrphanKey("mail key without a sealed source; retained for the orphan repair")
                 raise MailSecretsError("touch_id_policy_mismatch")
             return policy
 
@@ -798,27 +820,30 @@ class MailSecretStore:
         except OSError:
             return True  # cannot tell: never report a clean directory
 
-    def forget(self) -> bool:
+    def forget(self, *, force_orphan: bool = False) -> bool:
         with _mail_native_refusals():
             self._check_platform()
             if self._platform() == "win32" or self._native():
                 from .imap_sync import mail_writer_scope
 
                 with mail_writer_scope(self._profile_home()):
-                    return self._forget()
+                    return self._forget(force_orphan=force_orphan)
             return self._forget()
 
-    def _forget(self) -> bool:
+    def _forget(self, *, force_orphan: bool = False) -> bool:
         """Delete the sealed file, the flags and the Enclave key, whatever the flags say (absent is fine).
 
         Returns ``False`` when the Enclave key could not be deleted (no helper, a
         Keychain error): the sealed file is gone already, so the key unwraps
         nothing, and a retry deletes it. A file that cannot be removed raises.
+        Native stores retire only an authenticated source; ``force_orphan`` routes
+        to the explicit orphan repair instead (a pending journal is resumed as
+        usual). The portable fixture seam already retires unconditionally.
         """
 
         self._check_platform()
         if self._platform() == "win32":
-            return bool(self._windows().forget())
+            return bool(self._windows().forget(force_orphan=force_orphan))
         if self._native():
             from ..._private_fs import PrivateFSError, open_private_directory
             from ...keyvault._mail_custody import JOURNAL, read
@@ -830,7 +855,11 @@ class MailSecretStore:
                 if exc.reason == "missing":
                     return True
                 raise
-            return self.forget_from_snapshot((None, None) if pending else self.load_snapshot())
+            if pending:
+                return self.forget_from_snapshot((None, None))
+            if force_orphan:
+                return self._retire_orphan()
+            return self.forget_from_snapshot(self.load_snapshot())
         for path in (self.sealed_path, self.meta_path, self.key_record_path):
             path.unlink(missing_ok=True)
         for path in self.sealed_path.parent.glob(_STAGED_GLOB):  # left by a store() that was killed

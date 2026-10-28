@@ -3,6 +3,10 @@
 POSIX authentication releases lifecycle/credential locks before attended ECDH.
 Only issued proofs bind a source to a native deletion. Checked private filesystem
 transactions preserve intent/deleted journals and never repair unsafe paths.
+An orphan key (no sealed source) is retained until the explicit
+``mail forget --yes --force-orphan`` repair, whose distinct in-transaction proof
+binds the key to its recorded public digest; a sealed source whose native key is
+definitively absent is removed by the same repair without any native deletion.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from ._mail_key import KEY_ID
 if TYPE_CHECKING:
     from ..imports.mail.secrets import MailCredentials
 from . import _storage, wrap
+from ._exceptions import WrapKeyNotFound
 from ._native_deletion import _backend_binding, _issue_native_owner, _NativeOwnerFacts, _owned_delete_scope
 from .wrap import NativeBackend
 
@@ -32,7 +37,12 @@ SEALED = "credentials.sealed"
 META = "credentials.meta.json"
 GENERATION = "generation"
 JOURNAL = "mail-forget.json"
+KEY_RECORD = "enclave-key.json"
 LIMIT = 65536
+
+
+class MailOrphanKey(DatabaseRefused):
+    """A native mail key without a sealed source; retained for the explicit orphan repair."""
 
 
 def read(directory: PrivateDirectory | PrivateTransaction, name: str) -> tuple[bytes, FileMetadata] | None:
@@ -154,6 +164,12 @@ class MailAuthentication(_Opaque):
     __slots__ = ()
 
 
+class OrphanKeyAuthentication(_Opaque):
+    """Issued only inside :meth:`PosixMailCustody.retire_orphan`; never a source authentication."""
+
+    __slots__ = ()
+
+
 @dataclass(frozen=True)
 class Observation:
     home: Path
@@ -162,6 +178,20 @@ class Observation:
     public: str
     binding: tuple[object, ...]
     locks: tuple[tuple[Path, tuple[int, int, int]], ...]
+
+
+@dataclass(frozen=True)
+class _OrphanFacts:
+    """What an orphan proof binds: one live transaction, the selector, and the recorded key."""
+
+    tx: PrivateTransaction
+    backend: NativeBackend
+    selector: str
+    public: str
+    record: tuple[object, ...]
+    journal: str
+    observation: Observation
+    process: tuple[int, int]
 
 
 @dataclass
@@ -174,10 +204,12 @@ class _Record:
     locks: tuple[tuple[Path, tuple[int, int, int]], ...]
     process: tuple[int, int]
     authentication: MailAuthentication | None
+    orphan: OrphanKeyAuthentication | None = None
 
 
 _custodies: WeakKeyDictionary[PosixMailCustody, _Record] = WeakKeyDictionary()
 _proofs: WeakKeyDictionary[MailAuthentication, tuple[Observation, NativeBackend, tuple[int, int]]] = WeakKeyDictionary()
+_orphan_proofs: WeakKeyDictionary[OrphanKeyAuthentication, _OrphanFacts] = WeakKeyDictionary()
 
 
 def _record(scope: PosixMailCustody) -> _Record:
@@ -211,6 +243,57 @@ def _validate(scope: PosixMailCustody, proof: MailAuthentication | None) -> Obse
     return issued[0]
 
 
+def _validate_orphan(scope: PosixMailCustody, proof: OrphanKeyAuthentication | None) -> Observation:
+    """Recheck every orphan fact live; the proof exists only while ``retire_orphan`` runs."""
+    r = _record(scope)
+    facts = _orphan_proofs.get(proof) if type(proof) is OrphanKeyAuthentication else None
+    if (
+        facts is None
+        or r.orphan is not proof
+        or r.authentication is not None
+        or facts.tx is not r.tx
+        or facts.backend is not r.backend
+        or facts.process != _process()
+        or facts.selector != KEY_ID
+    ):
+        raise DatabaseRefused("mail orphan repair proof is foreign or stale")
+    observed = _observe(scope)
+    record = read(r.tx, KEY_RECORD)
+    journal = read(r.tx, JOURNAL)
+    if (
+        observed != facts.observation
+        or observed.files[0] is not None
+        or observed.files[1] is not None
+        or observed.public != facts.public
+        or record is None
+        or tuple(_file_document(record)) != facts.record
+        or journal is None
+        or hashlib.sha256(journal[0]).hexdigest() != facts.journal
+    ):
+        raise DatabaseRefused("mail orphan key/source changed")
+    return observed
+
+
+def _recorded_public(item: tuple[bytes, FileMetadata] | None) -> str | None:
+    try:
+        value = None if item is None else json.loads(item[0])
+    except ValueError:
+        return None
+    digest = value.get("public_sha256") if isinstance(value, dict) else None
+    return digest if isinstance(digest, str) else None
+
+
+def _key_absent(backend: NativeBackend) -> bool:
+    """True only for definitive absence; any other native failure propagates unchanged."""
+    try:
+        wrap.get_wrapping_key_public(KEY_ID, backend=backend)
+    except WrapKeyNotFound as exc:
+        if type(exc) is not WrapKeyNotFound:  # e.g. WrapKeyAlreadyExists: not an absence
+            raise
+        return True
+    return False
+
+
 class PosixMailCustody(_Opaque):
     __slots__ = ()
 
@@ -218,7 +301,10 @@ class PosixMailCustody(_Opaque):
         r = _record(self)
         if selector != KEY_ID or backend is not r.backend:
             raise DatabaseRefused("mail native selector/backend mismatch")
-        _validate(self, r.authentication)
+        if r.orphan is not None:
+            _validate_orphan(self, r.orphan)
+        else:
+            _validate(self, r.authentication)
         return _NativeOwnerFacts(home=r.home, role="mail")
 
     @property
@@ -255,6 +341,100 @@ class PosixMailCustody(_Opaque):
         publish(r.tx, JOURNAL, json.dumps({**journal, "phase": "deleted"}, sort_keys=True).encode())
         self.cleanup()
 
+    def retire_orphan(self, *, linux: bool) -> None:
+        """The explicit ``mail forget --yes --force-orphan`` repair; never a source authentication.
+
+        Orphan key: no sealed source, metadata or journal, and a key record whose
+        ``public_sha256`` names the live public key (Linux: also its checked
+        no-presence policy). An in-transaction orphan proof then drives the usual
+        intent journal, owned native deletion, acknowledgement and cleanup.
+        Keyless source: the native key is definitively absent (``WrapKeyNotFound``
+        exactly), so nothing is deleted natively; the undecryptable source, its
+        metadata and the key record are removed, the sealed file last so an
+        interruption stays repairable. Every other state refuses and retains evidence.
+        """
+        r = _record(self)
+        if r.authentication is not None or r.orphan is not None:
+            raise DatabaseRefused("mail orphan repair never reuses another proof")
+        if read(r.tx, JOURNAL) is not None:
+            raise DatabaseRefused("mail retirement is pending")
+        from ..imports.mail.imap_sync import assert_mail_writer_held
+
+        assert_mail_writer_held(r.home)
+        if _key_absent(r.backend):
+            self._remove_keyless_source()
+            return
+        if read(r.tx, SEALED) is not None:
+            raise DatabaseRefused("mail source has its native key; retire it with an authenticated forget")
+        if read(r.tx, META) is not None:
+            raise DatabaseRefused("mail metadata without a source requires reconciliation")
+        public = hashlib.sha256(wrap.get_wrapping_key_public(KEY_ID, backend=r.backend)).hexdigest()
+        record = read(r.tx, KEY_RECORD)
+        if record is None or _recorded_public(record) != public:
+            raise DatabaseRefused("mail native key is not the recorded orphan; retained")
+        if linux:
+            record = require_linux_no_presence_policy(r.tx, public)
+        self._retire_orphan_key(public, record)
+
+    def _retire_orphan_key(self, public: str, record: tuple[bytes, FileMetadata]) -> None:
+        import secrets
+
+        r = _record(self)
+        publish(r.tx, GENERATION, secrets.token_hex(16).encode())  # pending setup flows go stale
+        observed = _observe(self)
+        current = read(r.tx, KEY_RECORD)
+        if (
+            observed.files[0] is not None
+            or observed.files[1] is not None
+            or observed.public != public
+            or current is None
+            or _file_document(current) != _file_document(record)
+        ):
+            raise DatabaseRefused("mail source changed during orphan repair")
+        document = _journal_document(observed)
+        intent = json.dumps(document, sort_keys=True).encode()
+        publish(r.tx, JOURNAL, intent)
+        proof = object.__new__(OrphanKeyAuthentication)
+        _orphan_proofs[proof] = _OrphanFacts(
+            r.tx,
+            r.backend,
+            KEY_ID,
+            public,
+            tuple(_file_document(current)),
+            hashlib.sha256(intent).hexdigest(),
+            observed,
+            _process(),
+        )
+        r.orphan = proof
+        try:
+            owner = _issue_native_owner(self, native_key_id=KEY_ID, backend=r.backend)
+            with _owned_delete_scope(owner, backend=r.backend, database_lease=None) as permit:
+                wrap.delete_wrapping_key(KEY_ID, backend=r.backend, deletion=permit)
+        finally:
+            r.orphan = None
+            _orphan_proofs.pop(proof, None)
+        publish(r.tx, JOURNAL, json.dumps({**document, "phase": "deleted"}, sort_keys=True).encode())
+        self.cleanup()
+
+    def _remove_keyless_source(self) -> None:
+        import secrets
+
+        r = _record(self)
+        present = {name: read(r.tx, name) for name in (META, KEY_RECORD, SEALED)}
+        if all(item is None for item in present.values()):
+            return  # nothing native and nothing local: the plain forget outcome
+        publish(r.tx, GENERATION, secrets.token_hex(16).encode())  # pending setup flows go stale
+        if not _key_absent(r.backend):
+            raise DatabaseRefused("mail native key appeared during orphan repair")
+        for name in (META, KEY_RECORD, SEALED):  # the sealed source last: an interruption stays repairable
+            item = present[name]
+            if item is None:
+                continue
+            current = read(r.tx, name)
+            if current is None or _file_document(current) != _file_document(item):
+                raise DatabaseRefused("mail source changed during orphan repair")
+            r.tx.delete_file(name, expected_identity=item[1].identity)
+
     def cleanup(self) -> None:
         r = _record(self)
         item = read(r.tx, JOURNAL)
@@ -283,7 +463,7 @@ class PosixMailCustody(_Opaque):
                     raise ValueError
         except (ValueError, TypeError, KeyError) as exc:
             raise DatabaseRefused("mail retirement journal/source changed; evidence retained") from exc
-        for name in (SEALED, META, "enclave-key.json"):
+        for name in (SEALED, META, KEY_RECORD):
             remove(r.tx, name)
         remove(r.tx, JOURNAL)
 
@@ -645,8 +825,10 @@ class WindowsMailStore:
                 return True
             if read(tx, SEALED) is None:
                 status = session.role_status("mail")
-                if status.pending or status.current is not None or read(tx, META) is not None:
+                if status.pending or read(tx, META) is not None or (status.current is not None and status.retained):
                     raise DatabaseRefused("mail role/source requires checked reconciliation")
+                if status.current is not None:
+                    raise MailOrphanKey("mail role has no authenticated source; retained for the orphan repair")
                 return True
             proof = snapshot[1]
             observed = _windows_proofs.get(proof) if type(proof) is _WindowsAuthentication else None
@@ -687,15 +869,49 @@ class WindowsMailStore:
             self._cleanup(session, tx)
         return True
 
-    def forget(self) -> bool:
+    def forget(self, *, force_orphan: bool = False) -> bool:
         try:
             with self._transaction() as tx:
                 pending = read(tx, JOURNAL) is not None
         except PrivateFSError as exc:
-            if exc.reason == "missing":
+            if exc.reason != "missing":
+                raise
+            if not force_orphan:
                 return True
-            raise
-        return self.forget_from_snapshot((None, None) if pending else self.load_snapshot())
+            pending = False
+        if pending:
+            return self.forget_from_snapshot((None, None))
+        if force_orphan:
+            return self.retire_orphan()
+        return self.forget_from_snapshot(self.load_snapshot())
+
+    def retire_orphan(self) -> bool:
+        """Explicit ``--force-orphan`` repair: retire a current mail role that has no mail source.
+
+        The role is deleted only through the session's own journaled
+        ``delete_role``; any credential file, mail journal, pending or retained
+        generation refuses, and an absent role is the plain forget outcome.
+        """
+        from ..imports.mail.imap_sync import assert_mail_writer_held
+
+        assert_mail_writer_held(self.home)
+        with self._session() as session, contextlib.ExitStack() as stack:
+            status = session.role_status("mail")
+            if status.pending or status.retained:
+                raise DatabaseRefused("mail role requires checked reconciliation")
+            if status.current is None:
+                return True
+            try:
+                tx = stack.enter_context(self._transaction())
+            except PrivateFSError as exc:
+                if exc.reason != "missing":
+                    raise
+            else:
+                if any(read(tx, name) is not None for name in (SEALED, META, JOURNAL)):
+                    raise DatabaseRefused("mail source exists; retire it with an authenticated forget")
+            lease, _backend_value = self._role(session)
+            session.delete_role(lease, erase_authorized=True)
+        return True
 
 
 def check_snapshot_home(proof: object, home: Path) -> None:

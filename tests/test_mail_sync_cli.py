@@ -894,6 +894,7 @@ def test_forget_reports_an_enclave_key_it_could_not_delete(
     enclave.delete_enclave_key = broken
     code, _out, err = run(["mail", "forget", "--yes"], capsys)
     assert code == 1 and "key_left" in err and KEY_ID in enclave.keys
+    assert "`hermes-mordred mail forget --yes --force-orphan` once no sealed credentials remain" in err
     assert not sealed_forget_env["store"].sealed_path.exists()
     code, out, err = run(["mail", "forget", "--yes"], capsys)  # no file is left, the key still cannot go
     assert code == 1 and "key_left" in err and KEY_ID in enclave.keys
@@ -902,6 +903,94 @@ def test_forget_reports_an_enclave_key_it_could_not_delete(
     code, _out, err = run(["mail", "forget", "--yes"], capsys)  # nothing left on disk: the retry deletes the key
     assert code == 0, err
     assert KEY_ID not in enclave.keys
+
+
+# --- forget --force-orphan (the explicit orphan-key repair) -------------------------------------------
+
+
+@pytest.mark.parametrize("argv", [["--force-orphan"], ["--force-orphan", "--rows", "--yes"],
+                                  ["--force-orphan", "--yes", "--account", "mail"]])  # fmt: skip
+def test_force_orphan_needs_yes_and_never_combines_with_row_erasure(
+    forget_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]
+) -> None:
+    from mordred_hermes.imports.mail import forget as forget_module
+
+    monkeypatch.setattr(forget_module, "forget", lambda *args, **kwargs: pytest.fail("forget ran"))
+    code, _out, err = run(["mail", "forget", *argv], capsys)
+    assert code == 2 and forget_env["secrets"].creds is not None
+    assert ("confirm with --yes" in err) if "--yes" not in argv else ("--force-orphan repairs only" in err)
+
+
+def test_force_orphan_reaches_the_shared_library(
+    forget_env: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mordred_hermes.imports.mail import forget as forget_module
+
+    seen: list[Any] = []
+    real = forget_module.forget
+
+    def spy(secret_store: Any, where: Path, **kwargs: Any) -> Any:
+        seen.append((where, kwargs["account"], kwargs["rows"], kwargs["force_orphan"]))
+        return real(secret_store, where, **kwargs)
+
+    monkeypatch.setattr(forget_module, "forget", spy)
+    code, out, err = run(["mail", "forget", "--yes", "--force-orphan"], capsys)
+    assert code == 0, err
+    assert seen == [(home, None, False, True)] and "Orphan repair done" in out
+    run(["mail", "forget", "--yes"], capsys)
+    assert seen[-1] == (home, None, False, False)  # the plain forget never requests the repair
+
+
+_REPAIR = "run `hermes-mordred mail forget --yes --force-orphan`"
+
+
+@pytest.mark.parametrize(
+    ("code", "hint"),
+    [
+        ("mail_orphan_key", f"a native mail key has no sealed credentials; {_REPAIR}"),
+        ("tee_unavailable", f"if the native mail key no longer exists on this machine, {_REPAIR}"),
+    ],
+)
+def test_forget_refusals_point_at_the_orphan_repair(
+    forget_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    code: str,
+    hint: str,
+) -> None:
+    from mordred_hermes.imports.mail import forget as forget_module
+
+    def refused(*args: Any, **kwargs: Any) -> Any:
+        raise forget_module.MailForgetError(code)
+
+    monkeypatch.setattr(forget_module, "forget", refused)
+    status, _out, err = run(["mail", "forget", "--yes"], capsys)
+    assert status == 1 and f"mail refused ({code}: {hint})" in err
+    status, _out, err = run(["mail", "forget", "--yes", "--force-orphan"], capsys)
+    assert status == 1  # a refused repair never points at itself again
+    assert ("--force-orphan`" in err) == (code == "mail_orphan_key")
+
+
+def test_native_orphan_key_cli_repair_end_to_end(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from tests.test_mail_cross_platform_storage import orphan_after_refused_login
+
+    home.chmod(0o700)
+    secret_store, native = orphan_after_refused_login(home)
+    monkeypatch.setattr(mail_sync_cli, "_secret_store", lambda: secret_store)
+
+    def no_rows(_home: Path) -> Any:
+        raise RuntimeError("no database for credential custody")
+
+    monkeypatch.setattr(mail_sync_cli, "_open_store", no_rows)
+    code, _out, err = run(["mail", "forget", "--yes"], capsys)
+    assert code == 1 and "mail refused (mail_orphan_key:" in err and "--yes --force-orphan" in err
+    assert native.keys and "delete" not in native.calls
+    code, out, err = run(["mail", "forget", "--yes", "--force-orphan"], capsys)
+    assert code == 0, err
+    assert "Orphan repair done" in out and "No mail credentials were set up." in out
+    assert native.keys == {} and native.calls.count("delete") == 1 and not secret_store.key_record_path.exists()
 
 
 # --- the forget library (shared with the Desktop page) ---------------------------------------------

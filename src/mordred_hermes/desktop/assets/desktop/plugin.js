@@ -131,6 +131,7 @@ const MESSAGES = {
   mail_setup_stale: 'A mailbox was set up or removed elsewhere while this setup waited. Start again; this setup stored nothing.',
   mail_setup_cancelled: 'This mailbox setup was cancelled before anything was stored.',
   touch_id_policy_mismatch: 'The mailbox key’s Touch ID setting differs from your choice and could not be replaced. Remove the mailbox, then set it up again. Nothing was stored.',
+  mail_orphan_key: 'A mailbox key was left without sealed credentials (for example by a refused login), so Mordred keeps it. Run hermes-mordred mail forget --yes --force-orphan in Terminal, then set the mailbox up again. Nothing was stored.',
   invalid_selection: 'Choose one of the listed folders.',
   account_mismatch: 'The sealed mailbox has a different account label. Leave the label empty, or enter the mailbox’s own label.',
   mail_fetch_timeout: 'The fetch is taking longer than expected. It continues in the background; check this step again later.',
