@@ -124,6 +124,8 @@ def test_scope_revocation_rolls_back_without_reauthentication(native_root, mutat
         "ATTACH DATABASE ':memory:' AS leak",
         "PRAGMA key='leak'",
         "PRAGMA rekey='leak'",
+        "PRAGMA textrekey='leak'",
+        "PRAGMA kdf_iter=1",
         "PRAGMA temp_store=FILE",
         "PRAGMA mmap_size=4096",
         "SELECT load_extension('leak')",

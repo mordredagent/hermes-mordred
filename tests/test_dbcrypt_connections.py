@@ -130,6 +130,8 @@ def test_every_held_sql_surface_revalidates(native_root, authority, surface):
         "ATTACH DATABASE ':memory:' AS other",
         "VACUUM INTO 'escape.db'",
         "PRAGMA key='wrong'",
+        "PRAGMA textrekey='x'",
+        "PRAGMA kdf_iter=1",
         "PRAGMA writable_schema=ON",
         "SELECT load_extension('x')",
         "PRAGMA cipher_plaintext_header_size=0",
@@ -140,6 +142,53 @@ def test_dangerous_sql_refused_before_io(native_root, authority, sql):
     conn = opener()(native_root[0] / "state.db", authority=authority)
     with pytest.raises(DatabaseRefused):
         conn.execute(sql)
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("name", "second", "denied"),
+    [
+        *[
+            (n, "1", True)
+            for n in (
+                "textkey",
+                "textrekey",
+                "kdf_iter",
+                "fast_kdf_iter",
+                "rekey_kdf_iter",
+                "rekey_cipher",
+                "key",
+                "rekey",
+                "hexkey",
+                "hexrekey",
+                "cipher_page_size",
+                "writable_schema",
+                "temp_store_directory",
+                "data_store_directory",
+            )
+        ],
+        ("cipher_integrity_check", "1", True),
+        ("cipher_version", "1", True),
+        ("journal_mode", "off", True),
+        ("foreign_keys", "ON", False),
+        ("foreign_keys", None, False),
+        ("journal_mode", "wal", False),
+        ("user_version", None, False),
+        ("cipher_version", None, False),
+        ("cipher_integrity_check", None, False),
+        ("busy_timeout", "5000", False),
+    ],
+)
+def test_sql_action_denied_pragma_policy(name, second, denied):
+    from mordred_hermes.dbcrypt._connection import _sql_action_denied
+
+    assert _sql_action_denied(sc.SQLITE_PRAGMA, name, second) is denied
+
+
+def test_foreign_keys_pragma_still_executes(native_root, authority):
+    conn = opener()(native_root[0] / "state.db", authority=authority)
+    conn.execute("PRAGMA foreign_keys=ON")
+    assert conn.execute("PRAGMA foreign_keys").fetchall() == [(1,)]
     conn.close()
 
 

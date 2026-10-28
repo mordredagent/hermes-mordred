@@ -165,23 +165,40 @@ def _parameters(values: Any) -> Any:
 
 
 def _sql_action_denied(action: int, first: Any, second: Any) -> bool:
-    """Shared runtime/component SQL escape policy; admission remains owner-specific."""
+    """Shared runtime/component SQL escape policy; admission remains owner-specific.
+
+    Denies ATTACH/DETACH, every key-material pragma (any name ending in ``key``,
+    which covers key/rekey/hexkey/hexrekey/textkey/textrekey but not
+    ``foreign_keys``), every KDF pragma (``*kdf*``), every ``cipher*`` pragma
+    except the read-only ``cipher_version``/``cipher_integrity_check`` (no
+    value), path/schema escapes, and OFF/MEMORY journaling.
+    """
     import sqlcipher3.dbapi2 as sc
 
     prohibited = action in (sc.SQLITE_ATTACH, sc.SQLITE_DETACH)
     if action == sc.SQLITE_PRAGMA:
         name = (first or "").lower()
-        prohibited |= (
-            name.startswith("cipher") and not (name in {"cipher_version", "cipher_integrity_check"} and second is None)
-        ) or name in {
-            "key",
-            "rekey",
-            "hexkey",
-            "hexrekey",
-            "writable_schema",
-            "temp_store_directory",
-            "data_store_directory",
-        }
+        read_only_cipher = name in {"cipher_version", "cipher_integrity_check"} and second is None
+        prohibited |= ("cipher" in name and not read_only_cipher) or (
+            name.endswith("key")
+            or "kdf" in name
+            or name
+            in {
+                "key",
+                "rekey",
+                "hexkey",
+                "hexrekey",
+                "textkey",
+                "textrekey",
+                "kdf_iter",
+                "fast_kdf_iter",
+                "rekey_kdf_iter",
+                "rekey_cipher",
+                "writable_schema",
+                "temp_store_directory",
+                "data_store_directory",
+            }
+        )
         # OFF/MEMORY disables durable rollback; ordinary Hermes WAL is allowed.
         prohibited |= name == "journal_mode" and (second or "").lower() in {"off", "memory"}
     if action == sc.SQLITE_FUNCTION:
