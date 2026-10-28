@@ -284,3 +284,116 @@ def test_posix_snapshot_transport_rejects_truncated_success(tmp_path, monkeypatc
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, b"x"))
     with pytest.raises(ActivityRefused), checked_import_source(source, home=tmp_path):
         pytest.fail("a truncated snapshot was accepted as the observed source")
+
+
+_posix_only = pytest.mark.skipif(os.name != "posix", reason="POSIX isolated worker stream")
+
+
+def _fake_worker(monkeypatch, code):
+    import sys
+
+    from mordred_hermes.imports import _protected_destination as module
+
+    real = module._export_request
+
+    def request(resolved, before):
+        _, payload = real(resolved, before)
+        return [sys.executable, "-I", "-c", code], payload
+
+    monkeypatch.setattr(module, "_export_request", request)
+
+
+@_posix_only
+@pytest.mark.parametrize("name", ["state.db-wal", "state.db-shm", "state.db-journal", "STATE.DB-WAL"])
+def test_export_stream_refuses_sidecar_names_without_spawning(tmp_path, monkeypatch, name):
+    import subprocess
+
+    from mordred_hermes.imports._protected_destination import checked_export_stream
+
+    source = tmp_path / name
+    source.write_bytes(b"x" * 64)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("worker spawned for a sidecar name")
+
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    with pytest.raises(ActivityRefused), checked_export_stream(source):
+        pytest.fail("sidecar escaped admission")
+
+
+@_posix_only
+def test_export_stream_refuses_short_output_with_success_exit(tmp_path, monkeypatch):
+    from mordred_hermes.imports._protected_destination import checked_export_stream
+
+    source = tmp_path / "mail.mbox"
+    source.write_bytes(b"a" * 4096)
+    _fake_worker(monkeypatch, "import sys; sys.stdin.buffer.read(); sys.stdout.buffer.write(b'x' * 4095)")
+    with pytest.raises(ActivityRefused), checked_export_stream(source) as stream:
+        assert stream.read(1) == b"x"
+
+
+@_posix_only
+def test_export_stream_refuses_nonzero_exit_after_full_output(tmp_path, monkeypatch):
+    from mordred_hermes.imports._protected_destination import checked_export_stream
+
+    source = tmp_path / "mail.mbox"
+    source.write_bytes(b"a" * 4096)
+    _fake_worker(
+        monkeypatch,
+        "import sys; sys.stdin.buffer.read(); sys.stdout.buffer.write(b'x' * 4096); sys.stdout.flush(); sys.exit(1)",
+    )
+    with pytest.raises(ActivityRefused), checked_export_stream(source) as stream:
+        assert stream.read(1) == b"x"
+
+
+@_posix_only
+def test_export_stream_refuses_empty_output_and_reaps_worker(tmp_path, monkeypatch):
+    import subprocess
+
+    from mordred_hermes.imports._protected_destination import checked_export_stream
+
+    source = tmp_path / "mail.mbox"
+    source.write_bytes(b"a" * 4096)
+    _fake_worker(monkeypatch, "import sys; sys.stdin.buffer.read()")
+    real_popen = subprocess.Popen
+    procs = []
+
+    class Recording(real_popen):  # type: ignore[type-arg,misc]
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.wait_calls = 0
+            procs.append(self)
+
+        def wait(self, timeout=None):
+            self.wait_calls += 1
+            return super().wait(timeout)
+
+    monkeypatch.setattr(subprocess, "Popen", Recording)
+    with pytest.raises(ActivityRefused), checked_export_stream(source):
+        pytest.fail("empty worker output escaped admission")
+    assert len(procs) == 1
+    assert procs[0].wait_calls >= 1
+    assert procs[0].returncode is not None
+
+
+@_posix_only
+def test_export_stream_early_exit_is_drained_and_verified(tmp_path):
+    from mordred_hermes.imports._protected_destination import checked_export_stream
+
+    source = tmp_path / "mail.mbox"
+    source.write_bytes(os.urandom(2_621_440))  # ~2.5 MiB: crosses a worker chunk boundary
+    with checked_export_stream(source) as stream:
+        assert len(stream.read(1)) == 1
+
+
+@_posix_only
+@pytest.mark.parametrize("size", [4096, 2_621_440])
+def test_export_stream_refuses_source_appended_while_open(tmp_path, size):
+    from mordred_hermes.imports._protected_destination import checked_export_stream
+
+    source = tmp_path / "mail.mbox"
+    source.write_bytes(os.urandom(size))
+    with pytest.raises(ActivityRefused), checked_export_stream(source) as stream:
+        assert len(stream.read(1)) == 1
+        with source.open("ab") as handle:
+            handle.write(b"appended")

@@ -24,6 +24,7 @@ from typing import IO, Any, BinaryIO
 from ..activity._gate import ActivityRefused, refusal
 
 _MAX_SOURCE = 64 * 1024 * 1024
+_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 _EXPORT_SUFFIXES = frozenset({".json", ".jsonl", ".ndjson", ".eml", ".mbox", ".zip", ".txt"})
 
 
@@ -247,7 +248,7 @@ def checked_export_stream(path: Path) -> Iterator[BinaryIO]:
     if not path.is_absolute():
         raise _refused()
     resolved = Path(os.path.realpath(path.parent)) / path.name
-    if looks_like_database_name(resolved.name):
+    if looks_like_database_name(resolved.name) or resolved.name.lower().endswith(_SIDECAR_SUFFIXES):
         raise _refused()
     try:
         if os.name == "nt":
