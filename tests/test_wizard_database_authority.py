@@ -129,6 +129,21 @@ def test_status_startup_classification(argv, monkeypatch):
     assert maintenance_process()
 
 
+def test_activity_restore_is_offline_maintenance_with_strict_grammar(monkeypatch):
+    from mordred_hermes.dbcrypt._cli import maintenance_process
+
+    for argv, expected in (
+        (["hermes-mordred", "activity", "restore", "--input", "/tmp/b", "--yes"], True),
+        (["hermes-mordred", "activity", "restore", "--input", "/tmp/b"], True),
+        (["hermes", "mordred", "activity", "restore", "--input", "/tmp/b", "--yes"], True),
+        (["hermes-mordred", "activity", "restore", "--bogus"], False),
+        (["hermes-mordred", "activity", "restore"], False),
+        (["hermes-mordred", "activity", "backup", "--output", "/tmp/b"], False),
+    ):
+        monkeypatch.setattr("sys.argv", argv)
+        assert maintenance_process() is expected, argv
+
+
 @pytest.mark.parametrize(
     "argv",
     [

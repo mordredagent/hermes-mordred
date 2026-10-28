@@ -109,6 +109,11 @@ def _passive_or_maintenance(args: list[str], *, profiles: bool = False) -> bool:
         item = child(database, verb)
         if verb in {"encrypt", "decrypt"}:
             item.add_argument("--dry-run", action="store_true")
+    # Offline restore owns the exclusive lease; a runtime shared lease would refuse it.
+    # Keep aligned with wizard.activity_store_cli.add_parsers("restore").
+    restore = child(child(sub, "activity").add_subparsers(required=True), "restore")
+    restore.add_argument("--input", required=True)
+    restore.add_argument("--yes", action="store_true")
     uninstall = child(sub, "uninstall")
     for flag in ("--dry-run", "--yes", "--purge-data", "--remove-helper", "--erase-encrypted"):
         uninstall.add_argument(flag, action="store_true")

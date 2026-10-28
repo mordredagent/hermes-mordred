@@ -715,6 +715,7 @@ def restore_activity_store(source: Path, *, home: Path, lease: ExclusiveLease) -
     from ..dbcrypt._maintenance import maintenance_scope
     from ..imports._protected_destination import checked_store_destination
 
+    home = Path(os.path.realpath(home))  # stores bind the canonical spelling
     destination = checked_store_destination(home / "plugin-data/mordred/mordred.db", home=home)
     published = False
     try:
@@ -727,6 +728,8 @@ def restore_activity_store(source: Path, *, home: Path, lease: ExclusiveLease) -
                     raise ActivityRefused(refusal("profile_mismatch"))
             with scope.connection(source, readonly=True) as backup:
                 backup_meta = ActivityStore._checked_meta(ActivityStore._read_meta(backup))
+                if backup_meta.profile_home != target_meta.profile_home:
+                    raise ActivityRefused(refusal("profile_mismatch"))
                 if any(
                     step not in _schema.MIGRATIONS
                     for step in range(backup_meta.schema_version, SUPPORTED_SCHEMA_VERSION)
