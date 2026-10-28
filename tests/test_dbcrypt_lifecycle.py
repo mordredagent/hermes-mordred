@@ -369,7 +369,8 @@ with patch.object(_database_lifecycle, '_open', forbidden):
     reasons = {'SQLCipher driver extra is unavailable'}
     if sys.platform == 'win32':
         reasons |= {
-            'Windows VFS native qualification is incomplete',
+            'Windows native storage admission is disabled in this build',
+            'Windows workstation editions are not qualified',
             'Windows SQLCipher driver pair is unqualified',
             'owned Windows VFS asset is unavailable',
         }

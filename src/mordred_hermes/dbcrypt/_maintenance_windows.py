@@ -1,4 +1,4 @@
-"""Prepared Windows maintenance route; production remains qualification gated.
+"""Prepared Windows maintenance route; admitted on Windows Server editions only.
 
 Only internal EX-owned SQL can replace the default native authorizer. Its one
 ATTACH destination is a checked, reserved staging inode under the registered
@@ -19,10 +19,12 @@ from .._private_fs import open_private_directory
 
 
 def require_qualified() -> None:
-    from ._windows_vfs import NATIVE_QUALIFIED
+    from ._windows_vfs import NATIVE_QUALIFIED, windows_edition_admitted
 
     if not NATIVE_QUALIFIED:
-        raise DatabaseRefused("Windows database maintenance awaits native qualification")
+        raise DatabaseRefused("Windows native storage admission is disabled in this build")
+    if not windows_edition_admitted():
+        raise DatabaseRefused("Windows workstation editions are not qualified")
 
 
 def exclusive_root(path: Path, requested: Path | None = None) -> tuple[Path, ExclusiveLease]:

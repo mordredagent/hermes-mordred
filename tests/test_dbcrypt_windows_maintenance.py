@@ -15,8 +15,17 @@ from mordred_hermes.dbcrypt import _windows_vfs
 def test_windows_maintenance_refuses_before_any_io_when_unqualified(tmp_path, monkeypatch):
     monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", False)
     monkeypatch.setattr(windows, "exclusive_root", lambda *args: pytest.fail("lease I/O before qualification"))
-    with pytest.raises(DatabaseRefused, match="qualification"), windows.connection(tmp_path / "state.db"):
+    with pytest.raises(DatabaseRefused, match="admission is disabled"), windows.connection(tmp_path / "state.db"):
         pytest.fail("unqualified route admitted")
+
+
+def test_windows_maintenance_refuses_workstation_edition(monkeypatch):
+    monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", True)
+    monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: False)
+    with pytest.raises(DatabaseRefused, match="workstation editions are not qualified"):
+        windows.require_qualified()
+    monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: True)
+    windows.require_qualified()
 
 
 def test_internal_export_authorizer_replaces_prior_deny_for_only_exact_path(tmp_path):

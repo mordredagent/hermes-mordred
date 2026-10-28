@@ -81,6 +81,35 @@ def _dependency_count(home: Path) -> int | None:
     return len(inventory.entries) if inventory.complete else None
 
 
+def _windows_unavailable(configured: bool, dependencies: int) -> DatabaseStatus | None:
+    from ._windows_vfs import (
+        NATIVE_QUALIFIED,
+        driver_distribution_qualified,
+        packaged_library_path,
+        windows_edition_admitted,
+    )
+
+    if not NATIVE_QUALIFIED:
+        return DatabaseStatus(
+            configured,
+            dependencies,
+            "unavailable",
+            False,
+            "Windows native storage admission is disabled in this build",
+        )
+    if not windows_edition_admitted():
+        return DatabaseStatus(
+            configured, dependencies, "unavailable", False, "Windows workstation editions are not qualified"
+        )
+    if not driver_distribution_qualified():
+        return DatabaseStatus(
+            configured, dependencies, "unavailable", False, "Windows SQLCipher driver pair is unqualified"
+        )
+    if packaged_library_path() is None:
+        return DatabaseStatus(configured, dependencies, "unavailable", False, "owned Windows VFS asset is unavailable")
+    return None
+
+
 def database_status(home: Path) -> DatabaseStatus:
     """Return passive facts, always unauthenticated; no SQL or custody access."""
     try:
@@ -93,20 +122,9 @@ def database_status(home: Path) -> DatabaseStatus:
     if dependencies is None:
         return DatabaseStatus(configured, None, "unknown", False, "database dependency inventory is incomplete")
     if sys.platform == "win32":
-        from ._windows_vfs import NATIVE_QUALIFIED, driver_distribution_qualified, packaged_library_path
-
-        if not NATIVE_QUALIFIED:
-            return DatabaseStatus(
-                configured, dependencies, "unavailable", False, "Windows VFS native qualification is incomplete"
-            )
-        if not driver_distribution_qualified():
-            return DatabaseStatus(
-                configured, dependencies, "unavailable", False, "Windows SQLCipher driver pair is unqualified"
-            )
-        if packaged_library_path() is None:
-            return DatabaseStatus(
-                configured, dependencies, "unavailable", False, "owned Windows VFS asset is unavailable"
-            )
+        refused = _windows_unavailable(configured, dependencies)
+        if refused is not None:
+            return refused
     elif sys.platform not in {"darwin", "linux"}:
         return DatabaseStatus(
             configured,

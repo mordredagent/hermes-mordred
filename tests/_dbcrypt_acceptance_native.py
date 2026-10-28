@@ -423,7 +423,8 @@ def candidate_eligibility(root: Path) -> Iterator[None]:
         observed = original(home)
         allowed = {
             "database runtime activation is unavailable on this platform",
-            "Windows VFS native qualification is incomplete",
+            "Windows native storage admission is disabled in this build",
+            "Windows workstation editions are not qualified",
         }
         if observed.reason in allowed:
             if observed.dependencies is None or not _capability._driver_present():

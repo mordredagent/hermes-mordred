@@ -104,6 +104,7 @@ def test_windows_database_status_does_not_discover_or_promise_conversion(fs, mon
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(_migrate, "discover", lambda *args: pytest.fail("unsupported database discovery"))
     monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", True)
+    monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: True)
     monkeypatch.setattr(_windows_vfs, "driver_distribution_qualified", lambda: eligible)
     monkeypatch.setattr(_windows_vfs, "packaged_library_path", lambda: home / "owned.dll")
     monkeypatch.setattr(_capability, "_driver_present", lambda: True)

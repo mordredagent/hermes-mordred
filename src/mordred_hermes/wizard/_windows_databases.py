@@ -49,7 +49,7 @@ def refusal(home: Path) -> str | None:
         )
     if retained:
         return (
-            "this home retains database protection state; native Windows VFS qualification is incomplete; "
+            "this home retains database protection state; Windows uninstall cannot restore databases yet; "
             "retain the native key/helper and reconcile the database state on its qualified original runtime"
         )
     return None

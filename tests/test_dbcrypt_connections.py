@@ -824,6 +824,7 @@ def test_vfs_registration_released_when_driver_connect_fails(native_root, author
     # The actual driver rejects the deliberately unregistered VFS name.
     monkeypatch.setattr(_connection, "os", SimpleNamespace(name="nt", getpid=os.getpid))
     monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", True)
+    monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: True)
     monkeypatch.setattr(_windows_vfs, "classify_windows_database", lambda *a, **kw: native_root[0])
     monkeypatch.setattr(_windows_vfs, "register_checked_vfs", lambda *a, **kw: registration)
     monkeypatch.setattr(

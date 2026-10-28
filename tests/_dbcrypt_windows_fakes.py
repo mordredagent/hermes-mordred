@@ -142,6 +142,7 @@ def protected_windows_environment(monkeypatch):
     monkeypatch.setattr(_backup, "os", SimpleNamespace(name="nt"))
     monkeypatch.setattr(_windows_vfs, "sys", SimpleNamespace(platform="win32"))
     monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", True)
+    monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: True)
     monkeypatch.setattr(_windows_vfs, "checked_path_identity", posix_identity)
     monkeypatch.setattr(_windows_vfs, "classify_windows_database", lambda path, **kw: path)
     monkeypatch.setattr(_windows_vfs, "_path_parts", lambda path: (path,))

@@ -633,8 +633,10 @@ def _open(
     authority.check()
     path = path.absolute() if path is not None else None
     if os.name == "nt" and path is not None:
-        from ._windows_vfs import NATIVE_QUALIFIED
+        from ._windows_vfs import NATIVE_QUALIFIED, windows_edition_admitted
 
+        if not windows_edition_admitted():
+            raise DatabaseRefused("Windows workstation editions are not qualified")
         if not NATIVE_QUALIFIED or not protected:
             raise DatabaseRefused("Windows destination is not qualified for guarded SQL")
     with authority.operation():
@@ -653,8 +655,15 @@ def _open(
         mode = "ro" if readonly else ("rw" if binding.leaf is not None else "rwc")
         uri = f"file:{quote(path.as_posix(), safe='/:')}?mode={mode}" if path is not None else ":memory:"
         if os.name == "nt" and path is not None:
-            from ._windows_vfs import NATIVE_QUALIFIED, classify_windows_database, register_checked_vfs
+            from ._windows_vfs import (
+                NATIVE_QUALIFIED,
+                classify_windows_database,
+                register_checked_vfs,
+                windows_edition_admitted,
+            )
 
+            if not windows_edition_admitted():
+                raise DatabaseRefused("Windows workstation editions are not qualified")
             if not NATIVE_QUALIFIED:
                 raise DatabaseRefused("Windows checked VFS is not qualified")
             classify_windows_database(str(path), uri=False, root=authority.root)

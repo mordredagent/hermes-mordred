@@ -21,6 +21,17 @@ from typing import Any, Final
 # Release admission is source-controlled, never granted by an environment flag.
 # Actual platform acceptance is recorded separately by the production matrix.
 NATIVE_QUALIFIED: Final = True
+_VER_NT_SERVER: Final = 3
+
+
+def windows_edition_admitted() -> bool:
+    """Admit Windows Server editions only; workstation and unknown editions fail closed."""
+    try:
+        return bool(sys.platform == "win32" and sys.getwindowsversion().product_type == _VER_NT_SERVER)  # type: ignore[attr-defined,unused-ignore]
+    except Exception:
+        return False
+
+
 _NAME: Final = "mordred_checked_v1"
 _LOCK = threading.RLock()
 _LIBRARIES: dict[str, Any] = {}
@@ -128,6 +139,8 @@ def packaged_library_path() -> Path | None:
 def _load_native() -> Any:
     # Qualification retains its explicit test-library seam. Production ignores
     # that environment override and selects only the installed owned wheel.
+    if not windows_edition_admitted():
+        raise RuntimeError("Windows checked VFS admits Windows Server editions only")
     if NATIVE_QUALIFIED and not driver_distribution_qualified():
         raise RuntimeError("Windows checked VFS requires its qualified SQLCipher 0.5.7 driver pair")
     value = packaged_library_path() if NATIVE_QUALIFIED else os.environ.get("MORDRED_DBCRYPT_CHECKED_LIBRARY")
@@ -188,11 +201,14 @@ class VfsRegistration:
 def register_checked_vfs(driver: ModuleType, *, root: Path) -> VfsRegistration:
     """Pin the same-library extension and register an existing private root.
 
-    This is an explicit implementation/acceptance interface; production remains
-    unavailable until the independent native qualification gate is satisfied.
+    Admission is source-controlled: Windows Server x64 with the qualified 0.5.7
+    driver pair and the distribution-owned DLL. Workstation editions are
+    refused. Native acceptance is recorded separately in docs/dev/CI.md.
     """
     if sys.platform != "win32":
         raise RuntimeError("checked VFS requires Windows")
+    if not windows_edition_admitted():
+        raise RuntimeError("Windows checked VFS admits Windows Server editions only")
     _path_parts(os.fspath(root))
     with _LOCK:
         connection = driver.connect(":memory:")

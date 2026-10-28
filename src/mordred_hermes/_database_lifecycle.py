@@ -19,8 +19,11 @@ _HANDLES: set[NativeDatabaseLock] = set()
 
 def _open(root: Path) -> NativeDatabaseLock:
     if os.name == "nt":
+        from ._database_locking_windows import WINDOWS_LEASE_QUALIFIED
         from ._database_locking_windows import open_lock as windows_open
 
+        if not WINDOWS_LEASE_QUALIFIED:
+            raise DatabaseRefused("Windows database leases are not qualified")
         return windows_open(root)
     if os.name == "posix":
         from ._database_locking_posix import open_lock as posix_open

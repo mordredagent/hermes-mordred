@@ -25,6 +25,7 @@ def test_windows_backup_ancestor_parent_refuses_before_journal_or_staging(native
     authority = Authority.acquire(root)
     monkeypatch.setattr(_backup, "os", SimpleNamespace(name="nt"))
     monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", True)
+    monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: True)
     try:
         with pytest.raises(DatabaseRefused, match=r"separate.*directory"):
             _backup.backup_database(source, destination, authority=authority)

@@ -80,7 +80,7 @@ def test_database_status_projection_preserves_exact_v4_schema(
 
 
 def test_server_acceptance_does_not_claim_windows11_support(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A server evidence artifact does not change the real closed Desktop/native qualification gates."""
+    """A server evidence artifact does not admit workstation editions such as Windows 11."""
     from types import SimpleNamespace
 
     from mordred_hermes.dbcrypt import _capability, _windows_vfs
@@ -88,8 +88,24 @@ def test_server_acceptance_does_not_claim_windows11_support(tmp_path: Path, monk
 
     (tmp_path / "server-storage-acceptance.json").write_text('{"accepted": true}', encoding="utf-8")
     monkeypatch.setattr(_capability, "sys", SimpleNamespace(platform="win32"))
-    assert _windows_vfs.NATIVE_QUALIFIED is False
-    assert _databases.database_status_projection(dbcrypt.database_status(tmp_path)) == {"supported": False}
+    monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: False)
+    status = dbcrypt.database_status(tmp_path)
+    assert status.capability == "unavailable"
+    assert status.reason == "Windows workstation editions are not qualified"
+    assert _databases.database_status_projection(status) == {"supported": False}
+
+
+def test_server_edition_proceeds_past_admission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from mordred_hermes.dbcrypt import _capability, _windows_vfs
+
+    monkeypatch.setattr(_capability, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: True)
+    monkeypatch.setattr(_windows_vfs, "driver_distribution_qualified", lambda: True)
+    monkeypatch.setattr(_windows_vfs, "packaged_library_path", lambda: tmp_path / "owned.dll")
+    monkeypatch.setattr(_capability, "_driver_present", lambda: True)
+    assert dbcrypt.database_status(tmp_path).capability == "unknown"
 
 
 def test_unknown_database_status_never_schedules(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -55,7 +55,58 @@ def test_driver_import_is_not_readiness(tmp_path, monkeypatch):
     status = dbcrypt.database_status(tmp_path)
     assert status.capability == "unavailable"
     assert status.authenticated is False
-    assert status.reason and "qualification" in status.reason
+    assert status.reason and "admission is disabled" in status.reason
+
+
+@pytest.mark.parametrize("server", [False, True], ids=["workstation", "server"])
+def test_windows_edition_gates_status(tmp_path, monkeypatch, server):
+    from mordred_hermes.dbcrypt import _windows_vfs
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", True)
+    monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: server)
+    monkeypatch.setattr(_windows_vfs, "driver_distribution_qualified", lambda: True)
+    monkeypatch.setattr(_windows_vfs, "packaged_library_path", lambda: tmp_path / "owned.dll")
+    monkeypatch.setattr(capability(), "_driver_present", lambda: True)
+    status = dbcrypt.database_status(tmp_path)
+    if server:
+        assert status.capability == "unknown"
+    else:
+        assert status.capability == "unavailable"
+        assert status.reason == "Windows workstation editions are not qualified"
+
+
+@pytest.mark.parametrize(
+    ("platform", "product_type", "expected"),
+    [("win32", 3, True), ("win32", 1, False), ("win32", 2, False), ("linux", 3, False)],
+)
+def test_windows_edition_admitted_product_type(monkeypatch, platform, product_type, expected):
+    from types import SimpleNamespace
+
+    from mordred_hermes.dbcrypt import _windows_vfs
+
+    monkeypatch.setattr(
+        _windows_vfs,
+        "sys",
+        SimpleNamespace(platform=platform, getwindowsversion=lambda: SimpleNamespace(product_type=product_type)),
+    )
+    assert _windows_vfs.windows_edition_admitted() is expected
+
+
+def test_windows_edition_admitted_fails_closed_on_error(monkeypatch):
+    from types import SimpleNamespace
+
+    from mordred_hermes.dbcrypt import _windows_vfs
+
+    monkeypatch.setattr(_windows_vfs, "sys", SimpleNamespace(platform="win32"))
+    assert _windows_vfs.windows_edition_admitted() is False
+
+
+def test_native_and_lease_admission_flags_agree():
+    from mordred_hermes import _database_locking_windows
+    from mordred_hermes.dbcrypt import _windows_vfs
+
+    assert _windows_vfs.NATIVE_QUALIFIED == _database_locking_windows.WINDOWS_LEASE_QUALIFIED
 
 
 def test_unknown_platform_and_unsafe_metadata_are_not_available(tmp_path, monkeypatch):
@@ -253,6 +304,7 @@ def test_pending_prompt_is_passive_and_requires_explicit_maintenance(tmp_path, m
     before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", True)
+    monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: True)
     monkeypatch.setattr(_windows_vfs, "driver_distribution_qualified", lambda: eligible)
     monkeypatch.setattr(_windows_vfs, "packaged_library_path", lambda: tmp_path / "owned.dll")
     monkeypatch.setattr(capability(), "_driver_present", lambda: True)
@@ -293,6 +345,7 @@ def test_automatic_native_startup_installs_real_guarded_shim(native_root, monkey
     monkeypatch.setattr(dbcrypt, "sys", SimpleNamespace(platform=platform))
     monkeypatch.setattr(capability(), "sys", SimpleNamespace(platform=platform))
     # Platform-specific distribution metadata only; real Authority/lease/shim remain.
+    monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: True)
     monkeypatch.setattr(_windows_vfs, "driver_distribution_qualified", lambda: True)
     monkeypatch.setattr(_windows_vfs, "packaged_library_path", lambda: root / "owned.dll")
     monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
@@ -318,6 +371,7 @@ def test_native_passive_eligibility_is_unauthenticated_and_requires_driver(tmp_p
 
     module = capability()
     monkeypatch.setattr(module, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: True)
     monkeypatch.setattr(_windows_vfs, "driver_distribution_qualified", lambda: True)
     monkeypatch.setattr(_windows_vfs, "packaged_library_path", lambda: tmp_path / "owned.dll")
     monkeypatch.setattr(_key, "KeyProvider", lambda **kw: pytest.fail("passive custody acquisition"))
@@ -337,6 +391,7 @@ def test_windows_activation_still_refuses_unqualified_driver_or_missing_owned_as
     from mordred_hermes.dbcrypt import _windows_vfs
 
     monkeypatch.setattr(capability(), "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: True)
     monkeypatch.setattr(_windows_vfs, "driver_distribution_qualified", lambda: False)
     status = capability().database_status(tmp_path)
     assert "driver pair" in status.reason
@@ -357,6 +412,7 @@ def test_automatic_windows_startup_refuses_unavailable_prerequisite_before_custo
     monkeypatch.setattr(dbcrypt, "sys", SimpleNamespace(platform="win32"))
     monkeypatch.setattr(capability(), "sys", SimpleNamespace(platform="win32"))
     monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", failure != "qualification")
+    monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: True)
     monkeypatch.setattr(_windows_vfs, "driver_distribution_qualified", lambda: failure != "driver")
     monkeypatch.setattr(
         _windows_vfs, "packaged_library_path", lambda: None if failure == "asset" else root / "owned.dll"

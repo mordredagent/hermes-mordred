@@ -1,7 +1,8 @@
-"""Inert checked Windows database lease adapter, independent of SQL and custody.
+"""Checked Windows database lease adapter, independent of SQL and custody.
 
-Portable tests verify policy and resource ownership. Actual LockFileEx and
-rename exclusion still require Task 5's native Windows qualification gate.
+Portable tests verify policy and resource ownership. Admission is
+source-controlled; actual LockFileEx and rename exclusion acceptance is
+recorded separately in docs/dev/CI.md.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import math
 import sys
 import time
 from pathlib import Path
+from typing import Final
 
 from ._database_contracts import DatabaseBusy, DatabaseRefused, RootIdentity
 from ._private_fs._types import PrivateFSError
@@ -19,7 +21,9 @@ from ._private_fs._windows_api import Overlapped, OwnedHandle
 from ._private_fs._windows_paths import CheckedDirectory, checked_directory, checked_directory_optional
 from ._private_fs._windows_security import current_user_sid, validate_private
 
-WINDOWS_LEASE_QUALIFIED = False
+# Source-controlled admission, never granted by an environment flag; native
+# acceptance is recorded separately in docs/dev/CI.md.
+WINDOWS_LEASE_QUALIFIED: Final = True
 _LOCK_NAME = "db-encryption.lock"
 
 
