@@ -971,13 +971,16 @@ def test_forget_refusals_point_at_the_orphan_repair(
     assert ("--force-orphan`" in err) == (code == "mail_orphan_key")
 
 
+@pytest.mark.parametrize("record", ["recorded", "unrecorded"])
 def test_native_orphan_key_cli_repair_end_to_end(
-    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], record: str
 ) -> None:
     from tests.test_mail_cross_platform_storage import orphan_after_refused_login
 
     home.chmod(0o700)
     secret_store, native = orphan_after_refused_login(home)
+    if record == "unrecorded":  # the pre-PR key_left state: the record went before the native delete failed
+        secret_store.key_record_path.unlink()
     monkeypatch.setattr(mail_sync_cli, "_secret_store", lambda: secret_store)
 
     def no_rows(_home: Path) -> Any:

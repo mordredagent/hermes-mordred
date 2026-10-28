@@ -40,10 +40,10 @@
   for row erasure. ``--rows`` restricts deletion to the authenticated account;
   ``--account LABEL`` resolves retained account work once credentials are gone.
   ``--yes --force-orphan`` is the one explicit repair for a native key left
-  without sealed credentials (``mail_orphan_key``, e.g. after a refused login)
-  or sealed credentials whose native key no longer exists (a home moved to
-  another machine). It touches credential custody only, so it is refused with
-  ``--rows``/``--account``: their named retry follows it.
+  without sealed credentials (``mail_orphan_key``, e.g. after a refused login),
+  with or without its key record, or sealed credentials whose native key the
+  helper reports as absent. It touches credential custody only, so it is refused
+  with ``--rows``/``--account``: their named retry follows it.
 
 Nothing here prints a subject, name, address, label or body.
 """
@@ -561,6 +561,11 @@ def cmd_forget(args: argparse.Namespace) -> int:
         hint = None
         if exc.code == "tee_unavailable" and not force_orphan:
             hint = f"if the native mail key no longer exists on this machine, run {_FORCE_ORPHAN}"
+        elif exc.code == "tee_unavailable":  # the repair itself refused: never point back at it
+            hint = (
+                "the native mail key could not be read or deleted by this machine's helper; "
+                "the repair deletes nothing it cannot prove (see USAGE.md)"
+            )
         return _refused(exc.code, hint)
     _audit(forget_module.audit_entry(done, rows=rows))
     repaired = force_orphan and done.key_gone and (done.had_credentials or done.orphan_key_retired)
@@ -655,7 +660,7 @@ def add_parsers(msub: Any, handler: Callable[[argparse.Namespace], int]) -> None
         action="store_true",
         help=(
             "Repair (needs --yes; not with --rows/--account): retire a native key left without sealed "
-            "credentials, or credentials whose native key no longer exists"
+            "credentials, or sealed credentials whose native key the helper reports as absent"
         ),
     )
     p_forget.set_defaults(func=handler)

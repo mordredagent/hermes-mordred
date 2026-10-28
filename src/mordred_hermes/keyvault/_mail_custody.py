@@ -3,10 +3,12 @@
 POSIX authentication releases lifecycle/credential locks before attended ECDH.
 Only issued proofs bind a source to a native deletion. Checked private filesystem
 transactions preserve intent/deleted journals and never repair unsafe paths.
-An orphan key (no sealed source) is retained until the explicit
-``mail forget --yes --force-orphan`` repair, whose distinct in-transaction proof
-binds the key to its recorded public digest; a sealed source whose native key is
-definitively absent is removed by the same repair without any native deletion.
+An orphan key (no sealed source), with or without its key record, is retained
+until the explicit ``mail forget --yes --force-orphan`` repair, whose distinct
+in-transaction proof binds the key under the fixed mail selector to its live
+public digest (and to its record when one exists); a sealed source whose key the
+helper reports as definitively absent (``WrapKeyNotFound`` exactly) is removed by
+the same repair without any native deletion.
 """
 
 from __future__ import annotations
@@ -182,13 +184,13 @@ class Observation:
 
 @dataclass(frozen=True)
 class _OrphanFacts:
-    """What an orphan proof binds: one live transaction, the selector, and the recorded key."""
+    """What an orphan proof binds: one live transaction, the selector, the live key and its record."""
 
     tx: PrivateTransaction
     backend: NativeBackend
     selector: str
     public: str
-    record: tuple[object, ...]
+    record: tuple[object, ...]  # the key record's file document; ``()`` for an unrecorded orphan
     journal: str
     observation: Observation
     process: tuple[int, int]
@@ -265,8 +267,8 @@ def _validate_orphan(scope: PosixMailCustody, proof: OrphanKeyAuthentication | N
         or observed.files[0] is not None
         or observed.files[1] is not None
         or observed.public != facts.public
-        or record is None
-        or tuple(_file_document(record)) != facts.record
+        or (record is None) != (facts.record == ())
+        or (record is not None and tuple(_file_document(record)) != facts.record)
         or journal is None
         or hashlib.sha256(journal[0]).hexdigest() != facts.journal
     ):
@@ -344,14 +346,19 @@ class PosixMailCustody(_Opaque):
     def retire_orphan(self, *, linux: bool) -> None:
         """The explicit ``mail forget --yes --force-orphan`` repair; never a source authentication.
 
-        Orphan key: no sealed source, metadata or journal, and a key record whose
-        ``public_sha256`` names the live public key (Linux: also its checked
-        no-presence policy). An in-transaction orphan proof then drives the usual
-        intent journal, owned native deletion, acknowledgement and cleanup.
-        Keyless source: the native key is definitively absent (``WrapKeyNotFound``
-        exactly), so nothing is deleted natively; the undecryptable source, its
-        metadata and the key record are removed, the sealed file last so an
-        interruption stays repairable. Every other state refuses and retains evidence.
+        Orphan key: a live key under the fixed mail selector, observed by its
+        public digest, with no sealed source, metadata or journal. A key record,
+        when present, must name that live key (``public_sha256``; Linux: also its
+        checked no-presence policy). Without a record (an old forget removed it
+        before its native delete failed) nothing else can be bound to the
+        selector, so the key is retirable too. An in-transaction orphan proof
+        then drives the usual intent journal, owned native deletion,
+        acknowledgement and cleanup.
+        Keyless source: the helper reports the key as definitively absent
+        (``WrapKeyNotFound`` exactly), so nothing is deleted natively; the
+        undecryptable source, its metadata and the key record are removed, the
+        sealed file last so an interruption stays repairable. Every other state
+        refuses and retains evidence.
         """
         r = _record(self)
         if r.authentication is not None or r.orphan is not None:
@@ -370,13 +377,14 @@ class PosixMailCustody(_Opaque):
             raise DatabaseRefused("mail metadata without a source requires reconciliation")
         public = hashlib.sha256(wrap.get_wrapping_key_public(KEY_ID, backend=r.backend)).hexdigest()
         record = read(r.tx, KEY_RECORD)
-        if record is None or _recorded_public(record) != public:
+        if record is not None and _recorded_public(record) != public:
             raise DatabaseRefused("mail native key is not the recorded orphan; retained")
-        if linux:
+        # Unrecorded: there is no policy claim to check, and deletion never exercises the presence policy.
+        if linux and record is not None:
             record = require_linux_no_presence_policy(r.tx, public)
         self._retire_orphan_key(public, record)
 
-    def _retire_orphan_key(self, public: str, record: tuple[bytes, FileMetadata]) -> None:
+    def _retire_orphan_key(self, public: str, record: tuple[bytes, FileMetadata] | None) -> None:
         import secrets
 
         r = _record(self)
@@ -387,8 +395,8 @@ class PosixMailCustody(_Opaque):
             observed.files[0] is not None
             or observed.files[1] is not None
             or observed.public != public
-            or current is None
-            or _file_document(current) != _file_document(record)
+            or (current is None) != (record is None)
+            or (current is not None and record is not None and _file_document(current) != _file_document(record))
         ):
             raise DatabaseRefused("mail source changed during orphan repair")
         document = _journal_document(observed)
@@ -400,7 +408,7 @@ class PosixMailCustody(_Opaque):
             r.backend,
             KEY_ID,
             public,
-            tuple(_file_document(current)),
+            tuple(_file_document(current)) if current is not None else (),
             hashlib.sha256(intent).hexdigest(),
             observed,
             _process(),

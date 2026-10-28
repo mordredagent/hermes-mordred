@@ -9,12 +9,13 @@ key first, records acknowledgement, and only then removes the sealed source.
 Ambiguous deletion retains evidence; acknowledged POSIX cleanup can resume.
 
 ``generation`` survives retirement and invalidates pending setup flows. Existing
-native key policy is preserved; an orphan key (no sealed source) refuses with
-``mail_orphan_key`` and is retained until the explicit
-``hermes-mordred mail forget --yes --force-orphan`` repair, whose distinct
-in-transaction proof binds it to its recorded public key; it is never deleted by
-setup or a plain forget. The same repair removes a sealed source whose native
-key is definitively absent, deleting nothing natively. Explicit portable backend
+native key policy is preserved; an orphan key (no sealed source), with or
+without its key record, refuses with ``mail_orphan_key`` and is retained until
+the explicit ``hermes-mordred mail forget --yes --force-orphan`` repair, whose
+distinct in-transaction proof binds it to its live public key under the fixed
+mail selector (and to its record when one exists); it is never deleted by setup
+or a plain forget. The same repair removes a sealed source whose native key the
+helper reports as definitively absent, deleting nothing natively. Explicit portable backend
 injection keeps the historical fixture seam, without issuing any production
 native authority. No root database key, memory source, credential cache, or
 plaintext spool is used.
@@ -422,12 +423,24 @@ class MailSecretStore:
         return True
 
     def native_key_present(self) -> bool:
-        """True while a native mail key is recorded (Windows: a current mail role exists); never calls native POSIX."""
+        """True while a native mail key exists (Windows: a current mail role; POSIX: its record, else a
+        non-interactive public-key read so an unrecorded orphan is reported); never a presence-gated call."""
         with _mail_native_refusals():
             self._check_platform()
             if self._platform() == "win32":
                 return bool(self._windows().role_present())
-            return self.key_record_path.exists()  # the orphan proof; no native call
+            return self.key_record_path.exists() or self._posix_key_observable()
+
+    def _posix_key_observable(self) -> bool:
+        """An unrecorded key is visible only to the helper: read its public key, never a private operation."""
+        from ...keyvault._exceptions import WrapError
+        from ...keyvault.wrap import NativeBackendError
+
+        try:
+            self._backend().get_enclave_public_key(KEY_ID)
+        except (WrapError, NativeBackendError):
+            return False  # absent, or unreadable here: the repair's own proof decides what to do
+        return True
 
     def _dir(self, *, create: bool) -> Path:
         self._check_platform()
@@ -476,9 +489,11 @@ class MailSecretStore:
         ``replace=True`` deletes an existing key first (only when no credentials
         are sealed and the caller holds the writer lock, as ``mail setup`` does)
         and raises ``touch_id_policy_mismatch`` when it cannot be deleted. Native
-        POSIX keys are never deleted here: a differing or unknown policy refuses
-        with ``mail_orphan_key`` when no source is sealed (``touch_id_policy_mismatch``
-        otherwise), and only ``mail forget --yes --force-orphan`` retires it.
+        POSIX keys are never deleted here: a differing or unknown policy (a key
+        without its record included) refuses with ``mail_orphan_key`` when no
+        source is sealed (``touch_id_policy_mismatch`` otherwise), and only
+        ``mail forget --yes --force-orphan`` retires that orphan key, with or
+        without its record.
         """
         self._check_platform()
         if self._platform() == "win32":
@@ -522,6 +537,7 @@ class MailSecretStore:
         return require_presence
 
     def _ensure_posix_key(self, *, require_presence: bool, replace: bool) -> bool | None:
+        """Create and record a missing key; an existing orphan key, with or without its record, is never replaced."""
         from ..._database_contracts import DatabaseRefused
         from ...keyvault import wrap
         from ...keyvault._exceptions import WrapKeyNotFound
