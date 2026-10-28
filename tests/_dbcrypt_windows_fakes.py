@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 from dataclasses import replace
 from types import ModuleType, SimpleNamespace
+from urllib.parse import unquote
 
 from mordred_hermes._private_fs import FileIdentity, PrivateFSError
 from mordred_hermes._private_fs._windows_api import Metadata
@@ -61,6 +62,7 @@ class NativeRegistry:
         self.roots = {}
         self.busy = set()
         self.serial = 0
+        self.routed_uris = []
 
     def mordred_vfs_register_root(self, path, token):
         path = path.replace("/", "\\").casefold()
@@ -89,6 +91,7 @@ def registration_environment(monkeypatch):
     monkeypatch.setattr(_windows_paths, "get_api", lambda: api)
     monkeypatch.setattr(_windows_security, "current_user_sid", api.user_sid)
     monkeypatch.setattr(_windows_vfs, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: True)
     monkeypatch.setattr(_windows_vfs, "_load_native", lambda: native)
     driver = ModuleType("synthetic_native_boundary")
     native._name = "synthetic fixture DLL"
@@ -98,6 +101,20 @@ def registration_environment(monkeypatch):
         close=lambda: None,
     )
     return _windows_vfs, driver, api, native
+
+
+SELECTOR = "&vfs=mordred_checked_v1"
+
+
+def _assert_checked_route(native, uri):
+    """Fail unless the production URI selects the checked VFS under a registered root."""
+    if uri.count(SELECTOR) != 1:
+        raise AssertionError(f"Windows route must carry {SELECTOR!r} exactly once: {uri!r}")
+    database = unquote(uri[len("file:") :].split("?", 1)[0]).replace("/", "\\").casefold()
+    if not any(database == root or database.startswith(root + "\\") for root in native.roots.values()):
+        raise AssertionError(
+            f"routed database {database!r} is outside registered roots {sorted(native.roots.values())}"
+        )
 
 
 def protected_windows_environment(monkeypatch):
@@ -136,7 +153,11 @@ def protected_windows_environment(monkeypatch):
     def routed(path, *args, **kwargs):
         if path == ":memory:":
             return Bootstrap()
-        return connect(str(path).replace("&vfs=mordred_checked_v1", ""), *args, **kwargs)
+        text = str(path)
+        if text.startswith("file:"):
+            native.routed_uris.append(text)
+            _assert_checked_route(native, text)
+        return connect(text.replace(SELECTOR, ""), *args, **kwargs)
 
     monkeypatch.setattr(_connection, "os", SimpleNamespace(name="nt", getpid=os.getpid))
     monkeypatch.setattr(_backup, "os", SimpleNamespace(name="nt"))
