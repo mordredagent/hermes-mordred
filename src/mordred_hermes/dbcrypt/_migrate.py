@@ -3,9 +3,10 @@
 A genuine exclusive lifecycle lease precedes native source custody and SQL.
 Journal v2 binds the complete inventory, source/staging identities, directory
 parents and schema/count proof. Scoped runtime acquisition refuses pending work.
-Sources are checkpointed before their revision is recorded. Each POSIX replace
-swap re-proves that no process holds the files and, for a converted source, that
-no WAL commit arrived after its export.
+Sources are checkpointed before their revision is recorded. Each swap (POSIX
+replace or retained publication) re-proves that no process holds the files and,
+for a converted source, that no WAL commit or hot rollback journal arrived after
+its export.
 Windows uses the owning checked VFS and retained-original publication. Windows
 admission is source-controlled; workstation editions are refused; see
 docs/dev/CI.md for native acceptance. Only explicit tests replace the native
@@ -51,6 +52,10 @@ DECRYPT_PENDING_SUBPATH: Final = ("mordred", "db-decryption.pending")
 JOURNAL_SUBPATH: Final = ("mordred", "db-encryption.journal.json")
 PREPARED_SUFFIX: Final = ".mordred-enc"
 RETAINED_SUFFIX: Final = ".mordred-original-"
+#: Sidecars removed with the file they belong to (see ``_cleanup_sidecars``).
+_SIDECAR_SUFFIXES: Final = ("-wal", "-shm", "-journal")
+#: The first 8 bytes of a synced (hot-capable) SQLite rollback journal header.
+_JOURNAL_MAGIC: Final = b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7"
 
 
 @dataclass(frozen=True)
@@ -362,11 +367,16 @@ def prepare_plain(database: Database, key: DatabaseKey, *, _reserved_identity: l
 
 
 def _cleanup_sidecars(path: Path) -> None:
-    """Delete only private, regular sidecars through their checked identity."""
+    """Delete only private, regular sidecars through their checked identity.
+
+    A conversion swap reaches this only after ``_refuse_committed_wal``, so the
+    ``-journal`` it removes is never hot; left beside the replacement, a stale
+    journal would be rolled back into it.
+    """
     if os.name != "nt":
         # Historical POSIX DB directories may be 0755 and DBs 0644. Preserve
         # that accepted owner-only-write policy rather than requiring 0700.
-        for suffix in ("-wal", "-shm"):
+        for suffix in _SIDECAR_SUFFIXES:
             sidecar = Path(f"{path}{suffix}")
             try:
                 _file_identity(sidecar)
@@ -376,7 +386,7 @@ def _cleanup_sidecars(path: Path) -> None:
         _sync_directory(path.parent)
         return
     with open_private_directory(path.parent) as directory, directory.transaction() as tx:
-        for suffix in ("-wal", "-shm"):
+        for suffix in _SIDECAR_SUFFIXES:
             try:
                 metadata = tx.stat(path.name + suffix)
             except PrivateFSError as exc:
@@ -392,20 +402,51 @@ def _swap(path: Path, prepared: Path) -> None:
     _cleanup_sidecars(path)
 
 
+def _hot_journal(journal: Path) -> bool:
+    """Whether ``journal`` is non-empty and starts with SQLite's rollback-journal magic.
+
+    A missing, empty or zeroed-header journal is not hot: TRUNCATE mode empties
+    it and PERSIST mode zeroes its header when a transaction ends.
+    """
+    try:
+        if not journal.lstat().st_size:
+            return False
+        _file_identity(journal)  # The checked regular owned file _cleanup_sidecars would delete.
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(journal, flags)
+    except FileNotFoundError:
+        return False
+    try:
+        header = os.read(fd, len(_JOURNAL_MAGIC))
+    finally:
+        os.close(fd)
+    return header == _JOURNAL_MAGIC
+
+
 def _refuse_committed_wal(path: Path, relative: str) -> None:
-    """Refuse while ``path``'s WAL holds frames that are not in its main file.
+    """Refuse while ``path``'s sidecars hold changes its main file does not settle.
 
     Only an empty (or absent) WAL lets the main file's revision stand for the
     whole database, and lets a swap discard the sidecars without losing commits.
+    A hot rollback journal (non-empty, starting with SQLite's journal magic)
+    means a writer changed the main file inside a transaction it never ended:
+    the next opener would roll those pages back, so the main file is not a
+    committed state, and discarding the journal would publish torn pages. A
+    missing, empty or zeroed-header journal (a PERSIST-mode leftover) passes.
     """
     try:
         size = Path(f"{path}-wal").lstat().st_size
     except FileNotFoundError:
-        return
+        size = 0
     if size:
         raise MigrationError(
             f"{relative} has WAL commits that are not in its main file (another process wrote without "
             "the database lease); originals retained"
+        )
+    if _hot_journal(Path(f"{path}-journal")):
+        raise MigrationError(
+            f"{relative} has a hot rollback journal (another process wrote without the database lease); "
+            "originals retained"
         )
 
 
@@ -894,27 +935,58 @@ def _two_step_publication() -> bool:
     return os.name == "nt"
 
 
-def _retained_swap(root: Path, data: dict[str, Any], entry: dict[str, Any]) -> None:
+def _refuse_unsettled_swap(
+    path: Path,
+    staged: Path,
+    entry: dict[str, Any],
+    holders_of: Callable[[list[Path]], list[int] | None] | None,
+) -> None:
+    """Re-prove, just before a swap deletes ``path``'s sidecars, that nothing else wrote it.
+
+    The earlier holder checks do not cover a writer that started without the
+    lease. Slowest first: a holder scan, then the stat-only sidecar proofs and
+    the caller's identity/revision proof, which also catch a commit that
+    landed during the scan. Only conversion entries (prepare() emptied the WAL)
+    refuse sidecar content; restore entries replace the destination by design.
+    """
+    _refuse_if_open([Database(path, entry["relative"], ""), Database(staged, entry["prepared"], "")], holders_of)
+    if entry.get("wal_checkpointed") is True:
+        _refuse_committed_wal(path, entry["relative"])
+
+
+def _retained_swap(
+    root: Path,
+    data: dict[str, Any],
+    entry: dict[str, Any],
+    holders_of: Callable[[list[Path]], list[int] | None] | None,
+) -> None:
     path, staged, retained = (root / entry[name] for name in ("relative", "prepared", "retained"))
     with open_private_directory(path.parent) as directory, directory.transaction() as tx:
         if path.exists() and _file_identity(path) == entry["prepared_identity"]:
             if staged.exists():
                 raise MigrationError("two prepared survivors are ambiguous")
             return
+        _refuse_unsettled_swap(path, staged, entry, holders_of)  # Before any rename.
         if path.exists():
             if (
                 _file_identity(path) != entry["source_identity"]
                 or _revision(path) != entry["source_revision"]
+                or _file_identity(staged) != entry["prepared_identity"]
                 or retained.exists()
             ):
                 raise MigrationError("original destination changed before retained publication")
             tx.rename_file(path.name, retained.name, expected_identity=tx.stat(path.name).identity)
             _save_journal(root, data, "retained")
-        if _file_identity(retained) != entry["source_identity"] or _file_identity(staged) != entry["prepared_identity"]:
+        # A rename changes only the ctime, which _revision()[2] records on POSIX.
+        if (
+            _file_identity(retained) != entry["source_identity"]
+            or _revision(retained)[:2] != entry["source_revision"][:2]
+            or _file_identity(staged) != entry["prepared_identity"]
+        ):
             raise MigrationError("retained publication identities changed")
         tx.rename_file(staged.name, path.name, expected_identity=tx.stat(staged.name).identity)
         _transition("published")
-        for suffix in ("-wal", "-shm"):
+        for suffix in _SIDECAR_SUFFIXES:
             try:
                 sidecar = tx.stat(path.name + suffix)
             except PrivateFSError as exc:
@@ -945,13 +1017,7 @@ def _replace_swap(
 ) -> None:
     path, staged = _bound_path(root, entry["relative"]), root / entry["prepared"]
     if staged.exists():
-        # _swap unlinks the original's -wal/-shm. The earlier holder checks do
-        # not cover a writer that started without the lease, so re-prove both
-        # here, slowest first: a holder scan, then the stat-only WAL and
-        # revision proofs, which also catch a commit that landed during the scan.
-        _refuse_if_open([Database(path, entry["relative"], ""), Database(staged, entry["prepared"], "")], holders_of)
-        if entry.get("wal_checkpointed") is True:
-            _refuse_committed_wal(path, entry["relative"])
+        _refuse_unsettled_swap(path, staged, entry, holders_of)
         if (
             _file_identity(path) != entry["source_identity"]
             or _revision(path) != entry["source_revision"]
@@ -995,7 +1061,7 @@ def _finish(
     for entry in files:
         ExclusiveLease.assert_held(lease, root)
         if data["publication"] == "retained":
-            _retained_swap(root, data, entry)
+            _retained_swap(root, data, entry, holders_of)
         else:
             _replace_swap(root, entry, holders_of)
         entry["phase"] = "swapped"

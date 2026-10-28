@@ -6,7 +6,8 @@ import json
 import sqlite3 as stdlib_sqlite3
 import subprocess
 import sys
-from contextlib import closing
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 import pytest
@@ -655,3 +656,189 @@ def test_a_commit_during_the_export_refuses_before_arming(tmp_path: Path, monkey
     with closing(sc.connect(f"{staged.as_uri()}?mode=ro", uri=True)) as copy:
         _shim.apply_key(copy, KEY)
         assert copy.execute("SELECT count(*) FROM messages").fetchone() == (len(_BASE_ROWS),)  # the copy lacks it
+
+
+# -- hot rollback journals, busy checkpoints, the journal's WAL proof, retained publication --
+
+#: The first 8 bytes of a synced SQLite rollback journal: a transaction that never ended.
+_JOURNAL_MAGIC = bytes.fromhex("d9d505f920a163d7")
+#: Shorter than a journal header, so SQLite would never play it back into anything.
+_HOT_JOURNAL = _JOURNAL_MAGIC + bytes(20)
+
+
+def _put_rollback_journal(path: Path, content: bytes) -> None:
+    journal = Path(f"{path}-journal")
+    journal.write_bytes(content)
+    journal.chmod(0o600)
+
+
+def test_a_hot_rollback_journal_at_swap_time_refuses_and_keeps_everything(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lease-less writer that stopped mid-transaction leaves pages the next opener rolls back."""
+    sources = [home / relative for relative in _SOURCES]
+    originals = {path: path.read_bytes() for path in sources}
+
+    def foreign_hot_journal(phase: str) -> None:
+        if phase == "armed":
+            for path in sources:
+                _put_rollback_journal(path, _HOT_JOURNAL)
+
+    monkeypatch.setattr(_migrate, "_transition", foreign_hot_journal)
+    with pytest.raises(_migrate.MigrationError, match="hot rollback journal"):
+        _migrate.migrate(home, KEY, arm=dbcrypt.arm, holders_of=_no_holders)
+    monkeypatch.setattr(_migrate, "_transition", lambda phase: None)
+
+    def state() -> dict[Path, tuple[bytes, bytes, bytes]]:
+        return {
+            path: (
+                path.read_bytes(),
+                Path(f"{path}-journal").read_bytes(),
+                Path(f"{path}{_migrate.PREPARED_SUFFIX}").read_bytes(),
+            )
+            for path in sources
+        }
+
+    before = state()
+    assert {path: contents[0] for path, contents in before.items()} == originals
+    assert all(contents[1] == _HOT_JOURNAL for contents in before.values())
+    assert {(entry["phase"], entry["wal_checkpointed"]) for entry in _journal_files(home)} == {("armed", True)}
+    # Recovery refuses the same way and never discards the journal or either copy.
+    with pytest.raises(_migrate.MigrationError, match="hot rollback journal"):
+        _migrate.resume(home, holders_of=_no_holders)
+    assert state() == before and _migrate.journal_path(home).exists()
+
+
+def test_a_zeroed_rollback_journal_is_not_hot_and_goes_with_the_swap(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PERSIST mode zeroes the header when its transaction ends; the stale body after it is inert."""
+    sources = [home / relative for relative in _SOURCES]
+
+    def persist_leftover(phase: str) -> None:
+        if phase == "armed":
+            for path in sources:
+                _put_rollback_journal(path, bytes(28) + _JOURNAL_MAGIC * 8)
+
+    monkeypatch.setattr(_migrate, "_transition", persist_leftover)
+    report = _migrate.migrate(home, KEY, arm=dbcrypt.arm, holders_of=_no_holders)
+    assert sorted(report.converted) == sorted(_SOURCES)
+    assert not _migrate.journal_path(home).exists() and dbcrypt.marker_path(home).is_file()
+    for path in sources:
+        assert not Path(f"{path}-journal").exists()
+        assert not _is_plaintext(path)
+        with closing(_keyed(path)) as conn:
+            assert conn.execute("SELECT count(*) FROM messages").fetchone() == (len(_BASE_ROWS),)
+
+
+def test_a_busy_source_checkpoint_refuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "state.db"
+    _plain_db(path)
+
+    class BusyCheckpoint:
+        def execute(self, sql: str) -> BusyCheckpoint:
+            assert sql == "PRAGMA wal_checkpoint(TRUNCATE)"
+            return self
+
+        def fetchone(self) -> tuple[int, int, int]:
+            return (1, 0, 0)  # SQLITE_BUSY: another connection still uses the WAL.
+
+    @contextmanager
+    def busy(_path: Path, **_kwargs: object) -> Iterator[BusyCheckpoint]:
+        yield BusyCheckpoint()
+
+    monkeypatch.setattr(_migrate, "_offline_connection", busy)
+    with pytest.raises(_migrate.MigrationError, match="could not be checkpointed"):
+        _migrate._checkpoint_source(_migrate.Database(path, "state.db", "plaintext"), None)
+
+
+@pytest.mark.parametrize("proof", ["yes", 1, None])
+def test_a_journal_with_a_malformed_wal_proof_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, proof: object
+) -> None:
+    base = tmp_path / "hermes"
+    path = base / "state.db"
+    _plain_db(path)
+
+    class Crash(Exception):
+        pass
+
+    def crash(phase: str) -> None:
+        if phase == "prepared":
+            raise Crash
+
+    monkeypatch.setattr(_migrate, "_transition", crash)
+    with pytest.raises(Crash):
+        _migrate.migrate(base, KEY, arm=dbcrypt.arm, holders_of=_no_holders)
+    monkeypatch.setattr(_migrate, "_transition", lambda phase: None)
+    journal = _migrate.journal_path(base)
+    data = json.loads(journal.read_bytes())
+    data["files"][0]["wal_checkpointed"] = proof
+    journal.write_text(json.dumps(data))
+    before = {p: p.read_bytes() for p in (path, journal)}
+    with pytest.raises(_migrate.MigrationError, match="invalid journal WAL proof"):
+        _migrate.resume(base, holders_of=_no_holders)
+    assert {p: p.read_bytes() for p in before} == before
+    assert not dbcrypt.marker_path(base).exists()
+
+
+@pytest.fixture
+def private_home(tmp_path: Path) -> Path:
+    """A home that passes the private-directory checks retained (Windows-style) publication makes."""
+    base = tmp_path / "hermes"
+    base.mkdir(mode=0o700)
+    _plain_db(base / "state.db")
+    (base / "state.db").chmod(0o600)
+    return base
+
+
+@pytest.mark.parametrize("hazard", ["holder", "wal", "hot-journal"])
+def test_retained_publication_reproves_the_source_before_any_rename(
+    private_home: Path, monkeypatch: pytest.MonkeyPatch, hazard: str
+) -> None:
+    """The two-step publication carries the replace swap's guards, before the original moves."""
+    path = private_home / "state.db"
+    staged = Path(f"{path}{_migrate.PREPARED_SUFFIX}")
+    monkeypatch.setattr(_migrate, "_two_step_publication", lambda: True)
+    armed: list[bool] = []
+    asked: list[list[Path]] = []
+
+    def transition(phase: str) -> None:
+        if phase != "armed":
+            return
+        armed.append(True)
+        if hazard == "wal":
+            _wal_only_commits(path)
+        elif hazard == "hot-journal":
+            _put_rollback_journal(path, _HOT_JOURNAL)
+
+    def late_holder(paths: list[Path]) -> list[int]:
+        if not armed or hazard != "holder":
+            return []
+        asked.append(sorted(paths))
+        return [4242]
+
+    expected = {"holder": "open in other processes", "wal": "WAL commits", "hot-journal": "hot rollback journal"}
+    monkeypatch.setattr(_migrate, "_transition", transition)
+    with pytest.raises(_migrate.MigrationError, match=expected[hazard]):
+        _migrate.migrate(private_home, KEY, arm=dbcrypt.arm, holders_of=late_holder)
+    monkeypatch.setattr(_migrate, "_transition", lambda phase: None)
+
+    (entry,) = _journal_files(private_home)
+    assert (entry["phase"], entry["wal_checkpointed"]) == ("armed", True)
+    assert json.loads(_migrate.journal_path(private_home).read_bytes())["publication"] == "retained"
+    assert not list(private_home.glob(f"state.db{_migrate.RETAINED_SUFFIX}*"))  # Nothing was renamed.
+    assert path.is_file() and staged.is_file()
+    if hazard == "wal":
+        assert _plain_rows(path) == _BASE_ROWS + _WAL_ROWS  # The foreign commits are kept.
+    if hazard != "holder":
+        return
+    assert asked == [sorted([path, staged])]
+    assert _plain_rows(path) == _BASE_ROWS
+    # Once the holder is gone the journal publishes and retires the original.
+    assert _migrate.resume(private_home, holders_of=_no_holders) is True
+    assert not _migrate.journal_path(private_home).exists() and not staged.exists()
+    assert not list(private_home.glob(f"state.db{_migrate.RETAINED_SUFFIX}*"))
+    assert not _is_plaintext(path)
+    with closing(_keyed(path)) as conn:
+        assert conn.execute("SELECT count(*) FROM messages").fetchone() == (len(_BASE_ROWS),)

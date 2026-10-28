@@ -36,7 +36,7 @@ _LIVE_CONNECTIONS: weakref.WeakSet[ProtectedConnection] = weakref.WeakSet()
 _LIVE_CURSORS: weakref.WeakSet[ProtectedCursor] = weakref.WeakSet()
 _LIVE_MAINTENANCE: weakref.WeakSet[_MaintenanceConnection] = weakref.WeakSet()
 # Every raw handle not yet closed, including ones whose facade was dropped
-# without close() and awaits _reap(); an owner leaves only after raw.close().
+# without close() and awaits _reap(); an owner leaves only once raw.close() ran.
 _LIVE_OWNERS: weakref.WeakSet[_RawOwner] = weakref.WeakSet()
 # Facade finalizers only queue here: no SQLite, VFS or lock work may run in a
 # GC/refcount callback. _reap() releases the queue where no lock is held.
@@ -674,11 +674,14 @@ class _RawOwner:
                     for cursor in cursors:
                         cursor.close()
                 finally:
-                    if raw is not None:
-                        raw.close()
-                    _LIVE_OWNERS.discard(self)
-                    if vfs is not None:
-                        vfs.close()
+                    try:
+                        if raw is not None:
+                            raw.close()
+                    finally:
+                        # A failed raw.close() must not pin the owner or leak its VFS.
+                        _LIVE_OWNERS.discard(self)
+                        if vfs is not None:
+                            vfs.close()
 
 
 def _reap() -> None:
@@ -823,15 +826,9 @@ def _open(
         mode = "ro" if readonly else ("rw" if binding.leaf is not None else "rwc")
         uri = f"file:{quote(path.as_posix(), safe='/:')}?mode={mode}" if path is not None else ":memory:"
         if os.name == "nt" and path is not None:
-            from ._windows_vfs import (
-                NATIVE_QUALIFIED,
-                classify_windows_database,
-                register_checked_vfs,
-                windows_edition_admitted,
-            )
+            # The edition was admitted above, before this operation began.
+            from ._windows_vfs import NATIVE_QUALIFIED, classify_windows_database, register_checked_vfs
 
-            if not windows_edition_admitted():
-                raise DatabaseRefused("Windows workstation editions are not qualified")
             if not NATIVE_QUALIFIED:
                 raise DatabaseRefused("Windows checked VFS is not qualified")
             classify_windows_database(str(path), uri=False, root=authority.root)

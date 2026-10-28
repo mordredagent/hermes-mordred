@@ -321,10 +321,56 @@ def test_readiness_probe_without_close_releases_every_handle(native_root, author
             ref = weakref.ref(conn)
             del conn
             assert ref() is None
-            assert len(authority._connections) <= 1
             assert len(_owned_handles(authority)) <= 1  # The previous probe's raw handle is closed.
+        # Each admission reaps the abandoned probes before it, so exactly the new one remains.
+        probe = native_module(authority).connect(uri, uri=True, timeout=1.0)
+        try:
+            assert len(authority._connections) == 1
+            assert len(_owned_handles(authority)) == 1
+        finally:
+            probe.close()
+        assert len(authority._connections) == 0
+        assert _owned_handles(authority) == []
     finally:
         gc.enable()
+
+
+def test_owner_release_forgets_and_closes_its_vfs_when_raw_close_fails(authority):
+    from mordred_hermes.dbcrypt._connection import _LIVE_OWNERS, _RawOwner
+
+    events = []
+
+    class Raw:
+        def set_authorizer(self, _callback):
+            pass
+
+        def set_progress_handler(self, _handler, _steps):
+            pass
+
+        def rollback(self):
+            events.append("rollback")
+
+        def close(self):
+            events.append("raw.close")
+            raise sc.OperationalError("unable to close due to unfinalized statements")
+
+    class Vfs:
+        def close(self):
+            events.append(("vfs.close", owner in _LIVE_OWNERS))
+
+    class Facade:
+        pass
+
+    facade = Facade()
+    owner = _RawOwner(authority, Vfs(), facade)
+    owner._raw = Raw()
+    with pytest.raises(sc.OperationalError):
+        owner.release()
+    # raw.close -> forget the owner -> close its VFS, even though raw.close raised.
+    assert events == ["rollback", "raw.close", ("vfs.close", False)]
+    assert owner not in _LIVE_OWNERS
+    owner.release()  # Exactly once.
+    assert events == ["rollback", "raw.close", ("vfs.close", False)]
 
 
 def test_abandoned_uncommitted_write_is_rolled_back_before_lease_release(native_root, authority):
@@ -341,6 +387,7 @@ def test_abandoned_uncommitted_write_is_rolled_back_before_lease_release(native_
     del conn
     assert ref() is None
     authority.close()
+    assert authority._connections == []
     assert _owned_handles(authority) == []
     with acquire_exclusive(root):
         writer = sc.connect(str(path), timeout=0)
@@ -797,10 +844,12 @@ def test_writer_commits_while_another_connection_busy_waits(native_root, authori
         x.execute("BEGIN IMMEDIATE")
         x.execute("INSERT INTO records VALUES (1)")
         waited, failures = [], []
+        beginning = threading.Event()
 
         def write():
             started = time.monotonic()
             try:
+                beginning.set()
                 y.execute("BEGIN IMMEDIATE")  # Busy-waits for X inside SQLite.
                 waited.append(time.monotonic() - started)
                 y.execute("INSERT INTO records VALUES (2)")
@@ -810,7 +859,8 @@ def test_writer_commits_while_another_connection_busy_waits(native_root, authori
 
         worker = threading.Thread(target=write)
         worker.start()
-        time.sleep(0.2)
+        assert beginning.wait(2)
+        time.sleep(0.2)  # X still holds its write lock: Y must be waiting, not done.
         started = time.monotonic()
         x.commit()
         committed = time.monotonic() - started
@@ -818,7 +868,7 @@ def test_writer_commits_while_another_connection_busy_waits(native_root, authori
         assert not worker.is_alive()
         assert failures == []
         assert committed < 1.0
-        assert len(waited) == 1 and waited[0] < 2.0
+        assert len(waited) == 1 and 0.1 <= waited[0] < 2.0
         assert x.execute("SELECT value FROM records ORDER BY value").fetchall() == [(1,), (2,)]
     finally:
         if y is not None:
