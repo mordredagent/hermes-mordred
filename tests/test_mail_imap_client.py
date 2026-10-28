@@ -263,8 +263,23 @@ def test_a_wrapper_handshake_past_the_deadline_fails_and_closes_the_late_socket(
         release.set()
 
 
+def _drain_abandoned_handshakes() -> None:
+    """Start from an empty cap: an earlier test's worker may outlive its waiter until its socket timeout.
+
+    The absolute counts asserted below would otherwise blame this test for a
+    worker it never started (seen on the macOS runner, where one slot stayed
+    taken for longer than the 5 s the tests poll).
+    """
+    deadline = time.monotonic() + 35.0
+    while imap._abandoned_handshakes.active and time.monotonic() < deadline:
+        time.sleep(0.05)
+    active = imap._abandoned_handshakes.active
+    assert active == 0, f"{active} handshake worker(s) left by an earlier test are still running"
+
+
 def test_a_late_handshake_result_is_closed_whoever_finishes_last() -> None:
     """The waiter gives up at the deadline; a socket the worker publishes afterwards is closed, not leaked."""
+    _drain_abandoned_handshakes()
     server = FakeImapServer({"INBOX": FakeMailbox(1)})
     release = threading.Event()
     produced: list[socket.socket] = []
@@ -322,6 +337,7 @@ def test_a_handshake_slot_is_released_when_the_worker_never_runs() -> None:
 
 def test_abandoned_handshake_workers_are_capped() -> None:
     """A verifier that never returns keeps its worker; past the cap a new attempt is refused at once."""
+    _drain_abandoned_handshakes()
     server = FakeImapServer({"INBOX": FakeMailbox(1)})
     release = threading.Event()
 
