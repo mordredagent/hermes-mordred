@@ -989,8 +989,11 @@ def test_native_orphan_key_cli_repair_end_to_end(
     assert native.keys and "delete" not in native.calls
     code, out, err = run(["mail", "forget", "--yes", "--force-orphan"], capsys)
     assert code == 0, err
-    assert "Orphan repair done" in out and "No mail credentials were set up." in out
+    assert "Orphan repair done" in out and "No mail credentials were set up." not in out
     assert native.keys == {} and native.calls.count("delete") == 1 and not secret_store.key_record_path.exists()
+    code, out, err = run(["mail", "forget", "--yes", "--force-orphan"], capsys)  # nothing left: a no-op
+    assert code == 0, err
+    assert "Orphan repair done" not in out and "No mail credentials were set up." in out
 
 
 # --- the forget library (shared with the Desktop page) ---------------------------------------------

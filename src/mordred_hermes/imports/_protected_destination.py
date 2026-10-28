@@ -2,8 +2,10 @@
 
 A returned Path is classification, never authority for a later open. Database
 I/O belongs exclusively to guarded SQLCipher. Source reads are for export
-files, use the actual checked handle and release a verified memory snapshot;
-no database header is opened to guess whether it contains encrypted data.
+files and use the actual checked handle: POSIX streams the file through an
+isolated worker, while Windows reads the validated handle fully into memory
+(no size cap); no database header is opened to guess whether it contains
+encrypted data.
 """
 
 from __future__ import annotations
@@ -235,17 +237,17 @@ def checked_export_stream(path: Path) -> Iterator[BinaryIO]:
     """Yield a streaming, verified view of a mail export; the worker child is the only opener.
 
     Symlinked parents are resolved; the leaf must be a regular, single-link file owned by
-    the caller. There is no size, suffix or mode-bit limit. Database-named files and
-    anything inside Hermes's own database scope are refused. The caller must consume the
-    stream inside the ``with`` block; completeness is verified at exit.
+    the caller. POSIX streams through the isolated worker with no size, suffix or mode-bit
+    limit. Windows reads the validated handle fully into memory (no size cap) and keeps the
+    confidential-parent-directory policy. Database-named files are refused. The caller must
+    consume the stream inside the ``with`` block; completeness is verified at exit.
     """
-    from .._home import hermes_home
-    from ..dbcrypt._policy import in_scope, looks_like_database_name
+    from ..dbcrypt._policy import looks_like_database_name
 
     if not path.is_absolute():
         raise _refused()
     resolved = Path(os.path.realpath(path.parent)) / path.name
-    if looks_like_database_name(resolved.name) or in_scope(resolved, hermes_home()):
+    if looks_like_database_name(resolved.name):
         raise _refused()
     try:
         if os.name == "nt":

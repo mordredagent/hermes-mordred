@@ -58,6 +58,7 @@ class Forgotten:
     had_credentials: bool
     unidentified: bool  # the requested row/cursor erasure target could not be identified
     key_gone: bool
+    orphan_key_retired: bool = False  # force_orphan only: a native key without a source was deleted
 
     @property
     def warnings(self) -> tuple[str, ...]:
@@ -213,12 +214,13 @@ def _orphan_forget(secret_store: Any, home: Path, lock: WriterLock) -> Forgotten
 
     with lock(home), mail_writer_scope(home):
         had = bool(secret_store.credential_files())
+        had_key = bool(secret_store.native_key_present())
         key_gone = secret_store.forget(force_orphan=True) is not False
         if secret_store.residue():
             raise MailForgetError("credentials_left")
     # A removed keyless source may leave its account's rows and cursors: only
     # the named retry (`--account LABEL`) erases them, so say the label is unknown.
-    return Forgotten(None, 0, 0, None, had, had, key_gone)
+    return Forgotten(None, 0, 0, None, had, had, key_gone, orphan_key_retired=had_key and key_gone)
 
 
 def forget(

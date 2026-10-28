@@ -332,6 +332,14 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270; track them here.
   (`src/mordred_hermes/dbcrypt/_authority.py`).
 - [ ] Explicit, safe route to abandon a prepared migration transaction
   (`src/mordred_hermes/dbcrypt/_migrate.py`).
+- [ ] An interrupted `mail forget --force-orphan` (intent journal published, native delete not reached) cannot be
+  resumed: `retire_orphan` refuses 'pending' and `cleanup()` requires phase deleted; let the repair resume an intent
+  journal after re-verifying the live key digest (`src/mordred_hermes/keyvault/_mail_custody.py`).
+- [ ] `open_vault` registers against the anchor read before the interactive unwrap; a writer advancing the vault
+  during the Touch ID prompt yields a stale read-only handle until the next custody/commit re-check; either compare
+  a fresh read after the unwrap or document freshness as of the pre-unwrap read (`src/mordred_hermes/keyvault/vault.py`).
+- [ ] Windows mail exports are read whole into memory with no size cap and still require a confidential parent
+  directory; stream from the validated handle or restore a generous cap (`src/mordred_hermes/imports/_protected_destination.py`).
 
 ### Linux private Telegram (proposed)
 

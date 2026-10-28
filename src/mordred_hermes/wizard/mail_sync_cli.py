@@ -563,14 +563,18 @@ def cmd_forget(args: argparse.Namespace) -> int:
             hint = f"if the native mail key no longer exists on this machine, run {_FORCE_ORPHAN}"
         return _refused(exc.code, hint)
     _audit(forget_module.audit_entry(done, rows=rows))
-    if force_orphan:
+    repaired = force_orphan and done.key_gone and (done.had_credentials or done.orphan_key_retired)
+    if repaired:
         print("Orphan repair done: no native mail key or credential file is left without its pair.")
-    return _report_forget(done, rows)
+    return _report_forget(done, rows, quiet_if_repaired=repaired and not done.had_credentials)
 
 
-def _report_forget(done: Forgotten, rows: bool) -> int:
+def _report_forget(done: Forgotten, rows: bool, *, quiet_if_repaired: bool = False) -> int:
     """What forget did and what it could not do (exit 1 whenever something the operator asked for remains)."""
-    print("Mail credentials removed." if done.had_credentials else "No mail credentials were set up.")
+    if done.had_credentials:
+        print("Mail credentials removed.")
+    elif not quiet_if_repaired:  # an orphan repair that retired only a key has already said so
+        print("No mail credentials were set up.")
     status = 0
     if not done.key_gone:  # whatever files there were: a key left behind is reported until a retry deletes it
         _term.emit_error(

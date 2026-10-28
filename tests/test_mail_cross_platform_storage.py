@@ -1257,3 +1257,16 @@ def test_windows_force_orphan_retires_a_sourceless_mail_role(fs):
     with pytest.raises(MailSecretsError, match=r"^tee_unavailable$"):
         store.forget(force_orphan=True)  # a source with its role keeps the authenticated retirement
     assert store.sealed_path.read_bytes() == sealed and store.load() == generic_creds()
+
+
+def test_force_orphan_with_a_live_key_and_no_directory_is_refused_not_silently_repaired(tmp_path):
+    """POSIX matches Windows: ``force_orphan`` runs the repair even when the credential directory is gone."""
+    import shutil
+
+    store, native = orphan_after_refused_login(tmp_path)
+    shutil.rmtree(tmp_path / "mordred/mail")
+    keys = dict(native.keys)
+    for force, code in ((False, "mail_orphan_key"), (True, "tee_unavailable")):  # no record proves an orphan: refuse
+        with pytest.raises(MailSecretsError, match=rf"^{code}$"):
+            store.forget(force_orphan=force)
+        assert native.keys == keys and "delete" not in native.calls

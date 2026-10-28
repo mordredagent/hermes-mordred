@@ -69,15 +69,6 @@ def test_backup_writes_a_private_copy_and_refuses_an_existing_one(
     assert dest.read_bytes() == before
 
 
-def test_restore_of_a_missing_file_is_refused_without_creating_it(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    missing = tmp_path / "missing.db"
-    assert cli.main(["activity", "restore", "--input", str(missing)]) == 1
-    assert "refused (store_unavailable)" in capsys.readouterr().err
-    assert not missing.exists()
-
-
 def test_retention_dry_run_deletes_nothing_and_the_real_run_deletes(
     store: ActivityStore, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -253,3 +244,18 @@ def test_real_restore_refuses_another_profiles_backup(protected_runtime, monkeyp
     for extra in ([], ["--yes"]):
         assert cli.main(["activity", "restore", "--input", str(foreign), *extra]) == 1
         assert "refused (profile_mismatch)" in capsys.readouterr().err
+
+
+def test_real_restore_of_a_missing_file_is_refused_without_creating_it(protected_runtime, monkeypatch, capsys) -> None:
+    root, home, _ = _protected_restore_setup(protected_runtime, monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    missing = root.parent / (root.name + "-missing.backup")
+    before = _count_events(home, protected_runtime)
+    capsys.readouterr()
+
+    for extra in ([], ["--yes"]):
+        assert cli.main(["activity", "restore", "--input", str(missing), *extra]) == 1
+        assert "refused (store_unavailable)" in capsys.readouterr().err
+        assert not missing.exists()
+
+    assert _count_events(home, protected_runtime) == before == 2

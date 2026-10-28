@@ -393,6 +393,26 @@ class MailSecretStore:
                 raise MailOrphanKey("mail native key has no authenticated source; retained for the orphan repair")
         return True
 
+    def _forget_native(self, *, force_orphan: bool) -> bool:
+        """The native POSIX forget: resume a pending journal, else repair an orphan or retire the source."""
+        from ..._private_fs import PrivateFSError, open_private_directory
+        from ...keyvault._mail_custody import JOURNAL, read
+
+        try:
+            with open_private_directory(self._profile_home() / "mordred/mail") as directory:
+                pending = read(directory, JOURNAL) is not None
+        except PrivateFSError as exc:
+            if exc.reason != "missing":
+                raise
+            if not force_orphan:
+                return True
+            pending = False  # a live key may outlast its directory: the repair decides
+        if pending:
+            return self.forget_from_snapshot((None, None))
+        if force_orphan:
+            return self._retire_orphan()
+        return self.forget_from_snapshot(self.load_snapshot())
+
     def _retire_orphan(self) -> bool:
         """``forget(force_orphan=True)`` on POSIX: the custody's explicit orphan repair, never a retirement."""
         from ...keyvault._mail_custody import mail_credential_transaction
@@ -400,6 +420,14 @@ class MailSecretStore:
         with mail_credential_transaction(home=self._profile_home(), backend=self._backend()) as custody:
             custody.retire_orphan(linux=self._platform() == "linux")
         return True
+
+    def native_key_present(self) -> bool:
+        """True while a native mail key is recorded (Windows: a current mail role exists); never calls native POSIX."""
+        with _mail_native_refusals():
+            self._check_platform()
+            if self._platform() == "win32":
+                return bool(self._windows().role_present())
+            return self.key_record_path.exists()  # the orphan proof; no native call
 
     def _dir(self, *, create: bool) -> Path:
         self._check_platform()
@@ -845,21 +873,7 @@ class MailSecretStore:
         if self._platform() == "win32":
             return bool(self._windows().forget(force_orphan=force_orphan))
         if self._native():
-            from ..._private_fs import PrivateFSError, open_private_directory
-            from ...keyvault._mail_custody import JOURNAL, read
-
-            try:
-                with open_private_directory(self._profile_home() / "mordred/mail") as directory:
-                    pending = read(directory, JOURNAL) is not None
-            except PrivateFSError as exc:
-                if exc.reason == "missing":
-                    return True
-                raise
-            if pending:
-                return self.forget_from_snapshot((None, None))
-            if force_orphan:
-                return self._retire_orphan()
-            return self.forget_from_snapshot(self.load_snapshot())
+            return self._forget_native(force_orphan=force_orphan)
         for path in (self.sealed_path, self.meta_path, self.key_record_path):
             path.unlink(missing_ok=True)
         for path in self.sealed_path.parent.glob(_STAGED_GLOB):  # left by a store() that was killed

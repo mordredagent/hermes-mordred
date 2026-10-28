@@ -8,8 +8,9 @@
 - ``retention [--dry-run] [--json]`` — one bounded retention pass with the configured raw-event
   window; ``--dry-run`` reports the same counts from read-only queries.
 
-Every command opens the store through the protection gate and prints only the refusal code when
-it refuses (exit 1). Identifiers and counts only; event content is never printed.
+Every command except ``restore`` opens the store through the protection gate; ``restore`` runs
+offline under the exclusive lease. A refusal prints only its code (exit 1).
+Identifiers and counts only; event content is never printed.
 """
 
 from __future__ import annotations

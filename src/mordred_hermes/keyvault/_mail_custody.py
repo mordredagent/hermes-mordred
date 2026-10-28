@@ -885,6 +885,11 @@ class WindowsMailStore:
             return self.retire_orphan()
         return self.forget_from_snapshot(self.load_snapshot())
 
+    def role_present(self) -> bool:
+        """True while a current mail role exists (read-only; creates nothing)."""
+        with self._session() as session:
+            return bool(session.role_status("mail").current is not None)
+
     def retire_orphan(self) -> bool:
         """Explicit ``--force-orphan`` repair: retire a current mail role that has no mail source.
 
