@@ -76,11 +76,9 @@ def test_windows_edition_gates_status(tmp_path, monkeypatch, server):
         assert status.reason == "Windows workstation editions are not qualified"
 
 
-@pytest.mark.parametrize(
-    ("platform", "product_type", "expected"),
-    [("win32", 3, True), ("win32", 1, False), ("win32", 2, False), ("linux", 3, False)],
-)
-def test_windows_edition_admitted_product_type(monkeypatch, platform, product_type, expected):
+def _fake_windows_edition(monkeypatch, *, system, product_type, edition):
+    """Fake both the kernel product type and the registry EditionID."""
+    import platform as platform_module
     from types import SimpleNamespace
 
     from mordred_hermes.dbcrypt import _windows_vfs
@@ -88,9 +86,54 @@ def test_windows_edition_admitted_product_type(monkeypatch, platform, product_ty
     monkeypatch.setattr(
         _windows_vfs,
         "sys",
-        SimpleNamespace(platform=platform, getwindowsversion=lambda: SimpleNamespace(product_type=product_type)),
+        SimpleNamespace(platform=system, getwindowsversion=lambda: SimpleNamespace(product_type=product_type)),
     )
-    assert _windows_vfs.windows_edition_admitted() is expected
+    if callable(edition):
+        monkeypatch.setattr(platform_module, "win32_edition", edition)
+    else:
+        monkeypatch.setattr(platform_module, "win32_edition", lambda: edition)
+    return _windows_vfs
+
+
+@pytest.mark.parametrize(
+    ("system", "product_type", "edition", "expected"),
+    [
+        ("win32", 3, "ServerStandard", True),
+        ("win32", 3, "ServerDatacenter", True),
+        ("win32", 2, "ServerDatacenter", True),  # domain controller
+        ("win32", 2, "ServerStandard", True),  # domain controller
+        ("win32", 3, "ServerRdsh", False),  # Windows 10/11 Enterprise multi-session
+        ("win32", 1, "Professional", False),
+        ("win32", 1, "Enterprise", False),
+        ("win32", 1, "ServerStandard", False),  # workstation product type never admits
+        ("win32", 3, None, False),
+        ("win32", 3, "", False),
+        ("win32", 3, "Core", False),
+        ("win32", 3, "EnterpriseMultiSession", False),
+        ("win32", 4, "ServerStandard", False),
+        ("linux", 3, "ServerStandard", False),
+        ("darwin", 2, "ServerDatacenter", False),
+    ],
+)
+def test_windows_edition_admitted_product_type(monkeypatch, system, product_type, edition, expected):
+    module = _fake_windows_edition(monkeypatch, system=system, product_type=product_type, edition=edition)
+    assert module.windows_edition_admitted() is expected
+
+
+def test_windows_edition_admitted_fails_closed_when_edition_lookup_raises(monkeypatch):
+    def broken():
+        raise OSError("EditionID unreadable")
+
+    module = _fake_windows_edition(monkeypatch, system="win32", product_type=3, edition=broken)
+    assert module.windows_edition_admitted() is False
+
+
+def test_windows_edition_admitted_skips_edition_lookup_off_windows(monkeypatch):
+    def forbidden():
+        pytest.fail("EditionID consulted on a non-Windows platform")
+
+    module = _fake_windows_edition(monkeypatch, system="linux", product_type=3, edition=forbidden)
+    assert module.windows_edition_admitted() is False
 
 
 def test_windows_edition_admitted_fails_closed_on_error(monkeypatch):

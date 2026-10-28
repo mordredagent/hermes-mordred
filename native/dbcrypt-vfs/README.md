@@ -4,12 +4,13 @@
 
 `vfs.c` and `checked_io.c` are a separate owned-handle implementation candidate,
 not the delegating diagnostic probe below. Native database storage admission is
-source-controlled: Linux, and Windows Server x64 with the qualified
-sqlcipher3-wheels 0.5.7 driver pair and the distribution-owned checked-VFS DLL,
-are admitted; Windows workstation editions are refused at runtime. Admission is
-not acceptance: native platform acceptance evidence is recorded separately in
-docs/dev/CI.md's manual validation log, and the Windows native acceptance matrix
-is still pending.
+source-controlled: Linux, and Windows Server x64 (ServerStandard/ServerDatacenter,
+including domain controllers) with the qualified sqlcipher3-wheels 0.5.7 driver
+pair and the distribution-owned checked-VFS DLL, are admitted; Windows 10/11
+Enterprise multi-session (ServerRdsh) and workstation editions are refused at
+runtime. Admission is not acceptance: native platform acceptance evidence is
+recorded separately in docs/dev/CI.md's manual validation log, and the Windows
+native acceptance matrix is still pending.
 
 Build with the same pinned headers described below, using `-Target Checked`.
 `-Target CheckedTest` emits a distinct `_test.dll` with deterministic native

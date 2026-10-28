@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import platform
 import re
 import stat
 import sys
@@ -18,16 +19,31 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Final
 
-# Release admission is source-controlled, never granted by an environment flag.
-# Actual platform acceptance is recorded separately by the production matrix.
+# Release admission is source-controlled, never granted by an environment flag:
+# Windows Server x64 (ServerStandard/ServerDatacenter, including domain
+# controllers); Windows 10/11 Enterprise multi-session (ServerRdsh) and
+# workstation editions are refused at runtime. Actual platform acceptance is
+# recorded separately by the production matrix.
 NATIVE_QUALIFIED: Final = True
+_VER_NT_DOMAIN_CONTROLLER: Final = 2
 _VER_NT_SERVER: Final = 3
 
 
 def windows_edition_admitted() -> bool:
-    """Admit Windows Server editions only; workstation and unknown editions fail closed."""
+    """Admit Windows Server editions only (including domain controllers).
+
+    Windows 10/11 Enterprise multi-session reports the server product type with
+    EditionID ``ServerRdsh`` on the client kernel; it, workstation editions and
+    anything unknown fail closed.
+    """
     try:
-        return bool(sys.platform == "win32" and sys.getwindowsversion().product_type == _VER_NT_SERVER)  # type: ignore[attr-defined,unused-ignore]
+        if sys.platform != "win32":
+            return False
+        product_type = sys.getwindowsversion().product_type  # type: ignore[attr-defined,unused-ignore]
+        if product_type not in (_VER_NT_DOMAIN_CONTROLLER, _VER_NT_SERVER):
+            return False
+        edition = platform.win32_edition()
+        return isinstance(edition, str) and edition.startswith("Server") and edition != "ServerRdsh"
     except Exception:
         return False
 
@@ -202,8 +218,9 @@ def register_checked_vfs(driver: ModuleType, *, root: Path) -> VfsRegistration:
     """Pin the same-library extension and register an existing private root.
 
     Admission is source-controlled: Windows Server x64 with the qualified 0.5.7
-    driver pair and the distribution-owned DLL. Workstation editions are
-    refused. Native acceptance is recorded separately in docs/dev/CI.md.
+    driver pair and the distribution-owned DLL. Enterprise multi-session
+    (ServerRdsh) and workstation editions are refused. Native acceptance is
+    recorded separately in docs/dev/CI.md.
     """
     if sys.platform != "win32":
         raise RuntimeError("checked VFS requires Windows")
