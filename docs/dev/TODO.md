@@ -275,6 +275,64 @@ The macOS CLI, startup protection, monitor and uninstall lifecycle are implement
   support or Windows 11/Desktop acceptance. Touch ID prompt reduction is a
   separate change.
 
+#### Follow-ups from the 2026-10-28 PR #270 review
+
+MEDIUM and LOW findings deliberately left unfixed in PR #270; track them here.
+
+- [ ] Staging WAL sidecars: `mode=ro` verification leaves `*.mordred-enc-wal`/`-shm` behind,
+  and later operations refuse them as unknown sidecars (`src/mordred_hermes/dbcrypt/_migrate.py`).
+- [ ] Monitor: `monitor_runtime` invalidates authority over non-database files such as `state.db.malformed-backup-*`;
+  the inventory and policy name classifiers disagree (`src/mordred_hermes/dbcrypt/_monitor.py`, `src/mordred_hermes/_database_inventory.py`, `src/mordred_hermes/dbcrypt/_policy.py`).
+- [ ] Backup journal: a failed backup journal is never cleared in production, because
+  `recover_backups`/`delete_backup` have no non-test caller (`src/mordred_hermes/dbcrypt/_backup.py`).
+- [ ] Uninstall: it decrypts everything, then refuses on the all-generation guard; move the
+  guard before the irreversible step (`src/mordred_hermes/wizard/uninstall_cli.py`).
+- [ ] Authority checks: `Authority.check()` runs on every authorizer/progress callback and takes
+  Windows custody locks; validate at admission and before commit only (`src/mordred_hermes/dbcrypt/_connection.py`).
+- [ ] Connection errors: an unprotected out-of-scope connection error invalidates the whole
+  runtime; revoke only that connection (`src/mordred_hermes/dbcrypt/_connection.py`).
+- [ ] `keyvault reset`: `rmtree` of `mordred/keyvault` strips the mail/Telegram helper stores and
+  bypasses custody; it also refuses corrupt or legacy `meta.json` (`src/mordred_hermes/wizard/keyvault_cli.py`).
+- [ ] macOS database-key load is not bound to the root helper store, so child profiles fail closed
+  (`src/mordred_hermes/keyvault/_database_authority.py`).
+- [ ] macOS passive regressions: Desktop database step stuck in attention and `mail status --json` nulls;
+  decide on an authenticated path (`src/mordred_hermes/desktop/_databases.py`, `src/mordred_hermes/desktop/_status_v4.py`).
+- [ ] Activity peer auth spawns `python -I -S` per JSON read; read the 0600 files in-process with
+  `O_NOFOLLOW` and `fstat` (`src/mordred_hermes/activity/peers.py`).
+- [ ] Windows DLL provenance: release CI ships only `py3-none-any`, the toolset is unpinned, there is
+  no hash binding to `RECORD`, and source builds hard-fail without MSVC (`hatch_build.py`).
+- [ ] Acceptance `verify` self-attests `live_accepted`; `_verify_mode_sequences` and
+  `_verify_native_stops` are untested (`tools/dbcrypt_acceptance.py`).
+- [ ] Oversized files: `tools/dbcrypt_acceptance.py` (4,407 lines), `tests/test_dbcrypt_acceptance_manifest.py` (3,258),
+  `tests/_dbcrypt_acceptance_native.py` (1,905; destructive collector shipped in the sdist); split them, consider stacked PRs.
+- [ ] Windows path handling: `_shim.py` and `_connection.py` touch the filesystem before
+  classifying, so UNC paths trigger SMB/NTLM (`src/mordred_hermes/dbcrypt/_shim.py`).
+- [ ] Backup cleanup: `_copy_registered_backup`'s `finally` leaks the destination connection and
+  VFS registration when rollback fails (`src/mordred_hermes/dbcrypt/_connection.py`).
+- [ ] Backup restore is not bound to its source database or profile (latent)
+  (`src/mordred_hermes/dbcrypt/_backup.py`).
+- [ ] `mail forget` reports success while a native key remains, on Windows and POSIX
+  (`src/mordred_hermes/keyvault/_mail_custody.py`, `src/mordred_hermes/imports/mail/secrets.py`).
+- [ ] `mail forget --rows` retires credentials before deleting rows, so a retry needs `--account`
+  (`src/mordred_hermes/imports/mail/forget.py`).
+- [ ] Strict `.env` parsing: one unparseable line blocks every vault commit (`src/mordred_hermes/keyvault/vault.py`).
+- [ ] Windows VFS bridge: no driver version check, and transient sharing violations are neither
+  retried nor mapped to `IOERR_*` (`native/dbcrypt-vfs/vfs.c`, `native/dbcrypt-vfs/checked_io.c`).
+- [ ] Build hook leaves the DLL in `dist/` and re-reads the source after validating the image (`hatch_build.py`).
+- [ ] CI scope: `tools/ci_scope_paths.json` maps `tests/_dbcrypt_support.py` to `[]` (`tools/ci_scope_paths.json`).
+- [ ] Acceptance tooling: source mode misses `.pth`/`sitecustomize` and driver hashes; manifest has
+  stale `native_collectors` fields and dead `acceptance_failures` code (`tools/dbcrypt_acceptance.py`).
+- [ ] Temp store: runtime connections do not pin `temp_store=MEMORY` or deny `temp_store`/`mmap_size`
+  changes (`src/mordred_hermes/dbcrypt/_connection.py`).
+- [ ] Reviewer-facing PR summary: the PR #270 body relies on internal jargon; state per platform what
+  is enabled at merge (no repo file).
+- [ ] Runtime self-check that a protected Windows connection increments the native
+  `mordred_vfs_stats` open counter (needs Windows execution) (`native/dbcrypt-vfs/vfs.c`).
+- [ ] Cache `cipher_integrity_check` per file identity and authority instead of per open
+  (`src/mordred_hermes/dbcrypt/_authority.py`).
+- [ ] Explicit, safe route to abandon a prepared migration transaction
+  (`src/mordred_hermes/dbcrypt/_migrate.py`).
+
 ### Linux private Telegram (proposed)
 
 - [x] Review the [design](SPEC.md#linux-private-telegram-design) and
