@@ -91,8 +91,14 @@ def _ancestor(fd: int) -> None:
     _validate_acl(fd)
 
 
+# The ACL implementation follows the host this module was imported on, like
+# the POSIX/Windows selection itself: a test that patches ``sys.platform``
+# must not route a Linux descriptor into the macOS libSystem query.
+_MACOS_ACL = sys.platform == "darwin"
+
+
 def _validate_acl(fd: int) -> None:
-    if sys.platform == "darwin":
+    if _MACOS_ACL:
         from ._macos_acl import validate_acl
 
         validate_acl(fd)

@@ -200,7 +200,9 @@ def test_detached_supervisor_survives_worker_exit_and_source_change(tmp_path: Pa
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     fake_aws_executable(fake_bin / "aws", state)
-    source = tmp_path / "operator.py"
+    # Not "operator.py": the detached guard runs from this directory, where a
+    # stdlib-shadowing name would be imported by argparse before the controller.
+    source = tmp_path / "control_tool.py"
     source_text = Path(module.__file__).read_text()
     default = 'self.admission_directory = Path.home() / ".cache" / "mordred-dbcrypt-control"'
     assert source_text.count(default) == 1, "keep the detached fixture isolated from the real controller directory"

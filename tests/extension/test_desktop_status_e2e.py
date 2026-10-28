@@ -183,7 +183,7 @@ def test_a_tripwire_cannot_be_swallowed_by_a_status_fallback(
 
     monkeypatch.setattr(dbcrypt, "database_status", leaky_status)
     # Never a 200 with a fallback state: the tripwire stops the request (the test client's portal may report
-    # the stopped server task as cancelled when it shuts down).
-    with pytest.raises((_Tripped, CancelledError)), _client() as http:
+    # the stopped server task as cancelled, or as "This portal is not running", when it shuts down).
+    with pytest.raises((_Tripped, CancelledError, RuntimeError)), _client() as http:
         http.get(f"{PREFIX}/databases/status")
     assert trips.calls == ["dbcrypt._PROVIDER"]  # and the record names the boundary even if it were caught
