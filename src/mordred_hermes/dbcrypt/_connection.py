@@ -179,7 +179,9 @@ def _sql_action_denied(action: int, first: Any, second: Any) -> bool:
     which covers key/rekey/hexkey/hexrekey/textkey/textrekey but not
     ``foreign_keys``), every KDF pragma (``*kdf*``), every ``cipher*`` pragma
     except the read-only ``cipher_version``/``cipher_integrity_check`` (no
-    value), path/schema escapes, and OFF/MEMORY journaling.
+    value), path/schema escapes, and any ``journal_mode`` argument other than a read or
+    an exact wal/delete/truncate/persist (SQLite matches the argument by prefix,
+    so ``o``/``me`` would otherwise reach OFF/MEMORY).
     """
     import sqlcipher3.dbapi2 as sc
 
@@ -207,8 +209,13 @@ def _sql_action_denied(action: int, first: Any, second: Any) -> bool:
                 "data_store_directory",
             }
         )
-        # OFF/MEMORY disables durable rollback; ordinary Hermes WAL is allowed.
-        prohibited |= name == "journal_mode" and (second or "").lower() in {"off", "memory"}
+        # OFF/MEMORY disable durable rollback and SQLite prefix-matches the mode
+        # string, so allow-list exact durable modes instead of denying names.
+        if name == "journal_mode":
+            prohibited |= not (
+                second is None
+                or (isinstance(second, str) and second.lower() in {"wal", "delete", "truncate", "persist"})
+            )
     if action == sc.SQLITE_FUNCTION:
         prohibited |= (second or "").lower() in {"load_extension", "sqlcipher_export", "writefile", "readfile"}
     return prohibited

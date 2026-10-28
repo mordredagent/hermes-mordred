@@ -170,6 +170,8 @@ def test_dangerous_sql_refused_before_io(native_root, authority, sql):
         ("cipher_integrity_check", "1", True),
         ("cipher_version", "1", True),
         ("journal_mode", "off", True),
+        *[("journal_mode", v, True) for v in ("o", "OF", "m", "me", "MEM", "", "walx", 1)],
+        *[("journal_mode", v, False) for v in ("wal", "WAL", "delete", "truncate", "persist", None)],
         ("foreign_keys", "ON", False),
         ("foreign_keys", None, False),
         ("journal_mode", "wal", False),
@@ -183,6 +185,16 @@ def test_sql_action_denied_pragma_policy(name, second, denied):
     from mordred_hermes.dbcrypt._connection import _sql_action_denied
 
     assert _sql_action_denied(sc.SQLITE_PRAGMA, name, second) is denied
+
+
+def test_journal_mode_prefix_refused_and_wal_allowed(native_root, authority):
+    conn = opener()(native_root[0] / "state.db", authority=authority)
+    with pytest.raises(DatabaseRefused):
+        conn.execute("PRAGMA journal_mode=o")
+    conn.close()
+    conn = opener()(native_root[0] / "state.db", authority=authority)
+    assert conn.execute("PRAGMA journal_mode=wal").fetchall() == [("wal",)]
+    conn.close()
 
 
 def test_foreign_keys_pragma_still_executes(native_root, authority):
