@@ -15,7 +15,8 @@ import pytest
 from mordred_hermes.extension.telegram import secrets, store
 from mordred_hermes.extension.telegram.windows_secrets import WindowsCustodySecretStore
 from mordred_hermes.keyvault import _windows_custody as custody
-from tests._keyvault_fakes import FakeBackend
+from mordred_hermes.keyvault._database_mutation import database_key_mutation
+from tests._windows_custody_fakes import windows_test_backend
 from tests.test_private_fs_confidential_windows import descriptor
 from tests.test_private_fs_confidential_windows import shared_home as shared_home
 
@@ -33,9 +34,12 @@ def _value():
 @pytest.fixture
 def native_telegram(shared_home):
     home = shared_home
-    backend = FakeBackend()
-    with custody.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    backend = windows_test_backend()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        custody.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
         session.enroll_role("audit")
         leases = {"telegram": session.enroll_role("telegram")}
     return home, backend, leases

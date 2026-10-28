@@ -111,6 +111,15 @@ def test_every_setup_code_passes_through(desktop: Any, code: str) -> None:
     assert desktop.post("/mail/setup/start", _start_body()) == {"ok": False, "error": code}
 
 
+def test_requested_presence_refusal_is_actionable_without_silent_downgrade(desktop: Any) -> None:
+    desktop.flows.start_result = FakeSetupError("presence_unsupported")
+    assert desktop.post("/mail/setup/start", _start_body(touch_id=True)) == {
+        "ok": False,
+        "error": "presence_unsupported",
+    }
+    assert len(desktop.flows.calls) == 1 and desktop.flows.calls[0][1]["presence"] is True
+
+
 @pytest.mark.parametrize("hint", sorted(_projections.IMAP_HINTS))
 def test_hints_pass_through(desktop: Any, hint: str) -> None:
     desktop.flows.start_result = FakeSetupError("imap_auth_failed", hint)
@@ -157,15 +166,22 @@ def test_finish_type_errors_are_invalid_body(desktop: Any) -> None:
     assert desktop.flows.calls == []
 
 
-def test_setup_needs_macos_and_memory_but_cancel_does_not(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+def test_credential_setup_is_independent_of_memory(
+    desktop: Any, monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
     _memory_off(monkeypatch)
-    refused = {"ok": False, "error": "memory_encryption_required"}
-    assert desktop.post("/mail/setup/start", _start_body()) == refused
-    assert desktop.post("/mail/setup/f/finish", {"selection": None}) == refused
+    monkeypatch.setattr(api, "sys", SimpleNamespace(platform=platform))
+    assert desktop.post("/mail/setup/start", _start_body(touch_id=False))["ok"] is True
+    assert desktop.post("/mail/setup/f/finish", {"selection": None}) == {"ok": True, "step": "done"}
     assert desktop.post("/mail/setup/f/cancel") == {"ok": True}
-    assert desktop.flows.calls == [("cancel", "f")]
-    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="linux"))
+    assert [call[0] for call in desktop.flows.calls] == ["start", "finish", "cancel"]
+
+
+def test_unknown_platform_refuses_setup_before_native_flows(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="freebsd"))
     assert desktop.post("/mail/setup/start", _start_body()) == {"ok": False, "error": "unsupported_platform"}
+    assert desktop.flows.calls == []
 
 
 def test_cancel_is_idempotent_and_never_creates_the_flows(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -247,6 +263,40 @@ def test_a_result_error_fails_the_job_with_that_code(fetch: Any) -> None:
     )
 
 
+def test_fetch_preserves_native_presence_refusal_in_result_job_and_event(fetch: Any) -> None:
+    # The native policy owner supplies this content-free public refusal. Keep
+    # the entire fixed result shape while testing only the Desktop consumer.
+    data = {**FetchResult().as_dict(), "error": "presence_unsupported"}
+    fetch.seen["result"] = SimpleNamespace(as_dict=lambda: dict(data))
+    started = fetch.desktop.post("/mail/fetch", {})
+    job = fetch.desktop.wait_job(started["job_id"])
+    assert job["state"] == "failed" and job["error"] == "presence_unsupported"
+    assert job["progress"] == {"result": data}
+    assert fetch.desktop.events[-1] == (
+        "job",
+        {"job_id": started["job_id"], "kind": "mail_fetch", "state": "failed", "error": "presence_unsupported"},
+    )
+    assert not fetch.desktop.leaked(started, job)
+
+
+def test_mail_attempt_projection_preserves_native_presence_refusal() -> None:
+    flags = {"account": "mail", "gmail": False, "roles": ["inbox"], "touch_id": True}
+    projected = _projections.mail_projection(
+        flags,
+        {"configured": True, "last_attempt": {"at": 123, "error": "presence_unsupported", "partial": False}},
+    )
+    assert projected == {
+        "configured": True,
+        "account": "mail",
+        "gmail": False,
+        "scope": ["inbox"],
+        "touch_id": True,
+        "last_attempt": {"at": 123, "error": "presence_unsupported", "partial": False},
+        "last_success": None,
+        "cursors": {},
+    }
+
+
 def test_a_crashing_fetch_is_fetch_failed_without_text(fetch: Any) -> None:
     fetch.seen["result"] = RuntimeError(ADDRESS)
     job = fetch.desktop.wait_job(fetch.desktop.post("/mail/fetch", {})["job_id"])
@@ -288,7 +338,7 @@ def test_fetch_validation(fetch: Any, body: dict[str, Any]) -> None:
 def test_fetch_gates(fetch: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     _memory_off(monkeypatch)
     assert fetch.desktop.post("/mail/fetch", {}) == {"ok": False, "error": "memory_encryption_required"}
-    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="freebsd"))
     assert fetch.desktop.post("/mail/fetch", {}) == {"ok": False, "error": "unsupported_platform"}
     assert fetch.seen["calls"] == []
 
@@ -379,7 +429,7 @@ def test_credential_only_forget_needs_no_memory_but_rows_do(forget: Any, monkeyp
         "error": "memory_encryption_required",
     }
     monkeypatch.setattr(api, "sys", SimpleNamespace(platform="linux"))
-    assert forget.desktop.post("/mail/forget", {"rows": False}) == {"ok": False, "error": "unsupported_platform"}
+    assert forget.desktop.post("/mail/forget", {"rows": False})["ok"] is True
 
 
 def test_forget_without_flows_does_not_create_them(forget: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -614,3 +664,28 @@ def test_shutdown_cancels_a_real_pending_flow(real_flows: Any) -> None:
         _start_pending(http)
         assert _pending(real_flows.flows) == 1
     assert _pending(real_flows.flows) == 0  # the lifespan's exit called cancel_all()
+
+
+def test_native_credential_only_forget_remains_independent_of_database_authority(
+    desktop: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mordred_hermes import dbcrypt
+    from mordred_hermes.imports.mail.forget import forget as native_forget
+    from tests._mail_sync_helpers import generic_creds
+    from tests.test_mail_cross_platform_storage import native_store
+
+    store, native = native_store(desktop.home)
+    store.ensure_key(require_presence=False)
+    store.store(generic_creds(), require_presence=False)
+    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="linux"))
+    _memory_off(monkeypatch)
+    monkeypatch.setattr(_seams, "mail_secret_store", lambda: store)
+    monkeypatch.setattr(_seams, "forget", native_forget)
+    answer = desktop.post("/mail/forget", {"rows": False})
+    assert answer["ok"] is True and answer["had_credentials"] is True
+    assert answer["deleted_messages"] == 0
+    assert "delete" in native.calls
+    assert not store.residue()
+    assert not (desktop.home / "plugin-data/mordred/mordred.db").exists()
+    assert dbcrypt._PROVIDER is None

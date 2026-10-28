@@ -58,11 +58,19 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import secrets
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING
+from weakref import WeakKeyDictionary
 
+from .._database_contracts import DatabaseRefused
 from . import anchor, file_container, manifest, vault_master
+from ._native_deletion import _native_creation_handoff, _revoke_native_creation_rollbacks
 from ._storage import atomic_write, ensure_lock_file, keyvault_lock, safe_read
 from ._vault_errors import VaultError as VaultError
 from .anchor import AnchorStore
@@ -70,12 +78,153 @@ from .kek import MasterKey, open_master_key
 from .wrap import NativeBackend
 
 if TYPE_CHECKING:
+    from .._database_lifecycle import ExclusiveLease
+    from ._native_deletion import ValidatedNativeOwner, _NativeOwnerFacts
     from ._windows_capability import ExcludedCapability
 
 _RECOVERY_NAME = "recovery.mrkv"
 _LOCK_NAME = ".lock"
 _BLOBS_DIR = "blobs"
 _DIR_MODE = 0o700
+
+
+@dataclass
+class _CheckedOpen:
+    root: Path
+    identity: tuple[int, int, int, int]
+    key_id: str
+    label: str
+    master: MasterKey
+    wmk: bytes
+    backend: NativeBackend
+    backend_binding: tuple[object, ...] | None
+    store: AnchorStore
+    store_binding: tuple[object, ...]
+    pid: int
+    scopes: list[tuple[int, int, str]]
+
+
+_checked_opens: WeakKeyDictionary[OpenVault, _CheckedOpen] = WeakKeyDictionary()
+
+
+def _checked_vault_path(root: Path) -> tuple[int, int, int, int]:
+    import stat
+
+    try:
+        if root.absolute() != root.resolve(strict=True):
+            raise DatabaseRefused("vault path must be canonical and physical")
+        info = root.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise DatabaseRefused("vault directory is not private and owned")
+        return info.st_dev, info.st_ino, info.st_uid, info.st_mode
+    except OSError as exc:
+        raise DatabaseRefused("vault directory identity is unavailable") from exc
+
+
+def _anchor_store_binding(store: AnchorStore) -> tuple[object, ...]:
+    from ._anchor_keychain import HelperAnchorStore, KeychainAnchorStore
+    from ._native_deletion import _path_identity
+
+    if type(store) is KeychainAnchorStore:
+        return id(store), store._service, id(store._ops)
+    if type(store) is HelperAnchorStore:
+        helper = store._helper
+        legacy = () if store._legacy is None else _anchor_store_binding(store._legacy)
+        return (
+            id(store),
+            id(helper),
+            _path_identity(helper._binary),
+            id(helper._runner),
+            legacy,
+            store._helper_supported,
+            os.environ.get("HERMES_HOME"),
+            os.environ.get("MORDRED_SEKEY_STORE"),
+        )
+    return (id(store),)
+
+
+def _register_checked_open(
+    opened: OpenVault,
+    backend: NativeBackend,
+    store: AnchorStore,
+    expected_identity: tuple[int, int, int, int],
+    *,
+    pinned: anchor.VaultAnchor,
+) -> OpenVault:
+    """Only successful authenticated factory paths register native provenance.
+
+    ``pinned`` is the anchor record the factory itself read (:func:`open_vault`)
+    or wrote (:func:`init_vault` / :func:`recover_to_device`, which register
+    inside the critical section that wrote it). Re-reading the Keychain item
+    here would cost another access dialog and adds nothing a consumer relies
+    on: every use of this provenance (:meth:`OpenVault._custody_scope`,
+    :meth:`OpenVault._check_native_delete_owner`,
+    :meth:`OpenVault._commit_new_manifest`) re-reads the anchor under the lock
+    before acting, so a handle that went stale after its open fails there.
+    """
+    from ._native_deletion import _backend_binding
+    from ._seckey_backend import _SecKeyBackend
+
+    try:
+        with keyvault_lock(opened._root):
+            identity = _checked_vault_path(opened._root)
+            if identity != expected_identity:
+                raise DatabaseRefused("vault directory changed during authenticated open")
+            opened._authenticate_current(store, pinned=pinned)
+            _revoke_native_creation_rollbacks(opened._key_id)
+            _checked_opens[opened] = _CheckedOpen(
+                opened._root,
+                identity,
+                opened._key_id,
+                opened._label,
+                opened._master,
+                opened._wmk,
+                backend,
+                _backend_binding(backend, opened._key_id) if type(backend) is _SecKeyBackend else None,
+                store,
+                _anchor_store_binding(store),
+                os.getpid(),
+                [],
+            )
+    except BaseException:
+        opened.close()
+        raise
+    return opened
+
+
+def _guard_vault_source_change(root: Path, database_lease: ExclusiveLease | None) -> None:
+    """Final guard and explicit binding retirement, while retaining custody."""
+    from ._database_authority import observe_database_source, retire_database_source
+    from ._database_mutation import _assert_memory_database_mutation_safe
+    from ._identity import _vault_database_home
+
+    home = _vault_database_home(root)
+    _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
+    binding = home / "mordred" / "db-key-source.json"
+    try:
+        binding.lstat()
+    except FileNotFoundError:
+        return  # Never enroll or repair an absent source as a mutation side effect.
+    expected = observe_database_source(root=home)
+    if database_lease is None:  # Narrowing; the final guard already rejects None.
+        raise DatabaseRefused("vault source mutation requires preceding database exclusion")
+    retire_database_source(root=home, expected=expected, lease=database_lease)
+
+
+def _guard_vault_initialization(root: Path, database_lease: ExclusiveLease | None) -> None:
+    """A missing canonical source is never proof that retained DBs are unrelated."""
+    from ._database_mutation import _assert_memory_database_mutation_safe
+    from ._identity import _vault_database_home
+
+    if root.name != "vault" or root.parent.name != "mordred":
+        return  # Only genuinely fresh custom vaults may reach the write below.
+    home = _vault_database_home(root, allow_missing=True)
+    _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
+    try:
+        (home / "mordred" / "db-key-source.json").lstat()
+    except FileNotFoundError:
+        return
+    raise DatabaseRefused("existing database source binding requires recovery before vault initialization")
 
 
 def _refuse_excluded(capability: ExcludedCapability, operation: str) -> None:
@@ -156,13 +305,27 @@ def artifacts_present(root: Path) -> bool:
     return any(root.glob("manifest.*.mvmf"))
 
 
+def _initialization_artifacts_present(root: Path) -> bool:
+    """Include recovery-only and ciphertext-only remnants of interrupted init."""
+    recovery_path = root / _RECOVERY_NAME
+    blobs = root / _BLOBS_DIR
+    return (
+        artifacts_present(root)
+        or recovery_path.exists()
+        or recovery_path.is_symlink()
+        or blobs.is_symlink()
+        or (blobs.is_dir() and any(blobs.iterdir()))
+    )
+
+
 def _load_pinned_unverified(
     root: Path,
     *,
     store: AnchorStore,
     anchor_label: str,
     missing_detail: str,
-) -> tuple[bytes, manifest.VaultManifest]:
+    pinned: anchor.VaultAnchor | None = None,
+) -> tuple[anchor.VaultAnchor, bytes, manifest.VaultManifest]:
     """Device-path open preamble shared by :func:`open_vault` and the device
     branch of :func:`change_passphrase`: read the device-bound anchor, load
     the manifest generation it pins, and pin-check it.
@@ -172,12 +335,15 @@ def _load_pinned_unverified(
     anchor holds, and the manifest's generation must match the authoritative
     generation (defeats P1-a substitution + P1-b rollback). ``missing_detail``
     finishes the missing-manifest message so each caller keeps its exact
-    error string.
+    error string. ``pinned`` is an anchor record the caller already read (or
+    wrote) for this same open or transaction; it replaces a second Keychain
+    read of that item, and every check below runs against it unchanged.
 
-    Returns ``(blob, untrusted)`` — parsed but NOT yet authenticated; the
-    caller still authenticates via :func:`manifest.decode` under the master.
+    Returns ``(record, blob, untrusted)``: the anchor record the pin-check ran
+    against, and the manifest parsed but NOT yet authenticated; the caller
+    still authenticates via :func:`manifest.decode` under the master.
     """
-    record = anchor.read_anchor(store, anchor_label)
+    record = anchor.read_anchor(store, anchor_label) if pinned is None else pinned
     try:
         blob = safe_read(_manifest_path(root, record.generation))
     except FileNotFoundError as e:
@@ -185,13 +351,13 @@ def _load_pinned_unverified(
             f"authoritative manifest for generation {record.generation} is missing — {missing_detail}"
         ) from e
     untrusted = manifest.parse_unverified(blob)
-    # Pin-check against the record read above: ONE Keychain read per open.
+    # Pin-check against the record read (or supplied) above: ONE Keychain read per open.
     # Re-reading here added nothing (the record was just read and nothing is
     # locked between the two reads) but cost a second Keychain access, and with
     # it a second macOS access dialog whenever the item's ACL does not trust
     # the calling binary.
     anchor.verify_pinned(record, wmk=untrusted.wmk, generation=untrusted.generation)
-    return blob, untrusted
+    return record, blob, untrusted
 
 
 def _load_latest_unverified(root: Path, *, action: str) -> tuple[int, bytes, manifest.VaultManifest]:
@@ -267,51 +433,87 @@ def init_vault(
     backend: NativeBackend,
     store: AnchorStore,
     anchor_label: str,
+    database_lease: ExclusiveLease | None = None,
 ) -> OpenVault:
     """Create a fresh, empty vault at ``root`` and return it opened.
 
     Seals one master under the existing Secure-Enclave wrapping key
     ``key_id`` (SE ``wmk`` + passphrase recovery), writes the recovery
     sidecar and the generation-0 manifest, then flips the device-bound
-    anchor to generation 0 — the same commit point an enroll uses, so a
-    crashed init (no anchor) simply allows a clean re-init.
+    anchor to generation 0 — the same commit point an enroll uses. Retained
+    artifacts without an anchor require recovery; initialization never
+    overwrites an orphaned encrypted source or its cold recovery sidecar.
+    Canonical source initialization requires ``database_lease`` acquired before
+    custody, including when all source artifacts have been lost.
 
     Raises:
         VaultError: a vault is already initialized at ``root`` (its anchor
             exists in ``store``).
+        DatabaseRefused: encrypted source artifacts remain without an anchor.
         ValueError: ``passphrase`` is empty.
         WrapKeyNotFound: no SE wrapping key exists for ``key_id``.
     """
     _refuse_excluded("file_vault", "init_vault")
     root = Path(root)
+    from ._identity import _assert_vault_publication_identity
+
+    _assert_vault_publication_identity(root, key_id, anchor_label)
+    _guard_vault_initialization(root, database_lease)
+    if (
+        root.is_dir()
+        and not root.is_symlink()
+        and not (root / _BLOBS_DIR).is_symlink()
+        and _initialization_artifacts_present(root)
+        and store.read(anchor_label) is None
+    ):
+        raise DatabaseRefused("retained vault artifacts require recovery before initialization")
     _ensure_dir(root)
     _ensure_dir(root / _BLOBS_DIR)
     _ensure_lock(root)
 
-    sealed, master = vault_master.seal(key_id=key_id, passphrase=passphrase, backend=backend)
-    try:
-        # The clobber-check and the writes are one critical section: checking
-        # the anchor outside the lock would let two concurrent inits both pass
-        # it and then race their writes, silently destroying the first vault.
-        with keyvault_lock(root):
-            if store.read(anchor_label) is not None:
-                raise VaultError(f"a vault is already initialized for anchor label {anchor_label!r}")
-            atomic_write(root / _RECOVERY_NAME, sealed.recovery)
-            empty = manifest.VaultManifest(key_id=key_id, wmk=sealed.wmk, files={}, generation=0)
-            atomic_write(_manifest_path(root, 0), manifest.encode(empty, master))
-            anchor.write_anchor(store, anchor_label, wmk=sealed.wmk, generation=0)
-    except BaseException:
-        master.close()
-        raise
-    return OpenVault(
-        root=root,
-        key_id=key_id,
-        master=master,
-        manifest_=empty,
-        store=store,
-        anchor_label=anchor_label,
-        wmk=sealed.wmk,
-    )
+    identity = _checked_vault_path(root)
+    master: MasterKey | None = None
+    # The clobber-check, the writes and the registration are one critical
+    # section: checking the anchor outside the lock would let two concurrent
+    # inits both pass it and then race their writes, silently destroying the
+    # first vault. Registering before the lock is released authenticates the
+    # handle against the anchor written here, without reading it back.
+    with keyvault_lock(root):
+        try:
+            with _native_creation_handoff(key_id):
+                if _checked_vault_path(root) != identity:
+                    raise DatabaseRefused("vault directory changed during initialization")
+                if store.read(anchor_label) is not None:
+                    raise VaultError(f"a vault is already initialized for anchor label {anchor_label!r}")
+                if _initialization_artifacts_present(root):
+                    raise DatabaseRefused("retained vault artifacts require recovery before initialization")
+                _guard_vault_initialization(root, database_lease)
+                # Seal uses the existing device public key, never an interactive
+                # private-key unwrap. Keep it after the orphan-source check.
+                sealed, master = vault_master.seal(key_id=key_id, passphrase=passphrase, backend=backend)
+                atomic_write(root / _RECOVERY_NAME, sealed.recovery)
+                empty = manifest.VaultManifest(key_id=key_id, wmk=sealed.wmk, files={}, generation=0)
+                atomic_write(_manifest_path(root, 0), manifest.encode(empty, master))
+                anchor.write_anchor(store, anchor_label, wmk=sealed.wmk, generation=0)
+        except BaseException:
+            if master is not None:
+                master.close()
+            raise
+        return _register_checked_open(
+            OpenVault(
+                root=root,
+                key_id=key_id,
+                master=master,
+                manifest_=empty,
+                store=store,
+                anchor_label=anchor_label,
+                wmk=sealed.wmk,
+            ),
+            backend,
+            store,
+            identity,
+            pinned=anchor.VaultAnchor(anchor.wmk_fingerprint(sealed.wmk), 0),
+        )
 
 
 def open_vault(
@@ -343,27 +545,34 @@ def open_vault(
     """
     _refuse_excluded("file_vault", "open_vault")
     root = Path(root)
-    blob, untrusted = _load_pinned_unverified(
+    pinned, blob, untrusted = _load_pinned_unverified(
         root,
         store=store,
         anchor_label=anchor_label,
         missing_detail="vault is corrupt or was rolled back below its anchor",
     )
 
+    identity = _checked_vault_path(root)
     master = open_master_key(untrusted.wmk, key_id, backend=backend)
     try:
         verified = manifest.decode(blob, master)
     except BaseException:
         master.close()
         raise
-    return OpenVault(
-        root=root,
-        key_id=key_id,
-        master=master,
-        manifest_=verified,
-        store=store,
-        anchor_label=anchor_label,
-        wmk=untrusted.wmk,
+    return _register_checked_open(
+        OpenVault(
+            root=root,
+            key_id=key_id,
+            master=master,
+            manifest_=verified,
+            store=store,
+            anchor_label=anchor_label,
+            wmk=untrusted.wmk,
+        ),
+        backend,
+        store,
+        identity,
+        pinned=pinned,
     )
 
 
@@ -430,6 +639,7 @@ def recover_to_device(
     store: AnchorStore,
     key_id: str,
     anchor_label: str,
+    database_lease: ExclusiveLease | None = None,
 ) -> OpenVault:
     """Cold-open a vault via its passphrase AND re-key it onto THIS device.
 
@@ -458,7 +668,10 @@ def recover_to_device(
        mirroring :meth:`OpenVault._gc`).
 
     The whole sequence runs under the vault lock so a concurrent writer cannot
-    interleave. Crash-safety note: the new-generation manifest (bound to the new
+    interleave. The caller must acquire database exclusion before entering
+    custody and pass ``database_lease``; rekey refuses while any database
+    dependency remains. No native key is generated before this final guard.
+    Crash-safety note: the new-generation manifest (bound to the new
     ``wmk``) is written BEFORE the re-bound recovery sidecar, and these two files
     cannot be updated atomically together. A crash between them leaves the newest
     manifest bound to a ``wmk`` the still-old sidecar does not certify. Recovery
@@ -478,6 +691,9 @@ def recover_to_device(
     """
     _refuse_excluded("recovery", "recover_to_device")
     root = Path(root)
+    from ._identity import _assert_vault_publication_identity
+
+    _assert_vault_publication_identity(root, key_id, anchor_label)
     _ensure_lock(root)
     with keyvault_lock(root):
         recovery_blob = _read_recovery_blob(root, action="cannot re-key this vault")
@@ -485,6 +701,7 @@ def recover_to_device(
             root, recovery_blob, action="cannot re-key this vault"
         )
 
+        identity = _checked_vault_path(root)
         # Open the master under the passphrase + verify the manifest under it, so
         # we re-encode only an authenticated file set (never a forged manifest).
         master = vault_master.open_passphrase(recovery_blob, passphrase, wmk=untrusted.wmk)
@@ -495,20 +712,22 @@ def recover_to_device(
             raise
 
         try:
+            _guard_vault_source_change(root, database_lease)
             # Re-key: re-wrap the SAME master under this device's (fresh) key and
             # re-bind the recovery sidecar to the new wmk.
-            sealed = vault_master.reseal_onto_device(
-                recovery_blob, passphrase, old_wmk=untrusted.wmk, key_id=key_id, backend=backend
-            )
-            new_generation = verified.generation + 1
-            new_manifest = manifest.VaultManifest(
-                key_id=key_id, wmk=sealed.wmk, files=dict(verified.files), generation=new_generation
-            )
-            # ---- write the new generation + the re-bound sidecar BEFORE the commit ----
-            atomic_write(_manifest_path(root, new_generation), manifest.encode(new_manifest, master))
-            atomic_write(root / _RECOVERY_NAME, sealed.recovery)
-            # ---- commit: the anchor flip makes the new generation authoritative ----
-            anchor.write_anchor(store, anchor_label, wmk=sealed.wmk, generation=new_generation)
+            with _native_creation_handoff(key_id):
+                sealed = vault_master.reseal_onto_device(
+                    recovery_blob, passphrase, old_wmk=untrusted.wmk, key_id=key_id, backend=backend
+                )
+                new_generation = verified.generation + 1
+                new_manifest = manifest.VaultManifest(
+                    key_id=key_id, wmk=sealed.wmk, files=dict(verified.files), generation=new_generation
+                )
+                # ---- write the new generation + the re-bound sidecar BEFORE the commit ----
+                atomic_write(_manifest_path(root, new_generation), manifest.encode(new_manifest, master))
+                atomic_write(root / _RECOVERY_NAME, sealed.recovery)
+                # ---- commit: the anchor flip makes the new generation authoritative ----
+                anchor.write_anchor(store, anchor_label, wmk=sealed.wmk, generation=new_generation)
         except BaseException:
             master.close()
             raise
@@ -526,7 +745,9 @@ def recover_to_device(
         # enroll_file / change_passphrase. Reuses the live handle's _gc so the
         # current-manifest blob set is the keep-set.
         opened._gc(superseded_generation=generation)
-        return opened
+        # Still inside the lock that wrote the anchor: register against that record.
+        written = anchor.VaultAnchor(anchor.wmk_fingerprint(sealed.wmk), new_generation)
+        return _register_checked_open(opened, backend, store, identity, pinned=written)
 
 
 def change_passphrase(
@@ -597,7 +818,7 @@ def change_passphrase(
         _read_recovery_blob(root, action="not a vault, or it is corrupt")
         # The unwrap inside rewrap_from_device is the interactive (Touch ID)
         # step — run it outside the lock; see the docstring's locking note.
-        _blob, untrusted = _load_pinned_unverified(
+        _record, _blob, untrusted = _load_pinned_unverified(
             root, store=store, anchor_label=anchor_label, missing_detail="vault is corrupt"
         )
         new_recovery = vault_master.rewrap_from_device(
@@ -606,7 +827,7 @@ def change_passphrase(
         with keyvault_lock(root):
             # Re-pin under the lock: a re-key that landed during the prompt
             # minted a new wmk, and our sidecar certifies only the old one.
-            _blob, current = _load_pinned_unverified(
+            _record, _blob, current = _load_pinned_unverified(
                 root, store=store, anchor_label=anchor_label, missing_detail="vault is corrupt"
             )
             if current.wmk != untrusted.wmk:
@@ -638,7 +859,7 @@ class OpenVault:
     persists plaintext to disk. Usable as a context manager.
     """
 
-    __slots__ = ("_closed", "_key_id", "_label", "_manifest", "_master", "_root", "_store", "_wmk")
+    __slots__ = ("__weakref__", "_closed", "_key_id", "_label", "_manifest", "_master", "_root", "_store", "_wmk")
 
     def __init__(
         self,
@@ -663,6 +884,88 @@ class OpenVault:
     def _check(self) -> None:
         if self._closed:
             raise VaultError("vault is closed")
+
+    def _authenticate_current(self, store: AnchorStore, *, pinned: anchor.VaultAnchor | None = None) -> None:
+        """Re-authenticate under the opened master without another device unwrap.
+
+        ``pinned`` is an anchor record the caller already read or wrote for this
+        transaction; it replaces only the Keychain read, never a comparison.
+        """
+        _record, blob, current = _load_pinned_unverified(
+            self._root, store=store, anchor_label=self._label, missing_detail="vault is corrupt", pinned=pinned
+        )
+        verified = manifest.decode(blob, self._master)
+        if verified != self._manifest or current.wmk != self._wmk or verified.key_id != self._key_id:
+            raise VaultError("stale or substituted authenticated vault handle; reopen it")
+
+    def _checked_open(self) -> _CheckedOpen:
+        checked = _checked_opens.get(self)
+        if (
+            checked is None
+            or self._closed
+            or checked.pid != os.getpid()
+            or self._root != checked.root
+            or _checked_vault_path(self._root) != checked.identity
+            or self._key_id != checked.key_id
+            or self._label != checked.label
+            or self._master is not checked.master
+            or self._wmk != checked.wmk
+            or self._store is not checked.store
+            or _anchor_store_binding(checked.store) != checked.store_binding
+        ):
+            raise DatabaseRefused("vault handle lacks current authenticated factory provenance")
+        return checked
+
+    @contextmanager
+    def _custody_scope(self) -> Iterator[OpenVault]:
+        """Hold actual vault custody; database exclusion must already precede it."""
+        self._checked_open()
+        with keyvault_lock(self._root):
+            checked = self._checked_open()
+            self._authenticate_current(checked.store)
+            scope = (os.getpid(), threading.get_ident(), secrets.token_hex(16))
+            checked.scopes.append(scope)
+            try:
+                yield self
+            finally:
+                checked.scopes.remove(scope)
+
+    def _native_delete_owner(self, backend: NativeBackend) -> ValidatedNativeOwner:
+        from ._native_deletion import _issue_native_owner
+
+        return _issue_native_owner(self, native_key_id=self._key_id, backend=backend)
+
+    def _check_native_delete_owner(self, native_key_id: str, backend: NativeBackend) -> _NativeOwnerFacts:
+        from . import wrap
+        from ._identity import _vault_database_home, vault_identity
+        from ._native_deletion import _backend_binding, _NativeOwnerFacts
+        from ._storage import assert_advisory_lock_held
+
+        checked = self._checked_open()
+        if (
+            backend is not checked.backend
+            or native_key_id != vault_identity(checked.root)
+            or checked.backend_binding != _backend_binding(backend, native_key_id)
+            or checked.key_id != native_key_id
+            or checked.label != native_key_id
+            or not checked.scopes
+            or checked.scopes[-1][:2] != (os.getpid(), threading.get_ident())
+        ):
+            raise DatabaseRefused("vault native selector, backend, or active custody does not match")
+        try:
+            self._authenticate_current(checked.store)
+            wrap._parse_header(self._wmk, native_key_id)
+        except Exception as exc:
+            raise DatabaseRefused("vault native ownership is stale or unauthenticated") from exc
+        home = _vault_database_home(checked.root)
+        try:
+            assert_advisory_lock_held(checked.root / _LOCK_NAME)
+            assert_advisory_lock_held(checked.root.parent / ".keyvault.lifecycle.lock")
+        except OSError as exc:
+            raise DatabaseRefused("vault custody lock changed or is no longer held") from exc
+        # Distinguish successive custody scopes of the same live handle, so a
+        # previously issued owner cannot revive when that handle locks again.
+        return _NativeOwnerFacts(home=home, role="vault", generation=checked.scopes[-1][2], database_home=home)
 
     @property
     def generation(self) -> int:
@@ -707,6 +1010,7 @@ class OpenVault:
         new_manifest: manifest.VaultManifest,
         *,
         blobs: tuple[tuple[Path, bytes], ...] = (),
+        database_lease: ExclusiveLease | None = None,
     ) -> None:
         """Commit ``new_manifest`` under the keyvault lock — shared by enroll/unenroll.
 
@@ -735,6 +1039,28 @@ class OpenVault:
                     f"stale vault handle: in-memory generation {self._manifest.generation} no longer matches the "
                     f"device anchor (generation {pinned.generation}) — another writer advanced the vault; reopen it"
                 )
+            # Same lock, same record: nothing between the read above and here
+            # writes the anchor, so a second Keychain read would only cost a dialog.
+            self._authenticate_current(store, pinned=pinned)
+            from ._memory_env import effective_memory_key
+
+            old_env = self.read_file(".env") if ".env" in self._manifest.files else None
+            new_digest = new_manifest.files.get(".env")
+            new_env = None
+            if new_digest is not None:
+                supplied = dict(blobs).get(_blob_path(self._root, new_digest))
+                if supplied is None:
+                    if new_digest != self._manifest.files.get(".env"):
+                        raise DatabaseRefused("new vault memory source lacks authenticated content")
+                    new_env = old_env
+                else:
+                    if hashlib.sha256(supplied).hexdigest() != new_digest:
+                        raise DatabaseRefused("new vault source content address does not match")
+                    new_env = file_container.decode(supplied, self._master, name=".env")
+            old_key = effective_memory_key(old_env)
+            new_key = effective_memory_key(new_env)
+            if old_key != new_key:
+                _guard_vault_source_change(self._root, database_lease)
             for blob_path, blob in blobs:
                 atomic_write(blob_path, blob)
             atomic_write(_manifest_path(self._root, new_generation), manifest.encode(new_manifest, self._master))
@@ -743,7 +1069,7 @@ class OpenVault:
             self._manifest = new_manifest
             self._gc(superseded_generation=new_generation - 1)
 
-    def enroll_file(self, name: str, plaintext: bytes) -> None:
+    def enroll_file(self, name: str, plaintext: bytes, *, database_lease: ExclusiveLease | None = None) -> None:
         """Encrypt ``plaintext`` as enrolled file ``name`` and commit it.
 
         Bumps the generation, writes the content-addressed blob and the new
@@ -753,6 +1079,8 @@ class OpenVault:
         Raises:
             VaultError: the vault is closed, or was opened in recovery mode
                 (no device anchor to commit against — re-key first).
+            DatabaseRefused: the effective memory source changes without a
+                preceding database lease, has dependencies, or is invalid.
         """
         _refuse_excluded("file_vault", "enroll_file")
         self._check()
@@ -769,9 +1097,11 @@ class OpenVault:
         new_manifest = manifest.VaultManifest(
             key_id=self._key_id, wmk=self._wmk, files=new_files, generation=new_generation
         )
-        self._commit_new_manifest(store, new_manifest, blobs=((_blob_path(self._root, digest), blob),))
+        self._commit_new_manifest(
+            store, new_manifest, blobs=((_blob_path(self._root, digest), blob),), database_lease=database_lease
+        )
 
-    def unenroll_file(self, name: str) -> None:
+    def unenroll_file(self, name: str, *, database_lease: ExclusiveLease | None = None) -> None:
         """Remove enrolled file ``name`` and commit — the mirror of :meth:`enroll_file`.
 
         Drops ``name`` from the manifest, bumps the generation, writes the new
@@ -781,6 +1111,8 @@ class OpenVault:
 
         Removing a name that is not enrolled is a clean no-op: nothing is written
         and the generation does not advance (so ``purge`` is idempotent).
+        Removing an effective memory key requires ``database_lease`` acquired
+        before custody and a complete dependency-free database inventory.
 
         Raises:
             VaultError: the vault is closed, was opened in recovery mode (no device
@@ -802,7 +1134,7 @@ class OpenVault:
         new_manifest = manifest.VaultManifest(
             key_id=self._key_id, wmk=self._wmk, files=new_files, generation=new_generation
         )
-        self._commit_new_manifest(store, new_manifest)
+        self._commit_new_manifest(store, new_manifest, database_lease=database_lease)
 
     def _gc(self, *, superseded_generation: int) -> None:
         """Best-effort: drop the superseded manifest + any orphan blobs.
@@ -825,6 +1157,7 @@ class OpenVault:
     def close(self) -> None:
         """Zero the in-RAM master and block further use. Idempotent."""
         if not self._closed:
+            _checked_opens.pop(self, None)
             self._master.close()
             self._closed = True
 

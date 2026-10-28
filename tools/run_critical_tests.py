@@ -14,6 +14,18 @@ ROOT = Path(__file__).resolve().parents[1]
 # Existing tests retain their complete assertions and fixtures. Select individual
 # parameter cases where a broad matrix is unnecessary for everyday feedback.
 COMMON_CASES = (
+    (
+        "driver import is not authenticated readiness",
+        "tests/test_dbcrypt_capability.py::test_driver_import_is_not_readiness",
+    ),
+    (
+        "metadata-only retained database count",
+        "tests/test_dbcrypt_capability.py::test_dependency_count_includes_retained_database_objects_without_sql",
+    ),
+    (
+        "read-only mail source never enrolls",
+        "tests/test_keyvault_mail_key.py::test_read_backend_never_upgrades_or_enrolls",
+    ),
     ("checked filesystem roundtrip", "tests/test_private_fs.py::test_private_create_read_replace"),
     ("crashed lock owner release", "tests/test_private_fs_processes.py::test_crashed_owner_releases_lock"),
     ("config publication failure", "tests/test_config_io.py::test_verify_pair_failure_retains_marker"),
@@ -60,6 +72,7 @@ COMMON_CASES = (
     ),
 )
 POSIX_CASES = (
+    ("one native unwrap per authority", "tests/test_dbcrypt_authority.py::test_hundred_operations_one_unwrap"),
     ("real symlink/hardlink refusal", "tests/test_private_fs_posix.py::test_symlink_and_hardlink_refused"),
     ("real unsafe permissions refusal", "tests/test_private_fs_posix.py::test_unsafe_objects_never_repaired[file]"),
 )

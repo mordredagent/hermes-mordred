@@ -7,6 +7,24 @@ line), reverse conversion (`databases decrypt`) and both uninstall modes
 done; the Desktop page step and log-preview redaction remain.
 Track those remaining tasks in [`TODO.md`](./TODO.md#hermes-database-encryption).
 
+The selected cross-platform direction is a shared SQLCipher lifecycle for
+Linux and Windows as well as macOS. Its proposed design is
+[`Cross-platform database encryption`](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md).
+Native database storage admission is source-controlled: Linux, and Windows Server
+x64 with the qualified sqlcipher3-wheels 0.5.7 driver pair and the
+distribution-owned checked-VFS DLL, are admitted; Windows workstation editions
+are refused at runtime. Admission is not acceptance: native platform acceptance
+evidence is recorded separately in docs/dev/CI.md's manual validation log, and
+the Windows native acceptance matrix is still pending.
+
+The qualification-gated Windows backup route requires an existing private
+destination directory separate from the protected home: neither directory may
+contain the other. For example, use `C:\MordredBackups\activity.backup` for a
+home at `C:\HermesHome`, rather than writing the backup directly in `C:\`.
+Overlap with another live checked database root is also refused before any
+backup journal or staging file is created. The POSIX destination policy is
+unchanged; this restriction does not establish Windows native acceptance.
+
 ## Goal
 
 Hermes's databases are plaintext SQLite: the conversation store `state.db`
@@ -19,7 +37,7 @@ Encrypt all of them with SQLCipher, keyed from the key Mordred already
 manages, without forking Hermes. Only Python opens them (no Node/Electron
 SQLite access in Hermes Desktop or the TUI).
 
-This is a separate macOS-only opt-in: `setup` and `encryption enable all` do
+This is a separate opt-in on the admitted platforms: `setup` and `encryption enable all` do
 not arm database encryption. Session JSONL, text logs and existing ZIP backups
 are not converted. Decrypt databases before removing their memory key or vault;
 retain recovery material for encrypted backups.
@@ -58,7 +76,8 @@ plugin's later injection is skipped (one vault unlock per process).
   elsewhere). Without the key an in-scope database is refused rather than
   opened, so Hermes can never create a plaintext replacement.
 - Armed by `<home>/mordred/db-encryption.marker` (phase 3 writes it after
-  converting every database). Database encryption is macOS-only. Ordinary
+  converting every database). Database encryption is admitted on macOS, Linux and Windows Server only (see the
+admission statement above). Ordinary
   unarmed Linux/Windows homes retain plain SQLite; enabling memory encryption
   there does not encrypt databases. A marker or interrupted conversion copied
   to an unsupported OS causes startup to refuse before opening the databases.

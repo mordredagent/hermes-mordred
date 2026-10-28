@@ -71,15 +71,21 @@ def test_workflow_selector_preserves_frozen_native_harness_contract() -> None:
     weights = _tool().load_weights(WEIGHTS)
     additions = {"tests/test_windows_database_compat.py", "tests/test_desktop_windows_pm_compat.py"}
     assert additions <= set(modules)
-    assert len(modules) == len(set(modules)) == 84
+    assert len(modules) == len(set(modules)) == 92
+    baseline = modules[:84]
+    assert {
+        "tests/test_dbcrypt_capability.py",
+        "tests/test_dbcrypt_packaging.py",
+        "tests/test_windows_custody_schema_v2.py",
+    } <= set(modules[84:])
     assert modules == json.loads((ROOT / "tools/ci_scope_paths.json").read_text())["native_modules"]
-    frozen = [module for module in modules if module not in additions]
+    frozen = [module for module in baseline if module not in additions]
     # SHA256 of newline-joined, sorted distinct modules at frozen BASE f3506b7dc.
     # Independent of the weights fixture, so replacing a module cannot hide loss.
     assert hashlib.sha256("\n".join(sorted(frozen)).encode()).hexdigest() == (
         "7d7b2b9da0549e631373054f3741a8c1e8cd8c96c51e3261538af783c6667b0d"
     )
-    assert set(modules) == set(weights)  # Latest measured native run includes both additions.
+    assert set(baseline) == set(weights)  # Original timings are retained; new modules use fallback.
     shards = _tool().shard_modules(modules, weights, 3)
     assert sorted(m for shard in shards for m in shard) == sorted(modules)
     # New modules use the runner's explicit unmeasured fallback, not invented

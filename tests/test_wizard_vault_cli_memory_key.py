@@ -12,7 +12,7 @@ from mordred_hermes.keyvault import vault
 from mordred_hermes.wizard import vault_cli, vault_memory_key
 
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend
-from ._wizard_vault_cli_helpers import _PASSPHRASE, _PromptIO, _ReadOSErrorVault, _ReadRaisesStore
+from ._wizard_vault_cli_helpers import _PASSPHRASE, _legacy_env, _PromptIO, _ReadOSErrorVault, _ReadRaisesStore
 
 
 class TestSetMemoryKey:
@@ -70,7 +70,7 @@ class TestSetMemoryKey:
         return len(base64.urlsafe_b64decode(value + padding)) == 32
 
     def test_preserves_existing_env_lines(self, tmp_path: Path) -> None:
-        root = tmp_path / "v"
+        root = tmp_path / "mordred" / "vault"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
         src = tmp_path / "s"
@@ -84,7 +84,7 @@ class TestSetMemoryKey:
 
     def test_idempotent_when_already_set(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """A second call without ``--rotate`` is a no-op: same key, no new generation."""
-        root = tmp_path / "v"
+        root = tmp_path / "mordred" / "vault"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
         assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
@@ -101,7 +101,7 @@ class TestSetMemoryKey:
         assert self._generation(root) == gen  # no needless re-enroll
 
     def test_rotate_replaces_key(self, tmp_path: Path) -> None:
-        root = tmp_path / "v"
+        root = tmp_path / "mordred" / "vault"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
         assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
@@ -116,7 +116,7 @@ class TestSetMemoryKey:
     ) -> None:
         """``enable memory`` needs the key *value* to migrate files — through the
         same single vault open (one Touch ID), and never on stdout."""
-        root = tmp_path / "v"
+        root = tmp_path / "mordred" / "vault"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
 
@@ -130,7 +130,7 @@ class TestSetMemoryKey:
         assert value not in captured.err
 
     def test_ensure_memory_key_returns_the_existing_value_on_a_no_op(self, tmp_path: Path) -> None:
-        root = tmp_path / "v"
+        root = tmp_path / "mordred" / "vault"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
         assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
@@ -142,18 +142,20 @@ class TestSetMemoryKey:
 
     def test_ensure_memory_key_reports_failure_without_a_value(self, tmp_path: Path) -> None:
         rc, value = vault_memory_key.ensure_memory_key(
-            root=tmp_path / "v", rotate=False, backend=FakeBackend(), store=FakeAnchorStore()
+            root=tmp_path / "mordred" / "vault", rotate=False, backend=FakeBackend(), store=FakeAnchorStore()
         )
         assert rc == 1
         assert value is None
 
     def test_uninitialised_vault_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = vault_memory_key.set_memory_key(root=tmp_path / "v", backend=FakeBackend(), store=FakeAnchorStore())
+        rc = vault_memory_key.set_memory_key(
+            root=tmp_path / "mordred" / "vault", backend=FakeBackend(), store=FakeAnchorStore()
+        )
         assert rc == 1
         assert capsys.readouterr().err.strip() != ""
 
     def test_keychain_error_opening_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        root = tmp_path / "v"
+        root = tmp_path / "mordred" / "vault"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
         rc = vault_memory_key.set_memory_key(root=root, backend=backend, store=_ReadRaisesStore())
@@ -162,38 +164,34 @@ class TestSetMemoryKey:
 
     def test_non_utf8_existing_env_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """A non-UTF-8 enrolled ``.env`` cannot be merged as text — fail closed, enroll nothing."""
-        root = tmp_path / "v"
+        root = tmp_path / "mordred" / "vault"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
         src = tmp_path / "s"
         src.write_bytes(b"\xff\xfe not utf-8")
-        assert vault_cli.add(root=root, name=".env", source=src, backend=backend, store=store) == 0
+        _legacy_env(root, backend, store, src.read_bytes())
         gen = self._generation(root)
         rc = vault_memory_key.set_memory_key(root=root, backend=backend, store=store)
         assert rc == 1
         assert capsys.readouterr().err.strip() != ""
         assert self._generation(root) == gen  # nothing enrolled
 
-    def test_rotate_collapses_duplicate_keys(self, tmp_path: Path) -> None:
-        """Review P2: ``--rotate`` must leave exactly one key — dotenv keeps the *last*,
-        so a stale later duplicate would silently win over the rotated value."""
-        root = tmp_path / "v"
+    def test_rotate_refuses_invalid_legacy_duplicate_keys(self, tmp_path: Path) -> None:
+        """Invalid legacy sources require explicit recovery instead of guessed replacement."""
+        root = tmp_path / "mordred" / "vault"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
         src = tmp_path / "s"
         src.write_bytes(b"HERMES_MEMORY_KEY=aaa\nHERMES_MEMORY_KEY=bbb\nFOO=bar\n")
-        assert vault_cli.add(root=root, name=".env", source=src, backend=backend, store=store) == 0
+        _legacy_env(root, backend, store, src.read_bytes())
 
-        assert vault_memory_key.set_memory_key(root=root, rotate=True, backend=backend, store=store) == 0
-        text = self._env_text(root)
-        assert text.count("HERMES_MEMORY_KEY=") == 1  # both duplicates collapsed to one
-        assert "FOO=bar" in text  # unrelated entry preserved
-        assert self._key_value(root) not in {"aaa", "bbb"}  # a fresh value, not a stale duplicate
-        assert self._decodes_to_32_bytes(self._key_value(root))
+        before = self._env_text(root)
+        assert vault_memory_key.set_memory_key(root=root, rotate=True, backend=backend, store=store) == 1
+        assert self._env_text(root) == before
 
     def test_rotate_warns_about_orphaned_memories(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """Review P1: rotating orphans memories encrypted under the old key — warn loudly."""
-        root = tmp_path / "v"
+        root = tmp_path / "mordred" / "vault"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
         assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
@@ -213,42 +211,36 @@ class TestSetMemoryKey:
             return _ReadOSErrorVault()
 
         monkeypatch.setattr(vault, "open_vault", _fake_open)
-        rc = vault_memory_key.set_memory_key(root=tmp_path / "v", backend=FakeBackend(), store=FakeAnchorStore())
+        rc = vault_memory_key.set_memory_key(
+            root=tmp_path / "mordred" / "vault", backend=FakeBackend(), store=FakeAnchorStore()
+        )
         assert rc == 1
         assert capsys.readouterr().err.strip() != ""
 
-    def test_invalid_existing_key_is_replaced_without_rotate(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Re-review P2: a present-but-unusable key is not treated as 'already set'.
-
-        An empty / wrong-length `HERMES_MEMORY_KEY` would make `memory.encryption`
-        fail at startup, so it must be replaced even without `--rotate` — and
-        without the rotation warning, since it never encrypted anything.
-        """
-        root = tmp_path / "v"
+    def test_invalid_existing_key_refuses_replacement(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """An ambiguous legacy source cannot authorize automatic replacement."""
+        root = tmp_path / "mordred" / "vault"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
         src = tmp_path / "s"
         src.write_bytes(b"HERMES_MEMORY_KEY=\nFOO=bar\n")  # empty value → not 32 bytes
-        assert vault_cli.add(root=root, name=".env", source=src, backend=backend, store=store) == 0
+        _legacy_env(root, backend, store, src.read_bytes())
 
-        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
-        assert self._decodes_to_32_bytes(self._key_value(root))  # now a usable key
-        assert "FOO=bar" in self._env_text(root)
-        assert "warning" not in capsys.readouterr().err.lower()  # nothing was orphaned
+        before = self._env_text(root)
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 1
+        assert self._env_text(root) == before
 
-    def test_short_existing_key_is_replaced(self, tmp_path: Path) -> None:
-        """A too-short value decodes to ≠32 bytes → invalid → replaced, not kept."""
-        root = tmp_path / "v"
+    def test_short_existing_key_refuses_replacement(self, tmp_path: Path) -> None:
+        """A too-short legacy value is preserved until explicit source recovery."""
+        root = tmp_path / "mordred" / "vault"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
         src = tmp_path / "s"
         src.write_bytes(b"HERMES_MEMORY_KEY=abc\n")
-        assert vault_cli.add(root=root, name=".env", source=src, backend=backend, store=store) == 0
-        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
-        assert self._key_value(root) != "abc"
-        assert self._decodes_to_32_bytes(self._key_value(root))
+        _legacy_env(root, backend, store, src.read_bytes())
+        before = self._env_text(root)
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 1
+        assert self._env_text(root) == before
 
     def test_refuses_when_effective_key_invalid_but_valid_exists(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -259,13 +251,13 @@ class TestSetMemoryKey:
         valid key may have encrypted memories. Refuse (rc 1) rather than guess or
         regenerate — and leave the .env untouched so nothing is lost.
         """
-        root = tmp_path / "v"
+        root = tmp_path / "mordred" / "vault"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
         valid = base64.urlsafe_b64encode(b"\x22" * 32).decode("ascii")
         src = tmp_path / "s"
         src.write_bytes(f"HERMES_MEMORY_KEY={valid}\nHERMES_MEMORY_KEY=oops\nFOO=bar\n".encode())
-        assert vault_cli.add(root=root, name=".env", source=src, backend=backend, store=store) == 0
+        _legacy_env(root, backend, store, src.read_bytes())
         gen = self._generation(root)
 
         rc = vault_memory_key.set_memory_key(root=root, backend=backend, store=store)
@@ -276,7 +268,7 @@ class TestSetMemoryKey:
 
     def test_quoted_valid_key_is_recognized(self, tmp_path: Path) -> None:
         """Re-review P2: a dotenv-quoted valid key (``"base64:..."``) is recognized, not replaced."""
-        root = tmp_path / "v"
+        root = tmp_path / "mordred" / "vault"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
         raw = base64.urlsafe_b64encode(b"\x33" * 32).decode("ascii")
@@ -289,45 +281,40 @@ class TestSetMemoryKey:
         assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         assert self._generation(root) == gen  # untouched, not regenerated
 
-    def test_bare_key_line_does_not_shadow_written_key(self, tmp_path: Path) -> None:
+    def test_bare_key_line_refuses_replacement(self, tmp_path: Path) -> None:
         """Re-review P2: a bare ``HERMES_MEMORY_KEY`` (dotenv → None) must be removed on write.
 
         Otherwise it stays as the last entry and shadows the written key, so the
         runtime shim's dotenv parse sees None and injects nothing.
         """
-        root = tmp_path / "v"
+        root = tmp_path / "mordred" / "vault"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
         src = tmp_path / "s"
         # invalid assignment then a bare line → dotenv effective value is None.
         src.write_bytes(b"HERMES_MEMORY_KEY=bad\nHERMES_MEMORY_KEY\nFOO=bar\n")
-        assert vault_cli.add(root=root, name=".env", source=src, backend=backend, store=store) == 0
+        _legacy_env(root, backend, store, src.read_bytes())
 
-        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
-        text = self._env_text(root)
-        assert "FOO=bar" in text  # unrelated entry preserved
-        # The effective value the runtime would inject is now a usable 32-byte key,
-        # not None — i.e. the bare shadow was removed, not left behind.
-        assert vault_memory_key._is_valid_memory_key(vault_memory_key._effective_memory_key(text))
+        before = self._env_text(root)
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 1
+        assert self._env_text(root) == before
 
-    def test_bare_key_with_trailing_comment_does_not_shadow(self, tmp_path: Path) -> None:
+    def test_bare_key_with_trailing_comment_refuses_replacement(self, tmp_path: Path) -> None:
         """Re-review P2: ``HERMES_MEMORY_KEY # comment`` is a dotenv bare entry (None) too.
 
         Delegating removal to dotenv's parser drops it like any other binding, so
         it can't be left behind to shadow the written key.
         """
-        root = tmp_path / "v"
+        root = tmp_path / "mordred" / "vault"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
         src = tmp_path / "s"
         src.write_bytes(b"HERMES_MEMORY_KEY=bad\nHERMES_MEMORY_KEY # disabled\nFOO=bar\n")
-        assert vault_cli.add(root=root, name=".env", source=src, backend=backend, store=store) == 0
+        _legacy_env(root, backend, store, src.read_bytes())
 
-        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
-        text = self._env_text(root)
-        assert "FOO=bar" in text
-        # the effective value the runtime would inject is now a usable 32-byte key
-        assert vault_memory_key._is_valid_memory_key(vault_memory_key._effective_memory_key(text))
+        before = self._env_text(root)
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 1
+        assert self._env_text(root) == before
 
     def test_refuses_valid_key_with_trailing_comment_shadowed(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -337,13 +324,13 @@ class TestSetMemoryKey:
         dotenv strips the comment, so the earlier line *is* a valid key — the
         ambiguity must be surfaced (refuse), not lost by regenerating.
         """
-        root = tmp_path / "v"
+        root = tmp_path / "mordred" / "vault"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
         valid = base64.urlsafe_b64encode(b"\x44" * 32).decode("ascii")
         src = tmp_path / "s"
         src.write_bytes(f"HERMES_MEMORY_KEY={valid} # my key\nHERMES_MEMORY_KEY=bad\n".encode())
-        assert vault_cli.add(root=root, name=".env", source=src, backend=backend, store=store) == 0
+        _legacy_env(root, backend, store, src.read_bytes())
         gen = self._generation(root)
 
         rc = vault_memory_key.set_memory_key(root=root, backend=backend, store=store)
@@ -357,7 +344,7 @@ class TestSetMemoryKey:
         A fresh key would override the user's existing one at startup and orphan
         memories already encrypted under it.
         """
-        root = tmp_path / "v"
+        root = tmp_path / "mordred" / "vault"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
         existing = base64.urlsafe_b64encode(b"\x55" * 32).decode("ascii")
@@ -368,7 +355,7 @@ class TestSetMemoryKey:
 
     def test_adopts_plaintext_home_env_key(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """A valid key in the plaintext home .env (not yet migrated) is adopted."""
-        root = tmp_path / "v"
+        root = tmp_path / "mordred" / "vault"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
         home = tmp_path / "real_home"
@@ -385,7 +372,7 @@ class TestSetMemoryKey:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """--rotate ignores the ambient key, mints fresh, and warns about orphaning."""
-        root = tmp_path / "v"
+        root = tmp_path / "mordred" / "vault"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
         ambient = base64.urlsafe_b64encode(b"\x77" * 32).decode("ascii")

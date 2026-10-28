@@ -5,7 +5,8 @@ runs the activity protection gate and passes the gate's keyed opener; tests pass
 a plain-SQLite opener (the only test seam). The tables share the activity
 store's encrypted file but keep their own ``import_meta``; ``activity_*`` is never touched.
 :func:`open_import_store_readonly` is the status path (the Desktop page's polling): it
-creates, initialises, upgrades and unlocks nothing (see its docstring).
+creates, initialises and upgrades nothing, and only reuses existing authenticated
+runtime authority (see its docstring).
 
 Every public method runs one short connection and one transaction (``BEGIN IMMEDIATE``
 for writes, busy timeout 2 s). SQLite failures become :class:`ImportRefused` (``busy``,
@@ -113,7 +114,6 @@ import os
 import re
 import secrets
 import sqlite3
-import stat
 import sys
 import threading
 import time
@@ -122,15 +122,16 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, Final, NamedTuple, cast
+from typing import Any, Final, NamedTuple
 
+from .._database_contracts import DatabaseRefused
 from ..activity._gate import (
     ActivityRefused,
     Refusal,
+    _open_guarded,
     check_protection,
-    keyed_opener,
     refusal,
-    verify_keyed_connection,
+    runtime_authority,
 )
 from ..activity.store import BUSY_TIMEOUT_S
 from . import _mail_reconcile, _schema
@@ -203,7 +204,7 @@ Opener = Callable[[Path], sqlite3.Connection]
 CopyCheck = Callable[[Path], Refusal | None]
 
 _DETAILS: Final = {
-    "unsupported_platform": "the import store requires macOS database encryption",
+    "unsupported_platform": "the import store requires qualified native database encryption",
     "busy": "the import store is busy",
     "disk_full": "the disk holding the import store is full",
     "store_unavailable": "the import store is unavailable",
@@ -364,7 +365,11 @@ class StoredPart(NamedTuple):
 def _db_errors() -> tuple[type[BaseException], ...]:
     """The stdlib's and, once installed, the SQLCipher replacement's error base classes."""
     current = sys.modules.get("sqlite3", sqlite3)
-    return (sqlite3.Error, getattr(current, "Error", sqlite3.Error))
+    try:
+        import sqlcipher3.dbapi2 as sc
+    except ImportError:
+        return (sqlite3.Error, getattr(current, "Error", sqlite3.Error))
+    return (sqlite3.Error, getattr(current, "Error", sqlite3.Error), sc.Error)
 
 
 def _classify(exc: BaseException) -> str:
@@ -382,6 +387,8 @@ def _refusing() -> Iterator[None]:
         yield
     except ActivityRefused as exc:  # the gate's opener refused an unkeyed connection
         raise ImportRefused(exc.code) from None
+    except DatabaseRefused:
+        raise ImportRefused("store_unavailable") from None
     except _db_errors() as exc:
         raise ImportRefused(_classify(exc)) from None
 
@@ -1141,18 +1148,33 @@ class ImportStore:
         rows = [_values(part, _PART_FIELDS) for part in msg.parts]
         conn.executemany(f"INSERT INTO import_parts ({_PART_COLUMNS}) VALUES ({_marks(len(rows[0]))})", rows)
 
-    def delete_source(self, source: Source | str, source_account: str) -> int:
+    def delete_source(
+        self, source: Source | str, source_account: str, *, expected_retired_account: str | None = None
+    ) -> int:
         """Delete one account's conversations, messages, parts, references and own addresses; returns messages deleted.
 
         Runs with ``PRAGMA secure_delete = ON`` and the FTS index's
         ``secure-delete`` option, so freed pages are zeroed and no index tokens remain.
         ``import_mail_refs`` rows of the deleted messages go too (and any left
         without a message), so no referenced Message-ID survives.
+
+        ``expected_retired_account`` binds Telegram storage forget to its
+        observed retirement marker, checked and removed in this transaction.
         """
         value = _source_value(source)
+        if expected_retired_account is not None and (
+            value != Source.TELEGRAM.value or source_account != expected_retired_account
+        ):
+            raise ImportRefused("conflict")
         convs = "SELECT conv_uid FROM import_conversations WHERE source = ? AND source_account = ?"
         key = (value, source_account)
         with self._transaction(secure_delete=True) as conn:
+            if expected_retired_account is not None:
+                marker = conn.execute(
+                    "SELECT value FROM import_meta WHERE key = ?", (TELEGRAM_RETIRED_ACCOUNT,)
+                ).fetchone()
+                if marker != (expected_retired_account,):
+                    raise ImportRefused("conflict")
             for table in ("import_parts", "import_mail_refs"):
                 conn.execute(
                     f"DELETE FROM {table} WHERE source_uid IN "
@@ -1165,6 +1187,8 @@ class ImportStore:
             )
             conn.execute("DELETE FROM import_conversations WHERE source = ? AND source_account = ?", key)
             conn.execute("DELETE FROM import_accounts WHERE source = ? AND account = ?", key)
+            if expected_retired_account is not None:
+                conn.execute("DELETE FROM import_meta WHERE key = ?", (TELEGRAM_RETIRED_ACCOUNT,))
         return int(deleted)
 
     # --- reads (committed runs only) -----------------------------------------------------
@@ -1396,38 +1420,33 @@ def refusal_code(exc: BaseException) -> str:
 
 
 def open_import_store(home: Path) -> ImportStore:
-    """Gate, open, verify and bind the ``import_*`` tables of ``home``'s ``mordred.db``.
-
-    The same gate and keyed opener as :func:`mordred_hermes.activity._gate.open_store`,
-    without creating or checking any activity table. Raises :class:`ImportRefused`.
-    """
+    """Authenticate before creating the fixed shared activity/import destination."""
     found = check_protection(home)
     if found is not None:
         raise ImportRefused(found.code)
     from ..activity._paths import store_path
-    from ..dbcrypt import _monitor
+    from ._protected_destination import checked_store_destination
 
-    try:
-        path = store_path(home)
-    except OSError:
-        raise ImportRefused("store_unavailable") from None
-    if path.is_file() and path.stat().st_size > 0 and _monitor.is_plaintext(path):
-        raise ImportRefused("plaintext_store")
-    store = ImportStore(path, keyed_opener)
-    store.initialize(Path(os.path.realpath(home)))
-    with store.connection() as conn:
-        found = verify_keyed_connection(conn, path)
-    if found is not None:
-        raise ImportRefused(found.code)
-    return store
+    with _refusing():
+        authority = runtime_authority(home)  # refusal precedes mkdir, even for a missing store
+        checked_store_destination(readonly_store_path(home), home=home)
+        try:
+            with authority.operation():
+                path = store_path(home)
+        except OSError:
+            raise ImportRefused("store_unavailable") from None
+
+        def opener(target: Path) -> sqlite3.Connection:
+            return _open_guarded(target, authority=authority, timeout=BUSY_TIMEOUT_S)
+
+        store = ImportStore(path, opener)
+        store.initialize(Path(os.path.realpath(home)))
+        return store
 
 
 # --- the read-only status path ----------------------------------------------------------------
 
-#: The write and read format version bytes of a SQLite header; 2 in either means WAL mode.
-_FORMAT_VERSION_BYTES: Final = slice(18, 20)
-_WAL_VERSION: Final = 2
-#: A journal or WAL sidecar next to the store: a writer is active (or crashed); the status path stays away.
+#: Existing recovery/active-writer state keeps record readers away.
 _SIDECARS: Final = ("-journal", "-wal", "-shm")
 
 
@@ -1439,66 +1458,10 @@ def readonly_store_path(home: Path) -> Path:
 
 
 def readonly_uri(path: Path) -> str:
-    """``file:<path>?mode=ro`` with the path escaped, so a ``#``, ``?`` or ``%`` cannot cut it short."""
+    """Compatibility utility; callers still need guarded authority for actual opens."""
     from urllib.parse import quote
 
     return f"file:{quote(path.as_posix(), safe='/')}?mode=ro"
-
-
-def _sqlcipher() -> Any:
-    """The SQLCipher DB-API module itself, never the process ``sqlite3`` shim (a seam for tests)."""
-    import sqlcipher3.dbapi2 as sc
-
-    return sc
-
-
-def _env_database_key() -> Any:
-    """The database key derived from ``HERMES_MEMORY_KEY`` as it is now; ``None`` unless it decodes to 32 bytes.
-
-    Read once per open; no key provider runs, so nothing can unlock the vault or prompt.
-    """
-    from ..dbcrypt._key import derive
-    from ..keyvault._memory_hook import _decode_env_key
-
-    memory_key = _decode_env_key(os.environ)
-    return None if memory_key is None else derive(memory_key)
-
-
-def _readonly_gate(home: Path) -> str | None:
-    """The protection checks without anything that could unlock the vault or prompt; ``None`` when they pass."""
-    if sys.platform != "darwin":
-        return "unsupported_platform"
-    from .. import dbcrypt
-    from ..dbcrypt import _migrate, _shim
-
-    root = dbcrypt.root_home(home)
-    markers = (_migrate.journal_path(root), _migrate.pending_path(root), _migrate.decrypt_pending_path(root))
-    if any(path.is_file() for path in markers):
-        return "conversion_pending"  # either direction
-    if not dbcrypt.armed(root):
-        return "not_armed"
-    if not _shim.is_installed():
-        return "unprotected_process"
-    return None
-
-
-def _open_readonly(path: Path, key: Any) -> sqlite3.Connection:
-    """One connection through SQLCipher itself, keyed with ``key``: never the shim and its key provider.
-
-    ``check_same_thread`` is off because :class:`ReadOnlyImportStore` serialises its
-    single connection with its own lock across the threads that read status.
-    """
-    from ..dbcrypt._shim import apply_key
-
-    conn = _sqlcipher().connect(readonly_uri(path), uri=True, timeout=BUSY_TIMEOUT_S, check_same_thread=False)
-    try:
-        apply_key(conn, key)
-        conn.isolation_level = None  # explicit BEGIN / COMMIT, as ImportStore.connection does
-        conn.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT_S * 1000)}")
-    except BaseException:
-        conn.close()
-        raise
-    return cast(sqlite3.Connection, conn)
 
 
 def _no_reopen(_path: Path) -> sqlite3.Connection:
@@ -1554,48 +1517,28 @@ def _lstat(path: Path) -> os.stat_result | None:
 
 
 def open_import_store_readonly(home: Path) -> ReadOnlyImportStore:
-    """Open ``home``'s ``import_*`` tables for status reads: nothing is created, initialised, upgraded or unlocked.
+    """Read existing records with runtime authority; never initialize, migrate or use ambient keys.
 
-    Its own gate sequence (never :func:`~..activity._gate.check_protection`, never a
-    key provider that could inject the vault or prompt): macOS, no database
-    conversion pending in either direction, armed, the SQLCipher shim installed,
-    and ``HERMES_MEMORY_KEY`` already in the environment and decoding to 32 bytes
-    (``no_key`` otherwise; read once, the derived key serves every later read of
-    the returned store). The path is computed without creating directories; no
-    file (or an empty one) is ``store_uninitialised``. Only rollback-journal stores
-    at rest are read: a header that says WAL (either format byte is 2), or any
-    ``-journal``, ``-wal`` or ``-shm`` next to the file (a writer in a write
-    transaction, or one that crashed), is ``store_unavailable`` before any
-    connection. A ``mode=ro`` reader of a WAL file may create ``-wal``/``-shm``
-    when a writer closes between any check and the open, a hot journal or an
-    orphan sidecar would make it roll back or map and delete it, and no lock is
-    shared with every writer (``immutable=1`` would disable locking instead).
-    Mordred never puts ``mordred.db`` in WAL mode: it is created in rollback mode,
-    a backup is written and restored in rollback mode, and only a conversion
-    keeps WAL for a file that already was. The file must not be plaintext; it is
-    opened ``mode=ro`` through SQLCipher itself (not the process ``sqlite3``
-    shim, whose key provider could inject the vault) with the derived key, and
-    any open failure is ``store_unavailable``; ``import_meta`` is read with plain
-    selects (no table: ``store_uninitialised``; a wrong key or an unreadable
-    file: ``store_unavailable``; a newer schema: ``schema_newer``; another
-    profile: ``profile_mismatch``; an older schema is read as it is). The
-    returned :class:`ReadOnlyImportStore` keeps that one connection for its life
-    and serves :meth:`ImportStore.status` and other reads on it (deferred read
-    transactions, which a writer holding ``BEGIN IMMEDIATE`` does not block);
-    callers close it (``with``) and never write through it. Raises :class:`ImportRefused` with a
-    :data:`REFUSAL_CODES` member.
+    This authenticated record reader only reuses current runtime authority; a
+    cold status poll refuses rather than acquiring custody or prompting. Pure
+    capability observation belongs to check_protection. Guarded SQLCipher owns
+    every database handle and checks rollback journal mode; raw header probes
+    cannot safely coexist with live SQLite locks.
     """
-    found = _readonly_gate(home)
+    found = check_protection(home)
     if found is not None:
-        raise ImportRefused(found)
-    key = _env_database_key()
-    if key is None:
-        raise ImportRefused("no_key")
-    path = _readonly_file(home)
+        raise ImportRefused(found.code)
+    with _refusing():
+        authority = runtime_authority(home, acquire=False)
+        path = _readonly_file(home)
+        conn = _open_guarded(path, authority=authority, timeout=BUSY_TIMEOUT_S, readonly=True, check_same_thread=False)
     try:
-        conn = _open_readonly(path, key)
-    except Exception:  # an open or sidecar failure: never stringified
-        raise ImportRefused("store_unavailable") from None
+        conn.isolation_level = None
+        if conn.execute("PRAGMA journal_mode").fetchone() != ("delete",):
+            raise ImportRefused("store_unavailable")
+    except BaseException:
+        conn.close()
+        raise
     store = ReadOnlyImportStore(path, conn)
     try:
         meta = _readonly_meta(store)
@@ -1610,33 +1553,18 @@ def open_import_store_readonly(home: Path) -> ReadOnlyImportStore:
 
 
 def _readonly_file(home: Path) -> Path:
-    """The existing, non-empty, not-plaintext, rollback-journal store of ``home`` at rest (nothing is created)."""
-    from ..dbcrypt import _monitor
+    """Metadata classification only; Task 6 performs actual checked handle admission."""
+    from ._protected_destination import checked_store_destination
 
     path = readonly_store_path(home)
-    info = _lstat(path.parent)
-    if info is not None and not stat.S_ISDIR(info.st_mode):
-        raise ImportRefused("store_unavailable")  # a planted symlink would move the store elsewhere
-    info = None if info is None else _lstat(path)
-    if info is not None and not stat.S_ISREG(info.st_mode):
-        raise ImportRefused("store_unavailable")
+    with _refusing():
+        checked_store_destination(path, home=home)
+    info = _lstat(path)
     if info is None or info.st_size == 0:
         raise ImportRefused("store_uninitialised")
-    if _wal_mode(path) or any(_lstat(Path(f"{path}{suffix}")) is not None for suffix in _SIDECARS):
-        raise ImportRefused("store_unavailable")  # rollback-journal stores at rest only: see open_import_store_readonly
-    if _monitor.is_plaintext(path):
-        raise ImportRefused("plaintext_store")
+    if any(_lstat(Path(f"{path}{suffix}")) is not None for suffix in _SIDECARS):
+        raise ImportRefused("store_unavailable")
     return path
-
-
-def _wal_mode(path: Path) -> bool:
-    """Whether the header's format bytes (18-19, plaintext also in an encrypted store) say WAL."""
-    try:
-        with path.open("rb") as handle:
-            header = handle.read(_FORMAT_VERSION_BYTES.stop)
-    except OSError:
-        raise ImportRefused("store_unavailable") from None
-    return _WAL_VERSION in header[_FORMAT_VERSION_BYTES]
 
 
 def _readonly_meta(store: ReadOnlyImportStore) -> dict[str, str] | None:

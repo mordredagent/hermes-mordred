@@ -42,7 +42,7 @@ import getpass
 import os
 import sys
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -116,6 +116,8 @@ def _report(code: str) -> int:
         "invalid_api_credentials": "api_id must be a number and api_hash a 32-character hex string "
         "(from https://my.telegram.org → API development tools).",
         "sync_in_progress": "another sync is already running.",
+        "telegram_logout_refused": "local Telegram cleanup was refused; retained files and any pending "
+        "forget journal need checked recovery before retrying.",
         "tee_unavailable": f"the {hardware} helper is not available. Run `hermes-mordred keyvault {setup}` "
         "first: Telegram credentials require hardware sealing (no software fallback).",
         "tee_auth_cancelled": "Touch ID / passcode was cancelled, so the credentials stayed sealed.",
@@ -445,13 +447,13 @@ async def _revoke(make_client: Callable[[], Any]) -> None:
         await client.disconnect()
 
 
-def _revoke_stored(current: Any, client_factory: Callable[..., Any] | None) -> None:
+def _revoke_stored(current: Any, client_factory: Callable[..., Any] | None) -> bool:
     """Revoke the stored session at Telegram; a failure only warns (the local copy is removed anyway)."""
     from ..extension.telegram.client import build_client
     from ..extension.telegram.readonly import RequestPolicy
 
     if current is None or current.session is None:
-        return
+        return False
     factory = client_factory or build_client
     try:
         asyncio.run(
@@ -465,6 +467,16 @@ def _revoke_stored(current: Any, client_factory: Callable[..., Any] | None) -> N
             "could not reach Telegram to revoke the session; it is removed locally. "
             "Also terminate it in Telegram → Settings → Devices."
         )
+        return True
+    return False
+
+
+@dataclass(frozen=True)
+class _TelegramLogoutOutcome:
+    local_complete: bool
+    rows_kept: bool = False
+    remote_warning: bool = False
+    exit_code: int = 0
 
 
 def telegram_logout(
@@ -475,49 +487,76 @@ def telegram_logout(
     client_factory: Callable[..., Any] | None = None,
     input_fn: InputFn | None = None,
 ) -> int:
-    """Revoke and drop the session; ``forget`` deletes the import rows first, then everything else.
-
-    A failed row deletion stops ``forget`` before the session, the credentials,
-    the keys or the archive are touched (exit 1); ``force`` goes on without the
-    rows and still exits 1. ``force`` means nothing without ``forget``.
-    """
-    from ..extension.telegram.secrets import TelegramSecretsError
-    from ..extension.telegram.store import wipe_archive
-
+    """Keep the public integer CLI result while preserving local completion internally."""
     if _windows_telegram.routed():
         return _windows_logout(
             forget=forget, store=store, client_factory=client_factory, input_fn=input_fn if input_fn else input
         )
+    from .._database_contracts import DatabaseRefused
+    from ..extension.telegram.secrets import TelegramSecretsError
+    from ..extension.telegram.store import StoreError
+    from ..keyvault._exceptions import WrapError
+
+    try:
+        return _telegram_logout_result(forget=forget, force=force, store=store, client_factory=client_factory).exit_code
+    except (TelegramSecretsError, StoreError) as exc:
+        return _report(exc.code)
+    except (DatabaseRefused, WrapError, OSError):
+        # The strict default uninstall calls the internal result path directly;
+        # only the interactive CLI translates expected refusal to integer 1.
+        return _report("telegram_logout_refused")
+
+
+def _telegram_logout_result(
+    *, forget: bool = False, force: bool = False, store: Any = None, client_factory: Callable[..., Any] | None = None
+) -> _TelegramLogoutOutcome:
+    from .._database_contracts import DatabaseRefused
+    from ..extension.telegram.secrets import TelegramSecretsError
+    from ..extension.telegram.tee import TeeSecretStore
+    from ..keyvault._telegram_custody import pending_telegram_forget
+
     secrets_store = store if store is not None else _secret_store()
+    if forget and type(secrets_store) is TeeSecretStore and pending_telegram_forget(secrets_store._home()):
+        # Only a checked durable `deleted` record can resume. An intent refuses
+        # here without another unwrap, missing-key inference or remote call.
+        secrets_store.forget_from_snapshot((None, None))
+        print("Completed the pending local Telegram forget.")
+        return _TelegramLogoutOutcome(local_complete=True)
     try:
         current, snapshot = _load_for_update(secrets_store)
     except TelegramSecretsError as exc:
-        return _report(exc.code)
+        return _TelegramLogoutOutcome(local_complete=False, exit_code=_report(exc.code))
     if current is None:
         print("Telegram is not configured; nothing to do.")
-        return 0
-    # First, while the store key and the archive index exist: the index names the account whose rows to delete.
+        return _TelegramLogoutOutcome(local_complete=True)
+    # SQL runs before archive/credential custody is acquired.
     rows_kept = telegram_migrate_cli.forget_import_rows(current) if forget else None
     if rows_kept is not None and not force:
-        return telegram_migrate_cli.rows_not_deleted(rows_kept)
-    _revoke_stored(current, client_factory)
-    try:
-        # One unseal for the whole command: the write reuses the value read above.
-        if forget:
-            _write_back(secrets_store, snapshot, lambda _old: None)
-        else:
+        return _TelegramLogoutOutcome(
+            local_complete=False, rows_kept=True, exit_code=telegram_migrate_cli.rows_not_deleted(rows_kept)
+        )
+    if forget:
+        checked_forget = getattr(secrets_store, "forget_from_snapshot", None)
+        if checked_forget is None:
+            raise DatabaseRefused("Telegram store has no checked local forget operation")
+        checked_forget(snapshot)
+    else:
+        try:
             _write_back(secrets_store, snapshot, lambda old: replace(old, session=None) if old is not None else None)
-    except TelegramSecretsError as exc:
-        return _report(exc.code)
+        except TelegramSecretsError as exc:
+            return _TelegramLogoutOutcome(local_complete=False, exit_code=_report(exc.code))
+    # No SQL or network operation runs while local custody is held. Revoke from
+    # the caller's RAM value only after local completion is positively known.
+    remote_warning = _revoke_stored(current, client_factory)
     if not forget:
         print("Logged out. The encrypted archive is kept (use --forget to delete it).")
-        return 0
-    wipe_archive()
-    delete_key = getattr(secrets_store, "delete_key", None)
-    if delete_key is not None:
-        with contextlib.suppress(Exception):
-            delete_key()
-    return telegram_migrate_cli.forgotten(rows_kept)
+        return _TelegramLogoutOutcome(local_complete=True, remote_warning=remote_warning)
+    return _TelegramLogoutOutcome(
+        local_complete=True,
+        rows_kept=rows_kept is not None,
+        remote_warning=remote_warning,
+        exit_code=telegram_migrate_cli.forgotten(rows_kept),
+    )
 
 
 def _windows_logout(*, forget: bool, store: Any, client_factory: Callable[..., Any] | None, input_fn: InputFn) -> int:

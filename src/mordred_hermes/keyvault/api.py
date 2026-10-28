@@ -463,7 +463,7 @@ def _commit_key_state(
     journal on generation failure) are documented step by step inline.
     """
     commit_path: Path | None = None
-    with _storage.keyvault_lock(root):
+    with _storage.keyvault_custody(root, backend=backend) as custody, contextlib.ExitStack() as native_keys:
         # Authoritative re-init guard — TOCTOU-safe under the lock.
         meta = _storage.load_meta(root)
         if _native_key_id.has_native_key_ownership_state(meta):
@@ -477,11 +477,14 @@ def _commit_key_state(
 
         # If generation raises, retain the pending journal: the backend may
         # have made the scoped key visible before reporting its error.
-        wrap.generate_wrapping_key(
-            key_id,
-            backend=backend,
-            unattended=unattended,
-            native_key_id=native_key_id,
+        creation = native_keys.enter_context(
+            wrap.create_wrapping_key_scope(
+                key_id,
+                backend=backend,
+                custody=custody,
+                unattended=unattended,
+                native_key_id=native_key_id,
+            )
         )
 
         try:
@@ -511,6 +514,7 @@ def _commit_key_state(
                 imported_key_id=key_id,
                 native_key_id=native_key_id,
                 backend=backend,
+                creation=creation,
                 remove_ciphertext_tree=False,
             )
             raise
@@ -520,6 +524,7 @@ def _commit_key_state(
         # accepts a post-replace error only when the visible row is complete
         # and pending-free; otherwise the error propagates and pending blocks
         # every normal operation until reset.
+        wrap.commit_created_key(creation)
         _secret_ops._clear_pending_native_key_after_commit(
             root,
             key_id=key_id,

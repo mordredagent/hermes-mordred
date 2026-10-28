@@ -6,7 +6,7 @@ interpreter-startup bootstrap, before Hermes imports ``sqlite3`` — swaps the
 ``sqlite3`` module for SQLCipher and keys Hermes's own databases with a key
 derived from the existing agent-memory key. When not armed nothing changes.
 
-macOS only, like the vault that holds the key. See
+Native activation is independently gated on each platform. See
 ``docs/dev/STATE_DB_ENCRYPTION.md``.
 """
 
@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 from typing import Final
 
+from ._capability import DatabaseStatus, database_status, diagnose_database
 from ._cli import maintenance_process as _maintenance_process
 from ._key import KeyProvider
 
@@ -58,10 +59,72 @@ def protected_state_present(home: Path) -> bool:
     )
 
 
+def _check_legacy_marker_posix(path: Path) -> None:
+    """Read an unchanged private legacy leaf under the preceding root EX lease."""
+    from contextlib import ExitStack
+
+    from .._database_contracts import DatabaseRefused
+    from .._private_fs._posix import _ancestor, _private
+
+    with ExitStack() as resources:
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        resources.callback(os.close, directory)
+        _ancestor(directory)  # Owned 0755 is allowed, unsafe permissions/ACLs are not.
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+        resources.callback(os.close, fd)
+        before = _private(fd)
+        if before.st_size != 2 or os.read(fd, 3) != b"1\n":
+            raise DatabaseRefused("legacy publication cannot replace native or unknown database intent")
+        expected = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        for observed in (_private(fd), os.stat(path.name, dir_fd=directory, follow_symlinks=False)):
+            current = (
+                observed.st_dev,
+                observed.st_ino,
+                observed.st_mode,
+                observed.st_size,
+                observed.st_mtime_ns,
+                observed.st_ctime_ns,
+            )
+            if current != expected:
+                raise DatabaseRefused("legacy database marker changed during observation")
+
+
 def arm(home: Path) -> None:
-    path = marker_path(home)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("1\n", encoding="utf-8")
+    """Legacy publication seam: never overwrite native or unknown marker bytes."""
+    from .._database_contracts import DatabaseRefused
+    from .._database_lifecycle import acquire_exclusive
+    from .._private_fs import open_private_directory
+
+    with acquire_exclusive(home) as lease:
+        # Preserve the explicit legacy seam for older 0755 Mordred directories.
+        # Exclusive creation cannot replace a concurrently published v2 marker.
+        try:
+            with marker_path(home).open("xb") as stream:
+                stream.write(b"1\n")
+            marker_path(home).chmod(0o600)
+            return
+        except FileExistsError:
+            pass
+        try:
+            lease.assert_held(home)
+            if os.name == "posix":
+                # The legacy lease admits an owned 0755 directory; the leaf
+                # still needs the exact private-file policy and pinned identity.
+                _check_legacy_marker_posix(marker_path(home))
+            else:
+                with open_private_directory(home / "mordred") as directory, directory.transaction() as tx:
+                    if tx.read_bytes(MARKER_SUBPATH[-1], max_bytes=4096) != b"1\n":
+                        raise DatabaseRefused("legacy publication cannot replace native or unknown database intent")
+            lease.assert_held(home)
+        except OSError:
+            raise DatabaseRefused("legacy database marker cannot be published safely") from None
 
 
 def _run_pending_conversion(base: Path, key_provider: KeyProvider) -> None:
@@ -108,6 +171,84 @@ def register(ctx: object) -> None:
     register_hooks(ctx)
 
 
+def _native_home(home: Path | None) -> tuple[Path, Path]:
+    from .._home import hermes_home
+    from ..keyvault._database_authority import resolve_database_domain
+
+    requested = home or hermes_home()
+    if requested.exists():
+        domain = resolve_database_domain(requested)
+        return domain.home, domain.root
+    return requested, root_home(requested)
+
+
+def _refuse_deferred_native_state(base: Path) -> None:
+    """Native recovery/adoption remain closed until the offline transaction layer."""
+    from .._database_contracts import DatabaseRefused
+
+    for name in (
+        "db-encryption.journal.json",
+        "db-encryption.pending",
+        "db-decryption.pending",
+    ):
+        try:
+            (base / "mordred" / name).lstat()
+        except FileNotFoundError:
+            continue
+        raise DatabaseRefused("native database recovery is unavailable; database files were not opened")
+
+
+def _install_native(home: Path | None, provider: KeyProvider | None) -> bool:
+    from .._database_contracts import DatabaseRefused
+    from . import _shim
+    from ._locking import runtime_lease
+
+    global _PROVIDER
+    requested_home, base = _native_home(home)
+    _refuse_deferred_native_state(base)
+    if _PROVIDER is not None and _PROVIDER.runtime_native and _PROVIDER.current_authority is not None:
+        existing = _PROVIDER.current_authority
+        existing.check()
+        if existing.home != requested_home or (provider is not None and provider is not _PROVIDER):
+            raise DatabaseRefused("installed database authority cannot be rebound")
+        return True
+    candidate = provider or KeyProvider(home=requested_home)
+    # Offline adoption, recovery and pending conversion stay closed.
+    try:
+        marker_path(base).lstat()
+    except FileNotFoundError:
+        # Preserve plain-runtime exclusion and first-time home initialization.
+        # This lease uses no native custody and never enters offline recovery.
+        with runtime_lease(base):
+            _refuse_deferred_native_state(base)
+            try:
+                marker_path(base).lstat()
+            except FileNotFoundError:
+                return False
+            raise DatabaseRefused("database publication changed during startup; restart required") from None
+    try:
+        authority = candidate.authority
+        if authority.home != requested_home or authority.root != base:
+            raise DatabaseRefused("database provider does not match the requested home")
+        authority.check()
+        _refuse_deferred_native_state(base)
+        module = _shim.build_module(authority=authority)
+        _shim.install_module(module)
+    except BaseException:
+        candidate.close()
+        raise
+    _PROVIDER = candidate
+    return True
+
+
+def _require_native_runtime_capability(base: Path) -> None:
+    """Refuse known-unavailable prerequisites before authenticating a protected home."""
+    if protected_state_present(base):
+        status = database_status(base)
+        if status.capability == "unavailable":
+            raise RuntimeError("database runtime unavailable: " + (status.reason or "native prerequisites missing"))
+
+
 def install(*, home: Path | None = None, provider: KeyProvider | None = None) -> bool:
     """Swap ``sqlite3`` for SQLCipher if database encryption is armed. Returns whether it did.
 
@@ -120,7 +261,10 @@ def install(*, home: Path | None = None, provider: KeyProvider | None = None) ->
     # and a lifetime reader lease would prevent their own offline conversion.
     if _maintenance_process():
         return False
-    base = home or _home()
+    base = root_home(home or _home())
+    if sys.platform in {"linux", "win32"}:
+        _require_native_runtime_capability(base)
+        return _install_native(home, provider)
     if sys.platform != "darwin":
         if protected_state_present(base):
             raise RuntimeError(
@@ -131,11 +275,13 @@ def install(*, home: Path | None = None, provider: KeyProvider | None = None) ->
     from . import _migrate, _shim
     from ._locking import runtime_lease
 
+    global _PROVIDER
+    if provider is None or provider.runtime_native:
+        return _install_native(home, provider)
     if _shim.is_installed():
         return True
-    global _PROVIDER
-    _PROVIDER = provider or KeyProvider()
-    key_provider = _PROVIDER
+    _PROVIDER = provider
+    key_provider = provider
     _migrate.resume_at_startup(base)
     _run_pending_conversion(base, key_provider)
     _run_pending_decryption(base, key_provider)
@@ -161,4 +307,15 @@ def is_installed() -> bool:
     return _shim.is_installed()
 
 
-__all__ = ["arm", "armed", "install", "is_installed", "marker_path", "register", "root_home"]
+__all__ = [
+    "DatabaseStatus",
+    "arm",
+    "armed",
+    "database_status",
+    "diagnose_database",
+    "install",
+    "is_installed",
+    "marker_path",
+    "register",
+    "root_home",
+]

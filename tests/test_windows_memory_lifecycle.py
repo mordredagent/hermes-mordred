@@ -22,6 +22,7 @@ from mordred_hermes import _config_io as cio
 from mordred_hermes import _windows_runtime
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
 from mordred_hermes.keyvault import _windows_processes, wrap
+from mordred_hermes.keyvault._database_mutation import database_key_mutation
 from mordred_hermes.keyvault._runtime_probe import GatewayDiscoveryUnavailable, GatewayRuntime
 from mordred_hermes.keyvault.memory_crypto import is_sealed, seal, unseal
 from tests import _windows_proof_runtime as injected
@@ -223,10 +224,16 @@ def _rewrap(env):
 
 def _new_generation(env):
     put(env.home, "mordred", OPTOUT, b"opt-out\n")
-    with env.custody.windows_custody_session(env.home, backend=env.backend) as owner:
-        owner.delete_role(env.lease)
-    with env.custody.windows_custody_session(env.home, backend=env.backend) as owner:
-        owner.enroll_memory()
+    with (
+        database_key_mutation(root=env.home, generation=None) as database_lease,
+        env.custody.windows_custody_session(env.home, backend=env.backend) as owner,
+    ):
+        owner.delete_role(env.lease, database_lease=database_lease)
+    with (
+        database_key_mutation(root=env.home, generation=None) as database_lease,
+        env.custody.windows_custody_session(env.home, backend=env.backend) as owner,
+    ):
+        owner.enroll_memory(database_lease=database_lease)
         assert owner.lease("memory").generation != env.lease.generation
 
 
@@ -250,8 +257,13 @@ def test_proof_for_another_profile_refuses(proven, tmp_path):
     other = tmp_path / "other"
     with open_private_directory(other, create=True):
         pass
-    with env.custody.windows_custody_session(other, create=True, backend=env.backend) as owner:
-        owner.enroll_memory()
+    from mordred_hermes.keyvault._database_mutation import database_key_mutation
+
+    with (
+        database_key_mutation(root=other, generation=None) as other_lease,
+        env.custody.windows_custody_session(other, create=True, backend=env.backend) as owner,
+    ):
+        owner.enroll_memory(database_lease=other_lease)
     put(other, "memories", "MEMORY.md", b"other profile")
     with pytest.raises(proof_module().WindowsRuntimeProofError, match=r"\(proof-stale\)"):
         storage().enable_memory_encryption(other, env.proof)

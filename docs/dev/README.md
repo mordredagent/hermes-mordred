@@ -29,6 +29,7 @@ design diaries and upstream snapshots remain available through Git history.
 | [`UBUNTU_MANUAL_INSTALL_NOTES.md`](./UBUNTU_MANUAL_INSTALL_NOTES.md) | Observed Ubuntu Desktop/TPM installation issues and remedies |
 | [`WINDOWS_CONFIG_IO.md`](./WINDOWS_CONFIG_IO.md) | Canonical Windows configuration API, ownership and verification |
 | [`WINDOWS_AUDIT_IO.md`](./WINDOWS_AUDIT_IO.md) | Opt-in checked audit sessions, bounded rotation, and validation |
+| [Cross-platform database encryption design](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md) | Proposed shared SQLCipher lifecycle for Linux, Windows and macOS; AWS native acceptance boundaries |
 
 When prose and code disagree, the typed implementation, tests, CLI parser, and
 machine contracts named by the relevant document take precedence. Correct the

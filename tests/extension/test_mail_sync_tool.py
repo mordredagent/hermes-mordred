@@ -83,7 +83,7 @@ def test_the_skill_says_when_to_call_it() -> None:
 # -- check_fn ------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("platform", ["darwin", "linux"])
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32", "freebsd"])
 @pytest.mark.parametrize(
     "base_url", ["http://127.0.0.1:11434/v1", "https://api.venice.ai/api/v1", "https://api.openai.com/v1"]
 )
@@ -96,7 +96,7 @@ def test_check_fn_matrix(
     monkeypatch.setattr(mail_tool, "_platform", lambda: platform)
     monkeypatch.setattr(_gate, "check_protection", lambda _home: None if gate else _gate.refusal("not_armed"))
     monkeypatch.setattr(mail_tool, "_mail_configured", lambda: configured)
-    expected = platform == "darwin" and "openai" not in base_url and gate and configured
+    expected = platform in {"darwin", "linux", "win32"} and "openai" not in base_url and gate and configured
     assert mail_tool.mail_sync_available() is expected
 
 
@@ -104,12 +104,15 @@ def test_configured_means_sealed_credentials_with_flags(tmp_path: Path, monkeypa
     monkeypatch.setattr(secrets, "_platform", lambda: "darwin")
     assert mail_tool._mail_configured() is False
     folder = tmp_path / "mordred" / "mail"
-    folder.mkdir(parents=True)
+    (tmp_path / "mordred").mkdir(mode=0o700)
+    folder.mkdir(mode=0o700)
     (folder / "credentials.sealed").write_bytes(b"MMC1")
     (folder / "credentials.meta.json").write_text('{"account": "mail", "gmail": true, "roles": ["all"]}')
+    for path in folder.iterdir():
+        path.chmod(0o600)
     assert mail_tool._mail_configured() is True
     monkeypatch.setattr(secrets, "_platform", lambda: "linux")
-    assert mail_tool._mail_configured() is False
+    assert mail_tool._mail_configured() is True
 
 
 # -- arguments and the model gate ----------------------------------------------------------------

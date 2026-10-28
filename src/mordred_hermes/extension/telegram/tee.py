@@ -36,61 +36,41 @@ file layout but wraps to the independent C5a custody ``telegram`` role.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import secrets as _secrets
-import struct
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .secrets import TelegramSecrets, TelegramSecretsError, decode, encode
+from ..._database_contracts import DatabaseRefused
+from ...keyvault._telegram_custody import (
+    KEY_ID as KEY_ID,
+)
+from ...keyvault._telegram_custody import (
+    TelegramAuthentication,
+    TelegramSnapshotChanged,
+    assert_no_pending_forget,
+    authenticate_telegram_source,
+    checked_telegram_home,
+    pending_telegram_forget,
+    telegram_credential_transaction,
+)
+from ...keyvault._telegram_custody import (
+    _decrypt as _decrypt,
+)
+from ...keyvault._telegram_custody import (
+    _pack as _pack,
+)
+from ...keyvault._telegram_custody import (
+    _unpack as _unpack,
+)
+from .secrets import TelegramSecrets, TelegramSecretsError, encode
 
-KEY_ID = "mordred-hermes.telegram.credentials.v1"
-_MAGIC = b"MTC1"
-_NONCE_LEN = 12
-_AAD = b"mordred-telegram-credentials-v1"
 _SEALED_NAME = "credentials.sealed"
 _META_NAME = "credentials.meta.json"
-
-#: ``(value, token)`` from :meth:`TeeSecretStore.load_snapshot`.
-Snapshot = tuple[TelegramSecrets | None, bytes | None]
+Snapshot = tuple[TelegramSecrets | None, TelegramAuthentication | None]
 _DEFAULT_FLAGS: dict[str, Any] = {"version": 1, "logged_in": False, "llm_backend": None, "llm_model": None}
-
-
-def _pack(blob: bytes, dek: bytes, plaintext: bytes) -> bytes:
-    """``MTC1 || u16 len || wrap_blob || nonce || AES-256-GCM(plaintext)`` under *dek*."""
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-    nonce = _secrets.token_bytes(_NONCE_LEN)
-    body = AESGCM(dek).encrypt(nonce, plaintext, _AAD)
-    return _MAGIC + struct.pack(">H", len(blob)) + blob + nonce + body
-
-
-def _unpack(sealed: bytes) -> tuple[bytes, bytes, bytes]:
-    """Split a sealed file into ``(wrap_blob, nonce, body)``; ``secrets_corrupt`` if malformed."""
-    header = len(_MAGIC) + 2
-    if len(sealed) < header or not sealed.startswith(_MAGIC):
-        raise TelegramSecretsError("secrets_corrupt")
-    (blob_len,) = struct.unpack(">H", sealed[len(_MAGIC) : header])
-    blob = sealed[header : header + blob_len]
-    nonce = sealed[header + blob_len : header + blob_len + _NONCE_LEN]
-    body = sealed[header + blob_len + _NONCE_LEN :]
-    if len(blob) != blob_len or len(nonce) != _NONCE_LEN or len(body) < 16:
-        raise TelegramSecretsError("secrets_corrupt")
-    return blob, nonce, body
-
-
-def _decrypt(dek: bytes, nonce: bytes, body: bytes) -> bytes:
-    from cryptography.exceptions import InvalidTag
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-    try:
-        return AESGCM(dek).decrypt(nonce, body, _AAD)
-    except InvalidTag as exc:
-        raise TelegramSecretsError("secrets_corrupt") from exc
 
 
 def _meta_document(value: TelegramSecrets, previous: dict[str, Any] | None) -> dict[str, Any]:
@@ -168,17 +148,30 @@ class TeeSecretStore:
         audit_sink: Callable[[dict[str, Any]], None] = _audit_sink,
     ) -> None:
         self._root = root
-        self._backend_factory = backend_factory or hardware_backend
+        self._backend_factory = backend_factory or (lambda: hardware_backend(self._home()))
         self._audit_sink = audit_sink
+        self._native_backend: Any = None
 
     # -- paths ----------------------------------------------------------------
 
-    def _dir(self, *, create: bool = True) -> Path:
-        """The archive directory; created (0700, git-ignored) only for writes, never by a read."""
-        from .store import _ensure_private_dir, _private_dir_for_read, telegram_dir
+    def _home(self) -> Path:
+        from .store import StoreError, _windows
 
-        path = self._root if self._root is not None else telegram_dir()
-        return _ensure_private_dir(path) if create else _private_dir_for_read(path)
+        if _windows():
+            raise StoreError("store_path_unsafe")
+        root = self._root if self._root is not None else _home() / "mordred/telegram"
+        if root.name != "telegram" or root.parent.name != "mordred":
+            raise DatabaseRefused("Telegram requires its canonical profile directory")
+        return checked_telegram_home(root.parent.parent)
+
+    def _backend(self) -> Any:
+        if self._native_backend is None:
+            self._native_backend = self._backend_factory()
+        return self._native_backend
+
+    def _dir(self, *, create: bool = False) -> Path:
+        home = self._home()
+        return checked_telegram_home(home, create=create) / "mordred/telegram"
 
     @property
     def sealed_path(self) -> Path:
@@ -189,7 +182,7 @@ class TeeSecretStore:
         return self._dir() / _META_NAME
 
     def _read_path(self, name: str) -> Path:
-        return self._dir(create=False) / name
+        return self._dir() / name
 
     # -- Enclave key ----------------------------------------------------------
 
@@ -198,23 +191,26 @@ class TeeSecretStore:
         from ...keyvault import wrap
         from ...keyvault._exceptions import WrapError, WrapKeyNotFound
 
-        backend = self._backend_factory()
-        try:
-            wrap.get_wrapping_key_public(KEY_ID, backend=backend)
-            return
-        except WrapKeyNotFound:
-            pass
-        except WrapError as exc:
-            raise TelegramSecretsError("tee_unavailable") from exc
-        try:
-            wrap.generate_wrapping_key(KEY_ID, backend=backend, unattended=not require_presence)
-        except WrapError as exc:
-            raise TelegramSecretsError("tee_unavailable") from exc
+        home = self._home()
+        backend = self._backend()
+        with telegram_credential_transaction(home=home, backend=backend, create=True):
+            try:
+                wrap.get_wrapping_key_public(KEY_ID, backend=backend)
+                return
+            except WrapKeyNotFound:
+                if self.sealed_path.exists():
+                    raise DatabaseRefused(
+                        "Telegram source exists without its native key; retain it for repair"
+                    ) from None
+            except WrapError as exc:
+                raise TelegramSecretsError("tee_unavailable") from exc
+            try:
+                wrap.generate_wrapping_key(KEY_ID, backend=backend, unattended=not require_presence)
+            except WrapError as exc:
+                raise TelegramSecretsError("tee_unavailable") from exc
 
     def delete_key(self) -> None:
-        from ...keyvault import wrap
-
-        wrap.delete_wrapping_key(KEY_ID, backend=self._backend_factory())
+        raise DatabaseRefused("Telegram deletion requires authenticated forget custody")
 
     # -- seal / unseal ----------------------------------------------------------
 
@@ -225,7 +221,7 @@ class TeeSecretStore:
         dek = _secrets.token_bytes(32)
         try:
             # Offline: uses the Enclave PUBLIC key; no prompt.
-            blob = wrap.wrap_dek(dek, KEY_ID, backend=self._backend_factory())
+            blob = wrap.wrap_dek(dek, KEY_ID, backend=self._backend())
         except WrapError as exc:
             raise TelegramSecretsError("tee_unavailable") from exc
         return _pack(blob, dek, plaintext)
@@ -237,7 +233,7 @@ class TeeSecretStore:
         blob, nonce, body = _unpack(sealed)
         try:
             # The authorization boundary: ECDH inside the Secure Enclave.
-            dek = wrap.unwrap_dek(blob, KEY_ID, audit_sink=self._audit_sink, backend=self._backend_factory())
+            dek = wrap.unwrap_dek(blob, KEY_ID, audit_sink=self._audit_sink, backend=self._backend())
         except WrapAuthCancelled as exc:
             raise TelegramSecretsError("tee_auth_cancelled") from exc
         except WrapError as exc:
@@ -246,103 +242,125 @@ class TeeSecretStore:
 
     # -- public API -------------------------------------------------------------
 
-    def _read_sealed(self) -> bytes | None:
-        path = self._read_path(_SEALED_NAME)
-        if path.is_symlink():
-            raise TelegramSecretsError("secrets_corrupt")
-        try:
-            return path.read_bytes()
-        except FileNotFoundError:
-            return None
-
     def load(self, *, fresh: bool = True) -> TelegramSecrets | None:
-        """Unseal through the Enclave. Never cached (``fresh`` is ignored)."""
+        """Every load authenticates fresh; no plaintext or private-key cache."""
         del fresh
         return self.load_snapshot()[0]
 
     def load_snapshot(self) -> Snapshot:
-        """:meth:`load` plus a token for :meth:`update_from_snapshot`.
-
-        One Enclave unwrap (none when nothing is sealed yet). The token is the
-        SHA-256 of the sealed file that was unsealed (``None`` when absent); it
-        is not secret and holds nothing derived from the plaintext.
-        """
-        sealed = self._read_sealed()
-        if sealed is None:
+        home = self._home()
+        assert_no_pending_forget(home)
+        if not self.sealed_path.exists() and not self.sealed_path.is_symlink():
             return None, None
-        return decode(self._unseal(sealed)), hashlib.sha256(sealed).digest()
+        return authenticate_telegram_source(home=home, backend=self._backend(), audit_sink=self._audit_sink)
 
     def update(self, mutate: Callable[[TelegramSecrets | None], TelegramSecrets | None]) -> TelegramSecrets | None:
-        """Unseal (one Enclave unwrap), apply ``mutate``, and seal the result."""
-        return self._write(mutate(self.load()))
+        for _attempt in range(3):
+            snapshot = self.load_snapshot()
+            try:
+                return self._update_checked(snapshot, mutate)
+            except TelegramSnapshotChanged:
+                continue  # release custody before fresh authentication
+        raise DatabaseRefused("Telegram source changed repeatedly; update refused")
+
+    def _update_checked(
+        self, snapshot: Snapshot, mutate: Callable[[TelegramSecrets | None], TelegramSecrets | None]
+    ) -> TelegramSecrets | None:
+        current, authentication = snapshot
+        with telegram_credential_transaction(
+            home=self._home(), backend=self._backend(), authenticated=authentication, create=True
+        ) as custody:
+            if authentication is None:
+                if current is not None:
+                    raise DatabaseRefused("Telegram snapshot has no issued authentication")
+                custody.check_absence()
+            updated = mutate(current)
+            if updated is None:
+                raise DatabaseRefused("Telegram removal requires explicit authenticated forget")
+            return self._write_locked(updated, custody)
 
     def update_from_snapshot(
         self, snapshot: Snapshot, mutate: Callable[[TelegramSecrets | None], TelegramSecrets | None]
     ) -> TelegramSecrets | None:
-        """:meth:`update` for a value just read with :meth:`load_snapshot`,
-        without unsealing it a second time (no second Touch ID).
-
-        The sealed file must be byte-identical to the one the snapshot came from;
-        if another writer changed (or removed / created) it in between, this
-        falls back to a plain :meth:`update` (one unwrap) so that write is never
-        lost. Sealing itself only uses the Enclave public key -- no prompt.
-        """
-        current, token = snapshot
-        sealed = self._read_sealed()
-        now = None if sealed is None else hashlib.sha256(sealed).digest()
-        unchanged = (now is None and token is None) or (
-            now is not None and token is not None and hmac.compare_digest(now, token)
-        )
-        if not unchanged:
+        try:
+            return self._update_checked(snapshot, mutate)
+        except TelegramSnapshotChanged:
             return self.update(mutate)
-        return self._write(mutate(current))
+
+    def _write_locked(self, updated: TelegramSecrets, custody: Any) -> TelegramSecrets:
+        from .store import _ensure_gitignored
+
+        _ensure_gitignored(self._dir())
+        meta = _meta_document(updated, self._read_meta())
+        custody.write_source(self._seal(encode(updated)), json.dumps(meta).encode("utf-8"))
+        return updated
 
     def _write(self, updated: TelegramSecrets | None) -> TelegramSecrets | None:
-        from ...keyvault._storage import atomic_write
-
         if updated is None:
-            for path in (self.sealed_path, self.meta_path):
-                path.unlink(missing_ok=True)
-            return None
-        atomic_write(self.sealed_path, self._seal(encode(updated)))
-        self._write_meta(updated)
+            raise DatabaseRefused("Telegram removal requires explicit authenticated forget")
+        self.store(updated)
         return updated
 
     def store(self, value: TelegramSecrets) -> None:
-        """Seal *value* without unsealing first (migration / first login)."""
-        from ...keyvault._storage import atomic_write
-
-        atomic_write(self.sealed_path, self._seal(encode(value)))
-        self._write_meta(value)
+        with telegram_credential_transaction(home=self._home(), backend=self._backend(), create=True) as custody:
+            self._write_locked(value, custody)
 
     def _write_meta(self, value: TelegramSecrets) -> None:
-        from ...keyvault._storage import atomic_write
+        with telegram_credential_transaction(home=self._home(), backend=self._backend()) as custody:
+            custody.write_metadata(json.dumps(_meta_document(value, self._read_meta())).encode("utf-8"))
 
-        meta = _meta_document(value, self._read_meta())
-        atomic_write(self.meta_path, json.dumps(meta).encode("utf-8"))
+    def forget_from_snapshot(self, snapshot: Snapshot) -> None:
+        from .store import _posix_archive_lock, _prepare_archive_wipe, _wipe_archive_locked
+
+        home = self._home()
+        _current, authentication = snapshot
+        # Archive is first and nonblocking. Sync credential writes never take it.
+        with (
+            _posix_archive_lock(self._dir(), allow_pending=True) as archive,
+            telegram_credential_transaction(
+                home=home, backend=self._backend(), authenticated=authentication, _resume=True
+            ) as custody,
+        ):
+            journal = custody.forget_journal()
+            if journal is not None and journal["phase"] != "deleted":
+                raise DatabaseRefused("Telegram native deletion was interrupted; intent retained for repair")
+            _prepare_archive_wipe(archive)
+            if journal is None:
+                custody.validate(authentication)
+                custody.delete_native_key()
+            custody.clean_source()
+            _wipe_archive_locked(archive)
+            custody.finish_forget()
 
     def _read_meta(self) -> dict[str, Any] | None:
+        from ...keyvault._telegram_custody import _read
+
         try:
-            meta = json.loads(self._read_path(_META_NAME).read_text("utf-8"))
-        except (FileNotFoundError, ValueError):
+            observed = _read(self._read_path(_META_NAME))
+            if observed is None:
+                return None
+            meta = json.loads(observed[0])
+        except ValueError:
             return None
         return meta if isinstance(meta, dict) else None
 
     def sync_scope(self) -> dict[str, Any]:
         """The import scope chosen at setup (non-secret); empty = everything."""
+        assert_no_pending_forget(self._home())
         meta = self._read_meta() or {}
         scope = meta.get("sync_scope")
         return dict(scope) if isinstance(scope, dict) else {}
 
     def save_sync_scope(self, scope: dict[str, Any]) -> None:
-        from ...keyvault._storage import atomic_write
-
-        meta = self._read_meta() or dict(_DEFAULT_FLAGS)
-        meta["sync_scope"] = _scope_document(scope)
-        atomic_write(self.meta_path, json.dumps(meta).encode("utf-8"))
+        with telegram_credential_transaction(home=self._home(), backend=self._backend(), create=True) as custody:
+            meta = self._read_meta() or dict(_DEFAULT_FLAGS)
+            meta["sync_scope"] = _scope_document(scope)
+            custody.write_metadata(json.dumps(meta).encode("utf-8"))
 
     def flags(self) -> dict[str, Any] | None:
         """Non-secret status flags, or ``None`` when not configured. No Enclave, and nothing is created."""
+        if pending_telegram_forget(self._home()):
+            return {**_DEFAULT_FLAGS, "forget_pending": True}
         path = self._read_path(_META_NAME)
         if path.is_symlink() or not self._read_path(_SEALED_NAME).exists():
             return None

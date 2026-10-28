@@ -77,6 +77,27 @@ def test_round_trip_unseals_fresh_every_time(tmp_path: Path, enclave: FakeEnclav
     assert (tmp_path / "mail" / ".gitignore").exists()
 
 
+def test_explicit_portable_linux_seam_cannot_reuse_unknown_presence(tmp_path: Path, enclave: FakeEnclave) -> None:
+    store = sealed_store(tmp_path / "mail", enclave, platform="linux")
+    assert store.ensure_key(require_presence=False) is False
+    store.store(generic_creds(), require_presence=False)
+    assert store.load() == generic_creds() and store.flags()["touch_id"] is False
+    record = json.loads(store.key_record_path.read_bytes())
+    record["touch_id"] = True
+    store.key_record_path.write_text(json.dumps(record))
+    before = [p.read_bytes() for p in (store.sealed_path, store.meta_path, store.key_record_path)]
+    unwraps, keys = enclave.ecdh_calls, dict(enclave.keys)
+    for operation in (
+        store.load,
+        lambda: store.ensure_key(require_presence=False, replace=True),
+        lambda: store.store(generic_creds(), require_presence=False),
+    ):
+        with pytest.raises(MailSecretsError, match=r"^presence_unsupported$"):
+            operation()
+    assert enclave.ecdh_calls == unwraps and enclave.keys == keys
+    assert [p.read_bytes() for p in (store.sealed_path, store.meta_path, store.key_record_path)] == before
+
+
 def test_flags_never_hold_the_address_host_or_password(tmp_path: Path, enclave: FakeEnclave) -> None:
     store = sealed_store(tmp_path / "mail", enclave)
     store.ensure_key()
@@ -102,7 +123,7 @@ def test_repr_hides_secrets() -> None:
 
 def test_other_platforms_are_refused_before_any_file_use(tmp_path: Path, enclave: FakeEnclave) -> None:
     root = tmp_path / "mail"
-    store = sealed_store(root, enclave, platform="linux")
+    store = sealed_store(root, enclave, platform="unsupported-test-os")
     for call in (store.load, lambda: store.store(gmail_creds()), store.ensure_key, store.forget):
         with pytest.raises(MailSecretsError) as raised:
             call()
@@ -134,6 +155,14 @@ def test_forget_removes_the_files_and_the_key(tmp_path: Path, enclave: FakeEncla
     assert not store.sealed_path.exists() and not store.meta_path.exists()
     assert KEY_ID not in enclave.keys
     assert store.forget() is True  # absent is fine
+
+
+def test_portable_force_orphan_is_the_unconditional_fixture_forget(tmp_path: Path, enclave: FakeEnclave) -> None:
+    """The explicit portable seam has no source proof to bypass: the flag grants nothing extra."""
+    store = sealed_store(tmp_path / "mail", enclave)
+    store.ensure_key()  # a key left without credentials
+    assert store.forget(force_orphan=True) is True
+    assert KEY_ID not in enclave.keys and not store.key_record_path.exists() and not store.residue()
 
 
 @pytest.mark.parametrize("damage", ["corrupt", "missing", "symlink"])

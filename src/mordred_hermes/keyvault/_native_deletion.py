@@ -1,0 +1,568 @@
+"""Issuer-backed native deletion authority, without SQL or native imports.
+
+This is an API misuse boundary, not a sandbox against replacing module internals.
+Object fields alone never convey authority: only live registered identities do.
+"""
+
+from __future__ import annotations
+
+import importlib
+import os
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal, Never, cast
+from weakref import WeakKeyDictionary
+
+from mordred_hermes._database_contracts import DatabaseRefused
+
+if TYPE_CHECKING:
+    from mordred_hermes._database_lifecycle import ExclusiveLease
+
+    from ._seckey_ops import _SecKeyOps
+    from ._storage import KeyvaultCustody, _NativeCreationOwner
+    from .wrap import NativeBackend
+
+
+class _OpaqueAuthority:
+    __slots__ = ("__weakref__",)
+
+    def __new__(cls) -> _OpaqueAuthority:
+        raise DatabaseRefused("native deletion authority cannot be constructed")
+
+    def __copy__(self) -> None:
+        raise DatabaseRefused("native deletion authority cannot be copied")
+
+    def __deepcopy__(self, memo: object) -> None:
+        raise DatabaseRefused("native deletion authority cannot be copied")
+
+    def __reduce__(self) -> Never:
+        raise DatabaseRefused("native deletion authority cannot be serialized")
+
+
+class NativeDeletePermit(_OpaqueAuthority):
+    """Opaque single-invocation authority issued under checked custody."""
+
+    __slots__ = ()
+
+
+class ValidatedNativeOwner(_OpaqueAuthority):
+    """Opaque ownership from a fixed in-tree custody implementation."""
+
+    __slots__ = ()
+
+
+class NativeCreateReceipt(_OpaqueAuthority):
+    """A positive create-only result, valid only in its creating scope."""
+
+    __slots__ = ()
+
+    @property
+    def public_key(self) -> bytes:
+        return _receipt_record(self).public_key
+
+
+@dataclass(frozen=True)
+class _NativeOwnerFacts:
+    home: Path
+    role: Literal["memory", "vault", "main", "audit", "telegram", "mail"]
+    generation: str | None = None
+    database_home: Path | None = None
+
+
+@dataclass
+class _OwnerRecord:
+    scope: object
+    selector: str
+    backend: NativeBackend
+    facts: _NativeOwnerFacts
+    home_identity: tuple[object, ...]
+    binding: tuple[object, ...]
+    process: tuple[int, int]
+
+
+@dataclass
+class _PermitRecord:
+    owner: ValidatedNativeOwner
+    lease: ExclusiveLease | None
+    active: bool = True
+    consumed: bool = False
+
+
+@dataclass
+class _ReceiptRecord:
+    backend: NativeBackend | None
+    binding: tuple[object, ...]
+    ops: _SecKeyOps
+    tag: bytes
+    public_key: bytes
+    process: tuple[int, int]
+    active: bool = True
+    consumed: bool = False
+    custody: KeyvaultCustody | None = None
+    creation_owner: _NativeCreationOwner | None = None
+    logical_key_id: str | None = None
+
+
+@dataclass
+class _Invocation:
+    pairs: list[tuple[object, bytes, tuple[object, ...]]]
+    process: tuple[int, int]
+
+
+_owners: WeakKeyDictionary[ValidatedNativeOwner, _OwnerRecord] = WeakKeyDictionary()
+_permits: WeakKeyDictionary[NativeDeletePermit, _PermitRecord] = WeakKeyDictionary()
+_receipts: WeakKeyDictionary[NativeCreateReceipt, _ReceiptRecord] = WeakKeyDictionary()
+_invocations = threading.local()
+_receipt_lock = threading.RLock()
+_handoff_epochs: dict[bytes, int] = {}
+_active_handoffs: dict[bytes, int] = {}
+_rollback_inflight: dict[bytes, int] = {}
+
+
+def _process() -> tuple[int, int]:
+    return os.getpid(), threading.get_ident()
+
+
+def _path_identity(value: str) -> tuple[object, ...]:
+    path = Path(value).absolute()
+    try:
+        stat = path.lstat()
+    except FileNotFoundError:
+        return (os.fspath(path), None)
+    except OSError as exc:
+        raise DatabaseRefused("native owner/store identity cannot be checked") from exc
+    try:
+        target = path.stat()
+    except FileNotFoundError:
+        target_identity = None
+    except OSError as exc:
+        raise DatabaseRefused("native owner/store target cannot be checked") from exc
+    else:
+        target_identity = (target.st_dev, target.st_ino, target.st_mode, target.st_uid)
+    return (os.fspath(path), stat.st_dev, stat.st_ino, stat.st_mode, stat.st_uid, target_identity)
+
+
+def _helper_store_paths(ops: object) -> tuple[tuple[str, Path], ...]:
+    from ._seckey_helper import _HelperSecKeyOps
+
+    if not isinstance(ops, _HelperSecKeyOps):
+        return ()
+    override = ops._env_override
+
+    def expand(value: str, leaf: str) -> Path:
+        if leaf == "tpm":
+            # Match the Rust helper: only ~ and ~/ expand; ~user is literal.
+            user_home = Path(os.environ.get("HOME", "."))
+            if value == "~":
+                return user_home
+            if value.startswith("~/"):
+                return user_home / value[2:]
+            return Path(value)
+        return Path(value).expanduser()
+
+    home = os.environ.get("HERMES_HOME")
+    stores = []
+    for name, leaf in (("MORDRED_SEKEY_STORE", "sekey"), ("MORDRED_TPMKEY_STORE", "tpm")):
+        selected = override[1] if override and override[0] == name else os.environ.get(name)
+        if selected:
+            path = expand(selected, leaf)
+        else:
+            base = expand(home, leaf) if home else expand("~", leaf) / ".hermes"
+            path = base / "mordred" / "keyvault" / leaf
+        stores.append((name, path.absolute()))
+    return tuple(stores)
+
+
+def _ops_configuration(ops: object) -> tuple[object, ...]:
+    from ._seckey_helper import _HelperSecKeyOps
+
+    if isinstance(ops, _HelperSecKeyOps):
+        override = ops._env_override
+        stores = tuple((name, os.fspath(path)) for name, path in _helper_store_paths(ops))
+        return (
+            id(ops),
+            _path_identity(ops._binary),
+            override,
+            os.environ.get("HERMES_HOME"),
+            os.fspath(Path.home()),
+            stores,
+        )
+    return (id(ops),)
+
+
+def _ops_binding(ops: object) -> tuple[object, ...]:
+    configuration = _ops_configuration(ops)
+    from ._seckey_helper import _HelperSecKeyOps
+
+    if isinstance(ops, _HelperSecKeyOps):
+        stores = tuple((name, _path_identity(os.fspath(path))) for name, path in _helper_store_paths(ops))
+        return (configuration, stores)
+    return (configuration,)
+
+
+def _backend_pairs(backend: NativeBackend, selector: str) -> tuple[tuple[_SecKeyOps, bytes], ...]:
+    from ._seckey_backend import _SecKeyBackend
+    from ._seckey_errors import _application_tag, _sw_application_tag
+
+    if type(backend) is not _SecKeyBackend:
+        raise DatabaseRefused("native deletion requires the trusted production backend")
+    pairs = [(backend._ops, _application_tag(selector))]
+    if backend._legacy_ops is not None and backend._legacy_ops is not backend._ops:
+        pairs.append((backend._legacy_ops, _application_tag(selector)))
+    if backend._sw_ops is not None:
+        pairs.append((backend._sw_ops, _sw_application_tag(selector)))
+    return tuple(pairs)
+
+
+def _backend_binding(backend: NativeBackend, selector: str) -> tuple[object, ...]:
+    return (id(backend), tuple((_ops_binding(ops), tag) for ops, tag in _backend_pairs(backend, selector)))
+
+
+def _checked_owner_facts(scope: object, selector: str, backend: NativeBackend) -> _NativeOwnerFacts:
+    # Fixed concrete classes only. Never invoke an arbitrary instance override.
+    adapters = (
+        ("._memory_key", "MemoryKeyCustody"),
+        ("._storage", "KeyvaultCustody"),
+        ("._windows_custody", "WindowsCustodySession"),
+        (".vault", "OpenVault"),
+        ("._telegram_custody", "PosixTelegramCustody"),
+        ("._mail_custody", "PosixMailCustody"),
+    )
+    for module_name, name in adapters:
+        module = importlib.import_module(module_name, __package__)
+        cls = getattr(module, name, None)
+        if cls is not None and type(scope) is cls:
+            method = getattr(cls, "_check_native_delete_owner", None)
+            if method is None:
+                break
+            facts = method(scope, selector, backend)
+            if type(facts) is _NativeOwnerFacts:
+                return facts
+            break
+    raise DatabaseRefused("native owner is not a live supported custody scope")
+
+
+def _issue_native_owner(scope: object, *, native_key_id: str, backend: NativeBackend) -> ValidatedNativeOwner:
+    facts = _checked_owner_facts(scope, native_key_id, backend)
+    owner = object.__new__(ValidatedNativeOwner)
+    _owners[owner] = _OwnerRecord(
+        scope,
+        native_key_id,
+        backend,
+        facts,
+        _path_identity(os.fspath(facts.home)),
+        _backend_binding(backend, native_key_id),
+        _process(),
+    )
+    _revoke_native_creation_rollbacks(native_key_id)
+    return owner
+
+
+def _revoke_native_creation_rollbacks(native_key_id: str) -> None:
+    """Retire unpublished-key rights when another transaction adopts the key.
+
+    This grants no native authority and performs no I/O. Match exact existing
+    tag encodings, without guessing role or provider from the selector. Because
+    distinct backend/ops instances can address the same physical key, revoke
+    across all stores conservatively. An unrelated same-selector creation can
+    consequently require explicit checked cleanup instead of receipt rollback.
+    """
+    from ._seckey_errors import _application_tag, _sw_application_tag
+
+    tags = (_application_tag(native_key_id), _sw_application_tag(native_key_id))
+    with _receipt_lock:
+        for tag in tags:
+            _handoff_epochs[tag] = _handoff_epochs.get(tag, 0) + 1
+        for receipt in list(_receipts.values()):
+            if receipt.active and receipt.tag in tags:
+                receipt.consumed = True
+        if any(_rollback_inflight.get(tag, 0) for tag in tags):
+            raise DatabaseRefused("native creation rollback is already in progress; adoption must retain no source")
+
+
+@contextmanager
+def _native_creation_handoff(native_key_id: str) -> Iterator[None]:
+    """Exclude receipt rollback while a different transaction adopts this key.
+
+    This only removes rights. Registry locks are never held over native I/O,
+    database or custody acquisition, and a competing rollback refuses admission
+    instead of waiting for either transaction's locks.
+    """
+    from ._seckey_errors import _application_tag, _sw_application_tag
+
+    tags = (_application_tag(native_key_id), _sw_application_tag(native_key_id))
+    issuing_process = _process()
+    with _receipt_lock:
+        _revoke_native_creation_rollbacks(native_key_id)
+        for tag in tags:
+            _active_handoffs[tag] = _active_handoffs.get(tag, 0) + 1
+    try:
+        yield
+    finally:
+        with _receipt_lock:
+            if issuing_process == _process():
+                for tag in tags:
+                    remaining = _active_handoffs[tag] - 1
+                    if remaining:
+                        _active_handoffs[tag] = remaining
+                    else:
+                        del _active_handoffs[tag]
+
+
+def _owner_record(owner: ValidatedNativeOwner, backend: NativeBackend) -> _OwnerRecord:
+    record = _owners.get(owner) if type(owner) is ValidatedNativeOwner else None
+    if record is None or record.process != _process() or record.backend is not backend:
+        raise DatabaseRefused("native owner is invalid for this process or backend")
+    if record.home_identity != _path_identity(os.fspath(record.facts.home)):
+        raise DatabaseRefused("native owner home changed")
+    if record.binding != _backend_binding(backend, record.selector):
+        raise DatabaseRefused("native backend or store changed")
+    if _checked_owner_facts(record.scope, record.selector, backend) != record.facts:
+        raise DatabaseRefused("native custody ownership changed")
+    return record
+
+
+def _check_database(record: _OwnerRecord, lease: ExclusiveLease | None) -> None:
+    if record.facts.role == "memory" and record.facts.database_home != record.facts.home:
+        raise DatabaseRefused("native memory owner lacks its checked database home")
+    if record.facts.database_home is not None:
+        if lease is None:
+            raise DatabaseRefused("native memory deletion requires a preceding database lease")
+        from ._database_mutation import _assert_memory_database_mutation_safe
+
+        _assert_memory_database_mutation_safe(home=record.facts.database_home, database_lease=lease)
+
+
+@contextmanager
+def _owned_delete_scope(
+    owner: ValidatedNativeOwner, *, backend: NativeBackend, database_lease: ExclusiveLease | None
+) -> Iterator[NativeDeletePermit]:
+    record = _owner_record(owner, backend)
+    _check_database(record, database_lease)
+    permit = object.__new__(NativeDeletePermit)
+    issued = _PermitRecord(owner, database_lease)
+    _permits[permit] = issued
+    try:
+        yield permit
+    finally:
+        issued.active = False
+
+
+def _require_delete_permit(deletion: NativeDeletePermit | None) -> _PermitRecord:
+    record = _permits.get(deletion) if type(deletion) is NativeDeletePermit else None
+    if record is None or not record.active or record.consumed:
+        raise DatabaseRefused("native deletion requires live checked ownership")
+    return record
+
+
+def _check_delete_request(*, backend: NativeBackend, native_key_id: str, deletion: NativeDeletePermit | None) -> None:
+    permit = _require_delete_permit(deletion)
+    try:
+        owner = _owner_record(permit.owner, backend)
+        if native_key_id != owner.selector:
+            raise DatabaseRefused("native deletion selector does not match custody")
+        _check_database(owner, permit.lease)
+    except BaseException:
+        permit.consumed = True
+        raise
+
+
+@contextmanager
+def _tag_invocation(pairs: tuple[tuple[_SecKeyOps, bytes], ...]) -> Iterator[None]:
+    invocation = _Invocation([(ops, tag, _ops_binding(ops)) for ops, tag in pairs], _process())
+    stack = getattr(_invocations, "stack", None)
+    if stack is None:
+        stack = []
+        _invocations.stack = stack
+    stack.append(invocation)
+    try:
+        yield
+    finally:
+        stack.pop()
+
+
+@contextmanager
+def _validate_delete_invocation(
+    *, backend: NativeBackend, native_key_id: str, deletion: NativeDeletePermit | None
+) -> Iterator[None]:
+    permit = _require_delete_permit(deletion)
+    # Every attempted invocation consumes authority, including failed validation.
+    permit.consumed = True
+    owner = _owner_record(permit.owner, backend)
+    if native_key_id != owner.selector:
+        raise DatabaseRefused("native deletion selector does not match custody")
+    _check_database(owner, permit.lease)
+    with _tag_invocation(_backend_pairs(backend, native_key_id)):
+        yield
+
+
+def _assert_native_tag_delete(*, ops: object, tag: bytes) -> None:
+    stack = getattr(_invocations, "stack", [])
+    if stack:
+        invocation = stack[-1]
+        if invocation.process == _process():
+            for index, (allowed, allowed_tag, binding) in enumerate(invocation.pairs):
+                if allowed is ops and allowed_tag == tag and binding == _ops_binding(ops):
+                    invocation.pairs.pop(index)
+                    return
+    raise DatabaseRefused("raw native deletion requires an active exact-tag invocation")
+
+
+def _receipt_record(receipt: NativeCreateReceipt) -> _ReceiptRecord:
+    record = _receipts.get(receipt) if type(receipt) is NativeCreateReceipt else None
+    if record is None or not record.active or record.consumed or record.process != _process():
+        raise DatabaseRefused("native creation receipt is expired or consumed")
+    return record
+
+
+def _checked_creation_owner(
+    custody: KeyvaultCustody, key_id: str, selector: str, backend: NativeBackend
+) -> _NativeCreationOwner:
+    from ._storage import KeyvaultCustody
+
+    if type(custody) is not KeyvaultCustody:
+        raise DatabaseRefused("creation receipts require genuine keyvault provisioning custody")
+    return KeyvaultCustody._check_native_creation_owner(custody, key_id, selector, backend)
+
+
+def _check_receipt_creation_owner(record: _ReceiptRecord) -> None:
+    if record.backend is None:  # Internal random, disjoint probe only.
+        return
+    if record.custody is None or record.logical_key_id is None:
+        raise DatabaseRefused("creation receipt has no provisioning transaction")
+    owner = _checked_creation_owner(record.custody, record.logical_key_id, cast(str, record.binding[1]), record.backend)
+    if owner is not record.creation_owner:
+        raise DatabaseRefused("creation receipt belongs to another provisioning transaction")
+
+
+def _expire_native_creation_receipts(custody: KeyvaultCustody) -> None:
+    with _receipt_lock:
+        for record in list(_receipts.values()):
+            if record.custody is custody:
+                record.active = False
+
+
+@contextmanager
+def create_wrapping_key_scope(
+    key_id: str,
+    *,
+    backend: NativeBackend,
+    custody: KeyvaultCustody,
+    unattended: bool | None = None,
+    native_key_id: str | None = None,
+) -> Iterator[NativeCreateReceipt]:
+    from ._seckey_backend import _SecKeyBackend
+    from .wrap import _decode_sec1_uncompressed_p256
+
+    selector = key_id if native_key_id is None else native_key_id
+    creation_owner = _checked_creation_owner(custody, key_id, selector, backend)
+    pairs = _backend_pairs(backend, selector)
+    configuration = tuple((_ops_configuration(ops), tag) for ops, tag in pairs)
+    creating_process = _process()
+    with _receipt_lock:
+        if any(_active_handoffs.get(tag, 0) for _, tag in pairs):
+            raise DatabaseRefused("native key adoption is in progress; no new rollback may be created")
+        epochs = {tag: _handoff_epochs.get(tag, 0) for _, tag in pairs}
+    if type(backend) is not _SecKeyBackend:
+        raise DatabaseRefused("creation receipts require the trusted create-only backend")
+    public_key, ops, tag = _SecKeyBackend._create_tracked_key(backend, selector, unattended=unattended)
+    if configuration != tuple((_ops_configuration(ops), tag) for ops, tag in _backend_pairs(backend, selector)):
+        raise DatabaseRefused("native backend or store changed during create")
+    if _checked_creation_owner(custody, key_id, selector, backend) is not creation_owner:
+        raise DatabaseRefused("native creation transaction changed during create")
+    _decode_sec1_uncompressed_p256(public_key)
+    backend_binding = _backend_binding(backend, selector)
+    receipt = object.__new__(NativeCreateReceipt)
+    record = _ReceiptRecord(backend, (_ops_binding(ops), selector, backend_binding), ops, tag, public_key, _process())
+    record.custody, record.creation_owner, record.logical_key_id = custody, creation_owner, key_id
+    with _receipt_lock:
+        if creating_process != _process() or _active_handoffs.get(tag, 0) or epochs[tag] != _handoff_epochs.get(tag, 0):
+            raise DatabaseRefused("native key was adopted during creation; rollback authority was not issued")
+        _receipts[receipt] = record
+    try:
+        yield receipt
+    finally:
+        record.active = False
+
+
+def _probe_native_ops(ops: _SecKeyOps) -> None:
+    # Only these concrete create-only implementations can issue probe receipts.
+    from ._seckey_errors import _PROBE_TAG_PREFIX, _SW_TAG_PREFIX, _OpsError
+    from ._seckey_ops import _PyobjcSecKeyOps, _SoftwareFallbackOps
+    from .wrap import _decode_sec1_uncompressed_p256
+
+    if type(ops) not in (_PyobjcSecKeyOps, _SoftwareFallbackOps):
+        raise DatabaseRefused("unsupported native probe implementation")
+    prefix = _SW_TAG_PREFIX if type(ops) is _SoftwareFallbackOps else _PROBE_TAG_PREFIX
+    tag = prefix + b"__probe__." + os.urandom(16)
+    public_key = ops.create_keypair(tag, "Mordred capability probe", unattended=True)
+    _decode_sec1_uncompressed_p256(public_key)
+    receipt = object.__new__(NativeCreateReceipt)
+    record = _ReceiptRecord(None, (_ops_binding(ops),), ops, tag, public_key, _process())
+    with _receipt_lock:
+        _receipts[receipt] = record
+    try:
+        # A successful probe retains its historical cleanup-failure policy.
+        with suppress(_OpsError):
+            rollback_created_key(receipt)
+    finally:
+        record.active = False
+
+
+def rollback_created_key(receipt: NativeCreateReceipt) -> None:
+    with _receipt_lock:
+        record = _receipt_record(receipt)
+        record.consumed = True
+        _rollback_inflight[record.tag] = _rollback_inflight.get(record.tag, 0) + 1
+    try:
+        _check_receipt_creation_owner(record)
+        if record.binding[0] != _ops_binding(record.ops):
+            raise DatabaseRefused("created native key store changed")
+        if record.backend is not None and record.binding[2] != _backend_binding(
+            record.backend, cast(str, record.binding[1])
+        ):
+            raise DatabaseRefused("created native backend changed")
+        if record.ops.copy_public_key(record.tag) != record.public_key:
+            raise DatabaseRefused("created native public key changed")
+        _check_receipt_creation_owner(record)
+        with _tag_invocation(((record.ops, record.tag),)):
+            record.ops.delete_key(record.tag)
+    finally:
+        with _receipt_lock:
+            if record.process == _process():
+                remaining = _rollback_inflight[record.tag] - 1
+                if remaining:
+                    _rollback_inflight[record.tag] = remaining
+                else:
+                    del _rollback_inflight[record.tag]
+
+
+def commit_created_key(receipt: NativeCreateReceipt) -> None:
+    with _receipt_lock:
+        record = _receipt_record(receipt)
+    _check_receipt_creation_owner(record)
+    with _receipt_lock:
+        _receipt_record(receipt).consumed = True
+        if record.custody is not None and record.creation_owner is not None:
+            from ._storage import _complete_native_creation_owner
+
+            _complete_native_creation_owner(record.custody, record.creation_owner)
+
+
+def _after_fork() -> None:
+    global _receipt_lock
+    _receipt_lock = threading.RLock()
+    _handoff_epochs.clear()
+    _active_handoffs.clear()
+    _rollback_inflight.clear()
+    _owners.clear()
+    _permits.clear()
+    _receipts.clear()
+    _invocations.__dict__.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork)

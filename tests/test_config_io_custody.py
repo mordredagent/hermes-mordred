@@ -31,6 +31,14 @@ def loan_fs(fs, monkeypatch):
 
     monkeypatch.setattr(tx, "append_bytes", append, raising=False)
     monkeypatch.setattr(tx, "rename_file", rename, raising=False)
+
+    def flush_file(name, *, expected_identity=None):
+        if expected_identity is not None and tx.stat(name).identity != expected_identity:
+            raise PrivateFSError("unsafe", "identity")
+        backend.event("policy:flush_file")
+
+    monkeypatch.setattr(tx, "flush_file", flush_file, raising=False)
+    monkeypatch.setattr(tx, "flush_directory", lambda: backend.event("policy:flush_directory"), raising=False)
     return backend, paths
 
 
@@ -84,6 +92,7 @@ PROTECTED = [
         "create_bytes",
         "replace_bytes",
         "append_bytes",
+        "flush_file",
         "delete_file",
         "rename_source",
         "rename_destination",
@@ -320,3 +329,63 @@ def test_home_identity_rechecks_owner_and_directory_binding(fs, monkeypatch, bou
                 assert caught.value.operation == "home_identity"
             finally:
                 backend.home.ident = original
+
+
+@pytest.mark.parametrize("operation", ["flush_file", "flush_directory"])
+@pytest.mark.parametrize("boundary", ["closed", "thread", "process", "pending", "identity"])
+def test_loan_flush_rechecks_lifetime_and_coordinator_before_io(loan_fs, monkeypatch, operation, boundary):
+    b, paths = loan_fs
+    with cio.canonical_session(paths, scope="policy") as session:
+        with session.borrow_mordred_transaction() as tx:
+            call = tx.flush_directory if operation == "flush_directory" else lambda: tx.flush_file("owned")
+            if boundary == "closed":
+                pass
+            elif boundary == "thread":
+                with ThreadPoolExecutor(1) as executor, pytest.raises(RuntimeError):
+                    executor.submit(call).result()
+            elif boundary == "process":
+                with monkeypatch.context() as child:
+                    child.setattr(cio.os, "getpid", lambda: -1)
+                    with pytest.raises(RuntimeError):
+                        call()
+            elif boundary == "pending":
+                b.policy.create_bytes(cio.POLICY_TRANSACTION_MARKER, b"pending")
+                with pytest.raises(cio.PolicyPendingError):
+                    call()
+                del b.policy.files[cio.POLICY_TRANSACTION_MARKER]
+            else:
+                original = b.policy.ident
+                b.policy.ident = b.identity()
+                try:
+                    with pytest.raises(PrivateFSError) as error:
+                        call()
+                    assert error.value.operation == "policy_identity"
+                finally:
+                    b.policy.ident = original
+        if boundary == "closed":
+            with pytest.raises(RuntimeError):
+                call()
+    assert "policy:" + operation not in b.events
+
+
+@pytest.mark.parametrize("operation", ["flush_file", "flush_directory"])
+def test_loan_flush_uncertainty_poison_survives_caught_error(loan_fs, monkeypatch, operation):
+    b, paths = loan_fs
+    original = PrivateFSError("io", "flush", commit_state="uncertain")
+
+    def fail(*args, **kwargs):
+        raise original
+
+    monkeypatch.setattr(b.policy, operation, fail)
+    with (
+        pytest.raises(PrivateFSError) as caught,
+        cio.canonical_session(paths, scope="policy") as session,
+        session.borrow_mordred_transaction() as tx,
+    ):
+        with pytest.raises(PrivateFSError) as error:
+            if operation == "flush_directory":
+                tx.flush_directory()
+            else:
+                tx.flush_file("owned")
+        assert error.value is original
+    assert caught.value is original

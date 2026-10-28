@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from mordred_hermes.imports import _posix_source as posix_source
 from mordred_hermes.imports.mail import source as source_mod
 from mordred_hermes.imports.mail.source import (
     EmlBytes,
@@ -129,21 +130,83 @@ def test_eml_directory_is_sorted_by_name_and_skips_non_regular_entries(tmp_path:
 
 
 def test_sources_are_only_opened_read_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    flags: list[int] = []
+    importing_opens: list[object] = []
     real_open = os.open
 
     def recording_open(path: object, flag: int, *args: object) -> int:
-        flags.append(flag)
+        importing_opens.append(path)
         return real_open(path, flag, *args)  # type: ignore[arg-type]
 
     monkeypatch.setattr(source_mod.os, "open", recording_open)
-    list(iter_raw(MboxSource(FIXTURES / "takeout_small.mbox"), Counter()))
-    list(iter_raw(EmlSource(FIXTURES), Counter()))
+    source = FIXTURES / "takeout_small.mbox"
+    messages, _ = _raw(MboxSource(source))
+    assert messages
+    # Only the isolated worker opens the source; this PID never does (it would
+    # release SQLCipher locks on an aliased inode).
+    assert not [p for p in importing_opens if Path(str(p)).name == source.name]
+
+    # The worker's own open is read-only, no-follow and non-blocking.
+    flags: list[int] = []
+
+    def worker_open(path: object, flag: int, *args: object) -> int:
+        flags.append(flag)
+        return real_open(path, flag, *args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(posix_source.os, "open", worker_open)
+    chunks: list[bytes] = []
+    info = source.lstat()
+    posix_source._read_source(source, None, list(posix_source._file_fact(info)), chunks.append)
+    assert b"".join(chunks) == source.read_bytes()
     assert flags
     assert all(flag & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC) == 0 for flag in flags)
+    assert all(flag & os.O_NOFOLLOW and flag & os.O_NONBLOCK for flag in flags)
+
+
+_MESSAGE = b"From a@example.com Mon Oct  5 10:00:00 2026\nSubject: tail\n\nbody\n"
+
+
+def test_mbox_larger_than_the_old_cap_is_streamed(tmp_path: Path) -> None:
+    path = tmp_path / "takeout.mbox"
+    block = (b"padding line of text\n" * 50000)[: 1024 * 1024]
+    block = block[: block.rindex(b"\n") + 1]
+    with path.open("wb") as handle:
+        handle.write(b"From a@example.com Mon Oct  5 09:00:00 2026\nSubject: head\n\n")
+        for _ in range(70):
+            handle.write(block)
+        handle.write(b"\n" + _MESSAGE)
+    assert path.stat().st_size > 64 * 1024 * 1024
+    messages, stats = _raw(MboxSource(path))
+    assert messages[-1].startswith(b"Subject: tail") or b"Subject: tail" in messages[-1]
+    assert stats["skipped_oversize"] == 1
+
+
+def test_suffixless_and_group_writable_mbox_are_read(tmp_path: Path) -> None:
+    inbox = tmp_path / "Inbox"
+    inbox.write_bytes(_MESSAGE)
+    inbox.chmod(0o664)
+    messages, _ = _raw(MboxSource(inbox))
+    assert len(messages) == 1
+
+
+def test_mbox_under_symlinked_parent_is_read(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "mail.mbox").write_bytes(_MESSAGE)
+    link = tmp_path / "link"
+    _symlink(link, real)
+    messages, _ = _raw(MboxSource(link / "mail.mbox"))
+    assert len(messages) == 1
 
 
 def test_package_never_uses_mailbox_tempfile_or_logging() -> None:
     forbidden = re.compile(r"^\s*(?:import|from)\s+(?:mailbox|tempfile|logging)\b", re.MULTILINE)
     for path in sorted(PACKAGE.glob("*.py")):
         assert not forbidden.search(path.read_text(encoding="utf-8")), path.name
+
+
+def test_mail_export_hardlink_never_reads_a_protected_alias(tmp_path: Path) -> None:
+    source = tmp_path / "mail.mbox"
+    source.write_bytes(b"From a Mon Oct  5 10:00:00 2026\nSubject: private\n\nprivate\n")
+    os.link(source, tmp_path / "state.db")
+    with pytest.raises(SourceError):
+        list(iter_raw(MboxSource(source), Counter()))

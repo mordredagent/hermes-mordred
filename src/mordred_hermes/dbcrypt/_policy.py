@@ -78,3 +78,9 @@ def in_scope(path: str | os.PathLike[str], home: Path) -> bool:
             continue
         return not (len(parts) > 1 and parts[0] in DENY_DIRS)
     return False
+
+
+def lexically_in_scope(path: Path, home: Path) -> bool:
+    """Preserve protected scope before resolving a planted link out of the root."""
+    parts = _relative_to_a_home(path.absolute(), home.absolute())
+    return bool(parts and looks_like_database_name(parts[-1]) and not (len(parts) > 1 and parts[0] in DENY_DIRS))

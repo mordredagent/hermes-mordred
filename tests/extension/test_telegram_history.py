@@ -259,16 +259,11 @@ def test_every_sync_into_mordred_db_marks_the_account_retired(tmp_path, darwin):
     assert imports.get_meta(TELEGRAM_RETIRED_ACCOUNT) == str(OWNER)  # backfilled by the next sync
 
 
-def test_fresh_account_elsewhere_or_with_the_gate_closed_stays_on_enc(tmp_path, monkeypatch):
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+def test_fresh_account_with_the_gate_closed_stays_on_enc(tmp_path, monkeypatch, platform):
     archive = _archive(tmp_path)
-    monkeypatch.setattr(history, "_platform", lambda: "linux")
-    opener, calls = _counting(_import_store(tmp_path))
-    assert isinstance(
-        history.select_sink(archive, store.ArchiveIndex(), home=tmp_path, opener=opener), history.ArchiveSink
-    )
-    assert calls == []
-    monkeypatch.setattr(history, "_platform", lambda: "darwin")
-    refusing, refused = _refusing("unprotected_process")
+    monkeypatch.setattr(history, "_platform", lambda: platform)
+    refusing, refused = _refusing("unsupported_platform")
     index = store.ArchiveIndex()
     assert isinstance(history.select_sink(archive, index, home=tmp_path, opener=refusing), history.ArchiveSink)
     assert refused == [tmp_path] and index.retired_to is None and not (tmp_path / "tg" / "index.enc").exists()
@@ -482,7 +477,7 @@ def test_service_dialogs_and_status_on_the_archive(tmp_path, monkeypatch):
     opener, calls = _refusing()
     svc = _service(tmp_path, _fake_client(), opener)
     _run_sync(svc)
-    assert svc._last_error is None and calls == []
+    assert svc._last_error is None and calls == [tmp_path]
     status = asyncio.run(svc.status())
     assert (status["dialog_count"], status["message_count"]) == (2, 6)
     rows = asyncio.run(svc.dialogs())

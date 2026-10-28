@@ -1,4 +1,4 @@
-"""``/vault/*`` and ``/databases/*``: the macOS ceremonies of Desktop step 1 (a sub-router of ``api.router``).
+"""Desktop vault ceremonies and shared database observation (a sub-router of ``api.router``).
 
 The vault is prepared, acknowledged, then committed (:mod:`._vault`); the
 databases are only ever scheduled or reported (:mod:`._databases`). Shared
@@ -93,14 +93,14 @@ async def databases_status() -> Any:
 
 @router.post("/databases/encrypt")
 async def databases_encrypt(request: Request) -> Any:
-    """Body ``{"dry_run": bool}``. Schedules the conversion for the next start, or reports why not.
+    """Body ``{"dry_run": bool}``. Report shared capability; unknown facts require explicit diagnosis.
 
     ``{"ok": true, "action": "dry_run" | "scheduled" | "attention" | "needs_restart" | "done", …}``
     (``restart_required`` with ``scheduled`` / ``needs_restart``, ``code`` with
     ``attention``: ``journal``, ``decrypt_pending``, ``stale_pending``,
-    ``plaintext_in_armed_home``); ``databases_unsupported`` off macOS or without
-    SQLCipher; ``databases_failed`` when scheduling failed (re-read the status).
-    No key is needed and none is unwrapped: the conversion runs at startup.
+    ``plaintext_in_armed_home``); ``databases_unsupported`` when shared capability
+    is unavailable. Passive unknown state returns ``attention/databases_failed``
+    without scheduling, native enrollment or implicit startup recovery.
     """
     api = _api()
     body = await read_object(request)
@@ -109,14 +109,14 @@ async def databases_encrypt(request: Request) -> Any:
     dry_run = body.get("dry_run", False)
     if not isinstance(dry_run, bool):
         return api._error("invalid_body")
-    if api.sys.platform != "darwin" or not await asyncio.to_thread(_seams.sqlcipher_available):
-        return api._error("databases_unsupported")
-    if dry_run:
-        return {"ok": True, "action": "dry_run"}
     home = api._home()
 
     def decide() -> dict[str, Any]:
-        facts = _databases.status_object(home, platform="darwin", sqlcipher=True)
+        facts = _databases.status_object(home)
+        if not facts.get("supported"):
+            return {"ok": False, "error": "databases_unsupported"}
+        if dry_run:
+            return {"ok": True, "action": "dry_run"}
         return _databases.encrypt_answer(home, facts)
 
     try:

@@ -16,7 +16,8 @@ from mordred_hermes.keyvault import _memory_storage as storage
 from mordred_hermes.keyvault import _seckey_helper
 from mordred_hermes.keyvault import _windows_capability as cap
 from mordred_hermes.keyvault import _windows_custody as custody
-from tests._keyvault_fakes import FakeBackend
+from mordred_hermes.keyvault._database_mutation import database_key_mutation
+from tests._windows_custody_fakes import windows_test_backend
 from tests.test_private_fs_confidential_windows import descriptor
 from tests.test_private_fs_confidential_windows import shared_home as shared_home
 
@@ -28,13 +29,16 @@ SUPPORTED = ("memory_custody", "native_audit", "telegram_hardware")
 @pytest.fixture
 def native_custody(shared_home, monkeypatch):
     home = shared_home
-    backend = FakeBackend()
+    backend = windows_test_backend()
     helper = str(home.parent / "bin" / "mordred-hermes-winkey.exe")
     monkeypatch.setattr(_seckey_helper, "find_winkey_helper", lambda: helper)
     monkeypatch.setattr(storage, "windows_memory_runtime_admitted", lambda executable=None: True)
     monkeypatch.setattr(custody, "require_stopped_windows_gateways", lambda path: None)
-    with custody.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        custody.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
         session.enroll_role("audit")
     return home, backend
 
@@ -75,10 +79,13 @@ def test_native_case_alias_memory_reset_preserves_audit_and_lock(native_custody)
     home, backend = native_custody
     alias = home.with_name(home.name.upper())
     opt_out(home)
-    with custody.windows_custody_session(alias, backend=backend) as session:
+    with (
+        database_key_mutation(root=alias, generation=None) as database_lease,
+        custody.windows_custody_session(alias, backend=backend) as session,
+    ):
         audit = session.lease("audit")
         memory = session.lease("memory")
-        assert session.reset_role("memory").deleted == (memory.generation,)
+        assert session.reset_role("memory", database_lease=database_lease).deleted == (memory.generation,)
         session.validate_lease(audit)
     assert memory.native_key_id not in backend._keys
     assert audit.native_key_id in backend._keys
@@ -102,10 +109,12 @@ def test_native_copied_home_refuses_capabilities_and_reset(native_custody):
     for name in SUPPORTED:
         assert result[name] == (False, "custody-broken")
     for role in ("memory", "audit"):
+        # A missing lease is refused first; hold one so foreign custody itself refuses.
         with (
+            database_key_mutation(root=copied, generation=None) as database_lease,
             pytest.raises(custody.CustodyError),
             custody.windows_custody_session(copied, backend=backend) as session,
         ):
-            session.reset_role(role, erase_authorized=True)
+            session.reset_role(role, erase_authorized=True, database_lease=database_lease)
     assert backend.calls == calls
     assert {name: (copied / "mordred" / name).read_bytes() for name in before} == before

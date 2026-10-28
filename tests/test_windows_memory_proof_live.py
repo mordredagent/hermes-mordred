@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from mordred_hermes.keyvault._database_mutation import database_key_mutation
+
 pytestmark = pytest.mark.integration
 
 READER = r"""
@@ -76,9 +78,14 @@ def test_installed_runtime_proof_and_lifecycle_real_cng():
     home = root / ("memory-proof-" + uuid.uuid4().hex)
     # The real gate runs before any native key exists; no workaround is applied.
     require_stopped_windows_gateways(home)
+    with open_confidential_directory(home, create=True):
+        pass
     try:
-        with windows_custody_session(home, create=True) as owner:
-            owner.enroll_memory()
+        with (
+            database_key_mutation(root=home, generation=None) as database_lease,
+            windows_custody_session(home, create=True) as owner,
+        ):
+            owner.enroll_memory(database_lease=database_lease)
             lease = owner.lease("memory")
         with open_confidential_directory(home / "memories", create=True) as directory, directory.transaction() as tx:
             tx.create_bytes("MEMORY.md", CONTENT.encode("utf-8"))
@@ -99,8 +106,11 @@ def test_installed_runtime_proof_and_lifecycle_real_cng():
         report = verify_memory_purge_candidates(home)
         assert report.may_purge, report.reasons
         # Fixture-only cleanup through the C5a deletion journal: no seals remain.
-        with windows_custody_session(home) as owner:
-            owner.delete_role(lease)
+        with (
+            database_key_mutation(root=home, generation=None) as database_lease,
+            windows_custody_session(home) as owner,
+        ):
+            owner.delete_role(lease, database_lease=database_lease)
     except BaseException as exc:
         exc.add_note(f"retained isolated proof profile and journals: {home}")
         raise

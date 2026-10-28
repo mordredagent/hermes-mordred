@@ -10,12 +10,14 @@ from typing import Literal, cast
 
 from .._private_fs import FileIdentity
 
-Role = Literal["memory", "audit", "telegram"]
-ROLES: tuple[Role, ...] = ("memory", "audit", "telegram")
+Role = Literal["memory", "audit", "telegram", "mail"]
+V1_ROLES: tuple[Role, ...] = ("memory", "audit", "telegram")
+ROLES: tuple[Role, ...] = (*V1_ROLES, "mail")
 LOGICAL_IDS = {
     "memory": "mordred.memory",
     "audit": "mordred.audit-log",
     "telegram": "mordred-hermes.telegram.credentials.v1",
+    "mail": "mordred-hermes.mail.credentials.v1",
 }
 LIMIT = 65536
 MAX_EPOCH = (1 << 53) - 1
@@ -46,15 +48,26 @@ class Manifest:
     sid: bytes
     profile_nonce: str
     epoch: int
-    roles: tuple[RoleState, RoleState, RoleState]
+    roles: tuple[RoleState, ...]
+    version: Literal[1, 2] = 1
+
+    @property
+    def role_names(self) -> tuple[Role, ...]:
+        return V1_ROLES if self.version == 1 else ROLES
 
     def role(self, role: Role) -> RoleState:
-        return self.roles[ROLES.index(role)]
+        if role == "mail" and self.version == 1:
+            return RoleState()  # Read-only v1 compatibility never grants mail ownership.
+        if role not in self.role_names:
+            raise CustodyError("unknown custody role")
+        return self.roles[self.role_names.index(role)]
 
     def with_role(self, role: Role, state: RoleState, *, epoch: int) -> Manifest:
+        if role not in self.role_names:
+            raise CustodyError("mail custody requires explicit schema upgrade")
         roles = list(self.roles)
-        roles[ROLES.index(role)] = state
-        return replace(self, roles=cast(tuple[RoleState, RoleState, RoleState], tuple(roles)), epoch=epoch)
+        roles[self.role_names.index(role)] = state
+        return replace(self, roles=tuple(roles), epoch=epoch)
 
 
 @dataclass(frozen=True)
@@ -150,6 +163,8 @@ def new_manifest(identity: FileIdentity, sid: bytes, *, nonce: bytes | None = No
 
 
 def new_record(manifest: Manifest, role: Role, *, generation: bytes | None = None) -> RoleRecord:
+    if role not in manifest.role_names:
+        raise CustodyError("mail custody requires explicit schema upgrade")
     generation = secrets.token_bytes(32) if generation is None else generation
     epoch = _integer(manifest.epoch + 1)
     return RoleRecord(
@@ -177,20 +192,22 @@ def _record(value: object, manifest: Manifest, role: Role, *, pending: bool = Fa
 def encode_manifest(manifest: Manifest) -> bytes:
     return _encode(
         {
-            "version": 1,
+            "version": manifest.version,
             "home": {"volume": manifest.home.volume, "file_id": manifest.home.file_id.hex()},
             "sid": manifest.sid.hex(),
             "profile_nonce": manifest.profile_nonce,
             "epoch": manifest.epoch,
-            "roles": {role: asdict(manifest.role(role)) for role in ROLES},
+            "roles": {role: asdict(manifest.role(role)) for role in manifest.role_names},
         }
     )
 
 
 def parse_manifest(data: bytes, identity: FileIdentity, sid: bytes) -> Manifest:
     obj = _object(_decode(data), {"version", "home", "sid", "profile_nonce", "epoch", "roles"})
-    if type(obj["version"]) is not int or obj["version"] != 1:
+    if type(obj["version"]) is not int or obj["version"] not in (1, 2):
         raise CustodyError("unsupported custody version")
+    version = cast(Literal[1, 2], obj["version"])
+    names = V1_ROLES if version == 1 else ROLES
     home = _object(obj["home"], {"volume", "file_id"})
     bound = FileIdentity(_integer(home["volume"], (1 << 64) - 1), _hex(home["file_id"], 16))
     owner = _sid(_hex(obj["sid"]))
@@ -201,12 +218,13 @@ def parse_manifest(data: bytes, identity: FileIdentity, sid: bytes) -> Manifest:
         owner,
         _hex(obj["profile_nonce"], 32).hex(),
         _integer(obj["epoch"]),
-        (RoleState(), RoleState(), RoleState()),
+        tuple(RoleState() for _ in names),
+        version,
     )
-    roles = _object(obj["roles"], set(ROLES))
+    roles = _object(obj["roles"], set(names))
     generations: set[str] = set()
     retained_count = 0
-    for role in ROLES:
+    for role in names:
         state = _object(roles[role], {"current", "retained"})
         retained = state["retained"]
         if not isinstance(retained, list):
@@ -229,6 +247,8 @@ def encode_pending(pending: Pending) -> bytes:
 
 
 def parse_pending(data: bytes, manifest: Manifest, role: Role) -> Pending:
+    if role not in manifest.role_names:
+        raise CustodyError("journal role requires explicit schema upgrade")
     obj = _object(_decode(data), {"version", "profile_nonce", "role", "operation", "phase", "record"})
     if (
         type(obj["version"]) is not int
@@ -291,3 +311,29 @@ def _validate_pending_ownership(
             raise CustodyError("enrollment journal conflicts with committed ownership")
     elif state.current is not None and (role == "memory" or record.epoch <= state.current.epoch):
         raise CustodyError("enrollment journal conflicts with current generation")
+
+
+@dataclass(frozen=True)
+class SchemaUpgrade:
+    """Digests bind both complete manifests; no role material is reconstructed."""
+
+    phase: Literal["intent", "published"]
+    before_sha256: str
+    after_sha256: str
+
+
+def encode_schema_upgrade(journal: SchemaUpgrade) -> bytes:
+    return _encode({"version": 1, "from_version": 1, "to_version": 2, **asdict(journal)})
+
+
+def parse_schema_upgrade(data: bytes) -> SchemaUpgrade:
+    obj = _object(_decode(data), {"version", "from_version", "to_version", "phase", "before_sha256", "after_sha256"})
+    if any(type(obj[k]) is not int or obj[k] != v for k, v in (("version", 1), ("from_version", 1), ("to_version", 2))):
+        raise CustodyError("unsupported custody schema journal version")
+    if obj["phase"] not in ("intent", "published"):
+        raise CustodyError("invalid custody schema journal phase")
+    return SchemaUpgrade(
+        obj["phase"],
+        _hex(obj["before_sha256"], 32).hex(),
+        _hex(obj["after_sha256"], 32).hex(),
+    )

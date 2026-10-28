@@ -23,8 +23,9 @@ Hermes model itself may read it:
 fetches new mail into ``mordred.db`` and returns counts only, so it is not a
 reader tool (see that module).
 
-Opening the archive unseals the credentials through the Secure Enclave (Touch
-ID unless disabled), exactly like the CLI and the browser extension.
+Visibility checks inspect metadata only and never acquire database authority
+or unseal credentials. Foreground archive access uses the platform's existing
+Telegram credential role, independently of the shared database root authority.
 
 **Reader mode** (SPEC "Reader mode (requirement 7)"): once a session has read
 imported history it may no longer write files, run commands, send messages,

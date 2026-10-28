@@ -14,6 +14,23 @@ import pytest
 from mordred_hermes import dbcrypt
 from mordred_hermes.dbcrypt import _key, _migrate, _shim
 from mordred_hermes.dbcrypt._locking import runtime_lease
+from tests._dbcrypt_platform_support import policy_sys
+
+
+@pytest.fixture(autouse=True)
+def explicit_raw_key_seam(monkeypatch):
+    """Legacy portable SQL tests explicitly replace custody, never production policy."""
+    from mordred_hermes.dbcrypt import _locking
+
+    previous = set(_locking._LEASES)
+    monkeypatch.setattr(
+        _migrate, "_authenticate", lambda root, supplied, lease: (None, supplied or _key.derive(bytes(range(32))))
+    )
+    yield
+    # Fixtures own synthetic lifetimes; installed production shims have no reset.
+    for root in set(_locking._LEASES) - previous:
+        context, _lease = _locking._LEASES.pop(root)
+        context.__exit__(None, None, None)
 
 
 def _database(home: Path) -> Path:
@@ -64,9 +81,9 @@ def test_a_starting_reader_waits_for_the_prepared_copy(tmp_path: Path, monkeypat
     prepare = _migrate.prepare
     child: subprocess.Popen[str] | None = None
 
-    def pause(database: _migrate.Database, key: _key.DatabaseKey) -> Path:
+    def pause(database: _migrate.Database, key: _key.DatabaseKey, **kwargs) -> Path:
         nonlocal child
-        copy = prepare(database, key)
+        copy = prepare(database, key, **kwargs)
         child = subprocess.Popen(
             [sys.executable, "-c", _START_READER, str(tmp_path)],
             stdin=subprocess.PIPE,
@@ -132,14 +149,14 @@ def test_enabling_an_empty_home_waits_for_existing_runtimes(tmp_path: Path, monk
     pytest.importorskip("sqlcipher3")
     from mordred_hermes.wizard import databases_cli
 
-    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
     monkeypatch.setattr(sys, "argv", ["hermes"])
     assert dbcrypt.install(home=tmp_path) is False
     key = _key.derive(bytes(range(32)))
     monkeypatch.setattr(_key, "KeyProvider", lambda: lambda: key)
-    assert databases_cli.databases_encrypt(home=tmp_path) == 0
+    assert databases_cli.databases_encrypt(home=tmp_path) == 1
     assert not dbcrypt.marker_path(tmp_path).exists()
-    assert _migrate.pending_path(tmp_path).exists()
+    assert not _migrate.pending_path(tmp_path).exists()
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork lifetime")
@@ -192,7 +209,7 @@ def test_maintenance_startup_does_not_execute_pending_conversions(
     pytest.importorskip("sqlcipher3")
     path = _database(tmp_path)
     before = path.read_bytes()
-    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
     monkeypatch.setattr(sys, "argv", argv)
     monkeypatch.setitem(sys.modules, "sqlite3", sqlite3)
     monkeypatch.setitem(sys.modules, "sqlite3.dbapi2", sqlite3.dbapi2)
@@ -216,6 +233,34 @@ def test_agent_arguments_do_not_bypass_database_protection(monkeypatch: pytest.M
     assert dbcrypt._maintenance_process() is False
 
 
+def test_legacy_policy_fixture_preserves_linux_acl_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A simulated startup OS must not select a foreign filesystem ABI.
+
+    Model the shared Linux sys object at just these module boundaries so this
+    regression also runs on macOS, without changing the interpreter's platform.
+    The existing maintenance test still schedules real files and checks bytes.
+    """
+    from types import SimpleNamespace
+
+    from mordred_hermes._private_fs import _macos_acl, _posix
+    from mordred_hermes.dbcrypt import _cli
+
+    host = SimpleNamespace(**{**vars(sys), "platform": "linux"})
+    monkeypatch.setattr(sys.modules[__name__], "sys", host)
+    monkeypatch.setattr(dbcrypt, "sys", host)
+    monkeypatch.setattr(_cli, "sys", host)
+    monkeypatch.setattr(_posix, "sys", host)
+
+    def foreign_acl(_fd: int) -> None:
+        raise AssertionError("startup policy simulation reached the Darwin ACL ABI on Linux")
+
+    monkeypatch.setattr(_macos_acl, "validate_acl", foreign_acl)
+    test_maintenance_startup_does_not_execute_pending_conversions(
+        tmp_path, monkeypatch, ["hermes-mordred", "databases", "status"]
+    )
+    assert host.platform == "linux"
+
+
 def test_startup_joins_runtime_that_already_recovered_the_journal(tmp_path: Path) -> None:
     pytest.importorskip("sqlcipher3")
     _database(tmp_path)
@@ -227,7 +272,7 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 from mordred_hermes import dbcrypt
-from mordred_hermes.dbcrypt import _migrate
+from mordred_hermes.dbcrypt import _migrate, _key
 sys.platform = 'darwin'
 original = _migrate.migration_lock
 @contextmanager
@@ -237,7 +282,8 @@ def delayed(*args, **kwargs):
     with original(*args, **kwargs):
         yield
 _migrate.migration_lock = delayed
-dbcrypt.install(home=Path(sys.argv[1]))
+provider = _key.KeyProvider(environ={"HERMES_MEMORY_KEY": "hex:" + bytes(range(32)).hex()}, inject=lambda: 0)
+dbcrypt.install(home=Path(sys.argv[1]), provider=provider)
 print('ready', flush=True)
 """
     child = subprocess.Popen(
@@ -251,7 +297,8 @@ print('ready', flush=True)
         assert child.stdout is not None
         assert child.stdout.readline().strip() == "recovering"
         with _migrate.migration_lock(tmp_path):
-            _migrate.resume(tmp_path)
+            # Simulate the other authenticated recovery completing publication.
+            journal.unlink()
         with runtime_lease(tmp_path):
             # Another startup now owns a lifetime reader lease. The child saw
             # the old journal, but must join this reader instead of needing EX.
@@ -265,54 +312,258 @@ print('ready', flush=True)
 
 
 @pytest.mark.parametrize("platform", ["linux", "win32"])
-@pytest.mark.parametrize("encrypted", [False, True])
-def test_unsupported_platform_without_posix_or_sqlcipher(tmp_path: Path, platform: str, encrypted: bool) -> None:
+@pytest.mark.parametrize("configured", [False, True])
+def test_native_platform_missing_prerequisites_refuses_before_sql_or_auth(
+    tmp_path: Path, platform: str, configured: bool
+) -> None:
     path = _database(tmp_path)
     before = path.read_bytes()
-    if encrypted:
+    if configured:
         dbcrypt.arm(tmp_path)
+    marker = dbcrypt.marker_path(tmp_path)
+    marker_before = marker.read_bytes() if configured else None
     script = """
 import importlib.abc
+import os
+import sqlite3
+import _sqlite3
 import sys
 from pathlib import Path
+from unittest.mock import patch
+# POSIX hosts exercise the real missing-fcntl boundary for Linux. Cross-host
+# native domain adapters are unavailable dependencies, never mocked successes.
+if sys.argv[2] == 'win32':
+    missing_lock = 'mordred_hermes._database_locking_windows'
+elif os.name == 'nt':
+    missing_lock = 'mordred_hermes._database_locking_posix'
+else:
+    missing_lock = 'fcntl'
 class Unavailable(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname == 'fcntl' or fullname.startswith('sqlcipher3'):
-            raise ModuleNotFoundError(fullname)
-sys.modules.pop('fcntl', None)
+        if fullname == missing_lock or fullname == 'fcntl' or fullname.startswith('sqlcipher3'):
+            raise ModuleNotFoundError(fullname, name=fullname)
+for name in (missing_lock, 'fcntl'):
+    sys.modules.pop(name, None)
 sys.meta_path.insert(0, Unavailable())
 sys.platform = sys.argv[2]
 from mordred_hermes import dbcrypt
-from mordred_hermes.dbcrypt import _monitor
+from mordred_hermes import _database_lifecycle
+from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes.dbcrypt._authority import Authority
 from mordred_hermes.wizard import databases_cli
 home = Path(sys.argv[1])
-if sys.argv[3] == 'True':
+configured = sys.argv[3] == 'True'
+forbidden_calls = []
+def forbidden(*args, **kwargs):
+    forbidden_calls.append('SQL, native authentication or passive lease acquisition')
+    raise AssertionError('unavailable capability must not authenticate or open SQL')
+sqlite3.connect = _sqlite3.connect = forbidden
+Authority.acquire = forbidden
+# Status must remain metadata-only even when the lock and SQLCipher cannot load.
+with patch.object(_database_lifecycle, '_open', forbidden):
+    status = dbcrypt.database_status(home)
+    assert status.configured is configured
+    assert status.capability == 'unavailable'
+    assert status.authenticated is False
+    assert status.dependencies == 1 + int(configured)
+    reasons = {'SQLCipher driver extra is unavailable'}
+    if sys.platform == 'win32':
+        reasons |= {
+            'Windows native storage admission is disabled in this build',
+            'Windows workstation editions are not qualified',
+            'Windows SQLCipher driver pair is unqualified',
+            'owned Windows VFS asset is unavailable',
+        }
+    assert status.reason in reasons, status
+    assert databases_cli.databases_status(home=home) == 0
+assert forbidden_calls == []
+if configured:
     try:
         dbcrypt.install(home=home)
     except RuntimeError as exc:
-        assert 'macOS' in str(exc), str(exc)
+        assert str(exc) == 'database runtime unavailable: ' + status.reason
     else:
-        raise AssertionError('encrypted home was admitted on unsupported platform')
-    assert any(f.code == 'unsupported_platform' for f in _monitor.check(home))
-    assert databases_cli.databases_status(home=home) == 1
+        raise AssertionError('configured native runtime admitted unavailable capability')
 else:
-    assert dbcrypt.install(home=home) is False
-    assert _monitor.check(home) == []
-    # Simulated Windows has no checked Win32 storage backend on a POSIX host.
-    # A failed observation must refuse, rather than report an empty home.
-    import os
-    expected = 1 if sys.platform == 'win32' and os.name != 'nt' else 0
-    assert databases_cli.databases_status(home=home) == expected
+    # A plain native runtime still needs checked domain identity and lifetime
+    # SH; the missing native adapter or fcntl must refuse before opening SQL.
+    try:
+        dbcrypt.install(home=home)
+    except ModuleNotFoundError as exc:
+        assert missing_lock == 'fcntl'
+        assert exc.name == missing_lock, exc
+    except DatabaseRefused as exc:
+        assert missing_lock != 'fcntl'
+        assert str(exc) == 'native database source is unavailable or invalid'
+        assert isinstance(exc.__cause__, ModuleNotFoundError)
+        assert exc.__cause__.name == missing_lock
+    else:
+        raise AssertionError('plain native runtime started without its lock dependency')
 assert databases_cli.databases_encrypt(home=home) == 1
 assert databases_cli.databases_decrypt(home=home) == 1
+assert forbidden_calls == []
 """
     result = subprocess.run(
-        [sys.executable, "-c", script, str(tmp_path), platform, str(encrypted)],
+        [sys.executable, "-c", script, str(tmp_path), platform, str(configured)],
         env={**os.environ, "HERMES_HOME": str(tmp_path)},
         capture_output=True,
         text=True,
         timeout=15,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "unsupported" in result.stdout.lower()
+    assert "capability: unavailable" in result.stdout.lower()
+    assert "authenticated: not checked" in result.stdout.lower()
     assert path.read_bytes() == before
+    assert (marker.read_bytes() if marker.exists() else None) == marker_before
+
+
+def test_fresh_home_setup_bootstrap_initializes_only_the_legacy_boundary(tmp_path: Path) -> None:
+    home = tmp_path / "fresh-hermes"
+    script = r"""
+import sys
+from pathlib import Path
+sys.platform = 'darwin'
+sys.argv = ['hermes', 'setup']
+from mordred_hermes._runtime_bootstrap import run
+run()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "HERMES_HOME": str(home)},
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert home.is_dir() and (home / "mordred/db-encryption.lock").is_file()
+    assert not (home / "state.db").exists()
+
+
+def test_missing_identified_root_is_not_silently_recreated(tmp_path: Path) -> None:
+    from mordred_hermes._database_contracts import DatabaseRefused
+    from mordred_hermes._database_lifecycle import acquire_runtime
+
+    missing = tmp_path / "missing-managed-root"
+    with pytest.raises(DatabaseRefused), acquire_runtime(missing):
+        pytest.fail("core authority recreated a missing identified root")
+    assert not missing.exists()
+
+
+def test_legacy_bootstrap_never_recreates_an_already_observed_root(tmp_path: Path) -> None:
+    from mordred_hermes._database_contracts import DatabaseRefused
+
+    root = tmp_path / "observed"
+    root.mkdir()
+    with runtime_lease(root):
+        pass
+    root.rename(tmp_path / "retired-observed")
+    with pytest.raises(DatabaseRefused), runtime_lease(root):
+        pytest.fail("legacy startup recreated a root it already knew")
+    assert not root.exists()
+    # This test owns no installed shim: explicitly retire its synthetic lifetime.
+    from mordred_hermes.dbcrypt._locking import _LEASES
+
+    context, _lease = _LEASES.pop(root.absolute())
+    context.__exit__(None, None, None)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork lifecycle")
+@pytest.mark.parametrize("closed", [False, True])
+def test_offline_sql_fork_quarantines_cursors_before_child_finalization(tmp_path, closed):
+    script = r"""
+import gc, os, sys
+from pathlib import Path
+from mordred_hermes.keyvault import kek
+kek._noop_audit = lambda entry: None
+import sqlcipher3.dbapi2 as sc
+from mordred_hermes._database_lifecycle import acquire_exclusive
+from mordred_hermes.dbcrypt._migrate import _offline_connection
+root = Path(os.environ['HERMES_HOME'])
+path = root / 'state.db'
+raw = sc.connect(str(path))
+raw.execute('CREATE TABLE data(value TEXT)')
+raw.commit()
+raw.close()
+closed = sys.argv[1] == 'True'
+with acquire_exclusive(root) as lease:
+    with _offline_connection(path) as connection:
+        connection.execute("INSERT INTO data VALUES ('pending parent')")
+        cursor = connection.execute('SELECT value FROM data')
+        if closed:
+            connection.rollback()
+            connection.close()
+        child = os.fork()
+        if child == 0:
+            del connection, cursor
+            gc.collect()
+            sys.exit(0)
+        _, status = os.waitpid(child, 0)
+        assert os.waitstatus_to_exitcode(status) == (0 if closed else 74), status
+        lease.assert_held(root)
+        if not closed:
+            assert cursor.fetchall() == [('pending parent',)]
+            connection.commit()
+with sc.connect(str(path)) as raw:
+    assert raw.execute('SELECT value FROM data').fetchall() == ([] if closed else [('pending parent',)])
+raw.close()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(closed)],
+        env={**os.environ, "HERMES_HOME": str(tmp_path)},
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        [],
+        ["--non-interactive"],
+        ["--with-hermes-setup"],
+        ["--skip-hermes-setup"],
+        ["--unattended-keys"],
+        ["--attended-keys"],
+        ["--store-seed-for-hd"],
+        ["--paper-only"],
+        ["--non-interactive", "--skip-hermes-setup", "--attended-keys", "--paper-only"],
+    ],
+)
+def test_setup_startup_preserves_pending_conversion(tmp_path, monkeypatch, options):
+    test_maintenance_startup_does_not_execute_pending_conversions(
+        tmp_path, monkeypatch, ["hermes-mordred", "setup", *options]
+    )
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["hermes-mordred", "setup", "--with-hermes-setup", "--skip-hermes-setup"],
+        ["hermes-mordred", "setup", "--unattended-keys", "--attended-keys"],
+        ["hermes-mordred", "setup", "--store-seed-for-hd", "--paper-only"],
+        ["hermes-mordred", "setup", "--unknown"],
+        ["hermes-mordred", "setup", "--non-interactive", "false"],
+        ["hermes", "setup"],
+        ["hermes", "--oneshot", "mordred setup", "mordred", "setup"],
+        ["hermes", "--model", "mordred", "setup"],
+        ["hermes", "--profile", "--bad", "mordred", "setup"],
+    ],
+)
+def test_invalid_setup_arguments_keep_runtime_protection(argv):
+    from mordred_hermes.dbcrypt._cli import maintenance_process
+
+    assert maintenance_process(argv) is False
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["hermes-mordred", "--no-color", "setup"],
+        ["hermes", "--profile", "work", "mordred", "setup"],
+        ["hermes", "mordred", "setup", "--profile", "work", "--paper-only"],
+    ],
+)
+def test_setup_plugin_startup_preserves_pending_conversion(tmp_path, monkeypatch, argv):
+    test_maintenance_startup_does_not_execute_pending_conversions(tmp_path, monkeypatch, argv)

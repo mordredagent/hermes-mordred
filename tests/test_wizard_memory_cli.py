@@ -81,7 +81,11 @@ def _vault_memory_key(root: Path, backend: FakeBackend, store: FakeAnchorStore) 
 def _enroll_env_text(root: Path, backend: FakeBackend, store: FakeAnchorStore, text: str) -> None:
     key_id = anchor_label = _identity.vault_identity(root)
     with vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label) as opened:
-        opened.enroll_file(".env", text.encode("utf-8"))
+        from mordred_hermes.wizard._vault_entries import _source_change_lease
+
+        plaintext = text.encode("utf-8")
+        with _source_change_lease(root, opened, ".env", plaintext) as lease:
+            opened.enroll_file(".env", plaintext, database_lease=lease)
 
 
 def _raw_flag(home: Path) -> object:
@@ -105,7 +109,7 @@ def _memories(home: Path) -> Path:
 
 
 def _setup_home_and_vault(tmp_path: Path) -> tuple[Path, Path, FakeBackend, FakeAnchorStore]:
-    root, home = tmp_path / "v", tmp_path / "home"
+    root, home = tmp_path / "home" / "mordred" / "vault", tmp_path / "home"
     home.mkdir()
     backend, store = FakeBackend(), FakeAnchorStore()
     require_legacy_file_vault()
@@ -125,7 +129,7 @@ class TestEnableGates:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (False, "tools.memory_tool is missing"))
-        root, home = tmp_path / "v", tmp_path / "home"
+        root, home = tmp_path / "home" / "mordred" / "vault", tmp_path / "home"
         home.mkdir()
 
         rc = memory_cli.enable(home=home, root=root, backend=FakeBackend(), store=FakeAnchorStore(), platform="darwin")
@@ -140,7 +144,7 @@ class TestEnableGates:
     def test_refuses_unsupported_platform(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch
     ) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
+        root, home = tmp_path / "home" / "mordred" / "vault", tmp_path / "home"
         home.mkdir()
 
         from mordred_hermes.keyvault import _seckey_helper
@@ -160,7 +164,7 @@ class TestEnableGates:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         monkeypatch.setattr(encryption_cli, "_enrolled_names", lambda _root: set())
-        root, home = tmp_path / "v", tmp_path / "home"
+        root, home = tmp_path / "home" / "mordred" / "vault", tmp_path / "home"
         home.mkdir()
 
         rc = memory_cli.enable(home=home, root=root, backend=FakeBackend(), store=FakeAnchorStore(), platform="darwin")
@@ -171,7 +175,7 @@ class TestEnableGates:
 
     def test_refuses_when_env_target_is_opted_out(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """The key rides on the .env shim: enrolled but injection off is no good."""
-        root, home = tmp_path / "v", tmp_path / "home"
+        root, home = tmp_path / "home" / "mordred" / "vault", tmp_path / "home"
         home.mkdir()
         marker = _env_optout_marker_path(home)
         marker.parent.mkdir(parents=True, exist_ok=True)
@@ -191,7 +195,7 @@ class TestEnableGates:
             "runtime_memory_encryption_available",
             lambda **_kw: (False, "mordred is not installed there"),
         )
-        root, home = tmp_path / "v", tmp_path / "home"
+        root, home = tmp_path / "home" / "mordred" / "vault", tmp_path / "home"
         home.mkdir()
 
         rc = memory_cli.enable(home=home, root=root, backend=FakeBackend(), store=FakeAnchorStore(), platform="darwin")
@@ -216,7 +220,7 @@ class TestEnableGates:
             "runtime_memory_encryption_available",
             lambda **kw: (kw.get("runtime_python") is None, "no memory hook there"),
         )
-        root, home = tmp_path / "v", tmp_path / "home"
+        root, home = tmp_path / "home" / "mordred" / "vault", tmp_path / "home"
         home.mkdir()
 
         rc = memory_cli.enable(home=home, root=root, backend=FakeBackend(), store=FakeAnchorStore(), platform="darwin")
@@ -353,7 +357,7 @@ class TestEnable:
 
     def test_missing_vault_is_auto_created(self, tmp_path: Path) -> None:
         require_legacy_file_vault()
-        root, home = tmp_path / "v", tmp_path / "home"
+        root, home = tmp_path / "home" / "mordred" / "vault", tmp_path / "home"
         home.mkdir()
         backend, store = FakeBackend(), FakeAnchorStore()
 
@@ -371,7 +375,7 @@ class TestEnable:
         assert memory_marker_path(home).exists()
 
     def test_vault_create_refused_writes_no_marker(self, tmp_path: Path) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
+        root, home = tmp_path / "home" / "mordred" / "vault", tmp_path / "home"
         home.mkdir()
 
         rc = memory_cli.enable(

@@ -1,9 +1,8 @@
 """The database key, derived from the key Mordred already manages.
 
-No new key is created or stored. Hermes's agent-memory key
-(``HERMES_MEMORY_KEY``, sealed in the vault and injected into every Hermes
-process) is stretched with HKDF into a separate SQLCipher key, so the two uses
-never share a value:
+No new key is created or stored. The root agent-memory key, freshly loaded
+from native custody for each runtime, is stretched with HKDF into a separate
+SQLCipher key, so the two uses never share a value:
 
     key  = HKDF-SHA256(memory key, info="mordred sqlite v1")
     salt = HMAC-SHA256(key, "mordred sqlite salt v1")[:16]
@@ -21,7 +20,11 @@ import os
 import threading
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
-from typing import Final
+from pathlib import Path
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:
+    from ._authority import Authority
 
 _INFO: Final = b"mordred sqlite v1"
 _SALT_LABEL: Final = b"mordred sqlite salt v1"
@@ -58,24 +61,54 @@ def _inject_vault_env() -> int:
 
 
 class KeyProvider:
-    """Resolve the key once per process, on the first database that needs it.
+    """Bind production keys to root-native authority, preserving explicit seams.
 
-    If ``HERMES_MEMORY_KEY`` is not in the environment yet (the plugin that
-    injects it has not run), the vault-sealed ``.env`` is injected now — the
-    same unlock the plugin would do, done once (it skips a second injection).
+    Explicit ``environ`` or ``inject`` arguments retain the portable provider
+    used by existing offline callers. The default path never uses ambient key
+    material or environment injection.
     """
 
     def __init__(
         self,
         environ: MutableMapping[str, str] | None = None,
-        inject: Callable[[], int] = _inject_vault_env,
+        inject: Callable[[], int] | None = None,
+        *,
+        home: Path | None = None,
     ) -> None:
+        if home is not None and (environ is not None or inject is not None):
+            raise ValueError("native root binding cannot use an injected provider")
+        self._native = environ is None and inject is None
+        self._home = home
+        self._authority: Authority | None = None
+        self._lock = threading.RLock()
+        self._pid = os.getpid()
+        self._closed = False
         self._environ = os.environ if environ is None else environ
-        self._inject = inject
+        self._inject = _inject_vault_env if inject is None else inject
         self._cached: DatabaseKey | None = None
         self._injected = False
 
+    @property
+    def runtime_native(self) -> bool:
+        """Whether this provider requires runtime-native integration by its caller."""
+        return self._native
+
     def __call__(self) -> DatabaseKey | None:
+        if self._native:
+            from .._database_contracts import DatabaseRefused
+            from .._home import hermes_home
+            from ._authority import Authority
+
+            if self._pid != os.getpid():
+                self._lock = threading.RLock()
+                self.close()
+                raise DatabaseRefused("database key provider cannot survive fork")
+            with self._lock:
+                if self._closed:
+                    raise DatabaseRefused("database key provider is closed")
+                if self._authority is None:
+                    self._authority = Authority.acquire(self._home if self._home is not None else hermes_home())
+                return self._authority.key
         if self._cached is not None:
             return self._cached
         with _LOCK:
@@ -88,3 +121,29 @@ class KeyProvider:
                 if memory_key is not None:
                     self._cached = derive(memory_key)
         return self._cached
+
+    @property
+    def authority(self) -> Authority:
+        """Acquire once for the guarded runtime; never export a temporary bare key."""
+        from .._database_contracts import DatabaseRefused
+
+        if not self._native:
+            raise DatabaseRefused("injected providers have no native authority")
+        self()
+        assert self._authority is not None
+        return self._authority
+
+    @property
+    def current_authority(self) -> Authority | None:
+        """Observation only: status must not authenticate or acquire a runtime."""
+        return self._authority
+
+    def close(self) -> None:
+        """Release a native runtime and refuse its reuse."""
+        if self._pid != os.getpid():
+            self._lock = threading.RLock()
+        with self._lock:
+            self._closed = True
+            self._cached = None
+            if self._authority is not None:
+                self._authority.close()

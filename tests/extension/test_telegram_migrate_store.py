@@ -134,9 +134,43 @@ class _Secrets:
         return self.value
 
 
+class _CheckedSecrets(_Secrets):
+    """Accounting wrapper around real POSIX native ownership and sealed storage."""
+
+    def __init__(self, store_key: bytes, *, session: str | None = None) -> None:
+        from mordred_hermes._home import hermes_home
+
+        from .test_telegram_tee import _tee_store
+
+        super().__init__(store_key, session=session)
+        self.actual, self.native = _tee_store(hermes_home())
+        self.actual.ensure_key()
+        self.actual.store(self.value)
+
+    def load(self, *, fresh: bool = False):
+        self.loads += 1
+        return self.actual.load(fresh=fresh)
+
+    def load_snapshot(self):
+        self.loads += 1
+        return self.actual.load_snapshot()
+
+    def update(self, mutate):
+        self.value = self.actual.update(mutate)
+        return self.value
+
+    def update_from_snapshot(self, snapshot, mutate):
+        self.value = self.actual.update_from_snapshot(snapshot, mutate)
+        return self.value
+
+    def forget_from_snapshot(self, snapshot):
+        self.actual.forget_from_snapshot(snapshot)
+        self.value = None
+
+
 @pytest.fixture
 def sealed(key: bytes, monkeypatch: pytest.MonkeyPatch) -> _Secrets:
-    held = _Secrets(key)
+    held = _CheckedSecrets(key)
     monkeypatch.setattr(telegram_cli, "_secret_store", lambda: held)
     monkeypatch.setattr(hardening, "harden_process", lambda: None)
     return held
@@ -374,12 +408,12 @@ def test_finalize_wipes_segments_only_and_keeps_the_retired_index(
     assert migrate.finalize(archive, imports).segments_deleted == 0  # idempotent
 
 
-def test_finalize_is_refused_on_windows(
+def test_finalize_uses_the_admitted_store_without_an_os_refusal(
     archive: store.ArchiveStore, imports: ImportStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    migrate.run_migration(archive, imports, commit=True)
     monkeypatch.setattr(migrate, "_platform", lambda: "win32")
-    with pytest.raises(migrate.MigrationError, match="unsupported_platform"):
-        migrate.finalize(archive, imports)
+    assert migrate.finalize(archive, imports).messages == 6
 
 
 # -- CLI ---------------------------------------------------------------------------------------
@@ -589,7 +623,7 @@ def test_logout_forget_deletes_the_accounts_import_rows_before_the_key(
 ) -> None:
     migrate.run_migration(archive, imports, commit=True)
     assert imports.status()["sources"]["telegram"]["messages"] == 6
-    held, client = _Secrets(key, session="S"), _Revocable()
+    held, client = _CheckedSecrets(key, session="S"), _Revocable()
     assert _logout(held, client) == 0
     out, err = capsys.readouterr()
     assert imports.status()["sources"] == {}
@@ -612,7 +646,7 @@ def test_logout_forget_stops_before_anything_else_when_the_rows_cannot_be_delete
 ) -> None:
     migrate.run_migration(archive, imports, commit=True)
     _refuse_the_store(monkeypatch)
-    held, client = _Secrets(key, session="S"), _Revocable()
+    held, client = _CheckedSecrets(key, session="S"), _Revocable()
     before = sorted(archive._root.rglob("*.enc"))
     assert _logout(held, client) == 1
     out, err = capsys.readouterr()
@@ -633,7 +667,7 @@ def test_logout_forget_force_forgets_the_rest_and_reports_the_rows_left_behind(
 ) -> None:
     migrate.run_migration(archive, imports, commit=True)
     _refuse_the_store(monkeypatch)
-    held, client = _Secrets(key, session="S"), _Revocable()
+    held, client = _CheckedSecrets(key, session="S"), _Revocable()
     assert _logout(held, client, force=True) == 1
     out, err = capsys.readouterr()
     assert out.splitlines() == ["Revoked the session at Telegram.", f"{_FORGOTTEN} (--force)."]
@@ -675,7 +709,8 @@ def test_uninstall_forget_never_stops_on_rows_it_cannot_delete(
 
     migrate.run_migration(archive, imports, commit=True)
     _refuse_the_store(monkeypatch)
-    assert uninstall_cli._default_telegram_forget() == 1
+    outcome = uninstall_cli._default_telegram_forget()
+    assert outcome.local_complete and outcome.rows_kept and outcome.exit_code == 1
     out, err = capsys.readouterr()
     assert f"{_FORGOTTEN} (--force)." in out
     assert "import_rows_not_deleted:import_store_unavailable" in err and "left them behind" in err
@@ -690,7 +725,7 @@ def test_logout_forget_of_an_unmigrated_archive_never_opens_the_store(
         raise AssertionError("an unretired index names no import rows")
 
     monkeypatch.setattr(store_module, "open_import_store", never)
-    held = _Secrets(key, session="S")
+    held = _CheckedSecrets(key, session="S")
     assert _logout(held, _Revocable()) == 0
     assert held.value is None and not list(archive._root.rglob("*.enc"))
     capsys.readouterr()

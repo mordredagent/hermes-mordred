@@ -33,6 +33,7 @@ from mordred_hermes import _config_io as cio
 from mordred_hermes import _windows_runtime
 from mordred_hermes._private_fs import open_private_directory
 from mordred_hermes.keyvault import _windows_processes
+from mordred_hermes.keyvault._database_mutation import database_key_mutation
 from mordred_hermes.keyvault._runtime_probe import GatewayDiscoveryUnavailable, GatewayRuntime
 from tests import _windows_proof_runtime as injected
 from tests.test_windows_custody import fs as fs
@@ -122,8 +123,10 @@ def known_empty(home, **kwargs):
 
 @pytest.fixture
 def proof_env(fs, monkeypatch, installed_runtime, tmp_path):
+    from tests._windows_custody_fakes import windows_test_backend
+
     custody, storage, home, _ = fs
-    backend = injected.backend_for(home)
+    backend = windows_test_backend(injected.backend_for(home))
     injected.emulate(monkeypatch.setattr, backend)
     # This fixture already emulates the native boundary. Model only the
     # parent's source-test admission so wheel-parent units use that same
@@ -158,8 +161,11 @@ def proof_env(fs, monkeypatch, installed_runtime, tmp_path):
 
 
 def enroll(env):
-    with env.custody.windows_custody_session(env.home, create=True, backend=env.backend) as owner:
-        owner.enroll_memory()
+    with (
+        database_key_mutation(root=env.home, generation=None) as database_lease,
+        env.custody.windows_custody_session(env.home, create=True, backend=env.backend) as owner,
+    ):
+        owner.enroll_memory(database_lease=database_lease)
         return owner.lease("memory")
 
 

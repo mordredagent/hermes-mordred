@@ -310,6 +310,7 @@ def test_offered_on_a_mail_only_home_without_telethon_or_a_telegram_login(
 ) -> None:
     _hermes_model(tmp_path, "http://127.0.0.1:11434/v1")
     monkeypatch.setattr(_gate, "check_protection", lambda _home: None)  # database encryption armed
+    monkeypatch.setattr(_gate, "runtime_authority", lambda home, **kw: None)
     assert hermes_tools.history_search_available() is True
     _use(monkeypatch, tmp_path, _Opener(_mail_store(tmp_path)), _Secrets(configured=False, forbidden=True))
     assert _ids(_search({"query": "見積もり"}, session)) == ["mail:work:m1@example.com#a"]

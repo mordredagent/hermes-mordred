@@ -1,18 +1,21 @@
-"""``hermes-mordred mail setup|fetch|forget`` — IMAP sync into the encrypted ``mordred.db`` (macOS).
+"""``hermes-mordred mail setup|fetch|forget`` — IMAP sync through admitted native storage.
 
 ::
 
     hermes-mordred mail setup [--imap-host H] [--imap-port 993] [--account LABEL] [--no-touch-id]
     hermes-mordred mail fetch [--max N] [--mailbox all|inbox|sent] [--since YYYY-MM-DD] [--dry-run] [--json]
     hermes-mordred mail forget [--rows] [--account LABEL] --yes
+    hermes-mordred mail forget --yes --force-orphan
 
 - ``setup`` reads the address and the app password on a TTY (never from argv or
   the environment) and drives :class:`~mordred_hermes.imports.mail.setup_flow.MailSetupFlows`,
   the flow the Desktop page uses too: one read-only login (``CAPABILITY``,
   ``LIST``), the mailboxes (Gmail: All Mail by its ``\\All`` special use or its
   usual name, else the operator's pick; other servers: INBOX plus the ``\\Sent``
-  special-use folder, or the operator's pick, or none), sealed with the Secure
-  Enclave (:mod:`mordred_hermes.imports.mail.secrets`). It prints the account
+  special-use folder, or the operator's pick, or none), sealed with the independent
+  native key (:mod:`mordred_hermes.imports.mail.secrets`). Capability is checked
+  before prompts; Linux TPM and Windows CNG presence requests refuse unless the
+  operator explicitly selects ``--no-touch-id``. It prints the account
   label and the path, never the address; a refusal prints its code and, for a
   refused login, the hint (``mail refused (imap_auth_failed:
   authentication_failed)``). Sealed credentials are never replaced
@@ -28,23 +31,19 @@
   1 on a refusal or failure, 2 on bad arguments. A refused login's hint follows
   the code in the text output (``mail fetch failed (imap_auth_failed:
   authentication_failed)``), never in ``--json``.
-- ``forget --yes`` runs :func:`mordred_hermes.imports.mail.forget.forget` (shared
-  with the Desktop page): it deletes the account's cursors and then the sealed
-  credentials and the Enclave key; ``--rows`` first deletes the account's mail
-  rows (``delete_source``) and stops (exit 1, nothing touched) if the store
-  refuses. The account label is resolved once, before the lock; under the lock
-  the credentials must still be the same setup (``setup_id``), else nothing is
-  deleted (``credentials_changed``): a concurrent ``mail setup`` is never
-  undone. Rows and cursors go first and the credentials last, so a failed
-  forget is retried; ``--account LABEL`` deletes a label's rows and cursors
-  when its credentials are already gone (``account_mismatch`` when it names
-  another label than the sealed one). The sealed file, the flags and the
-  Enclave key are deleted whatever the flags say: credentials whose flags are
-  missing or corrupt (a setup or forget interrupted between its two files) are
-  still deleted, their label is reported as unknown (``account_unknown``, exit
-  1: rows and cursors need ``--account LABEL``), and forget never reports
-  success while a sealed file remains (``credentials_left``) or when the
-  Enclave key could not be deleted (``key_left``, exit 1; a retry deletes it).
+- ``forget --yes`` runs :func:`mordred_hermes.imports.mail.forget.forget`.
+  Native retirement authenticates the owning credential source, captures the
+  admitted shared store before custody, and deletes the native key before
+  removing credentials, rows or cursors. Row deletion then reuses that captured
+  store after credential custody exits. Ambiguous retirement retains evidence
+  and refuses; public flags never authorize native deletion or choose an account
+  for row erasure. ``--rows`` restricts deletion to the authenticated account;
+  ``--account LABEL`` resolves retained account work once credentials are gone.
+  ``--yes --force-orphan`` is the one explicit repair for a native key left
+  without sealed credentials (``mail_orphan_key``, e.g. after a refused login),
+  with or without its key record, or sealed credentials whose native key the
+  helper reports as absent. It touches credential custody only, so it is refused
+  with ``--rows``/``--account``: their named retry follows it.
 
 Nothing here prints a subject, name, address, label or body.
 """
@@ -163,7 +162,19 @@ def _audit(entry: Mapping[str, Any]) -> None:
         _LOG.debug("mail audit append failed (%s)", type(exc).__name__)
 
 
+#: The explicit repair of a native key without sealed credentials (or credentials without their key).
+_FORCE_ORPHAN: Final = "`hermes-mordred mail forget --yes --force-orphan`"
+
+
 def _refused(code: str, hint: str | None = None) -> int:
+    if code == "presence_unsupported" and hint is None:
+        native = {"linux": "Linux TPM", "win32": "Windows CNG"}.get(_platform(), "This native backend")
+        hint = (
+            f"{native} mail has no per-use presence; explicitly select --no-touch-id "
+            "to use its machine-bound native key"
+        )
+    if code == "mail_orphan_key" and hint is None:
+        hint = f"a native mail key has no sealed credentials; run {_FORCE_ORPHAN}"
     _term.emit_error(f"mail refused ({code}: {hint})" if hint else f"mail refused ({code})")
     return 1
 
@@ -198,7 +209,7 @@ def _password(host: str) -> str:
     from ..imports.mail.setup_flow import MailSetupError, check_password
 
     try:  # Google shows app passwords in groups of four: the spaces are dropped on Gmail's host
-        return check_password(_secret("App password (hidden; sealed by the Secure Enclave): "), host)
+        return check_password(_secret("App password (hidden; sealed by the native key): "), host)
     except MailSetupError:
         raise _Usage("the app password must be 1-256 printable characters") from None
 
@@ -239,8 +250,30 @@ def _setup_values(args: argparse.Namespace) -> tuple[str, str, str, list[str]]:
     port = int(getattr(args, "imap_port", IMAPS_PORT) or IMAPS_PORT)
     if port != IMAPS_PORT:
         raise _Usage("--imap-port must be 993 (implicit TLS); other ports are not supported")
-    if _platform() != "darwin":
+    if _platform() in {"linux", "win32"} and not bool(getattr(args, "no_touch_id", False)):
+        raise _Refused("presence_unsupported")
+    if _platform() not in {"darwin", "linux", "win32"}:
         raise _Refused("unsupported_platform")
+    # Native backend selection checks capability without key creation, source
+    # publication, or Windows manifest upgrade before interactive prompts.
+    from ..imports.mail.secrets import MailSecretsError
+
+    try:
+        secret_store = _secret_store()
+        secret_store._check_platform()
+        if _platform() == "win32":
+            # Observe the mail role itself; another role's enrollment never
+            # admits mail and setup's explicit manifest upgrade happens later.
+            with secret_store._windows()._session() as session:
+                _ = session.backend  # Resolve the actual native helper; never enroll or unwrap.
+                if session.role_status("mail").pending:
+                    raise _Refused("tee_unavailable")
+        else:
+            secret_store._backend()
+    except MailSecretsError as exc:
+        raise _Refused(exc.code) from None
+    except (OSError, RuntimeError, ValueError):
+        raise _Refused("tee_unavailable") from None
     if not _isatty():
         raise _Refused("tty_required")
     address = _address(_input("Mail address: "), "the mail address")
@@ -297,7 +330,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         _term.emit_error(f"mail setup cancelled; {_STAGE_LINES[stage]}")
         return 1
     path = "Gmail (All Mail with labels)" if flow.gmail else "IMAP (" + ", ".join(sorted(flow.roles)) + ")"
-    print(f"Mail account '{flow.account}' is set up: {path}. The credentials are sealed by the Secure Enclave.")
+    print(f"Mail account '{flow.account}' is set up: {path}. The credentials are sealed by the native key.")
     if not flow.gmail and "sent" not in flow.roles:
         print("No sent folder was chosen: your own messages are recognised only by your addresses.")
     print("Fetch new mail with `hermes-mordred mail fetch`, or say 'sync my mail' in a Hermes chat.")
@@ -346,19 +379,26 @@ def imap_status(store: Any, flags: Mapping[str, Any] | None) -> dict[str, Any]:
     if not flags or not isinstance(account, str) or not ACCOUNT_RE.fullmatch(account):
         return {"configured": False}
     raw: Any = None
-    with contextlib.suppress(Exception):
-        raw = store.get_meta(last_fetch_key(account))
+    if store is not None:
+        with contextlib.suppress(Exception):
+            raw = store.get_meta(last_fetch_key(account))
     attempt, success = last_fetch_status(raw if isinstance(raw, str) else None)
     roles = flags.get("roles")
+    presence = flags.get("touch_id")
+    # Missing/invalid recorded metadata proves no effective presence policy.
+    # TPM/CNG cannot enforce a historical True claim; retain that evidence but
+    # project its effective policy as unknown rather than silently False.
+    if type(presence) is not bool or (_platform() in {"linux", "win32"} and presence):
+        presence = None
     return {
         "configured": True,
         "account": account,
         "gmail": flags.get("gmail") is True,
         "scope": [role for role in _ROLES if isinstance(roles, list) and role in roles],
-        "touch_id": flags.get("touch_id") is not False,
+        "touch_id": presence,
         "last_fetch": attempt,
         "last_success": success,
-        "cursors": imap_cursors(store, account),
+        "cursors": imap_cursors(store, account) if store is not None else None,
     }
 
 
@@ -371,6 +411,9 @@ def print_imap_status(info: Mapping[str, Any]) -> None:
         return
     path = "Gmail All Mail" if info.get("gmail") else "IMAP " + ", ".join(info.get("scope") or [])
     print(f"  imap sync: account {info.get('account')} ({path}; other folders are not fetched)")
+    if info.get("cursors") is None:
+        print("    last fetch, successful fetch and cursors: unknown (passive status)")
+        return
     last = info.get("last_fetch") or {}
     if last:
         state = last.get("error") or ("partial" if last.get("partial") else "complete")
@@ -486,13 +529,21 @@ def _print_cursors(env: FetchEnv) -> None:
 def cmd_forget(args: argparse.Namespace) -> int:
     from ..imports.mail import forget as forget_module
 
+    force_orphan = bool(getattr(args, "force_orphan", False))
     if not getattr(args, "yes", False):
-        _term.emit_error("mail forget deletes the sealed mail credentials; confirm with --yes")
+        if force_orphan:
+            _term.emit_error("mail forget --force-orphan retires a key without a source proof; confirm with --yes")
+        else:
+            _term.emit_error("mail forget deletes the sealed mail credentials; confirm with --yes")
         return 2
     rows = bool(getattr(args, "rows", False))
-    if _platform() != "darwin":
-        return _refused("unsupported_platform")
     named = getattr(args, "account", None)
+    if force_orphan and (rows or named is not None):
+        _term.emit_error(
+            "--force-orphan repairs only the native key and credential files; run it alone, then "
+            "`hermes-mordred mail forget [--rows] --yes --account LABEL` for the rows and cursors"
+        )
+        return 2
     try:
         done = forget_module.forget(
             _secret_store(),
@@ -501,23 +552,39 @@ def cmd_forget(args: argparse.Namespace) -> int:
             rows=rows,
             open_store=_open_store,
             lock=_lock,
+            force_orphan=force_orphan,
         )
     except forget_module.MailForgetError as exc:
         if exc.code == "invalid_account":
             _term.emit_error("--account must be 1-32 lowercase letters, digits or '_', starting with a letter")
             return 2
-        return _refused(exc.code)
+        hint = None
+        if exc.code == "tee_unavailable" and not force_orphan:
+            hint = f"if the native mail key no longer exists on this machine, run {_FORCE_ORPHAN}"
+        elif exc.code == "tee_unavailable":  # the repair itself refused: never point back at it
+            hint = (
+                "the native mail key could not be read or deleted by this machine's helper; "
+                "the repair deletes nothing it cannot prove (see USAGE.md)"
+            )
+        return _refused(exc.code, hint)
     _audit(forget_module.audit_entry(done, rows=rows))
-    return _report_forget(done, rows)
+    repaired = force_orphan and done.key_gone and (done.had_credentials or done.orphan_key_retired)
+    if repaired:
+        print("Orphan repair done: no native mail key or credential file is left without its pair.")
+    return _report_forget(done, rows, quiet_if_repaired=repaired and not done.had_credentials)
 
 
-def _report_forget(done: Forgotten, rows: bool) -> int:
+def _report_forget(done: Forgotten, rows: bool, *, quiet_if_repaired: bool = False) -> int:
     """What forget did and what it could not do (exit 1 whenever something the operator asked for remains)."""
-    print("Mail credentials removed." if done.had_credentials else "No mail credentials were set up.")
+    if done.had_credentials:
+        print("Mail credentials removed.")
+    elif not quiet_if_repaired:  # an orphan repair that retired only a key has already said so
+        print("No mail credentials were set up.")
     status = 0
     if not done.key_gone:  # whatever files there were: a key left behind is reported until a retry deletes it
         _term.emit_error(
-            "the Enclave key could not be deleted (key_left); run `hermes-mordred mail forget --yes` again"
+            "the native key could not be deleted (key_left); run `hermes-mordred mail forget --yes` again, "
+            f"or {_FORCE_ORPHAN} once no sealed credentials remain"
         )
         status = 1
     if done.unidentified and done.account is None:
@@ -569,7 +636,11 @@ def add_parsers(msub: Any, handler: Callable[[argparse.Namespace], int]) -> None
     p.add_argument("--imap-host", metavar="H", help="IMAP server (default imap.gmail.com for Gmail addresses)")
     p.add_argument("--imap-port", type=_port, default=993, metavar="P", help="Implicit-TLS port (993 only)")
     p.add_argument("--account", default="mail", metavar="LABEL", help="Short lowercase account label (default mail)")
-    p.add_argument("--no-touch-id", action="store_true", help="Create the Enclave key without Touch ID (cron use)")
+    p.add_argument(
+        "--no-touch-id",
+        action="store_true",
+        help="Use the native key without per-use presence (explicit on Linux/Windows)",
+    )
     p.set_defaults(func=handler)
     p_fetch = msub.add_parser("fetch", help="Fetch new mail over IMAP into the encrypted store (counts only)")
     p_fetch.add_argument("--max", type=_max_messages, default=2000, metavar="N", help="At most N messages (1-2000)")
@@ -584,4 +655,12 @@ def add_parsers(msub: Any, handler: Callable[[argparse.Namespace], int]) -> None
         "--account", metavar="LABEL", help="The label whose rows and cursors to delete when its credentials are gone"
     )
     p_forget.add_argument("--yes", action="store_true", help="Confirm the deletion")
+    p_forget.add_argument(
+        "--force-orphan",
+        action="store_true",
+        help=(
+            "Repair (needs --yes; not with --rows/--account): retire a native key left without sealed "
+            "credentials, or sealed credentials whose native key the helper reports as absent"
+        ),
+    )
     p_forget.set_defaults(func=handler)

@@ -62,7 +62,9 @@ _ANY = object()
 #: Codes for definite (uncommitted) checked-storage failures, shared with ``store``.
 _DEFINITE = {"missing": "store_missing", "io": "store_io", "busy": "store_busy"}
 
-Snapshot = tee.Snapshot
+# Windows snapshots use a sealed-file digest under the custody session;
+# POSIX tee.Snapshot instead carries an issued TelegramAuthentication.
+Snapshot = tuple[TelegramSecrets | None, bytes | None]
 AuditSink = Callable[[dict[str, Any]], None]
 
 

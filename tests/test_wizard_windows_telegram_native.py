@@ -22,7 +22,7 @@ from mordred_hermes.keyvault import _memory_storage as storage
 from mordred_hermes.keyvault import _seckey_helper, wrap
 from mordred_hermes.keyvault import _windows_custody as custody
 from mordred_hermes.wizard import _windows_telegram, keyvault_windows_cli, telegram_cli, telegram_setup_cli
-from tests._keyvault_fakes import FakeBackend
+from tests._windows_custody_fakes import windows_test_backend
 from tests.test_private_fs_confidential_windows import descriptor
 from tests.test_private_fs_confidential_windows import shared_home as shared_home
 
@@ -58,7 +58,7 @@ class _Client:
 @pytest.fixture
 def native(shared_home, monkeypatch):
     home = shared_home
-    backend = FakeBackend()
+    backend = windows_test_backend()
     helper = str(home.parent / "bin" / "mordred-hermes-winkey.exe")
     monkeypatch.setattr(_seckey_helper, "find_winkey_helper", lambda: helper)
     monkeypatch.setattr(storage, "windows_memory_runtime_admitted", lambda executable=None: True)

@@ -1,114 +1,50 @@
-"""Hermes database encryption as the Desktop page sees it: facts, and schedule-or-report.
+"""Shared passive database capability projected onto the unchanged Desktop v4 API.
 
-The Desktop backend never converts or arms the databases itself: it holds them
-open and keeps a runtime lease, so a conversion can only run at the next
-Hermes start (``dbcrypt.install`` runs a scheduled conversion before anything
-opens a database). :func:`status_object` reads facts without a key, a Touch ID
-prompt or a capture; :func:`encrypt_answer` turns them into the one answer of
-the total state table (SPEC "Databases from the page") and schedules the
-conversion when that is the answer. ``migrate()`` is never called from here.
+Observation never opens SQL, constructs a provider or acquires native custody.
+Explicit maintenance remains separate from passive rendering.
 """
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-__all__ = ["encrypt_answer", "key_material_valid", "runtime_protected", "status_object"]
+if TYPE_CHECKING:
+    from ..dbcrypt import DatabaseStatus
 
-_STATES = ("plaintext", "unreadable", "encrypted")
-
-
-def key_material_valid(environ: Mapping[str, str]) -> bool:
-    """``HERMES_MEMORY_KEY`` decodes to 32 bytes (no provider is called: nothing can be injected or unlocked)."""
-    from ..keyvault._memory_hook import _decode_env_key
-
-    key = _decode_env_key(environ)
-    return key is not None and len(key) == 32
+__all__ = ["database_status_projection", "encrypt_answer", "status_object"]
 
 
-def _pending(root: Path) -> tuple[bool, bool, bool]:
-    from ..dbcrypt import _migrate
+def database_status_projection(status: DatabaseStatus) -> dict[str, object]:
+    """Project passive capability onto the exact v4 shapes, without asserting unknown facts.
 
-    return (
-        _migrate.pending_path(root).is_file(),
-        _migrate.decrypt_pending_path(root).is_file(),
-        _migrate.journal_path(root).is_file(),
-    )
-
-
-def runtime_protected(home: Path, *, platform: str, environ: Mapping[str, str]) -> bool:
-    """This process runs the SQLCipher layer over an armed home with valid key material and nothing pending.
-
-    The non-unlocking counterpart of ``activity._gate.check_protection``: the
-    key check reads the environment value only, never ``dbcrypt._PROVIDER``.
+    ``supported`` means no known static unavailability; ``armed`` is configured
+    intent, never proof of encryption. Version 4 has no capability/reason field.
+    Pending state, database classification and backup counts need facts that
+    DatabaseStatus does not carry, so they remain explicitly unknown.
     """
-    if platform != "darwin":
-        return False
-    from .. import dbcrypt
-    from ..dbcrypt import _shim
-
-    root = dbcrypt.root_home(home)
-    if not dbcrypt.armed(root) or any(_pending(root)):
-        return False
-    return _shim.is_installed() and key_material_valid(environ)
-
-
-def status_object(
-    home: Path, *, platform: str, sqlcipher: bool, environ: Mapping[str, str] | None = None
-) -> dict[str, Any]:
-    """``/status.databases``: persisted intent, pending work, runtime protection and key-less discovery."""
-    if platform != "darwin":
+    if status.capability == "unavailable":
         return {"supported": False}
-    from .. import dbcrypt
-    from ..dbcrypt import _migrate
-
-    env = os.environ if environ is None else environ
-    root = dbcrypt.root_home(home)
-    encrypt_pending, decrypt_pending, journal = _pending(root)
     return {
-        "supported": sqlcipher,
-        "armed": dbcrypt.armed(root),
-        "encrypt_pending": encrypt_pending,
-        "decrypt_pending": decrypt_pending,
-        "journal": journal,
-        "runtime_protected": runtime_protected(home, platform=platform, environ=env),
-        "databases": _discovered(root),
-        "plaintext_backups": len(_migrate.plaintext_backups(root)),
+        "supported": True,
+        "armed": status.configured,
+        "encrypt_pending": None,
+        "decrypt_pending": None,
+        "journal": None,
+        "runtime_protected": status.authenticated and status.capability == "available",
+        "databases": [],
+        "plaintext_backups": None,
     }
 
 
-def _discovered(root: Path) -> list[dict[str, Any]]:
-    """Key-less discovery: ``plaintext`` or ``unreadable`` per database file (``encrypted`` needs the key).
+def status_object(
+    home: Path, *, platform: str | None = None, sqlcipher: bool | None = None, environ: Mapping[str, str] | None = None
+) -> dict[str, object]:
+    """Passive shared observation; legacy arguments do not grant database authority."""
+    from .. import dbcrypt
 
-    Inside a Hermes process whose ``sqlite3`` is the SQLCipher shim, the offline
-    classifier may not open the files (it would drop Hermes's own SQLite locks;
-    ``dbcrypt._migrate._refuse_inside_a_runtime``), so every file is probed
-    through the process's own library instead (``dbcrypt._monitor.is_plaintext``,
-    the per-turn check's probe). Outside one the classifier runs as before.
-    """
-    from ..dbcrypt import _migrate, _monitor, _shim
-
-    if not _shim.is_installed():
-        return [
-            {"relative": found.relative, "state": found.state}
-            for found in _migrate.discover(root, None)
-            if isinstance(found.relative, str) and found.state in _STATES
-        ]
-    found: list[dict[str, Any]] = []
-    for path in _migrate.database_paths(root):
-        try:
-            size = path.stat().st_size
-        except OSError:
-            found.append({"relative": str(path.relative_to(root)), "state": "unreadable"})
-            continue
-        if size == 0 or path.suffix.casefold() == ".json":  # what the classifier omits as "other"
-            continue
-        state = "plaintext" if _monitor.is_plaintext(path) else "unreadable"
-        found.append({"relative": str(path.relative_to(root)), "state": state})
-    return found
+    return database_status_projection(dbcrypt.database_status(home))
 
 
 def _attention(code: str) -> dict[str, Any]:
@@ -123,6 +59,10 @@ def encrypt_answer(home: Path, facts: Mapping[str, Any]) -> dict[str, Any]:
     from .. import dbcrypt
     from ..dbcrypt import _migrate
 
+    if not facts.get("supported") or any(
+        facts.get(field) is None for field in ("encrypt_pending", "decrypt_pending", "journal")
+    ):
+        return _attention("databases_failed")
     plaintext = any(entry.get("state") == "plaintext" for entry in facts.get("databases", ()))
     if facts.get("journal"):
         return _attention("journal")

@@ -127,23 +127,20 @@ def detail(home: Path, *, erase: bool = False) -> str:
 
 
 def needs_vault(ctx: UninstallContext) -> bool:
-    from ._vault_open import _vault_present
-
-    return _vault_present(ctx.vault_root) and any(
-        path.name != "db-encryption.pending" and path.exists() for path in state_paths(ctx.home)
-    )
+    return False  # Database maintenance authenticates its native source under EX.
 
 
 @contextmanager
 def guard(ctx: UninstallContext, *, erase: bool = False) -> Iterator[None]:
     """Refuse unsupported/profile operations before any restore or teardown."""
     base = root_home(ctx.home)
-    if ctx.platform != "darwin":
-        raise RuntimeError(
-            "database encryption can only be restored or erased on macOS; Mordred and its keys were kept"
-        )
+    from ..dbcrypt import database_status
     from ..dbcrypt._migrate import migration_lock
 
+    if needed(base):
+        capability = database_status(base)
+        if capability.capability == "unavailable":
+            raise RuntimeError(capability.reason or "native database restoration is unavailable; sources retained")
     with migration_lock(base, timeout=0):
         if base.resolve() != ctx.home.resolve() and needed(base):
             raise RuntimeError(
@@ -155,38 +152,18 @@ def guard(ctx: UninstallContext, *, erase: bool = False) -> Iterator[None]:
         yield
 
 
-def restore(ctx: UninstallContext, flow: FlowSession) -> None:
+def restore(ctx: UninstallContext, flow: FlowSession | None) -> None:
     """Synchronously finish conversion and restore plaintext; never schedule it."""
     from ..dbcrypt import _migrate
-    from ..dbcrypt._key import derive
-    from ..keyvault._memory_hook import _decode_env_key
-    from . import memory_cli
-    from ._vault_open import _vault_present
 
     base = root_home(ctx.home)
-    prepared = [path for path in database_files(base) if _PREPARED_SUFFIX in path.name]
-    if prepared and not _migrate.journal_path(base).exists():
-        raise _migrate.MigrationError(
-            "prepared database copies remain; resolve the interrupted conversion before uninstalling: "
-            + ", ".join(str(path) for path in prepared)
-        )
-    # Only a scheduled, unstarted encryption can be cancelled without the key.
-    if not any(path.exists() for path in state_paths(base) if path.name != "db-encryption.pending"):
-        _migrate.pending_path(base).unlink(missing_ok=True)
-        return
-    if _vault_present(ctx.vault_root):
-        memory_key = memory_cli._memory_key_from_vault(
-            root=ctx.vault_root, backend=ctx.backend, store=ctx.store, flow_session=flow
-        )
-    else:
-        memory_key = _decode_env_key(os.environ)
-    if memory_key is None:
-        raise _migrate.MigrationError("the database key is unavailable; restore vault access before uninstalling")
-    key = derive(memory_key)
-    unreadable = [database.relative for database in _migrate.discover(base, key) if database.state == "unreadable"]
-    if unreadable:
-        raise _migrate.MigrationError("database key cannot open: " + ", ".join(unreadable))
-    report = _migrate.decrypt_all(base, key)
+    # Outer uninstall exclusion precedes all FlowSession/native custody. The
+    # conversion owner authenticates the native source under that actual EX.
+    report = _migrate.decrypt_all(base, None)
+    print(
+        f"Restored {len(report.converted)} Hermes database(s) to plaintext; "
+        "native source retained pending teardown guard."
+    )
     if report.scheduled or report.unreadable or any(path.exists() for path in state_paths(base)):
         raise _migrate.MigrationError("database restoration did not finish; Mordred and its keys must be kept")
     # Interrupted preparation can leave unjournaled encrypted copies. They are
@@ -197,7 +174,6 @@ def restore(ctx: UninstallContext, flow: FlowSession) -> None:
             "prepared database copies remain; resolve the interrupted conversion before uninstalling: "
             + ", ".join(str(path) for path in prepared)
         )
-    print(f"Restored {len(report.converted)} Hermes database(s) to plaintext.")
 
 
 def erase(ctx: UninstallContext) -> None:

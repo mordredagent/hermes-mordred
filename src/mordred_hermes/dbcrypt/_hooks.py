@@ -23,6 +23,7 @@ from . import _monitor, armed
 _LOG = logging.getLogger("mordred.dbcrypt")
 _REASON = "mordred.db_encryption.violation"
 _reported: set[tuple[str, str]] = set()
+_observation: tuple[Path, object, tuple[_monitor.Finding, ...]] | None = None
 _SECTION_MAX_CHARS = 600
 #: Room for the findings in the prompt section, inside ``_SECTION_MAX_CHARS``.
 _SECTION_DETAIL_CHARS = 420
@@ -51,6 +52,17 @@ def _key() -> Any:
         return _PROVIDER()
     except Exception:
         return None
+
+
+def _findings() -> list[_monitor.Finding]:
+    from . import _PROVIDER
+
+    if _PROVIDER is not None and _PROVIDER.runtime_native:
+        authority = _PROVIDER.current_authority
+        if authority is None:
+            return [_monitor.Finding("no_key", "native database authority has not been acquired")]
+        return list(_monitor.monitor_runtime(authority))
+    return _monitor.check(_home(), key_available=_key_available, key=_key)
 
 
 def _policy_mode() -> str:
@@ -93,8 +105,15 @@ def _describe(findings: list[_monitor.Finding]) -> str:
 
 def evaluate(event: str) -> str | None:
     """Run the monitor; return a warning for the model, or raise under strict policy."""
+    from . import _PROVIDER
+
+    global _observation
+    _observation = None
     try:
-        findings = [f for f in _monitor.check(_home(), key_available=_key_available, key=_key) if f.violation]
+        checked = tuple(_findings())
+        token = _PROVIDER.current_authority if _PROVIDER is not None and _PROVIDER.runtime_native else _PROVIDER
+        _observation = (_home(), token, checked)
+        findings = [f for f in checked if f.violation]
     except Exception as exc:  # the monitor itself must never take a turn down
         _LOG.warning("database encryption check failed: %s", exc)
         return None
@@ -128,22 +147,60 @@ def pre_llm_call(**_kwargs: Any) -> dict[str, str] | None:
     return {"context": warning} if warning else None
 
 
+def _pending_line(home: Path) -> str:
+    from ._capability import database_status
+
+    status = database_status(home)
+    if status.capability == "unavailable":
+        return (
+            "## Hermes's databases (Mordred)\nPending database encryption is unavailable on this runtime: "
+            f"{status.reason}. The conversation history is not protected."
+        )
+    return (
+        "## Hermes's databases (Mordred)\nEncryption of Hermes's databases is scheduled but not active yet: "
+        "the conversation history remains unencrypted. Pending conversion requires explicit supported maintenance."
+    )
+
+
 def status_line(_info: Any = None) -> str:
     """The ``mordred.databases`` prompt section (empty when encryption is neither on nor scheduled).
 
     Hermes calls a section callable with the session-info mapping.
     """
     try:
+        from . import _PROVIDER
+
         home = _home()
-        findings = _monitor.check(home, key_available=_key_available, key=_key)
-    except Exception:
-        return ""
-    if not armed(home):
-        if any(f.code == "pending" for f in findings):
-            return (
-                "## Hermes's databases (Mordred)\nEncryption of Hermes's databases is scheduled but not active yet: "
-                "the conversation history is stored unencrypted until Hermes restarts."
+        token: object | None = _PROVIDER
+        native_passive = _PROVIDER is not None and _PROVIDER.runtime_native
+        if native_passive:
+            assert _PROVIDER is not None
+            authority = _PROVIDER.current_authority
+            token = authority
+        cached = _observation
+        if cached is not None and cached[0] == home and cached[1] is token:
+            findings = list(cached[2])
+        else:
+            findings = (
+                []
+                if native_passive
+                else [_monitor.Finding("no_key", "database protection has not been authenticated in this process")]
             )
+        if native_passive:
+            # Authority.check can revoke connections and roll back SQL on failure.
+            # Until authority exposes a pure observation API, never reuse a native
+            # protection claim in passive rendering; evaluate owns freshness work.
+            findings = [f for f in findings if f.violation]
+        if token is None and not native_passive and not any(f.violation for f in findings):
+            findings = [_monitor.Finding("no_key", "database protection has not been authenticated in this process")]
+    except Exception:
+        return (
+            "## Hermes's databases (Mordred)\nWARNING: Hermes's conversation history is NOT protected: "
+            "database authority metadata could not be verified. Never say it is encrypted."
+        )
+    if not armed(home):
+        if any(f.code == "pending" for f in findings) or (home / "mordred/db-encryption.pending").is_file():
+            return _pending_line(home)
         return ""
     violations = [f for f in findings if f.violation]
     if violations:
@@ -155,8 +212,15 @@ def status_line(_info: Any = None) -> str:
             f"{detail}. Tell the user; never say it is encrypted."
         )
     return (
-        "## Hermes's databases (Mordred)\nHermes's conversation history and its other databases are encrypted "
-        "at rest with SQLCipher (checked when this session started)."
+        (
+            "## Hermes's databases (Mordred)\nNative database protection is not checked by passive status. "
+            "Current protection is unknown; session and turn checks authenticate the runtime."
+        )
+        if native_passive
+        else (
+            "## Hermes's databases (Mordred)\nHermes's conversation history and its other databases are encrypted "
+            "at rest with SQLCipher (checked when this session started)."
+        )
     )
 
 

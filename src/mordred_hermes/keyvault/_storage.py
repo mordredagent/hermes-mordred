@@ -46,9 +46,16 @@ except ImportError:  # pragma: no cover — non-POSIX platform (Windows)
     fcntl = None  # type: ignore[assignment]
 
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from weakref import WeakKeyDictionary
 
+if TYPE_CHECKING:
+    from ._native_deletion import _NativeOwnerFacts
+    from .wrap import NativeBackend
+
+from .._custody_order import custody_scope
 from .._home import hermes_home as _hermes_home
 
 _META_VERSION = 1
@@ -78,12 +85,20 @@ _LOCK_PROCESS_PID = os.getpid()
 _ACTIVE_LOCK_FDS: set[int] = set()
 
 
+@dataclass(frozen=True)
+class _HeldAdvisoryLock:
+    fd: int
+    identity: tuple[int, int, int]
+    process: tuple[int, int]
+
+
 class _ThreadLockState(threading.local):
     """Per-thread advisory-lock recursion depths for this process."""
 
     def __init__(self) -> None:
         self.pid = os.getpid()
         self.depths: dict[str, int] = {}
+        self.held: dict[str, _HeldAdvisoryLock] = {}
 
 
 _THREAD_LOCK_STATE = _ThreadLockState()
@@ -124,6 +139,7 @@ def _thread_lock_depths() -> dict[str, int]:
     if _THREAD_LOCK_STATE.pid != pid:
         _THREAD_LOCK_STATE.pid = pid
         _THREAD_LOCK_STATE.depths = {}
+        _THREAD_LOCK_STATE.held = {}
     return _THREAD_LOCK_STATE.depths
 
 
@@ -782,6 +798,40 @@ def _open_validated_lock_once(path: Path, *, label: str) -> int:
         raise
 
 
+def _checked_advisory_lock(path: Path) -> _HeldAdvisoryLock:
+    """Read authority from this thread's actual descriptor, never a path snapshot."""
+    depths = _thread_lock_depths()
+    key = _lock_path_key(path)
+    record = _THREAD_LOCK_STATE.held.get(key)
+    if (
+        record is None
+        or not depths.get(key)
+        or record.process != (os.getpid(), threading.get_ident())
+        or record.fd not in _ACTIVE_LOCK_FDS
+    ):
+        raise KeyvaultPermissionError(errno.EPERM, "advisory lock is not held by this thread", str(path))
+    try:
+        opened = os.fstat(record.fd)
+        current = path.lstat()
+        _validate_lock_stat(opened, path, label="held advisory lock", from_lstat=False)
+        _validate_lock_stat(current, path, label="held advisory lock", from_lstat=True)
+    except OSError as exc:
+        raise KeyvaultPermissionError(errno.EPERM, "held advisory lock cannot be validated", str(path)) from exc
+    if _lock_inode_identity(opened) != record.identity or _lock_inode_identity(current) != record.identity:
+        raise KeyvaultPermissionError(errno.EAGAIN, "held advisory lock inode changed", str(path))
+    return record
+
+
+def assert_advisory_lock_held(path: Path) -> None:
+    """Require this thread's active opened lock to match its current pathname.
+
+    Raises KeyvaultPermissionError for absent/expired/foreign custody, a changed
+    descriptor, or a replaced pathname. Global active-FD membership alone never
+    proves ownership; it only corroborates the exact thread/path registration.
+    """
+    _checked_advisory_lock(path)
+
+
 @contextlib.contextmanager
 def _advisory_file_lock(path: Path, *, label: str) -> Iterator[None]:
     """Acquire one OS lock per path/thread and make nested use reentrant."""
@@ -789,6 +839,7 @@ def _advisory_file_lock(path: Path, *, label: str) -> Iterator[None]:
     depths = _thread_lock_depths()
     depth = depths.get(key, 0)
     if depth:
+        assert_advisory_lock_held(path)
         depths[key] = depth + 1
         try:
             yield
@@ -800,13 +851,19 @@ def _advisory_file_lock(path: Path, *, label: str) -> Iterator[None]:
     owner_pid = os.getpid()
     _ACTIVE_LOCK_FDS.add(fd)
     try:
+        record = _HeldAdvisoryLock(fd, _lock_inode_identity(os.fstat(fd)), (owner_pid, threading.get_ident()))
         if fcntl is not None:
             fcntl.flock(fd, fcntl.LOCK_EX)
         depths[key] = 1
+        _THREAD_LOCK_STATE.held[key] = record
         try:
+            # flock can block after open-time validation. A replacement during
+            # that wait must not turn the old locked inode into new authority.
+            assert_advisory_lock_held(path)
             yield
         finally:
             depths.pop(key, None)
+            _THREAD_LOCK_STATE.held.pop(key, None)
             # A forked child shares the parent's open-file description. It
             # must never explicitly unlock that description on the parent's
             # behalf; the at-fork callback already closed the child's copy.
@@ -838,7 +895,7 @@ def keyvault_lifecycle_lock(root: Path) -> Iterator[None]:
     refuse_unported_on_windows("secret_store", "keyvault_lifecycle_lock")  # before any I/O or mkdir (C5e)
     _refresh_process_lock_state()
     thread_lock = _LIFECYCLE_THREAD_LOCK
-    with thread_lock:
+    with custody_scope(), thread_lock:
         lock_path = root.parent / ".keyvault.lifecycle.lock"
         ensure_lock_file(lock_path)
         with _advisory_file_lock(lock_path, label="keyvault lifecycle lock"):
@@ -868,6 +925,187 @@ def keyvault_lock(root: Path) -> Iterator[None]:
         assert_keyvault_active(root)
         with _advisory_file_lock(root / ".lock", label="keyvault lock"):
             yield
+
+
+@dataclass
+class _CustodyRecord:
+    root: Path
+    backend: NativeBackend
+    identity: tuple[int, int] | None
+    process: tuple[int, int]
+    reset: bool
+    binding: tuple[object, ...]
+    locks: tuple[tuple[Path, _HeldAdvisoryLock], ...]
+    initial_meta: bytes
+    creations: dict[tuple[str, str], _NativeCreationOwner] = field(default_factory=dict)
+    completed_creations: set[_NativeCreationOwner] = field(default_factory=set)
+
+
+def _only_created_store_directories(before: object, after: object) -> bool:
+    """Allow only create-only helper directory materialization, never replacement."""
+    if before == after:
+        return True
+    if not isinstance(before, tuple) or not isinstance(after, tuple):
+        return False
+    if len(before) == 2 and isinstance(before[0], str) and before[1] is None and after and after[0] == before[0]:
+        try:
+            _check_dir_mode(Path(before[0]))
+        except OSError:
+            return False
+        return True
+    return len(before) == len(after) and all(
+        _only_created_store_directories(a, b) for a, b in zip(before, after, strict=True)
+    )
+
+
+class _NativeCreationOwner:
+    """Issued identity belonging only to one live checked provisioning scope."""
+
+    __slots__ = ()
+
+    def __new__(cls) -> _NativeCreationOwner:
+        from .._database_contracts import DatabaseRefused
+
+        raise DatabaseRefused("native creation ownership cannot be constructed")
+
+
+class KeyvaultCustody:
+    """Opaque handle to one live checked lifecycle/keyvault transaction."""
+
+    __slots__ = ("__weakref__",)
+
+    def __new__(cls) -> KeyvaultCustody:
+        from .._database_contracts import DatabaseRefused
+
+        raise DatabaseRefused("keyvault custody cannot be constructed")
+
+    def _check_native_delete_owner(self, native_key_id: str, backend: NativeBackend) -> _NativeOwnerFacts:
+        from .._database_contracts import DatabaseRefused
+        from . import _native_deletion, _native_key_id
+
+        record = _KEYVAULT_CUSTODY.get(self)
+        if record is None or record.process != (os.getpid(), threading.get_ident()) or backend is not record.backend:
+            raise DatabaseRefused("keyvault custody is closed or belongs to another backend/process")
+        try:
+            current = record.root.lstat()
+        except FileNotFoundError:
+            identity = None
+        else:
+            _check_dir_mode(record.root)
+            identity = (current.st_dev, current.st_ino)
+        if identity != record.identity:
+            raise DatabaseRefused("keyvault custody root changed")
+        for path, held_registration in record.locks:
+            try:
+                held_lock = _checked_advisory_lock(path)
+            except OSError as exc:
+                raise DatabaseRefused("keyvault custody lock changed") from exc
+            if held_lock is not held_registration:
+                raise DatabaseRefused("keyvault custody lock changed")
+        if record.binding != _native_deletion._backend_binding(backend, ""):
+            raise DatabaseRefused("keyvault backend/store changed")
+        try:
+            role = _native_key_id._checked_keyvault_role(record.root, native_key_id, reset=record.reset)
+        except (OSError, ValueError) as exc:
+            raise DatabaseRefused("keyvault ownership cannot be validated") from exc
+        return _native_deletion._NativeOwnerFacts(home=record.root, role=role)
+
+    def _check_native_creation_owner(
+        self,
+        key_id: str,
+        native_key_id: str,
+        backend: NativeBackend,
+    ) -> _NativeCreationOwner:
+        from .._database_contracts import DatabaseRefused
+        from . import _native_key_id
+
+        record = _KEYVAULT_CUSTODY.get(self)
+        if record is None:
+            raise DatabaseRefused("native creation custody is closed")
+        pair = (key_id, native_key_id)
+        if pair in record.creations:
+            from ._native_deletion import _backend_binding
+
+            observed_binding = _backend_binding(backend, "")
+            if record.binding != observed_binding and _only_created_store_directories(record.binding, observed_binding):
+                record.binding = observed_binding
+        # Fixed implementation validates real held descriptor registrations,
+        # not a reopened handle or a caller's snapshot of a lock pathname.
+        KeyvaultCustody._check_native_delete_owner(self, native_key_id, backend)
+        if record.reset or record.identity is None or len(record.locks) != 2 or fcntl is None:
+            raise DatabaseRefused("native creation requires both POSIX provisioning locks")
+        _native_key_id._assert_creation_backend_bound(backend, record.root)
+        pair = (key_id, native_key_id)
+        issued = record.creations.get(pair)
+        if issued in record.completed_creations:
+            raise DatabaseRefused("committed native ownership cannot obtain new creation rollback")
+        try:
+            _native_key_id._checked_creation_pending(
+                record.root,
+                key_id,
+                native_key_id,
+                initial_meta=record.initial_meta,
+                allow_intermediate=issued is not None,
+            )
+        except (OSError, ValueError) as exc:
+            raise DatabaseRefused("native creation requires fresh exact pending ownership") from exc
+        if issued is None:
+            issued = object.__new__(_NativeCreationOwner)
+            record.creations[pair] = issued
+        return issued
+
+
+_KEYVAULT_CUSTODY: WeakKeyDictionary[KeyvaultCustody, _CustodyRecord] = WeakKeyDictionary()
+
+
+def _complete_native_creation_owner(custody: KeyvaultCustody, owner: _NativeCreationOwner) -> None:
+    """Pure rights retirement, called after trusted validation at commit."""
+    record = _KEYVAULT_CUSTODY.get(custody)
+    if record is not None and owner in record.creations.values():
+        record.completed_creations.add(owner)
+
+
+@contextlib.contextmanager
+def keyvault_custody(root: Path, *, backend: NativeBackend, reset: bool = False) -> Iterator[KeyvaultCustody]:
+    """Bind exact backend and physical root while both actual locks are held.
+
+    Reset may resume an absent tree from its durable parent journal. It still
+    holds the stable lifecycle lock; an existing tree also holds its own lock.
+    """
+    from ._native_deletion import _backend_binding, _expire_native_creation_receipts
+
+    with keyvault_lifecycle_lock(root), contextlib.ExitStack() as stack:
+        try:
+            current = root.lstat()
+        except FileNotFoundError:
+            if not reset:
+                raise
+            identity = None
+        else:
+            _check_dir_mode(root)
+            identity = (current.st_dev, current.st_ino)
+            if not reset:
+                assert_keyvault_active(root)
+            stack.enter_context(_advisory_file_lock(root / ".lock", label="keyvault lock"))
+        handle = object.__new__(KeyvaultCustody)
+        lock_paths = [root.parent / ".keyvault.lifecycle.lock"]
+        if identity is not None:
+            lock_paths.append(root / ".lock")
+        _KEYVAULT_CUSTODY[handle] = _CustodyRecord(
+            root,
+            backend,
+            identity,
+            (os.getpid(), threading.get_ident()),
+            reset,
+            _backend_binding(backend, ""),
+            tuple((path, _checked_advisory_lock(path)) for path in lock_paths),
+            safe_read(root / "meta.json") if (root / "meta.json").exists() else b"",
+        )
+        try:
+            yield handle
+        finally:
+            _expire_native_creation_receipts(handle)
+            _KEYVAULT_CUSTODY.pop(handle, None)
 
 
 def _write_meta_atomic(path: Path, meta: dict[str, Any]) -> None:

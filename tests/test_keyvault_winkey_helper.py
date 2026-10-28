@@ -12,7 +12,10 @@ import pytest
 
 from mordred_hermes import _home
 from mordred_hermes.keyvault import _seckey_helper as helper
+from mordred_hermes.keyvault._exceptions import WrapError
+from mordred_hermes.keyvault._seckey_backend import _SecKeyBackend
 from mordred_hermes.keyvault._seckey_errors import _OpsError
+from tests.test_keyvault_native_deletion import checked_audit_permit
 
 
 @pytest.fixture(autouse=True)
@@ -105,19 +108,21 @@ def test_winkey_process_timeout() -> None:
 )
 @pytest.mark.parametrize("command", ["probe", "delete"])
 def test_winkey_requires_boolean_success(response: dict[str, object], command: str) -> None:
-    with (
-        patch.object(
-            helper.subprocess,
-            "run",
-            return_value=subprocess.CompletedProcess([], 0, json.dumps(response).encode(), b""),
-        ),
-        pytest.raises(_OpsError),
+    with patch.object(
+        helper.subprocess,
+        "run",
+        return_value=subprocess.CompletedProcess([], 0, json.dumps(response).encode(), b""),
     ):
         ops = helper._HelperSecKeyOps("C:/test/helper.exe")
         if command == "probe":
-            ops.probe()
-        else:
-            ops.delete_key(b"synthetic-key")
+            with pytest.raises(_OpsError):
+                ops.probe()
+            return
+        backend = _SecKeyBackend(ops=ops, sw_ops=None)
+        sel = "synthetic-key"
+        with checked_audit_permit(backend, sel) as permit, pytest.raises(WrapError) as caught:
+            backend.delete_enclave_key(sel, deletion=permit)
+        assert isinstance(caught.value.__cause__, _OpsError)
 
 
 @pytest.mark.parametrize("status", ["bad", None, [], {}, True, 1.5])

@@ -307,6 +307,7 @@ def test_service_start_sync_holds_the_checked_lock_until_the_task_ends(archive, 
     svc = service.TelegramService(
         secret_store=windows_store(home, backend),
         archive_root=root,
+        home=home,
         client_factory=lambda *a, **k: Client(),
         installed=lambda: True,
         memory_guard=lambda: None,
@@ -405,8 +406,8 @@ def test_ambiguous_native_deletion_stays_journaled_and_blocks_the_next_forget(ar
     leases = seed(home, backend, root, c)
     real_delete = backend.delete_enclave_key
 
-    def lost(key_id):
-        real_delete(key_id)
+    def lost(key_id, **kwargs):
+        real_delete(key_id, **kwargs)
         raise RuntimeError("native deletion result lost")
 
     monkeypatch.setattr(backend, "delete_enclave_key", lost)
@@ -611,6 +612,7 @@ def test_service_sync_still_finishes_when_the_lock_release_fails(archive, monkey
     svc = service.TelegramService(
         secret_store=windows_store(home, backend),
         archive_root=root,
+        home=home,
         client_factory=lambda *a, **k: Client(),
         installed=lambda: True,
         memory_guard=lambda: None,
@@ -668,3 +670,51 @@ def test_session_identity_change_is_broken_custody_not_a_missing_helper(archive,
     with pytest.raises(secrets.TelegramSecretsError) as excinfo:
         WindowsCustodySecretStore(home, audit_sink=lambda entry: None).load()
     assert code(excinfo) == "custody_broken"
+
+
+@pytest.mark.parametrize(
+    "relative", ["../foreign.enc", "dialogs/../../foreign.enc", "credentials.sealed", "dialogs/foreign.enc"]
+)
+def test_archive_destination_escape_refuses(archive, relative):
+    """Archive publication cannot address credentials, foreign leaves or parent paths."""
+    _c, home, _backend, root = archive
+    from mordred_hermes._private_fs import PrivateFSError
+    from mordred_hermes.extension.telegram import _windows_archive
+
+    foreign_destination = home / "foreign.enc"
+    with pytest.raises(PrivateFSError):
+        _windows_archive.write_archive_file(root, relative, b"ciphertext")
+    assert foreign_destination.exists() is False
+    assert not root.exists()
+
+
+def test_checked_finalization_keeps_index_credentials_and_unknown_files(archive):
+    import sqlite3
+
+    from mordred_hermes.extension.telegram import migrate
+    from mordred_hermes.imports.store import ImportStore
+
+    _c, home, _backend, root = archive
+    s = store.ArchiveStore(KEY, root)
+    s.append_messages(7, [_msg(1), _msg(2)])
+    s.save_index(
+        store.ArchiveIndex(account_id=9, dialogs={7: store.DialogInfo(7, "user", "synthetic", message_count=2)})
+    )
+    imports = ImportStore(home / "portable-test.db", sqlite3.connect)
+    imports.initialize(home)
+    migrate.run_migration(s, imports, commit=True)
+    from mordred_hermes.extension.telegram import _windows_archive
+
+    with _windows_archive.transaction(root, create=True) as tx:
+        tx.create_bytes("credentials.sealed", b"retained sealed credentials")
+    with _windows_archive.transaction(root / "dialogs", create=True) as tx:
+        tx.create_bytes("unrelated.enc", b"retained unknown ciphertext")
+    result = migrate.finalize(s, imports)
+    assert result.segments_deleted == 1
+    assert s.load_index().retired_to == "mordred.db"
+    assert s.load_messages(7) == []
+    with _windows_archive.transaction(root) as tx:
+        assert tx.read_bytes("credentials.sealed", max_bytes=1024) == b"retained sealed credentials"
+    with _windows_archive.transaction(root / "dialogs") as tx:
+        assert tx.read_bytes("unrelated.enc", max_bytes=1024) == b"retained unknown ciphertext"
+    assert imports.status()["sources"]["telegram"]["messages"] == 2

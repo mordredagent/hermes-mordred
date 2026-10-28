@@ -1,7 +1,7 @@
 """Hermes tool ``mordred_mail_sync``: fetch the owner's new mail into ``mordred.db``; counts only.
 
 The owner says "sync my mail" in a Hermes chat; the model calls this tool; Mordred
-unseals the IMAP credentials (Secure Enclave), fetches new mail read-only and
+unseals the independent native IMAP credentials, fetches new mail read-only and
 writes it through the mail collector (:func:`mordred_hermes.imports.mail.imap_sync.run_fetch`,
 the same function as ``hermes-mordred mail fetch``). Hermes receives only the
 fixed counts-only result: no subject, name, address, label or body ever enters
@@ -10,7 +10,7 @@ the conversation, ``state.db`` or a log.
 - **Arguments**: ``max_messages`` (integer 1-2000) only; anything else —
   another key, a boolean, a float, a string — is ``invalid_request``. The model
   cannot choose the account, the server or the mailbox.
-- **Visibility** (``check_fn``, offline): macOS, the ``mordred.db`` gate passes,
+- **Visibility** (``check_fn``, offline): the shared ``mordred.db`` gate passes,
   mail credentials are sealed, and the Hermes model is Venice or loopback (the
   rule of the other Mordred tools).
 - **Every call** repeats the gates: the running model's endpoint (a Venice model
@@ -77,10 +77,12 @@ REVOKE_GRACE_S: Final = 5.0
 #: The name of the daemon thread that abandons a fetch (never waited for past the call's bound).
 ABANDON_NAME: Final = "mordred-mail-sync-abandon"
 NOTE: Final = (
-    "Mordred fetched the user's new mail into its encrypted store; only counts are reported here. "
+    "This tool fetches new mail into Mordred's encrypted store and reports counts only. "
     "partial=true means more remains: call this tool again to continue. To read or quote messages use "
     "mordred_history_search. error=mail_not_configured means the user must run `hermes-mordred mail setup` "
-    "in a terminal (never ask for the address or password in the chat)."
+    "in a terminal (never ask for the address or password in the chat). error=no_key or "
+    "import_store_unavailable requires checking `hermes-mordred databases status`; after terminal authority "
+    "loss restart Hermes before retrying. No automatic authority reacquisition occurs."
 )
 
 SCHEMA: Final[dict[str, Any]] = {
@@ -89,7 +91,7 @@ SCHEMA: Final[dict[str, Any]] = {
         "Fetch the user's new e-mail into Mordred's encrypted history store (read-only on the mail server; "
         "nothing is marked read, moved or sent). Call it when the user asks to sync, refresh or import their "
         "mail. Returns counts only (inserted, duplicates, partial, error...), never message content; afterwards "
-        "use mordred_history_search to read mail. Each call may ask the user for Touch ID."
+        "use mordred_history_search to read mail. Native authentication may be required by the configured policy."
     ),
     "parameters": {
         "type": "object",
@@ -136,10 +138,10 @@ def _mail_configured() -> bool:
 
 
 def mail_sync_available() -> bool:
-    """check_fn: macOS, a Venice/loopback Hermes model, the store gate, and sealed mail credentials."""
+    """Passive native eligibility, a Venice/loopback model, and sealed mail flags; never authenticate."""
     from .hermes_tools import _classify_endpoint, _configured_model, _store_gate_open
 
-    if _platform() != "darwin":
+    if _platform() not in {"darwin", "linux", "win32"}:
         return False
     _model, base_url = _configured_model()
     if _classify_endpoint(base_url) is None:

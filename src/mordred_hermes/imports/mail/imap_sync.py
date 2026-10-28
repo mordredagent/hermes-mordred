@@ -5,7 +5,7 @@ One implementation for ``hermes-mordred mail fetch`` and the Hermes tool
 ``docs/superpowers/specs/2026-10-22-mail-imap-sync-design.md``; SPEC
 "IMAP sync (2026-10-22)".
 
-Order of gates: macOS, sealed credentials present (flags only), memory
+Order of gates: supported native platform, sealed credentials present (flags only), memory
 encryption armed, the ``mordred.db`` protection gate, the per-home fetch lock
 (``sync_in_progress``), then ONE Enclave unseal and the IMAP login. A crashed
 fetch's ``open`` mail runs are marked failed under the lock. A caller running
@@ -97,9 +97,10 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Final, Protocol, TypeAlias
+from weakref import WeakKeyDictionary
 
 from .imap import CancelToken, ImapError, ImapSession, ImapStopped, IoLimits
-from .secrets import MailCredentials, MailSecretsError, ensure_private_dir, mail_dir
+from .secrets import MailCredentials, MailSecretsError, mail_dir
 from .source import MAX_MESSAGE_BYTES, TrustedBytes, TrustedMeta
 
 __all__ = [
@@ -153,6 +154,7 @@ ERROR_CODES: Final = frozenset(
         "store_path_unsafe",
         "tee_unavailable",
         "tee_auth_cancelled",
+        "presence_unsupported",
         "secrets_corrupt",
         "credentials_left",
         "routing_unavailable",
@@ -433,6 +435,105 @@ class _LockRelease:
                 fcntl.flock(self._fd, fcntl.LOCK_UN)
 
 
+class _WindowsWriterRelease:
+    """A checked transaction can only be released by its owning thread.
+
+    Abandonment revokes writes but retains this lock until worker exit.
+    """
+
+    held = True
+
+    def __call__(self) -> None:
+        pass
+
+
+@dataclass(eq=False)
+class _HeldMailWriter:
+    home: Path
+    process: tuple[int, int]
+    release: _LockRelease | _WindowsWriterRelease
+    fd: int | None = None
+    identity: tuple[int, int] | None = None
+    transaction: Any = None
+
+
+_mail_writers = threading.local()
+_issued_writers: WeakKeyDictionary[_HeldMailWriter, tuple[Any, ...]] = WeakKeyDictionary()
+
+
+def _writer_facts(held: _HeldMailWriter) -> tuple[Any, ...]:
+    return held.home, held.process, held.release, held.fd, held.identity, held.transaction
+
+
+def _held_mail_writer(home: Path) -> _HeldMailWriter | None:
+    held = getattr(_mail_writers, "held", None)
+    if type(held) is not _HeldMailWriter or held.home != home:
+        return None
+    if _issued_writers.get(held) != _writer_facts(held):
+        raise FetchStop("sync_in_progress")
+    if held.process != (os.getpid(), threading.get_ident()) or not held.release.held:
+        raise FetchStop("sync_in_progress")
+    if held.fd is not None:
+        named = (mail_dir(home) / _LOCK_NAME).lstat()
+        opened = os.fstat(held.fd)
+        if (
+            not stat.S_ISREG(named.st_mode)
+            or named.st_nlink != 1
+            or stat.S_IMODE(named.st_mode) != 0o600
+            or (named.st_dev, named.st_ino) != held.identity
+            or (opened.st_dev, opened.st_ino) != held.identity
+        ):
+            raise FetchStop("store_path_unsafe")
+    else:
+        held.transaction.assert_private_admission()
+    return held
+
+
+def assert_mail_writer_held(home: Path) -> None:
+    if _held_mail_writer(home) is None:
+        raise FetchStop("sync_in_progress")
+
+
+@contextlib.contextmanager
+def mail_writer_scope(home: Path) -> Iterator[None]:
+    """Native credential entry points join only an actually held mail writer."""
+    if _held_mail_writer(home) is not None:
+        yield
+    else:
+        with fetch_lock(home):
+            yield
+
+
+@contextlib.contextmanager
+def _windows_fetch_lock(home: Path, lease: FetchLease | None) -> Iterator[None]:
+    from ..._private_fs import PrivateFSError, open_private_directory
+
+    try:
+        with open_private_directory(home / "mordred", create=True):
+            pass
+        # Separate from credentials: home/mordred/mail custody can be entered
+        # after this writer without recursively acquiring its data transaction.
+        with (
+            open_private_directory(home / "mordred/mail-writer", create=True) as directory,
+            directory.transaction(blocking=False) as tx,
+        ):
+            release = _WindowsWriterRelease()
+            if lease is not None and not lease.hold_lock(release):
+                raise _Abandoned()
+            previous = getattr(_mail_writers, "held", None)
+            held = _HeldMailWriter(home, (os.getpid(), threading.get_ident()), release, transaction=tx)
+            _mail_writers.held = held
+            _issued_writers[held] = _writer_facts(held)
+            try:
+                yield
+            finally:
+                release.held = False
+                _issued_writers.pop(held, None)
+                _mail_writers.held = previous
+    except PrivateFSError as exc:
+        raise FetchStop("sync_in_progress" if exc.reason == "busy" else "store_path_unsafe") from None
+
+
 class FetchLease:
     """The tie between a fetch running in a worker thread and the caller that may abandon it.
 
@@ -464,7 +565,7 @@ class FetchLease:
         self._abandoned = False
         self._settled = False
         self._writes = 0
-        self._release: _LockRelease | None = None
+        self._release: _LockRelease | _WindowsWriterRelease | None = None
         self._runs: dict[str, Any] = {}
 
     @property
@@ -482,7 +583,7 @@ class FetchLease:
         if self._abandoned:
             raise _Abandoned()
 
-    def hold_lock(self, release: _LockRelease) -> bool:
+    def hold_lock(self, release: _LockRelease | _WindowsWriterRelease) -> bool:
         """Register the writer lock's release; ``False`` (the caller releases it) once abandoned."""
         with self._mutex:
             if self._abandoned:
@@ -537,7 +638,7 @@ class FetchLease:
             if not revoked or self._settled:
                 return False
             release()
-            return True
+            return not release.held
 
     def settle(self) -> bool:
         """End the abandonment: nothing is released after this. Returns whether the writer lock is retained."""
@@ -585,23 +686,36 @@ def fetch_lock(home: Path, lease: FetchLease | None = None) -> Iterator[None]:
     abandons the fetch can release the lock once the fetch is revoked; a lease
     already abandoned releases it before anything runs under it (:class:`_Abandoned`).
     """
-    if sys.platform == "win32":  # no mordred.db on Windows: nothing to serialize
-        yield
+    if _held_mail_writer(home) is not None:
+        raise FetchStop("sync_in_progress")
+    if sys.platform == "win32":
+        with _windows_fetch_lock(home, lease):
+            yield
         return
     import fcntl  # POSIX only
 
     try:
-        directory = ensure_private_dir(mail_dir(home))
+        from ..._private_fs import open_private_directory
+
+        with open_private_directory(home / "mordred", create=True):
+            pass
+        with open_private_directory(mail_dir(home), create=True):
+            pass
     except (MailSecretsError, OSError):
         raise FetchStop("store_path_unsafe") from None
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(directory / _LOCK_NAME, flags, 0o600)
+        fd = os.open(mail_dir(home) / _LOCK_NAME, flags, 0o600)
     except OSError:
         raise FetchStop("store_path_unsafe") from None
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_uid != os.getuid()
+        ):
             raise FetchStop("store_path_unsafe")
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -613,7 +727,15 @@ def fetch_lock(home: Path, lease: FetchLease | None = None) -> Iterator[None]:
         try:
             if lease is not None and not lease.hold_lock(release):
                 raise _Abandoned()
-            yield
+            previous = getattr(_mail_writers, "held", None)
+            held = _HeldMailWriter(home, (os.getpid(), threading.get_ident()), release, fd, (info.st_dev, info.st_ino))
+            _mail_writers.held = held
+            _issued_writers[held] = _writer_facts(held)
+            try:
+                yield
+            finally:
+                _issued_writers.pop(held, None)
+                _mail_writers.held = previous
         finally:
             release()  # a no-op when the lease released it already; the descriptor is closed only here
     finally:
@@ -697,7 +819,7 @@ def default_env(home: Path | None = None) -> FetchEnv:
 
     return FetchEnv(
         home=home if home is not None else hermes_home(),
-        secret_store=MailSecretStore(),
+        secret_store=MailSecretStore(mail_dir(home if home is not None else hermes_home())),
         connect=_default_connect,
         open_store=_default_open_store,
         memory_guard=_default_memory_guard,
@@ -1093,7 +1215,7 @@ def _sync(store: Any, creds: MailCredentials, options: FetchOptions, env: FetchE
 
 
 def _gated_store(options: FetchOptions, env: FetchEnv) -> Any:
-    if env.platform() != "darwin":
+    if env.platform() not in {"darwin", "linux", "win32"}:
         raise FetchStop("unsupported_platform")
     if _setup_identity(env) is None:
         raise FetchStop("mail_not_configured")

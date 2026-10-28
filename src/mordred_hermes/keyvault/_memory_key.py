@@ -9,19 +9,112 @@ import os
 import secrets
 import stat
 import tempfile
+import threading
+import time
+import weakref
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
+from .._custody_order import custody_scope
+from .._database_contracts import DatabaseBusy, DatabaseRefused
+from .._database_lifecycle import ExclusiveLease
 from . import _storage, wrap
 from ._exceptions import WrapError, WrapKeyNotFound
+from ._native_deletion import (
+    _issue_native_owner,
+    _native_creation_handoff,
+    _NativeOwnerFacts,
+    _owned_delete_scope,
+)
 from .memory_crypto import MemoryCryptoError, decode_key, looks_like_magic_line, unseal
 from .wrap import NativeBackend
 
 MEMORY_KEY_PROVIDER_VERSION = 1
 
 
-class MemoryKeyError(RuntimeError):
+class MemoryKeyError(DatabaseRefused):
     """Custody failed; callers must preserve ciphertext and refuse access."""
+
+
+@contextlib.contextmanager
+def _memory_failure() -> Iterator[None]:
+    try:
+        yield
+    except MemoryKeyError:
+        raise
+    except (DatabaseRefused, OSError) as exc:
+        raise MemoryKeyError("TPM memory custody refused; existing data was preserved") from exc
+
+
+@dataclass(frozen=True)
+class _MemoryOwnerRecord:
+    home: Path
+    backend: NativeBackend
+    pid: int
+    thread: int
+    wrapper: bytes
+    identity: tuple[int, int]
+
+
+_memory_owners: weakref.WeakKeyDictionary[MemoryKeyCustody, _MemoryOwnerRecord] = weakref.WeakKeyDictionary()
+
+
+class MemoryKeyCustody:
+    """Opaque live checked ownership, created only inside the real memory lock."""
+
+    def __new__(cls) -> MemoryKeyCustody:
+        raise TypeError("memory custody is issued only by a checked transaction")
+
+    def _check_native_delete_owner(self, native_key_id: str, backend: NativeBackend) -> _NativeOwnerFacts:
+        record = _memory_owners.get(self)
+        if (
+            record is None
+            or record.pid != os.getpid()
+            or record.thread != threading.get_ident()
+            or record.backend is not backend
+            or native_key_id != memory_key_id(record.home)
+        ):
+            raise DatabaseRefused("memory native ownership is no longer held")
+        try:
+            _storage.assert_advisory_lock_held(record.home / "mordred" / "memory-key.lock")
+        except OSError as exc:
+            raise DatabaseRefused("memory native ownership requires its live custody lock") from exc
+        path = memory_key_path(record.home)
+        observed = path.lstat()
+        if (observed.st_dev, observed.st_ino) != record.identity or _storage.safe_read(path) != record.wrapper:
+            raise DatabaseRefused("memory wrapping record changed")
+        wrap._parse_header(record.wrapper, native_key_id)
+        return _NativeOwnerFacts(home=record.home, role="memory", database_home=record.home)
+
+
+@contextlib.contextmanager
+def _native_memory_custody(home: Path, backend: NativeBackend) -> Iterator[MemoryKeyCustody]:
+    from ._database_authority import resolve_database_domain
+    from ._seckey_backend import _SecKeyBackend
+    from ._seckey_helper import _HelperSecKeyOps
+
+    home = resolve_database_domain(home).home
+    if type(backend) is not _SecKeyBackend or backend._sw_ops is not None or backend._legacy_ops is not None:
+        raise DatabaseRefused("Linux memory requires its native-only backend")
+    if isinstance(backend._ops, _HelperSecKeyOps) and backend._ops._env_override != (
+        "MORDRED_TPMKEY_STORE",
+        os.fspath(home / "mordred" / "keyvault" / "tpm"),
+    ):
+        raise DatabaseRefused("memory native backend belongs to another store")
+    _private_parent(home)
+    path = memory_key_path(home)
+    blob = _storage.safe_read(path)
+    observed = path.lstat()
+    scope = object.__new__(MemoryKeyCustody)
+    _memory_owners[scope] = _MemoryOwnerRecord(
+        home, backend, os.getpid(), threading.get_ident(), blob, (observed.st_dev, observed.st_ino)
+    )
+    try:
+        MemoryKeyCustody._check_native_delete_owner(scope, memory_key_id(home), backend)
+        yield scope
+    finally:
+        _memory_owners.pop(scope, None)
 
 
 def memory_key_path(home: Path) -> Path:
@@ -49,7 +142,8 @@ def _private_parent(home: Path, *, create: bool = False) -> Path:
     if create:
         parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         # Provisioning holds memory_key_lock, which has validated this directory.
-        parent.chmod(0o700)
+        if stat.S_IMODE(parent.lstat().st_mode) != 0o700:
+            parent.chmod(0o700)
     _storage._check_dir_mode(parent)
     return parent
 
@@ -57,6 +151,12 @@ def _private_parent(home: Path, *, create: bool = False) -> Path:
 @contextlib.contextmanager
 def memory_key_lock(home: Path) -> Iterator[None]:
     """Serialize provisioning and lifecycle operations within a profile."""
+    with custody_scope(), _memory_key_lock(home):
+        yield
+
+
+@contextlib.contextmanager
+def _memory_key_lock(home: Path) -> Iterator[None]:
     try:
         parent = memory_key_path(home).parent
         parent.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -151,40 +251,99 @@ def ensure_linux_memory_key(
     home: Path,
     adopted_key: bytes | None = None,
     backend: NativeBackend | None = None,
+    database_lease: ExclusiveLease | None = None,
 ) -> bytes:
+    from ._database_mutation import _assert_memory_database_mutation_safe, database_key_mutation
+
+    with _memory_failure(), contextlib.ExitStack() as stack:
+        path = memory_key_path(home)
+        if not (path.exists() or path.is_symlink()):
+            # Explicit provisioning may initialize a fresh home before exclusion;
+            # an identified missing source is never reconstructed over DB state.
+            home.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if database_lease is None:
+                # A competing first enrollment can publish while we are waiting.
+                # Retry only exclusion admission, outside every custody lock.
+                deadline = time.monotonic() + 1.0
+                while True:
+                    try:
+                        database_lease = stack.enter_context(database_key_mutation(root=home, generation=None))
+                        break
+                    except DatabaseBusy:
+                        if path.exists() or path.is_symlink():
+                            break
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.01)
+            else:
+                _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
+        return _ensure_linux_memory_key(
+            home=home, adopted_key=adopted_key, backend=backend, database_lease=database_lease
+        )
+
+
+def _ensure_linux_memory_key(
+    *, home: Path, adopted_key: bytes | None, backend: NativeBackend | None, database_lease: ExclusiveLease | None
+) -> bytes:
+    from ._database_mutation import _assert_memory_database_mutation_safe
+
     with memory_key_lock(home):
+        path = memory_key_path(home)
+        if not (path.exists() or path.is_symlink()):
+            _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
         _private_parent(home, create=True)
         selected = backend if backend is not None else linux_memory_backend(home)
-        path = memory_key_path(home)
-        if path.exists() or path.is_symlink():
-            existing = _load(home, selected)
-            _validate_adoption(home, existing)
-            return existing
-        if (path.parent / "memory-vault.marker").exists():
-            raise MemoryKeyError("armed profile has lost its wrapped key; refusing regeneration")
-        _validate_adoption(home, adopted_key)
-        key_id = memory_key_id(home)
-        try:
-            selected.get_enclave_public_key(key_id)
-        except WrapKeyNotFound:
-            selected.generate_enclave_key(key_id, unattended=True)
-        key = adopted_key if adopted_key is not None else secrets.token_bytes(32)
-        blob = wrap.wrap_dek(key, key_id, backend=selected)
-        # Verify actual TPM access before publishing: a public-key lookup is insufficient.
-        if wrap.unwrap_dek(blob, key_id, backend=selected, audit_sink=lambda entry: None) != key:
-            raise MemoryKeyError("TPM memory key verification failed")
-        _publish(path, blob)
-        return key
+        with _native_creation_handoff(memory_key_id(home)):
+            path = memory_key_path(home)
+            if path.exists() or path.is_symlink():
+                existing = _load(home, selected)
+                _validate_adoption(home, existing)
+                return existing
+            if (path.parent / "memory-vault.marker").exists():
+                raise MemoryKeyError("armed profile has lost its wrapped key; refusing regeneration")
+            _validate_adoption(home, adopted_key)
+            _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
+            key_id = memory_key_id(home)
+            try:
+                selected.get_enclave_public_key(key_id)
+            except WrapKeyNotFound:
+                _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
+                selected.generate_enclave_key(key_id, unattended=True)
+            key = adopted_key if adopted_key is not None else secrets.token_bytes(32)
+            blob = wrap.wrap_dek(key, key_id, backend=selected)
+            # Verify actual TPM access before publishing: a public-key lookup is insufficient.
+            if wrap.unwrap_dek(blob, key_id, backend=selected, audit_sink=lambda entry: None) != key:
+                raise MemoryKeyError("TPM memory key verification failed")
+            _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
+            _publish(path, blob)
+            return key
 
 
-def delete_linux_memory_key(*, home: Path, backend: NativeBackend | None = None) -> None:
-    with memory_key_lock(home):
+def delete_linux_memory_key(
+    *, home: Path, backend: NativeBackend | None = None, database_lease: ExclusiveLease | None = None
+) -> None:
+    from ._database_authority import observe_database_source, retire_database_source
+    from ._database_mutation import _assert_memory_database_mutation_safe, database_key_mutation
+
+    with _memory_failure(), contextlib.ExitStack() as stack:
+        if database_lease is None:
+            database_lease = stack.enter_context(database_key_mutation(root=home, generation=None))
+        _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
+        stack.enter_context(memory_key_lock(home))
+        _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
         selected = backend if backend is not None else linux_memory_backend(home)
         path = memory_key_path(home)
-        if path.exists() or path.is_symlink():
-            _storage.safe_read(path)
-        selected.delete_enclave_key(memory_key_id(home))
-        path.unlink(missing_ok=True)
+        if not (path.exists() or path.is_symlink()):
+            return  # No checked owner: retain any orphan native key for explicit repair.
+        with _native_memory_custody(home, selected) as custody:
+            owner = _issue_native_owner(custody, native_key_id=memory_key_id(home), backend=selected)
+            binding = home / "mordred" / "db-key-source.json"
+            if binding.exists() or binding.is_symlink():
+                expected = observe_database_source(root=home)
+                retire_database_source(root=home, expected=expected, lease=database_lease)
+            with _owned_delete_scope(owner, backend=selected, database_lease=database_lease) as permit:
+                selected.delete_enclave_key(memory_key_id(home), deletion=permit)
+            path.unlink()
 
 
 def resolve_memory_key(*, home: Path, platform: str, environ: Mapping[str, str]) -> bytes | None:

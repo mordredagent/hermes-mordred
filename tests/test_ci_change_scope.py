@@ -233,3 +233,25 @@ def test_docs_mixed_with_code_cannot_skip_execution_workers():
 
 def test_unmapped_wizard_setup_owner_stays_final_even_in_extension_test_directory():
     assert scope_tool().classify_changes([change("tests/extension/test_telegram_setup.py")]).final
+
+
+def test_dbcrypt_and_mail_modules_are_explicit_windows_inventory_members():
+    expected = {
+        "tests/test_dbcrypt_contracts.py",
+        "tests/test_dbcrypt_inventory.py",
+        "tests/test_dbcrypt_windows_paths.py",
+        "tests/test_dbcrypt_windows_locking.py",
+        "tests/test_dbcrypt_capability.py",
+        "tests/test_dbcrypt_packaging.py",
+        "tests/test_keyvault_mail_key.py",
+        "tests/test_windows_custody_schema_v2.py",
+    }
+    module = scope_tool()
+    assert expected <= set(module.native_modules())
+    for path in (
+        "hatch_build.py",
+        "tools/dbcrypt_build_headers.py",
+        "src/mordred_hermes/dbcrypt/_capability.py",
+        "native/dbcrypt-vfs/checked_io.c",
+    ):
+        assert module.classify_changes([change(path)]).final

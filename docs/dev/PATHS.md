@@ -31,6 +31,7 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/memory-key.wrapped` | Linux memory provider | 127-byte TPM-wrapped memory key; private `0600`, no portable recovery |
 | `<home>/mordred/memory-key.lock` | Linux memory lifecycle | private interprocess provisioning/lifecycle lock |
 | `<home>/mordred/memory-vault.marker` | encryption CLI | arms the agent-memory at-rest encryption runtime |
+| `<root>/mordred/db-key-source.json` | explicit database source enrollment (Linux/macOS only) | private `0600` v1 metadata binding: checked physical root/provider, random 32-hex generation, and public wrapped-source/header digest; no key or plaintext-key digest. Only this validated root-local record is omitted from dependency inventory; copies, variants, and temporary records block cleanup. Retirement requires the existing exclusive root lease and a clean all-generations inventory before checked durable unlink; Windows uses its checked native memory-role generation without this file. |
 | `<home>/mordred/db-encryption.marker` | `databases encrypt` / startup conversion | arms SQLCipher for every Hermes database (`mordred_hermes.dbcrypt`) |
 | `<home>/mordred/db-encryption.pending` | `databases encrypt` while Hermes runs | converts the databases at the next Hermes start |
 | `<home>/mordred/db-decryption.pending` | `databases decrypt` while Hermes runs | turns the databases back into plain SQLite at the next Hermes start |
@@ -416,6 +417,9 @@ The operator keeps the matching plaintext token in its own
   encryption armed, shim installed, key resolvable, keyed connection, file not
   readable as plain SQLite, and the stored profile binding equal to this home.
   There is no plaintext fallback; on Linux and Windows the store is refused.
+  The [cross-platform proposal](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md)
+  retains this store path and SQLCipher requirement while extending the shared
+  lifecycle. It does not yet change the supported platforms or path handling.
 - **Backup and restore:** `ActivityStore.backup` / `restore` take consistent
   SQLite-backup-API snapshots (a new `0600` file, keyed by the shim, refused if
   plaintext); restore keeps the profile binding, issues a new store

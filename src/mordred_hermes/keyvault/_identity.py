@@ -55,6 +55,25 @@ def vault_identity(root: Path) -> str:
     return f"mordred-hermes.vault.{digest}"
 
 
+def _vault_database_home(root: Path, *, allow_missing: bool = False) -> Path:
+    """Resolve only the supported canonical file-vault source relationship.
+
+    An arbitrary custom path is not evidence of an independent native source.
+    No ambient home or absence of an enrollment record grants an exemption.
+    """
+    from .._database_contracts import DatabaseRefused
+    from ._database_authority import resolve_database_domain
+
+    absolute = root.absolute()
+    if absolute.name != "vault" or absolute.parent.name != "mordred":
+        raise DatabaseRefused("custom vault source independence is not established")
+    home = absolute.parent.parent
+    domain = resolve_database_domain(home)
+    if absolute != absolute.resolve(strict=not allow_missing) or domain.home / "mordred" / "vault" != absolute:
+        raise DatabaseRefused("vault source path is not canonical")
+    return domain.home
+
+
 def resolve_backend(backend: NativeBackend | None) -> NativeBackend:
     """Return ``backend``, or build the production Secure-Enclave backend.
 
@@ -97,3 +116,13 @@ def resolve_backend_store(
     each production default.
     """
     return resolve_backend(backend), resolve_store(store)
+
+
+def _assert_vault_publication_identity(root: Path, key_id: str, anchor_label: str) -> None:
+    """Admit only this physical vault's derived native and anchor selectors."""
+    from .._database_contracts import DatabaseRefused
+
+    absolute = root.absolute()
+    checked = root.resolve()
+    if absolute != checked or key_id != vault_identity(checked) or anchor_label != vault_identity(checked):
+        raise DatabaseRefused("vault publication requires its exact physical-root native and anchor identity")

@@ -11,7 +11,6 @@ so this module imports on any platform, matching ``wizard/vault_cli.py``.
 
 from __future__ import annotations
 
-import io
 import os
 import sys
 from collections.abc import MutableMapping
@@ -70,9 +69,8 @@ def inject_vault_env(
     from ._windows_capability import refuse_excluded_on_windows
 
     refuse_excluded_on_windows("env_config_workspace_seals", "inject_vault_env")  # before any I/O (C5e)
-    from dotenv import dotenv_values
-
     from . import anchor, vault
+    from ._memory_env import parse_env
 
     key_id = anchor_label = vault_identity(root)
     backend, store = resolve_backend_store(backend, store)
@@ -100,13 +98,12 @@ def inject_vault_env(
         plaintext = opened.read_file(name)
 
     try:
-        text = plaintext.decode("utf-8")
+        values = parse_env(plaintext)
     except UnicodeDecodeError as exc:
         raise vault.VaultError(f"enrolled {name!r} is not valid UTF-8 — cannot parse as .env") from exc
 
     # interpolate=False: secret values are injected verbatim; a value containing
     # ``${...}`` must not be expanded against other vars / os.environ.
-    values = dotenv_values(stream=io.StringIO(text), interpolate=False)
     injected = 0
     for env_key, env_value in values.items():
         if env_value is None:  # a bare ``KEY`` with no ``=value`` parses to None — skip it
@@ -135,6 +132,10 @@ def install_vault_env_decrypt(*, environ: MutableMapping[str, str] | None = None
     nothing is injected, even if ``.env`` is still enrolled — the operator has
     restored a plaintext ``.env`` and wants the runtime to use that.
     """
+    from ..dbcrypt._cli import maintenance_process
+
+    if maintenance_process():
+        return 0
     global _INJECTED_INTO_OS_ENVIRON
     if sys.platform != "darwin":
         return 0

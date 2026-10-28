@@ -27,6 +27,7 @@ from mordred_hermes._audit_session import AuditSession
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
 from mordred_hermes.keyvault import _seckey_helper, _storage, _windows_capability
 from mordred_hermes.keyvault import log_encryption as mral
+from mordred_hermes.keyvault._seckey_errors import OPS_AUTH_DENIED, _OpsError
 from mordred_hermes.privacy_check import audit as privacy_audit
 from mordred_hermes.wizard import _windows_gates, audit_cli, cli
 from tests._private_files import write_private
@@ -510,7 +511,7 @@ def test_decrypt_reports_corrupt_and_foreign_files_then_continues(win, monkeypat
 def test_decrypt_missing_native_key_never_regenerates(win, monkeypatch, capsys):
     lease = enroll(win)
     history(win, monkeypatch, [(DAY, ["a"]), (today(), ["b"])])
-    win.backend.delete_enclave_key(lease.native_key_id)
+    win.backend._keys.pop(lease.native_key_id)
     generated = native_calls(win.backend).count("generate")
     assert audit_cli.decrypt(date=DAY) == 1
     captured = capsys.readouterr()
@@ -525,7 +526,11 @@ def test_decrypt_missing_native_key_never_regenerates(win, monkeypatch, capsys):
 def test_decrypt_auth_denied_uses_windows_wording(win, monkeypatch, capsys):
     enroll(win)
     history(win, monkeypatch, [(DAY, ["a"]), (today(), ["b"])])
-    win.backend.denied_reason = "auth_failed"
+
+    def denied(*_args, **_kwargs):
+        raise _OpsError(-1, "cng", "denied", reason=OPS_AUTH_DENIED)
+
+    monkeypatch.setattr(win.backend._ops, "key_exchange", denied)
     assert audit_cli.decrypt(date=DAY) == 1
     captured = capsys.readouterr()
     assert captured.out == ""

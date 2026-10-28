@@ -619,9 +619,13 @@ def test_cli_login_rejects_bad_api_hash(tmp_path):
 def test_cli_logout_revokes_and_forgets(tmp_path, monkeypatch):
     _seed_archive(tmp_path / "mordred" / "telegram")
     fake = _LoginClient(needs_password=False)
-    mem = _MemorySecrets(_value())
+    from .test_telegram_tee import _tee_store
+
+    mem, _native = _tee_store(tmp_path)
+    mem.ensure_key()
+    mem.store(_value())
     rc = telegram_cli.telegram_logout(forget=True, store=mem, client_factory=lambda *_a, **_k: fake)
-    assert rc == 0 and fake.logged_out and mem.value is None
+    assert rc == 0 and fake.logged_out and not mem.sealed_path.exists()
     assert not list((tmp_path / "mordred" / "telegram").rglob("*.enc"))
 
 

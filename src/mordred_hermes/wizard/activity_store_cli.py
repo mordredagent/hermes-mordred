@@ -8,8 +8,9 @@
 - ``retention [--dry-run] [--json]`` — one bounded retention pass with the configured raw-event
   window; ``--dry-run`` reports the same counts from read-only queries.
 
-Every command opens the store through the protection gate and prints only the refusal code when
-it refuses (exit 1). Identifiers and counts only; event content is never printed.
+Every command except ``restore`` opens the store through the protection gate; ``restore`` runs
+offline under the exclusive lease. A refusal prints only its code (exit 1).
+Identifiers and counts only; event content is never printed.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -53,22 +55,55 @@ def _display(value: object, limit: int = 300) -> str:
     return text if text.isprintable() else text.encode("unicode_escape").decode("ascii")
 
 
-def _refused(code: object) -> int:
+_HINTS = {
+    "busy": "stop Hermes first (a runtime holds the database lease)",
+    "store_missing": "start Hermes once so a fresh store is created, stop it, then restore",
+}
+_UNAVAILABLE_RESTORE_HINT = (
+    "the backup must be a readable registered copy; if the current store is corrupt, move it aside, start Hermes "
+    "once to create a fresh store, stop it, then restore"
+)
+
+
+def _refused(code: object, *, hint: str | None = None) -> int:
     _term.emit_error(f"refused ({_display(code if isinstance(code, str) else 'store_unavailable', 64)})")
+    if hint:
+        _term.emit_error(hint)
     return 1
 
 
-def _guarded(handler: Callable[[argparse.Namespace, ActivityStore, ActivityConfig], int]) -> Callable[..., int]:
+def _refusal_code(exc: BaseException) -> str:
+    from .._database_contracts import DatabaseBusy
+    from ..activity._gate import ActivityRefused
+
+    if isinstance(exc, ActivityRefused):
+        return exc.code
+    return "busy" if isinstance(exc, DatabaseBusy) else "store_unavailable"
+
+
+def _catching(
+    run_body: Callable[[argparse.Namespace], int], *, unavailable_hint: str | None = None
+) -> Callable[[argparse.Namespace], int]:
     def run(args: argparse.Namespace) -> int:
+        from .._database_contracts import DatabaseRefused
+        from .._private_fs import PrivateFSError
         from ..activity._gate import ActivityRefused
 
         try:
-            store, config = _open(_home())
-            return handler(args, store, config)
-        except ActivityRefused as exc:
-            return _refused(exc.code)
+            return run_body(args)
+        except (ActivityRefused, DatabaseRefused, PrivateFSError, OSError) as exc:  # DatabaseBusy is a DatabaseRefused
+            code = _refusal_code(exc)
+            return _refused(code, hint=_HINTS.get(code) or (unavailable_hint if code == "store_unavailable" else None))
 
     return run
+
+
+def _guarded(handler: Callable[[argparse.Namespace, ActivityStore, ActivityConfig], int]) -> Callable[..., int]:
+    def body(args: argparse.Namespace) -> int:
+        store, config = _open(_home())
+        return handler(args, store, config)
+
+    return _catching(body)
 
 
 def _path(raw: object) -> Path:
@@ -99,18 +134,33 @@ def _backup(args: argparse.Namespace, store: ActivityStore, config: ActivityConf
 # --------------------------------------------------------------------------- #
 
 
-def _source_status(store: ActivityStore, src: Path) -> StoreStatus:
-    """The backup's status through the keyed copy opener; refuses a missing, plaintext or foreign copy."""
+def _backup_status(src: Path, home: Path, lease: Any) -> StoreStatus:
+    """The backup's status through the retained maintenance scope; refuses a missing or foreign copy."""
+    from ..activity import _schema
     from ..activity._gate import ActivityRefused, refusal
-    from ..activity.store import ActivityStore
+    from ..activity.store import ActivityStore, StoreStatus, require_store_file
+    from ..dbcrypt._maintenance import maintenance_scope
+    from ..imports._protected_destination import checked_store_destination
 
     if not src.is_file():  # never let the opener create an empty database at ``src``
         raise ActivityRefused(refusal("store_unavailable"))
-    store._check_copy(src)
-    source = ActivityStore(src, store._copy_opener)
-    if source.meta().profile_home != store.meta().profile_home:
-        raise ActivityRefused(refusal("profile_mismatch"))
-    return source.status()
+    destination = checked_store_destination(home / "plugin-data/mordred/mordred.db", home=home)
+    require_store_file(destination)
+    with maintenance_scope(home, lease=lease) as scope:
+        with scope.connection(destination, readonly=True) as current:
+            target = ActivityStore._checked_meta(ActivityStore._read_meta(current))
+            if target.profile_home != str(home):
+                raise ActivityRefused(refusal("profile_mismatch"))
+        with scope.connection(src, readonly=True) as backup:
+            meta = ActivityStore._checked_meta(ActivityStore._read_meta(backup))
+            if meta.profile_home != target.profile_home:
+                raise ActivityRefused(refusal("profile_mismatch"))
+            counts = {
+                table: int((backup.execute(f"SELECT count(*) FROM {table}").fetchone() or (0,))[0])
+                for table in _schema.TABLES
+                if table != "activity_meta"
+            }
+    return StoreStatus(schema_version=meta.schema_version, store_generation=meta.store_generation, counts=counts)
 
 
 def _print_counts(title: str, values: Mapping[str, int]) -> None:
@@ -119,17 +169,29 @@ def _print_counts(title: str, values: Mapping[str, int]) -> None:
         print(f"    {_display(key, 64)}: {value}")
 
 
-def _restore(args: argparse.Namespace, store: ActivityStore, config: ActivityConfig) -> int:
+def _restore(args: argparse.Namespace) -> int:
+    """Offline restore: takes the exclusive lease itself; never opens the shared runtime store."""
+    from .._database_lifecycle import acquire_exclusive
+    from ..activity._gate import ActivityRefused, refusal
+    from ..activity.store import restore_activity_store
+    from ..keyvault._database_authority import resolve_database_domain
+
     src = _path(args.input)
-    source = _source_status(store, src)
-    if not args.yes:
-        print(f"Restore from {_display(src)} would replace the current activity store content.")
-        print(f"  backup schema version: {source.schema_version}")
-        print(f"  backup generation:     {_display(source.store_generation, 64)}")
-        _print_counts("  backup rows:", source.counts)
-        print("Nothing changed. Run again with --yes to restore.")
-        return 2
-    meta = store.restore(src)
+    home = Path(os.path.realpath(_home()))
+    src_abs = Path(os.path.realpath(src))
+    base = resolve_database_domain(home).root
+    with acquire_exclusive(base) as lease:
+        if not args.yes:
+            source = _backup_status(src_abs, home, lease)
+            print(f"Restore from {_display(src)} would replace the current activity store content.")
+            print(f"  backup schema version: {source.schema_version}")
+            print(f"  backup generation:     {_display(source.store_generation, 64)}")
+            _print_counts("  backup rows:", source.counts)
+            print("Nothing changed. Run again with --yes to restore.")
+            return 2
+        if not src_abs.is_file():
+            raise ActivityRefused(refusal("store_unavailable"))
+        meta = restore_activity_store(src_abs, home=home, lease=lease)
     print(f"Restored the activity store from {_display(src)}")
     print(f"  new store generation: {_display(meta.store_generation, 64)}")
     print("Hermes session references in the restored history are marked unavailable.")
@@ -166,7 +228,7 @@ def _retention(args: argparse.Namespace, store: ActivityStore, config: ActivityC
 
 _HANDLERS: Mapping[str, Callable[[argparse.Namespace], int]] = {
     "backup": _guarded(_backup),
-    "restore": _guarded(_restore),
+    "restore": _catching(_restore, unavailable_hint=_UNAVAILABLE_RESTORE_HINT),
     "retention": _guarded(_retention),
 }
 COMMANDS = frozenset(_HANDLERS)

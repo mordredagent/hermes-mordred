@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from mordred_hermes.extension.egress import EgressRoute
-from mordred_hermes.extension.telegram import ask, hermes_tools, history, secrets, service, store, tee
+from mordred_hermes.extension.telegram import ask, hermes_tools, history, secrets, service, store
 from mordred_hermes.wizard import telegram_cli
 
 
@@ -197,7 +197,7 @@ def test_archive_busy_reflects_the_sync_lock(tmp_path):
 
 
 def test_sync_scope_is_saved_and_used(tmp_path):
-    vault = tee.TeeSecretStore(tmp_path / "tg", backend_factory=lambda: None, audit_sink=lambda _e: None)
+    vault = _metadata_store(tmp_path)
     assert vault.sync_scope() == {}
     vault.save_sync_scope({"include_channels": False, "include_archived": False, "limit_per_dialog": 500})
     svc = service.TelegramService(secret_store=vault, archive_root=tmp_path / "tg")
@@ -432,7 +432,7 @@ def test_full_channel_lookup_is_allow_listed():
 
 
 def test_group_size_scope_defaults_and_opt_in(tmp_path):
-    vault = tee.TeeSecretStore(tmp_path / "tg", backend_factory=lambda: None, audit_sink=lambda _e: None)
+    vault = _metadata_store(tmp_path)
     svc = service.TelegramService(secret_store=vault, archive_root=tmp_path / "tg")
     assert svc.sync_options().max_group_size == 100  # nothing saved: large groups skipped
     assert svc.sync_options({"max_group_size": 0}).max_group_size is None  # --include-large-groups
@@ -531,3 +531,9 @@ def test_interrupted_window_sync_resumes_without_refetching(tmp_path, monkeypatc
     asyncio.run(tg.sync_archive(fake, archive, options=opts, clock=lambda: now.timestamp()))
     assert seen == [3, 4, 5]  # resumed after 2: nothing fetched twice
     assert [m.id for m in archive.load_messages(1)] == [1, 2, 3, 4, 5]
+
+
+def _metadata_store(home):
+    from .test_telegram_tee import _tee_store
+
+    return _tee_store(home)[0]

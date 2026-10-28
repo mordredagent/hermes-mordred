@@ -137,7 +137,24 @@ class TestInjectVaultEnv:
         """A non-UTF-8 enrolled ``.env`` raises a domain VaultError, not a raw decode error."""
         root = tmp_path / "v"
         backend, store = FakeBackend(), FakeAnchorStore()
-        _init_vault_with_env(root, backend, store, b"\xff\xfe\x00not utf-8")
+        _init_vault_with_env(root, backend, store, None)
+        # Construct a legacy authenticated invalid source directly: new source
+        # mutations now reject this before publication, while runtime must still
+        # fail closed for already-existing invalid vault contents.
+        import hashlib
+
+        from mordred_hermes.keyvault import anchor, file_container, manifest
+
+        selector = _identity.vault_identity(root)
+        with vault.open_vault(root, key_id=selector, backend=backend, store=store, anchor_label=selector) as opened:
+            blob = file_container.encode(
+                opened._master, b"\xff\xfe\x00not utf-8", key_id=selector, wmk=opened._wmk, name=".env"
+            )
+            digest = hashlib.sha256(blob).hexdigest()
+            vault.atomic_write(root / "blobs" / f"{digest}.blob", blob)
+            legacy = manifest.VaultManifest(key_id=selector, wmk=opened._wmk, files={".env": digest}, generation=1)
+            vault.atomic_write(root / "manifest.1.mvmf", manifest.encode(legacy, opened._master))
+            anchor.write_anchor(store, selector, wmk=opened._wmk, generation=1)
         environ: dict[str, str] = {}
         with pytest.raises(vault.VaultError):
             _runtime_env.inject_vault_env(root=root, environ=environ, backend=backend, store=store)

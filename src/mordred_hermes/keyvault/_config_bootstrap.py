@@ -303,6 +303,10 @@ def install_config_decrypt(*, home: Path | None = None) -> int:
     runs unchanged. Called from the ``.pth`` startup hook before ``cli.py`` is
     imported. Returns the :func:`materialize_config` result.
     """
+    from ..dbcrypt._cli import maintenance_process
+
+    if maintenance_process():
+        return 0
     if sys.platform != "darwin":
         return 0
     if home is None:

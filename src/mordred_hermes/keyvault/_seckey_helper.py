@@ -34,6 +34,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from ._native_deletion import _assert_native_tag_delete
 from ._seckey_errors import _OPS_REASONS, _OpsError
 
 # Helper executable name (as installed by native/sekey-helper/build.sh).
@@ -410,6 +411,7 @@ class _HelperSecKeyOps:
         return _hex_field(response, "public_key_hex")
 
     def delete_key(self, tag: bytes) -> None:
+        _assert_native_tag_delete(ops=self, tag=tag)
         # Acknowledge deletion or confirmed absence; ambiguous native state refuses.
         response = self._invoke({"cmd": "delete", "tag_hex": tag.hex()})
         if response.get("ok") is not True:

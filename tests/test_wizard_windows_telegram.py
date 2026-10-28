@@ -773,8 +773,8 @@ def test_ambiguous_forget_deletion_reports_the_reconcile_gap(wt, monkeypatch, ca
     seed(wt)
     real_delete = wt.backend.delete_enclave_key
 
-    def lost(key_id):
-        real_delete(key_id)
+    def lost(key_id, **kwargs):
+        real_delete(key_id, **kwargs)
         raise RuntimeError("native deletion result lost")
 
     monkeypatch.setattr(wt.backend, "delete_enclave_key", lost)

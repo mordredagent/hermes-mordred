@@ -237,7 +237,7 @@ regressing silently.
 Database encryption is implemented in `dbcrypt`: the startup shim selects
 SQLCipher, conversion uses journals and process-lifetime locks, and hooks check
 protection each turn. The CLI owns conversion and uninstall ordering; see
-[`STATE_DB_ENCRYPTION.md`](./STATE_DB_ENCRYPTION.md) for the macOS-only lifecycle.
+[`STATE_DB_ENCRYPTION.md`](./STATE_DB_ENCRYPTION.md) for the lifecycle and its admitted platforms.
 
 ### Documentation
 
@@ -2696,3 +2696,41 @@ Delivered in PRs 11 and 12.
   [`CI.md`](CI.md#provenance-evaluation-runs).
 - Cost control: about 600 calls per header style, so tiers plus resumable JSONL
   output; the header A/B runs on the privacy driver only.
+
+## Cross-platform database encryption rollout (proposed, 2026-10-24)
+
+**Spec:** [Cross-platform database encryption](SPEC.md#cross-platform-database-encryption-proposed-2026-10-24).
+**Design:** [Selected Approach A](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md).
+The user approved the architecture on 2026-10-24. The
+[implementation plan](../superpowers/plans/2026-10-24-cross-platform-database-encryption.md)
+defines the stage gate, exact interfaces, test tasks and component PR boundaries.
+Product code is delivered by PR #270; platform acceptance is still recorded
+separately in docs/dev/CI.md's manual validation log.
+
+Keep independent component PRs in dependency order:
+
+1. Freeze ownership, failure, compatibility and AWS acceptance contracts in
+   documentation before cross-component implementation.
+2. Establish Windows SQLCipher/VFS feasibility with the actual driver before
+   downstream Windows implementation; a probe pass is not native filesystem
+   security acceptance, and a failing or not-run gate remains visible.
+3. Establish inert lease contracts and keyvault's root database-key authority
+   and dependency guards for key disable/reset/purge, retaining independent
+   profile memory custody. Complete checked Windows I/O before activation.
+4. Port `dbcrypt` driver capability, startup, locking, migration/decryption,
+   monitoring and backup behavior; preserve existing macOS database bytes and
+   key derivation. Wizard lifecycle and uninstall consumers land separately.
+5. Port activity/import-store protection and checked storage consumers, then
+   Telegram destination selection/migration and mail credentials/collectors in
+   their own component slices. Extend Windows custody schemas explicitly before
+   adding a mail role.
+6. Complete CLI/Desktop capability consumers after their platform prerequisites
+   land, retaining truthful unsupported/pending/error states.
+7. Validate source and fresh installed wheels on the retained AWS Linux and
+   Windows hosts, record independent outcomes in CI's manual log, and perform
+   final regression at integration freeze. Windows 11/Desktop and actual
+   external-service gates remain independently tracked.
+
+The design owns architecture and acceptance boundaries; the implementation plan
+owns exact interfaces and test tasks. This rollout outline does not authorize
+skipping native gates or combining unrelated component implementations into one PR.

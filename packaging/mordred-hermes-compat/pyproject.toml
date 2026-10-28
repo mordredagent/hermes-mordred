@@ -13,6 +13,7 @@ license = { text = "MIT" }
 dependencies = ["hermes-mordred==0.3.0a4"]
 
 [project.optional-dependencies]
+dbcrypt = ["hermes-mordred[dbcrypt]==0.3.0a4"]
 keyvault = ["hermes-mordred[keyvault]==0.3.0a4"]
 extension = ["hermes-mordred[extension]==0.3.0a4"]
 macos = ["hermes-mordred[macos]==0.3.0a4"]

@@ -1,4 +1,4 @@
-"""Windows refuses retained macOS database state without opening databases."""
+"""Windows retained-state refusal and passive capability never open databases."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def test_uninstall_refuses_retained_database_state_before_any_cleanup(
     calls = list(env.backend.calls)
     assert run_uninstall(context(env, home=home), UninstallOptions(yes=True)) == 1
     err = capsys.readouterr().err
-    assert "database" in err and "macOS" in err
+    assert "database" in err and "Nothing was removed" in err
     assert database.read_bytes() == b"retained encrypted database content"
     assert (env.home / "mordred" / name).read_bytes() == b"retained state\n"
     # Native Windows planning may inspect the installed interpreter read-only.
@@ -90,7 +90,12 @@ def test_uninstall_rechecks_database_state_after_confirmation(win, monkeypatch, 
 
 
 @pytest.mark.parametrize("name", [None, *STATES])
-def test_windows_database_status_does_not_discover_or_promise_conversion(fs, monkeypatch, capsys, name):
+@pytest.mark.parametrize("eligible", [False, True], ids=["unavailable", "eligible"])
+def test_windows_database_status_does_not_discover_or_promise_conversion(fs, monkeypatch, capsys, name, eligible):
+    import sqlcipher3.dbapi2 as driver
+
+    from mordred_hermes.dbcrypt import _capability, _key, _windows_vfs
+
     _, _, home, backend = fs
     if name:
         put_state(home, name)
@@ -98,28 +103,58 @@ def test_windows_database_status_does_not_discover_or_promise_conversion(fs, mon
     database.write_bytes(b"do not inspect this database")
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(_migrate, "discover", lambda *args: pytest.fail("unsupported database discovery"))
-    assert databases_cli.databases_status(home=home) == (1 if name else 0)
+    monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", True)
+    monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: True)
+    monkeypatch.setattr(_windows_vfs, "driver_distribution_qualified", lambda: eligible)
+    monkeypatch.setattr(_windows_vfs, "packaged_library_path", lambda: home / "owned.dll")
+    monkeypatch.setattr(_capability, "_driver_present", lambda: True)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("passive status performed SQL or native custody work")
+
+    monkeypatch.setattr(_key, "KeyProvider", forbidden)
+    monkeypatch.setattr(_windows_vfs, "_load_native", forbidden)
+    monkeypatch.setattr(driver, "connect", forbidden)
+    before = {p.relative_to(home): p.read_bytes() for p in home.rglob("*") if p.is_file()}
+    assert databases_cli.databases_status(home=home) == 0
     captured = capsys.readouterr()
-    assert "unsupported" in captured.out.lower()
+    assert "authenticated: not checked" in captured.out
+    assert "capability: " + ("unknown" if eligible else "unavailable") in captured.out
+    assert ("not been authenticated" if eligible else "driver pair is unqualified") in captured.out
+    assert "configured: " + ("yes" if name else "no") in captured.out
     assert "runs the next time Hermes starts" not in captured.out
     assert "Database encryption: on" not in captured.out
-    if name:
-        assert "macOS" in captured.err
+    assert captured.err == ""
     assert database.read_bytes() == b"do not inspect this database" and backend.calls == []
+    assert before == {p.relative_to(home): p.read_bytes() for p in home.rglob("*") if p.is_file()}
 
 
-def test_windows_database_status_refuses_unknown_checked_home(fs, monkeypatch, capsys):
-    from mordred_hermes import _config_io
-
+@pytest.mark.parametrize("failure", ["unsafe_lexical", "checked_inventory"])
+def test_windows_database_status_refuses_unknown_checked_home(fs, monkeypatch, capsys, failure):
     _, _, home, backend = fs
     monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(_migrate, "discover", lambda *args: pytest.fail("unsafe database discovery"))
+    # Exercise the current status boundary, retaining the original checked-IO
+    # refusal/no-private-error-disclosure intent as well as unsafe lexical paths.
+    selected = home
+    if failure == "checked_inventory":
+        from mordred_hermes import _database_inventory
 
-    def unsafe(_home):
-        raise PrivateFSError("unsafe", "test-DO-NOT-ECHO")
+        def unsafe(_home):
+            raise PrivateFSError("unsafe", "test-DO-NOT-ECHO")
 
-    monkeypatch.setattr(_config_io, "open_optional_confidential_directory", unsafe)
-    monkeypatch.setattr(_migrate, "discover", lambda *args: pytest.fail("unsupported database discovery"))
-    assert databases_cli.databases_status(home=home) == 1
-    err = capsys.readouterr().err
-    assert "unsafe" in err and "DO-NOT-ECHO" not in err
-    assert backend.calls == []
+        monkeypatch.setattr(_database_inventory, "scan_dependencies", unsafe)
+    else:
+        selected = home / ".." / home.name
+    before = {path.relative_to(home): path.read_bytes() for path in home.rglob("*") if path.is_file()}
+    assert databases_cli.databases_status(home=selected) == 0
+    captured = capsys.readouterr()
+    assert "capability: unknown" in captured.out
+    assert "dependencies: unknown" in captured.out
+    assert (
+        "inventory is incomplete" if failure == "checked_inventory" else "requires checked diagnosis"
+    ) in captured.out
+    assert "authenticated: not checked" in captured.out
+    assert "DO-NOT-ECHO" not in captured.out + captured.err
+    assert before == {path.relative_to(home): path.read_bytes() for path in home.rglob("*") if path.is_file()}
+    assert captured.err == "" and backend.calls == []

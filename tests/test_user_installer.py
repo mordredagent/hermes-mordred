@@ -275,10 +275,10 @@ def test_user_optional_extras_do_not_drift_from_pyproject_or_docs(tmp_path: Path
     user_extras = set(extras_in_order)
 
     declared = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["optional-dependencies"]
-    # macos/keyvault are platform-automatic; dev/integration are for repository
+    # macos/keyvault/dbcrypt are platform-automatic; dev/integration are for repository
     # development and must never land in Hermes's runtime environment (see the
     # rejection messages in scripts/install.sh's add_requested_extra()).
-    platform_or_dev_only = {"macos", "keyvault", "dev", "integration"}
+    platform_or_dev_only = {"macos", "keyvault", "dbcrypt", "dev", "integration"}
     assert user_extras == set(declared) - platform_or_dev_only
 
     # The case-arm whitelist lists the same extras, in the same order, as a
@@ -370,7 +370,7 @@ def test_user_docs_do_not_reintroduce_the_cli_path_variable(relative_path: str) 
     ("platform_name", "expected_extra"),
     [
         ("Darwin", "hermes-mordred[macos]>=0.1.0a16"),
-        ("Linux", "hermes-mordred[keyvault]>=0.1.0a16"),
+        ("Linux", "hermes-mordred[keyvault,dbcrypt]>=0.1.0a16"),
     ],
 )
 def test_installs_platform_extra_and_exposes_cli(
@@ -398,7 +398,7 @@ def test_installs_platform_extra_and_exposes_cli(
     ("platform_name", "expected_spec"),
     [
         ("Darwin", "hermes-mordred[macos,extension,ethereum]==0.1.0a16,>=0.1.0a16"),
-        ("Linux", "hermes-mordred[keyvault,extension,ethereum]==0.1.0a16,>=0.1.0a16"),
+        ("Linux", "hermes-mordred[keyvault,dbcrypt,extension,ethereum]==0.1.0a16,>=0.1.0a16"),
     ],
 )
 def test_with_extension_and_version_install_requested_package(
@@ -492,7 +492,7 @@ def test_installs_optional_extras_from_pipe_friendly_environment_variable(tmp_pa
     result = _run_from_stdin(fixture, MORDRED_INSTALL_EXTRAS="extension,tor-control")
 
     assert result.returncode == 0, result.stderr
-    expected = "hermes-mordred[keyvault,extension,tor-control]>=0.1.0a16"
+    expected = "hermes-mordred[keyvault,dbcrypt,extension,tor-control]>=0.1.0a16"
     assert fixture.uv_calls().count(expected) == 2
 
 
@@ -502,7 +502,7 @@ def test_piped_installer_accepts_optional_extra_arguments(tmp_path: Path) -> Non
     result = _run_from_stdin(fixture, "--extras", "extension,messaging")
 
     assert result.returncode == 0, result.stderr
-    expected = "hermes-mordred[keyvault,extension,messaging]>=0.1.0a16"
+    expected = "hermes-mordred[keyvault,dbcrypt,extension,messaging]>=0.1.0a16"
     assert fixture.uv_calls().count(expected) == 2
 
 
@@ -981,7 +981,7 @@ def test_real_uv_accepts_the_installer_flag_combination(tmp_path: Path) -> None:
     )
     assert check.returncode == 0, check.stderr
 
-    platform_extra = "macos" if platform.system() == "Darwin" else "keyvault"
+    platform_extra = "macos" if platform.system() == "Darwin" else "keyvault,dbcrypt"
     specs = (
         f"hermes-mordred[{platform_extra}]>=0.1.0a16",
         f"hermes-mordred[{platform_extra},extension,ethereum]==0.1.0a16,>=0.1.0a16",

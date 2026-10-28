@@ -12,6 +12,7 @@ import pytest
 
 from mordred_hermes import _config_io as cio
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
+from mordred_hermes.keyvault._database_mutation import database_key_mutation
 from tests.test_windows_custody import fs  # noqa: F401
 
 SUPPORTED = ("memory_custody", "native_audit", "telegram_hardware")
@@ -110,8 +111,11 @@ def test_absent_and_fresh_homes_are_supported_but_not_enrolled(caps, monkeypatch
 
 def test_managed_roles_are_available_from_checked_ownership_only(caps, monkeypatch):
     cap, c, _, home, backend = caps
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
         session.enroll_role("audit")
         session.enroll_role("telegram")
     calls = list(backend.calls)
@@ -140,8 +144,11 @@ def test_missing_or_uncertain_helper_is_never_available(caps, monkeypatch, failu
     cap, c, _, home, backend = caps
     from mordred_hermes.keyvault import _seckey_helper
 
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
         session.enroll_role("audit")
 
     def raises():
@@ -158,8 +165,11 @@ def test_missing_or_uncertain_helper_is_never_available(caps, monkeypatch, failu
 
 def test_memory_requires_structural_c4_runtime_admission(caps, monkeypatch):
     cap, c, storage, home, backend = caps
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
         session.enroll_role("audit")
     monkeypatch.setattr(storage, "windows_memory_runtime_admitted", lambda executable=None: False)
     forbid_native(monkeypatch, c)
@@ -170,8 +180,11 @@ def test_memory_requires_structural_c4_runtime_admission(caps, monkeypatch):
 
 def test_lost_memory_wrapper_is_broken_without_hiding_other_roles(caps, monkeypatch):
     cap, c, _, home, backend = caps
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
         session.enroll_role("audit")
     (home / "mordred" / "memory-key.wrapped").unlink()
     forbid_native(monkeypatch, c)
@@ -196,8 +209,11 @@ def test_unresolved_journal_is_uncertain(caps, monkeypatch):
     def denied(*args, **kwargs):
         raise c.CustodyError("native unavailable")
 
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
     monkeypatch.setattr(backend, "generate_enclave_key", denied)
     with pytest.raises(c.CustodyError), c.windows_custody_session(home, backend=backend) as session:
         session.enroll_role("telegram")
@@ -212,8 +228,11 @@ def test_unresolved_journal_is_uncertain(caps, monkeypatch):
 
 def test_copied_home_is_broken_for_every_role(caps, monkeypatch):
     cap, c, _, home, backend = caps
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
         session.enroll_role("audit")
     copied = home.parent / "copied"
     with open_private_directory(copied, create=True):
@@ -240,8 +259,11 @@ def test_copied_home_is_broken_for_every_role(caps, monkeypatch):
 )
 def test_unsafe_or_uncertain_storage_is_classified_never_available(caps, monkeypatch, error, expected):
     cap, c, _, home, backend = caps
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
 
     def refuse(path):
         raise error
@@ -334,8 +356,11 @@ def test_canonical_session_held_by_another_thread_is_uncertain_promptly(caps, mo
     import threading
 
     cap, c, _, home, backend = caps
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
     forbid_native(monkeypatch, c)
     held, release = threading.Event(), threading.Event()
 
@@ -363,8 +388,11 @@ def test_canonical_session_held_by_another_thread_is_uncertain_promptly(caps, mo
 @pytest.mark.parametrize("holder", ["home", "mordred"])
 def test_directory_lock_held_by_another_process_is_uncertain_promptly(caps, monkeypatch, holder):
     cap, c, _, home, backend = caps
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
         session.enroll_role("audit")
     child = hold_in_child(home if holder == "home" else home / "mordred")
     try:
@@ -381,8 +409,11 @@ def test_directory_lock_held_by_another_process_is_uncertain_promptly(caps, monk
 
 def test_runtime_admission_failure_is_uncertain_not_available(caps, monkeypatch):
     cap, c, storage, home, backend = caps
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
 
     def unreadable(executable=None):
         raise PermissionError("interpreter metadata unreadable")

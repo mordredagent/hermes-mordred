@@ -361,7 +361,7 @@ def test_dry_run_writes_nothing_and_moves_no_cursor(home: Path, store: ImportSto
 @pytest.mark.parametrize(
     ("change", "code"),
     [
-        ({"platform": "linux"}, "unsupported_platform"),
+        ({"platform": "unsupported-test-os"}, "unsupported_platform"),
         ({"secrets": None}, "mail_not_configured"),
         ({"memory": True}, "memory_encryption_required"),
         ({"store_error": "not_armed"}, "not_armed"),
@@ -1266,3 +1266,37 @@ def test_a_write_in_flight_keeps_the_lock_until_its_worker_exits(home: Path) -> 
         thread.join(5)
     with imap_sync.fetch_lock(home):  # the worker took it with it
         pass
+
+
+def test_linux_fetch_uses_protected_store_before_unsealing(home, store):
+    events = []
+    secrets = FakeSecrets(generic_creds())
+    original = secrets.load
+    secrets.load = lambda: events.append("credentials") or original()
+    env = make_env(
+        home,
+        store,
+        generic_server(),
+        secrets,
+        platform="linux",
+        open_store=lambda _home: events.append("database") or store,
+    )
+    result = run_fetch(FetchOptions(), env)
+    assert result.error is None
+    assert events[:2] == ["database", "credentials"]
+
+
+def test_windows_writer_is_real_and_abandonment_retains_owning_transaction(home, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(imap_sync, "sys", SimpleNamespace(platform="win32"))
+    lease = imap_sync.FetchLease()
+    with imap_sync.fetch_lock(home, lease):
+        imap_sync.assert_mail_writer_held(home)
+        with pytest.raises(imap_sync.FetchStop, match="sync_in_progress"), imap_sync.fetch_lock(home):
+            pytest.fail("second writer entered")
+        assert lease.abandon() is False
+        assert lease.lock_retained is True
+        with pytest.raises(imap_sync._Abandoned):
+            lease.check()
+    assert lease.lock_retained is False

@@ -67,9 +67,42 @@ def _value(**overrides: Any) -> secrets.TelegramSecrets:
 
 
 def _tee_store(tmp_path, enclave: _FakeEnclave | None = None) -> tuple[tee.TeeSecretStore, _FakeEnclave]:
+    import sys
+
+    from mordred_hermes.keyvault._seckey_backend import _SecKeyBackend
+    from mordred_hermes.keyvault._seckey_errors import _OpsError, errSecDuplicateItem, errSecItemNotFound
+    from mordred_hermes.keyvault._seckey_helper import _HelperSecKeyOps
+
     require_posix_tee()
+    tmp_path.mkdir(mode=0o700, parents=True, exist_ok=True)
     fake = enclave or _FakeEnclave()
-    return tee.TeeSecretStore(tmp_path / "tg", backend_factory=lambda: fake, audit_sink=lambda _e: None), fake
+    name, leaf = ("MORDRED_SEKEY_STORE", "sekey") if sys.platform == "darwin" else ("MORDRED_TPMKEY_STORE", "tpm")
+    ops = _HelperSecKeyOps("/test-only-never-executed", env_override=(name, str(tmp_path / "mordred/keyvault" / leaf)))
+
+    def invoke(payload):
+        try:
+            if payload["cmd"] == "generate":
+                public = fake.generate_enclave_key(tee.KEY_ID, unattended=payload["unattended"])
+                return {"public_key_hex": public.hex()}
+            if payload["cmd"] == "public_key":
+                return {"public_key_hex": fake.get_enclave_public_key(tee.KEY_ID).hex()}
+            if payload["cmd"] == "ecdh":
+                shared = fake.enclave_ecdh(tee.KEY_ID, bytes.fromhex(payload["peer_pub_hex"]))
+                return {"shared_hex": shared.hex()}
+            if payload["cmd"] == "delete":
+                fake.delete_enclave_key(tee.KEY_ID)
+                return {"ok": True}
+            raise AssertionError(payload)
+        except WrapKeyNotFound as exc:
+            raise _OpsError(errSecItemNotFound) from exc
+        except WrapKeyAlreadyExists as exc:
+            raise _OpsError(errSecDuplicateItem) from exc
+
+    ops._invoke = invoke
+    backend = _SecKeyBackend(ops=ops, legacy_ops=None, sw_ops=None)
+    return tee.TeeSecretStore(
+        tmp_path / "mordred/telegram", backend_factory=lambda: backend, audit_sink=lambda _e: None
+    ), fake
 
 
 class _CheckedBoundary:
@@ -166,7 +199,7 @@ def test_every_load_is_a_fresh_enclave_unwrap_and_status_uses_none(tmp_path, sea
 def test_reads_never_create_the_archive_directory(tmp_path):
     """Status polls (flags), loads and the scope read leave a fresh home untouched; a write creates it."""
     vault, _enclave = _tee_store(tmp_path)
-    root = tmp_path / "tg"
+    root = tmp_path / "mordred/telegram"
     assert vault.flags() is None and vault.load() is None and vault.sync_scope() == {}
     assert not root.exists()
     vault.ensure_key()
@@ -174,7 +207,9 @@ def test_reads_never_create_the_archive_directory(tmp_path):
     assert root.is_dir() and (root / ".gitignore").is_file() and vault.flags()["logged_in"] is True
     root.rename(tmp_path / "moved")
     root.symlink_to(tmp_path / "moved")
-    with pytest.raises(store.StoreError):
+    from mordred_hermes._database_contracts import DatabaseRefused
+
+    with pytest.raises(DatabaseRefused):
         vault.flags()  # a planted symlink is still refused on the read path
 
 

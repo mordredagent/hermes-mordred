@@ -17,14 +17,16 @@ metadata from selecting or deleting an arbitrary native key.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from ._exceptions import WrapKeyNotFound
 
 if TYPE_CHECKING:
+    from ._native_deletion import NativeDeletePermit, ValidatedNativeOwner
     from .wrap import NativeBackend
 
 NATIVE_KEY_ID_FIELD: Final = "native_key_id"
@@ -49,7 +51,7 @@ _NATIVE_OWNERSHIP_META_FIELDS: Final = frozenset(
 """Top-level fields proving or journaling profile-owned native keys."""
 
 _NATIVE_KEY_ID_PREFIX: Final = "mordred-hermes.native.v1."
-_RESERVED_MAIN_KEY_IDS: Final = frozenset({"mordred.audit-log"})
+_RESERVED_MAIN_KEY_IDS: Final = frozenset({"mordred.audit-log", "mordred-hermes.mail.credentials.v1"})
 """Logical ids owned by internal auxiliary keys, never by the main vault."""
 
 
@@ -64,9 +66,9 @@ class InvalidMainKeyId(ValueError):
 def validate_main_key_id(logical_key_id: object) -> str:
     """Validate and return a logical id suitable for the main keyvault key.
 
-    The audit-log wrapping key shares the profile-scoped native namespace
-    with the main wrapping key, so allowing its reserved logical id here
-    would collapse two trust roles onto one physical key.  Empty ids are
+    Auxiliary wrapping keys share native storage with the main wrapping key,
+    so allowing their reserved logical ids here would collapse independent
+    trust roles onto one physical key.  Empty ids are
     rejected as well: they cannot be represented by the durable pending-key
     journal used to recover interrupted provisioning.
     """
@@ -346,8 +348,8 @@ class _LegacyReadFallbackBackend:
         except WrapKeyNotFound:
             return self._fallback.get_enclave_public_key(key_id)
 
-    def delete_enclave_key(self, key_id: str) -> None:
-        self._primary.delete_enclave_key(key_id)
+    def delete_enclave_key(self, key_id: str, *, deletion: NativeDeletePermit | None = None) -> None:
+        self._primary.delete_enclave_key(key_id, deletion=deletion)
 
     def enclave_ecdh(self, key_id: str, peer_pub: bytes) -> bytes:
         try:
@@ -374,3 +376,173 @@ def backend_for_persisted_key(
     if native_key_id != logical_key_id or bound is backend:
         return bound
     return _LegacyReadFallbackBackend(bound, backend)
+
+
+def _checked_main_logical(logical: object) -> str:
+    value = validate_main_key_id(logical)
+    # These namespaces belong to independent managed custody producers. Their
+    # opaque selectors must never gain main-key permission through a metadata row.
+    if value.startswith(("mordred-hermes.", "mordred.windows.", "mordred.memory", "mordred.vault")):
+        raise NativeKeyIdMismatch("managed native selectors cannot be generic main keys")
+    return value
+
+
+def _unique_ownership_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise NativeKeyIdMismatch("ownership record contains duplicate JSON fields")
+        result[key] = value
+    return result
+
+
+def _checked_metadata_targets(root: Path) -> dict[str, str]:
+    """Read exact profile ownership; never infer a key from a known name."""
+    from . import _storage
+    from .log_encryption import AUDIT_LOG_KEY_ID
+
+    json.loads(_storage.safe_read(root / "meta.json"), object_pairs_hook=_unique_ownership_object)
+    meta = _storage.load_meta(root)
+    targets: dict[str, str] = {}
+    pending = pending_native_key_from_meta(root, meta)
+    for key_hash, row in meta["keys"].items():
+        if not isinstance(row, dict):
+            raise NativeKeyIdMismatch("main ownership row is malformed")
+        logical = _checked_main_logical(row.get("key_id"))
+        if key_hash != hashlib.sha256(logical.encode()).digest()[:16].hex() or NATIVE_KEY_ID_FIELD not in row:
+            raise NativeKeyIdMismatch("main ownership hash or scoped selector is missing")
+        physical = persisted_native_key_id(root, logical, row[NATIVE_KEY_ID_FIELD])
+        if pending != (logical, physical):
+            _storage._check_dir_mode(root / "digests")
+            if len(_storage.safe_read(root / "digests" / f"{key_hash}.commit")) != 32:
+                raise NativeKeyIdMismatch("main ownership digest commit is malformed")
+        targets[logical] = physical
+    if pending is not None:
+        logical = _checked_main_logical(pending[0])
+        if logical in targets and targets[logical] != pending[1]:
+            raise NativeKeyIdMismatch("main ownership records disagree")
+        targets[logical] = pending[1]
+    audit = committed_audit_key_from_meta(root, meta, AUDIT_LOG_KEY_ID)
+    pending_audit = pending_audit_key_from_meta(root, meta, AUDIT_LOG_KEY_ID)
+    if audit is not None and pending_audit is not None and audit != pending_audit:
+        raise NativeKeyIdMismatch("audit ownership records disagree")
+    if audit is not None or pending_audit is not None:
+        targets[AUDIT_LOG_KEY_ID] = audit if audit is not None else cast(str, pending_audit)
+    return dict(sorted(targets.items()))
+
+
+def _checked_keyvault_role(root: Path, native_key_id: str, *, reset: bool) -> Literal["main", "audit"]:
+    from . import _storage
+    from .log_encryption import AUDIT_LOG_KEY_ID
+
+    if reset:
+        # The reset parser checks exact schema, scoped selectors and physical
+        # root identity. A journal is authoritative only inside checked custody.
+        from ..wizard.keyvault_cli import _load_reset_journal
+
+        journal = _load_reset_journal(root)
+        if journal.metadata_incomplete or journal.retained_legacy:
+            raise NativeKeyIdMismatch("reset ownership is ambiguous")
+        try:
+            current = root.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if (current.st_dev, current.st_ino) != journal.root_identity:
+                raise NativeKeyIdMismatch("reset journal root identity changed")
+        targets = journal.key_ids
+    else:
+        _storage.assert_keyvault_active(root)
+        targets = _checked_metadata_targets(root)
+    for logical, physical in targets.items():
+        if logical != AUDIT_LOG_KEY_ID:
+            _checked_main_logical(logical)
+        if physical == native_key_id:
+            return "audit" if logical == AUDIT_LOG_KEY_ID else "main"
+    raise NativeKeyIdMismatch("native selector has no exact checked keyvault owner")
+
+
+def checked_native_owner(custody: object, *, native_key_id: str, backend: NativeBackend) -> ValidatedNativeOwner:
+    """Issue only through the fixed trusted, live transaction adapter."""
+    from ._native_deletion import _issue_native_owner
+
+    return _issue_native_owner(custody, native_key_id=native_key_id, backend=backend)
+
+
+def _checked_creation_pending(
+    root: Path,
+    key_id: str,
+    native_key_id: str,
+    *,
+    initial_meta: bytes,
+    allow_intermediate: bool,
+) -> None:
+    """Validate one fresh pending main/audit owner, retaining failed-row rollback."""
+    from . import _storage
+    from .log_encryption import AUDIT_LOG_KEY_ID
+
+    _checked_metadata_targets(root)  # Duplicate keys and malformed other owners refuse.
+    meta = _storage.load_meta(root)
+    initial = json.loads(initial_meta, object_pairs_hook=_unique_ownership_object) if initial_meta else {}
+    if native_key_id != scoped_native_key_id(root, key_id):
+        raise NativeKeyIdMismatch("creation selector is not scoped to the checked root")
+    if key_id == AUDIT_LOG_KEY_ID:
+        if pending_audit_key_from_meta(root, meta, key_id) != native_key_id:
+            raise NativeKeyIdMismatch("exact pending audit owner is required")
+        if PENDING_AUDIT_KEY_FIELD in initial or AUDIT_KEY_FIELD in initial:
+            raise NativeKeyIdMismatch("resumed or committed audit custody cannot obtain a creation receipt")
+        if committed_audit_key_from_meta(root, meta, key_id) is not None and not allow_intermediate:
+            raise NativeKeyIdMismatch("existing committed audit owner cannot obtain rollback")
+        if pending_native_key_from_meta(root, meta) is not None or len(meta["keys"]) != 1:
+            raise NativeKeyIdMismatch("audit provisioning requires committed main custody")
+    else:
+        _checked_main_creation_pending(root, key_id, native_key_id, meta, initial, allow_intermediate)
+
+
+def _checked_main_creation_pending(
+    root: Path,
+    key_id: str,
+    native_key_id: str,
+    meta: Mapping[str, Any],
+    initial: Mapping[str, Any],
+    allow_intermediate: bool,
+) -> None:
+    from . import _storage
+
+    validate_main_key_id(key_id)
+    if pending_native_key_from_meta(root, meta) != (key_id, native_key_id):
+        raise NativeKeyIdMismatch("exact pending main owner is required")
+    if has_native_key_ownership_state(initial):
+        raise NativeKeyIdMismatch("resumed or committed main custody cannot obtain a creation receipt")
+    if not allow_intermediate:
+        for name in ("digests", "ciphertexts"):
+            directory = root / name
+            _storage._check_dir_mode(directory)
+            if any(directory.iterdir()):
+                raise NativeKeyIdMismatch("retained main artifacts cannot obtain a new creation receipt")
+    rows = meta["keys"]
+    if rows and (not allow_intermediate or len(rows) != 1 or key_id not in _checked_metadata_targets(root)):
+        raise NativeKeyIdMismatch("existing main owner cannot obtain rollback")
+
+
+def _assert_creation_backend_bound(backend: NativeBackend, root: Path) -> None:
+    from .._database_contracts import DatabaseRefused
+    from ._seckey_backend import _SecKeyBackend
+    from ._seckey_helper import _HelperSecKeyOps
+
+    if type(backend) is not _SecKeyBackend:
+        raise DatabaseRefused("creation ownership requires the production backend")
+    expected = _SecKeyBackend._for_keyvault_root(backend, root)
+    for actual, selected in (
+        (backend._ops, expected._ops),
+        (backend._legacy_ops, expected._legacy_ops),
+        (backend._sw_ops, expected._sw_ops),
+    ):
+        if isinstance(actual, _HelperSecKeyOps) and (
+            not isinstance(selected, _HelperSecKeyOps)
+            or actual._env_override is None
+            or selected._env_override is None
+            or actual._env_override[0] != selected._env_override[0]
+            or Path(actual._env_override[1]).resolve() != Path(selected._env_override[1]).resolve()
+        ):
+            raise DatabaseRefused("creation backend is not bound to the checked custody store")

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 import sys
 import time
 
@@ -196,3 +197,27 @@ def test_storage_failure_is_a_content_free_refusal(monkeypatch):
     assert exc.value.reason == "storage_refused"
     # The code is burned, not left reusable.
     assert peers.pair_outcome(code) == ("failed", "storage_refused")
+
+
+@pytest.mark.parametrize("kind", ["hardlink", "symlink", "swap"])
+def test_unsafe_peer_source_cannot_authenticate_or_record(tmp_path, monkeypatch, kind):
+    code, _ = peers.generate_peer_code()
+    paired = peers.handle_pair_init(code)
+    source = tmp_path / "extension/activity_peers.json"
+    if kind == "hardlink":
+        os.link(source, tmp_path / "peer-alias.json")
+    elif kind == "symlink":
+        source.rename(tmp_path / "peer-original.json")
+        source.symlink_to(tmp_path / "peer-original.json")
+    else:
+        real_popen = subprocess.Popen
+
+        def swap(args, *pargs, **kwargs):
+            source.rename(tmp_path / "peer-original.json")
+            source.write_bytes((tmp_path / "peer-original.json").read_bytes())
+            source.chmod(0o600)
+            return real_popen(args, *pargs, **kwargs)
+
+        monkeypatch.setattr(subprocess, "Popen", swap)
+    assert peers.authenticate(paired["peer_token"]) is None
+    assert not (tmp_path / "plugin-data").exists()

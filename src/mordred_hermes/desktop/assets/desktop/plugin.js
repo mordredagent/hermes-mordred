@@ -89,7 +89,7 @@ const MESSAGES = {
   telegram_not_enrolled: 'Telegram custody is not enrolled on this Windows profile. Follow the custody step or recovery remedy below.',
   telegram_custody_unavailable: 'Telegram custody could not be checked on this Windows profile.',
   presence_acknowledgement_required: 'First confirm that Windows asks for no per-use approval (Telegram custody step).',
-  presence_unsupported: 'Windows has no per-use presence prompt. Confirm the machine-bound key first.',
+  presence_unsupported: 'This native backend cannot provide per-use presence. Explicitly choose no presence with hermes-mordred mail setup --no-touch-id in Terminal; requested presence is never silently disabled.',
   custody_unsafe: 'A Mordred custody file or folder is not private to this Windows account. Mordred never repairs it: fix its ownership or ACL by hand.',
   custody_uncertain: 'Custody is busy or has an unresolved journal. Let other Hermes/Mordred processes finish, then retry.',
   custody_broken: 'Custody evidence does not match this profile and Windows account (a copied or restored profile). It is preserved, never adopted.',
@@ -115,9 +115,9 @@ const MESSAGES = {
   // The page needs a newer Mordred (its status lacks the version 4 keys).
   mordred_update_required: 'Update Mordred to use this. The running Mordred does not report this step yet; the update is under Maintenance.',
   // Database encryption, the import store and mail (closed sets of the version 4 API).
-  databases_unsupported: 'Database encryption needs macOS with SQLCipher. Nothing was changed.',
+  databases_unsupported: 'Protected storage is unavailable for this runtime. Run hermes-mordred databases status in Terminal for the platform requirements. Windows Server storage validation does not establish Windows 11 or Desktop support.',
   databases_key_missing: 'The database key is not available yet. Finish the memory step and restart Hermes Desktop first.',
-  databases_failed: 'Scheduling the database encryption failed. The step shows the current state again; try again, or run hermes-mordred databases status in Terminal.',
+  databases_failed: 'Database capability and authentication are not checked by this page. The step shows the current state again. Run hermes-mordred databases status, then explicitly run hermes-mordred databases diagnose in Terminal. If authority was lost, restart Hermes before another foreground operation.',
   databases_busy: 'A database conversion is already running. Try again when it finishes.',
   // Step 1.3 attention states (the second design revision's table).
   plaintext_in_armed_home: 'A plaintext database is in a Hermes home whose databases are already encrypted (a new or restored file). Quit Hermes Desktop, then run hermes-mordred databases encrypt in Terminal.',
@@ -131,6 +131,7 @@ const MESSAGES = {
   mail_setup_stale: 'A mailbox was set up or removed elsewhere while this setup waited. Start again; this setup stored nothing.',
   mail_setup_cancelled: 'This mailbox setup was cancelled before anything was stored.',
   touch_id_policy_mismatch: 'The mailbox key’s Touch ID setting differs from your choice and could not be replaced. Remove the mailbox, then set it up again. Nothing was stored.',
+  mail_orphan_key: 'A mailbox key was left without sealed credentials (for example by a refused login), so Mordred keeps it. Run hermes-mordred mail forget --yes --force-orphan in Terminal, then set the mailbox up again. Nothing was stored.',
   invalid_selection: 'Choose one of the listed folders.',
   account_mismatch: 'The sealed mailbox has a different account label. Leave the label empty, or enter the mailbox’s own label.',
   mail_fetch_timeout: 'The fetch is taking longer than expected. It continues in the background; check this step again later.',
@@ -888,7 +889,10 @@ const databaseRows = (db) => (Array.isArray(db && db.databases) ? db.databases.f
 // Step 1.3 from the databases facts (the second design revision): an attention code; done
 // (armed, this process protected, no plaintext file); or a restart that finishes it (armed
 // but this process started before, or a conversion scheduled for the next start).
+const databaseFactsUnknown = (db) => ['encrypt_pending', 'decrypt_pending', 'journal'].some((key) => db[key] == null)
+
 function databaseState(db) {
+  if (databaseFactsUnknown(db)) return { code: 'databases_failed' }
   const plaintext = databaseRows(db).some((row) => row.state === 'plaintext')
   if (db.decrypt_pending) return { code: 'decrypt_pending' }
   if (db.journal) return { code: 'journal' }
@@ -910,6 +914,7 @@ function storeBlocker(status) {
   if (!(pageLayout(status) === 'macos' && reportsV4(status))) return null
   const db = status.databases
   if (!db.armed) return db.encrypt_pending ? 'needs_restart' : 'needs_databases'
+  if (databaseFactsUnknown(db)) return null // the explicit foreground operation performs admission
   if (!db.runtime_protected) return 'needs_restart'
   const code = status.imports.available === false ? status.imports.code : null
   if (code === 'conversion_pending' || code === 'unprotected_process') return 'needs_restart'
@@ -1005,7 +1010,8 @@ function stepStates(status, sync = null) {
     decide('mail', {
       done: Boolean(mail.configured) && !lastError && !residue,
       fact: residue || lastError,
-      blocker: firstBlocker([hardware, 'needs_enclave'], [memory, 'needs_memory'], [!store, store]),
+      // Credential setup/finish uses the native mail role independently of memory and SQL.
+      blocker: firstBlocker([hardware, 'needs_enclave']),
       job: runningJob('mail_fetch'),
     })
   }
@@ -1052,6 +1058,7 @@ function protectionRow(status, layout, hardware, memory) {
 
 function databasesFact(db, state) {
   if (db.supported === false) return 'databases: not available'
+  if (databaseFactsUnknown(db)) return 'databases: not checked'
   if (state.done) return 'databases on'
   if (state.code) return 'databases: needs attention'
   if (state.restart) return db.armed ? 'databases: restart Hermes Desktop' : 'databases: converting at next restart'
@@ -1086,7 +1093,8 @@ function mailRow(status, layout, now) {
   const sources = storeSources(status)
   if (sources) parts.push(plural(Number(sources.mail && sources.mail.messages) || 0, 'message'))
   const last = lastFetch(mail)
-  parts.push(last ? `last fetch ${relativeTime(last.at, now)} (${fetchOutcome(last)})` : 'never fetched')
+  const observed = own(mail, 'last_attempt') || own(mail, 'last_success')
+  parts.push(last ? `last fetch ${relativeTime(last.at, now)} (${fetchOutcome(last)})` : observed ? 'never fetched' : 'fetch history not checked')
   return { ...row, dot: last && last.error ? 'attention' : 'done', detail: parts.join(' · ') }
 }
 
@@ -2209,7 +2217,8 @@ function UpdateRequiredStep({ id, n, title, why }) {
 
 // -- version 4 sections: databases (1.3) and mail (2.5) ----------------------------------------
 
-function DatabaseTable({ rows }) {
+function DatabaseTable({ rows, unknown = false }) {
+  if (unknown) return jsx('p', { children: 'Database files and encryption state: not checked by passive status.' })
   if (!rows.length) return jsx('p', { children: 'No Hermes database files were found yet.' })
   const cell = { textAlign: 'left', padding: '2px 16px 2px 0' }
   return jsxs('table', {
@@ -2273,6 +2282,7 @@ function DatabasesStep({ id, n, state, blocker = null, goto = null, code = null,
   }
   const rows = databaseRows(db)
   const unreadable = rows.filter((row) => row.state === 'unreadable').length
+  const unknown = databaseFactsUnknown(db)
   const backups = Number(db.plaintext_backups) || 0
   const waiting = Boolean(restartFor) || restart
   const shown = state === 'done' || state === 'blocked' ? state : busy ? 'running' : failure ? 'attention' : state
@@ -2296,7 +2306,7 @@ function DatabasesStep({ id, n, state, blocker = null, goto = null, code = null,
     state: shown,
     blocker,
     goto,
-    summary: `Database encryption: on (${plural(unreadable, 'file')} encrypted or unreadable).`,
+    summary: unknown ? 'Database encryption: not checked.' : `Database encryption: on (${plural(unreadable, 'file')} encrypted or unreadable).`,
     progress: 'Scheduling the database encryption…',
     failure: stepFailure(failure, code),
     noteRef,
@@ -2304,11 +2314,12 @@ function DatabasesStep({ id, n, state, blocker = null, goto = null, code = null,
     why: WHY.databases,
     children: jsxs(Fragment, {
       children: [
-        jsx(DatabaseTable, { key: 'table', rows }),
+        jsx(DatabaseTable, { key: 'table', rows, unknown }),
+        db.plaintext_backups == null ? jsx('p', { key: 'backups-unknown', children: 'Backup archive count: unknown.' }) : null,
         backups > 0
           ? jsx('p', { key: 'backups', children: `${plural(backups, 'backup archive')} in your Hermes home may contain plaintext copies; delete them when you no longer need them.` })
           : null,
-        waiting || code
+        waiting || code || unknown
           ? null
           : jsx(Row, {
               key: 'encrypt',
@@ -2366,6 +2377,7 @@ function mailScope(mail) {
 
 // Last success and last attempt; the attempt only when it says something the success does not.
 function mailHistory(mail, now = Date.now()) {
+  if (!own(mail, 'last_attempt') && !own(mail, 'last_success')) return ['Fetch history: not checked by passive status.']
   const success = timed(mail.last_success)
   const attempt = timed(mail.last_attempt)
   const lines = []
@@ -2444,6 +2456,14 @@ const hint = (text) => jsx('span', { key: 'hint', style: { fontSize: 12, color: 
 // and folder names only in the folder question.
 function MailStep({ id, n, state, blocker = null, goto = null, code = null, status, refresh }) {
   const mail = status.mail || {}
+  const checks = status.checks || {}
+  const store = storeBlocker(status)
+  // Apply storage prerequisites to data operations, never to credential setup/finish or removal.
+  const dataBlocker = firstBlocker(
+    [Boolean(checks.hardware && checks.hardware.ok), 'needs_enclave'],
+    [Boolean(checks.memory_encryption && checks.memory_encryption.ok), 'needs_memory'],
+    [!store, store],
+  )
   const [address, setAddress] = useState('')
   const [others, setOthers] = useState('')
   const [server, setServer] = useState('')
@@ -2643,6 +2663,7 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
     setFailure(null)
   }
   const fetchMail = async () => {
+    if (dataBlocker) return
     if (!validMax(maxText) || (older && !validDate(since))) return
     // A new attempt: the previous failure and result are gone at once, before the job id arrives.
     setBusy('fetch')
@@ -2672,6 +2693,7 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
   const accountUnknown = Boolean(forgotten && forgotten.warnings.includes('account_unknown')) || Boolean(failure && failure.code === 'account_unknown')
   const askAccount = residue || accountUnknown
   const remove = async () => {
+    if (purge && dataBlocker) return
     setFailure(null)
     setForgotten(null)
     setNote(null)
@@ -2736,12 +2758,13 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
         : null,
       jsx(Row, {
         key: 'go',
-        children: jsx(Button, { variant: 'outline', disabled: Boolean(busy), onClick: remove, children: purge ? 'Remove mailbox and delete its mail' : 'Remove mailbox' }),
+        children: jsx(Button, { variant: 'outline', disabled: Boolean(busy) || Boolean(purge && dataBlocker), onClick: remove, children: purge ? 'Remove mailbox and delete its mail' : 'Remove mailbox' }),
       }),
     ],
   })
   const fetchReady = validMax(maxText) && (!older || validDate(since))
   const setUpCard = [
+    dataBlocker ? jsx('p', { key: 'storage', children: `${BLOCKERS[dataBlocker].text} This is required to fetch mail or delete stored messages.` }) : null,
     shown === 'done' ? null : jsx('p', { key: 'account', children: accountLine }),
     ...mailHistory(mail).map((line, index) => jsx('p', { key: `history-${index}`, style: { margin: '4px 0' }, children: line })),
     sources ? jsx('p', { key: 'count', style: { margin: '4px 0' }, children: `${plural(Number(sources.mail && sources.mail.messages) || 0, 'message')} in Mordred’s store (all accounts).` }) : null,
@@ -2758,7 +2781,7 @@ function MailStep({ id, n, state, blocker = null, goto = null, code = null, stat
     jsx(Row, {
       key: 'fetch',
       children: [
-        jsx(Button, { key: 'go', disabled: fetching || !fetchReady, onClick: fetchMail, children: fetching ? 'Fetching…' : 'Fetch new mail' }),
+        jsx(Button, { key: 'go', disabled: fetching || !fetchReady || Boolean(dataBlocker), onClick: fetchMail, children: fetching ? 'Fetching…' : 'Fetch new mail' }),
         mail.touch_id === false ? null : hint('May show a Touch ID prompt.'),
       ],
     }),

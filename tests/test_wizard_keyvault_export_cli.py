@@ -23,6 +23,8 @@ from mordred_hermes.wizard._prompt_io import NonInteractiveAbort, _RefusingPromp
 from mordred_hermes.wizard.cli import _setup_subparser, dispatch, main
 from tests._keyvault_fakes import FakeBackend
 
+pytestmark = pytest.mark.usefixtures("fake_native_creation_receipts")
+
 SEED = _bip39.entropy_to_mnemonic(bytes(range(32)))
 OTHER_VALID_SEED = _bip39.entropy_to_mnemonic(bytes(reversed(range(32))))
 PASSPHRASE = "correct horse battery staple"

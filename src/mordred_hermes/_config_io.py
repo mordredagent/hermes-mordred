@@ -12,11 +12,12 @@ import re
 import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeVar
 
+from ._custody_order import custody_scope
 from ._private_fs import (
     ConfidentialDirectory,
     ConfidentialTransaction,
@@ -210,6 +211,15 @@ def _nested_session(
 @contextmanager
 def canonical_session(
     paths: CanonicalPaths, *, scope: Literal["home", "policy"], create: bool = False, blocking: bool = True
+) -> Iterator[CanonicalSession]:
+    # Include mutex wait and nested/borrowed canonical sessions in the order.
+    with custody_scope(), _canonical_session(paths, scope=scope, create=create, blocking=blocking) as session:
+        yield session
+
+
+@contextmanager
+def _canonical_session(
+    paths: CanonicalPaths, *, scope: Literal["home", "policy"], create: bool, blocking: bool
 ) -> Iterator[CanonicalSession]:
     if scope not in ("home", "policy"):
         raise ValueError("unknown canonical scope")
@@ -498,8 +508,54 @@ class _MordredTransaction:
     def assert_private_admission(self) -> None:
         self._check()
 
+    def _read_windows_custody(self, name: str, limit: int) -> bytes | None:
+        """One stat/read, with Windows-only held-directory traversal coalescing.
+
+        Keep this bridge private and fixed: no caller code, SQL, writes or
+        native key operations execute while directory traversal is deferred.
+        The public stat/read APIs and all their guard/leaf checks are retained.
+        """
+        from ._private_fs._windows_io import _CustodyReadScope, _Directory, _Transaction
+
+        state = self._session._state
+        scope: _CustodyReadScope | nullcontext[None] = nullcontext()
+        if type(self._transaction) is _Transaction:
+            home, policy = state.home, state.policy
+            home_tx, policy_tx = state.home_tx, state.policy_tx
+            if (
+                type(home) is not _Directory
+                or type(policy) is not _Directory
+                or type(home_tx) is not _Transaction
+                or policy_tx is not self._transaction
+                or home_tx.directory is not home
+                or self._transaction.directory is not policy
+                or home is policy
+            ):
+                raise RuntimeError("custody read requires the canonical held directories")
+            scope = _CustodyReadScope(home_tx, self._transaction)
+        with scope:
+            try:
+                try:
+                    self.stat(name)
+                except PrivateFSError as exc:
+                    if exc.reason == "missing":
+                        return None
+                    raise
+                return self.read_bytes(name, max_bytes=limit)
+            finally:
+                # Also run the unchanged coordinator/pending-marker guard on
+                # exceptional and missing reads, before fresh directory exit.
+                self._check()
+
     def directory_identity(self) -> FileIdentity:
         return self._invoke(self._transaction.directory_identity)
+
+    def flush_directory(self) -> None:
+        self._invoke(self._transaction.flush_directory)
+
+    def flush_file(self, name: str, *, expected_identity: FileIdentity | None = None) -> None:
+        self._leaf(name)
+        self._invoke(lambda: self._transaction.flush_file(name, expected_identity=expected_identity))
 
     def stat(self, name: str) -> FileMetadata:
         self._leaf(name)

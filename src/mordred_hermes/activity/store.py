@@ -28,11 +28,17 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
+from .._database_contracts import DatabaseRefused
 from . import _schema
 from ._gate import ActivityRefused, Refusal, refusal
 from .contracts import COVERAGE_RANK, NormalizedEvent, canonical_digest
+
+if TYPE_CHECKING:
+    from .._database_lifecycle import ExclusiveLease
+    from ..dbcrypt._authority import Authority
+    from ..dbcrypt._maintenance import MaintenanceConnection
 
 __all__ = [
     "ATTEMPT_PHASES",
@@ -45,6 +51,7 @@ __all__ = [
     "RetentionReport",
     "StoreMeta",
     "StoreStatus",
+    "restore_activity_store",
 ]
 
 SUPPORTED_SCHEMA_VERSION: Final = _schema.SCHEMA_VERSION
@@ -128,7 +135,11 @@ _EPISODE_COLUMNS: Final = (
 def _db_errors() -> tuple[type[BaseException], ...]:
     """The stdlib's and, once installed, the SQLCipher replacement's error base classes."""
     current = sys.modules.get("sqlite3", sqlite3)
-    return (sqlite3.Error, getattr(current, "Error", sqlite3.Error))
+    try:
+        import sqlcipher3.dbapi2 as sc
+    except ImportError:
+        return (sqlite3.Error, getattr(current, "Error", sqlite3.Error))
+    return (sqlite3.Error, getattr(current, "Error", sqlite3.Error), sc.Error)
 
 
 def _wal_header(path: Path) -> bool:
@@ -154,6 +165,8 @@ def _classify(exc: BaseException) -> Refusal:
 def _refusing() -> Iterator[None]:
     try:
         yield
+    except DatabaseRefused:
+        raise ActivityRefused(refusal("store_unavailable")) from None
     except _db_errors() as exc:
         raise ActivityRefused(_classify(exc)) from None
 
@@ -203,9 +216,13 @@ class ActivityStore:
         copy_opener: Opener | None = None,
         verify_copy: CopyCheck | None = None,
         busy_timeout_s: float = BUSY_TIMEOUT_S,
+        authority: Authority | None = None,
     ) -> None:
         self.path = path
         self._opener = opener
+        # Borrowed runtime lifetime, never closed/replaced by the store. The
+        # portable explicit opener seam has no production native authority.
+        self._authority = authority
         #: How long a statement waits for another connection's lock before the store refuses as ``busy``.
         self._busy_timeout_ms = max(1, int(busy_timeout_s * 1000))
         # Backups live outside the store; production opens them through the
@@ -242,7 +259,7 @@ class ActivityStore:
     # --- schema and binding -----------------------------------------------------------------
 
     @staticmethod
-    def _read_meta(conn: sqlite3.Connection) -> dict[str, str] | None:
+    def _read_meta(conn: sqlite3.Connection | MaintenanceConnection) -> dict[str, str] | None:
         exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'activity_meta'").fetchone()
         if exists is None:
             return None
@@ -271,7 +288,7 @@ class ActivityStore:
             return self._upgraded(conn, checked)
 
     @staticmethod
-    def _upgraded(conn: sqlite3.Connection, meta: StoreMeta) -> StoreMeta:
+    def _upgraded(conn: sqlite3.Connection | MaintenanceConnection, meta: StoreMeta) -> StoreMeta:
         """Run :data:`._schema.MIGRATIONS` from ``meta.schema_version`` up to the supported version."""
         steps = range(meta.schema_version, SUPPORTED_SCHEMA_VERSION)
         if not steps:
@@ -580,6 +597,17 @@ class ActivityStore:
 
     def backup(self, dest: Path) -> None:
         """A consistent snapshot (SQLite backup API, WAL included) to a new ``0600`` rollback-journal file."""
+        if self._authority is not None:
+            from ..dbcrypt._backup import backup_database
+
+            try:
+                with _refusing():
+                    backup_database(self.path, dest, authority=self._authority)
+            except ActivityRefused:
+                raise
+            except Exception:
+                raise ActivityRefused(refusal("store_unavailable")) from None
+            return
         try:
             fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         except FileExistsError:
@@ -602,6 +630,9 @@ class ActivityStore:
         A backup in WAL mode is refused (``backup_wal_unsupported``) and the store
         is left in rollback-journal mode whatever the copy carried.
         """
+        if self._authority is not None:
+            # A shared runtime cannot upgrade itself into the offline EX lease.
+            raise ActivityRefused(refusal("store_unavailable"))
         if not src.is_file():
             raise ActivityRefused(refusal("store_unavailable"))
         self._check_copy(src)
@@ -616,7 +647,7 @@ class ActivityStore:
             return self._upgraded(conn, self._checked_meta(self._read_meta(conn)))
 
     @staticmethod
-    def _after_restore(conn: sqlite3.Connection, bound: str) -> None:
+    def _after_restore(conn: sqlite3.Connection | MaintenanceConnection, bound: str) -> None:
         conn.executemany(
             "INSERT OR REPLACE INTO activity_meta (key, value) VALUES (?, ?)",
             [("profile_home", bound), ("store_generation", secrets.token_hex(16))],
@@ -671,3 +702,74 @@ class ActivityStore:
                 ).fetchall()
             )
         return RetentionReport(events, episodes, complete=events < limit and episodes < limit)
+
+
+def require_store_file(destination: Path) -> None:
+    """Maintenance never creates a database: a missing store is its own refusal, not ``store_unavailable``."""
+    if not destination.is_file():
+        raise ActivityRefused(
+            Refusal(
+                "store_missing",
+                "no activity store exists for this home; start Hermes once so a fresh store is created, "
+                "stop it, then restore",
+            )
+        )
+
+
+def restore_activity_store(source: Path, *, home: Path, lease: ExclusiveLease) -> StoreMeta:
+    """Offline component restore under the caller's actual EX lease.
+
+    The controller closes the old runtime first and starts a fresh one only
+    after this helper and EX exit. Published data followed by failed component
+    finalization is incomplete; no rollback is claimed. Backup/key are retained.
+    """
+    from ..dbcrypt._backup import restore_database
+    from ..dbcrypt._maintenance import maintenance_scope
+    from ..imports._protected_destination import checked_store_destination
+
+    home = Path(os.path.realpath(home))  # stores bind the canonical spelling
+    destination = checked_store_destination(home / "plugin-data/mordred/mordred.db", home=home)
+    require_store_file(destination)
+    published = False
+    try:
+        with _refusing(), maintenance_scope(home, lease=lease) as scope:
+            # Authenticate the retained scope before the real restore's second
+            # authentication and publication. No preflight SQL crosses the copy.
+            with scope.connection(destination, readonly=True) as current:
+                target_meta = ActivityStore._checked_meta(ActivityStore._read_meta(current))
+                if target_meta.profile_home != str(home):
+                    raise ActivityRefused(refusal("profile_mismatch"))
+            with scope.connection(source, readonly=True) as backup:
+                backup_meta = ActivityStore._checked_meta(ActivityStore._read_meta(backup))
+                if backup_meta.profile_home != target_meta.profile_home:
+                    raise ActivityRefused(refusal("profile_mismatch"))
+                if any(
+                    step not in _schema.MIGRATIONS
+                    for step in range(backup_meta.schema_version, SUPPORTED_SCHEMA_VERSION)
+                ):
+                    raise ActivityRefused(refusal("store_unavailable"))
+            restore_database(source, destination, lease=lease)
+            published = True
+            with scope.connection(destination) as restored:
+                restored.execute("BEGIN IMMEDIATE")
+                ActivityStore._checked_meta(ActivityStore._read_meta(restored))
+                ActivityStore._after_restore(restored, target_meta.profile_home)
+                result = ActivityStore._upgraded(
+                    restored, ActivityStore._checked_meta(ActivityStore._read_meta(restored))
+                )
+                if result.profile_home != str(home) or result.schema_version != SUPPORTED_SCHEMA_VERSION:
+                    raise ActivityRefused(refusal("profile_mismatch"))
+                restored.commit()
+        return result
+    except Exception as error:
+        if published:
+            raise ActivityRefused(
+                Refusal(
+                    "restore_incomplete",
+                    "the database copy was restored but activity finalization is incomplete; "
+                    "retain the registered backup and native key",
+                )
+            ) from None
+        if isinstance(error, ActivityRefused):
+            raise
+        raise ActivityRefused(refusal("store_unavailable")) from None

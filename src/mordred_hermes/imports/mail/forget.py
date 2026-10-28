@@ -1,36 +1,20 @@
-"""Remove the IMAP mail setup: the account's rows (optional), its cursors, then the credentials and the key (macOS).
+"""Retire mail credentials and optionally erase the authenticated account's rows.
 
-Shared by ``hermes-mordred mail forget`` and the Desktop page (SPEC "Desktop mail and
-ceremony pages (2026-10-23)"). The order makes a failed forget retryable: rows and
-cursors go first, the sealed credentials, their flags and the Enclave key last.
+Native flows capture the protected store's owning database authority before the
+shared mail writer. The actual MMC1 payload supplies the account; flags cannot
+redirect erasure. Under the same writer, checked credential custody invalidates
+pending setup generations and retires the native source first. Database row and
+cursor deletion then occurs after credential custody exits, while the writer
+still excludes replacement setup/import/sync. No root memory key is touched.
 
-- The target is resolved before the per-home mail writer lock
-  (:func:`~.imap_sync.fetch_lock`, ``sync_in_progress`` when held) and re-checked
-  under it: if a ``mail setup`` replaced the credentials meanwhile (``setup_id``),
-  nothing is deleted (``credentials_changed``), so a concurrent setup is never undone.
-- The label whose rows and cursors are deleted is the sealed one; ``account``
-  names it once the credentials are gone (``account_mismatch`` when it names
-  another label than the sealed one; ``invalid_account`` when it is not a label).
-- ``rows=True`` first deletes the account's mail rows (``delete_source``) and stops
-  with the store's code, touching nothing, when the store refuses. Callers ask the
-  owner to confirm that deletion (``mail forget --yes``, the page's
-  ``delete my data`` phrase) BEFORE calling.
-- Under the lock, before anything is deleted, the setup generation
-  (:func:`~.secrets.new_setup_generation`) is rewritten, so a setup flow that
-  started before this forget, in any process, can no longer seal
-  (``mail_setup_stale``).
-- The sealed file, the flags and the Enclave key are deleted whatever the flags
-  say. Credentials whose flags are missing or corrupt are still deleted and
-  reported as unidentified (``account_unknown``: their rows and cursors need
-  ``account``). A sealed file that remains is ``credentials_left`` (never a
-  success); a key that could not be deleted is reported (``key_left``; a retry
-  deletes it).
-
-Pending setup flows are not reached here (they hold the address and the
-password in another object, maybe another process): the generation makes them
-stale, and the Desktop page also calls
-:meth:`~.setup_flow.MailSetupFlows.cancel_all` to drop its own. Failures are
-:class:`MailForgetError` codes; nothing here logs or returns an address.
+``force_orphan`` (``mail forget --yes --force-orphan``) is the one explicit
+repair for a native key left without a sealed source, or a sealed source whose
+native key is definitively absent. It runs the custody's own orphan checks under
+the same writer, never authenticates or reads a source, and never touches rows or
+cursors (their named ``--account`` retry stays separate), so it refuses
+``rows``/``account``. The explicit portable secret-store fixture seam retains its
+original row-first contract (its forget already retires unconditionally). All
+outward failures remain content-free MailForgetError codes.
 """
 
 from __future__ import annotations
@@ -55,7 +39,8 @@ WriterLock = Callable[[Path], contextlib.AbstractContextManager[None]]
 
 class MailForgetError(Exception):
     """A content-free forget refusal: ``invalid_account``, ``account_mismatch``, ``credentials_changed``,
-    ``credentials_left``, ``sync_in_progress``, ``store_path_unsafe``, a store code or ``fetch_failed``."""
+    ``credentials_left``, ``sync_in_progress``, ``store_path_unsafe``, ``force_orphan_exclusive``, a store
+    code (``mail_orphan_key`` among them) or ``fetch_failed``."""
 
     def __init__(self, code: str) -> None:
         super().__init__(code)
@@ -71,8 +56,9 @@ class Forgotten:
     cursors_deleted: int
     cursors_left: str | None  # the store code that left the cursors behind
     had_credentials: bool
-    unidentified: bool  # credentials were present but their label could not be read
+    unidentified: bool  # the requested row/cursor erasure target could not be identified
     key_gone: bool
+    orphan_key_retired: bool = False  # force_orphan only: a native key without a source was deleted
 
     @property
     def warnings(self) -> tuple[str, ...]:
@@ -140,6 +126,10 @@ def _forget_store(open_store: OpenStore, home: Path, account: str, rows: bool) -
         if rows:
             raise MailForgetError(_code(exc, "import_store_unavailable")) from None
         return 0, 0, _code(exc, "import_store_unavailable")
+    return _delete_store_rows(store, account, rows)
+
+
+def _delete_store_rows(store: Any, account: str, rows: bool) -> tuple[int, int, str | None]:
     deleted = 0
     try:
         if rows:
@@ -175,6 +165,64 @@ def _locked_forget(
     return Forgotten(label, deleted, cursors, left, sealed is not None, sealed == _UNIDENTIFIED, key_gone)
 
 
+def _native_forget(
+    secret_store: Any, home: Path, account: str | None, rows: bool, open_store: OpenStore, lock: WriterLock
+) -> Forgotten:
+    # Capture the actual owning store (and its lifetime root SH authority)
+    # before writer/custody locks. Never retarget a replacement global provider.
+    if secret_store._profile_home() != home:
+        raise MailForgetError("credentials_changed")
+    try:
+        store = open_store(home)
+        left = None
+    except Exception as exc:
+        if rows:
+            raise MailForgetError(_code(exc, "import_store_unavailable")) from None
+        store, left = None, _code(exc, "import_store_unavailable")
+    from ...keyvault._mail_custody import pending_mail_retirement
+
+    pending = pending_mail_retirement(home)
+    snapshot = (None, None) if pending else secret_store.load_snapshot()
+    credentials = snapshot[0]
+    label = account if credentials is None else credentials.account
+    if account is not None and credentials is not None and account != credentials.account:
+        raise MailForgetError("account_mismatch")
+    from .imap_sync import mail_writer_scope
+
+    with lock(home), mail_writer_scope(home):
+        # This validates the actual MMC1 source, advances generation under its
+        # checked custody, and retires native first. Metadata cannot pick rows.
+        key_gone = secret_store.forget_from_snapshot(snapshot)
+        if secret_store.residue():
+            raise MailForgetError("credentials_left")
+        # Credential custody has exited; every SQL operation reuses the store's
+        # captured authority while this same mail writer remains held.
+        deleted, cursors = 0, 0
+        if store is not None and label is not None:
+            deleted, cursors, left = _delete_store_rows(store, label, rows)
+        # Retirement may already have removed its journal/account before SQL
+        # failed or the process stopped. Absence cannot prove requested erasure;
+        # require an explicit named retry when no authenticated target survives.
+        return Forgotten(label, deleted, cursors, left, credentials is not None or pending, label is None, key_gone)
+
+
+def _orphan_forget(secret_store: Any, home: Path, lock: WriterLock) -> Forgotten:
+    """The explicit orphan repair: credential custody only, no source read, no rows or cursors."""
+    if secret_store._profile_home() != home:
+        raise MailForgetError("credentials_changed")
+    from .imap_sync import mail_writer_scope
+
+    with lock(home), mail_writer_scope(home):
+        had = bool(secret_store.credential_files())
+        had_key = bool(secret_store.native_key_present())
+        key_gone = secret_store.forget(force_orphan=True) is not False
+        if secret_store.residue():
+            raise MailForgetError("credentials_left")
+    # A removed keyless source may leave its account's rows and cursors: only
+    # the named retry (`--account LABEL`) erases them, so say the label is unknown.
+    return Forgotten(None, 0, 0, None, had, had, key_gone, orphan_key_retired=had_key and key_gone)
+
+
 def forget(
     secret_store: Any,
     home: Path,
@@ -183,11 +231,20 @@ def forget(
     rows: bool = False,
     open_store: OpenStore = _default_open_store,
     lock: WriterLock = fetch_lock,
+    force_orphan: bool = False,
 ) -> Forgotten:
     """Remove the mail setup (see the module docstring); every refusal is a :class:`MailForgetError`."""
     if account is not None and (not isinstance(account, str) or not ACCOUNT_RE.fullmatch(account)):
         raise MailForgetError("invalid_account")
+    if force_orphan and (rows or account is not None):
+        raise MailForgetError("force_orphan_exclusive")
     try:
+        from .secrets import MailSecretStore
+
+        if type(secret_store) is MailSecretStore and (secret_store._platform() == "win32" or secret_store._native()):
+            if force_orphan:
+                return _orphan_forget(secret_store, home, lock)
+            return _native_forget(secret_store, home, account, rows, open_store, lock)
         resolved = _identity(secret_store)  # the target, decided before waiting for the lock
         _target(account, resolved)
         with lock(home):

@@ -1,7 +1,7 @@
 """Tests for ``hermes-mordred keyvault reset`` — destroy all key material.
 
 ``reset`` deletes every Secure-Enclave wrapping key (the live key(s) recorded
-in ``meta.json`` plus the well-known default + audit-log ids) and removes the
+in validated ``meta.json`` ownership records) and removes the
 on-disk keyvault directory. It is irreversible, so the interactive path
 requires the operator to type a confirmation phrase; ``--yes`` skips it for
 scripted use.
@@ -24,6 +24,13 @@ from mordred_hermes.keyvault.api import _DEFAULT_KEY_ID
 from mordred_hermes.keyvault.log_encryption import AUDIT_LOG_KEY_ID, EncryptedWriter
 from mordred_hermes.wizard import keyvault_cli
 from tests._keyvault_fakes import FakeBackend
+
+
+@pytest.fixture(autouse=True)
+def _legacy_owned_deletion_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests._keyvault_owned_deletion import install_fake_owned_deletion
+
+    install_fake_owned_deletion(monkeypatch)
 
 
 def _key_id_hash(key_id: str) -> str:
@@ -122,12 +129,12 @@ class TestResetYes:
         args = parser.parse_args(["keyvault", "reset", "--yes"])
         assert args.func(args) == 0
         assert not root.exists()
-        # Both the live key and the audit-log wrapping key are destroyed.
+        # Only recorded owned native selectors are submitted for deletion.
         assert _physical(root, _DEFAULT_KEY_ID) in _deleted(backend)
         assert _physical(root, "payments") in _deleted(backend)
-        assert _physical(root, AUDIT_LOG_KEY_ID) in _deleted(backend)
+        assert _physical(root, AUDIT_LOG_KEY_ID) not in _deleted(backend)
 
-    def test_corrupt_meta_still_resets_known_keys(self, tmp_path: Path) -> None:
+    def test_corrupt_meta_retains_all_state(self, tmp_path: Path) -> None:
         root = _storage.resolve_keyvault_dir(tmp_path)
         _storage.ensure_layout(root)
         (root / "meta.json").write_text("{ this is not valid json", encoding="utf-8")
@@ -135,12 +142,12 @@ class TestResetYes:
 
         rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
-        assert rc == 0
-        assert not root.exists()
-        # A corrupt meta must not strand the default / audit-log SE keys.
-        assert {_physical(root, _DEFAULT_KEY_ID), _physical(root, AUDIT_LOG_KEY_ID)} <= _deleted(backend)
+        assert rc == 1
+        assert root.exists()
+        assert _deleted(backend) == set()
+        assert not _storage.reset_journal_path(root).exists()
 
-    def test_non_utf8_meta_still_resets_known_keys(self, tmp_path: Path) -> None:
+    def test_non_utf8_meta_retains_all_state(self, tmp_path: Path) -> None:
         root = _storage.resolve_keyvault_dir(tmp_path)
         _storage.ensure_layout(root)
         (root / "meta.json").write_bytes(b"\xffnot-utf8")
@@ -148,11 +155,12 @@ class TestResetYes:
 
         rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
-        assert rc == 0
-        assert not root.exists()
-        assert {_physical(root, _DEFAULT_KEY_ID), _physical(root, AUDIT_LOG_KEY_ID)} <= _deleted(backend)
+        assert rc == 1
+        assert root.exists()
+        assert _deleted(backend) == set()
+        assert not _storage.reset_journal_path(root).exists()
 
-    def test_wrong_metadata_hash_still_resets_scoped_row_and_warns(
+    def test_wrong_metadata_hash_retains_all_state(
         self,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
@@ -166,12 +174,12 @@ class TestResetYes:
 
         rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
-        assert rc == 0
-        assert _physical(root, "payments") in _deleted(backend)
-        assert not root.exists()
-        assert "metadata was incomplete" in capsys.readouterr().out.lower()
+        assert rc == 1
+        assert root.exists()
+        assert _deleted(backend) == set()
+        assert not _storage.reset_journal_path(root).exists()
 
-    def test_malformed_pending_and_audit_records_use_only_derived_targets(
+    def test_malformed_pending_and_audit_records_retain_all_state(
         self,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
@@ -192,19 +200,12 @@ class TestResetYes:
 
         rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
-        assert rc == 0
-        assert not root.exists()
-        deleted = _deleted(backend)
-        assert {
-            _physical(root, _DEFAULT_KEY_ID),
-            _physical(root, "payments"),
-            _physical(root, AUDIT_LOG_KEY_ID),
-        } <= deleted
-        assert "../../foreign-main" not in deleted
-        assert "../../foreign-audit" not in deleted
-        assert "metadata was incomplete" in capsys.readouterr().out.lower()
+        assert rc == 1
+        assert root.exists()
+        assert _deleted(backend) == set()
+        assert not _storage.reset_journal_path(root).exists()
 
-    def test_retained_completion_escapes_terminal_controls(
+    def test_ambiguous_legacy_refusal_escapes_terminal_controls(
         self,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
@@ -215,16 +216,15 @@ class TestResetYes:
         del meta["keys"][_key_id_hash(key_id)][_native_key_id.NATIVE_KEY_ID_FIELD]
         _storage.save_meta(root, meta)
 
-        assert keyvault_cli.reset_keyvault(home=tmp_path, backend=FakeBackend(), assume_yes=True) == 0
-
-        out = capsys.readouterr().out
-        assert "\x1b" not in out
-        assert key_id not in out
-        assert "legacy\\n\\x1b[31mowned" in out
+        assert keyvault_cli.reset_keyvault(home=tmp_path, backend=FakeBackend(), assume_yes=True) == 1
+        assert root.exists()
+        output = capsys.readouterr()
+        assert "\x1b" not in output.out + output.err
+        assert key_id not in output.out + output.err
 
 
 class _DeleteFailsBackend(FakeBackend):
-    """FakeBackend whose SE-key delete always raises, to exercise best-effort."""
+    """Inject a native deletion failure into the reset state machine."""
 
     def delete_enclave_key(self, key_id: str) -> None:
         self.calls.append(("delete", key_id))
@@ -462,7 +462,7 @@ class TestResetDegradedPaths:
         (tmp_path / "mordred").write_text("not a directory", encoding="utf-8")
 
         assert keyvault_cli.reset_keyvault(home=tmp_path, backend=FakeBackend(), assume_yes=True) == 1
-        assert "cannot inspect keyvault root" in capsys.readouterr().err.lower()
+        assert "cannot reset keyvault" in capsys.readouterr().err.lower()
 
     def test_symlinked_root_is_refused_before_any_native_delete(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -653,9 +653,8 @@ class TestResetConfirmation:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         key_id = "payments\n\x1b[2Jowned"
-        retained = ["legacy\n\x1b]52;c;Y2xpcGJvYXJk\x07"]
         root = _build_keyvault(tmp_path, [key_id])
-        _write_current_reset_journal(root, retained_legacy=retained)
+        _write_current_reset_journal(root)
         epoch_before = _storage.read_generation_epoch(root)
         backend = FakeBackend()
         prompt = _ScriptedPrompt("no")
@@ -676,9 +675,7 @@ class TestResetConfirmation:
         assert _storage.read_generation_epoch(root) == epoch_before
         assert "\x1b" not in captured.out + captured.err
         assert key_id not in captured.err
-        assert retained[0] not in captured.err
         assert "payments\\n\\x1b[2Jowned" in captured.err
-        assert "legacy\\n\\x1b]52;c;Y2xpcGJvYXJk\\x07" in captured.err
 
     def test_existing_journal_with_absent_root_still_requires_confirmation(
         self,

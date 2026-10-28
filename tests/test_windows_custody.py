@@ -7,9 +7,11 @@ from dataclasses import replace
 import pytest
 
 from mordred_hermes import _config_io as cio
+from mordred_hermes._database_contracts import DatabaseRefused
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
+from mordred_hermes.keyvault._database_mutation import database_key_mutation
 from mordred_hermes.keyvault._exceptions import WrapKeyNotFound
-from tests._keyvault_fakes import FakeBackend
+from tests._windows_custody_fakes import windows_test_backend
 from tests.test_windows_custody_profile import SID
 
 
@@ -21,7 +23,7 @@ def modules():
 
 
 @pytest.fixture
-def fs(monkeypatch, tmp_path):
+def fs(monkeypatch, tmp_path, request):
     custody, storage = modules()
 
     @contextmanager
@@ -44,7 +46,15 @@ def fs(monkeypatch, tmp_path):
     home = tmp_path / "home"
     with open_private_directory(home, create=True):
         pass
-    return custody, storage, home, FakeBackend()
+    backend = windows_test_backend()
+    if request.path.name == "test_windows_custody_database_guard.py":
+        from mordred_hermes.keyvault._database_mutation import database_key_mutation
+
+        with database_key_mutation(root=home, generation=None) as database_lease:
+            backend.database_lease = database_lease
+            yield custody, storage, home, backend
+    else:
+        yield custody, storage, home, backend
 
 
 def test_unmanaged_resolver_does_not_create_mordred_or_accept_ambient_key(fs, monkeypatch):
@@ -59,19 +69,25 @@ def test_unmanaged_resolver_does_not_create_mordred_or_accept_ambient_key(fs, mo
 
 def test_create_only_enrollment_roundtrip_and_load_do_not_regenerate(fs):
     c, _, home, backend = fs
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        key = session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        key = session.enroll_memory(database_lease=database_lease)
         lease = session.lease("memory")
         assert len(key) == 32
         assert session.load_memory_key() == key
     assert len((home / "mordred" / "memory-key.wrapped").read_bytes()) == 127
     assert not (home / "mordred" / "windows-memory.pending.json").exists()
     assert not (home / "mordred" / "memory-vault.marker").exists()
-    with c.windows_custody_session(home, backend=backend) as session:
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
         assert session.load_memory_key() == key
         session.validate_lease(lease)
-        with pytest.raises(c.CustodyError):
-            session.enroll_memory()
+        with pytest.raises((c.CustodyError, DatabaseRefused)):
+            session.enroll_memory(database_lease=database_lease)
     assert [op for op, _ in backend.calls].count("generate") == 1
     with pytest.raises(RuntimeError):
         session.load_memory_key()
@@ -84,8 +100,12 @@ def test_retained_state_without_manifest_never_generates(fs, artifact):
     c, _, home, backend = fs
     with open_private_directory(home / "mordred", create=True) as d, d.transaction() as tx:
         tx.create_bytes(artifact, b"broken")
-    with pytest.raises(c.CustodyError), c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        pytest.raises(c.CustodyError),
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
     assert not backend.calls
 
 
@@ -96,15 +116,22 @@ def test_native_create_failure_retains_intent_and_recovery_never_generates(fs, m
         raise c.CustodyError("native unavailable")
 
     monkeypatch.setattr(backend, "generate_enclave_key", denied)
-    with pytest.raises(c.CustodyError), c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        pytest.raises(c.CustodyError),
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
     journal = home / "mordred" / "windows-memory.pending.json"
     before = journal.read_bytes()
-    with c.windows_custody_session(home, backend=backend) as session:
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
         with pytest.raises(c.CustodyError):
             session.load_memory_key()
         with pytest.raises(WrapKeyNotFound):
-            session.reconcile_pending("memory")
+            session.reconcile_pending("memory", database_lease=database_lease)
     assert journal.read_bytes() == before
     assert not (home / "mordred" / "memory-key.wrapped").exists()
 
@@ -118,10 +145,17 @@ def test_explicit_recovery_reuses_only_positively_proven_exact_key(fs, monkeypat
         raise c.CustodyError("interrupted after native publication")
 
     monkeypatch.setattr(backend, "generate_enclave_key", interrupted)
-    with pytest.raises(c.CustodyError), c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
-    with c.windows_custody_session(home, backend=backend) as session:
-        lease = session.reconcile_pending("memory")
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        pytest.raises(c.CustodyError),
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
+        lease = session.reconcile_pending("memory", database_lease=database_lease)
         assert lease.role == "memory"
         assert len(session.load_memory_key()) == 32
     assert [op for op, _ in backend.calls].count("generate") == 1
@@ -135,32 +169,44 @@ def test_explicit_adoption_authenticates_backup_before_native_action(fs):
     name = "MEMORY.md.bak.old"
     with open_private_directory(home / "memories", create=True) as d, d.transaction() as tx:
         tx.create_bytes(name, seal(b"secret", key=b"A" * 32, name=name))
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
         with pytest.raises(c.CustodyError):
-            session.enroll_memory(adopted_key=b"B" * 32)
+            session.enroll_memory(adopted_key=b"B" * 32, database_lease=database_lease)
         assert not backend.calls
-        assert session.enroll_memory(adopted_key=b"A" * 32) == b"A" * 32
+        assert session.enroll_memory(adopted_key=b"A" * 32, database_lease=database_lease) == b"A" * 32
 
 
 def test_missing_native_key_does_not_replace_retained_wrapper(fs):
     c, _, home, backend = fs
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
     wrapped = (home / "mordred" / "memory-key.wrapped").read_bytes()
     backend._keys.clear()
-    with c.windows_custody_session(home, backend=backend) as session:
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
         with pytest.raises(WrapKeyNotFound):
             session.load_memory_key()
-        with pytest.raises(c.CustodyError):
-            session.enroll_memory()
+        with pytest.raises((c.CustodyError, DatabaseRefused)):
+            session.enroll_memory(database_lease=database_lease)
     assert (home / "mordred" / "memory-key.wrapped").read_bytes() == wrapped
     assert [op for op, _ in backend.calls].count("generate") == 1
 
 
 def test_role_leases_are_independent_and_reject_forged_generation(fs):
     c, _, home, backend = fs
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
         memory = session.lease("memory")
         audit = session.enroll_role("audit")
         session.validate_lease(memory)
@@ -174,8 +220,12 @@ def test_inventory_failure_is_not_empty_and_never_generates(fs):
     memories = home / "memories"
     memories.mkdir(mode=0o700)
     (memories / "MEMORY.md").mkdir(mode=0o700)
-    with c.windows_custody_session(home, create=True, backend=backend) as session, pytest.raises(PrivateFSError):
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+        pytest.raises(PrivateFSError),
+    ):
+        session.enroll_memory(database_lease=database_lease)
     assert not backend.calls
 
 
@@ -188,13 +238,19 @@ def test_memory_delete_preserves_independent_audit_and_requires_stopped_gate(fs,
     c, _, home, backend = fs
     gates = []
     monkeypatch.setattr(c, "require_stopped_windows_gateways", lambda path: gates.append(path))
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
         memory = session.lease("memory")
         audit = session.enroll_role("audit")
     opt_out(home)
-    with c.windows_custody_session(home, backend=backend) as session:
-        session.delete_role(memory)
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
+        session.delete_role(memory, database_lease=database_lease)
         session.validate_lease(audit)
         with pytest.raises(c.CustodyError):
             session.lease("memory")
@@ -206,8 +262,11 @@ def test_memory_delete_preserves_independent_audit_and_requires_stopped_gate(fs,
 
 def test_unknown_gateway_refuses_native_deletion_and_journal(fs, monkeypatch):
     c, _, home, backend = fs
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
         memory = session.lease("memory")
     opt_out(home)
 
@@ -215,8 +274,12 @@ def test_unknown_gateway_refuses_native_deletion_and_journal(fs, monkeypatch):
         raise RuntimeError("unknown gateway inventory")
 
     monkeypatch.setattr(c, "require_stopped_windows_gateways", unknown)
-    with c.windows_custody_session(home, backend=backend) as session, pytest.raises(RuntimeError):
-        session.delete_role(memory)
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+        pytest.raises(RuntimeError),
+    ):
+        session.delete_role(memory, database_lease=database_lease)
     assert memory.native_key_id in backend._keys
     assert not (home / "mordred" / "windows-memory.pending.json").exists()
 
@@ -224,22 +287,33 @@ def test_unknown_gateway_refuses_native_deletion_and_journal(fs, monkeypatch):
 def test_ambiguous_native_delete_never_treats_missing_as_success(fs, monkeypatch):
     c, _, home, backend = fs
     monkeypatch.setattr(c, "require_stopped_windows_gateways", lambda path: None)
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
         memory = session.lease("memory")
     opt_out(home)
     delete = backend.delete_enclave_key
 
-    def ambiguous(key_id):
-        delete(key_id)
+    def ambiguous(key_id, **kwargs):
+        delete(key_id, **kwargs)
         raise c.CustodyError("native response lost")
 
     monkeypatch.setattr(backend, "delete_enclave_key", ambiguous)
-    with pytest.raises(c.CustodyError), c.windows_custody_session(home, backend=backend) as session:
-        session.delete_role(memory)
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        pytest.raises(c.CustodyError),
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
+        session.delete_role(memory, database_lease=database_lease)
     before = (home / "mordred" / "windows-memory.pending.json").read_bytes()
-    with c.windows_custody_session(home, backend=backend) as session, pytest.raises(c.CustodyError):
-        session.reconcile_pending("memory")
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+        pytest.raises(c.CustodyError),
+    ):
+        session.reconcile_pending("memory", database_lease=database_lease)
     assert (home / "mordred" / "windows-memory.pending.json").read_bytes() == before
     assert (home / "mordred" / "memory-key.wrapped").exists()
     assert [op for op, _ in backend.calls].count("delete") == 1
@@ -247,13 +321,16 @@ def test_ambiguous_native_delete_never_treats_missing_as_success(fs, monkeypatch
 
 def test_audit_retained_generation_requires_explicit_erase_authorization(fs):
     c, _, home, backend = fs
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
         old = session.enroll_role("audit")
         new = session.enroll_role("audit", retain_current=True)
         session.validate_lease(old)
         with pytest.raises(c.CustodyError):
-            session.delete_role(old)
-        session.delete_role(old, erase_authorized=True)
+            session.delete_role(old, database_lease=database_lease)
+        session.delete_role(old, erase_authorized=True, database_lease=database_lease)
         session.validate_lease(new)
         with pytest.raises(c.CustodyError):
             session.validate_lease(old)
@@ -295,8 +372,12 @@ def test_every_publication_failure_retains_evidence_and_never_recreates(fs, monk
         return original(tx, leaf, *args, **kwargs)
 
     monkeypatch.setattr(_posix._Transaction, method, fault)
-    with pytest.raises(PrivateFSError), c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        pytest.raises(PrivateFSError),
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
     assert triggered
     generates = [op for op, _ in backend.calls].count("generate")
     monkeypatch.setattr(_posix._Transaction, method, original)
@@ -304,8 +385,12 @@ def test_every_publication_failure_retains_evidence_and_never_recreates(fs, monk
         assert (home / "mordred" / "windows-memory.pending.json").exists() or (
             home / "mordred" / "memory-key.wrapped"
         ).exists()
-        with c.windows_custody_session(home, backend=backend) as session, pytest.raises(c.CustodyError):
-            session.enroll_memory()
+        with (
+            database_key_mutation(root=home, generation=None) as database_lease,
+            c.windows_custody_session(home, backend=backend) as session,
+            pytest.raises(c.CustodyError),
+        ):
+            session.enroll_memory(database_lease=database_lease)
         assert [op for op, _ in backend.calls].count("generate") == generates
 
 
@@ -327,11 +412,12 @@ def test_caught_postpublication_verification_uncertainty_poisons_owner(fs, monke
 
     monkeypatch.setattr(c.WindowsCustodySession, "_publish", corrupt_verify)
     with (
+        database_key_mutation(root=home, generation=None) as database_lease,
         pytest.raises(PrivateFSError) as outer,
         c.windows_custody_session(home, create=True, backend=backend) as session,
         pytest.raises(PrivateFSError) as inner,
     ):
-        session.enroll_memory()
+        session.enroll_memory(database_lease=database_lease)
     assert outer.value is inner.value
     assert outer.value.commit_state == "uncertain"
 
@@ -341,9 +427,12 @@ def test_nested_session_reuses_home_lock_and_rejects_another_home(fs):
     other = home.parent / "other"
     with open_private_directory(other, create=True):
         pass
-    with cio.canonical_session(cio.CanonicalPaths(home), scope="policy", create=True) as canonical:
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        cio.canonical_session(cio.CanonicalPaths(home), scope="policy", create=True) as canonical,
+    ):
         with c.windows_custody_session(home, canonical=canonical, backend=backend) as session:
-            session.enroll_memory()
+            session.enroll_memory(database_lease=database_lease)
         with pytest.raises(c.CustodyError), c.windows_custody_session(other, canonical=canonical, backend=backend):
             pass
         assert canonical.home_directory_identity() is not None
@@ -354,29 +443,43 @@ def test_memory_inventory_includes_case_alias_backups_and_bounds_before_native(f
     with open_private_directory(home / "memories", create=True) as directory, directory.transaction() as tx:
         tx.create_bytes("memory.MD.BAK.1", b"abcdefgh")
     monkeypatch.setattr(storage, "MEMORY_FILE_LIMIT", 7)
-    with pytest.raises(PrivateFSError), c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        pytest.raises(PrivateFSError),
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
     assert not backend.calls
 
 
 def test_retained_deleted_journal_finishes_without_second_native_delete(fs, monkeypatch):
     c, _, home, backend = fs
     monkeypatch.setattr(c, "require_stopped_windows_gateways", lambda path: None)
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
         memory = session.lease("memory")
     opt_out(home)
     original = c.WindowsCustodySession._finish_delete
 
-    def interrupt(*args):
+    def interrupt(*args, **kwargs):
         raise c.CustodyError("crash after durable deleted phase")
 
     monkeypatch.setattr(c.WindowsCustodySession, "_finish_delete", interrupt)
-    with pytest.raises(c.CustodyError), c.windows_custody_session(home, backend=backend) as session:
-        session.delete_role(memory)
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        pytest.raises(c.CustodyError),
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
+        session.delete_role(memory, database_lease=database_lease)
     monkeypatch.setattr(c.WindowsCustodySession, "_finish_delete", original)
-    with c.windows_custody_session(home, backend=backend) as session:
-        assert session.reconcile_pending("memory") is None
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
+        assert session.reconcile_pending("memory", database_lease=database_lease) is None
     assert [op for op, _ in backend.calls].count("delete") == 1
     assert not (home / "mordred" / "memory-key.wrapped").exists()
 
@@ -384,16 +487,22 @@ def test_retained_deleted_journal_finishes_without_second_native_delete(fs, monk
 def test_successful_memory_purge_returns_unmanaged_without_losing_audit(fs, monkeypatch):
     c, _, home, backend = fs
     monkeypatch.setattr(c, "require_stopped_windows_gateways", lambda path: None)
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
         memory = session.lease("memory")
         audit = session.enroll_role("audit")
     opt_out(home)
-    with c.windows_custody_session(home, backend=backend) as session:
-        session.delete_role(memory)
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
+        session.delete_role(memory, database_lease=database_lease)
         assert session.resolve_memory_key() is None
         session.validate_lease(audit)
-        session.enroll_memory()
+        session.enroll_memory(database_lease=database_lease)
         assert session.lease("memory").generation != memory.generation
         session.validate_lease(audit)
 
@@ -403,8 +512,11 @@ def test_runtime_dispatch_uses_existing_memory_failure_contract(fs, monkeypatch)
     from mordred_hermes.keyvault._memory_key import MemoryKeyError, resolve_memory_key
 
     monkeypatch.setattr(c, "windows_backend", lambda: backend)
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
     backend._keys.clear()
     with pytest.raises(MemoryKeyError):
         resolve_memory_key(home=home, platform="win32", environ={})
@@ -418,11 +530,16 @@ def test_concurrent_enrollment_has_one_native_creation_winner(fs):
     start = threading.Barrier(2)
 
     def enroll():
+        from mordred_hermes.keyvault._database_mutation import database_key_mutation
+
         start.wait(timeout=5)
         try:
-            with c.windows_custody_session(home, create=True, backend=backend) as session:
-                return session.enroll_memory()
-        except c.CustodyError:
+            with (
+                database_key_mutation(root=home, generation=None) as database_lease,
+                c.windows_custody_session(home, create=True, backend=backend) as session,
+            ):
+                return session.enroll_memory(database_lease=database_lease)
+        except (c.CustodyError, DatabaseRefused):
             return None
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -434,8 +551,11 @@ def test_concurrent_enrollment_has_one_native_creation_winner(fs):
 def test_physical_rename_keeps_key_but_copied_home_refuses(fs):
 
     c, _, home, backend = fs
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        key = session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        key = session.enroll_memory(database_lease=database_lease)
     moved = home.parent / "Renamed home 日本"
     home.rename(moved)
     with c.windows_custody_session(moved, backend=backend) as session:
@@ -446,11 +566,14 @@ def test_physical_rename_keeps_key_but_copied_home_refuses(fs):
     with open_private_directory(copied / "mordred", create=True) as directory, directory.transaction() as tx:
         for name in ("windows-custody.json", "memory-key.wrapped"):
             tx.create_bytes(name, (moved / "mordred" / name).read_bytes())
-    with c.windows_custody_session(copied, backend=backend) as session:
+    with (
+        database_key_mutation(root=copied, generation=None) as database_lease,
+        c.windows_custody_session(copied, backend=backend) as session,
+    ):
         with pytest.raises(c.CustodyError):
             session.load_memory_key()
-        with pytest.raises(c.CustodyError):
-            session.enroll_memory()
+        with pytest.raises((c.CustodyError, DatabaseRefused)):
+            session.enroll_memory(database_lease=database_lease)
     assert [op for op, _ in backend.calls].count("generate") == 1
 
 
@@ -474,16 +597,23 @@ def test_missing_helper_refuses_before_creating_irrecoverable_native_intent(fs, 
         raise c.CustodyError("helper absent")
 
     monkeypatch.setattr(c, "windows_backend", missing)
-    with c.windows_custody_session(home, create=True) as session, pytest.raises(c.CustodyError):
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True) as session,
+        pytest.raises(c.CustodyError),
+    ):
+        session.enroll_memory(database_lease=database_lease)
     assert not (home / "mordred" / "windows-memory.pending.json").exists()
 
 
 def test_caught_native_delete_ledger_failure_remains_uncertain_on_outer_exit(fs, monkeypatch):
     c, _, home, backend = fs
     monkeypatch.setattr(c, "require_stopped_windows_gateways", lambda path: None)
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
         memory = session.lease("memory")
     opt_out(home)
     journal = c.WindowsCustodySession._journal
@@ -495,11 +625,12 @@ def test_caught_native_delete_ledger_failure_remains_uncertain_on_outer_exit(fs,
 
     monkeypatch.setattr(c.WindowsCustodySession, "_journal", fail_deleted)
     with (
+        database_key_mutation(root=home, generation=None) as database_lease,
         pytest.raises(PrivateFSError) as outer,
         c.windows_custody_session(home, backend=backend) as session,
         pytest.raises(PrivateFSError) as inner,
     ):
-        session.delete_role(memory)
+        session.delete_role(memory, database_lease=database_lease)
     assert outer.value is inner.value
     assert outer.value.commit_state == "uncertain"
     assert memory.native_key_id not in backend._keys
@@ -511,16 +642,63 @@ def test_exhausted_epoch_refuses_before_native_deletion_or_wrapper_cleanup(fs, m
 
     c, _, home, backend = fs
     monkeypatch.setattr(c, "require_stopped_windows_gateways", lambda path: None)
-    with c.windows_custody_session(home, create=True, backend=backend) as session:
-        session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
         memory = session.lease("memory")
     opt_out(home)
     with open_private_directory(home / "mordred") as directory, directory.transaction() as tx:
         manifest = json.loads(tx.read_bytes("windows-custody.json", max_bytes=65536))
         manifest["epoch"] = 9007199254740991
         tx.replace_bytes("windows-custody.json", json.dumps(manifest).encode())
-    with pytest.raises(c.CustodyError), c.windows_custody_session(home, backend=backend) as session:
-        session.delete_role(memory)
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        pytest.raises(c.CustodyError),
+        c.windows_custody_session(home, backend=backend) as session,
+    ):
+        session.delete_role(memory, database_lease=database_lease)
     assert memory.native_key_id in backend._keys
     assert (home / "mordred" / "memory-key.wrapped").exists()
     assert not (home / "mordred" / "windows-memory.pending.json").exists()
+
+
+def test_memory_source_record_is_metadata_only_and_does_not_require_hook_arming(fs):
+    c, _, home, backend = fs
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
+        expected = session.lease("memory")
+    backend.calls.clear()
+    with c.windows_custody_session(home, backend=backend) as session:
+        lease, wrapped = session.memory_source_record()
+        assert lease == expected and len(lease.generation) == 64
+        assert len(wrapped) == c.wrap.HEADER_LEN
+        assert session.memory_state().armed is False
+    assert backend.calls == []
+
+
+@pytest.mark.parametrize("invalid", ["missing", "malformed", "foreign"])
+def test_memory_source_record_refuses_incomplete_or_foreign_wrapper_without_native_lookup(fs, invalid):
+    c, _, home, backend = fs
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as session,
+    ):
+        session.enroll_memory(database_lease=database_lease)
+    path = home / "mordred" / c.WRAPPED
+    if invalid == "missing":
+        path.unlink()
+    elif invalid == "malformed":
+        path.write_bytes(b"X" * c.wrap.HEADER_LEN)
+    else:
+        blob = bytearray(path.read_bytes())
+        blob[6] ^= 1  # The wrapper's key-id hash must match its checked role lease.
+        path.write_bytes(blob)
+    backend.calls.clear()
+    with c.windows_custody_session(home, backend=backend) as session, pytest.raises(c.CustodyError):
+        session.memory_source_record()
+    assert backend.calls == []

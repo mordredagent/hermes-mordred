@@ -28,11 +28,14 @@ import sys
 import types
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Final
-from urllib.parse import unquote, urlsplit
+from typing import TYPE_CHECKING, Any, Final
+from urllib.parse import parse_qsl, unquote, urlsplit
+
+if TYPE_CHECKING:
+    from ._authority import Authority
 
 from ._key import DatabaseKey
-from ._policy import in_scope
+from ._policy import in_scope, lexically_in_scope
 
 PLAINTEXT_HEADER_BYTES: Final = 112
 SQLITE_MAGIC: Final = b"SQLite format 3\x00"
@@ -199,9 +202,10 @@ def stdlib_sqlite3() -> types.ModuleType:
 
 def build_module(
     *,
-    key: Callable[[], DatabaseKey | None],
-    home: Callable[[], Path],
-    has_key: Callable[[], bool],
+    key: Callable[[], DatabaseKey | None] | None = None,
+    home: Callable[[], Path] | None = None,
+    has_key: Callable[[], bool] | None = None,
+    authority: Authority | None = None,
 ) -> types.ModuleType:
     """A ``sqlite3`` replacement backed by ``sqlcipher3`` (``import`` errors propagate)."""
     import sqlcipher3.dbapi2 as sc
@@ -211,20 +215,34 @@ def build_module(
     module.__dict__.update({k: v for k, v in vars(stdlib).items() if not k.startswith("__")})
     module.__dict__.update({k: v for k, v in vars(sc).items() if not k.startswith("__")})
 
+    if authority is not None:
+        from ._connection import ProtectedConnection, ProtectedCursor
+
+        module.Connection = ProtectedConnection  # type: ignore[attr-defined]
+        module.Cursor = ProtectedCursor  # type: ignore[attr-defined]
+        module.connect = _native_connect(authority)  # type: ignore[attr-defined]
+        module.register_adapter = _refuse_registration  # type: ignore[attr-defined]
+        module.register_converter = _refuse_registration  # type: ignore[attr-defined]
+        module.dbapi2 = module  # type: ignore[attr-defined]
+        setattr(module, MARKER, True)
+        return module
+    if key is None or home is None or has_key is None:
+        raise TypeError("legacy shim requires an explicit key, home and has_key seam")
+    legacy_key, legacy_home, legacy_has_key = key, home, has_key
     opener = _Opener(sc)
 
     def connect(database: Any, *args: Any, **kwargs: Any) -> Any:
         path = _database_path(database, bool(kwargs.get("uri", False)))
-        if path is not None and in_scope(path, home()):
+        if path is not None and in_scope(path, legacy_home()):
             try:
-                resolved = key()
+                resolved = legacy_key()
             except Exception as exc:  # the vault could not be opened
                 raise sc.OperationalError(f"{KEY_UNAVAILABLE} ({type(exc).__name__})") from exc
             if resolved is None:
                 raise sc.OperationalError(KEY_UNAVAILABLE)
             return opener.open_hermes_database(database, path, resolved, args, kwargs)
-        if path is not None and has_key() and os.path.isfile(path):
-            resolved = key()
+        if path is not None and legacy_has_key() and os.path.isfile(path):
+            resolved = legacy_key()
             if resolved is not None and _is_encrypted_copy(path, resolved, sc):
                 return opener.open(database, path, resolved, args, kwargs)
         return opener.open(database, path, None, args, kwargs)
@@ -234,6 +252,84 @@ def build_module(
     module.dbapi2 = module  # type: ignore[attr-defined]
     setattr(module, MARKER, True)
     return module
+
+
+def _refuse_registration(*args: Any, **kwargs: Any) -> None:
+    from .._database_contracts import DatabaseRefused
+
+    raise DatabaseRefused("custom SQL adaptation callbacks are unsupported in the guarded runtime")
+
+
+def _native_path(database: Any, *, uri: bool) -> tuple[Path | None, bool]:
+    from .._database_contracts import DatabaseRefused
+
+    text = os.fsdecode(os.fspath(database))
+    readonly = False
+    if text.startswith("file:") or uri:
+        parsed = urlsplit(text)
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+        if (
+            parsed.scheme != "file"
+            or parsed.netloc
+            or parsed.fragment
+            or len(query) > 1
+            or any(k != "mode" or v not in {"ro", "rw", "rwc"} for k, v in query)
+        ):
+            raise DatabaseRefused("unsafe database URI")
+        text = unquote(parsed.path)
+        readonly = query == [("mode", "ro")]
+        if query == [("mode", "rw")] and not Path(text).exists():
+            raise DatabaseRefused("read-write database does not exist")
+    if not text or "\x00" in text:
+        raise DatabaseRefused("temporary or invalid database names are unsupported")
+    path = None if text == ":memory:" else Path(text).absolute()
+    return path, readonly
+
+
+def _native_connect(authority: Authority) -> Callable[..., Any]:
+    from .._database_contracts import DatabaseRefused
+    from ._connection import ProtectedConnection, _open_unprotected, open_protected
+
+    def connect(database: Any, *args: Any, **kwargs: Any) -> Any:
+        authority.check()
+        names = (
+            "timeout",
+            "detect_types",
+            "isolation_level",
+            "check_same_thread",
+            "factory",
+            "cached_statements",
+            "uri",
+        )
+        if len(args) > len(names) or set(kwargs).difference(names):
+            raise DatabaseRefused("unsupported connection options")
+        options = dict(zip(names, args, strict=False))
+        if options.keys() & kwargs.keys():
+            raise TypeError("duplicate connection argument")
+        options.update(kwargs)
+        if options.get("factory", ProtectedConnection) is not ProtectedConnection:
+            raise DatabaseRefused("custom connection factories cannot bypass authority")
+        if options.get("detect_types", 0):
+            raise DatabaseRefused("custom SQL converters are unsupported")
+        path, readonly = _native_path(database, uri=bool(options.get("uri", False)))
+        timeout = float(options.get("timeout", 5.0))
+        # Lexical scope must not be erased by resolving an unsafe symlink.
+        scoped = path is not None and (in_scope(path, authority.root) or lexically_in_scope(path, authority.root))
+        if scoped:
+            assert path is not None
+            conn = open_protected(path, authority=authority, timeout=timeout, readonly=readonly)
+        else:
+            conn = _open_unprotected(path, authority=authority, timeout=timeout, readonly=readonly)
+        try:
+            conn._same_thread = bool(options.get("check_same_thread", True))
+            if "isolation_level" in options:
+                conn.isolation_level = options["isolation_level"]
+            return conn
+        except BaseException:
+            conn.close()
+            raise
+
+    return connect
 
 
 def is_installed() -> bool:

@@ -229,7 +229,7 @@ def test_refused_gate_exits_1_with_the_code_and_writes_nothing(
     assert not (home / "plugin-data").exists()
     assert audits == []
     code, _, err = run(["mail", "status"], capsys)
-    assert code == 1 and "(not_armed)" in err
+    assert code == 0 and err == ""
 
 
 def test_real_gate_refuses_an_unprotected_home(
@@ -289,22 +289,21 @@ def test_stored_own_addresses_merge_and_status_shows_only_the_count(
 
     code, out, err = run(["mail", "status"], capsys)
     assert code == 0, err
-    assert "work: 2 own address(es)" in out
-    assert "messages: 5" in out and "committed=2" in out
+    assert "unknown (passive status" in out
     assert "@" not in out
     code, out, err = run(["mail", "status", "--json"], capsys)
     assert code == 0, err
     status = json.loads(out)
-    assert status["accounts"] == {"work": {"own_addresses": 2}}
-    assert status["mail"]["messages"] == 5
-    assert status["last_run"]["counts"]["duplicates"] == 5
+    assert status["accounts"] is None
+    assert status["mail"] is None
+    assert status["last_run"] is None
     assert "@" not in out
 
 
 def test_status_of_an_empty_store(store: ImportStore, capsys: pytest.CaptureFixture[str]) -> None:
     code, out, err = run(["mail", "status"], capsys)
     assert code == 0, err
-    assert "accounts: none" in out and "runs: none" in out
+    assert "unknown (passive status" in out
 
 
 def test_write_failure_fails_the_run_and_publishes_nothing(

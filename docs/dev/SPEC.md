@@ -59,7 +59,8 @@ compatibility policy.
   See [Linux Private Telegram Design](#linux-private-telegram-design) and
   [Windows dedicated custody and memory lifecycle](#windows-dedicated-custody-and-memory-lifecycle).
 - SQLite database encryption (`state.db` and sibling/profile stores) is
-  macOS-only, enabled separately with `databases encrypt` after memory setup.
+  admitted on macOS, Linux and Windows Server (workstation editions are refused
+  at runtime), enabled separately with `databases encrypt` after memory setup.
   It derives its key from the memory key; `setup` and `encryption enable all`
   do not enable it. JSONL/text logs and existing ZIP backups are not converted.
   Protected homes must be decrypted on macOS before migration to Linux/Windows.
@@ -912,7 +913,7 @@ desktop     install | uninstall | status
 egress      status | set | block | unblock | block-tool | unblock-tool |
             taint
 direct-tools  on | off | status
-databases   status | encrypt | decrypt
+databases   status | diagnose | encrypt | decrypt
 telegram    setup | doctor | login | sync | status | logout | venice |
             local-llm | migrate-tee | migrate-store
 mail        import | status | setup | fetch | forget
@@ -920,6 +921,25 @@ activity    status | use | tools | pair-operator | peers | correct |
             backup | restore | retention
 uninstall
 ```
+
+`databases status` reports configured intent, capability, dependency count (or
+unknown), and authentication **not checked**, without SQL, native authentication,
+or writes. `databases diagnose` explicitly authenticates existing authority and
+exits nonzero on refusal; its result applies only to that invocation. `mail status`
+also remains passive: record, run, account and cursor counts are unknown.
+`databases encrypt` requires root native memory to have been explicitly enabled
+first and uses offline exclusive custody; busy maintenance refuses without
+scheduling. Decryption retains source and backup evidence. Uninstall and native
+key teardown recheck all generations and refuse while database dependencies
+remain, including plaintext files after restoration. External/offline encrypted
+backups may become unrecoverable after an explicit destructive source operation;
+their absence is never proven. Native database storage admission is
+source-controlled: Linux, and Windows Server x64 with the qualified
+sqlcipher3-wheels 0.5.7 driver pair and the distribution-owned checked-VFS DLL,
+are admitted; Windows workstation editions are refused at runtime. Admission is
+not acceptance: native platform acceptance evidence is recorded separately in
+docs/dev/CI.md's manual validation log, and the Windows native acceptance matrix
+is still pending.
 
 `hermes-mordred --version` and the registered Hermes-host compatibility alias
 print the invoked command name and the Mordred package version, then exit successfully.
@@ -3339,15 +3359,21 @@ retained secret store or file vault, and the `<home>\mordred` and
 recursive removal yet. The plan lists exactly that. `--erase-encrypted`
 refuses on Windows, including `--dry-run`.
 
-Database encryption remains macOS-only. Windows `databases status` observes
-only known protection-state names through bounded, nonblocking checked
-storage; it never discovers databases or promises a scheduled conversion.
-Retained encryption/decryption markers, pending work or a conversion journal
-require reconciliation on macOS. Windows uninstall reports that refusal in
-its plan and stops before memory disable, custody purge or any teardown. It
-checks both a profile home and its owning root, and rechecks after confirmation.
-Unknown or unsafe storage refuses instead of reporting absence. This adds no
-Windows SQLCipher migration or decryption support.
+Native database storage admission is source-controlled: Linux, and Windows
+Server x64 with the qualified sqlcipher3-wheels 0.5.7 driver pair and the
+distribution-owned checked-VFS DLL, are admitted; Windows workstation editions
+are refused at runtime. Admission is not acceptance: native platform acceptance
+evidence is recorded separately in docs/dev/CI.md's manual validation log, and
+the Windows native acceptance matrix is still pending. Windows `databases status` uses the passive
+capability API to project intent, bounded dependency facts and reasons without
+SQL, native authentication or writes. Markers and driver presence do not prove
+usable authority, and no conversion is promised for the next startup. Retained
+protection state blocks Windows uninstall before memory disable, custody purge
+or teardown while restoration is unavailable. Checked root/profile relationships
+and all-generation mutation guards apply again at the actual owning boundaries.
+Unknown or unsafe storage never proves absence. This paragraph adds no Windows
+SQLCipher admission or acceptance evidence; the admission and acceptance split
+stated above applies.
 
 Purge ordering on Windows uninstall: purge requires an explicit disable (the
 opt-out marker) and no seal, broken seal or staging entry. With `--purge-data`
@@ -3790,8 +3816,10 @@ the raw retention default is 365 days.
   `activity retention [--dry-run] [--json]` — `--dry-run` reports the counts
   from the read-only `ActivityStore.plan_retention`. Restore while no writer
   is open (stop `hermes-mordred extension serve` and Hermes sessions first):
-  the store takes no exclusive lease, so a concurrent writer may be refused
-  `busy` or observe the restored content before the post-restore reset.
+  restore runs offline under the exclusive lifecycle lease (`acquire_exclusive`)
+  and refuses with `busy` while a runtime holds the shared lease; it never opens
+  the shared runtime store, so a concurrent writer cannot observe the restored
+  content before the post-restore reset.
 - `ActivityStore.apply_retention(now, raw_days)` is one bounded pass: raw
   events older than `retention_raw_days` are deleted, then episodes left
   without events (`retention_raw_days: 0` keeps everything forever). The
@@ -5371,9 +5399,10 @@ in `import_accounts`. Fixtures use RFC 2606 domains only.
   recorded ones and only accumulate (no command removes a stored address yet);
   `mail import --dry-run` never opens the store; `--preview-labels` cannot be
   combined with `--json`; the audit event `mail.import` is written once per real
-  run, with decision `committed` or `failed`, counts only; `mail status` prints
-  row and run counts and the number of recorded own addresses per account
-  label, never the addresses, and exits 1 with the gate code when refused.
+  run, with decision `committed` or `failed`, counts only; `mail status` projects
+  checked metadata and passive database capability without SQL or authentication.
+  Record/run/account counts remain unknown; unavailable capability is reported
+  without turning observation into an authenticated readiness claim.
 
 ### IMAP sync (2026-10-22)
 
@@ -5608,6 +5637,7 @@ CLI:
 hermes-mordred mail setup [--imap-host H] [--imap-port 993] [--account LABEL] [--no-touch-id]
 hermes-mordred mail fetch [--max N] [--mailbox all|inbox|sent] [--since YYYY-MM-DD] [--dry-run] [--json]
 hermes-mordred mail forget [--rows] [--account LABEL] --yes
+hermes-mordred mail forget --yes --force-orphan
 hermes-mordred mail status [--json]
 ```
 
@@ -5639,10 +5669,12 @@ LABEL`); forget never reports success while a sealed or flags file remains
 (`credentials_left`, exit 1), and an Enclave key it could not delete is
 `key_left` (exit 1, also on a retry that finds no credential file left;
 running forget again deletes it).
-`mail status` adds the account label, the path and scope, the last
-attempt (JSON key `last_fetch`) and the last success (`last_success`), and the
-cursor positions, as an explicit projection: every field is type-checked and
-anything else in the flags or the store is dropped. Credentials without their
+`--force-orphan` (requires `--yes`; refused with `--rows`/`--account`) is the explicit repair that retires a native mail key left without sealed credentials, with or without its key record, and removes sealed credentials whose native key the helper reports as definitively absent; it never authenticates a source.
+`mail status` projects only checked account metadata, path and scope. The last
+attempt (JSON key `last_fetch`), last success (`last_success`) and cursor
+positions stay unknown without an authenticated foreground read; status never
+opens the store. Every metadata field is type-checked and unknown fields are
+dropped. Credentials without their
 metadata show as `{"configured": false, "residue": "credentials_left"}`.
 
 Hermes tool `mordred_mail_sync` (toolset `mordred_telegram`, beside
@@ -6165,8 +6197,9 @@ thin driver over it so the two entry points cannot drift. There is ONE contract:
   `initialize()` or upgrades. The status path reads rollback-journal stores at rest
   only: a store whose header says WAL, or with a `-journal`, `-wal` or `-shm` next to
   it (a write transaction in flight, or a crashed writer), reports `store_unavailable`
-  before any connection; `activity restore` refuses a WAL-mode backup
-  (`backup_wal_unsupported`) and `activity backup` writes rollback-mode copies.
+  before any connection; `activity restore` runs offline and refuses an unregistered
+  or unreadable copy (`store_unavailable`) and a missing store (`store_missing`);
+  `activity backup` writes rollback-mode copies.
   Counts still answer while a fetch holds the mail writer lock between batches.
   Tests: an absent file is not created; empty, malformed and valid keys run with a
   provider fake that fails the test if called.
@@ -6503,3 +6536,49 @@ result decides the default `label_language`; until then it stays `en`.
   smoke is 42 privacy calls and 126 Hermes calls; standard is 1068 privacy
   calls at 3 repetitions; full is 2136 privacy calls (two styles) and 6408
   Hermes calls.
+
+## Cross-platform database encryption (proposed, 2026-10-24)
+
+The owner selected Approach A: extend the shared SQLCipher database-encryption
+foundation to Linux and Windows, covering Hermes's root/shared/profile databases
+and the Telegram, mail and activity tables in `mordred.db`. The
+[design](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md)
+records that selected direction and the proposed implementation contracts.
+The user approved the architecture on 2026-10-24; the
+[implementation plan](../superpowers/plans/2026-10-24-cross-platform-database-encryption.md)
+tracks its gated execution.
+Native database storage admission is source-controlled: Linux, and Windows Server
+x64 with the qualified sqlcipher3-wheels 0.5.7 driver pair and the
+distribution-owned checked-VFS DLL, are admitted; Windows workstation editions
+are refused at runtime. Admission is not acceptance: native platform acceptance
+evidence is recorded separately in docs/dev/CI.md's manual validation log, and
+the Windows native acceptance matrix is still pending.
+
+The proposal preserves the macOS database format and root-owned encryption
+domain. Linux TPM and Windows CNG memory-key custody supply the root database
+key without porting `.env` injection or the file vault. Profile memory custody
+remains distinct from the root database-key dependency. SQLCipher is mandatory;
+an unavailable key, driver, checked storage boundary or unresolved conversion
+must refuse rather than create or replace a plaintext database.
+
+Root/profile ownership, authority generation, process-lifetime migration leases,
+checked Windows SQLite I/O, backup/restore, and key disable/reset/purge/uninstall
+ordering are prerequisite contracts. A native Windows filesystem mediation
+feasibility gate must pass before Windows database support is claimed as accepted.
+Telegram migration, mail credential custody and activity peer/storage consumers
+remain separate component changes; a database-only pass is not their acceptance.
+
+The qualification-gated Windows backup destination must have an existing private
+parent directory that neither contains nor is contained by the protected home
+or another live checked root. A separate sibling backup directory is supported;
+a backup file placed directly in the home's parent directory is refused before
+journaling or staging. Native overlap refusal and POSIX backup policy remain
+unchanged. Broader Windows backup layouts need a separately reviewed publication
+design.
+
+Actual AWS Linux/Windows NitroTPM validation is required by the owner; see
+[the proposed acceptance policy](CI.md#cross-platform-database-encryption-acceptance-proposed).
+Windows Server evidence is separate from Windows 11/Desktop acceptance.
+Session JSONL and text logs remain outside SQLCipher coverage. Touch ID prompt
+reduction, portable key recovery and automatic cross-machine transfer are not
+part of this proposal.
