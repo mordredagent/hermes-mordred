@@ -3,10 +3,14 @@
 A genuine exclusive lifecycle lease precedes native source custody and SQL.
 Journal v2 binds the complete inventory, source/staging identities, directory
 parents and schema/count proof. Scoped runtime acquisition refuses pending work.
-Windows uses the owning checked VFS and retained-original publication, behind
-native qualification; file flushes do not claim unqualified directory durability.
-Only explicit tests replace the native authentication seam for historical raw-key
-compatibility. Unknown legacy journals and uncertain survivors remain untouched.
+Sources are checkpointed before their revision is recorded. Each POSIX replace
+swap re-proves that no process holds the files and, for a converted source, that
+no WAL commit arrived after its export.
+Windows uses the owning checked VFS and retained-original publication. Windows
+admission is source-controlled; workstation editions are refused; see
+docs/dev/CI.md for native acceptance. Only explicit tests replace the native
+authentication seam for historical raw-key compatibility. Unknown legacy
+journals and uncertain survivors remain untouched.
 """
 
 from __future__ import annotations
@@ -388,6 +392,40 @@ def _swap(path: Path, prepared: Path) -> None:
     _cleanup_sidecars(path)
 
 
+def _refuse_committed_wal(path: Path, relative: str) -> None:
+    """Refuse while ``path``'s WAL holds frames that are not in its main file.
+
+    Only an empty (or absent) WAL lets the main file's revision stand for the
+    whole database, and lets a swap discard the sidecars without losing commits.
+    """
+    try:
+        size = Path(f"{path}-wal").lstat().st_size
+    except FileNotFoundError:
+        return
+    if size:
+        raise MigrationError(
+            f"{relative} has WAL commits that are not in its main file (another process wrote without "
+            "the database lease); originals retained"
+        )
+
+
+def _checkpoint_source(database: Database, key: DatabaseKey | None) -> None:
+    """Fold committed WAL frames into ``database``'s main file before its revision is recorded.
+
+    ``prepare``/``prepare_plain`` checkpoint (TRUNCATE) again. After this
+    their checkpoint copies nothing, so the main file's size/mtime/ctime stay
+    as the journal records them and a failed export remains resumable. Closing
+    the read-write connection also removes the emptied ``-wal``/``-shm``.
+    """
+    with _offline_connection(database.path) as conn:
+        if key is not None:
+            apply_key(conn, key)
+        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    if row is None or row[0] != 0:  # busy: another connection still uses the WAL
+        raise MigrationError(f"{database.relative} could not be checkpointed; stop every process using it first")
+    _refuse_committed_wal(database.path, database.relative)
+
+
 # -- the whole home ---------------------------------------------------------------------
 
 
@@ -419,7 +457,8 @@ def _transition(phase: str) -> None:
 def _sync_directory(path: Path) -> None:
     if os.name == "nt":
         # Full checked NTFS directory barrier under the accepted local-flush
-        # mapping; production still requires native qualification.
+        # mapping. Windows admission is source-controlled; workstation editions
+        # are refused; see docs/dev/CI.md for native acceptance.
         from ._maintenance_windows import require_qualified
 
         require_qualified()
@@ -736,6 +775,8 @@ def _validate_journal(root: Path, data: Any, snapshot: NativeSnapshot | None, le
             "complete",
         }:
             raise MigrationError("invalid journal file phase")
+        if type(entry.get("wal_checkpointed", False)) is not bool:
+            raise MigrationError("invalid journal WAL proof")
         path = _bound_path(root, entry.get("relative"))
         if str(path) in seen:
             raise MigrationError("duplicate journal database")
@@ -802,6 +843,10 @@ def _complete_preparation(root: Path, data: dict[str, Any], key: DatabaseKey, de
                 raise MigrationError("reserved staged file is not a verified target")
             _fsync_file(staged)
             entry["source_revision"] = _revision(path)
+            # prepare() truncated the source's WAL. From here on WAL content is a
+            # commit the staged copy lacks, which the swap must not discard.
+            # Restore entries (_backup) never pass here: they replace by design.
+            entry["wal_checkpointed"] = True
             entry["phase"] = "verified"
             _save_journal(root, data, "verified")
 
@@ -882,9 +927,18 @@ def _retire_originals(root: Path, data: dict[str, Any], target_key: DatabaseKey 
     _transition("retired")
 
 
-def _replace_swap(root: Path, entry: dict[str, Any]) -> None:
+def _replace_swap(
+    root: Path, entry: dict[str, Any], holders_of: Callable[[list[Path]], list[int] | None] | None
+) -> None:
     path, staged = _bound_path(root, entry["relative"]), root / entry["prepared"]
     if staged.exists():
+        # _swap unlinks the original's -wal/-shm. The earlier holder checks do
+        # not cover a writer that started without the lease, so re-prove both
+        # here, slowest first: a holder scan, then the stat-only WAL and
+        # revision proofs, which also catch a commit that landed during the scan.
+        _refuse_if_open([Database(path, entry["relative"], ""), Database(staged, entry["prepared"], "")], holders_of)
+        if entry.get("wal_checkpointed") is True:
+            _refuse_committed_wal(path, entry["relative"])
         if (
             _file_identity(path) != entry["source_identity"]
             or _revision(path) != entry["source_revision"]
@@ -903,6 +957,8 @@ def _finish(
     lease: ExclusiveLease,
     arm: Callable[[Path], None] | None,
     disarm: Callable[[Path], None] | None,
+    *,
+    holders_of: Callable[[list[Path]], list[int] | None] | None = None,
 ) -> None:
     _check_inventory_binding(root, data)
     decrypting = data["direction"] == "decrypt"
@@ -928,7 +984,7 @@ def _finish(
         if data["publication"] == "retained":
             _retained_swap(root, data, entry)
         else:
-            _replace_swap(root, entry)
+            _replace_swap(root, entry, holders_of)
         entry["phase"] = "swapped"
         _save_journal(root, data, "swapped")
     for entry in files:
@@ -942,7 +998,11 @@ def _finish(
 
 
 def resume(
-    home: Path, *, disarm: Callable[[Path], None] | None = None, arm: Callable[[Path], None] | None = None
+    home: Path,
+    *,
+    disarm: Callable[[Path], None] | None = None,
+    arm: Callable[[Path], None] | None = None,
+    holders_of: Callable[[list[Path]], list[int] | None] | None = None,
 ) -> bool:
     """Recover only authenticated root/identity-bound journals under EX."""
     if not journal_path(home).exists():
@@ -967,11 +1027,11 @@ def resume(
             for name in ("relative", "prepared", "retained")
             if (home / entry[name]).exists()
         ]
-        _refuse_if_open(paths, None)
+        _refuse_if_open(paths, holders_of)
         if data["direction"] == "adopt":
             _finish_adoption(home, data, snapshot, key, lease)
         else:
-            _finish(home, data, key, snapshot, lease, arm, disarm)
+            _finish(home, data, key, snapshot, lease, arm, disarm, holders_of=holders_of)
     return True
 
 
@@ -989,7 +1049,7 @@ def _convert(
     with migration_lock(home) as lease:
         snapshot, authenticated = _authenticate(home, key, lease)
         if journal_path(home).exists():
-            resume(home, arm=arm, disarm=disarm)
+            resume(home, arm=arm, disarm=disarm, holders_of=holders_of)
         if snapshot is not None and isinstance(read_marker(home), LegacyMarker):
             raise MigrationError("legacy encryption must be adopted before conversion")
         _inventory(home)
@@ -1002,6 +1062,12 @@ def _convert(
             raise MigrationError("unreadable database(s); originals retained: " + ", ".join(report.unreadable))
         _refuse_if_open(databases, holders_of)
         todo = [d for d in databases if d.state == ("encrypted" if decrypting else "plaintext")]
+        # prepare() checkpoints its source, which rewrites the main file. Do it
+        # now, before any journal exists, so the recorded revision is the one a
+        # failed export leaves behind and resume() can still match it. A crash
+        # here leaves only SQLite's own recoverable WAL state and no journal.
+        for database in todo:
+            _checkpoint_source(database, authenticated if decrypting else None)
         data: dict[str, Any] = {
             "version": 2,
             "root": asdict(lease.root),
@@ -1026,7 +1092,7 @@ def _convert(
                 }
             )
         _save_journal(home, data, "prepared")
-        _finish(home, data, authenticated, snapshot, lease, arm, disarm)
+        _finish(home, data, authenticated, snapshot, lease, arm, disarm, holders_of=holders_of)
         report.converted = [d.relative for d in todo]
     return report
 
