@@ -704,6 +704,18 @@ class ActivityStore:
         return RetentionReport(events, episodes, complete=events < limit and episodes < limit)
 
 
+def require_store_file(destination: Path) -> None:
+    """Maintenance never creates a database: a missing store is its own refusal, not ``store_unavailable``."""
+    if not destination.is_file():
+        raise ActivityRefused(
+            Refusal(
+                "store_missing",
+                "no activity store exists for this home; start Hermes once so a fresh store is created, "
+                "stop it, then restore",
+            )
+        )
+
+
 def restore_activity_store(source: Path, *, home: Path, lease: ExclusiveLease) -> StoreMeta:
     """Offline component restore under the caller's actual EX lease.
 
@@ -717,6 +729,7 @@ def restore_activity_store(source: Path, *, home: Path, lease: ExclusiveLease) -
 
     home = Path(os.path.realpath(home))  # stores bind the canonical spelling
     destination = checked_store_destination(home / "plugin-data/mordred/mordred.db", home=home)
+    require_store_file(destination)
     published = False
     try:
         with _refusing(), maintenance_scope(home, lease=lease) as scope:

@@ -55,8 +55,20 @@ def _display(value: object, limit: int = 300) -> str:
     return text if text.isprintable() else text.encode("unicode_escape").decode("ascii")
 
 
-def _refused(code: object) -> int:
+_HINTS = {
+    "busy": "stop Hermes first (a runtime holds the database lease)",
+    "store_missing": "start Hermes once so a fresh store is created, stop it, then restore",
+}
+_UNAVAILABLE_RESTORE_HINT = (
+    "the backup must be a readable registered copy; if the current store is corrupt, move it aside, start Hermes "
+    "once to create a fresh store, stop it, then restore"
+)
+
+
+def _refused(code: object, *, hint: str | None = None) -> int:
     _term.emit_error(f"refused ({_display(code if isinstance(code, str) else 'store_unavailable', 64)})")
+    if hint:
+        _term.emit_error(hint)
     return 1
 
 
@@ -69,15 +81,19 @@ def _refusal_code(exc: BaseException) -> str:
     return "busy" if isinstance(exc, DatabaseBusy) else "store_unavailable"
 
 
-def _catching(run_body: Callable[[argparse.Namespace], int]) -> Callable[[argparse.Namespace], int]:
+def _catching(
+    run_body: Callable[[argparse.Namespace], int], *, unavailable_hint: str | None = None
+) -> Callable[[argparse.Namespace], int]:
     def run(args: argparse.Namespace) -> int:
         from .._database_contracts import DatabaseRefused
+        from .._private_fs import PrivateFSError
         from ..activity._gate import ActivityRefused
 
         try:
             return run_body(args)
-        except (ActivityRefused, DatabaseRefused) as exc:  # DatabaseBusy is a DatabaseRefused
-            return _refused(_refusal_code(exc))
+        except (ActivityRefused, DatabaseRefused, PrivateFSError, OSError) as exc:  # DatabaseBusy is a DatabaseRefused
+            code = _refusal_code(exc)
+            return _refused(code, hint=_HINTS.get(code) or (unavailable_hint if code == "store_unavailable" else None))
 
     return run
 
@@ -122,16 +138,19 @@ def _backup_status(src: Path, home: Path, lease: Any) -> StoreStatus:
     """The backup's status through the retained maintenance scope; refuses a missing or foreign copy."""
     from ..activity import _schema
     from ..activity._gate import ActivityRefused, refusal
-    from ..activity.store import ActivityStore, StoreStatus
+    from ..activity.store import ActivityStore, StoreStatus, require_store_file
     from ..dbcrypt._maintenance import maintenance_scope
     from ..imports._protected_destination import checked_store_destination
 
     if not src.is_file():  # never let the opener create an empty database at ``src``
         raise ActivityRefused(refusal("store_unavailable"))
     destination = checked_store_destination(home / "plugin-data/mordred/mordred.db", home=home)
+    require_store_file(destination)
     with maintenance_scope(home, lease=lease) as scope:
         with scope.connection(destination, readonly=True) as current:
             target = ActivityStore._checked_meta(ActivityStore._read_meta(current))
+            if target.profile_home != str(home):
+                raise ActivityRefused(refusal("profile_mismatch"))
         with scope.connection(src, readonly=True) as backup:
             meta = ActivityStore._checked_meta(ActivityStore._read_meta(backup))
             if meta.profile_home != target.profile_home:
@@ -209,7 +228,7 @@ def _retention(args: argparse.Namespace, store: ActivityStore, config: ActivityC
 
 _HANDLERS: Mapping[str, Callable[[argparse.Namespace], int]] = {
     "backup": _guarded(_backup),
-    "restore": _catching(_restore),
+    "restore": _catching(_restore, unavailable_hint=_UNAVAILABLE_RESTORE_HINT),
     "retention": _guarded(_retention),
 }
 COMMANDS = frozenset(_HANDLERS)

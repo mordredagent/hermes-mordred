@@ -6197,8 +6197,9 @@ thin driver over it so the two entry points cannot drift. There is ONE contract:
   `initialize()` or upgrades. The status path reads rollback-journal stores at rest
   only: a store whose header says WAL, or with a `-journal`, `-wal` or `-shm` next to
   it (a write transaction in flight, or a crashed writer), reports `store_unavailable`
-  before any connection; `activity restore` refuses a WAL-mode backup
-  (`backup_wal_unsupported`) and `activity backup` writes rollback-mode copies.
+  before any connection; `activity restore` runs offline and refuses an unregistered
+  or unreadable copy (`store_unavailable`) and a missing store (`store_missing`);
+  `activity backup` writes rollback-mode copies.
   Counts still answer while a fetch holds the mail writer lock between batches.
   Tests: an absent file is not created; empty, malformed and valid keys run with a
   provider fake that fails the test if called.

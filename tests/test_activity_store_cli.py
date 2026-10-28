@@ -259,3 +259,79 @@ def test_real_restore_of_a_missing_file_is_refused_without_creating_it(protected
         assert not missing.exists()
 
     assert _count_events(home, protected_runtime) == before == 2
+
+
+def _store_path(home: Path) -> Path:
+    return home / "plugin-data/mordred/mordred.db"
+
+
+def test_real_restore_of_a_deleted_store_reports_store_missing(protected_runtime, monkeypatch, capsys) -> None:
+    _, home, backup = _protected_restore_setup(protected_runtime, monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        Path(str(_store_path(home)) + suffix).unlink(missing_ok=True)
+    capsys.readouterr()
+
+    for extra in ([], ["--yes"]):
+        assert cli.main(["activity", "restore", "--input", str(backup), *extra]) == 1
+        err = capsys.readouterr().err
+        assert "refused (store_missing)" in err
+        assert "start Hermes once" in err
+        assert not _store_path(home).exists()
+
+
+def test_real_restore_refuses_busy_while_a_runtime_lease_is_live(protected_runtime, monkeypatch, capsys) -> None:
+    from mordred_hermes._database_lifecycle import acquire_runtime
+    from mordred_hermes.keyvault._database_authority import resolve_database_domain
+
+    _, home, backup = _protected_restore_setup(protected_runtime, monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    capsys.readouterr()
+
+    with acquire_runtime(resolve_database_domain(home).root):
+        for extra in ([], ["--yes"]):
+            assert cli.main(["activity", "restore", "--input", str(backup), *extra]) == 1
+            err = capsys.readouterr().err
+            assert "refused (busy)" in err
+            assert "stop Hermes first" in err
+    assert _count_events(home, protected_runtime) == 2
+
+
+def test_real_restore_preview_refuses_a_store_bound_to_another_home(protected_runtime, monkeypatch, capsys) -> None:
+    from mordred_hermes.activity._gate import open_store
+    from mordred_hermes.dbcrypt import _migrate
+
+    root, provider, _ = protected_runtime
+    live = open_store(root)
+    backup = root.parent / (root.name + "-snap.backup")
+    live.backup(backup)
+    with live.connection() as conn:
+        conn.execute("UPDATE activity_meta SET value = ? WHERE key = 'profile_home'", (str(root / "moved-away"),))
+    provider.close()
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    capsys.readouterr()
+
+    for extra in ([], ["--yes"]):
+        assert cli.main(["activity", "restore", "--input", str(backup), *extra]) == 1
+        assert "refused (profile_mismatch)" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_real_restore_of_an_unregistered_copy_is_refused(protected_runtime, monkeypatch, capsys, confirmed) -> None:
+    """A WAL-mode keyed backup cannot be produced (the live store refuses to back up in WAL mode, and the
+    maintenance scope opens backups read-only), so the closest reachable case is a byte copy that was never
+    registered as a backup; it is refused as ``store_unavailable`` and nothing changes."""
+    import shutil
+
+    _, home, backup = _protected_restore_setup(protected_runtime, monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    copy = backup.with_name(backup.name + ".copy")
+    shutil.copyfile(backup, copy)
+    before = _count_events(home, protected_runtime)
+    capsys.readouterr()
+
+    assert cli.main(["activity", "restore", "--input", str(copy), *(["--yes"] if confirmed else [])]) == 1
+
+    assert "refused (store_unavailable)" in capsys.readouterr().err
+    assert _count_events(home, protected_runtime) == before == 2
