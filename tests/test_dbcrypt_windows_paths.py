@@ -80,6 +80,7 @@ def test_unqualified_registration_cannot_enable_runtime_support(tmp_path: Path, 
     library = tmp_path / "unchecked.dll"
     library.write_bytes(b"inert fixture; never loaded")
     monkeypatch.setenv("MORDRED_DBCRYPT_CHECKED_LIBRARY", str(library))
+    monkeypatch.setattr(module, "windows_edition_admitted", lambda: True)  # the driver check is under test
     monkeypatch.setattr(module, "driver_distribution_qualified", lambda: False)
 
     def forbidden(*args, **kwargs):
@@ -105,6 +106,7 @@ def test_other_platform_registration_does_not_bootstrap(monkeypatch: pytest.Monk
 def test_non_cipher_driver_refuses_before_loading_native(monkeypatch: pytest.MonkeyPatch) -> None:
     module = implementation()
     monkeypatch.setattr(module.sys, "platform", "win32")
+    monkeypatch.setattr(module, "windows_edition_admitted", lambda: True)  # the driver check is under test
 
     def unexpected() -> None:
         pytest.fail("must not pin a non-SQLCipher driver's API table")
