@@ -17,7 +17,7 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
-from typing import BinaryIO
+from typing import IO, Any, BinaryIO
 
 from ..activity._gate import ActivityRefused, refusal
 
@@ -112,7 +112,7 @@ def _posix_source(path: Path) -> bytes:
     return result.stdout
 
 
-def _windows_source(path: Path) -> bytes:
+def _windows_source(path: Path, *, limit: int | None = _MAX_SOURCE) -> bytes:
     from .._private_fs._windows_paths import checked_directory_optional, windows_leaf
     from .._private_fs._windows_security import validate_confidential_file
 
@@ -128,7 +128,7 @@ def _windows_source(path: Path) -> bytes:
         with api.open(bound, share=1) as source:
             validate_confidential_file(source)
             before = api.metadata(source)
-            if before.size > _MAX_SOURCE or api.final_path(source).casefold() != bound.casefold():
+            if (limit is not None and before.size > limit) or api.final_path(source).casefold() != bound.casefold():
                 raise ActivityRefused(refusal("store_unavailable"))
             data = api.read(source, before.size + 1)
             validate_confidential_file(source)
@@ -159,3 +159,100 @@ def checked_import_source(path: Path, *, home: Path) -> Iterator[BinaryIO]:
         raise ActivityRefused(refusal("store_unavailable")) from None
     with io.BytesIO(data) as source:
         yield source
+
+
+class _CountingReader(io.RawIOBase):
+    """Counts bytes pulled from the worker pipe so the exit check can compare with st_size."""
+
+    def __init__(self, raw: IO[bytes]) -> None:
+        super().__init__()
+        self._raw = raw
+        self.count = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        got = self._raw.readinto(buffer) or 0  # type: ignore[attr-defined]
+        self.count += got
+        return got
+
+
+def _refused() -> ActivityRefused:
+    return ActivityRefused(refusal("store_unavailable"))
+
+
+def _export_request(resolved: Path, before: os.stat_result) -> tuple[list[str], bytes]:
+    executable = Path(sys.executable)
+    if not executable.is_absolute():
+        raise _refused()
+    request = json.dumps({"path": str(resolved), "file": _file_fact(before), "stream": True}).encode("utf-8")
+    worker = Path(__file__).resolve().with_name("_posix_source.py")
+    return [str(executable), "-I", "-S", str(worker)], request
+
+
+@contextlib.contextmanager
+def _posix_export_stream(resolved: Path) -> Iterator[BinaryIO]:
+    # Metadata only in this PID; the isolated worker is the sole opener.
+    before = resolved.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_uid != os.getuid():
+        raise _refused()
+    argv, request = _export_request(resolved, before)
+    try:
+        proc = subprocess.Popen(
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env={}, close_fds=True
+        )
+    except OSError:
+        raise _refused() from None
+    assert proc.stdin is not None and proc.stdout is not None
+    try:
+        try:
+            proc.stdin.write(request)
+        finally:
+            proc.stdin.close()
+        counter = _CountingReader(proc.stdout)
+        stream = io.BufferedReader(counter, buffer_size=1024 * 1024)
+        # A refused worker exits before emitting anything: fail before the caller sees data.
+        if before.st_size > 0 and not stream.peek(1):
+            proc.wait()
+            raise _refused()
+        yield stream
+        while stream.read(1024 * 1024):  # verify against the whole file even if the caller stopped early
+            pass
+        if proc.wait() != 0 or counter.count != before.st_size or _file_fact(resolved.lstat()) != _file_fact(before):
+            raise _refused()
+    except BaseException:
+        with contextlib.suppress(OSError):
+            proc.kill()
+        raise
+    finally:
+        proc.stdout.close()
+        proc.wait()
+
+
+@contextlib.contextmanager
+def checked_export_stream(path: Path) -> Iterator[BinaryIO]:
+    """Yield a streaming, verified view of a mail export; the worker child is the only opener.
+
+    Symlinked parents are resolved; the leaf must be a regular, single-link file owned by
+    the caller. There is no size, suffix or mode-bit limit. Database-named files and
+    anything inside Hermes's own database scope are refused. The caller must consume the
+    stream inside the ``with`` block; completeness is verified at exit.
+    """
+    from .._home import hermes_home
+    from ..dbcrypt._policy import in_scope, looks_like_database_name
+
+    if not path.is_absolute():
+        raise _refused()
+    resolved = Path(os.path.realpath(path.parent)) / path.name
+    if looks_like_database_name(resolved.name) or in_scope(resolved, hermes_home()):
+        raise _refused()
+    try:
+        if os.name == "nt":
+            with io.BytesIO(_windows_source(resolved, limit=None)) as source:
+                yield source
+            return
+        with _posix_export_stream(resolved) as stream:
+            yield stream
+    except OSError:
+        raise _refused() from None

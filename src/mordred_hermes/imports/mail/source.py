@@ -8,9 +8,11 @@ Security contract:
 - Only regular files are read: the path is checked with :func:`os.lstat` before
   opening (a symlink, FIFO, socket or device is refused) and the opened
   descriptor is checked again with :func:`os.fstat`.
-- The mbox is streamed line by line; a message larger than
+- The source is streamed in chunks through an isolated reader process (the only
+  opener); there is no size or suffix limit and no temporary file. The mbox is
+  split line by line; a message larger than
   :data:`MAX_MESSAGE_BYTES` is dropped while reading and counted as
-  ``skipped_oversize``. No temporary files are written.
+  ``skipped_oversize``.
 - Errors carry content-free codes only.
 - :class:`TrustedBytes` carries messages fetched by the IMAP collector
   (:mod:`.imap_sync`) together with :class:`TrustedMeta`: the server's labels,
@@ -148,9 +150,8 @@ MailSource = MboxSource | EmlSource | MboxBytes | EmlBytes | TrustedBytes
 
 @contextlib.contextmanager
 def _open_regular(path: Path) -> Iterator[IO[bytes]]:
-    from ..._home import hermes_home
     from ...activity._gate import ActivityRefused
-    from .._protected_destination import checked_import_source
+    from .._protected_destination import checked_export_stream
 
     try:
         before = os.lstat(path)
@@ -161,9 +162,9 @@ def _open_regular(path: Path) -> Iterator[IO[bytes]]:
     if not stat.S_ISREG(before.st_mode):
         raise SourceError("not_regular_file")
     try:
-        # The returned memory snapshot is the checked handle's content. Never
-        # reopen the path after admission, including a protected DB alias.
-        with checked_import_source(path.absolute(), home=hermes_home()) as handle:
+        # The isolated reader process is the only opener; this PID never opens
+        # the path, so a protected DB alias cannot lose its locks.
+        with checked_export_stream(path.absolute()) as handle:
             yield handle
     except (ActivityRefused, OSError):
         raise SourceError("read_error") from None
