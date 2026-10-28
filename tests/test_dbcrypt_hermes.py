@@ -43,6 +43,8 @@ def test_real_sessiondb_fts_japanese(native_root, monkeypatch, profile):
                     db.create_session("japanese-test", source="cli")
                     message_id = db.append_message("japanese-test", "user", "今日は東京で日本語を勉強します")
                 assert db.get_messages("japanese-test")[0]["content"] == "今日は東京で日本語を勉強します"
+                if not hasattr(db, "_fts_enabled"):
+                    pytest.skip("the installed Hermes SessionDB predates FTS/trigram message search")
                 assert db._fts_enabled and db._trigram_available
                 hits = db.search_messages("日本語")
                 assert len(hits) == 1

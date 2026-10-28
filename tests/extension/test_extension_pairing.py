@@ -71,7 +71,8 @@ def test_full_pairing_handshake():
 
 
 def test_attestation_key_creation_is_serialized_and_stable(monkeypatch):
-    real_generate = pairing.ec.generate_private_key
+    real_ec = pairing.ec
+    real_generate = real_ec.generate_private_key
     entered_generate = threading.Event()
     release_generate = threading.Event()
     generated = 0
@@ -91,7 +92,19 @@ def test_attestation_key_creation_is_serialized_and_stable(monkeypatch):
         except BaseException as exc:  # pragma: no cover - asserted below
             failures.append(exc)
 
-    monkeypatch.setattr(pairing.ec, "generate_private_key", delayed_generate)
+    class _PatchedEc:
+        # cryptography exposes ``ec`` through a deprecation proxy whose
+        # ``__delattr__`` reaches the real module. Patching the proxy itself
+        # makes pytest >= 9.2 undo with ``delattr`` (the name is not in the
+        # proxy's ``__dict__``), which strips ``generate_private_key`` from
+        # cryptography for the rest of the session. Swap the module reference
+        # that ``pairing`` resolves at call time instead.
+        generate_private_key = staticmethod(delayed_generate)
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(real_ec, name)
+
+    monkeypatch.setattr(pairing, "ec", _PatchedEc())
     first = threading.Thread(target=load_public_key)
     second = threading.Thread(target=load_public_key)
     first.start()

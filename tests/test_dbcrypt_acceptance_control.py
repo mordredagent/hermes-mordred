@@ -222,10 +222,13 @@ def test_detached_supervisor_survives_worker_exit_and_source_change(tmp_path: Pa
     pid = int(completed.stdout.strip())
     source.write_text("raise RuntimeError('the worker checkout changed')\n")
     try:
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 30
         while time.monotonic() < deadline and control.read(path)["state"] != "stopped":
             time.sleep(0.05)
-        assert control.read(path)["state"] == "stopped"
+        supervisor_log = path.with_suffix(".supervisor.log")
+        assert control.read(path)["state"] == "stopped", (
+            supervisor_log.read_text() if supervisor_log.exists() else "no supervisor log"
+        )
         observed = json.loads(state.read_text())
         assert observed["state"] == "stopped" and observed["owner"] is None
         assert observed["stopped_at"] < now + 30

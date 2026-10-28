@@ -957,6 +957,8 @@ class TestDatabaseUninstall:
             from mordred_hermes.keyvault import _database_authority as custody
 
             monkeypatch.setattr(custody, "_load_posix", lambda *a: key)
+            # The Linux record is a TPM-wrapped header this vault fixture never writes.
+            monkeypatch.setattr(custody, "_posix_record", lambda root, identity: ("secure-enclave", "0" * 64))
             with acquire_exclusive(installed.home) as lease:
                 custody.enroll_database_source(root=installed.home, lease=lease)
                 _migrate.migrate(installed.home, _key.derive(key), arm=dbcrypt.arm)

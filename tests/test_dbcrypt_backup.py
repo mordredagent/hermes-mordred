@@ -91,9 +91,10 @@ def test_backup_roundtrip_and_dependency(native_root, monkeypatch):
 
 
 def test_backup_publish_crash_retains_dependency(native_root, monkeypatch):
-    from mordred_hermes.dbcrypt import _backup
+    from mordred_hermes.dbcrypt import _backup, _migrate
 
     root, backend, key, snapshot = native_root
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
     cipher(root / "state.db", key)
     destination = root.parent / (root.name + "-backup.db")
 

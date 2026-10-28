@@ -349,6 +349,7 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
 - [ ] The restore preview in `wizard/activity_store_cli.py` duplicates the preflight of `restore_activity_store`; share one helper (`src/mordred_hermes/wizard/activity_store_cli.py`).
 - [ ] `ActivityStore.restore` has no production caller since restore went offline; remove it and its tests or document why it stays (`src/mordred_hermes/activity/store.py`).
 - [ ] `activity restore` cannot recreate a deleted store; it now refuses with `store_missing` and guidance; decide whether an offline creation path is wanted (`src/mordred_hermes/activity/store.py`).
+- [ ] `linux_holders_of` returns "unknown" as soon as one same-UID process refuses `/proc/<pid>/fd` (non-dumpable processes such as sandboxed browsers or agents); on the GitHub Ubuntu runner every unstubbed maintenance path refused with "could not check database holders". Decide whether such processes stay "uncertain" (current, refuses maintenance on many desktops) or are reported by PID so the operator can stop them (`src/mordred_hermes/_database_locking_posix.py`).
 
 ### Linux private Telegram (proposed)
 

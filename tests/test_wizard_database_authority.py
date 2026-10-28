@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import pytest
@@ -435,6 +436,9 @@ def test_profiles_and_option_values_are_parsed_before_maintenance_admission(argv
 def test_only_actual_command_boundaries_admit_maintenance(argv, monkeypatch):
     from mordred_hermes.dbcrypt._cli import maintenance_process
 
+    # An earlier test may have imported the Hermes bootstrap; this process is
+    # not a Hermes command boundary.
+    monkeypatch.delitem(sys.modules, "hermes_bootstrap", raising=False)
     monkeypatch.setattr("sys.argv", argv)
     assert not maintenance_process()
 

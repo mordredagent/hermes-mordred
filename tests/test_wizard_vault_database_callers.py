@@ -2,6 +2,8 @@
 
 # ruff: noqa: F811 - imported pytest fixtures are resolved by parameter name
 
+import sys
+
 import pytest
 
 from mordred_hermes._database_contracts import DatabaseRefused
@@ -95,6 +97,9 @@ def test_native_teardown_reuses_authenticated_handle(source):
     assert any(c[0] == "delete" for c in store.calls)
 
 
+@pytest.mark.skipif(
+    sys.platform == "linux", reason="Linux purge follows the TPM memory-key route (tests/test_wizard_linux_memory.py)"
+)
 def test_memory_purge_authenticates_once_before_source_change(source):
     from mordred_hermes.wizard import memory_cli
 

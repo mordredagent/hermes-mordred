@@ -310,6 +310,7 @@ def test_encrypt_with_another_key_does_not_claim_everything_is_encrypted(
 ) -> None:
     from mordred_hermes.wizard import databases_cli
 
+    monkeypatch.setattr(_migrate, "holders", _no_holders)
     _migrate.migrate(home, KEY, arm=dbcrypt.arm, holders_of=_no_holders)
     wrong = _key.derive(bytes(32))
     monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
