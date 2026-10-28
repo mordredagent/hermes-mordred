@@ -231,7 +231,7 @@ nonzero. Windows skips excluded env/config targets and uses CNG memory.
 an `all` batch. Production file-vault operations refuse unsupported default
 stores before enrollment. Linux memory does not use that store.
 `all` does not include SQLite databases; use
-[`databases encrypt`](#databases--encrypt-hermess-sqlite-databases-macos) separately on macOS.
+[`databases encrypt`](#databases--encrypt-hermess-sqlite-databases-macos) separately on an admitted platform (macOS, Linux, Windows Server).
 ```sh
 hermes-mordred encryption status                        # all targets (non-prompting)
 hermes-mordred encryption enable  TARGET                # TARGET: env, config, memory, workspace, or all
@@ -1097,6 +1097,7 @@ hermes-mordred mail fetch [--max N] [--mailbox all|inbox|sent] [--since YYYY-MM-
 hermes-mordred mail status                              # adds the account label, last fetch and cursors
 hermes-mordred mail forget --yes                        # delete the sealed credentials and the cursors
 hermes-mordred mail forget --rows --yes                 # ... and the account's imported mail
+hermes-mordred mail forget --yes --force-orphan         # repair: retire a native mail key left without sealed credentials (mail_orphan_key)
 ```
 
 0. **From Hermes Desktop (optional).** The Mordred page's mail step does steps
@@ -1149,6 +1150,8 @@ crash left credentials without their metadata: run `mail forget --yes`),
 `mail setup` refuses with `mail_already_configured` while credentials (or what
 an interrupted setup left of them) exist: it never replaces them, so remove
 them first with `hermes-mordred mail forget --yes`.
+
+If `mail setup` or `mail forget` refuses with `mail_orphan_key` (a native key was left without sealed credentials, for example by a refused login), run `hermes-mordred mail forget --yes --force-orphan` once, then set up again; it refuses `--rows`/`--account`, which follow separately.
 
 `mail setup`, `mail fetch` and the Desktop page also say why a login was
 refused: the hint follows the code, as in `mail refused (imap_auth_failed:

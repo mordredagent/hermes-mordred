@@ -277,7 +277,7 @@ The macOS CLI, startup protection, monitor and uninstall lifecycle are implement
 
 #### Follow-ups from the 2026-10-28 PR #270 review
 
-MEDIUM and LOW findings deliberately left unfixed in PR #270; track them here.
+MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred parts of HIGH #4, #7 and #11; track them here.
 
 - [ ] Staging WAL sidecars: `mode=ro` verification leaves `*.mordred-enc-wal`/`-shm` behind,
   and later operations refuse them as unknown sidecars (`src/mordred_hermes/dbcrypt/_migrate.py`).
@@ -340,6 +340,15 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270; track them here.
   a fresh read after the unwrap or document freshness as of the pre-unwrap read (`src/mordred_hermes/keyvault/vault.py`).
 - [ ] Windows mail exports are read whole into memory with no size cap and still require a confidential parent
   directory; stream from the validated handle or restore a generous cap (`src/mordred_hermes/imports/_protected_destination.py`).
+- [ ] `mail forget --force-orphan` keyless-source repair only fires on an exact `WrapKeyNotFound`; a home moved to another Mac/TPM carries a blob the helper cannot use and reports a different error, so that case still dead-ends in `tee_unavailable`; decide what counts as "unusable on this device" (`src/mordred_hermes/keyvault/_mail_custody.py`).
+- [ ] `--force-orphan` trusts the ambient `MORDRED_SEKEY_STORE` override when deciding a key is absent; pin the helper store for the repair (`src/mordred_hermes/keyvault/_mail_custody.py`).
+- [ ] `_reap()` runs only at `_open`; an abandoned mid-transaction facade keeps RESERVED until the next admission; consider reaping at `_operation` entry when `_ABANDONED` is non-empty (`src/mordred_hermes/dbcrypt/_connection.py`).
+- [ ] The Windows lease entry point checks only the constant `WINDOWS_LEASE_QUALIFIED`, not the edition gate, so unqualified editions still take the LockFileEx lease (availability only) (`src/mordred_hermes/_database_lifecycle.py`).
+- [ ] Desktop Remove shows `tee_unavailable` for a sealed source whose key is gone and gives no route to the terminal repair (`src/mordred_hermes/desktop/_projections.py`).
+- [ ] `test_desktop_status_v4.py` forces `_driver_present -> False` and `test_history_search_tool.py` stubs `_gate.runtime_authority`; add companion tests that keep the original intent (`tests/extension/`).
+- [ ] The restore preview in `wizard/activity_store_cli.py` duplicates the preflight of `restore_activity_store`; share one helper (`src/mordred_hermes/wizard/activity_store_cli.py`).
+- [ ] `ActivityStore.restore` has no production caller since restore went offline; remove it and its tests or document why it stays (`src/mordred_hermes/activity/store.py`).
+- [ ] `activity restore` cannot recreate a deleted store; it now refuses with `store_missing` and guidance; decide whether an offline creation path is wanted (`src/mordred_hermes/activity/store.py`).
 
 ### Linux private Telegram (proposed)
 

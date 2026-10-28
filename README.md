@@ -56,9 +56,11 @@ settings sections in `config.yaml` keep their names.
   `encryption enable all`, and standalone commands; Private Telegram has its
   dedicated flow. Linux setup/all skip env/config file-vault enrollment. Windows
   support is reported per capability.
-- Hermes database encryption (`state.db` and the other SQLite stores) is
-  macOS-only and requires the separate `databases encrypt` command after memory
-  setup. Linux TPM and Windows CNG memory encryption do not encrypt databases.
+- Hermes database encryption (`state.db` and the other SQLite stores) is admitted
+  on macOS, Linux and Windows Server (Windows workstation editions are refused at
+  runtime) and requires the separate `databases encrypt` command after memory
+  setup. Linux TPM and Windows CNG memory encryption do not encrypt databases by
+  themselves.
 
 ## Install (users, from PyPI)
 

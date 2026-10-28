@@ -3816,8 +3816,10 @@ the raw retention default is 365 days.
   `activity retention [--dry-run] [--json]` — `--dry-run` reports the counts
   from the read-only `ActivityStore.plan_retention`. Restore while no writer
   is open (stop `hermes-mordred extension serve` and Hermes sessions first):
-  the store takes no exclusive lease, so a concurrent writer may be refused
-  `busy` or observe the restored content before the post-restore reset.
+  restore runs offline under the exclusive lifecycle lease (`acquire_exclusive`)
+  and refuses with `busy` while a runtime holds the shared lease; it never opens
+  the shared runtime store, so a concurrent writer cannot observe the restored
+  content before the post-restore reset.
 - `ActivityStore.apply_retention(now, raw_days)` is one bounded pass: raw
   events older than `retention_raw_days` are deleted, then episodes left
   without events (`retention_raw_days: 0` keeps everything forever). The
@@ -5635,6 +5637,7 @@ CLI:
 hermes-mordred mail setup [--imap-host H] [--imap-port 993] [--account LABEL] [--no-touch-id]
 hermes-mordred mail fetch [--max N] [--mailbox all|inbox|sent] [--since YYYY-MM-DD] [--dry-run] [--json]
 hermes-mordred mail forget [--rows] [--account LABEL] --yes
+hermes-mordred mail forget --yes --force-orphan
 hermes-mordred mail status [--json]
 ```
 
@@ -5666,6 +5669,7 @@ LABEL`); forget never reports success while a sealed or flags file remains
 (`credentials_left`, exit 1), and an Enclave key it could not delete is
 `key_left` (exit 1, also on a retry that finds no credential file left;
 running forget again deletes it).
+`--force-orphan` (requires `--yes`; refused with `--rows`/`--account`) is the explicit repair that retires a native mail key left without sealed credentials, with or without its key record, and removes sealed credentials whose native key the helper reports as definitively absent; it never authenticates a source.
 `mail status` projects only checked account metadata, path and scope. The last
 attempt (JSON key `last_fetch`), last success (`last_success`) and cursor
 positions stay unknown without an authenticated foreground read; status never
