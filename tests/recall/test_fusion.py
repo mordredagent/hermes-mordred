@@ -14,9 +14,11 @@ def test_lexical_is_bounded_and_zero_for_the_like_path() -> None:
     assert 0.0 < fusion.lexical_component(-2.0) < 1.0
 
 
-def test_coverage_is_case_insensitive_and_partial() -> None:
+def test_coverage_counts_whole_terms_case_insensitively_and_partially() -> None:
     assert fusion.coverage_component(["deploy", "key"], "DEPLOY_KEY") == 1.0
-    assert fusion.coverage_component(["deploy", "key", "deploy key"], "DEPLOY_KEY") == 2 / 3
+    assert fusion.coverage_component(["deploy", "key", "vault"], "DEPLOY_KEY") == 2 / 3
+    assert fusion.coverage_component(["AI"], "the pairing code") == 0.0  # never inside a longer word
+    assert fusion.coverage_component(["締め切り"], "〆切は月末") == 1.0  # normalised spelling
     assert fusion.coverage_component(["x"], "nothing") == 0.0
     assert fusion.coverage_component([], "anything") == 0.0
 

@@ -441,7 +441,7 @@ def test_a_refetch_attaches_references_to_rows_stored_before_v2(store: ImportSto
         store.write_batch(
             store.run_begin("mail"), [thread.messages], conversations=[thread.conversation], meta_updates={}
         )
-    assert ImportStore(tmp_path / "mordred.db", sqlite3.connect).initialize(tmp_path).schema_version == 2
+    assert ImportStore(tmp_path / "mordred.db", sqlite3.connect).initialize(tmp_path).schema_version == 3  # v1 -> v3
     _synced(store, root)  # A joins B's conversation; nothing connects C yet (the v1 rows have no references)
     assert _conversations(store) == [["msg1@example.net", "msg2@example.net"], ["msg3@example.net"]]
     assert _synced(store, late) == BatchResult(0, 1, 0, 0)  # the same bytes again (a --since re-fetch) ...

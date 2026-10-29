@@ -12,6 +12,8 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Protocol, TypeVar
 
+from ..imports import analysis
+
 #: How much a source is trusted when two hits are otherwise equal.
 SOURCE_WEIGHT: dict[str, float] = {
     "mail": 1.0,
@@ -42,11 +44,10 @@ def lexical_component(rank: float) -> float:
 
 
 def coverage_component(terms: Sequence[str], text: str) -> float:
-    """Fraction of query terms present, case-insensitively (DEPLOY_KEY matches deploy)."""
+    """Fraction of query terms that ``text`` matches as the index does (DEPLOY_KEY covers deploy)."""
     if not terms:
         return 0.0
-    folded = text.casefold()
-    return sum(1 for term in terms if term.casefold() in folded) / len(terms)
+    return len(analysis.matched(text, terms)) / len(terms)
 
 
 def recency_component(sent_at: int | None, now: float) -> float:
@@ -79,10 +80,12 @@ def score(
     sent_at: int | None,
     source: str,
     now: float,
+    coverage: float | None = None,
 ) -> tuple[float, dict[str, float]]:
+    """The weighted score and its components; ``coverage`` is computed from ``text`` unless the caller knows it."""
     components = {
         "lexical": lexical_component(rank),
-        "coverage": coverage_component(terms, text),
+        "coverage": coverage_component(terms, text) if coverage is None else coverage,
         "assertion": assertion_component(text),
         "recency": recency_component(sent_at, now),
         "source": SOURCE_WEIGHT.get(source, 0.8),

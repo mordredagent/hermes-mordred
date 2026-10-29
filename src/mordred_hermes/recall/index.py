@@ -11,7 +11,7 @@ from __future__ import annotations
 import contextlib
 import sqlite3
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -89,6 +89,8 @@ class RecallStore(Protocol):
 
     def search(self, query: str | None, *, limit: int = 20) -> Sequence[_Hit]: ...
 
+    def document_frequencies(self, words: Sequence[str]) -> tuple[dict[str, int], int]: ...
+
 
 @dataclass(frozen=True)
 class SearchResult:
@@ -118,12 +120,15 @@ class RecallIndex:
     def search(self, text: str, *, limit: int = 8, now: float | None = None) -> SearchResult:
         started = time.monotonic()
         now = time.time() if now is None else now
-        derived = derive(text)
+        derived = derive(text, frequencies=self._frequencies)
         if not derived.queries:
             return SearchResult([], "none", "", 0, derived)
 
         terms = list(derived.keywords) or terms_of(derived.summary)[:8]
-        return self._ranked(self._multi_hits(derived.queries), terms, derived, limit=limit, now=now, started=started)
+        hits, matched = self._multi_hits(derived.queries)
+        # Coverage from the index itself: the share of derived queries that found the part.
+        coverage = {uid: count / len(derived.queries) for uid, count in matched.items()}
+        return self._ranked(hits, terms, derived, limit=limit, now=now, started=started, coverage=coverage)
 
     def search_words(self, text: str, *, limit: int = 8, now: float | None = None) -> SearchResult:
         """The parts containing EVERY whitespace-separated word of ``text``, ranked like :meth:`search`.
@@ -141,7 +146,8 @@ class RecallIndex:
         if not words:
             return SearchResult([], "none", "", 0, derived)
         hits = sorted(self.store.search(query, limit=_SCAN_LIMIT), key=lambda hit: hit.rank)
-        return self._ranked(hits, words, derived, limit=limit, now=now, started=started)
+        every = {hit.part_uid: 1.0 for hit in hits}  # a hit matched every word
+        return self._ranked(hits, words, derived, limit=limit, now=now, started=started, coverage=every)
 
     def _ranked(
         self,
@@ -152,6 +158,7 @@ class RecallIndex:
         limit: int,
         now: float,
         started: float,
+        coverage: Mapping[str, float],
     ) -> SearchResult:
         parts = self._hydrate([hit.part_uid for hit in hits])
         suppressed = self._suppressed(now)
@@ -168,6 +175,7 @@ class RecallIndex:
                 sent_at=part["sent_at"],
                 source=part["source"],
                 now=now,
+                coverage=coverage.get(hit.part_uid, 0.0),
             )
             scored.append((value, components, part))
         scored.sort(key=lambda item: fusion.rank_key(item[0], item[2]["sent_at"], item[2]["part_uid"]))
@@ -194,15 +202,20 @@ class RecallIndex:
             derived=derived,
         )
 
-    def _multi_hits(self, queries: Sequence[str]) -> list[_Hit]:
-        """One search per derived keyword; a part keeps its best (lowest) rank."""
+    def _frequencies(self, words: Sequence[str]) -> tuple[dict[str, int], int]:
+        return self.store.document_frequencies(words)
+
+    def _multi_hits(self, queries: Sequence[str]) -> tuple[list[_Hit], dict[str, int]]:
+        """One search per derived keyword; a part keeps its best (lowest) rank. Also: queries that found each part."""
         best: dict[str, _Hit] = {}
+        matched: dict[str, int] = {}
         for query in queries:
             for hit in self.store.search(query, limit=_SCAN_LIMIT):
+                matched[hit.part_uid] = matched.get(hit.part_uid, 0) + 1
                 previous = best.get(hit.part_uid)
                 if previous is None or hit.rank < previous.rank:
                     best[hit.part_uid] = hit
-        return sorted(best.values(), key=lambda hit: hit.rank)
+        return sorted(best.values(), key=lambda hit: hit.rank), matched
 
     # -- open -------------------------------------------------------------
 
@@ -244,6 +257,10 @@ class RecallIndex:
                 "reason = excluded.reason, created_at = excluded.created_at",
                 (conv_uid, until, int(now)),
             )
+
+    def suppressed(self, now: float) -> set[str]:
+        """Conversation ids the user hid that are still hidden at ``now``."""
+        return self._suppressed(now)
 
     def _suppressed(self, now: float) -> set[str]:
         with self.store.connection() as conn:

@@ -22,6 +22,9 @@ Message protocol: ``Mordred-Extension/SPEC.ja.md`` §6 and the extension's
 - ``recall_query`` / ``recall_open`` / ``recall_dismiss`` → :mod:`mordred_hermes.recall` over
   ``mordred.db``'s import tables; the selection arrives sealed and the cards and context
   leave sealed with K_extchat (``recall_result`` / ``recall_opened`` / ``recall_dismissed``)
+- ``recall_events`` (prototype) → :mod:`mordred_hermes.recall.events`: the typed words' hits
+  grouped into events, headlined by a loopback-only local model when one is configured;
+  sealed both ways (``recall_events_result``)
 - ``activity_pair_init`` / ``activity_auth`` (pre-auth), ``activity_batch`` / ``activity_status``
   → :mod:`mordred_hermes.extension.activity_api`. An ``activity_auth`` socket is an
   activity principal limited to those two authed frames; the page principal never
@@ -38,6 +41,7 @@ import asyncio
 import ipaddress
 import json
 import logging
+import os
 import re
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -103,6 +107,8 @@ _EXTENSION_CAPABILITIES = [
     "recall_v1",
     # ``recall_query`` with ``mode: "words"``: every typed word, as typed (``RecallIndex.search_words``).
     "recall_words_v1",
+    # ``recall_events``: the typed words' hits grouped into events, headlined by a local model (prototype).
+    "recall_events_v1",
     IMPORTS_CAPABILITY,
 ]
 
@@ -293,6 +299,7 @@ class ExtensionAPIServer:
         self.activity_receiver = activity_receiver
         self.activity_max_batch_bytes = activity_max_batch_bytes
         self._runner: web.AppRunner | None = None
+        self._topics_updater: Any = None
         # Per-process page principal. It is printed only as a URL fragment by
         # the foreground launcher; fragments never cross the HTTP boundary.
         self._page_token = secrets.token_urlsafe(32)
@@ -350,8 +357,22 @@ class ExtensionAPIServer:
             self.host,
             self.port,
         )
+        self._start_topics_updater()
+
+    def _start_topics_updater(self) -> None:
+        """Keep recall's stored events and topics current (prototype; ``MORDRED_RECALL_TOPICS=0`` turns it off)."""
+        if os.environ.get("MORDRED_RECALL_TOPICS", "1") == "0" or self._topics_updater is not None:
+            return
+        try:
+            self._topics_updater = self.recall_service.topics_updater()
+            self._topics_updater.start()
+        except Exception:
+            _log.exception("recall topics updater not started")
 
     async def stop(self) -> None:
+        if self._topics_updater is not None:
+            self._topics_updater.stop()
+            self._topics_updater = None
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
@@ -568,6 +589,7 @@ class _Connection:
             "activity_batch": self._on_activity_batch,
             "activity_status": self._on_activity_status,
             "recall_query": self._on_recall_query,
+            "recall_events": self._on_recall_events,
             "recall_open": self._on_recall_open,
             "recall_dismiss": self._on_recall_dismiss,
             "imports_status": self._on_imports_status,
@@ -1138,6 +1160,41 @@ class _Connection:
         else:
             content = self._telegram_seal(ek, json.dumps(result, ensure_ascii=False))
             await self._send({"id": mid, "type": "recall_result", "ok": True, "content": content})
+
+    async def _on_recall_events(self, msg: dict[str, Any]) -> None:
+        from ..recall.service import MAX_EVENTS
+
+        mid = msg.get("id")
+        ek = self._telegram_key()
+        if ek is None:
+            await self._send(
+                {"id": mid, "type": "recall_events_result", "ok": False, "error": "encryption_key_unavailable"}
+            )
+            return
+        sealed = msg.get("text")
+        limit = msg.get("limit", 5)
+        headlines = msg.get("headlines", True)
+        if (
+            not isinstance(sealed, str)
+            or not is_encrypted(sealed)
+            or not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= MAX_EVENTS
+            or not isinstance(headlines, bool)
+        ):
+            await self._send({"id": mid, "type": "recall_events_result", "ok": False, "error": "invalid_request"})
+            return
+        try:
+            text = decrypt_message(ek, sealed)
+        except DecryptError:
+            await self._send({"id": mid, "type": "recall_events_result", "ok": False, "error": "undecryptable"})
+            return
+        result, error = await self._recall_call(lambda svc: svc.events(text, limit=limit, headlines=headlines))
+        if error is not None:
+            await self._send({"id": mid, "type": "recall_events_result", "ok": False, "error": error})
+        else:
+            content = self._telegram_seal(ek, json.dumps(result, ensure_ascii=False))
+            await self._send({"id": mid, "type": "recall_events_result", "ok": True, "content": content})
 
     async def _on_recall_open(self, msg: dict[str, Any]) -> None:
         from ..recall.service import MAX_CONTEXT

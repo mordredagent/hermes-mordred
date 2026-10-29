@@ -167,3 +167,41 @@ def test_word_mode_reaches_the_word_search_and_bad_modes_are_refused() -> None:
     assert frame["ok"] is True and svc.calls == [("query_words", ("経費 締め切り", 8))]
     [bad] = _dispatch(_conn(_FakeRecall()), {**payload, "mode": "regex"})
     assert bad == {"id": "q", "type": "recall_result", "ok": False, "error": "invalid_request"}
+
+
+class _FakeEvents(_FakeRecall):
+    def events(self, text: str, *, limit: int = 5, headlines: bool = True) -> dict[str, Any]:
+        self.calls.append(("events", (text, limit, headlines)))
+        self._check()
+        return {"query": text, "headlines": "local", "events": [{"headline": "SmolVLM の量子化を進めている"}]}
+
+
+def test_events_decrypt_the_words_and_seal_the_result() -> None:
+    svc = _FakeEvents()
+    payload = {"id": "e", "type": "recall_events", "text": _sealed("量子化"), "limit": 3, "headlines": False}
+    [frame] = _dispatch(_conn(svc), payload)
+    assert svc.calls == [("events", ("量子化", 3, False))]
+    assert frame["type"] == "recall_events_result" and frame["ok"] is True and frame["id"] == "e"
+    assert "量子化" not in json.dumps(frame, ensure_ascii=False)
+    assert json.loads(decrypt_message(_EK, frame["content"]))["events"][0]["headline"].startswith("SmolVLM")
+
+
+def test_events_refuse_plaintext_and_bad_options_without_touching_the_store() -> None:
+    svc = _FakeEvents()
+    bad: list[dict[str, Any]] = [
+        {"text": "量子化"},
+        {"text": _sealed("x"), "limit": 0},
+        {"text": _sealed("x"), "limit": 11},
+        {"text": _sealed("x"), "limit": True},
+        {"text": _sealed("x"), "headlines": "yes"},
+    ]
+    for extra in bad:
+        [frame] = _dispatch(_conn(svc), {"id": "e", "type": "recall_events", **extra})
+        assert frame == {"id": "e", "type": "recall_events_result", "ok": False, "error": "invalid_request"}
+    assert svc.calls == []
+
+
+def test_events_report_store_failures_as_codes() -> None:
+    for fail, code in (("import_store_unavailable", "import_store_unavailable"), ("boom", "recall_unavailable")):
+        [frame] = _dispatch(_conn(_FakeEvents(fail)), {"id": "e", "type": "recall_events", "text": _sealed("x")})
+        assert frame == {"id": "e", "type": "recall_events_result", "ok": False, "error": code}

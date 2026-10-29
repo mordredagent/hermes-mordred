@@ -2,7 +2,9 @@
 
 Cards are built ONLY from stored rows. No model text is ever inserted into a
 card; the excerpt is a substring of the stored part, and the highlight spans
-index into that substring.
+index into that substring. A span covers a morpheme whose term matches a query
+term (:mod:`~mordred_hermes.imports.analysis`), the same rule the index
+matched by, so nothing is highlighted inside a longer word.
 """
 
 from __future__ import annotations
@@ -12,6 +14,8 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
+
+from ..imports import analysis
 
 #: Excerpt window around the first matching term.
 _BEFORE = 40
@@ -92,14 +96,14 @@ def detect_kind(text: str) -> str:
 
 
 def _matches(text: str, terms: Sequence[str]) -> list[tuple[int, int]]:
-    """Case-insensitive, non-overlapping spans; the longest term wins an overlap."""
+    """Spans where a query term matches, adjacent ones joined; the longest wins an overlap; at most 12."""
     found: list[tuple[int, int]] = []
-    for term in terms:
-        if not term:
-            continue
-        for match in re.finditer(re.escape(term), text, re.IGNORECASE):
-            found.append((match.start(), match.end()))
-    found.sort(key=lambda span: (span[0], -(span[1] - span[0])))
+    ordered = sorted(analysis.spans(text, [term for term in terms if term]), key=lambda span: (span[0], -span[1]))
+    for start, end in ordered:
+        if found and found[-1][1] == start:
+            found[-1] = (found[-1][0], end)
+        else:
+            found.append((start, end))
     kept: list[tuple[int, int]] = []
     for start, end in found:
         if kept and start < kept[-1][1]:
@@ -143,7 +147,7 @@ def days_in(text: str) -> tuple[str, ...]:
 def build_card(*, part: Mapping[str, Any], terms: Sequence[str], score: float, components: dict[str, float]) -> Card:
     text = str(part["text"])
     shown, spans = excerpt(text, terms)
-    hits = [term for term in terms if re.search(re.escape(term), text, re.IGNORECASE)]
+    hits = analysis.matched(text, terms)
     why = f"「{'」「'.join(hits)}」を含む発言" if hits else "語彙スコア上位"
     return Card(
         part_uid=str(part["part_uid"]),

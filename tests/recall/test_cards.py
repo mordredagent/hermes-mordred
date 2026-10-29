@@ -37,15 +37,17 @@ def test_excerpt_is_a_substring_and_spans_land_on_the_terms() -> None:
     text = "前置き" * 40 + "経費精算の締め切りは25日" + "後置き" * 40
     shown, spans = excerpt(text, ["経費精算の締め切り"])
     assert shown.strip("…") in text
-    for start, end in spans:
-        assert shown[start:end] == "経費精算の締め切り"
+    # The whole phrase is one span, as the index matched it.
+    assert [shown[start:end] for start, end in spans] == ["経費精算の締め切り"]
 
 
-def test_excerpt_marks_are_case_insensitive() -> None:
+def test_excerpt_marks_are_case_insensitive_whole_words() -> None:
     shown, spans = excerpt("Rotate DEPLOY_KEY in the vault", ["deploy_key"])
-    assert len(spans) == 1
-    start, end = spans[0]
-    assert shown[start:end].lower() == "deploy_key"
+    assert [shown[start:end].lower() for start, end in spans] == ["deploy_key"]
+    shown, spans = excerpt("the pairing code, then AI", ["ai"])
+    assert [shown[start:end] for start, end in spans] == ["AI"]
+    shown, spans = excerpt("暗号化した。最適化も", ["暗号化"])
+    assert [shown[start:end] for start, end in spans] == ["暗号化"]  # not the 化 of 最適化
 
 
 def test_kind_detection() -> None:

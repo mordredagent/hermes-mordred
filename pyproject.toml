@@ -30,6 +30,12 @@ dependencies = [
   # Version/requirement parsing for the in-place updater and the Desktop
   # package-manager member; hermes-agent declares it only on Python 3.14+.
   "packaging>=23",
+  # Search index of the import store (mordred.db): Japanese morphological
+  # analysis (Sudachi, split mode A, with its core dictionary) and English
+  # stemming (Snowball). See mordred_hermes/imports/analysis.py.
+  "sudachipy>=0.6.8",
+  "sudachidict-core>=20240409",
+  "snowballstemmer>=2.2",
 ]
 
 [project.optional-dependencies]
@@ -386,6 +392,11 @@ module = [
     "requests",
     "requests.*",
     "objc",
+    # sudachipy and snowballstemmer (import-store search index) ship no py.typed marker.
+    "sudachipy",
+    "sudachipy.*",
+    "snowballstemmer",
+    "snowballstemmer.*",
     # stem lives in the optional `tor-control` extra. CI does not install it, so
     # `paths/tor.py`'s lazy `from stem.control import Controller` is an
     # unresolvable import there (import-not-found) — but a DEV box synced with

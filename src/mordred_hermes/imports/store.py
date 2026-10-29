@@ -1,4 +1,4 @@
-"""``ImportStore``: imported conversations, messages and parts in ``mordred.db`` (``import_*`` v2).
+"""``ImportStore``: imported conversations, messages and parts in ``mordred.db`` (``import_*`` v3).
 
 Mirrors :class:`mordred_hermes.activity.store.ActivityStore`: :func:`open_import_store`
 runs the activity protection gate and passes the gate's keyed opener; tests pass
@@ -122,7 +122,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, Final, NamedTuple, cast
+from typing import Any, Final, NamedTuple, TypeVar, cast
 
 from ..activity._gate import (
     ActivityRefused,
@@ -133,7 +133,7 @@ from ..activity._gate import (
     verify_keyed_connection,
 )
 from ..activity.store import BUSY_TIMEOUT_S
-from . import _mail_reconcile, _schema
+from . import _mail_reconcile, _schema, analysis
 from .records import (
     ConversationKind,
     ImportConversation,
@@ -177,9 +177,8 @@ __all__ = [
 SUPPORTED_SCHEMA_VERSION: Final = _schema.SCHEMA_VERSION
 MAX_SEARCH_LIMIT: Final = 500
 MAX_NEIGHBORS: Final = 50
-#: FTS5 ``trigram`` needs three characters to match; shorter terms fall back to ``LIKE``.
-_TRIGRAM: Final = 3
 _MAX_TERMS: Final = 32
+_A = TypeVar("_A")
 _CHUNK: Final = 500  # bound on ``IN (...)`` parameters per statement
 _COUNT_KEY_RE: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _WRITES: Final = frozenset({"inserted", "revised"})
@@ -568,18 +567,23 @@ def _terms(query: str | None) -> list[str]:
     return list(dict.fromkeys(word for word in words if word))[:_MAX_TERMS]
 
 
-def _phrase(term: str) -> str:
-    """An FTS5 string literal: the term can never become an operator, column filter or prefix query."""
-    return '"' + term.replace('"', '""') + '"'
+def _analysed(run: Callable[[], _A]) -> _A:
+    """``run`` with an unavailable analyser (a broken install) refused like any other store failure."""
+    try:
+        return run()
+    except analysis.AnalyzerUnavailable:
+        raise ImportRefused("store_unavailable") from None
 
 
-def _like(term: str) -> str:
-    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"%{escaped}%"
+def _index_parts(conn: sqlite3.Connection, where: str, params: Sequence[Any]) -> None:
+    """Write the term-index rows of the parts selected by ``where`` (they have none yet)."""
+    rows = conn.execute(f"SELECT id, text FROM import_parts WHERE {where}", params).fetchall()
+    entries = _analysed(lambda: [(part_id, analysis.index_text(text)) for part_id, text in rows])
+    conn.executemany("INSERT INTO import_parts_fts (rowid, terms) VALUES (?, ?)", entries)
 
 
 def _search_sql(
-    terms: Sequence[str],
+    match: str | None,
     *,
     conv_uids: Sequence[str] | None,
     since: int | None,
@@ -587,21 +591,16 @@ def _search_sql(
     source: str | None,
     limit: int,
 ) -> tuple[str, list[Any]]:
-    indexed = [term for term in terms if len(term) >= _TRIGRAM]
     params: list[Any] = []
     where: list[str] = []
-    if indexed:
+    if match is not None:
         tables = f"import_parts_fts JOIN import_parts p ON p.id = import_parts_fts.rowid {_MESSAGE_OF_PART}"
         score, order = "bm25(import_parts_fts)", "score, m.sent_at DESC, p.part_uid"
         where.append("import_parts_fts MATCH ?")
-        params.append(" AND ".join(_phrase(term) for term in indexed))
+        params.append(match)
     else:
         tables = _COMMITTED_PARTS
         score, order = "0.0", "m.sent_at IS NULL, m.sent_at DESC, p.part_uid"
-    for term in terms:
-        if len(term) < _TRIGRAM:
-            where.append("p.text LIKE ? ESCAPE '\\'")
-            params.append(_like(term))
     if conv_uids is not None:
         where.append(f"m.conv_uid IN ({_marks(len(conv_uids))})")
         params.extend(conv_uids)
@@ -709,8 +708,12 @@ class ImportStore:
         if any(step not in _schema.MIGRATIONS for step in steps):
             raise ImportRefused("store_unavailable")
         for step in steps:
+            if step in _schema.REINDEX_AFTER:
+                conn.execute("PRAGMA secure_delete = ON")  # the dropped index's pages are zeroed
             for statement in _schema.MIGRATIONS[step]:
                 conn.execute(statement)
+            if step in _schema.REINDEX_AFTER:
+                _index_parts(conn, "1", ())
         conn.execute("UPDATE import_meta SET value = ? WHERE key = 'schema_version'", (str(SUPPORTED_SCHEMA_VERSION),))
         return replace(meta, schema_version=SUPPORTED_SCHEMA_VERSION)
 
@@ -1140,6 +1143,7 @@ class ImportStore:
         conn.execute("DELETE FROM import_parts WHERE source_uid = ?", (msg.source_uid,))
         rows = [_values(part, _PART_FIELDS) for part in msg.parts]
         conn.executemany(f"INSERT INTO import_parts ({_PART_COLUMNS}) VALUES ({_marks(len(rows[0]))})", rows)
+        _index_parts(conn, "source_uid = ?", (msg.source_uid,))
 
     def delete_source(self, source: Source | str, source_account: str) -> int:
         """Delete one account's conversations, messages, parts, references and own addresses; returns messages deleted.
@@ -1258,17 +1262,23 @@ class ImportStore:
         source: Source | str | None = None,
         limit: int = 20,
     ) -> list[SearchHit]:
-        """Parts matching every term of ``query`` (all parts without one), filtered in SQL.
+        """Parts matching every word of ``query`` (all parts without one), filtered in SQL.
 
-        Terms of three or more characters match through the trigram FTS index
-        (substring, case-insensitive) and rank by ``bm25``; shorter terms
-        match by ``LIKE``. ``since <= sent_at < until`` (unix seconds) excludes
-        unknown dates. Without indexed terms the newest parts come first.
+        Each whitespace-separated word is analysed like the stored text
+        (:mod:`.analysis`) and must match as a phrase of whole terms; hits rank
+        by ``bm25``. A word with no content term (a lone particle) is ignored,
+        and a query with none matches nothing. ``since <= sent_at < until``
+        (unix seconds) excludes unknown dates. Without a query the newest
+        parts come first.
         """
         if limit <= 0 or (conv_uids is not None and not conv_uids):
             return []
+        words = _terms(query)
+        match = _analysed(lambda: analysis.match_query(words)) if words else None
+        if words and match is None:
+            return []
         sql, params = _search_sql(
-            _terms(query),
+            match,
             conv_uids=None if conv_uids is None else list(dict.fromkeys(conv_uids)),
             since=since,
             until=until,
@@ -1280,6 +1290,27 @@ class ImportStore:
         return [
             SearchHit(str(part), str(source_uid), str(conv), float(score)) for part, source_uid, conv, score in rows
         ]
+
+    def document_frequencies(self, words: Sequence[str], *, cap: int = 10_000) -> tuple[dict[str, int], int]:
+        """Per word, the stored parts it matches as :meth:`search` would (at most ``cap``); and the part total.
+
+        A word with no content term counts 0. The counts are what an IDF weight needs.
+        """
+        phrases = _analysed(lambda: {word: analysis.phrase(word) for word in dict.fromkeys(words)})
+        counts: dict[str, int] = {}
+        with self._transaction(write=False) as conn:
+            total = int(conn.execute("SELECT count(*) FROM import_parts").fetchone()[0])
+            for word, found in phrases.items():
+                if found is None:
+                    counts[word] = 0
+                    continue
+                counts[word] = int(
+                    conn.execute(
+                        "SELECT count(*) FROM (SELECT 1 FROM import_parts_fts WHERE import_parts_fts MATCH ? LIMIT ?)",
+                        (found, cap),
+                    ).fetchone()[0]
+                )
+        return counts, total
 
     def parts_for(self, part_uids: Iterable[str]) -> dict[str, StoredPart]:
         """Hydrate ``part_uids`` (unknown or uncommitted ones are left out) with their message and conversation."""

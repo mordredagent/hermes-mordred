@@ -115,9 +115,11 @@ def test_word_search_ands_every_word_as_typed(store: ImportStore) -> None:
     both = index.search_words("経費精算 前倒し", now=NOW)
     assert {card.source for card in both.cards} == {"telegram"}
     assert both.derived.queries == ("経費精算 前倒し",)
-    # A hiragana word and a single kanji are searched as written (selection recall drops them).
+    # A hiragana word is searched as typed (selection recall drops it); a word matches whole
+    # terms only, so one kanji does not match inside 固定.
     assert [c.source for c in index.search_words("了解です", now=NOW).cards] == ["telegram"]
-    assert {c.source for c in index.search_words("固 経費精算", now=NOW).cards} == {"mail"}
+    assert {c.source for c in index.search_words("固定 経費精算", now=NOW).cards} == {"mail"}
+    assert index.search_words("固 経費精算", now=NOW).cards == []
     assert index.search_words("経費精算 存在しない語", now=NOW).cards == []
 
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from mordred_hermes.recall.derive import MAX_SELECTION, derive
+from collections.abc import Sequence
+
+from mordred_hermes.recall.derive import MAX_SELECTION, derive, keywords_of
 
 PARAGRAPH = (
     "経費精算の締め切りについて確認したい。先月の分がまだ未提出で、領収書の添付も忘れていた。"
@@ -13,16 +15,33 @@ PARAGRAPH = (
 
 def test_keywords_are_the_things_worth_searching() -> None:
     result = derive(PARAGRAPH)
-    assert "経費精算" in result.keywords
-    assert "27日" in result.keywords
+    assert {"経費精算", "締め切り"} <= set(result.keywords)
     assert result.queries
     assert all(len(query) >= 2 for query in result.queries)
 
 
+def test_keywords_are_whole_morphemes_with_numbers_and_formal_nouns_split_off() -> None:
+    every = keywords_of(PARAGRAPH, limit=100)
+    assert {"27日", "31日", "20日", "毎月", "必着", "前倒し", "田中"} <= set(every)
+    assert not {"ため27日", "31日必着", "毎月20日", "田中さん", "確認"} & set(every)
+    assert keywords_of("Use AI privately") == ["privately", "AI"]  # "use" is a stop word
+
+
+def test_corpus_frequencies_rank_rare_keywords_first_and_drop_absent_ones() -> None:
+    counts = {"経費精算": 40, "27日": 2, "締め切り": 300}
+
+    def frequencies(words: Sequence[str]) -> tuple[dict[str, int], int]:
+        return {word: counts.get(word, 0) for word in words}, 1000
+
+    kept = keywords_of(PARAGRAPH, frequencies=frequencies)
+    assert kept == ["27日", "経費精算", "締め切り"]  # everything else is absent from the corpus
+
+
 def test_summary_is_the_keyword_rich_sentence() -> None:
     result = derive(PARAGRAPH)
-    assert result.summary.startswith("総務の田中さんからは")
-    assert result.summary.endswith("。")
+    assert result.summary in PARAGRAPH and result.summary.endswith("。")
+    richest = max(sum(word in sentence for word in result.keywords) for sentence in PARAGRAPH.split("。"))
+    assert sum(word in result.summary for word in result.keywords) == richest
 
 
 def test_selection_is_cut_at_a_thousand_characters() -> None:

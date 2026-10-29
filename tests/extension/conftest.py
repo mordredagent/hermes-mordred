@@ -20,6 +20,8 @@ if _SRC.exists() and str(_SRC) not in sys.path:
 @pytest.fixture(autouse=True)
 def _isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    # No background recall rebuilds while a test server runs.
+    monkeypatch.setenv("MORDRED_RECALL_TOPICS", "0")
 
 
 @pytest.fixture(autouse=True)
