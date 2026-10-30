@@ -37,6 +37,8 @@ MAX_SELECTION = 1000
 MAX_QUERIES = 5
 #: Display cap for the summary.
 MAX_SUMMARY = 160
+#: How many nouns of a selection the event search weighs.
+MAX_SELECTION_WORDS = 30
 
 #: Counters that close a number expression (15日, 3万円, 50%).
 _COUNTERS = frozenset(
@@ -175,6 +177,89 @@ _STOP = {
     "such",
     "each",
     "other",
+    # English function words: the analyser makes every Latin word a noun, so they reach here.
+    "a",
+    "an",
+    "is",
+    "be",
+    "am",
+    "do",
+    "did",
+    "done",
+    "to",
+    "of",
+    "in",
+    "on",
+    "at",
+    "by",
+    "as",
+    "or",
+    "if",
+    "so",
+    "no",
+    "it",
+    "we",
+    "us",
+    "me",
+    "my",
+    "up",
+    "nor",
+    "yes",
+    "else",
+    "has",
+    "had",
+    "get",
+    "gets",
+    "got",
+    "make",
+    "makes",
+    "made",
+    "uses",
+    "may",
+    "might",
+    "must",
+    "shall",
+    "most",
+    "less",
+    "much",
+    "many",
+    "few",
+    "own",
+    "same",
+    "another",
+    "both",
+    "either",
+    "between",
+    "through",
+    "during",
+    "before",
+    "after",
+    "above",
+    "below",
+    "under",
+    "over",
+    "again",
+    "once",
+    "against",
+    "among",
+    "within",
+    "without",
+    "along",
+    "across",
+    "per",
+    "via",
+    "like",
+    "onto",
+    "off",
+    "down",
+    "well",
+    "best",
+    "keep",
+    "add",
+    "one",
+    "two",
+    "new",
+    "etc",
 }
 
 
@@ -236,13 +321,18 @@ def _keyword(text: str, run: list[analysis.Token]) -> str | None:
     return word if len(word) >= 2 else None  # one letter, kanji or kana alone is too common
 
 
-def _candidates(text: str) -> list[tuple[str, float]]:
-    """``(keyword, weight)`` in reading order: compound nouns, then content verbs and adjectives."""
+def _candidates(text: str, *, nouns_only: bool = False) -> list[tuple[str, float]]:
+    """``(keyword, weight)`` in reading order: compound nouns, then content verbs and adjectives.
+
+    ``nouns_only`` leaves out the verbs and adjectives, and an adjectival noun
+    standing alone (必要, 大切, 十分): they say how, not what about.
+    """
     found: list[tuple[str, float]] = []
     run: list[analysis.Token] = []
 
     def flush() -> None:
-        word = _keyword(text, run)
+        alone = len(run) == 1 and run[0].pos == "形状詞"
+        word = None if nouns_only and alone else _keyword(text, run)
         if word is not None:
             found.append((word, 1.0))
         run.clear()
@@ -254,6 +344,8 @@ def _candidates(text: str) -> list[tuple[str, float]]:
             run.append(token)
             continue
         flush()
+        if nouns_only:
+            continue
         if token.pos in _PREDICATES and token.term not in _LIGHT_VERBS and token.end - token.start >= 2:
             found.append((text[token.start : token.end], _PREDICATE_WEIGHT))
     flush()
@@ -297,6 +389,17 @@ def keywords_of(text: str, *, limit: int = MAX_QUERIES, frequencies: Frequencies
         if len(kept) >= limit:
             break
     return kept
+
+
+def selection_words(text: str, *, limit: int = MAX_SELECTION_WORDS) -> list[str]:
+    """A page selection's distinct nouns (compounds kept whole), in reading order.
+
+    Unlike :func:`keywords_of` nothing is ranked or dropped here: the event
+    search weighs each noun by its rarity in the store, and a noun the store
+    lacks still counts against an event (it is part of what the selection is about).
+    """
+    words = dict.fromkeys(word for word, _weight in _candidates(normalize(text)[:MAX_SELECTION], nouns_only=True))
+    return list(words)[:limit]
 
 
 def _sentences(text: str) -> list[str]:

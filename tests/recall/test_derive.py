@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from mordred_hermes.recall.derive import MAX_SELECTION, derive, keywords_of
+from mordred_hermes.recall.derive import MAX_SELECTION, derive, keywords_of, selection_words
 
 PARAGRAPH = (
     "経費精算の締め切りについて確認したい。先月の分がまだ未提出で、領収書の添付も忘れていた。"
@@ -77,3 +77,18 @@ def test_deduplicates_and_orders_by_weight() -> None:
     result = derive("経費精算 経費精算 経費精算 締め切り")
     assert result.keywords[0] == "経費精算"
     assert len(result.keywords) == len(set(result.keywords))
+
+
+def test_selection_words_are_the_nouns_in_reading_order() -> None:
+    text = "SQLCipher は SQLite のデータベースを暗号化する拡張で、WAL ファイルも大切な鍵で十分に守られます。"
+    words = selection_words(text)
+    assert words[:3] == ["SQLCipher", "SQLite", "データベース"]
+    assert "暗号化" in words and "WAL" in words
+    # Verbs (守る) and adjectival nouns standing alone (大切, 十分) say how, not what about.
+    assert not any(word.startswith("守") for word in words) and {"大切", "十分"}.isdisjoint(words)
+
+
+def test_english_function_words_are_not_selection_words() -> None:
+    words = selection_words("FRI is the low degree test used by STARKs to check the folding between rounds.")
+    assert {"is", "to", "by", "between"}.isdisjoint(words)
+    assert {"FRI", "STARKs", "folding"} <= set(words)

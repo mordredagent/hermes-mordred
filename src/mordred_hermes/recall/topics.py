@@ -96,6 +96,12 @@ _B: Final = 0.75
 _RECENCY_TAU: Final = 30 * 86400
 _KEYWORDS: Final = 10
 _MAX_BRANCHES: Final = 4
+#: A page selection finds the events holding at least this share of its nouns' weight ...
+MIN_COVERAGE: Final = 0.35
+#: ... or at least two of its rare nouns: held by this many events or fewer.
+_RARE_EVENTS: Final = 3
+#: A selection's rarest shared nouns whose parts anchor the branches.
+_SELECTION_ANCHORS: Final = 3
 #: Events shown under one topic.
 _EVENTS_PER_TOPIC: Final = 3
 _HIT_LIMIT: Final = 500
@@ -298,6 +304,11 @@ def _load(store: Any) -> list[Part]:
     return parts
 
 
+def _idf(found: int, total: int) -> float:
+    """BM25's inverse document frequency: rare words weigh more, and it never goes negative."""
+    return math.log(1 + (total - found + 0.5) / (found + 0.5))
+
+
 def _bm25(groups: Sequence[_Group]) -> list[tuple[str, int, float]]:
     """``(term, group_id, score)`` for every term of every group, the groups as BM25 documents."""
     tfs: list[Counter[str]] = []
@@ -316,7 +327,7 @@ def _bm25(groups: Sequence[_Group]) -> list[tuple[str, int, float]]:
     for group, tf, length in zip(groups, tfs, lengths, strict=True):
         norm = _K1 * (1 - _B + _B * length / average)
         for term, n in tf.items():
-            idf = math.log(1 + (total - df[term] + 0.5) / (df[term] + 0.5))
+            idf = _idf(df[term], total)
             rows.append((term, group.group_id, idf * n * (_K1 + 1) / (n + norm)))
     return rows
 
@@ -865,27 +876,85 @@ class TopicIndex:
             cards.append(card)
         return cards
 
-    def covering_words(self, words: Sequence[str]) -> list[str]:
-        """Of ``words``, the largest set that one stored event holds all of.
+    def selection_events(
+        self, words: Sequence[str], *, limit: int = 5, now: float | None = None, suppressed: Iterable[str] = ()
+    ) -> EventResult:
+        """Events for a page selection's nouns (:func:`.derive.selection_words`), ranked by what they share.
 
-        A page selection's keywords rarely sit together in one message, so the
-        event search (which ANDs its words) needs the subset that does belong
-        together: the most words one event holds, then the set the most events
-        hold, then the earlier words. Empty when no event holds any of them.
+        Each noun weighs by its rarity over the stored events (BM25's IDF; a noun
+        no event holds weighs the most), and an event covers the weight of the
+        nouns it holds over the weight of them all. Events under
+        :data:`MIN_COVERAGE` are left out unless they share two rare nouns with
+        the selection (a name and a term only they mention): a selection about
+        something never discussed shares only common words with the store
+        (時間, 午後) and finds nothing. The rest rank by their BM25 over the nouns they hold
+        (no recency or importance: the question is what was said about this).
+        The query reported is those nouns, the rarest first.
         """
-        held: dict[int, set[int]] = defaultdict(set)
+        started = time.monotonic()
+        now = time.time() if now is None else now
+        hidden = set(suppressed)
+        analysed = [
+            (word, terms)
+            for word in dict.fromkeys(words)
+            if (terms := list(dict.fromkeys(token.term for token in analysis.tokens(word))))
+        ]
         with self.store.connection() as conn:
-            for i, word in enumerate(words[:_MAX_WORDS]):
-                terms = list(dict.fromkeys(token.term for token in analysis.tokens(word)))
-                if terms:
-                    for event_id in self._relevance(conn, terms):
-                        held[event_id].add(i)
-        if not held:
-            return []
-        sets = {frozenset(found) for found in held.values()}
-        support = {found: sum(1 for other in held.values() if found <= other) for found in sets}
-        best = min(sets, key=lambda found: (-len(found), -support[found], sorted(found)))
-        return [words[i] for i in sorted(best)]
+            total = int(conn.execute("SELECT count(*) FROM recall_groups WHERE level = 'event'").fetchone()[0])
+            holders = {word: self._relevance(conn, terms) for word, terms in analysed}
+        weight = {word: _idf(len(held), total) for word, held in holders.items()}
+        whole = sum(weight.values())
+        covered: dict[int, float] = defaultdict(float)
+        relevance: dict[int, float] = defaultdict(float)
+        rare: Counter[int] = Counter()
+        for word, held in holders.items():
+            for event_id, score in held.items():
+                covered[event_id] += weight[word]
+                relevance[event_id] += score
+                rare[event_id] += len(held) <= _RARE_EVENTS
+        kept = {
+            event_id: relevance[event_id]
+            for event_id in covered
+            if covered[event_id] >= MIN_COVERAGE * whole or rare[event_id] >= 2
+        }
+        # The score is known here, so only the events the topic cards can show are assembled.
+        kept = dict(heapq.nlargest(limit * _EVENTS_PER_TOPIC, kept.items(), key=lambda item: item[1]))
+        shared = sorted(
+            (word for word, held in holders.items() if not kept.keys().isdisjoint(held)), key=lambda w: -weight[w]
+        )[:_MAX_WORDS]
+        hits = [
+            hit
+            for word in (shared[:_SELECTION_ANCHORS] if kept else [])
+            for hit in self.store.search(word, limit=_HIT_LIMIT)
+            if hit.conv_uid not in hidden
+        ]
+        with self.store.connection() as conn:
+            part_hits = self._hit_episodes(conn, list(dict.fromkeys(hit.part_uid for hit in hits)))
+            if kept:
+                marks = ",".join("?" for _ in kept)
+                inside = {
+                    int(row[0])
+                    for row in conn.execute(
+                        f"SELECT episode_id FROM recall_episodes WHERE event_id IN ({marks})", list(kept)
+                    )
+                }
+                part_hits = [hit for hit in part_hits if hit[0] in inside]
+            else:
+                part_hits = []
+            looked = time.monotonic()
+            events = self._events(conn, kept, part_hits, hidden, shared, now, selection=True)
+            events.sort(key=lambda event: -event.score)
+            cards = self._topic_cards(conn, events, limit, now)
+        done = time.monotonic()
+        return EventResult(
+            " ".join(shared),
+            events[:limit],
+            topics=cards,
+            hits=len(part_hits),
+            episodes=len({ep for ep, _uid, _owner in part_hits}),
+            took_ms=int((done - started) * 1000),
+            timings={"lookup_ms": int((looked - started) * 1000), "assemble_ms": int((done - looked) * 1000)},
+        )
 
     @staticmethod
     def _relevance(conn: sqlite3.Connection, terms: Sequence[str]) -> dict[int, float]:
@@ -929,12 +998,18 @@ class TopicIndex:
         hidden: set[str],
         words: Sequence[str],
         now: float,
+        *,
+        selection: bool = False,
     ) -> list[Event]:
+        """The events of ``relevance`` and every event a hit falls in.
+
+        For a ``selection`` only those of ``relevance``, scored by it alone.
+        """
         hits_by_episode: dict[int, list[tuple[str, bool]]] = defaultdict(list)
         for ep, uid, owner in part_hits:
             hits_by_episode[ep].append((uid, owner))
         candidates = set(relevance)
-        if hits_by_episode:
+        if hits_by_episode and not selection:
             marks = ",".join("?" for _ in hits_by_episode)
             candidates |= {
                 int(row[0])
@@ -968,7 +1043,8 @@ class TopicIndex:
             lexical = relevance.get(event_id, 0.0) + math.log1p(len(found))
             rel = lexical * (1.5 if any(owner for _uid, owner in found) else 1.0)
             recency = math.exp(-max(0.0, now - end) / _RECENCY_TAU)
-            score = rel * (1 + importance / 10) * (0.5 + recency)
+            # A selection asks what was said about this, so only the match counts there.
+            score = relevance.get(event_id, 0.0) if selection else rel * (1 + importance / 10) * (0.5 + recency)
             topic = None
             if parent_id is not None:
                 parent = conn.execute(

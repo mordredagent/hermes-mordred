@@ -156,7 +156,7 @@ or a particular platform's native/live acceptance gates are ready.
 | `sign_approve` | Signs only the request captured by the matching prompt. |
 | `history_get` / `history_clear` | Reads or clears encrypted-at-rest conversation history. |
 | `recall_query` / `recall_open` / `recall_dismiss` | Finds the user's own stored messages (`mordred.db` import tables) that match a page selection, opens a part with its neighbours, or hides a conversation from recall for seven days. Return `recall_result` / `recall_opened` / `recall_dismissed`. The selection must arrive sealed to the extension key and cards and context leave sealed; there is no model in the path, and excerpts are substrings of stored text. Page sessions are refused. |
-| `recall_events` | The stored events and topics holding the typed words (`mode: "words"`, the default), or a page selection (`mode: "selection"`): searched as typed when short, otherwise by the derived keywords that one stored event holds together. Returns `recall_events_result`, sealed both ways like `recall_query`. Reads the prebuilt topic store; no model runs per search. Page sessions are refused. |
+| `recall_events` | The stored events and topics holding the typed words (`mode: "words"`, the default), or a page selection (`mode: "selection"`): searched as typed when short, otherwise by the events that share enough of its nouns (weighted by rarity), so a selection about something never discussed finds nothing. Returns `recall_events_result`, sealed both ways like `recall_query`. Reads the prebuilt topic store; no model runs per search. Page sessions are refused. |
 
 Large history reads return the newest complete suffix with `truncated: true`;
 stored history is not modified. `history_result` also carries `status`

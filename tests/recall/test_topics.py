@@ -21,8 +21,9 @@ from mordred_hermes.imports.records import (
 )
 from mordred_hermes.imports.store import ImportStore
 from mordred_hermes.recall import topics
+from mordred_hermes.recall.derive import selection_words
 from mordred_hermes.recall.index import RecallIndex
-from mordred_hermes.recall.service import RecallService, selection_queries
+from mordred_hermes.recall.service import RecallService
 from tests.imports._factories import OWNER, SENT_AT, authored, message, part, participant, tg_conv
 
 DAY = 86400
@@ -289,23 +290,30 @@ def test_service_builds_on_first_use_and_returns_topics(tmp_path: Path, store: I
     assert found["lines"]["events"] >= 1
 
 
-def test_selection_queries_try_a_short_selection_as_typed_then_the_words_held_together() -> None:
-    assert selection_queries("  量子化  ", ["量子化"], ["量子化"]) == ["量子化"]
-    long = "SmolVLM を FPGA に載せるために量子化と蒸留を順に試していった記録です"
-    assert selection_queries(long, ["FPGA", "量子化"], ["蒸留", "FPGA", "量子化"]) == ["FPGA 量子化", "蒸留"]
-    assert selection_queries(long, [], ["蒸留"]) == ["蒸留"]
-    assert selection_queries(long, [], []) == []
-
-
-def test_covering_words_are_the_largest_set_one_event_holds(store: ImportStore) -> None:
+def test_a_selection_is_looked_up_by_the_events_that_share_most_of_its_nouns(store: ImportStore) -> None:
     _chat(store, Source.CLAUDE_CODE, "fpga", "FPGA 推論エンジン", FPGA, start=SENT_AT)
     _chat(store, Source.CODEX, "gif", "GIF 作成", GIF, start=SENT_AT + DAY)
     topics.build(store)
     index = topics.TopicIndex(store)
-    # パレット is the rarest, but only the GIF chat holds it; SmolVLM, 蒸留 and 量子化 sit together.
-    assert index.covering_words(["パレット", "SmolVLM", "蒸留", "量子化"]) == ["SmolVLM", "蒸留", "量子化"]
-    assert index.covering_words(["パレット", "ヤマネコ"]) == ["パレット"]
-    assert index.covering_words(["ヤマネコ"]) == []
+
+    found = index.selection_events(["SmolVLM", "FPGA", "蒸留", "量子化", "ヤマネコ"], now=NOW)
+
+    # 量子化 is in both chats, but the GIF chat holds too little of the selection to show.
+    assert [event.sources for event in found.events] == [{"claude_code": 1}]
+    # The nouns shared, the rarest first; ヤマネコ is in no chat and 量子化 in both.
+    assert found.query.split()[-1] == "量子化" and "ヤマネコ" not in found.query.split()
+    assert found.hits > 0 and found.events[0].branches[0].hits > 0
+
+
+def test_a_selection_about_something_never_discussed_finds_nothing(store: ImportStore) -> None:
+    _chat(store, Source.CLAUDE_CODE, "fpga", "FPGA 推論エンジン", FPGA, start=SENT_AT)
+    _chat(store, Source.CODEX, "gif", "GIF 作成", GIF, start=SENT_AT + DAY)
+    topics.build(store)
+
+    # One common noun (量子化) among many the store never saw is not enough.
+    found = topics.TopicIndex(store).selection_events(["ヤマネコ", "冬毛", "北海道", "観察記録", "量子化"], now=NOW)
+
+    assert found.events == [] and found.topics == [] and found.query == "" and found.hits == 0
 
 
 def test_a_long_selection_finds_events_by_its_keywords(tmp_path: Path, store: ImportStore) -> None:
@@ -319,8 +327,19 @@ def test_a_long_selection_finds_events_by_its_keywords(tmp_path: Path, store: Im
 
     assert as_typed["hits"] == 0
     assert found["hits"] > 0
-    assert set(found["query"].split()) <= set(found["derived"]["queries"])
+    assert set(found["query"].split()) <= set(selection_words(selection))
     assert {source for event in found["events"] for source in event["sources"]} == {"claude_code"}
+    assert found["derived"]["keywords"]
+
+
+def test_a_long_selection_about_something_else_finds_nothing(tmp_path: Path, store: ImportStore) -> None:
+    _chat(store, Source.CLAUDE_CODE, "fpga", "FPGA 推論エンジン", FPGA, start=SENT_AT)
+    service = RecallService(opener=lambda _home: store, home=tmp_path)
+    selection = "ヤマネコの冬毛と夏毛の違いについて、北海道の観察記録をもとにまとめた文章です。"
+
+    found = service.events(selection, selection=True)
+
+    assert found["events"] == [] and found["topics"] == [] and found["query"] == ""
 
 
 def test_a_short_selection_is_searched_as_the_search_box_would(tmp_path: Path, store: ImportStore) -> None:
