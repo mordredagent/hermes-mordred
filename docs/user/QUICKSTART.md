@@ -77,9 +77,8 @@ curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/sc
 ```
 
 `--with-extension` is the convenience option for the `extension` and
-`ethereum` dependency groups. The `messaging` extra is not required to use the
-browser extension: a browser is approved with Touch ID on the Mac, not with a
-pairing code (see [`EXTENSION.md`](./EXTENSION.md)).
+`ethereum` dependency groups. A browser is then approved with Touch ID on the
+Mac (see [`EXTENSION.md`](./EXTENSION.md)); no other extra is needed.
 
 Add `--version VERSION` after replacing `VERSION` with a release number when
 you need an exact PyPI version. For example, the two options can be combined as
@@ -95,9 +94,9 @@ its bundled `uv` even when neither `hermes` nor `uv` is on PATH.
 <summary>Advanced: choose individual dependency groups</summary>
 
 Most users should use one of the two install paths above. Use `--extras LIST`
-only when you want a custom, comma-separated feature set. To add the optional
-terminal QR to the extension bundle, append `--extras messaging`, producing
-`bash -s -- --with-extension --extras messaging`. `--all-extras` includes all
+only when you want a custom, comma-separated feature set. For example,
+`bash -s -- --with-extension --extras telegram` adds the Telegram import to the
+extension bundle. `--all-extras` includes all
 user-facing extras, including deep Tor liveness checks. Extras can also be
 added later by rerunning the installer.
 
@@ -105,7 +104,6 @@ added later by rerunning the installer.
 |---|---|
 | `extension` | Browser-extension WebSocket server and wallet RPC transport |
 | `ethereum` | HD-wallet derivation and signing |
-| `messaging` | Nothing at present: it rendered the pairing-code QR, which approval by signature replaced |
 | `tor-control` | Deep Tor liveness checks |
 | `telegram` | Read-only import of your own Telegram account for private questions (Telethon) |
 

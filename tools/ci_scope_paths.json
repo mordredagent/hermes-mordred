@@ -379,9 +379,6 @@
     "src/mordred_hermes/wizard/direct_tools_cli.py": [
       "extension"
     ],
-    "src/mordred_hermes/wizard/extension_pair_cli.py": [
-      "features"
-    ],
     "src/mordred_hermes/wizard/policy_explainer.py": [],
     "tests/_desktop_page.py": [
       "extension"
@@ -661,9 +658,6 @@
       "privacy"
     ],
     "tests/test_wizard_defaults.py": [],
-    "tests/test_wizard_extension_pair_cli.py": [
-      "features"
-    ],
     "tests/test_wizard_term.py": []
   }
 }

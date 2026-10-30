@@ -105,13 +105,6 @@ ethereum = [
   "eth-account>=0.13",
   "rlp>=4",
 ]
-messaging = [
-  # Terminal QR-code rendering for `hermes-mordred extension pair`. Optional
-  # (the command already falls back to printing the code as plain text when
-  # this isn't installed) — was referenced in a comment as living in this
-  # extra before the extra itself existed.
-  "qrcode>=7.4",
-]
 tor-control = [
   "stem>=1.8.0,<2",
 ]
@@ -363,11 +356,9 @@ follow_imports = "skip"
 # - objc (pyobjc) is the macOS-only Security/CoreFoundation bridge used by
 #   keyvault/_seckey_ctypes.py; it ships no py.typed marker and is absent on the
 #   Linux runner entirely.
-# - qrcode lives in the optional `messaging` extra (also not installed for the
-#   mypy job); the extension-pair CLI imports it lazily.
 # - gateway is a repo-root top-level package (not under mordred-hermes/src), so
-#   it isn't importable from the mordred-hermes mypy run; the extension-pair CLI
-#   only imports it lazily at runtime.
+#   it isn't importable from the mordred-hermes mypy run; the extension egress,
+#   RPC and Discord context modules only import it lazily at runtime.
 # Treat all as untyped so `mypy --strict src` resolves cross-platform.
 [[tool.mypy.overrides]]
 module = [
@@ -381,8 +372,6 @@ module = [
     "rlp.*",
     "eth_hash",
     "eth_hash.*",
-    "qrcode",
-    "qrcode.*",
     # run_agent is a repo-root top-level Hermes module (like gateway); the
     # extension chat bridge imports AIAgent from it lazily at runtime.
     "run_agent",

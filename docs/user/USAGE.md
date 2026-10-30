@@ -1920,7 +1920,7 @@ curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/sc
 
 A Hermes self-update can recreate `~/.hermes/hermes-agent/venv`. Repeat the
 same feature flags whenever you reinstall or upgrade so optional dependencies
-such as `extension`, `ethereum`, `messaging`, `tor-control`, and `telegram` are installed
+such as `extension`, `ethereum`, `tor-control`, and `telegram` are installed
 and re-resolved in the new environment.
 
 To install an exact release, replace `VERSION` with its PEP 440 version and

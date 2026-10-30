@@ -90,7 +90,7 @@ readers.
   shim pins are synchronized by `python tools/bump_version.py <version>`; the
   top-level README remains version-agnostic and relies on its PyPI badge.
 - Base install stays small. Platform and feature dependencies remain in the
-  `keyvault`, `macos`, `extension`, `ethereum`, `messaging`, `tor-control`, and
+  `keyvault`, `macos`, `extension`, `ethereum`, `tor-control`, `telegram`, and
   integration extras.
 - `hermes-mordred` is the canonical user-facing CLI across the full Hermes
   support range. Hermes 0.19.0+ can expose the same handlers through an

@@ -907,7 +907,7 @@ vault       init | change-passphrase | recover | add | status | cat |
             disable-config-decrypt
 encryption  status | enable | disable | purge | change-passphrase
 plugins     list | migrate
-extension   pair | serve
+extension   devices | serve
 desktop     install | uninstall | status
 egress      status | set | block | unblock | block-tool | unblock-tool |
             taint
@@ -3825,8 +3825,9 @@ and revocable on its own:
 | `activity_status` | no | `activity_status {collection: enabled \| disabled \| unavailable, reason}` |
 
 - Pair codes come from `hermes-mordred activity pair-operator` (single use,
-  10 minutes, `MORT-XXXXXXXX-XXXXXXXX` shape) and are purpose-bound: the
-  extension's `pair_init` never consumes them and vice versa. Peer ids are
+  10 minutes, `MORT-XXXXXXXX-XXXXXXXX` shape) and only `activity_pair_init`
+  accepts them; the browser extension takes no codes and is approved by
+  signature (`extension/trust.py`). Peer ids are
   `operator:<12 hex>`; only the SHA-256 of a peer token is stored.
 - A socket authenticated by `activity_auth` is an activity principal: only
   `activity_batch` and `activity_status` are dispatched; any other frame gets

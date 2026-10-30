@@ -15,8 +15,6 @@ curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/sc
   bash -s -- --with-extension
 ```
 
-The `messaging` extra is not required to use the browser extension.
-
 Add `--version VERSION` to the command after replacing `VERSION` with the exact
 PyPI release you need. When rerunning the installer, repeat the same feature
 options and version pin.

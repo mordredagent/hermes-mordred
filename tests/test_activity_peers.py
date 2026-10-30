@@ -10,11 +10,9 @@ import sys
 import time
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from mordred_hermes.activity import peers
 from mordred_hermes.extension import pairing
-from mordred_hermes.extension.crypto import b64u_encode, x25519_public_raw
 
 
 @pytest.fixture(autouse=True)
@@ -158,26 +156,6 @@ def test_fingerprint_tracks_revocation_per_peer():
     assert peers.fingerprint(first["peer_id"]) is None
     assert peers.fingerprint(second["peer_id"]) is not None
     assert peers.fingerprint("operator:unknown") is None
-
-
-def test_activity_code_does_not_pair_the_extension():
-    code, _ = peers.generate_peer_code()
-    ext_pub = b64u_encode(x25519_public_raw(X25519PrivateKey.generate()))
-    with pytest.raises(pairing.PairError) as exc:
-        pairing.handle_pair_init(code, ext_pub, b64u_encode(b"\x07" * 32))
-    assert exc.value.reason == "invalid_code"
-    assert pairing.load_pairing() is None
-    # The activity code is still usable for its own purpose.
-    assert peers.handle_pair_init(code)["peer_id"].startswith("operator:")
-
-
-def test_extension_code_does_not_mint_an_activity_peer():
-    code, _ = pairing.generate_code()
-    with pytest.raises(peers.PeerPairError) as exc:
-        peers.handle_pair_init(code)
-    assert exc.value.reason == "invalid_code"
-    assert peers.list_peers() == []
-    assert pairing.pair_outcome(code) == ("pending", None)
 
 
 def test_storage_failure_is_a_content_free_refusal(monkeypatch):
