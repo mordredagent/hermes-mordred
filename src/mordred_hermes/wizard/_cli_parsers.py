@@ -333,11 +333,11 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
 
 
 def _add_extension(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    p = sub.add_parser("extension", help="Browser extension: pairing and bridge")
+    p = sub.add_parser("extension", help="Browser extension: approved browsers and bridge")
     esub = p.add_subparsers(dest="extension_command", required=True, metavar="COMMAND")
-    p_pair = esub.add_parser("pair", help="Generate a pairing code and wait for the extension")
-    p_pair.add_argument("--timeout", type=float, default=600.0, help="Seconds to wait for pairing (default: 600)")
-    p_pair.set_defaults(func=_handle_extension_pair)
+    p_devices = esub.add_parser("devices", help="List the approved browsers, or remove one")
+    p_devices.add_argument("--remove", metavar="ID", help="Remove the browser with this id")
+    p_devices.set_defaults(func=_handle_extension_devices)
     p_serve = esub.add_parser(
         "serve",
         help="Run the extension WebSocket server (ws://127.0.0.1:7788/ext) in the foreground",
@@ -1136,10 +1136,10 @@ def _handle_plugins_migrate(args: argparse.Namespace) -> int:
     return plugins_list.migrate_cli_handler(args)
 
 
-def _handle_extension_pair(args: argparse.Namespace) -> int:
-    from . import extension_pair_cli
+def _handle_extension_devices(args: argparse.Namespace) -> int:
+    from . import extension_devices_cli
 
-    return extension_pair_cli.cli_extension_pair(args)
+    return extension_devices_cli.cli_extension_devices(args)
 
 
 def _handle_desktop(args: argparse.Namespace) -> int:

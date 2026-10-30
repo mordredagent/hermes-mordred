@@ -526,24 +526,21 @@ hermes-mordred plugins list                 # the mordred plugin + per-component
 hermes-mordred plugins migrate              # switch old mordred_* plugin names to mordred
 ```
 
-### `extension` — browser-extension pairing and server (preview)
+### `extension` — browser-extension approval and server (preview)
 ```sh
-hermes-mordred extension pair               # print a MORT-… code (+ QR with messaging), then wait
-hermes-mordred extension pair --timeout 300 # seconds to wait for the extension to pair (default 600)
 hermes-mordred extension serve              # run the extension WebSocket server in the foreground
 hermes-mordred extension serve --port 7799  # bind a non-default port (default: 127.0.0.1:7788)
+hermes-mordred extension devices            # list the approved browsers
+hermes-mordred extension devices --remove ID  # remove one; its connections close
 ```
-> `pair` prints a code and waits for a running extension WebSocket server to
-> consume it — either this plugin's `extension serve` or a compatible
-> legacy/custom gateway. After the normal platform install, the pairing path
-> does not need the server's `extension` extra; `messaging` adds only the QR
-> render. A `gateway.extension_pairing` fallback remains for compatible older
-> custom checkouts. When no pairing backend is available, the command fails
-> closed with a clear install hint.
+> There is no pairing code. Choose **Connect** in the extension popup: the popup
+> shows a check code, and the Mac asks for Touch ID (or the login password)
+> once, with the same code in the prompt. Approve only when the codes match.
+> Removing a browser needs no approval.
 >
 > `serve` runs the plugin's own ported server (`mordred_hermes.extension`)
 > standalone. Install the `extension` extra to guarantee its dependencies.
-> Pairing, crypto, history, keyvault signing, and agent chat all work: the chat
+> Approval, crypto, history, keyvault signing, and agent chat all work: the chat
 > handler binds the
 > Hermes runtime shipped with `hermes-agent`, so E2E-encrypted messages get
 > real agent replies (a stub reply appears only if that runtime is missing);

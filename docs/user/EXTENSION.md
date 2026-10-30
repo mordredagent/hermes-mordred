@@ -1,7 +1,7 @@
 # Mordred — browser extension guide
 
 > **Status**: preview. This page covers the packaged localhost WebSocket server,
-> browser pairing, encrypted gateway chat, history, and wallet bridge. For the
+> browser approval, encrypted gateway chat, history, and wallet bridge. For the
 > general Mordred setup, start with [`QUICKSTART.md`](./QUICKSTART.md).
 
 ## Install
@@ -15,17 +15,9 @@ curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/sc
   bash -s -- --with-extension
 ```
 
-The `messaging` extra is not required to use the browser extension. Without it,
-`hermes-mordred extension pair` prints the `MORT-...` pairing code as text. If
-you also want the same code rendered as a terminal QR, add only `messaging` to
-the recommended extension bundle:
+The `messaging` extra is not required to use the browser extension.
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
-  bash -s -- --with-extension --extras messaging
-```
-
-Add `--version VERSION` to either form after replacing `VERSION` with the exact
+Add `--version VERSION` to the command after replacing `VERSION` with the exact
 PyPI release you need. When rerunning the installer, repeat the same feature
 options and version pin.
 
@@ -40,7 +32,7 @@ Open `chrome://extensions` (or the equivalent page in Brave, Arc, or Edge),
 enable Developer mode, choose **Load unpacked**, and select the cloned `dist/`
 directory. There is currently no published Firefox bundle.
 
-## Start and pair
+## Start and approve a browser
 
 Stock `hermes-agent` does not host or automatically start the Extension API.
 Start the packaged server in the foreground:
@@ -64,17 +56,21 @@ hermes-mordred extension serve --port 7799
 An alternate port requires a custom extension build whose manifest permits and
 client configuration selects that port.
 
-In a second terminal, generate a pairing code and wait for the browser
-extension to consume it:
+There is no pairing code. Open the extension popup and choose **Connect**. The
+popup shows a six-character check code, and the Mac that runs Hermes asks for
+Touch ID (or the login password) with the same code in its prompt. Approve only
+when the two codes match. That single prompt is the whole approval; afterwards
+the browser reconnects without asking.
+
+On macOS the approval key is a Secure Enclave key, so the Mac running Hermes
+must be the one where you approve. List or remove approved browsers with:
 
 ```sh
-hermes-mordred extension pair
-hermes-mordred extension pair --timeout 300
+hermes-mordred extension devices
+hermes-mordred extension devices --remove DEVICE_ID
 ```
 
-`pair` prints a `MORT-...` code and, with the `messaging` extra, a terminal QR.
-The standalone server and compatible legacy/custom gateway implementations use
-`~/.hermes/extension/pending.json`, so either can consume the code.
+Removing a browser needs no approval and closes its open connections.
 
 The `Web page:` line printed at startup contains a private URL fragment. Copy
 the complete URL, including `#token=...`, when opening the bundled localhost
@@ -85,15 +81,29 @@ history before the app starts.
 
 The server validates the TCP peer, `Host`, and `Origin`; only loopback clients,
 supported browser-extension origins, and the private localhost page are
-admitted. A connection begins with `auth_challenge` and is bound to the pairing
-token generation that authenticated it. Re-pairing or clearing pairing state
-revokes existing privileged sessions.
+admitted. A connection begins with `auth_challenge`; the browser answers with
+a hello signed by its own non-extractable device key.
 
-The currently published browser bundle targets Chromium and can additionally
-register a WebAuthn credential. The server accepts `moz-extension://` transport
-origins for compatible custom clients, but Firefox WebAuthn registration is
-refused until the protocol can carry its stable browser-specific ceremony
-origin and RP ID.
+Three keys are involved:
+
+- **V**, the approval key, is a Secure Enclave key that needs Touch ID or the
+  login password for every signature. It signs endorsements and nothing else.
+- **H**, the Hermes identity key, is a Secure Enclave key that needs no prompt.
+  It signs every handshake reply and is itself endorsed by V.
+- **D**, the browser's device key, is trusted while an endorsement by V names
+  it.
+
+The extension pins V at its first approval and refuses a Hermes whose replies
+do not chain to it. Each socket derives its own session key from an X25519
+exchange.
+
+V and H, and the list of removed browsers, are stored in the Mordred vault. The
+endorsements themselves are stored in `~/.hermes/extension/devices.json`, so
+approving a browser asks for Touch ID only once, for V's signature. Nothing in
+that file needs the vault's protection. Every endorsement is checked against V
+when it is read. A removed browser's endorsement is recorded in the vault, so
+copying it back into the file does not restore the browser. Deleting the file
+only means the browsers must be approved again.
 
 For wallet requests, the browser cannot select an arbitrary chain or RPC URL.
 Both must match the operator-selected values in
@@ -132,9 +142,9 @@ or a particular platform's native/live acceptance gates are ready.
 | Message | Behavior |
 |---|---|
 | `auth_challenge` / `ping` | Server-initiated authentication challenge and application keepalive. |
-| `pair_init` | Consumes a one-time pairing code and establishes the shared key. |
-| `auth` | Validates the rotated local token and, when registered, a WebAuthn assertion. |
-| `webauthn_register` | Registers or clears the Chromium WebAuthn credential. |
+| `auth2_hello` | The browser's signed hello. Answered by `auth2_ok` for an approved browser, or by `auth2_unendorsed` with the check code. |
+| `device_enroll` | Asks the owner at the Mac to approve the browser of the pending hello. |
+| `auth` | Validates the bundled localhost page's process token. |
 | `chat` | Streams a Hermes agent turn as `chat_chunk*` plus `chat_end`. |
 | `encrypt` / `decrypt` | Encrypts or decrypts extension message payloads. |
 | `channel_key_set` | Stores an encrypted per-channel gateway key from the paired extension. |
@@ -195,13 +205,14 @@ Ctrl+C and SIGTERM shut the standalone server down cleanly.
 | Published extension cannot connect on port 7799 | Use port 7788, or build a custom extension whose manifest and client configuration permit 7799. |
 | `web app not built` | Reinstall the PyPI wheel; released wheels include the bundled page. |
 | Reconnects with close code `1002` / `invalid_server_frame` | Update and reload the browser extension and Mordred together, then restart the server. |
-| QR code is absent | Install the `messaging` extra or enter the printed `MORT-...` code manually. |
+| The popup waits for approval but no prompt appears on the Mac | Check that `extension serve` runs on the Mac where you are signed in; the prompt appears there. |
+| A browser stopped connecting after Hermes moved to a new vault | The extension refuses a changed approval key. Remove the agent in the popup and connect again. |
 | Wallet command says the extra is missing | Install `ethereum` in the same Hermes venv and restart the server. |
 | Background chat cannot open sealed secrets on macOS | The file-vault key may be attended. `enable-se` cannot change its policy. Keep the server foreground, or preserve the complete vault plus recovery passphrase and re-key a copied vault on a genuinely fresh device/profile with `vault recover`; never delete the working store first. See [`USAGE.md` §4.3](./USAGE.md#43-touch-id-prompts--why-several-per-command-and-how-to-silence-them). |
 
 ## Related references
 
-- [`USAGE.md` — extension command](./USAGE.md#extension--browser-extension-pairing-and-server-preview)
+- [`USAGE.md` — extension command](./USAGE.md#extension--browser-extension-approval-and-server-preview)
 - [`SLACK_E2E.md`](../dev/SLACK_E2E.md)
 - [`ROADMAP.md` — lifecycle integration](../dev/ROADMAP.md#remaining-browser-extension-gateway-integration)
 - Server entry point: `src/mordred_hermes/extension/api.py`

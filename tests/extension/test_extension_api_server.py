@@ -18,13 +18,19 @@ import aiohttp
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from mordred_hermes.extension import extension_api
 from mordred_hermes.extension import extension_crypto as xc
 from mordred_hermes.extension import extension_pairing as pairing
 from tests._checked_fixture_helpers import assert_private, seed_private_text
 from tests._checked_fixture_helpers import tmp_path as tmp_path
+from tests.extension._trust_helpers import Browser, authenticate, with_test_root
+
+
+@pytest.fixture(autouse=True)
+def _test_root(monkeypatch):
+    """Browsers are approved without Touch ID (an in-memory vault with a test root)."""
+    with_test_root(monkeypatch)
 
 
 def test_reported_package_version_prefers_canonical_distribution(monkeypatch):
@@ -84,25 +90,12 @@ async def _recv(ws):
 
 
 async def _pair_and_auth(ws) -> bytes:
-    """Drive pair_init + auth as the extension would; returns the shared AES key."""
-    await _recv(ws)  # auth_challenge
-    code, _ = pairing.generate_code()
-    ext_priv = X25519PrivateKey.generate()
-    await ws.send_str(
-        json.dumps(
-            {
-                "id": "p1",
-                "type": "pair_init",
-                "code": code,
-                "ext_pubkey": xc.b64u_encode(xc.x25519_public_raw(ext_priv)),
-                "challenge": xc.b64u_encode(b"\x07" * 32),
-            }
-        )
-    )
-    complete = await _recv(ws)
-    await ws.send_str(json.dumps({"type": "auth", "ext_token": complete["ext_token"]}))
-    await _recv(ws)  # auth_ok
-    return xc.derive_shared_key(ext_priv, complete["hermes_pubkey"], code)
+    """Run auth v2 as an approved browser would; returns the socket's session key."""
+    browser = Browser()
+    reply = await browser.connect(ws)
+    assert reply["type"] == "auth2_ok", reply
+    assert browser.session_key is not None
+    return browser.session_key
 
 
 async def _page_auth(ws, server) -> None:
@@ -128,42 +121,15 @@ async def _run_flow(port: int) -> dict:
             async with session.ws_connect(
                 f"http://127.0.0.1:{port}/ext", headers={"Origin": "chrome-extension://abc"}
             ) as ws:
-                # Server greets with an auth_challenge (§3.5).
-                chal = json.loads((await ws.receive()).data)
-                results["challenge_type"] = chal["type"]
-                results["webauthn_required"] = chal["webauthn_required"]
-
-                # --- pairing ---
-                code, _ = pairing.generate_code()
-                ext_priv = X25519PrivateKey.generate()
-                ext_pub_b64 = xc.b64u_encode(xc.x25519_public_raw(ext_priv))
-                await ws.send_str(
-                    json.dumps(
-                        {
-                            "id": "p1",
-                            "type": "pair_init",
-                            "code": code,
-                            "ext_pubkey": ext_pub_b64,
-                            "challenge": xc.b64u_encode(b"\x07" * 32),
-                        }
-                    )
-                )
-                complete = json.loads((await ws.receive()).data)
-                results["pair_type"] = complete["type"]
-                ext_key = xc.derive_shared_key(ext_priv, complete["hermes_pubkey"], code)
-
-                # --- auth ---
-                await ws.send_str(json.dumps({"type": "auth", "ext_token": complete["ext_token"]}))
-                auth = json.loads((await ws.receive()).data)
+                # --- approval, then auth v2 ---
+                auth = await Browser().connect(ws)
                 results["auth_type"] = auth["type"]
                 results["auth_capabilities"] = auth.get("capabilities")
 
-                # --- encrypt then decrypt round-trip via the server ---
+                # --- encrypt then decrypt round-trip via the server (Hermes' own key) ---
                 await ws.send_str(json.dumps({"id": "e1", "type": "encrypt", "plaintext": "秘密"}))
                 enc = json.loads((await ws.receive()).data)
                 results["enc_type"] = enc["type"]
-                # The extension would also be able to decrypt locally:
-                results["client_decrypt"] = xc.decrypt_message(ext_key, enc["ciphertext"])
 
                 await ws.send_str(json.dumps({"id": "d1", "type": "decrypt", "ciphertext": enc["ciphertext"]}))
                 dec = json.loads((await ws.receive()).data)
@@ -222,10 +188,7 @@ async def _run_flow(port: int) -> dict:
 def test_full_server_flow():
     r = asyncio.run(_run_flow(_free_port()))
     assert r["origin_rejected"] is True
-    assert r["challenge_type"] == "auth_challenge"
-    assert r["webauthn_required"] is False
-    assert r["pair_type"] == "pair_complete"
-    assert r["auth_type"] == "auth_ok"
+    assert r["auth_type"] == "auth2_ok"
     assert r["auth_capabilities"] == [
         "discord_channel_resolve_v1",
         "telegram_import_v1",
@@ -236,7 +199,6 @@ def test_full_server_flow():
         "imports_v1",
     ]
     assert r["enc_type"] == "encrypt_result"
-    assert r["client_decrypt"] == "秘密"
     assert r["dec_plaintext"] == "秘密"
     assert r["chat"] == "こんにちは、受け取りました: 状態"
     assert r["sign_prompt_type"] == "sign_prompt"
@@ -391,136 +353,6 @@ def test_keepalive_ping_pushed_to_idle_client():
     assert asyncio.run(_flow(_free_port())) == {"type": "ping"}
 
 
-def test_reconnect_reauths_with_persisted_token():
-    """A reconnecting client (e.g. after an MV3 service-worker kill) redoes
-    only the auth handshake with its stored ext_token — no re-pairing."""
-
-    async def _flow(port):
-        server = extension_api.ExtensionAPIServer(port=port)
-        await server.start()
-        try:
-            async with aiohttp.ClientSession() as s:
-                async with s.ws_connect(f"http://127.0.0.1:{port}/ext") as ws:
-                    json.loads((await ws.receive()).data)  # auth_challenge
-                    code, _ = pairing.generate_code()
-                    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
-                    await ws.send_str(
-                        json.dumps(
-                            {
-                                "id": "p1",
-                                "type": "pair_init",
-                                "code": code,
-                                "ext_pubkey": ext_pub,
-                                "challenge": xc.b64u_encode(b"\x07" * 32),
-                            }
-                        )
-                    )
-                    token = json.loads((await ws.receive()).data)["ext_token"]
-                # First socket is closed here — reconnect with the token only.
-                async with s.ws_connect(f"http://127.0.0.1:{port}/ext") as ws2:
-                    json.loads((await ws2.receive()).data)  # fresh auth_challenge
-                    await ws2.send_str(json.dumps({"type": "auth", "ext_token": token}))
-                    return json.loads((await ws2.receive()).data)
-        finally:
-            await server.stop()
-
-    assert asyncio.run(_flow(_free_port()))["type"] == "auth_ok"
-
-
-@pytest.mark.parametrize("state_change", ["replace", "clear"])
-def test_open_extension_socket_is_revoked_when_pairing_changes(state_change):
-    """A live socket must never inherit replacement pairing keys or privileges."""
-    old_token = "old-extension-token"
-    old_key = b"\x11" * 32
-    pairing._save_pairing(
-        pairing.Pairing(
-            aes_key=old_key,
-            ext_token=old_token,
-            ext_pubkey_b64="old-extension",
-            hermes_pubkey_b64="old-hermes",
-            paired_at=1.0,
-        )
-    )
-    conn = extension_api._Connection(_FakeWS(), _chat_handler)
-    asyncio.run(conn._on_auth({"type": "auth", "ext_token": old_token}))
-    assert conn.ws.sent[-1]["type"] == "auth_ok"
-    conn._pending_sign["approved-under-old-pairing"] = {"method": "personal_sign"}
-
-    if state_change == "replace":
-        pairing._save_pairing(
-            pairing.Pairing(
-                aes_key=b"\x22" * 32,
-                ext_token="replacement-extension-token",
-                ext_pubkey_b64="new-extension",
-                hermes_pubkey_b64="new-hermes",
-                paired_at=2.0,
-            )
-        )
-    else:
-        pairing.clear_pairing()
-
-    asyncio.run(
-        conn.dispatch(
-            json.dumps(
-                {
-                    "id": "e1",
-                    "type": "encrypt",
-                    "plaintext": "must not cross pairing generations",
-                }
-            )
-        )
-    )
-
-    assert conn.ws.sent[-1] == {"type": "auth_fail", "reason": "pairing_changed"}
-    assert conn.authed is False
-    assert conn._pending_sign == {}
-    assert not any(frame.get("type") == "encrypt_result" for frame in conn.ws.sent)
-
-
-def test_socket_authenticated_before_webauthn_enable_cannot_unregister_it():
-    """Credential generation changes revoke token-only sessions immediately."""
-    token = "extension-token"
-    pairing._save_pairing(
-        pairing.Pairing(
-            aes_key=b"\x11" * 32,
-            ext_token=token,
-            ext_pubkey_b64="extension",
-            hermes_pubkey_b64="hermes",
-            paired_at=1.0,
-        )
-    )
-    conn = extension_api._Connection(
-        _FakeWS(),
-        _chat_handler,
-        client_origin="chrome-extension://abcdefghijklmnopabcdefghijklmnop",
-    )
-    asyncio.run(conn._on_auth({"type": "auth", "ext_token": token}))
-    assert conn.ws.sent[-1]["type"] == "auth_ok"
-
-    priv = ec.generate_private_key(ec.SECP256R1())
-    spki = priv.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
-    pairing.save_webauthn_credential(
-        "cred-1",
-        xc.b64u_encode(spki),
-        origin="chrome-extension://abcdefghijklmnopabcdefghijklmnop",
-    )
-    asyncio.run(
-        conn.dispatch(
-            json.dumps(
-                {
-                    "id": "w1",
-                    "type": "webauthn_register",
-                    # Empty credential fields request unregister.
-                }
-            )
-        )
-    )
-
-    assert conn.ws.sent[-1] == {"type": "auth_fail", "reason": "pairing_changed"}
-    assert conn.authed is False
-    assert pairing.has_webauthn_credential() is True
-
-
 def test_malformed_frames_get_error_and_connection_survives():
     async def _flow(port):
         server = extension_api.ExtensionAPIServer(port=port)
@@ -576,21 +408,9 @@ def test_crashed_handler_replies_error(monkeypatch):
 
 
 def test_page_session_cannot_touch_credentials(tmp_path):
-    """The launch-fragment page principal is exempt from WebAuthn, so its
-    allowlist must not reach credential/key-writing handlers or clear the
-    extension's registered second factor."""
-    pairing._save_pairing(
-        pairing.Pairing(
-            aes_key=b"\x01" * 32,
-            ext_token="page-test-extension-token",
-            ext_pubkey_b64="test-extension",
-            hermes_pubkey_b64="test-hermes",
-            paired_at=1.0,
-        )
-    )
-    priv = ec.generate_private_key(ec.SECP256R1())
-    spki = priv.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
-    pairing.save_webauthn_credential("cred-1", xc.b64u_encode(spki))
+    """The launch-fragment page principal's allowlist must not reach
+    credential/key-writing handlers."""
+    pairing.ensure_master()
 
     async def _flow(port):
         server = extension_api.ExtensionAPIServer(port=port)
@@ -602,9 +422,6 @@ def test_page_session_cannot_touch_credentials(tmp_path):
             ):
                 await _page_auth(ws, server)
                 out = {}
-                # Empty fields = "unregister" — the attacker's cheapest move.
-                await ws.send_str(json.dumps({"id": "w1", "type": "webauthn_register"}))
-                out["webauthn"] = await _recv(ws)
                 await ws.send_str(
                     json.dumps({"id": "s1", "type": "slack_setup", "bot_token": "xoxb-a", "app_token": "xapp-b"})
                 )
@@ -636,15 +453,9 @@ def test_page_session_cannot_touch_credentials(tmp_path):
             await server.stop()
 
     out = asyncio.run(_flow(_free_port()))
-    assert out["webauthn"] == {
-        "id": "w1",
-        "type": "error",
-        "reason": "page_session_forbidden",
-    }
     assert out["slack"] == {"id": "s1", "type": "error", "reason": "page_session_forbidden"}
     assert out["channel"] == {"id": "k1", "type": "error", "reason": "page_session_forbidden"}
     assert out["discord"] == {"id": "dc1", "type": "error", "reason": "page_session_forbidden"}
-    assert pairing.has_webauthn_credential() is True  # second factor survived
     assert not (tmp_path / ".env").exists()  # no Slack tokens written
     assert pairing.load_channel_keys() == {}
 
@@ -935,12 +746,11 @@ def test_chat_undecryptable_ciphertext_is_not_forwarded_to_the_agent():
                 aiohttp.ClientSession() as s,
                 s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": "chrome-extension://abc"}) as ws,
             ):
-                aes = await _pair_and_auth(ws)
-                stale = xc.encrypt_message(b"\x09" * 32, "hello")  # not our K_extchat
+                ek = await _pair_and_auth(ws)
+                stale = xc.encrypt_message(b"\x09" * 32, "hello")  # not this socket's key
                 await ws.send_str(json.dumps({"id": "c1", "type": "chat", "content": stale}))
                 err = await _recv(ws)
                 # A correctly-keyed encrypted message must still get through.
-                ek = xc.hkdf_subkey(aes, extension_api._EXTCHAT_SALT, extension_api._EXTCHAT_INFO)
                 await ws.send_str(json.dumps({"id": "c2", "type": "chat", "content": xc.encrypt_message(ek, "hi")}))
                 ok = await _recv(ws)
                 return err, ok
@@ -998,20 +808,12 @@ class _FakeWS:
 
 
 def _authed_conn() -> extension_api._Connection:
-    token = "direct-test-extension-token"
     pairing._save_pairing(
-        pairing.Pairing(
-            aes_key=b"\x01" * 32,
-            ext_token=token,
-            ext_pubkey_b64="test-extension",
-            hermes_pubkey_b64="test-hermes",
-            paired_at=1.0,
-        )
+        pairing.Pairing(aes_key=b"\x01" * 32, ext_token="", ext_pubkey_b64="", hermes_pubkey_b64="", paired_at=1.0)
     )
+    assert pairing.load_pairing() is not None  # warms the state cache, as a live gateway has
     conn = extension_api._Connection(_FakeWS(), _chat_handler)
-    conn.authed = True
-    conn._authentication_generation = pairing.authentication_generation_fingerprint(token)
-    assert conn._authentication_generation is not None
+    authenticate(conn, b"\x02" * 32)
     return conn
 
 
@@ -1056,114 +858,6 @@ def test_authed_extension_resolves_discord_channel_metadata():
             "parent_channel_name": "secure-ops",
         }
     ]
-
-
-def test_webauthn_registration_binds_chromium_origin_as_rp_id(tmp_path):
-    origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
-    pairing._save_pairing(
-        pairing.Pairing(
-            aes_key=b"\x01" * 32,
-            ext_token="registration-test-token",
-            ext_pubkey_b64="test-extension",
-            hermes_pubkey_b64="test-hermes",
-            paired_at=1.0,
-        )
-    )
-    conn = extension_api._Connection(_FakeWS(), _chat_handler, client_origin=origin)
-    conn.authed = True
-
-    asyncio.run(
-        conn._on_webauthn_register(
-            {
-                "id": "w1",
-                "credential_id": "cred-1",
-                "public_key": _p256_public_key_b64(),
-            }
-        )
-    )
-
-    stored = json.loads((tmp_path / "extension" / "webauthn.json").read_text("utf-8"))
-    assert stored["origin"] == origin
-    assert stored["rp_id"] == origin
-    assert conn.ws.sent == [{"id": "w1", "type": "webauthn_registered", "ok": True}]
-
-
-@pytest.mark.parametrize(
-    "invalid_public_key",
-    [
-        pytest.param(xc.b64u_encode(b"not a DER public key"), id="malformed"),
-        pytest.param(_ec_public_key_b64(ec.SECP384R1()), id="p384"),
-    ],
-)
-def test_webauthn_registration_rejects_invalid_public_key_without_replacing_credential(
-    tmp_path,
-    invalid_public_key,
-):
-    origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
-    pairing._save_pairing(
-        pairing.Pairing(
-            aes_key=b"\x01" * 32,
-            ext_token="registration-test-token",
-            ext_pubkey_b64="test-extension",
-            hermes_pubkey_b64="test-hermes",
-            paired_at=1.0,
-        )
-    )
-    pairing.save_webauthn_credential("existing-credential", _p256_public_key_b64(), origin=origin)
-    stored_path = tmp_path / "extension" / "webauthn.json"
-    original = stored_path.read_bytes()
-    conn = extension_api._Connection(_FakeWS(), _chat_handler, client_origin=origin)
-    conn.authed = True
-
-    asyncio.run(
-        conn._on_webauthn_register(
-            {
-                "id": "w-invalid",
-                "credential_id": "replacement-credential",
-                "public_key": invalid_public_key,
-            }
-        )
-    )
-
-    assert conn.ws.sent == [
-        {
-            "id": "w-invalid",
-            "type": "webauthn_registered",
-            "ok": False,
-            "error": "invalid_public_key",
-        }
-    ]
-    assert stored_path.read_bytes() == original
-    assert json.loads(original)["credential_id"] == "existing-credential"
-
-
-def test_webauthn_registration_rejects_firefox_until_binding_is_in_protocol(tmp_path):
-    conn = extension_api._Connection(
-        _FakeWS(),
-        _chat_handler,
-        client_origin="moz-extension://random-document-uuid",
-    )
-    conn.authed = True
-
-    asyncio.run(
-        conn._on_webauthn_register(
-            {
-                "id": "w1",
-                "credential_id": "cred-1",
-                "public_key": _p256_public_key_b64(),
-            }
-        )
-    )
-
-    assert conn.ws.sent == [
-        {
-            "id": "w1",
-            "type": "webauthn_registered",
-            "ok": False,
-            "error": "webauthn_browser_unsupported",
-        }
-    ]
-    assert not (tmp_path / "extension" / "webauthn.json").exists()
 
 
 def test_on_encrypt_not_paired_replies_encrypt_fail(monkeypatch):
@@ -1801,9 +1495,7 @@ def test_history_result_flags_undecryptable_history(tmp_path):
 
     from mordred_hermes.extension import extension_history
 
-    code, _ = pairing.generate_code()
-    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
-    pairing.handle_pair_init(code, ext_pub, xc.b64u_encode(b"\x00" * 32))
+    pairing.ensure_master()
 
     async def _flow(port):
         server = extension_api.ExtensionAPIServer(port=port)

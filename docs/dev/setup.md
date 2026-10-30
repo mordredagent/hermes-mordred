@@ -122,7 +122,7 @@ The extras defined by `[project.optional-dependencies]` in `pyproject.toml`. `uv
 | `extension` | `aiohttp` + `cryptography` + `requests[socks]` + `urllib3` | Browser extension WebSocket gateway and Tor-routed wallet RPC (`extension serve`) |
 | `ethereum` | `eth-keys` / `eth-account` / `rlp` / `eth-hash` | keyvault signing feature (`extension_sign.py`) |
 | `tor-control` | `stem` (Tor ControlPort cookie auth + liveness probe) | Tor liveness in strict mode |
-| `messaging` | `qrcode` | Device QR display for `extension pair` (falls back to plaintext if absent) |
+| `messaging` | `qrcode` | Unused since browsers are approved by signature (it rendered the `extension pair` QR) |
 | `integration` | SOCKS5h client library + provider SDK | `pytest -m integration` network verification suite |
 
 > **CI uses two dependency profiles**: the main strict lane intentionally runs with only `.[dev,keyvault,extension]`, while `feature-extras` installs `ethereum` / `messaging` / `tor-control`, requires their imports, and runs the focused feature suites so `importorskip` cannot hide missing coverage. Use `uv sync --all-extras` when developing those optional features, and also reproduce the main profile before pushing (see `CI.md`).

@@ -7,10 +7,14 @@ no TLS; an Origin check rejects connections from ordinary web pages (only
 Message protocol: ``Mordred-Extension/SPEC.ja.md`` §6 and the extension's
 ``src/lib/protocol.ts``. Handlers:
 
-- ``pair_init``        → :mod:`mordred_hermes.extension.pairing` (pre-auth)
-- ``auth``             → validate ext_token, reply ``auth_ok`` (se_available)
+- ``auth2_hello``      → a browser's signed hello (pre-auth). An endorsed device key
+  gets ``auth2_ok`` (signed by Hermes' identity key, with the endorsements and a
+  fresh X25519 session); an unknown one gets ``auth2_unendorsed`` with the check
+  code, and may then send ``device_enroll``, which asks the owner at the Mac
+  (Touch ID or the login password) through :mod:`mordred_hermes.extension.trust`
+- ``auth``             → the localhost page's process token, reply ``auth_ok``
 - ``chat``             → injected ``chat_handler`` streamed as ``chat_chunk*`` + ``chat_end``
-- ``encrypt``/``decrypt`` → :mod:`mordred_hermes.extension.crypto` with the shared key
+- ``encrypt``/``decrypt`` → :mod:`mordred_hermes.extension.crypto` with Hermes' master key
 - ``discord_channel_resolve`` → Discord channel/thread metadata via the configured bot token
 - ``accounts_request`` → keyvault address (``accounts_result``)
 - ``sign_request`` → analyze + ``sign_prompt``; ``sign_approve`` → keyvault sign → ``sign_result``
@@ -21,7 +25,7 @@ Message protocol: ``Mordred-Extension/SPEC.ja.md`` §6 and the extension's
   (validated source cards) right before ``telegram_ask_end``
 - ``recall_query`` / ``recall_open`` / ``recall_dismiss`` → :mod:`mordred_hermes.recall` over
   ``mordred.db``'s import tables; the selection arrives sealed and the cards and context
-  leave sealed with K_extchat (``recall_result`` / ``recall_opened`` / ``recall_dismissed``)
+  leave sealed with the socket's session key (``recall_result`` / ``recall_opened`` / ``recall_dismissed``)
 - ``recall_events`` (prototype) → :mod:`mordred_hermes.recall.events`: the typed words' hits
   grouped into events, headlined by a loopback-only local model when one is configured;
   sealed both ways (``recall_events_result``)
@@ -38,6 +42,7 @@ Both are part of the extension's strict frame decoder contract.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
@@ -50,16 +55,17 @@ from typing import Any
 from urllib.parse import quote, urlsplit
 
 from aiohttp import WSMsgType, web
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from ..activity.peers import PeerPrincipal
-from . import activity_api, page_headers, pairing
+from . import activity_api, page_headers, pairing, trust
 from ._windows_storage import ExtensionStorageError
 from .crypto import (
     DecryptError,
     decrypt_message,
     encrypt_message,
     encrypt_message_v2,
-    hkdf_subkey,
     is_encrypted,
     key_id,
 )
@@ -71,11 +77,6 @@ from .discord_context import (
 from .errors import wire_error_code
 from .imports_api import IMPORTS_CAPABILITY, ImportsRefusal
 from .wallet import _do_sign, _get_account_snapshot, _prepare_sign, analyze_sign
-from .webauthn import InvalidWebAuthnPublicKey
-
-# K_extchat derivation label (SPEC-v2 §1.1) — must match the extension.
-_EXTCHAT_SALT = "mordred-extchat-v1"
-_EXTCHAT_INFO = "extchat"
 
 # Slack tokens land verbatim in ~/.hermes/.env as ``KEY=value`` lines. A prefix
 # check plus ``.strip()`` is not enough: ``.strip()`` only trims the *edges*, so
@@ -476,11 +477,15 @@ class _Connection:
         self.page_token = page_token  # set only for local-origin (page) sockets
         self.client_origin = client_origin
         self.authed = False
-        # Extension sessions are bound to the exact pairing token generation
-        # that completed authentication. Re-pairing or clearing state must
-        # revoke already-open sockets before they can touch replacement keys.
+        # Extension sessions belong to one endorsed device key and to the exact
+        # endorsement that admitted it; removing the device revokes its open
+        # sockets. Their K_extchat is this socket's own session key.
         # Page sessions use the separate process-bound page principal.
-        self._authentication_generation: bytes | None = None
+        self._device_id: str | None = None
+        self._device_generation: bytes | None = None
+        self._session_key: bytes | None = None
+        # A verified hello from an unknown device, kept for ``device_enroll``.
+        self._hello: _Hello | None = None
         self._page_authenticated = False
         # Activity peers (activity_auth) are a separate, narrower principal,
         # revalidated per frame against their own credential record.
@@ -527,21 +532,17 @@ class _Connection:
                 return
 
     async def send_challenge(self) -> None:
-        import os
-
-        from .crypto import b64u_encode
-
         self._nonce = os.urandom(32)
-        challenge: dict[str, Any] = {"type": "auth_challenge", "nonce": b64u_encode(self._nonce)}
-        try:
-            challenge["webauthn_required"] = pairing.has_webauthn_credential()
-        except ExtensionStorageError as exc:
-            # Checked Windows storage refused: fail closed and say why, rather
-            # than advertising "no credential" from state that was not read.
-            self._log_storage_refusal("auth_challenge", exc)
-            challenge["webauthn_required"] = True
-            challenge["storage_error"] = exc.wire_reason
-        await self._send(challenge)
+        # ``webauthn_required: False`` keeps localhost pages built before auth v2,
+        # whose decoder requires the field, working with their page token.
+        await self._send(
+            {
+                "type": "auth_challenge",
+                "nonce": trust.b64u(self._nonce),
+                "webauthn_required": False,
+                "auth_versions": [trust.AUTH_VERSION],
+            }
+        )
 
     async def _parse_frame(self, raw: str) -> dict[str, Any] | None:
         try:
@@ -563,7 +564,8 @@ class _Connection:
         # Two dispatch tables keep the auth gate explicit: pre-auth messages are
         # always allowed; everything else requires a completed auth handshake.
         pre_auth = {
-            "pair_init": self._on_pair_init,
+            "auth2_hello": self._on_auth2_hello,
+            "device_enroll": self._on_device_enroll,
             "auth": self._on_auth,
             "activity_pair_init": self._on_activity_pair_init,
             "activity_auth": self._on_activity_auth,
@@ -578,7 +580,6 @@ class _Connection:
             "accounts_request": self._on_accounts,
             "sign_request": self._on_sign_request,
             "sign_approve": self._on_sign_approve,
-            "webauthn_register": self._on_webauthn_register,
             "history_get": self._on_history_get,
             "history_clear": self._on_history_clear,
             "telegram_status": self._on_telegram_status,
@@ -638,7 +639,10 @@ class _Connection:
 
     def _invalidate_authentication(self) -> None:
         self.authed = False
-        self._authentication_generation = None
+        self._device_id = None
+        self._device_generation = None
+        self._session_key = None
+        self._hello = None
         self._page_authenticated = False
         self._activity_principal = None
         self._activity_generation = None
@@ -694,34 +698,17 @@ class _Connection:
             return self.page_token is not None
         if self._activity_principal is not None:
             return activity_api.principal_is_current(self._activity_principal, self._activity_generation)
-        expected = self._authentication_generation
-        if expected is None:
+        expected, device_id = self._device_generation, self._device_id
+        if expected is None or device_id is None:
             return False
         try:
-            current = pairing.authentication_generation_fingerprint()
-            return current is not None and secrets.compare_digest(expected, current)
-        except ExtensionStorageError:
-            raise
+            state = trust.store().load()
+            device = state.devices.get(device_id) if state is not None else None
+            return device is not None and secrets.compare_digest(expected, device.generation)
         except Exception:
-            # Missing/corrupt/unreadable pairing state is revocation, not a
+            # Missing/corrupt/unreadable trust state is revocation, not a
             # reason to retain a privileged session.
             return False
-
-    async def _on_pair_init(self, msg: dict[str, Any]) -> None:
-        mid = msg.get("id")
-        try:
-            # Executor: handle_pair_init does ECDH/signing plus flock-guarded
-            # file I/O — neither belongs on the event loop.
-            result = await asyncio.get_event_loop().run_in_executor(
-                None, pairing.handle_pair_init, msg.get("code", ""), msg.get("ext_pubkey", ""), msg.get("challenge", "")
-            )
-        except pairing.PairError as exc:
-            await self._send({"id": mid, "type": "pair_fail", "reason": exc.reason})
-            return
-        # handle_pair_init has replaced the active token. Invalidate any prior
-        # principal on this same socket before returning the new credential.
-        self._invalidate_authentication()
-        await self._send({"id": mid, "type": "pair_complete", **result})
 
     async def _on_activity_pair_init(self, msg: dict[str, Any]) -> None:
         await activity_api.on_activity_pair_init(self, msg)
@@ -736,138 +723,126 @@ class _Connection:
         await activity_api.on_activity_status(self, msg)
 
     async def _on_auth(self, msg: dict[str, Any]) -> None:
+        """The localhost page's process token. Browsers use ``auth2_hello``."""
         token = msg.get("ext_token", "")
         self._invalidate_authentication()
-        if not isinstance(token, str):
+        if not isinstance(token, str) or not self.page_token or not secrets.compare_digest(token, self.page_token):
             await self._send({"type": "auth_fail", "reason": "invalid_token"})
             return
-        # The localhost page authenticates with the per-process page token; the
-        # extension with its paired ext_token. The page is exempt from WebAuthn
-        # (it never holds the shared key and is served by Hermes itself).
-        if self.page_token and secrets.compare_digest(token, self.page_token):
-            self.authed = True
-            self._page_authenticated = True
-            await self._send(
-                {
-                    "type": "auth_ok",
-                    "hermes_version": _hermes_version(),
-                    "se_available": pairing.se_available(),
-                }
-            )
-            return
-        initial_generation = pairing.authentication_generation_fingerprint(token)
-        if initial_generation is None:
-            await self._send({"type": "auth_fail", "reason": "invalid_token"})
-            return
-        # WebAuthn hardening (§3.5): when a credential is registered, require a
-        # valid assertion over this connection's nonce.
-        webauthn_required = pairing.has_webauthn_credential()
-        assertion = msg.get("webauthn_assertion")
-        if webauthn_required and (
-            not isinstance(assertion, dict)
-            or not pairing.verify_webauthn_assertion(
-                self._nonce,
-                assertion,
-                expected_origin=self.client_origin,
-            )
-        ):
-            await self._send({"type": "auth_fail", "reason": "webauthn_required"})
-            return
-        final_generation = pairing.authentication_generation_fingerprint(token)
-        if final_generation is None:
-            await self._send({"type": "auth_fail", "reason": "pairing_changed"})
-            return
-        if not secrets.compare_digest(initial_generation, final_generation):
-            # A valid legacy WebAuthn assertion may atomically add its missing
-            # origin/RP-hash binding. Accept that one in-band migration only
-            # after the same signed assertion verifies again against the new
-            # stored binding and the resulting auth generation stays stable.
-            if (
-                not webauthn_required
-                or not isinstance(assertion, dict)
-                or not pairing.verify_webauthn_assertion(
-                    self._nonce,
-                    assertion,
-                    expected_origin=self.client_origin,
-                )
-            ):
-                await self._send({"type": "auth_fail", "reason": "pairing_changed"})
-                return
-            stable_generation = pairing.authentication_generation_fingerprint(token)
-            if stable_generation is None or not secrets.compare_digest(
-                final_generation,
-                stable_generation,
-            ):
-                await self._send({"type": "auth_fail", "reason": "pairing_changed"})
-                return
         self.authed = True
-        self._authentication_generation = final_generation
+        self._page_authenticated = True
         await self._send(
             {
                 "type": "auth_ok",
+                "hermes_version": _hermes_version(),
+                "se_available": pairing.se_available(),
+            }
+        )
+
+    async def _on_auth2_hello(self, msg: dict[str, Any]) -> None:
+        self._invalidate_authentication()
+        try:
+            hello = _Hello.parse(msg, self._nonce, self.client_origin)
+            state = await _in_executor(trust.store().ensure_root)
+        except trust.TrustError as exc:
+            await self._send({"type": "auth_fail", "reason": exc.reason})
+            return
+        device = state.devices.get(hello.device_id)
+        if device is not None and device.spki == hello.device_spki:
+            await self._admit(state, device, hello)
+            return
+        self._hello = hello
+        code = trust.sas(state.v_spki, state.hermes_spki, hello.device_spki, self._nonce, hello.nonce_c)
+        hello.code = code
+        body = trust.body_text(
+            {
+                "kind": "unendorsed",
+                "hello_sha256": hello.digest,
+                "hermes_spki": trust.b64u(state.hermes_spki),
+                "v_spki": trust.b64u(state.v_spki),
+                "sas": code,
+            }
+        )
+        [sig] = await _in_executor(state.h.sign, [trust.SERVER_CONTEXT + body.encode()], "handshake")
+        await self._send(
+            {
+                "type": "auth2_unendorsed",
+                "body": body,
+                "sig": trust.b64u(sig),
+                "endorsements": [state.hermes_id] if state.hermes_id else [],
+            }
+        )
+
+    async def _on_device_enroll(self, msg: dict[str, Any]) -> None:
+        """Ask the owner at the Mac to approve the browser of the pending hello."""
+        hello = self._hello
+        if hello is None or self.authed or hello.code is None:
+            await self._send({"type": "auth_fail", "reason": "no_pending_hello"})
+            return
+        if not self.client_origin or not _is_extension_origin(self.client_origin):
+            await self._send({"type": "auth_fail", "reason": "extension_origin_required"})
+            return
+        try:
+            await _in_executor(pairing.ensure_master)
+            state = await _in_executor(
+                trust.store().approve, hello.device_spki, hello.label, self.client_origin, hello.code
+            )
+        except trust.TrustError as exc:
+            self._hello = None
+            await self._send({"type": "auth_fail", "reason": exc.reason})
+            return
+        if self._hello is not hello:
+            return  # the socket re-authenticated while the owner was deciding
+        device = state.devices.get(hello.device_id)
+        if device is None:
+            await self._send({"type": "auth_fail", "reason": "approval_denied"})
+            return
+        await self._admit(state, device, hello)
+
+    async def _admit(self, state: trust.Trust, device: trust.Device, hello: _Hello) -> None:
+        """``auth2_ok`` for an endorsed device: Hermes' signature, the endorsements, a session key."""
+        if state.hermes_id is None:
+            await self._send({"type": "auth_fail", "reason": "not_endorsed"})
+            return
+        eph = X25519PrivateKey.generate()
+        body = trust.body_text(
+            {
+                "kind": "ok",
+                "hello_sha256": hello.digest,
+                "hermes_spki": trust.b64u(state.hermes_spki),
+                "v_spki": trust.b64u(state.v_spki),
+                "device_id": device.device_id,
+                "eph_s": trust.b64u(eph.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)),
+            }
+        )
+        try:
+            [sig] = await _in_executor(state.h.sign, [trust.SERVER_CONTEXT + body.encode()], "handshake")
+            key = trust.session_key(eph, hello.eph_c, hello.body, body)
+        except trust.TrustError as exc:
+            await self._send({"type": "auth_fail", "reason": exc.reason})
+            return
+        self._hello = None
+        self.authed = True
+        self._device_id = device.device_id
+        self._device_generation = device.generation
+        self._session_key = key
+        await self._send(
+            {
+                "type": "auth2_ok",
+                "body": body,
+                "sig": trust.b64u(sig),
+                "endorsements": [state.hermes_id, device.endorsement],
                 "hermes_version": _hermes_version(),
                 "se_available": pairing.se_available(),
                 "capabilities": _EXTENSION_CAPABILITIES,
             }
         )
 
-    async def _on_webauthn_register(self, msg: dict[str, Any]) -> None:
-        mid = msg.get("id")
-        cred_id = msg.get("credential_id") or ""
-        pub = msg.get("public_key") or ""
-        if cred_id and pub:
-            if not self.client_origin or not _is_extension_origin(self.client_origin):
-                await self._send(
-                    {
-                        "id": mid,
-                        "type": "webauthn_registered",
-                        "ok": False,
-                        "error": "extension_origin_required",
-                    }
-                )
-                return
-            if not self.client_origin.startswith("chrome-extension://"):
-                # Firefox's clientDataJSON uses a stable hashed extension
-                # origin that is deliberately different from the random
-                # moz-extension document/WebSocket origin.  The current wire
-                # message does not carry that ceremony origin or its external
-                # RP ID, so accepting registration would create a credential
-                # that this server can never verify.
-                await self._send(
-                    {
-                        "id": mid,
-                        "type": "webauthn_registered",
-                        "ok": False,
-                        "error": "webauthn_browser_unsupported",
-                    }
-                )
-                return
-            try:
-                pairing.save_webauthn_credential(cred_id, pub, origin=self.client_origin)
-            except InvalidWebAuthnPublicKey:
-                # The public wire error is deliberately stable and does not
-                # expose parser/backend details from the rejected DER key.
-                await self._send(
-                    {
-                        "id": mid,
-                        "type": "webauthn_registered",
-                        "ok": False,
-                        "error": "invalid_public_key",
-                    }
-                )
-                return
-        else:
-            pairing.clear_webauthn_credential()  # unregister
-        await self._send({"id": mid, "type": "webauthn_registered", "ok": True})
-
     # -- chat ---------------------------------------------------------------
 
     def _extchat_key(self) -> bytes | None:
-        """K_extchat = HKDF(master, extchat) — separate from Slack keys (SPEC-v2 §2)."""
-        p = pairing.load_pairing()
-        if p is None:
-            return None
-        return hkdf_subkey(p.aes_key, _EXTCHAT_SALT, _EXTCHAT_INFO)
+        """K_extchat: this socket's session key (``None`` for the page, which sends plaintext)."""
+        return self._session_key
 
     async def _on_chat(self, msg: dict[str, Any]) -> None:
         mid = msg.get("id")
@@ -1715,3 +1690,48 @@ def _update_slack_env(env_path: Path, updates: dict[str, str], overwrite: bool) 
     except _SlackAlreadyConfigured:
         return False
     return True
+
+
+async def _in_executor(func: Callable[..., Any], *args: Any) -> Any:
+    # Vault I/O, Enclave signing and the owner's approval never run on the event loop.
+    return await asyncio.get_running_loop().run_in_executor(None, func, *args)
+
+
+class _Hello:
+    """A browser's verified ``auth2_hello``: its signed body and the fields Hermes uses."""
+
+    def __init__(self, body: str, fields: dict[str, Any]) -> None:
+        self.body = body
+        self.digest = trust.b64u(hashlib.sha256(body.encode()).digest())
+        self.device_spki = trust.unb64u(fields["device_spki"])
+        self.device_id = trust.device_id_of(self.device_spki)
+        self.nonce_c = trust.unb64u(fields["nonce_c"])
+        self.eph_c = trust.unb64u(fields["eph_c"])
+        self.label = trust.clean_label(fields.get("label"))
+        self.code: str | None = None
+
+    @classmethod
+    def parse(cls, msg: dict[str, Any], nonce: bytes, origin: str | None) -> _Hello:
+        body = msg.get("body")
+        if not isinstance(body, str) or len(body) > 8192:
+            raise trust.TrustError("bad_hello")
+        try:
+            fields = json.loads(body)
+        except ValueError as exc:
+            raise trust.TrustError("bad_hello") from exc
+        if (
+            not isinstance(fields, dict)
+            or fields.get("v") != trust.AUTH_VERSION
+            or fields.get("nonce_s") != trust.b64u(nonce)
+            or fields.get("origin") != (origin or "")
+        ):
+            raise trust.TrustError("bad_hello")
+        try:
+            hello = cls(body, fields)
+        except KeyError as exc:
+            raise trust.TrustError("bad_hello") from exc
+        if len(hello.nonce_c) != 32 or len(hello.eph_c) != 32:
+            raise trust.TrustError("bad_hello")
+        if not trust.verify(hello.device_spki, trust.CLIENT_CONTEXT + body.encode(), trust.unb64u(msg.get("sig"))):
+            raise trust.TrustError("bad_signature")
+        return hello

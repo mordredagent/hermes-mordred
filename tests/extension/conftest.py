@@ -20,6 +20,7 @@ if _SRC.exists() and str(_SRC) not in sys.path:
 @pytest.fixture(autouse=True)
 def _isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("MORDRED_EXT_TEST_ROOT", raising=False)
     # No background recall rebuilds while a test server runs.
     monkeypatch.setenv("MORDRED_RECALL_TOPICS", "0")
 
@@ -44,3 +45,13 @@ def desktop(monkeypatch, tmp_path):
     from ._desktop_support import desktop_client
 
     yield from desktop_client(monkeypatch, tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_trust_store():
+    """No test inherits another's trust store."""
+    from mordred_hermes.extension import trust
+
+    trust.set_store(None)
+    yield
+    trust.set_store(None)

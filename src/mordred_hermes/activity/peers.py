@@ -10,8 +10,7 @@ purpose-bound:
 
 - ``<home>/extension/activity_pending.json`` — pending activity pair codes,
   keyed by ``sha256(code)``: ``{expires_at, label, outcome, fail_reason, peer_id}``.
-  ``pairing.handle_pair_init`` never reads this file and :func:`handle_pair_init`
-  here never reads the extension's ``pending.json``.
+  Only :func:`handle_pair_init` here reads it.
 - ``<home>/extension/activity_peers.json`` — ``{peer_id: {token_sha256, label,
   kind, created_at, revoked_at}}``. Only the SHA-256 of a peer token is stored;
   comparison uses :func:`secrets.compare_digest`.
@@ -62,6 +61,27 @@ class PeerPairError(Exception):
 # --------------------------------------------------------------------------- #
 
 
+# Unambiguous alphabet (no 0/O/1/I), as Hermes' own DM pairing (gateway/pairing.py).
+_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+def _format_code(raw16: str) -> str:
+    return f"MORT-{raw16[:8]}-{raw16[8:16]}"
+
+
+def normalize_code(code: str) -> str:
+    """Canonicalize input to ``MORT-XXXXXXXX-XXXXXXXX`` (strip, upper).
+
+    Strips a single leading ``MORT`` literal first so its letters don't leak
+    into the payload — ``M``/``R``/``T`` are valid alphabet characters and
+    would shift the grouping."""
+    upper = code.upper()
+    if upper.startswith("MORT"):
+        upper = upper[4:]
+    cleaned = "".join(c for c in upper if c in _CODE_ALPHABET)
+    return _format_code(cleaned[:16])
+
+
 def _pending_path() -> Path:
     return pairing._ext_dir() / _PENDING_FILE
 
@@ -79,7 +99,7 @@ def _sha256(value: str) -> str:
 
 
 def _code_digest(code: str) -> str:
-    return _sha256(pairing.normalize_code(code))
+    return _sha256(normalize_code(code))
 
 
 def _clean_label(label: object) -> str:
@@ -107,8 +127,8 @@ def _storage_guard() -> Iterator[None]:
 
 def generate_peer_code(label: str = _DEFAULT_LABEL) -> tuple[str, float]:
     """Create a single-use activity pair code; return ``(code, expires_at)``."""
-    raw = "".join(secrets.choice(pairing._CODE_ALPHABET) for _ in range(16))
-    code = pairing._format_code(raw)
+    raw = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(16))
+    code = _format_code(raw)
     now = time.time()
     expires_at = now + CODE_TTL_SECONDS
     path = _pending_path()

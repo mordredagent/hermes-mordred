@@ -1,182 +1,43 @@
-"""Mordred Extension pairing — codes, ECDH key agreement, and attestation.
+"""Mordred Extension state on the Hermes side: the master key, channel keys, replay cache.
 
-The pairing handshake is split across two processes:
+Browsers no longer pair with codes: they are approved with a signature by the
+vault approval key (:mod:`.trust`). What stays here is Hermes' own state under
+``~/.hermes/extension/`` with ``0600`` permissions:
 
-- ``hermes mordred extension pair`` (CLI) generates a code, writes it to the
-  shared pending-code store, and waits for the gateway to consume it.
-- The gateway's extension WebSocket server (``extension_api.py``) receives the
-  ``pair_init`` frame, validates the code, performs ECDH + HKDF to derive the
-  shared AES key, signs the attestation challenge, issues an ``ext_token``,
-  persists the pairing, and returns ``pair_complete``.
-
-State lives under ``~/.hermes/extension/`` with ``0600`` permissions:
-
-- ``pending.json``  — unconsumed pairing codes (CLI ⇄ gateway handoff).
-- ``state.json``    — the active pairing (shared AES key, ext_token, pubkeys).
-- ``attest_key.pem`` — the P-256 attestation key (TOFU-pinned by the extension).
-- ``webauthn.json`` — the optional credential managed by :mod:`.webauthn`.
+- ``state.json`` — Hermes' master key (``aes_key``: chat history, the legacy
+  Slack key and the encrypt/decrypt oracle), the Slack channel keys and the E2E
+  replay cache. The master is created at the first browser approval
+  (:func:`ensure_master`) and never leaves Hermes.
 
 On Windows these files live in a checked private directory instead
 (:mod:`._windows_storage`): the ``.mordred-fs.lock`` transaction replaces the
 ``.lock`` flock, every read is bounded and identity-bound, and unsafe state is
 refused rather than repaired or treated as absent.
-
-WebAuthn operations remain available from this module for compatibility, while
-their credential binding and assertion verification live in :mod:`.webauthn`.
-
-See ``Mordred-Extension/SPEC.ja.md`` §3.
 """
 
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import logging
 import math
 import os
 import secrets
 import stat
-import sys
 import threading
 import time
-import types
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, NoReturn, TypeGuard, cast
-
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+from typing import Any, NoReturn, TypeGuard
 
 from .._file_lock import private_flock
 from .._private_fs import FileIdentity
 from ..keyvault._storage import atomic_write, safe_read
 from . import _windows_storage as _storage
-from . import webauthn as _webauthn
-from .crypto import b64u_decode, b64u_encode, derive_shared_key, x25519_public_raw
-from .webauthn import (
-    _active_webauthn_data as _active_webauthn_data,
-)
-from .webauthn import (
-    _authenticator_data_matches as _authenticator_data_matches,
-)
-from .webauthn import (
-    _client_data_matches as _client_data_matches,
-)
-from .webauthn import (
-    _decode_webauthn_fields as _decode_webauthn_fields,
-)
-from .webauthn import (
-    _legacy_client_origins as _legacy_client_origins,
-)
-from .webauthn import (
-    _legacy_signed_rp_hash as _legacy_signed_rp_hash,
-)
-from .webauthn import (
-    _migrate_legacy_webauthn_binding as _migrate_legacy_webauthn_binding,
-)
-from .webauthn import (
-    _pairing_token_hash as _pairing_token_hash,
-)
-from .webauthn import (
-    _parse_client_data as _parse_client_data,
-)
-from .webauthn import (
-    _persist_legacy_webauthn_binding as _persist_legacy_webauthn_binding,
-)
-from .webauthn import (
-    _rp_id_for_origin as _rp_id_for_origin,
-)
-from .webauthn import (
-    _serialized_extension_origin as _serialized_extension_origin,
-)
-from .webauthn import (
-    _signature_valid as _signature_valid,
-)
-from .webauthn import (
-    _stored_webauthn_binding as _stored_webauthn_binding,
-)
-from .webauthn import (
-    _webauthn_path as _webauthn_path,
-)
-from .webauthn import (
-    authentication_generation_fingerprint as authentication_generation_fingerprint,
-)
-from .webauthn import (
-    clear_webauthn_credential as clear_webauthn_credential,
-)
-from .webauthn import (
-    has_webauthn_credential as has_webauthn_credential,
-)
-from .webauthn import (
-    save_webauthn_credential as save_webauthn_credential,
-)
-from .webauthn import (
-    verify_webauthn_assertion as verify_webauthn_assertion,
-)
+from .crypto import b64u_decode, b64u_encode
 
-_WEBAUTHN_COMPAT_NAMES: Final[frozenset[str]] = frozenset(
-    {
-        "_active_webauthn_data",
-        "_authenticator_data_matches",
-        "_client_data_matches",
-        "_decode_webauthn_fields",
-        "_legacy_client_origins",
-        "_legacy_signed_rp_hash",
-        "_migrate_legacy_webauthn_binding",
-        "_pairing_token_hash",
-        "_parse_client_data",
-        "_persist_legacy_webauthn_binding",
-        "_rp_id_for_origin",
-        "_serialized_extension_origin",
-        "_signature_valid",
-        "_stored_webauthn_binding",
-        "_webauthn_path",
-        "authentication_generation_fingerprint",
-        "clear_webauthn_credential",
-        "has_webauthn_credential",
-        "save_webauthn_credential",
-        "verify_webauthn_assertion",
-    }
-)
-
-
-class _WebauthnCompatModule(types.ModuleType):
-    """Mirror writes to the pre-split WebAuthn seams onto :mod:`.webauthn`.
-
-    The names in ``_WEBAUTHN_COMPAT_NAMES`` are static re-exports whose
-    implementations resolve each other through *webauthn's* module globals.
-    Before the split they lived in this module, so harnesses patched e.g.
-    ``pairing._webauthn_path`` and save/clear/verify honored the patch. A
-    static alias alone turns such a patch into a silent no-op — the real
-    ``~/.hermes/extension/webauthn.json`` would still be written while the
-    harness reads its sandbox (review 2026-07-29). Forwarding assignment
-    and deletion keeps the two modules in lockstep, in both patch and
-    restore directions.
-    """
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        if name in _WEBAUTHN_COMPAT_NAMES:
-            setattr(_webauthn, name, value)
-        super().__setattr__(name, value)
-
-    def __delattr__(self, name: str) -> None:
-        if name in _WEBAUTHN_COMPAT_NAMES and hasattr(_webauthn, name):
-            delattr(_webauthn, name)
-        super().__delattr__(name)
-
-
-cast(Any, sys.modules[__name__]).__class__ = _WebauthnCompatModule
-
-# Unambiguous alphabet (no 0/O/1/I) — matches the extension and Hermes' own
-# DM pairing (gateway/pairing.py).
-_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-_CODE_TTL_SECONDS = 10 * 60
-ATTEST_CONTEXT = b"mordred-ext-attest-v1"
 _E2E_REPLAY_FIELD = "e2e_replay_v3"
 # Raw K_chan length. AES-256-GCM throughout (crypto.derive_shared_key /
 # derive_subkey both emit 32 bytes), so any other length is a malformed push.
@@ -187,43 +48,7 @@ _E2E_REPLAY_MAX_IDENTITIES = 32_768
 # command, so it must not be the first thing the operator learns about.
 _E2E_REPLAY_WARN_THRESHOLD = (_E2E_REPLAY_MAX_IDENTITIES * 9) // 10
 _LOG = logging.getLogger("mordred.extension.pairing")
-_PAIRING_CODE_DIGEST_FIELD = "paired_code_sha256"
 _STATE_THREAD_LOCK = threading.RLock()
-
-
-class PairError(Exception):
-    """Pairing rejected. ``reason`` is one of the SPEC pair_fail reasons."""
-
-    def __init__(self, reason: str) -> None:
-        super().__init__(reason)
-        self.reason = reason
-
-
-class PairingStorageError(PairError):
-    """``pair_fail`` for unavailable, unsafe or uncertain checked Windows storage.
-
-    ``reason`` is the wire code (``storage_unavailable`` / ``storage_uncertain``);
-    the classified storage reason, native status and commit state are kept.
-    """
-
-    def __init__(self, error: _storage.ExtensionStorageError) -> None:
-        super().__init__(error.wire_reason)
-        self.storage_reason = error.reason
-        self.native_code = error.native_code
-        self.commit_state = error.commit_state
-
-
-class AttestationKeyMissing(PairError):
-    """Windows: the attestation key that signed the active pairing is absent.
-
-    The extension pinned that key, so a replacement is never minted while
-    ``state.json`` holds the pairing. Recovery is explicit: remove the pairing
-    (:func:`clear_pairing`), then pair again, which creates and presents a new
-    attestation identity.
-    """
-
-    def __init__(self) -> None:
-        super().__init__("attestation_key_missing")
 
 
 @contextlib.contextmanager
@@ -268,8 +93,8 @@ def _ext_dir() -> Path:
 def _write_private(path: Path, data: bytes) -> None:
     """0600 atomic write, delegated to the keyvault's canonical helper.
 
-    These files hold the pairing AES key, the ext_token and the attestation
-    private key — the same class of secret the keyvault protects — so they get
+    These files hold Hermes' master key and the channel keys — the same class
+    of secret the keyvault protects — so they get
     the same guarantees instead of a hand-rolled, weaker copy: unpredictable tmp
     name, ``O_EXCL | O_NOFOLLOW`` (no symlink follow / tmp pre-planting), fsync
     of the tmp fd *and* the parent dir, and tmp cleanup on failure. The parent
@@ -355,7 +180,7 @@ def _reject_unsafe_state_lock(_lock_path: Path) -> NoReturn:
 def _state_lock() -> Iterator[None]:
     """Cross-process mutex for read-modify-write cycles on the JSON stores.
 
-    The CLI (``extension pair``) and the gateway server mutate ``pending.json``
+    Concurrent processes (the gateway, the CLI) mutate ``state.json``
     / ``state.json`` from different processes; without this, interleaved
     read→write cycles lose updates — e.g. two racing ``pair_init`` frames could
     both consume the same one-time code. Locked sections must stay synchronous
@@ -379,234 +204,6 @@ def _state_lock() -> Iterator[None]:
         return
     with _STATE_THREAD_LOCK, private_flock(_ext_dir() / ".lock", on_unsafe=_reject_unsafe_state_lock):
         yield
-
-
-# --------------------------------------------------------------------------- #
-# Pairing code helpers
-# --------------------------------------------------------------------------- #
-
-
-def _format_code(raw16: str) -> str:
-    return f"MORT-{raw16[:8]}-{raw16[8:16]}"
-
-
-def normalize_code(code: str) -> str:
-    """Canonicalize input to ``MORT-XXXXXXXX-XXXXXXXX`` (strip, upper).
-
-    Strips a single leading ``MORT`` literal first (matching the extension's
-    ``normalizeCode``) so its letters don't leak into the payload — otherwise
-    ``M``/``R``/``T`` are valid alphabet chars and would shift the grouping."""
-    upper = code.upper()
-    if upper.startswith("MORT"):
-        upper = upper[4:]
-    cleaned = "".join(c for c in upper if c in _CODE_ALPHABET)
-    return _format_code(cleaned[:16])
-
-
-def generate_code() -> tuple[str, float]:
-    """Create a pairing code, persist it as pending, return ``(code, expires_at)``."""
-    raw = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(16))
-    code = _format_code(raw)
-    expires_at = time.time() + _CODE_TTL_SECONDS
-    path = _ext_dir() / "pending.json"
-    with _state_lock():
-        pending = _read_json(path)
-        # Drop expired entries to keep the file bounded.
-        now = time.time()
-        pending = {k: v for k, v in pending.items() if v.get("expires_at", 0) > now}
-        pending[code] = {"expires_at": expires_at, "used": False, "paired_at": None}
-        _write_private(path, json.dumps(pending).encode("utf-8"))
-    return code, expires_at
-
-
-def revoke_code(code: str) -> bool:
-    """Atomically burn a pairing code that has not committed a pairing.
-
-    A gateway may already have claimed the code and be deriving keys when the
-    CLI is cancelled. Such an in-flight code is still revocable: the final
-    pairing commit checks the cancellation marker under this same state lock.
-    ``False`` therefore means the code was absent or its pairing had already
-    reached a terminal result.
-    """
-    code = normalize_code(code)
-    path = _ext_dir() / "pending.json"
-    with _state_lock():
-        pending = _read_json(path)
-        entry = pending.get(code)
-        if not isinstance(entry, dict) or entry.get("result") is not None:
-            return False
-        state = _read_state_cached()
-        if state.get(_PAIRING_CODE_DIGEST_FIELD) == _pairing_code_digest(code):
-            return False
-        entry["used"] = True
-        entry["cancelled_at"] = time.time()
-        entry["result"] = "failed"
-        entry["fail_reason"] = "cancelled"
-        pending[code] = entry
-        _write_private(path, json.dumps(pending).encode("utf-8"))
-        return True
-
-
-def _consume_code(code: str) -> None:
-    """Validate a code against the pending store and mark it used. Raises PairError."""
-    path = _ext_dir() / "pending.json"
-    # The lock spans check + mark-used: without it two racing pair_init frames
-    # could both see used=False and pair against the same one-time code.
-    with _state_lock():
-        pending = _read_json(path)
-        entry = pending.get(code)
-        if entry is None:
-            raise PairError("invalid_code")
-        if entry.get("used"):
-            raise PairError("already_used")
-        if entry.get("expires_at", 0) < time.time():
-            raise PairError("expired")
-        entry["used"] = True
-        entry["paired_at"] = time.time()
-        pending[code] = entry
-        _write_private(path, json.dumps(pending).encode("utf-8"))
-
-
-def code_consumed(code: str) -> bool:
-    """Has this code been claimed by a pair_init attempt? (legacy CLI polling).
-
-    Claimed ≠ paired: the handshake can still fail after the code is consumed.
-    Prefer :func:`pair_outcome`, which distinguishes the two; this stays for
-    older CLI builds and the Hermes-fork gateway's identical pending.json."""
-    entry = _read_json(_ext_dir() / "pending.json").get(code)
-    return bool(entry and entry.get("used"))
-
-
-def _mark_pair_result(code: str, result: str, fail_reason: str | None = None) -> None:
-    """Record the pair_init outcome on the consumed pending entry.
-
-    The polling CLI reads this back via :func:`pair_outcome`; without it a
-    handshake that dies *after* claiming the code is indistinguishable from a
-    successful pairing. Additive fields only — servers that predate them (the
-    Hermes-fork gateway) simply never write a result."""
-    path = _ext_dir() / "pending.json"
-    with _state_lock():
-        pending = _read_json(path)
-        entry = pending.get(code)
-        if entry is None:  # pruned meanwhile — nothing to annotate
-            return
-        entry["result"] = result
-        if fail_reason is not None:
-            entry["fail_reason"] = fail_reason
-        pending[code] = entry
-        _write_private(path, json.dumps(pending).encode("utf-8"))
-
-
-def pair_outcome(code: str) -> tuple[str, str | None]:
-    """CLI polling: ``(state, fail_reason)``.
-
-    ``state`` is one of:
-
-    - ``"pending"``  — not claimed yet.
-    - ``"paired"``   — handshake completed and the pairing was persisted.
-    - ``"failed"``   — claimed, then rejected; ``fail_reason`` is the SPEC
-      pair_fail reason. The code stays burned (single-use).
-    - ``"consumed"`` — claimed with no outcome recorded: mid-handshake, or a
-      server implementation that predates result recording.
-    """
-    code = normalize_code(code)
-    with _state_lock():
-        entry = _read_json(_ext_dir() / "pending.json").get(code)
-        committed = _read_state_cached().get(_PAIRING_CODE_DIGEST_FIELD) == _pairing_code_digest(code)
-    if committed:
-        return ("paired", None)
-    if not entry or not entry.get("used"):
-        return ("pending", None)
-    result = entry.get("result")
-    if result == "paired":
-        return ("paired", None)
-    if result == "failed":
-        return ("failed", entry.get("fail_reason") or "unknown")
-    return ("consumed", None)
-
-
-# --------------------------------------------------------------------------- #
-# Attestation key (P-256) — persistent, TOFU-pinned by the extension
-# --------------------------------------------------------------------------- #
-
-
-def _load_or_create_attest_key() -> ec.EllipticCurvePrivateKey:
-    if _storage.enabled():
-        return _load_or_create_checked_attest_key()
-    path = _ext_dir() / "attest_key.pem"
-    with _state_lock():
-        try:
-            pem = safe_read(path)
-        except FileNotFoundError:
-            key = ec.generate_private_key(ec.SECP256R1())
-            pem = key.private_bytes(
-                serialization.Encoding.PEM,
-                serialization.PrivateFormat.PKCS8,
-                serialization.NoEncryption(),
-            )
-            _write_private(path, pem)
-            return key
-        except OSError as exc:
-            raise RuntimeError("attestation identity is unreadable; refusing replacement") from exc
-        try:
-            loaded_key = serialization.load_pem_private_key(pem, password=None)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError("attestation identity is invalid; refusing replacement") from exc
-        if not isinstance(loaded_key, ec.EllipticCurvePrivateKey) or not isinstance(loaded_key.curve, ec.SECP256R1):
-            raise RuntimeError("attestation identity is invalid; refusing replacement")
-        return loaded_key
-
-
-def _load_or_create_checked_attest_key() -> ec.EllipticCurvePrivateKey:
-    """Windows: create the identity once, exclusively, under the checked lock.
-
-    A checked absence creates a key only while no pairing is committed: the
-    extension pinned the key that signed the active pairing, so a lost key
-    refuses with :class:`AttestationKeyMissing` (``pair_fail`` /
-    ``pair_outcome`` reason ``attestation_key_missing``) instead of silently
-    minting a different identity. Unsafe or unreadable key files refuse
-    through :class:`ExtensionStorageError`.
-    """
-    path = _ext_dir() / "attest_key.pem"
-    with _state_lock():
-        pem = _storage.read_file(path)
-        if pem is None:
-            state = _read_json(_state_path())
-            if state.get("aes_key") or state.get("ext_token"):
-                raise AttestationKeyMissing
-            key = ec.generate_private_key(ec.SECP256R1())
-            created = key.private_bytes(
-                serialization.Encoding.PEM,
-                serialization.PrivateFormat.PKCS8,
-                serialization.NoEncryption(),
-            )
-            _storage.write_file(path, created, exclusive=True)
-            return key
-        try:
-            loaded_key = serialization.load_pem_private_key(pem, password=None)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError("attestation identity is invalid; refusing replacement") from exc
-        if not isinstance(loaded_key, ec.EllipticCurvePrivateKey) or not isinstance(loaded_key.curve, ec.SECP256R1):
-            raise RuntimeError("attestation identity is invalid; refusing replacement")
-        return loaded_key
-
-
-def attest_pubkey_spki_b64() -> str:
-    key = _load_or_create_attest_key()
-    spki = key.public_key().public_bytes(
-        serialization.Encoding.DER,
-        serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-    return b64u_encode(spki)
-
-
-def _sign_attestation(challenge: bytes) -> str:
-    """ECDSA-P256-SHA256 over ``ATTEST_CONTEXT || challenge``, returned as raw
-    IEEE-P1363 (r‖s, 64 bytes) base64url — the format the extension verifies."""
-    key = _load_or_create_attest_key()
-    der = key.sign(ATTEST_CONTEXT + challenge, ec.ECDSA(hashes.SHA256()))
-    r, s = decode_dss_signature(der)
-    return b64u_encode(r.to_bytes(32, "big") + s.to_bytes(32, "big"))
 
 
 # --------------------------------------------------------------------------- #
@@ -639,10 +236,6 @@ class Pairing:
 
 def _state_path() -> Path:
     return _ext_dir() / "state.json"
-
-
-def _pairing_code_digest(code: str) -> str:
-    return hashlib.sha256(code.encode("ascii")).hexdigest()
 
 
 # --------------------------------------------------------------------------- #
@@ -767,14 +360,14 @@ def load_pairing() -> Pairing | None:
         return None
     return Pairing(
         aes_key=b64u_decode(data["aes_key"]),
-        ext_token=data["ext_token"],
+        ext_token=data.get("ext_token", ""),
         ext_pubkey_b64=data.get("ext_pubkey", ""),
         hermes_pubkey_b64=data.get("hermes_pubkey", ""),
         paired_at=data.get("paired_at", 0.0),
     )
 
 
-def _write_pairing_locked(p: Pairing, *, paired_code_digest: str | None) -> None:
+def _write_pairing_locked(p: Pairing) -> None:
     """Persist *p* while the caller holds :func:`_state_lock`."""
     # Preserve any v2 keyring fields (channel_keys) already in state.
     data = _read_json(_state_path()) or {}
@@ -785,65 +378,32 @@ def _write_pairing_locked(p: Pairing, *, paired_code_digest: str | None) -> None
             "ext_pubkey": p.ext_pubkey_b64,
             "hermes_pubkey": p.hermes_pubkey_b64,
             "paired_at": p.paired_at,
-            # Any WebAuthn file not explicitly bound to this new token is
-            # from an older pairing generation and must be ignored.
-            "reject_unbound_webauthn": True,
         }
     )
-    if paired_code_digest is None:
-        data.pop(_PAIRING_CODE_DIGEST_FIELD, None)
-    else:
-        data[_PAIRING_CODE_DIGEST_FIELD] = paired_code_digest
     _write_private(_state_path(), json.dumps(data).encode("utf-8"))
     _invalidate_state_cache()
-    # Normal lifecycle cleanup. The state marker above remains the
-    # authoritative revocation if unlink fails (permissions/race).
-    # Resolved through the webauthn module (the canonical seam), not this
-    # module's static alias: a harness that sandboxes the store by
-    # patching webauthn._webauthn_path must also redirect this unlink,
-    # or a pairing flow would delete the real production credential
-    # while every other patched operation uses the sandbox
-    # (review 2026-07-29).
-    if _storage.enabled():
-        with _tolerated_storage_failure("stale WebAuthn credential removal"):
-            _storage.delete_file(_webauthn._webauthn_path())
-        return
-    with _suppress_oserror():
-        _webauthn._webauthn_path().unlink()
 
 
 def _save_pairing(p: Pairing) -> None:
     with _state_lock():
-        _write_pairing_locked(p, paired_code_digest=None)
+        _write_pairing_locked(p)
 
 
-def _commit_pairing(code: str, p: Pairing) -> None:
-    """Commit a claimed code unless the polling CLI cancelled it.
-
-    Cancellation and the state write are ordered by the same cross-process
-    lock. The code digest in ``state.json`` is the authoritative commit marker
-    if the best-effort outcome annotation in ``pending.json`` cannot be saved.
-    """
-    path = _ext_dir() / "pending.json"
+def ensure_master() -> Pairing:
+    """Hermes' master key, created on first use. It never leaves Hermes."""
     with _state_lock():
-        pending = _read_json(path)
-        entry = pending.get(code)
-        if not isinstance(entry, dict) or not entry.get("used"):
-            raise PairError("invalid_code")
-        result = entry.get("result")
-        if result is not None:
-            reason = entry.get("fail_reason") if result == "failed" else "already_used"
-            raise PairError(str(reason or "already_used"))
-
-        _write_pairing_locked(p, paired_code_digest=_pairing_code_digest(code))
-
-        entry["result"] = "paired"
-        pending[code] = entry
-        # Outcome metadata improves the polling UX, but state.json already
-        # proves the commit and must not be rolled back if this annotation
-        # fails after the pairing was durably saved.
-        with contextlib.suppress(OSError), _tolerated_storage_failure("pairing outcome annotation"):
-            _write_private(path, json.dumps(pending).encode("utf-8"))
+        current = load_pairing()
+        if current is not None:
+            return current
+        created = Pairing(
+            aes_key=secrets.token_bytes(32),
+            ext_token="",
+            ext_pubkey_b64="",
+            hermes_pubkey_b64="",
+            paired_at=time.time(),
+        )
+        _write_pairing_locked(created)
+        return created
 
 
 # --- v2 key ring (SPEC-v2 §1.3): per-channel Slack keys + extension-chat key ---
@@ -902,8 +462,8 @@ def _require_active_replay_state(data: dict[str, Any]) -> None:
         )
     except Exception:
         active_key_valid = False
-    if not isinstance(data.get("ext_token"), str) or not data.get("ext_token") or not active_key_valid:
-        raise RuntimeError("active pairing required for E2E replay protection")
+    if not active_key_valid:
+        raise RuntimeError("Hermes' master key required for E2E replay protection")
 
 
 def _replay_relief_description(kept: list[dict[str, Any]], now: float) -> str:
@@ -1040,89 +600,3 @@ class _suppress_oserror:
 
     def __exit__(self, exc_type: Any, *_: Any) -> bool:
         return exc_type is not None and issubclass(exc_type, OSError)
-
-
-def validate_token(ext_token: str) -> bool:
-    p = load_pairing()
-    if p is None or not ext_token:
-        return False
-    return secrets.compare_digest(p.ext_token, ext_token)
-
-
-# --------------------------------------------------------------------------- #
-# pair_init handler (gateway side)
-# --------------------------------------------------------------------------- #
-
-
-def handle_pair_init(code: str, ext_pubkey_b64: str, challenge_b64: str) -> dict[str, Any]:
-    """Validate the code, derive the shared key, persist the pairing, and return
-    the ``pair_complete`` payload. Raises :class:`PairError` on rejection.
-
-    The outcome is recorded back onto the consumed pending entry (see
-    :func:`_mark_pair_result`) so the polling CLI reports rejection instead of
-    a false "Paired" when the handshake dies after the code is claimed."""
-    code = normalize_code(code)
-    try:
-        _consume_code(code)  # raises on invalid/expired/used — nothing to record
-    except _storage.ExtensionStorageError as exc:
-        raise PairingStorageError(exc) from None
-
-    try:
-        try:
-            challenge = b64u_decode(challenge_b64)
-        except Exception as exc:
-            raise PairError("invalid_challenge") from exc
-        if len(challenge) < 16:
-            raise PairError("invalid_challenge")
-
-        hermes_priv = X25519PrivateKey.generate()
-        try:
-            aes_key = derive_shared_key(hermes_priv, ext_pubkey_b64, code)
-        except Exception as exc:
-            raise PairError("invalid_pubkey") from exc
-
-        hermes_pub_b64 = b64u_encode(x25519_public_raw(hermes_priv))
-        ext_token = b64u_encode(secrets.token_bytes(32))
-
-        # Everything that can fail (attestation signing included) runs BEFORE
-        # _save_pairing: a failure after the save would have replaced a
-        # previously-working pairing's key/token with a half-completed one.
-        payload = {
-            "hermes_pubkey": hermes_pub_b64,
-            "ext_token": ext_token,
-            "attestation": {
-                "signed_challenge": _sign_attestation(challenge),
-                "se_pubkey": attest_pubkey_spki_b64(),
-                "se_available": se_available(),
-            },
-        }
-
-        _commit_pairing(
-            code,
-            Pairing(
-                aes_key=aes_key,
-                ext_token=ext_token,
-                ext_pubkey_b64=ext_pubkey_b64,
-                hermes_pubkey_b64=hermes_pub_b64,
-                paired_at=time.time(),
-            ),
-        )
-    except PairError as exc:
-        # Outcome marking is best-effort UX metadata — never let its I/O
-        # failure mask the PairError the extension's pair_fail frame needs.
-        with contextlib.suppress(OSError), _tolerated_storage_failure("pairing outcome"):
-            _mark_pair_result(code, "failed", exc.reason)
-        raise
-    except _storage.ExtensionStorageError as exc:
-        # Windows: a refused read is recorded for the polling CLI; an uncertain
-        # publication is not followed by another write.
-        if exc.commit_state != "uncertain":
-            with _tolerated_storage_failure("pairing outcome"):
-                _mark_pair_result(code, "failed", exc.wire_reason)
-        raise PairingStorageError(exc) from None
-    except Exception:
-        with contextlib.suppress(OSError), _tolerated_storage_failure("pairing outcome"):
-            _mark_pair_result(code, "failed", "internal_error")
-        raise
-
-    return payload

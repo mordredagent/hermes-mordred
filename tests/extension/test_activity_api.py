@@ -14,12 +14,10 @@ from typing import Any
 
 import aiohttp
 import pytest
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from mordred_hermes.activity import peers
 from mordred_hermes.extension import activity_api, extension_api
-from mordred_hermes.extension import extension_crypto as xc
-from mordred_hermes.extension import extension_pairing as pairing
+from tests.extension._trust_helpers import Browser, with_test_root
 
 
 class FakeReceiver:
@@ -257,29 +255,14 @@ def test_malformed_batch_and_failing_receiver_are_content_free_refusals():
     assert exploded == {"id": "b2", "type": "activity_refused", "reason": "store_unavailable"}
 
 
-def test_paired_extension_batch_uses_the_extension_principal():
+def test_approved_extension_batch_uses_the_extension_principal(monkeypatch):
+    with_test_root(monkeypatch)
     receiver = FakeReceiver({"type": "activity_refused", "reason": "collection_disabled"})
+    browser = Browser()
 
     async def scenario(session, url, _server):
-        async with session.ws_connect(url, headers={"Origin": "chrome-extension://abc"}) as ws:
-            challenge = await _recv(ws)
-            assert challenge["type"] == "auth_challenge"
-            code, _ = await asyncio.to_thread(pairing.generate_code)
-            ext_priv = X25519PrivateKey.generate()
-            await ws.send_str(
-                json.dumps(
-                    {
-                        "id": "p1",
-                        "type": "pair_init",
-                        "code": code,
-                        "ext_pubkey": xc.b64u_encode(xc.x25519_public_raw(ext_priv)),
-                        "challenge": xc.b64u_encode(b"\x07" * 32),
-                    }
-                )
-            )
-            complete = await _recv(ws)
-            await ws.send_str(json.dumps({"type": "auth", "ext_token": complete["ext_token"]}))
-            auth_ok = await _recv(ws)
+        async with session.ws_connect(url, headers={"Origin": browser.origin}) as ws:
+            auth_ok = await browser.connect(ws)
             return auth_ok, await _send_batch(ws)
 
     auth_ok, reply = _run(scenario, receiver)
@@ -288,17 +271,6 @@ def test_paired_extension_batch_uses_the_extension_principal():
     [(principal, _batch)] = receiver.calls
     assert principal.peer_id == "extension"
     assert principal.kind == "browser"
-
-
-def test_extension_token_is_not_an_activity_token():
-    async def scenario(session, url, _server):
-        async with session.ws_connect(url) as ws:
-            await _recv(ws)
-            code, _ = await asyncio.to_thread(pairing.generate_code)
-            await ws.send_str(json.dumps({"id": "p", "type": "activity_pair_init", "code": code}))
-            return await _recv(ws)
-
-    assert _run(scenario)["reason"] == "invalid_code"
 
 
 @pytest.mark.parametrize("value", [10, 10**9])

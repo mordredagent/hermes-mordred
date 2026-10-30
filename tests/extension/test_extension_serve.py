@@ -170,7 +170,9 @@ def test_serve_loads_vault_managed_environment_before_accepting_rpcs(tmp_path, m
     monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
     calls: list[str] = []
 
-    def inject() -> int:
+    def inject(*, on_open: object = None) -> int:
+        # The same unlock also preloads the browser trust state.
+        assert on_open is extension_main._prime_trust
         calls.append("inject")
         monkeypatch.setenv("DISCORD_BOT_TOKEN", "from-vault")
         return 1

@@ -6,7 +6,6 @@ from __future__ import annotations
 import stat
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from mordred_hermes.extension import extension_crypto as xc
 from mordred_hermes.extension import extension_history, extension_pairing
@@ -15,10 +14,8 @@ from mordred_hermes.extension import extension_history, extension_pairing
 @pytest.fixture(autouse=True)
 def _paired_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    # Establish a pairing so a shared key exists for history encryption.
-    code, _ = extension_pairing.generate_code()
-    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
-    extension_pairing.handle_pair_init(code, ext_pub, xc.b64u_encode(b"\x00" * 32))
+    # Hermes' master key encrypts the history.
+    extension_pairing.ensure_master()
 
 
 def test_projection_extracts_text():

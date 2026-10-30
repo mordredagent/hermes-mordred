@@ -61,7 +61,18 @@ def _load_vault_managed_environment() -> int:
         return 0
     from ..keyvault._runtime_env import install_vault_env_decrypt
 
-    return install_vault_env_decrypt()
+    return install_vault_env_decrypt(on_open=_prime_trust)
+
+
+def _prime_trust(opened: Any, key_id: str) -> None:
+    """Keep the browser trust state from the start-up unlock (see ``TrustStore.prime``)."""
+    from . import trust
+
+    try:
+        trust.store().prime(opened, key_id)
+    except Exception as exc:
+        # The first connection then reads it on its own.
+        logging.getLogger(__name__).warning("browser trust state not preloaded (%s)", type(exc).__name__)
 
 
 def _resolve_chat_handler() -> Any:

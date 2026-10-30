@@ -86,6 +86,16 @@ def find_sekey_helper() -> str | None:
     return _find_named_helper("MORDRED_SEKEY_HELPER", _HELPER_NAME)
 
 
+def find_sekey_sign_helper() -> str | None:
+    """The helper used for Secure Enclave signing keys.
+
+    ``MORDRED_SEKEY_SIGN_HELPER`` lets a development Hermes try a newer helper
+    for signing alone, while vault unwrapping and the Keychain anchor keep the
+    installed binary their items trust. Unset, this is :func:`find_sekey_helper`.
+    """
+    return _find_named_helper("MORDRED_SEKEY_SIGN_HELPER", _HELPER_NAME)
+
+
 def find_tpmkey_helper() -> str | None:
     """Locate the Linux TPM 2.0 helper (``mordred-hermes-tpmkey``)."""
     return _find_named_helper("MORDRED_TPMKEY_HELPER", _TPM_HELPER_NAME)
@@ -425,6 +435,28 @@ class _HelperSecKeyOps:
         response = self._invoke({"cmd": "probe"})
         if response.get("ok") is not True:
             raise _OpsError(-1, "helper", "helper did not pass the probe")
+
+    def create_signing_key(self, tag: bytes, *, unattended: bool) -> bytes:
+        """A new Enclave P-256 signing key; its X9.63 public key."""
+        response = self._invoke({"cmd": "sign_generate", "tag_hex": tag.hex(), "unattended": unattended})
+        return _hex_field(response, "public_key_hex")
+
+    def signing_public_key(self, tag: bytes) -> bytes:
+        response = self._invoke({"cmd": "sign_public_key", "tag_hex": tag.hex()})
+        return _hex_field(response, "public_key_hex")
+
+    def sign(self, tag: bytes, messages: list[bytes], reason: str) -> list[bytes]:
+        """Raw (r || s) ECDSA-SHA256 signatures, one per message, under one authorization."""
+        response = self._invoke(
+            {"cmd": "sign", "tag_hex": tag.hex(), "messages_hex": [m.hex() for m in messages], "reason": reason}
+        )
+        signatures = response.get("signatures_hex")
+        if not isinstance(signatures, list) or len(signatures) != len(messages):
+            raise _OpsError(-1, "helper", "helper returned an invalid signature list")
+        try:
+            return [bytes.fromhex(h) for h in signatures]
+        except (TypeError, ValueError) as exc:
+            raise _OpsError(-1, "helper", "helper returned an invalid signature") from exc
 
 
 def _helper_ops_or_none(find: Callable[[], str | None]) -> _HelperSecKeyOps | None:

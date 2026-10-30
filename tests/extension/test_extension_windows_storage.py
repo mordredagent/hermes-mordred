@@ -1,7 +1,7 @@
 """Checked Windows extension storage, exercised through real ``_private_fs`` on each host.
 
-Pairing, attestation, WebAuthn, history and the wallet snapshot fingerprint run
-their Windows branch here. On POSIX the descriptor-relative private backend
+Hermes' master key, channel keys, the replay cache, history and the wallet
+snapshot fingerprint run their Windows branch here. On POSIX the descriptor-relative private backend
 stands in for NTFS admission (mode/owner/link checks instead of DACLs); the
 real Windows backend runs the same module in the scoped Windows CI job.
 """
@@ -25,9 +25,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
 from mordred_hermes.extension import _windows_storage as storage
@@ -37,10 +34,10 @@ from mordred_hermes.extension import errors as extension_errors
 from mordred_hermes.extension import history, pairing
 from mordred_hermes.extension import wallet as extension_wallet
 from tests._child_env import with_package_under_test
+from tests.extension._trust_helpers import authenticate
 from tests.extension._windows_storage_support import REPO_ROOT, enable_checked_storage
 
 ORIGIN = "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
-CODE = "MORT-AAAAAAAA-BBBBBBBB"
 REPLAY_ID = "a" * 64
 
 
@@ -100,51 +97,24 @@ def snapshot(directory: Path) -> dict[str, str]:
     return {entry.name: file_sha(entry) for entry in sorted(directory.iterdir()) if entry.is_file()}
 
 
-def token_is_valid(token: str) -> bool:
-    return pairing.validate_token(token)
-
-
-def loaded_token_sha() -> str | None:
+def loaded_master_sha() -> str | None:
     loaded = pairing.load_pairing()
-    return None if loaded is None else sha(loaded.ext_token)
-
-
-def p256_public_key_b64() -> str:
-    public_key = ec.generate_private_key(ec.SECP256R1()).public_key()
-    return xc.b64u_encode(
-        public_key.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
-    )
-
-
-def handshake() -> dict[str, Any]:
-    code, _expires = pairing.generate_code()
-    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
-    return pairing.handle_pair_init(code, ext_pub, xc.b64u_encode(b"\x11" * 32))
+    return None if loaded is None else sha(loaded.aes_key)
 
 
 @pytest.fixture
-def paired(home: Path) -> dict[str, Any]:
-    result = handshake()
-    pairing.save_webauthn_credential("cred-1", p256_public_key_b64(), origin=ORIGIN)
+def paired(home: Path) -> pairing.Pairing:
+    master = pairing.ensure_master()
     history.save_messages([{"role": "user", "content": "hello"}])
-    return result
+    return master
 
 
-def operations(token: str) -> dict[str, Callable[[], object]]:
+def operations() -> dict[str, Callable[[], object]]:
     return {
-        "generate_code": pairing.generate_code,
-        "consume": lambda: pairing._consume_code(CODE),
-        "pair_outcome": lambda: pairing.pair_outcome(CODE),
-        "code_consumed": lambda: pairing.code_consumed(CODE),
-        "revoke": lambda: pairing.revoke_code(CODE),
+        "ensure_master": pairing.ensure_master,
         "load_pairing": pairing.load_pairing,
-        "attest": pairing.attest_pubkey_spki_b64,
         "channel_key": lambda: pairing.save_channel_key("C1", b"\x01" * 32),
         "replay": lambda: pairing.claim_e2e_replay_identities(("b" * 64,)),
-        "fingerprint": lambda: pairing.authentication_generation_fingerprint(token),
-        "webauthn_has": pairing.has_webauthn_credential,
-        "webauthn_save": lambda: pairing.save_webauthn_credential("cred-2", p256_public_key_b64(), origin=ORIGIN),
-        "webauthn_clear": pairing.clear_webauthn_credential,
         "history_load": history.load_history,
         "history_save": lambda: history.save_messages([{"role": "user", "content": "again"}]),
         "history_clear": history.clear,
@@ -157,20 +127,11 @@ def operations(token: str) -> dict[str, Callable[[], object]]:
 # --------------------------------------------------------------------------- #
 
 
-def test_handshake_state_and_history_use_the_checked_directory(paired: dict[str, Any], home: Path) -> None:
-    valid = token_is_valid(paired["ext_token"])
-    assert valid is True
-    assert pairing.has_webauthn_credential() is True
+def test_master_state_and_history_use_the_checked_directory(paired: pairing.Pairing, home: Path) -> None:
+    assert pairing.load_pairing() == paired
     assert history.load_history().status == history.STATUS_OK
     names = sorted(entry.name for entry in ext(home).iterdir())
-    assert names == [
-        ".mordred-fs.lock",
-        "attest_key.pem",
-        "history.enc",
-        "pending.json",
-        "state.json",
-        "webauthn.json",
-    ]
+    assert names == [".mordred-fs.lock", "history.enc", "state.json"]
     if os.name != "nt":
         assert stat.S_IMODE(os.lstat(ext(home)).st_mode) == 0o700
         assert {stat.S_IMODE(os.lstat(ext(home) / name).st_mode) for name in names} == {0o600}
@@ -179,36 +140,20 @@ def test_handshake_state_and_history_use_the_checked_directory(paired: dict[str,
     assert pairing.load_channel_keys() == {"C1": b"\x01" * 32}
     assert pairing.claim_e2e_replay_identities((REPLAY_ID,)) is True
     assert pairing.claim_e2e_replay_identities((REPLAY_ID,)) is False
-    pairing.clear_webauthn_credential()
-    assert pairing.has_webauthn_credential() is False
     history.clear()
     assert history.load_history().status == history.STATUS_EMPTY
     pairing.clear_pairing()
     assert pairing.load_pairing() is None
-    assert sorted(entry.name for entry in ext(home).iterdir()) == [".mordred-fs.lock", "attest_key.pem", "pending.json"]
+    assert sorted(entry.name for entry in ext(home).iterdir()) == [".mordred-fs.lock"]
 
 
 def test_checked_absence_reads_create_nothing(home: Path) -> None:
     assert pairing.load_pairing() is None
     assert pairing.load_channel_keys() == {}
-    assert pairing.code_consumed(CODE) is False
-    assert pairing.has_webauthn_credential() is False
-    assert pairing.authentication_generation_fingerprint() is None
     assert history.load_history().status == history.STATUS_UNAVAILABLE
     pairing.clear_pairing()
-    pairing.clear_webauthn_credential()
     history.clear()
     assert not ext(home).exists()
-
-
-def test_cancelled_code_round_trip(home: Path) -> None:
-    code, _expires = pairing.generate_code()
-    assert pairing.pair_outcome(code) == ("pending", None)
-    assert pairing.revoke_code(code) is True
-    assert pairing.code_consumed(code) is True
-    assert pairing.pair_outcome(code) == ("failed", "cancelled")
-    with pytest.raises(pairing.PairError, match="already_used"):
-        pairing._consume_code(code)
 
 
 _RAW_PATH_METHODS = (
@@ -289,25 +234,14 @@ def test_posix_tolerant_storage_is_unreachable_on_windows(home: Path, monkeypatc
 
 
 def _exercise_every_storage_operation() -> None:
-    result = handshake()
-    valid = token_is_valid(result["ext_token"])
-    assert valid
-    assert pairing.attest_pubkey_spki_b64()
+    master = pairing.ensure_master()
+    assert pairing.load_pairing() == master
     pairing.save_channel_key("C1", b"\x01" * 32)
     assert pairing.load_channel_keys() == {"C1": b"\x01" * 32}
     assert pairing.claim_e2e_replay_identities((REPLAY_ID,)) is True
-    pairing.save_webauthn_credential("cred-1", p256_public_key_b64(), origin=ORIGIN)
-    assert pairing.has_webauthn_credential()
-    generation = pairing.authentication_generation_fingerprint(result["ext_token"])
-    assert generation is not None
-    pairing.clear_webauthn_credential()
     history.save_messages([{"role": "user", "content": "hello"}])
     assert history.projected_history().turns == [{"role": "user", "content": "hello"}]
     history.clear()
-    code, _expires = pairing.generate_code()
-    assert pairing.revoke_code(code) is True
-    assert pairing.pair_outcome(code) == ("failed", "cancelled")
-    assert pairing.code_consumed(code) is True
     wallet_fingerprint = extension_wallet._wallet_config_fingerprint()
     assert len(wallet_fingerprint) == 5 and str(wallet_fingerprint[0]).endswith("wallet.json")
     pairing.clear_pairing()
@@ -319,18 +253,15 @@ def _exercise_every_storage_operation() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_unsafe_directory_refuses_every_operation_without_repair(paired: dict[str, Any], home: Path) -> None:
+def test_unsafe_directory_refuses_every_operation_without_repair(paired: pairing.Pairing, home: Path) -> None:
     before = snapshot(ext(home))
     broaden(ext(home))
     directory_posture = posture(ext(home))
-    for name, operation in operations(paired["ext_token"]).items():
+    for name, operation in operations().items():
         with pytest.raises(storage.ExtensionStorageError) as error:
             operation()
         assert error.value.commit_state == "not_committed", name
         assert error.value.wire_reason == "storage_unavailable", name
-    with pytest.raises(pairing.PairError) as pair_error:
-        pairing.handle_pair_init(CODE, "x", "y")
-    assert pair_error.value.reason == "storage_unavailable"
     assert posture(ext(home)) == directory_posture
     assert snapshot(ext(home)) == before
 
@@ -338,58 +269,35 @@ def test_unsafe_directory_refuses_every_operation_without_repair(paired: dict[st
 @pytest.mark.parametrize(
     ("name", "names"),
     [
-        ("state.json", ["load_pairing", "channel_key", "replay", "fingerprint", "webauthn_has", "history_load"]),
-        ("pending.json", ["generate_code", "consume", "pair_outcome", "code_consumed", "revoke"]),
-        ("webauthn.json", ["webauthn_has", "webauthn_save", "webauthn_clear"]),
-        ("attest_key.pem", ["attest"]),
+        ("state.json", ["ensure_master", "load_pairing", "channel_key", "replay", "history_load"]),
         ("history.enc", ["history_load", "history_save", "history_clear"]),
     ],
 )
 def test_hardlinked_file_refuses_its_operations_unchanged(
-    paired: dict[str, Any], home: Path, name: str, names: list[str]
+    paired: pairing.Pairing, home: Path, name: str, names: list[str]
 ) -> None:
     os.link(ext(home) / name, ext(home) / "alias")
     before = snapshot(ext(home))
-    selected = operations(paired["ext_token"])
+    selected = operations()
     for operation in names:
         with pytest.raises(storage.ExtensionStorageError):
             selected[operation]()
     assert snapshot(ext(home)) == before
 
 
-@pytest.mark.parametrize("name", ["state.json", "pending.json", "attest_key.pem", "webauthn.json"])
-def test_broadened_file_refuses_without_repair(paired: dict[str, Any], home: Path, name: str) -> None:
+@pytest.mark.parametrize("name", ["state.json", "history.enc"])
+def test_broadened_file_refuses_without_repair(paired: pairing.Pairing, home: Path, name: str) -> None:
     broaden(ext(home) / name)
     before, file_posture = snapshot(ext(home)), posture(ext(home) / name)
-    selected = operations(paired["ext_token"])
-    relevant = {
-        "state.json": "load_pairing",
-        "pending.json": "generate_code",
-        "attest_key.pem": "attest",
-        "webauthn.json": "webauthn_has",
-    }[name]
+    selected = operations()
+    relevant = {"state.json": "load_pairing", "history.enc": "history_load"}[name]
     with pytest.raises(storage.ExtensionStorageError):
         selected[relevant]()
     assert posture(ext(home) / name) == file_posture
     assert snapshot(ext(home)) == before
 
 
-def test_unsafe_attestation_key_refuses_pairing_and_records_the_reason(paired: dict[str, Any], home: Path) -> None:
-    os.link(ext(home) / "attest_key.pem", ext(home) / "alias")
-    key_before = file_sha(ext(home) / "attest_key.pem")
-    code, _expires = pairing.generate_code()
-    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
-    with pytest.raises(pairing.PairError) as error:
-        pairing.handle_pair_init(code, ext_pub, xc.b64u_encode(b"\x11" * 32))
-    assert error.value.reason == "storage_unavailable"
-    assert pairing.pair_outcome(code) == ("failed", "storage_unavailable")
-    key_after = file_sha(ext(home) / "attest_key.pem")
-    assert key_after == key_before
-    valid = token_is_valid(paired["ext_token"])
-    assert valid is True
-
-
-def test_oversized_state_refuses_without_replacement(paired: dict[str, Any], home: Path) -> None:
+def test_oversized_state_refuses_without_replacement(paired: pairing.Pairing, home: Path) -> None:
     huge = b"{" + b" " * storage.MAX_BYTES["state.json"] + b"}"
     put(ext(home), "state.json", huge)
     for operation in (pairing.load_pairing, lambda: pairing.save_channel_key("C1", b"\x01" * 32)):
@@ -401,7 +309,7 @@ def test_oversized_state_refuses_without_replacement(paired: dict[str, Any], hom
 
 def test_oversized_write_refuses_before_touching_storage(home: Path) -> None:
     with pytest.raises(storage.ExtensionStorageError) as error:
-        pairing._write_private(ext(home) / "pending.json", b"x" * (storage.MAX_BYTES["pending.json"] + 1))
+        pairing._write_private(ext(home) / "state.json", b"x" * (storage.MAX_BYTES["state.json"] + 1))
     assert error.value.commit_state == "not_committed"
     assert not ext(home).exists()
 
@@ -409,27 +317,24 @@ def test_oversized_write_refuses_before_touching_storage(home: Path) -> None:
 @pytest.mark.parametrize(
     ("name", "payload", "operation"),
     [
-        ("pending.json", b'{"MORT-', "generate_code"),
-        ("pending.json", b"[]", "consume"),
         ("state.json", b'{"aes_key": "', "load_pairing"),
         ("state.json", b"[]", "replay"),
         ("state.json", b"\xff", "channel_key"),
-        ("webauthn.json", b'{"credential_id"', "webauthn_has"),
-        ("attest_key.pem", b"-----BEGIN PRIVATE KEY-----\ntruncated", "attest"),
+        ("state.json", b"{", "ensure_master"),
     ],
 )
 def test_corrupt_or_truncated_state_refuses_and_is_never_reset(
-    paired: dict[str, Any], home: Path, name: str, payload: bytes, operation: str
+    paired: pairing.Pairing, home: Path, name: str, payload: bytes, operation: str
 ) -> None:
     put(ext(home), name, payload)
     with pytest.raises(RuntimeError) as error:
-        operations(paired["ext_token"])[operation]()
+        operations()[operation]()
     assert not isinstance(error.value, storage.ExtensionStorageError)
     stored, expected = file_sha(ext(home) / name), sha(payload)
     assert stored == expected
 
 
-def test_undecryptable_history_keeps_its_status_and_blob(paired: dict[str, Any], home: Path) -> None:
+def test_undecryptable_history_keeps_its_status_and_blob(paired: pairing.Pairing, home: Path) -> None:
     put(ext(home), "history.enc", b"truncated")
     assert history.load_history().status == history.STATUS_UNDECRYPTABLE
     stored, expected = file_sha(ext(home) / "history.enc"), sha(b"truncated")
@@ -441,81 +346,13 @@ def test_undecryptable_history_keeps_its_status_and_blob(paired: dict[str, Any],
 # --------------------------------------------------------------------------- #
 
 
-def test_lost_attestation_key_refuses_with_a_classified_reason(paired: dict[str, Any], home: Path) -> None:
-    checked_delete(ext(home), "attest_key.pem")
-    with pytest.raises(pairing.PairError) as direct:
-        pairing.attest_pubkey_spki_b64()
-    assert direct.value.reason == "attestation_key_missing"
-    code, _expires = pairing.generate_code()
-    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
-    with pytest.raises(pairing.PairError) as handshake_error:
-        pairing.handle_pair_init(code, ext_pub, xc.b64u_encode(b"\x11" * 32))
-    assert handshake_error.value.reason == "attestation_key_missing"
-    assert pairing.pair_outcome(code) == ("failed", "attestation_key_missing")
-    assert not (ext(home) / "attest_key.pem").exists()
-    still_paired = pairing.validate_token(paired["ext_token"])
-    assert still_paired is True
-
-
-def test_lost_attestation_key_is_reported_through_pair_fail(paired: dict[str, Any], home: Path) -> None:
-    checked_delete(ext(home), "attest_key.pem")
-    code, _expires = pairing.generate_code()
-    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
-    frame = {
-        "id": "p1",
-        "type": "pair_init",
-        "code": code,
-        "ext_pubkey": ext_pub,
-        "challenge": xc.b64u_encode(b"\x11" * 32),
-    }
-    reply = _dispatch(_connection(), frame)
-    assert reply == {"id": "p1", "type": "pair_fail", "reason": "attestation_key_missing"}
-
-
-def test_lost_attestation_key_recovers_by_unpairing_then_pairing(paired: dict[str, Any], home: Path) -> None:
-    checked_delete(ext(home), "attest_key.pem")
-    pairing.clear_pairing()
-    result = handshake()
-    repaired = pairing.validate_token(result["ext_token"])
-    old_rejected = pairing.validate_token(paired["ext_token"])
-    assert repaired is True and old_rejected is False
-    assert (ext(home) / "attest_key.pem").exists()
-
-
-def test_attestation_key_is_created_once_by_concurrent_threads(home: Path) -> None:
-    results: list[str] = []
-    barrier = threading.Barrier(4)
-
-    def worker() -> None:
-        barrier.wait()
-        results.append(pairing.attest_pubkey_spki_b64())
-
-    threads = [threading.Thread(target=worker) for _ in range(4)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=30)
-    assert len(results) == 4 and len(set(results)) == 1
-    pem_before = file_sha(ext(home) / "attest_key.pem")
-    assert pairing.attest_pubkey_spki_b64() == results[0]
-    pem_after = file_sha(ext(home) / "attest_key.pem")
-    assert pem_after == pem_before
-
-
-def test_attestation_key_after_unpair_is_a_fresh_identity(paired: dict[str, Any], home: Path) -> None:
-    pairing.clear_pairing()
-    checked_delete(ext(home), "attest_key.pem")
-    assert pairing.attest_pubkey_spki_b64()
-    assert (ext(home) / "attest_key.pem").exists()
-
-
 # --------------------------------------------------------------------------- #
 # state.json cache                                                            #
 # --------------------------------------------------------------------------- #
 
 
 def test_state_cache_is_reused_for_an_unchanged_checked_identity(
-    paired: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    paired: pairing.Pairing, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     parses: list[str] = []
     real_read_json = pairing._read_json
@@ -532,30 +369,28 @@ def test_state_cache_is_reused_for_an_unchanged_checked_identity(
     assert parses == ["state.json"]
 
 
-def test_state_cache_rereads_a_replaced_identity_with_same_size_and_mtime(paired: dict[str, Any], home: Path) -> None:
+def test_state_cache_rereads_a_replaced_identity_with_same_size_and_mtime(paired: pairing.Pairing, home: Path) -> None:
     state = ext(home) / "state.json"
-    before_replacement, original_token = loaded_token_sha(), sha(paired["ext_token"])
-    assert before_replacement == original_token
+    before_replacement, original_master = loaded_master_sha(), sha(paired.aes_key)
+    assert before_replacement == original_master
     raw = state.read_bytes()
     original = os.stat(state)
     data = json.loads(raw)
-    data["ext_token"] = "Z" * len(data["ext_token"])
+    data["aes_key"] = xc.b64u_encode(b"\x5a" * 32)
     replacement = json.dumps(data).encode()
     assert len(replacement) == len(raw)
     put(ext(home), "state.json", replacement)
     os.utime(state, ns=(original.st_atime_ns, original.st_mtime_ns))
     assert (os.stat(state).st_size, os.stat(state).st_mtime_ns) == (original.st_size, original.st_mtime_ns)
-    after_replacement, replacement_token = loaded_token_sha(), sha(data["ext_token"])
-    assert after_replacement == replacement_token
+    after_replacement, replacement_master = loaded_master_sha(), sha(b"\x5a" * 32)
+    assert after_replacement == replacement_master
 
 
-def test_state_cache_never_serves_after_a_security_change(paired: dict[str, Any], home: Path) -> None:
+def test_state_cache_never_serves_after_a_security_change(paired: pairing.Pairing, home: Path) -> None:
     assert pairing.load_pairing() is not None
     broaden(ext(home) / "state.json")
     with pytest.raises(storage.ExtensionStorageError):
         pairing.load_pairing()
-    with pytest.raises(storage.ExtensionStorageError):
-        pairing.validate_token(paired["ext_token"])
 
 
 # --------------------------------------------------------------------------- #
@@ -610,7 +445,7 @@ def _fail_publication_of(monkeypatch: pytest.MonkeyPatch, name: str) -> list[str
 
 
 def test_uncertain_publication_is_classified_and_never_retried(
-    paired: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    paired: pairing.Pairing, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     real = storage.open_private_directory
     published = _fail_publication_of(monkeypatch, "state.json")
@@ -622,24 +457,6 @@ def test_uncertain_publication_is_classified_and_never_retried(
     assert published == ["state.json"]
     monkeypatch.setattr(storage, "open_private_directory", real)
     assert pairing.load_channel_keys() == {"C1": b"\x01" * 32}
-
-
-def test_uncertain_pairing_commit_is_surfaced_without_further_writes(
-    paired: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    code, _expires = pairing.generate_code()
-    published = _fail_publication_of(monkeypatch, "state.json")
-    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
-    with pytest.raises(pairing.PairError) as error:
-        pairing.handle_pair_init(code, ext_pub, xc.b64u_encode(b"\x11" * 32))
-    assert error.value.reason == "storage_uncertain"
-    assert isinstance(error.value, pairing.PairingStorageError)
-    assert error.value.commit_state == "uncertain"
-    # The code was claimed, state.json was attempted exactly once, and no
-    # outcome annotation followed the uncertain publication.
-    assert published == ["pending.json", "state.json"]
-    entry = json.loads((ext(home) / "pending.json").read_bytes())[code]
-    assert entry["used"] is True and "result" not in entry
 
 
 @pytest.mark.parametrize("reason", ["io", "missing"])
@@ -654,12 +471,14 @@ def test_directory_cleanup_after_a_save_is_uncertain(home: Path, monkeypatch: py
 
     monkeypatch.setattr(storage, "open_private_directory", fail_cleanup)
     with pytest.raises(storage.ExtensionStorageUncertain) as error:
-        pairing.generate_code()
+        pairing.ensure_master()
     assert error.value.reason == reason
     assert error.value.native_code == 6
 
 
-def test_partial_publication_promotes_a_later_refusal_to_uncertain(paired: dict[str, Any], home: Path) -> None:
+def test_partial_publication_promotes_a_later_refusal_to_uncertain(paired: pairing.Pairing, home: Path) -> None:
+    # A credential file left by an earlier release; clear_pairing still removes it.
+    put(ext(home), "webauthn.json", b"{}")
     os.link(ext(home) / "webauthn.json", ext(home) / "alias")
     with pytest.raises(storage.ExtensionStorageUncertain):
         pairing.clear_pairing()
@@ -669,7 +488,7 @@ def test_partial_publication_promotes_a_later_refusal_to_uncertain(paired: dict[
 
 @pytest.mark.parametrize("phase", ["lock", "cleanup"])
 def test_missing_lock_or_cleanup_error_is_not_absence(
-    paired: dict[str, Any], monkeypatch: pytest.MonkeyPatch, phase: str
+    paired: pairing.Pairing, monkeypatch: pytest.MonkeyPatch, phase: str
 ) -> None:
     real = storage.open_optional_private_directory
 
@@ -691,7 +510,7 @@ def test_missing_lock_or_cleanup_error_is_not_absence(
             raise PrivateFSError("missing", "close")
 
     monkeypatch.setattr(storage, "open_optional_private_directory", failing)
-    for operation in (pairing.load_pairing, lambda: pairing.code_consumed(CODE), history.load_history):
+    for operation in (pairing.load_pairing, pairing.load_channel_keys, history.load_history):
         with pytest.raises(storage.ExtensionStorageError) as error:
             operation()
         assert error.value.reason == "missing"
@@ -725,11 +544,9 @@ def _dispatch(conn: extension_api._Connection, frame: dict[str, Any]) -> dict[st
     return sent[-1]
 
 
-def test_api_surfaces_unsafe_storage_instead_of_empty_state(paired: dict[str, Any], home: Path) -> None:
-    pairing.clear_webauthn_credential()
+def test_api_surfaces_unsafe_storage_instead_of_empty_state(paired: pairing.Pairing, home: Path) -> None:
     conn = _connection()
-    authenticated = _dispatch(conn, {"type": "auth", "ext_token": paired["ext_token"]})
-    assert authenticated["type"] == "auth_ok"
+    authenticate(conn, b"\x02" * 32)
 
     os.link(ext(home) / "history.enc", ext(home) / "alias")
     assert _dispatch(conn, {"id": "h1", "type": "history_get"}) == {
@@ -742,21 +559,8 @@ def test_api_surfaces_unsafe_storage_instead_of_empty_state(paired: dict[str, An
 
     broaden(ext(home))
     assert _dispatch(conn, {"id": "e1", "type": "encrypt", "plaintext": "x"}) == {
-        "type": "auth_fail",
-        "reason": "storage_unavailable",
-    }
-    assert conn.authed is False
-
-    fresh = _connection()
-    asyncio.run(fresh.send_challenge())
-    challenge = fresh.ws.sent[-1]  # type: ignore[attr-defined]
-    assert challenge["webauthn_required"] is True
-    assert challenge["storage_error"] == "storage_unavailable"
-    refused = _dispatch(fresh, {"type": "auth", "ext_token": paired["ext_token"]})
-    assert refused == {"type": "auth_fail", "reason": "storage_unavailable"}
-    assert _dispatch(fresh, {"id": "p1", "type": "pair_init", "code": CODE, "ext_pubkey": "x", "challenge": "y"}) == {
-        "id": "p1",
-        "type": "pair_fail",
+        "id": "e1",
+        "type": "error",
         "reason": "storage_unavailable",
     }
 
@@ -824,28 +628,18 @@ print("ready", flush=True)
 """
 
 _CHILDREN = {
-    "consume": """
-try:
-    pairing._consume_code(sys.argv[1])
-    print("ok", flush=True)
-except pairing.PairError as exc:
-    print(exc.reason, flush=True)
-""",
-    "revoke": """
-print("revoked" if pairing.revoke_code(sys.argv[1]) else "kept", flush=True)
-""",
     "replay": """
 print(json.dumps(pairing.claim_e2e_replay_identities((sys.argv[1],))), flush=True)
 """,
     "commit": """
-pairing._commit_pairing(sys.argv[1], pairing.Pairing(b"\\x05" * 32, sys.argv[2], "ext", "hermes", 1.0))
+pairing.ensure_master()
 print("committed", flush=True)
 """,
     "reader": """
 import hashlib
 for _ in range(25):
     loaded = pairing.load_pairing()
-    print("none" if loaded is None else hashlib.sha256(loaded.ext_token.encode()).hexdigest(), flush=True)
+    print("none" if loaded is None else hashlib.sha256(loaded.aes_key).hexdigest(), flush=True)
 """,
 }
 
@@ -903,39 +697,15 @@ def _race(home: Path, children: list[tuple[str, list[str]]]) -> list[list[str]]:
     return results
 
 
-def test_two_processes_racing_one_code_have_exactly_one_winner(home: Path) -> None:
-    code, _expires = pairing.generate_code()
-    results = _race(home, [("consume", [code]), ("consume", [code])])
-    assert sorted(result[-1] for result in results) == ["already_used", "ok"]
-    entry = json.loads((ext(home) / "pending.json").read_bytes())[code]
-    assert entry["used"] is True
-
-
-def test_revoke_and_consume_race_never_commits_a_pairing(home: Path) -> None:
-    code, _expires = pairing.generate_code()
-    revoke, consume = _race(home, [("revoke", [code]), ("consume", [code])])
-    assert revoke[-1] == "revoked"
-    assert consume[-1] in {"ok", "already_used"}
-    with pytest.raises(pairing.PairError, match="cancelled"):
-        pairing._commit_pairing(code, pairing.Pairing(b"\x05" * 32, "token", "ext", "hermes", 1.0))
-    assert pairing.load_pairing() is None
-    assert pairing.pair_outcome(code) == ("failed", "cancelled")
-
-
-def test_replay_identity_race_accepts_exactly_once(paired: dict[str, Any], home: Path) -> None:
+def test_replay_identity_race_accepts_exactly_once(paired: pairing.Pairing, home: Path) -> None:
     results = _race(home, [("replay", [REPLAY_ID]), ("replay", [REPLAY_ID])])
     assert sorted(result[-1] for result in results) == ["false", "true"]
     assert pairing.claim_e2e_replay_identities((REPLAY_ID,)) is False
 
 
 def test_commit_and_reader_race_never_observes_partial_state(home: Path) -> None:
-    code, _expires = pairing.generate_code()
-    pairing._consume_code(code)
-    token = "T" * 43
-    commit, reader = _race(home, [("commit", [code, token]), ("reader", [])])
+    commit, reader = _race(home, [("commit", []), ("reader", [])])
     assert commit[-1] == "committed"
-    token_digest = sha(token)
-    assert len(reader) == 25 and set(reader) <= {"none", token_digest}
-    committed_token = loaded_token_sha()
-    assert committed_token == token_digest
-    assert pairing.pair_outcome(code) == ("paired", None)
+    master_digest = loaded_master_sha()
+    assert master_digest is not None
+    assert len(reader) == 25 and set(reader) <= {"none", master_digest}

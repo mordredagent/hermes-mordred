@@ -1,6 +1,11 @@
 [
   {"type": "ping"},
-  {"type": "auth_challenge", "nonce": "bm9uY2U", "webauthn_required": false},
+  {
+    "type": "auth_challenge",
+    "nonce": "bm9uY2U",
+    "webauthn_required": false,
+    "auth_versions": [2]
+  },
   {
     "type": "auth_ok",
     "hermes_version": "0.1.0a12",
@@ -8,15 +13,26 @@
     "capabilities": ["discord_channel_resolve_v1", "telegram_import_v1"]
   },
   {"type": "auth_fail", "reason": "invalid_token"},
+  {
+    "type": "auth2_ok",
+    "body": "{\"device_id\":\"ZGV2aWNl\",\"eph_s\":\"ZXBo\",\"hello_sha256\":\"aGVsbG8\",\"hermes_spki\":\"aGVybWVz\",\"kind\":\"ok\",\"v_spki\":\"dmF1bHQ\"}",
+    "sig": "c2lnbmF0dXJl",
+    "endorsements": [
+      {"body": "{\"action\":\"hermes-id\"}", "sig": "c2ln"},
+      {"body": "{\"action\":\"device-add\"}", "sig": "c2ln"}
+    ],
+    "hermes_version": "0.1.0a12",
+    "se_available": true,
+    "capabilities": ["recall_v1"]
+  },
+  {
+    "type": "auth2_unendorsed",
+    "body": "{\"hello_sha256\":\"aGVsbG8\",\"hermes_spki\":\"aGVybWVz\",\"kind\":\"unendorsed\",\"sas\":\"ABC-DEF\",\"v_spki\":\"dmF1bHQ\"}",
+    "sig": "c2lnbmF0dXJl",
+    "endorsements": []
+  },
   {"type": "error", "reason": "bad_json"},
   {"id": "rpc-error", "type": "error", "reason": "internal_error"},
-  {"id": "webauthn-ok", "type": "webauthn_registered", "ok": true},
-  {
-    "id": "webauthn-fail",
-    "type": "webauthn_registered",
-    "ok": false,
-    "error": "invalid_public_key"
-  },
   {
     "id": "history-complete",
     "type": "history_result",
@@ -30,18 +46,6 @@
     "truncated": true
   },
   {"id": "history-clear", "type": "history_cleared", "ok": true},
-  {
-    "id": "pair-ok",
-    "type": "pair_complete",
-    "hermes_pubkey": "aGVybWVzLXB1YmxpYy1rZXk",
-    "attestation": {
-      "signed_challenge": "c2lnbmVkLWNoYWxsZW5nZQ",
-      "se_pubkey": "c2UtcHVibGljLWtleQ",
-      "se_available": true
-    },
-    "ext_token": "ZXh0ZW5zaW9uLXRva2Vu"
-  },
-  {"id": "pair-fail", "type": "pair_fail", "reason": "expired"},
   {"id": "chat-1", "type": "chat_chunk", "content": "partial"},
   {"id": "chat-1", "type": "chat_end"},
   {"id": "chat-2", "type": "chat_error", "reason": "agent_unavailable"},
