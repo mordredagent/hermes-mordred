@@ -160,8 +160,8 @@ def test_word_mode_reaches_the_word_search_and_bad_modes_are_refused() -> None:
 
 
 class _FakeEvents(_FakeRecall):
-    def events(self, text: str, *, limit: int = 5, headlines: bool = True) -> dict[str, Any]:
-        self.calls.append(("events", (text, limit, headlines)))
+    def events(self, text: str, *, limit: int = 5, headlines: bool = True, selection: bool = False) -> dict[str, Any]:
+        self.calls.append(("events", (text, limit, headlines, selection)))
         self._check()
         return {"query": text, "headlines": "local", "events": [{"headline": "SmolVLM の量子化を進めている"}]}
 
@@ -170,7 +170,7 @@ def test_events_decrypt_the_words_and_seal_the_result() -> None:
     svc = _FakeEvents()
     payload = {"id": "e", "type": "recall_events", "text": _sealed("量子化"), "limit": 3, "headlines": False}
     [frame] = _dispatch(_conn(svc), payload)
-    assert svc.calls == [("events", ("量子化", 3, False))]
+    assert svc.calls == [("events", ("量子化", 3, False, False))]
     assert frame["type"] == "recall_events_result" and frame["ok"] is True and frame["id"] == "e"
     assert "量子化" not in json.dumps(frame, ensure_ascii=False)
     assert json.loads(decrypt_message(_EK, frame["content"]))["events"][0]["headline"].startswith("SmolVLM")
@@ -184,11 +184,20 @@ def test_events_refuse_plaintext_and_bad_options_without_touching_the_store() ->
         {"text": _sealed("x"), "limit": 11},
         {"text": _sealed("x"), "limit": True},
         {"text": _sealed("x"), "headlines": "yes"},
+        {"text": _sealed("x"), "mode": "regex"},
     ]
     for extra in bad:
         [frame] = _dispatch(_conn(svc), {"id": "e", "type": "recall_events", **extra})
         assert frame == {"id": "e", "type": "recall_events_result", "ok": False, "error": "invalid_request"}
     assert svc.calls == []
+
+
+def test_a_selection_reaches_the_event_search_as_a_selection() -> None:
+    svc = _FakeEvents()
+    payload = {"id": "e", "type": "recall_events", "text": _sealed("量子化のコードを確認します"), "mode": "selection"}
+    [frame] = _dispatch(_conn(svc), payload)
+    assert frame["ok"] is True
+    assert svc.calls == [("events", ("量子化のコードを確認します", 5, True, True))]
 
 
 def test_events_report_store_failures_as_codes() -> None:

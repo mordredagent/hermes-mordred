@@ -28,7 +28,8 @@ Message protocol: ``Mordred-Extension/SPEC.ja.md`` §6 and the extension's
   leave sealed with the socket's session key (``recall_result`` / ``recall_opened`` / ``recall_dismissed``)
 - ``recall_events`` (prototype) → :mod:`mordred_hermes.recall.events`: the typed words' hits
   grouped into events, headlined by a loopback-only local model when one is configured;
-  sealed both ways (``recall_events_result``)
+  sealed both ways (``recall_events_result``). ``mode: "selection"`` takes a page
+  selection and searches its derived keywords instead (``recall_events_selection_v1``)
 - ``activity_pair_init`` / ``activity_auth`` (pre-auth), ``activity_batch`` / ``activity_status``
   → :mod:`mordred_hermes.extension.activity_api`. An ``activity_auth`` socket is an
   activity principal limited to those two authed frames; the page principal never
@@ -110,6 +111,8 @@ _EXTENSION_CAPABILITIES = [
     "recall_words_v1",
     # ``recall_events``: the typed words' hits grouped into events, headlined by a local model (prototype).
     "recall_events_v1",
+    # ``recall_events`` with ``mode: "selection"``: a page selection, searched by its derived keywords.
+    "recall_events_selection_v1",
     IMPORTS_CAPABILITY,
 ]
 
@@ -1149,6 +1152,7 @@ class _Connection:
         sealed = msg.get("text")
         limit = msg.get("limit", 5)
         headlines = msg.get("headlines", True)
+        mode = msg.get("mode", "words")
         if (
             not isinstance(sealed, str)
             or not is_encrypted(sealed)
@@ -1156,6 +1160,7 @@ class _Connection:
             or isinstance(limit, bool)
             or not 1 <= limit <= MAX_EVENTS
             or not isinstance(headlines, bool)
+            or mode not in ("words", "selection")
         ):
             await self._send({"id": mid, "type": "recall_events_result", "ok": False, "error": "invalid_request"})
             return
@@ -1164,7 +1169,10 @@ class _Connection:
         except DecryptError:
             await self._send({"id": mid, "type": "recall_events_result", "ok": False, "error": "undecryptable"})
             return
-        result, error = await self._recall_call(lambda svc: svc.events(text, limit=limit, headlines=headlines))
+        selection = mode == "selection"
+        result, error = await self._recall_call(
+            lambda svc: svc.events(text, limit=limit, headlines=headlines, selection=selection)
+        )
         if error is not None:
             await self._send({"id": mid, "type": "recall_events_result", "ok": False, "error": error})
         else:

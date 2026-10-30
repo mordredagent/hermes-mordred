@@ -9,8 +9,9 @@ content-free :class:`RecallError` code.
 from __future__ import annotations
 
 import logging
+import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -24,9 +25,34 @@ MAX_TEXT_CHARS = 4000
 MAX_LIMIT = 20
 MAX_CONTEXT = 5
 MAX_EVENTS = 10
+#: A selection this short (whitespace-collapsed) is first searched as typed, like the search box.
+SHORT_SELECTION_CHARS = 24
+#: A longer selection offers this many keywords; the search takes the ones one event holds together.
+SELECTION_KEYWORDS = 8
+#: A keyword of hiragana alone (もと, つい, まとめ) is a function word that the stop list missed.
+_KANA_ONLY = re.compile(r"[\u3041-\u309fー]+")
 
 StoreOpener = Callable[[Path], RecallStore]
 _T = TypeVar("_T")
+
+
+def selection_queries(text: str, covering: Sequence[str], keywords: Sequence[str]) -> list[str]:
+    """The word searches to try for a page selection, best first.
+
+    The event search ANDs its words, so a sentence finds nothing: a short
+    selection is tried as typed (as the search box would), then the keywords
+    one stored event holds together (``covering``), then the rarest keyword alone.
+    """
+    typed = " ".join(text.split())
+    queries: list[str] = []
+    for query in (
+        typed if typed and len(typed) <= SHORT_SELECTION_CHARS else "",
+        " ".join(covering),
+        keywords[0] if keywords else "",
+    ):
+        if query and query not in queries:
+            queries.append(query)
+    return queries
 
 
 class RecallError(Exception):
@@ -82,11 +108,14 @@ class RecallService:
             result = self._guarded(lambda index: index.search(cut, limit=limit))
         return result.as_dict(cut)
 
-    def events(self, text: str, *, limit: int = 5, headlines: bool = True) -> dict[str, Any]:
+    def events(self, text: str, *, limit: int = 5, headlines: bool = True, selection: bool = False) -> dict[str, Any]:
         """The stored events holding the typed words (:mod:`.topics`); no grouping or model runs here.
 
         A store never built is built first (once, without lines). ``headlines``
-        false leaves the stored lines out.
+        false leaves the stored lines out. With ``selection`` the text is a page
+        selection: searched as typed when short, otherwise (or when that finds
+        nothing) by its derived keywords (:func:`selection_queries`); the
+        result then also carries ``derived``.
         """
         cut = text[:MAX_TEXT_CHARS]
 
@@ -95,14 +124,29 @@ class RecallService:
             if not built.built():
                 _log.info("recall topics: first build on demand")
                 topics.build(index.store)
-            result = built.events(cut, limit=limit, suppressed=index.suppressed(time.time()))
+            hidden = index.suppressed(time.time())
+            derived = index.derive(cut) if selection else None
+            if derived is None:
+                queries = [cut]
+            else:
+                offered = index.keywords(cut, limit=SELECTION_KEYWORDS)
+                keywords = [word for word in offered if not _KANA_ONLY.fullmatch(word)]
+                queries = selection_queries(cut, built.covering_words(keywords), keywords)
+            result = built.events(queries[0] if queries else "", limit=limit, suppressed=hidden)
+            for query in queries[1:]:
+                if result.events:
+                    break
+                result = built.events(query, limit=limit, suppressed=hidden)
             if not headlines:
                 for event in result.events:
                     event.headline = None
                     for branch in event.branches:
                         branch.summary = None
             counts = topics.line_counts(index.store)
-            return {**result.as_dict(), "headlines": "stored" if headlines else "off", "lines": counts}
+            found = {**result.as_dict(), "headlines": "stored" if headlines else "off", "lines": counts}
+            if derived is not None:
+                found["derived"] = derived.as_dict()
+            return found
 
         return self._guarded(run)
 

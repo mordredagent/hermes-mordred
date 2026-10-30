@@ -22,7 +22,7 @@ from mordred_hermes.imports.records import (
 from mordred_hermes.imports.store import ImportStore
 from mordred_hermes.recall import topics
 from mordred_hermes.recall.index import RecallIndex
-from mordred_hermes.recall.service import RecallService
+from mordred_hermes.recall.service import RecallService, selection_queries
 from tests.imports._factories import OWNER, SENT_AT, authored, message, part, participant, tg_conv
 
 DAY = 86400
@@ -287,6 +287,54 @@ def test_service_builds_on_first_use_and_returns_topics(tmp_path: Path, store: I
     assert topics.built_fingerprint(store) is not None
     assert found["headlines"] == "stored" and found["topics"][0]["events"][0]["headline"] is None
     assert found["lines"]["events"] >= 1
+
+
+def test_selection_queries_try_a_short_selection_as_typed_then_the_words_held_together() -> None:
+    assert selection_queries("  量子化  ", ["量子化"], ["量子化"]) == ["量子化"]
+    long = "SmolVLM を FPGA に載せるために量子化と蒸留を順に試していった記録です"
+    assert selection_queries(long, ["FPGA", "量子化"], ["蒸留", "FPGA", "量子化"]) == ["FPGA 量子化", "蒸留"]
+    assert selection_queries(long, [], ["蒸留"]) == ["蒸留"]
+    assert selection_queries(long, [], []) == []
+
+
+def test_covering_words_are_the_largest_set_one_event_holds(store: ImportStore) -> None:
+    _chat(store, Source.CLAUDE_CODE, "fpga", "FPGA 推論エンジン", FPGA, start=SENT_AT)
+    _chat(store, Source.CODEX, "gif", "GIF 作成", GIF, start=SENT_AT + DAY)
+    topics.build(store)
+    index = topics.TopicIndex(store)
+    # パレット is the rarest, but only the GIF chat holds it; SmolVLM, 蒸留 and 量子化 sit together.
+    assert index.covering_words(["パレット", "SmolVLM", "蒸留", "量子化"]) == ["SmolVLM", "蒸留", "量子化"]
+    assert index.covering_words(["パレット", "ヤマネコ"]) == ["パレット"]
+    assert index.covering_words(["ヤマネコ"]) == []
+
+
+def test_a_long_selection_finds_events_by_its_keywords(tmp_path: Path, store: ImportStore) -> None:
+    _chat(store, Source.CLAUDE_CODE, "fpga", "FPGA 推論エンジン", FPGA, start=SENT_AT)
+    _chat(store, Source.CODEX, "gif", "GIF 作成", GIF, start=SENT_AT + DAY)
+    service = RecallService(opener=lambda _home: store, home=tmp_path)
+    selection = "このページでは SmolVLM を FPGA の乗算器に合わせて量子化する手順を、精度の比較と一緒に説明しています。"
+
+    as_typed = service.events(selection)
+    found = service.events(selection, selection=True)
+
+    assert as_typed["hits"] == 0
+    assert found["hits"] > 0
+    assert set(found["query"].split()) <= set(found["derived"]["queries"])
+    assert {source for event in found["events"] for source in event["sources"]} == {"claude_code"}
+
+
+def test_a_short_selection_is_searched_as_the_search_box_would(tmp_path: Path, store: ImportStore) -> None:
+    _chat(store, Source.CLAUDE_CODE, "fpga", "FPGA 推論エンジン", FPGA, start=SENT_AT)
+    _chat(store, Source.CODEX, "gif", "GIF 作成", GIF, start=SENT_AT + DAY)
+    service = RecallService(opener=lambda _home: store, home=tmp_path)
+
+    typed = service.events("量子化")
+    selected = service.events("量子化", selection=True)
+
+    assert selected["query"] == "量子化"
+    assert selected["hits"] == typed["hits"]
+    assert selected["derived"]["keywords"] == ["量子化"]
+    assert "derived" not in typed
 
 
 def _grab_bag(store: ImportStore) -> None:

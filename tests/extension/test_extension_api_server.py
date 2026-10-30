@@ -196,6 +196,7 @@ def test_full_server_flow():
         "recall_v1",
         "recall_words_v1",
         "recall_events_v1",
+        "recall_events_selection_v1",
         "imports_v1",
     ]
     assert r["enc_type"] == "encrypt_result"

@@ -865,6 +865,28 @@ class TopicIndex:
             cards.append(card)
         return cards
 
+    def covering_words(self, words: Sequence[str]) -> list[str]:
+        """Of ``words``, the largest set that one stored event holds all of.
+
+        A page selection's keywords rarely sit together in one message, so the
+        event search (which ANDs its words) needs the subset that does belong
+        together: the most words one event holds, then the set the most events
+        hold, then the earlier words. Empty when no event holds any of them.
+        """
+        held: dict[int, set[int]] = defaultdict(set)
+        with self.store.connection() as conn:
+            for i, word in enumerate(words[:_MAX_WORDS]):
+                terms = list(dict.fromkeys(token.term for token in analysis.tokens(word)))
+                if terms:
+                    for event_id in self._relevance(conn, terms):
+                        held[event_id].add(i)
+        if not held:
+            return []
+        sets = {frozenset(found) for found in held.values()}
+        support = {found: sum(1 for other in held.values() if found <= other) for found in sets}
+        best = min(sets, key=lambda found: (-len(found), -support[found], sorted(found)))
+        return [words[i] for i in sorted(best)]
+
     @staticmethod
     def _relevance(conn: sqlite3.Connection, terms: Sequence[str]) -> dict[int, float]:
         """BM25 per event holding every term (summed over the terms)."""

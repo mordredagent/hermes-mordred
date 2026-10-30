@@ -17,7 +17,7 @@ from typing import Any, Protocol
 
 from . import fusion
 from .cards import Card, build_card, conflict_summary, mark_conflicts, terms_of
-from .derive import Derived, derive
+from .derive import MAX_SELECTION, Derived, derive, keywords_of, normalize
 
 #: Parts pulled from the store per derived query before grouping by conversation.
 _SCAN_LIMIT = 80
@@ -204,6 +204,14 @@ class RecallIndex:
 
     def _frequencies(self, words: Sequence[str]) -> tuple[dict[str, int], int]:
         return self.store.document_frequencies(words)
+
+    def derive(self, text: str) -> Derived:
+        """A selection's summary and keywords, as :meth:`search` derives them."""
+        return derive(text, frequencies=self._frequencies)
+
+    def keywords(self, text: str, *, limit: int) -> list[str]:
+        """A selection's ``limit`` best keywords that the store holds, rarest first."""
+        return keywords_of(normalize(text)[:MAX_SELECTION], limit=limit, frequencies=self._frequencies)
 
     def _multi_hits(self, queries: Sequence[str]) -> tuple[list[_Hit], dict[str, int]]:
         """One search per derived keyword; a part keeps its best (lowest) rank. Also: queries that found each part."""
