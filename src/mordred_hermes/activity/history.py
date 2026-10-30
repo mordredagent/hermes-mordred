@@ -20,9 +20,9 @@ Two kinds of text come out of the store and they are kept apart:
   :data:`USER_TEXT_SQL`): a ``boundary`` / ``task_start`` whose ``actor`` is
   ``human``, a ``correction`` whose ``source`` is ``user_correction`` and
   whose ``actor`` is ``human``; plus metadata (site, route path, outcome,
-  time, step count). The operator sends exactly these values for the user's
-  instruction and corrections; its task-end summary (``actor`` ``agent``)
-  and any text labelled ``agent`` or ``unknown`` never count;
+  time, step count). The operator collector sent exactly these values for
+  the user's instruction and corrections; its task-end summary (``actor``
+  ``agent``) and any text labelled ``agent`` or ``unknown`` never count;
 - *everything else*: page titles, page text, element labels, URL query
   strings, typed text, and boundary or correction text not attributed to the
   user.

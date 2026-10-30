@@ -917,8 +917,8 @@ databases   status | diagnose | encrypt | decrypt
 telegram    setup | doctor | login | sync | status | logout | venice |
             local-llm | migrate-tee | migrate-store
 mail        import | status | setup | fetch | forget
-activity    status | use | tools | pair-operator | peers | correct |
-            backup | restore | retention
+activity    status | use | tools | correct | backup | restore |
+            retention
 uninstall
 ```
 
@@ -3727,8 +3727,11 @@ This section is the shipped contract of the `activity` component
 targets of the original capture design are in the
 [browser activity learning design](../superpowers/specs/2026-10-19-browser-activity-learning-design.md);
 where this section and that design differ, this section describes the code.
-The operator-side collector is documented in the operator repository
-(`docs/activity.md`).
+The operator collector (`mordred-browser-os-oparator`) was retired on
+2026-10-30: its peer credential (`activity/peers.py`), the
+`activity_pair_init` / `activity_auth` frames and the `activity pair-operator`
+/ `activity peers` commands are removed. Rows it wrote stay readable until
+retention ages them out (§"Collector credentials and WebSocket frames").
 
 On 2026-10-22 the lesson pipeline (candidate lessons, validation and
 adoption, the LLM review, the recall tools and the two bundled skills) was
@@ -3835,40 +3838,35 @@ the raw retention default is 365 days.
   `hermes-mordred activity tools off` / `on` hint, JSON keys
   `history_tools_enabled` for the switch and `history_tools_in_use` for it
   together with `history_in_use`), the protection gate result, the store schema version,
-  generation and row counts for `activity_events` and `activity_episodes`, and
-  the activity peers. It never prints content.
+  generation and row counts for `activity_events` and `activity_episodes`. It
+  never prints content.
 
 ### Collector credentials and WebSocket frames
 
-Activity collectors talk to the extension API (`extension/activity_api.py`,
-capability `activity_batch_v1`). The operator collector holds its own peer
-credential (`activity/peers.py`), separate from the browser-extension pairing
-and revocable on its own:
+Activity batches reach the extension API (`extension/activity_api.py`,
+capability `activity_batch_v1`) only from the paired browser extension: a
+socket authenticated by `auth` with its extension token submits them as
+principal `extension` (kind `browser`, `EXTENSION_PRINCIPAL`); the localhost
+page principal cannot (`error: page_session_forbidden`).
 
 | Frame (client → server) | Pre-auth | Reply |
 |---|---|---|
-| `activity_pair_init` `{code, label}` | yes | `activity_pair_complete {peer_id, peer_token}` or `activity_pair_fail {reason: invalid_code \| expired_code \| used_code \| storage_refused}` |
-| `activity_auth` `{peer_token}` | yes | `activity_auth_ok {peer_id, capabilities}` or `auth_fail {reason: invalid_token \| peer_revoked \| pairing_changed}` |
 | `activity_batch` `{batch}` | no | `activity_ack {status, accepted, duplicates, episode_revisions}` or `activity_refused {reason}` |
 | `activity_status` | no | `activity_status {collection: enabled \| disabled \| unavailable, reason}` |
 
-- Pair codes come from `hermes-mordred activity pair-operator` (single use,
-  10 minutes, `MORT-XXXXXXXX-XXXXXXXX` shape) and are purpose-bound: the
-  extension's `pair_init` never consumes them and vice versa. Peer ids are
-  `operator:<12 hex>`; only the SHA-256 of a peer token is stored.
-- A socket authenticated by `activity_auth` is an activity principal: only
-  `activity_batch` and `activity_status` are dispatched; any other frame gets
-  `error: activity_session_forbidden`. The principal is revalidated on every
-  frame against that peer's credential record; revoking or re-pairing it
-  answers `auth_fail: pairing_changed`. The paired browser extension (`auth`
-  with its extension token) may also submit `activity_batch` as principal
-  `extension`; the localhost page principal cannot.
+- The operator collector's own peer credential (`activity/peers.py`,
+  `<home>/extension/activity_peers.json` / `activity_pending.json`) and its
+  pre-auth frames `activity_pair_init` / `activity_auth` were removed on
+  2026-10-30. Those frames are now unknown: on an unauthenticated socket they
+  get `auth_fail: not_authenticated`, on an authenticated one they are
+  ignored, and they authenticate nothing. Leftover credential files are inert
+  (`PATHS.md`).
 - Trust (`paired_peer`) and permitted use (`learning`) come from the
   principal, never from the payload; a batch's `producer_kind` must match the
-  credential's kind (`operator`, or `browser` for the extension). The kind
-  `hermes` belongs to the in-process principal of Hermes's own capture
-  (§"History for Hermes"); a peer credential record naming it is refused as
-  `invalid_token`.
+  principal's kind (`browser` for the extension). The kind `hermes` belongs
+  to the in-process principal of Hermes's own capture (§"History for
+  Hermes"). `operator` remains a valid stored `source` / `producer_kind` for
+  rows written before the removal, but no principal of that kind exists.
 - Limits: at most 100 events per batch, 16 KiB normalized per event
   (`MAX_EVENT_BYTES`; 4 KiB before 2026-10-22), 256 KiB per raw batch frame.
   Configuration may lower these, never raise them.
@@ -4258,10 +4256,10 @@ and revocable on its own:
 - `hermes-mordred activity correct --episode ID --text TEXT [--attempt ID]`
   appends one `user_correction` / `human` / `correction` event, linked to the
   attempt when given, to an existing episode (also one a paired peer wrote)
-  and prints the event id. A correction sent by the operator collector (for
-  example its "correct:" input) is stored the same way, and so is one typed
-  in Hermes chat (`correct: …` or its Japanese equivalent, §"History for Hermes"). There is no
-  candidate, no lesson and no model call.
+  and prints the event id. A correction typed in Hermes chat (`correct: …`
+  or its Japanese equivalent, §"History for Hermes") is stored the same way,
+  as were those the retired operator collector sent. There is no candidate,
+  no lesson and no model call.
 
 ### Hermes integration
 
@@ -4352,12 +4350,12 @@ per-process state.
   to the user (`history.speaks_for_user`, the same rule as the SQL
   `history.USER_TEXT_SQL`): a `boundary` / `task_start` whose `actor` is
   `human`, or a `correction` whose `source` is `user_correction` and whose
-  `actor` is `human`. The operator collector sends exactly these values for
-  the instruction the user typed (`operator` / `human` / `task_start`) and
-  for the user's corrections (`user_correction` / `human` / `correction`), as
-  does `activity correct`; its task-end summary (`operator` / `agent` /
-  `task_end`) and any text labelled `agent` or `unknown` never count. The
-  episode tool still returns such text, unmarked.
+  `actor` is `human`. The retired operator collector sent exactly these
+  values for the instruction the user typed (`operator` / `human` /
+  `task_start`) and for the user's corrections (`user_correction` / `human` /
+  `correction`), as `activity correct` does; its task-end summary
+  (`operator` / `agent` / `task_end`) and any text labelled `agent` or
+  `unknown` never count. The episode tool still returns such text, unmarked.
 - **Excluded sites at read time.** An episode that touched a host in
   `excluded_sites` (or a subdomain) is never returned or injected, by any
   surface, including the episode tool and the lookup's page-text excerpt.
@@ -4368,10 +4366,10 @@ per-process state.
   An episode holding either marker of an excluded host is hidden the same
   way whatever `excluded_sites` holds at read time: a refusal marker, an
   event whose `args.reason` is `source_excluded` (the `gap` the operator
-  records for a batch the receiver refused as an excluded host's;
+  collector recorded for a batch the receiver refused as an excluded host's;
   `history.REFUSED_SQL`), or the collector's exclusion mark, an event whose
-  `exclusions` hold `site_excluded` (the operator sends an event on a host
-  excluded in the collector itself, `--activity-exclude-site`, with its
+  `exclusions` hold `site_excluded` (the operator collector sent an event on
+  a host excluded in the collector itself, `--activity-exclude-site`, with its
   position only: no site, route, target or content;
   `history.COLLECTOR_EXCLUDED_SQL` matches that whole token of the stored
   JSON array). Such an episode touched an excluded host the marker does not
@@ -6565,7 +6563,7 @@ Root/profile ownership, authority generation, process-lifetime migration leases,
 checked Windows SQLite I/O, backup/restore, and key disable/reset/purge/uninstall
 ordering are prerequisite contracts. A native Windows filesystem mediation
 feasibility gate must pass before Windows database support is claimed as accepted.
-Telegram migration, mail credential custody and activity peer/storage consumers
+Telegram migration, mail credential custody and activity storage consumers
 remain separate component changes; a database-only pass is not their acceptance.
 
 The qualification-gated Windows backup destination must have an existing private

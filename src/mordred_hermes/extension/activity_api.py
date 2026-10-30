@@ -1,14 +1,10 @@
 """Activity-batch handlers for the extension WebSocket API (``activity_batch_v1``).
 
-:class:`mordred_hermes.extension.api._Connection` dispatches four frame types
-here; this module keeps their logic out of the already large ``api.py``:
+:class:`mordred_hermes.extension.api._Connection` dispatches two authed frame
+types here; this module keeps their logic out of the already large ``api.py``.
+Only the paired browser extension reaches them (principal
+:data:`EXTENSION_PRINCIPAL`); the page principal is refused before dispatch.
 
-- ``activity_pair_init`` (pre-auth) — consume an activity pair code
-  (:mod:`mordred_hermes.activity.peers`) → ``activity_pair_complete`` /
-  ``activity_pair_fail``.
-- ``activity_auth`` (pre-auth) — authenticate an activity peer token →
-  ``activity_auth_ok`` / ``auth_fail``. The socket becomes an *activity
-  principal*: only ``activity_batch`` and ``activity_status`` are dispatched.
 - ``activity_batch`` — size check on the raw frame, then the configured
   receiver (``ExtensionAPIServer.activity_receiver``) → ``activity_ack`` /
   ``activity_refused``. No receiver means ``store_unavailable``.
@@ -22,13 +18,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import secrets
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from ..activity import peers
-from ..activity.peers import EXTENSION_PRINCIPAL, PeerPrincipal
+from ..activity.contracts import PeerPrincipal
 
 if TYPE_CHECKING:
     from ..activity.config import ActivityConfig
@@ -40,8 +34,9 @@ DEFAULT_MAX_BATCH_BYTES = 256 * 1024
 _MAX_BATCH_BYTES_CEILING = 4 * 1024 * 1024
 _MIN_BATCH_BYTES = 1024
 ACTIVITY_CAPABILITY = "activity_batch_v1"
-# The only frames an activity principal may send after activity_auth.
-ACTIVITY_ALLOWED = frozenset({"activity_batch", "activity_status"})
+#: Every batch the paired extension submits is attributed to this principal; trust and permitted use come
+#: from it, never from the payload.
+EXTENSION_PRINCIPAL = PeerPrincipal(peer_id="extension", kind="browser")
 _REPLY_TYPES = frozenset({"activity_ack", "activity_refused"})
 
 _log = logging.getLogger(__name__)
@@ -119,74 +114,8 @@ def collection_status(home: Path) -> tuple[str, str | None]:
 
 
 # --------------------------------------------------------------------------- #
-# Principal revalidation
-# --------------------------------------------------------------------------- #
-
-
-def authenticate_with_generation(peer_token: object) -> tuple[PeerPrincipal | None, bytes | None, str | None]:
-    """Authenticate a peer token and capture its credential generation together."""
-    principal, reason = peers.check_token(peer_token)
-    if principal is None:
-        return None, None, reason
-    generation = peers.fingerprint(principal.peer_id)
-    if generation is None:
-        return None, None, "pairing_changed"
-    return principal, generation, None
-
-
-def principal_is_current(principal: PeerPrincipal | None, generation: bytes | None) -> bool:
-    """Fail closed unless the activity peer's stored credential is unchanged.
-
-    Checked Windows storage refusals propagate so the caller can classify them;
-    any other read failure is revocation.
-    """
-    from ._windows_storage import ExtensionStorageError
-
-    if principal is None or generation is None:
-        return False
-    try:
-        current = peers.fingerprint(principal.peer_id)
-    except ExtensionStorageError:
-        raise
-    except Exception:
-        return False
-    return current is not None and secrets.compare_digest(generation, current)
-
-
-# --------------------------------------------------------------------------- #
 # Handlers
 # --------------------------------------------------------------------------- #
-
-
-async def on_activity_pair_init(conn: _Connection, msg: dict[str, Any]) -> None:
-    mid = msg.get("id")
-    try:
-        result = await _in_executor(peers.handle_pair_init, msg.get("code"), msg.get("label"))
-    except peers.PeerPairError as exc:
-        await conn._send({"id": mid, "type": "activity_pair_fail", "reason": exc.reason})
-        return
-    # A new credential on this socket never inherits a prior principal.
-    conn._invalidate_authentication()
-    _log.info("activity peer paired (%s)", result["peer_id"])
-    await conn._send({"id": mid, "type": "activity_pair_complete", **result})
-
-
-async def on_activity_auth(conn: _Connection, msg: dict[str, Any]) -> None:
-    conn._invalidate_authentication()
-    principal, generation, reason = await _in_executor(authenticate_with_generation, msg.get("peer_token"))
-    if principal is None or generation is None:
-        await conn._send({"type": "auth_fail", "reason": reason or "invalid_token"})
-        return
-    conn.authed = True
-    conn._activity_principal = principal
-    conn._activity_generation = generation
-    await conn._send(
-        {
-            "type": "activity_auth_ok",
-            "peer_id": principal.peer_id,
-            "capabilities": [ACTIVITY_CAPABILITY],
-        }
-    )
 
 
 def _ingest(receiver: Any, principal: PeerPrincipal, batch: Mapping[str, Any]) -> dict[str, Any]:
@@ -203,7 +132,7 @@ def _ingest(receiver: Any, principal: PeerPrincipal, batch: Mapping[str, Any]) -
 
 async def on_activity_batch(conn: _Connection, msg: dict[str, Any]) -> None:
     mid = msg.get("id")
-    principal = conn._activity_principal or EXTENSION_PRINCIPAL
+    principal = EXTENSION_PRINCIPAL
     if conn._frame_bytes > conn.activity_max_batch_bytes:
         _log.info("activity batch refused: batch_too_large (peer=%s)", principal.peer_id)
         await conn._send(_refused(mid, "batch_too_large"))

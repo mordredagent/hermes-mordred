@@ -1198,11 +1198,9 @@ the tool inside a running Hermes can. An HTTP proxy is refused
 ### `activity` — record browser work (preview, macOS)
 
 ```sh
-hermes-mordred activity status                # switches, protection gate, counts, peers (no content)
+hermes-mordred activity status                # switches, protection gate, counts (no content)
 hermes-mordred activity use off               # Hermes stops using the history and recording its own browser work (on: both again); next turn
 hermes-mordred activity tools off             # keep the automatic hints, drop the lookup tools (on: offer them)
-hermes-mordred activity pair-operator         # single-use code for the browser operator's collector
-hermes-mordred activity peers list            # peers revoke <peer_id> stops a collector at once
 hermes-mordred activity correct --episode ID --text "Open the official site instead"   # stores one correction event; prints its id
 hermes-mordred activity backup --output ~/mordred-activity.bak  # encrypted; file must not exist
 hermes-mordred activity restore --input ~/mordred-activity.bak  # preview; add --yes to restore
@@ -1240,9 +1238,8 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > on a host excluded in the collector itself (`site_excluded`) is never shown
 > to Hermes, also after you remove the exclusion. Your own instruction is still stored, so do not name the
 > excluded site's private details in it. Also exclude the host in the
-> collector itself when it can (the operator's `--activity-exclude-site`):
-> then nothing from that host leaves the collector but where its events fall
-> in the episode (marked `site_excluded`). If one entry of that list names no host, the
+> collector itself when it can: then nothing from that host leaves the
+> collector but where its events fall in the episode (marked `site_excluded`). If one entry of that list names no host, the
 > other entries still apply but every batch is refused
 > (`excluded_sites_invalid`; `activity status` shows `collection: refused`)
 > until you fix it, so a typo never records a site you excluded. Raw events are kept
@@ -1251,7 +1248,7 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > most once an hour.
 > `activity correct` appends your correction as one raw event to an existing
 > episode (also one a paired collector wrote); nothing is derived from it and
-> no model is called. A correction typed in the operator after a task finished
+> no model is called. A correction a collector sends after a task finished
 > is attributed to that task when it names the task's last action.
 > `activity restore` without `--yes` prints the backup's schema version,
 > generation and row counts and exits 2; with it, the content is replaced and
@@ -1260,15 +1257,15 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 >
 > **Hermes uses this history** while the feature is enabled (master switch
 > `history_enabled`, default on; `activity use off` turns it off from the next
-> turn, without a restart, and `activity use on` back on; operator collection
-> is not affected, while Hermes's own capture of its browser calls and your
-> chat corrections stops and restarts with the switch). After Hermes opens a
+> turn, without a restart, and `activity use on` back on; batches from the
+> paired extension are not affected, while Hermes's own capture of its browser
+> calls and your chat corrections stops and restarts with the switch). After Hermes opens a
 > site with `browser_navigate`, the browser result carries a short block of
 > your earlier work there (tasks, routes, outcomes, page titles, your
 > corrections; never page text or typed text). When your message names a site
 > or matches an earlier task, the turn gets a block with only your own task
 > texts and corrections (the instruction and corrections you typed, never the
-> operator's own summary) plus sites, routes, outcomes and times. Hermes can
+> collector's own summary) plus sites, routes, outcomes and times. Hermes can
 > also look things up with `mordred_browser_history` and
 > `mordred_browser_history_episode` (skill `mordred:browser-history`). Blocks
 > are bounded (`history_max_chars` 1500, `history_max_episodes` 3,
@@ -1330,7 +1327,7 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > arriving through a gateway, the API server or an unknown platform is
 > recorded as the agent's task, not yours, and cannot record a correction.
 > Add a gateway platform (for example `telegram`) only if that gateway is
-> used by you alone. Type `correct: …` (or the Japanese "teisei:", the operator's prefix) in Hermes chat to record
+> used by you alone. Type `correct: …` (or the Japanese "teisei:") in Hermes chat to record
 > a correction of Hermes's last browser action (`history_chat_corrections`,
 > default on); the message still goes to Hermes as usual. Recording never
 > slows or breaks a tool call: a write waits at most 250 ms for the store,

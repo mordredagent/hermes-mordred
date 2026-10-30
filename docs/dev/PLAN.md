@@ -2310,14 +2310,14 @@ implementation plan:
 
 | Design component | Modules |
 |---|---|
-| Operator and extension collectors | operator repository (`src/mordred/activity.py`, `activity_cli.py`, `docs/activity.md`); no collector code in this repository |
-| Authenticated receiver | `activity/peers.py` (peer credentials), `extension/activity_api.py` (frames, principal revalidation), `activity/contracts.py` (normalization, `PeerPrincipal`), `activity/ingest.py` (`build_receiver`, hourly bounded retention after append), `activity/_capture_audit.py` (`activity.capture_refused`, once per process and code) |
+| Operator and extension collectors | the paired browser extension (its collector code is not in this repository; Hermes's own capture is `activity/capture_hermes.py`); the operator collector (operator repository) was retired on 2026-10-30 |
+| Authenticated receiver | `extension/activity_api.py` (`activity_batch` / `activity_status` frames, `EXTENSION_PRINCIPAL`), `activity/contracts.py` (normalization, `PeerPrincipal`), `activity/ingest.py` (`build_receiver`, hourly bounded retention after append), `activity/_capture_audit.py` (`activity.capture_refused`, once per process and code) |
 | Secret redaction | `activity/_redaction.py` (standard-library-only masking, bounded scanning and caches); `activity/contracts.py` explicitly re-exports its public redaction functions, constants and type alongside event validation, serialization and digests |
 | Activity store | `activity/_paths.py`, `activity/_gate.py` (protection gate, keyed opener), `activity/_schema.py` (schema v3, in-place v1→v2→v3 migration), `activity/store.py` (append, episodes, status, backup/restore, `plan_retention`/`apply_retention`) |
 | Corrections | `activity/corrections.py` (record-only: one `user_correction` event appended to an existing episode; nothing derived) |
 | Term matching helpers | `activity/matching.py` (`terms` with CJK bigrams, `SessionBudget` counting characters and shown episodes per session) |
 | History for Hermes (B1) | `activity/history.py` (bounded queries `episodes_for_site` / `episodes_for_terms` / `episode_detail`, `render_block`), `activity/_history_access.py` (configuration cached by mtime, gated store reader, session budget, `activity.history_unavailable` audit), `activity/hooks_history.py` (`transform_tool_result`, `pre_llm_call`), `activity/tools.py` (`mordred_browser_history`, `mordred_browser_history_episode`, skill registration), `activity/skills/browser-history/SKILL.md` |
-| Commands | `wizard/activity_cli.py` (`status`, `use on\|off`, `tools on\|off`, `pair-operator`, `peers`, `correct`; `set_history_switch` writes `history_enabled` / `history_tools_enabled`), `wizard/activity_store_cli.py` (`backup`, `restore`, `retention`) |
+| Commands | `wizard/activity_cli.py` (`status`, `use on\|off`, `tools on\|off`, `correct`; `set_history_switch` writes `history_enabled` / `history_tools_enabled`), `wizard/activity_store_cli.py` (`backup`, `restore`, `retention`) |
 | Configuration | `activity/config.py` (`plugins.mordred_activity`; `history_tools_active` gates the lookup tools) |
 
 `plugin.py` wires `activity` after `e2e` and before `wizard`; its
@@ -2339,7 +2339,9 @@ v3 drops their tables.
 Delivery as shipped:
 
 1. **Contracts and recording** — gate, store, receiver, peer credentials, WS
-   frames, `status`/`pair-operator`/`peers` CLI, operator collector.
+   frames, `status`/`pair-operator`/`peers` CLI, operator collector. The
+   operator peer credential, its frames and the `pair-operator` / `peers`
+   commands were removed on 2026-10-30 with the operator collector.
 2. **Corrections as raw events** — `activity correct` and operator-sent
    corrections are stored as events; retention, backup and restore.
 3. **Hermes-side use of the history** — designed in

@@ -363,9 +363,9 @@ class ActivityStore:
     ) -> list[NormalizedEvent]:
         """Corrections moved into the episode of the attempt they reference.
 
-        The operator closes its episode when a task ends, so a correction typed afterwards arrives in a fresh
-        episode while its ``attempt_id`` still names the finished task's attempt; left there, the correction has
-        no attempt or task context to learn from.
+        A collector that closes its episode when a task ends (the retired operator collector did) sends a
+        correction typed afterwards in a fresh episode while its ``attempt_id`` still names the finished task's
+        attempt; left there, the correction has no attempt or task context to learn from.
         """
         homes: dict[str, str] = {}
         for phase in ATTEMPT_PHASES:
