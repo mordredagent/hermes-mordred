@@ -20,7 +20,7 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 - ``vault {init,add,status,cat,migrate,...}``    — at-rest secrets/env vault
 - ``plugins list``                               — show the Mordred plugin and its components
 - ``plugins migrate``                            — switch config.yaml to the single ``mordred`` plugin
-- ``activity {status,use,tools,pair-operator,peers,correct,backup,restore,retention}`` — browser
+- ``activity {status,use,tools,correct,backup,restore,retention}`` — browser
   activity history administration (``use on|off``: Hermes's use of the history; ``tools on|off``:
   the lookup tools only)
 - ``mail {import,status,setup,fetch,forget}``    — mail import (mbox / .eml) and IMAP sync into ``mordred.db``
@@ -146,9 +146,9 @@ def _add_databases(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
 
 
 def _add_activity(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    p = sub.add_parser("activity", help="Browser activity history: status, pairing, peers, corrections and maintenance")
+    p = sub.add_parser("activity", help="Browser activity history: status, corrections and maintenance")
     asub = p.add_subparsers(dest="activity_command", required=True, metavar="COMMAND")
-    p_status = asub.add_parser("status", help="Show switches, protection gate, store counts and peers (no content)")
+    p_status = asub.add_parser("status", help="Show switches, protection gate and store counts (no content)")
     p_status.add_argument("--json", action="store_true", help="Print one JSON object")
     p_status.set_defaults(func=_handle_activity)
     p_use = asub.add_parser("use", help="Turn Hermes's use of the browser history on or off (history_enabled)")
@@ -162,18 +162,6 @@ def _add_activity(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
         "into reader mode",
     )
     p_tools.set_defaults(func=_handle_activity)
-    p_pair = asub.add_parser("pair-operator", help="Generate a single-use pair code for the operator collector")
-    p_pair.add_argument("--label", default="operator", help="Label recorded for the new peer (default: operator)")
-    p_pair.add_argument("--timeout", type=float, default=600.0, help="Seconds to wait (default: 600)")
-    p_pair.set_defaults(func=_handle_activity)
-    p_peers = asub.add_parser("peers", help="List or revoke activity peer credentials")
-    psub = p_peers.add_subparsers(dest="activity_peers_command", required=True, metavar="COMMAND")
-    p_list = psub.add_parser("list", help="List activity peers")
-    p_list.add_argument("--json", action="store_true", help="Print one JSON object")
-    p_list.set_defaults(func=_handle_activity)
-    p_revoke = psub.add_parser("revoke", help="Revoke an activity peer (idempotent)")
-    p_revoke.add_argument("peer_id", help="Peer id, e.g. operator:0123456789ab")
-    p_revoke.set_defaults(func=_handle_activity)
     p_correct = asub.add_parser("correct", help="Record an explicit correction of an episode as a raw event")
     p_correct.add_argument("--episode", required=True, help="Episode id the correction refers to")
     p_correct.add_argument("--text", required=True, help="What should have been done")

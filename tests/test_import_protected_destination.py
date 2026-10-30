@@ -103,8 +103,7 @@ def test_destination_rejects_planted_parent(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX per-process SQLCipher advisory locks")
-@pytest.mark.parametrize("consumer", ["export", "peer"])
-def test_live_sqlcipher_lock_survives_rejected_database_alias(native_root, monkeypatch, tmp_path, consumer):
+def test_live_sqlcipher_lock_survives_rejected_database_alias(native_root, monkeypatch, tmp_path):
     import json
     import subprocess
     import sys
@@ -112,14 +111,13 @@ def test_live_sqlcipher_lock_survives_rejected_database_alias(native_root, monke
 
     import sqlcipher3.dbapi2 as sc
 
-    from mordred_hermes.activity import peers
     from mordred_hermes.dbcrypt._authority import Authority
     from mordred_hermes.dbcrypt._connection import open_protected
     from mordred_hermes.imports._protected_destination import checked_import_source
 
     root = native_root[0]
     database = root / "protected.db"
-    source = root / ("peer.json" if consumer == "peer" else "export.jsonl")
+    source = root / "export.jsonl"
     source.write_bytes(b'{"original":true}\n')
     source.chmod(0o600)
     authority = Authority.acquire(root)
@@ -250,12 +248,8 @@ raise SystemExit(code)
         assert reserved_lock_is_held(), "fixture did not establish a real cross-process RESERVED lock"
         monkeypatch.setattr(os, "open", legacy_parent_open)
         monkeypatch.setattr(subprocess, "Popen", launch_with_child_handoff)
-        if consumer == "peer":
-            with pytest.raises(RuntimeError):
-                peers._read(source)
-        else:
-            with pytest.raises(ActivityRefused), checked_import_source(source, home=root):
-                pytest.fail("swapped database alias escaped admission")
+        with pytest.raises(ActivityRefused), checked_import_source(source, home=root):
+            pytest.fail("swapped database alias escaped admission")
         for worker in threads:
             worker.join(timeout=5)
             assert not worker.is_alive()

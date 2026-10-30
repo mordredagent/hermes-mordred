@@ -1,7 +1,8 @@
 """Activity frames over a real ExtensionAPIServer socket (activity_batch_v1).
 
-The receiver is a fake: these tests pin authentication, principal scoping,
-revalidation and size limits, independent of the activity store.
+The receiver is a fake: these tests pin authentication, principal scoping and
+size limits, independent of the activity store. Only the paired extension
+submits batches (principal ``extension``).
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import aiohttp
 import pytest
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
-from mordred_hermes.activity import peers
+from mordred_hermes.activity.contracts import PeerPrincipal
 from mordred_hermes.extension import activity_api, extension_api
 from mordred_hermes.extension import extension_crypto as xc
 from mordred_hermes.extension import extension_pairing as pairing
@@ -24,7 +25,7 @@ from mordred_hermes.extension import extension_pairing as pairing
 
 class FakeReceiver:
     def __init__(self, reply: dict[str, Any] | None = None) -> None:
-        self.calls: list[tuple[peers.PeerPrincipal, dict[str, Any]]] = []
+        self.calls: list[tuple[PeerPrincipal, dict[str, Any]]] = []
         self.reply = reply or {
             "type": "activity_ack",
             "status": "ok",
@@ -33,12 +34,13 @@ class FakeReceiver:
             "episode_revisions": {"ep-1": 1},
         }
 
-    def ingest(self, principal: peers.PeerPrincipal, batch: dict[str, Any]) -> dict[str, Any]:
+    def ingest(self, principal: PeerPrincipal, batch: dict[str, Any]) -> dict[str, Any]:
         self.calls.append((principal, batch))
         return dict(self.reply)
 
 
-_BATCH = {"schema_version": 1, "producer_id": "p-1", "producer_kind": "operator", "events": [{"event_id": "e1"}]}
+_BATCH = {"schema_version": 1, "producer_id": "p-1", "producer_kind": "browser", "events": [{"event_id": "e1"}]}
+_EXTENSION_ORIGIN = {"Origin": "chrome-extension://abc"}
 
 
 def _free_port() -> int:
@@ -73,17 +75,29 @@ def _run(scenario: Scenario, receiver: Any = None, **server_kwargs: Any) -> Any:
     return asyncio.run(main())
 
 
-async def _activity_pair_and_auth(ws: aiohttp.ClientWebSocketResponse) -> dict[str, Any]:
-    await _recv(ws)  # auth_challenge
-    code, _ = await asyncio.to_thread(peers.generate_peer_code, "test")
-    await ws.send_str(json.dumps({"id": "p1", "type": "activity_pair_init", "code": code, "label": "operator"}))
+async def _extension_pair_and_auth(ws: aiohttp.ClientWebSocketResponse) -> dict[str, Any]:
+    """Pair the browser extension, authenticate the socket with its ext_token and return ``auth_ok``."""
+    challenge = await _recv(ws)
+    assert challenge["type"] == "auth_challenge"
+    code, _ = await asyncio.to_thread(pairing.generate_code)
+    ext_priv = X25519PrivateKey.generate()
+    await ws.send_str(
+        json.dumps(
+            {
+                "id": "p1",
+                "type": "pair_init",
+                "code": code,
+                "ext_pubkey": xc.b64u_encode(xc.x25519_public_raw(ext_priv)),
+                "challenge": xc.b64u_encode(b"\x07" * 32),
+            }
+        )
+    )
     complete = await _recv(ws)
-    assert complete["type"] == "activity_pair_complete", complete
-    assert complete["id"] == "p1"
-    await ws.send_str(json.dumps({"type": "activity_auth", "peer_token": complete["peer_token"]}))
-    ok = await _recv(ws)
-    assert ok == {"type": "activity_auth_ok", "peer_id": complete["peer_id"], "capabilities": ["activity_batch_v1"]}
-    return complete
+    assert complete["type"] == "pair_complete", complete
+    await ws.send_str(json.dumps({"type": "auth", "ext_token": complete["ext_token"]}))
+    auth_ok = await _recv(ws)
+    assert auth_ok["type"] == "auth_ok", auth_ok
+    return auth_ok
 
 
 async def _send_batch(ws: aiohttp.ClientWebSocketResponse, batch: Any = _BATCH, mid: str = "b1") -> dict[str, Any]:
@@ -91,18 +105,19 @@ async def _send_batch(ws: aiohttp.ClientWebSocketResponse, batch: Any = _BATCH, 
     return await _recv(ws)
 
 
-def test_pair_auth_batch_ack_reaches_receiver_with_peer_principal():
+def test_extension_batch_ack_reaches_receiver_with_extension_principal():
     receiver = FakeReceiver()
 
     async def scenario(session, url, _server):
-        async with session.ws_connect(url) as ws:
-            complete = await _activity_pair_and_auth(ws)
+        async with session.ws_connect(url, headers=_EXTENSION_ORIGIN) as ws:
+            auth_ok = await _extension_pair_and_auth(ws)
             reply = await _send_batch(ws)
             await ws.send_str(json.dumps({"id": "s1", "type": "activity_status"}))
             status = await _recv(ws)
-            return complete, reply, status
+            return auth_ok, reply, status
 
-    complete, reply, status = _run(scenario, receiver)
+    auth_ok, reply, status = _run(scenario, receiver)
+    assert "activity_batch_v1" in auth_ok["capabilities"]
     assert reply == {
         "id": "b1",
         "type": "activity_ack",
@@ -112,73 +127,68 @@ def test_pair_auth_batch_ack_reaches_receiver_with_peer_principal():
         "episode_revisions": {"ep-1": 1},
     }
     [(principal, batch)] = receiver.calls
-    assert principal == peers.PeerPrincipal(peer_id=complete["peer_id"], kind="operator")
+    assert principal == activity_api.EXTENSION_PRINCIPAL
+    assert (principal.peer_id, principal.kind) == ("extension", "browser")
     assert batch == _BATCH
     # Defaults: the activity feature is off for a fresh profile.
     assert status == {"id": "s1", "type": "activity_status", "collection": "disabled", "reason": "collection_disabled"}
 
 
-def test_wrong_token_is_refused():
+def test_receiver_refusal_is_passed_through():
+    receiver = FakeReceiver({"type": "activity_refused", "reason": "collection_disabled"})
+
     async def scenario(session, url, _server):
-        async with session.ws_connect(url) as ws:
-            await _recv(ws)
-            await ws.send_str(json.dumps({"type": "activity_auth", "peer_token": "nope"}))
-            fail = await _recv(ws)
-            reply = await _send_batch(ws)
-            return fail, reply
+        async with session.ws_connect(url, headers=_EXTENSION_ORIGIN) as ws:
+            await _extension_pair_and_auth(ws)
+            return await _send_batch(ws)
 
-    fail, reply = _run(scenario, FakeReceiver())
-    assert fail == {"type": "auth_fail", "reason": "invalid_token"}
-    assert reply == {"type": "auth_fail", "reason": "not_authenticated"}
+    assert _run(scenario, receiver) == {"id": "b1", "type": "activity_refused", "reason": "collection_disabled"}
+    assert len(receiver.calls) == 1
 
 
-def test_bad_pair_code_fails_without_authenticating():
+def test_extension_repairing_revokes_activity_submission_mid_session():
+    receiver = FakeReceiver()
+
     async def scenario(session, url, _server):
-        async with session.ws_connect(url) as ws:
-            await _recv(ws)
-            await ws.send_str(json.dumps({"id": "p", "type": "activity_pair_init", "code": "MORT-AAAAAAAA-AAAAAAAA"}))
-            return await _recv(ws)
+        async with session.ws_connect(url, headers=_EXTENSION_ORIGIN) as ws:
+            await _extension_pair_and_auth(ws)
+            first = await _send_batch(ws)
+            # A new pairing replaces the extension token the first socket authenticated with.
+            async with session.ws_connect(url, headers=_EXTENSION_ORIGIN) as other:
+                await _extension_pair_and_auth(other)
+            changed = await _send_batch(ws, mid="b2")
+            after = await _send_batch(ws, mid="b3")
+            return first, changed, after
 
-    assert _run(scenario) == {"id": "p", "type": "activity_pair_fail", "reason": "invalid_code"}
+    first, changed, after = _run(scenario, receiver)
+    assert first["type"] == "activity_ack"
+    assert changed == {"type": "auth_fail", "reason": "pairing_changed"}
+    assert after == {"type": "auth_fail", "reason": "not_authenticated"}
+    assert len(receiver.calls) == 1
 
 
-def test_revoked_peer_mid_session_gets_pairing_changed():
+@pytest.mark.parametrize(
+    "frame",
+    [
+        {"id": "p", "type": "activity_pair_init", "code": "MORT-AAAAAAAA-AAAAAAAA", "label": "operator"},
+        {"type": "activity_auth", "peer_token": "anything"},
+    ],
+)
+def test_operator_peer_frames_are_gone(frame):
+    """The operator collector's pairing and auth frames no longer exist: they authenticate nothing."""
     receiver = FakeReceiver()
 
     async def scenario(session, url, _server):
         async with session.ws_connect(url) as ws:
-            complete = await _activity_pair_and_auth(ws)
-            assert (await _send_batch(ws))["type"] == "activity_ack"
-            await asyncio.to_thread(peers.revoke, complete["peer_id"])
-            changed = await _send_batch(ws, mid="b2")
-            after = await _send_batch(ws, mid="b3")
-            # Re-auth with the revoked token is refused as such.
-            await ws.send_str(json.dumps({"type": "activity_auth", "peer_token": complete["peer_token"]}))
-            reauth = await _recv(ws)
-            return changed, after, reauth
+            await _recv(ws)
+            await ws.send_str(json.dumps(frame))
+            refused = await _recv(ws)
+            return refused, await _send_batch(ws)
 
-    changed, after, reauth = _run(scenario, receiver)
-    assert changed == {"type": "auth_fail", "reason": "pairing_changed"}
-    assert after == {"type": "auth_fail", "reason": "not_authenticated"}
-    assert reauth == {"type": "auth_fail", "reason": "peer_revoked"}
-    assert len(receiver.calls) == 1
-
-
-def test_activity_principal_cannot_use_other_handlers():
-    async def scenario(session, url, _server):
-        async with session.ws_connect(url) as ws:
-            await _activity_pair_and_auth(ws)
-            replies = []
-            for mtype in ("chat", "accounts_request", "history_get", "not_a_frame"):
-                await ws.send_str(json.dumps({"id": mtype, "type": mtype, "content": "x"}))
-                replies.append(await _recv(ws))
-            return replies
-
-    replies = _run(scenario, FakeReceiver())
-    assert replies == [
-        {"id": mtype, "type": "error", "reason": "activity_session_forbidden"}
-        for mtype in ("chat", "accounts_request", "history_get", "not_a_frame")
-    ]
+    refused, batch = _run(scenario, receiver)
+    assert refused == {"type": "auth_fail", "reason": "not_authenticated"}
+    assert batch == {"type": "auth_fail", "reason": "not_authenticated"}
+    assert receiver.calls == []
 
 
 def test_page_principal_cannot_submit_activity():
@@ -204,8 +214,8 @@ def test_oversized_raw_frame_is_refused_before_the_receiver():
     receiver = FakeReceiver()
 
     async def scenario(session, url, _server):
-        async with session.ws_connect(url) as ws:
-            await _activity_pair_and_auth(ws)
+        async with session.ws_connect(url, headers=_EXTENSION_ORIGIN) as ws:
+            await _extension_pair_and_auth(ws)
             big = {**_BATCH, "events": [{"event_id": "e", "text": "x" * 3000}]}
             return await _send_batch(ws, big)
 
@@ -218,8 +228,8 @@ def test_default_limit_is_256_kib():
     receiver = FakeReceiver()
 
     async def scenario(session, url, _server):
-        async with session.ws_connect(url) as ws:
-            await _activity_pair_and_auth(ws)
+        async with session.ws_connect(url, headers=_EXTENSION_ORIGIN) as ws:
+            await _extension_pair_and_auth(ws)
             big = {**_BATCH, "events": [{"event_id": "e", "text": "x" * (256 * 1024)}]}
             return await _send_batch(ws, big)
 
@@ -229,8 +239,8 @@ def test_default_limit_is_256_kib():
 
 def test_no_receiver_answers_store_unavailable():
     async def scenario(session, url, _server):
-        async with session.ws_connect(url) as ws:
-            await _activity_pair_and_auth(ws)
+        async with session.ws_connect(url, headers=_EXTENSION_ORIGIN) as ws:
+            await _extension_pair_and_auth(ws)
             reply = await _send_batch(ws)
             await ws.send_str(json.dumps({"id": "s", "type": "activity_status"}))
             return reply, await _recv(ws)
@@ -246,8 +256,8 @@ def test_malformed_batch_and_failing_receiver_are_content_free_refusals():
             raise RuntimeError("secret page text")
 
     async def scenario(session, url, _server):
-        async with session.ws_connect(url) as ws:
-            await _activity_pair_and_auth(ws)
+        async with session.ws_connect(url, headers=_EXTENSION_ORIGIN) as ws:
+            await _extension_pair_and_auth(ws)
             malformed = await _send_batch(ws, ["not", "a", "dict"])
             exploded = await _send_batch(ws, mid="b2")
             return malformed, exploded
@@ -255,50 +265,6 @@ def test_malformed_batch_and_failing_receiver_are_content_free_refusals():
     malformed, exploded = _run(scenario, Exploding())
     assert malformed == {"id": "b1", "type": "activity_refused", "reason": "malformed"}
     assert exploded == {"id": "b2", "type": "activity_refused", "reason": "store_unavailable"}
-
-
-def test_paired_extension_batch_uses_the_extension_principal():
-    receiver = FakeReceiver({"type": "activity_refused", "reason": "collection_disabled"})
-
-    async def scenario(session, url, _server):
-        async with session.ws_connect(url, headers={"Origin": "chrome-extension://abc"}) as ws:
-            challenge = await _recv(ws)
-            assert challenge["type"] == "auth_challenge"
-            code, _ = await asyncio.to_thread(pairing.generate_code)
-            ext_priv = X25519PrivateKey.generate()
-            await ws.send_str(
-                json.dumps(
-                    {
-                        "id": "p1",
-                        "type": "pair_init",
-                        "code": code,
-                        "ext_pubkey": xc.b64u_encode(xc.x25519_public_raw(ext_priv)),
-                        "challenge": xc.b64u_encode(b"\x07" * 32),
-                    }
-                )
-            )
-            complete = await _recv(ws)
-            await ws.send_str(json.dumps({"type": "auth", "ext_token": complete["ext_token"]}))
-            auth_ok = await _recv(ws)
-            return auth_ok, await _send_batch(ws)
-
-    auth_ok, reply = _run(scenario, receiver)
-    assert "activity_batch_v1" in auth_ok["capabilities"]
-    assert reply == {"id": "b1", "type": "activity_refused", "reason": "collection_disabled"}
-    [(principal, _batch)] = receiver.calls
-    assert principal.peer_id == "extension"
-    assert principal.kind == "browser"
-
-
-def test_extension_token_is_not_an_activity_token():
-    async def scenario(session, url, _server):
-        async with session.ws_connect(url) as ws:
-            await _recv(ws)
-            code, _ = await asyncio.to_thread(pairing.generate_code)
-            await ws.send_str(json.dumps({"id": "p", "type": "activity_pair_init", "code": code}))
-            return await _recv(ws)
-
-    assert _run(scenario)["reason"] == "invalid_code"
 
 
 @pytest.mark.parametrize("value", [10, 10**9])

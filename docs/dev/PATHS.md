@@ -49,8 +49,8 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/reader_sessions.json` | privacy_check reader mode | durable record (SHA-256 digests) of sessions that used a reader tool |
 | `<home>/mordred/uninstall/` | `uninstall` | `.env` lines (`HERMES_MEMORY_KEY`, `MORDRED_*`) moved out of `.env`, mode `0600` |
 | `<home>/extension/` | extension and keyvault signer | pairing, E2E, WebAuthn, history, wallet config |
-| `<home>/extension/activity_pending.json` | `activity pair-operator` / extension server | pending activity pair codes (SHA-256 of the code only), `0600` |
-| `<home>/extension/activity_peers.json` | extension server (`activity_pair_init`) / `activity peers revoke` | activity peer credentials (token SHA-256 only), `0600` |
+| `<home>/extension/activity_pending.json` | none (legacy) | pending operator pair codes (SHA-256 of the code only), `0600`; inert since 2026-10-30, safe to delete |
+| `<home>/extension/activity_peers.json` | none (legacy) | operator peer credentials (token SHA-256 only), `0600`; inert since 2026-10-30, safe to delete |
 | `<home>/plugin-data/mordred/mordred.db` | `activity` component and `imports` library (SQLCipher only) | browser activity events and episodes (schema v3: `activity_meta`, `activity_events`, `activity_episodes`); `import_*` imported-message tables |
 | `<home>/.env` | Hermes + Mordred writers | plaintext runtime secrets when present |
 | `<home>/config.yaml` | Hermes + Mordred writers | Hermes config and Mordred plugin sections |
@@ -390,19 +390,13 @@ These are private mode-`0600` files beneath a real mode-`0700` directory.
 Pairing state and the software attestation private key are security-sensitive;
 do not publish them as diagnostics.
 
-The browser-activity component (`activity/peers.py`) adds two files of its own
-here, written through the same pairing helpers (atomic `0600` writes under
-the extension state lock):
-
-- `activity_pending.json` — pending activity pair codes keyed by the SHA-256
-  of the code, with expiry, label and outcome. The extension's `pair_init`
-  never reads it, and activity pairing never reads `pending.json`.
-- `activity_peers.json` — `{peer_id: {token_sha256, label, kind, created_at,
-  revoked_at}}`. Only token digests are stored; `activity peers revoke` sets
-  `revoked_at`, which ends that peer's open sockets on their next frame.
-
-The operator keeps the matching plaintext token in its own
-`~/.config/mordred/activity-peer.json` (`0600`), outside this inventory.
+Two legacy files may remain here from the retired operator collector's
+pairing (`activity/peers.py`, removed on 2026-10-30): `activity_pending.json`
+(pending pair codes keyed by the SHA-256 of the code) and
+`activity_peers.json` (`{peer_id: {token_sha256, label, kind, created_at,
+revoked_at}}`, token digests only). Nothing reads or writes them any more and
+nothing deletes them automatically; removing them by hand is safe, and
+`uninstall --purge-data` removes them with the rest of `<home>/extension/`.
 
 ## `<home>/plugin-data/mordred/mordred.db`
 

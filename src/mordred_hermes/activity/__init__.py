@@ -1,7 +1,7 @@
 """Mordred ``activity`` component: browser activity capture into the encrypted ``mordred.db``, used by Hermes.
 
-The operator collector (and the paired extension) deliver activity batches to
-the extension server's receiver (:mod:`.ingest`). Hermes uses the recorded
+The paired browser extension delivers activity batches to the extension
+server's receiver (:mod:`.ingest`). Hermes uses the recorded
 history directly (:mod:`.history`): :func:`register` wires
 
 - the ``transform_tool_result`` and ``pre_llm_call`` hooks

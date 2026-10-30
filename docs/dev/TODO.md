@@ -297,8 +297,6 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
   (`src/mordred_hermes/keyvault/_database_authority.py`).
 - [ ] macOS passive regressions: Desktop database step stuck in attention and `mail status --json` nulls;
   decide on an authenticated path (`src/mordred_hermes/desktop/_databases.py`, `src/mordred_hermes/desktop/_status_v4.py`).
-- [ ] Activity peer auth spawns `python -I -S` per JSON read; read the 0600 files in-process with
-  `O_NOFOLLOW` and `fstat` (`src/mordred_hermes/activity/peers.py`).
 - [ ] Windows DLL provenance: release CI ships only `py3-none-any`, the toolset is unpinned, there is
   no hash binding to `RECORD`, and source builds hard-fail without MSVC (`hatch_build.py`).
 - [ ] Acceptance `verify` self-attests `live_accepted`; `_verify_mode_sequences` and
@@ -750,11 +748,7 @@ learning implementation".
   custody, rotation and deletion; the extension never receives Hermes's
   database or memory key.
 - [ ] Human DOM observation (clicks and typing made directly on the page),
-  with the same exclusions as operator events.
-- [ ] Windows checked-storage port of `<home>/extension/activity_peers.json`
-  and `activity_pending.json`: explicit per-file bounds in
-  `extension/_windows_storage.py` and Windows tests. The store itself stays
-  refused off macOS (`unsupported_platform`).
+  with the same exclusions as other collected events.
 - [x] The 2026-10-22 removal of the lesson pipeline (candidates, adoption, LLM
   review, recall tools and skills) is done; Hermes is to use the raw history
   instead (see "Hermes-side use of the history" below).
@@ -767,33 +761,23 @@ learning implementation".
   and record it in [`CI.md`](./CI.md). Done 2026-10-21 after the correction
   re-homing change to `activity/store.py` (live end-to-end run in
   [`CI.md`](./CI.md) §"Manual live-device validation log").
-- [ ] Cross-repo (operator collector `mordred-browser-os-oparator`): record a
-  correction in the episode of the attempt it references instead of a fresh
-  post-task episode. The receiver already re-homes such corrections
-  ([`SPEC.md`](./SPEC.md) §"Event contract"), so this is cleanup, not a fix.
 - [ ] Optional index on `activity_events.attempt_id` for the correction
   re-homing lookup; it is a schema DDL change for existing stores.
-- [ ] Live-verify the extension-relay path (`--browser extension`,
-  `activityObserved` navigation observations) in a real Chrome and record it
-  in [`CI.md`](./CI.md).
 - [ ] Separate PR (`keyvault` file vault, not part of this branch): a stale
   file-vault anchor must not crash the ceremonies. See the entry under
   "Imported message provenance" below for the root cause and the fix.
 
 ### Operator collector (other repository, not changed here)
 
-Follow-ups in `mordred-browser-os-oparator` for the 2026-10-22 capture policy;
-the receiver side is [`SPEC.md`](./SPEC.md) §"Event contract".
+Retired on 2026-10-30: `mordred-browser-os-oparator` no longer sends
+activity, and its peer pairing, frames and commands were removed from this
+repository ([`SPEC.md`](./SPEC.md) §"Browser activity and conditional
+learning (2026-10-20)"). Its open follow-ups are dropped.
 
-- [ ] Send `text` for `type`/`search` operations when the field is not
-  sensitive, and keep sending `args.field_kind`.
-- [ ] Send `route` with its query and fragment (or the full URL) and let the
-  receiver scrub credentials.
-- [ ] Send `page_title` and `page_text` (at most 8000 characters of visible
-  text) on `observed` events after navigation and at task boundaries.
-- [ ] Raise the client-side per-event limit to 16 KiB to match the receiver's
-  `MAX_EVENT_BYTES`.
-- [ ] Make `--activity` default on.
+- [ ] Follow-up (activity component): drop `operator` from
+  `contracts.PRODUCER_KINDS` and `SOURCES` (no principal of that kind exists
+  any more) and relabel the test fixtures that still use it; stored
+  `operator` rows stay readable.
 
 ### Hermes-side use of the history (next design)
 

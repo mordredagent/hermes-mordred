@@ -19,10 +19,8 @@ Message protocol: ``Mordred-Extension/SPEC.ja.md`` §6 and the extension's
   ``telegram_ask_chunk*`` + ``telegram_ask_end`` (or ``telegram_ask_error``); a request
   carrying ``"evidence": true`` also gets one sealed ``telegram_ask_evidence`` frame
   (validated source cards) right before ``telegram_ask_end``
-- ``activity_pair_init`` / ``activity_auth`` (pre-auth), ``activity_batch`` / ``activity_status``
-  → :mod:`mordred_hermes.extension.activity_api`. An ``activity_auth`` socket is an
-  activity principal limited to those two authed frames; the page principal never
-  reaches them; the paired extension may submit ``activity_batch``.
+- ``activity_batch`` / ``activity_status`` → :mod:`mordred_hermes.extension.activity_api`;
+  the paired extension may submit ``activity_batch``; the page principal never reaches them.
 
 Server-initiated frames: ``ping`` (app-level keepalive, see
 ``_Connection.keepalive``) and ``error`` (malformed JSON / crashed handler).
@@ -44,7 +42,6 @@ from urllib.parse import quote, urlsplit
 
 from aiohttp import WSMsgType, web
 
-from ..activity.peers import PeerPrincipal
 from . import activity_api, page_headers, pairing
 from ._windows_storage import ExtensionStorageError
 from .crypto import (
@@ -417,10 +414,6 @@ class _Connection:
         # Page sessions use the separate process-bound page principal.
         self._authentication_generation: bytes | None = None
         self._page_authenticated = False
-        # Activity peers (activity_auth) are a separate, narrower principal,
-        # revalidated per frame against their own credential record.
-        self._activity_principal: PeerPrincipal | None = None
-        self._activity_generation: bytes | None = None
         self.activity_receiver = activity_receiver
         self.activity_max_batch_bytes = activity_max_batch_bytes
         self._frame_bytes = 0
@@ -500,8 +493,6 @@ class _Connection:
         pre_auth = {
             "pair_init": self._on_pair_init,
             "auth": self._on_auth,
-            "activity_pair_init": self._on_activity_pair_init,
-            "activity_auth": self._on_activity_auth,
         }
         authed = {
             "chat": self._on_chat,
@@ -547,9 +538,6 @@ class _Connection:
         """The refusal frame for a post-auth message, ``None`` when it may run."""
         if not self.authed:
             return {"type": "auth_fail", "reason": "not_authenticated"}
-        if self._activity_principal is not None and mtype not in activity_api.ACTIVITY_ALLOWED:
-            # Activity peers hold a submission-only credential: allowlist.
-            return {"type": "error", "reason": "activity_session_forbidden"}
         if not known:
             return None
         if (failure := self._authentication_failure()) is not None:
@@ -569,8 +557,6 @@ class _Connection:
         self.authed = False
         self._authentication_generation = None
         self._page_authenticated = False
-        self._activity_principal = None
-        self._activity_generation = None
         # An approval captured under a revoked principal must not survive a
         # re-authentication with a replacement pairing.
         self._pending_sign.clear()
@@ -621,8 +607,6 @@ class _Connection:
             return False
         if self._page_authenticated:
             return self.page_token is not None
-        if self._activity_principal is not None:
-            return activity_api.principal_is_current(self._activity_principal, self._activity_generation)
         expected = self._authentication_generation
         if expected is None:
             return False
@@ -651,12 +635,6 @@ class _Connection:
         # principal on this same socket before returning the new credential.
         self._invalidate_authentication()
         await self._send({"id": mid, "type": "pair_complete", **result})
-
-    async def _on_activity_pair_init(self, msg: dict[str, Any]) -> None:
-        await activity_api.on_activity_pair_init(self, msg)
-
-    async def _on_activity_auth(self, msg: dict[str, Any]) -> None:
-        await activity_api.on_activity_auth(self, msg)
 
     async def _on_activity_batch(self, msg: dict[str, Any]) -> None:
         await activity_api.on_activity_batch(self, msg)
