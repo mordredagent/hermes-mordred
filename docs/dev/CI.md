@@ -721,6 +721,66 @@ missing gates stay not-run or failed.
 
 ## Manual live-device validation log
 
+- **2026-11-02 — Data-preserving uninstall: isolated macOS candidate-wheel lifecycle passed; Linux/Windows native acceptance pending.**
+  Dedicated branch `fix/data-preserving-uninstall` follows the shared contract
+  commit `201e4b4d6`. No production Hermes home or native key was used. The local
+  wheel is an unpublished `0.3.0a4` candidate, not evidence for a released wheel.
+  Candidate wheel SHA256:
+  `c8d589b47c9a0c52d384112b865d1aa3cbda7daaa7a85b6bade6907286e556ec`.
+
+  macOS arm64/Python 3.12.13 with the actual signed Secure Enclave helper and
+  login-Keychain anchor passed the isolated
+  [manual wheel driver](../../tests/integration/_uninstall_macos_acceptance.py).
+  Its fresh `mordred-uninstall-wheel-*/home` held root/profile SQLCipher DBs,
+  sealed memory, config and environment files, and a registered external backup.
+  The actual package was uninstalled; a fresh interpreter without Mordred read
+  every restored DB with SQLite integrity/row checks and verified memory/config
+  and environment content. After installing the same wheel, the real
+  `databases backup export` CLI recovered the backup into a new plaintext DB;
+  the original backup hash remained identical. Purge with the backup retained
+  refused without changing the checked files. After the test explicitly deleted
+  that backup through checked backup maintenance and enrolled scoped main-key
+  ownership, purge restored both DBs, removed native keys and the package, and
+  the fresh package-free interpreter read the preserved plaintext again.
+  Test-only keys used `MORDRED_SEKEY_UNATTENDED=1`; no attended/Touch ID prompt
+  count is asserted. The final purge removed this fixture's native key material.
+
+  The checked main-key ownership requirement is unchanged: a vault-only native
+  key directory with no `meta.json` is not a complete keyvault-reset target.
+  Its purge was observed refusing **before restoration**, with keys and package
+  retained. This change does not repair ambiguous ownership or widen recursive
+  keyvault reset. Ordinary uninstall and recovery remain available.
+
+  Portable regressions exercise Windows proof-before-EX ordering, qualified
+  Server admission, unsupported-runtime refusal, memory-only purge and profile
+  ordering. Neither Linux TPM nor Windows Server CNG uninstall acceptance was
+  executed on this Mac. The retained-host control tool requires AWS profile
+  `intmax-dev`, which is absent from the current AWS profile inventory; no
+  alternate account or cloud resources were selected or started. Windows 11 encrypted DB restoration and Windows recursive
+  deletion/erase remain unsupported. The existing native crash/persistence
+  matrix is not relabelled as evidence for this candidate.
+
+  Evidence archive: `~/.codex/artifacts/mordred-safe-uninstall-20261102-c8d589b4/`
+  (candidate wheel, native/portable logs and manual driver). Runtime source is
+  recorded in `45486c673`, `d6fffa1bf` and `ae2d5d4f1`. Isolated root:
+  `/private/var/folders/v_/qz0m0d1d71j6njw_fgrnlwsc0000gn/T/mordred-uninstall-wheel-la1j371m/home`.
+  Portable verification: the containing-module run passed **241 tests**; the
+  critical preset passed **24 tests**. The full regression completed with
+  **14,370 passed, 295 skipped, 168 deselected, 9 failed** (968.36 s). All nine
+  failures were old package-removal mock targets in the Windows compatibility
+  tests after orchestration moved into its own module. The test-only correction
+  in `59581c421` preserves native/file immutability and removal tripwires;
+  the entire compatibility/acceptance-helper selection passed **81 tests**, and
+  `pytest --lf --lfnf=none` confirmed **all 9 previously failing cases pass**.
+  Product code did not change after that full regression started. This records
+  the full run and targeted reruns separately, not a second clean full run.
+
+  Ruff, formatting, shellcheck and 12 documentation checks passed. Strict mypy
+  passed all 401 checked source/tool files in both all-extras and the CI-sized
+  `dev,keyvault,extension,macos` environment. No Linux/Windows native skip is
+  counted as platform acceptance. Logs include `full-regression.log`,
+  `compatibility-rerun.log` and `last-failed-rerun.log` in the evidence archive.
+
 - **2026-10-28 — Cross-platform database: Windows read optimization reviewed; remaining lifecycle validation deferred.**
   The owner requested a shorter completion path. Draft PR
   [#270](https://github.com/mordredagent/hermes-mordred/pull/270) records the

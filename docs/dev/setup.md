@@ -458,3 +458,46 @@ and pwsh argument passing and exit codes with compiled fixture executables and
 temporary profiles, without network package installation. Native wheel installs,
 TPM probes and ordinary-user Windows 11 acceptance remain separate controller-run
 gates; macOS/Linux unit evidence does not establish those results.
+
+
+## Uninstall and retained database recovery
+
+Run `hermes-mordred uninstall --dry-run` from the root Hermes home first. The
+plan includes its profiles, retained data and known blockers. Dry-run neither
+authenticates keys nor guarantees restoration. A profile-specific invocation
+refuses because the package is shared.
+
+Ordinary uninstall restores and verifies live databases, memory and configuration
+before removing integration and finally the package. Keep the retained native
+keys, wrappers, source binding, backup registry and required helper. Registered
+SQLCipher backups and supported ZIP database members must be verifiable with
+those same keys; unknown or damaged state stops the operation.
+
+After reinstalling Mordred on the **same physical home and device**, recover a
+retained database to a new, nonexistent output in an existing private directory:
+
+```sh
+hermes-mordred databases backup export --source /absolute/path/backup.db --output /absolute/path/recovered.db
+hermes-mordred databases backup export --source /absolute/path/backup.zip --member state.db --output /absolute/path/recovered.db
+```
+
+These commands leave the source unchanged. Output is a verified plaintext DB;
+existing files are never overwritten. Keep it private. This is export, not an
+automatic replacement of a live Hermes database.
+
+`--purge-data` refuses before restoration if known encrypted backups would be
+stranded. Export or manage those backups separately; uninstall never silently
+converts or deletes them. Unregistered external/offline copies cannot be
+inventoried. Do not delete their keys unless you accept losing access to them.
+Removing a helper required by retained data also refuses. POSIX
+`--erase-encrypted` deletes only the exact reviewed targets and refuses if an
+uncovered dependency would remain. Windows purge still deletes only memory
+custody; Windows erase and recursive data deletion remain unsupported.
+
+Incomplete conversion/backup journals and incomplete keyvault ownership require
+separate recovery before destructive uninstall. In particular, a vault-only
+native key directory without main-key ownership metadata cannot satisfy the
+existing keyvault-reset contract: ordinary uninstall retains it, while purge
+refuses before restoration. This command does not infer ownership or rewrite
+that metadata. If later I/O or package removal fails, already completed restore
+steps remain; retain the recovery files, resolve the reported failure and rerun.
