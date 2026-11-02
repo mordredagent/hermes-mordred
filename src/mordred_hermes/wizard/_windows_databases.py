@@ -48,8 +48,17 @@ def refusal(home: Path) -> str | None:
             "resolve the checked storage refusal and review a new uninstall plan"
         )
     if retained:
+        from ..dbcrypt import database_status
+
+        status = database_status(home)
+        if status.capability == "available" or (
+            status.capability == "unknown"
+            and status.dependencies is not None
+            and status.reason == "native database authority has not been authenticated"
+        ):
+            return None
         return (
-            "this home retains database protection state; Windows uninstall cannot restore databases yet; "
+            "this home retains database protection state on an unqualified or uncertain Windows runtime; "
             "retain the native key/helper and reconcile the database state on its qualified original runtime"
         )
     return None

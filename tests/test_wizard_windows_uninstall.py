@@ -63,6 +63,9 @@ class Prompt:
 @pytest.fixture(autouse=True)
 def hermes_files(monkeypatch):
     """The C3 config/.env cleanup and Desktop page are recorded, not exercised (not C6)."""
+    from mordred_hermes.wizard._uninstall_hermes_env import HermesEnv
+
+    monkeypatch.setattr(uninstall_cli, "detect_hermes_env", lambda *a, **k: HermesEnv(None, None, None, ()))
     calls: list[str] = []
     monkeypatch.setattr(uninstall_cli, "plan_config_cleanup", lambda path: ConfigCleanup(path))
     monkeypatch.setattr(uninstall_cli, "plan_env_cleanup", lambda path: EnvCleanup(path))
@@ -290,7 +293,7 @@ def test_inert_custody_purge_refusal_leaves_the_profile_installed(
         assert "1 broken seal(s) cannot be decrypted, so the restore refuses" in captured.out
     stopped = "Windows memory custody could not be purged" if fault == "reset" else "memory could not be restored"
     assert f"uninstall stopped: {stopped}" in captured.err
-    assert "Nothing was removed and Mordred stays installed" in captured.err
+    # Earlier restoration may have completed; integration/package removal still must not run.
     assert hermes_files == [] and launcher.exists(), "step b and step c never ran"
     assert not [call for call in env.runner.calls if call[1:3] == ["pip", "uninstall"]]
     assert memory_lease(env) == lease and files(env.home) == before
@@ -349,3 +352,82 @@ def test_uninstall_reports_and_preserves_native_mail_custody(fs, monkeypatch, st
     assert windows.purge(SimpleNamespace(home=home, vault_root=home / "mordred/vault")) == 0
     assert {path: path.read_bytes() for path in (home / "mordred").rglob("*") if path.is_file()} == before
     assert backend.calls == native_calls
+
+
+def test_qualified_unauthenticated_server_database_can_reach_preflight(monkeypatch, tmp_path):
+    from mordred_hermes import dbcrypt
+    from mordred_hermes.dbcrypt._capability import DatabaseStatus
+    from mordred_hermes.wizard import _windows_databases
+
+    monkeypatch.setattr(_windows_databases, "state_names", lambda home: ("db-encryption.marker",))
+    monkeypatch.setattr(
+        dbcrypt,
+        "database_status",
+        lambda home: DatabaseStatus(True, 1, "unknown", False, "native database authority has not been authenticated"),
+    )
+    assert _windows_databases.refusal(tmp_path) is None
+    monkeypatch.setattr(
+        dbcrypt,
+        "database_status",
+        lambda home: DatabaseStatus(True, None, "unknown", False, "database dependency inventory is incomplete"),
+    )
+    assert _windows_databases.refusal(tmp_path) is not None
+
+
+def test_remove_helper_refuses_before_restore_when_purge_keeps_audit(enabled, hermes_files, capsys):
+    before = files(enabled.home), markers(enabled.home), mordred_entries(enabled)
+    assert run_uninstall(context(enabled), UninstallOptions(purge_data=True, remove_helper=True)) == 1
+    assert (files(enabled.home), markers(enabled.home), mordred_entries(enabled)) == before
+    assert hermes_files == []
+    assert "helper" in capsys.readouterr().err
+
+
+def test_purge_all_profiles_reauthenticates_after_root_source_deleted(inert, monkeypatch):
+    from mordred_hermes._private_fs import open_private_directory
+    from mordred_hermes.wizard import _uninstall_coordinator as coordinator
+
+    env = inert
+    child = env.home / "profiles" / "work"
+    for directory in (child.parent, child):
+        with open_private_directory(directory, create=True):
+            pass
+    from mordred_hermes.wizard import _windows_memory
+
+    purged = []
+    monkeypatch.setattr(_windows_memory, "prepare_uninstall", lambda home: None)
+    monkeypatch.setattr(_windows_memory, "verify_uninstall_inputs", lambda home, proof: None)
+    monkeypatch.setattr(_windows_memory, "_disable", lambda **kwargs: 0)
+    monkeypatch.setattr(_windows_memory, "purge", lambda **kwargs: purged.append(kwargs["home"]) or 0)
+    # Isolate ordering: once the root is purged, no subsequent profile may ask
+    # the DB layer to authenticate the deleted root source again.
+    original = coordinator.preflight
+    snapshot = object()
+    calls = []
+
+    def observed(root, **kwargs):
+        calls.append(kwargs.get("source"))
+        if kwargs.get("source") is snapshot and env.home in purged:
+            raise RuntimeError("purged root source was requested again")
+        result = original(root, **{k: v for k, v in kwargs.items() if k != "source"})
+        if env.home not in purged:
+            result.snapshot = snapshot
+        return result
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def checked(report, *, lease):
+        retained = report.snapshot
+        report.snapshot = None
+        try:
+            with coordinator_verified(report, lease=lease) as permit:
+                yield permit
+        finally:
+            report.snapshot = retained
+
+    coordinator_verified = coordinator.verified
+    monkeypatch.setattr(coordinator, "preflight", observed)
+    monkeypatch.setattr(coordinator, "verified", checked)
+    assert run_uninstall(context(env), UninstallOptions(purge_data=True)) == 0
+    assert purged == [env.home, child]
+    assert calls.count(snapshot) == 1

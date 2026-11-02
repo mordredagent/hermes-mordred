@@ -372,7 +372,8 @@ def test_owner_requires_final_database_guard_before_delete(owned_native, monkeyp
         pytest.fail("missing lease entered")
     guarded = []
 
-    def guard(*, home, database_lease):
+    def guard(*, home, database_lease, uninstall=None):
+        assert uninstall is None, "unrelated deletion must retain its conservative guard"
         guarded.append(home)
         if len(guarded) == 2:
             raise DatabaseRefused("dependency appeared")

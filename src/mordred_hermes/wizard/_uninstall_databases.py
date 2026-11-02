@@ -115,13 +115,15 @@ def detail(home: Path, *, erase: bool = False) -> str:
             )
         else:
             lines.append(
-                f"restore all Hermes databases under {base}, including profiles and backups ({names}); "
-                "cancel pending conversions"
+                f"restore and verify live Hermes databases under {base}, including profiles ({names}); "
+                "verify and retain recoverable backups; incomplete conversions must be recovered first"
             )
     archives = protected_archives(base)
     if archives:
         names = ", ".join(str(path.relative_to(base)) for path in archives)
-        action = "delete" if erase else "restore and decrypt separately before uninstalling"
+        action = (
+            "delete" if erase else "verify and retain for recovery with `databases backup export` after reinstalling"
+        )
         lines.append(f"{action} encrypted or unreadable backup archives ({names})")
     return "; ".join(lines)
 

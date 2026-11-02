@@ -72,7 +72,7 @@ def erase_refusal() -> int:
     return 1
 
 
-def restores(home: Path, *, purge_data: bool = False) -> list[Restore]:
+def _memory_restores(home: Path, *, purge_data: bool = False) -> list[Restore]:
     """The memory restore the plan promises, from a load-only observation.
 
     With ``purge_data`` an enrolled profile that was never explicitly disabled
@@ -288,3 +288,13 @@ def kept_lines(plan: UninstallPlan) -> str:
             "Remove these paths by hand once you no longer need them.",
         ]
     )
+
+
+def restores(home: Path, *, purge_data: bool = False) -> list[Restore]:
+    from . import _uninstall_databases
+    from .uninstall_cli import Restore
+
+    items = _memory_restores(home, purge_data=purge_data)
+    if not any(item.target == "databases" for item in items) and _uninstall_databases.needed(home):
+        items.insert(0, Restore("databases", _uninstall_databases.detail(home), False))
+    return items

@@ -46,7 +46,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
+from .._database_lifecycle import current_thread_exclusive_leases
 from ..keyvault._memory_hook import _write_private, memory_marker_path, memory_optout_marker_path
+from ..keyvault._uninstall_authority import UninstallAuthorization, check_authorization
 from ..keyvault.memory_crypto import MAGIC
 from . import _term, _windows_memory
 from ._runtime_gate import runtime_gate
@@ -608,13 +610,14 @@ def disable(
     store: AnchorStore | None = None,
     flow_session: FlowSession | None = None,
     platform: str | None = None,
+    uninstall: UninstallAuthorization | None = None,
 ) -> int:
     if _windows_memory.routed(platform):
         return _windows_memory.disable(home=home)
     from ..keyvault._memory_key import memory_key_lock, memory_key_path
 
     try:
-        with _disable_database_guard(home):
+        with _disable_database_guard(home, uninstall=uninstall):
             if sys.platform == "linux" or memory_key_path(home).exists() or memory_key_path(home).is_symlink():
                 with memory_key_lock(home):
                     return _disable(home=home, root=root, backend=backend, store=store, flow_session=flow_session)
@@ -624,13 +627,19 @@ def disable(
 
 
 @contextmanager
-def _disable_database_guard(home: Path) -> Iterator[None]:
+def _disable_database_guard(home: Path, *, uninstall: UninstallAuthorization | None = None) -> Iterator[None]:
     """Root disable precedes custody; reversible child disable keeps its key."""
     from ..keyvault._database_authority import resolve_database_domain
     from ..keyvault._database_mutation import database_key_mutation
 
     domain = resolve_database_domain(home)
-    if domain.root == home.absolute():
+    if uninstall is not None:
+        leases = [lease for lease in current_thread_exclusive_leases() if lease.root == domain.identities[0]]
+        if not leases:
+            raise RuntimeError("uninstall restoration requires preceding database exclusion")
+        check_authorization(uninstall, root=domain.root, lease=leases[0], purpose="restore")
+        yield
+    elif domain.root == home.absolute():
         with database_key_mutation(root=domain.root, generation=None):
             yield
     else:

@@ -567,3 +567,37 @@ def test_invalid_setup_arguments_keep_runtime_protection(argv):
 )
 def test_setup_plugin_startup_preserves_pending_conversion(tmp_path, monkeypatch, argv):
     test_maintenance_startup_does_not_execute_pending_conversions(tmp_path, monkeypatch, argv)
+
+
+@pytest.mark.parametrize("launcher", [["hermes-mordred"], ["hermes", "mordred"]])
+def test_backup_export_startup_is_offline_and_does_not_take_runtime_lease(tmp_path, monkeypatch, launcher):
+    test_maintenance_startup_does_not_execute_pending_conversions(
+        tmp_path,
+        monkeypatch,
+        [
+            *launcher,
+            "databases",
+            "backup",
+            "export",
+            "--source",
+            "backup.zip",
+            "--member",
+            "state.db",
+            "--output",
+            "new.db",
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--source", "backup.db"],
+        ["--output", "new.db"],
+        ["--source", "backup.db", "--output", "new.db", "--unknown"],
+    ],
+)
+def test_malformed_backup_export_is_not_a_startup_exemption(arguments):
+    from mordred_hermes.dbcrypt._cli import maintenance_process
+
+    assert not maintenance_process(["hermes-mordred", "databases", "backup", "export", *arguments])

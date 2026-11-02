@@ -723,6 +723,190 @@ missing gates stay not-run or failed.
 
 ## Manual live-device validation log
 
+- **2026-11-02 — Uninstall PR integration with the current `dev` layering contract.**
+  Shared SPEC/PLAN contract [PR #276](https://github.com/mordredagent/hermes-mordred/pull/276)
+  merged before the implementation PR. Integrating the newer `dev` import
+  contract exposed the new root helper's keyvault dependency when registered
+  in the explicit helper inventory. The failing contract was reproduced, then
+  the SQL-free permit implementation moved without behavioral changes to
+  `keyvault/_uninstall_authority.py` (`d92c773cf`); consumers and tests use its
+  new location. Both import contracts pass without additional ignores. New
+  paths are registered in the CI inventory and retain conservative final CI.
+  The integration selection passed 383 tests, CI policy modules passed 137,
+  critical passed 24, strict typing passed 402 files, and ruff/format passed.
+  The integrated local default suite passed 14,384 tests (295 skipped,
+  168 deselected). Initial hosted run `41444965496` exposed test-fixture
+  assumptions: nine Linux cases used ambient holder discovery instead of the
+  controlled empty inventory used by neighboring proof tests, and one Windows
+  profile-ordering fixture used `mkdir` instead of checked private directory
+  creation. Test-only corrections retain all production holder/ACL refusals.
+  The native wheel hashes below precede this module relocation and the imported
+  `dev` reset-journal extraction; they are not relabelled as new native runs.
+  Current merge-context hosted acceptance is recorded on the implementation PR.
+
+- **2026-11-02 — Data-preserving uninstall final regression passed.**
+  On final runtime source `075a99e58`, `uv run pytest -q` completed with exit
+  code 0: **14,384 passed, 295 skipped**, with integration tests excluded by
+  the repository default. Counts are from the per-test status characters in
+  the complete double-quiet output. Evidence archive:
+  `~/.codex/artifacts/mordred-safe-uninstall-20261102-c8d589b4/`
+  (`full-regression-final.log`, `full-regression-final-result.json`). This
+  supersedes the earlier interrupted follow-up run; its import-store containing
+  module also passed independently (83 tests).
+
+  Final containing-module selection: **240 passed**; critical preset: **24
+  passed**. Ruff check/format passed (867 files already formatted), strict mypy
+  passed all 401 source files, and documentation link checks passed (12 tests).
+  An independent review of the two native fixes found no actionable defects
+  and independently passed both changed test modules (38 tests). Earlier
+  full-branch review, CI-extras typing and shellcheck evidence remain recorded
+  below; native outcomes and exact candidate builds are separate entries.
+
+- **2026-11-02 — Final-source macOS Secure Enclave uninstall/recovery recheck passed.**
+  After both Windows native fixes, a freshly built universal candidate wheel
+  (`4f11f42a4dda71391ee8887c17acb590482a36b045b7d473871a274c5ddb3ef6`)
+  matched all 362 source Python modules at `075a99e58` and passed every phase
+  of the existing manual macOS wheel driver in a new home:
+  `/private/var/folders/v_/qz0m0d1d71j6njw_fgrnlwsc0000gn/T/mordred-uninstall-wheel-tuh97vp9/home`.
+  Normal restore/uninstall, package-free reads, same-wheel reinstall, actual CLI
+  backup export, retained-backup purge refusal, checked backup deletion, native
+  main-key enrollment, purge and final package-free reads all passed. The
+  fixture used the real signed Secure Enclave helper and login-Keychain anchor;
+  successful fixture keys were removed by purge. Production homes/keys were
+  untouched. Evidence in the archive below: `macos-final.log` (ending with
+  `ALL_PHASES_PASSED`), `macos-final.json`, `macos-final-run.py`, `final-posix/`.
+
+- **2026-11-02 — Data-preserving uninstall follow-up: Windows Server CNG candidate-wheel lifecycle passed.**
+  The retained Windows Server 2025 host ran under the ordinary, non-admin
+  `mordred` account with Python 3.11.17, Hermes 0.19.0, SQLCipher wheels 0.5.7,
+  actual CNG/TPM custody and the native checked VFS. The unpublished candidate
+  wheel SHA256 is
+  `0fe78eff5ebf14a96364899a2aa3a16838c79bde506f41440a958304913f34fd`;
+  all 362 packaged Python modules match source commit `075a99e58`.
+  Synthetic root:
+  `C:\Users\mordred.000\mordred-uninstall-wheel-20261102-r6\home`.
+
+  Root/profile memory custody and the required installed-Hermes runtime proof,
+  three encrypted databases (root, profile and plugin data), registered backup,
+  normal uninstall and package-free SQLite integrity/content reads passed.
+  Reinstalling the same wheel at the same physical home allowed the real
+  `databases backup export` CLI to recover the unchanged retained backup.
+  Purge refused with the backup retained, without changing observed data.
+  After explicit checked backup deletion, purge restored all three DBs, deleted
+  only root/profile memory custody keys and removed the package. Another fresh
+  interpreter verified preserved plaintext DB, memory, config and environment
+  content. Windows recursive deletion and Windows 11 encrypted DB restoration
+  remain unsupported; this run does not establish native Windows 11 evidence.
+
+  Earlier native attempts exposed two defects, fixed with failing-then-passing
+  regressions: recursive private transactions during retained publication
+  (`ac150e801`), and bound ATTACH parameters rejected by the exact-path export
+  authorizer (`075a99e58`). Holder/identity/revision checks remain in place;
+  the authorizer was not widened. Failed synthetic homes retain their recovery
+  state. The earlier macOS/Linux wheel results below predate these two fixes
+  and must not be relabelled as runs of this final Windows candidate.
+
+  Evidence: `~/.codex/artifacts/mordred-safe-uninstall-20261102-c8d589b4/`
+  (`windows-wheel-r6.log`, `windows-driver.py`, `windows-run-r6.py`,
+  `final-windows-r6/source-comparison.json`). The lifecycle log ends with
+  `ALL_PHASES_PASSED`. AWS profile `intmax-developer` was used with a bounded
+  ownership/deadline controller and an independent guest shutdown timer.
+  Both retained validation instances were independently observed stopped,
+  their task ownership tags released, and the task's SSM forwarder closed.
+  No production Hermes home or keys were used.
+
+- **2026-11-02 — Data-preserving uninstall follow-up: Linux NitroTPM candidate-wheel lifecycle passed.**
+  The owner selected AWS profile `intmax-developer` and completed CLI login.
+  The retained Linux host ran the same unpublished candidate wheel with SHA256
+  `c8d589b47c9a0c52d384112b865d1aa3cbda7daaa7a85b6bade6907286e556ec`,
+  Python 3.12.3, Hermes 0.19.0 and SQLCipher wheels 0.5.7. The TPM device was
+  `/dev/tpmrm0`, with manufacturer `AMZN`. No production home or keys were used.
+
+  The ordinary `ubuntu` account (UID 1000) ran in a fresh private PID/mount
+  namespace using the actual host filesystem and NitroTPM. Root/profile DBs,
+  encrypted memory, plaintext configuration/environment, registered backup,
+  actual package uninstall, package-free SQLite/content checks, reinstall and
+  real CLI backup export passed. The backup hash remained unchanged. Purge
+  refused with that backup retained; checked backup deletion, native main-key
+  enrollment and purge then passed, including removal of native fixture keys
+  and another package-free read of the preserved plaintext.
+
+  Outside the namespace, the same-user `systemd` and `(sd-pam)` processes had
+  unreadable descriptor inventories. Database conversion refused before DB
+  mutation; these failed synthetic setup homes and their recovery material
+  remain retained. No holder check, process visibility policy or product code
+  was weakened. The successful isolated result does not establish successful
+  operation with those host-level visibility gaps.
+
+  Successful root: `/home/ubuntu/mordred-uninstall-wheel-8Op9IVMX/home`.
+  Evidence: `~/.codex/artifacts/mordred-safe-uninstall-20261102-c8d589b4/`
+  (`linux-wheel-lifecycle.log`, `linux-driver.py`, `linux-run.sh`,
+  `linux-prepare-refusal.log`). The host was independently observed stopped,
+  and the temporary current-IP SSH rule was removed. Windows Server candidate
+  execution is tracked separately; no Windows result is inferred from Linux.
+
+- **2026-11-02 — Data-preserving uninstall: isolated macOS candidate-wheel lifecycle passed; Linux/Windows native acceptance pending.**
+  This initial snapshot is retained for build provenance; the follow-up entries
+  above supersede its pending native gates and record subsequent source fixes.
+  Dedicated branch `fix/data-preserving-uninstall` follows the shared contract
+  commit `201e4b4d6`. No production Hermes home or native key was used. The local
+  wheel is an unpublished `0.3.0a4` candidate, not evidence for a released wheel.
+  Candidate wheel SHA256:
+  `c8d589b47c9a0c52d384112b865d1aa3cbda7daaa7a85b6bade6907286e556ec`.
+
+  macOS arm64/Python 3.12.13 with the actual signed Secure Enclave helper and
+  login-Keychain anchor passed the isolated
+  [manual wheel driver](../../tests/integration/_uninstall_macos_acceptance.py).
+  Its fresh `mordred-uninstall-wheel-*/home` held root/profile SQLCipher DBs,
+  sealed memory, config and environment files, and a registered external backup.
+  The actual package was uninstalled; a fresh interpreter without Mordred read
+  every restored DB with SQLite integrity/row checks and verified memory/config
+  and environment content. After installing the same wheel, the real
+  `databases backup export` CLI recovered the backup into a new plaintext DB;
+  the original backup hash remained identical. Purge with the backup retained
+  refused without changing the checked files. After the test explicitly deleted
+  that backup through checked backup maintenance and enrolled scoped main-key
+  ownership, purge restored both DBs, removed native keys and the package, and
+  the fresh package-free interpreter read the preserved plaintext again.
+  Test-only keys used `MORDRED_SEKEY_UNATTENDED=1`; no attended/Touch ID prompt
+  count is asserted. The final purge removed this fixture's native key material.
+
+  The checked main-key ownership requirement is unchanged: a vault-only native
+  key directory with no `meta.json` is not a complete keyvault-reset target.
+  Its purge was observed refusing **before restoration**, with keys and package
+  retained. This change does not repair ambiguous ownership or widen recursive
+  keyvault reset. Ordinary uninstall and recovery remain available.
+
+  Portable regressions exercise Windows proof-before-EX ordering, qualified
+  Server admission, unsupported-runtime refusal, memory-only purge and profile
+  ordering. Neither Linux TPM nor Windows Server CNG uninstall acceptance was
+  executed on this Mac. The retained-host control tool requires AWS profile
+  `intmax-dev`, which is absent from the current AWS profile inventory; no
+  alternate account or cloud resources were selected or started. Windows 11 encrypted DB restoration and Windows recursive
+  deletion/erase remain unsupported. The existing native crash/persistence
+  matrix is not relabelled as evidence for this candidate.
+
+  Evidence archive: `~/.codex/artifacts/mordred-safe-uninstall-20261102-c8d589b4/`
+  (candidate wheel, native/portable logs and manual driver). Runtime source is
+  recorded in `45486c673`, `d6fffa1bf` and `ae2d5d4f1`. Isolated root:
+  `/private/var/folders/v_/qz0m0d1d71j6njw_fgrnlwsc0000gn/T/mordred-uninstall-wheel-la1j371m/home`.
+  Portable verification: the containing-module run passed **241 tests**; the
+  critical preset passed **24 tests**. The full regression completed with
+  **14,370 passed, 295 skipped, 168 deselected, 9 failed** (968.36 s). All nine
+  failures were old package-removal mock targets in the Windows compatibility
+  tests after orchestration moved into its own module. The test-only correction
+  in `59581c421` preserves native/file immutability and removal tripwires;
+  the entire compatibility/acceptance-helper selection passed **81 tests**, and
+  `pytest --lf --lfnf=none` confirmed **all 9 previously failing cases pass**.
+  Product code did not change after that full regression started. This records
+  the full run and targeted reruns separately, not a second clean full run.
+
+  Ruff, formatting, shellcheck and 12 documentation checks passed. Strict mypy
+  passed all 401 checked source/tool files in both all-extras and the CI-sized
+  `dev,keyvault,extension,macos` environment. No Linux/Windows native skip is
+  counted as platform acceptance. Logs include `full-regression.log`,
+  `compatibility-rerun.log` and `last-failed-rerun.log` in the evidence archive.
+
 - **2026-10-28 — Cross-platform database: Windows read optimization reviewed; remaining lifecycle validation deferred.**
   The owner requested a shorter completion path. Draft PR
   [#270](https://github.com/mordredagent/hermes-mordred/pull/270) records the

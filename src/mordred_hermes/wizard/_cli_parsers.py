@@ -167,6 +167,13 @@ def _add_databases(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     )
     p_decrypt.add_argument("--dry-run", action="store_true", help="List what would be decrypted; change nothing")
     p_decrypt.set_defaults(func=_handle_databases)
+    backup = dsub.add_parser("backup", help="Recover retained encrypted database backups")
+    bsub = backup.add_subparsers(dest="backup_command", required=True)
+    export = bsub.add_parser("export", help="Export a retained backup to a NEW plaintext database")
+    export.add_argument("--source", required=True, help="Registered SQLCipher backup or ZIP path")
+    export.add_argument("--output", required=True, help="New plaintext database path; never overwritten")
+    export.add_argument("--member", help="Exact database member name inside a ZIP backup")
+    export.set_defaults(func=_handle_databases)
 
 
 def _add_activity(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
