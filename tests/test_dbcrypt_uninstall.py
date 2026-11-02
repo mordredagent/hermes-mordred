@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import threading
 import zipfile
@@ -107,7 +108,8 @@ def test_restore_proves_every_profile_against_preflight(native_root, monkeypatch
             assert connection.execute("SELECT body FROM messages").fetchone() == ("private 日本語",)
 
 
-def test_registered_backup_retained_and_exportable_after_decrypt(native_root, monkeypatch):
+@pytest.mark.parametrize("checked_policy", [False, True])
+def test_registered_backup_retained_and_exportable_after_decrypt(native_root, monkeypatch, checked_policy):
     from mordred_hermes.dbcrypt import _backup
     from mordred_hermes.dbcrypt._authority import Authority
     from mordred_hermes.dbcrypt._uninstall import preflight, verified
@@ -130,7 +132,22 @@ def test_registered_backup_retained_and_exportable_after_decrypt(native_root, mo
         with verified(report, lease=lease):
             pass
     # Fresh lease and native authentication, as after uninstall/reinstall.
-    output = root.parent / (root.name + "-plain.db")
+    from mordred_hermes._private_fs import open_private_directory
+
+    output_dir = root.parent / (root.name + "-export's directory")
+    with open_private_directory(output_dir, create=True):
+        pass
+    output = output_dir / "plain.db"
+    if checked_policy:
+        offline = _migrate._offline_connection
+
+        @contextlib.contextmanager
+        def checked_offline(path, **kwargs):
+            with offline(path, **kwargs) as connection:
+                connection._install_export_policy(kwargs.get("target"), kwargs.get("alias"))
+                yield connection
+
+        monkeypatch.setattr(_migrate, "_offline_connection", checked_offline)
     with acquire_exclusive(root) as lease:
         _backup.export_database(root, backup, output, lease=lease)
         with pytest.raises(DatabaseRefused):

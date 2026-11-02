@@ -616,7 +616,10 @@ def export_database(  # noqa: C901, PLR0912, PLR0915 - ordered checked publicati
             owned[staged] = _migrate._file_identity(staged)
             with _migrate._offline_connection(copied, readonly=True, target=staged, alias="plain", root=root) as conn:
                 apply_key(conn, key)
-                conn.execute("ATTACH DATABASE ? AS plain KEY ''", (str(staged),))
+                # SQLite authorizes ATTACH before resolving bound parameters.
+                # Supply the escaped literal so Windows can admit only this
+                # exact reserved staging path, as in prepare_plain().
+                conn.execute(f"ATTACH DATABASE '{str(staged).replace(chr(39), chr(39) * 2)}' AS plain KEY ''")
                 conn.execute("SELECT sqlcipher_export('plain')").fetchall()
                 app, version = actual["ids"]
                 conn.execute(f"PRAGMA plain.application_id = {app}")
