@@ -916,7 +916,7 @@ desktop     install | uninstall | status
 egress      status | set | block | unblock | block-tool | unblock-tool |
             taint
 direct-tools  on | off | status
-databases   status | diagnose | encrypt | decrypt
+databases   status | diagnose | encrypt | decrypt | backup
 telegram    setup | doctor | login | sync | status | logout | venice |
             local-llm | migrate-tee | migrate-store
 mail        import | status | setup | fetch | forget
@@ -924,6 +924,10 @@ activity    status | use | tools | correct | backup | restore |
             retention
 uninstall
 ```
+
+`databases backup export --source PATH --output PATH [--member NAME]` is an
+offline recovery command; it takes exclusive database exclusion before key
+authentication and publishes only a new, verified plaintext output.
 
 `databases status` reports configured intent, capability, dependency count (or
 unknown), and authentication **not checked**, without SQL, native authentication,
@@ -3353,8 +3357,9 @@ clean or opted out, `manual` without the helper or under `--non-interactive`,
 otherwise runs `encryption enable memory`. `encryption enable all` skips the
 excluded env/config targets and runs the Windows memory flow.
 
-Uninstall on Windows restores memory only (the env/config seals are excluded;
-retained artifacts are reported). A refusing gate, proof or custody state stops
+Uninstall on qualified Windows Server restores root/profile databases through
+the shared coordinator and memory through the proof-bound disable flow (the
+env/config seals are excluded; retained artifacts are reported). A refusing gate, proof or custody state stops
 it before anything is removed. `--purge-data` deletes only the memory custody
 key after the verified restore; audit and Telegram custody and history, a
 retained secret store or file vault, and the `<home>\mordred` and
@@ -6592,3 +6597,46 @@ Windows Server evidence is separate from Windows 11/Desktop acceptance.
 Session JSONL and text logs remain outside SQLCipher coverage. Touch ID prompt
 reduction, portable key recovery and automatic cross-machine transfer are not
 part of this proposal.
+
+### Data-preserving uninstall
+
+Uninstall is a root-home operation covering every profile before removing the
+shared package. Known refusals must precede restoration and deletion. Ordinary
+uninstall verifies restored databases (integrity, schema and row counts), memory
+and configuration, removes integration, and removes the package last. Recovery
+keys, wrappers, source bindings, registered backup metadata and required native
+helpers remain. A package-removal failure reports the already restored state.
+
+Database verification issues process-local, operation-specific authority under
+the actual exclusive root lease. Authority is bound to the physical root, native
+source generation and exact dependency inventory, file identities and revisions.
+It expires on lease release, cross-thread/process use, replacement, modification
+or new dependencies. Keyvault consumes explicit authority without importing SQL.
+Restore/package authority never authorizes key deletion; deletion authority
+requires no known encrypted dependency outside the confirmed deletion set.
+Existing callers, including keyvault reset, retain conservative refusal behavior.
+
+Ordinary uninstall may retain authenticated registered SQLCipher backups and
+supported ZIP database members. Unreadable archives, unsupported formats,
+incomplete journals, unavailable destinations and other generations refuse.
+`databases backup export --source PATH --output PATH [--member NAME]` recovers a
+retained backup to a new plaintext database after reinstalling Mordred on the same
+physical home/device with the retained key and helper. Export verifies a private
+staging file before no-overwrite publication; it never modifies the backup.
+
+`--purge-data` refuses before restoration when known encrypted backups would
+outlive their keys; it never implicitly decrypts or deletes backups. Helper
+removal also refuses when it would strand retained recovery data. Confirmation
+warns that unregistered external/offline copies cannot be discovered and will
+lose their key. POSIX `--erase-encrypted` only deletes displayed and confirmed
+targets and refuses beforehand if dependencies outside that set would remain.
+Dry-run displays targets, retained resources and known blockers without key
+authentication, restoration or any guarantee of eventual success.
+
+Windows Server retains its edition, driver and checked-VFS gates. Runtime proof
+children run before acquiring database exclusion; all targets are rechecked
+under exclusion afterwards. Windows purge removes only memory custody. Recursive
+Windows deletion, Windows erase-encrypted and Windows 11 encrypted database
+restoration are outside this change. Mid-operation hardware or disk failures do
+not promise automatic rollback: preserve recovery records and report partial
+progress without claiming completion.

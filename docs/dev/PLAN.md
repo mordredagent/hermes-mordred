@@ -2744,3 +2744,27 @@ Keep independent component PRs in dependency order:
 The design owns architecture and acceptance boundaries; the implementation plan
 owns exact interfaces and test tasks. This rollout outline does not authorize
 skipping native gates or combining unrelated component implementations into one PR.
+
+### Data-preserving uninstall implementation
+
+1. Establish the shared contract in SPEC before component changes.
+2. DB layer: complete preflight inventory, authenticated retained backups, fresh
+   plaintext verification, lease-bound operation permits, atomic plaintext
+   backup export and adversarial regression tests.
+3. Keyvault layer: explicitly consume restore versus deletion permits at the
+   final mutation boundaries; leave unrelated callers conservative and SQL-free.
+4. Wizard layer: root/profile plan and confirmation, read-only preflight,
+   restoration and verification, integration cleanup, then package removal.
+   Keep required recovery resources and print reinstall/export instructions.
+5. Verify each containing security test module and critical feedback, then lint,
+   formatting, strict typing and one final full regression. Native candidate
+   wheel acceptance uses isolated homes/keys on macOS Secure Enclave, Linux TPM
+   and supported Windows Server CNG; record actual evidence in CI, never infer
+   live-device coverage from mocks. No production home or key is a test fixture.
+
+Known-failure preflight includes package target availability, stopped Hermes,
+all profile restoration keys, incomplete conversion/backup records, unsupported
+archives and deletion dependencies. Preserve unknown state and require explicit
+recovery instead of guessing. Staged exports are verified against their source
+schema/count result and published only to an absent output. Retained backup
+registrations and native source bindings survive ordinary uninstall/reinstall.
