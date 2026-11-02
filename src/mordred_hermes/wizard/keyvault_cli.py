@@ -37,10 +37,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .._database_lifecycle import ExclusiveLease
-from .._database_uninstall import UninstallAuthorization
 from .._home import hermes_home as _hermes_home
 from ..keyvault import _native_key_id, _storage
 from ..keyvault._reset_journal import _encode_reset_journal, _load_reset_journal
+from ..keyvault._uninstall_authority import UninstallAuthorization
 from . import _term
 from ._defaults import resolve_backend, resolve_prompt_io
 from ._keyvault_init import (

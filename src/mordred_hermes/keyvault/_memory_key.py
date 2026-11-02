@@ -19,7 +19,6 @@ from pathlib import Path
 from .._custody_order import custody_scope
 from .._database_contracts import DatabaseBusy, DatabaseRefused
 from .._database_lifecycle import ExclusiveLease
-from .._database_uninstall import UninstallAuthorization
 from . import _storage, wrap
 from ._exceptions import WrapError, WrapKeyNotFound
 from ._native_deletion import (
@@ -28,6 +27,7 @@ from ._native_deletion import (
     _NativeOwnerFacts,
     _owned_delete_scope,
 )
+from ._uninstall_authority import UninstallAuthorization
 from .memory_crypto import MemoryCryptoError, decode_key, looks_like_magic_line, unseal
 from .wrap import NativeBackend
 

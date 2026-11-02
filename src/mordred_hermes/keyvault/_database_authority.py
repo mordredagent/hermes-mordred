@@ -21,9 +21,9 @@ from typing import TYPE_CHECKING, Literal
 
 from .._database_contracts import DatabaseRefused, NativeSnapshot, RootIdentity, decode_database_source_binding
 from .._database_lifecycle import ExclusiveLease
-from .._database_uninstall import UninstallAuthorization
 from .._private_fs import PrivateFSError, open_private_directory
 from .._private_fs._types import validate_leaf
+from ._uninstall_authority import UninstallAuthorization
 
 if TYPE_CHECKING:
     from ._windows_custody import WindowsCustodySession
@@ -361,7 +361,7 @@ def retire_database_source(
     Successful retirement is not silently undone if that later operation fails.
     """
     from .._database_inventory import assert_mutation_safe
-    from .._database_uninstall import check_authorization
+    from ._uninstall_authority import check_authorization
 
     with _refusal():
         root, identity = _root(root)

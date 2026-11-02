@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Literal, Never, cast
 from weakref import WeakKeyDictionary
 
 from mordred_hermes._database_contracts import DatabaseRefused
-from mordred_hermes._database_uninstall import UninstallAuthorization
+from mordred_hermes.keyvault._uninstall_authority import UninstallAuthorization
 
 if TYPE_CHECKING:
     from mordred_hermes._database_lifecycle import ExclusiveLease

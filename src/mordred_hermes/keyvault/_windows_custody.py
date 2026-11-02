@@ -20,7 +20,6 @@ from weakref import WeakKeyDictionary
 from .._config_io import CanonicalPaths, CanonicalSession, _MordredTransaction, canonical_session
 from .._custody_order import custody_scope
 from .._database_contracts import DatabaseRefused
-from .._database_uninstall import UninstallAuthorization
 from .._private_fs import (
     FileIdentity,
     PrivateFSError,
@@ -39,6 +38,7 @@ from ._native_deletion import (
     _owned_delete_scope,
 )
 from ._runtime_probe import require_stopped_windows_gateways
+from ._uninstall_authority import UninstallAuthorization
 from ._windows_profile import (
     LIMIT,
     MAX_EPOCH,

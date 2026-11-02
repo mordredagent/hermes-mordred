@@ -47,8 +47,8 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from .._database_lifecycle import current_thread_exclusive_leases
-from .._database_uninstall import UninstallAuthorization, check_authorization
 from ..keyvault._memory_hook import _write_private, memory_marker_path, memory_optout_marker_path
+from ..keyvault._uninstall_authority import UninstallAuthorization, check_authorization
 from ..keyvault.memory_crypto import MAGIC
 from . import _term, _windows_memory
 from ._runtime_gate import runtime_gate

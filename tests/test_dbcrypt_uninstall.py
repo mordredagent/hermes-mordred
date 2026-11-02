@@ -25,8 +25,8 @@ def plain(path):
 
 
 def test_plaintext_permit_requires_real_verification_and_live_lease(tmp_path):
-    from mordred_hermes._database_uninstall import check_authorization
     from mordred_hermes.dbcrypt._uninstall import preflight, verified
+    from mordred_hermes.keyvault._uninstall_authority import check_authorization
 
     plain(tmp_path / "state.db")
     with acquire_exclusive(tmp_path) as lease:
@@ -41,8 +41,8 @@ def test_plaintext_permit_requires_real_verification_and_live_lease(tmp_path):
 
 @pytest.mark.parametrize("change", ["new", "replace", "modify", "forge", "thread"])
 def test_permit_rejects_changed_inventory_and_foreign_owner(tmp_path, change):
-    from mordred_hermes._database_uninstall import UninstallAuthorization, check_authorization
     from mordred_hermes.dbcrypt._uninstall import preflight, verified
+    from mordred_hermes.keyvault._uninstall_authority import UninstallAuthorization, check_authorization
 
     path = tmp_path / "state.db"
     plain(path)
@@ -92,8 +92,8 @@ def test_corrupt_or_pending_state_refuses_before_changes(tmp_path, name):
 
 
 def test_restore_proves_every_profile_against_preflight(native_root, monkeypatch):
-    from mordred_hermes._database_uninstall import check_authorization
     from mordred_hermes.dbcrypt._uninstall import preflight, verified
+    from mordred_hermes.keyvault._uninstall_authority import check_authorization
 
     root, _, key, _ = native_root
     cipher(root / "state.db", key)
@@ -184,8 +184,8 @@ def test_zip_backup_export_preserves_archive(native_root, monkeypatch):
 
 
 def test_new_dependency_during_permit_issuance_refuses(tmp_path, monkeypatch):
-    from mordred_hermes import _database_uninstall as permissions
     from mordred_hermes.dbcrypt._uninstall import preflight, verified
+    from mordred_hermes.keyvault import _uninstall_authority as permissions
 
     plain(tmp_path / "state.db")
     with acquire_exclusive(tmp_path) as lease:

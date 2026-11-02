@@ -10,9 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from ._database_contracts import DatabaseRefused, Dependency, NativeSnapshot
-from ._database_inventory import scan_dependencies
-from ._database_lifecycle import ExclusiveLease
+from .._database_contracts import DatabaseRefused, Dependency, NativeSnapshot
+from .._database_inventory import scan_dependencies
+from .._database_lifecycle import ExclusiveLease
 
 Purpose = Literal["restore", "delete"]
 
@@ -86,7 +86,7 @@ def check_authorization(permit: UninstallAuthorization, *, root: Path, lease: Ex
             raise DatabaseRefused("uninstall native source generation changed")
     elif record.snapshot is not None:
         # Public metadata only: no SQL and no native-key authentication.
-        from .keyvault._database_authority import observe_database_source
+        from ._database_authority import observe_database_source
 
         if observe_database_source(root=root) != record.snapshot:
             raise DatabaseRefused("uninstall native source generation changed")
@@ -98,7 +98,7 @@ def check_authorization(permit: UninstallAuthorization, *, root: Path, lease: Ex
 def _windows_source(root: Path, snapshot: NativeSnapshot | None) -> tuple[tuple[str, bytes], ...]:
     if snapshot is None or snapshot.provider != "cng":
         return ()
-    from ._private_fs import open_private_directory
+    from .._private_fs import open_private_directory
 
     with open_private_directory(root / "mordred") as directory:
         return tuple(

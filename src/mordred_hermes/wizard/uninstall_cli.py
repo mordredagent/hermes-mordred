@@ -53,7 +53,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .._database_uninstall import UninstallAuthorization
+from ..keyvault._uninstall_authority import UninstallAuthorization
 from . import _term, _uninstall_databases, _uninstall_windows
 from ._uninstall_config import (
     ConfigCleanup,
@@ -366,7 +366,7 @@ def build_plan(  # noqa: C901, PLR0912 - read-only platform/profile inventory
         plan.notes.append(
             "Preflight blocker: --remove-helper would remove a helper required by retained recovery keys."
         )
-    from .._database_uninstall import fingerprint, profile_fingerprint
+    from ..keyvault._uninstall_authority import fingerprint, profile_fingerprint
 
     plan.profile_observation = profile_fingerprint(ctx.home)
 

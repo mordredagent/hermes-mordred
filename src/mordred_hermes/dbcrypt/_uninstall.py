@@ -14,7 +14,7 @@ from typing import Any, cast
 from .._database_contracts import DatabaseRefused, Dependency, NativeSnapshot
 from .._database_inventory import scan_dependencies
 from .._database_lifecycle import ExclusiveLease
-from .._database_uninstall import UninstallAuthorization, _issue, fingerprint
+from ..keyvault._uninstall_authority import UninstallAuthorization, _issue, fingerprint
 from . import _backup, _migrate
 from ._key import DatabaseKey
 from ._policy import looks_like_database_name

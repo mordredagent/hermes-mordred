@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .._database_uninstall import UninstallAuthorization
+from ..keyvault._uninstall_authority import UninstallAuthorization
 from . import _term
 from ._windows_gates import (
     CUSTODY_FAILURES,

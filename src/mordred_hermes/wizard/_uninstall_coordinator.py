@@ -10,9 +10,9 @@ from typing import TYPE_CHECKING
 
 from .._database_contracts import DatabaseRefused
 from .._database_lifecycle import ExclusiveLease
-from .._database_uninstall import check_authorization, fingerprint, profile_fingerprint
 from ..dbcrypt import _migrate
 from ..dbcrypt._uninstall import preflight, verified
+from ..keyvault._uninstall_authority import check_authorization, fingerprint, profile_fingerprint
 from . import _term, _uninstall_databases, _uninstall_windows
 from . import uninstall_cli as cli
 from ._flow_session import FlowSession

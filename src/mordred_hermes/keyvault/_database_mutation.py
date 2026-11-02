@@ -10,8 +10,8 @@ from .._custody_order import active_custody_scopes, assert_preceding_database_le
 from .._database_contracts import DatabaseRefused
 from .._database_inventory import assert_mutation_safe
 from .._database_lifecycle import ExclusiveLease, acquire_exclusive, current_thread_exclusive_leases
-from .._database_uninstall import UninstallAuthorization, check_authorization
 from ._database_authority import resolve_database_domain
+from ._uninstall_authority import UninstallAuthorization, check_authorization
 
 
 def _assert_memory_database_mutation_safe(
