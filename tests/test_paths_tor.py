@@ -437,6 +437,9 @@ class _FakeController:
     def __exit__(self, *_: object) -> None:
         self.close()
 
+    def factory(self, *, host: str, port: int) -> _FakeController:
+        return self
+
 
 class TestCircuitStatusHealth:
     """``circuit_status_health(handle, *, controller_factory=...)`` does
@@ -456,10 +459,7 @@ class TestCircuitStatusHealth:
         handle = self._make_handle(tmp_path)
         fake = _FakeController(get_info_response="circuit-status=\n42 BUILT $abc,$def,$ghi BUILD_FLAGS=NEED_CAPACITY")
 
-        def factory(*, host: str, port: int) -> _FakeController:
-            return fake
-
-        assert tor.circuit_status_health(handle, controller_factory=factory) is True
+        assert tor.circuit_status_health(handle, controller_factory=fake.factory) is True
         assert fake.authenticated is True
         # A BUILT circuit is conclusive on its own — no liveness follow-up.
         assert "network-liveness" not in fake.get_info_keys
@@ -476,10 +476,7 @@ class TestCircuitStatusHealth:
         handle = self._make_handle(tmp_path)
         fake = _FakeController(get_info_response=f"42 {status} $abc", network_liveness="up")
 
-        def factory(*, host: str, port: int) -> _FakeController:
-            return fake
-
-        assert tor.circuit_status_health(handle, controller_factory=factory) is True
+        assert tor.circuit_status_health(handle, controller_factory=fake.factory) is True
 
     def test_no_circuits_returns_true_for_healthy_idle_tor(self, tmp_path: Path) -> None:
         """Tor tears down unused preemptive circuits after a long idle period."""
@@ -488,10 +485,7 @@ class TestCircuitStatusHealth:
         handle = self._make_handle(tmp_path)
         fake = _FakeController(get_info_response="", network_liveness="up")
 
-        def factory(*, host: str, port: int) -> _FakeController:
-            return fake
-
-        assert tor.circuit_status_health(handle, controller_factory=factory) is True
+        assert tor.circuit_status_health(handle, controller_factory=fake.factory) is True
 
     @pytest.mark.parametrize("response", ["", "42 LAUNCHED $abc", "42 LAUNCHED $abc\n43 EXTENDED $def"])
     def test_circuitless_tor_with_liveness_down_returns_false(self, tmp_path: Path, response: str) -> None:
@@ -506,10 +500,7 @@ class TestCircuitStatusHealth:
         handle = self._make_handle(tmp_path)
         fake = _FakeController(get_info_response=response, network_liveness="down")
 
-        def factory(*, host: str, port: int) -> _FakeController:
-            return fake
-
-        assert tor.circuit_status_health(handle, controller_factory=factory) is False
+        assert tor.circuit_status_health(handle, controller_factory=fake.factory) is False
 
     def test_liveness_query_failure_returns_false(self, tmp_path: Path) -> None:
         """An inconclusive circuit list plus a failing liveness query fails
@@ -519,10 +510,7 @@ class TestCircuitStatusHealth:
         handle = self._make_handle(tmp_path)
         fake = _FakeController(get_info_response="", liveness_raises=RuntimeError("no such info"))
 
-        def factory(*, host: str, port: int) -> _FakeController:
-            return fake
-
-        assert tor.circuit_status_health(handle, controller_factory=factory) is False
+        assert tor.circuit_status_health(handle, controller_factory=fake.factory) is False
 
     def test_built_among_malformed_lines_returns_true(self, tmp_path: Path) -> None:
         """A proven BUILT circuit must not be vetoed by an unparseable
@@ -533,10 +521,7 @@ class TestCircuitStatusHealth:
         handle = self._make_handle(tmp_path)
         fake = _FakeController(get_info_response="!!garbage!!\n43 BUILT $def")
 
-        def factory(*, host: str, port: int) -> _FakeController:
-            return fake
-
-        assert tor.circuit_status_health(handle, controller_factory=factory) is True
+        assert tor.circuit_status_health(handle, controller_factory=fake.factory) is True
 
     def test_attached_echo_prefix_is_tolerated(self, tmp_path: Path) -> None:
         """Older Tor may echo the key attached to the first data line
@@ -546,10 +531,7 @@ class TestCircuitStatusHealth:
         handle = self._make_handle(tmp_path)
         fake = _FakeController(get_info_response="circuit-status=8 BUILT $abc")
 
-        def factory(*, host: str, port: int) -> _FakeController:
-            return fake
-
-        assert tor.circuit_status_health(handle, controller_factory=factory) is True
+        assert tor.circuit_status_health(handle, controller_factory=fake.factory) is True
 
     def test_echo_line_with_leading_whitespace_is_tolerated(self, tmp_path: Path) -> None:
         """A whitespace-indented standalone echo (`` circuit-status=``) must
@@ -560,10 +542,7 @@ class TestCircuitStatusHealth:
         handle = self._make_handle(tmp_path)
         fake = _FakeController(get_info_response=" circuit-status=\n42 BUILT $abc")
 
-        def factory(*, host: str, port: int) -> _FakeController:
-            return fake
-
-        assert tor.circuit_status_health(handle, controller_factory=factory) is True
+        assert tor.circuit_status_health(handle, controller_factory=fake.factory) is True
 
     @pytest.mark.parametrize(
         "response",
@@ -579,10 +558,7 @@ class TestCircuitStatusHealth:
         handle = self._make_handle(tmp_path)
         fake = _FakeController(get_info_response=response)
 
-        def factory(*, host: str, port: int) -> _FakeController:
-            return fake
-
-        assert tor.circuit_status_health(handle, controller_factory=factory) is False
+        assert tor.circuit_status_health(handle, controller_factory=fake.factory) is False
 
     def test_terminal_and_healthy_circuits_return_true(self, tmp_path: Path) -> None:
         from mordred_hermes.network.paths import tor
@@ -590,10 +566,7 @@ class TestCircuitStatusHealth:
         handle = self._make_handle(tmp_path)
         fake = _FakeController(get_info_response="42 FAILED $abc REASON=TIMEOUT\n43 BUILT $def")
 
-        def factory(*, host: str, port: int) -> _FakeController:
-            return fake
-
-        assert tor.circuit_status_health(handle, controller_factory=factory) is True
+        assert tor.circuit_status_health(handle, controller_factory=fake.factory) is True
 
     def test_future_well_formed_status_returns_true(self, tmp_path: Path) -> None:
         """A newer Tor status must not create a sticky false drop."""
@@ -602,10 +575,7 @@ class TestCircuitStatusHealth:
         handle = self._make_handle(tmp_path)
         fake = _FakeController(get_info_response="42 PATH_BIAS_RECOVERY $abc")
 
-        def factory(*, host: str, port: int) -> _FakeController:
-            return fake
-
-        assert tor.circuit_status_health(handle, controller_factory=factory) is True
+        assert tor.circuit_status_health(handle, controller_factory=fake.factory) is True
 
     @pytest.mark.parametrize(
         "response",
@@ -622,10 +592,7 @@ class TestCircuitStatusHealth:
         handle = self._make_handle(tmp_path)
         fake = _FakeController(get_info_response=response)
 
-        def factory(*, host: str, port: int) -> _FakeController:
-            return fake
-
-        assert tor.circuit_status_health(handle, controller_factory=factory) is False
+        assert tor.circuit_status_health(handle, controller_factory=fake.factory) is False
 
     def test_unreachable_control_port_returns_false(self, tmp_path: Path) -> None:
         from mordred_hermes.network.paths import tor
@@ -705,10 +672,7 @@ class TestCircuitStatusHealth:
         handle = self._make_handle(tmp_path)
         fake = _FakeController(get_info_response="42 BUILT $abc")
 
-        def factory(*, host: str, port: int) -> _FakeController:
-            return fake
-
-        tor.circuit_status_health(handle, controller_factory=factory)
+        tor.circuit_status_health(handle, controller_factory=fake.factory)
         assert fake.closed is True
 
     def test_default_factory_attempts_stem_lazy_import(self, tmp_path: Path) -> None:
