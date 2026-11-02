@@ -721,7 +721,110 @@ missing gates stay not-run or failed.
 
 ## Manual live-device validation log
 
+- **2026-11-02 — Data-preserving uninstall final regression passed.**
+  On final runtime source `075a99e58`, `uv run pytest -q` completed with exit
+  code 0: **14,384 passed, 295 skipped**, with integration tests excluded by
+  the repository default. Counts are from the per-test status characters in
+  the complete double-quiet output. Evidence archive:
+  `~/.codex/artifacts/mordred-safe-uninstall-20261102-c8d589b4/`
+  (`full-regression-final.log`, `full-regression-final-result.json`). This
+  supersedes the earlier interrupted follow-up run; its import-store containing
+  module also passed independently (83 tests).
+
+  Final containing-module selection: **240 passed**; critical preset: **24
+  passed**. Ruff check/format passed (867 files already formatted), strict mypy
+  passed all 401 source files, and documentation link checks passed (12 tests).
+  An independent review of the two native fixes found no actionable defects
+  and independently passed both changed test modules (38 tests). Earlier
+  full-branch review, CI-extras typing and shellcheck evidence remain recorded
+  below; native outcomes and exact candidate builds are separate entries.
+
+- **2026-11-02 — Final-source macOS Secure Enclave uninstall/recovery recheck passed.**
+  After both Windows native fixes, a freshly built universal candidate wheel
+  (`4f11f42a4dda71391ee8887c17acb590482a36b045b7d473871a274c5ddb3ef6`)
+  matched all 362 source Python modules at `075a99e58` and passed every phase
+  of the existing manual macOS wheel driver in a new home:
+  `/private/var/folders/v_/qz0m0d1d71j6njw_fgrnlwsc0000gn/T/mordred-uninstall-wheel-tuh97vp9/home`.
+  Normal restore/uninstall, package-free reads, same-wheel reinstall, actual CLI
+  backup export, retained-backup purge refusal, checked backup deletion, native
+  main-key enrollment, purge and final package-free reads all passed. The
+  fixture used the real signed Secure Enclave helper and login-Keychain anchor;
+  successful fixture keys were removed by purge. Production homes/keys were
+  untouched. Evidence in the archive below: `macos-final.log` (ending with
+  `ALL_PHASES_PASSED`), `macos-final.json`, `macos-final-run.py`, `final-posix/`.
+
+- **2026-11-02 — Data-preserving uninstall follow-up: Windows Server CNG candidate-wheel lifecycle passed.**
+  The retained Windows Server 2025 host ran under the ordinary, non-admin
+  `mordred` account with Python 3.11.17, Hermes 0.19.0, SQLCipher wheels 0.5.7,
+  actual CNG/TPM custody and the native checked VFS. The unpublished candidate
+  wheel SHA256 is
+  `0fe78eff5ebf14a96364899a2aa3a16838c79bde506f41440a958304913f34fd`;
+  all 362 packaged Python modules match source commit `075a99e58`.
+  Synthetic root:
+  `C:\Users\mordred.000\mordred-uninstall-wheel-20261102-r6\home`.
+
+  Root/profile memory custody and the required installed-Hermes runtime proof,
+  three encrypted databases (root, profile and plugin data), registered backup,
+  normal uninstall and package-free SQLite integrity/content reads passed.
+  Reinstalling the same wheel at the same physical home allowed the real
+  `databases backup export` CLI to recover the unchanged retained backup.
+  Purge refused with the backup retained, without changing observed data.
+  After explicit checked backup deletion, purge restored all three DBs, deleted
+  only root/profile memory custody keys and removed the package. Another fresh
+  interpreter verified preserved plaintext DB, memory, config and environment
+  content. Windows recursive deletion and Windows 11 encrypted DB restoration
+  remain unsupported; this run does not establish native Windows 11 evidence.
+
+  Earlier native attempts exposed two defects, fixed with failing-then-passing
+  regressions: recursive private transactions during retained publication
+  (`ac150e801`), and bound ATTACH parameters rejected by the exact-path export
+  authorizer (`075a99e58`). Holder/identity/revision checks remain in place;
+  the authorizer was not widened. Failed synthetic homes retain their recovery
+  state. The earlier macOS/Linux wheel results below predate these two fixes
+  and must not be relabelled as runs of this final Windows candidate.
+
+  Evidence: `~/.codex/artifacts/mordred-safe-uninstall-20261102-c8d589b4/`
+  (`windows-wheel-r6.log`, `windows-driver.py`, `windows-run-r6.py`,
+  `final-windows-r6/source-comparison.json`). The lifecycle log ends with
+  `ALL_PHASES_PASSED`. AWS profile `intmax-developer` was used with a bounded
+  ownership/deadline controller and an independent guest shutdown timer.
+  Both retained validation instances were independently observed stopped,
+  their task ownership tags released, and the task's SSM forwarder closed.
+  No production Hermes home or keys were used.
+
+- **2026-11-02 — Data-preserving uninstall follow-up: Linux NitroTPM candidate-wheel lifecycle passed.**
+  The owner selected AWS profile `intmax-developer` and completed CLI login.
+  The retained Linux host ran the same unpublished candidate wheel with SHA256
+  `c8d589b47c9a0c52d384112b865d1aa3cbda7daaa7a85b6bade6907286e556ec`,
+  Python 3.12.3, Hermes 0.19.0 and SQLCipher wheels 0.5.7. The TPM device was
+  `/dev/tpmrm0`, with manufacturer `AMZN`. No production home or keys were used.
+
+  The ordinary `ubuntu` account (UID 1000) ran in a fresh private PID/mount
+  namespace using the actual host filesystem and NitroTPM. Root/profile DBs,
+  encrypted memory, plaintext configuration/environment, registered backup,
+  actual package uninstall, package-free SQLite/content checks, reinstall and
+  real CLI backup export passed. The backup hash remained unchanged. Purge
+  refused with that backup retained; checked backup deletion, native main-key
+  enrollment and purge then passed, including removal of native fixture keys
+  and another package-free read of the preserved plaintext.
+
+  Outside the namespace, the same-user `systemd` and `(sd-pam)` processes had
+  unreadable descriptor inventories. Database conversion refused before DB
+  mutation; these failed synthetic setup homes and their recovery material
+  remain retained. No holder check, process visibility policy or product code
+  was weakened. The successful isolated result does not establish successful
+  operation with those host-level visibility gaps.
+
+  Successful root: `/home/ubuntu/mordred-uninstall-wheel-8Op9IVMX/home`.
+  Evidence: `~/.codex/artifacts/mordred-safe-uninstall-20261102-c8d589b4/`
+  (`linux-wheel-lifecycle.log`, `linux-driver.py`, `linux-run.sh`,
+  `linux-prepare-refusal.log`). The host was independently observed stopped,
+  and the temporary current-IP SSH rule was removed. Windows Server candidate
+  execution is tracked separately; no Windows result is inferred from Linux.
+
 - **2026-11-02 — Data-preserving uninstall: isolated macOS candidate-wheel lifecycle passed; Linux/Windows native acceptance pending.**
+  This initial snapshot is retained for build provenance; the follow-up entries
+  above supersede its pending native gates and record subsequent source fixes.
   Dedicated branch `fix/data-preserving-uninstall` follows the shared contract
   commit `201e4b4d6`. No production Hermes home or native key was used. The local
   wheel is an unpublished `0.3.0a4` candidate, not evidence for a released wheel.

@@ -283,9 +283,11 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
   package-removal authority from key deletion. Cover every profile, retain
   recoverable backups, and export them after reinstalling. See
   [the contract](SPEC.md#data-preserving-uninstall).
-- [ ] Complete native Linux TPM and qualified Windows Server CNG candidate-wheel
-  uninstall/reinstall/export and purge acceptance. macOS Secure Enclave passed
-  on 2026-11-02; portable Windows tests are not native Windows evidence. Keep
+- [x] Complete native candidate-wheel uninstall/reinstall/export and purge
+  acceptance on macOS Secure Enclave, Linux NitroTPM and qualified Windows
+  Server CNG (2026-11-02). Linux used an isolated PID/mount namespace and
+  ordinary UID 1000. Windows and the final macOS recheck include the two native
+  fixes discovered after the Linux run. Exact builds are recorded in CI. Keep
   unresolved keyvault-reset ownership and backup-journal recovery outside this
   change; these states refuse before restoration. See
   [the validation log](CI.md#manual-live-device-validation-log).
