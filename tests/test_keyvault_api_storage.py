@@ -855,35 +855,20 @@ class TestLoadMetaKeysFieldValidation:
     ``{"version": 1, "keys": [...]}`` (wrong type). Both shapes break the
     read-modify-write pattern downstream. Fix: reject in load_meta."""
 
-    def test_missing_keys_field_raises_corrupt(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param('{"version": 1}', id="missing_keys"),
+            pytest.param('{"version": 1, "keys": []}', id="keys_as_list"),
+            pytest.param('{"version": 1, "keys": "oops"}', id="keys_as_string"),
+            pytest.param('{"version": 1, "keys": null}', id="keys_as_null"),
+        ],
+    )
+    def test_invalid_keys_field_raises_corrupt(self, tmp_path: Path, payload: str) -> None:
         root = tmp_path / "kv"
         root.mkdir()
         (root / "meta.json").write_bytes(b'{"version": 1, "keys": {}}')
-        (root / "meta.json").write_text('{"version": 1}')
-        with pytest.raises(_storage.KeyvaultCorruptError):
-            _storage.load_meta(root)
-
-    def test_keys_field_as_list_raises_corrupt(self, tmp_path: Path) -> None:
-        root = tmp_path / "kv"
-        root.mkdir()
-        (root / "meta.json").write_bytes(b'{"version": 1, "keys": {}}')
-        (root / "meta.json").write_text('{"version": 1, "keys": []}')
-        with pytest.raises(_storage.KeyvaultCorruptError):
-            _storage.load_meta(root)
-
-    def test_keys_field_as_string_raises_corrupt(self, tmp_path: Path) -> None:
-        root = tmp_path / "kv"
-        root.mkdir()
-        (root / "meta.json").write_bytes(b'{"version": 1, "keys": {}}')
-        (root / "meta.json").write_text('{"version": 1, "keys": "oops"}')
-        with pytest.raises(_storage.KeyvaultCorruptError):
-            _storage.load_meta(root)
-
-    def test_keys_field_as_null_raises_corrupt(self, tmp_path: Path) -> None:
-        root = tmp_path / "kv"
-        root.mkdir()
-        (root / "meta.json").write_bytes(b'{"version": 1, "keys": {}}')
-        (root / "meta.json").write_text('{"version": 1, "keys": null}')
+        (root / "meta.json").write_text(payload)
         with pytest.raises(_storage.KeyvaultCorruptError):
             _storage.load_meta(root)
 

@@ -72,6 +72,20 @@ def _init_device(home: Path, backend: FakeBackend, sink: Any) -> str:
     return result.key_id
 
 
+def _export_backup(key_id: str, backend: FakeBackend, home: Path, sink: Any) -> bytes:
+    """Export canonical credentials from the explicitly selected device and audit sink."""
+    return api.export_backup(
+        key_id, PASSPHRASE, backend=backend, audit_sink=sink, home=home, seed_phrase=SEED, pow_bytes=POW
+    )
+
+
+def _import_backup(blob: bytes, backend: FakeBackend, home: Path, sink: Any) -> str:
+    """Import canonical credentials into the explicitly selected device and audit sink."""
+    return api.import_backup(
+        blob, PASSPHRASE, backend=backend, audit_sink=sink, home=home, seed_phrase=SEED, pow_bytes=POW
+    )
+
+
 def _key_id_hash_hex(key_id: str) -> str:
     return hashlib.sha256(key_id.encode("utf-8")).digest()[:16].hex()
 
@@ -96,15 +110,7 @@ class TestExportBlob:
             if entry.get("reason") == "keyvault.backup_exported":
                 raise RuntimeError("audit log disk full")
 
-        blob = api.export_backup(
-            result.key_id,
-            PASSPHRASE,
-            backend=backend,
-            audit_sink=failing_sink,
-            home=home,
-            seed_phrase=SEED,
-            pow_bytes=POW,
-        )
+        blob = _export_backup(result.key_id, backend, home, failing_sink)
         assert blob[:4] == b"MRKV"
 
     def test_export_rejects_passphrase_not_bound_to_commit_before_unwrap(
@@ -217,21 +223,11 @@ class TestCrossMachineRoundtrip:
             purpose: api.encrypt(key_id, pt, purpose, backend=backend_a, audit_sink=sink, home=home_a)
             for purpose, pt in items.items()
         }
-        blob = api.export_backup(
-            key_id,
-            PASSPHRASE,
-            backend=backend_a,
-            audit_sink=sink,
-            home=home_a,
-            seed_phrase=SEED,
-            pow_bytes=POW,
-        )
+        blob = _export_backup(key_id, backend_a, home_a, sink)
 
         backend_b = FakeBackend()
         home_b = tmp_path / "deviceB"
-        imported = api.import_backup(
-            blob, PASSPHRASE, seed_phrase=SEED, pow_bytes=POW, backend=backend_b, audit_sink=sink, home=home_b
-        )
+        imported = _import_backup(blob, backend_b, home_b, sink)
 
         assert imported == key_id
         root_b = home_b / "mordred" / "keyvault"
@@ -259,21 +255,11 @@ class TestCrossMachineRoundtrip:
         backend_a = FakeBackend()
         home_a = tmp_path / "deviceA"
         key_id = _init_device(home_a, backend_a, sink)
-        blob = api.export_backup(
-            key_id,
-            PASSPHRASE,
-            backend=backend_a,
-            audit_sink=sink,
-            home=home_a,
-            seed_phrase=SEED,
-            pow_bytes=POW,
-        )
+        blob = _export_backup(key_id, backend_a, home_a, sink)
 
         backend_b = FakeBackend()
         home_b = tmp_path / "deviceB"
-        imported = api.import_backup(
-            blob, PASSPHRASE, seed_phrase=SEED, pow_bytes=POW, backend=backend_b, audit_sink=sink, home=home_b
-        )
+        imported = _import_backup(blob, backend_b, home_b, sink)
 
         assert blob[:4] == b"MRKV"
         parsed = backup.parse_header(blob)
@@ -295,15 +281,7 @@ class TestCrossMachineRoundtrip:
         home_a = tmp_path / "deviceA"
         key_id = _init_device(home_a, backend_a, sink)
         api.encrypt(key_id, b"live-secret", "vault", backend=backend_a, audit_sink=sink, home=home_a)
-        blob = api.export_backup(
-            key_id,
-            PASSPHRASE,
-            backend=backend_a,
-            audit_sink=sink,
-            home=home_a,
-            seed_phrase=SEED,
-            pow_bytes=POW,
-        )
+        blob = _export_backup(key_id, backend_a, home_a, sink)
 
         # Device B: pre-seed the residue — an envelope under this key id's
         # tree, wrapped by a key that no longer exists anywhere.
@@ -317,15 +295,7 @@ class TestCrossMachineRoundtrip:
         stale_path.write_bytes(b"MREN-garbage-wrapped-by-a-destroyed-key")
 
         with pytest.raises(BackupImportConflict, match="fresh keyvault"):
-            api.import_backup(
-                blob,
-                PASSPHRASE,
-                seed_phrase=SEED,
-                pow_bytes=POW,
-                backend=backend_b,
-                audit_sink=sink,
-                home=home_b,
-            )
+            _import_backup(blob, backend_b, home_b, sink)
 
         assert stale_path.read_bytes() == b"MREN-garbage-wrapped-by-a-destroyed-key"
         assert backend_b.calls == []
@@ -346,15 +316,7 @@ class TestCrossMachineRoundtrip:
             audit_sink=sink,
             home=source_home,
         )
-        blob = api.export_backup(
-            source_key_id,
-            PASSPHRASE,
-            backend=source_backend,
-            audit_sink=sink,
-            home=source_home,
-            seed_phrase=SEED,
-            pow_bytes=POW,
-        )
+        blob = _export_backup(source_key_id, source_backend, source_home, sink)
 
         live_home = tmp_path / "live"
         live_backend = FakeBackend()
@@ -377,15 +339,7 @@ class TestCrossMachineRoundtrip:
 
         empty_import_backend = FakeBackend()
         with pytest.raises(BackupImportConflict, match="existing key metadata"):
-            api.import_backup(
-                blob,
-                PASSPHRASE,
-                seed_phrase=SEED,
-                pow_bytes=POW,
-                backend=empty_import_backend,
-                audit_sink=sink,
-                home=live_home,
-            )
+            _import_backup(blob, empty_import_backend, live_home, sink)
 
         assert empty_import_backend.calls == []
         assert live_path.read_bytes() == before
@@ -416,30 +370,14 @@ class TestCrossMachineRoundtrip:
             audit_sink=sink,
             home=source_home,
         )
-        blob = api.export_backup(
-            source.key_id,
-            PASSPHRASE,
-            backend=source_backend,
-            audit_sink=sink,
-            home=source_home,
-            seed_phrase=SEED,
-            pow_bytes=POW,
-        )
+        blob = _export_backup(source.key_id, source_backend, source_home, sink)
 
         live_home = tmp_path / "live"
         live_backend = FakeBackend()
         _init_device(live_home, live_backend, sink)
         import_backend = FakeBackend()
         with pytest.raises(BackupImportConflict, match="existing key metadata"):
-            api.import_backup(
-                blob,
-                PASSPHRASE,
-                seed_phrase=SEED,
-                pow_bytes=POW,
-                backend=import_backend,
-                audit_sink=sink,
-                home=live_home,
-            )
+            _import_backup(blob, import_backend, live_home, sink)
         assert import_backend.calls == []
 
     def test_concurrent_imports_generate_exactly_one_destination_key(
@@ -460,15 +398,7 @@ class TestCrossMachineRoundtrip:
             audit_sink=sink,
             home=source_home,
         )
-        blob = api.export_backup(
-            key_id,
-            PASSPHRASE,
-            backend=source_backend,
-            audit_sink=sink,
-            home=source_home,
-            seed_phrase=SEED,
-            pow_bytes=POW,
-        )
+        blob = _export_backup(key_id, source_backend, source_home, sink)
         parsed = backup.parse_header(blob)
         manifest_json = backup.decrypt_body(parsed, PASSPHRASE)
         barrier = threading.Barrier(2)
@@ -484,15 +414,7 @@ class TestCrossMachineRoundtrip:
 
         def run_import(backend: FakeBackend) -> None:
             try:
-                api.import_backup(
-                    blob,
-                    PASSPHRASE,
-                    seed_phrase=SEED,
-                    pow_bytes=POW,
-                    backend=backend,
-                    audit_sink=sink,
-                    home=destination,
-                )
+                _import_backup(blob, backend, destination, sink)
                 outcomes.append(("ok", backend))
             except BaseException as exc:
                 outcomes.append(("error", exc))
@@ -540,15 +462,7 @@ class TestCrossMachineRoundtrip:
         source_home = tmp_path / "source"
         source_backend = FakeBackend()
         key_id = _init_device(source_home, source_backend, sink)
-        blob = api.export_backup(
-            key_id,
-            PASSPHRASE,
-            backend=source_backend,
-            audit_sink=sink,
-            home=source_home,
-            seed_phrase=SEED,
-            pow_bytes=POW,
-        )
+        blob = _export_backup(key_id, source_backend, source_home, sink)
 
         generated = threading.Barrier(2)
         release_generation = threading.Barrier(2)
@@ -578,15 +492,7 @@ class TestCrossMachineRoundtrip:
 
         def run_import() -> None:
             try:
-                api.import_backup(
-                    blob,
-                    PASSPHRASE,
-                    seed_phrase=SEED,
-                    pow_bytes=POW,
-                    backend=destination_backend,
-                    audit_sink=sink,
-                    home=destination,
-                )
+                _import_backup(blob, destination_backend, destination, sink)
             except BaseException as exc:
                 import_errors.append(exc)
 
@@ -655,15 +561,7 @@ class TestCrossMachineRoundtrip:
         source_home = tmp_path / "source"
         source_backend = FakeBackend()
         key_id = _init_device(source_home, source_backend, sink)
-        blob = api.export_backup(
-            key_id,
-            PASSPHRASE,
-            backend=source_backend,
-            audit_sink=sink,
-            home=source_home,
-            seed_phrase=SEED,
-            pow_bytes=POW,
-        )
+        blob = _export_backup(key_id, source_backend, source_home, sink)
         log.clear()
 
         destination = tmp_path / "destination"
@@ -699,31 +597,13 @@ class TestCrossMachineRoundtrip:
 
         def run_import() -> None:
             try:
-                api.import_backup(
-                    blob,
-                    PASSPHRASE,
-                    seed_phrase=SEED,
-                    pow_bytes=POW,
-                    backend=destination_backend,
-                    audit_sink=sink,
-                    home=destination,
-                )
+                _import_backup(blob, destination_backend, destination, sink)
             except BaseException as exc:
                 import_errors.append(exc)
 
         def run_export() -> None:
             try:
-                exported_blobs.append(
-                    api.export_backup(
-                        key_id,
-                        PASSPHRASE,
-                        backend=destination_backend,
-                        audit_sink=sink,
-                        home=destination,
-                        seed_phrase=SEED,
-                        pow_bytes=POW,
-                    )
-                )
+                exported_blobs.append(_export_backup(key_id, destination_backend, destination, sink))
             except BaseException as exc:
                 export_errors.append(exc)
 
@@ -761,15 +641,7 @@ class TestCrossMachineRoundtrip:
         source_home = tmp_path / "source"
         source_backend = FakeBackend()
         key_id = _init_device(source_home, source_backend, sink)
-        blob = api.export_backup(
-            key_id,
-            PASSPHRASE,
-            backend=source_backend,
-            audit_sink=sink,
-            home=source_home,
-            seed_phrase=SEED,
-            pow_bytes=POW,
-        )
+        blob = _export_backup(key_id, source_backend, source_home, sink)
 
         class DeleteFailBackend(FakeBackend):
             def delete_enclave_key(self, deleted_key_id: str) -> None:
@@ -792,15 +664,7 @@ class TestCrossMachineRoundtrip:
 
         monkeypatch.setattr(_storage, "save_meta", ownership_commit_then_boom)
         with pytest.raises(OSError, match="ownership rename"):
-            api.import_backup(
-                blob,
-                PASSPHRASE,
-                seed_phrase=SEED,
-                pow_bytes=POW,
-                backend=destination_backend,
-                audit_sink=sink,
-                home=destination,
-            )
+            _import_backup(blob, destination_backend, destination, sink)
 
         meta = _storage.load_meta(destination_root)
         physical = _native_key_id.scoped_native_key_id(destination_root, key_id)
@@ -940,15 +804,7 @@ class TestCrossMachineRoundtrip:
             audit_sink=sink,
             home=home_a,
         )
-        current_blob = api.export_backup(
-            key_id,
-            PASSPHRASE,
-            backend=backend_a,
-            audit_sink=sink,
-            home=home_a,
-            seed_phrase=SEED,
-            pow_bytes=POW,
-        )
+        current_blob = _export_backup(key_id, backend_a, home_a, sink)
         parsed = backup.parse_header(current_blob)
         manifest_json = backup.decrypt_body(parsed, PASSPHRASE)
         legacy_backup_passphrase = "the-typo-used-at-export"
@@ -985,15 +841,7 @@ class TestImportRejection:
         home_a = tmp_path / "deviceA"
         key_id = _init_device(home_a, backend_a, sink)
         api.encrypt(key_id, b"secret", "p", backend=backend_a, audit_sink=sink, home=home_a)
-        return api.export_backup(
-            key_id,
-            PASSPHRASE,
-            backend=backend_a,
-            audit_sink=sink,
-            home=home_a,
-            seed_phrase=SEED,
-            pow_bytes=POW,
-        )
+        return _export_backup(key_id, backend_a, home_a, sink)
 
     def test_wrong_passphrase_raises_recovery_mismatch(
         self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]
@@ -1041,15 +889,7 @@ class TestImportRejection:
         home_b = tmp_path / "deviceB"
 
         with pytest.raises(BackupCorrupt):
-            api.import_backup(
-                b"this is not a valid MRKV backup blob at all",
-                PASSPHRASE,
-                seed_phrase=SEED,
-                pow_bytes=POW,
-                backend=backend_b,
-                audit_sink=sink,
-                home=home_b,
-            )
+            _import_backup(b"this is not a valid MRKV backup blob at all", backend_b, home_b, sink)
 
 
 # ----------------------------- audit reason freeze -----------------------------
@@ -1120,15 +960,7 @@ class TestImportBackupManifestValidation:
         monkeypatch.setattr(_secret_ops.recovery, "import_backup", lambda *args, **kwargs: manifest)
 
         with pytest.raises(BackupImportConflict, match="fresh keyvault"):
-            api.import_backup(
-                b"dummy-blob",
-                PASSPHRASE,
-                seed_phrase=SEED,
-                pow_bytes=POW,
-                backend=backend,
-                audit_sink=audit_entries.append,
-                home=tmp_path,
-            )
+            _import_backup(b"dummy-blob", backend, tmp_path, audit_entries.append)
 
         after_files = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
         assert after_files == before_files

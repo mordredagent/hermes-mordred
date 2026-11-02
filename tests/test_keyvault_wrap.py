@@ -30,69 +30,12 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.serialization import (
-    Encoding,
-    PublicFormat,
-)
 
-from mordred_hermes.keyvault._exceptions import WrapKeyAlreadyExists, WrapKeyNotFound
-from mordred_hermes.keyvault.wrap import NativeBackendError, NativeErrorCode
+from mordred_hermes.keyvault.wrap import NativeBackendError
+from tests._keyvault_fakes import FakeBackend
 from tests.test_keyvault_native_deletion import checked_audit_permit
 
 AuditSink = Callable[[dict[str, Any]], None]
-
-
-class FakeBackend:
-    """Software P-256 keypair store, stands in for the Secure Enclave.
-
-    Each ``key_id`` maps to a freshly generated ``cryptography`` P-256
-    private key. ``enclave_ecdh`` performs real ECDH against a supplied
-    peer public key. Authorization failure paths are simulated by
-    setting ``denied_reason`` before the call.
-
-    review-fix-1 MEDIUM-2: ``WrapKeyNotFound`` and ``NativeBackendError``
-    are imported at module level (not deferred inside each method).
-    No real circularity exists — ``_exceptions`` and ``wrap`` have no
-    test-file dependencies — so the deferred form only served to hide
-    typos from mypy. Module-level imports let mypy catch a rename or
-    move at collect time instead of test runtime.
-    """
-
-    def __init__(self) -> None:
-        self._keys: dict[str, ec.EllipticCurvePrivateKey] = {}
-        # Narrowed to ``NativeErrorCode | None`` (review-fix-2 MEDIUM-1)
-        # — only the 5 frozen translated codes can be assigned, so a
-        # typo in a test value surfaces at mypy time.
-        self.denied_reason: NativeErrorCode | None = None
-        self.calls: list[tuple[str, str]] = []  # (op, key_id)
-
-    def generate_enclave_key(self, key_id: str, *, unattended: bool | None = None) -> bytes:
-        self.calls.append(("generate", key_id))
-        if key_id in self._keys:
-            raise WrapKeyAlreadyExists(f"key {key_id!r} already exists")
-        priv = ec.generate_private_key(ec.SECP256R1())
-        self._keys[key_id] = priv
-        return priv.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
-
-    def get_enclave_public_key(self, key_id: str) -> bytes:
-        self.calls.append(("get_pub", key_id))
-        if key_id not in self._keys:
-            raise WrapKeyNotFound(f"no key for {key_id!r}")
-        return self._keys[key_id].public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
-
-    def delete_enclave_key(self, key_id: str) -> None:
-        self.calls.append(("delete", key_id))
-        self._keys.pop(key_id, None)  # idempotent
-
-    def enclave_ecdh(self, key_id: str, peer_pub: bytes) -> bytes:
-        self.calls.append(("ecdh", key_id))
-        if self.denied_reason is not None:
-            raise NativeBackendError(self.denied_reason)
-        if key_id not in self._keys:
-            raise WrapKeyNotFound(f"no key for {key_id!r}")
-        peer = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), peer_pub)
-        return self._keys[key_id].exchange(ec.ECDH(), peer)
 
 
 @pytest.fixture
@@ -198,51 +141,35 @@ class TestParseRejections:
         with pytest.raises(WrapParseError):
             unwrap_dek(b"too short", "k1", audit_sink=sink, backend=backend)
 
-    def test_wrong_magic_rejected(
+    @pytest.mark.parametrize(
+        ("offset", "replacement", "assert_no_ecdh"),
+        [
+            pytest.param(0, b"XXXX", True, id="wrong_magic"),
+            pytest.param(4, b"\x02", False, id="unknown_version"),
+            pytest.param(5, b"\xff", False, id="unknown_alg_suite"),
+            # ephemeral_pub must use the 0x04 uncompressed SEC1 prefix.
+            pytest.param(22, b"\x05", False, id="invalid_ec_point"),
+        ],
+    )
+    def test_malformed_blob_rejected(
         self,
         backend: FakeBackend,
         captured_audit: tuple[list[dict[str, Any]], AuditSink],
+        offset: int,
+        replacement: bytes,
+        assert_no_ecdh: bool,
     ) -> None:
         from mordred_hermes.keyvault._exceptions import WrapParseError
         from mordred_hermes.keyvault.wrap import unwrap_dek
 
         _, sink = captured_audit
         blob = self._good_blob(backend)
-        tampered = b"XXXX" + blob[4:]
+        tampered = blob[:offset] + replacement + blob[offset + len(replacement) :]
 
         with pytest.raises(WrapParseError):
             unwrap_dek(tampered, "k1", audit_sink=sink, backend=backend)
-        assert not any(op == "ecdh" for op, _ in backend.calls)
-
-    def test_unknown_version_rejected(
-        self,
-        backend: FakeBackend,
-        captured_audit: tuple[list[dict[str, Any]], AuditSink],
-    ) -> None:
-        from mordred_hermes.keyvault._exceptions import WrapParseError
-        from mordred_hermes.keyvault.wrap import unwrap_dek
-
-        _, sink = captured_audit
-        blob = self._good_blob(backend)
-        tampered = blob[:4] + b"\x02" + blob[5:]
-
-        with pytest.raises(WrapParseError):
-            unwrap_dek(tampered, "k1", audit_sink=sink, backend=backend)
-
-    def test_unknown_alg_suite_rejected(
-        self,
-        backend: FakeBackend,
-        captured_audit: tuple[list[dict[str, Any]], AuditSink],
-    ) -> None:
-        from mordred_hermes.keyvault._exceptions import WrapParseError
-        from mordred_hermes.keyvault.wrap import unwrap_dek
-
-        _, sink = captured_audit
-        blob = self._good_blob(backend)
-        tampered = blob[:5] + b"\xff" + blob[6:]
-
-        with pytest.raises(WrapParseError):
-            unwrap_dek(tampered, "k1", audit_sink=sink, backend=backend)
+        if assert_no_ecdh:
+            assert not any(op == "ecdh" for op, _ in backend.calls)
 
     def test_wrong_key_id_hash_rejected(
         self,
@@ -261,23 +188,6 @@ class TestParseRejections:
 
         with pytest.raises(WrapParseError):
             unwrap_dek(blob, "k1", audit_sink=sink, backend=backend)
-
-    def test_invalid_ec_point_rejected(
-        self,
-        backend: FakeBackend,
-        captured_audit: tuple[list[dict[str, Any]], AuditSink],
-    ) -> None:
-        """ephemeral_pub must start with 0x04 (uncompressed SEC1) and lie on
-        the curve. A flipped first byte → invalid point."""
-        from mordred_hermes.keyvault._exceptions import WrapParseError
-        from mordred_hermes.keyvault.wrap import unwrap_dek
-
-        _, sink = captured_audit
-        blob = self._good_blob(backend)
-        tampered = blob[:22] + b"\x05" + blob[23:]  # 0x05 prefix = compressed, not uncompressed
-
-        with pytest.raises(WrapParseError):
-            unwrap_dek(tampered, "k1", audit_sink=sink, backend=backend)
 
 
 # ---------------------------------------------------------------------------
