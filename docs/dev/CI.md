@@ -734,6 +734,12 @@ missing gates stay not-run or failed.
   paths are registered in the CI inventory and retain conservative final CI.
   The integration selection passed 383 tests, CI policy modules passed 137,
   critical passed 24, strict typing passed 402 files, and ruff/format passed.
+  The integrated local default suite passed 14,384 tests (295 skipped,
+  168 deselected). Initial hosted run `41444965496` exposed test-fixture
+  assumptions: nine Linux cases used ambient holder discovery instead of the
+  controlled empty inventory used by neighboring proof tests, and one Windows
+  profile-ordering fixture used `mkdir` instead of checked private directory
+  creation. Test-only corrections retain all production holder/ACL refusals.
   The native wheel hashes below precede this module relocation and the imported
   `dev` reset-journal extraction; they are not relabelled as new native runs.
   Current merge-context hosted acceptance is recorded on the implementation PR.

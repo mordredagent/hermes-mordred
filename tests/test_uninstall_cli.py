@@ -1518,9 +1518,11 @@ def test_dependency_appearing_before_package_removal_retains_key_helper_and_pack
     assert not any(op == "delete" for op, _ in installed.backend.calls)
 
 
-def test_plain_database_uninstall_completes_and_preserves_conversations(plain_install):
+def test_plain_database_uninstall_completes_and_preserves_conversations(plain_install, monkeypatch):
+    from mordred_hermes.dbcrypt import _migrate
     from tests.test_dbcrypt_uninstall import plain
 
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
     ctx, runner = plain_install
     plain(ctx.home / "state.db")
     assert run_uninstall(ctx, UninstallOptions(yes=True)) == 0

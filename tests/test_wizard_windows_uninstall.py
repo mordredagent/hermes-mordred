@@ -383,11 +383,14 @@ def test_remove_helper_refuses_before_restore_when_purge_keeps_audit(enabled, he
 
 
 def test_purge_all_profiles_reauthenticates_after_root_source_deleted(inert, monkeypatch):
+    from mordred_hermes._private_fs import open_private_directory
     from mordred_hermes.wizard import _uninstall_coordinator as coordinator
 
     env = inert
     child = env.home / "profiles" / "work"
-    child.mkdir(parents=True, mode=0o700)
+    for directory in (child.parent, child):
+        with open_private_directory(directory, create=True):
+            pass
     from mordred_hermes.wizard import _windows_memory
 
     purged = []

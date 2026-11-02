@@ -1,4 +1,4 @@
-"""Uninstall proof checks real databases; only native hardware is substituted."""
+"""Real database proofs with controlled native hardware and holder inventories."""
 
 from __future__ import annotations
 
@@ -24,10 +24,11 @@ def plain(path):
     path.chmod(0o600)
 
 
-def test_plaintext_permit_requires_real_verification_and_live_lease(tmp_path):
+def test_plaintext_permit_requires_real_verification_and_live_lease(tmp_path, monkeypatch):
     from mordred_hermes.dbcrypt._uninstall import preflight, verified
     from mordred_hermes.keyvault._uninstall_authority import check_authorization
 
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
     plain(tmp_path / "state.db")
     with acquire_exclusive(tmp_path) as lease:
         report = preflight(tmp_path, lease=lease, purge=False)
@@ -40,10 +41,11 @@ def test_plaintext_permit_requires_real_verification_and_live_lease(tmp_path):
 
 
 @pytest.mark.parametrize("change", ["new", "replace", "modify", "forge", "thread"])
-def test_permit_rejects_changed_inventory_and_foreign_owner(tmp_path, change):
+def test_permit_rejects_changed_inventory_and_foreign_owner(tmp_path, monkeypatch, change):
     from mordred_hermes.dbcrypt._uninstall import preflight, verified
     from mordred_hermes.keyvault._uninstall_authority import UninstallAuthorization, check_authorization
 
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
     path = tmp_path / "state.db"
     plain(path)
     with acquire_exclusive(tmp_path) as lease:
@@ -187,6 +189,7 @@ def test_new_dependency_during_permit_issuance_refuses(tmp_path, monkeypatch):
     from mordred_hermes.dbcrypt._uninstall import preflight, verified
     from mordred_hermes.keyvault import _uninstall_authority as permissions
 
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
     plain(tmp_path / "state.db")
     with acquire_exclusive(tmp_path) as lease:
         report = preflight(tmp_path, lease=lease, purge=True)

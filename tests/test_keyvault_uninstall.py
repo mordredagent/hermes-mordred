@@ -1,4 +1,4 @@
-"""Uninstall proof checks real databases; only native hardware is substituted."""
+"""Real database proofs with controlled native hardware and holder inventories."""
 
 from __future__ import annotations
 
@@ -21,10 +21,11 @@ def plain(path):
     path.chmod(0o600)
 
 
-def test_keyvault_consumes_explicit_deletion_proof_only(tmp_path):
+def test_keyvault_consumes_explicit_deletion_proof_only(tmp_path, monkeypatch):
     from mordred_hermes.dbcrypt._uninstall import preflight, verified
     from mordred_hermes.keyvault._database_mutation import database_key_mutation
 
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
     plain(tmp_path / "state.db")
     with acquire_exclusive(tmp_path) as lease:
         with (
