@@ -723,6 +723,21 @@ missing gates stay not-run or failed.
 
 ## Manual live-device validation log
 
+- **2026-11-02 — Uninstall PR integration with the current `dev` layering contract.**
+  Shared SPEC/PLAN contract [PR #276](https://github.com/mordredagent/hermes-mordred/pull/276)
+  merged before the implementation PR. Integrating the newer `dev` import
+  contract exposed the new root helper's keyvault dependency when registered
+  in the explicit helper inventory. The failing contract was reproduced, then
+  the SQL-free permit implementation moved without behavioral changes to
+  `keyvault/_uninstall_authority.py` (`d92c773cf`); consumers and tests use its
+  new location. Both import contracts pass without additional ignores. New
+  paths are registered in the CI inventory and retain conservative final CI.
+  The integration selection passed 383 tests, CI policy modules passed 137,
+  critical passed 24, strict typing passed 402 files, and ruff/format passed.
+  The native wheel hashes below precede this module relocation and the imported
+  `dev` reset-journal extraction; they are not relabelled as new native runs.
+  Current merge-context hosted acceptance is recorded on the implementation PR.
+
 - **2026-11-02 — Data-preserving uninstall final regression passed.**
   On final runtime source `075a99e58`, `uv run pytest -q` completed with exit
   code 0: **14,384 passed, 295 skipped**, with integration tests excluded by
