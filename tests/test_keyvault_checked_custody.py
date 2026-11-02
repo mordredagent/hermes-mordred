@@ -12,7 +12,7 @@ import pytest
 from mordred_hermes._database_contracts import DatabaseRefused
 from mordred_hermes.keyvault import _native_deletion as deletion
 from mordred_hermes.keyvault import _native_key_id as ids
-from mordred_hermes.keyvault import _storage
+from mordred_hermes.keyvault import _reset_journal, _storage
 from mordred_hermes.keyvault._seckey_backend import _SecKeyBackend
 from mordred_hermes.keyvault._seckey_helper import _HelperSecKeyOps
 
@@ -96,10 +96,8 @@ def test_real_checked_owner_refuses_changed_transaction(tmp_path, monkeypatch, m
 
 
 def test_reset_journal_rechecked_before_native_io(tmp_path, monkeypatch):
-    from mordred_hermes.wizard import keyvault_cli
-
     root, selector, backend, calls = _owned(tmp_path, monkeypatch)
-    _, encoded = keyvault_cli._encode_reset_journal(root, {"default": selector}, [], False)
+    _, encoded = _reset_journal._encode_reset_journal(root, {"default": selector}, [], False)
     _storage.write_reset_journal(root, encoded)
     with _storage.keyvault_custody(root, backend=backend, reset=True) as custody:
         owner = deletion._issue_native_owner(custody, native_key_id=selector, backend=backend)
@@ -251,7 +249,7 @@ def test_ambiguous_or_legacy_reset_journal_retains_state(tmp_path, monkeypatch):
     from mordred_hermes.wizard import keyvault_cli
 
     root, selector, backend, calls = _owned(tmp_path, monkeypatch)
-    _, raw = keyvault_cli._encode_reset_journal(root, {"default": selector}, [], False)
+    _, raw = _reset_journal._encode_reset_journal(root, {"default": selector}, [], False)
     payload = json.loads(raw)
     payload["version"] = 1
     _storage.write_reset_journal(root, json.dumps(payload).encode())

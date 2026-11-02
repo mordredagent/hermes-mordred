@@ -24,6 +24,7 @@ uv run pytest -q                          # unit suite (integration marker exclu
 uv run ruff check src tests scripts
 uv run ruff format --check src tests scripts
 uv run mypy --strict src tools scripts/keyvault_offline_digest.py
+uv run lint-imports                       # import layering contracts ([tool.importlinter] in pyproject.toml)
 shellcheck scripts/*.sh native/*/build.sh # blocking in CI; brew/apt install shellcheck
 uv run pytest --cov=src/mordred_hermes    # coverage; CI floor is 80%
 ```

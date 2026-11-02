@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from mordred_hermes.keyvault import _native_key_id, _storage
+from mordred_hermes.keyvault import _native_key_id, _reset_journal, _storage
 from mordred_hermes.keyvault._exceptions import WrapError
 from mordred_hermes.keyvault.api import _DEFAULT_KEY_ID
 from mordred_hermes.keyvault.log_encryption import AUDIT_LOG_KEY_ID, EncryptedWriter
@@ -103,7 +103,7 @@ def _write_current_reset_journal(
 
     key_ids, collected_retained, metadata_incomplete = keyvault_cli._collect_reset_key_ids(root)
     retained = collected_retained if retained_legacy is None else retained_legacy
-    _journal, encoded = keyvault_cli._encode_reset_journal(
+    _journal, encoded = _reset_journal._encode_reset_journal(
         root,
         key_ids,
         retained,

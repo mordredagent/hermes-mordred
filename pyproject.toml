@@ -150,6 +150,12 @@ dev = [
   # reformatting in the same commit.
   "ruff==0.15.13",
   "mypy==2.1.0",
+  # Import-layering contracts (`uv run lint-imports`, `[tool.importlinter]`
+  # below). Pinned exactly like ruff/mypy so local (uv) and CI (pip) evaluate
+  # identical contract semantics; grimp (its graph engine) floats as a
+  # transitive dependency — pin it too if a grimp release ever changes what
+  # counts as an import.
+  "import-linter==2.15",
 ]
 
 # One plugin, `mordred`. mordred_hermes.plugin.register() wires every
@@ -446,3 +452,134 @@ ignore_missing_imports = true
 module = ["gateway", "gateway.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
+
+# Import layering for mordred_hermes (import-linter; run `uv run lint-imports`).
+#
+# grimp (import-linter's graph) counts function-level imports exactly like
+# module-level ones, and the layers contract also flags INDIRECT chains that
+# pass through unlisted root modules (e.g. keyvault -> _audit_support ->
+# privacy_check). Every entry in `ignore_imports` below is a pre-existing
+# inversion that was baselined when the contract was introduced; the lists are
+# a ratchet (unmatched entries fail the run, so delete the entry when you fix
+# the inversion) and must never grow for new code.
+[tool.importlinter]
+root_package = "mordred_hermes"
+include_external_packages = false
+
+# Top -> bottom. A line with `|` holds independent siblings (neither may import
+# the other); `:` would mark siblings that may import each other.
+[[tool.importlinter.contracts]]
+name = "mordred_hermes component layering"
+type = "layers"
+containers = ["mordred_hermes"]
+layers = [
+  "plugin : _runtime_bootstrap : _pth_bootstrap",
+  "desktop",
+  "wizard",
+  "extension",
+  "imports",
+  "activity",
+  "dbcrypt",
+  "llm_guard | network",
+  "privacy_check",
+  "keyvault",
+  "_private_fs",
+]
+ignore_imports = [
+  # --- baseline: keyvault reaching into higher components -----------------
+  "mordred_hermes.keyvault._mail_custody -> mordred_hermes.imports.mail.imap_sync",
+  "mordred_hermes.keyvault._mail_custody -> mordred_hermes.imports.mail.secrets",
+  "mordred_hermes.keyvault._telegram_custody -> mordred_hermes.extension.telegram.secrets",
+  "mordred_hermes.keyvault._extension_config -> mordred_hermes.extension.rpc",
+  "mordred_hermes.keyvault._config_bootstrap -> mordred_hermes.dbcrypt._cli",
+  "mordred_hermes.keyvault._runtime_env -> mordred_hermes.dbcrypt._cli",
+  "mordred_hermes.keyvault.network_fallback -> mordred_hermes.network._exceptions",
+  "mordred_hermes.keyvault.log_encryption -> mordred_hermes.privacy_check.audit",
+  "mordred_hermes.keyvault.extension_sign -> mordred_hermes.privacy_check.audit",
+  "mordred_hermes.keyvault -> mordred_hermes.privacy_check.hooks",
+  "mordred_hermes.keyvault._memory_hook -> mordred_hermes._runtime_bootstrap",
+  # --- baseline: privacy_check reaching upward -----------------------------
+  "mordred_hermes.privacy_check.hooks -> mordred_hermes.network.api",
+  "mordred_hermes.privacy_check.egress -> mordred_hermes.activity.contracts",
+  "mordred_hermes.privacy_check._runtime -> mordred_hermes.plugin",
+  # --- baseline: activity <-> imports, imports <-> extension ---------------
+  "mordred_hermes.activity._paths -> mordred_hermes.imports._protected_destination",
+  "mordred_hermes.activity.store -> mordred_hermes.imports._protected_destination",
+  "mordred_hermes.activity._gate -> mordred_hermes.imports._protected_destination",
+  "mordred_hermes.imports.mail.imap_sync -> mordred_hermes.extension.telegram.memory_guard",
+  "mordred_hermes.imports.mail.imap_sync -> mordred_hermes.extension.telegram.hardening",
+  "mordred_hermes.imports.legacy_enc -> mordred_hermes.extension.telegram.store",
+  "mordred_hermes.imports.mail.imap -> mordred_hermes.extension.egress",
+  # --- baseline: extension -> wizard, wizard -> desktop / plugin -----------
+  "mordred_hermes.extension.telegram.memory_guard -> mordred_hermes.wizard._windows_status",
+  "mordred_hermes.extension.telegram.memory_guard -> mordred_hermes.wizard._windows_memory",
+  "mordred_hermes.extension.telegram.memory_guard -> mordred_hermes.wizard.encryption_cli",
+  "mordred_hermes.wizard.uninstall_cli -> mordred_hermes.desktop.install",
+  "mordred_hermes.wizard._cli_parsers -> mordred_hermes.desktop.install",
+  "mordred_hermes.wizard.plugins_list -> mordred_hermes.plugin",
+  # --- baseline: root helpers that reach into components (see contract 2) --
+  "mordred_hermes._audit_support -> mordred_hermes.privacy_check.audit",
+  "mordred_hermes._audit_support -> mordred_hermes.privacy_check._keyvault_probe",
+  "mordred_hermes._audit_support -> mordred_hermes.privacy_check._windows_audit",
+  "mordred_hermes._self_update -> mordred_hermes.desktop.install",
+  "mordred_hermes._self_update -> mordred_hermes.desktop.member",
+]
+
+# Flat `mordred_hermes._*.py` helpers are the shared foundation and must not
+# import any component package. `plugin`, `_runtime_bootstrap` and
+# `_pth_bootstrap` are entry points that wire components together on purpose
+# and are therefore the TOP layer of contract 1 rather than sources here.
+# grimp rejects partial-segment wildcards (`mordred_hermes._*`), so this list
+# is explicit: add every new flat helper module here.
+[[tool.importlinter.contracts]]
+name = "root helpers do not import components"
+type = "forbidden"
+allow_indirect_imports = true
+source_modules = [
+  "mordred_hermes._audit_io",
+  "mordred_hermes._audit_session",
+  "mordred_hermes._audit_support",
+  "mordred_hermes._bounded_json",
+  "mordred_hermes._config_io",
+  "mordred_hermes._config_text_io",
+  "mordred_hermes._custody_order",
+  "mordred_hermes._database_contracts",
+  "mordred_hermes._database_inventory",
+  "mordred_hermes._database_lifecycle",
+  "mordred_hermes._database_locking_posix",
+  "mordred_hermes._database_locking_windows",
+  "mordred_hermes._dotenv_io",
+  "mordred_hermes._dotenv_text",
+  "mordred_hermes._file_lock",
+  "mordred_hermes._home",
+  "mordred_hermes._log_rotation",
+  "mordred_hermes._plugin_identity",
+  "mordred_hermes._policy_io",
+  "mordred_hermes._policy_types",
+  "mordred_hermes._provider_identity",
+  "mordred_hermes._provider_resolution",
+  "mordred_hermes._proxy_bypass",
+  "mordred_hermes._self_update",
+  "mordred_hermes._term",
+  "mordred_hermes._windows_runtime",
+  "mordred_hermes._yaml_io",
+]
+forbidden_modules = [
+  "mordred_hermes.activity",
+  "mordred_hermes.dbcrypt",
+  "mordred_hermes.desktop",
+  "mordred_hermes.extension",
+  "mordred_hermes.imports",
+  "mordred_hermes.keyvault",
+  "mordred_hermes.llm_guard",
+  "mordred_hermes.network",
+  "mordred_hermes.privacy_check",
+  "mordred_hermes.wizard",
+]
+ignore_imports = [
+  "mordred_hermes._audit_support -> mordred_hermes.privacy_check.audit",
+  "mordred_hermes._audit_support -> mordred_hermes.privacy_check._keyvault_probe",
+  "mordred_hermes._audit_support -> mordred_hermes.privacy_check._windows_audit",
+  "mordred_hermes._self_update -> mordred_hermes.desktop.install",
+  "mordred_hermes._self_update -> mordred_hermes.desktop.member",
+]
