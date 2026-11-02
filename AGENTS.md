@@ -31,6 +31,12 @@ uv run pytest --cov=src/mordred_hermes    # coverage; CI floor is 80%
 Full guide: `docs/dev/setup.md`. Always go through `uv run` / `.venv/bin/…`;
 bare `pytest` or `hermes-mordred` may hit a different environment via PATH.
 
+Documentation-only push/PR events skip CI for `docs/**/*.md` and root
+`README.md`, `AGENTS.md`, `CLAUDE.md`, `notes.md`. Version files, executable
+examples, runtime Markdown and mixed code/doc changes still trigger CI. Manual
+dispatch remains available; see `docs/dev/CI.md`. For documentation-only edits,
+run `uv run pytest -q tests/test_docs_links.py` locally as needed.
+
 For ordinary edits, start with `uv run python tools/run_critical_tests.py` and
 the changed modules (`uv run pytest -q tests/test_<affected>.py`). Use `--list`
 to inspect the critical preset or `--dry-run` to validate collection. This is

@@ -121,7 +121,7 @@ def test_floor_runs_in_parallel_with_main_only_when_requested() -> None:
     assert "--role floor" in next(s for s in floor["steps"] if s.get("id") == "evidence")["run"]
 
 
-def test_ready_conversion_and_manual_validation_cannot_be_path_filtered() -> None:
+def test_documentation_filters_preserve_code_events_and_manual_validation() -> None:
     events = workflow().get("on", workflow().get(True))
     assert set(events["pull_request"]["types"]) == {
         "opened",
@@ -130,8 +130,13 @@ def test_ready_conversion_and_manual_validation_cannot_be_path_filtered() -> Non
         "ready_for_review",
         "converted_to_draft",
     }
-    assert "paths" not in events["pull_request"]
+    # Keep the exclusion bounded: VERSION and runtime Markdown remain CI inputs.
+    documentation = {"docs/**/*.md", "README.md", "AGENTS.md", "CLAUDE.md", "notes.md"}
+    for event in ("pull_request", "push"):
+        assert "paths" not in events[event]
+        assert set(events[event].get("paths-ignore", [])) == documentation
     assert "workflow_dispatch" in events
+    assert events["workflow_dispatch"] is None
     assert events["push"]["branches"] == ["main", "dev"]
 
 

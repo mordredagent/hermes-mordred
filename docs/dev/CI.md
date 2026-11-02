@@ -20,7 +20,7 @@ repair is complete; historical restoration details remain in Git.
 
 | Workflow | Purpose | Trigger |
 |---|---|---|
-| `ci.yml` | Test matrix, extras, wheel smoke, Tor/TPM, native helper builds | PR and pushes to `dev`/`main` |
+| `ci.yml` | Test matrix, extras, wheel smoke, Tor/TPM, native helper builds | Non-documentation-only PRs and pushes to `dev`/`main`; manual dispatch |
 | `upstream-check.yml` | Hermes hook-name and consumed-payload drift | Weekly and manual |
 | `labeler.yml` | Path-based PR labels | `pull_request_target` |
 | `integration-vpn.yml` | Live Mullvad validation | Manual only |
@@ -36,7 +36,7 @@ workers:
 |---|---:|---|
 | Ordinary portable change | 3 | Policy, Ubuntu 3.12 default suite, acceptance |
 | Ordinary platform change | 4–6 | Adds selected macOS, Windows and/or Linux floor workers |
-| Ready allowlisted user-documentation PR | 2 | Policy and complete documentation contract checks |
+| Documentation-only PR or push | 0 | Filtered before workflow startup; local checks or manual dispatch remain available |
 | Draft feedback | 3–5 | Critical preset on Ubuntu 3.12 and mapped platforms |
 | Final validation | 10 | Policy, Linux 3.11/3.13, Linux floor 3.11, macOS 3.11, four Windows 3.11 shards, acceptance |
 
@@ -46,8 +46,13 @@ renames inspect both paths. It never classifies only the latest PR commit.
 `tools/ci_scope_paths.json` is a finite inventory of reviewed existing paths.
 A PR that adds a file lists it there in the same PR; entries for files that do not
 yet exist are rejected, so documentation PRs cannot pre-register them.
-Only reviewed existing Markdown under `docs/user/` can take the documents route;
-developer policy/version/setup contracts require final validation.
+Automatic push and PR events are filtered when every changed path matches
+`docs/**/*.md`, `README.md`, `AGENTS.md`, `CLAUDE.md` or `notes.md`. This includes
+developer Markdown. `docs/dev/VERSION`, executable examples, workflow changes
+and Markdown under `src/` or skill directories remain CI inputs. Mixed changes
+start CI and retain the existing conservative cumulative scope classification.
+The internal two-job `docs` route remains for compatibility with policy/evidence
+consumers; it does not start a workflow for these filtered events.
 New, removed, unknown, shared storage/bootstrap/crypto/authentication, native,
 installer, dependency, CI and tools changes conservatively require final
 validation when ready. Mapped component changes retain complete affected
@@ -62,7 +67,19 @@ from cancelling an untested broad change and then hiding it behind a short CI.
 validation. The label is read on existing PR events: apply it before the next
 synchronize/reopen/ready event, or dispatch CI manually. A label-only change does
 not start CI. PR event types remain opened, synchronize, reopened,
-ready_for_review and converted_to_draft; no whole-PR path filter is used.
+ready_for_review and converted_to_draft. Documentation-only events are filtered
+before scope selection, including on `main` and draft/ready transitions. A
+`ci:full` label cannot override that filter; use manual dispatch when validation
+of a documentation-only revision is wanted. Manual dispatch remains unfiltered
+and selects final validation.
+
+Skipped revisions produce no acceptance evidence and are not accepted baselines.
+The next code push may therefore select final validation when its exact `before`
+SHA has no accepted run; do not substitute a nearby green SHA. Releases still
+require final evidence for the exact release revision. If branch protection later
+requires `CI acceptance`, account for filtered runs remaining pending before
+making that check mandatory; do not silently relax the release evidence gate.
+The labeler remains independent PR metadata automation, not a test workflow.
 
 Key policy:
 
@@ -98,7 +115,7 @@ Key policy:
 - Where branch protection is available, use the single stable `CI acceptance`
   check rather than retired matrix checks. Repository settings are configured
   separately from this YAML; a critical green remains feedback only.
-- Merge a ready PR only after acceptance for its current tested merge context
+- For a PR that starts CI, merge only after acceptance for its current tested merge context
   succeeds with the selected scope. Sensitive/unknown changes require final;
   ordinary acceptance covers mapped non-foundation changes. A head/base update
   invalidates previous context. Protection is currently unavailable, so this
@@ -164,17 +181,18 @@ rerunning unchanged broad suites.
 Known draft PRs run critical feedback on Ubuntu 3.12, adding macOS or Windows
 only for mapped platform changes. Linux runs repository-wide static checks,
 strict typing, shellcheck, the status guard and CI routing/runner tests. Draft
-user-documentation changes remain feedback; ready allowlisted user-doc PRs use the
-two-job documentation route. Failures remain red and JUnit artifacts are
+documentation-only changes are filtered before any job starts, as described above.
+For workflows that run, failures remain red and JUnit artifacts are
 uploaded after failures. A critical green cannot supply an accepted dev baseline
 or release evidence. Unselected regressions can be discovered later in exchange
 for cheaper iteration.
 
 Ready conversion, open/reopen and ready updates select the complete appropriate
 scope from the cumulative diff. Sensitive or unknown changes receive final
-validation. `main`, manual dispatch and `ci:full` always receive final validation,
+validation. For events that pass the path filter, `main` and `ci:full` receive final validation;
+manual dispatch is unfiltered and always receives final validation,
 including from a draft branch. Unexpected/incomplete discovery selects final
-conservatively. All branch pushes are observed, including unknown paths.
+conservatively. Non-documentation-only branch pushes are observed, including unknown paths.
 
 Windows critical CI prepares a fresh checked home and `mordred` child under
 `USERPROFILE`, then exports `HERMES_HOME` before test collection. `RUNNER_TEMP`

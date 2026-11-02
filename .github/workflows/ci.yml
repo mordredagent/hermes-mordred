@@ -1,9 +1,16 @@
-# Scope-aware CI: routine 3–6, documentation 2, final 10 jobs.
+# Scope-aware CI: routine 3–6, final 10 jobs; documentation-only events are filtered.
 # Policy and positive acceptance are defined in docs/dev/CI.md.
 # Keep PR event types stable: label-only runs can cancel actual testing.
 name: CI
 'on':
   pull_request:
+    # Keep version pins, executable examples and runtime Markdown in CI scope.
+    paths-ignore:
+      - 'docs/**/*.md'
+      - 'README.md'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+      - 'notes.md'
     types:
       - opened
       - synchronize
@@ -11,6 +18,13 @@ name: CI
       - ready_for_review
       - converted_to_draft
   push:
+    # Keep version pins, executable examples and runtime Markdown in CI scope.
+    paths-ignore:
+      - 'docs/**/*.md'
+      - 'README.md'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+      - 'notes.md'
     branches:
       - main
       - dev
