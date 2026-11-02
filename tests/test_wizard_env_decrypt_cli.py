@@ -41,6 +41,15 @@ _ENV_A = b"ANTHROPIC_API_KEY=sk-secret\n"
 _ENV_B = b"ANTHROPIC_API_KEY=sk-other\n"
 
 
+def _setup(tmp_path: Path) -> tuple[Path, Path, FakeBackend, FakeAnchorStore]:
+    root, home = tmp_path / "v", tmp_path / "home"
+    home.mkdir()
+    backend, store = FakeBackend(), FakeAnchorStore()
+    _init_empty_vault(root, backend, store)
+    (home / ".env").write_bytes(_ENV_A)
+    return root, home, backend, store
+
+
 def _vault_env(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> bytes | None:
     key_id = anchor_label = _identity.vault_identity(root)
     with vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label) as opened:
@@ -66,11 +75,7 @@ def _runtime_injection_available(monkeypatch: pytest.MonkeyPatch) -> None:
 # -----------------------------------------------------------------------------
 class TestEnable:
     def test_enrolls_and_removes_plaintext_on_macos(self, tmp_path: Path) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / ".env").write_bytes(_ENV_A)
+        root, home, backend, store = _setup(tmp_path)
 
         before = sum(1 for call in backend.calls if call[0] == "ecdh")
         rc = env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store)
@@ -84,11 +89,7 @@ class TestEnable:
     def test_already_sealed_reenable_is_noop_success(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         # Re-running enable when env is already sealed (enrolled, injection ON, no
         # plaintext) must succeed as a no-op, not error "nothing to protect".
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / ".env").write_bytes(_ENV_A)
+        root, home, backend, store = _setup(tmp_path)
         assert env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store) == 0
         assert not (home / ".env").exists()  # sealed: no plaintext to re-enroll
 
@@ -100,11 +101,7 @@ class TestEnable:
         assert "nothing to protect" not in (out.out + out.err)
 
     def test_keeps_plaintext_off_macos(self, tmp_path: Path) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / ".env").write_bytes(_ENV_A)
+        root, home, backend, store = _setup(tmp_path)
 
         rc = env_decrypt_cli.enable(home=home, root=root, platform="linux", backend=backend, store=store)
         assert rc == 0
@@ -168,11 +165,7 @@ class TestEnable:
         enable must not proceed to unlink — it warns and fails safe (return 0)."""
         from mordred_hermes.wizard import vault_cli
 
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / ".env").write_bytes(_ENV_A)
+        root, home, backend, store = _setup(tmp_path)
 
         # the enroll "succeeds" but the plaintext vanishes before the verify read,
         # so env_path.read_bytes() raises and `current` becomes None.
@@ -202,11 +195,7 @@ class TestEnable:
         """
         from mordred_hermes.wizard import vault_cli
 
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / ".env").write_bytes(_ENV_A)
+        root, home, backend, store = _setup(tmp_path)
         # The enrolled copy differs from what's on disk (mismatch) ...
         monkeypatch.setattr(vault_cli, "add_and_verify", lambda **_k: (0, _ENV_B))
         # ... AND unlinking it would also fail, if the code ever got that far.
@@ -227,11 +216,7 @@ class TestEnable:
         assert "leaving the plaintext" in capsys.readouterr().err.lower()
 
     def test_clears_optout_marker(self, tmp_path: Path) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / ".env").write_bytes(_ENV_A)
+        root, home, backend, store = _setup(tmp_path)
         marker = _env_optout_marker_path(home)
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text("opt-out\n", encoding="utf-8")
@@ -245,11 +230,7 @@ class TestEnable:
 # -----------------------------------------------------------------------------
 class TestDisable:
     def test_restores_plaintext_and_writes_marker(self, tmp_path: Path) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / ".env").write_bytes(_ENV_A)
+        root, home, backend, store = _setup(tmp_path)
         env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store)
         assert not (home / ".env").exists()  # sealed by enable
 
@@ -260,11 +241,7 @@ class TestDisable:
         assert _vault_env(root, backend, store) == _ENV_A  # vault copy kept (reversible)
 
     def test_keeps_diverging_plaintext_and_warns(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / ".env").write_bytes(_ENV_A)
+        root, home, backend, store = _setup(tmp_path)
         env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store)
         # operator put a DIFFERENT plaintext back by hand
         (home / ".env").write_bytes(_ENV_B)
@@ -286,11 +263,7 @@ class TestDisable:
 # -----------------------------------------------------------------------------
 class TestPurge:
     def test_unenrolls_and_restores_plaintext(self, tmp_path: Path) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / ".env").write_bytes(_ENV_A)
+        root, home, backend, store = _setup(tmp_path)
         env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store)
 
         rc = env_decrypt_cli.purge(home=home, root=root, backend=backend, store=store)
@@ -303,11 +276,7 @@ class TestPurge:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """The vault copy must never be destroyed silently when it differs from disk."""
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / ".env").write_bytes(_ENV_A)
+        root, home, backend, store = _setup(tmp_path)
         env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store)
         # operator put a DIFFERENT plaintext back by hand before purging
         (home / ".env").write_bytes(_ENV_B)
@@ -496,11 +465,7 @@ class TestEnableReconcilesDrift:
     def test_enable_sweeps_stale_reseal_temp(self, tmp_path: Path) -> None:
         """A reseal temp stranded by a prior crash (a plaintext at rest) is swept by
         the next ``enable``, so the documented remedy actually clears the exposure."""
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / ".env").write_bytes(_ENV_A)
+        root, home, backend, store = _setup(tmp_path)
         (home / ".env.reseal.tmp").write_bytes(b"stale\n")  # leftover from a crash
 
         rc = env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store)
@@ -521,18 +486,10 @@ class TestRuntimeGate:
     it cannot, ``enable`` refuses and leaves every byte of state untouched.
     """
 
-    def _setup(self, tmp_path: Path) -> tuple[Path, Path, FakeBackend, FakeAnchorStore]:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / ".env").write_bytes(_ENV_A)
-        return root, home, backend, store
-
     def test_refuses_and_keeps_state_when_runtime_cannot_inject(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        root, home, backend, store = self._setup(tmp_path)
+        root, home, backend, store = _setup(tmp_path)
         rc = env_decrypt_cli.enable(
             home=home,
             root=root,
@@ -549,7 +506,7 @@ class TestRuntimeGate:
         assert "refusing to vault-seal .env" in (out.err + out.out)
 
     def test_force_bypasses_the_gate(self, tmp_path: Path) -> None:
-        root, home, backend, store = self._setup(tmp_path)
+        root, home, backend, store = _setup(tmp_path)
         rc = env_decrypt_cli.enable(
             home=home,
             root=root,
@@ -564,7 +521,7 @@ class TestRuntimeGate:
         assert not (home / ".env").exists()  # sealed despite an unverified runtime
 
     def test_gate_not_applied_off_macos(self, tmp_path: Path) -> None:
-        root, home, backend, store = self._setup(tmp_path)
+        root, home, backend, store = _setup(tmp_path)
         rc = env_decrypt_cli.enable(
             home=home,
             root=root,
@@ -581,7 +538,7 @@ class TestRuntimeGate:
         # Enrolled + injection ON + a stray plaintext on macOS routes enable() to
         # the drift/reseal branch, which also deletes the plaintext. The gate sits
         # before that branch, so a regressed runtime must block reseal too.
-        root, home, backend, store = self._setup(tmp_path)
+        root, home, backend, store = _setup(tmp_path)
         assert (
             env_decrypt_cli.enable(
                 home=home,
@@ -616,14 +573,6 @@ class TestRunningGatewayGate:
     plaintext and the vault exactly as they were (the 2026-06-25 incident shape).
     """
 
-    def _setup(self, tmp_path: Path) -> tuple[Path, Path, FakeBackend, FakeAnchorStore]:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / ".env").write_bytes(_ENV_A)
-        return root, home, backend, store
-
     def _gateway_python(self, tmp_path: Path) -> Path:
         bindir = tmp_path / "repo" / ".venv" / "bin"
         bindir.mkdir(parents=True)
@@ -634,7 +583,7 @@ class TestRunningGatewayGate:
     def test_refuses_when_the_running_gateway_cannot_inject(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        root, home, backend, store = self._setup(tmp_path)
+        root, home, backend, store = _setup(tmp_path)
         gateway = self._gateway_python(tmp_path)
         monkeypatch.setattr(
             _runtime_gate, "_default_gateway_discovery", lambda *, home: [GatewayRuntime(pid=4242, python=gateway)]
@@ -662,7 +611,7 @@ class TestRunningGatewayGate:
     def test_proceeds_when_the_running_gateway_can_inject(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        root, home, backend, store = self._setup(tmp_path)
+        root, home, backend, store = _setup(tmp_path)
         gateway = self._gateway_python(tmp_path)
         monkeypatch.setattr(
             _runtime_gate, "_default_gateway_discovery", lambda *, home: [GatewayRuntime(pid=9, python=gateway)]
@@ -682,7 +631,7 @@ class TestRunningGatewayGate:
     def test_force_bypasses_the_running_gateway_check_too(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        root, home, backend, store = self._setup(tmp_path)
+        root, home, backend, store = _setup(tmp_path)
 
         def _never(*, home: Path) -> list[GatewayRuntime]:
             raise AssertionError("--force-runtime-unverified must skip discovery entirely")
