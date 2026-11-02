@@ -916,7 +916,7 @@ desktop     install | uninstall | status
 egress      status | set | block | unblock | block-tool | unblock-tool |
             taint
 direct-tools  on | off | status
-databases   status | diagnose | encrypt | decrypt
+databases   status | diagnose | encrypt | decrypt | backup
 telegram    setup | doctor | login | sync | status | logout | venice |
             local-llm | migrate-tee | migrate-store
 mail        import | status | setup | fetch | forget
@@ -924,6 +924,10 @@ activity    status | use | tools | correct | backup | restore |
             retention
 uninstall
 ```
+
+`databases backup export --source PATH --output PATH [--member NAME]` is an
+offline recovery command; it takes exclusive database exclusion before key
+authentication and publishes only a new, verified plaintext output.
 
 `databases status` reports configured intent, capability, dependency count (or
 unknown), and authentication **not checked**, without SQL, native authentication,
@@ -3353,8 +3357,9 @@ clean or opted out, `manual` without the helper or under `--non-interactive`,
 otherwise runs `encryption enable memory`. `encryption enable all` skips the
 excluded env/config targets and runs the Windows memory flow.
 
-Uninstall on Windows restores memory only (the env/config seals are excluded;
-retained artifacts are reported). A refusing gate, proof or custody state stops
+Uninstall on qualified Windows Server restores root/profile databases through
+the shared coordinator and memory through the proof-bound disable flow (the
+env/config seals are excluded; retained artifacts are reported). A refusing gate, proof or custody state stops
 it before anything is removed. `--purge-data` deletes only the memory custody
 key after the verified restore; audit and Telegram custody and history, a
 retained secret store or file vault, and the `<home>\mordred` and

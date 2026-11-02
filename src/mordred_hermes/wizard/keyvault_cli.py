@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .._database_lifecycle import ExclusiveLease
+from .._database_uninstall import UninstallAuthorization
 from .._home import hermes_home as _hermes_home
 from ..keyvault import _native_key_id, _storage
 from . import _term
@@ -712,13 +713,15 @@ def _delete_wrapping_keys(
     return failures
 
 
-def _assert_reset_database_safe(home: Path, lease: ExclusiveLease) -> None:
+def _assert_reset_database_safe(
+    home: Path, lease: ExclusiveLease, uninstall: UninstallAuthorization | None = None
+) -> None:
     """Helper reset cannot retire an enrolled root source owned elsewhere."""
     from .._database_contracts import DatabaseRefused
     from ..keyvault._database_authority import resolve_database_domain
     from ..keyvault._database_mutation import assert_database_helper_removal_safe
 
-    assert_database_helper_removal_safe(home, lease)
+    assert_database_helper_removal_safe(home, lease, uninstall=uninstall)
     domain = resolve_database_domain(home)
     try:
         (domain.root / "mordred" / "db-key-source.json").lstat()
@@ -765,6 +768,7 @@ def _reset_with_memory_guard(
     prompt_io: PromptIO | None = None,
     assume_yes: bool = False,
     database_lease: ExclusiveLease,
+    uninstall: UninstallAuthorization | None = None,
 ) -> int:
     """Reset keyvault only after independent TPM memory custody is removed.
 
@@ -796,12 +800,18 @@ def _reset_with_memory_guard(
                     prompt_io=prompt_io,
                     assume_yes=assume_yes,
                     database_lease=database_lease,
+                    uninstall=uninstall,
                 )
         except MemoryKeyError:
             _term.emit_error("cannot lock TPM memory before keyvault reset; nothing was deleted")
             return 1
     return _reset_keyvault(
-        home=resolved_home, backend=backend, prompt_io=prompt_io, assume_yes=assume_yes, database_lease=database_lease
+        home=resolved_home,
+        backend=backend,
+        prompt_io=prompt_io,
+        assume_yes=assume_yes,
+        database_lease=database_lease,
+        uninstall=uninstall,
     )
 
 
@@ -812,6 +822,7 @@ def _reset_keyvault(  # noqa: C901, PLR0912, PLR0915 - destructive state machine
     prompt_io: PromptIO | None = None,
     assume_yes: bool = False,
     database_lease: ExclusiveLease,
+    uninstall: UninstallAuthorization | None = None,
 ) -> int:
     """Destroy the keyvault: delete every provably profile-owned native
     wrapping key and remove the on-disk keyvault directory. Irreversible.
@@ -914,7 +925,7 @@ def _reset_keyvault(  # noqa: C901, PLR0912, PLR0915 - destructive state machine
                         print("Reset aborted — nothing was deleted.")
                         return 1
 
-                _assert_reset_database_safe(home or root.parent.parent, database_lease)
+                _assert_reset_database_safe(home or root.parent.parent, database_lease, uninstall)
                 journal, encoded_journal = _encode_reset_journal(
                     root,
                     key_ids,
@@ -927,7 +938,7 @@ def _reset_keyvault(  # noqa: C901, PLR0912, PLR0915 - destructive state machine
                     _term.emit_error(f"could not durably journal keyvault reset ({exc}); no native keys were deleted.")
                     return 1
 
-            _assert_reset_database_safe(home or root.parent.parent, database_lease)
+            _assert_reset_database_safe(home or root.parent.parent, database_lease, uninstall)
             # Rotate the independent generation lease after the stable journal
             # is durable and before native deletion. This invalidates cached
             # writers even if a later re-init happens to reuse root dev/inode.
@@ -948,7 +959,7 @@ def _reset_keyvault(  # noqa: C901, PLR0912, PLR0915 - destructive state machine
                 )
                 return 1
 
-            _assert_reset_database_safe(home or root.parent.parent, database_lease)
+            _assert_reset_database_safe(home or root.parent.parent, database_lease, uninstall)
             try:
                 current_root = root.lstat()
             except FileNotFoundError:
