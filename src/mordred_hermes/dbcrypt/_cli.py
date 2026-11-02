@@ -81,7 +81,9 @@ def _setup_options(setup: _ObservationParser) -> None:
     seed.add_argument("--paper-only", action="store_true")
 
 
-def _passive_or_maintenance(args: list[str], *, profiles: bool = False) -> bool:  # noqa: C901 - finite CLI grammar
+def _passive_or_maintenance(  # noqa: C901, PLR0915 - finite CLI grammar
+    args: list[str], *, profiles: bool = False
+) -> bool:
     """Parse only reviewed metadata/ceremony commands, without importing Hermes.
 
     Values are consumed by argparse: command words inside prompts, roots or
@@ -109,6 +111,10 @@ def _passive_or_maintenance(args: list[str], *, profiles: bool = False) -> bool:
         item = child(database, verb)
         if verb in {"encrypt", "decrypt"}:
             item.add_argument("--dry-run", action="store_true")
+    export = child(child(database, "backup").add_subparsers(required=True), "export")
+    export.add_argument("--source", required=True)
+    export.add_argument("--output", required=True)
+    export.add_argument("--member")
     # Offline restore owns the exclusive lease; a runtime shared lease would refuse it.
     # Keep aligned with wizard.activity_store_cli.add_parsers("restore").
     restore = child(child(sub, "activity").add_subparsers(required=True), "restore")
