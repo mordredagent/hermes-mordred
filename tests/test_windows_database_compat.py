@@ -8,7 +8,7 @@ import pytest
 
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
 from mordred_hermes.dbcrypt import _migrate
-from mordred_hermes.wizard import databases_cli, memory_cli, uninstall_cli
+from mordred_hermes.wizard import _uninstall_coordinator, databases_cli, memory_cli, uninstall_cli
 from mordred_hermes.wizard._uninstall_config import ConfigCleanup
 from mordred_hermes.wizard.uninstall_cli import UninstallOptions, run_uninstall
 from tests.test_windows_custody import fs as fs
@@ -51,12 +51,14 @@ def test_uninstall_refuses_retained_database_state_before_any_cleanup(
     monkeypatch.setattr(
         uninstall_cli, "plan_config_cleanup", lambda path: ConfigCleanup(path, removed=["plugins.enabled: mordred"])
     )
-    monkeypatch.setattr(uninstall_cli, "uninstall_packages", lambda *args, **kwargs: pytest.fail("package removed"))
+    monkeypatch.setattr(
+        _uninstall_coordinator, "uninstall_packages", lambda *args, **kwargs: pytest.fail("package removed")
+    )
     monkeypatch.setattr(memory_cli, "disable", lambda **kwargs: pytest.fail("memory modified before database refusal"))
     calls = list(env.backend.calls)
     assert run_uninstall(context(env, home=home), UninstallOptions(yes=True)) == 1
     err = capsys.readouterr().err
-    assert "database" in err and "Nothing was removed" in err
+    assert ("shared package" if profile else "database") in err
     assert database.read_bytes() == b"retained encrypted database content"
     assert (env.home / "mordred" / name).read_bytes() == b"retained state\n"
     # Native Windows planning may inspect the installed interpreter read-only.
@@ -80,7 +82,9 @@ def test_uninstall_rechecks_database_state_after_confirmation(win, monkeypatch, 
         return True
 
     monkeypatch.setattr(uninstall_cli, "_confirm", confirm)
-    monkeypatch.setattr(uninstall_cli, "uninstall_packages", lambda *args, **kwargs: pytest.fail("package removed"))
+    monkeypatch.setattr(
+        _uninstall_coordinator, "uninstall_packages", lambda *args, **kwargs: pytest.fail("package removed")
+    )
     monkeypatch.setattr(memory_cli, "purge", lambda **kwargs: pytest.fail("custody purged"))
     calls = list(env.backend.calls)
     assert run_uninstall(context(env), UninstallOptions(yes=True, purge_data=True)) == 1

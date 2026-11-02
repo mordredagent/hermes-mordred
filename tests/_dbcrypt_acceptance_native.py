@@ -1583,7 +1583,7 @@ def _public_lifecycle_guards(root: Path) -> list[str]:
     from unittest.mock import patch
 
     from mordred_hermes.keyvault._database_authority import observe_database_source
-    from mordred_hermes.wizard import uninstall_cli
+    from mordred_hermes.wizard import _uninstall_coordinator, uninstall_cli
     from mordred_hermes.wizard.cli import main
 
     before = observe_database_source(root=root)
@@ -1608,7 +1608,7 @@ def _public_lifecycle_guards(root: Path) -> list[str]:
     # These are irreversible side-effect tripwires, not replacements for native
     # custody, restoration, dependency inventory, auth, or the low-level broker.
     with (
-        patch.object(uninstall_cli, "uninstall_packages", forbidden),
+        patch.object(_uninstall_coordinator, "uninstall_packages", forbidden),
         patch.object(uninstall_cli, "_remove_helpers", forbidden),
     ):
         assert main(["uninstall", "--yes", "--remove-helper"]) == 1

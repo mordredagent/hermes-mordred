@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..keyvault._uninstall_authority import UninstallAuthorization
 from . import _term
 from ._windows_gates import (
     CUSTODY_FAILURES,
@@ -289,7 +290,9 @@ def disable(*, home: Path) -> int:
         return _lifecycle_failure("disable", exc, state=_UNCHANGED)
 
 
-def _disable(*, home: Path) -> int:
+def _disable(
+    *, home: Path, proof: WindowsRuntimeProof | None = None, uninstall: UninstallAuthorization | None = None
+) -> int:
     """capabilities (+ load-only scan) -> gate -> proof -> disable_memory_encryption (key kept)."""
     from ..keyvault._memory_storage import disable_memory_encryption
 
@@ -319,7 +322,7 @@ def _disable(*, home: Path) -> int:
 
     if _gate(home, force_runtime_unverified=False) != 0:
         return 1
-    proof = _prove("disable", home, state=_UNCHANGED)
+    proof = proof if proof is not None else _prove("disable", home, state=_UNCHANGED)
     if proof is None:
         return 1
     try:
@@ -327,7 +330,7 @@ def _disable(*, home: Path) -> int:
 
         # Fresh exclusion and all-generation scan after proof, before owning
         # lifecycle custody. The engine revalidates the issued proof inside it.
-        with _disable_database_guard(home):
+        with _disable_database_guard(home, uninstall=uninstall):
             result = disable_memory_encryption(home, proof, keep_key=True)
     except _errors() as exc:
         return _lifecycle_failure("disable", exc, state=_UNCHANGED)
@@ -351,7 +354,7 @@ _PURGE_HINTS: dict[str, str] = {
 }
 
 
-def purge(*, home: Path) -> int:
+def purge(*, home: Path, uninstall: UninstallAuthorization | None = None) -> int:
     """capabilities -> gate -> verify_memory_purge_candidates -> reset_role("memory")."""
     from ..keyvault._database_mutation import database_key_mutation
     from ..keyvault._windows_custody import windows_custody_session
@@ -375,14 +378,16 @@ def purge(*, home: Path) -> int:
         return _refused("purge", "verification", "not-purgeable", "; ".join(report.reasons), hints)
     try:
         with (
-            database_key_mutation(root=home, generation=None) as database_lease,
+            database_key_mutation(root=home, generation=None, uninstall=uninstall) as database_lease,
             windows_custody_session(home) as custody,
         ):
             # Memory reset ignores erasure authorization: seals always refuse.
             from .memory_cli import _warn_external_backups
 
             _warn_external_backups()
-            reset = custody.reset_role("memory", erase_authorized=False, database_lease=database_lease)
+            reset = custody.reset_role(
+                "memory", erase_authorized=False, database_lease=database_lease, uninstall=uninstall
+            )
     except _errors() as exc:
         notes = " ".join(getattr(exc, "__notes__", ()))
         reason = classify_exception(exc)
@@ -401,3 +406,33 @@ def purge(*, home: Path) -> int:
         "decrypted."
     )
     return 0
+
+
+def prepare_uninstall(home: Path) -> WindowsRuntimeProof | None:
+    """Authenticate the installed runtime before any database lease is held."""
+    observation = observe(home, blocking=True)
+    if _preflight("disable", observation) is not None or _helper_refusal("disable", observation) is not None:
+        raise RuntimeError("memory could not be restored to plaintext: Windows memory preflight refused")
+    if observation.report is None or not observation.report.managed:
+        return None
+    if _gate(home, force_runtime_unverified=False) != 0:
+        raise RuntimeError("memory could not be restored to plaintext: Windows runtime gate refused")
+    proof = _prove("disable", home, state=_UNCHANGED)
+    if proof is None:
+        raise RuntimeError("memory could not be restored to plaintext: Windows installed runtime proof refused")
+    return proof
+
+
+def verify_uninstall_inputs(home: Path, proof: WindowsRuntimeProof | None) -> None:
+    """Under root EX, authenticate every memory before restoring any database."""
+    if proof is None:
+        return
+    from ..keyvault._memory_storage import _plan, windows_memory_session
+    from ..keyvault._windows_custody import windows_custody_session
+    from ..keyvault._windows_proof import validate_windows_runtime_proof
+
+    with windows_custody_session(home) as custody, windows_memory_session(home, custody=custody) as session:
+        validate_windows_runtime_proof(custody, proof)
+        if session._key is None:
+            raise RuntimeError("memory could not be restored to plaintext: native memory key unavailable")
+        _plan(session, session._key, seal_files=False)

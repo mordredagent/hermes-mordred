@@ -954,46 +954,57 @@ def _refuse_unsettled_swap(
         _refuse_committed_wal(path, entry["relative"])
 
 
-def _retained_swap(
+def _retained_swap(  # noqa: C901 - ordered holder proof, durable retention and checked publication
     root: Path,
     data: dict[str, Any],
     entry: dict[str, Any],
     holders_of: Callable[[list[Path]], list[int] | None] | None,
 ) -> None:
     path, staged, retained = (root / entry[name] for name in ("relative", "prepared", "retained"))
-    with open_private_directory(path.parent) as directory, directory.transaction() as tx:
+    with open_private_directory(path.parent) as directory:
         if path.exists() and _file_identity(path) == entry["prepared_identity"]:
             if staged.exists():
                 raise MigrationError("two prepared survivors are ambiguous")
             return
+        # Windows holder inspection owns its own private transaction. Keep the
+        # root EX lease, but acquire publication's transaction only afterwards.
+        # Recheck identities/revisions inside it; native rename also uses a
+        # share-zero handle, so a new holder cannot be silently displaced.
         _refuse_unsettled_swap(path, staged, entry, holders_of)  # Before any rename.
-        if path.exists():
-            if (
-                _file_identity(path) != entry["source_identity"]
-                or _revision(path) != entry["source_revision"]
-                or _file_identity(staged) != entry["prepared_identity"]
-                or retained.exists()
-            ):
-                raise MigrationError("original destination changed before retained publication")
-            tx.rename_file(path.name, retained.name, expected_identity=tx.stat(path.name).identity)
+        retained_now = False
+        with directory.transaction() as tx:
+            if path.exists():
+                if (
+                    _file_identity(path) != entry["source_identity"]
+                    or _revision(path) != entry["source_revision"]
+                    or _file_identity(staged) != entry["prepared_identity"]
+                    or retained.exists()
+                ):
+                    raise MigrationError("original destination changed before retained publication")
+                tx.rename_file(path.name, retained.name, expected_identity=tx.stat(path.name).identity)
+                retained_now = True
+        # Journal writes own a private transaction too. Finish it before
+        # publication reacquires this transaction, even if their parents coincide.
+        if retained_now:
             _save_journal(root, data, "retained")
-        # A rename changes only the ctime, which _revision()[2] records on POSIX.
-        if (
-            _file_identity(retained) != entry["source_identity"]
-            or _revision(retained)[:2] != entry["source_revision"][:2]
-            or _file_identity(staged) != entry["prepared_identity"]
-        ):
-            raise MigrationError("retained publication identities changed")
-        tx.rename_file(staged.name, path.name, expected_identity=tx.stat(staged.name).identity)
-        _transition("published")
-        for suffix in _SIDECAR_SUFFIXES:
-            try:
-                sidecar = tx.stat(path.name + suffix)
-            except PrivateFSError as exc:
-                if exc.reason != "missing":
-                    raise
-            else:
-                tx.delete_file(path.name + suffix, expected_identity=sidecar.identity)
+        with directory.transaction() as tx:
+            # A rename changes only the ctime, which _revision()[2] records on POSIX.
+            if (
+                _file_identity(retained) != entry["source_identity"]
+                or _revision(retained)[:2] != entry["source_revision"][:2]
+                or _file_identity(staged) != entry["prepared_identity"]
+            ):
+                raise MigrationError("retained publication identities changed")
+            tx.rename_file(staged.name, path.name, expected_identity=tx.stat(staged.name).identity)
+            _transition("published")
+            for suffix in _SIDECAR_SUFFIXES:
+                try:
+                    sidecar = tx.stat(path.name + suffix)
+                except PrivateFSError as exc:
+                    if exc.reason != "missing":
+                        raise
+                else:
+                    tx.delete_file(path.name + suffix, expected_identity=sidecar.identity)
 
 
 def _retire_originals(root: Path, data: dict[str, Any], target_key: DatabaseKey | None) -> None:

@@ -562,3 +562,87 @@ def delete_backup(source: Path, *, authority: Authority) -> None:
             }
             _migrate._put_json(authority.root, _JOURNAL, data)
         _recover_delete(authority.root, authority.snapshot, data)
+
+
+def export_database(  # noqa: C901, PLR0912, PLR0915 - ordered checked publication
+    root: Path, source: Path, output: Path, *, lease: ExclusiveLease, member: str | None = None
+) -> Path:
+    """Export retained recovery data to a new plaintext file, without overwriting."""
+    from ..keyvault._database_authority import observe_database_source
+    from ._shim import apply_key
+    from ._uninstall import archive_member
+
+    ExclusiveLease.assert_held(lease, root)
+    source = _canonical_destination(source)
+    output = _canonical_destination(output)
+    _destination_absent(output)
+    _no_pending(root)
+    snapshot, key = _migrate._authenticate(root, None, lease)
+    if snapshot is None:
+        raise DatabaseRefused("backup export requires the original native source")
+    source_identity = _migrate._file_identity(source)
+    source_revision = _migrate._revision(source)
+    _migrate._refuse_if_open([_migrate.Database(source, str(source), "")], None)
+    expected = None
+    if member is None:
+        entry = _find(root, source, snapshot)
+        expected = entry["verification"]
+    elif source.suffix.casefold() != ".zip":
+        raise DatabaseRefused("--member requires a ZIP backup")
+    nonce = secrets.token_hex(16)
+    copied = output.with_name(f".mordred-export-{nonce}.db")
+    staged = output.with_name(f".mordred-export-{nonce}-plain.db")
+    owned: dict[Path, list[int]] = {}
+    try:
+        with contextlib.ExitStack() as stack:
+            payload = stack.enter_context(archive_member(root, source, member)) if member is not None else source
+            # An isolated copy avoids source checkpoint/sidecar writes and keeps
+            # ATTACH inside one checked native VFS directory on Windows Server.
+            _migrate._reserve(copied)
+            owned[copied] = _migrate._file_identity(copied)
+            with (
+                payload.open("rb") as reader,
+                open_private_directory(copied.parent) as directory,
+                directory.transaction() as tx,
+            ):
+                while chunk := reader.read(1024 * 1024):
+                    if _migrate._file_identity(copied) != owned[copied]:
+                        raise DatabaseRefused("backup staging changed while copying")
+                    tx.append_bytes(copied.name, chunk)
+            actual = _migrate._schema(copied, key, root=root)
+            if expected is not None and actual != expected:
+                raise DatabaseRefused("registered backup schema/count verification failed")
+            _migrate._reserve(staged)
+            owned[staged] = _migrate._file_identity(staged)
+            with _migrate._offline_connection(copied, readonly=True, target=staged, alias="plain", root=root) as conn:
+                apply_key(conn, key)
+                # SQLite authorizes ATTACH before resolving bound parameters.
+                # Supply the escaped literal so Windows can admit only this
+                # exact reserved staging path, as in prepare_plain().
+                conn.execute(f"ATTACH DATABASE '{str(staged).replace(chr(39), chr(39) * 2)}' AS plain KEY ''")
+                conn.execute("SELECT sqlcipher_export('plain')").fetchall()
+                app, version = actual["ids"]
+                conn.execute(f"PRAGMA plain.application_id = {app}")
+                conn.execute(f"PRAGMA plain.user_version = {version}")
+                conn.execute("DETACH DATABASE plain")
+            verified_revision = _migrate._revision(staged)
+            if _migrate._schema(staged, None, root=root) != actual:
+                raise DatabaseRefused("plaintext export verification failed")
+            if _migrate._file_identity(source) != source_identity or _migrate._revision(source) != source_revision:
+                raise DatabaseRefused("backup changed during export")
+            ExclusiveLease.assert_held(lease, root)
+            if observe_database_source(root=root) != snapshot:
+                raise DatabaseRefused("native source changed during export")
+            with open_private_directory(output.parent) as directory, directory.transaction() as tx:
+                if _migrate._file_identity(staged) != owned[staged] or _migrate._revision(staged) != verified_revision:
+                    raise DatabaseRefused("plaintext staging changed after verification")
+                identity = tx.stat(staged.name).identity
+                tx.flush_file(staged.name, expected_identity=identity)
+                tx.rename_file(staged.name, output.name, expected_identity=identity)
+    finally:
+        for path, owned_identity in owned.items():
+            if path.exists() and _migrate._file_identity(path) == owned_identity:
+                _migrate._cleanup_sidecars(path)
+                with open_private_directory(path.parent) as directory, directory.transaction() as tx:
+                    tx.delete_file(path.name, expected_identity=tx.stat(path.name).identity)
+    return output

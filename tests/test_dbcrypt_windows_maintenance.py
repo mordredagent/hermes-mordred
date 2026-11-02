@@ -130,3 +130,52 @@ def test_windows_staging_errors_preserve_survivors_and_journal(tmp_path, monkeyp
     assert caught.value is error
     assert entry["prepared_identity"] is None
     assert {path: path.read_bytes() for path in before} == before
+
+
+@pytest.mark.parametrize("change_source", [False, True])
+@pytest.mark.parametrize("parent_name", ["", "mordred"])
+def test_retained_publication_does_not_nest_the_holder_transaction(tmp_path, change_source, parent_name):
+    from mordred_hermes._private_fs import open_private_directory
+    from mordred_hermes.dbcrypt import _migrate
+
+    tmp_path = tmp_path / "owned"
+    with open_private_directory(tmp_path, create=True), open_private_directory(tmp_path / "mordred", create=True):
+        pass
+    parent = tmp_path / parent_name
+    source = parent / "state.db"
+    staged = parent / "state.db.mordred-enc"
+    retained = parent / "state.db.mordred-original"
+    with open_private_directory(parent) as directory, directory.transaction() as tx:
+        tx.create_bytes(source.name, b"original")
+        tx.create_bytes(staged.name, b"verified replacement")
+    entry = {
+        "relative": str(source.relative_to(tmp_path)),
+        "prepared": str(staged.relative_to(tmp_path)),
+        "retained": str(retained.relative_to(tmp_path)),
+        "source_identity": _migrate._file_identity(source),
+        "source_revision": _migrate._revision(source),
+        "prepared_identity": _migrate._file_identity(staged),
+    }
+
+    def checked_holders(paths):
+        # Windows holder inspection takes this same directory transaction.
+        # Nonblocking acquisition also reproduces the conflict on POSIX,
+        # without hanging a regression test on its own publication lock.
+        for path in paths:
+            with open_private_directory(path.parent) as directory, directory.transaction(blocking=False) as tx:
+                tx.flush_file(path.name, expected_identity=tx.stat(path.name).identity)
+        if change_source:
+            source.write_bytes(b"new writer's data")
+        return []
+
+    if change_source:
+        with pytest.raises(_migrate.MigrationError, match="original destination changed"):
+            _migrate._retained_swap(tmp_path, {"files": [entry]}, entry, checked_holders)
+        assert source.read_bytes() == b"new writer's data"
+        assert staged.read_bytes() == b"verified replacement"
+        assert not retained.exists()
+        return
+    _migrate._retained_swap(tmp_path, {"files": [entry]}, entry, checked_holders)
+    assert source.read_bytes() == b"verified replacement"
+    assert retained.read_bytes() == b"original"
+    assert not staged.exists()

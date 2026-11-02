@@ -279,8 +279,18 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
   the inventory and policy name classifiers disagree (`src/mordred_hermes/dbcrypt/_monitor.py`, `src/mordred_hermes/_database_inventory.py`, `src/mordred_hermes/dbcrypt/_policy.py`).
 - [ ] Backup journal: a failed backup journal is never cleared in production, because
   `recover_backups`/`delete_backup` have no non-test caller (`src/mordred_hermes/dbcrypt/_backup.py`).
-- [ ] Uninstall: it decrypts everything, then refuses on the all-generation guard; move the
-  guard before the irreversible step (`src/mordred_hermes/wizard/uninstall_cli.py`).
+- [x] Uninstall: move known refusals before restoration and separate verified
+  package-removal authority from key deletion. Cover every profile, retain
+  recoverable backups, and export them after reinstalling. See
+  [the contract](SPEC.md#data-preserving-uninstall).
+- [x] Complete native candidate-wheel uninstall/reinstall/export and purge
+  acceptance on macOS Secure Enclave, Linux NitroTPM and qualified Windows
+  Server CNG (2026-11-02). Linux used an isolated PID/mount namespace and
+  ordinary UID 1000. Windows and the final macOS recheck include the two native
+  fixes discovered after the Linux run. Exact builds are recorded in CI. Keep
+  unresolved keyvault-reset ownership and backup-journal recovery outside this
+  change; these states refuse before restoration. See
+  [the validation log](CI.md#manual-live-device-validation-log).
 - [ ] Authority checks: `Authority.check()` runs on every authorizer/progress callback and takes
   Windows custody locks; validate at admission and before commit only (`src/mordred_hermes/dbcrypt/_connection.py`).
 - [ ] Connection errors: an unprotected out-of-scope connection error invalidates the whole

@@ -95,6 +95,22 @@ def databases_decrypt(*, dry_run: bool = False, home: Path | None = None) -> int
 
 def cli_databases(args: argparse.Namespace) -> int:
     command = getattr(args, "databases_command", None)
+    if command == "backup":
+        from .._database_lifecycle import acquire_exclusive
+        from ..dbcrypt._backup import export_database
+        from ..keyvault._database_authority import resolve_database_domain
+
+        try:
+            root = resolve_database_domain(_home()).root
+            with acquire_exclusive(root) as lease:
+                output = export_database(
+                    root, Path(args.source), Path(args.output), lease=lease, member=getattr(args, "member", None)
+                )
+        except (OSError, RuntimeError, ValueError) as exc:
+            _term.emit_error(f"database backup export stopped: {exc}; original backup retained")
+            return 1
+        print(f"Verified plaintext database exported to {output}. Original backup and native key retained.")
+        return 0
     if command == "encrypt":
         return databases_encrypt(dry_run=bool(getattr(args, "dry_run", False)))
     if command == "decrypt":
