@@ -56,7 +56,7 @@ def successful_steps(*names):
 
 
 def linux_steps():
-    return successful_steps("install", "mypy", "pytest", "ruff", "shellcheck", "status")
+    return successful_steps("install", "mypy", "pytest", "ruff", "import_linter", "shellcheck", "status")
 
 
 def needs():
@@ -340,6 +340,7 @@ def final_evidence(tier="full"):
                 "mypy",
                 "pytest",
                 "ruff",
+                "import_linter",
                 "shellcheck",
                 "status",
                 "feature_install",

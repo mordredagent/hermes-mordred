@@ -438,7 +438,7 @@ def _checked_keyvault_role(root: Path, native_key_id: str, *, reset: bool) -> Li
     if reset:
         # The reset parser checks exact schema, scoped selectors and physical
         # root identity. A journal is authoritative only inside checked custody.
-        from ..wizard.keyvault_cli import _load_reset_journal
+        from ._reset_journal import _load_reset_journal
 
         journal = _load_reset_journal(root)
         if journal.metadata_incomplete or journal.retained_legacy:

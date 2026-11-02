@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from mordred_hermes.keyvault import _native_key_id, _storage
+from mordred_hermes.keyvault import _native_key_id, _reset_journal, _storage
 from mordred_hermes.wizard import _keyvault_init, keyvault_cli
 from tests._keyvault_fakes import FakeBackend
 
@@ -20,7 +20,7 @@ def install_fake_owned_deletion(monkeypatch: pytest.MonkeyPatch) -> None:
     def delete(key_ids, *, root, backend, database_lease):
         if not isinstance(backend, FakeBackend):
             return original_delete(key_ids, root=root, backend=backend, database_lease=database_lease)
-        journal = keyvault_cli._load_reset_journal(root)
+        journal = _reset_journal._load_reset_journal(root)
         assert journal.key_ids == key_ids
         assert not journal.metadata_incomplete and not journal.retained_legacy
         failures = []
