@@ -20,6 +20,7 @@ from weakref import WeakKeyDictionary
 from .._config_io import CanonicalPaths, CanonicalSession, _MordredTransaction, canonical_session
 from .._custody_order import custody_scope
 from .._database_contracts import DatabaseRefused
+from .._database_uninstall import UninstallAuthorization
 from .._private_fs import (
     FileIdentity,
     PrivateFSError,
@@ -315,11 +316,13 @@ class WindowsCustodySession:
             database_home=self.home if role == "memory" else None,
         )
 
-    def _memory_database_guard(self, database_lease: ExclusiveLease | None) -> None:
+    def _memory_database_guard(
+        self, database_lease: ExclusiveLease | None, uninstall: UninstallAuthorization | None = None
+    ) -> None:
         self.check()
         from ._database_mutation import _assert_memory_database_mutation_safe
 
-        _assert_memory_database_mutation_safe(home=self.home, database_lease=database_lease)
+        _assert_memory_database_mutation_safe(home=self.home, database_lease=database_lease, uninstall=uninstall)
 
     def _transaction(self) -> PrivateTransaction:
         self.check()
@@ -701,9 +704,10 @@ class WindowsCustodySession:
         *,
         erase_authorized: bool = False,
         database_lease: ExclusiveLease | None = None,
+        uninstall: UninstallAuthorization | None = None,
     ) -> None:
         if lease.role == "memory":
-            self._memory_database_guard(database_lease)
+            self._memory_database_guard(database_lease, uninstall)
         self.validate_lease(lease)
         self._delete_guard(lease.role, erase_authorized=erase_authorized)
         manifest = self._manifest()
@@ -716,26 +720,33 @@ class WindowsCustodySession:
         owner = _issue_native_owner(self, native_key_id=lease.native_key_id, backend=backend)
         self.backend_for(lease)
         # Check final inventory before publishing even the deletion intent.
-        with _owned_delete_scope(owner, backend=backend, database_lease=database_lease):
+        with _owned_delete_scope(owner, backend=backend, database_lease=database_lease, uninstall=uninstall):
             pass
         self._journal(pending, create=True)
         with self.canonical.publication_receipt() as receipt:
             receipt.mark_published()
-            with _owned_delete_scope(owner, backend=backend, database_lease=database_lease) as deletion:
+            with _owned_delete_scope(
+                owner, backend=backend, database_lease=database_lease, uninstall=uninstall
+            ) as deletion:
                 backend.delete_enclave_key(lease.native_key_id, deletion=deletion)
             pending = replace(pending, phase="deleted")
             if pending.role == "memory":
-                self._memory_database_guard(database_lease)
+                self._memory_database_guard(database_lease, uninstall)
             self._journal(pending)
-            self._finish_delete(manifest, pending, database_lease=database_lease)
+            self._finish_delete(manifest, pending, database_lease=database_lease, uninstall=uninstall)
 
     def _finish_delete(
-        self, manifest: Manifest, pending: Pending, *, database_lease: ExclusiveLease | None = None
+        self,
+        manifest: Manifest,
+        pending: Pending,
+        *,
+        database_lease: ExclusiveLease | None = None,
+        uninstall: UninstallAuthorization | None = None,
     ) -> None:
         if pending.phase != "deleted":
             raise CustodyError("native deletion has not been positively recorded")
         if pending.role == "memory":
-            self._memory_database_guard(database_lease)
+            self._memory_database_guard(database_lease, uninstall)
             if _read(self._tx, WRAPPED, wrap.HEADER_LEN) is not None:
                 self._remove(WRAPPED)
             if _read(self._tx, OPTOUT) is not None:
@@ -820,6 +831,7 @@ class WindowsCustodySession:
         *,
         erase_authorized: bool = False,
         database_lease: ExclusiveLease | None = None,
+        uninstall: UninstallAuthorization | None = None,
     ) -> RoleReset:
         """Delete every owned generation of exactly one role through ``delete_role``.
 
@@ -831,12 +843,14 @@ class WindowsCustodySession:
         Audit/Telegram reset does not consult the gateway inventory (callers gate).
         """
         if role == "memory":
-            self._memory_database_guard(database_lease)
+            self._memory_database_guard(database_lease, uninstall)
         leases = self._reset_leases(role, erase_authorized=erase_authorized)
         deleted: list[str] = []
         for lease in leases:
             try:
-                self.delete_role(lease, erase_authorized=erase_authorized, database_lease=database_lease)
+                self.delete_role(
+                    lease, erase_authorized=erase_authorized, database_lease=database_lease, uninstall=uninstall
+                )
             except BaseException as exc:
                 exc.add_note(
                     f"Windows {role} custody reset stopped after {len(deleted)} confirmed deletion(s); "

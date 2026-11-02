@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Literal, Never, cast
 from weakref import WeakKeyDictionary
 
 from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._database_uninstall import UninstallAuthorization
 
 if TYPE_CHECKING:
     from mordred_hermes._database_lifecycle import ExclusiveLease
@@ -87,6 +88,7 @@ class _OwnerRecord:
 class _PermitRecord:
     owner: ValidatedNativeOwner
     lease: ExclusiveLease | None
+    uninstall: UninstallAuthorization | None = None
     active: bool = True
     consumed: bool = False
 
@@ -325,7 +327,9 @@ def _owner_record(owner: ValidatedNativeOwner, backend: NativeBackend) -> _Owner
     return record
 
 
-def _check_database(record: _OwnerRecord, lease: ExclusiveLease | None) -> None:
+def _check_database(
+    record: _OwnerRecord, lease: ExclusiveLease | None, uninstall: UninstallAuthorization | None = None
+) -> None:
     if record.facts.role == "memory" and record.facts.database_home != record.facts.home:
         raise DatabaseRefused("native memory owner lacks its checked database home")
     if record.facts.database_home is not None:
@@ -333,17 +337,23 @@ def _check_database(record: _OwnerRecord, lease: ExclusiveLease | None) -> None:
             raise DatabaseRefused("native memory deletion requires a preceding database lease")
         from ._database_mutation import _assert_memory_database_mutation_safe
 
-        _assert_memory_database_mutation_safe(home=record.facts.database_home, database_lease=lease)
+        _assert_memory_database_mutation_safe(
+            home=record.facts.database_home, database_lease=lease, uninstall=uninstall
+        )
 
 
 @contextmanager
 def _owned_delete_scope(
-    owner: ValidatedNativeOwner, *, backend: NativeBackend, database_lease: ExclusiveLease | None
+    owner: ValidatedNativeOwner,
+    *,
+    backend: NativeBackend,
+    database_lease: ExclusiveLease | None,
+    uninstall: UninstallAuthorization | None = None,
 ) -> Iterator[NativeDeletePermit]:
     record = _owner_record(owner, backend)
-    _check_database(record, database_lease)
+    _check_database(record, database_lease, uninstall)
     permit = object.__new__(NativeDeletePermit)
-    issued = _PermitRecord(owner, database_lease)
+    issued = _PermitRecord(owner, database_lease, uninstall)
     _permits[permit] = issued
     try:
         yield permit
@@ -364,7 +374,7 @@ def _check_delete_request(*, backend: NativeBackend, native_key_id: str, deletio
         owner = _owner_record(permit.owner, backend)
         if native_key_id != owner.selector:
             raise DatabaseRefused("native deletion selector does not match custody")
-        _check_database(owner, permit.lease)
+        _check_database(owner, permit.lease, permit.uninstall)
     except BaseException:
         permit.consumed = True
         raise
@@ -394,7 +404,7 @@ def _validate_delete_invocation(
     owner = _owner_record(permit.owner, backend)
     if native_key_id != owner.selector:
         raise DatabaseRefused("native deletion selector does not match custody")
-    _check_database(owner, permit.lease)
+    _check_database(owner, permit.lease, permit.uninstall)
     with _tag_invocation(_backend_pairs(backend, native_key_id)):
         yield
 

@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Literal
 
 from .._database_contracts import DatabaseRefused, NativeSnapshot, RootIdentity, decode_database_source_binding
 from .._database_lifecycle import ExclusiveLease
+from .._database_uninstall import UninstallAuthorization
 from .._private_fs import PrivateFSError, open_private_directory
 from .._private_fs._types import validate_leaf
 
@@ -345,7 +346,13 @@ def enroll_database_source(*, root: Path, lease: ExclusiveLease) -> NativeSnapsh
         return result
 
 
-def retire_database_source(*, root: Path, expected: NativeSnapshot, lease: ExclusiveLease) -> None:
+def retire_database_source(
+    *,
+    root: Path,
+    expected: NativeSnapshot,
+    lease: ExclusiveLease,
+    uninstall: UninstallAuthorization | None = None,
+) -> None:
     """Retire only the observed POSIX binding after a fresh all-generation guard.
 
     The caller owns native custody and retains the preceding database lease
@@ -354,6 +361,7 @@ def retire_database_source(*, root: Path, expected: NativeSnapshot, lease: Exclu
     Successful retirement is not silently undone if that later operation fails.
     """
     from .._database_inventory import assert_mutation_safe
+    from .._database_uninstall import check_authorization
 
     with _refusal():
         root, identity = _root(root)
@@ -369,7 +377,10 @@ def retire_database_source(*, root: Path, expected: NativeSnapshot, lease: Exclu
             raw = directory.read_bytes(_BINDING, max_bytes=4096)
             if directory.stat(_BINDING) != observed or decode_database_source_binding(raw) != expected:
                 raise DatabaseRefused("database source binding changed before retirement")
-            assert_mutation_safe(root, None, lease)
+            if uninstall is None:
+                assert_mutation_safe(root, None, lease)
+            else:
+                check_authorization(uninstall, root=root, lease=lease, purpose="delete")
             if _observe_posix(root, identity) != expected:
                 raise DatabaseRefused("database source changed during retirement")
             with directory.transaction() as tx:

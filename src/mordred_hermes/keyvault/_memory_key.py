@@ -19,6 +19,7 @@ from pathlib import Path
 from .._custody_order import custody_scope
 from .._database_contracts import DatabaseBusy, DatabaseRefused
 from .._database_lifecycle import ExclusiveLease
+from .._database_uninstall import UninstallAuthorization
 from . import _storage, wrap
 from ._exceptions import WrapError, WrapKeyNotFound
 from ._native_deletion import (
@@ -320,17 +321,21 @@ def _ensure_linux_memory_key(
 
 
 def delete_linux_memory_key(
-    *, home: Path, backend: NativeBackend | None = None, database_lease: ExclusiveLease | None = None
+    *,
+    home: Path,
+    backend: NativeBackend | None = None,
+    database_lease: ExclusiveLease | None = None,
+    uninstall: UninstallAuthorization | None = None,
 ) -> None:
     from ._database_authority import observe_database_source, retire_database_source
     from ._database_mutation import _assert_memory_database_mutation_safe, database_key_mutation
 
     with _memory_failure(), contextlib.ExitStack() as stack:
         if database_lease is None:
-            database_lease = stack.enter_context(database_key_mutation(root=home, generation=None))
-        _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
+            database_lease = stack.enter_context(database_key_mutation(root=home, generation=None, uninstall=uninstall))
+        _assert_memory_database_mutation_safe(home=home, database_lease=database_lease, uninstall=uninstall)
         stack.enter_context(memory_key_lock(home))
-        _assert_memory_database_mutation_safe(home=home, database_lease=database_lease)
+        _assert_memory_database_mutation_safe(home=home, database_lease=database_lease, uninstall=uninstall)
         selected = backend if backend is not None else linux_memory_backend(home)
         path = memory_key_path(home)
         if not (path.exists() or path.is_symlink()):
@@ -338,11 +343,15 @@ def delete_linux_memory_key(
         with _native_memory_custody(home, selected) as custody:
             owner = _issue_native_owner(custody, native_key_id=memory_key_id(home), backend=selected)
             binding = home / "mordred" / "db-key-source.json"
-            if binding.exists() or binding.is_symlink():
-                expected = observe_database_source(root=home)
+            expected = observe_database_source(root=home) if binding.exists() or binding.is_symlink() else None
+            if expected is not None and uninstall is None:
                 retire_database_source(root=home, expected=expected, lease=database_lease)
-            with _owned_delete_scope(owner, backend=selected, database_lease=database_lease) as permit:
+            with _owned_delete_scope(
+                owner, backend=selected, database_lease=database_lease, uninstall=uninstall
+            ) as permit:
                 selected.delete_enclave_key(memory_key_id(home), deletion=permit)
+            if expected is not None and uninstall is not None:
+                retire_database_source(root=home, expected=expected, lease=database_lease, uninstall=uninstall)
             path.unlink()
 
 
