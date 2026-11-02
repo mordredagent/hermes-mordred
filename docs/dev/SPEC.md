@@ -316,7 +316,8 @@ supported hosts.
 The distribution is `hermes-mordred`; imports remain under `mordred_hermes`.
 Hermes sees one plugin, `mordred`. Its `register()` first installs the shared
 integrity gate on `on_session_start`, then registers the components in this
-order (the table order):
+order (the table order). The historical heading is retained as a link anchor;
+the current registration contains eight components:
 
 | Component | Module | Current responsibility |
 |---|---|---|
@@ -324,7 +325,9 @@ order (the table order):
 | `llm_guard` | `mordred_hermes.llm_guard` | `mordred-local` registration, strict provider/endpoint refusal, harness and auxiliary-client guards |
 | `network` | `mordred_hermes.network` | Tor/VPN/clearnet route lifecycle, proxy evidence, health checks, transport gating |
 | `privacy_check` | `mordred_hermes.privacy_check` | install policy, generic runtime tool policy, audit writer, plugin integrity |
+| `dbcrypt` | `mordred_hermes.dbcrypt` | SQLCipher database lifecycle, monitoring and status |
 | `e2e` | `mordred_hermes.extension.gateway_plugin` | gateway-side encrypted extension dispatch, signing integration, read-only Telegram tools |
+| `activity` | `mordred_hermes.activity` | encrypted activity store, history hooks and reader tools |
 | `wizard` | `mordred_hermes.wizard` | configuration, migration, status, policy, network, keyvault, vault, encryption, and plugin CLI |
 
 A component whose `register()` raises an ordinary exception is contained: its
@@ -4859,13 +4862,15 @@ Owner decisions (2026-10-22):
   `activity` component opens. Protection is SQLCipher only, the same level as
   `state.db` after `databases encrypt` and as the activity tables: plaintext
   inside the encrypted file, FTS allowed. Per-question Touch ID is no longer
-  required for Telegram text once it is migrated. The store is macOS-only and
-  opens only through the activity protection gate
+  required for Telegram text once it is migrated. The store opens only through
+  the shared native database authority and activity protection gate
   (`check_protection`: `conversion_pending`, `not_armed`,
   `unprotected_process`, `no_key`).
-- Linux and Windows keep the `.enc` archive and `telegram_ask` unchanged. Head
-  lines are produced through a legacy adapter; forward separation and the
-  Hermes read tool are macOS-only.
+- The original macOS delivery is extended by the shared database lifecycle in
+  PR #270. Qualified Linux/Windows native consumers exist; admission and
+  acceptance remain distinct (see the cross-platform database contract below).
+  Retained `.enc` archives use the legacy adapter until explicitly migrated;
+  a migrated store must never silently fall back to that archive.
 - Imported text is reference data. It never carries authority to trigger an
   action, regardless of who the speaker was.
 
@@ -5227,8 +5232,9 @@ Things the code does that the text above does not say, or says differently.
   are touched; `--force` goes on without the rows and still exits 1, reporting
   that the rows were left behind. `--force` means nothing without `--forget`.
   `uninstall` calls the Telegram forget with `--force` semantics, so it never
-  stops on undeletable rows and reports them. On Windows the forget path does
-  not touch `import_*` rows (the store is macOS-only).
+  stops on undeletable rows and reports them. The shared native store is no
+  longer macOS-only; Windows consumer lifecycle and its remaining acceptance
+  are governed by the cross-platform database contract and TODO.
 - History source selection (`extension/telegram/search.py`, `history.
   load_ask_records`): `mordred_history_search` first opens `mordred.db`
   through the protection gate with no Telegram unseal. If the store opens and
@@ -5416,9 +5422,11 @@ The owner says "sync my mail" in a Hermes chat. Hermes calls
 `mordred_mail_sync`; Mordred fetches new mail over IMAP and writes it through
 the collector above (`plan_import`, the store-backed quote linker,
 `write_thread`); Hermes receives counts only. `hermes-mordred mail fetch` runs
-the same function (`imports/mail/imap_sync.run_fetch`). macOS only: other
-platforms refuse with `unsupported_platform`. OAuth and the Gmail API are not
-part of this delivery ([`TODO.md`](./TODO.md)).
+the same function (`imports/mail/imap_sync.run_fetch`). The original macOS
+flow now has Linux/Windows native consumers in #270; platform eligibility,
+credential custody, memory protection and database authority must all admit
+execution. This is not a claim of completed live-account acceptance on each OS.
+OAuth and the Gmail API remain [deferred](ROADMAP.md#deferred-activity-mail-and-desktop-features).
 
 - **Credentials.** `mail setup` reads the address and an app password on a
   TTY (never argv or the environment; `tty_required` otherwise), logs in once
@@ -5797,7 +5805,11 @@ Where the code differs from the design record:
 
 ## Desktop mail and ceremony pages (2026-10-23)
 
-Status: specification; nothing below is implemented yet. Design record:
+Status: implemented in the merged Desktop/mail code (D1–D4), with D5 direct-tools
+and D6 history switches. Remaining live UI acceptance and the post-#270 passive
+status regression are tracked in [TODO](TODO.md#imported-message-provenance);
+the 2026-10-23 CI observations cover only the operations actually run.
+Design record:
 [`2026-10-23-desktop-mail-and-ceremonies-design.md`](../superpowers/specs/2026-10-23-desktop-mail-and-ceremonies-design.md).
 Delivery is the PR sequence D1 to D5 in
 [PLAN.md](PLAN.md#desktop-mail-and-ceremony-pages-implementation).

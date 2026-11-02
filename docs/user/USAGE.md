@@ -1034,7 +1034,10 @@ hermes-mordred telegram logout --forget --force   # go on even if the imported r
 > not distinguished`; messages synced afterwards carry the exact sender,
 > forward and quote information. A sync into `mordred.db` is one all-or-nothing
 > run: if it is interrupted nothing is readable and the next sync fetches those
-> chats again. Linux and Windows keep the `.enc` archive and `telegram_ask`.
+> chats again. Qualified Linux/Windows native store consumers also exist in the
+> shared database rollout; their source/wheel and live-account acceptance remains
+> incomplete. Keep existing `.enc` archives until an explicit migration succeeds;
+> see [remaining database work](../dev/TODO.md#hermes-database-encryption).
 >
 > **`logout --forget` and the imported rows.** `--forget` deletes this
 > account's Telegram rows in `mordred.db` first. If that fails it stops with

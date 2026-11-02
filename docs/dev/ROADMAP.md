@@ -327,6 +327,24 @@ Until those conditions are met, user documentation continues to use
 
 - **Priority**: H after the Hermes version floor can move to 0.19.0.
 
+## Deferred activity, mail and Desktop features
+
+These candidates were moved from TODO's unscheduled list during the 2026-11-02
+reconciliation. They are not approved implementation work. Before selecting one,
+define its owner boundary, privacy contract and acceptance criteria in SPEC/PLAN.
+
+- Desktop mail file picker and import jobs for Takeout mbox and `.eml` files;
+  the terminal import remains available.
+- A user-chosen recovery passphrase on the Desktop page, alongside the current
+  generated eight-word passphrase ceremony.
+- Gmail API collection through the existing normalization path.
+- OAuth 2.0 for IMAP (`XOAUTH2`) and/or Gmail API: client registration, consent
+  and sealed refresh-token lifecycle are prerequisites.
+- Label-language default (`en` or `ja`), after provenance evaluation.
+
+Linux/Windows `mordred.db` acceptance is current work, not a deferred feature;
+see [TODO](TODO.md#hermes-database-encryption).
+
 ## Forever out of scope
 
 - Submitting Mordred changes to Hermes upstream.

@@ -3,7 +3,9 @@
 > **Status**: current implementation map. Completed PR-by-PR history lives in
 > Git and PR descriptions; this document describes the architecture to maintain
 > now. [`SPEC.md`](./SPEC.md) defines behavior and [`TODO.md`](./TODO.md) lists
-> open work.
+> open work. The dated execution sequences below retain stable headings for
+> references; they are not independent task queues. Use TODO for reconciled
+> implementation/acceptance status and CI for actual validation evidence.
 
 Mordred is a standalone Python distribution loaded through
 `hermes_agent.plugins`. It does not fork Hermes and does not submit changes to
@@ -26,6 +28,7 @@ names, which survive as config section names (`plugins.mordred_network`, ...);
 | `mordred_network` | `network/` | Process-wide Tor/VPN/clearnet route |
 | `mordred_keyvault` | `keyvault/` | Vault, hardware key, backup, and signing |
 | `mordred_e2e` | `extension/gateway_plugin.py` | Slack/Discord E2E gateway hook, Telegram tools |
+| (none) | `dbcrypt/` | Shared SQLCipher lifecycle, monitoring, migration and backup authority |
 | (none) | `activity/` | Encrypted browser-activity capture, store and corrections |
 
 Shared policy, path, audit, YAML, provider, and terminal boundaries live at the
@@ -2527,6 +2530,11 @@ live-gated ([CI.md](CI.md#provenance-evaluation-runs)).
 **Spec:** [Desktop mail and ceremony pages](SPEC.md#desktop-mail-and-ceremony-pages-2026-10-23);
 design record
 [`2026-10-23-desktop-mail-and-ceremonies-design.md`](../superpowers/specs/2026-10-23-desktop-mail-and-ceremonies-design.md).
+D1–D4 are implemented in the merged Desktop/mail code; D5 direct-tools and D6
+history switches are also present. Remaining UI/native acceptance and regressions
+are tracked under [TODO](TODO.md#imported-message-provenance). The sequence below
+records component boundaries and validation requirements, not unstarted tasks.
+
 One component per PR, all targeting `dev`. Each PR runs
 `uv run python tools/run_critical_tests.py`, the changed test modules, `ruff` and
 `mypy --strict`; D2 and D4 also run their complete containing test modules
@@ -2706,7 +2714,7 @@ Delivered in PRs 11 and 12.
 The user approved the architecture on 2026-10-24. The
 [implementation plan](../superpowers/plans/2026-10-24-cross-platform-database-encryption.md)
 defines the stage gate, exact interfaces, test tasks and component PR boundaries.
-Product code is delivered by PR #270; platform acceptance is still recorded
+Product code merged in PR #270 on 2026-10-28; platform acceptance is still recorded
 separately in docs/dev/CI.md's manual validation log.
 
 Keep independent component PRs in dependency order:

@@ -4,11 +4,13 @@ Status: phases 0 (feasibility spike), 1 (startup hook under Hermes Desktop)
 2 (`mordred_hermes.dbcrypt`, all of Hermes's databases), 3 (conversion of
 an existing home, `hermes-mordred databases encrypt`), 4 (monitor), 5 (status
 line), reverse conversion (`databases decrypt`) and both uninstall modes
-done; the Desktop page step and log-preview redaction remain.
+implemented. The Desktop database step also exists; its remaining acceptance
+and passive-status regression, log-preview redaction and lifecycle review
+findings remain open.
 Track those remaining tasks in [`TODO.md`](./TODO.md#hermes-database-encryption).
 
 The selected cross-platform direction is a shared SQLCipher lifecycle for
-Linux and Windows as well as macOS. Its proposed design is
+Linux and Windows as well as macOS, delivered in PR #270. Its design is
 [`Cross-platform database encryption`](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md).
 Native database storage admission is source-controlled: Linux, and Windows Server
 x64 with the qualified sqlcipher3-wheels 0.5.7 driver pair and the
@@ -57,6 +59,13 @@ supplied explicitly because the file header is kept in plaintext (below).
 The key is resolved on the first keyed `connect()`; if `HERMES_MEMORY_KEY` is
 not in the environment yet, the vault-sealed `.env` is injected then, and the
 plugin's later injection is skipped (one vault unlock per process).
+
+The key-resolution explanation above describes the original macOS compatibility
+format. Native Linux/Windows authority is root-bound and separately owned; do
+not infer that a bare environment key authorizes their lifecycle. The shared
+[contract](SPEC.md#cross-platform-database-encryption-proposed-2026-10-24)
+and [implementation map](PLAN.md#cross-platform-database-encryption-rollout-proposed-2026-10-24)
+own current platform behavior.
 
 ## Mechanism
 

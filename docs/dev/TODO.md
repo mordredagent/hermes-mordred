@@ -5,6 +5,26 @@
 > [`ROADMAP.md`](./ROADMAP.md). [`PLAN.md`](./PLAN.md) describes the
 > implementation that exists today.
 
+Reconciled against `dev` at `f44d521c6` on 2026-11-02. This is a source,
+test-definition and recorded-evidence review, not a fresh runtime acceptance run.
+Unchecked items can mean code changes, missing acceptance evidence, or decisions;
+they do not by themselves mean a feature is absent. Existing review findings
+remain open unless code or recorded evidence resolves them.
+
+## Current triage
+
+| Work | Remaining outcome | Location |
+|---|---|---|
+| Safety and recovery | Reproduce and fix backup recovery, uninstall ordering, key reset and mail deletion findings in separate component changes | [Database review follow-ups](#follow-ups-from-the-2026-10-28-pr-270-review) |
+| Platform acceptance | Complete current source/wheel lifecycle evidence, Windows 11/Desktop and live external flows | [Database rollout](#hermes-database-encryption), [Windows acceptance](#windows-product-completion-backlog) |
+| Desktop operation | Finish unrun mail/ceremony checks and address passive-status, stale-anchor and launcher defects | [Imported-message follow-ups](#imported-message-provenance) |
+| Model/provider evidence | Complete Bedrock/Vertex transport checks and production-model provenance evaluation | [Network](#phase-3--network-paths-mordrednetwork), [Provenance](#imported-message-provenance) |
+| Deferred features | Select scope before implementation; no delivery commitment | [ROADMAP](ROADMAP.md#deferred-activity-mail-and-desktop-features) |
+
+This table is navigation, not a second task list. Merge evidence closes
+implementation only; CI's dated live records retain their original platform,
+revision and limitations.
+
 Every item here must have a known owner boundary and a testable completion
 condition. Preserve the zero-upstream-PR commitment and one-plugin-one-PR rule.
 
@@ -45,7 +65,7 @@ change.
 ### 0.4 Plugin scaffolding (five plugins)
 
 No open work. The heading is retained as a stable historical anchor; the
-current package exposes one entry-point plugin, `mordred`, with six components.
+current package exposes one entry-point plugin, `mordred`, with eight components.
 
 ### 0.5 `mordred-hermes` package scaffold
 
@@ -53,9 +73,9 @@ No open work. Release mechanics belong to [`CI.md`](./CI.md) §Normal release.
 
 ### 0.6 CI workflow
 
-No open implementation work. Scope-aware CI uses 3–5 ordinary jobs, two for
-ready allowlisted user-documentation PRs and six for final validation. Workflow YAML and
-[`CI.md`](./CI.md) own routing, evidence, matrix tradeoffs and hosted validation.
+No open implementation work in this phase. Workflow YAML and
+[`CI.md`](./CI.md) own routing, worker counts, validation packs and rerun policy;
+do not copy a fixed job count into this checklist.
 
 ### 0.7 ~~HSeam-1 PR~~ → Zero-PR commitment (deferred to v2 vendored fork)
 
@@ -179,61 +199,32 @@ API and the operator CLI.
 
 ### Open decisions
 
-- [x] Select the single initialized logical key automatically, collect recovery
-  inputs through masked prompts, require a new `--output` path, and cover an
-  isolated export/recover round trip. Secrets are never accepted in argv or
-  written to logs.
+No open export decision. The CLI selects the initialized logical key, collects
+masked recovery inputs and requires a new output path; secrets stay out of argv
+and logs.
 
 ### 4.1 `mordred_keyvault` plugin
 
 No open format/API work for export: `keyvault.api.export_backup()` already
-returns an MRKV blob. Keep its wire compatibility unchanged while adding the
-operator surface.
+returns an MRKV blob. The operator surface exists; preserve wire compatibility.
 
 ### 4.2 Wizard additions (Phase 4)
 
-- [x] Add `hermes-mordred keyvault export --output <path>` backed by
-  `keyvault.api.export_backup()`.
-- [x] Write the output atomically as a mode-`0600` regular file, refuse unsafe
-  destinations, avoid printing secret inputs or blob contents, and leave no
-  partial output on failure.
-- [x] Verify the blob in tests against an isolated fresh profile/fake backend
-  without mutating the source profile.
-- [x] Update Quickstart/Usage/README to recommend
-  export-before-reset, cross-profile key migration, or attended-to-unattended
-  key replacement.
+Export CLI, atomic private output, refusal/cleanup and isolated recovery coverage
+are implemented. Usage documents export-before-reset and cross-profile recovery.
 
 ### 4.3 Tests (Phase 4)
 
-- [x] Cover parser/help, interactive and non-interactive secret handling,
-  permissions, existing-output refusal, atomic failure cleanup, successful
-  round trip, wrong-passphrase failure, and source-profile preservation.
+Parser, prompt, permissions, atomic-failure, recovery and source-preservation
+coverage exists. Run the containing modules when changing these paths.
 
 ### 4.4 Agent-memory at-rest encryption (cross-plugin: keyvault + wizard)
 
-- [x] Docs: specify the sealed memory file format, arming rule, seam
-  coverage, and lifecycle in SPEC/PLAN/PATHS/ROADMAP (this PR).
-- [x] Keyvault runtime: the memory-hook wrapper around the memory tool seam,
-  the capability probe, and the CI canary against the installed upstream.
-- [x] Weekly selected-source main memory/Journey canary with parent/child
-  provenance, sealed-backup/refusal behavior and separate issue-report authority.
-- [x] Wizard lifecycle: `encryption enable/disable/purge memory`, `status`
-  drift, and the `setup` `memory-encryption` step.
-- [x] Wizard production file-vault eligibility and anchor `WrapError` handling:
-  early macOS Keychain eligibility, first Windows exclusions, cached/injected
-  portable stores, recovery refusal before prompts, and cold-path rotation.
-  Dedicated Linux/Windows memory engines remain independent.
-- [x] Linux general setup and enable-all memory routing through the existing TPM
-  engine; file-vault enable eligibility, load-only readiness, pause semantics and
-  actual Windows host precedence remain intact.
-- [x] Real-device acceptance of the new Linux setup/enable-all entrances and
-  fresh installed shape-B memory drift backup/refusal, using the bounded test
-  in `tests/integration/test_linux_memory_orchestration_tpm.py` on actual NitroTPM:
-  3 gated tests passed; see [`CI.md`](./CI.md#manual-live-device-validation-log)
-  (2026-10-11). This is the bounded memory slice, not full setup or live-account acceptance.
-- [x] Live verification on Apple Silicon with a running gateway (2026-08-20).
-- [x] Record the live-verification result in [`CI.md`](./CI.md) §Manual
-  live-device validation log (2026-08-20).
+Memory runtime hooks, drift canaries, wizard lifecycle and Linux setup routing
+are implemented. CI.md records Apple Silicon live verification (2026-08-20)
+and the bounded three-test Linux NitroTPM orchestration run (2026-10-11).
+These records do not establish full setup, Windows 11 or live-account acceptance;
+those remaining gates are tracked in their platform sections below.
 
 ### Acceptance gate (Phase 4)
 
@@ -247,7 +238,10 @@ the source remains usable, and failure paths leave no partial destination.
 The macOS CLI, startup protection, monitor and uninstall lifecycle are implemented
 ([design](./STATE_DB_ENCRYPTION.md)). Remaining work:
 
-- [ ] Desktop: add database enable/disable/status controls, including scheduled conversion.
+- [ ] Desktop acceptance: status and scheduled encryption exist in
+  `desktop/_databases.py` and the page. Finish the throwaway-home ceremony checks
+  under Desktop operability below; decide whether a page-level decrypt control
+  is required (the CLI already provides `databases decrypt`).
 - [ ] Logging: redact message previews (`msg=`) from `logs/agent.log`.
 - [ ] Cross-platform shared SQLCipher lifecycle (owner-selected Approach A):
   the [design](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md)
@@ -262,17 +256,17 @@ The macOS CLI, startup protection, monitor and uninstall lifecycle are implement
   complete 639-file graph passed. The reviewed Windows read optimization at
   38f passed local focused checks and reduced actual metadata observation cost
   by about 58%; it does not establish new source/wheel or lifecycle acceptance.
-  The owner chose a shorter Draft PR completion path. New-runtime Windows
+  PR #270 merged on 2026-10-28 with acceptance incomplete. New-runtime Windows
   qualification, Windows8, final16 and unresolved baseline Windows test groups
   remain follow-up work. Do not mark this item complete or relabel old evidence.
   Both Codex SOL development environments are prepared. Retain failed roots
   without replay and reuse the accepted Linux8/qualification records.
   Windows Desktop/Hello, live accounts/model behavior and measured Touch ID
   counts remain separate. See [the validation log](CI.md#manual-live-device-validation-log)
-  and Draft PR [#270](https://github.com/mordredagent/hermes-mordred/pull/270).
-- [ ] Complete Telegram, mail and activity consumers after their shared database
-  prerequisites land. A database-layer pass alone does not establish collector
-  support or Windows 11/Desktop acceptance. Touch ID prompt reduction is a
+  and merged PR [#270](https://github.com/mordredagent/hermes-mordred/pull/270).
+- [ ] Finish acceptance and remaining defects in the Telegram, mail and activity
+  consumers delivered with the shared database implementation. A database-layer
+  pass alone does not establish collector support or Windows 11/Desktop acceptance. Touch ID prompt reduction is a
   separate change.
 
 #### Follow-ups from the 2026-10-28 PR #270 review
@@ -353,25 +347,13 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
 
 ### Linux private Telegram (proposed)
 
-- [x] Review the [design](SPEC.md#linux-private-telegram-design) and
-  [implementation plan](PLAN.md#linux-private-telegram-implementation-plan); land contracts
-  before component implementation PRs (contract PR #181).
-- [x] Verify the unchanged Linux TPM helper, Python wrap/unwrap, and Telegram
-  secret-store path on actual EC2 NitroTPM before feature development (2026-10-07).
-  Cross-instance rejection, stop/start persistence, CLI setup, and deletion
-  passed; 64 native and 172 focused Python tests passed. CI swtpm evidence
-  remains separate. See [CI.md](CI.md#manual-live-device-validation-log).
-- [x] Keyvault: TPM-wrapped memory-key custody, runtime resolution, and probes.
-- [x] Wizard: Linux memory lifecycle, uninstall, Telegram setup and diagnostics.
-- [x] Desktop/extension: platform-aware hardware and memory setup, preserving
-  macOS behavior and existing client/API compatibility.
-- [x] Verify synthetic custody/service integration independently on actual EC2
-  NitroTPM and swtpm; verify the packaged Linux Desktop setup.
-- [x] Operator-assisted live Telegram login, minimal sync, and private-model
-  questions on actual EC2 NitroTPM (2026-10-07).
+Contracts and component implementations are merged (#181–#184). CI.md records
+NitroTPM custody, packaged Linux Desktop and operator-assisted login/minimal
+sync/private-model observations (2026-10-07).
+
 - [ ] Live-account cancel/logout and live Hermes/Desktop question UI acceptance.
-- [x] Split publication into contract, keyvault, wizard, and Desktop/extension
-  PRs targeting `dev`, in dependency order.
+  Record the actual environment and outcome in CI.md; the earlier synthetic
+  and login/sync evidence does not close this gate.
 
 ### Ongoing maintenance
 
@@ -385,50 +367,23 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
   documentation first.
 ## Windows keyvault wallet storage
 
-- [ ] Land the wallet storage contract before its dependent keyvault PR.
-- [x] Complete WW1–WW2 in [PLAN.md](PLAN.md#windows-wallet-storage-implementation-plan).
-- [ ] Design shared safe deletion/lifecycle contracts before remaining keyvault
-  storage, memory provision/reset/purge and plaintext capture migration.
-- [ ] Finish wizard/install, network, policy/LLM guard, privacy/audit and
-  extension/Desktop migration, Windows 11 and full installation-to-use acceptance.
-  Passing wallet storage tests does not establish these capabilities.
+Wallet storage and its contract are merged (#194; WW1–WW2). Remaining shared
+lifecycle and product acceptance belongs to C5/C6 below; wallet tests alone do
+not establish full Windows support.
 
 ## Windows native support
 
-- [x] Investigate native Windows feasibility and identify actual AWS NitroTPM
-  image candidates; preserve the existing Linux validation environment.
-- [x] Prove CNG P-256 ECDH and unchanged MRKW interoperability on actual AWS
-  Windows under a credentialed non-administrator user.
-- [x] Record Phase 0 host/persistence/device-binding outcomes and unmet scope.
-- [x] Review the Windows SPEC and helper implementation plan before production
-  implementation; in-session execution approved.
-- [ ] Submit the cross-component contract docs before the implementation PR.
-- [x] Implement and live-validate the standalone Windows CNG helper (PLAN W1–W4).
-- [ ] Implement secure Windows filesystem primitives and migrate callers in
-  separate component PRs without weakening POSIX behavior.
-- [ ] Extend keyvault memory custody, wizard, network, policy/privacy and
-  Desktop/extension through their respective plans and Windows acceptance gates.
-- [ ] Add the Windows CI/packaging matrix and a separate Windows 11 Desktop
-  acceptance run before advertising general native Windows product support.
+CNG helper (#190), private filesystem (#192), wallet storage (#194), consolidated
+callers (#226) and Windows CI are present. Initial contracts no longer await
+submission. Current gaps and native acceptance are tracked below; Windows
+11/Desktop and real-account flows remain separate gates.
 
 ## Windows shared private filesystem
 
-Historical foundation checklist restored from PR #191 at `5b848ca3b`.
-Completed WF tasks and the then-open PR review/merge and caller-migration
-items retain their original status; the Windows product completion backlog
-below tracks subsequent work. This checklist does not reopen completed
-component slices or close Windows 11, live or Desktop acceptance.
-
-- [x] Draft the shared filesystem contract and executable WF0–WF5 plan in SPEC/PLAN.
-- [x] Prove native filesystem assumptions on the retained AWS host (WF0).
-- [ ] Review and land the shared filesystem contract before merging the foundation PR.
-- [x] Implement and actual-host validate independent primitives (WF1–WF4).
-- [x] Finish the scoped hosted CI matrix and foundation PR #192 acceptance (WF5).
-- [ ] Review and merge the separate foundation PR #192 after the contract PR.
-- [ ] Migrate callers in separate component PRs; preserve transaction domains and
-  design append/delete/rotation before adoption.
-- [ ] Complete later Windows component and Windows 11 Desktop acceptance before
-  advertising general native Windows product support. Helper PR #190 is separate.
+Foundation contract and implementation (#192, WF0–WF5) are merged. This is a
+stable reference, not an open merge checklist. Remaining checked recursive
+cleanup, caller defects and acceptance are tracked below. Foundation evidence
+does not establish general Windows support.
 
 # Windows product completion backlog
 
@@ -455,8 +410,8 @@ is acceptable; a physical PC is not required.
   Part 1 (privacy_check factory, probe, hooks and install wrapper) routes
   Windows writers through native audit custody with checked plaintext only for
   clean absence and fail-closed refusals otherwise. Independent review, native
-  Windows CI, live CNG, C5e predicate adoption and the separate part 2 wizard
-  audit CLI remain.
+  Windows CI, live CNG and C5e predicate adoption evidence remain. The part 2
+  wizard audit CLI exists, with its own acceptance below.
   Part 2 (wizard audit CLI) routes Windows `tail`/`grep` through one bounded
   C7a snapshot, `decrypt` through the `native_audit` capability and C5d
   `decrypt_windows_log_file`, and `purge` through checked identity-bound
@@ -495,7 +450,7 @@ is acceptable; a physical PC is not required.
   snapshot fingerprint through checked private storage (host-tested; native
   Windows source/wheel validation of
   `tests/extension/test_extension_windows_storage_native.py` is still required).
-  C10b Telegram custody/archive remains open. Follow-ups:
+  C10b Telegram custody/archive exists; review/live gates are below. Follow-ups:
   - [ ] Wizard `extension pair`: report a checked-storage refusal from
     `generate_code` (`storage_unavailable` / `storage_uncertain`) instead of a
     raw traceback.
@@ -516,7 +471,10 @@ is acceptable; a physical PC is not required.
 
 The approved contract is in [SPEC.md](SPEC.md#windows-dedicated-custody-and-memory-lifecycle)
 and the scoped sequence is in [PLAN.md](PLAN.md#windows-c5-dedicated-custody-implementation).
-Implementation and acceptance remain open:
+Implementation slices are present in the consolidated Windows code. Unchecked
+C5 entries combine acceptance and residual changes; detailed follow-ups name
+the gaps. Do not repeat initial enrollment or hook implementation solely
+because its acceptance item remains unchecked.
 
 - [ ] Shared prerequisite: confidential memory enumeration and binary-SID
   principal API; protected C2 transaction proxy and publication receipts.
@@ -531,7 +489,7 @@ Implementation and acceptance remain open:
   and require actual installed-runtime memory proof without a force override.
 - [ ] C5d: independent audit role leases and C7a encrypted writer integration.
   The opt-in provider/writer/reader, exact retained-selector lookup and checked
-  publication receipts are implemented. Independent review, native source/wheel
+  publication receipts are implemented. Remaining review evidence, native source/wheel
   CNG and Windows 11 acceptance remain; C7b factory/CLI adoption is separate.
 - [ ] C5e: excluded file-vault refusal and flat role reset/deletion journals.
   C5e now supplies pure capability predicates (no aggregate readiness flag),
@@ -553,7 +511,7 @@ Implementation and acceptance remain open:
   removal, `--erase-encrypted` refused). Remaining: independent review, scoped
   Windows CI, the gated `test_wizard_windows_memory_live.py` source and
   sdist-wheel runs, Windows 11 acceptance, wizard journal reconciliation,
-  Telegram (C10b), audit CLI (C7b part 2) and Desktop (C11) routing.
+  and consumer-specific follow-ups below. Telegram, audit CLI and Desktop routing exist.
   Review fix round 1: uninstall `--purge-data` plans the disable for inert
   custody and purges memory custody inside step a (every refusal precedes
   step b); enable/setup print the no-presence/no-portable-recovery notice when
@@ -583,20 +541,19 @@ Implementation and acceptance remain open:
 - [ ] Review and accept checked Windows storage/hooks independently; native
   source/sdist-wheel inherited-ACL and real CNG installed-Hermes validation
   remain controller-owned until recorded.
-- [ ] After C5c installed proof is frozen, implement reusable enable/seal,
-  disable/decrypt, marker transitions and purge verification with exact
-  physical-home/SID/generation/epoch/wrapped-digest proof preconditions.
-  Expose no bool/callback proof bypass; C5a continues to own deletion journals.
+
+The proof-bound lifecycle is implemented; acceptance is tracked by C5b-2 below.
+
 - [ ] C5b-2 lifecycle: `enable_memory_encryption`,
   `disable_memory_encryption`, marker transitions and
   `verify_memory_purge_candidates` are implemented with portable real-proof
   tests. Independent review, scoped Windows CI, the explicit real-CNG
-  `test_windows_memory_proof_live.py` source and sdist-wheel runs, C6 routing
-  of the ceremonies and Windows 11 acceptance remain.
+  `test_windows_memory_proof_live.py` source and sdist-wheel runs, ceremony
+  acceptance and Windows 11 acceptance remain; C6 routing is implemented.
 - [ ] Implement checked atomic Windows plaintext Journey memory mutations;
   first-slice refusal is a preserved functional gap, not complete integration.
-- [ ] Complete separate C6 ceremony consumers and ordinary-user Windows 11
-  installed product acceptance.
+- [ ] Complete C6 ceremony consumer acceptance on ordinary-user Windows 11;
+  the consumer implementation exists.
 - [ ] C5b review follow-ups deferred from fix round 1: replace scattered
   `sys.platform == "win32"` hook branches with install-time dispatch and split
   `_memory_hook.py`; return `{"ok": False}` instead of raising for unmappable
@@ -610,13 +567,10 @@ Implementation and acceptance remain open:
   forget ceremony independently; native source/sdist-wheel runs of
   `tests/test_windows_telegram_native.py` and the gated real-CNG
   `tests/test_windows_telegram_live.py` remain controller-owned.
-- [ ] C6-telegram: route wizard telegram setup/login/logout on Windows through
-  `default_secret_store()`, the explicit `enroll_role("telegram")` ceremony
-  (mapping `telegram_not_enrolled`), `require_presence=False` after the
-  machine-bound disclosure, and `wipe_archive(forget=True)` for `--forget`;
-  replace the raw `_orphaned_archive_present` scan.
-- [ ] C11: Desktop/login adoption of the seam and of the presence opt-out
-  (`login_flow` keeps calling `ensure_key()`, which refuses on Windows).
+Wizard enrollment/setup/login/logout and Desktop adoption are implemented.
+Remaining reconciliation, classification and live gates are below and under C11;
+do not reopen initial routing work.
+
 - [ ] Live Telegram account gate and Windows 11 installation-to-use acceptance.
 - [ ] C6: never rotate the telegram role (`retain_current=True`) without
   re-sealing `credentials.sealed` under the new generation first; otherwise
@@ -633,10 +587,8 @@ Implementation and acceptance remain open:
   `tests/test_wizard_windows_telegram_native.py`, the gated
   `tests/test_wizard_windows_telegram_live.py` real-CNG run, a wizard
   reconciliation verb for an ambiguous telegram deletion journal, Windows
-  routing of `extension.telegram.memory_guard` (never active on `win32`, so
-  the Hermes Telegram tools, Desktop and the extension server refuse
-  `memory_encryption_required`), Desktop login (C11), the live account gate
-  and Windows 11 acceptance.
+  guard acceptance (C10c), the live account gate and Windows 11 acceptance.
+  Shared Windows guard routing and Desktop login are implemented.
   Review fix round 1: plain logout keeps the archive (R-C6T-1); forget
   deletes before revoking and reports partial outcomes (R-C6T-2); role-less
   credentials point to `logout --forget` (R-C6T-3). Still open from the
@@ -660,14 +612,16 @@ extension server's Windows shutdown (host-tested; native and live gates below).
 - [ ] Gated real-CNG `tests/test_desktop_windows_live.py` from the Desktop
   runtime and from an sdist-built wheel venv; real packaged Hermes Desktop
   launch, page render, memory enable and restart; Windows 11.
-- [ ] C6-telegram: a wizard ceremony that enrolls the `telegram` role
-  (`keyvault native init` offers memory/audit only); the Desktop then sets
-  `TELEGRAM_CEREMONY_COMMAND` and stops refusing `telegram_not_enrolled`.
+
+Telegram role enrollment and the Desktop recovery command are implemented
+(PR #222); see C11 integration evidence below.
+
 - [ ] C6-telegram: a structured (step, reason) result from the wizard's
   Windows memory verbs so the Desktop stops composing the same order itself.
-- [ ] C6-telegram: `memory_guard.memory_encryption_active` (and the wizard
-  `telegram` CLI) still report Windows memory as inactive; only the Desktop
-  and its import service use the load-only Windows state today.
+
+Shared Windows memory guard routing is implemented (C10c below). Wizard
+completion wording and native guard acceptance remain separate follow-ups.
+
 - [ ] Desktop `_hermes_venice_key` still reads `<home>/.env` with python-dotenv
   (C3 dotenv scope).
 - [ ] Windows `extension serve` binds without `SO_EXCLUSIVEADDRUSE`; decide
@@ -763,9 +717,9 @@ learning implementation".
   [`CI.md`](./CI.md) §"Manual live-device validation log").
 - [ ] Optional index on `activity_events.attempt_id` for the correction
   re-homing lookup; it is a schema DDL change for existing stores.
-- [ ] Separate PR (`keyvault` file vault, not part of this branch): a stale
-  file-vault anchor must not crash the ceremonies. See the entry under
-  "Imported message provenance" below for the root cause and the fix.
+
+The stale file-vault anchor defect is tracked once under "Imported message
+provenance" below (keyvault boundary).
 
 ### Operator collector (other repository, not changed here)
 
@@ -808,43 +762,37 @@ injection channels are `transform_tool_result` and `pre_llm_call`).
   Closing it means `privacy_check` reading the activity switch (skip reader
   mode for a refused, switched-off lookup) in its own PR; until then the CLI,
   the card and USAGE say to start a new chat.
-- [ ] Live LLM check of B1 with a real Hermes session on a throwaway home
-  (navigation block, turn-start context, both tools), recorded in
-  [`CI.md`](./CI.md) §"Manual live-device validation log".
+
+B1 has live Hermes/SQLCipher evidence in CI.md (2026-10-22/23), including
+navigation and tool use. Those local-model records do not establish production
+model or new database-lifecycle acceptance.
+
 - [x] B2: record Hermes's own browser tool calls as `source: hermes` events via
   `post_tool_call` (episode per session turn, task text from `pre_llm_call`,
   field kind from the ref's snapshot line); accept `correct:` (or its
   Japanese equivalent) corrections typed in Hermes chat
   (`activity/capture_hermes.py`, audit code `activity.capture_suspended`).
-- [ ] Live check of B2 with a real Hermes session on a throwaway home (browser
-  calls, task start, a chat correction, a concurrent operator batch),
-  recorded in [`CI.md`](./CI.md) §"Manual live-device validation log".
-- [ ] B3: live validation with a real Hermes session and the operator's
-  extended capture, recorded in CI.md.
+
+B2 browser calls, task capture and chat corrections have live evidence in
+CI.md (2026-10-22/23). B3's external-operator acceptance is retired with that
+collector (#273); do not schedule new operator batches. Historical observations
+remain in CI.md and do not validate future collectors.
 
 ## Imported message provenance
 
 Spec: [SPEC.md](SPEC.md#imported-message-provenance-2026-10-22); plan:
-[PLAN.md](PLAN.md#imported-message-provenance-implementation). Nothing below is
-implemented unless checked. Steps 1 to 11 landed on
-`feat/imported-message-provenance` (2026-10-22).
+[PLAN.md](PLAN.md#imported-message-provenance-implementation). Core implementation
+and evaluation drivers are merged (#259). Remaining evaluation and live gates
+are distinct from implementation status.
 
-- [x] Precondition: commit the activity code on `feat/browser-activity-learning`
-  and reconcile SPEC activity schema v2 versus code v1; create the
-  `feat/imported-message-provenance` worktree from it.
-- [x] PR 1: documentation (this change).
-- [x] PR 2: `imports/` records, render, evidence.
-- [x] PR 3: `ImportStore`, schema, legacy `.enc` adapter, public `keyed_opener`.
-- [x] PR 4: Telegram `convert_import_message`, sync sink, `index.enc` version 2.
-- [x] PR 5: `telegram migrate-store` (dry run, `--commit`, `--finalize --yes`).
-- [x] PR 6: ask rendering, evidence validation, `telegram_ask_evidence` frame.
-- [x] PR 7: reader mode and durable `reader_sessions.json` (before PR 8).
-- [x] PR 8: `mordred_history_search` tool, skill section and prompt.
-- [x] PR 9: mail collector library and fixtures.
-- [x] PR 10: `mail import` / `mail status` CLI.
-- [x] PR 11: evaluation generator, scorer and conformance tests.
-- [ ] PR 12: evaluation drivers, gated live test, then a docs PR recording live
-  results in [CI.md](CI.md#manual-live-device-validation-log).
+Core records/render/evidence, ImportStore, Telegram migration and reader mode,
+mail import and evaluation generator/scorer are implemented (#259). Their module
+map is in PLAN; Git retains the original PR 1–11 checklist.
+
+- [ ] Evaluation acceptance: both drivers (`tools/provenance_eval`) and
+  `tests/integration/test_provenance_eval.py` exist. Complete production-model
+  runs and record verdicts in [CI.md](CI.md#manual-live-device-validation-log);
+  the 2026-10-22 local-model smoke results are partial and remain UNAVAILABLE.
 - [ ] Live-gated validation: `telegram migrate-store` dry run and commit on a
   throwaway `HERMES_HOME`; `mail import --dry-run` on fixtures; owner counts-only
   dry run on real Takeout mail; `provenance_eval --tier smoke` on both drivers;
@@ -865,12 +813,18 @@ Follow-ups left by the landed code:
 - [ ] Interrupted `mordred.db` Telegram sync: the cursor advances only after the
   run commits, so an interrupted first sync fetches again from the start;
   decide whether a long sync should commit in chunks.
-- [ ] `ActivityStore.restore` rebinds only `activity_meta`; after a restore the
-  import tables refuse with `profile_mismatch`. Rebind `import_meta` too (or
-  refuse the restore explicitly).
-- [ ] dbcrypt `arm` may create `<home>/mordred` with mode 0755, which makes the
-  reader record refuse (`storage_unsafe`) and so blocks every reader tool; create
-  it `0700`.
+- [ ] Review shared-store restore binding: `_after_restore` updates
+  `activity_meta` only; verify whether any admitted offline restore can leave
+  `import_meta` bound to another profile. The old instance `ActivityStore.restore`
+  has no production caller (tracked above), and the offline route now checks
+  destination/source identity. Reproduce through that route before choosing
+  rebinding or explicit refusal; do not assume the old reproduction still holds.
+
+The old `arm` directory-creation defect is superseded: the POSIX lease creates
+`mordred` with mode `0700` (`_database_locking_posix.py`). Existing legacy `0755`
+directories remain admitted by the legacy marker seam; that does not establish
+compatibility with every downstream private-store reader.
+
 - [ ] A `reader_sessions.json` prune command (the record never evicts; at 4096
   digests new sessions cannot use reader tools).
 - [ ] The evaluation's Telegram encoder lacks the unverified-quote scenario
@@ -915,26 +869,20 @@ Follow-ups left by the landed code:
   folders), IP-literal or loopback hosts (for example a local bridge), and a
   way to change the Touch ID choice without `mail forget` and a new setup.
 
-- [ ] Desktop operability (owner request 2026-10-23): drive the mail collector
-  (`mail setup`, `mail fetch`, `mail status`, `mail forget`) and the macOS
-  ceremonies that `mordred.db` depends on (`encryption enable env`,
-  `encryption enable memory`, `databases encrypt`) from the Mordred page in Hermes
-  Desktop. The page is `src/mordred_hermes/desktop/assets/desktop/plugin.js` behind
-  `desktop/api.py` and Hermes's plugin REST bridge (not `extension/web/index.html`,
-  which is the browser-extension launcher page). The app password is typed in the
-  page and travels only through `ctx.rest()` to Mordred's local API; the page shows
-  counts and codes only, the CLI stays as the fallback, and reader-mode and egress
-  rules do not change. Design and PR split:
-  [SPEC](SPEC.md#desktop-mail-and-ceremony-pages-2026-10-23),
+- [ ] Desktop operability acceptance (macOS; implementation merged): D1–D4
+  documentation, mail setup library, v4 page/API, database/mail steps and
+  stale-anchor remediation exist; D5 direct-tools and D6 history switches also
+  exist. See [SPEC](SPEC.md#desktop-mail-and-ceremony-pages-2026-10-23) and
   [PLAN](PLAN.md#desktop-mail-and-ceremony-pages-implementation).
-  - [ ] D1: documentation (stays unchecked until merged).
-  - [ ] D2: mail library (`imap.py` hints, `setup_flow.py`, `forget.py`, CLI drivers).
-  - [ ] D3: page framework (`Step` states, overview card, groups, `client_version=4`).
-  - [ ] D4: Desktop backend and sections (`/status` v4, `/databases/*`, `/mail/*`,
-    `vault_anchor_stale`, `DatabasesStep`, `MailStep`), then the live checklist in
-    [CI.md](CI.md#manual-live-device-validation-log).
-  - [x] Second Codex pass on the revised design before D4.
-  - [ ] Third Codex pass after D2/D4 land (implementation review).
+  The 2026-10-23 CI log records overview, fetch and chat/reader-mode observations.
+  Remaining: page mail setup and wrong-password hints, mailbox removal,
+  throwaway-home database ceremonies, light/dark and VoiceOver checks.
+  Post-D2/D4 implementation review is recorded in
+  [PR #262 pass 11](../superpowers/reviews/2026-10-23-desktop-pr262-codex-pass11.md),
+  following the earlier API/page/mail reviews. Its SHIP verdict is scoped to
+  that revision; it does not validate #270's later changes.
+  - [ ] Recheck passive database/mail status after #270; see the database
+    review follow-ups. Earlier Desktop evidence does not close that regression.
 
 - [ ] CLI counts after the Telegram archive moved to `mordred.db` (found during
   the production rollout, 2026-10-23). `hermes-mordred telegram status` prints
@@ -1003,19 +951,8 @@ Follow-ups left by the landed code:
     own `hermes config set tools.tool_search.enabled off` (or `unset`), and it never
     edits config.yaml itself.
 
-- [ ] `imap_auth_failed` without a hint (found 2026-10-23, part of the
-  Desktop design): every Gmail `NO` collapses to one code. Classify the
-  bracketed response code only (`AUTHENTICATIONFAILED`, `ALERT` app password
-  required, `ALERT` web login required), never the free text, and print the
-  remediation (same Google account as the address, primary sign-in address,
-  2-Step Verification on, Workspace admins can disable IMAP or app passwords,
-  Advanced Protection disables app passwords) in the CLI and on the page
-  (designed in the Desktop design doc, implemented by PR D2).
-  - [x] CLI (PR D2, #264): `ImapError.hint` from the response code only;
-    `mail setup` prints `mail refused (imap_auth_failed: <hint>)` and `mail
-    fetch` prints the hint after the code in its text output; USAGE explains
-    the four hints.
-  - [ ] Page (PR D4): the remediation text per hint in `IMAP_HINTS`.
+IMAP response-code hints exist in the CLI and the page's `IMAP_HINTS`. The
+unrun live wrong-password check belongs to Desktop acceptance above.
 
 - [ ] Vault key policy record (`keyvault`, found 2026-10-23 by the Desktop D4 work):
   the Secure Enclave key's access policy (attended / unattended) is opaque after
@@ -1025,11 +962,10 @@ Follow-ups left by the landed code:
   secret), expose it through a non-unlocking read, and let `status` print it.
   While it is `null`, the page must never show the requested policy instead.
 
-- [ ] Unescaped SQLite URIs in `dbcrypt/_migrate.py` (~117) and `dbcrypt/_shim.py`
-  (~82) build `file:` URIs without `urllib.parse.quote`; a home path containing
-  `#`, `?` or `%` would open a different file (PR #262 fixed the same bug in
-  `dbcrypt/_monitor.py` and the read-only import-store opener). Fix both with the
-  same `quote(path.as_posix(), safe="/")` and a test with a `we#ird?ho%me` home.
+- [ ] Escape the remaining read-only probe URI in `dbcrypt/_shim.py`
+  (`_is_encrypted_copy`); it still interpolates the path into `file:` directly.
+  `_migrate._connect` now quotes paths, so do not repeat that repair. Cover
+  `#`, `?` and `%` in a home path without opening a different file.
 
 - [ ] Stale `hermes-mordred` launcher after a Hermes Desktop environment rebuild
   (found 2026-10-23, live check). Hermes Desktop rebuilt its Python environment on
@@ -1089,21 +1025,9 @@ Follow-ups left by the landed code:
   and the audit rely on. The log line is cosmetic (the model reads the counts);
   if it ever matters, change the closed schema deliberately in SPEC first.
 
-Later (not scheduled):
+Later (not scheduled): see
+[Deferred activity, mail and Desktop features](ROADMAP.md#deferred-activity-mail-and-desktop-features).
 
-- [ ] Desktop `mail import` (file picker): Takeout mbox and `.eml` import from the
-  Mordred page; needs a file picker and a long-running job over a user-chosen path.
-  It stays a terminal command until then.
-- [ ] Typed recovery passphrase on the page: the page generates and shows an
-  eight-word passphrase once; a "choose my own" option would match the terminal
-  ceremony.
-- [ ] Gmail API collector feeding the same normalization path.
-- [ ] OAuth 2.0 for mail instead of app passwords: `XOAUTH2` over the same IMAP
-  collector and/or the Gmail API (needs an OAuth client, consent flow and the
-  refresh token sealed with the mail credentials).
-- [ ] Label-language decision (`label_language` default `en` or `ja`) after the
-  evaluation.
-- [ ] Linux and Windows `mordred.db` stores (today those platforms keep the
-  `.enc` archive and `telegram_ask`): tracked under
-  [Hermes database encryption](#hermes-database-encryption), using the shared
-  SQLCipher lifecycle rather than a separate Mordred-only store.
+Linux and Windows store implementation and acceptance are tracked under
+[Hermes database encryption](#hermes-database-encryption). Native consumers exist;
+the former claim that both platforms only use `.enc` archives is stale.

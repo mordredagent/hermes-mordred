@@ -672,7 +672,11 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 The owner selected a shared SQLCipher lifecycle for Hermes databases and
 `mordred.db`, with actual Linux and Windows validation on AWS. The
 [design](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md)
-defines the proposed acceptance matrix; it is not an execution result.
+defines the acceptance matrix; it is not an execution result. Product code
+merged in #270 on 2026-10-28. The historical heading is retained; unresolved
+source/wheel, Windows 11/Desktop and live-account gates remain in
+[TODO](TODO.md#hermes-database-encryption). Dated records below keep their original
+revision and scope; documentation reconciliation does not upgrade those results.
 
 Reuse the retained NitroTPM hosts in `ap-southeast-1`: Linux
 `i-095cbe655c196c749` and Windows Server 2025 `i-00f4db5c3a204906b`.
