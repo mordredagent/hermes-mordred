@@ -107,6 +107,10 @@ jobs:
         run: |-
           .venv/bin/python -m ruff check src tests scripts tools hatch_build.py
           .venv/bin/python -m ruff format --check src tests scripts tools hatch_build.py
+      - name: import-linter (layering contracts)
+        id: import_linter
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'static') && matrix.python-version == needs.ci-policy.outputs.support_python
+        run: .venv/bin/lint-imports --no-cache
       - name: shellcheck
         id: shellcheck
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'static') && matrix.python-version == needs.ci-policy.outputs.support_python

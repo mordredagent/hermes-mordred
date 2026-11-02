@@ -57,7 +57,7 @@ FINAL_PACKS = {
     "windows": ["main", "winkey", "windows-wheel"],
 }
 PACK_STEPS = {
-    "static": ("ruff", "shellcheck", "status"),
+    "static": ("ruff", "import_linter", "shellcheck", "status"),
     "features": ("feature_install", "feature_imports", "feature_tests"),
     "floor": ("floor_install", "floor_guard", "floor_tests"),
     "package": ("package_build", "package_smoke"),

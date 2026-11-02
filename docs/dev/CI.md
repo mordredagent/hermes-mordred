@@ -93,7 +93,8 @@ Key policy:
   Windows validation excludes only 28 reviewed portable cases. Full Windows
   validation retains them for `main`, manual dispatch and `ci:full`.
   Helper validation and the outside-checkout wheel run once, on shard 1.
-- Static Ruff, formatting, shellcheck and status checks run once on Linux.
+- Static Ruff, formatting, import-linter, shellcheck and status checks run once
+  on Linux.
   Main typing uses `.[dev,keyvault,extension]`, plus `macos` on macOS. Feature,
   Hermes-floor, integration and swtpm packs have separate environments.
   Auxiliary environments, including the documentation-test environment,
@@ -179,8 +180,9 @@ integration/code freeze. Reports or documentation do not justify repeatedly
 rerunning unchanged broad suites.
 
 Known draft PRs run critical feedback on Ubuntu 3.12, adding macOS or Windows
-only for mapped platform changes. Linux runs repository-wide static checks,
-strict typing, shellcheck, the status guard and CI routing/runner tests. Draft
+only for mapped platform changes. Linux runs repository-wide static checks
+(including import-linter layering contracts), strict typing, shellcheck, the
+status guard and CI routing/runner tests. Draft
 documentation-only changes are filtered before any job starts, as described above.
 For workflows that run, failures remain red and JUnit artifacts are
 uploaded after failures. A critical green cannot supply an accepted dev baseline
