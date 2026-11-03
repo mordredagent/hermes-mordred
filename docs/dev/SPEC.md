@@ -185,7 +185,12 @@ Accepted limitations include:
   `pre_tool_call`, so runtime policy is tool-based rather than per-skill;
 - provider or transport metadata supplied by an untrusted component can lie;
 - same-UID malware can inspect process memory, modify local files, or remove
-  audit history;
+  audit history; the process-private memory-key holder does not change this;
+- vault-enrolled `.env` values other than `HERMES_MEMORY_KEY` stay in
+  `os.environ` and reach terminal children according to Hermes's own blocklist;
+- if a plaintext `.env` holding `HERMES_MEMORY_KEY` is reloaded into `os.environ`,
+  the value stays visible there, including to child processes spawned outside a
+  tool call, until the next eviction point (session boundary or `pre_tool_call`);
 - plaintext necessarily exists while a secret is in use, and screen-capture
   detection cannot defeat a physical camera;
 - traffic emitted by a parent harness such as Codex CLI, Claude CLI, Cursor,
@@ -820,6 +825,12 @@ purpose — an upstream `read_text()` of a sealed file yields a recognisable
 magic line instead of a `UnicodeDecodeError`. Every write uses a fresh nonce,
 and the plaintext is always the whole file body: Mordred encrypts bytes and
 leaves entry parsing to Hermes.
+
+The runtime shim never leaves `HERMES_MEMORY_KEY` in `os.environ`: it lives in a
+process-private holder read through `keyvault._memory_key_holder.memory_key_value`,
+so terminal children and raw `os.environ` copies do not inherit it. Values
+re-populated by a `.env` reload are evicted at session boundaries and before each
+tool call; the holder keeps the key it already has.
 
 Linux resolves a dedicated TPM-wrapped memory key; Windows resolves dedicated
 CNG memory custody through checked storage and generation leases. Neither
@@ -1575,7 +1586,8 @@ described below. See CI.md for feature acceptance and the pending live-account g
 - `extension/telegram/tee.py:hardware_backend` already selects the Linux TPM
   helper and excludes software and legacy fallbacks.
 - `_memory_hook.py` wraps the memory tool independently of the OS, but obtains
-  its key exclusively from `HERMES_MEMORY_KEY`.
+  its key exclusively from the `HERMES_MEMORY_KEY` value (then in `os.environ`;
+  on macOS now the process-private holder).
 - `wizard/memory_cli.py` requires the macOS `.env` vault injection path;
   `wizard/encryption_cli.py:memory_status` explicitly requires Darwin.
 - `keyvault/_identity.py:resolve_store` uses the Keychain anchor store. The

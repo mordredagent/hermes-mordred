@@ -48,7 +48,7 @@ retain recovery material for encrypted backups.
 
 No new key is created or stored. The SQLCipher key is derived from the
 existing agent-memory key (`HERMES_MEMORY_KEY`, already sealed in the vault
-and injected into every Hermes process at startup):
+and loaded into every Hermes process's private key holder at startup):
 
     key  = HKDF-SHA256(HERMES_MEMORY_KEY, info="mordred sqlite v1")
     salt = HMAC-SHA256(key, "mordred sqlite salt v1")[:16]
@@ -57,7 +57,7 @@ One key and salt for every database, so copies and renames Hermes makes
 (backups, quarantines, staged exports) stay readable. The salt has to be
 supplied explicitly because the file header is kept in plaintext (below).
 The key is resolved on the first keyed `connect()`; if `HERMES_MEMORY_KEY` is
-not in the environment yet, the vault-sealed `.env` is injected then, and the
+not available yet, the vault-sealed `.env` is injected then, and the
 plugin's later injection is skipped (one vault unlock per process).
 
 The key-resolution explanation above describes the original macOS compatibility

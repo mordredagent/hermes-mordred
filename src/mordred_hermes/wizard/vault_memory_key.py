@@ -80,8 +80,9 @@ def _effective_memory_key(text: str) -> str | None:
     """The ``HERMES_MEMORY_KEY`` value the runtime shim would use, or ``None``.
 
     Parsed with ``dotenv_values`` (last-wins, no interpolation, quotes stripped) —
-    exactly the value :func:`...keyvault._runtime_env.inject_vault_env` injects at
-    startup, matching the key Mordred's memory-encryption runtime reads.
+    exactly the value :func:`...keyvault._runtime_env.inject_vault_env` hands to the
+    process-private holder at startup, matching the key Mordred's memory-encryption
+    runtime reads.
     """
     import io
 
@@ -95,13 +96,18 @@ def _ambient_memory_key() -> str | None:
 
     A user who already enabled ``memory.encryption`` has their key in
     ``os.environ`` (Hermes loads ``~/.hermes/.env`` into the environment at
-    startup) or still in the plaintext ``~/.hermes/.env`` not yet migrated into the
-    vault. ``set-memory-key`` must **adopt** that key rather than mint a new one —
-    a fresh key would override theirs at startup and orphan memories encrypted
-    under it. Returns the env value first (it is what the memory tool reads), then
-    the plaintext ``.env`` value; ``None`` if neither holds a usable key.
+    startup), in this process's holder after the runtime shim evicted it, or still
+    in the plaintext ``~/.hermes/.env`` not yet migrated into the vault.
+    ``set-memory-key`` must **adopt** that key rather than mint a new one — a fresh
+    key would override theirs at startup and orphan memories encrypted under it.
+    Returns the live value first (it is what the memory tool reads), then the
+    plaintext ``.env`` value; ``None`` if neither holds a usable key. A child of a
+    running Hermes does not inherit the live value, so only a key that is also in
+    the plaintext ``.env`` is found there.
     """
-    env_value = os.environ.get(_MEMORY_KEY_ENV)
+    from ..keyvault._memory_key_holder import memory_key_value
+
+    env_value = memory_key_value(os.environ)
     if _is_valid_memory_key(env_value):
         return env_value
     try:
@@ -157,8 +163,8 @@ def _env_with_memory_key(text: str, value: str) -> str:
 def _print_memory_config_hint() -> None:
     """Tell the operator what the stored key does and does not do (never prints the key)."""
     print(
-        f"The key stays protected at rest by the vault; the runtime shim injects {_MEMORY_KEY_ENV} into the "
-        "environment at startup, where Mordred's memory hook reads it. Storing the key does not seal "
+        f"The key stays protected at rest by the vault; the runtime shim loads {_MEMORY_KEY_ENV} into process "
+        "memory at startup, where Mordred's memory hook reads it. Storing the key does not seal "
         "anything by itself — turn agent-memory encryption on with "
         "`hermes-mordred encryption enable memory` (it arms the hook and seals existing memory files)."
     )
@@ -213,15 +219,15 @@ def _ensure_memory_key(
     """Ensure the vault ``.env`` carries a usable ``HERMES_MEMORY_KEY``, and report it.
 
     Returns ``(exit_code, key_value)`` — the value is the effective key the
-    runtime shim will inject (``None`` whenever the exit code is 1), so a
+    runtime shim will load (``None`` whenever the exit code is 1), so a
     caller that must seal files with it does not have to open the vault a
     second time (a second Touch ID prompt). It is never printed.
 
     The key Mordred's memory-encryption runtime is keyed by (AES-256-GCM, see
     :mod:`mordred_hermes.keyvault.memory_crypto`). Keeping it in the vault
     ``.env`` means the device wrapping key protects it at rest and the runtime
-    decrypt shim (:mod:`mordred_hermes.keyvault._runtime_env`) injects it into
-    the environment at startup.
+    decrypt shim (:mod:`mordred_hermes.keyvault._runtime_env`) loads it into the
+    process-private holder at startup.
 
     Opens the vault on the **hot path** (the device wrapping key — Secure Enclave
     or its software fallback, no passphrase) and decides off the *effective*

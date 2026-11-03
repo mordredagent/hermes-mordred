@@ -4,7 +4,8 @@ The public API covers key generation, envelope encryption, backup/recovery,
 vault lifecycle, audit-log encryption, and extension wallet signing. At plugin
 registration time this module installs the transparent environment decrypt
 shim, the agent-memory encryption hook, the host ``.env`` write guard, the
-shared integrity gate, and best-effort session-boundary resealing.
+shared integrity gate, best-effort session-boundary resealing, and the eviction of
+``HERMES_MEMORY_KEY`` from the process environment.
 
 Native protection is selected by capability: Secure Enclave on supported
 macOS systems and TPM 2.0 through the packaged helper on Linux. Pure crypto and
@@ -37,9 +38,10 @@ def register(ctx: Any) -> None:
     Then installs the runtime env transparent-decrypt shim (design note §8.2 item 3):
     on macOS, secrets enrolled in the at-rest vault are decrypted and injected
     into ``os.environ`` at startup, so an unattended process reads them from the
-    vault instead of plaintext on disk. Fail-closed — a present-but-unverifiable
+    vault instead of plaintext on disk. ``HERMES_MEMORY_KEY`` is held in process
+    memory instead (:mod:`._memory_key_holder`). Fail-closed — a present-but-unverifiable
     vault raises rather than starting with unverified secret provisioning. A no-op
-    where no vault is set up or off macOS.
+    where no vault is set up or off macOS, apart from evicting an ambient memory key.
 
     Also installs the write-side guard: it wraps the host ``.env`` writer so a
     ``hermes config set`` / setup write made while the env target is sealed is
@@ -59,6 +61,10 @@ def register(ctx: Any) -> None:
     Also on ``on_session_start``, reports a sealed memory this process cannot
     open: upstream's ``agent_init`` swallows a failed ``load_from_disk()``, so
     without it a locked memory looks exactly like an empty one.
+
+    Hermes reloads a plaintext ``.env`` into ``os.environ`` per gateway turn, so
+    the memory key is evicted again at each session boundary and on ``pre_tool_call``,
+    before the terminal tool builds its child environment.
     """
     from ._memory_hook import install_memory_hook
 
@@ -93,6 +99,9 @@ def register(ctx: Any) -> None:
 
     with contextlib.suppress(Exception):
         ctx.register_hook("on_session_start", _on_session_memory_check)
+
+    with contextlib.suppress(Exception):
+        ctx.register_hook("pre_tool_call", _on_pre_tool_call_evict)
 
 
 def _install_journey_guard() -> None:
@@ -143,8 +152,22 @@ def _on_session_memory_check(**_kwargs: Any) -> None:
 def _on_session_reseal(**_kwargs: Any) -> None:
     """``on_session_start`` / ``on_session_end`` callback: reseal a stray plaintext
     ``.env`` back into the vault. Fail-open — a reseal problem must never break a
-    session boundary (mirrors the write guard's swallow)."""
+    session boundary (mirrors the write guard's swallow). Also evicts a re-populated
+    memory key, independently of the reseal's outcome."""
+    _evict_memory_key()
     with contextlib.suppress(Exception):
         from ._env_write_guard import reseal_stray_env_if_present
 
         reseal_stray_env_if_present()
+
+
+def _on_pre_tool_call_evict(**_kwargs: Any) -> None:
+    """``pre_tool_call`` callback: evict only. Returns ``None``, so it never blocks a tool."""
+    _evict_memory_key()
+
+
+def _evict_memory_key() -> None:
+    with contextlib.suppress(Exception):
+        from ._memory_key_holder import evict_ambient_memory_key
+
+        evict_ambient_memory_key()

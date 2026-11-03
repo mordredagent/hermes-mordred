@@ -296,7 +296,9 @@ def install(*, home: Path | None = None, provider: KeyProvider | None = None) ->
             return False
 
         def has_key() -> bool:
-            return bool(os.environ.get("HERMES_MEMORY_KEY"))
+            from ..keyvault._memory_key_holder import memory_key_value
+
+            return bool(memory_key_value(os.environ))
 
         module = _shim.build_module(key=key_provider, home=lambda: base, has_key=has_key)
         _shim.install_module(module)

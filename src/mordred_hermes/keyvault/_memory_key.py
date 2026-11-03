@@ -21,6 +21,7 @@ from .._core._database_contracts import DatabaseBusy, DatabaseRefused
 from .._core._database_lifecycle import ExclusiveLease
 from . import _storage, wrap
 from ._exceptions import WrapError, WrapKeyNotFound
+from ._memory_key_holder import memory_key_value
 from ._native_deletion import (
     _issue_native_owner,
     _native_creation_handoff,
@@ -365,7 +366,7 @@ def resolve_memory_key(*, home: Path, platform: str, environ: Mapping[str, str])
             raise MemoryKeyError("Windows memory custody unavailable; existing data was not replaced") from exc
     if platform == "linux" and linux_memory_managed(home):
         return load_linux_memory_key(home=home)
-    value = environ.get("HERMES_MEMORY_KEY")
+    value = memory_key_value(environ)
     if not value:
         return None
     try:

@@ -5,6 +5,10 @@ unattended Hermes process (telegram / gateway / cron) reads secrets from the
 at-rest vault instead of plaintext on disk. Opens on the **hot path** (device key
 — Secure Enclave or its software fallback, no passphrase) and is **fail-closed**.
 
+``HERMES_MEMORY_KEY`` is the exception: it goes to the process-private
+:mod:`._memory_key_holder` and is never left in the environment, where terminal
+children and raw ``dict(os.environ)`` copies would inherit it.
+
 Heavy imports (the cryptography-backed vault modules, dotenv) stay function-local
 so this module imports on any platform, matching ``wizard/vault_cli.py``.
 """
@@ -18,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .._core._home import hermes_home as _hermes_home
+from . import _memory_key_holder as holder
 from ._identity import default_vault_root, resolve_backend_store, vault_identity
 
 if TYPE_CHECKING:
@@ -31,6 +36,10 @@ __all__ = ["inject_vault_env", "install_vault_env_decrypt"]
 # the config opt-IN marker in :mod:`._config_bootstrap`, but inverted — env is
 # injected by default once enrolled, so the marker turns it OFF.
 _ENV_OPTOUT_SUBPATH = ("mordred", "env-vault.optout")
+
+#: Vault values held in process memory instead of ``environ``. Only the memory key:
+#: the other values stay under Hermes's own child-environment blocklist.
+_PROCESS_PRIVATE = frozenset({holder.MEMORY_KEY_ENV})
 
 
 def _env_optout_marker_path(home: Path) -> Path:
@@ -51,7 +60,8 @@ def inject_vault_env(
     Opens the vault on the hot path and injects each ``KEY=value`` from the
     enrolled ``name`` into ``environ`` with **override** semantics — matching
     Hermes's own ``load_hermes_dotenv(override=True)``, where ``~/.hermes/.env``
-    is authoritative over stale shell values.
+    is authoritative over stale shell values. A name in ``_PROCESS_PRIVATE`` goes to
+    the holder instead and is removed from ``environ``, whatever mapping that is.
 
     **Fail-closed**: if a vault is present at ``root`` but cannot be opened,
     verified, or read (tamper, wrong/locked key, non-UTF-8 payload), the error
@@ -108,7 +118,11 @@ def inject_vault_env(
     for env_key, env_value in values.items():
         if env_value is None:  # a bare ``KEY`` with no ``=value`` parses to None — skip it
             continue
-        environ[env_key] = env_value
+        if env_key in _PROCESS_PRIVATE:
+            holder.set_value(env_value)
+            environ.pop(env_key, None)
+        else:
+            environ[env_key] = env_value
         injected += 1
     return injected
 
@@ -131,11 +145,18 @@ def install_vault_env_decrypt(*, environ: MutableMapping[str, str] | None = None
     ``<home>/mordred/env-vault.optout`` is present the vault is never opened and
     nothing is injected, even if ``.env`` is still enrolled — the operator has
     restored a plaintext ``.env`` and wants the runtime to use that.
+
+    On the real ``os.environ``, an ambient memory key is evicted first on every
+    non-Windows platform, including on repeat calls and under the opt-out, because
+    a plaintext ``.env`` can supply one without any vault. Raises
+    :class:`~.vault.VaultError` if the key is still observable after injection.
     """
     from ..dbcrypt._cli import maintenance_process
 
     if maintenance_process():
         return 0
+    if environ is None or environ is os.environ:
+        holder.evict_ambient_memory_key()
     global _INJECTED_INTO_OS_ENVIRON
     if sys.platform != "darwin":
         return 0
@@ -147,6 +168,10 @@ def install_vault_env_decrypt(*, environ: MutableMapping[str, str] | None = None
     if _env_optout_marker_path(_hermes_home()).exists():
         return 0
     injected = inject_vault_env(root=default_vault_root(), environ=environ)
+    if environ is os.environ and holder.MEMORY_KEY_ENV in os.environ:
+        from . import vault
+
+        raise vault.VaultError("memory key observable in process environment")
     if default:
         _INJECTED_INTO_OS_ENVIRON = True
     return injected
