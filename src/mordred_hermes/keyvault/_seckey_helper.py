@@ -380,6 +380,7 @@ class _HelperSecKeyOps:
     ) -> None:
         self._binary = binary
         self._env_override = env_override
+        self._presence_capable: bool | None = None
 
     def with_store_override(self, env_name: str, store: Path) -> _HelperSecKeyOps:
         """Clone this helper ops with an explicit per-keyvault blob store."""
@@ -401,6 +402,9 @@ class _HelperSecKeyOps:
         )
 
     def create_keypair(self, tag: bytes, label: str, *, unattended: bool = False) -> bytes:
+        from ._presence import revoke
+
+        revoke()
         response = self._invoke(
             {"cmd": "generate", "tag_hex": tag.hex(), "label": label, "unattended": unattended},
         )
@@ -412,12 +416,30 @@ class _HelperSecKeyOps:
 
     def delete_key(self, tag: bytes) -> None:
         _assert_native_tag_delete(ops=self, tag=tag)
+        from ._presence import revoke
+
+        revoke()
         # Acknowledge deletion or confirmed absence; ambiguous native state refuses.
         response = self._invoke({"cmd": "delete", "tag_hex": tag.hex()})
         if response.get("ok") is not True:
             raise _OpsError(-1, "helper", "helper did not acknowledge deletion")
 
     def key_exchange(self, tag: bytes, peer_pub: bytes) -> bytes:
+        from . import _presence
+
+        authority = _presence.eligible(tag)
+        if authority is not None:
+            if self._presence_capable is None:
+                try:
+                    self._presence_capable = self._invoke({"cmd": "capabilities"}).get("presence_session") == 1
+                except _OpsError:
+                    self._presence_capable = False  # prompt-free legacy negotiation only
+            if self._presence_capable:
+                scope, seconds, binding = authority
+                response = _presence._pool.exchange(
+                    scope, self._binary, self._env_override, tag, peer_pub, seconds, binding
+                )
+                return _hex_field(response, "shared_hex")
         response = self._invoke(
             {"cmd": "ecdh", "tag_hex": tag.hex(), "peer_pub_hex": peer_pub.hex()},
         )

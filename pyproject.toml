@@ -238,6 +238,7 @@ packages = ["src/mordred_hermes"]
 "native/sekey-helper/build.sh" = "mordred_hermes/_native/sekey-helper/build.sh"
 "native/sekey-helper/Package.swift" = "mordred_hermes/_native/sekey-helper/Package.swift"
 "native/sekey-helper/Sources" = "mordred_hermes/_native/sekey-helper/Sources"
+"native/sekey-helper/Tests" = "mordred_hermes/_native/sekey-helper/Tests"
 "native/sekey-helper/README.md" = "mordred_hermes/_native/sekey-helper/README.md"
 # The Linux TPM 2.0 helper's Rust *sources* (NOT the cargo `target/` artifacts)
 # so `hermes-mordred keyvault enable-tpm` can build them after a plain

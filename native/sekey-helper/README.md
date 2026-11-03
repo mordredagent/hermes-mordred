@@ -194,3 +194,60 @@ whose code hash the item trusts. Details:
   Rebuilding the same source with the same toolchain keeps the item trusted; a
   helper built from changed source asks once per anchor item -- answer
   **Always Allow** so the new binary is added to the item's ACL.
+
+## Bounded presence sessions
+
+The default one-shot protocol is unchanged. `{"cmd":"capabilities"}` reports
+`{"presence_session":1}` without accessing a key or authenticating. Old helpers
+reject that command and Python keeps one-shot behavior. There is no retry or
+fallback after starting a session.
+
+`--presence-session SECONDS` (1–300) accepts newline-delimited ECDH JSON frames
+on private parent stdin/stdout pipes, up to 64 KiB per frame. The parent permits
+8 helpers, with one active and 16 waiting requests per helper. Queueing and OS
+authentication count against each request's 120-second limit. The child binds a
+single key tag and source fingerprint, reloads the key for every ECDH and keeps
+only the LAContext and non-secret lifecycle state. It uses `mach_continuous_time`
+for a non-sliding deadline from authentication success, checks before ECDH and
+before returning, and exits on expiry, parent death/EOF, lock, sleep, session
+resignation, denial, cancellation, key replacement or protocol failure. The
+main run loop and independent timer remain responsive during authentication and
+pipe I/O. No socket, plaintext credential cache or shared-secret cache exists.
+
+Python enables this only for a matching Telegram/mail credential read inside
+an operation-local trusted host scope. The setting is:
+
+```yaml
+plugins:
+  mordred_keyvault:
+    presence_reuse_seconds: 0  # opt in to 300 only after attended acceptance
+```
+
+Missing, malformed, boolean, string, negative and above-300 values disable reuse.
+CLI, management operations, signing and non-macOS hosts retain one-shot behavior.
+Desktop supports the loaded loopback dashboard host's authenticated session-token
+generation. Unknown hosts, gated OAuth hosts and child ASGI proxies without a
+verifiable live authentication generation retain one-shot prompts.
+
+For attended acceptance, build a candidate into a private directory using
+`MORDRED_SEKEY_INSTALL_DIR` (leave `~/.local/bin` untouched), create a private
+synthetic root, then run:
+
+```sh
+env MORDRED_PRESENCE_LIVE=1 \
+  MORDRED_PRESENCE_TEST_ROOT=/absolute/private/synthetic-root \
+  MORDRED_SEKEY_HELPER=/absolute/private/bin/mordred-hermes-sekey \
+  MORDRED_PRESENCE_SCENARIO=within-window \
+  uv run pytest -m integration -s tests/integration/test_presence_macos.py
+```
+
+Repeat with `expiry` (waits 301 seconds), `lock`, `sleep` and `deny`. Each case
+uses new test keys and a retained synthetic home, counts authorized decrypts and
+asks the operator for the actual OS prompt count. Lock/sleep must kill the old
+child before another read; denial must not retry. Separately verify ordinary
+and HD wallet signatures each prompt independently (two decrypts per approved
+operation), then record exact candidate/device evidence in
+`docs/dev/VALIDATION_LOG.md`. Never enable a production profile if reuse or lock
+invalidation has not been verified. `swift test --package-path
+native/sekey-helper` tests the deadline, revocation, denial and authentication
+versus ECDH counts without requiring Touch ID.
