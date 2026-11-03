@@ -150,8 +150,8 @@ def _default_subprocess_counter() -> int:
         except (psutil.Error, OSError):
             return 0
     try:
-        result = subprocess.run(
-            ["pgrep", "-P", str(os.getpid())],
+        result = subprocess.run(  # noqa: S603 - list argv, no shell
+            ["pgrep", "-P", str(os.getpid())],  # noqa: S607 - PATH lookup of a system tool is intended
             capture_output=True,
             text=True,
             timeout=2.0,

@@ -28,7 +28,7 @@ COMPILER_LIMIT = 1024 * 1024
 
 def _capture_compiler(argv: list[str], *, cwd: str) -> subprocess.CompletedProcess[bytes]:
     """Capture only the fixed compiler boundary, with bounded pipes and runtime."""
-    process = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # noqa: S603 - list argv, no shell
     output = [bytearray(), bytearray()]
     overflow = threading.Event()
 
@@ -280,7 +280,7 @@ class CustomBuildHook(BuildHookInterface[Any]):
                 "Checked",
             ]
             if receipt_directory is None:
-                subprocess.run(argv, check=True)
+                subprocess.run(argv, check=True)  # noqa: S603 - list argv, no shell
             else:
                 _compile_receipt(argv, receipt_directory, Path(self.root), pinned_headers, version, receipt)
             source = staging / "mordred_dbcrypt_checked.dll"

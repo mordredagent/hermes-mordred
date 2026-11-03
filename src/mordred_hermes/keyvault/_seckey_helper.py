@@ -286,7 +286,7 @@ def _run_helper(
         if env_override is not None:
             env = dict(os.environ)
             env[env_override[0]] = env_override[1]
-        proc = subprocess.run(
+        proc = subprocess.run(  # noqa: S603 - list argv, no shell
             [binary],
             input=json.dumps(payload).encode("utf-8"),
             capture_output=True,

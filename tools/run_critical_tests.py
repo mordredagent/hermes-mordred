@@ -107,7 +107,7 @@ def run_cases(nodes: Sequence[str], *, collect_only: bool = False, junitxml: Pat
     command += ["--collect-only"] if collect_only else ["--durations=10"]
     if junitxml is not None:
         command.append(f"--junitxml={junitxml}")
-    return subprocess.run([*command, *nodes], cwd=ROOT, check=False).returncode
+    return subprocess.run([*command, *nodes], cwd=ROOT, check=False).returncode  # noqa: S603 - list argv, no shell
 
 
 def main(argv: list[str] | None = None) -> int:

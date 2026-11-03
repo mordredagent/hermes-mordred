@@ -58,7 +58,7 @@ class AwsCli:
 
     def _call(self, *args: str) -> Any:
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: S603 - list argv, no shell
                 [*self.command, *args],
                 capture_output=True,
                 text=True,
@@ -457,7 +457,7 @@ def _launch_supervisor(path: Path) -> int:
     log = path.with_suffix(".supervisor.log")
     fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as output:
-        process = subprocess.Popen(
+        process = subprocess.Popen(  # noqa: S603 - list argv, no shell
             [sys.executable, str(guard.absolute()), "watch", "--evidence", str(path.absolute())],
             stdin=subprocess.DEVNULL,
             stdout=output,

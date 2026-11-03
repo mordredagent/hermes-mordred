@@ -532,7 +532,7 @@ class ActivityStore:
         ]
         placeholders = ", ".join("?" * len(rows[0]))
         conn.executemany(
-            f"INSERT INTO activity_events (peer_id, producer_id, trust, permitted_use, received_at, "
+            f"INSERT INTO activity_events (peer_id, producer_id, trust, permitted_use, received_at, "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
             f"episode_revision, {_EVENT_COLUMNS}) VALUES ({placeholders})",
             rows,
         )
@@ -542,14 +542,15 @@ class ActivityStore:
     def episode(self, episode_id: str) -> EpisodeRecord | None:
         with self._transaction(write=False) as conn:
             row = conn.execute(
-                f"SELECT {_EPISODE_COLUMNS} FROM activity_episodes WHERE episode_id = ?", (episode_id,)
+                f"SELECT {_EPISODE_COLUMNS} FROM activity_episodes WHERE episode_id = ?",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+                (episode_id,),
             ).fetchone()
         return None if row is None else self._episode_from_row(row)
 
     def list_episodes(self, limit: int = 50) -> list[EpisodeRecord]:
         with self._transaction(write=False) as conn:
             rows = conn.execute(
-                f"SELECT {_EPISODE_COLUMNS} FROM activity_episodes ORDER BY last_event_at DESC LIMIT ?",
+                f"SELECT {_EPISODE_COLUMNS} FROM activity_episodes ORDER BY last_event_at DESC LIMIT ?",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                 (max(0, limit),),
             ).fetchall()
         return [self._episode_from_row(row) for row in rows]
@@ -565,7 +566,7 @@ class ActivityStore:
 
         With ``revision``, only events that existed at that episode revision.
         """
-        query = f"SELECT {_EVENT_COLUMNS} FROM activity_events WHERE episode_id = ?"
+        query = f"SELECT {_EVENT_COLUMNS} FROM activity_events WHERE episode_id = ?"  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         params: tuple[Any, ...] = (episode_id,)
         if revision is not None:
             query += " AND episode_revision <= ?"
@@ -578,7 +579,7 @@ class ActivityStore:
         with self._transaction(write=False) as conn:
             meta = self._checked_meta(self._read_meta(conn))
             counts = {
-                table: int(conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
+                table: int(conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0])  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                 for table in _schema.TABLES
                 if table != "activity_meta"
             }

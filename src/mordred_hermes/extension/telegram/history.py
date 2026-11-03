@@ -464,7 +464,7 @@ def stored_conversations(store: ImportStore, account: str) -> dict[str, ImportCo
     """Every Telegram conversation row of ``account`` (cursors and counts as last committed)."""
     with store.connection() as conn:
         rows = conn.execute(
-            f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE source = ? AND source_account = ?",
+            f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE source = ? AND source_account = ?",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
             (_SOURCE, account),
         ).fetchall()
     try:
@@ -483,7 +483,7 @@ def committed_stats(store: ImportStore, conv_uids: Iterable[str]) -> dict[str, t
             chunk = uids[start : start + _CHUNK]
             marks = ", ".join("?" * len(chunk))
             for conv_uid, count, last in conn.execute(
-                "SELECT m.conv_uid, count(*), max(m.sent_at) FROM import_messages m "
+                "SELECT m.conv_uid, count(*), max(m.sent_at) FROM import_messages m "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                 "JOIN import_runs r ON r.run_id = m.run_id AND r.state = 'committed' "
                 f"WHERE m.conv_uid IN ({marks}) GROUP BY m.conv_uid",
                 chunk,
@@ -669,7 +669,7 @@ def _committed_messages(
         for start in range(0, len(conv_uids), _CHUNK):
             chunk = list(conv_uids[start : start + _CHUNK])
             sql = (
-                "SELECT min(p.part_uid) FROM import_messages m "
+                "SELECT min(p.part_uid) FROM import_messages m "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                 "JOIN import_runs r ON r.run_id = m.run_id AND r.state = 'committed' "
                 "JOIN import_parts p ON p.source_uid = m.source_uid "
                 f"WHERE m.conv_uid IN ({', '.join('?' * len(chunk))}){clauses} GROUP BY m.source_uid"

@@ -50,7 +50,7 @@ def _memory_refusal(home: Path | None) -> str | None:
     except PrivateFSError as exc:
         if sys.platform == "win32" and exc.reason == "busy":
             return "custody_busy"
-    except Exception:
+    except Exception:  # noqa: S110 - any failure fails closed to memory_encryption_required
         pass
     return "memory_encryption_required"
 

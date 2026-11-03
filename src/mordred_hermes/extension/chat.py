@@ -252,7 +252,7 @@ def _ensure_agent(runner: Any, state: dict[str, Any]) -> Any:
             from hermes_cli.models import get_default_model_for_provider
 
             model = get_default_model_for_provider(runtime["provider"])
-        except Exception:
+        except Exception:  # noqa: S110 - optional default-model lookup; absence handled below
             pass
 
     sig = (model, tuple(sorted((k, str(v)) for k, v in runtime.items() if k != "api_key")))

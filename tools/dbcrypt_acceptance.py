@@ -144,7 +144,7 @@ print(json.dumps({
 
 def probe_interpreter(interpreter: Path, *, cwd: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="mordred-dbcrypt-probe-") as directory:
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: S603 - list argv, no shell
             [str(interpreter), "-c", _PROBE],
             cwd=cwd,
             env=probe_environment(Path(directory)),
@@ -684,7 +684,7 @@ def validate_bundle(root: Path) -> dict[str, Any]:
 
 def _run_build(argv: list[str], *, cwd: Path, environment: dict[str, str], log: list[dict[str, Any]]) -> str:
     started = time.time()
-    result = subprocess.run(argv, cwd=cwd, env=environment, text=True, capture_output=True, timeout=900, check=False)
+    result = subprocess.run(argv, cwd=cwd, env=environment, text=True, capture_output=True, timeout=900, check=False)  # noqa: S603 - list argv, no shell
     # Dependency tools can print credential-bearing index URLs: retain command,
     # timing and status, never arbitrary subprocess stdout/stderr in evidence.
     log.append(
@@ -702,8 +702,12 @@ def _run_build(argv: list[str], *, cwd: Path, environment: dict[str, str], log: 
 
 
 def _git(checkout: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(checkout), *args], capture_output=True, text=True, timeout=30, check=False
+    result = subprocess.run(  # noqa: S603 - list argv, no shell
+        ["git", "-C", str(checkout), *args],  # noqa: S607 - PATH lookup of a system tool is intended
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
     )
     if result.returncode:
         raise AcceptanceRefused("checkout_git_provenance_unavailable")
@@ -3013,7 +3017,7 @@ def _native_process(
     record: dict[str, Any] = {"name": name, "argv": argv, "cwd": str(context["bundle"]), "started_at": time.time()}
     context.setdefault("execution_log", []).append(record)
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: S603 - list argv, no shell
             argv,
             cwd=context["bundle"],
             env=environment,
@@ -4116,7 +4120,7 @@ def qualify_windows_vfs(*, bundle: Path, mode: str, diagnostic: Path, fixtures: 
                 action = row["action"]
                 path = output / (action + ".json")
                 started = time.time()
-                execution = subprocess.run(
+                execution = subprocess.run(  # noqa: S603 - list argv, no shell
                     row["argv"],
                     cwd=bundle,
                     env={**environment, **row["env"], "MORDRED_DBCRYPT_PYTEST_REPORT": str(path)},

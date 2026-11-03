@@ -94,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     if unknown:
         print(f"Unmeasured modules use {DEFAULT_SECONDS}s each: {', '.join(unknown)}", flush=True)
     if args.manifest is not None:
-        return subprocess.run(
+        return subprocess.run(  # noqa: S603 - list argv, no shell
             [
                 sys.executable,
                 str(Path(__file__).with_name("run_native_pytest.py")),
@@ -112,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
             ],
             check=False,
         ).returncode
-    return subprocess.run(
+    return subprocess.run(  # noqa: S603 - list argv, no shell
         [
             sys.executable,
             "-m",

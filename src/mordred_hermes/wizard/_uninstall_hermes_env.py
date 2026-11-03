@@ -87,7 +87,7 @@ def default_runner(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
     if sys.platform == "win32":
         env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     try:
-        return subprocess.run(
+        return subprocess.run(  # noqa: S603 - list argv, no shell
             list(argv),
             capture_output=True,
             text=True,

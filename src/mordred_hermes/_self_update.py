@@ -271,7 +271,7 @@ def _default_fetch(url: str) -> bytes:
     except ImportError:
         from urllib.request import Request, urlopen
 
-        with urlopen(Request(url, headers=_HEADERS), timeout=FETCH_TIMEOUT_SECONDS) as response:
+        with urlopen(Request(url, headers=_HEADERS), timeout=FETCH_TIMEOUT_SECONDS) as response:  # noqa: S310 - https URL on a fixed origin
             return bytes(response.read(MAX_FETCH_BYTES + 1))
     with httpx.Client(timeout=FETCH_TIMEOUT_SECONDS, trust_env=True, follow_redirects=False) as client:
         response = client.get(url, headers=_HEADERS)
@@ -528,7 +528,7 @@ def _default_runner(
     timeout: float | None = None,
 ) -> CommandResult:
     try:
-        proc = subprocess.run(
+        proc = subprocess.run(  # noqa: S603 - list argv, no shell
             argv,
             capture_output=True,
             text=True,

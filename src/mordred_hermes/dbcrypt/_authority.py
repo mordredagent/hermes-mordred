@@ -170,7 +170,7 @@ class Authority:
                 for connection in connections:
                     try:
                         connection.invalidate()
-                    except BaseException:
+                    except BaseException:  # noqa: S112 - every held object must still be invalidated
                         # A broken callback cannot leave another held object live.
                         continue
             finally:

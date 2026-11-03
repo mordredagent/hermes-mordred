@@ -156,7 +156,7 @@ def _backup_status(src: Path, home: Path, lease: Any) -> StoreStatus:
             if meta.profile_home != target.profile_home:
                 raise ActivityRefused(refusal("profile_mismatch"))
             counts = {
-                table: int((backup.execute(f"SELECT count(*) FROM {table}").fetchone() or (0,))[0])
+                table: int((backup.execute(f"SELECT count(*) FROM {table}").fetchone() or (0,))[0])  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                 for table in _schema.TABLES
                 if table != "activity_meta"
             }

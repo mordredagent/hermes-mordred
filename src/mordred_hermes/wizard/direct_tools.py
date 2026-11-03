@@ -162,7 +162,7 @@ def _spawn_reader(text: str, strict_empty: bool) -> dict[str, Any] | None:
     env = {key: value for key, value in os.environ.items() if key not in ("PYTHONPATH", "PYTHONHOME")}
     env["MORDRED_CONFIG_DECRYPT"] = "0"  # a reader: never on the config.yaml materialize/reseal lifecycle
     try:
-        done = subprocess.run(
+        done = subprocess.run(  # noqa: S603 - list argv, no shell
             _reader_argv(strict_empty),
             input=text.encode("utf-8"),
             capture_output=True,  # stderr (ruamel's warnings quote the document) is dropped unread
@@ -254,7 +254,7 @@ def _run(command: Path, home: Path, *args: str) -> tuple[int, str]:
     env["HERMES_HOME"] = str(home)
     env["MORDRED_CONFIG_DECRYPT"] = "0"  # the running process's lifecycle owns the plaintext; the child only edits it
     try:
-        done = subprocess.run(
+        done = subprocess.run(  # noqa: S603 - list argv, no shell
             [str(command), "config", *args],
             cwd=home,
             env=env,

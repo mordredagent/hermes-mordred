@@ -95,7 +95,7 @@ def _posix_source(path: Path) -> bytes:
     ).encode("utf-8")
     worker = Path(__file__).resolve().with_name("_posix_source.py")
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: S603 - list argv, no shell
             [str(executable), "-I", "-S", str(worker)],
             input=request,
             stdout=subprocess.PIPE,
@@ -202,7 +202,7 @@ def _posix_export_stream(resolved: Path) -> Iterator[BinaryIO]:
         raise _refused()
     argv, request = _export_request(resolved, before)
     try:
-        proc = subprocess.Popen(
+        proc = subprocess.Popen(  # noqa: S603 - list argv, no shell
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env={}, close_fds=True
         )
     except OSError:

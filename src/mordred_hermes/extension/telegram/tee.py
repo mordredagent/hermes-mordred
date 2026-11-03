@@ -129,7 +129,7 @@ def _audit_sink(entry: dict[str, Any]) -> None:
 
         writer = build_audit_writer(_home() / "mordred" / "audit.log")
         safe_audit_append(writer, entry, logger=logging.getLogger(__name__))
-    except Exception:
+    except Exception:  # noqa: S110 - audit sink must never break the TEE call path
         pass
 
 

@@ -856,7 +856,7 @@ def load_channel_keys() -> dict[str, bytes]:
     for cid, kb in (data.get("channel_keys") or {}).items():
         try:
             out[cid] = b64u_decode(kb)
-        except Exception:
+        except Exception:  # noqa: S112 - undecodable channel keys are skipped by design
             continue
     return out
 

@@ -77,7 +77,7 @@ def main() -> None:
     if args.source_archive is not None:
         source = args.source_archive.read_bytes()
     else:
-        with urllib.request.urlopen(SOURCE_URL, timeout=60) as response:
+        with urllib.request.urlopen(SOURCE_URL, timeout=60) as response:  # noqa: S310 - https URL on a fixed origin
             source = response.read(32 * 1024 * 1024 + 1)
     prepare_headers(args.output_directory, source)
 

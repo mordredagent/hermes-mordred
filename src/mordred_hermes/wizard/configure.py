@@ -168,7 +168,7 @@ class SubprocessSetupRunner:
         if non_interactive:
             cmd.append("--non-interactive")
         try:
-            completed = subprocess.run(cmd, check=False)
+            completed = subprocess.run(cmd, check=False)  # noqa: S603 - list argv, no shell
         except FileNotFoundError:
             _term.emit_warn(
                 "`hermes` executable not found on PATH; skipping `hermes setup` step. "
