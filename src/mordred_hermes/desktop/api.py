@@ -635,7 +635,7 @@ def _service() -> Any:
 
 
 @router.post("/sync")
-async def sync(body: dict[str, Any]) -> Any:
+async def sync(body: dict[str, Any], request: Request = None) -> Any:  # type: ignore[assignment]
     """Body (all optional): days, include_archived, include_channels, include_large_groups."""
     days = body.get("days")
     if days is not None and (not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 3650):
@@ -649,7 +649,10 @@ async def sync(body: dict[str, Any]) -> Any:
     svc = _service()
     try:
         options = svc.sync_options(overrides)
-        await svc.start_sync(options)
+        from ..keyvault._presence_hosts import desktop_presence
+
+        with desktop_presence(request, "telegram") if request is not None else contextlib.nullcontext():
+            await svc.start_sync(options)
     except Exception as exc:
         from ..extension.telegram.service import error_code
 

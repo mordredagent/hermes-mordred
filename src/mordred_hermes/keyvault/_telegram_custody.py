@@ -384,6 +384,9 @@ class PosixTelegramCustody(_Opaque):
 
     def begin_forget(self) -> None:
         record = _record(self)
+        from ._presence import revoke
+
+        revoke(home=record.home)
         if record.journal is not None:
             raise DatabaseRefused("Telegram forget already pending")
         observed = _validate_authentication(self, record.authenticated)
@@ -511,20 +514,29 @@ def authenticate_telegram_source(
         observed, sealed = _observe(custody)
     if sealed is None:
         return None, None
-    blob, nonce, body = _unpack(sealed)
-    try:
-        dek = wrap.unwrap_dek(blob, KEY_ID, backend=backend, audit_sink=audit_sink)
-    except WrapAuthCancelled as exc:
-        raise TelegramSecretsError("tee_auth_cancelled") from exc
-    except WrapError as exc:
-        raise TelegramSecretsError("tee_unavailable") from exc
-    current = decode(_decrypt(dek, nonce, body))
-    del dek
-    with telegram_credential_transaction(home=home, backend=backend) as custody:
-        if _observe(custody)[0] != observed:
-            raise DatabaseRefused("Telegram source changed during authentication")
-        with _native_creation_handoff(KEY_ID):
-            authentication = object.__new__(TelegramAuthentication)
-            assert observed is not None
-            _authentications[authentication] = _AuthenticationRecord(observed, backend, _process())
-        return current, authentication
+    from ._presence import credential_scope
+
+    with credential_scope(
+        home,
+        "telegram",
+        None
+        if observed is None
+        else (observed.roots, observed.source_identity, observed.digest, observed.public_fingerprint, observed.locks),
+    ):
+        blob, nonce, body = _unpack(sealed)
+        try:
+            dek = wrap.unwrap_dek(blob, KEY_ID, backend=backend, audit_sink=audit_sink)
+        except WrapAuthCancelled as exc:
+            raise TelegramSecretsError("tee_auth_cancelled") from exc
+        except WrapError as exc:
+            raise TelegramSecretsError("tee_unavailable") from exc
+        current = decode(_decrypt(dek, nonce, body))
+        del dek
+        with telegram_credential_transaction(home=home, backend=backend) as custody:
+            if _observe(custody)[0] != observed:
+                raise DatabaseRefused("Telegram source changed during authentication")
+            with _native_creation_handoff(KEY_ID):
+                authentication = object.__new__(TelegramAuthentication)
+                assert observed is not None
+                _authentications[authentication] = _AuthenticationRecord(observed, backend, _process())
+            return current, authentication

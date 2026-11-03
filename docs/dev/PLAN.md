@@ -11,6 +11,32 @@ Mordred is a standalone Python distribution loaded through
 `hermes_agent.plugins`. It does not fork Hermes and does not submit changes to
 Hermes upstream.
 
+
+## Bounded macOS presence reuse
+
+`keyvault/_presence.py` binds operation-local scope, fixed-purpose credential
+observations, admission and cancellation; `_presence_transport.py` bounds the
+private pipe protocol. `PresenceSession.swift` owns native authentication and
+expiry. `_presence_hosts.py` adapts verified Hermes/Desktop identities; extension
+connections bind their pairing generation directly. No service instance stores
+caller authority. Both raw mail workers and Desktop jobs carry context and
+revoke it before draining cancelled work. A cancelled operation cannot create a
+helper after a late capability result. Weakly held operation scopes revoke a
+caller's previous profile before a late worker can acquire presence. Monitor
+checks observe the process home independently of request ContextVars; callbacks
+that read profile-specific pairing state temporarily bind only Hermes's profile
+selector in a fresh context, retaining no request-context secrets.
+Nonzero opt-in explicitly requires OS
+presence even for unattended keys; zero preserves their previous behavior.
+The native helper owns LAContext expiry, independent lock/sleep notifications
+and parent lifetime. Python owns bounded admission, prompt-free compatibility
+negotiation and operation-local profile/session/purpose binding. Existing custody
+observations remain authoritative on each decrypt. No plaintext cache is added.
+Run critical feedback and complete containing security modules, then one final
+regression, static checks and the CI extras type environment. Record isolated
+live-device evidence in VALIDATION_LOG before setting a profile to 300 seconds.
+
+
 ## Current architecture
 
 One Hermes entry point, `mordred` (`plugin.py`), registers these components in

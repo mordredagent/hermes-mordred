@@ -2015,3 +2015,65 @@ completion acceptance matrix track later work and current open gates.
   both retained hosts stopped. Linux was not started. This is diagnostic
   feasibility; production checked-filesystem, custody, consumer and Desktop
   acceptance remain gated by the later implementation tasks.
+
+
+- **2026-11-03 — Bounded macOS presence reuse: automatic candidate validation; attended acceptance pending.**
+  Production implementation at `3d0c947c1`, on the isolated
+  `feat/presence-reuse` worktree, was checked with Python 3.13.12 and the
+  repository editable source (not the released Hermes venv). The coverage run
+  completed with **14,432 passed, 295 skipped, 170 deselected and one environment
+  failure**; coverage was **91.44%** (55,530 / 60,726 statements), exceeding the
+  80% floor. The single failure was the member-wheel bootstrap test: stdlib
+  `venv.EnvBuilder` copied uv's managed Python executable without its relative
+  `libpython3.13.dylib`. The interpreter failed before wheel installation or any
+  Mordred bootstrap could run. Re-running the **entire containing module** with
+  `DYLD_LIBRARY_PATH` set to `sys.base_prefix + "/lib"` produced **66 passed,
+  one skipped**. No production or test implementation was changed for that
+  environment correction. This is not a claim that the initial full command
+  was entirely green.
+
+  The final critical preset passed **24 tests**; the profile/cancellation and
+  affected host security set passed **354 tests**. Ruff check and format,
+  strict mypy over **409 files**, both import-layer contracts, and ShellCheck
+  passed. Strict mypy also passed in a separate Python 3.13 environment
+  installed with only `dev,keyvault,extension,macos` extras. `swift test
+  --package-path native/sekey-helper` passed **four tests** covering fixed
+  deadlines, revocation, denial and one authentication decision with fresh
+  exchanges. Credential tests used real custody, wrapping and AES operations
+  with native IPC faked; ordinary and HD wallet tests verified two decrypts
+  and rejection before the signing primitive when the signer changes.
+
+  A fresh read-only branch review identified two mail cancellation defects;
+  both were reproduced and fixed before worker drain. Additional regression
+  tests cover late capability completion, cancellation after a setting change,
+  independent monitor threads with request-scoped profiles, and invalidating
+  pending old-profile operations. Profile validation binds only the framework
+  profile selector in a fresh context, rather than retaining request secrets.
+
+  A signed candidate was built only at
+  `/tmp/mordred-presence-candidate.gR3e6k/bin/mordred-hermes-sekey`, SHA-256
+  `2457510ac9099f1876d73292c8d090316d1f99638317ad34fc93413197419e35`.
+  Its prompt-free capability command reported `presence_session: 1`.
+  The explicit integration invocation of `test_presence_macos.py` and
+  `test_keyvault_macos.py` collected **10 skipped tests**, with live gates unset.
+  Actual Touch ID counts, 300-second reauthentication, lock/sleep notifications,
+  denial UI and independent ordinary/HD signing prompts are **not validated**.
+  The attended driver and commands are in `native/sekey-helper/README.md`.
+
+  Decisions retained: unverifiable Desktop authentication generations (including
+  gated OAuth and isolated ASGI hosts) use one-shot authorization; a nonzero
+  opt-in requests OS presence even for an unattended key, without changing its
+  stored ACL. Zero preserves unattended reads. Contract documents preceded
+  foundation and caller-path implementation commits; no upstream PR or
+  production integration was performed. **Reuse remains disabled by default
+  (0); no production profile, key, installed helper or gateway was changed.**
+
+  The initial Python 3.14.7 full run also exposed existing Windows-simulation
+  `_winapi` imports and IMAP streaming incompatibilities. Representative failures
+  reproduced against baseline `3db560f1d`; all **240** suspect module tests
+  passed under Python 3.13. No unrelated runtime fixes were included.
+  Local evidence: `/tmp/mordred-presence-verified-regression.log`,
+  `/tmp/mordred-presence-verified-junit.xml`,
+  `/tmp/mordred-presence-verified-coverage.xml`,
+  `/tmp/mordred-member-verified.log`, `/tmp/mordred-final-profile-static.log`,
+  `/tmp/mordred-swift-acceptance.log` and `/tmp/mordred-live-gates-final.log`.

@@ -16,5 +16,6 @@ let package = Package(
             name: "mordred-hermes-sekey",
             path: "Sources/mordred-hermes-sekey"
         ),
+        .testTarget(name: "PresenceTests", dependencies: ["mordred-hermes-sekey"]),
     ]
 )

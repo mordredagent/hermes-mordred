@@ -314,6 +314,9 @@ class PosixMailCustody(_Opaque):
         return _record(self).tx
 
     def retire(self) -> None:
+        from ._presence import revoke
+
+        revoke()
         r = _record(self)
         observed = _validate(self, r.authentication)
         if read(r.tx, JOURNAL) is not None:
@@ -573,13 +576,16 @@ def authenticate_mail_source(
         if item is None:
             return None, None
         observed = _observe(custody)
-    value = decrypt(item[0], backend, entries)
-    with mail_credential_transaction(home=home, backend=backend) as custody:
-        if _observe(custody) != observed:
-            raise DatabaseRefused("mail source changed during authentication")
-        proof = object.__new__(MailAuthentication)
-        _proofs[proof] = observed, backend, _process()
-    return value, proof
+    from ._presence import credential_scope
+
+    with credential_scope(home, "mail", (observed.roots, observed.files, observed.public, observed.locks)):
+        value = decrypt(item[0], backend, entries)
+        with mail_credential_transaction(home=home, backend=backend) as custody:
+            if _observe(custody) != observed:
+                raise DatabaseRefused("mail source changed during authentication")
+            proof = object.__new__(MailAuthentication)
+            _proofs[proof] = observed, backend, _process()
+        return value, proof
 
 
 def require_linux_no_presence_policy(tx: PrivateTransaction, public: str) -> tuple[bytes, FileMetadata]:

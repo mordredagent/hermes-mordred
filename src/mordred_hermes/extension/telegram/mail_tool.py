@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import sys
 import threading
@@ -228,12 +229,16 @@ async def _run_worker(max_messages: int) -> dict[str, Any] | None:
         except Exception:  # never stringified; the handler reports fetch_failed
             box.pop("result", None)
 
-    worker = threading.Thread(target=target, name=WORKER_NAME, daemon=True)
+    context = contextvars.copy_context()
+    worker = threading.Thread(target=lambda: context.run(target), name=WORKER_NAME, daemon=True)
     budget_end = time.monotonic() + imap_sync.TOOL_BUDGET_S
     worker.start()
     try:
         ended = await _joined(worker, budget_end + ABANDON_GRACE_S - REVOKE_GRACE_S)
     except asyncio.CancelledError:
+        from ...keyvault._presence import revoke_current
+
+        revoke_current()  # kill authentication before any bounded drain/abandon waits
         cancel.cancel()  # the fetch stops at once: its IMAP socket is shut down, a resolver wait woken
         bound = max(budget_end, time.monotonic()) + CANCEL_GRACE_S  # fixed now: later cancellations never move it
         if not await _joined_after_cancel(worker, bound - REVOKE_GRACE_S):
@@ -241,6 +246,9 @@ async def _run_worker(max_messages: int) -> dict[str, Any] | None:
                 await _abandon(lease, bound)  # its writes refused, its run failed, the writer lock released or kept
         raise  # an abandoned worker is a daemon that has been told to stop
     if not ended:
+        from ...keyvault._presence import revoke_current
+
+        revoke_current()
         cancel.cancel()
         return _abandoned(await _abandon(lease, budget_end + ABANDON_GRACE_S))
     return box.get("result")
@@ -253,8 +261,7 @@ def _error(code: str) -> str:
 async def mordred_mail_sync(
     args: dict[str, Any], parent_agent: Any = None, session_id: str | None = None, **_: Any
 ) -> str:
-    """Fetch new mail; returns the counts-only result (``session_id`` is accepted and unused)."""
-    del session_id
+    """Fetch new mail; bind optional presence to the framework dispatch session."""
     try:
         max_messages = parse_args(args)
     except _Invalid:
@@ -267,7 +274,10 @@ async def mordred_mail_sync(
         code = getattr(exc, "code", None)
         allowed = {"hermes_model_not_allowed", "hermes_model_not_private", "routing_unavailable"}
         return _error(code if code in allowed else "fetch_failed")
-    result = await _run_worker(max_messages)  # the worker has ended, or was abandoned (``abandoned: true``)
+    from ...keyvault._presence_hosts import hermes_presence
+
+    with hermes_presence(session_id, "mail"):
+        result = await _run_worker(max_messages)  # ended or abandoned; no credentials cached
     if result is None:
         return _error("fetch_failed")
     return json.dumps({**result, "note": NOTE})
