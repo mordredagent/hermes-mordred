@@ -238,3 +238,153 @@ def test_windows_identity_still_refuses_unsafe_native_metadata(monkeypatch, chan
         api.change(path, **({"reparse": True} if change == "reparse" else {"links": 2}))
     with pytest.raises(DatabaseRefused):
         _connection._identity(PureWindowsPath(path), directory=False)
+
+
+_REMOTE_DATABASE_NAMES = [
+    r"\\server\share\state.db",
+    "//server/share/state.db",
+    r"\/server\share/state.db",
+    r"\\?\UNC\server\share\state.db",
+    r"\\?\C:\private\state.db",
+    r"\\.\C:\private\state.db",
+    r"\??\C:\private\state.db",
+    "/??/C:/private/state.db",
+]
+
+
+@pytest.mark.parametrize("name", _REMOTE_DATABASE_NAMES)
+@pytest.mark.parametrize("representation", ["str", "bytes", "pathlike"])
+def test_native_shim_refuses_windows_remote_names_before_path_io(monkeypatch, name, representation):
+    import os
+    from types import SimpleNamespace
+
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+    from mordred_hermes.dbcrypt import _policy, _shim
+
+    monkeypatch.setattr(_policy, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    monkeypatch.setattr(_shim, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    value = name if representation == "str" else os.fsencode(name) if representation == "bytes" else Path(name)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("remote name reached filesystem classification")
+
+    # Exercise the actual shim entry, including its scope/realpath decision.
+    authority = SimpleNamespace(check=lambda: None, root=Path("C:/private"))
+    connect = _shim._native_connect(authority)
+    with monkeypatch.context() as guard:
+        guard.setattr(Path, "absolute", forbidden)
+        guard.setattr(Path, "exists", forbidden)
+        guard.setattr(Path, "stat", forbidden)
+        guard.setattr(os.path, "realpath", forbidden)
+        with pytest.raises(DatabaseRefused) as refused:
+            connect(value)
+    assert name not in str(refused.value)
+
+
+@pytest.mark.parametrize("name", _REMOTE_DATABASE_NAMES)
+@pytest.mark.parametrize("mode", ["ro", "rw", "rwc"])
+def test_native_shim_refuses_encoded_remote_uri_before_exists(monkeypatch, name, mode):
+    import os
+    from types import SimpleNamespace
+    from urllib.parse import quote
+
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+    from mordred_hermes.dbcrypt import _policy, _shim
+
+    monkeypatch.setattr(_policy, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    monkeypatch.setattr(_shim, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    uri = f"file:{quote(name, safe='')}?mode={mode}"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("URI reached filesystem before lexical refusal")
+
+    with monkeypatch.context() as guard:
+        guard.setattr(Path, "exists", forbidden)
+        guard.setattr(Path, "absolute", forbidden)
+        with pytest.raises(DatabaseRefused):
+            _shim._native_path(uri, uri=True)
+
+
+@pytest.mark.parametrize("entry", ["shim", "direct"])
+def test_windows_relative_path_on_unc_cwd_refused_after_absolutizing(monkeypatch, entry):
+    import os
+    from pathlib import PureWindowsPath
+    from types import SimpleNamespace
+
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+    from mordred_hermes.dbcrypt import _connection, _policy, _shim
+
+    for module in (_policy, _shim, _connection):
+        monkeypatch.setattr(module, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    monkeypatch.setattr(_connection, "_PathBinding", lambda *a, **k: pytest.fail("remote binding attempted"))
+    authority = SimpleNamespace(check=lambda: None)
+    with monkeypatch.context() as guard:
+        guard.setattr(Path, "absolute", lambda self: PureWindowsPath(r"\\server\share\state.db"))
+        with pytest.raises(DatabaseRefused, match="namespace"):
+            if entry == "shim":
+                _shim._native_path("state.db", uri=False)
+            else:
+                _connection._open(Path("state.db"), authority=authority, timeout=5, readonly=False, protected=True)
+
+
+@pytest.mark.parametrize("name", _REMOTE_DATABASE_NAMES)
+def test_direct_connection_refuses_remote_names_before_absolute_binding_or_sql(monkeypatch, name):
+    import os
+    from types import SimpleNamespace
+
+    import sqlcipher3.dbapi2 as sc
+
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+    from mordred_hermes.dbcrypt import _connection, _policy
+
+    for module in (_policy, _connection):
+        monkeypatch.setattr(module, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("remote destination reached I/O")
+
+    monkeypatch.setattr(_connection, "_PathBinding", forbidden)
+    monkeypatch.setattr(sc, "connect", forbidden)
+    authority = SimpleNamespace(check=lambda: None)
+    with monkeypatch.context() as guard:
+        guard.setattr(Path, "absolute", forbidden)
+        guard.setattr(Path, "stat", forbidden)
+        guard.setattr(Path, "lstat", forbidden)
+        with pytest.raises(DatabaseRefused) as refused:
+            _connection._open(Path(name), authority=authority, timeout=5, readonly=False, protected=True)
+    assert name not in str(refused.value)
+
+
+@pytest.mark.parametrize("name", ["state.db", "C:/private/state.db", ":memory:"])
+def test_windows_lexical_guard_keeps_local_and_memory_paths(monkeypatch, name):
+    import os
+    from types import SimpleNamespace
+
+    from mordred_hermes.dbcrypt import _policy, _shim
+
+    for module in (_policy, _shim):
+        monkeypatch.setattr(module, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    path, readonly = _shim._native_path(name, uri=False)
+    assert path == (None if name == ":memory:" else Path(name).absolute())
+    assert not readonly
+
+
+def test_posix_double_slash_path_keeps_existing_policy():
+    import os
+
+    from mordred_hermes.dbcrypt import _shim
+
+    if os.name == "nt":
+        pytest.skip("POSIX compatibility")
+    path, readonly = _shim._native_path("//local/state.db", uri=False)
+    assert path == Path("//local/state.db").absolute()
+    assert not readonly
+
+
+def test_native_memory_uri_rw_keeps_existing_refusal(tmp_path, monkeypatch):
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+    from mordred_hermes.dbcrypt import _shim
+
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(DatabaseRefused, match="does not exist"):
+        _shim._native_path("file::memory:?mode=rw", uri=True)
