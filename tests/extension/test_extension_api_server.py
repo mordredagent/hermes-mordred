@@ -1407,23 +1407,30 @@ def test_message_approval_rejects_wallet_switch_before_signing(monkeypatch, meth
 
     approved_signer = "0x" + "aa" * 20
     replacement_signer = "0x" + "bb" * 20
-    addresses = iter((approved_signer, replacement_signer))
+
+    def refuse_changed_key(*args, expected_signer, **kwargs):
+        assert expected_signer == approved_signer
+        from mordred_hermes.keyvault.ethereum import _check_expected_signer
+
+        _check_expected_signer(replacement_signer, expected_signer)
+        pytest.fail("changed key must never sign")
+
     params = (
         ["0xdeadbeef", approved_signer.upper()]
         if method == "personal_sign"
         else [approved_signer.upper(), {"types": {}, "primaryType": "Test", "domain": {}, "message": {}}]
     )
     monkeypatch.setattr(extension_api, "_do_sign", wallet_do_sign)
-    monkeypatch.setattr(extension_sign, "get_address", lambda: next(addresses))
+    monkeypatch.setattr(extension_sign, "get_address", lambda: approved_signer)
     monkeypatch.setattr(
         extension_sign,
         "personal_sign",
-        lambda *_args, **_kwargs: pytest.fail("changed wallet must be rejected before personal_sign"),
+        refuse_changed_key,
     )
     monkeypatch.setattr(
         extension_sign,
         "sign_typed_data_v4",
-        lambda *_args, **_kwargs: pytest.fail("changed wallet must be rejected before typed-data signing"),
+        refuse_changed_key,
     )
     conn = _authed_conn()
 
@@ -1476,18 +1483,25 @@ def test_transaction_approval_rejects_wallet_switch_before_signing(monkeypatch):
 
     approved_signer = "0x" + "aa" * 20
     replacement_signer = "0x" + "bb" * 20
-    addresses = iter((approved_signer, replacement_signer))
+
+    def refuse_changed_key(*args, expected_signer, **kwargs):
+        assert expected_signer == approved_signer
+        from mordred_hermes.keyvault.ethereum import _check_expected_signer
+
+        _check_expected_signer(replacement_signer, expected_signer)
+        pytest.fail("changed key must never sign")
+
     # ``test_full_server_flow`` stubs the imported API symbol for its real
     # socket flow; restore the wallet implementation so this test exercises the
     # approval-time signer recheck rather than that test-only stub.
     monkeypatch.setattr(extension_api, "_do_sign", wallet_do_sign)
     monkeypatch.setattr(extension_sign, "chain_id_int", lambda: 1)
-    monkeypatch.setattr(extension_sign, "get_address", lambda: next(addresses))
+    monkeypatch.setattr(extension_sign, "get_address", lambda: approved_signer)
     monkeypatch.setattr(extension_sign, "rpc_url_for", lambda _chain_id: "https://rpc.example.com")
     monkeypatch.setattr(
         extension_sign,
         "sign_transaction",
-        lambda *_args, **_kwargs: pytest.fail("changed wallet must be rejected before signing"),
+        refuse_changed_key,
     )
     monkeypatch.setattr(
         extension_rpc,

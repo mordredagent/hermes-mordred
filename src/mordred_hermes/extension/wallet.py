@@ -216,13 +216,6 @@ def _validated_account_bound_params(
     raise ValueError(f"unsupported_method:{method}")
 
 
-def _assert_current_signer(expected_signer: str) -> None:
-    from mordred_hermes.keyvault import extension_sign
-
-    if not _addresses_match(extension_sign.get_address(), expected_signer):
-        raise RuntimeError("wallet_signer_changed")
-
-
 def _recover_personal_signer(message: str, signature: str) -> str:
     from eth_account import Account
     from eth_account.messages import encode_defunct
@@ -272,17 +265,16 @@ def _do_sign(
         _account_index, requested_signer, payload = _validated_account_bound_params(method, params)
         if not _addresses_match(requested_signer, expected_signer):
             raise RuntimeError("signer_snapshot_mismatch")
-        _assert_current_signer(expected_signer)
         if method == "personal_sign":
             if not isinstance(payload, str):
                 raise ValueError("invalid_personal_sign_params")
-            signature = extension_sign.personal_sign(payload)
+            signature = extension_sign.personal_sign(payload, expected_signer=expected_signer)
             try:
                 actual_signer = _recover_personal_signer(payload, signature)
             except Exception as exc:
                 raise RuntimeError("signature_signer_verification_failed") from exc
         else:
-            signature = extension_sign.sign_typed_data_v4(payload)
+            signature = extension_sign.sign_typed_data_v4(payload, expected_signer=expected_signer)
             try:
                 actual_signer = _recover_typed_data_signer(payload, signature)
             except Exception as exc:
@@ -446,11 +438,10 @@ def _send_prepared_transaction(
     tx_signer = tx.get("from")
     if not isinstance(tx_signer, str) or not _addresses_match(tx_signer, expected_signer):
         raise RuntimeError("transaction_signer_mismatch")
-    _assert_current_signer(expected_signer)
     canonical_tx = extension_sign.canonicalize_transaction(tx, chain_id=chain_id)
     if canonical_tx != tx:
         raise RuntimeError("transaction_snapshot_not_canonical")
-    signed = extension_sign.sign_transaction(canonical_tx, chain_id=chain_id)
+    signed = extension_sign.sign_transaction(canonical_tx, chain_id=chain_id, expected_signer=expected_signer)
     try:
         actual_signer = _recover_transaction_signer(signed["raw"])
     except Exception as exc:

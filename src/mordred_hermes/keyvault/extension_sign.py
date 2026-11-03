@@ -338,9 +338,10 @@ def _resolve_account() -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-def _sign_hash(message_hash: bytes) -> ethereum.EthereumSignature:
+def _sign_hash(message_hash: bytes, *, expected_signer: str | None = None) -> ethereum.EthereumSignature:
     acct = _resolve_account()
     backend, sink = _backend(), _audit_sink
+    signer_options: dict[str, Any] = {"expected_signer": expected_signer} if expected_signer is not None else {}
     if acct["kind"] == "hd":
         return ethereum.sign_hash_hd(
             acct["key_id"],
@@ -349,6 +350,7 @@ def _sign_hash(message_hash: bytes) -> ethereum.EthereumSignature:
             message_hash,
             backend=backend,
             audit_sink=sink,
+            **signer_options,
             account=int(acct.get("account", 0)),
             change=int(acct.get("change", 0)),
         )
@@ -358,6 +360,7 @@ def _sign_hash(message_hash: bytes) -> ethereum.EthereumSignature:
         message_hash,
         backend=backend,
         audit_sink=sink,
+        **signer_options,
     )
 
 
@@ -419,21 +422,26 @@ def _eip191_hash(signable: Any) -> bytes:
     return bytes(keccak(b"\x19" + signable.version + signable.header + signable.body))
 
 
-def personal_sign(message: str) -> str:
+def personal_sign(message: str, *, expected_signer: str | None = None) -> str:
     """EIP-191 ``personal_sign``. ``message`` is the DApp param (hex or text)."""
     from eth_account.messages import encode_defunct
 
     signable = encode_defunct(hexstr=message) if message.startswith("0x") else encode_defunct(text=message)
-    sig = _sign_hash(_eip191_hash(signable))
+    sig = _sign_hash(
+        _eip191_hash(signable), **({"expected_signer": expected_signer} if expected_signer is not None else {})
+    )
     return "0x" + sig.hex
 
 
-def sign_typed_data_v4(typed_data: str | dict[str, Any]) -> str:
+def sign_typed_data_v4(typed_data: str | dict[str, Any], *, expected_signer: str | None = None) -> str:
     """EIP-712 ``eth_signTypedData_v4``. Accepts the JSON string or dict."""
     from eth_account.messages import encode_typed_data
 
     data = json.loads(typed_data) if isinstance(typed_data, str) else typed_data
-    sig = _sign_hash(_eip191_hash(encode_typed_data(full_message=data)))
+    sig = _sign_hash(
+        _eip191_hash(encode_typed_data(full_message=data)),
+        **({"expected_signer": expected_signer} if expected_signer is not None else {}),
+    )
     return "0x" + sig.hex
 
 
@@ -453,7 +461,7 @@ def _rlp_int(n: int) -> bytes:
     return n.to_bytes((n.bit_length() + 7) // 8, "big")
 
 
-def sign_transaction(tx: dict[str, Any], *, chain_id: int = 1) -> dict[str, str]:
+def sign_transaction(tx: dict[str, Any], *, chain_id: int = 1, expected_signer: str | None = None) -> dict[str, str]:
     """Sign a transaction, returning ``{"raw": "0x..", "hash": "0x.."}``.
 
     All nonce/gas/fee fields must already be present. The extension wallet fills
@@ -490,7 +498,7 @@ def sign_transaction(tx: dict[str, Any], *, chain_id: int = 1) -> dict[str, str]
             canonical["accessList"],
         ]
         sighash = keccak(b"\x02" + rlp.encode(unsigned))
-        sig = _sign_hash(sighash)
+        sig = _sign_hash(sighash, **({"expected_signer": expected_signer} if expected_signer is not None else {}))
         y = sig.v - 27
         r = int.from_bytes(sig.r, "big")
         s_int = int.from_bytes(sig.s, "big")
@@ -510,7 +518,7 @@ def sign_transaction(tx: dict[str, Any], *, chain_id: int = 1) -> dict[str, str]
             b"",
         ]
         sighash = keccak(rlp.encode(unsigned))
-        sig = _sign_hash(sighash)
+        sig = _sign_hash(sighash, **({"expected_signer": expected_signer} if expected_signer is not None else {}))
         v = (sig.v - 27) + 35 + 2 * signing_chain_id
         signed = [
             _rlp_int(nonce),

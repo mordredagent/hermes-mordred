@@ -940,8 +940,8 @@ def test_message_sign_rejects_signature_from_wallet_changed_after_precheck(monke
     expected_signer = "0x" + "aa" * 20
     actual_signer = "0x" + "bb" * 20
     monkeypatch.setattr(extension_sign, "get_address", lambda: expected_signer)
-    monkeypatch.setattr(extension_sign, "personal_sign", lambda _payload: "0xsigned-by-b")
-    monkeypatch.setattr(extension_sign, "sign_typed_data_v4", lambda _payload: "0xsigned-by-b")
+    monkeypatch.setattr(extension_sign, "personal_sign", lambda _payload, *, expected_signer: "0xsigned-by-b")
+    monkeypatch.setattr(extension_sign, "sign_typed_data_v4", lambda _payload, *, expected_signer: "0xsigned-by-b")
     monkeypatch.setattr(extension_wallet, "_recover_personal_signer", lambda _payload, _signature: actual_signer)
     monkeypatch.setattr(extension_wallet, "_recover_typed_data_signer", lambda _payload, _signature: actual_signer)
 
@@ -966,7 +966,7 @@ def test_send_prepared_transaction_never_refills_and_checks_broadcast_hash(monke
     }
     seen = {}
 
-    def sign_transaction(candidate, *, chain_id):
+    def sign_transaction(candidate, *, chain_id, expected_signer):
         seen["tx"] = candidate
         seen["chain_id"] = chain_id
         return {"raw": "0xraw", "hash": "0xabc"}
@@ -1052,7 +1052,7 @@ def test_transaction_sign_rejects_raw_tx_from_wallet_changed_after_precheck(monk
     monkeypatch.setattr(
         extension_sign,
         "sign_transaction",
-        lambda _tx, *, chain_id: {"raw": "0xsigned-by-b", "hash": "0xhash"},
+        lambda _tx, *, chain_id, expected_signer: {"raw": "0xsigned-by-b", "hash": "0xhash"},
     )
     monkeypatch.setattr(extension_wallet, "_recover_transaction_signer", lambda _raw: actual_signer)
     monkeypatch.setattr(
