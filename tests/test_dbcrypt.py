@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import sqlite3 as stdlib_sqlite3
 import struct
@@ -12,6 +13,7 @@ import pytest
 
 from mordred_hermes import dbcrypt
 from mordred_hermes.dbcrypt import _key, _policy, _shim
+from mordred_hermes.keyvault import _memory_key_holder
 
 MEMORY_KEY = bytes(range(32))
 
@@ -102,6 +104,16 @@ def test_provider_without_a_key_returns_none_after_one_injection() -> None:
     provider = _key.KeyProvider(environ={}, inject=lambda: calls.append(1) or 0)
     assert provider() is None and provider() is None
     assert calls == [1]
+
+
+def test_default_environ_provider_resolves_the_held_key_through_os_environ() -> None:
+    value = "hex:" + MEMORY_KEY.hex()
+    _memory_key_holder.set_value(value)
+    assert "HERMES_MEMORY_KEY" not in os.environ
+    provider = _key.KeyProvider(inject=lambda: 0)  # ``environ is None`` selects ``os.environ`` itself
+    assert provider.runtime_native is False
+    explicit = _key.KeyProvider(environ={"HERMES_MEMORY_KEY": value}, inject=lambda: 0)
+    assert provider() == explicit() == _key.derive(MEMORY_KEY)
 
 
 # -- the sqlite3 replacement (real SQLCipher) ------------------------------------------

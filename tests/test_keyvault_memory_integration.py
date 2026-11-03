@@ -1,4 +1,4 @@
-"""Integration: vault ``.env`` → env shim → usable ``HERMES_MEMORY_KEY``.
+"""Integration: vault ``.env`` → runtime shim → usable, held ``HERMES_MEMORY_KEY``.
 
 The Mordred-owned memory hook consumes this key on macOS env/vault custody
 paths. This module proves vault injection and the 32-byte AES-256-GCM key
@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from mordred_hermes.keyvault import _identity, _runtime_env, vault
+from mordred_hermes.keyvault import _identity, _memory_key_holder, _runtime_env, vault
 from mordred_hermes.wizard import vault_memory_key
 
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend
@@ -95,6 +95,12 @@ def _assert_usable_aes256_memory_key(value: str) -> None:
     assert aes.decrypt(nonce, ciphertext, _MEMORY_AAD) == b"a memory entry"
 
 
+def _held_memory_key() -> str:
+    value = _memory_key_holder.get_value()
+    assert value is not None
+    return value
+
+
 class TestVaultEnvToMemoryKey:
     """A vault-enrolled ``HERMES_MEMORY_KEY`` is injected and usable for memory encryption."""
 
@@ -117,8 +123,10 @@ class TestVaultEnvToMemoryKey:
         environ: dict[str, str] = {}
         _runtime_env.inject_vault_env(root=root, environ=environ, backend=backend, store=store)
 
-        assert environ["HERMES_MEMORY_KEY"] == memory_key
-        _assert_usable_aes256_memory_key(environ["HERMES_MEMORY_KEY"])
+        assert "HERMES_MEMORY_KEY" not in environ
+        assert environ["FOO"] == "bar"
+        assert _memory_key_holder.get_value() == memory_key
+        _assert_usable_aes256_memory_key(memory_key)
 
     def test_set_memory_key_then_inject_end_to_end(self, tmp_path: Path) -> None:
         """The on-ramp + the runtime shim compose: set the key, then inject it."""
@@ -132,7 +140,8 @@ class TestVaultEnvToMemoryKey:
         environ: dict[str, str] = {}
         n = _runtime_env.inject_vault_env(root=root, environ=environ, backend=backend, store=store)
         assert n == 1
-        _assert_usable_aes256_memory_key(environ["HERMES_MEMORY_KEY"])
+        assert "HERMES_MEMORY_KEY" not in environ
+        _assert_usable_aes256_memory_key(_held_memory_key())
 
     def test_set_memory_key_preserves_other_env_vars(self, tmp_path: Path) -> None:
         """Adding the memory key must not drop existing vault ``.env`` entries."""
@@ -147,7 +156,8 @@ class TestVaultEnvToMemoryKey:
         _runtime_env.inject_vault_env(root=root, environ=environ, backend=backend, store=store)
         assert environ["ANTHROPIC_API_KEY"] == "sk-secret"
         assert environ["FOO"] == "bar"
-        _assert_usable_aes256_memory_key(environ["HERMES_MEMORY_KEY"])
+        assert "HERMES_MEMORY_KEY" not in environ
+        _assert_usable_aes256_memory_key(_held_memory_key())
 
 
 def test_custom_vault_memory_source_refuses_even_with_real_home_lease(tmp_path: Path) -> None:

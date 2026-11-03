@@ -7,7 +7,7 @@ whole story: the sealing itself is done at runtime by
 lifecycle — the three pieces that make it real and reversible:
 
 1. ``HERMES_MEMORY_KEY`` in the vault ``.env`` (protected at rest by the device
-   key, injected into the environment by the ``.env`` shim at startup),
+   key, loaded into process memory by the ``.env`` shim at startup),
 2. the opt-in marker ``<home>/mordred/memory-vault.marker`` that arms the hook,
    plus the opt-out marker that expresses the reversible *paused* state, and
 3. the memory files themselves, migrated in both directions.
@@ -242,7 +242,7 @@ def _enable_gate_reason(*, home: Path, root: Path, platform: str) -> str | None:
         return f"memory encryption is unsupported on {platform}."
     if not _env_target_ready(home=home, root=root):
         return (
-            "memory encryption rides on the env target (the key is injected by the .env shim) — "
+            "memory encryption rides on the env target (the key is loaded by the .env shim) — "
             "run `hermes-mordred encryption enable env` first."
         )
     return None
@@ -484,7 +484,7 @@ def _memory_key_from_vault(
     """The effective ``HERMES_MEMORY_KEY`` from the vault ``.env``, or ``None``.
 
     Reads through the hot path (device key, no passphrase) — the same value the
-    runtime shim injects, so it is by construction the key the files were sealed
+    runtime shim loads, so it is by construction the key the files were sealed
     with. ``None`` covers every "cannot get a usable key" case; the caller turns
     that into one refusal.
     """
@@ -863,6 +863,7 @@ def _enable_linux(*, home: Path, backend: NativeBackend | None, force_runtime_un
         memory_key_lock,
         memory_key_path,
     )
+    from ..keyvault._memory_key_holder import memory_key_value
     from ..keyvault._runtime_probe import runtime_memory_key_available
     from ..keyvault.memory_crypto import MemoryCryptoError, decode_key
 
@@ -881,7 +882,7 @@ def _enable_linux(*, home: Path, backend: NativeBackend | None, force_runtime_un
                 database_lease = stack.enter_context(database_key_mutation(root=home, generation=None))
             stack.enter_context(memory_key_lock(home))
             # Ambient input is only for initial adoption, never an existing TPM key.
-            value = None if path.exists() or path.is_symlink() else os.environ.get(_MEMORY_KEY_ENV)
+            value = None if path.exists() or path.is_symlink() else memory_key_value(os.environ)
             adopted = decode_key(value) if value else None
             ensure_linux_memory_key(home=home, adopted_key=adopted, backend=backend, database_lease=database_lease)
             source = _linux_memory_source(home)
