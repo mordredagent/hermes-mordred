@@ -337,6 +337,13 @@ isolation credentials and use Requests `socks5h://` for remote DNS. Permitted
 direct routes retain public-DNS validation, IP pinning, TLS verification and
 redirect refusal.
 
+Discord outbound encryption resolves the destination from cache or the existing
+client before deciding whether encryption is mandatory. Check the destination,
+supplied channel and parent binding in that order; parent inheritance does not
+supply or change the reply thread context or v3 AAD. Unavailable destination or
+parent context refuses the send with `mordred_encrypt_context_unavailable`.
+Unbound ordinary channels and fixed control notices keep their existing policy.
+
 [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) and
 `tools/hook_payload_contract.json` own the exact consumed fields.
 
