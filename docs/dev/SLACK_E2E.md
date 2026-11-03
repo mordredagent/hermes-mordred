@@ -243,7 +243,8 @@ encrypted-send path directly and never passes through the wrapper.
 > Re-run the Slack round-trip (encrypted command in a bound channel, encrypted
 > reply, an agent-initiated send into the same channel decrypting in the
 > extension, and a plaintext post still receiving a readable needs-key notice)
-> and record the result in `docs/dev/CI.md` §Manual live-device validation log.
+> and record the result in `docs/dev/VALIDATION_LOG.md` (the Manual live-device
+> validation log).
 >
 > **Also verify Slack Connect (externally shared) channels, including a
 > `/hermes` slash command.** The two inbound paths derive the team id
@@ -258,7 +259,8 @@ encrypted-send path directly and never passes through the wrapper.
 > live adapter's `auth_test`-backed installations. DMs, malformed events,
 > uninstalled or stale key scopes, and every non-Slack platform remain
 > fail-closed. Record both the external-member round-trip and the installing-
-> workspace slash result in `docs/dev/CI.md` §Manual live-device validation log.
+> workspace slash result in `docs/dev/VALIDATION_LOG.md` (the Manual live-device
+> validation log).
 
 **An empty `text` value is also rejected as unencrypted input.** The Slack
 adapter strips bot mentions (`text.replace(f"<@{bot_uid}>", "").strip()`) and

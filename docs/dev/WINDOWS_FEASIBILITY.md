@@ -2,7 +2,7 @@
 
 Date: 2026-10-07 (initial feasibility snapshot).
 The consolidated Windows implementation has since merged into `dev` (#226).
-See [CI.md](./CI.md#manual-live-device-validation-log) for 2026-10-11 ordinary-user
+See [VALIDATION_LOG.md](./VALIDATION_LOG.md#manual-live-device-validation-log) for 2026-10-11 ordinary-user
 Server/NitroTPM validation. The findings and proposed sequence below describe the
 initial investigation; SPEC.md, PLAN.md and TODO.md own current behavior and
 remaining work. Full Windows product support remains incomplete.
@@ -221,7 +221,7 @@ storage and recurring charges. Do not terminate an instance retaining the only
 TPM key for data the operator wants to keep. Use disposable synthetic fixtures
 for destructive/key-deletion experiments.
 
-The Phase 0 evidence is recorded in [CI.md](CI.md#manual-live-device-validation-log).
+The Phase 0 evidence is recorded in [VALIDATION_LOG.md](VALIDATION_LOG.md#manual-live-device-validation-log).
 The immediate implementation deliverable is the independent CNG helper and its
 Python bridge ([PLAN W1–W4](PLAN.md#windows-cng-helper-implementation-plan));
 full Windows product readiness depends on the later component gates. No reliable

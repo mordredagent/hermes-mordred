@@ -262,7 +262,7 @@ The macOS CLI, startup protection, monitor and uninstall lifecycle are implement
   Both Codex SOL development environments are prepared. Retain failed roots
   without replay and reuse the accepted Linux8/qualification records.
   Windows Desktop/Hello, live accounts/model behavior and measured Touch ID
-  counts remain separate. See [the validation log](CI.md#manual-live-device-validation-log)
+  counts remain separate. See [the validation log](VALIDATION_LOG.md#manual-live-device-validation-log)
   and merged PR [#270](https://github.com/mordredagent/hermes-mordred/pull/270).
 - [ ] Finish acceptance and remaining defects in the Telegram, mail and activity
   consumers delivered with the shared database implementation. A database-layer
@@ -290,7 +290,7 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
   fixes discovered after the Linux run. Exact builds are recorded in CI. Keep
   unresolved keyvault-reset ownership and backup-journal recovery outside this
   change; these states refuse before restoration. See
-  [the validation log](CI.md#manual-live-device-validation-log).
+  [the validation log](VALIDATION_LOG.md#manual-live-device-validation-log).
 - [ ] Authority checks: `Authority.check()` runs on every authorizer/progress callback and takes
   Windows custody locks; validate at admission and before commit only (`src/mordred_hermes/dbcrypt/_connection.py`).
 - [ ] Connection errors: an unprotected out-of-scope connection error invalidates the whole
@@ -399,7 +399,7 @@ does not establish general Windows support.
 
 The full Windows port is **incomplete**. The helper (#190), private filesystem
 (#192), wallet caller (#194) and consolidated implementation (#226) are merged.
-The 2026-10-11 [validation log](./CI.md#manual-live-device-validation-log)
+The 2026-10-11 [validation log](./VALIDATION_LOG.md#manual-live-device-validation-log)
 records ordinary-user Server/NitroTPM source and installed-wheel CNG acceptance.
 Unchecked items below include remaining acceptance and follow-ups; they do not
 mean the components are wholly unimplemented. Full Server regression, Windows 11,
@@ -718,13 +718,13 @@ learning implementation".
   instead (see "Hermes-side use of the history" below).
 - [x] The 2026-10-20 integration runs (live SQLCipher check on a throwaway
   home; end-to-end operator pairing and batch delivery to the receiver) are
-  recorded in [`CI.md`](./CI.md) §"Manual live-device validation log".
+  recorded in [`VALIDATION_LOG.md`](./VALIDATION_LOG.md).
 - [x] Repeat the live SQLCipher check (store and backup unreadable to the
   stdlib `sqlite3`, no fixture bytes in the file) after any change to
   `activity/_gate.py`, `activity/store.py` backup/restore or the dbcrypt shim,
-  and record it in [`CI.md`](./CI.md). Done 2026-10-21 after the correction
-  re-homing change to `activity/store.py` (live end-to-end run in
-  [`CI.md`](./CI.md) §"Manual live-device validation log").
+  and record it in [`VALIDATION_LOG.md`](./VALIDATION_LOG.md). Done 2026-10-21
+  after the correction re-homing change to `activity/store.py` (live end-to-end
+  run in [`VALIDATION_LOG.md`](./VALIDATION_LOG.md)).
 - [ ] Optional index on `activity_events.attempt_id` for the correction
   re-homing lookup; it is a schema DDL change for existing stores.
 
@@ -801,7 +801,7 @@ map is in PLAN; Git retains the original PR 1–11 checklist.
 
 - [ ] Evaluation acceptance: both drivers (`tools/provenance_eval`) and
   `tests/integration/test_provenance_eval.py` exist. Complete production-model
-  runs and record verdicts in [CI.md](CI.md#manual-live-device-validation-log);
+  runs and record verdicts in [VALIDATION_LOG.md](VALIDATION_LOG.md#manual-live-device-validation-log);
   the 2026-10-22 local-model smoke results are partial and remain UNAVAILABLE.
 - [ ] Live-gated validation: `telegram migrate-store` dry run and commit on a
   throwaway `HERMES_HOME`; `mail import --dry-run` on fixtures; owner counts-only
@@ -811,7 +811,7 @@ map is in PLAN; Git retains the original PR 1–11 checklist.
   `mordred_mail_sync` ([SPEC](SPEC.md#imap-sync-2026-10-22)).
 - [ ] Live-gated: one real Gmail app-password `mail fetch` and one
   `mordred_mail_sync` call on a throwaway `HERMES_HOME`, counts only, recorded in
-  [CI.md](CI.md#manual-live-device-validation-log).
+  [VALIDATION_LOG.md](VALIDATION_LOG.md#manual-live-device-validation-log).
 
 Follow-ups left by the landed code:
 
@@ -888,7 +888,7 @@ compatibility with every downstream private-store reader.
   Remaining: page mail setup and wrong-password hints, mailbox removal,
   throwaway-home database ceremonies, light/dark and VoiceOver checks.
   Post-D2/D4 implementation review is recorded in
-  [PR #262 pass 11](../superpowers/reviews/2026-10-23-desktop-pr262-codex-pass11.md),
+  the Codex pass-11 review of PR #262 (2026-10-23; note retired from the tree),
   following the earlier API/page/mail reviews. Its SHIP verdict is scoped to
   that revision; it does not validate #270's later changes.
   - [ ] Recheck passive database/mail status after #270; see the database

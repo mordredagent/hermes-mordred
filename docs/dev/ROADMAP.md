@@ -154,9 +154,9 @@ that does not trust same-UID callers merely because they can reach it.
 
 ### v2-OS2: Remaining keyvault platforms and authorization tiers
 
-Current custody is Secure Enclave/Keychain on macOS and TPM 2.0 on Linux.
-Candidates are Windows DPAPI/CNG TPM, external PKCS#11/FIDO2 hardware, and a
-stronger Linux PIN/PCR presence policy.
+Windows CNG/TPM custody shipped (PRs #189–#194; [`SPEC.md`](./SPEC.md) §Windows
+product completion contract). Remaining candidates are external PKCS#11/FIDO2
+hardware and a stronger Linux PIN/PCR presence policy.
 
 - **Priority**: M.
 - **Constraint**: no new backend may weaken the existing platform floors or
@@ -182,8 +182,10 @@ verification boundary.
 
 ### v2-F3: GUI controls
 
-Offer status, policy, network, and audit controls through a thin client over
-stable internal APIs. Do not duplicate security decisions in the UI.
+Partially complete: the Hermes Desktop page ([`SPEC.md`](./SPEC.md) §Desktop mail
+and ceremony pages) ships status, database, vault, mail, ceremony and direct-tool
+controls over the Desktop API without duplicating security decisions in the UI.
+Policy, network and audit controls remain deferred.
 
 - **Priority**: L.
 
