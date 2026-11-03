@@ -469,7 +469,7 @@ Result: actual NitroTPM custody, Python integration, cross-instance rejection,
 stop/start persistence, CLI installation, and deletion all passed. No baseline
 product defect was found in these exercised paths. Linux memory encryption
 remains inactive, as expected. Full evidence scope and limitations are recorded
-in [CI.md](CI.md#manual-live-device-validation-log).
+in [VALIDATION_LOG.md](VALIDATION_LOG.md#manual-live-device-validation-log).
 
 ### Task 1: Keyvault — isolated Linux memory-key custody
 
@@ -2438,7 +2438,7 @@ Each PR: `uv run python tools/run_critical_tests.py`, its changed modules,
 `uv run ruff check src tests scripts`, `uv run ruff format --check src tests
 scripts`, `uv run mypy --strict src tools scripts/keyvault_offline_digest.py`,
 and coverage at or above 80%. Live-gated results are recorded in
-[`CI.md`](CI.md#manual-live-device-validation-log) after execution; see
+[`VALIDATION_LOG.md`](VALIDATION_LOG.md#manual-live-device-validation-log) after execution; see
 [Provenance evaluation runs](CI.md#provenance-evaluation-runs).
 
 Risks: loss of per-question Touch ID for Telegram text (accepted); Hermes keeps
@@ -2610,7 +2610,7 @@ One component per PR, all targeting `dev`. Each PR runs
   adds `/imports/status`, `/databases/status`, `/vault/prepare` and `/commit`, setup finish and
   cancel, residue, restart with `job_not_found`, and malformed bodies posted to every
   secret-bearing route) and `tests/test_desktop_page.py`; the live checklist of the design is recorded in
-  [CI.md](CI.md#manual-live-device-validation-log).
+  [VALIDATION_LOG.md](VALIDATION_LOG.md#manual-live-device-validation-log).
 - Depends on: D2 and D3.
 
 ### D5: direct tool calls
@@ -2653,10 +2653,8 @@ One component per PR, all targeting `dev`. Each PR runs
   payload, restart control, recommendation, `MESSAGES`), the version 4 key sets in
   `tests/extension/test_desktop_status_v4.py`, `/tools/direct` in
   `tests/extension/test_desktop_bodies.py`, and the unchanged Windows snapshot.
-- Depends on: D4. Review records:
-  [`2026-10-23-direct-tools-codex-review.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review.md),
-  [`2026-10-23-direct-tools-codex-review-pass2.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review-pass2.md),
-  [`2026-10-23-direct-tools-codex-review-pass3.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review-pass3.md).
+- Depends on: D4. Review records: Codex review passes 1–3 (2026-10-23; notes retired
+  from the tree, available in Git history).
 
 ### D6: browser history switches
 

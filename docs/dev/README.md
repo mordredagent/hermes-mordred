@@ -3,9 +3,9 @@
 Start with [`setup.md`](./setup.md) for the editable environment and safe local
 validation. This index lists every maintained developer document; completed
 design diaries and upstream snapshots remain available through Git history.
-Dated design and review records retained under `docs/superpowers/` explain past
-decisions; their old checkboxes and platform claims do not override current
-SPEC/PLAN, TODO or CI evidence.
+Dated design records (specs, plans and one investigation record) retained under
+`docs/superpowers/` explain past decisions; their old checkboxes and platform
+claims do not override current SPEC/PLAN, TODO or CI evidence.
 
 ## Current sources of truth
 
@@ -17,6 +17,7 @@ SPEC/PLAN, TODO or CI evidence.
 | [`TODO.md`](./TODO.md) | Actionable work for the current release |
 | [`ROADMAP.md`](./ROADMAP.md) | Deferred work and its prerequisites |
 | [`CI.md`](./CI.md) | CI, branching, release, and changelog policy |
+| [`VALIDATION_LOG.md`](./VALIDATION_LOG.md) | Append-only live-device, native and model validation results (split from CI.md) |
 | [`PATHS.md`](./PATHS.md) | Every filesystem path Mordred reads or manages |
 | [`POLICY.md`](./POLICY.md) | Policy schema, decisions, and audit reason codes |
 | [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) | Consumed Hermes hook fields and drift validation |
@@ -49,7 +50,7 @@ tree solely as history.
 - Changing behavior: SPEC for the contract, PLAN for the implementation map,
   PATHS for storage ownership, and CI for the required validation.
 - Assessing readiness: distinguish merged code from dated native/live evidence
-  in [CI](CI.md#manual-live-device-validation-log). A historical run does not
+  in [the validation log](VALIDATION_LOG.md#manual-live-device-validation-log). A historical run does not
   certify a later revision or a different platform.
 
 ## Maintenance rules

@@ -78,7 +78,7 @@ See `docs/dev/CI.md` for exact evidence and rerun rules.
   suites have no CI automation. The Mullvad suite has a manual-only GitHub
   Actions workflow (`integration-vpn.yml`); it never runs on pushes or PRs.
   Run the relevant gated path after changing it and record the result in
-  `docs/dev/CI.md` §Manual live-device validation log.
+  `docs/dev/VALIDATION_LOG.md` (the Manual live-device validation log).
 
 ## Git and PR conventions
 

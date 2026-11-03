@@ -1548,7 +1548,7 @@ described below. See CI.md for feature acceptance and the pending live-account g
   run then passed the same 64 native tests on actual NitroTPM, 172 focused
   Python tests, production wrap/unwrap and Telegram credential-store round
   trips, cross-instance key-blob rejection, and stop/start persistence.
-  See [the validation log](CI.md#manual-live-device-validation-log).
+  See [the validation log](VALIDATION_LOG.md#manual-live-device-validation-log).
   This established the existing custody path before the Linux memory and
   Telegram integration work.
 
@@ -1694,7 +1694,7 @@ on 2026-10-07: stopped, Ubuntu 24.04 x86_64, `t3.medium`, UEFI boot, no
 `TpmSupport`. The subsequent, explicitly requested TPM baseline test cloned
 that stopped disk into a private NitroTPM-enabled AMI and used two isolated
 instances. The original instance remained stopped. Results are in
-[CI.md](CI.md#manual-live-device-validation-log).
+[VALIDATION_LOG.md](VALIDATION_LOG.md#manual-live-device-validation-log).
 
 1. Use the NitroTPM test environment for the required EC2 checks. Preserve the
    earlier Desktop environment and use separate test homes, checkouts, and key
@@ -6263,13 +6263,9 @@ section 2). Hermes's global `tools.tool_search.enabled: "off"` makes every tool 
 Owner decision (2026-10-23): the default stays deferred; direct calls are an explicit,
 explained opt-in from the CLI and the Desktop page, recommended with a Venice private
 model. Library `wizard/direct_tools.py` (the read in `wizard/_direct_tools_yaml.py`),
-CLI `wizard/direct_tools_cli.py`, routes in `desktop/_maintenance_routes.py`. Review
-records:
-[`2026-10-23-direct-tools-codex-review.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review.md)
-and
-[`2026-10-23-direct-tools-codex-review-pass2.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review-pass2.md)
-and
-[`2026-10-23-direct-tools-codex-review-pass3.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review-pass3.md);
+CLI `wizard/direct_tools_cli.py`, routes in `desktop/_maintenance_routes.py`. Three
+Codex review passes (2026-10-23, notes removed from the tree in this PR; see Git history
+before it) drove two changes:
 after the second pass the write was delegated to Hermes, after the third the parse
 moved to a child process.
 

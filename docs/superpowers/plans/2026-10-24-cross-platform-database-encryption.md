@@ -621,7 +621,7 @@ assert evidence["unexpected_skips"] == []
   scripts/*.sh native/*/build.sh`; require CI's 80% coverage floor and final changed-scope/full CI policy. A failure returns to the owning component; rerun only justified affected checks before the
   final regression evidence is renewed.
 - [ ] Stop both task-owned started instances in unconditional cleanup, independently verify stopped via EC2, inventory residual test artifacts and remove only owned resources. Green
-  `tests/test_dbcrypt_acceptance_manifest.py`. Record actual commands, versions, source/wheel results and limitations under CI.md's existing Manual live-device validation log; inventory-only work is
+  `tests/test_dbcrypt_acceptance_manifest.py`. Record actual commands, versions, source/wheel results and limitations under `docs/dev/VALIDATION_LOG.md`; inventory-only work is
   not live success. Real Telegram/IMAP accounts and live LLM tests remain separate, explicitly skipped/unrun when unavailable. Never represent Windows Server results as Win11/Desktop validation.
 - [ ] Commit acceptance tooling/docs: `test(dbcrypt): record native installed-package acceptance`. Reconcile source-of-truth support matrix, setup `[dbcrypt]` extra, lifecycle and backup limits,
   remaining platform qualifications, and actual failures. Open component PRs to `dev` with Changes/Fixes and precise validation, never an upstream PR.
