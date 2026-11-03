@@ -3,7 +3,8 @@
 The database key is HKDF-derived from this value, so it must not be observable
 through ``os.environ``: Hermes's terminal environment does not strip the name,
 and raw ``dict(os.environ)`` copies pass it to every child process. The runtime
-shim therefore never leaves it there, and consumers read it through
+shim therefore never puts a vault-sourced key there, a plaintext-sourced one is
+evicted at the points SPEC.md lists, and consumers read it through
 :func:`memory_key_value`.
 
 This does not defend against same-UID memory inspection. Scope is this one name;
@@ -64,9 +65,9 @@ def evict_ambient_memory_key() -> None:
     """Move an ambient key out of ``os.environ``; a no-op on Windows.
 
     Adopts the value only into an empty holder, then always removes the name, so a
-    plaintext ``.env`` reloaded by Hermes can neither stay visible nor replace the
-    key this process is already using. An empty variable is not a key and is removed
-    without adoption. Never raises, and never logs the value.
+    plaintext ``.env`` reloaded by Hermes stays visible only until the next call and
+    cannot replace the key this process is already using. An empty variable is not a
+    key and is removed without adoption. Never raises, and never logs the value.
     """
     global _value
     if sys.platform == "win32":

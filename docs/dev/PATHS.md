@@ -622,9 +622,10 @@ environment, the `dashboard/plugin_api.py` shim serves a fallback API
   plaintext unless Mordred's memory hook is armed; when armed, every write is
   sealed in the `HERMES-MEMORY-ENC-v1` format, and drift backups
   (`*.md.bak.<ts>`) are sealed too. On macOS Mordred stores `HERMES_MEMORY_KEY`
-  in the file-vault `.env` (at runtime it lives in a process-private holder, never
-  left in `os.environ`, with re-populated values evicted at session boundaries and
-  before each tool call); Linux uses `mordred/memory-key.wrapped`, and Windows
+  in the file-vault `.env` (at runtime a vault-sourced key lives in a process-private
+  holder and never enters `os.environ`; a plaintext-sourced one is evicted at startup,
+  at session boundaries, at the start of each turn and before each tool call, with
+  the limitations SPEC.md accepts); Linux uses `mordred/memory-key.wrapped`, and Windows
   uses that wrapper through dedicated checked CNG custody. Mordred owns the
   sealed container format; Hermes owns the entry
   format inside the plaintext and the memory tool itself. The legacy

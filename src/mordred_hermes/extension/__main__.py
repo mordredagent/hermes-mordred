@@ -52,11 +52,14 @@ def _load_vault_managed_environment() -> int:
     The standalone launcher does not run ``mordred_keyvault.register()``.  A
     manifest pre-check keeps an extension-only install free of macOS Keychain
     dependencies when no vault exists, while any on-disk vault state takes the
-    normal fail-closed runtime path.
+    normal fail-closed runtime path. An ambient memory key is evicted before that
+    pre-check, so a no-vault server does not keep it until plugin discovery.
     """
 
     from ..keyvault._identity import default_vault_root
+    from ..keyvault._memory_key_holder import evict_ambient_memory_key
 
+    evict_ambient_memory_key()
     if not any(default_vault_root().glob("manifest.*.mvmf")):
         return 0
     from ..keyvault._runtime_env import install_vault_env_decrypt

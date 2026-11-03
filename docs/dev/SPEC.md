@@ -188,9 +188,14 @@ Accepted limitations include:
   audit history; the process-private memory-key holder does not change this;
 - vault-enrolled `.env` values other than `HERMES_MEMORY_KEY` stay in
   `os.environ` and reach terminal children according to Hermes's own blocklist;
-- if a plaintext `.env` holding `HERMES_MEMORY_KEY` is reloaded into `os.environ`,
-  the value stays visible there, including to child processes spawned outside a
-  tool call, until the next eviction point (session boundary or `pre_tool_call`);
+- a plaintext `.env` holding `HERMES_MEMORY_KEY` can put it in `os.environ`, and
+  eviction points narrow that without closing it: (a) in the brief window between
+  a `.env` reload and the next eviction point, another spawn can copy the key;
+  (b) `HERMES_SAFE_MODE=1` makes Hermes load no plugin, so nothing evicts a
+  plaintext key; (c) a running process keeps the key it holds, so a rotated
+  plaintext key takes effect after restart; (d) evicting while another thread runs
+  `dict(os.environ)` can raise `KeyError` in that thread, a Python `os.environ`
+  property, only when a reload re-populated the key;
 - plaintext necessarily exists while a secret is in use, and screen-capture
   detection cannot defeat a physical camera;
 - traffic emitted by a parent harness such as Codex CLI, Claude CLI, Cursor,
@@ -826,11 +831,14 @@ magic line instead of a `UnicodeDecodeError`. Every write uses a fresh nonce,
 and the plaintext is always the whole file body: Mordred encrypts bytes and
 leaves entry parsing to Hermes.
 
-The runtime shim never leaves `HERMES_MEMORY_KEY` in `os.environ`: it lives in a
-process-private holder read through `keyvault._memory_key_holder.memory_key_value`,
-so terminal children and raw `os.environ` copies do not inherit it. Values
-re-populated by a `.env` reload are evicted at session boundaries and before each
-tool call; the holder keeps the key it already has.
+A vault-sourced `HERMES_MEMORY_KEY` never enters `os.environ`: the runtime shim
+puts it in a process-private holder read through
+`keyvault._memory_key_holder.memory_key_value`, so terminal children and raw
+`os.environ` copies do not inherit it. A plaintext-sourced key does enter
+`os.environ`, on every `.env` reload, and outside Windows is evicted at startup,
+at session boundaries, at the start of each turn (`pre_llm_call`, before the
+turn's first LLM call) and before each tool call; the holder keeps the key it
+already has. The accepted limitations list what this leaves open.
 
 Linux resolves a dedicated TPM-wrapped memory key; Windows resolves dedicated
 CNG memory custody through checked storage and generation leases. Neither

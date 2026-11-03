@@ -147,16 +147,17 @@ def install_vault_env_decrypt(*, environ: MutableMapping[str, str] | None = None
     restored a plaintext ``.env`` and wants the runtime to use that.
 
     On the real ``os.environ``, an ambient memory key is evicted first on every
-    non-Windows platform, including on repeat calls and under the opt-out, because
-    a plaintext ``.env`` can supply one without any vault. Raises
+    non-Windows platform, including in maintenance processes (which still open no
+    vault), on repeat calls and under the opt-out, because a plaintext ``.env`` can
+    supply one without any vault. Raises
     :class:`~.vault.VaultError` if the key is still observable after injection.
     """
     from ..dbcrypt._cli import maintenance_process
 
-    if maintenance_process():
-        return 0
     if environ is None or environ is os.environ:
         holder.evict_ambient_memory_key()
+    if maintenance_process():
+        return 0
     global _INJECTED_INTO_OS_ENVIRON
     if sys.platform != "darwin":
         return 0

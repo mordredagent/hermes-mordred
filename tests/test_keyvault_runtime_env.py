@@ -401,13 +401,43 @@ class TestMemoryKeyNeverObservable:
         assert _KEY_NAME not in os.environ
         assert _memory_key_holder.get_value() == _STALE_KEY
 
-    def test_maintenance_process_leaves_environ_alone(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.usefixtures("_fresh_install")
+    def test_maintenance_process_evicts_without_opening_a_vault(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.dbcrypt import _cli
+
+        opened: list[object] = []
+        monkeypatch.setattr(_cli, "maintenance_process", lambda: True)
+        monkeypatch.setattr(_runtime_env, "inject_vault_env", lambda **kwargs: opened.append(kwargs) or 0)
+        monkeypatch.setenv(_KEY_NAME, _STALE_KEY)
+        assert _runtime_env.install_vault_env_decrypt() == 0
+        assert _KEY_NAME not in os.environ
+        assert _memory_key_holder.get_value() == _STALE_KEY
+        assert memory_key_value(os.environ) == _STALE_KEY
+        assert opened == []
+        assert _runtime_env._INJECTED_INTO_OS_ENVIRON is False
+
+    def test_maintenance_with_explicit_mapping_leaves_os_environ_alone(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from mordred_hermes.dbcrypt import _cli
 
         monkeypatch.setattr(_cli, "maintenance_process", lambda: True)
         monkeypatch.setenv(_KEY_NAME, _STALE_KEY)
-        assert _runtime_env.install_vault_env_decrypt() == 0
+        assert _runtime_env.install_vault_env_decrypt(environ={}) == 0
         assert os.environ[_KEY_NAME] == _STALE_KEY
+        assert _memory_key_holder.get_value() is None
+
+    def test_pre_llm_call_hook_evicts_reloaded_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ctx = _RecordingCtx()
+        _register_keyvault(monkeypatch, ctx)
+        from mordred_hermes import keyvault
+
+        callbacks = [callback for name, callback in ctx.hooks if name == "pre_llm_call"]
+        assert callbacks == [keyvault._on_hook_evict]
+        _memory_key_holder.set_value(_VAULT_KEY)
+        monkeypatch.setenv(_KEY_NAME, _STALE_KEY)
+        # Hermes injects any non-None pre_llm_call result into the user message.
+        assert callbacks[0](session_id="s", user_message="hi", is_first_turn=False) is None
+        assert _KEY_NAME not in os.environ
+        assert _memory_key_holder.get_value() == _VAULT_KEY
 
     def test_pre_tool_call_hook_evicts_reloaded_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         ctx = _RecordingCtx()
@@ -415,17 +445,22 @@ class TestMemoryKeyNeverObservable:
         from mordred_hermes import keyvault
 
         callbacks = [callback for name, callback in ctx.hooks if name == "pre_tool_call"]
-        assert callbacks == [keyvault._on_pre_tool_call_evict]
+        assert callbacks == [keyvault._on_hook_evict]
         _memory_key_holder.set_value(_VAULT_KEY)
         monkeypatch.setenv(_KEY_NAME, _STALE_KEY)
         assert callbacks[0](tool_name="terminal", args={"command": "env"}, session_id="s") is None
         assert _KEY_NAME not in os.environ
         assert _memory_key_holder.get_value() == _VAULT_KEY
 
-    def test_pre_tool_call_rejection_does_not_break_startup(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        ctx = _RecordingCtx(reject="pre_tool_call")
+    @pytest.mark.parametrize(
+        ("rejected", "kept"), [("pre_tool_call", "pre_llm_call"), ("pre_llm_call", "pre_tool_call")]
+    )
+    def test_evict_hook_rejection_does_not_break_startup(
+        self, monkeypatch: pytest.MonkeyPatch, rejected: str, kept: str
+    ) -> None:
+        ctx = _RecordingCtx(reject=rejected)
         _register_keyvault(monkeypatch, ctx)
-        assert {name for name, _callback in ctx.hooks} >= {"on_session_start", "on_session_end"}
+        assert {name for name, _callback in ctx.hooks} >= {"on_session_start", "on_session_end", kept}
 
     def test_session_boundary_evicts_even_if_reseal_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from mordred_hermes import keyvault

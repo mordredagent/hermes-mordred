@@ -62,9 +62,13 @@ def register(ctx: Any) -> None:
     open: upstream's ``agent_init`` swallows a failed ``load_from_disk()``, so
     without it a locked memory looks exactly like an empty one.
 
-    Hermes reloads a plaintext ``.env`` into ``os.environ`` per gateway turn, so
-    the memory key is evicted again at each session boundary and on ``pre_tool_call``,
-    before the terminal tool builds its child environment.
+    Hermes reloads a plaintext ``.env`` into ``os.environ`` per gateway turn, but
+    fires ``on_session_start`` once per session, so a plaintext-sourced memory key is
+    evicted again at each session boundary, at the start of each turn (``pre_llm_call``,
+    which must return ``None``: anything else is injected as context) and on
+    ``pre_tool_call``, before the terminal tool builds its child environment. A spawn
+    between a reload and the next eviction can still copy it; a vault-sourced key
+    never enters ``os.environ``. SPEC.md lists the accepted limitations.
     """
     from ._memory_hook import install_memory_hook
 
@@ -100,8 +104,9 @@ def register(ctx: Any) -> None:
     with contextlib.suppress(Exception):
         ctx.register_hook("on_session_start", _on_session_memory_check)
 
-    with contextlib.suppress(Exception):
-        ctx.register_hook("pre_tool_call", _on_pre_tool_call_evict)
+    for _hook_name in ("pre_llm_call", "pre_tool_call"):
+        with contextlib.suppress(Exception):
+            ctx.register_hook(_hook_name, _on_hook_evict)
 
 
 def _install_journey_guard() -> None:
@@ -161,8 +166,11 @@ def _on_session_reseal(**_kwargs: Any) -> None:
         reseal_stray_env_if_present()
 
 
-def _on_pre_tool_call_evict(**_kwargs: Any) -> None:
-    """``pre_tool_call`` callback: evict only. Returns ``None``, so it never blocks a tool."""
+def _on_hook_evict(**_kwargs: Any) -> None:
+    """``pre_llm_call`` / ``pre_tool_call`` callback: evict only.
+
+    Returns ``None``, so it never injects context into a turn or blocks a tool.
+    """
     _evict_memory_key()
 
 
