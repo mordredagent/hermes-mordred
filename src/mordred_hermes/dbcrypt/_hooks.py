@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from ..privacy_check._exceptions import MordredIntegrityRefused
-from . import _monitor, armed
+from . import _monitor
+from ._runtime import armed
 
 _LOG = logging.getLogger("mordred.dbcrypt")
 _REASON = "mordred.db_encryption.violation"
@@ -34,7 +35,7 @@ class DatabaseEncryptionRefused(MordredIntegrityRefused):
 
 
 def _home() -> Path:
-    from . import _home as home
+    from ._runtime import _home as home
 
     return home()
 
@@ -44,7 +45,7 @@ def _key_available() -> bool:
 
 
 def _key() -> Any:
-    from . import _PROVIDER
+    from ._runtime import _PROVIDER
 
     if _PROVIDER is None:
         return None
@@ -55,7 +56,7 @@ def _key() -> Any:
 
 
 def _findings() -> list[_monitor.Finding]:
-    from . import _PROVIDER
+    from ._runtime import _PROVIDER
 
     if _PROVIDER is not None and _PROVIDER.runtime_native:
         authority = _PROVIDER.current_authority
@@ -105,7 +106,7 @@ def _describe(findings: list[_monitor.Finding]) -> str:
 
 def evaluate(event: str) -> str | None:
     """Run the monitor; return a warning for the model, or raise under strict policy."""
-    from . import _PROVIDER
+    from ._runtime import _PROVIDER
 
     global _observation
     _observation = None
@@ -168,7 +169,7 @@ def status_line(_info: Any = None) -> str:
     Hermes calls a section callable with the session-info mapping.
     """
     try:
-        from . import _PROVIDER
+        from ._runtime import _PROVIDER
 
         home = _home()
         token: object | None = _PROVIDER

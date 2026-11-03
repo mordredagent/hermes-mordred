@@ -24,7 +24,7 @@ def protected_runtime(native_root, monkeypatch):
     )
     monkeypatch.setattr(_shim, "is_installed", lambda: True)
     provider = KeyProvider(home=root)
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", provider)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", provider)
     try:
         yield root, provider, backend
     finally:

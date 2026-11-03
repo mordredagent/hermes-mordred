@@ -95,7 +95,7 @@ def check_protection(home: Path) -> Refusal | None:
         return refusal("store_unavailable")
     if not _shim.is_installed():
         return refusal("unprotected_process")
-    provider = dbcrypt._PROVIDER
+    provider = dbcrypt._runtime._PROVIDER
     if provider is None or not provider.runtime_native:
         return refusal("no_key")
     current = provider.current_authority
@@ -109,7 +109,7 @@ def runtime_authority(home: Path, *, acquire: bool = True) -> Authority:
     from .. import dbcrypt
     from ..keyvault._database_authority import resolve_database_domain
 
-    provider = dbcrypt._PROVIDER
+    provider = dbcrypt._runtime._PROVIDER
     if provider is None or not provider.runtime_native:
         raise ActivityRefused(refusal("no_key"))
     try:

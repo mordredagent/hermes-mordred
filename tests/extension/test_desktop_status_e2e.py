@@ -76,7 +76,7 @@ def cold_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trips: _Tripwires
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr("mordred_hermes.extension.telegram.tee.hardware_backend", _no_helper)
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", trips.wire("dbcrypt._PROVIDER"))
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", trips.wire("dbcrypt._runtime._PROVIDER"))
     monkeypatch.setattr("mordred_hermes.dbcrypt._key.KeyProvider", trips.wire("KeyProvider"))
     monkeypatch.setattr("mordred_hermes.dbcrypt._key._inject_vault_env", trips.wire("_inject_vault_env"))
     monkeypatch.setattr("mordred_hermes.activity._gate.check_protection", trips.wire("activity check_protection"))
@@ -178,12 +178,14 @@ def test_a_tripwire_cannot_be_swallowed_by_a_status_fallback(
     _protected_store(cold_home, monkeypatch, trips)
 
     def leaky_status(home: Path) -> Any:
-        dbcrypt._PROVIDER()  # what a regressed opener would do; _status_v4 catches every Exception here
+        dbcrypt._runtime._PROVIDER()  # what a regressed opener would do; _status_v4 catches every Exception here
         raise AssertionError("unreachable")
 
     monkeypatch.setattr(dbcrypt, "database_status", leaky_status)
+
+    monkeypatch.setattr(dbcrypt._runtime, "database_status", leaky_status)
     # Never a 200 with a fallback state: the tripwire stops the request (the test client's portal may report
     # the stopped server task as cancelled, or as "This portal is not running", when it shuts down).
     with pytest.raises((_Tripped, CancelledError, RuntimeError)), _client() as http:
         http.get(f"{PREFIX}/databases/status")
-    assert trips.calls == ["dbcrypt._PROVIDER"]  # and the record names the boundary even if it were caught
+    assert trips.calls == ["dbcrypt._runtime._PROVIDER"]  # and the record names the boundary even if it were caught

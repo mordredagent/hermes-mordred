@@ -23,6 +23,9 @@ def test_native_offline_commands_use_ex_without_runtime_provider(native_root, mo
     root, backend, _, _ = native_root
     before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
     monkeypatch.setattr(dbcrypt, "database_status", lambda home: DatabaseStatus(True, 1, "unknown", False, None))
+    monkeypatch.setattr(
+        dbcrypt._runtime, "database_status", lambda home: DatabaseStatus(True, 1, "unknown", False, None)
+    )
     monkeypatch.setattr(KeyProvider, "__call__", lambda self: pytest.fail("offline command consumed runtime SH key"))
     calls = []
 

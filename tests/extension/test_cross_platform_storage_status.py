@@ -38,6 +38,7 @@ def test_desktop_poll_does_not_prompt_or_enroll(desktop: Any, monkeypatch: pytes
     monkeypatch.setattr(_migrate, "discover", forbidden)
     monkeypatch.setattr(_migrate, "schedule", forbidden)
     monkeypatch.setattr(dbcrypt, "arm", forbidden)
+    monkeypatch.setattr(dbcrypt._runtime, "arm", forbidden)
     before = _snapshot(desktop.home)
     for _ in range(3):
         status = desktop.get("/status?client_version=4")

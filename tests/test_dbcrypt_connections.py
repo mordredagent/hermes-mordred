@@ -482,9 +482,9 @@ def test_native_install_owns_one_guarded_authority(native_root, monkeypatch):
     from mordred_hermes.dbcrypt import _hooks, _shim
 
     root, backend, _, _ = native_root
-    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(dbcrypt._runtime, "sys", policy_sys("darwin"))
     monkeypatch.setattr(sys, "argv", ["hermes"])
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", None)
     installed = []
     monkeypatch.setattr(_shim, "install_module", installed.append)
     monkeypatch.setenv("HERMES_MEMORY_KEY", "hex:" + "aa" * 32)
@@ -500,7 +500,7 @@ def test_native_install_owns_one_guarded_authority(native_root, monkeypatch):
         with pytest.raises(DatabaseRefused):
             conn.execute("SELECT 1")
     finally:
-        dbcrypt._PROVIDER.close()
+        dbcrypt._runtime._PROVIDER.close()
 
 
 def test_row_factory_receives_only_guarded_cursor(native_root, authority):
@@ -769,15 +769,15 @@ def test_native_install_cannot_reacquire_or_rebind(native_root, monkeypatch):
     from mordred_hermes.dbcrypt import _shim
 
     root, backend, _, _ = native_root
-    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(dbcrypt._runtime, "sys", policy_sys("darwin"))
     monkeypatch.setattr(sys, "argv", ["hermes"])
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", None)
     monkeypatch.setattr(_shim, "install_module", lambda module: None)
     assert dbcrypt.install(home=root)
-    provider = dbcrypt._PROVIDER
+    provider = dbcrypt._runtime._PROVIDER
     try:
         assert dbcrypt.install(home=root)
-        assert dbcrypt._PROVIDER is provider
+        assert dbcrypt._runtime._PROVIDER is provider
         assert sum(op == "ecdh" for op, _ in backend.calls) == 1
         with pytest.raises(DatabaseRefused):
             dbcrypt.install(home=root / "profiles/work")
@@ -786,7 +786,7 @@ def test_native_install_cannot_reacquire_or_rebind(native_root, monkeypatch):
             dbcrypt.install(home=root)
     finally:
         provider.close()
-        dbcrypt._PROVIDER.close()
+        dbcrypt._runtime._PROVIDER.close()
 
 
 def test_native_monitor_internal_error_revokes(native_root, authority, monkeypatch):
@@ -963,7 +963,7 @@ def test_actual_activity_keyed_opener_accepts_guarded_connection(native_root, au
     from mordred_hermes.dbcrypt._key import KeyProvider
 
     provider = KeyProvider(home=profile)
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", provider)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", provider)
     try:
         store = ActivityStore(path, _gate.keyed_opener)
         meta = store.initialize(profile)
@@ -1023,16 +1023,16 @@ def test_first_install_refuses_provider_from_another_home(native_root, monkeypat
         put(supplied, encoded(snapshot))
     provider = KeyProvider(home=supplied)
     published = []
-    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(dbcrypt._runtime, "sys", policy_sys("darwin"))
     monkeypatch.setattr(sys, "argv", ["hermes"])
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", None)
     monkeypatch.setattr(_shim, "install_module", published.append)
     try:
         with pytest.raises(DatabaseRefused):
             dbcrypt.install(home=requested, provider=provider)
         assert published == []
         assert not (requested / "new.db").exists()
-        assert dbcrypt._PROVIDER is None
+        assert dbcrypt._runtime._PROVIDER is None
     finally:
         provider.close()
 

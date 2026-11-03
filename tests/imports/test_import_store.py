@@ -633,7 +633,7 @@ def test_opener_failures_become_content_free_refusals(tmp_path: Path, error: Bas
 
 def test_missing_authority_refuses_both_paths_without_creating(protected_runtime, monkeypatch):
     home, _, _ = protected_runtime
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", None)
     monkeypatch.setenv("HERMES_MEMORY_KEY", "hex:" + "11" * 32)
     for opening in (open_import_store, open_import_store_readonly):
         with pytest.raises(ImportRefused) as caught:
@@ -792,7 +792,7 @@ def test_existing_import_store_never_retargets_replaced_provider(protected_runti
     store = open_import_store(home)
     provider.close()
     fresh = KeyProvider(home=home)
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", fresh)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", fresh)
     try:
         with pytest.raises(ImportRefused):
             store.status()
@@ -808,7 +808,7 @@ def test_cold_readonly_status_never_acquires_native_authority(protected_runtime,
     open_import_store(home)
     provider.close()
     fresh = KeyProvider(home=home)
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", fresh)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", fresh)
     calls = list(backend.calls)
     try:
         with pytest.raises(ImportRefused) as caught:

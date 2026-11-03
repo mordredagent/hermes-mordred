@@ -9,7 +9,7 @@ from . import _term
 
 
 def _home() -> Path:
-    from ..dbcrypt import _home as database_home
+    from ..dbcrypt._runtime import _home as database_home
 
     return database_home()
 

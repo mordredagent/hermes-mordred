@@ -19,7 +19,7 @@ from tests._activity_protection import protected_runtime as protected_runtime
 def test_passive_gate_does_not_acquire_key_sql_or_create_state(native_root, monkeypatch):
     root = native_root[0]
     provider = KeyProvider(home=root)
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", provider)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", provider)
     monkeypatch.setattr(_capability, "sys", SimpleNamespace(platform="darwin"))
     monkeypatch.setattr(_shim, "is_installed", lambda: True)
 
@@ -36,7 +36,7 @@ def test_passive_gate_does_not_acquire_key_sql_or_create_state(native_root, monk
 
 def test_missing_authority_no_store_created(protected_runtime, monkeypatch):
     root, _, _ = protected_runtime
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", None)
     monkeypatch.setenv("HERMES_MEMORY_KEY", "hex:" + "11" * 32)
     with pytest.raises(ActivityRefused) as caught:
         open_store(root)
@@ -46,7 +46,7 @@ def test_missing_authority_no_store_created(protected_runtime, monkeypatch):
 
 def test_environment_provider_is_not_runtime_authority(protected_runtime, monkeypatch):
     root, _, _ = protected_runtime
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", KeyProvider(environ={"HERMES_MEMORY_KEY": "hex:" + "11" * 32}))
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", KeyProvider(environ={"HERMES_MEMORY_KEY": "hex:" + "11" * 32}))
     with pytest.raises(ActivityRefused) as caught:
         open_store(root)
     assert caught.value.code == "no_key"

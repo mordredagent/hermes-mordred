@@ -256,6 +256,7 @@
       "llm",
       "privacy"
     ],
+    "src/mordred_hermes/llm_guard/_registration.py": [],
     "src/mordred_hermes/llm_guard/_typing.py": [],
     "src/mordred_hermes/llm_guard/_windows_policy.py": [
       "llm",
@@ -273,6 +274,10 @@
       "tor"
     ],
     "src/mordred_hermes/network/_exceptions.py": [],
+    "src/mordred_hermes/network/_registration.py": [
+      "network",
+      "tor"
+    ],
     "src/mordred_hermes/network/_windows_exec.py": [
       "network",
       "tor"

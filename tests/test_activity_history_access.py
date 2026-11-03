@@ -50,7 +50,7 @@ def test_existing_history_store_never_retargets_replaced_provider(protected_runt
     reader = _history_access.reader(home)
     provider.close()
     fresh = KeyProvider(home=home)
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", fresh)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", fresh)
     try:
         with pytest.raises(ActivityRefused):
             reader.status()

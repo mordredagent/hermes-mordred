@@ -293,7 +293,7 @@ def test_default_install_refuses_legacy_without_adoption(native_root, monkeypatc
 
     root, backend, key, _ = native_root
     marker = put(root, b"1\n")
-    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(dbcrypt._runtime, "sys", policy_sys("darwin"))
     monkeypatch.setattr(sys, "argv", ["hermes"])
     monkeypatch.setattr(_shim, "is_installed", lambda: False)
     monkeypatch.setenv("HERMES_MEMORY_KEY", "hex:" + key.hex())
@@ -385,9 +385,9 @@ def test_default_startup_cannot_return_unregistered_live_sql_connection(native_r
     from mordred_hermes.dbcrypt._connection import ProtectedConnection
 
     root, backend, _, _ = native_root
-    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(dbcrypt._runtime, "sys", policy_sys("darwin"))
     monkeypatch.setattr(sys, "argv", ["hermes"])
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", None)
     installed = []
     monkeypatch.setattr(_shim, "install_module", installed.append)
     try:
@@ -402,8 +402,8 @@ def test_default_startup_cannot_return_unregistered_live_sql_connection(native_r
         with pytest.raises(DatabaseRefused):
             held.commit()
     finally:
-        if dbcrypt._PROVIDER is not None:
-            dbcrypt._PROVIDER.close()
+        if dbcrypt._runtime._PROVIDER is not None:
+            dbcrypt._runtime._PROVIDER.close()
     with acquire_exclusive(root):
         pass
 
@@ -420,12 +420,12 @@ def test_default_profile_startup_refuses_before_sql_or_native(native_root, monke
 
     root, backend, _, _ = native_root
     profile = root / "profiles/work"
-    before_modules = (dbcrypt.sys.modules["sqlite3"], dbcrypt.sys.modules["sqlite3.dbapi2"])
+    before_modules = (dbcrypt._runtime.sys.modules["sqlite3"], dbcrypt._runtime.sys.modules["sqlite3.dbapi2"])
     assert before_modules[0] is sqlite3
-    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(dbcrypt._runtime, "sys", policy_sys("darwin"))
     monkeypatch.setattr(sys, "argv", ["hermes"])
     monkeypatch.setattr(_shim, "is_installed", lambda: installed)
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", None)
     modules = []
     monkeypatch.setattr(_shim, "install_module", modules.append)
     try:
@@ -435,7 +435,7 @@ def test_default_profile_startup_refuses_before_sql_or_native(native_root, monke
         assert isinstance(held, ProtectedConnection)
         cursor = held.execute("SELECT 1")
         assert sum(op == "ecdh" for op, _ in backend.calls) == 1
-        authority = dbcrypt._PROVIDER.current_authority
+        authority = dbcrypt._runtime._PROVIDER.current_authority
         assert authority is not None and authority.home == profile and authority.root == root
         before_calls = list(backend.calls)
         if damage == "directory":
@@ -456,9 +456,9 @@ def test_default_profile_startup_refuses_before_sql_or_native(native_root, monke
         else:
             assert (profile / "state.db").exists()
     finally:
-        if dbcrypt._PROVIDER is not None:
-            dbcrypt._PROVIDER.close()
-    assert (dbcrypt.sys.modules["sqlite3"], dbcrypt.sys.modules["sqlite3.dbapi2"]) == before_modules
+        if dbcrypt._runtime._PROVIDER is not None:
+            dbcrypt._runtime._PROVIDER.close()
+    assert (dbcrypt._runtime.sys.modules["sqlite3"], dbcrypt._runtime.sys.modules["sqlite3.dbapi2"]) == before_modules
     with acquire_exclusive(root):
         pass
 
@@ -490,7 +490,7 @@ def test_default_install_refuses_unsafe_marker_entry(native_root, monkeypatch, d
         marker.symlink_to(root / "missing")
     else:
         marker.mkdir(mode=0o700)
-    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(dbcrypt._runtime, "sys", policy_sys("darwin"))
     monkeypatch.setattr(sys, "argv", ["hermes"])
     monkeypatch.setattr(_shim, "is_installed", lambda: False)
     before = list(backend.calls)
@@ -580,7 +580,7 @@ def test_default_startup_without_marker_preserves_recovery_state(tmp_path, monke
         resumed.append(True)
         return resume(*args, **kwargs)
 
-    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(dbcrypt._runtime, "sys", policy_sys("darwin"))
     monkeypatch.setattr(sys, "argv", ["hermes"])
     monkeypatch.setattr(_shim, "is_installed", lambda: False)
     monkeypatch.setattr(_migrate, "resume_at_startup", observe_resume)
@@ -591,8 +591,8 @@ def test_default_startup_without_marker_preserves_recovery_state(tmp_path, monke
         assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
         assert not dbcrypt.marker_path(root).exists()
     finally:
-        if dbcrypt._PROVIDER is not None:
-            dbcrypt._PROVIDER.close()
+        if dbcrypt._runtime._PROVIDER is not None:
+            dbcrypt._runtime._PROVIDER.close()
 
 
 def test_explicit_native_provider_cannot_enter_legacy_install(native_root, monkeypatch):
@@ -600,9 +600,9 @@ def test_explicit_native_provider_cannot_enter_legacy_install(native_root, monke
     from mordred_hermes.dbcrypt import _migrate, _shim
 
     root, backend, _, _ = native_root
-    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(dbcrypt._runtime, "sys", policy_sys("darwin"))
     monkeypatch.setattr(sys, "argv", ["hermes"])
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", None)
     installed = []
     monkeypatch.setattr(_shim, "install_module", installed.append)
 

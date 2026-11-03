@@ -563,7 +563,7 @@ def test_activity_roundtrip_dedup_search_restart(protected_runtime, monkeypatch)
     original_rows = rows(store, "SELECT event_id, text FROM activity_events")
     provider.close()
     fresh = KeyProvider(home=home)
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", fresh)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", fresh)
     try:
         restarted = open_store(home)
         assert rows(restarted, "SELECT event_id, text FROM activity_events") == original_rows
@@ -612,7 +612,7 @@ def test_activity_roundtrip_dedup_search_restart_backup(protected_runtime, monke
         restored_meta = restore_activity_store(backup, home=home, lease=lease)
     assert sum(operation == "ecdh" for operation, _ in backend.calls[len(before) :]) == 2
     fresh = KeyProvider(home=home)
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", fresh)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", fresh)
     try:
         restarted = open_store(home)
         assert rows(restarted, "SELECT event_id,text FROM activity_events ORDER BY receipt") == original
@@ -719,7 +719,7 @@ def test_offline_restore_upgrades_older_activity_schema_under_ex(protected_runti
         restored = restore_activity_store(backup, home=home, lease=lease)
     assert restored.schema_version == 3
     fresh = KeyProvider(home=home)
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", fresh)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", fresh)
     try:
         reopened = open_store(home)
         assert rows(reopened, "SELECT name FROM sqlite_master WHERE name='activity_lessons'") == []

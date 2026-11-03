@@ -678,7 +678,7 @@ def test_native_credential_only_forget_remains_independent_of_database_authority
     store, native = native_store(desktop.home)
     store.ensure_key(require_presence=False)
     store.store(generic_creds(), require_presence=False)
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", None)
     monkeypatch.setattr(api, "sys", SimpleNamespace(platform="linux"))
     _memory_off(monkeypatch)
     monkeypatch.setattr(_seams, "mail_secret_store", lambda: store)
@@ -689,4 +689,4 @@ def test_native_credential_only_forget_remains_independent_of_database_authority
     assert "delete" in native.calls
     assert not store.residue()
     assert not (desktop.home / "plugin-data/mordred/mordred.db").exists()
-    assert dbcrypt._PROVIDER is None
+    assert dbcrypt._runtime._PROVIDER is None

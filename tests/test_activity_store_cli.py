@@ -186,7 +186,7 @@ def _count_events(home: Path, protected_runtime) -> int:
     from mordred_hermes.dbcrypt._key import KeyProvider
 
     fresh = KeyProvider(home=protected_runtime[0])
-    dbcrypt._PROVIDER = fresh
+    dbcrypt._runtime._PROVIDER = fresh
     try:
         return int(rows(open_store(home), "SELECT count(*) FROM activity_events")[0][0])
     finally:
