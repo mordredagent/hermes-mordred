@@ -249,6 +249,15 @@ def test_send_raw_requires_canonical_transaction_hash(monkeypatch, result):
 # --------------------------------------------------------------------------- #
 
 
+# Windows reads default_path from a checked canonical config/policy generation,
+# so a plain tmp_path/config.yaml refuses there and these expectations would fail
+# or pass for the wrong reason. tests/test_network_windows_policy.py owns that reader.
+posix_config_reader = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="exercises the POSIX config.yaml reader; Windows requires a checked canonical generation",
+)
+
+
 def _install_gateway_resolver(monkeypatch, resolver):
     gateway = types.ModuleType("gateway")
     platforms = types.ModuleType("gateway.platforms")
@@ -267,6 +276,7 @@ def test_proxies_resolves_for_explicit_rpc_host(monkeypatch):
         seen.append(target_hosts)
         return "socks5h://127.0.0.1:9050"
 
+    _rpc_network_state(monkeypatch, "clearnet")
     _install_gateway_resolver(monkeypatch, resolve)
     proxies = extension_rpc._proxies("https://rpc.example.com/v1")
     assert proxies == {"http": "socks5h://127.0.0.1:9050", "https": "socks5h://127.0.0.1:9050"}
@@ -277,6 +287,7 @@ def test_call_never_posts_when_route_resolution_fails(monkeypatch):
     def fail(*, target_hosts=None):
         raise RuntimeError(f"resolver unavailable for {target_hosts}")
 
+    _rpc_network_state(monkeypatch, "clearnet")
     _install_gateway_resolver(monkeypatch, fail)
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8118")
     monkeypatch.setattr(extension_rpc, "_direct_https_post", lambda *a, **k: pytest.fail("route failure must not post"))
@@ -390,6 +401,7 @@ def test_direct_route_rejects_private_dns_answer_before_post(monkeypatch):
 
 
 def test_call_refuses_redirect_and_disables_automatic_redirects(monkeypatch):
+    _rpc_network_state(monkeypatch, "clearnet")
     _install_gateway_resolver(
         monkeypatch,
         lambda *, target_hosts=None: "socks5h://127.0.0.1:9050",
@@ -1120,6 +1132,7 @@ def _rpc_network_state(monkeypatch, path, *, ready=True, dropped=False):
     monkeypatch.setattr(network_api, "is_dropped", lambda: dropped)
 
 
+@posix_config_reader
 @pytest.mark.parametrize("path", ["tor", "vpn"])
 def test_rpc_standalone_protected_selection_refuses_before_dns_or_http(monkeypatch, tmp_path, path):
     from mordred_hermes.network import api as network_api
@@ -1187,7 +1200,7 @@ def test_rpc_verified_direct_route_still_validates_dns_and_pins_ip(monkeypatch, 
     assert seen == ["93.184.216.34"]
 
 
-@pytest.mark.parametrize("standalone", [False, True])
+@pytest.mark.parametrize("standalone", [False, pytest.param(True, marks=posix_config_reader)])
 def test_rpc_socks_route_preserves_auth_and_forces_remote_dns(monkeypatch, standalone, tmp_path):
     from mordred_hermes.network import api as network_api
 
@@ -1207,6 +1220,7 @@ def test_rpc_socks_route_preserves_auth_and_forces_remote_dns(monkeypatch, stand
     )
 
 
+@posix_config_reader
 @pytest.mark.parametrize(
     "config",
     [None, "plugins:\n  mordred_network:\n    default_path: clearnet\n"],
@@ -1238,6 +1252,7 @@ def test_rpc_standalone_unconfigured_uses_pinned_direct_route(monkeypatch, tmp_p
     assert seen == ["93.184.216.34"]
 
 
+@posix_config_reader
 def test_rpc_standalone_malformed_config_refuses_before_dns(monkeypatch, tmp_path):
     from mordred_hermes.network import api as network_api
 

@@ -1,9 +1,10 @@
 """Minimal EVM JSON-RPC client for the Mordred extension wallet (SPEC §5.3).
 
 Used to fill missing transaction fields (nonce / gas / fees / chainId) and to
-broadcast the signed raw transaction. Honors the gateway's configured proxy
-(Tor via ``mordred_network``) so RPC egress follows the same path as the rest
-of Hermes — the extension itself never talks to an RPC node.
+broadcast the signed raw transaction. The route comes from
+``extension.egress``, the extension server's shared fail-closed policy (Tor or
+VPN via ``mordred_network``, otherwise the gateway's configured proxy) — the
+extension itself never talks to an RPC node.
 
 Synchronous (``requests``); callers invoke it from a thread executor.
 """

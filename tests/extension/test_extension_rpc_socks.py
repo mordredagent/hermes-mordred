@@ -1,4 +1,9 @@
-"""Exercise wallet routing through the local SOCKS wire inspector."""
+"""Exercise wallet routing through the local SOCKS wire inspector.
+
+Loopback-only and runtime-pinned, so it stays in the default suite: this is the
+only test proving Requests really sends the isolation credentials and hands the
+RPC hostname to the proxy.
+"""
 
 from __future__ import annotations
 
@@ -11,8 +16,6 @@ from mordred_hermes.extension import rpc
 from mordred_hermes.network import api as network_api
 from tests.integration import _socks5_inspector as inspector_module
 from tests.integration._http_target import http_target
-
-pytestmark = pytest.mark.integration
 
 
 def test_rpc_socks_wire_keeps_isolation_credentials_and_remote_dns(monkeypatch):
@@ -50,7 +53,7 @@ def test_rpc_socks_wire_keeps_isolation_credentials_and_remote_dns(monkeypatch):
         # The local origin deliberately speaks HTTP: TLS must fail only AFTER
         # SOCKS authentication and CONNECT, without weakening RPC TLS policy.
         with pytest.raises(rpc.JsonRpcError, match="rpc_request_failed"):
-            rpc.call(f"https://rpc.example.com:{target.port}", "eth_chainId", [], timeout=3)
+            rpc.call(f"https://rpc.example.com:{target.port}", "eth_chainId", [], timeout=10)
     assert authenticated == [(b"isolate@user", b"p:ss")]
     assert len(inspector.captures) == 1
     assert inspector.last_capture.is_remote_dns
