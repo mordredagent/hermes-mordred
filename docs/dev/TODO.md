@@ -14,11 +14,12 @@ remain open unless code or recorded evidence resolves them.
 
 ## Bounded macOS presence reuse
 
-- [ ] Add ordinary/HD expected-signer checks and verify two-decrypt wallet flow.
-- [ ] Implement bounded native LAContext sessions and Python broker.
-- [ ] Bind Telegram/mail operations to trusted host sessions and revocation.
-- [ ] Verify expiry, concurrency, failure, cancellation, isolation and replacement.
-- [ ] Run final regression, static checks and reduced-extras type checks.
+- [x] Add ordinary/HD expected-signer checks and verify two-decrypt wallet flow.
+- [x] Implement bounded native LAContext sessions and Python broker.
+- [x] Bind Telegram/mail operations to trusted host sessions and revocation.
+- [x] Verify expiry, concurrency, failure, cancellation, isolation and replacement.
+- [x] Run final regression, static checks and reduced-extras type checks
+      (see the 2026-11-03 validation entry for the corrected test environment).
 - [ ] Record isolated live Touch ID, lock/sleep/denial and signing evidence;
       enable 300 seconds only after those checks succeed.
 

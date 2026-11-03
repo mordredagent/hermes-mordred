@@ -57,7 +57,10 @@ def test_attended_presence(purpose, monkeypatch):
     store.ensure_key(require_presence=True)
     store.store(credentials)
     (home / "config.yaml").write_text("plugins:\n  mordred_keyvault:\n    presence_reuse_seconds: 300\n")
-    print(f"\nRetained synthetic home: {home}\nScenario: {purpose}/{scenario}; count every OS prompt.")
+    print(
+        f"\nRetained synthetic home: {home}\nScenario: {purpose}/{scenario}; "
+        "count Mordred prompts, excluding screen unlock."
+    )
     try:
         with presence.presence_scope(home, ("manual", "isolated-session"), purpose):
             assert store.load() == credentials  # approve first prompt
@@ -88,10 +91,13 @@ def test_attended_presence(purpose, monkeypatch):
                 with pytest.raises((TelegramSecretsError, MailSecretsError)):
                     store.load()
                 assert not presence._pool._entries, "denial must discard all reuse for this operation"
-                assert store.load() == credentials  # explicit next operation; approve
+                with presence.presence_scope(home, ("manual", "isolated-session"), purpose):
+                    assert store.load() == credentials  # explicit new operation; approve
                 expected_prompts, expected_decrypts = "3", 2
             assert sum(e.get("reason") == "keyvault.unwrap_authorized" for e in audit) == expected_decrypts
-            observed = input(f"Actual OS prompt count (expected {expected_prompts}): ").strip()
+            observed = input(
+                f"Mordred authentication prompts, excluding screen unlock (expected {expected_prompts}): "
+            ).strip()
             assert observed == expected_prompts
     finally:
         presence.revoke(home=home)
