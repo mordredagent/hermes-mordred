@@ -88,8 +88,8 @@ def _run_sekey_build(src: Path, *, install_dir: Path | None, unattended: bool | 
     if install_dir is not None:
         env["MORDRED_SEKEY_INSTALL_DIR"] = str(install_dir)
     try:
-        proc = subprocess.run(
-            ["bash", str(src / "build.sh")],
+        proc = subprocess.run(  # noqa: S603 - list argv, no shell
+            ["bash", str(src / "build.sh")],  # noqa: S607 - PATH lookup of a system tool is intended
             cwd=str(src),
             env=env,
             capture_output=True,
@@ -261,8 +261,8 @@ def _run_tpmkey_build(src: Path, *, install_dir: Path | None) -> tuple[int, str]
     if install_dir is not None:
         env["MORDRED_TPMKEY_INSTALL_DIR"] = str(install_dir)
     try:
-        proc = subprocess.run(
-            ["bash", str(src / "build.sh")],
+        proc = subprocess.run(  # noqa: S603 - list argv, no shell
+            ["bash", str(src / "build.sh")],  # noqa: S607 - PATH lookup of a system tool is intended
             cwd=str(src),
             env=env,
             capture_output=True,
@@ -415,7 +415,7 @@ def _run_winkey_build(src: Path, *, install_dir: Path) -> tuple[int, str]:
     env = scrubbed_environment(os.environ)
     env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: S603 - list argv, no shell
             [
                 powershell,
                 "-NoProfile",

@@ -68,7 +68,7 @@ class GitHub:
         }
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
-        request = Request(self.base + path, headers=headers)
+        request = Request(self.base + path, headers=headers)  # noqa: S310 - https URL on a fixed origin
         with build_opener(SafeRedirect()).open(request, timeout=30) as response:
             raw = bounded_read(response, MAX_ARCHIVE_BYTES if binary else MAX_API_BYTES)
         if binary:

@@ -280,7 +280,7 @@ _NEIGHBOR_SQL: Final = f"""
     SELECT ordered.source_uid FROM ordered, anchor
     WHERE ordered.pos BETWEEN anchor.pos - ? AND anchor.pos + ?
     ORDER BY ordered.pos
-"""
+"""  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
 
 
 class ImportRefused(Exception):
@@ -617,7 +617,7 @@ def _search_sql(
             where.append(clause)
             params.append(value)
     sql = (
-        f"SELECT p.part_uid, p.source_uid, m.conv_uid, {score} AS score FROM {tables} "
+        f"SELECT p.part_uid, p.source_uid, m.conv_uid, {score} AS score FROM {tables} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         "JOIN import_conversations c ON c.conv_uid = m.conv_uid "
         f"WHERE {' AND '.join(where) or '1'} ORDER BY {order} LIMIT ?"
     )
@@ -786,7 +786,8 @@ class ImportStore:
         if stored is not None and tuple(stored) != values[1:3]:
             raise ImportRefused("conflict")
         conn.execute(
-            f"INSERT OR REPLACE INTO import_conversations ({_CONV_COLUMNS}) VALUES ({_marks(len(values))})", values
+            f"INSERT OR REPLACE INTO import_conversations ({_CONV_COLUMNS}) VALUES ({_marks(len(values))})",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+            values,
         )
 
     # --- runs ----------------------------------------------------------------------------
@@ -988,7 +989,9 @@ class ImportStore:
         rows = {
             str(row[0]): ImportConversation(**_decoded(_CONV_FIELDS, row))
             for row in _select_in(
-                conn, f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE conv_uid IN", [survivor, *others]
+                conn,
+                f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE conv_uid IN",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+                [survivor, *others],
             )
         }
         target = rows.get(survivor)
@@ -1003,9 +1006,10 @@ class ImportStore:
         for start in range(0, len(others), _CHUNK):
             chunk = list(others[start : start + _CHUNK])
             moved += conn.execute(
-                f"UPDATE import_messages SET conv_uid = ? WHERE conv_uid IN ({_marks(len(chunk))})", (survivor, *chunk)
+                f"UPDATE import_messages SET conv_uid = ? WHERE conv_uid IN ({_marks(len(chunk))})",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+                (survivor, *chunk),
             ).rowcount
-            conn.execute(f"DELETE FROM import_conversations WHERE conv_uid IN ({_marks(len(chunk))})", chunk)
+            conn.execute(f"DELETE FROM import_conversations WHERE conv_uid IN ({_marks(len(chunk))})", chunk)  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         cls._upsert_conversation(conn, merged)
         cls._recount(conn, run_id, survivor)
         return int(moved)
@@ -1094,7 +1098,8 @@ class ImportStore:
     def _merged(conn: sqlite3.Connection, conv: ImportConversation) -> ImportConversation:
         """``conv`` merged with its stored row: participants unioned, newest date, the stored title kept."""
         row = conn.execute(
-            f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE conv_uid = ?", (conv.conv_uid,)
+            f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE conv_uid = ?",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+            (conv.conv_uid,),
         ).fetchone()
         if row is None:
             return conv
@@ -1128,7 +1133,7 @@ class ImportStore:
     def _outcome(conn: sqlite3.Connection, run_id: str, msg: ImportMessage) -> str:
         """``inserted`` / ``duplicates`` / ``revised`` / ``conflicts`` (see the module docstring)."""
         row = conn.execute(
-            f"SELECT {_DECISION_COLUMNS}, m.run_id = ?, r.state FROM import_messages m "
+            f"SELECT {_DECISION_COLUMNS}, m.run_id = ?, r.state FROM import_messages m "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
             "LEFT JOIN import_runs r ON r.run_id = m.run_id WHERE m.source_uid = ?",
             (run_id, msg.source_uid),
         ).fetchone()
@@ -1141,12 +1146,12 @@ class ImportStore:
     def _store_message(conn: sqlite3.Connection, run_id: str, msg: ImportMessage) -> None:
         values = (*_values(msg, _MESSAGE_FIELDS), run_id)
         conn.execute(
-            f"INSERT OR REPLACE INTO import_messages ({_MESSAGE_COLUMNS}, run_id) VALUES ({_marks(len(values))})",
+            f"INSERT OR REPLACE INTO import_messages ({_MESSAGE_COLUMNS}, run_id) VALUES ({_marks(len(values))})",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
             values,
         )
         conn.execute("DELETE FROM import_parts WHERE source_uid = ?", (msg.source_uid,))
         rows = [_values(part, _PART_FIELDS) for part in msg.parts]
-        conn.executemany(f"INSERT INTO import_parts ({_PART_COLUMNS}) VALUES ({_marks(len(rows[0]))})", rows)
+        conn.executemany(f"INSERT INTO import_parts ({_PART_COLUMNS}) VALUES ({_marks(len(rows[0]))})", rows)  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
 
     def delete_source(
         self, source: Source | str, source_account: str, *, expected_retired_account: str | None = None
@@ -1177,11 +1182,11 @@ class ImportStore:
                     raise ImportRefused("conflict")
             for table in ("import_parts", "import_mail_refs"):
                 conn.execute(
-                    f"DELETE FROM {table} WHERE source_uid IN "
+                    f"DELETE FROM {table} WHERE source_uid IN "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                     f"(SELECT source_uid FROM import_messages WHERE conv_uid IN ({convs}))",
                     key,
                 )
-            deleted = conn.execute(f"DELETE FROM import_messages WHERE conv_uid IN ({convs})", key).rowcount
+            deleted = conn.execute(f"DELETE FROM import_messages WHERE conv_uid IN ({convs})", key).rowcount  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
             conn.execute(
                 "DELETE FROM import_mail_refs WHERE source_uid NOT IN (SELECT source_uid FROM import_messages)"
             )
@@ -1197,7 +1202,7 @@ class ImportStore:
         """The subset of ``source_uids`` stored under a committed run."""
         uids = list(dict.fromkeys(source_uids))
         with self._transaction(write=False) as conn:
-            rows = _select_in(conn, f"SELECT m.source_uid FROM {_COMMITTED_MESSAGES} WHERE m.source_uid IN", uids)
+            rows = _select_in(conn, f"SELECT m.source_uid FROM {_COMMITTED_MESSAGES} WHERE m.source_uid IN", uids)  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         return {str(row[0]) for row in rows}
 
     def classify_incoming(self, copies: Iterable[IncomingCopy]) -> dict[str, str]:
@@ -1212,7 +1217,7 @@ class ImportStore:
         with self._transaction(write=False) as conn:
             rows = _select_in(
                 conn,
-                f"SELECT m.source_uid, {_DECISION_COLUMNS}, 0, r.state FROM import_messages m "
+                f"SELECT m.source_uid, {_DECISION_COLUMNS}, 0, r.state FROM import_messages m "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                 "LEFT JOIN import_runs r ON r.run_id = m.run_id WHERE m.source_uid IN",
                 list(incoming),
             )
@@ -1256,7 +1261,7 @@ class ImportStore:
                 raise RecordError("unknown_enum") from None
             where.append("m.owner_class = ?")
         sql = (
-            f"SELECT m.source_uid FROM {_COMMITTED_MESSAGES} "
+            f"SELECT m.source_uid FROM {_COMMITTED_MESSAGES} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
             f"JOIN import_conversations c ON c.conv_uid = m.conv_uid WHERE {' AND '.join(where)}"
         )
         chunks: list[list[str]] = [[]] if ids is None else [ids[i : i + _CHUNK] for i in range(0, len(ids), _CHUNK)]
@@ -1311,7 +1316,7 @@ class ImportStore:
         with self._transaction(write=False) as conn:
             rows = _select_in(
                 conn,
-                f"SELECT p.part_uid, p.source_uid FROM {_COMMITTED_PARTS} WHERE p.part_uid IN",
+                f"SELECT p.part_uid, p.source_uid FROM {_COMMITTED_PARTS} WHERE p.part_uid IN",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                 uids,
             )
             owners = {str(part): str(source_uid) for part, source_uid in rows}
@@ -1333,7 +1338,7 @@ class ImportStore:
         span = max(0, min(n, MAX_NEIGHBORS))
         with self._transaction(write=False) as conn:
             anchor = conn.execute(
-                f"SELECT m.conv_uid, m.source_uid FROM {_COMMITTED_PARTS} WHERE p.part_uid = ?",
+                f"SELECT m.conv_uid, m.source_uid FROM {_COMMITTED_PARTS} WHERE p.part_uid = ?",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                 (part_uid,),
             ).fetchone()
             if anchor is None:
@@ -1348,16 +1353,20 @@ class ImportStore:
         conn: sqlite3.Connection, source_uids: Sequence[str]
     ) -> dict[str, tuple[ImportConversation, ImportMessage]]:
         message_rows = _select_in(
-            conn, f"SELECT {_MESSAGE_COLUMNS} FROM import_messages WHERE source_uid IN", source_uids
+            conn,
+            f"SELECT {_MESSAGE_COLUMNS} FROM import_messages WHERE source_uid IN",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+            source_uids,
         )
         parts: dict[str, list[ImportPart]] = {}
-        for row in _select_in(conn, f"SELECT {_PART_COLUMNS} FROM import_parts WHERE source_uid IN", source_uids):
+        for row in _select_in(conn, f"SELECT {_PART_COLUMNS} FROM import_parts WHERE source_uid IN", source_uids):  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
             parts.setdefault(str(row[1]), []).append(ImportPart(**_decoded(_PART_FIELDS, row)))
         conv_uids = sorted({str(row[1]) for row in message_rows})
         convs = {
             str(row[0]): ImportConversation(**_decoded(_CONV_FIELDS, row))
             for row in _select_in(
-                conn, f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE conv_uid IN", conv_uids
+                conn,
+                f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE conv_uid IN",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+                conv_uids,
             )
         }
         result: dict[str, tuple[ImportConversation, ImportMessage]] = {}
@@ -1373,7 +1382,7 @@ class ImportStore:
         """Committed message count per source; a source without committed messages is left out."""
         with self._transaction(write=False) as conn:
             rows = conn.execute(
-                f"SELECT c.source, count(*) FROM {_COMMITTED_MESSAGES} "
+                f"SELECT c.source, count(*) FROM {_COMMITTED_MESSAGES} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                 "JOIN import_conversations c ON c.conv_uid = m.conv_uid GROUP BY c.source ORDER BY c.source"
             ).fetchall()
         return {str(source): int(count) for source, count in rows}
@@ -1397,7 +1406,7 @@ class ImportStore:
             ):
                 add(str(source), "messages" if committed else "uncommitted_messages", int(count))
             for source, count in conn.execute(
-                f"SELECT c.source, count(*) FROM {_COMMITTED_PARTS} "
+                f"SELECT c.source, count(*) FROM {_COMMITTED_PARTS} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                 "JOIN import_conversations c ON c.conv_uid = m.conv_uid GROUP BY 1"
             ):
                 add(str(source), "parts", int(count))

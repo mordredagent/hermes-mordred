@@ -56,7 +56,7 @@ class InstallResult:
 
 
 def _default_runner(cmd: list[str]) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(cmd, check=False)
+    return subprocess.run(cmd, check=False)  # noqa: S603 - list argv, no shell
 
 
 def _resolve_skill_md(skill_path: Path, skill_md_name: str) -> Path:

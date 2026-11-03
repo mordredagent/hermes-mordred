@@ -48,7 +48,7 @@ def default_runner(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
     env = scrubbed_environment(os.environ)
     env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     try:
-        return subprocess.run(
+        return subprocess.run(  # noqa: S603 - list argv, no shell
             list(argv), capture_output=True, encoding="utf-8", errors="replace", timeout=30, env=env, check=False
         )
     except (OSError, subprocess.SubprocessError) as exc:

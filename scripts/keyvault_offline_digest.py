@@ -78,7 +78,7 @@ except ImportError as err:  # pragma: no cover - only reached when blake3 is abs
             f"note: blake3 not found in this Python; re-running under the bundled venv ({_venv_python}).\n"
         )
         with contextlib.suppress(OSError):
-            os.execv(str(_venv_python), [str(_venv_python), _script, *sys.argv[1:]])
+            os.execv(str(_venv_python), [str(_venv_python), _script, *sys.argv[1:]])  # noqa: S606 - re-exec of this script under the bundled venv
         # if execv raised OSError, fall through to the install hint below
     sys.stderr.write(
         "\n"
@@ -103,7 +103,7 @@ except ImportError as err:  # pragma: no cover - only reached when blake3 is abs
 # mordred-hermes/tests/test_keyvault_digest.py:SPEC_*. If the canonical
 # algorithm ever changes (SPEC update), both pins move together.
 _SPEC_SEED = "test seed"
-_SPEC_PASS = "test pass"
+_SPEC_PASS = "test pass"  # noqa: S105 - published test vector
 _SPEC_POW_TOP4 = bytes.fromhex("deadbeef")
 _SPEC_DIGEST_HEX = "25c17b1e1b249dd278f6de52e6e0dddf855fe9943177c99c5428fc1c321b5c93"
 

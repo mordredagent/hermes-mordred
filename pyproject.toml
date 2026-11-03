@@ -337,8 +337,26 @@ target-version = "py311"
 # hotspot under threshold, so the gate now prevents silent regression.
 # PLR0913 (too-many-args) is deliberately NOT enabled — the crypto signers
 # take intentional keyword-only params, which is good design, not a smell.
-select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "C901", "PLR0912", "PLR0915"]
-ignore = []
+# S: flake8-bandit. Every subprocess launch, dynamic SQL string, urlopen and
+# secret-looking literal in production code must carry a
+# `# noqa: Sxxx - <reason>` justification (existing sites were annotated when
+# the gate was enabled); tests are exempt below.
+# PT: flake8-pytest-style for new tests; style-only rules with large legacy
+# counts are ignored below instead of rewritten.
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "C901", "PLR0912", "PLR0915", "S", "PT"]
+ignore = [
+    # `assert` in production code is only mypy narrowing after an explicit
+    # check (`assert handle is not None`); Hermes never runs under `python -O`
+    # and B011 still rejects `assert False`. Guards must raise, not assert.
+    "S101",
+    # Style-only pytest rules with thousands of legacy hits (compound asserts,
+    # parametrize name type, `raises` without `match` / with several
+    # statements). No behavioural value in rewriting them.
+    "PT006", "PT011", "PT012", "PT018",
+    # Manual refactors (assert-in-except, valueless fixture parameters);
+    # a separate cleanup, not a gate.
+    "PT017", "PT019",
+]
 
 # Explicit complexity thresholds. These equal ruff's current defaults and are
 # pinned here so a future ruff default change can't silently loosen the gate.
@@ -352,9 +370,13 @@ max-statements = 50
 [tool.ruff.lint.per-file-ignores]
 # Complexity caps target production-code maintainability. Test functions are
 # intentionally long (arrange-act-assert across many cases) and splitting them
-# hurts readability, so tests are exempt from the complexity rules ONLY — all
-# other lint rules still apply to tests.
-"tests/**" = ["C901", "PLR0912", "PLR0915"]
+# hurts readability, so tests are exempt from the complexity rules. Bandit (S)
+# is also off for tests: asserts, fixture passwords, tmp paths and subprocess
+# launches of helpers are the point of a test, not a finding. All other lint
+# rules still apply to tests.
+"tests/**" = ["C901", "PLR0912", "PLR0915", "S"]
+# Dev-only PoC harnesses (excluded from the sdist) pass a literal pairing token.
+"scripts/poc_*.py" = ["S106"]
 
 [tool.ruff.format]
 # Defaults are intentional: double quotes, trailing commas auto, LF.

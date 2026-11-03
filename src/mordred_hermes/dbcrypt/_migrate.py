@@ -259,7 +259,7 @@ def _counts(conn: Any) -> dict[str, int]:
         )
     ]
     return {
-        name: conn.execute(f'SELECT count(*) FROM "{name.replace(chr(34), chr(34) * 2)}"').fetchone()[0]
+        name: conn.execute(f'SELECT count(*) FROM "{name.replace(chr(34), chr(34) * 2)}"').fetchone()[0]  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         for name in names
     }
 

@@ -72,7 +72,7 @@ def _verified_merge_sha(tested_sha: str, base_sha: object, head_sha: object, roo
         return None
     try:
         checkout = subprocess.run(
-            ["git", "--no-replace-objects", "rev-parse", "--verify", "HEAD"],
+            ["git", "--no-replace-objects", "rev-parse", "--verify", "HEAD"],  # noqa: S607 - PATH lookup of a system tool is intended
             cwd=root,
             capture_output=True,
             check=True,
@@ -80,8 +80,8 @@ def _verified_merge_sha(tested_sha: str, base_sha: object, head_sha: object, roo
         ).stdout.strip()
         if checkout != tested_sha.encode("ascii"):
             return None
-        commit = subprocess.run(
-            ["git", "--no-replace-objects", "cat-file", "commit", tested_sha],
+        commit = subprocess.run(  # noqa: S603 - list argv, no shell
+            ["git", "--no-replace-objects", "cat-file", "commit", tested_sha],  # noqa: S607 - PATH lookup of a system tool is intended
             cwd=root,
             capture_output=True,
             check=True,

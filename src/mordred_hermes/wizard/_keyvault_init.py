@@ -295,7 +295,7 @@ def _read_passphrase(prompt_io: PromptIO, session: FlowSession | None = None) ->
 #: Printed under the intro banner when the ceremony runs inside
 #: ``hermes-mordred setup``: the one Passphrase is reused for the at-rest vault.
 _SETUP_SHARED_PASSPHRASE_NOTE = (
-    "  Setup asks for a passphrase only once: this Passphrase also\n"
+    "  Setup asks for a passphrase only once: this Passphrase also\n"  # noqa: S105 - help text, not a secret
     "  becomes the recovery passphrase of the encryption vault that\n"
     "  setup creates next (used only if this device is lost).\n"
 )

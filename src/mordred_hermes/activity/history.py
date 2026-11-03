@@ -480,7 +480,7 @@ def _sites(conn: sqlite3.Connection, ids: Sequence[str]) -> dict[str, list[str]]
     if not ids:
         return {}
     rows = conn.execute(
-        "SELECT episode_id, site FROM (SELECT episode_id, site, observed_at, receipt, ROW_NUMBER() OVER "
+        "SELECT episode_id, site FROM (SELECT episode_id, site, observed_at, receipt, ROW_NUMBER() OVER "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         "(PARTITION BY episode_id, site ORDER BY observed_at, receipt) AS nth FROM activity_events "
         f"WHERE site IS NOT NULL AND episode_id IN ({_in(ids)})) WHERE nth = 1 ORDER BY observed_at, receipt",
         tuple(ids),
@@ -511,7 +511,7 @@ def _hidden(
         return hidden
     where = f"({_MARKED_SQL} OR {_URL_FIELDS_SQL})" if excluded_sites else _MARKED_SQL
     rows = conn.execute(
-        f"SELECT DISTINCT episode_id, route, query, target, {_MARKED_SQL} FROM activity_events "
+        f"SELECT DISTINCT episode_id, route, query, target, {_MARKED_SQL} FROM activity_events "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         f"WHERE episode_id IN ({_in(rest)}) AND {where}",
         tuple(rest),
     )
@@ -531,7 +531,7 @@ def _user_texts(conn: sqlite3.Connection, ids: Sequence[str]) -> dict[str, list[
     if not ids:
         return texts
     rows = conn.execute(
-        f"SELECT episode_id, text FROM activity_events WHERE text IS NOT NULL AND {USER_TEXT_SQL} "
+        f"SELECT episode_id, text FROM activity_events WHERE text IS NOT NULL AND {USER_TEXT_SQL} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         f"AND episode_id IN ({_in(ids)}) ORDER BY receipt",
         tuple(ids),
     )
@@ -546,7 +546,7 @@ def _page_fields(conn: sqlite3.Connection, ids: Sequence[str]) -> dict[str, list
     if not ids:
         return fields
     union = " UNION ".join(
-        f"SELECT episode_id, {column} FROM activity_events WHERE {column} IS NOT NULL AND episode_id IN ({_in(ids)})"
+        f"SELECT episode_id, {column} FROM activity_events WHERE {column} IS NOT NULL AND episode_id IN ({_in(ids)})"  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         for column in ("page_title", "route", "query")
     )
     for episode_id, value in conn.execute(union, tuple(ids) * 3):
@@ -583,13 +583,13 @@ def _summary(conn: sqlite3.Connection, head: _Head, sites: Sequence[str]) -> Epi
     # In time order (``observed_at``, then receipt): a collector sends a task start when its task or turn ends,
     # with the time it started, so the start page still leads the route and the cap keeps the earliest events.
     rows = conn.execute(
-        f"SELECT {_SUMMARY_COLUMNS} FROM activity_events WHERE episode_id = ? ORDER BY observed_at, receipt LIMIT ?",
+        f"SELECT {_SUMMARY_COLUMNS} FROM activity_events WHERE episode_id = ? ORDER BY observed_at, receipt LIMIT ?",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         (head.episode_id, MAX_SUMMARY_EVENTS),
     ).fetchall()
     # The user's own words are read even past the event cap: the first task starts (Hermes's own capture writes
     # a task start when its turn ends, after the turn's calls) and the last corrections, in one query.
     words = conn.execute(
-        "SELECT 0, text, receipt FROM (SELECT text, receipt FROM activity_events WHERE episode_id = ? "
+        "SELECT 0, text, receipt FROM (SELECT text, receipt FROM activity_events WHERE episode_id = ? "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         f"AND phase = 'boundary' AND op = 'task_start' AND text <> '' AND {USER_TEXT_SQL} "
         "ORDER BY receipt LIMIT ?) UNION ALL SELECT 1, text, receipt FROM (SELECT text, receipt "
         "FROM activity_events WHERE episode_id = ? AND phase = 'correction' AND text IS NOT NULL "
@@ -600,7 +600,7 @@ def _summary(conn: sqlite3.Connection, head: _Head, sites: Sequence[str]) -> Epi
     tasks = [redact_secret_shaped_tokens(str(text))[0] for kind, text, _receipt in words if kind == 0]
     corrections = [redact_secret_shaped_tokens(str(text))[0] for kind, text, _receipt in words if kind == 1]
     steps_row = conn.execute(
-        "SELECT COUNT(DISTINCT attempt_id), COALESCE(SUM(attempt_id IS NULL), 0) FROM activity_events "
+        "SELECT COUNT(DISTINCT attempt_id), COALESCE(SUM(attempt_id IS NULL), 0) FROM activity_events "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         f"WHERE episode_id = ? AND phase IN ({', '.join('?' * len(_STEP_PHASES))})",
         (head.episode_id, *_STEP_PHASES),
     ).fetchone()
@@ -655,7 +655,7 @@ def _with_work(conn: sqlite3.Connection, heads: list[_Head], sites: Mapping[str,
     if not siteless:
         return heads
     rows = conn.execute(
-        f"SELECT DISTINCT episode_id FROM activity_events WHERE episode_id IN ({_in(siteless)}) "
+        f"SELECT DISTINCT episode_id FROM activity_events WHERE episode_id IN ({_in(siteless)}) "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         f"AND phase IN ({_in(_RAN_PHASES)}) AND result_status NOT IN ({_in(_FAILED_RESULTS)})",
         (*siteless, *_RAN_PHASES, *_FAILED_RESULTS),
     )
@@ -677,7 +677,7 @@ def _not_own(conn: sqlite3.Connection, heads: list[_Head], session: HermesSessio
     if session is None or not ids:
         return heads
     rows = conn.execute(
-        f"SELECT p.episode_id FROM activity_episodes p WHERE p.episode_id IN ({_in(ids)}) "
+        f"SELECT p.episode_id FROM activity_episodes p WHERE p.episode_id IN ({_in(ids)}) "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         "AND p.hermes_session_id IS NOT NULL AND p.session_ref_state = 'bound' AND EXISTS (SELECT 1 "
         "FROM activity_events e WHERE e.episode_id = p.episode_id AND +e.peer_id = ? AND e.hermes_session_id = ?)",
         (*ids, session.peer_id, session.session_id),
@@ -857,7 +857,7 @@ def episode_detail(
         # task end, the last pages); they are returned in time order, then the order they were received (a
         # task start Hermes wrote when its turn ended carries the turn's start: it leads that turn's calls).
         rows = conn.execute(
-            "SELECT observed_at, phase, op, site, route, query, target, result_status, text, page_title, "
+            "SELECT observed_at, phase, op, site, route, query, target, result_status, text, page_title, "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
             "substr(page_text, 1, ?), source, actor FROM activity_events WHERE receipt IN (SELECT receipt FROM "
             f"activity_events WHERE episode_id = ? ORDER BY {_DETAIL_PRIORITY}, receipt DESC LIMIT ?) "
             "ORDER BY observed_at, receipt",

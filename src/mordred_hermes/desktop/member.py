@@ -178,7 +178,7 @@ def fresh_import_location(python: str | None = None) -> Path | None:
     overlays = [p for p in sys.path if p and Path(p).name == "site-packages" and Path(p).is_dir()]
     argv = [python or sys.executable, "-I", "-c", _FRESH_IMPORT_SCRIPT, *overlays]
     try:
-        done = subprocess.run(
+        done = subprocess.run(  # noqa: S603 - list argv, no shell
             argv, capture_output=True, text=True, timeout=FRESH_IMPORT_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL
         )
     except (OSError, subprocess.SubprocessError):

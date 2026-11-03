@@ -361,7 +361,7 @@ def _run_child(argv: list[str], *, env: dict[str, str], cwd: Path, stdin: bytes,
     _require_unlocked()
     # Only the C4-validated interpreter and the task-owned private probe script run here.
     try:
-        process = subprocess.Popen(
+        process = subprocess.Popen(  # noqa: S603 - list argv, no shell
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd=cwd
         )
     except OSError as exc:

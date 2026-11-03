@@ -98,7 +98,7 @@ def capture_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tu
     monkeypatch.setattr(hooks_history, "_last_hosts", type(hooks_history._last_hosts)())
     monkeypatch.setattr(capture_hermes, "STORE_FACTORY", lambda _home: store)
     monkeypatch.setattr(capture_hermes, "_sessions", type(capture_hermes._sessions)())
-    yield home, store
+    return home, store
 
 
 @pytest.fixture
