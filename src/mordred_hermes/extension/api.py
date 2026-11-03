@@ -529,17 +529,18 @@ class _Connection:
                 if mtype in {"telegram_sync", "telegram_dialogs", "telegram_ask"}:
                     from .._core._home import hermes_home
                     from ..keyvault._presence import presence_scope
+                    from ..keyvault._presence_hosts import profile_guard
 
                     home = hermes_home().resolve()
                     generation = self._authentication_generation
+                    profile_current = profile_guard(home, self._authentication_is_current)
 
                     def current() -> bool:
                         return (
                             not self.ws.closed
                             and self.authed
                             and self._authentication_generation == generation
-                            and self._authentication_is_current()
-                            and hermes_home().resolve() == home
+                            and profile_current()
                         )
 
                     with presence_scope(home, ("extension", self._presence_connection), "telegram", valid=current):

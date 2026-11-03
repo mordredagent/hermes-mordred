@@ -21,7 +21,12 @@ expiry. `_presence_hosts.py` adapts verified Hermes/Desktop identities; extensio
 connections bind their pairing generation directly. No service instance stores
 caller authority. Both raw mail workers and Desktop jobs carry context and
 revoke it before draining cancelled work. A cancelled operation cannot create a
-helper after a late capability result. Nonzero opt-in explicitly requires OS
+helper after a late capability result. Weakly held operation scopes revoke a
+caller's previous profile before a late worker can acquire presence. Monitor
+checks observe the process home independently of request ContextVars; callbacks
+that read profile-specific pairing state temporarily bind only Hermes's profile
+selector in a fresh context, retaining no request-context secrets.
+Nonzero opt-in explicitly requires OS
 presence even for unattended keys; zero preserves their previous behavior.
 The native helper owns LAContext expiry, independent lock/sleep notifications
 and parent lifetime. Python owns bounded admission, prompt-free compatibility

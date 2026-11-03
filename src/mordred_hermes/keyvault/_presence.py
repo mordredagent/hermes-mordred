@@ -20,6 +20,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from weakref import WeakSet
 
 from ._presence_transport import Channel, PresenceChannel
 from ._seckey_errors import _OpsError
@@ -40,7 +41,7 @@ def configured_seconds(home: Path) -> int:
         return 0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class _Scope:
     home: Path
     principal: tuple[str, ...]
@@ -64,6 +65,7 @@ def presence_scope(
 ) -> Iterator[None]:
     """Bind a trusted host identity to this operation, including child threads/tasks."""
     scope = _Scope(home.resolve(), principal, purpose, valid)
+    _pool.bind_scope(scope)
     token = _scope.set(scope)
     try:
         yield
@@ -172,6 +174,19 @@ class _PresencePool:
         self._clock = clock
         self._lock = threading.RLock()
         self._entries: dict[tuple[object, ...], _Entry] = {}
+        self._scopes: WeakSet[_Scope] = WeakSet()
+
+    def bind_scope(self, scope: _Scope) -> None:
+        with self._lock:
+            if not scope.active():
+                raise _refused("presence operation revoked")
+            if scope in self._scopes:
+                return
+            for previous in list(self._scopes):
+                if previous.principal == scope.principal and previous.home != scope.home:
+                    previous.cancelled.set()
+            self._scopes.add(scope)
+            self.reap()
 
     @property
     def pending(self) -> int:
@@ -229,6 +244,7 @@ class _PresencePool:
         binding: str,
     ) -> _Entry:
         with self._lock:
+            self.bind_scope(scope)
             self.reap()
             if not scope.active():
                 raise _refused("presence operation revoked")

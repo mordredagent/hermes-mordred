@@ -150,3 +150,59 @@ def test_cancelled_credential_operation_cannot_fall_back_when_setting_changes(tm
         p.revoke_current()
         with pytest.raises(p._OpsError):
             p.eligible(_application_tag("mordred-hermes.mail.credentials.v1"))
+
+
+def test_profile_override_is_valid_in_the_independent_monitor_thread(tmp_path, monkeypatch):
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    selected = contextvars.ContextVar("test_profile", default=tmp_path)
+    monkeypatch.setattr(hosts, "_home", selected.get)
+    token = selected.set(tmp_path / "profile-a")
+    try:
+        with hosts.hermes_presence("framework-session"):
+            scope = p._scope.get()
+            with ThreadPoolExecutor(1) as executor:
+                assert executor.submit(scope.active).result()
+    finally:
+        selected.reset(token)
+
+
+def test_profile_switch_revokes_pending_scope_before_helper_admission(tmp_path, monkeypatch):
+    import contextvars
+
+    selected = contextvars.ContextVar("test_profile", default=tmp_path)
+    monkeypatch.setattr(hosts, "_home", selected.get)
+    pool = p._PresencePool()
+    monkeypatch.setattr(p, "_pool", pool)
+    selected.set(tmp_path / "profile-a")
+    with hosts.hermes_presence("framework-session"):
+        old = p._scope.get()
+    selected.set(tmp_path / "profile-b")
+    with hosts.hermes_presence("framework-session"):
+        assert old.cancelled.is_set()
+        assert p._scope.get().active()
+
+
+def test_profile_specific_validation_binds_only_profile_context(tmp_path, monkeypatch):
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    selected = contextvars.ContextVar("test_selected_profile", default=tmp_path)
+    unrelated = contextvars.ContextVar("test_request_secret", default=None)
+    home = tmp_path / "profile-a"
+    monkeypatch.setattr(hosts, "_home", selected.get)
+    constants = ModuleType("hermes_constants")
+    constants.set_hermes_home_override = lambda value: selected.set(type(home)(value))
+    constants.reset_hermes_home_override = selected.reset
+    monkeypatch.setitem(sys.modules, "hermes_constants", constants)
+    token = selected.set(home)
+    secret = unrelated.set("must-not-be-retained-by-validation")
+    try:
+        check = hosts.profile_guard(home, lambda: selected.get() == home and unrelated.get() is None)
+        with ThreadPoolExecutor(1) as executor:
+            assert executor.submit(check).result()
+        assert selected.get() == home and unrelated.get() is not None
+    finally:
+        selected.reset(token)
+        unrelated.reset(secret)
