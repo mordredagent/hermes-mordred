@@ -236,6 +236,9 @@ async def _run_worker(max_messages: int) -> dict[str, Any] | None:
     try:
         ended = await _joined(worker, budget_end + ABANDON_GRACE_S - REVOKE_GRACE_S)
     except asyncio.CancelledError:
+        from ...keyvault._presence import revoke_current
+
+        revoke_current()  # kill authentication before any bounded drain/abandon waits
         cancel.cancel()  # the fetch stops at once: its IMAP socket is shut down, a resolver wait woken
         bound = max(budget_end, time.monotonic()) + CANCEL_GRACE_S  # fixed now: later cancellations never move it
         if not await _joined_after_cancel(worker, bound - REVOKE_GRACE_S):

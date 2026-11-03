@@ -75,3 +75,78 @@ def test_scope_exception_revokes_only_matching_principal(tmp_path, monkeypatch):
         raise asyncio.CancelledError
     assert calls == [{"home": tmp_path.resolve(), "principal": ("hermes", "cancelled"), "purpose": "telegram"}]
     assert p._scope.get() is None
+
+
+def test_cancelled_operation_cannot_start_a_helper_after_delayed_capability(tmp_path, monkeypatch):
+    channels = []
+    pool = p._PresencePool(factory=lambda *args: channels.append(args))
+    monkeypatch.setattr(p, "_pool", pool)
+    with p.presence_scope(tmp_path, ("hermes", "cancelled"), "mail"):
+        scope = p._scope.get()
+        p.revoke_current()  # cancellation before the worker reaches ECDH/admission
+        with pytest.raises(p._OpsError):
+            pool.exchange(scope, "helper", None, b"tag", b"peer", 300, "source")
+    assert channels == []
+
+
+def test_mail_cancellation_revokes_before_worker_cleanup(monkeypatch):
+    from mordred_hermes.extension.telegram import mail_tool
+
+    calls = []
+    monkeypatch.setattr(p, "revoke_current", lambda: calls.append("revoke"))
+    monkeypatch.setattr(mail_tool, "_fetch", lambda *args: {})
+
+    async def cancelled(*args):
+        raise asyncio.CancelledError
+
+    async def drained(*args):
+        assert calls == ["revoke"]
+        calls.append("drain")
+        return True
+
+    monkeypatch.setattr(mail_tool, "_joined", cancelled)
+    monkeypatch.setattr(mail_tool, "_joined_after_cancel", drained)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(mail_tool._run_worker(1))
+    assert calls == ["revoke", "drain"]
+
+
+def test_desktop_cancellation_revokes_while_worker_is_still_owned(tmp_path):
+    import threading
+
+    from mordred_hermes.desktop._jobs import Job
+
+    entered, release = threading.Event(), threading.Event()
+
+    def blocking():
+        entered.set()
+        assert release.wait(3)
+        return "finished"
+
+    async def run():
+        with p.presence_scope(tmp_path, ("desktop", "generation"), "mail"):
+            scope = p._scope.get()
+            task = asyncio.create_task(Job("job", "mail_fetch").run_sync(blocking))
+            try:
+                assert await asyncio.to_thread(entered.wait, 1)
+                task.cancel()
+                await asyncio.sleep(0.01)
+                assert scope.cancelled.is_set(), "cancel must revoke before the worker finishes"
+                assert not task.done(), "keep the existing drain/ownership semantics"
+            finally:
+                release.set()
+                assert await task == "finished"
+
+    asyncio.run(run())
+
+
+def test_cancelled_credential_operation_cannot_fall_back_when_setting_changes(tmp_path, monkeypatch):
+    if sys.platform != "darwin":
+        pytest.skip("macOS eligibility")
+    from mordred_hermes.keyvault._seckey_errors import _application_tag
+
+    monkeypatch.setattr(p, "configured_seconds", lambda home: 0)
+    with p.presence_scope(tmp_path, ("hermes", "cancelled"), "mail"), p.credential_scope(tmp_path, "mail", "source"):
+        p.revoke_current()
+        with pytest.raises(p._OpsError):
+            p.eligible(_application_tag("mordred-hermes.mail.credentials.v1"))

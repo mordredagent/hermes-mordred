@@ -10,7 +10,9 @@ change here in the same patch.
 ## Bounded macOS presence reuse
 
 The opt-in `plugins.mordred_keyvault.presence_reuse_seconds` accepts integers
-from 0 to 300 (default 0). Invalid values disable reuse. Telegram archive
+from 0 to 300 (default 0). Invalid values disable reuse. A nonzero opt-in
+requests OS presence even if an eligible credential key was enrolled unattended;
+keep 0 to preserve unattended reads. It does not change the stored key ACL. Telegram archive
 questions, lists, history reads and sync, and mail sync may reuse only OS
 presence, never plaintext credentials, seeds, DEKs or shared secrets. Each
 operation still decrypts, validates current custody, enforces model/reader and
@@ -18,9 +20,13 @@ SQLCipher requirements, and audits authorization. CLI, management operations,
 wallet signing, Linux and Windows retain per-operation authorization.
 
 Reuse is confined to the process, canonical profile, host-issued caller session
-and purpose (Telegram or mail). Hermes uses framework dispatch session identity;
+and purpose (Telegram or mail). Cancellation marks the operation revoked before
+worker cleanup, so a delayed capability check cannot start authentication later.
+Hermes uses framework dispatch session identity;
 Desktop uses its authenticated host generation; the extension uses its live
-connection and pairing generation. Tool arguments cannot supply that identity.
+connection and pairing generation. Hosts without a verifiable live authentication generation
+(including gated OAuth and isolated ASGI Desktop hosts) keep one-shot prompts.
+Tool arguments cannot supply that identity.
 Operation-local context carries authority; shared services do not store it.
 
 A parent-only pipe helper holds an LAContext and reloads the key and performs

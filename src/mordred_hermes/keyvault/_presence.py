@@ -46,6 +46,10 @@ class _Scope:
     principal: tuple[str, ...]
     purpose: str
     valid: Callable[[], bool] = field(compare=False, repr=False)
+    cancelled: threading.Event = field(default_factory=threading.Event, compare=False, repr=False)
+
+    def active(self) -> bool:
+        return not self.cancelled.is_set() and self.valid()
 
 
 _scope: contextvars.ContextVar[_Scope | None] = contextvars.ContextVar("mordred_presence", default=None)
@@ -64,6 +68,7 @@ def presence_scope(
     try:
         yield
     except BaseException:
+        scope.cancelled.set()
         _pool.revoke(home=scope.home, principal=principal, purpose=purpose)
         raise
     finally:
@@ -97,6 +102,8 @@ def eligible(tag: bytes) -> tuple[_Scope, int, str] | None:
     selector = {"telegram": telegram_key, "mail": mail_key}.get(scope.purpose)
     if selector is None or tag != _application_tag(selector):
         return None
+    if scope.cancelled.is_set():
+        raise _refused("presence operation revoked")
     seconds = configured_seconds(scope.home)
     if not seconds:
         return None
@@ -182,7 +189,7 @@ class _PresencePool:
 
     def _current(self, entry: _Entry) -> bool:
         try:
-            return entry.scope.valid() and _version(entry.paths) == entry.version
+            return entry.scope.active() and _version(entry.paths) == entry.version
         except Exception:
             return False
 
@@ -223,6 +230,8 @@ class _PresencePool:
     ) -> _Entry:
         with self._lock:
             self.reap()
+            if not scope.active():
+                raise _refused("presence operation revoked")
             entry = self._entries.get(key)
             if entry is not None and (
                 entry.binding != binding or entry.seconds != seconds or not entry.channel.alive()
@@ -230,7 +239,7 @@ class _PresencePool:
                 self._discard(key, entry, _refused("presence source changed"))
                 entry = None
             if entry is None:
-                if len(self._entries) >= 8 or not scope.valid():
+                if len(self._entries) >= 8:
                     raise _refused("presence capacity or authority refused")
                 paths = _watch_paths(scope, binary, env, tag)
                 version = _version(paths)
@@ -240,6 +249,21 @@ class _PresencePool:
                 raise _refused("presence queue full")
             entry.pending += 1
         return entry
+
+    def _accept(self, scope: _Scope, entry: _Entry, started: float) -> None:
+        # The child owns the authoritative sleep-inclusive deadline, measured
+        # from authentication success. The parent also rejects stale replies.
+        with self._lock:
+            if entry.failure is not None:
+                raise _copy_error(entry.failure)
+            if not scope.active():
+                raise _refused("presence operation revoked")
+            if self._clock() - started >= 120:
+                raise _refused("presence request timed out")
+            if entry.deadline is None:
+                entry.deadline = self._clock() + entry.seconds
+            if self._clock() >= entry.deadline or not self._current(entry):
+                raise _refused("presence expired or revoked during request")
 
     def exchange(
         self,
@@ -262,23 +286,17 @@ class _PresencePool:
             try:
                 if entry.failure is not None:
                     raise _copy_error(entry.failure)
-                if not self._current(entry) or (entry.deadline is not None and self._clock() >= entry.deadline):
+                if (
+                    not scope.active()
+                    or not self._current(entry)
+                    or (entry.deadline is not None and self._clock() >= entry.deadline)
+                ):
                     raise _refused("presence expired or revoked")
                 response = entry.channel.exchange(
                     {"cmd": "ecdh", "tag_hex": tag.hex(), "peer_pub_hex": peer.hex()},
                     120 - (self._clock() - started),
                 )
-                # Parent housekeeping deadline; the child owns the authoritative
-                # sleep-inclusive deadline from authentication success.
-                with self._lock:
-                    if entry.failure is not None:
-                        raise _copy_error(entry.failure)
-                    if self._clock() - started >= 120:
-                        raise _refused("presence request timed out")
-                    if entry.deadline is None:
-                        entry.deadline = self._clock() + seconds
-                    if self._clock() >= entry.deadline or not self._current(entry):
-                        raise _refused("presence expired or revoked during request")
+                self._accept(scope, entry, started)
                 return response
             finally:
                 entry.lock.release()
@@ -306,6 +324,7 @@ def revoke(*, home: Path | None = None, principal: tuple[str, ...] | None = None
 def revoke_current() -> None:
     scope = _scope.get()
     if scope is not None:
+        scope.cancelled.set()
         revoke(home=scope.home, principal=scope.principal, purpose=scope.purpose)
 
 

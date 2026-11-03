@@ -14,9 +14,15 @@ Hermes upstream.
 
 ## Bounded macOS presence reuse
 
-Implement in order: shared contract; expected-signer checks in ordinary/HD
-signing; bounded helper protocol and operation-local broker; trusted host
-session propagation for Telegram/mail; revocation and regression verification.
+`keyvault/_presence.py` binds operation-local scope, fixed-purpose credential
+observations, admission and cancellation; `_presence_transport.py` bounds the
+private pipe protocol. `PresenceSession.swift` owns native authentication and
+expiry. `_presence_hosts.py` adapts verified Hermes/Desktop identities; extension
+connections bind their pairing generation directly. No service instance stores
+caller authority. Both raw mail workers and Desktop jobs carry context and
+revoke it before draining cancelled work. A cancelled operation cannot create a
+helper after a late capability result. Nonzero opt-in explicitly requires OS
+presence even for unattended keys; zero preserves their previous behavior.
 The native helper owns LAContext expiry, independent lock/sleep notifications
 and parent lifetime. Python owns bounded admission, prompt-free compatibility
 negotiation and operation-local profile/session/purpose binding. Existing custody

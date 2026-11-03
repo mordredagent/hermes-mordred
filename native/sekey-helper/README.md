@@ -224,6 +224,10 @@ plugins:
 ```
 
 Missing, malformed, boolean, string, negative and above-300 values disable reuse.
+A nonzero opt-in explicitly requests OS presence even when the stored key itself
+was enrolled unattended. Keep 0 to preserve unattended reads; the key ACL is not
+modified. Telegram has no trustworthy recorded legacy key policy, so the helper
+does not guess or retry a failed ECDH to infer that policy.
 CLI, management operations, signing and non-macOS hosts retain one-shot behavior.
 Desktop supports the loaded loopback dashboard host's authenticated session-token
 generation. Unknown hosts, gated OAuth hosts and child ASGI proxies without a
