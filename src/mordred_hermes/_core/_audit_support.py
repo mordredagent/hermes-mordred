@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from .privacy_check.audit import Writer
+    from ..privacy_check.audit import Writer
 
 
 class AuditWriter(Protocol):
@@ -126,7 +126,7 @@ def build_audit_writer(path: Path, *, keyvault_home: Path | None = None) -> Writ
     explicitly because it permits a custom audit path while the keyvault still
     belongs to the directory containing ``config.yaml``.
     """
-    from .privacy_check.audit import make_audit_writer
+    from ..privacy_check.audit import make_audit_writer
 
     normalized = _normalized_audit_path(path)
     normalized_home = _normalized_audit_path(keyvault_home) if keyvault_home is not None else normalized.parent.parent
@@ -148,8 +148,8 @@ def build_audit_writer(path: Path, *, keyvault_home: Path | None = None) -> Writ
 
 def _warn_if_plaintext_restart_required(path: Path, keyvault_home: Path, writer: Writer) -> None:
     """Warn once if in-process keyvault init cannot upgrade live references."""
-    from .privacy_check._keyvault_probe import keyvault_initialized
-    from .privacy_check.audit import NDJSONWriter
+    from ..privacy_check._keyvault_probe import keyvault_initialized
+    from ..privacy_check.audit import NDJSONWriter
 
     if path in _PLAINTEXT_RESTART_WARNED or not isinstance(writer, NDJSONWriter):
         return
@@ -211,7 +211,7 @@ def _reset_audit_writer_registry_for_tests() -> None:
     which otherwise outlive the registry for the whole process.
     """
     _close_registered_audit_writers()
-    from .privacy_check._windows_audit import _forget_construction_refusals_for_tests
+    from ..privacy_check._windows_audit import _forget_construction_refusals_for_tests
 
     _forget_construction_refusals_for_tests()
 

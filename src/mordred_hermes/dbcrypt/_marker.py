@@ -8,8 +8,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, cast
 
-from .._database_contracts import DatabaseRefused, NativeSnapshot, RootIdentity
-from .._database_lifecycle import ExclusiveLease
+from .._core._database_contracts import DatabaseRefused, NativeSnapshot, RootIdentity
+from .._core._database_lifecycle import ExclusiveLease
 from .._private_fs import PrivateFSError, open_private_directory
 from ..keyvault._database_authority import resolve_database_domain
 

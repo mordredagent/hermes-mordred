@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Final
 
-from .. import _config_io, _windows_runtime
+from .._core import _config_io, _windows_runtime
 from .._private_fs import FileIdentity, PrivateDirectory, PrivateFSError, open_private_directory
 from . import _runtime_probe
 from ._windows_custody import WindowsCustodySession, windows_custody_session
@@ -94,7 +94,7 @@ def _main(out):
             module.install()
         from pathlib import Path
         import mordred_hermes
-        from mordred_hermes import _windows_runtime
+        from mordred_hermes._core import _windows_runtime
         root = _windows_runtime.environment_root(Path(sys.executable))
         module_path = os.path.realpath(mordred_hermes.__file__)
         base = None if root is None else os.path.normcase(os.path.realpath(root))

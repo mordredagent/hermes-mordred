@@ -8,7 +8,7 @@ from mordred_hermes._private_fs import PrivateFSError
 
 
 def test_generic_windows_helpers_refuse_before_touching_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from mordred_hermes import _config_text_io as text_io
+    from mordred_hermes._core import _config_text_io as text_io
 
     monkeypatch.setattr(text_io, "_windows", lambda: True)
     target = tmp_path / "absent" / "config.yaml"

@@ -470,7 +470,7 @@ def test_purge_refuses_at_the_gate_without_journal(seeded, monkeypatch, capsys):
 
 
 def test_proof_python_routes_through_the_launcher(monkeypatch, tmp_path):
-    from mordred_hermes import _windows_runtime
+    from mordred_hermes._core import _windows_runtime
     from mordred_hermes.keyvault._windows_proof import WindowsRuntimeProofError
     from mordred_hermes.wizard import _uninstall_hermes_env, _windows_memory
 
@@ -632,7 +632,7 @@ def test_existing_memory_with_database_dependencies_allows_mixed_independent_enr
 
 def test_absent_memory_with_database_dependencies_still_refuses_before_creation(win):
     env = win
-    from mordred_hermes._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_contracts import DatabaseRefused
 
     (env.home / "state.db").write_bytes(b"retained database")
     with pytest.raises(DatabaseRefused):
@@ -646,7 +646,7 @@ def test_memory_creation_rechecks_role_after_acquiring_database_lease(win, monke
     env = win
     from contextlib import contextmanager
 
-    from mordred_hermes._custody_order import active_custody_scopes
+    from mordred_hermes._core._custody_order import active_custody_scopes
     from mordred_hermes.keyvault import _database_mutation
 
     mutate = _database_mutation.database_key_mutation

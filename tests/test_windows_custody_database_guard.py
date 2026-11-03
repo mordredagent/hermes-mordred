@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from tests.test_windows_custody import fs as fs
 
 
@@ -185,8 +185,8 @@ def test_checked_native_owner_refuses_stale_or_borrowed_session_before_native_io
 
 def test_generic_borrowed_canonical_refuses_late_database_proof(fs, monkeypatch):
     c, _, home, backend = fs
-    from mordred_hermes._config_io import CanonicalPaths, canonical_session
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._config_io import CanonicalPaths, canonical_session
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes.keyvault import _database_mutation as mutation
 
     # Use a separate root with no fixture lease, to prove that canonical intent
@@ -382,7 +382,7 @@ def test_memory_enrollment_rejects_nonpreceding_database_proof_before_io(fs, pro
     c, _, home, backend = fs
     from contextlib import ExitStack
 
-    from mordred_hermes._database_lifecycle import ExclusiveLease, acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import ExclusiveLease, acquire_exclusive
 
     other = home.parent / "other"
     other.mkdir(mode=0o700)

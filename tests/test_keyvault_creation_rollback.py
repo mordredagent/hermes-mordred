@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.keyvault import _native_key_id, _storage, api, recovery
 from mordred_hermes.keyvault._seckey_backend import _SecKeyBackend
 from tests._keyvault_lifecycle_helpers import _SPEC_PASSPHRASE, _SPEC_POW, _SPEC_SEED

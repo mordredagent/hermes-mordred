@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Never
 from weakref import WeakKeyDictionary
 
-from .._database_contracts import DatabaseRefused
+from .._core._database_contracts import DatabaseRefused
 from ..extension.telegram.secrets import TelegramSecrets, TelegramSecretsError, decode
 from . import _storage, wrap
 from ._exceptions import WrapAuthCancelled, WrapError

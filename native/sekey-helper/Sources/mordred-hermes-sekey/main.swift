@@ -108,7 +108,7 @@ func hexEncode(_ d: Data) -> String {
 //   1. MORDRED_SEKEY_STORE — explicit absolute directory (authoritative).
 //   2. $HERMES_HOME/mordred/keyvault/sekey
 //   3. ~/.hermes/mordred/keyvault/sekey
-// This mirrors mordred_hermes._home.hermes_home so the SE blobs live under
+// This mirrors mordred_hermes._core._home.hermes_home so the SE blobs live under
 // the same keyvault tree the Python side uses for everything else.
 
 func storeDir() -> URL {

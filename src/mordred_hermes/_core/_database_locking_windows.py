@@ -15,11 +15,11 @@ import time
 from pathlib import Path
 from typing import Final
 
+from .._private_fs._types import PrivateFSError
+from .._private_fs._windows_api import Overlapped, OwnedHandle
+from .._private_fs._windows_paths import CheckedDirectory, checked_directory, checked_directory_optional
+from .._private_fs._windows_security import current_user_sid, validate_private
 from ._database_contracts import DatabaseBusy, DatabaseRefused, RootIdentity
-from ._private_fs._types import PrivateFSError
-from ._private_fs._windows_api import Overlapped, OwnedHandle
-from ._private_fs._windows_paths import CheckedDirectory, checked_directory, checked_directory_optional
-from ._private_fs._windows_security import current_user_sid, validate_private
 
 # Source-controlled admission, never granted by an environment flag; native
 # acceptance is recorded separately in docs/dev/CI.md.

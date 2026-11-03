@@ -78,7 +78,7 @@ from importlib.abc import Loader, MetaPathFinder
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
-from .._home import hermes_home as _hermes_home
+from .._core._home import hermes_home as _hermes_home
 from .._runtime_bootstrap import _SAFE_MODE_TRUTHY
 from .memory_crypto import (
     MemoryCryptoError,

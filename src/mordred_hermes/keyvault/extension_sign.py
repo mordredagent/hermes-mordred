@@ -177,11 +177,11 @@ def _audit_log_path() -> Path:
 
     Resolved the same way :func:`_ext_dir` already resolves the hermes home
     (a fresh ``hermes_constants.get_hermes_home()`` call, not the
-    import-time-frozen :data:`mordred_hermes._home.HERMES_BASE`) so this
+    import-time-frozen :data:`mordred_hermes._core._home.HERMES_BASE`) so this
     module keeps its existing import-cheapness contract: no package-root
     import pulls in the profile-aware home resolution at module-import time.
     ``.parent.parent`` of this path is ``<HERMES_BASE>``, matching
-    :func:`mordred_hermes._audit_support.build_audit_writer`'s
+    :func:`mordred_hermes._core._audit_support.build_audit_writer`'s
     ``keyvault_home = path.parent.parent`` contract.
     """
     from hermes_constants import get_hermes_home
@@ -197,12 +197,12 @@ def _audit_writer() -> Writer:
     because this module deliberately never freezes ``HERMES_BASE`` at import
     time (see :func:`_audit_log_path`); the path is recomputed on the first
     call. The local cache preserves the test ``cache_clear()`` API, while
-    :mod:`mordred_hermes._audit_support` owns the normalized-path singleton so
+    :mod:`mordred_hermes._core._audit_support` owns the normalized-path singleton so
     clearing this cache never closes a writer another plugin is using. The
-    :mod:`mordred_hermes._audit_support` import happens here, at first call,
+    :mod:`mordred_hermes._core._audit_support` import happens here, at first call,
     not at module scope, so plugin discovery stays cheap.
     """
-    from .._audit_support import build_audit_writer
+    from .._core._audit_support import build_audit_writer
 
     return build_audit_writer(_audit_log_path())
 
@@ -231,7 +231,7 @@ def _audit_sink(entry: dict[str, Any]) -> None:
     """
     _log.debug("extension_sign audit: %s", entry.get("event", "?"))
     try:
-        from .._audit_support import safe_audit_append
+        from .._core._audit_support import safe_audit_append
 
         safe_audit_append(_audit_writer(), entry, logger=_log)
     except Exception as exc:  # best-effort: never fail a sign over an audit issue

@@ -30,7 +30,7 @@ def _reject_unsafe_dotenv_lock(lock_path: Path) -> NoReturn:
 def _dotenv_lock(path: Path) -> Iterator[None]:
     """Stable sibling lock shared by every Mordred ``.env`` RMW writer.
 
-    The descriptor lifecycle is :func:`mordred_hermes._file_lock.private_flock`;
+    The descriptor lifecycle is :func:`mordred_hermes._core._file_lock.private_flock`;
     the in-process ``RLock``, the parent-directory check, and both raises stay
     here so the tagged ``EPERM`` :exc:`OSError`\\ s (and the ``from exc``
     chaining on the open failure) are unchanged.

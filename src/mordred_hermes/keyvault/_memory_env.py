@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 
-from .._database_contracts import DatabaseRefused
+from .._core._database_contracts import DatabaseRefused
 
 
 def parse_env(plaintext: bytes) -> dict[str, str | None]:

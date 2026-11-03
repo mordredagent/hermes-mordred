@@ -18,7 +18,7 @@ from contextlib import ExitStack
 
 import pytest
 
-from mordred_hermes import _config_io
+from mordred_hermes._core import _config_io
 from mordred_hermes._private_fs import open_private_directory
 from mordred_hermes.extension.telegram import secrets, store, tee
 from mordred_hermes.keyvault import wrap

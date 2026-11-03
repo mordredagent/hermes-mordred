@@ -207,7 +207,7 @@ def test_reads_never_create_the_archive_directory(tmp_path):
     assert root.is_dir() and (root / ".gitignore").is_file() and vault.flags()["logged_in"] is True
     root.rename(tmp_path / "moved")
     root.symlink_to(tmp_path / "moved")
-    from mordred_hermes._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_contracts import DatabaseRefused
 
     with pytest.raises(DatabaseRefused):
         vault.flags()  # a planted symlink is still refused on the read path

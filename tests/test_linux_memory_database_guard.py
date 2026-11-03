@@ -2,7 +2,7 @@
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.keyvault import _memory_key as memory
 from mordred_hermes.keyvault._database_mutation import database_key_mutation
 from mordred_hermes.keyvault._seckey_backend import _SecKeyBackend

@@ -170,7 +170,7 @@ def _sensitive(path: str) -> bool:
     rel = path.removeprefix(base)
     if "/" not in rel:
         return True
-    if rel.startswith(("keyvault/", "dbcrypt/", "_private_fs/")):
+    if rel.startswith(("keyvault/", "dbcrypt/", "_core/", "_private_fs/")):
         return True
     if rel in {
         "imports/store.py",

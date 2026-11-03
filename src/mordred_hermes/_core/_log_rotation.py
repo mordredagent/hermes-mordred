@@ -17,8 +17,8 @@ across three call sites:
   marker file (its docstring said "matches privacy_check.audit format" --
   now it just imports the format).
 
-This is the pure-stdlib sibling of :mod:`mordred_hermes._yaml_io` and
-:mod:`mordred_hermes._policy_io`: no ``cryptography``, no ``ruamel``, and no
+This is the pure-stdlib sibling of :mod:`mordred_hermes._core._yaml_io` and
+:mod:`mordred_hermes._core._policy_io`: no ``cryptography``, no ``ruamel``, and no
 import of ``privacy_check`` or ``keyvault`` themselves, so this module stays
 importable regardless of which optional extras (e.g. ``[macos]``) are
 installed -- exactly the property that let ``privacy_check.audit`` host the
@@ -31,7 +31,7 @@ Import-shape note (load-bearing for a test): ``test_keyvault_log_encryption
 clock for date-change tests. An unqualified call inside a function body
 resolves against *that function's own module* globals, not this module's,
 so each importer must bind the name at module scope in its own namespace
-(``from .._log_rotation import today_utc_date as _today_utc_date``) and call
+(``from .._core._log_rotation import today_utc_date as _today_utc_date``) and call
 it unqualified -- re-exporting via a qualified ``_log_rotation.today_utc_date()``
 call at the use site would silently break that monkeypatch.
 """
@@ -48,9 +48,9 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
+from .._private_fs import FileMetadata, PrivateFSError
+from .._private_fs._types import validate_leaf, validate_limit
 from ._audit_io import AuditSession, audit_path_stat, compress_rotated_file
-from ._private_fs import FileMetadata, PrivateFSError
-from ._private_fs._types import validate_leaf, validate_limit
 
 
 def utcnow_iso() -> str:
@@ -155,7 +155,7 @@ def rotate_and_compress(path: Path, date_suffix: str, *, retention_days: int, lo
        deletion under the same age rule as every older sibling.
 
     Note for ``privacy_check``: this module is pure stdlib and imports only
-    :mod:`mordred_hermes._audit_io` (also pure stdlib), so hosting the shared
+    :mod:`mordred_hermes._core._audit_io` (also pure stdlib), so hosting the shared
     body here keeps ``privacy_check.audit`` importable without the
     macOS-extra-gated keyvault crypto stack — the property that kept these two
     copies separate in the first place.

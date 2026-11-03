@@ -47,7 +47,7 @@ _POSIX_SOURCE_BINDING = pytest.mark.skipif(
     ],
 )
 def test_scans_every_dependency_class(tmp_path: Path, relative: str, kind: str) -> None:
-    from mordred_hermes._database_inventory import scan_dependencies
+    from mordred_hermes._core._database_inventory import scan_dependencies
 
     path = tmp_path / relative
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -63,9 +63,9 @@ def test_scans_every_dependency_class(tmp_path: Path, relative: str, kind: str) 
 def test_unknown_or_matching_generation_blocks_destruction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, generation: str | None
 ) -> None:
-    from mordred_hermes import _database_inventory as inventory
-    from mordred_hermes._database_contracts import DatabaseRefused, Dependency, Inventory
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core import _database_inventory as inventory
+    from mordred_hermes._core._database_contracts import DatabaseRefused, Dependency, Inventory
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
 
     dependency = Dependency(tmp_path / "state.db", kind, generation)
     monkeypatch.setattr(inventory, "scan_dependencies", lambda _root: Inventory((dependency,), True))
@@ -77,9 +77,9 @@ def test_unknown_or_matching_generation_blocks_destruction(
 
 
 def test_unknown_requested_generation_means_all_dependencies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from mordred_hermes import _database_inventory as inventory
-    from mordred_hermes._database_contracts import DatabaseRefused, Dependency, Inventory
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core import _database_inventory as inventory
+    from mordred_hermes._core._database_contracts import DatabaseRefused, Dependency, Inventory
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
 
     monkeypatch.setattr(
         inventory,
@@ -91,9 +91,9 @@ def test_unknown_requested_generation_means_all_dependencies(tmp_path: Path, mon
 
 
 def test_unreadable_inventory_blocks_deletion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from mordred_hermes import _database_inventory as inventory
-    from mordred_hermes._database_contracts import DatabaseRefused
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core import _database_inventory as inventory
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
 
     hidden = tmp_path / "cron"
     hidden.mkdir()
@@ -115,7 +115,7 @@ def test_unreadable_inventory_blocks_deletion(tmp_path: Path, monkeypatch: pytes
 
 
 def test_unrelated_home_files_are_not_database_dependencies(tmp_path: Path) -> None:
-    from mordred_hermes._database_inventory import scan_dependencies
+    from mordred_hermes._core._database_inventory import scan_dependencies
 
     for relative in (
         "config.yaml",
@@ -139,7 +139,7 @@ def test_unrelated_home_files_are_not_database_dependencies(tmp_path: Path) -> N
 
 
 def test_inventory_does_not_open_database_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from mordred_hermes._database_inventory import scan_dependencies
+    from mordred_hermes._core._database_inventory import scan_dependencies
 
     (tmp_path / "state.db").write_bytes(b"opaque")
     real = Path.open
@@ -153,9 +153,9 @@ def test_inventory_does_not_open_database_files(tmp_path: Path, monkeypatch: pyt
 
 
 def test_mutation_guard_requires_a_live_exclusive_lease(tmp_path: Path) -> None:
-    from mordred_hermes._database_contracts import DatabaseRefused
-    from mordred_hermes._database_inventory import assert_mutation_safe
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_inventory import assert_mutation_safe
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
 
     with acquire_exclusive(tmp_path) as lease:
         assert_mutation_safe(tmp_path, None, lease)
@@ -165,7 +165,7 @@ def test_mutation_guard_requires_a_live_exclusive_lease(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("relative", ["installs", "profiles/work/skills", "mordred/unrelated"])
 def test_denied_program_trees_are_not_traversed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str) -> None:
-    from mordred_hermes._database_inventory import scan_dependencies
+    from mordred_hermes._core._database_inventory import scan_dependencies
 
     excluded = tmp_path / relative
     excluded.mkdir(parents=True)
@@ -183,7 +183,7 @@ def test_denied_program_trees_are_not_traversed(tmp_path: Path, monkeypatch: pyt
 
 @_POSIX_PATHS
 def test_symlinked_in_scope_tree_is_unknown_without_following_it(tmp_path: Path) -> None:
-    from mordred_hermes._database_inventory import scan_dependencies
+    from mordred_hermes._core._database_inventory import scan_dependencies
 
     external = tmp_path.parent / f"{tmp_path.name}-external"
     external.mkdir()
@@ -197,7 +197,7 @@ def test_symlinked_in_scope_tree_is_unknown_without_following_it(tmp_path: Path)
 
 @_POSIX_PATHS
 def test_unrelated_regular_file_alias_is_not_a_database_dependency(tmp_path: Path) -> None:
-    from mordred_hermes._database_inventory import scan_dependencies
+    from mordred_hermes._core._database_inventory import scan_dependencies
 
     target = tmp_path / "config.yaml"
     target.write_text("ordinary configuration")
@@ -211,7 +211,7 @@ def test_unrelated_regular_file_alias_is_not_a_database_dependency(tmp_path: Pat
 def test_reparse_directory_metadata_is_unknown_before_traversal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, attributes: dict[str, int], location: str
 ) -> None:
-    from mordred_hermes._database_inventory import scan_dependencies
+    from mordred_hermes._core._database_inventory import scan_dependencies
 
     directory = tmp_path if location == "root" else tmp_path / "cron"
     directory.mkdir(exist_ok=True)
@@ -245,7 +245,7 @@ def test_reparse_directory_metadata_is_unknown_before_traversal(
 
 
 def test_vanished_directory_during_discovery_is_incomplete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from mordred_hermes._database_inventory import scan_dependencies
+    from mordred_hermes._core._database_inventory import scan_dependencies
 
     directory = tmp_path / "cron"
     directory.mkdir()
@@ -264,7 +264,7 @@ def test_vanished_directory_during_discovery_is_incomplete(tmp_path: Path, monke
 
 @pytest.mark.parametrize("root_kind", ["missing", "file", pytest.param("symlink", marks=_POSIX_PATHS)])
 def test_invalid_root_is_incomplete(tmp_path: Path, root_kind: str) -> None:
-    from mordred_hermes._database_inventory import scan_dependencies
+    from mordred_hermes._core._database_inventory import scan_dependencies
 
     root = tmp_path / "root"
     if root_kind == "file":
@@ -277,9 +277,9 @@ def test_invalid_root_is_incomplete(tmp_path: Path, root_kind: str) -> None:
 
 
 def test_mutation_guard_refuses_incomplete_empty_inventory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from mordred_hermes import _database_inventory as inventory
-    from mordred_hermes._database_contracts import DatabaseRefused, Inventory
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core import _database_inventory as inventory
+    from mordred_hermes._core._database_contracts import DatabaseRefused, Inventory
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
 
     monkeypatch.setattr(inventory, "scan_dependencies", lambda _root: Inventory((), False))
     with acquire_exclusive(tmp_path) as lease, pytest.raises(DatabaseRefused):
@@ -287,9 +287,9 @@ def test_mutation_guard_refuses_incomplete_empty_inventory(tmp_path: Path, monke
 
 
 def test_mutation_guard_allows_only_explicit_other_generation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from mordred_hermes import _database_inventory as inventory
-    from mordred_hermes._database_contracts import Dependency, Inventory
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core import _database_inventory as inventory
+    from mordred_hermes._core._database_contracts import Dependency, Inventory
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
 
     monkeypatch.setattr(
         inventory,
@@ -301,8 +301,8 @@ def test_mutation_guard_allows_only_explicit_other_generation(tmp_path: Path, mo
 
 
 def test_mutation_guard_rejects_a_duck_typed_lease_before_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from mordred_hermes import _database_inventory as inventory
-    from mordred_hermes._database_contracts import DatabaseRefused
+    from mordred_hermes._core import _database_inventory as inventory
+    from mordred_hermes._core._database_contracts import DatabaseRefused
 
     class FakeLease:
         def assert_held(self, root: Path) -> None:
@@ -318,9 +318,9 @@ def test_mutation_guard_rejects_a_duck_typed_lease_before_scan(tmp_path: Path, m
 
 @_POSIX_PATHS
 def test_mutation_guard_rechecks_the_lease_after_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from mordred_hermes import _database_inventory as inventory
-    from mordred_hermes._database_contracts import DatabaseRefused, Inventory
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core import _database_inventory as inventory
+    from mordred_hermes._core._database_contracts import DatabaseRefused, Inventory
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
 
     with acquire_exclusive(tmp_path) as lease:
 
@@ -338,7 +338,7 @@ def write_source_binding(root, *, relative="mordred/db-key-source.json", bound_r
     import dataclasses
     import json
 
-    from mordred_hermes._database_locking_posix import identify_root
+    from mordred_hermes._core._database_locking_posix import identify_root
 
     identity = identify_root(root if bound_root is None else bound_root)
     path = root / relative
@@ -361,7 +361,7 @@ def write_source_binding(root, *, relative="mordred/db-key-source.json", bound_r
 
 @_POSIX_SOURCE_BINDING
 def test_only_valid_checked_root_source_binding_is_not_a_dependency(tmp_path):
-    from mordred_hermes._database_inventory import scan_dependencies
+    from mordred_hermes._core._database_inventory import scan_dependencies
 
     write_source_binding(tmp_path)
     result = scan_dependencies(tmp_path)
@@ -373,7 +373,7 @@ def test_only_valid_checked_root_source_binding_is_not_a_dependency(tmp_path):
     "damage", ["malformed", "wrong-root", "mode", "parent-mode", "symlink", "hardlink", "unreadable"]
 )
 def test_invalid_root_source_binding_remains_unknown(tmp_path, monkeypatch, damage):
-    from mordred_hermes import _database_inventory as inventory
+    from mordred_hermes._core import _database_inventory as inventory
 
     path = write_source_binding(tmp_path)
     if damage == "malformed":
@@ -422,7 +422,7 @@ def test_invalid_root_source_binding_remains_unknown(tmp_path, monkeypatch, dama
 )
 @_POSIX_SOURCE_BINDING
 def test_source_binding_exemption_is_exact_root_path_only(tmp_path, relative):
-    from mordred_hermes._database_inventory import scan_dependencies
+    from mordred_hermes._core._database_inventory import scan_dependencies
 
     path = write_source_binding(tmp_path, relative=relative)
     result = scan_dependencies(tmp_path)

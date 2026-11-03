@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.keyvault import wrap
 from mordred_hermes.keyvault._database_mutation import database_key_mutation
 from mordred_hermes.keyvault._exceptions import WrapError

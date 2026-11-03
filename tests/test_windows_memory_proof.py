@@ -29,8 +29,8 @@ from types import SimpleNamespace
 import pytest
 
 import mordred_hermes
-from mordred_hermes import _config_io as cio
-from mordred_hermes import _windows_runtime
+from mordred_hermes._core import _config_io as cio
+from mordred_hermes._core import _windows_runtime
 from mordred_hermes._private_fs import open_private_directory
 from mordred_hermes.keyvault import _windows_processes
 from mordred_hermes.keyvault._database_mutation import database_key_mutation

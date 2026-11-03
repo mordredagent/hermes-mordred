@@ -126,7 +126,7 @@ def _configured_model() -> tuple[str | None, str | None]:
     try:
         from ruamel.yaml import YAML
 
-        from ..._home import hermes_home
+        from ..._core._home import hermes_home
 
         data = YAML(typ="safe").load(Path(hermes_home() / "config.yaml").read_text("utf-8"))
         section = data.get("model") if isinstance(data, dict) else None
@@ -165,7 +165,7 @@ def tools_available() -> bool:
 def _store_gate_open() -> bool:
     """The ``mordred.db`` protection gate passes for this Hermes home (offline; no Telethon, no unseal)."""
     try:
-        from ..._home import hermes_home
+        from ..._core._home import hermes_home
         from ...activity._gate import check_protection
 
         return check_protection(hermes_home()) is None

@@ -45,7 +45,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Final, Literal
 
-from .._policy_types import PolicyMode
+from .._core._policy_types import PolicyMode
 from .._private_fs import PrivateFSError, inspect_managed_installation_image, open_optional_confidential_directory
 from ._exceptions import BringupFailed
 

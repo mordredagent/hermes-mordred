@@ -10,7 +10,7 @@ import subprocess
 
 import pytest
 
-from mordred_hermes import _config_io as cio
+from mordred_hermes._core import _config_io as cio
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
 from mordred_hermes.keyvault._database_mutation import database_key_mutation
 from tests.test_windows_custody import fs  # noqa: F401

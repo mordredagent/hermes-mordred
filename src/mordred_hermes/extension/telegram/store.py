@@ -178,7 +178,7 @@ class ArchiveIndex:
 
 
 def telegram_dir() -> Path:
-    from ..._home import hermes_home
+    from ..._core._home import hermes_home
 
     return hermes_home() / "mordred" / "telegram"
 

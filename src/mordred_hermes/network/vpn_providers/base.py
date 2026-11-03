@@ -26,7 +26,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from ..._policy_types import PolicyMode
+from ..._core._policy_types import PolicyMode
 from ..paths.vpn import DEFAULT_RUNNER, SubprocessRunner
 
 #: Re-exported so providers and the runtime share one runner type.

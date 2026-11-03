@@ -11,9 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
-from .._database_contracts import DatabaseRefused, Dependency, NativeSnapshot
-from .._database_inventory import scan_dependencies
-from .._database_lifecycle import ExclusiveLease
+from .._core._database_contracts import DatabaseRefused, Dependency, NativeSnapshot
+from .._core._database_inventory import scan_dependencies
+from .._core._database_lifecycle import ExclusiveLease
 from ..keyvault._uninstall_authority import UninstallAuthorization, _issue, fingerprint
 from . import _backup, _migrate
 from ._key import DatabaseKey

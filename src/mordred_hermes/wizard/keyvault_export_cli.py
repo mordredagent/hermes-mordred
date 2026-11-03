@@ -26,7 +26,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .._home import hermes_home as _hermes_home
+from .._core._home import hermes_home as _hermes_home
 from ..keyvault import _native_key_id, _plaintext_capture, _storage
 from . import _term
 from ._defaults import resolve_backend, resolve_prompt_io

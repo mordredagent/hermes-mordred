@@ -211,7 +211,7 @@ def reseal(
     refusal = excluded_refusal("env_config_workspace_seals", "encryption enable env (reseal)")
     if refusal is not None:
         return refusal
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ..keyvault._env_reseal import reseal_env
 
     try:
@@ -418,7 +418,7 @@ def purge(
     refusal = excluded_refusal("env_config_workspace_seals", "encryption purge env")
     if refusal is not None:
         return refusal
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ..keyvault import _storage, anchor, vault
     from . import vault_cli
     from ._vault_entries import _source_change_lease

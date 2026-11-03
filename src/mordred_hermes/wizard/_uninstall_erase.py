@@ -6,7 +6,7 @@ import stat
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .._database_contracts import DatabaseRefused
+from .._core._database_contracts import DatabaseRefused
 from ..dbcrypt import root_home
 from . import _uninstall_databases
 from ._uninstall_database_archives import protected_archives

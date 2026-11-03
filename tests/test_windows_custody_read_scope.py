@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from mordred_hermes import _config_io as cio
+from mordred_hermes._core import _config_io as cio
 from mordred_hermes._private_fs import FileIdentity, PrivateFSError
 from mordred_hermes._private_fs import _windows_io as win
 from mordred_hermes._private_fs._windows_api import Metadata, OwnedHandle

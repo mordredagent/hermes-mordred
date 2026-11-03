@@ -41,7 +41,7 @@ def root_home(home: Path) -> Path:
 
 
 def _home() -> Path:
-    from .._home import hermes_home
+    from .._core._home import hermes_home
 
     return root_home(hermes_home())
 
@@ -63,7 +63,7 @@ def _check_legacy_marker_posix(path: Path) -> None:
     """Read an unchanged private legacy leaf under the preceding root EX lease."""
     from contextlib import ExitStack
 
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from .._private_fs._posix import _ancestor, _private
 
     with ExitStack() as resources:
@@ -98,8 +98,8 @@ def _check_legacy_marker_posix(path: Path) -> None:
 
 def arm(home: Path) -> None:
     """Legacy publication seam: never overwrite native or unknown marker bytes."""
-    from .._database_contracts import DatabaseRefused
-    from .._database_lifecycle import acquire_exclusive
+    from .._core._database_contracts import DatabaseRefused
+    from .._core._database_lifecycle import acquire_exclusive
     from .._private_fs import open_private_directory
 
     with acquire_exclusive(home) as lease:
@@ -172,7 +172,7 @@ def register(ctx: object) -> None:
 
 
 def _native_home(home: Path | None) -> tuple[Path, Path]:
-    from .._home import hermes_home
+    from .._core._home import hermes_home
     from ..keyvault._database_authority import resolve_database_domain
 
     requested = home or hermes_home()
@@ -184,7 +184,7 @@ def _native_home(home: Path | None) -> tuple[Path, Path]:
 
 def _refuse_deferred_native_state(base: Path) -> None:
     """Native recovery/adoption remain closed until the offline transaction layer."""
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
 
     for name in (
         "db-encryption.journal.json",
@@ -199,7 +199,7 @@ def _refuse_deferred_native_state(base: Path) -> None:
 
 
 def _install_native(home: Path | None, provider: KeyProvider | None) -> bool:
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from . import _shim
     from ._locking import runtime_lease
 

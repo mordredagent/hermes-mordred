@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.keyvault import wrap
 from tests._keyvault_receipt_ipc import make_backend
 from tests._platform_test_helpers import legacy_secret_store as legacy_secret_store

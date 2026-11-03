@@ -8,8 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from mordred_hermes import _audit_io as audit
 from mordred_hermes import _private_fs as fs
+from mordred_hermes._core import _audit_io as audit
 
 
 @pytest.fixture(name="audit_path")

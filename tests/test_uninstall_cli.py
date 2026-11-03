@@ -634,8 +634,8 @@ def encrypted_databases(installed: Installed, monkeypatch: pytest.MonkeyPatch) -
 
     key = memory_cli._memory_key_from_vault(root=installed.root, backend=installed.backend, store=installed.store)
     assert key is not None
-    from mordred_hermes import _database_locking_posix
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core import _database_locking_posix
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes.keyvault import _database_authority as custody
     from tests._helpers import PlatformSys
 
@@ -949,7 +949,7 @@ class TestDatabaseUninstall:
 
         def confirm(_ctx: UninstallContext, _opts: UninstallOptions, _plan: uninstall_cli.UninstallPlan) -> bool:
             assert not dbcrypt.marker_path(installed.home).exists()
-            from mordred_hermes._database_lifecycle import acquire_exclusive
+            from mordred_hermes._core._database_lifecycle import acquire_exclusive
             from mordred_hermes.keyvault import _database_authority as custody
 
             monkeypatch.setattr(custody, "_load_posix", lambda *a: key)
@@ -1288,7 +1288,7 @@ def test_helper_removal_refuses_dependencies_without_dbcrypt_enabled(plain_insta
 
 
 def test_native_refusal_preserves_helper_wrapper_journal_and_install(installed, monkeypatch):
-    from mordred_hermes._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_contracts import DatabaseRefused
 
     helper = installed.user_home / ".local/bin/mordred-hermes-sekey"
     helper.write_bytes(b"native helper")
@@ -1320,7 +1320,7 @@ def test_native_refusal_preserves_helper_wrapper_journal_and_install(installed, 
 
 @pytest.mark.parametrize("erase", [False, True])
 def test_wrapped_database_refusal_stops_all_later_teardown(installed, monkeypatch, erase):
-    from mordred_hermes._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_contracts import DatabaseRefused
     from mordred_hermes.keyvault._memory_key import MemoryKeyError
 
     def refuse(*args, **kwargs):
@@ -1339,7 +1339,7 @@ def test_wrapped_database_refusal_stops_all_later_teardown(installed, monkeypatc
 
 
 def _telegram_database_refusal(kind: str) -> Exception:
-    from mordred_hermes._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_contracts import DatabaseRefused
     from mordred_hermes.keyvault._memory_key import MemoryKeyError
 
     refused = DatabaseRefused("Telegram native source still protects database state")
@@ -1626,7 +1626,7 @@ def test_dry_run_lists_pending_database_blocker_without_authentication(installed
 
 
 def test_uninstall_with_registered_backup_can_export_after_package_removal(installed, encrypted_databases):
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes.dbcrypt import _backup
     from mordred_hermes.dbcrypt._authority import Authority
 

@@ -32,9 +32,9 @@ from pathlib import Path
 from typing import Any, Final
 from urllib.parse import quote
 
-from .._database_contracts import NativeSnapshot
-from .._database_inventory import scan_dependencies
-from .._database_lifecycle import ExclusiveLease
+from .._core._database_contracts import NativeSnapshot
+from .._core._database_inventory import scan_dependencies
+from .._core._database_lifecycle import ExclusiveLease
 from .._private_fs import PrivateFSError, open_private_directory
 from ..keyvault import _database_authority as custody
 from . import _shim
@@ -230,7 +230,7 @@ def holders(paths: list[Path], *, runner: Callable[..., Any] = subprocess.run) -
 
         return windows_holders([Path(p) for p in targets])
     if sys.platform == "linux":
-        from .._database_locking_posix import linux_holders_of
+        from .._core._database_locking_posix import linux_holders_of
 
         return linux_holders_of([Path(p) for p in targets])
     try:

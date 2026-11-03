@@ -1317,8 +1317,8 @@ an acceptance failure in the requested live run.
 |---|---|---|
 | Keyvault runtime | `keyvault/_storage.py`, `_memory_key.py`, `_memory_hook.py`, `_plaintext_capture.py`, `_extension_config.py`, `log_encryption.py` | Memory custody provision/reset/purge, no replacement key on unavailable data, retained data |
 | Wizard | `wizard/env_file_writer.py`, `policy_writer.py`, `credentials_writer.py`, `audit_cli.py`, `openclaw_migration.py`, installation flows | Config preservation, permission migration, packaged installation under ordinary user |
-| Network | Network audit/config users of `_audit_io.py`, `_file_lock.py`, `_log_rotation.py` | Native startup/audit plus route/strict failure behavior |
-| LLM guard/policy | Policy and audit users of `_policy_io.py` and shared I/O | Policy integrity and refusal behavior |
+| Network | Network audit/config users of `_core/_audit_io.py`, `_core/_file_lock.py`, `_core/_log_rotation.py` | Native startup/audit plus route/strict failure behavior |
+| LLM guard/policy | Policy and audit users of `_core/_policy_io.py` and shared I/O | Policy integrity and refusal behavior |
 | Privacy check | `privacy_check/audit.py` | Multi-process append/rotation, private audit retention |
 | Extension/Desktop | `extension/pairing.py`, `history.py`, `telegram/store.py`, `desktop/install.py` | Store/pairing lifecycle, runtime/UI and later Windows 11/MSIX acceptance |
 
@@ -1343,10 +1343,10 @@ without a separate instruction. Documentation is English.
 | --- | --- | --- | --- |
 | C1a: checked lifecycle primitives | #192 | `_private_fs/`, shared storage tests | deletion/metadata/enumeration/append/rename failure injection, native ACL/reparse/hardlink/identity and process-lock tests |
 | C1b: confidential shared parent | C1a | distinct `_private_fs` directory/file admission and checked absence | safe inherited ACLs accepted, private boundary unchanged, unsafe grants/owners/reparse/ancestor absence refused, new files private before bytes |
-| C2: shared policy transaction | C1 | `_policy_io.py`, `_yaml_io.py`, shared caller coordinator | cross-directory pending-marker failures, nested writer coordination and hostile cache inputs |
+| C2: shared policy transaction | C1 | `_core/_policy_io.py`, `_core/_yaml_io.py`, shared caller coordinator | cross-directory pending-marker failures, nested writer coordination and hostile cache inputs |
 | C3: wizard configuration | C2 | `wizard/policy_writer.py`, `env_file_writer.py`, `credentials_writer.py`, cleanup backups | concurrent policy/config/dotenv updates, preserved YAML, unsafe-state refusal, native configure rerun |
 | C4: native install/helper | #190, C1b | `scripts/install.ps1`, wizard interpreter/launcher resolution, native helper command and setup/status | PowerShell 5.1 and pwsh, spaces/non-ASCII, selected venv identity, owned launcher upgrade/removal, sdist/wheel installation |
-| C7a: shared audit operations | C1 | `_audit_io.py`, `_log_rotation.py` | stable transaction, append rollback, no-replace rotation, compression and identity-bound retention |
+| C7a: shared audit operations | C1 | `_core/_audit_io.py`, `_core/_log_rotation.py` | stable transaction, append rollback, no-replace rotation, compression and identity-bound retention |
 | C5: keyvault lifecycle/runtime | C1, C7a, #190, #194 | keyvault memory storage, markers, capture/export, runtime discovery/hooks, encrypted audit and file-vault gates | real CNG custody, failure preservation, runtime discovery refusal, foreign-user denial, restart/reboot, isolated reset and excluded recovery refusal |
 | C6: wizard encryption lifecycle | C3–C5 | wizard memory/Telegram/export/reset/uninstall orchestration and excluded seal/recovery gates | installed Hermes runtime consumes encrypted memory, no plaintext removal before verified runtime, verified backups and honest status |
 | C7b: audit and privacy callers | C7a, C5 | privacy writer, then wizard audit CLI in separate PRs | multi-process NDJSON/MRAL append, rollback, rotation/compression, retention/purge identity and uncertain outcomes |

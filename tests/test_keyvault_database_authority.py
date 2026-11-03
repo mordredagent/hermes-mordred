@@ -7,8 +7,8 @@ from dataclasses import replace
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused
-from mordred_hermes._database_lifecycle import acquire_exclusive
+from mordred_hermes._core._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_lifecycle import acquire_exclusive
 from mordred_hermes.keyvault import _memory_key as memory
 from tests._keyvault_fakes import FakeBackend
 from tests.test_windows_custody import fs  # noqa: F401
@@ -202,7 +202,7 @@ def test_explicit_child_home_is_rejected_before_native_access(source):
 def mac_source(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from mordred_hermes import _database_locking_posix
+    from mordred_hermes._core import _database_locking_posix
     from mordred_hermes.keyvault import _database_authority as authority
     from mordred_hermes.keyvault import _identity, _seckey_backend, vault
     from tests._keyvault_fakes import FakeAnchorStore
@@ -329,8 +329,8 @@ assert callable(observe_database_source)
 def windows_source(fs, monkeypatch):  # noqa: F811
     from types import SimpleNamespace
 
-    from mordred_hermes import _database_locking_windows as locking
-    from mordred_hermes._database_contracts import RootIdentity
+    from mordred_hermes._core import _database_locking_windows as locking
+    from mordred_hermes._core._database_contracts import RootIdentity
     from mordred_hermes.keyvault import _database_authority as authority
     from mordred_hermes.keyvault._database_mutation import database_key_mutation
     from tests.test_windows_custody_profile import SID
@@ -457,7 +457,7 @@ def test_hook_arming_does_not_replace_committed_native_source(source):
 
 
 def test_enrollment_refuses_forged_exclusive_subclass(source):
-    from mordred_hermes._database_lifecycle import ExclusiveLease
+    from mordred_hermes._core._database_lifecycle import ExclusiveLease
 
     authority, root, _, _ = source
 
@@ -563,8 +563,8 @@ def test_retirement_preserves_malformed_binding(source):
 
 
 def test_retirement_guard_includes_other_known_generations(source, monkeypatch):
-    from mordred_hermes import _database_inventory as inventory
-    from mordred_hermes._database_contracts import Dependency, Inventory
+    from mordred_hermes._core import _database_inventory as inventory
+    from mordred_hermes._core._database_contracts import Dependency, Inventory
 
     authority, root, _, _ = source
     snapshot = enroll(authority, root)

@@ -2,7 +2,7 @@
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.keyvault import _native_deletion, _native_key_id, wrap
 from mordred_hermes.keyvault._exceptions import WrapKeyAlreadyExists
 from mordred_hermes.keyvault._native_deletion import NativeCreateReceipt

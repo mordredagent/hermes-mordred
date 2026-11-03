@@ -6,8 +6,8 @@ import sqlite3
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused
-from mordred_hermes._database_lifecycle import acquire_exclusive
+from mordred_hermes._core._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_lifecycle import acquire_exclusive
 from mordred_hermes.dbcrypt import _migrate
 from tests.test_dbcrypt_adoption import cipher
 from tests.test_linux_memory_database_guard import enrolled as enrolled
@@ -54,7 +54,7 @@ def test_native_memory_deletion_uses_final_plaintext_proof(enrolled, monkeypatch
 
     root, backend, _ops = enrolled
     monkeypatch.setattr(custody, "sys", SimpleNamespace(platform="linux"))
-    from mordred_hermes import _database_locking_posix as locking
+    from mordred_hermes._core import _database_locking_posix as locking
 
     monkeypatch.setattr(locking, "sys", SimpleNamespace(platform="linux"))
     monkeypatch.setattr(memory, "linux_memory_backend", lambda home: backend)

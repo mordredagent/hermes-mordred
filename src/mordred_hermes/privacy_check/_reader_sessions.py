@@ -41,7 +41,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Final
 
-from .._bounded_json import _BoundedJSONDecoder
+from .._core._bounded_json import _BoundedJSONDecoder
 from .._private_fs import (
     PrivateDirectory,
     PrivateFSError,

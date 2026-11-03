@@ -8,8 +8,8 @@ from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
-from .._database_contracts import DatabaseRefused, GuardedConnection, NativeSnapshot
-from .._database_lifecycle import RuntimeLease, acquire_runtime
+from .._core._database_contracts import DatabaseRefused, GuardedConnection, NativeSnapshot
+from .._core._database_lifecycle import RuntimeLease, acquire_runtime
 from .._private_fs import PrivateFSError, open_private_directory
 from ..keyvault._database_authority import (
     CheckedDatabaseDomain,

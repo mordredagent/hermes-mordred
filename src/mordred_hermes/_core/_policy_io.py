@@ -10,7 +10,7 @@ copy-pasted across four call sites (``network`` x1 whole-dict load,
 caller still owns its own extraction (the ``.get()`` chain) and its own
 default; only the load core is shared.
 
-This is the JSON sibling of :mod:`mordred_hermes._yaml_io`. The shape is
+This is the JSON sibling of :mod:`mordred_hermes._core._yaml_io`. The shape is
 deliberately identical: an ``exists()`` pre-check, a narrow ``(OSError,
 json.JSONDecodeError)`` catch routed to ``{}``, and a non-mapping root
 collapsed to ``{}`` so callers can apply their own defaults without

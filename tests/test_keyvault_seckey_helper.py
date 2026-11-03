@@ -21,7 +21,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.keyvault import _seckey_helper
 from mordred_hermes.keyvault._exceptions import WrapKeyNotFound
 from mordred_hermes.keyvault._native_deletion import rollback_created_key

@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from mordred_hermes._config_io import CanonicalPaths, canonical_session
+from mordred_hermes._core._config_io import CanonicalPaths, canonical_session
 from mordred_hermes.llm_guard import auxiliary_guard, enforce
 from mordred_hermes.llm_guard._exceptions import MordredSessionRefused
 from tests.test_llm_windows_policy import Audit

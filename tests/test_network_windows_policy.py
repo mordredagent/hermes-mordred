@@ -15,8 +15,8 @@ from typing import Any
 import pytest
 
 import mordred_hermes.network as network
-from mordred_hermes import _config_io as cio
-from mordred_hermes._config_io import POLICY_TRANSACTION_MARKER, CanonicalPaths, canonical_session
+from mordred_hermes._core import _config_io as cio
+from mordred_hermes._core._config_io import POLICY_TRANSACTION_MARKER, CanonicalPaths, canonical_session
 from mordred_hermes.network import _windows_policy, api, hooks
 from mordred_hermes.network import settings as settings_mod
 from mordred_hermes.network._exceptions import MordredNetworkError, MordredPathBringupFailed

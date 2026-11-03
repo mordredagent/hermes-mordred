@@ -140,7 +140,7 @@ def verify_keyed_connection(conn: Any, path: Path) -> Refusal | None:
 def _open_guarded(
     path: Path, *, authority: Authority, timeout: float, readonly: bool = False, check_same_thread: bool = True
 ) -> sqlite3.Connection:
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ..dbcrypt._connection import open_protected
 
     try:
@@ -184,7 +184,7 @@ def open_store(
     if found is not None:
         raise ActivityRefused(found)
     authority = runtime_authority(home)
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ._paths import store_path
     from .store import BUSY_TIMEOUT_S, ActivityStore
 

@@ -453,7 +453,7 @@ def _default_connect(host: str, port: int) -> ImapSession:
 
 
 def _default_home() -> Path:
-    from ..._home import hermes_home
+    from ..._core._home import hermes_home
 
     return hermes_home()
 

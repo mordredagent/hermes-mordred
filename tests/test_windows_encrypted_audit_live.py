@@ -34,8 +34,8 @@ print('audit-child-verified', flush=True)
     reason="explicit ordinary-user Windows CNG audit fixture only",
 )
 def test_live_unique_audit_role_fresh_process_and_retained_history():
-    from mordred_hermes._audit_session import audit_session
-    from mordred_hermes._log_rotation import audit_rotation_names
+    from mordred_hermes._core._audit_session import audit_session
+    from mordred_hermes._core._log_rotation import audit_rotation_names
     from mordred_hermes._private_fs import open_confidential_directory
     from mordred_hermes.keyvault._runtime_probe import require_stopped_windows_gateways
     from mordred_hermes.keyvault._windows_custody import windows_custody_session

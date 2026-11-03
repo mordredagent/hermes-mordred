@@ -43,11 +43,11 @@ from typing import Any, Final, cast
 
 import psutil
 
-from .._audit_support import AuditWriter as _AuditWriter
-from .._audit_support import safe_audit_append
-from .._policy_types import ACTIVE_PATHS
-from .._policy_types import ActivePath as ActivePath
-from .._policy_types import PolicyMode as PolicyMode
+from .._core._audit_support import AuditWriter as _AuditWriter
+from .._core._audit_support import safe_audit_append
+from .._core._policy_types import ACTIVE_PATHS
+from .._core._policy_types import ActivePath as ActivePath
+from .._core._policy_types import PolicyMode as PolicyMode
 from . import proxy_env as proxy_env_mod
 from ._exceptions import (
     AlreadySwitching,

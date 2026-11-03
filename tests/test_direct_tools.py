@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes import _config_text_io
+from mordred_hermes._core import _config_text_io
 from mordred_hermes.wizard import direct_tools
 from mordred_hermes.wizard import policy_writer as pw
 from mordred_hermes.wizard.direct_tools import (

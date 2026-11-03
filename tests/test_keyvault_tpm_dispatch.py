@@ -346,7 +346,7 @@ def test_find_winkey_helper_env_missing_returns_none(tmp_path: Path, monkeypatch
 
 
 def test_find_winkey_helper_path_lookup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from mordred_hermes import _home
+    from mordred_hermes._core import _home
 
     monkeypatch.delenv("MORDRED_WINKEY_HELPER", raising=False)
     monkeypatch.setattr(_home, "hermes_home", lambda: tmp_path / "empty-home")

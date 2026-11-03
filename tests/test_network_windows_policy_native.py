@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from mordred_hermes._config_io import POLICY_TRANSACTION_MARKER, CanonicalPaths, canonical_session
+from mordred_hermes._core._config_io import POLICY_TRANSACTION_MARKER, CanonicalPaths, canonical_session
 from mordred_hermes.network import api, hooks
 from mordred_hermes.network._exceptions import MordredPathBringupFailed
 from tests._network_hooks_helpers import _FakeRuntime, _reset_api
@@ -89,7 +89,7 @@ def test_native_busy_generation_refuses_without_waiting(warmed: Path) -> None:
     script = """
 import sys
 from pathlib import Path
-from mordred_hermes._config_io import CanonicalPaths, canonical_session
+from mordred_hermes._core._config_io import CanonicalPaths, canonical_session
 with canonical_session(CanonicalPaths(Path(sys.argv[1])), scope="policy"):
     print("locked", flush=True)
     sys.stdin.readline()

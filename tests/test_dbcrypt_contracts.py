@@ -11,7 +11,7 @@ import pytest
 
 
 def test_database_contracts_are_frozen() -> None:
-    from mordred_hermes._database_contracts import Dependency, Inventory, NativeSnapshot, RootIdentity
+    from mordred_hermes._core._database_contracts import Dependency, Inventory, NativeSnapshot, RootIdentity
 
     root = RootIdentity("linux", 1, "2", "1000")
     source = NativeSnapshot(root, "tpm", "a" * 32, "b" * 64)
@@ -33,9 +33,9 @@ class Forbidden(importlib.abc.MetaPathFinder):
                ('sqlite3', 'sqlcipher3', 'mordred_hermes.dbcrypt', 'mordred_hermes.keyvault')):
             raise AssertionError('SQL/custody import below contract: ' + fullname)
 sys.meta_path.insert(0, Forbidden())
-import mordred_hermes._database_contracts
-import mordred_hermes._database_inventory
-import mordred_hermes._database_lifecycle
+import mordred_hermes._core._database_contracts
+import mordred_hermes._core._database_inventory
+import mordred_hermes._core._database_lifecycle
 """
     result = subprocess.run([sys.executable, "-c", child], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -56,7 +56,7 @@ def source_binding(**updates):
 
 
 def test_source_binding_decoder_is_pure_and_returns_posix_snapshot():
-    from mordred_hermes._database_contracts import NativeSnapshot, RootIdentity, decode_database_source_binding
+    from mordred_hermes._core._database_contracts import NativeSnapshot, RootIdentity, decode_database_source_binding
 
     assert decode_database_source_binding(source_binding()) == NativeSnapshot(
         RootIdentity("linux", 1, "2", "1000"), "tpm", "a" * 32, "b" * 64
@@ -91,7 +91,7 @@ def test_source_binding_decoder_is_pure_and_returns_posix_snapshot():
     ],
 )
 def test_source_binding_decoder_refuses_noncanonical_fields(updates):
-    from mordred_hermes._database_contracts import DatabaseRefused, decode_database_source_binding
+    from mordred_hermes._core._database_contracts import DatabaseRefused, decode_database_source_binding
 
     with pytest.raises(DatabaseRefused):
         decode_database_source_binding(source_binding(**updates))
@@ -110,7 +110,7 @@ def test_source_binding_decoder_refuses_noncanonical_fields(updates):
     ],
 )
 def test_source_binding_decoder_refuses_malformed_or_unbounded_data(data):
-    from mordred_hermes._database_contracts import DatabaseRefused, decode_database_source_binding
+    from mordred_hermes._core._database_contracts import DatabaseRefused, decode_database_source_binding
 
     with pytest.raises(DatabaseRefused):
         decode_database_source_binding(data)

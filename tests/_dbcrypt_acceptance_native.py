@@ -243,7 +243,7 @@ def package_qualification_observation() -> dict[str, Any]:
     import sqlcipher3.dbapi2 as driver
 
     import mordred_hermes
-    from mordred_hermes._database_locking_windows import identify_root
+    from mordred_hermes._core._database_locking_windows import identify_root
     from mordred_hermes._private_fs import open_confidential_directory
     from mordred_hermes.keyvault import kek
 
@@ -374,7 +374,7 @@ def native_facts(root: Path) -> dict[str, Any]:
         facts = _windows_provider()
         facts["dll"] = _owned_windows_dll(qualification)
         facts["qualification_manifest_sha256"] = qualification["manifest_sha256"]
-        from mordred_hermes._database_locking_windows import identify_root
+        from mordred_hermes._core._database_locking_windows import identify_root
         from mordred_hermes._private_fs import open_confidential_directory
 
         observed_root = root if root.exists() else root.parent
@@ -386,7 +386,7 @@ def native_facts(root: Path) -> dict[str, Any]:
         facts["filesystem"] = {"method": "checked_confidential_fixed_local_ntfs", "identity": asdict(identity)}
     else:
         facts = _linux_provider()
-        from mordred_hermes._database_locking_posix import identify_root
+        from mordred_hermes._core._database_locking_posix import identify_root
         from mordred_hermes._private_fs import open_private_directory
 
         observed_root = root if root.exists() else root.parent
@@ -579,7 +579,7 @@ def _maintenance(home: Path, arguments: list[str]) -> dict[str, Any]:
 
 def provision(root: Path) -> dict[str, Any]:
     from mordred_hermes import dbcrypt
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes._private_fs import open_confidential_directory, open_private_directory
     from mordred_hermes.dbcrypt import _migrate
     from mordred_hermes.keyvault._database_authority import enroll_database_source
@@ -1096,7 +1096,7 @@ def _runtime(root: Path) -> Any:
 
 
 def backup_restore(root: Path, *, finalization_failure: bool = False) -> dict[str, Any]:
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes.activity._gate import open_store
     from mordred_hermes.activity.store import restore_activity_store
     from mordred_hermes.dbcrypt import _migrate
@@ -1262,7 +1262,7 @@ def _multiprocess(root: Path, connection: Any) -> None:
 def _cached_and_boundaries(root: Path) -> list[str]:
     from unittest.mock import patch
 
-    from mordred_hermes._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_contracts import DatabaseRefused
     from mordred_hermes.dbcrypt import _authority, _shim
     from mordred_hermes.dbcrypt._authority import Authority
     from mordred_hermes.dbcrypt._connection import open_protected
@@ -1306,7 +1306,7 @@ def _cached_and_boundaries(root: Path) -> list[str]:
 
 
 def _missing_and_generation(root: Path) -> list[str]:
-    from mordred_hermes._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_contracts import DatabaseRefused
     from mordred_hermes.dbcrypt._authority import Authority
     from mordred_hermes.keyvault import wrap
     from mordred_hermes.keyvault._exceptions import WrapKeyNotFound
@@ -1385,7 +1385,7 @@ def _require_ciphertext_read_refused(connection: Any, message: str) -> None:
 def _wrong_profile_key(root: Path) -> None:
     import sqlcipher3.dbapi2 as driver
 
-    from mordred_hermes._database_lifecycle import acquire_runtime
+    from mordred_hermes._core._database_lifecycle import acquire_runtime
     from mordred_hermes.dbcrypt._key import derive
     from mordred_hermes.dbcrypt._shim import apply_key
     from mordred_hermes.keyvault._memory_key import resolve_memory_key
@@ -1483,7 +1483,7 @@ def fresh_unpatched_authority_probe() -> int:
             from mordred_hermes.keyvault import _seckey_helper, kek
 
             kek._noop_audit = lambda _entry: None
-            from mordred_hermes._database_contracts import DatabaseRefused
+            from mordred_hermes._core._database_contracts import DatabaseRefused
             from mordred_hermes.dbcrypt._authority import Authority
             from mordred_hermes.keyvault._database_authority import observe_database_source
 
@@ -1623,8 +1623,8 @@ def negative(root: Path) -> dict[str, Any]:
 
     import sqlcipher3.dbapi2 as driver
 
-    from mordred_hermes._database_contracts import DatabaseRefused
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes.dbcrypt import _authority, _migrate
     from mordred_hermes.dbcrypt._authority import Authority
     from mordred_hermes.dbcrypt._connection import open_protected

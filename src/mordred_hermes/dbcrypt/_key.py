@@ -95,8 +95,8 @@ class KeyProvider:
 
     def __call__(self) -> DatabaseKey | None:
         if self._native:
-            from .._database_contracts import DatabaseRefused
-            from .._home import hermes_home
+            from .._core._database_contracts import DatabaseRefused
+            from .._core._home import hermes_home
             from ._authority import Authority
 
             if self._pid != os.getpid():
@@ -125,7 +125,7 @@ class KeyProvider:
     @property
     def authority(self) -> Authority:
         """Acquire once for the guarded runtime; never export a temporary bare key."""
-        from .._database_contracts import DatabaseRefused
+        from .._core._database_contracts import DatabaseRefused
 
         if not self._native:
             raise DatabaseRefused("injected providers have no native authority")

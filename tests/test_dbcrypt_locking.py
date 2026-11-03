@@ -16,7 +16,7 @@ from tests._dbcrypt_support import database_lease_child
     os.name == "nt", reason="POSIX native primitive; Windows lease qualification is Task 5's explicit gate"
 )
 def test_root_lease_precedes_custody(tmp_path: Path) -> None:
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
 
     events = []
     with acquire_exclusive(tmp_path) as lease:
@@ -30,8 +30,8 @@ def test_root_lease_precedes_custody(tmp_path: Path) -> None:
 
 
 def test_no_in_place_upgrade(tmp_path: Path) -> None:
-    from mordred_hermes._database_contracts import DatabaseRefused
-    from mordred_hermes._database_lifecycle import acquire_exclusive, acquire_runtime
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive, acquire_runtime
 
     with acquire_runtime(tmp_path) as lease:
         lease.check()
@@ -40,8 +40,8 @@ def test_no_in_place_upgrade(tmp_path: Path) -> None:
 
 
 def test_closed_and_wrong_root_leases_refuse(tmp_path: Path) -> None:
-    from mordred_hermes._database_contracts import DatabaseRefused
-    from mordred_hermes._database_lifecycle import acquire_exclusive, acquire_runtime
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive, acquire_runtime
 
     wrong = tmp_path / "other"
     wrong.mkdir()
@@ -61,7 +61,7 @@ def test_closed_and_wrong_root_leases_refuse(tmp_path: Path) -> None:
     os.name == "nt", reason="POSIX process acceptance; Windows lock/rename native gate follows in Task 5"
 )
 def test_multiprocess_shared_exclusive_and_crash_release(tmp_path: Path) -> None:
-    from mordred_hermes._database_lifecycle import acquire_exclusive, acquire_runtime
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive, acquire_runtime
 
     with acquire_runtime(tmp_path):
         assert database_lease_child(tmp_path, "runtime") == "acquired"
@@ -86,8 +86,8 @@ def test_multiprocess_shared_exclusive_and_crash_release(tmp_path: Path) -> None
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX pathname replacement; Windows denies rename and is gated in Task 5")
 def test_root_and_lock_replacement_invalidate_runtime(tmp_path: Path) -> None:
-    from mordred_hermes._database_contracts import DatabaseRefused
-    from mordred_hermes._database_lifecycle import acquire_runtime
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_lifecycle import acquire_runtime
 
     root = tmp_path / "root"
     root.mkdir()
@@ -105,8 +105,8 @@ def test_root_and_lock_replacement_invalidate_runtime(tmp_path: Path) -> None:
 
 
 def test_holder_visibility_unknown_refuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from mordred_hermes import _database_locking_posix as posix
-    from mordred_hermes._database_contracts import DatabaseRefused
+    from mordred_hermes._core import _database_locking_posix as posix
+    from mordred_hermes._core._database_contracts import DatabaseRefused
 
     database = tmp_path / "state.db"
     database.write_bytes(b"opaque")
@@ -126,7 +126,7 @@ def test_holder_visibility_unknown_refuses(tmp_path: Path, monkeypatch: pytest.M
 
 
 def test_legacy_maintenance_reuses_preceding_exclusive_proof(tmp_path: Path) -> None:
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes.dbcrypt._locking import migration_lock
 
     with acquire_exclusive(tmp_path) as lease, migration_lock(tmp_path):
@@ -135,7 +135,7 @@ def test_legacy_maintenance_reuses_preceding_exclusive_proof(tmp_path: Path) -> 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork ownership")
 def test_fork_discards_inherited_authority_without_unlocking_parent(tmp_path: Path) -> None:
-    from mordred_hermes._database_lifecycle import acquire_runtime
+    from mordred_hermes._core._database_lifecycle import acquire_runtime
 
     read, write = os.pipe()
     with acquire_runtime(tmp_path) as lease:
@@ -143,7 +143,7 @@ def test_fork_discards_inherited_authority_without_unlocking_parent(tmp_path: Pa
         if pid == 0:
             os.close(read)
             try:
-                from mordred_hermes._database_contracts import DatabaseRefused
+                from mordred_hermes._core._database_contracts import DatabaseRefused
 
                 try:
                     lease.check()
@@ -174,8 +174,8 @@ def test_fork_discards_inherited_authority_without_unlocking_parent(tmp_path: Pa
 )
 @pytest.mark.parametrize("unsafe", ["permissions", "hardlink", "symlink"])
 def test_unsafe_lock_refuses_without_repair(tmp_path: Path, unsafe: str) -> None:
-    from mordred_hermes._database_contracts import DatabaseRefused
-    from mordred_hermes._database_lifecycle import acquire_runtime
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_lifecycle import acquire_runtime
 
     folder = tmp_path / "mordred"
     folder.mkdir(mode=0o700)
@@ -200,8 +200,8 @@ def test_unsafe_lock_refuses_without_repair(tmp_path: Path, unsafe: str) -> None
 @pytest.mark.skipif(os.name == "nt", reason="POSIX ownership/mode admission; Windows uses checked token/DACL tests")
 @pytest.mark.parametrize("change_before", [True, False])
 def test_other_user_writable_root_refuses_without_repair(tmp_path: Path, change_before: bool) -> None:
-    from mordred_hermes._database_contracts import DatabaseRefused
-    from mordred_hermes._database_lifecycle import acquire_runtime
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_lifecycle import acquire_runtime
 
     root = tmp_path / "root"
     root.mkdir(mode=0o700)
@@ -224,8 +224,8 @@ def test_other_user_writable_root_refuses_without_repair(tmp_path: Path, change_
 @pytest.mark.skipif(os.name == "nt", reason="POSIX replacement admission; Windows denies native rename")
 @pytest.mark.parametrize("replace_directory", [False, True])
 def test_exclusive_reentry_revalidates_the_original_proof(tmp_path: Path, replace_directory: bool) -> None:
-    from mordred_hermes._database_contracts import DatabaseRefused
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes.dbcrypt._locking import migration_lock
 
     entered = []
@@ -252,7 +252,7 @@ def test_exclusive_reentry_revalidates_the_original_proof(tmp_path: Path, replac
 def test_holder_scan_distinguishes_empty_visible_and_live_denied(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from mordred_hermes import _database_locking_posix as posix
+    from mordred_hermes._core import _database_locking_posix as posix
 
     database = tmp_path / "state.db"
     database.write_bytes(b"opaque")
@@ -280,7 +280,7 @@ def test_holder_scan_distinguishes_empty_visible_and_live_denied(
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX proc disappearance model")
 def test_holder_scan_knows_when_a_process_disappeared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from mordred_hermes import _database_locking_posix as posix
+    from mordred_hermes._core import _database_locking_posix as posix
 
     database = tmp_path / "state.db"
     database.write_bytes(b"opaque")
@@ -299,7 +299,7 @@ def test_holder_scan_knows_when_a_process_disappeared(tmp_path: Path, monkeypatc
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX first-open creation protocol")
 def test_existing_lock_opens_without_nonexclusive_create(tmp_path, monkeypatch):
-    from mordred_hermes import _database_locking_posix as posix
+    from mordred_hermes._core import _database_locking_posix as posix
 
     first = posix.open_lock(tmp_path)
     first.close()

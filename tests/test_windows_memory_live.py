@@ -22,8 +22,8 @@ def test_installed_memory_hook_real_cng():
     import ctypes
 
     import mordred_hermes
+    from mordred_hermes._core._windows_runtime import scrubbed_environment
     from mordred_hermes._private_fs import open_confidential_directory
-    from mordred_hermes._windows_runtime import scrubbed_environment
     from mordred_hermes.keyvault._memory_storage import inventory_memory_files, windows_memory_runtime_admitted
     from mordred_hermes.keyvault._runtime_probe import require_stopped_windows_gateways
     from mordred_hermes.keyvault._windows_custody import windows_custody_session

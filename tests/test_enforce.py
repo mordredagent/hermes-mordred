@@ -730,7 +730,7 @@ class TestPolicyJsonFallbacks:
         allowlist. ``_read_policy_settings`` must drop ``"custom"`` from the
         resulting allowlist rather than admit it as a real provider grant.
         """
-        from mordred_hermes._provider_identity import canonicalize_provider
+        from mordred_hermes._core._provider_identity import canonicalize_provider
 
         assert canonicalize_provider("ollama") == "custom"  # basis for this test
         assert canonicalize_provider("claude") == "anthropic"  # existing alias behaviour unaffected

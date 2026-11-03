@@ -56,7 +56,7 @@ from typing import Any, Final, Literal, Protocol
 
 import psutil
 
-from ..._policy_types import PolicyMode
+from ..._core._policy_types import PolicyMode
 from ..._private_fs import (
     FileMetadata,
     PrivateDirectory,

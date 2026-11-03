@@ -100,7 +100,7 @@ def observe(home: Path, *, blocking: bool = False) -> MemoryObservation:
     lock held by another process is reported as ``custody-uncertain``.
     """
     try:
-        from .._config_io import CanonicalPaths, canonical_session
+        from .._core._config_io import CanonicalPaths, canonical_session
         from ..keyvault._memory_storage import verify_memory_purge_candidates
         from ..keyvault._windows_capability import windows_capability
 
@@ -174,7 +174,7 @@ def proof_python(home: Path) -> Path | None:
     refuses rather than falling back to an unrelated home venv. Without a
     launcher the proof uses the C4 home-venv candidates.
     """
-    from .._windows_runtime import resolve_windows_python
+    from .._core._windows_runtime import resolve_windows_python
     from ..keyvault._windows_proof import PYTHON_OVERRIDE_ENV, WindowsRuntimeProofError
     from ._uninstall_hermes_env import find_hermes_launcher
 

@@ -152,7 +152,7 @@ async def on_activity_batch(conn: _Connection, msg: dict[str, Any]) -> None:
 async def on_activity_status(conn: _Connection, msg: dict[str, Any]) -> None:
     state: tuple[str, str | None] = ("unavailable", "store_unavailable")
     if conn.activity_receiver is not None:
-        from .._home import hermes_home
+        from .._core._home import hermes_home
 
         state = await _in_executor(collection_status, hermes_home())
     collection, reason = state

@@ -48,7 +48,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Final, NamedTuple
 
-from .._home import hermes_home as _hermes_home
+from .._core._home import hermes_home as _hermes_home
 
 __all__ = [
     "GatewayDiscoveryUnavailable",
@@ -399,7 +399,7 @@ def discover_runtime_python(home: Path | None = None, explicit: str | Path | Non
 
     override = explicit if explicit is not None else os.environ.get(RUNTIME_PYTHON_ENV)
     if sys.platform == "win32":
-        from .._windows_runtime import resolve_windows_python
+        from .._core._windows_runtime import resolve_windows_python
 
         if override is not None:
             return resolve_windows_python(home, override=str(override))

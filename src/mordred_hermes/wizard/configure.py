@@ -40,7 +40,7 @@ from typing import Any, Final, Literal, Protocol
 
 from mordred_hermes.network.provider_transport_flagger import KNOWN_PROVIDERS
 
-from .._policy_types import POLICY_MODES
+from .._core._policy_types import POLICY_MODES
 from . import _term
 from ._prompt_io import (
     _CHOICE_NAV_HINT,
@@ -508,9 +508,9 @@ def _read_existing_policy_inputs(policy_writer: PolicyWriter) -> dict[str, objec
     import json
 
     if _windows():
-        from .._config_io import read_canonical_snapshot
-        from .._policy_io import policy_mapping_from_snapshot
-        from .._yaml_io import yaml_mapping_from_snapshot
+        from .._core._config_io import read_canonical_snapshot
+        from .._core._policy_io import policy_mapping_from_snapshot
+        from .._core._yaml_io import yaml_mapping_from_snapshot
         from .policy_writer import _canonical_paths
 
         pair = read_canonical_snapshot(
@@ -538,7 +538,7 @@ def _read_existing_policy_inputs(policy_writer: PolicyWriter) -> dict[str, objec
 
     from ruamel.yaml.error import YAMLError
 
-    from .._yaml_io import load_plugin_section
+    from .._core._yaml_io import load_plugin_section
 
     # ValueError joins the shared helper's default catch set — this site has
     # historically swallowed it, and any unreadable config falls back to defaults.

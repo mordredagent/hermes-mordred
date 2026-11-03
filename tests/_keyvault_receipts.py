@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.keyvault import _storage, wrap
 from mordred_hermes.keyvault._seckey_backend import _SecKeyBackend
 from mordred_hermes.keyvault._seckey_errors import _OpsError, errSecItemNotFound

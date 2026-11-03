@@ -146,7 +146,7 @@ def test_windows_edition_admitted_fails_closed_on_error(monkeypatch):
 
 
 def test_native_and_lease_admission_flags_agree():
-    from mordred_hermes import _database_locking_windows
+    from mordred_hermes._core import _database_locking_windows
     from mordred_hermes.dbcrypt import _windows_vfs
 
     assert _windows_vfs.NATIVE_QUALIFIED == _database_locking_windows.WINDOWS_LEASE_QUALIFIED
@@ -178,7 +178,7 @@ def test_diagnose_refuses_legacy_and_pending_without_acquiring(tmp_path, monkeyp
 
 @pytest.mark.skipif(os.name != "posix", reason="uses the POSIX authority fixture; Windows native proof is explicit")
 def test_explicit_diagnosis_authenticates_once_and_releases(native_root):
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
 
     root, backend, _, _ = native_root
     assert capability().database_status(root).authenticated is False
@@ -191,7 +191,7 @@ def test_explicit_diagnosis_authenticates_once_and_releases(native_root):
 
 
 def test_dependency_count_includes_retained_database_objects_without_sql(tmp_path, monkeypatch):
-    from mordred_hermes import _database_lifecycle
+    from mordred_hermes._core import _database_lifecycle
 
     (tmp_path / "mordred").mkdir()
     for name in ("state.db", "state.db-wal", "state.db.bak", "mordred/db-encryption.pending"):
@@ -290,7 +290,7 @@ def test_native_prompt_does_not_revoke_registered_sql_on_changed_metadata(native
 
 @pytest.mark.skipif(os.name != "posix", reason="uses the POSIX authority fixture; Windows native proof is explicit")
 def test_diagnosis_authentication_failure_releases_lease(native_root, monkeypatch):
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
 
     root, backend, _, _ = native_root
 
@@ -314,7 +314,7 @@ def test_status_has_zero_os_write_and_raw_database_open_events(tmp_path):
     code = """
 import os, sys, types
 from pathlib import Path
-audit = types.ModuleType('mordred_hermes._audit_support')
+audit = types.ModuleType('mordred_hermes._core._audit_support')
 audit.safe_audit_append = lambda *args, **kwargs: None
 sys.modules[audit.__name__] = audit
 from mordred_hermes.dbcrypt import database_status

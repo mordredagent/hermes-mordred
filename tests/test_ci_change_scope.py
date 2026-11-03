@@ -46,6 +46,7 @@ def change(path: str, status: str = "modified", **extra: object) -> dict:
         ("tests/test_local_adapter.py", False, False, False, (), ("floor",)),
         ("src/mordred_hermes/llm_guard/future.py", True, False, True, (), ()),
         ("src/mordred_hermes/keyvault/ethereum.py", True, False, True, (), ()),
+        ("src/mordred_hermes/_core/_home.py", True, False, True, (), ()),
         ("src/mordred_hermes/extension/telegram/windows_secrets.py", True, False, True, (), ()),
         ("tests/test_config_io_windows.py", True, False, True, (), ()),
         ("tools/ci_test_policy.py", True, False, True, (), ()),

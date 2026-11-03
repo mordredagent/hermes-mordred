@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.keyvault import _native_deletion as deletion
 from mordred_hermes.keyvault import _native_key_id as ids
 from mordred_hermes.keyvault import _reset_journal, _storage
@@ -269,7 +269,7 @@ def test_duplicate_ownership_json_refuses_before_native_io(tmp_path, monkeypatch
 
 
 def test_valid_source_only_binding_survives_reset_after_source_is_lost(tmp_path, monkeypatch):
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes.keyvault import _database_authority as authority
     from mordred_hermes.keyvault import _memory_key as memory
     from mordred_hermes.wizard import keyvault_cli

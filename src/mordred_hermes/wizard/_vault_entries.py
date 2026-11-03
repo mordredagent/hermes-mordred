@@ -32,7 +32,7 @@ from . import _term
 from ._vault_open import _display_name, _open_cold_path, _open_hot_path_or_report
 
 if TYPE_CHECKING:
-    from .._database_lifecycle import ExclusiveLease
+    from .._core._database_lifecycle import ExclusiveLease
     from ..keyvault.anchor import AnchorStore
     from ..keyvault.vault import OpenVault
     from ..keyvault.wrap import NativeBackend
@@ -206,7 +206,7 @@ def _enroll_one(
     With a ``flow_session`` the flow's already open vault is reused (no unlock
     at all), or the one opened here is kept for the flow's later steps.
     """
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ..keyvault import anchor, vault
     from ..keyvault._exceptions import WrapError
 
@@ -370,7 +370,7 @@ def migrate(
             _term.emit_error(f"cannot read source file {source}: {exc}")
             return 1
 
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ..keyvault import anchor, vault
     from ..keyvault._exceptions import WrapError
 

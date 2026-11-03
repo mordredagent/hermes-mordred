@@ -23,8 +23,8 @@ from dataclasses import dataclass
 from typing import Final
 from urllib.parse import quote
 
-from .._policy_types import ACTIVE_PATHS
-from .._policy_types import ActivePath as ActivePath
+from .._core._policy_types import ACTIVE_PATHS
+from .._core._policy_types import ActivePath as ActivePath
 from ._exceptions import UnknownPath
 
 _LOCALHOST_DEFAULTS: Final[tuple[str, ...]] = ("localhost", "127.0.0.1", "::1")

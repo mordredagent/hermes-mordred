@@ -95,7 +95,7 @@ def _update_view(result: Any, *, current: Any | None, error: str | None = None) 
     answer.
     """
     from .. import __version__
-    from .. import _self_update as core
+    from .._core import _self_update as core
 
     view: dict[str, Any] = {"ok": True, "supported": True, "refusal": None, "running": __version__}
     try:
@@ -129,7 +129,7 @@ async def update_check(refresh: int = 0) -> Any:
     (``check_error``). ``check`` is ``null`` when nothing is known and nothing
     was asked.
     """
-    from .. import _self_update as core
+    from .._core import _self_update as core
 
     def work() -> dict[str, Any]:
         home = _api()._home()
@@ -165,7 +165,7 @@ async def update_check(refresh: int = 0) -> Any:
 
 def _prepare_update(target: str) -> tuple[Any, Any] | str:
     """The install source and uv for an update to *target*, or the refusal code."""
-    from .. import _self_update as core
+    from .._core import _self_update as core
 
     try:
         current = core.installed(_api()._home())
@@ -195,7 +195,7 @@ async def update_apply(body: dict[str, Any] | None = None) -> Any:
     success ``progress.report`` is the update report and the page offers the
     gateway restart.
     """
-    from .. import _self_update as core
+    from .._core import _self_update as core
 
     body = body or {}
     target = body.get("version")

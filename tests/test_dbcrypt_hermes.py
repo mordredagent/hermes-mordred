@@ -7,7 +7,7 @@ import importlib.util
 import pytest
 import sqlcipher3.dbapi2 as sc
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.dbcrypt._authority import Authority
 from mordred_hermes.dbcrypt._shim import wrong_key_errors
 from tests.test_dbcrypt_authority import native_root as _native_root

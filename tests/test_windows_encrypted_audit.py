@@ -9,8 +9,8 @@ from dataclasses import replace
 
 import pytest
 
-from mordred_hermes._audit_session import AuditSession, audit_session
-from mordred_hermes._config_io import PublicationReceipt
+from mordred_hermes._core._audit_session import AuditSession, audit_session
+from mordred_hermes._core._config_io import PublicationReceipt
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
 from mordred_hermes.keyvault import log_encryption as log
 from mordred_hermes.keyvault._database_mutation import database_key_mutation
@@ -44,7 +44,7 @@ def adapter():
 
 @pytest.fixture(autouse=True)
 def checked_audit_boundary(fs, monkeypatch):
-    from mordred_hermes import _audit_session, _config_io
+    from mordred_hermes._core import _audit_session, _config_io
 
     a = adapter()
     monkeypatch.setattr(a, "open_optional_private_directory", _config_io.open_optional_private_directory)

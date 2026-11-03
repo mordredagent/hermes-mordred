@@ -16,10 +16,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, cast
 
-from .._config_io import CanonicalPaths, CanonicalSnapshot, read_canonical_snapshot
-from .._policy_io import policy_mapping_from_snapshot
-from .._policy_types import VALID_ACTIVE_PATHS, VALID_POLICY_MODES, ActivePath, PolicyMode
-from .._yaml_io import yaml_mapping_from_snapshot
+from .._core._config_io import CanonicalPaths, CanonicalSnapshot, read_canonical_snapshot
+from .._core._policy_io import policy_mapping_from_snapshot
+from .._core._policy_types import VALID_ACTIVE_PATHS, VALID_POLICY_MODES, ActivePath, PolicyMode
+from .._core._yaml_io import yaml_mapping_from_snapshot
 from ._exceptions import MordredPathBringupFailed
 from .provider_transport_flagger import ProviderEntry
 from .settings import DEFAULT_NETWORK_PATH, DEFAULT_POLICY_MODE, parse_provider_overrides

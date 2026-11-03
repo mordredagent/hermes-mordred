@@ -55,8 +55,8 @@ if TYPE_CHECKING:
     from ._native_deletion import _NativeOwnerFacts
     from .wrap import NativeBackend
 
-from .._custody_order import custody_scope
-from .._home import hermes_home as _hermes_home
+from .._core._custody_order import custody_scope
+from .._core._home import hermes_home as _hermes_home
 
 _META_VERSION = 1
 _FILE_MODE = 0o600
@@ -182,7 +182,7 @@ class KeyvaultResetJournalRestoreError(OSError):
 def resolve_keyvault_dir(home: Path | None = None) -> Path:
     """Return the keyvault root directory.
 
-    ``home=None`` uses :func:`mordred_hermes._home.hermes_home`. The
+    ``home=None`` uses :func:`mordred_hermes._core._home.hermes_home`. The
     function does NOT create any directories; call :func:`ensure_layout`
     for that.
     """
@@ -964,7 +964,7 @@ class _NativeCreationOwner:
     __slots__ = ()
 
     def __new__(cls) -> _NativeCreationOwner:
-        from .._database_contracts import DatabaseRefused
+        from .._core._database_contracts import DatabaseRefused
 
         raise DatabaseRefused("native creation ownership cannot be constructed")
 
@@ -975,12 +975,12 @@ class KeyvaultCustody:
     __slots__ = ("__weakref__",)
 
     def __new__(cls) -> KeyvaultCustody:
-        from .._database_contracts import DatabaseRefused
+        from .._core._database_contracts import DatabaseRefused
 
         raise DatabaseRefused("keyvault custody cannot be constructed")
 
     def _check_native_delete_owner(self, native_key_id: str, backend: NativeBackend) -> _NativeOwnerFacts:
-        from .._database_contracts import DatabaseRefused
+        from .._core._database_contracts import DatabaseRefused
         from . import _native_deletion, _native_key_id
 
         record = _KEYVAULT_CUSTODY.get(self)
@@ -1016,7 +1016,7 @@ class KeyvaultCustody:
         native_key_id: str,
         backend: NativeBackend,
     ) -> _NativeCreationOwner:
-        from .._database_contracts import DatabaseRefused
+        from .._core._database_contracts import DatabaseRefused
         from . import _native_key_id
 
         record = _KEYVAULT_CUSTODY.get(self)
