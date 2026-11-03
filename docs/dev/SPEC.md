@@ -6,6 +6,44 @@ Implementation details may evolve, but security boundaries, persistent wire
 formats, and public behavior must stay consistent with this specification or
 change here in the same patch.
 
+
+## Bounded macOS presence reuse
+
+The opt-in `plugins.mordred_keyvault.presence_reuse_seconds` accepts integers
+from 0 to 300 (default 0). Invalid values disable reuse. Telegram archive
+questions, lists, history reads and sync, and mail sync may reuse only OS
+presence, never plaintext credentials, seeds, DEKs or shared secrets. Each
+operation still decrypts, validates current custody, enforces model/reader and
+SQLCipher requirements, and audits authorization. CLI, management operations,
+wallet signing, Linux and Windows retain per-operation authorization.
+
+Reuse is confined to the process, canonical profile, host-issued caller session
+and purpose (Telegram or mail). Hermes uses framework dispatch session identity;
+Desktop uses its authenticated host generation; the extension uses its live
+connection and pairing generation. Tool arguments cannot supply that identity.
+Operation-local context carries authority; shared services do not store it.
+
+A parent-only pipe helper holds an LAContext and reloads the key and performs
+ECDH every time. The helper measures a non-sliding maximum of 300 seconds from
+the first successful authentication using a clock that includes sleep. It checks
+expiry before ECDH and before replying; an operation crossing expiry fails
+without retry. Already decrypted syncs may finish. Lock, sleep, cancellation,
+authentication failure, host revocation, profile switch, credential/key change,
+deletion intent and process exit discard the context. Monitoring cannot wait
+behind authentication or network I/O. At most eight helpers and sixteen waiting
+requests per helper are admitted; frames are limited to 64 KiB and requests to
+120 seconds. Concurrent initial requests share authentication and its failure.
+A prompt-free capability check permits old helpers to retain one-shot behavior;
+there is no fallback after authentication begins.
+
+Signing APIs accept optional `expected_signer`. The same decrypted ordinary or
+HD-derived key must match the approved address before signing; recovered signer
+verification remains mandatory at the wallet boundary. This removes the extra
+pre-sign decrypt (three decrypts become two), without reusing wallet presence.
+Live isolated-home/test-key validation is required before enabling a profile.
+If presence reuse or lock invalidation cannot be verified, leave reuse disabled.
+
+
 ## Vision
 
 Mordred adds privacy-oriented policy, route selection, local-LLM enforcement,

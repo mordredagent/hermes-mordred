@@ -11,6 +11,21 @@ Mordred is a standalone Python distribution loaded through
 `hermes_agent.plugins`. It does not fork Hermes and does not submit changes to
 Hermes upstream.
 
+
+## Bounded macOS presence reuse
+
+Implement in order: shared contract; expected-signer checks in ordinary/HD
+signing; bounded helper protocol and operation-local broker; trusted host
+session propagation for Telegram/mail; revocation and regression verification.
+The native helper owns LAContext expiry, independent lock/sleep notifications
+and parent lifetime. Python owns bounded admission, prompt-free compatibility
+negotiation and operation-local profile/session/purpose binding. Existing custody
+observations remain authoritative on each decrypt. No plaintext cache is added.
+Run critical feedback and complete containing security modules, then one final
+regression, static checks and the CI extras type environment. Record isolated
+live-device evidence in VALIDATION_LOG before setting a profile to 300 seconds.
+
+
 ## Current architecture
 
 One Hermes entry point, `mordred` (`plugin.py`), registers these components in
