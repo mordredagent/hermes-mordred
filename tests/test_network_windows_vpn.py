@@ -516,12 +516,12 @@ def strict_tor_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Canon
         policy={"policy": "strict"},
         config={"plugins": {"mordred_network": {"default_path": "tor"}}, "model": {"provider": "anthropic"}},
     )
-    original = network._runtime_config
+    original = network._registration._runtime_config
 
     def fast_liveness(**kwargs: Any) -> RuntimeConfig:
         return dataclasses.replace(original(**kwargs), liveness_interval_seconds=0.01, liveness_failure_threshold=2)
 
-    monkeypatch.setattr(network, "_runtime_config", fast_liveness)
+    monkeypatch.setattr(network._registration, "_runtime_config", fast_liveness)
     monkeypatch.setattr(sys, "platform", "win32")
     return paths
 
@@ -533,7 +533,7 @@ def test_windows_strict_liveness_drop_refuses_tool_calls_without_clearnet_fallba
     config = strict_tor_profile.home / "config.yaml"
     fakes = _TorFakes()
     env: dict[str, str] = {}
-    runtime_config = network._load_runtime_config(policy_json_path=policy, config_path=config)
+    runtime_config = network._registration._load_runtime_config(policy_json_path=policy, config_path=config)
     rt = Runtime(
         config=runtime_config,
         env=env,

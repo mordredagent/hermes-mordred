@@ -170,6 +170,9 @@ def test_explicit_encrypt_requires_enabled_root_even_when_bound(native_root, mon
     marker.unlink(missing_ok=True)
     before = snapshot(root)
     monkeypatch.setattr(dbcrypt, "database_status", lambda home: DatabaseStatus(True, 1, "unknown", False, None))
+    monkeypatch.setattr(
+        dbcrypt._runtime, "database_status", lambda home: DatabaseStatus(True, 1, "unknown", False, None)
+    )
     monkeypatch.setattr(_migrate, "migrate", lambda *a, **k: pytest.fail("disabled root entered conversion"))
     assert databases_cli.databases_encrypt(home=root) == 1
     assert snapshot(root) == before and backend.calls == []

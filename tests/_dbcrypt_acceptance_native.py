@@ -447,6 +447,7 @@ def candidate_eligibility(root: Path) -> Iterator[None]:
             stack.enter_context(patch.object(_windows_vfs, "NATIVE_QUALIFIED", True))
         stack.enter_context(patch.object(_capability, "database_status", status))
         stack.enter_context(patch.object(dbcrypt, "database_status", status))
+        stack.enter_context(patch.object(dbcrypt._runtime, "database_status", status))
         yield
 
 
@@ -1029,7 +1030,7 @@ def collect(root: Path, *, seed: bool) -> dict[str, Any]:
     from mordred_hermes.keyvault.memory_crypto import seal, unseal
 
     if os.environ["MORDRED_DBCRYPT_ACCEPTANCE_KIND"] == "candidate":
-        assert dbcrypt._install_native(root, None)
+        assert dbcrypt._runtime._install_native(root, None)
     else:
         assert _shim.is_installed(), "automatic production startup required"
     logical = {}
@@ -1037,7 +1038,7 @@ def collect(root: Path, *, seed: bool) -> dict[str, Any]:
         for profile, home in _homes(root):
             with _failure_scope("collect", profile):
                 # The actual installed provider owns Root SH before credential custody.
-                authority = dbcrypt._PROVIDER.authority
+                authority = dbcrypt._runtime._PROVIDER.authority
                 assert authority.snapshot == observe_database_source(root=root)
                 original = _seed_credentials(home) if seed else None
                 _role_isolation(home)
@@ -1080,8 +1081,8 @@ def collect(root: Path, *, seed: bool) -> dict[str, Any]:
             else "reload_only_sacrificial_no_reference",
         }
     finally:
-        if dbcrypt._PROVIDER is not None:
-            dbcrypt._PROVIDER.close()
+        if dbcrypt._runtime._PROVIDER is not None:
+            dbcrypt._runtime._PROVIDER.close()
 
 
 def _runtime(root: Path) -> Any:
@@ -1089,10 +1090,10 @@ def _runtime(root: Path) -> Any:
     from mordred_hermes.dbcrypt import _shim
 
     if os.environ["MORDRED_DBCRYPT_ACCEPTANCE_KIND"] == "candidate":
-        assert dbcrypt._install_native(root, None)
+        assert dbcrypt._runtime._install_native(root, None)
     else:
         assert _shim.is_installed(), "automatic production startup required"
-    return dbcrypt._PROVIDER
+    return dbcrypt._runtime._PROVIDER
 
 
 def backup_restore(root: Path, *, finalization_failure: bool = False) -> dict[str, Any]:

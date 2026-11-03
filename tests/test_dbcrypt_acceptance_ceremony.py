@@ -25,7 +25,7 @@ from mordred_hermes import dbcrypt, _runtime_bootstrap, _pth_bootstrap
 from mordred_hermes._core._database_lifecycle import acquire_exclusive
 argv, root = json.loads(sys.argv[1]), Path(sys.argv[2])
 sys.argv = argv
-dbcrypt.sys = SimpleNamespace(platform='linux')
+dbcrypt._runtime.sys = SimpleNamespace(platform='linux')
 engaged = _pth_bootstrap._looks_like_hermes(argv, {}, orig_argv=[])
 if engaged:
     _runtime_bootstrap._install_database_encryption()
@@ -145,9 +145,9 @@ def test_installed_database_ceremony_owns_ex_then_real_automatic_runtime(native_
 
     root, backend, _, _ = native_root
     helper = runpy.run_path(str(Path(__file__).with_name("_dbcrypt_acceptance_native.py")))
-    monkeypatch.setattr(dbcrypt, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(dbcrypt._runtime, "sys", SimpleNamespace(platform="linux"))
     monkeypatch.setattr(_capability, "sys", SimpleNamespace(platform="linux"))
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", None)
     monkeypatch.setitem(sys.modules, "sqlite3", __import__("sqlite3"))
     monkeypatch.setitem(sys.modules, "sqlite3.dbapi2", sys.modules.get("sqlite3.dbapi2"))
     before = (root / "mordred/db-key-source.json").read_bytes()
@@ -196,12 +196,12 @@ def test_installed_database_ceremony_owns_ex_then_real_automatic_runtime(native_
     try:
         _runtime_bootstrap._install_database_encryption()
         assert _shim.is_installed()
-        assert dbcrypt._PROVIDER.authority.root == root
+        assert dbcrypt._runtime._PROVIDER.authority.root == root
         with pytest.raises(RuntimeError), acquire_exclusive(root):
             pass
     finally:
-        if dbcrypt._PROVIDER is not None:
-            dbcrypt._PROVIDER.close()
+        if dbcrypt._runtime._PROVIDER is not None:
+            dbcrypt._runtime._PROVIDER.close()
 
 
 def test_changed_installed_ceremony_entrypoint_refuses_before_execution(tmp_path, monkeypatch):
@@ -239,7 +239,7 @@ def test_installed_memory_ceremony_enrolls_fresh_home_without_runtime_lease(tmp_
     root.mkdir(mode=0o700)
     backend = FakeBackend()
     monkeypatch.setenv("HERMES_HOME", str(root))
-    for module in (dbcrypt, _database_locking_posix, _database_authority, encryption_cli, memory_cli):
+    for module in (dbcrypt._runtime, _database_locking_posix, _database_authority, encryption_cli, memory_cli):
         monkeypatch.setattr(module, "sys", SimpleNamespace(platform="linux"))
     monkeypatch.setattr(encryption_cli._windows_gates, "host_platform", lambda: "linux")
     monkeypatch.setattr(_memory_key, "linux_memory_backend", lambda home: backend)

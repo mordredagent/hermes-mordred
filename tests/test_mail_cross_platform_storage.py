@@ -587,7 +587,7 @@ def test_mail_mbox_imap_dedup_search_restart(protected_runtime, monkeypatch):
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
     provider.close()
     restarted = KeyProvider(home=home)
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", restarted)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", restarted)
     try:
         restarted_store = open_import_store(home)
         restarted_search_ids = [hit.source_uid for hit in restarted_store.search("日本語")]

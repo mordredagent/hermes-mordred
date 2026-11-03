@@ -35,6 +35,7 @@ def db(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(_seams, "sqlcipher_available", lambda: True)
     monkeypatch.setattr(_migrate, "migrate", forbidden)
     monkeypatch.setattr(dbcrypt, "arm", forbidden)
+    monkeypatch.setattr(dbcrypt._runtime, "arm", forbidden)
     monkeypatch.setattr("mordred_hermes.dbcrypt._key.KeyProvider", forbidden)
     monkeypatch.setattr(_migrate, "schedule", schedule)
     return SimpleNamespace(desktop=desktop, home=desktop.home, scheduled=scheduled)

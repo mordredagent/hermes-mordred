@@ -149,7 +149,7 @@ def test_enabling_an_empty_home_waits_for_existing_runtimes(tmp_path: Path, monk
     pytest.importorskip("sqlcipher3")
     from mordred_hermes.wizard import databases_cli
 
-    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(dbcrypt._runtime, "sys", policy_sys("darwin"))
     monkeypatch.setattr(sys, "argv", ["hermes"])
     assert dbcrypt.install(home=tmp_path) is False
     key = _key.derive(bytes(range(32)))
@@ -209,7 +209,7 @@ def test_maintenance_startup_does_not_execute_pending_conversions(
     pytest.importorskip("sqlcipher3")
     path = _database(tmp_path)
     before = path.read_bytes()
-    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(dbcrypt._runtime, "sys", policy_sys("darwin"))
     monkeypatch.setattr(sys, "argv", argv)
     monkeypatch.setitem(sys.modules, "sqlite3", sqlite3)
     monkeypatch.setitem(sys.modules, "sqlite3.dbapi2", sqlite3.dbapi2)
@@ -230,7 +230,7 @@ def test_maintenance_startup_does_not_execute_pending_conversions(
 )
 def test_agent_arguments_do_not_bypass_database_protection(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> None:
     monkeypatch.setattr(sys, "argv", argv)
-    assert dbcrypt._maintenance_process() is False
+    assert dbcrypt._runtime._maintenance_process() is False
 
 
 def test_legacy_policy_fixture_preserves_linux_acl_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -247,7 +247,7 @@ def test_legacy_policy_fixture_preserves_linux_acl_dispatch(tmp_path: Path, monk
 
     host = SimpleNamespace(**{**vars(sys), "platform": "linux"})
     monkeypatch.setattr(sys.modules[__name__], "sys", host)
-    monkeypatch.setattr(dbcrypt, "sys", host)
+    monkeypatch.setattr(dbcrypt._runtime, "sys", host)
     monkeypatch.setattr(_cli, "sys", host)
     monkeypatch.setattr(_posix, "sys", host)
 

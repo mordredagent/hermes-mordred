@@ -203,7 +203,7 @@ def test_a_scheduled_conversion_runs_at_startup_then_the_shim_is_installed(
 ) -> None:
     monkeypatch.setitem(sys.modules, "sqlite3", stdlib_sqlite3)
     monkeypatch.setitem(sys.modules, "sqlite3.dbapi2", sys.modules.get("sqlite3.dbapi2", stdlib_sqlite3))
-    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(dbcrypt._runtime, "sys", policy_sys("darwin"))
     monkeypatch.setattr(_migrate, "holders", _no_holders)
     _migrate.schedule(home)
     provider = _key.KeyProvider(environ={"HERMES_MEMORY_KEY": "hex:" + bytes(range(32)).hex()}, inject=lambda: 0)
@@ -218,7 +218,7 @@ def test_a_scheduled_conversion_runs_at_startup_then_the_shim_is_installed(
 
 def test_without_a_key_the_scheduled_conversion_waits(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "sqlite3", stdlib_sqlite3)
-    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(dbcrypt._runtime, "sys", policy_sys("darwin"))
     _migrate.schedule(home)
     provider = _key.KeyProvider(environ={}, inject=lambda: 0)
 
@@ -265,7 +265,7 @@ def test_a_scheduled_decryption_runs_at_startup_and_leaves_sqlite3_alone(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setitem(sys.modules, "sqlite3", stdlib_sqlite3)
-    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(dbcrypt._runtime, "sys", policy_sys("darwin"))
     monkeypatch.setattr(_migrate, "holders", _no_holders)
     _migrate.migrate(home, KEY, arm=dbcrypt.arm, holders_of=_no_holders)
     _migrate.schedule_decrypt(home)
@@ -313,7 +313,7 @@ def test_encrypt_with_another_key_does_not_claim_everything_is_encrypted(
     monkeypatch.setattr(_migrate, "holders", _no_holders)
     _migrate.migrate(home, KEY, arm=dbcrypt.arm, holders_of=_no_holders)
     wrong = _key.derive(bytes(32))
-    monkeypatch.setattr(dbcrypt, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(dbcrypt._runtime, "sys", policy_sys("darwin"))
     (home / "mordred/memory-vault.marker").write_bytes(b"memory-encryption enabled\n")
     (home / "mordred/memory-vault.marker").chmod(0o600)
     # Offline maintenance authenticates under EX; it never calls KeyProvider.

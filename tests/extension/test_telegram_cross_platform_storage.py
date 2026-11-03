@@ -74,7 +74,7 @@ def test_telegram_import_search_forget_restart(protected_archive, monkeypatch, r
     provider.close()
     provider = KeyProvider(home=home)
     request.addfinalizer(provider.close)
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", provider)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", provider)
     repeated_import_count = migrate.migrate_telegram_store(archive._root / "index.enc", home=home)
     assert repeated_import_count == 0
     restarted = import_store_module.open_import_store(home)

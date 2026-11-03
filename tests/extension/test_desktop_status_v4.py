@@ -210,7 +210,7 @@ def test_status_never_unlocks_or_treats_environment_keys_as_authority(
     def forbidden(*args: Any, **kwargs: Any) -> Any:
         pytest.fail("the status path must not call anything that could unlock or prompt")
 
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", forbidden)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", forbidden)
     monkeypatch.setattr("mordred_hermes.dbcrypt._key.KeyProvider", forbidden)
     monkeypatch.setattr("mordred_hermes.dbcrypt._key._inject_vault_env", forbidden)
     monkeypatch.setattr("mordred_hermes.activity._gate.check_protection", forbidden)
@@ -267,6 +267,8 @@ def test_a_failing_shared_observation_is_a_code_not_a_500(desktop: Any, monkeypa
         raise PermissionError(str(desktop.home))
 
     monkeypatch.setattr("mordred_hermes.dbcrypt.database_status", boom)
+
+    monkeypatch.setattr("mordred_hermes.dbcrypt._runtime.database_status", boom)
     databases = desktop.get("/status?client_version=4")["databases"]
     assert databases["code"] == "databases_failed"
 

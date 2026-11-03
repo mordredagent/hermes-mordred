@@ -47,7 +47,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _protected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_shim, "is_installed", lambda: True)
     monkeypatch.setattr(_hooks, "_key_available", lambda: True)
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", _key.KeyProvider(environ={}))
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", _key.KeyProvider(environ={}))
     _hooks.evaluate("test_protected")
 
 

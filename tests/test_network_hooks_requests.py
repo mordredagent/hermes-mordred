@@ -273,7 +273,7 @@ class TestPreApiRequestTransportGate:
         policy = _write_policy(tmp_path, "strict", disable_ipv6=True)
         protected_path = "tor" if config_change == "disable_ipv6" else "vpn"
         config = _write_config(tmp_path, protected_path)
-        initial_config = network._load_runtime_config(
+        initial_config = network._registration._load_runtime_config(
             policy_json_path=policy,
             config_path=config,
         )
@@ -282,7 +282,7 @@ class TestPreApiRequestTransportGate:
         rt._ready = True
         rt.process_route_frozen = True
         rt.frozen_requested_path = protected_path
-        rt.frozen_route_config = network.route_config_fingerprint(initial_config)
+        rt.frozen_route_config = network._registration.route_config_fingerprint(initial_config)
         api.set_runtime(rt)
 
         if config_change == "disable_ipv6":
@@ -319,7 +319,7 @@ class TestPreApiRequestTransportGate:
 
         policy = _write_policy(tmp_path, "lenient")
         config = _write_config(tmp_path, "vpn")
-        initial_config = network._load_runtime_config(
+        initial_config = network._registration._load_runtime_config(
             policy_json_path=policy,
             config_path=config,
         )
@@ -328,7 +328,7 @@ class TestPreApiRequestTransportGate:
         rt._ready = True
         rt.process_route_frozen = True
         rt.frozen_requested_path = "vpn"
-        rt.frozen_route_config = network.route_config_fingerprint(initial_config)
+        rt.frozen_route_config = network._registration.route_config_fingerprint(initial_config)
         api.set_runtime(rt)
         _write_policy(tmp_path, "strict")
 
@@ -595,12 +595,12 @@ class TestPreToolCall:
 
         policy = _write_policy(tmp_path, "strict")
         config = _write_config(tmp_path, protected_path)
-        current_config = network._load_runtime_config(
+        current_config = network._registration._load_runtime_config(
             policy_json_path=policy,
             config_path=config,
         )
         rt = _FakeRuntime()
-        rt.activation_config_fingerprint = network.route_config_fingerprint(current_config)
+        rt.activation_config_fingerprint = network._registration.route_config_fingerprint(current_config)
         rt.activate_and_freeze(protected_path)
         api.set_runtime(rt)
 
@@ -615,7 +615,7 @@ class TestPreToolCall:
 
         policy = _write_policy(tmp_path, "strict")
         config = _write_config(tmp_path, "tor")
-        current_config = network._load_runtime_config(
+        current_config = network._registration._load_runtime_config(
             policy_json_path=policy,
             config_path=config,
         )
@@ -627,7 +627,7 @@ class TestPreToolCall:
                 self._active_path = "clearnet"
 
         rt = _StoppingRuntime()
-        rt.activation_config_fingerprint = network.route_config_fingerprint(current_config)
+        rt.activation_config_fingerprint = network._registration.route_config_fingerprint(current_config)
         rt.activate_and_freeze("tor")
         api.set_runtime(rt)
         api.stop()
@@ -643,12 +643,12 @@ class TestPreToolCall:
 
         policy = _write_policy(tmp_path, "lenient")
         config = _write_config(tmp_path, "vpn")
-        initial_config = network._load_runtime_config(
+        initial_config = network._registration._load_runtime_config(
             policy_json_path=policy,
             config_path=config,
         )
         rt = _FakeRuntime()
-        rt.activation_config_fingerprint = network.route_config_fingerprint(initial_config)
+        rt.activation_config_fingerprint = network._registration.route_config_fingerprint(initial_config)
         rt.activate_and_freeze("vpn")
         api.set_runtime(rt)
         _write_policy(tmp_path, "strict")

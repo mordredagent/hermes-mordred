@@ -258,7 +258,7 @@ def _reuse_frozen_route(
     """Validate the activation fingerprint and reuse the process route."""
     try:
         # Compare every activation input before mutating the runtime's policy.
-        from . import _load_runtime_config
+        from ._registration import _load_runtime_config
 
         current_config = _load_runtime_config(
             policy_json_path=policy_json_path,
@@ -457,7 +457,7 @@ def pre_api_request(
             else cast(ActivePath, _read_default_network_path_strict(config_path))
         )
         stage = "activation_config"
-        from . import _load_runtime_config
+        from ._registration import _load_runtime_config
 
         current_config = _load_runtime_config(
             policy_json_path=policy_json_path,
@@ -561,7 +561,7 @@ def pre_tool_call(
             else cast(ActivePath, _read_default_network_path_strict(config_path))
         )
         stage = "activation_config"
-        from . import _load_runtime_config
+        from ._registration import _load_runtime_config
 
         current_config = _load_runtime_config(
             policy_json_path=policy_json_path,

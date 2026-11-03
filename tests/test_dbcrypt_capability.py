@@ -221,7 +221,7 @@ def test_prompt_status_never_runs_monitor_or_acquires_key(tmp_path, monkeypatch)
     (tmp_path / "mordred").mkdir()
     (tmp_path / "mordred/db-encryption.marker").write_bytes(b"1\n")
     monkeypatch.setattr(_hooks, "_home", lambda: tmp_path)
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", None)
     monkeypatch.setattr(_hooks, "_findings", lambda: pytest.fail("status opened SQL or acquired key"))
     text = _hooks.status_line()
     assert "encrypted at rest" not in text
@@ -240,7 +240,7 @@ def test_native_prompt_does_not_revoke_registered_sql_on_changed_metadata(native
     root, backend, _, _ = native_root
     provider = _key.KeyProvider(home=root)
     authority = provider.authority
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", provider)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", provider)
     monkeypatch.setattr(_hooks, "_home", lambda: root)
     monkeypatch.setattr(_hooks, "_observation", None)
     _hooks.evaluate("test_runtime")
@@ -361,7 +361,7 @@ def test_pending_prompt_is_passive_and_requires_explicit_maintenance(tmp_path, m
     monkeypatch.setattr(_windows_vfs, "packaged_library_path", lambda: tmp_path / "owned.dll")
     monkeypatch.setattr(capability(), "_driver_present", lambda: True)
     monkeypatch.setattr(_hooks, "_home", lambda: tmp_path)
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", None)
 
     def forbidden(*args, **kwargs):
         pytest.fail("passive pending status performed native, SQL, discovery, or conversion work")
@@ -394,25 +394,25 @@ def test_automatic_native_startup_installs_real_guarded_shim(native_root, monkey
     from mordred_hermes.dbcrypt import _shim, _windows_vfs
 
     root, backend, _, _ = native_root
-    monkeypatch.setattr(dbcrypt, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(dbcrypt._runtime, "sys", SimpleNamespace(platform=platform))
     monkeypatch.setattr(capability(), "sys", SimpleNamespace(platform=platform))
     # Platform-specific distribution metadata only; real Authority/lease/shim remain.
     monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: True)
     monkeypatch.setattr(_windows_vfs, "driver_distribution_qualified", lambda: True)
     monkeypatch.setattr(_windows_vfs, "packaged_library_path", lambda: root / "owned.dll")
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", None)
     monkeypatch.setitem(sys.modules, "sqlite3", __import__("sqlite3"))
     monkeypatch.setitem(sys.modules, "sqlite3.dbapi2", sys.modules.get("sqlite3.dbapi2"))
     before = (root / "mordred/db-key-source.json").read_bytes()
     try:
         _runtime_bootstrap._install_database_encryption()
         assert _shim.is_installed()
-        assert dbcrypt._PROVIDER.authority.root == root
+        assert dbcrypt._runtime._PROVIDER.authority.root == root
         assert sum(op == "ecdh" for op, _ in backend.calls) == 1
         assert (root / "mordred/db-key-source.json").read_bytes() == before
     finally:
-        if dbcrypt._PROVIDER is not None:
-            dbcrypt._PROVIDER.close()
+        if dbcrypt._runtime._PROVIDER is not None:
+            dbcrypt._runtime._PROVIDER.close()
 
 
 @pytest.mark.parametrize("platform", ["linux", "win32"])
@@ -461,7 +461,7 @@ def test_automatic_windows_startup_refuses_unavailable_prerequisite_before_custo
     from mordred_hermes.dbcrypt import _windows_vfs
 
     root, backend, _, _ = native_root
-    monkeypatch.setattr(dbcrypt, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(dbcrypt._runtime, "sys", SimpleNamespace(platform="win32"))
     monkeypatch.setattr(capability(), "sys", SimpleNamespace(platform="win32"))
     monkeypatch.setattr(_windows_vfs, "NATIVE_QUALIFIED", failure != "qualification")
     monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: True)
@@ -469,7 +469,7 @@ def test_automatic_windows_startup_refuses_unavailable_prerequisite_before_custo
     monkeypatch.setattr(
         _windows_vfs, "packaged_library_path", lambda: None if failure == "asset" else root / "owned.dll"
     )
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", None)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", None)
     monkeypatch.setitem(sys.modules, "sqlite3", __import__("sqlite3"))
     monkeypatch.setitem(sys.modules, "sqlite3.dbapi2", sys.modules.get("sqlite3.dbapi2"))
     try:
@@ -477,5 +477,5 @@ def test_automatic_windows_startup_refuses_unavailable_prerequisite_before_custo
             _runtime_bootstrap._install_database_encryption()
         assert backend.calls == []
     finally:
-        if dbcrypt._PROVIDER is not None:
-            dbcrypt._PROVIDER.close()
+        if dbcrypt._runtime._PROVIDER is not None:
+            dbcrypt._runtime._PROVIDER.close()

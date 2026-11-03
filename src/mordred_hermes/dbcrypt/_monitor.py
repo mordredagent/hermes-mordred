@@ -37,8 +37,9 @@ if TYPE_CHECKING:
     from ._authority import Authority
 from urllib.parse import quote
 
-from . import _migrate, _shim, armed, protected_state_present
+from . import _migrate, _shim
 from ._policy import in_scope, looks_like_database_name
+from ._runtime import armed, protected_state_present
 
 #: Findings that mean the databases are not protected.
 VIOLATIONS: Final = frozenset(

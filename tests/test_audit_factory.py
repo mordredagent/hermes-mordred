@@ -302,8 +302,8 @@ def _clear_shared_writer_references() -> None:
     from mordred_hermes.keyvault import extension_sign
     from mordred_hermes.privacy_check import _runtime
 
-    network._build_audit_writer.cache_clear()
-    llm_guard._build_audit_writer.cache_clear()
+    network._registration._build_audit_writer.cache_clear()
+    llm_guard._registration._build_audit_writer.cache_clear()
     extension_sign._audit_writer.cache_clear()
     _runtime.reset_state_for_tests()
     _audit_support._reset_audit_writer_registry_for_tests()
@@ -441,8 +441,8 @@ def test_all_plugin_factories_share_one_decryptable_mral_writer(
     monkeypatch.setattr(_identity, "resolve_backend", lambda _candidate: backend)
     monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: home)
 
-    network_writer = network._build_audit_writer(alias_path)
-    llm_writer = llm_guard._build_audit_writer(log_path)
+    network_writer = network._registration._build_audit_writer(alias_path)
+    llm_writer = llm_guard._registration._build_audit_writer(log_path)
     privacy_writer = _runtime.ensure_state(
         config_path=home / "config.yaml",
         audit_path=log_path,
@@ -455,8 +455,8 @@ def test_all_plugin_factories_share_one_decryptable_mral_writer(
 
     # A local memoizer reset must only drop that module's reference. The
     # process registry remains authoritative while other plugins are active.
-    network._build_audit_writer.cache_clear()
-    assert network._build_audit_writer(log_path) is network_writer
+    network._registration._build_audit_writer.cache_clear()
+    assert network._registration._build_audit_writer(log_path) is network_writer
 
     # Likewise, policy reload must retain the same active DEK rather than
     # constructing a writer that rotates the file out from under sibling hooks.
