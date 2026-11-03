@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.keyvault._database_mutation import database_key_mutation
 from mordred_hermes.wizard import _vault_entries, _vault_lifecycle, uninstall_cli, vault_memory_key
 from mordred_hermes.wizard._flow_session import FlowSession

@@ -128,7 +128,7 @@ assert ec2_stop_calls == [owned_instance_id]
 
 ## Task 2: Freeze shared bindings, lease ordering, and dependency inventory (P2)
 
-**Files:** Create `src/mordred_hermes/_database_contracts.py`, `_database_inventory.py`, `_database_lifecycle.py`, `_database_locking_posix.py`, `_database_locking_windows.py`,
+**Files:** Create `src/mordred_hermes/_core/_database_contracts.py`, `_database_inventory.py`, `_database_lifecycle.py`, `_database_locking_posix.py`, `_database_locking_windows.py`,
 `tests/test_dbcrypt_contracts.py`, `tests/test_dbcrypt_inventory.py`, `tests/test_dbcrypt_locking.py`; modify `dbcrypt/_locking.py` without activating Linux/Windows database use.
 
 **Interfaces:** Frozen dataclasses in top-level `_database_contracts.py`: `RootIdentity(platform: Literal['darwin','linux','win32'], volume: int, file_id: str, owner: str)`; `NativeSnapshot(root:

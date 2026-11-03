@@ -558,8 +558,8 @@ def error_code(exc: BaseException) -> str:
 def audit_event(decision: str, counts: Mapping[str, int], *, mode: str, error: str | None = None) -> None:
     """One best-effort ``telegram.migrate_store`` entry through the shared audit writer (counts and codes only)."""
     try:
-        from ..._audit_support import build_audit_writer, safe_audit_append
-        from ..._home import hermes_home
+        from ..._core._audit_support import build_audit_writer, safe_audit_append
+        from ..._core._home import hermes_home
 
         entry: dict[str, Any] = {"event": AUDIT_EVENT, "decision": decision, "reason": None, "mode": mode, **counts}
         if error is not None:

@@ -30,13 +30,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
-from .._database_contracts import DatabaseRefused
+from .._core._database_contracts import DatabaseRefused
 from . import _schema
 from ._gate import ActivityRefused, Refusal, refusal
 from .contracts import COVERAGE_RANK, NormalizedEvent, canonical_digest
 
 if TYPE_CHECKING:
-    from .._database_lifecycle import ExclusiveLease
+    from .._core._database_lifecycle import ExclusiveLease
     from ..dbcrypt._authority import Authority
     from ..dbcrypt._maintenance import MaintenanceConnection
 

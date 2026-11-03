@@ -62,7 +62,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
-from .. import _term
+from .._core import _term
 
 if TYPE_CHECKING:
     from ..imports.mail.forget import Forgotten
@@ -98,7 +98,7 @@ class _Refused(Exception):
 
 
 def _home() -> Path:
-    from .._home import hermes_home
+    from .._core._home import hermes_home
 
     return hermes_home()
 
@@ -154,7 +154,7 @@ def _lock(home: Path) -> contextlib.AbstractContextManager[None]:
 
 def _audit(entry: Mapping[str, Any]) -> None:
     try:
-        from .._audit_support import build_audit_writer, safe_audit_append
+        from .._core._audit_support import build_audit_writer, safe_audit_append
 
         writer = build_audit_writer(_home() / "mordred" / "audit.log")
         safe_audit_append(writer, entry, logger=_LOG)

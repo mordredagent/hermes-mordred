@@ -180,7 +180,7 @@ def _runtime_reason() -> str | None:
 
 
 def _role_reason(session: WindowsCustodySession, role: Role) -> str:
-    from .._config_io import PolicyPendingError
+    from .._core._config_io import PolicyPendingError
 
     try:
         status = session.role_status(role)
@@ -197,7 +197,7 @@ def _role_reason(session: WindowsCustodySession, role: Role) -> str:
 
 
 def _custody_reasons(home: Path) -> dict[Role, str]:
-    from .._config_io import CanonicalPaths, PolicyPendingError, canonical_session
+    from .._core._config_io import CanonicalPaths, PolicyPendingError, canonical_session
     from ._windows_custody import windows_custody_session
 
     try:
@@ -254,7 +254,7 @@ def excluded_artifacts(home: Path) -> tuple[ExcludedArtifactReport, ...]:
     other inspection failure propagates and is never treated as empty.
     """
     _require_windows("excluded_artifacts")
-    from .._config_io import CanonicalPaths, canonical_session
+    from .._core._config_io import CanonicalPaths, canonical_session
 
     with canonical_session(CanonicalPaths(home), scope="policy", blocking=False) as canonical:
         if canonical.home_directory_identity() is None:

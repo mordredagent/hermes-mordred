@@ -56,7 +56,7 @@ _ROOTS: dict[str, _RootRegistration] = {}
 
 def checked_path_identity(path: Path, *, directory: bool) -> tuple[int, int, int, int]:
     """Read native identity/security metadata, never DB bytes or POSIX modes."""
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from .._private_fs import PrivateFSError
     from .._private_fs._windows_io import open_private_directory
     from .._private_fs._windows_security import current_user_sid

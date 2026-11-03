@@ -273,7 +273,7 @@ class TestSharedBuildAuditWriter:
 
     def test_delegates_to_make_audit_writer_with_log_bound_home(self, monkeypatch, tmp_path: Path) -> None:
         import mordred_hermes.privacy_check.audit as pc_audit
-        from mordred_hermes import _audit_support
+        from mordred_hermes._core import _audit_support
 
         seen: list[tuple[Path, Path]] = []
         sentinel = object()
@@ -298,7 +298,7 @@ def _clear_shared_writer_references() -> None:
     """Drop plugin-local references before resetting the owning registry."""
     import mordred_hermes.llm_guard as llm_guard
     import mordred_hermes.network as network
-    from mordred_hermes import _audit_support
+    from mordred_hermes._core import _audit_support
     from mordred_hermes.keyvault import extension_sign
     from mordred_hermes.privacy_check import _runtime
 
@@ -322,7 +322,7 @@ def test_shared_builder_normalizes_plaintext_writer_paths(
     clean_shared_writer_registry: None,
 ) -> None:
     """An uninitialized keyvault also gets one writer per physical path."""
-    from mordred_hermes import _audit_support
+    from mordred_hermes._core import _audit_support
 
     home = tmp_path / "home"
     log_path = home / "mordred" / "audit.log"
@@ -346,7 +346,7 @@ def test_shared_builder_preserves_final_symlink_for_writer_refusal(
     clean_shared_writer_registry: None,
 ) -> None:
     """Registry normalization must not resolve ``audit.log`` to its victim."""
-    from mordred_hermes import _audit_support
+    from mordred_hermes._core import _audit_support
 
     home = tmp_path / "home"
     mordred_dir = home / "mordred"
@@ -371,7 +371,7 @@ def test_shared_builder_rejects_conflicting_keyvault_homes(
     clean_shared_writer_registry: None,
 ) -> None:
     """One log path cannot silently inherit whichever keyvault home won first."""
-    from mordred_hermes import _audit_support
+    from mordred_hermes._core import _audit_support
 
     log_path = tmp_path / "audit" / "audit.log"
     first_home = tmp_path / "home-a"
@@ -390,7 +390,7 @@ def test_plaintext_writer_warns_when_in_process_keyvault_init_requires_restart(
     clean_shared_writer_registry: None,
 ) -> None:
     """Live references stay safe, but the plaintext lifetime is never silent."""
-    from mordred_hermes import _audit_support
+    from mordred_hermes._core import _audit_support
     from mordred_hermes.privacy_check import _keyvault_probe
 
     home = tmp_path / "home"

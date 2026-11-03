@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Protocol, cast
 
-from ..._policy_types import PolicyMode
+from ..._core._policy_types import PolicyMode
 from .._exceptions import BringupFailed
 from . import _tor_windows
 

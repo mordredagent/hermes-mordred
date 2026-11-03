@@ -50,7 +50,7 @@ import threading
 from collections.abc import Callable
 from typing import Any, Final
 
-from ._plugin_identity import PLUGIN_NAME
+from ._core._plugin_identity import PLUGIN_NAME
 
 __all__ = [
     "COMPONENTS",

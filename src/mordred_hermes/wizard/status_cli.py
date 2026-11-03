@@ -36,8 +36,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..__about__ import __version__
-from .._home import hermes_home as _hermes_home
-from .._policy_io import (
+from .._core._home import hermes_home as _hermes_home
+from .._core._policy_io import (
     policy_transaction_marker_for_config,
     policy_transaction_warning,
 )
@@ -223,7 +223,7 @@ def _audit_log_is_mral_encrypted(audit_path: Path) -> bool:
     encrypted" — this reads at most a few KB, never the whole file, and
     never raises into ``status``'s never-raise contract.
     """
-    from .._audit_io import read_first_line
+    from .._core._audit_io import read_first_line
     from ..keyvault.log_encryption import MAGIC
 
     try:

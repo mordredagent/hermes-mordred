@@ -16,9 +16,9 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from .._custody_order import custody_scope
-from .._database_contracts import DatabaseBusy, DatabaseRefused
-from .._database_lifecycle import ExclusiveLease
+from .._core._custody_order import custody_scope
+from .._core._database_contracts import DatabaseBusy, DatabaseRefused
+from .._core._database_lifecycle import ExclusiveLease
 from . import _storage, wrap
 from ._exceptions import WrapError, WrapKeyNotFound
 from ._native_deletion import (

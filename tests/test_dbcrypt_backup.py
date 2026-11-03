@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused
-from mordred_hermes._database_inventory import assert_mutation_safe, scan_dependencies
-from mordred_hermes._database_lifecycle import acquire_exclusive
+from mordred_hermes._core._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_inventory import assert_mutation_safe, scan_dependencies
+from mordred_hermes._core._database_lifecycle import acquire_exclusive
 from mordred_hermes.dbcrypt._authority import Authority
 from tests.test_dbcrypt_adoption import cipher
 from tests.test_dbcrypt_authority import native_root as native_root
@@ -416,7 +416,7 @@ os.environ['HERMES_HOME'] = str(base)
 from mordred_hermes.keyvault import kek
 kek._noop_audit = lambda entry: None
 from pytest import MonkeyPatch
-from mordred_hermes._database_lifecycle import acquire_exclusive
+from mordred_hermes._core._database_lifecycle import acquire_exclusive
 from mordred_hermes.dbcrypt import _backup, _migrate
 from mordred_hermes.dbcrypt._authority import Authority
 from mordred_hermes.keyvault import _memory_key as memory

@@ -44,8 +44,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .. import _term
-from .._home import hermes_home
+from .._core import _term
+from .._core._home import hermes_home
 from ._identity import default_vault_root, resolve_backend_store, vault_identity
 from ._plaintext_capture import (
     capture_plaintext,

@@ -11,7 +11,7 @@ import weakref
 import pytest
 import sqlcipher3.dbapi2 as sc
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.dbcrypt._authority import Authority
 from mordred_hermes.dbcrypt._key import derive
 from mordred_hermes.dbcrypt._shim import apply_key
@@ -374,7 +374,7 @@ def test_owner_release_forgets_and_closes_its_vfs_when_raw_close_fails(authority
 
 
 def test_abandoned_uncommitted_write_is_rolled_back_before_lease_release(native_root, authority):
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
 
     root, _, material, _ = native_root
     path = root / "state.db"
@@ -677,7 +677,7 @@ def test_fork_normal_shutdown_cannot_finalize_inherited_handles(native_root):
     code = """import gc, os, sys
 from pathlib import Path
 from types import SimpleNamespace
-from mordred_hermes import _database_locking_posix as locks
+from mordred_hermes._core import _database_locking_posix as locks
 from mordred_hermes.keyvault import _database_authority as custody
 from mordred_hermes.dbcrypt import _authority
 from mordred_hermes.dbcrypt._connection import open_protected
@@ -722,7 +722,7 @@ def test_fork_quarantines_abandoned_handle_pending_release(native_root):
     code = """import gc, os, sys
 from pathlib import Path
 from types import SimpleNamespace
-from mordred_hermes import _database_locking_posix as locks
+from mordred_hermes._core import _database_locking_posix as locks
 from mordred_hermes.keyvault import _database_authority as custody
 from mordred_hermes.dbcrypt import _authority
 from mordred_hermes.dbcrypt._connection import _ABANDONED, _LIVE_CONNECTIONS, _LIVE_CURSORS, open_protected
@@ -804,8 +804,8 @@ def test_native_monitor_internal_error_revokes(native_root, authority, monkeypat
 
 
 def test_reentrant_revocation_retains_lease_until_rollback(native_root, authority):
-    from mordred_hermes._database_contracts import DatabaseBusy
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_contracts import DatabaseBusy
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
 
     root = native_root[0]
     conn = opener()(root / "state.db", authority=authority)
@@ -879,8 +879,8 @@ def test_writer_commits_while_another_connection_busy_waits(native_root, authori
 def test_cross_thread_revocation_defers_lease_for_in_flight_operation(native_root, authority):
     import threading
 
-    from mordred_hermes._database_contracts import DatabaseBusy
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_contracts import DatabaseBusy
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
 
     root = native_root[0]
     x = opener()(root / "state.db", authority=authority)
@@ -1001,7 +1001,7 @@ def test_only_exact_guarded_factory_is_admitted(native_root, authority):
 @pytest.mark.parametrize("binding", ["cross-root", "root-to-profile", "profile-to-root"])
 def test_first_install_refuses_provider_from_another_home(native_root, monkeypatch, binding):
     from mordred_hermes import dbcrypt
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes.dbcrypt import _shim
     from mordred_hermes.dbcrypt._key import KeyProvider
     from mordred_hermes.keyvault import _database_authority as custody
@@ -1112,7 +1112,7 @@ def test_closed_connection_retained_cursor_allows_normal_child_exit(native_root,
     code = """import gc, os, sys
 from pathlib import Path
 from types import SimpleNamespace
-from mordred_hermes import _database_locking_posix as locks
+from mordred_hermes._core import _database_locking_posix as locks
 from mordred_hermes.keyvault import _database_authority as custody
 from mordred_hermes.dbcrypt import _authority
 from mordred_hermes.dbcrypt._connection import open_protected

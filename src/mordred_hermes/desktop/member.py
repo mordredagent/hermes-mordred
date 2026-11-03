@@ -506,7 +506,7 @@ def ensure_member(
     # rewrite. The lock lives outside the member folder, which pm hashes.
     lock_dir = plugin_dir.parent.parent / "mordred"
     lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    from .._file_lock import private_flock
+    from .._core._file_lock import private_flock
 
     def unsafe(path: Path) -> NoReturn:
         raise OSError(f"refusing unsafe lock file {path}")

@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from mordred_hermes._database_contracts import DatabaseBusy
-from mordred_hermes._database_lifecycle import acquire_exclusive, acquire_runtime
+from mordred_hermes._core._database_contracts import DatabaseBusy
+from mordred_hermes._core._database_lifecycle import acquire_exclusive, acquire_runtime
 from mordred_hermes.keyvault import _memory_key as mk
 from mordred_hermes.keyvault import _runtime_probe
 from mordred_hermes.keyvault._memory_hook import memory_marker_path

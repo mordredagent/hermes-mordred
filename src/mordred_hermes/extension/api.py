@@ -894,7 +894,7 @@ class _Connection:
             await _reply(False, error="bad_token_format")
             return
         try:
-            from .._home import hermes_home
+            from .._core._home import hermes_home
 
             env_path = hermes_home() / ".env"
             updated = await asyncio.get_event_loop().run_in_executor(
@@ -1362,27 +1362,27 @@ def _hermes_version() -> str:
 
 def _dotenv_assignment(raw_line: str) -> tuple[str, bool, str] | None:
     """Return ``(name, exported, value)`` for one simple dotenv assignment."""
-    from .._dotenv_text import parse_assignment
+    from .._core._dotenv_text import parse_assignment
 
     return parse_assignment(raw_line)
 
 
 def _dotenv_has_nonempty_key(existing: str, keys: set[str]) -> bool:
     """Whether dotenv text contains one of *keys* with a non-empty value."""
-    from .._dotenv_text import has_nonempty_key
+    from .._core._dotenv_text import has_nonempty_key
 
     return has_nonempty_key(existing, keys)
 
 
 def _updated_env_text(existing: str, updates: dict[str, str]) -> str:
     """Return dotenv text with ``updates`` merged, preserving other lines."""
-    from .._dotenv_text import merge_assignments
+    from .._core._dotenv_text import merge_assignments
 
     return merge_assignments(existing, updates, mode="extension")
 
 
 def _validate_env_updates(updates: dict[str, str]) -> None:
-    from .._dotenv_text import contains_newline
+    from .._core._dotenv_text import contains_newline
 
     for key, val in updates.items():
         if contains_newline(key) or contains_newline(val):
@@ -1401,7 +1401,7 @@ def _upsert_env_vars(env_path: Path, updates: dict[str, str]) -> None:
     Slack and wizard updates cannot both read the same old file and lose one
     another's unrelated entries.
     """
-    from .._dotenv_io import update_dotenv_file
+    from .._core._dotenv_io import update_dotenv_file
 
     _validate_env_updates(updates)
     update_dotenv_file(env_path, lambda existing: _updated_env_text(existing, updates))
@@ -1413,7 +1413,7 @@ class _SlackAlreadyConfigured(Exception):
 
 def _update_slack_env(env_path: Path, updates: dict[str, str], overwrite: bool) -> bool:
     """Check-and-upsert Slack credentials in one locked dotenv transaction."""
-    from .._dotenv_io import update_dotenv_file
+    from .._core._dotenv_io import update_dotenv_file
 
     _validate_env_updates(updates)
 

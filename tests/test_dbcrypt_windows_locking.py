@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseBusy, DatabaseRefused, RootIdentity
+from mordred_hermes._core._database_contracts import DatabaseBusy, DatabaseRefused, RootIdentity
 from mordred_hermes._private_fs import _windows_api
 from mordred_hermes._private_fs._types import FileIdentity
 from mordred_hermes._private_fs._windows_security import SYSTEM, Ace
@@ -26,7 +26,7 @@ def api(monkeypatch: pytest.MonkeyPatch) -> WindowsAPI:
 
 
 def adapter():
-    name = "mordred_hermes._database_locking_windows"
+    name = "mordred_hermes._core._database_locking_windows"
     assert importlib.util.find_spec(name) is not None, "checked Windows lease adapter is missing"
     return importlib.import_module(name)
 

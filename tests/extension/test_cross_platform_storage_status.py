@@ -168,7 +168,7 @@ def test_activity_mail_tools_refuse_lost_authority(
     import json
     from types import SimpleNamespace
 
-    from mordred_hermes._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_contracts import DatabaseRefused
     from mordred_hermes.activity import _history_access, tools
     from mordred_hermes.activity._gate import open_store
     from mordred_hermes.desktop import api

@@ -14,7 +14,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.extension.telegram import tee
 from mordred_hermes.extension.telegram.secrets import TelegramSecrets
 from mordred_hermes.keyvault import _native_deletion as deletion

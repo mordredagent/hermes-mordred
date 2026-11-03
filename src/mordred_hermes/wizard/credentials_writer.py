@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from .._config_io import CONFIG_LIMIT, CanonicalPaths, canonical_session
+from .._core._config_io import CONFIG_LIMIT, CanonicalPaths, canonical_session
 from .policy_writer import _atomic_write_text, _bounded_utf8, _PrivateWriteOutcome, _windows
 
 # Same env-name shape rule as env_file_writer -- uppercase, alnum + underscore.

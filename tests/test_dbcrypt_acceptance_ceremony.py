@@ -22,7 +22,7 @@ import json, sys
 from pathlib import Path
 from types import SimpleNamespace
 from mordred_hermes import dbcrypt, _runtime_bootstrap, _pth_bootstrap
-from mordred_hermes._database_lifecycle import acquire_exclusive
+from mordred_hermes._core._database_lifecycle import acquire_exclusive
 argv, root = json.loads(sys.argv[1]), Path(sys.argv[2])
 sys.argv = argv
 dbcrypt.sys = SimpleNamespace(platform='linux')
@@ -140,7 +140,7 @@ def test_installed_database_ceremony_owns_ex_then_real_automatic_runtime(native_
     from types import SimpleNamespace
 
     from mordred_hermes import _runtime_bootstrap, dbcrypt
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes.dbcrypt import _capability, _shim
 
     root, backend, _, _ = native_root
@@ -228,8 +228,9 @@ def test_installed_memory_ceremony_enrolls_fresh_home_without_runtime_lease(tmp_
     import runpy
     from types import SimpleNamespace
 
-    from mordred_hermes import _database_locking_posix, _runtime_bootstrap, dbcrypt
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes import _runtime_bootstrap, dbcrypt
+    from mordred_hermes._core import _database_locking_posix
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes.keyvault import _database_authority, _memory_key, _runtime_probe
     from mordred_hermes.wizard import encryption_cli, memory_cli
     from tests._keyvault_fakes import FakeBackend

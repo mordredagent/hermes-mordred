@@ -46,7 +46,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
-from .._database_lifecycle import current_thread_exclusive_leases
+from .._core._database_lifecycle import current_thread_exclusive_leases
 from ..keyvault._memory_hook import _write_private, memory_marker_path, memory_optout_marker_path
 from ..keyvault._uninstall_authority import UninstallAuthorization, check_authorization
 from ..keyvault.memory_crypto import MAGIC
@@ -385,7 +385,7 @@ def _warn_pending_approvals(home: Path) -> None:
     ``memory.write_approval`` parks pending writes outside the memory files the
     hook wraps, so they are not sealed until they are applied.
     """
-    from .._yaml_io import load_yaml_mapping
+    from .._core._yaml_io import load_yaml_mapping
 
     memory = load_yaml_mapping(home / _CONFIG_NAME).get("memory")
     if isinstance(memory, dict) and memory.get("write_approval") is True:
@@ -763,7 +763,7 @@ def _purge(  # noqa: C901, PLR0912 - platform lifecycle branches retain explicit
     refuses the purge too. Returns 0 on success, 1 on that refusal or a vault
     open / re-enroll failure.
     """
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ..keyvault._database_mutation import database_key_mutation
     from ..keyvault._memory_key import MemoryKeyError, delete_linux_memory_key, memory_key_lock, memory_key_path
 
@@ -852,7 +852,7 @@ def _linux_memory_source(home: Path) -> tuple[CheckedDatabaseDomain, FileIdentit
 def _enable_linux(*, home: Path, backend: NativeBackend | None, force_runtime_unverified: bool) -> int:
     from contextlib import ExitStack
 
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ..keyvault._database_authority import resolve_database_domain
     from ..keyvault._database_mutation import database_key_mutation
     from ..keyvault._exceptions import WrapError

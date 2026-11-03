@@ -165,7 +165,7 @@ def _memory_flag_enabled(home: Path) -> bool:
     **legacy**: no runtime reads it (the marker arms the hook), and it is
     reported only so a profile carrying it is not silently ignored.
     """
-    from .._yaml_io import load_yaml_mapping
+    from .._core._yaml_io import load_yaml_mapping
 
     data = load_yaml_mapping(home / _CONFIG_NAME)
     memory = data.get("memory")

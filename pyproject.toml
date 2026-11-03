@@ -162,7 +162,7 @@ dev = [
 # component (keyvault, llm_guard, network, privacy_check, e2e, wizard) in a
 # fixed order. Releases up to 0.1.0a20 shipped six entry points
 # (mordred_network, mordred_privacy_check, ...); config writers migrate those
-# names in plugins.enabled/disabled (mordred_hermes._plugin_identity).
+# names in plugins.enabled/disabled (mordred_hermes._core._plugin_identity).
 # Hermes builds entry-point manifests from the entry-point name plus the
 # distribution's version and Summary; it never reads a plugin.yaml for them.
 # The entry point names the MODULE (not module:register): the Hermes loader
@@ -505,6 +505,7 @@ layers = [
   "llm_guard | network",
   "privacy_check",
   "keyvault",
+  "_core",
   "_private_fs",
 ]
 ignore_imports = [
@@ -539,53 +540,25 @@ ignore_imports = [
   "mordred_hermes.wizard.uninstall_cli -> mordred_hermes.desktop.install",
   "mordred_hermes.wizard._cli_parsers -> mordred_hermes.desktop.install",
   "mordred_hermes.wizard.plugins_list -> mordred_hermes.plugin",
-  # --- baseline: root helpers that reach into components (see contract 2) --
-  "mordred_hermes._audit_support -> mordred_hermes.privacy_check.audit",
-  "mordred_hermes._audit_support -> mordred_hermes.privacy_check._keyvault_probe",
-  "mordred_hermes._audit_support -> mordred_hermes.privacy_check._windows_audit",
-  "mordred_hermes._self_update -> mordred_hermes.desktop.install",
-  "mordred_hermes._self_update -> mordred_hermes.desktop.member",
+  # --- baseline: _core helpers that reach into components (see contract 2) --
+  "mordred_hermes._core._audit_support -> mordred_hermes.privacy_check.audit",
+  "mordred_hermes._core._audit_support -> mordred_hermes.privacy_check._keyvault_probe",
+  "mordred_hermes._core._audit_support -> mordred_hermes.privacy_check._windows_audit",
+  "mordred_hermes._core._self_update -> mordred_hermes.desktop.install",
+  "mordred_hermes._core._self_update -> mordred_hermes.desktop.member",
 ]
 
-# Flat `mordred_hermes._*.py` helpers are the shared foundation and must not
-# import any component package. `plugin`, `_runtime_bootstrap` and
-# `_pth_bootstrap` are entry points that wire components together on purpose
-# and are therefore the TOP layer of contract 1 rather than sources here.
-# grimp rejects partial-segment wildcards (`mordred_hermes._*`), so this list
-# is explicit: add every new flat helper module here.
+# `mordred_hermes._core` holds the shared foundation helpers and must not
+# import any component package (a package source covers every submodule,
+# so new helpers added under `_core/` are checked automatically). `plugin`,
+# `_runtime_bootstrap` and `_pth_bootstrap` are entry points that wire
+# components together on purpose and are therefore the TOP layer of
+# contract 1 rather than sources here.
 [[tool.importlinter.contracts]]
 name = "root helpers do not import components"
 type = "forbidden"
 allow_indirect_imports = true
-source_modules = [
-  "mordred_hermes._audit_io",
-  "mordred_hermes._audit_session",
-  "mordred_hermes._audit_support",
-  "mordred_hermes._bounded_json",
-  "mordred_hermes._config_io",
-  "mordred_hermes._config_text_io",
-  "mordred_hermes._custody_order",
-  "mordred_hermes._database_contracts",
-  "mordred_hermes._database_inventory",
-  "mordred_hermes._database_lifecycle",
-  "mordred_hermes._database_locking_posix",
-  "mordred_hermes._database_locking_windows",
-  "mordred_hermes._dotenv_io",
-  "mordred_hermes._dotenv_text",
-  "mordred_hermes._file_lock",
-  "mordred_hermes._home",
-  "mordred_hermes._log_rotation",
-  "mordred_hermes._plugin_identity",
-  "mordred_hermes._policy_io",
-  "mordred_hermes._policy_types",
-  "mordred_hermes._provider_identity",
-  "mordred_hermes._provider_resolution",
-  "mordred_hermes._proxy_bypass",
-  "mordred_hermes._self_update",
-  "mordred_hermes._term",
-  "mordred_hermes._windows_runtime",
-  "mordred_hermes._yaml_io",
-]
+source_modules = ["mordred_hermes._core"]
 forbidden_modules = [
   "mordred_hermes.activity",
   "mordred_hermes.dbcrypt",
@@ -599,9 +572,9 @@ forbidden_modules = [
   "mordred_hermes.wizard",
 ]
 ignore_imports = [
-  "mordred_hermes._audit_support -> mordred_hermes.privacy_check.audit",
-  "mordred_hermes._audit_support -> mordred_hermes.privacy_check._keyvault_probe",
-  "mordred_hermes._audit_support -> mordred_hermes.privacy_check._windows_audit",
-  "mordred_hermes._self_update -> mordred_hermes.desktop.install",
-  "mordred_hermes._self_update -> mordred_hermes.desktop.member",
+  "mordred_hermes._core._audit_support -> mordred_hermes.privacy_check.audit",
+  "mordred_hermes._core._audit_support -> mordred_hermes.privacy_check._keyvault_probe",
+  "mordred_hermes._core._audit_support -> mordred_hermes.privacy_check._windows_audit",
+  "mordred_hermes._core._self_update -> mordred_hermes.desktop.install",
+  "mordred_hermes._core._self_update -> mordred_hermes.desktop.member",
 ]

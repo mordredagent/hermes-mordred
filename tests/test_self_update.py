@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes import _self_update as core
+from mordred_hermes._core import _self_update as core
 from mordred_hermes.wizard import update_cli
 
 REPO = Path(__file__).resolve().parent.parent
@@ -228,7 +228,7 @@ from pathlib import Path
 if sys.platform != "win32":
     import resource
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-from mordred_hermes import _self_update as core
+from mordred_hermes._core import _self_update as core
 assert Path(core.__file__).resolve() == Path(sys.argv[3])
 sys.setrecursionlimit(100000)
 payload = "[" * 100000 + "]" * 100000

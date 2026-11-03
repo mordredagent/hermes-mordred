@@ -29,6 +29,17 @@ pytestmark = pytest.mark.usefixtures(_reset_api.__name__)
 # --------------------------------------------------------------------------- #
 
 
+def _call_web_fetch(policy_path: Path, config_path: Path) -> None:
+    from mordred_hermes.network import hooks
+
+    return hooks.pre_tool_call(
+        tool_name="web_fetch",
+        policy_json_path=policy_path,
+        config_path=config_path,
+        audit=_FakeAudit(),
+    )
+
+
 class TestPreApiRequestTransportGate:
     """The request-resolved provider is authoritative immediately pre-egress."""
 
@@ -580,7 +591,7 @@ class TestPreToolCall:
         protected_path: str,
     ) -> None:
         import mordred_hermes.network as network
-        from mordred_hermes.network import api, hooks
+        from mordred_hermes.network import api
 
         policy = _write_policy(tmp_path, "strict")
         config = _write_config(tmp_path, protected_path)
@@ -593,19 +604,14 @@ class TestPreToolCall:
         rt.activate_and_freeze(protected_path)
         api.set_runtime(rt)
 
-        result = hooks.pre_tool_call(
-            tool_name="web_fetch",
-            policy_json_path=policy,
-            config_path=config,
-            audit=_FakeAudit(),
-        )
+        result = _call_web_fetch(policy, config)
 
         assert result is None
         assert rt.stop_called is False
 
     def test_frozen_tor_stopped_before_tool_call_fails_closed(self, tmp_path: Path) -> None:
         import mordred_hermes.network as network
-        from mordred_hermes.network import api, hooks
+        from mordred_hermes.network import api
 
         policy = _write_policy(tmp_path, "strict")
         config = _write_config(tmp_path, "tor")
@@ -627,18 +633,13 @@ class TestPreToolCall:
         api.stop()
 
         with pytest.raises(MordredPathBringupFailed, match="is not active") as exc_info:
-            hooks.pre_tool_call(
-                tool_name="web_fetch",
-                policy_json_path=policy,
-                config_path=config,
-                audit=_FakeAudit(),
-            )
+            _call_web_fetch(policy, config)
 
         assert isinstance(exc_info.value, BaseException)
 
     def test_lenient_vpn_to_strict_tool_call_requires_restart(self, tmp_path: Path) -> None:
         import mordred_hermes.network as network
-        from mordred_hermes.network import api, hooks
+        from mordred_hermes.network import api
 
         policy = _write_policy(tmp_path, "lenient")
         config = _write_config(tmp_path, "vpn")
@@ -653,17 +654,12 @@ class TestPreToolCall:
         _write_policy(tmp_path, "strict")
 
         with pytest.raises(MordredPathBringupFailed, match="activation configuration changed"):
-            hooks.pre_tool_call(
-                tool_name="web_fetch",
-                policy_json_path=policy,
-                config_path=config,
-                audit=_FakeAudit(),
-            )
+            _call_web_fetch(policy, config)
 
         assert rt.stop_called is False
 
     def test_strict_dropped_raises_MordredPathDropped(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import api, hooks
+        from mordred_hermes.network import api
 
         rt = _FakeRuntime()
         rt.use("tor")
@@ -673,15 +669,10 @@ class TestPreToolCall:
         config = _write_config(tmp_path, "tor")
 
         with pytest.raises(MordredPathDropped):
-            hooks.pre_tool_call(
-                tool_name="web_fetch",
-                policy_json_path=policy,
-                config_path=config,
-                audit=_FakeAudit(),
-            )
+            _call_web_fetch(policy, config)
 
     def test_lenient_dropped_does_not_raise(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import api, hooks
+        from mordred_hermes.network import api
 
         rt = _FakeRuntime()
         rt.dropped = True
@@ -689,16 +680,11 @@ class TestPreToolCall:
         policy = _write_policy(tmp_path, "lenient")
         config = _write_config(tmp_path, "tor")
 
-        result = hooks.pre_tool_call(
-            tool_name="web_fetch",
-            policy_json_path=policy,
-            config_path=config,
-            audit=_FakeAudit(),
-        )
+        result = _call_web_fetch(policy, config)
         assert result is None
 
     def test_off_dropped_does_not_raise(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import api, hooks
+        from mordred_hermes.network import api
 
         rt = _FakeRuntime()
         rt.dropped = True
@@ -706,26 +692,15 @@ class TestPreToolCall:
         policy = _write_policy(tmp_path, "off")
         config = _write_config(tmp_path, "tor")
 
-        result = hooks.pre_tool_call(
-            tool_name="web_fetch",
-            policy_json_path=policy,
-            config_path=config,
-            audit=_FakeAudit(),
-        )
+        result = _call_web_fetch(policy, config)
         assert result is None
 
     def test_strict_protected_path_without_runtime_fails_closed(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import hooks
 
         policy = _write_policy(tmp_path, "strict")
         config = _write_config(tmp_path, "tor")
         with pytest.raises(MordredPathBringupFailed):
-            hooks.pre_tool_call(
-                tool_name="web_fetch",
-                policy_json_path=policy,
-                config_path=config,
-                audit=_FakeAudit(),
-            )
+            _call_web_fetch(policy, config)
 
 
 class TestPolicyReadFailClosed:
@@ -744,96 +719,60 @@ class TestPolicyReadFailClosed:
         api.set_runtime(rt)
 
     def test_corrupt_json_dropped_refuses(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import hooks
 
         self._dropped_runtime()
         policy = tmp_path / "policy.json"
         policy.write_text("{not json", encoding="utf-8")
         config = _write_config(tmp_path, "tor")
         with pytest.raises(MordredPathDropped):
-            hooks.pre_tool_call(
-                tool_name="web_fetch",
-                policy_json_path=policy,
-                config_path=config,
-                audit=_FakeAudit(),
-            )
+            _call_web_fetch(policy, config)
 
     def test_unreadable_policy_path_dropped_refuses(self, tmp_path: Path) -> None:
         """A directory at the policy path raises OSError on open()."""
-        from mordred_hermes.network import hooks
 
         self._dropped_runtime()
         policy = tmp_path / "policy.json"
         policy.mkdir()
         config = _write_config(tmp_path, "tor")
         with pytest.raises(MordredPathDropped):
-            hooks.pre_tool_call(
-                tool_name="web_fetch",
-                policy_json_path=policy,
-                config_path=config,
-                audit=_FakeAudit(),
-            )
+            _call_web_fetch(policy, config)
 
     def test_non_dict_root_dropped_refuses(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import hooks
 
         self._dropped_runtime()
         policy = tmp_path / "policy.json"
         policy.write_text('["strict"]', encoding="utf-8")
         config = _write_config(tmp_path, "tor")
         with pytest.raises(MordredPathDropped):
-            hooks.pre_tool_call(
-                tool_name="web_fetch",
-                policy_json_path=policy,
-                config_path=config,
-                audit=_FakeAudit(),
-            )
+            _call_web_fetch(policy, config)
 
     def test_invalid_mode_value_dropped_refuses(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import hooks
 
         self._dropped_runtime()
         policy = tmp_path / "policy.json"
         policy.write_text('{"policy": "bogus"}', encoding="utf-8")
         config = _write_config(tmp_path, "tor")
         with pytest.raises(MordredPathDropped):
-            hooks.pre_tool_call(
-                tool_name="web_fetch",
-                policy_json_path=policy,
-                config_path=config,
-                audit=_FakeAudit(),
-            )
+            _call_web_fetch(policy, config)
 
     def test_missing_file_still_defaults_off(self, tmp_path: Path) -> None:
         """Fresh install: no policy.json at all keeps the historical "off"."""
-        from mordred_hermes.network import hooks
 
         self._dropped_runtime()
         config = _write_config(tmp_path, "tor")
-        result = hooks.pre_tool_call(
-            tool_name="web_fetch",
-            policy_json_path=tmp_path / "nope.json",
-            config_path=config,
-            audit=_FakeAudit(),
-        )
+        result = _call_web_fetch(tmp_path / "nope.json", config)
         assert result is None
 
     def test_dangling_symlink_reads_as_absent(self, tmp_path: Path) -> None:
         """A dangling symlink raises FileNotFoundError on open — equivalent
         to deletion, so it keeps the fresh-install "off" (an attacker who can
         plant the link could delete the file outright; nothing extra leaks)."""
-        from mordred_hermes.network import hooks
 
         self._dropped_runtime()
         policy = tmp_path / "policy.json"
         policy.symlink_to(tmp_path / "gone.json")
         config = _write_config(tmp_path, "tor")
-        result = hooks.pre_tool_call(
-            tool_name="web_fetch",
-            policy_json_path=policy,
-            config_path=config,
-            audit=_FakeAudit(),
-        )
+        result = _call_web_fetch(policy, config)
         assert result is None
 
     def test_corrupt_policy_session_start_uses_strict_bringup(self, tmp_path: Path) -> None:

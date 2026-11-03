@@ -2,8 +2,8 @@
 
 import pytest
 
-from mordred_hermes import _config_io as cio
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core import _config_io as cio
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.keyvault import _database_mutation as mutation
 from tests.test_config_io import fs as fs
 from tests.test_config_io_custody import loan_fs as loan_fs

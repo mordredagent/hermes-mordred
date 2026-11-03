@@ -17,9 +17,9 @@ from pathlib import Path
 
 import pytest
 
-from mordred_hermes import _audit_support
-from mordred_hermes._audit_session import AuditSession
-from mordred_hermes._config_io import POLICY_TRANSACTION_MARKER
+from mordred_hermes._core import _audit_support
+from mordred_hermes._core._audit_session import AuditSession
+from mordred_hermes._core._config_io import POLICY_TRANSACTION_MARKER
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
 from mordred_hermes.keyvault._exceptions import WrapNativeUnavailable
 from mordred_hermes.privacy_check import _runtime, audit, egress, hooks, install_wrapper
@@ -35,7 +35,7 @@ MRAL_LINE = b'{"fmt":"MRAL","v":1}\n'
 
 @pytest.fixture(name="fs")
 def windows_fs(custody_fixture, monkeypatch):
-    from mordred_hermes import _audit_session, _config_io
+    from mordred_hermes._core import _audit_session, _config_io
     from mordred_hermes.keyvault import windows_audit
 
     monkeypatch.setattr(windows_audit, "open_optional_private_directory", _config_io.open_optional_private_directory)
@@ -612,7 +612,7 @@ def test_recoverable_construction_refusal_is_retried(fs):
 
 
 def test_nested_canonical_misuse_is_labelled_and_recoverable(fs, tmp_path):
-    from mordred_hermes._config_io import CanonicalPaths, canonical_session
+    from mordred_hermes._core._config_io import CanonicalPaths, canonical_session
 
     _, _, home, backend = fs
     path = home / "mordred" / "audit.log"
@@ -851,7 +851,7 @@ def test_unrecorded_egress_approval_becomes_a_block(hooked, monkeypatch):
 
 
 def test_hooked_appends_never_nest_custody_inside_a_held_canonical_session(hooked, monkeypatch):
-    from mordred_hermes import _config_io as cio
+    from mordred_hermes._core import _config_io as cio
     from mordred_hermes.keyvault import _windows_custody as custody
 
     original = custody.windows_custody_session

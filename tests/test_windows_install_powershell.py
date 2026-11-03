@@ -307,7 +307,7 @@ def test_winkey_bound_build_runs_from_fresh_restricted_parent(ps, native_fixture
 
 
 def test_installer_removes_scrubbed_keys_from_native_python_environment(native_fixture, tmp_path):
-    from mordred_hermes._windows_runtime import SCRUBBED_ENV
+    from mordred_hermes._core._windows_runtime import SCRUBBED_ENV
 
     argv, env, _home, _log, python, _source = native_fixture
     observed = tmp_path / "child environment keys.jsonl"

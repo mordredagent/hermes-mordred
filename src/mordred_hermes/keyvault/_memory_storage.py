@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from .._custody_order import custody_scope
+from .._core._custody_order import custody_scope
 from .._private_fs import (
     ConfidentialTransaction,
     FileIdentity,
@@ -29,7 +29,7 @@ from ._exceptions import WrapError
 from .memory_crypto import MemoryCryptoError, is_sealed, looks_like_magic_line, seal, unseal
 
 if TYPE_CHECKING:
-    from .._config_io import PublicationReceipt
+    from .._core._config_io import PublicationReceipt
     from ._windows_custody import GenerationLease, WindowsCustodySession, WindowsMemoryState
     from ._windows_proof import WindowsRuntimeProof
 
@@ -85,7 +85,7 @@ def inventory_memory_files(home: Path) -> tuple[MemoryFileSnapshot, ...]:
 
 def windows_memory_runtime_admitted(executable: Path | None = None) -> bool:
     """Structural C4 admission only; no subprocess, proof or lifecycle authority."""
-    from .._windows_runtime import environment_root
+    from .._core._windows_runtime import environment_root
 
     executable = Path(sys.executable) if executable is None else executable
     if executable.name.lower() == "pythonw.exe":

@@ -72,7 +72,7 @@ def _driver_present() -> bool:
 
 
 def _dependency_count(home: Path) -> int | None:
-    from .._database_inventory import scan_dependencies
+    from .._core._database_inventory import scan_dependencies
 
     try:
         inventory = scan_dependencies(_root(home))

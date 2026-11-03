@@ -9,8 +9,8 @@ import zipfile
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused
-from mordred_hermes._database_lifecycle import acquire_exclusive
+from mordred_hermes._core._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_lifecycle import acquire_exclusive
 from mordred_hermes.dbcrypt import _migrate
 from tests.test_dbcrypt_adoption import cipher
 from tests.test_dbcrypt_authority import native_root as native_root

@@ -24,8 +24,8 @@ import psutil
 import pytest
 
 import mordred_hermes.network as network
-from mordred_hermes import _config_io as cio
-from mordred_hermes._config_io import CanonicalPaths, canonical_session
+from mordred_hermes._core import _config_io as cio
+from mordred_hermes._core._config_io import CanonicalPaths, canonical_session
 from mordred_hermes._private_fs import FileIdentity, FileMetadata, PrivateFSError
 from mordred_hermes.network import _windows_exec as wexec
 from mordred_hermes.network import api, hooks

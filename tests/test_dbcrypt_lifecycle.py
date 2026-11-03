@@ -333,9 +333,9 @@ from unittest.mock import patch
 # POSIX hosts exercise the real missing-fcntl boundary for Linux. Cross-host
 # native domain adapters are unavailable dependencies, never mocked successes.
 if sys.argv[2] == 'win32':
-    missing_lock = 'mordred_hermes._database_locking_windows'
+    missing_lock = 'mordred_hermes._core._database_locking_windows'
 elif os.name == 'nt':
-    missing_lock = 'mordred_hermes._database_locking_posix'
+    missing_lock = 'mordred_hermes._core._database_locking_posix'
 else:
     missing_lock = 'fcntl'
 class Unavailable(importlib.abc.MetaPathFinder):
@@ -347,8 +347,8 @@ for name in (missing_lock, 'fcntl'):
 sys.meta_path.insert(0, Unavailable())
 sys.platform = sys.argv[2]
 from mordred_hermes import dbcrypt
-from mordred_hermes import _database_lifecycle
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core import _database_lifecycle
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.dbcrypt._authority import Authority
 from mordred_hermes.wizard import databases_cli
 home = Path(sys.argv[1])
@@ -440,8 +440,8 @@ run()
 
 
 def test_missing_identified_root_is_not_silently_recreated(tmp_path: Path) -> None:
-    from mordred_hermes._database_contracts import DatabaseRefused
-    from mordred_hermes._database_lifecycle import acquire_runtime
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_lifecycle import acquire_runtime
 
     missing = tmp_path / "missing-managed-root"
     with pytest.raises(DatabaseRefused), acquire_runtime(missing):
@@ -450,7 +450,7 @@ def test_missing_identified_root_is_not_silently_recreated(tmp_path: Path) -> No
 
 
 def test_legacy_bootstrap_never_recreates_an_already_observed_root(tmp_path: Path) -> None:
-    from mordred_hermes._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_contracts import DatabaseRefused
 
     root = tmp_path / "observed"
     root.mkdir()
@@ -476,7 +476,7 @@ from pathlib import Path
 from mordred_hermes.keyvault import kek
 kek._noop_audit = lambda entry: None
 import sqlcipher3.dbapi2 as sc
-from mordred_hermes._database_lifecycle import acquire_exclusive
+from mordred_hermes._core._database_lifecycle import acquire_exclusive
 from mordred_hermes.dbcrypt._migrate import _offline_connection
 root = Path(os.environ['HERMES_HOME'])
 path = root / 'state.db'

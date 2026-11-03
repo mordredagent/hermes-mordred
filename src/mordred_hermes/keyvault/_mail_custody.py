@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Never
 from weakref import WeakKeyDictionary
 
-from .._database_contracts import DatabaseRefused
+from .._core._database_contracts import DatabaseRefused
 from .._private_fs import FileMetadata, PrivateDirectory, PrivateFSError, PrivateTransaction, open_private_directory
 from ._mail_key import KEY_ID
 

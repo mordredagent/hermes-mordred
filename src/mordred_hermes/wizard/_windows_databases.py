@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .._config_io import CanonicalPaths, canonical_session
+from .._core._config_io import CanonicalPaths, canonical_session
 from .._private_fs import PrivateFSError
 from ._windows_gates import classify_exception
 

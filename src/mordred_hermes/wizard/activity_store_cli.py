@@ -24,7 +24,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .. import _term
+from .._core import _term
 
 if TYPE_CHECKING:
     from ..activity.config import ActivityConfig
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 
 def _home() -> Path:
-    from .._home import hermes_home
+    from .._core._home import hermes_home
 
     return hermes_home()
 
@@ -73,7 +73,7 @@ def _refused(code: object, *, hint: str | None = None) -> int:
 
 
 def _refusal_code(exc: BaseException) -> str:
-    from .._database_contracts import DatabaseBusy
+    from .._core._database_contracts import DatabaseBusy
     from ..activity._gate import ActivityRefused
 
     if isinstance(exc, ActivityRefused):
@@ -85,7 +85,7 @@ def _catching(
     run_body: Callable[[argparse.Namespace], int], *, unavailable_hint: str | None = None
 ) -> Callable[[argparse.Namespace], int]:
     def run(args: argparse.Namespace) -> int:
-        from .._database_contracts import DatabaseRefused
+        from .._core._database_contracts import DatabaseRefused
         from .._private_fs import PrivateFSError
         from ..activity._gate import ActivityRefused
 
@@ -171,7 +171,7 @@ def _print_counts(title: str, values: Mapping[str, int]) -> None:
 
 def _restore(args: argparse.Namespace) -> int:
     """Offline restore: takes the exclusive lease itself; never opens the shared runtime store."""
-    from .._database_lifecycle import acquire_exclusive
+    from .._core._database_lifecycle import acquire_exclusive
     from ..activity._gate import ActivityRefused, refusal
     from ..activity.store import restore_activity_store
     from ..keyvault._database_authority import resolve_database_domain

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from mordred_hermes import llm_guard
-from mordred_hermes._config_io import CanonicalPaths, canonical_session
+from mordred_hermes._core._config_io import CanonicalPaths, canonical_session
 from mordred_hermes.llm_guard import _windows_policy, auxiliary_guard, enforce, harness_detect, local_adapter
 from mordred_hermes.llm_guard._exceptions import MordredSessionRefused
 from tests._helpers import PlatformSys
@@ -31,7 +31,7 @@ def _set_platform(monkeypatch, platform):
 @pytest.fixture
 def profile(tmp_path, monkeypatch):
     if os.name != "nt":
-        from mordred_hermes import _config_io as cio
+        from mordred_hermes._core import _config_io as cio
         from mordred_hermes._private_fs import open_private_directory
 
         monkeypatch.setattr(cio, "open_confidential_directory", open_private_directory)
@@ -165,7 +165,7 @@ def test_prompt_grant_expires_on_checked_generation_change(profile):
 
 
 def test_checked_snapshot_is_single_and_released_before_prompt(profile, monkeypatch):
-    from mordred_hermes import _config_io as cio
+    from mordred_hermes._core import _config_io as cio
 
     calls = []
     original = cio.read_canonical_snapshot
@@ -200,7 +200,7 @@ def test_checked_snapshot_is_single_and_released_before_prompt(profile, monkeypa
 
 @pytest.mark.parametrize("fault", ["home:open", "policy:open", "home:close", "policy:close"])
 def test_admission_and_cleanup_errors_never_authorize(monkeypatch, tmp_path, fault):
-    from mordred_hermes import _config_io as cio
+    from mordred_hermes._core import _config_io as cio
     from tests.test_config_io import Backend
 
     backend = Backend()
@@ -214,7 +214,7 @@ def test_admission_and_cleanup_errors_never_authorize(monkeypatch, tmp_path, fau
 
 
 def test_only_checked_absence_keeps_fresh_install_default(monkeypatch, tmp_path):
-    from mordred_hermes import _config_io as cio
+    from mordred_hermes._core import _config_io as cio
     from tests.test_config_io import Backend
 
     backend = Backend()

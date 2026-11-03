@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, Protocol
 
-from ..._policy_types import PolicyMode as PolicyMode
+from ..._core._policy_types import PolicyMode as PolicyMode
 from .._exceptions import BringupFailed
 from ..guidance import MACOS_MULLVAD_APP_CLI, mullvad_install_guidance
 

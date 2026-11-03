@@ -18,7 +18,7 @@ import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .._home import hermes_home as _hermes_home
+from .._core._home import hermes_home as _hermes_home
 
 if TYPE_CHECKING:
     from .anchor import AnchorStore
@@ -61,7 +61,7 @@ def _vault_database_home(root: Path, *, allow_missing: bool = False) -> Path:
     An arbitrary custom path is not evidence of an independent native source.
     No ambient home or absence of an enrollment record grants an exemption.
     """
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ._database_authority import resolve_database_domain
 
     absolute = root.absolute()
@@ -120,7 +120,7 @@ def resolve_backend_store(
 
 def _assert_vault_publication_identity(root: Path, key_id: str, anchor_label: str) -> None:
     """Admit only this physical vault's derived native and anchor selectors."""
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
 
     absolute = root.absolute()
     checked = root.resolve()

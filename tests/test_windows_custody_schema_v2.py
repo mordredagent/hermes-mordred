@@ -113,7 +113,7 @@ def test_upgrade_refuses_unknown_schema_and_pending_role_without_native(fs):
 
 
 def test_mail_upgrade_preserves_database_authority_snapshot(fs, monkeypatch):
-    from mordred_hermes._database_lifecycle import acquire_runtime
+    from mordred_hermes._core._database_lifecycle import acquire_runtime
     from mordred_hermes.dbcrypt import _authority as runtime
     from mordred_hermes.dbcrypt._key import derive
     from mordred_hermes.dbcrypt._marker import Marker
@@ -158,7 +158,7 @@ def test_mail_enrollment_requires_explicit_upgrade(fs):
 
 
 def test_mail_creation_and_owned_deletion_preserve_held_database_authority(fs, monkeypatch):
-    from mordred_hermes._database_lifecycle import acquire_runtime
+    from mordred_hermes._core._database_lifecycle import acquire_runtime
     from mordred_hermes.dbcrypt import _authority as runtime
     from mordred_hermes.dbcrypt._key import derive
     from mordred_hermes.dbcrypt._marker import Marker

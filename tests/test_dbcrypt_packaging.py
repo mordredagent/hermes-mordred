@@ -310,7 +310,7 @@ def test_sdist_to_fresh_wheel_has_owned_assets_and_extra_outside_checkout(tmp_pa
     code = """
 import sys, types
 from pathlib import Path
-audit = types.ModuleType('mordred_hermes._audit_support')
+audit = types.ModuleType('mordred_hermes._core._audit_support')
 audit.safe_audit_append = lambda *args, **kwargs: None
 sys.modules[audit.__name__] = audit
 from mordred_hermes.dbcrypt import _windows_vfs, database_status

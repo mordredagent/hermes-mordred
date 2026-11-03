@@ -23,12 +23,12 @@ import shlex
 from dataclasses import dataclass, field
 from typing import Final
 
-from .._policy_types import ACTIVE_PATHS
+from .._core._policy_types import ACTIVE_PATHS
 
 _LOG = logging.getLogger("mordred.wizard.network_cli")
 
 #: The canonical closed route set, single-sourced from
-#: :mod:`mordred_hermes._policy_types` (declaration order preserved, so the
+#: :mod:`mordred_hermes._core._policy_types` (declaration order preserved, so the
 #: prompt choice listing and error messages render unchanged). Kept under this
 #: name — ``network_cli`` / ``_network_init`` and their tests import it here.
 _VALID_PATHS = ACTIVE_PATHS

@@ -294,7 +294,7 @@ def test_a_process_started_in_a_profile_home_uses_the_roots_marker(
 ) -> None:
     """Hermes starts gateways, Desktop chats and kanban workers with HERMES_HOME=<root>/profiles/<name>."""
     pytest.importorskip("sqlcipher3")
-    from mordred_hermes import _home
+    from mordred_hermes._core import _home
 
     monkeypatch.setitem(sys.modules, "sqlite3", stdlib_sqlite3)
     monkeypatch.setitem(sys.modules, "sqlite3.dbapi2", sys.modules.get("sqlite3.dbapi2", stdlib_sqlite3))

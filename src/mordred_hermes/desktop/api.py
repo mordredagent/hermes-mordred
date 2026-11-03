@@ -95,7 +95,7 @@ def _emit(event: str, payload: dict[str, Any]) -> None:
 
 
 def _home() -> Path:
-    from .._home import hermes_home
+    from .._core._home import hermes_home
 
     return hermes_home()
 
@@ -514,7 +514,7 @@ def _hermes_venice_key() -> str | None:
 
     from dotenv import dotenv_values
 
-    from .._yaml_io import load_yaml_mapping
+    from .._core._yaml_io import load_yaml_mapping
 
     config = load_yaml_mapping(_home() / "config.yaml")
     names: list[str] = []

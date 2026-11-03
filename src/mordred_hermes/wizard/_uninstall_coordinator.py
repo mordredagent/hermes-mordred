@@ -8,8 +8,8 @@ import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .._database_contracts import DatabaseRefused
-from .._database_lifecycle import ExclusiveLease
+from .._core._database_contracts import DatabaseRefused
+from .._core._database_lifecycle import ExclusiveLease
 from ..dbcrypt import _migrate
 from ..dbcrypt._uninstall import preflight, verified
 from ..keyvault._uninstall_authority import check_authorization, fingerprint, profile_fingerprint

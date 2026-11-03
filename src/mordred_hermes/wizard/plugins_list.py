@@ -22,9 +22,9 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from ..__about__ import __version__ as _PACKAGE_VERSION
-from .._home import HERMES_BASE
-from .._plugin_identity import PLUGIN_NAME
-from .._yaml_io import load_yaml_mapping
+from .._core._home import HERMES_BASE
+from .._core._plugin_identity import PLUGIN_NAME
+from .._core._yaml_io import load_yaml_mapping
 from . import _term
 
 DEFAULT_CONFIG_PATH = HERMES_BASE / "config.yaml"
@@ -149,7 +149,7 @@ def migrate(*, config_path: Path = DEFAULT_CONFIG_PATH, only_legacy: bool = Fals
     Mordred loading after an upgrade and never enables Mordred for a user who
     had not.
     """
-    from .._plugin_identity import has_legacy_names
+    from .._core._plugin_identity import has_legacy_names
     from .policy_writer import PolicyWriter
 
     if not config_path.exists():

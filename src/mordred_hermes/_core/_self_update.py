@@ -177,8 +177,8 @@ def installed(home: Path | None = None) -> Installed:
     from it the extras recorded in the member (``[tool.hermes-mordred]``) are
     added; the platform extra is always added, as the installer does.
     """
-    from .desktop import member
-    from .desktop.install import plugin_dir
+    from ..desktop import member
+    from ..desktop.install import plugin_dir
 
     source = member.install_source()
     env = member.environment()

@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused
-from mordred_hermes._database_lifecycle import acquire_exclusive
+from mordred_hermes._core._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_lifecycle import acquire_exclusive
 from mordred_hermes.dbcrypt import _connection, _windows_vfs
 from mordred_hermes.dbcrypt._authority import Authority
 from tests._dbcrypt_windows_fakes import SELECTOR, protected_windows_environment

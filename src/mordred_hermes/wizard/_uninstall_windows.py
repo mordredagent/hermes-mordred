@@ -129,7 +129,7 @@ def custody_roles(home: Path, *, blocking: bool = False) -> tuple[list[str], str
     The plan reads without waiting for a lock (``blocking=False``); the purge
     itself waits, like every other lifecycle command.
     """
-    from .._config_io import CanonicalPaths, canonical_session
+    from .._core._config_io import CanonicalPaths, canonical_session
     from ..keyvault._windows_custody import windows_custody_session
     from ..keyvault._windows_profile import ROLES
 

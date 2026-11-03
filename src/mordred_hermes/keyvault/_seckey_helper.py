@@ -101,7 +101,7 @@ def find_winkey_helper() -> str | None:
     Existence and suffix checks are not publisher/authenticity verification;
     the operator must trust the selected installation and PATH directories.
     """
-    from mordred_hermes._home import hermes_home
+    from mordred_hermes._core._home import hermes_home
 
     def executable(path: Path) -> str | None:
         if path.is_absolute() and path.suffix.lower() == ".exe" and path.is_file():

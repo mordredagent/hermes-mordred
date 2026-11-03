@@ -84,7 +84,7 @@ def _expected_runtime_python(home: Path) -> Path:
     if sys.platform == "win32":
         import os
 
-        from .._windows_runtime import resolve_windows_python
+        from .._core._windows_runtime import resolve_windows_python
         from ._uninstall_hermes_env import find_hermes_launcher
 
         selected = resolve_windows_python(

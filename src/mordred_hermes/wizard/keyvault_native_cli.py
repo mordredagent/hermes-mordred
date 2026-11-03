@@ -407,7 +407,7 @@ def _run_winkey_build(src: Path, *, install_dir: Path) -> tuple[int, str]:
     import subprocess
     import sys
 
-    from .._windows_runtime import scrubbed_environment
+    from .._core._windows_runtime import scrubbed_environment
 
     powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
     if powershell is None:
@@ -462,7 +462,7 @@ def enable_winkey(*, install_dir: Path | None = None, home: Path | None = None) 
     """Build and probe Windows TPM custody under the existing user token."""
     import sys
 
-    from .._home import hermes_home
+    from .._core._home import hermes_home
 
     if sys.platform != "win32":
         _term.emit_error("Windows CNG TPM helper requires native Windows.")

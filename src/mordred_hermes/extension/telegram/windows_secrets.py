@@ -49,7 +49,7 @@ from . import tee
 from .secrets import TelegramSecrets, TelegramSecretsError, decode, encode
 
 if TYPE_CHECKING:
-    from ..._config_io import PublicationReceipt
+    from ..._core._config_io import PublicationReceipt
     from ...keyvault._windows_custody import GenerationLease, WindowsCustodySession
     from ...keyvault.wrap import NativeBackend
 
@@ -83,7 +83,7 @@ class _ReceiptRecorder:
 
 def _classified(exc: Exception) -> TelegramSecretsError | None:
     """Content-free code for a custody/filesystem/native failure, or ``None``."""
-    from ..._config_io import PolicyPendingError
+    from ..._core._config_io import PolicyPendingError
     from ...keyvault._exceptions import WrapAuthCancelled, WrapError, WrapIntegrityError, WrapParseError
     from ...keyvault._windows_profile import CustodyError
     from ...keyvault.wrap import NativeBackendError
@@ -203,7 +203,7 @@ class WindowsCustodySecretStore:
     def _resolved_home(self) -> Path:
         if self._home is not None:
             return self._home
-        from ..._home import hermes_home
+        from ..._core._home import hermes_home
 
         return hermes_home()
 

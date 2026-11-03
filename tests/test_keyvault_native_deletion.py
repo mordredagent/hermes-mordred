@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.keyvault import wrap
 from mordred_hermes.keyvault._seckey_backend import _SecKeyBackend
 from mordred_hermes.keyvault._seckey_helper import _HelperSecKeyOps

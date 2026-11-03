@@ -37,7 +37,7 @@ import pytest
     ],
 )
 def test_preserved_merge_modes(mode, source, updates, want):
-    from mordred_hermes._dotenv_text import merge_assignments
+    from mordred_hermes._core._dotenv_text import merge_assignments
 
     assert merge_assignments(source, updates, mode=mode) == want
 
@@ -46,20 +46,20 @@ def test_preserved_merge_modes(mode, source, updates, want):
     "key,want", [("FOO", True), ("_9", True), ("foo", False), ("9FOO", False), ("FOO=bad", False), ("FOO\n", False)]
 )
 def test_wizard_key_validation(key, want):
-    from mordred_hermes._dotenv_text import is_wizard_key
+    from mordred_hermes._core._dotenv_text import is_wizard_key
 
     assert is_wizard_key(key) is want
 
 
 @pytest.mark.parametrize("value,want", [("", False), ("quoted=a#b", False), ("x\ny", True), ("x\ry", True)])
 def test_newline_validation(value, want):
-    from mordred_hermes._dotenv_text import contains_newline
+    from mordred_hermes._core._dotenv_text import contains_newline
 
     assert contains_newline(value) is want
 
 
 def test_nonempty_detection_uses_extension_recognition_without_expansion():
-    from mordred_hermes._dotenv_text import has_nonempty_key
+    from mordred_hermes._core._dotenv_text import has_nonempty_key
 
     assert has_nonempty_key("  export KEY = ' ' # literal\n", {"KEY"})
     assert not has_nonempty_key("# KEY=hidden\nKEY= \nOTHER=1\n", {"KEY"})

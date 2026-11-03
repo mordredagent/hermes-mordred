@@ -14,7 +14,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from ._private_fs import PrivateFSError
+from .._private_fs import PrivateFSError
 
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)

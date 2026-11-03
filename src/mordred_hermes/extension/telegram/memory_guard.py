@@ -27,13 +27,13 @@ class MemoryEncryptionRequired(RuntimeError):
 
 def _memory_refusal(home: Path | None) -> str | None:
     """One load-only decision; ``None`` permits, otherwise a stable refusal code."""
-    from ..._home import hermes_home
+    from ..._core._home import hermes_home
     from ..._private_fs import PrivateFSError
 
     try:
         selected_home = home or hermes_home()
         if sys.platform == "win32":
-            from ..._config_io import CanonicalPaths, canonical_session
+            from ..._core._config_io import CanonicalPaths, canonical_session
             from ...wizard._windows_memory import observe
             from ...wizard._windows_status import memory_target_status
 

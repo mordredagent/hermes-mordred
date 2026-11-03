@@ -28,7 +28,7 @@ from collections.abc import Callable, Mapping, MutableMapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
-from .. import _term
+from .._core import _term
 
 if TYPE_CHECKING:
     from ..activity.config import ActivityConfig
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 
 def _home() -> Path:
-    from .._home import hermes_home
+    from .._core._home import hermes_home
 
     return hermes_home()
 

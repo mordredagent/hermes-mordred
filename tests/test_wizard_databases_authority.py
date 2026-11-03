@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.dbcrypt._key import KeyProvider
 from tests.test_dbcrypt_authority import native_root as native_root
 
@@ -15,7 +15,7 @@ from tests.test_dbcrypt_authority import native_root as native_root
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_native_offline_commands_use_ex_without_runtime_provider(native_root, monkeypatch, capsys, command, dry_run):
     from mordred_hermes import dbcrypt
-    from mordred_hermes._database_lifecycle import current_thread_exclusive_leases
+    from mordred_hermes._core._database_lifecycle import current_thread_exclusive_leases
     from mordred_hermes.dbcrypt import _migrate
     from mordred_hermes.dbcrypt._capability import DatabaseStatus
     from mordred_hermes.wizard import databases_cli

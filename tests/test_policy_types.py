@@ -13,7 +13,7 @@ import subprocess
 import sys
 from typing import get_args
 
-from mordred_hermes._policy_types import (
+from mordred_hermes._core._policy_types import (
     ACTIVE_PATHS,
     POLICY_MODES,
     VALID_ACTIVE_PATHS,
@@ -40,7 +40,7 @@ def test_import_pulls_no_optional_dependencies() -> None:
     # without optional deps; a fresh interpreter proves it (importing it
     # in-process would be polluted by whatever this test run loaded first).
     code = (
-        "import sys; import mordred_hermes._policy_types; "
+        "import sys; import mordred_hermes._core._policy_types; "
         "bad = [m for m in sys.modules if m.startswith(('ruamel', 'cryptography', 'argon2', 'blake3'))]; "
         "sys.exit(1 if bad else 0)"
     )

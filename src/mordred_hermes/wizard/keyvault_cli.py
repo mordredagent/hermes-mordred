@@ -36,8 +36,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .._database_lifecycle import ExclusiveLease
-from .._home import hermes_home as _hermes_home
+from .._core._database_lifecycle import ExclusiveLease
+from .._core._home import hermes_home as _hermes_home
 from ..keyvault import _native_key_id, _storage
 from ..keyvault._reset_journal import _encode_reset_journal, _load_reset_journal
 from ..keyvault._uninstall_authority import UninstallAuthorization
@@ -595,7 +595,7 @@ def _assert_reset_database_safe(
     home: Path, lease: ExclusiveLease, uninstall: UninstallAuthorization | None = None
 ) -> None:
     """Helper reset cannot retire an enrolled root source owned elsewhere."""
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ..keyvault._database_authority import resolve_database_domain
     from ..keyvault._database_mutation import assert_database_helper_removal_safe
 
@@ -618,7 +618,7 @@ def reset_keyvault(
     assume_yes: bool = False,
 ) -> int:
     """Hold database exclusion before any custody through final tree removal."""
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ..keyvault._database_mutation import database_key_mutation
 
     unported = unported_refusal("secret_store", "keyvault reset")

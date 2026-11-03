@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from mordred_hermes import _config_io as cio
+from mordred_hermes._core import _config_io as cio
 from mordred_hermes._private_fs import PrivateFSError
 from tests.test_config_io import fs as fs
 

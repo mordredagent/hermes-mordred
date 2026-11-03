@@ -302,7 +302,7 @@ async def test_real_api_callback_keeps_outcome_and_progress_after_cancellation(
 ):
     from types import SimpleNamespace
 
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
     from mordred_hermes.wizard import keyvault_native_cli, uninstall_cli
 
     jobs, events = registry

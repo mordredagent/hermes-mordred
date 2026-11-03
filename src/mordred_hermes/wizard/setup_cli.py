@@ -153,7 +153,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .._home import hermes_home as _hermes_home
+from .._core._home import hermes_home as _hermes_home
 from ..keyvault._identity import resolve_root
 from ..keyvault._memory_hook import memory_marker_path, memory_optout_marker_path
 from ..keyvault._runtime_env import _env_optout_marker_path
@@ -293,7 +293,7 @@ def _probe_hermes(*, home: Path) -> tuple[bool, str]:
     """
     import shutil
 
-    from .._yaml_io import load_yaml_mapping
+    from .._core._yaml_io import load_yaml_mapping
 
     has_hermes = shutil.which("hermes") is not None
     config_path = home / "config.yaml"
@@ -404,7 +404,7 @@ def _probe_configure(*, policy_writer: PolicyWriter) -> tuple[bool, str]:
     if not policy_writer.policy_json_path.exists():
         return False, "policy.json does not exist yet"
 
-    from .._yaml_io import load_plugin_section, load_yaml_mapping
+    from .._core._yaml_io import load_plugin_section, load_yaml_mapping
     from ..privacy_check._runtime import SIBLING_PLUGINS
 
     privacy_check = load_plugin_section(policy_writer.config_path, "mordred_privacy_check", catch=(Exception,))
@@ -493,7 +493,7 @@ def _resolve_step_configure(
 
 def _probe_network(*, config_path: Path) -> tuple[bool, str]:
     """Read-only: is a network privacy path already configured?"""
-    from .._yaml_io import load_plugin_section
+    from .._core._yaml_io import load_plugin_section
 
     # Imported from ``_network_answers`` (the defining module) rather than its
     # re-export in ``_network_init``: the latter re-imports it without an

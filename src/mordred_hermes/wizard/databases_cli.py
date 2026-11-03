@@ -40,7 +40,7 @@ def databases_diagnose(home: Path | None = None) -> int:
 
 
 def _convert(*, decrypting: bool, dry_run: bool, home: Path | None) -> int:
-    from .._database_lifecycle import acquire_exclusive
+    from .._core._database_lifecycle import acquire_exclusive
     from ..dbcrypt import _migrate, arm, database_status
     from ..dbcrypt._marker import LegacyMarker, Marker, read_marker
     from ..keyvault._database_authority import (
@@ -96,7 +96,7 @@ def databases_decrypt(*, dry_run: bool = False, home: Path | None = None) -> int
 def cli_databases(args: argparse.Namespace) -> int:
     command = getattr(args, "databases_command", None)
     if command == "backup":
-        from .._database_lifecycle import acquire_exclusive
+        from .._core._database_lifecycle import acquire_exclusive
         from ..dbcrypt._backup import export_database
         from ..keyvault._database_authority import resolve_database_domain
 

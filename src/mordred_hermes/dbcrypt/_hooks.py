@@ -75,7 +75,7 @@ def _policy_mode() -> str:
 
 def _audit(findings: list[_monitor.Finding], event: str, decision: str) -> None:
     with contextlib.suppress(Exception):
-        from .._audit_support import safe_audit_append
+        from .._core._audit_support import safe_audit_append
         from ..privacy_check import _runtime
 
         safe_audit_append(

@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from .._database_contracts import DatabaseRefused
-from .._database_lifecycle import ExclusiveLease, current_thread_exclusive_leases
+from .._core._database_contracts import DatabaseRefused
+from .._core._database_lifecycle import ExclusiveLease, current_thread_exclusive_leases
 from .._private_fs import open_private_directory
 
 

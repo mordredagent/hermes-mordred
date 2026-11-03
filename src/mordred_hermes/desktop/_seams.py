@@ -83,7 +83,7 @@ def forget(secret_store: Any, home: Path, *, account: str | None, rows: bool) ->
 def mail_audit(done: Any, *, rows: bool, home: Path) -> None:
     """The CLI's ``mail.forget`` audit event (``imports.mail.forget.audit_entry``), to the same audit log."""
     try:
-        from .._audit_support import build_audit_writer, safe_audit_append
+        from .._core._audit_support import build_audit_writer, safe_audit_append
 
         entry = library("..imports.mail.forget", "audit_entry")(done, rows=rows)
         safe_audit_append(build_audit_writer(home / "mordred" / "audit.log"), entry, logger=_log)

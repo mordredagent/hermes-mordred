@@ -856,8 +856,8 @@ jobs:
           assert extension_sign._load_wallet_cfg() == selection
           extension_sign.set_wallet(selection | {'envelope_id': 'replacement'})
           assert extension_sign._load_wallet_cfg()['envelope_id'] == 'replacement'
-          from mordred_hermes._audit_io import audit_session, decode_audit_bytes
-          from mordred_hermes._log_rotation import rotate_audit
+          from mordred_hermes._core._audit_io import audit_session, decode_audit_bytes
+          from mordred_hermes._core._log_rotation import rotate_audit
           with audit_session(Path.cwd() / 'audit' / 'custom.log', create=True) as session:
               session.create('custom.log', b'{}\n')
               result = rotate_audit(session, '2026-10-08')

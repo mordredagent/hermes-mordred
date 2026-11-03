@@ -20,7 +20,7 @@ import ipaddress
 from dataclasses import dataclass
 from urllib.parse import unquote, urlsplit
 
-from .._home import hermes_home
+from .._core._home import hermes_home
 
 _PROTECTED_NETWORK_PATHS = frozenset({"tor", "vpn"})
 

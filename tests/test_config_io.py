@@ -8,7 +8,7 @@ from contextlib import ExitStack, contextmanager
 
 import pytest
 
-from mordred_hermes import _config_io as cio
+from mordred_hermes._core import _config_io as cio
 from mordred_hermes._private_fs import FileIdentity, FileMetadata, PrivateFSError, open_private_directory
 from tests.test_private_fs_processes import _child, _line
 

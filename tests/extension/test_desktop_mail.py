@@ -527,9 +527,10 @@ def test_mail_audit_writes_the_shared_event(monkeypatch: pytest.MonkeyPatch, tmp
     monkeypatch.setattr(
         _seams, "library", lambda module, name: lambda done, *, rows: {"event": "mail.forget", "rows": rows}
     )
-    monkeypatch.setattr("mordred_hermes._audit_support.build_audit_writer", lambda path: ("writer", path))
+    monkeypatch.setattr("mordred_hermes._core._audit_support.build_audit_writer", lambda path: ("writer", path))
     monkeypatch.setattr(
-        "mordred_hermes._audit_support.safe_audit_append", lambda writer, entry, logger: written.append((writer, entry))
+        "mordred_hermes._core._audit_support.safe_audit_append",
+        lambda writer, entry, logger: written.append((writer, entry)),
     )
     REAL_MAIL_AUDIT(object(), rows=True, home=tmp_path)
     assert written == [(("writer", tmp_path / "mordred" / "audit.log"), {"event": "mail.forget", "rows": True})]

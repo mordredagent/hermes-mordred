@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from .._database_contracts import DatabaseRefused
+from .._core._database_contracts import DatabaseRefused
 from ..keyvault._database_authority import resolve_database_domain
 from ._authority import Authority
 from ._policy import in_scope

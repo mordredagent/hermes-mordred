@@ -32,7 +32,7 @@ from tests._platform_test_helpers import directory_redirect as directory_redirec
 @pytest.fixture
 def posix_member_model(monkeypatch, tmp_path):
     """Model POSIX orchestration/locking and synthetic URI paths on the host filesystem."""
-    from mordred_hermes import _file_lock
+    from mordred_hermes._core import _file_lock
 
     monkeypatch.setattr(member, "_platform", lambda: "linux")
     monkeypatch.setattr(install, "_platform", lambda: "linux")

@@ -18,8 +18,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from mordred_hermes import _config_io as cio
-from mordred_hermes import _windows_runtime
+from mordred_hermes._core import _config_io as cio
+from mordred_hermes._core import _windows_runtime
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
 from mordred_hermes.keyvault import _windows_processes, wrap
 from mordred_hermes.keyvault._database_mutation import database_key_mutation

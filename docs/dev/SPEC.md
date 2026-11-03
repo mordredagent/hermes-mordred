@@ -1941,7 +1941,7 @@ directory creation, bounded reads, exclusive creation, checked replacement and
 cooperating-process transactions. Import Windows APIs lazily behind OS dispatch;
 use stdlib `ctypes` with explicit signatures and owned handle lifetimes. No
 PowerShell/icacls subprocess is part of a product I/O operation. Existing
-`_file_lock.py`, `_audit_io.py` and component storage code remain unchanged until
+`_core/_file_lock.py`, `_core/_audit_io.py` and component storage code remain unchanged until
 their individual migration PRs. The new POSIX backend uses descriptor-relative
 operations, private modes and flock; it does not replace existing POSIX code.
 

@@ -124,7 +124,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Final, NamedTuple
 
-from .._database_contracts import DatabaseRefused
+from .._core._database_contracts import DatabaseRefused
 from ..activity._gate import (
     ActivityRefused,
     Refusal,

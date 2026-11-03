@@ -11,9 +11,9 @@ from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Final
 
-from .._database_contracts import DatabaseBusy as MigrationBusy
-from .._database_contracts import DatabaseRefused as MigrationError
-from .._database_lifecycle import ExclusiveLease, RuntimeLease, acquire_exclusive, acquire_runtime
+from .._core._database_contracts import DatabaseBusy as MigrationBusy
+from .._core._database_contracts import DatabaseRefused as MigrationError
+from .._core._database_lifecycle import ExclusiveLease, RuntimeLease, acquire_exclusive, acquire_runtime
 
 __all__ = ["LOCK_SUBPATH", "MigrationBusy", "MigrationError", "migration_lock", "runtime_lease"]
 

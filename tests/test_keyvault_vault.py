@@ -501,7 +501,7 @@ def test_init_rejects_symlinked_root(tmp_path: Path, backend: FakeBackend, store
     root = tmp_path / "vault"
     root.symlink_to(target, target_is_directory=True)
 
-    from mordred_hermes._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_contracts import DatabaseRefused
 
     with pytest.raises(DatabaseRefused):
         _init(root, backend, store)

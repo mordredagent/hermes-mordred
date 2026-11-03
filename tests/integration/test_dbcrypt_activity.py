@@ -29,7 +29,7 @@ assert os.environ['HERMES_HOME'] == str(root)
 from mordred_hermes.keyvault import kek
 kek._noop_audit = lambda entry: None
 import sqlcipher3.dbapi2 as driver
-from mordred_hermes._database_lifecycle import acquire_exclusive
+from mordred_hermes._core._database_lifecycle import acquire_exclusive
 from mordred_hermes._private_fs import open_private_directory
 from mordred_hermes.activity._gate import ActivityRefused, _open_guarded, check_protection
 from mordred_hermes.activity._paths import store_path

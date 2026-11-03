@@ -20,7 +20,7 @@ import logging
 from pathlib import Path
 from typing import Any, Final, Literal, TypeAlias
 
-from .._policy_io import load_policy_mapping
+from .._core._policy_io import load_policy_mapping
 from ._cloud_endpoint import policy_provider_id
 
 _LOG = logging.getLogger("mordred.llm_guard.enforce")

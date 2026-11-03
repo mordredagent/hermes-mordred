@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .._database_contracts import DatabaseRefused, NativeSnapshot
-from .._database_lifecycle import ExclusiveLease, current_thread_exclusive_leases
+from .._core._database_contracts import DatabaseRefused, NativeSnapshot
+from .._core._database_lifecycle import ExclusiveLease, current_thread_exclusive_leases
 from ..keyvault._database_authority import CheckedDatabaseDomain, observe_database_source, resolve_database_domain
 from . import _migrate
 from ._connection import _check_sql, _MaintenanceConnection, _parameters, _PathBinding, _sql_action_denied

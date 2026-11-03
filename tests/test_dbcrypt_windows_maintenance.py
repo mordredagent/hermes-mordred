@@ -7,7 +7,7 @@ import contextlib
 import pytest
 import sqlcipher3.dbapi2 as sc
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.dbcrypt import _maintenance_windows as windows
 from mordred_hermes.dbcrypt import _windows_vfs
 

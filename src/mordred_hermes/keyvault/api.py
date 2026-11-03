@@ -674,7 +674,7 @@ def confirm_generate(
             }
         )
     except Exception as exc:  # success-path suppress (POLICY.md #22)
-        from .. import _term
+        from .._core import _term
 
         _term.emit_warn(
             f"keyvault.init_completed audit emit failed (init already durable, key_id_hash={key_id_hash_hex}): {exc!r}"

@@ -75,7 +75,7 @@ REMEDIES = {
 
 
 def _home() -> Path:
-    from .._home import hermes_home
+    from .._core._home import hermes_home
 
     return hermes_home()
 

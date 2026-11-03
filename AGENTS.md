@@ -13,7 +13,7 @@ components in `src/mordred_hermes/` in a fixed order: `keyvault`, `llm_guard`,
 `activity`, `wizard`.
 The pre-0.2.0a0 per-component plugin names (`mordred_network`, ...) survive
 only as `plugins.mordred_*` config section names and are migrated out of
-`plugins.enabled` / `plugins.disabled` (`_plugin_identity.py`). It is **not** a fork of Hermes upstream — never send
+`plugins.enabled` / `plugins.disabled` (`_core/_plugin_identity.py`). It is **not** a fork of Hermes upstream — never send
 PRs upstream (zero-PR commitment, `docs/dev/UPSTREAM.md`).
 
 ## Setup and everyday commands

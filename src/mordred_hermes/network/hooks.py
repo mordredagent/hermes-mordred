@@ -34,11 +34,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final, NoReturn, cast
 
-from .._audit_support import AuditWriter as _AuditWriter
-from .._audit_support import safe_audit_append
-from .._policy_io import load_policy_mapping
-from .._policy_types import VALID_ACTIVE_PATHS, ActivePath, PolicyMode
-from .._provider_resolution import (
+from .._core._audit_support import AuditWriter as _AuditWriter
+from .._core._audit_support import safe_audit_append
+from .._core._policy_io import load_policy_mapping
+from .._core._policy_types import VALID_ACTIVE_PATHS, ActivePath, PolicyMode
+from .._core._provider_resolution import (
     read_auth_active_provider,
     read_config_model_provider,
     resolve_disk_provider,
@@ -663,7 +663,7 @@ def wait_until_ready(*, timeout: float = 5.0, poll_interval: float = 0.05) -> bo
 def _safe_audit_append(audit: _AuditWriter, entry: Mapping[str, Any]) -> None:
     """Best-effort audit append binding this module's logger.
 
-    Thin wrapper over :func:`mordred_hermes._audit_support.safe_audit_append`
+    Thin wrapper over :func:`mordred_hermes._core._audit_support.safe_audit_append`
     -- a strict-mode refusal must still raise even if the audit write fails
     (disk full, permission denied, etc.).
     """

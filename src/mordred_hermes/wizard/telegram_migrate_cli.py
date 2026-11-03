@@ -99,7 +99,7 @@ def telegram_migrate_store(
     credentials are unsealed once, exactly like ``telegram sync``. Output and
     the one ``telegram.migrate_store`` audit event carry counts and codes only.
     """
-    from .._home import hermes_home
+    from .._core._home import hermes_home
     from ..extension.telegram import migrate
     from ..extension.telegram.secrets import TelegramSecretsError
     from ..extension.telegram.store import ArchiveStore, StoreError
@@ -143,7 +143,7 @@ def forget_import_rows(current: Any) -> str | None:
     :func:`~mordred_hermes.extension.telegram.history.forget_imported_history`).
     Needs the archive key and index, so it runs before either is wiped.
     """
-    from .._home import hermes_home
+    from .._core._home import hermes_home
     from ..extension.telegram.history import forget_imported_history
     from ..extension.telegram.store import ArchiveStore, StoreError
 
