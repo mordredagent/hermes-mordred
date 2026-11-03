@@ -334,7 +334,13 @@ class TelegramService:
     # -- helpers --------------------------------------------------------------
 
     async def _load_secrets(self, *, fresh: bool = False) -> TelegramSecrets | None:
-        return await asyncio.to_thread(self._secrets.load, fresh=fresh)
+        try:
+            return await asyncio.to_thread(self._secrets.load, fresh=fresh)
+        except BaseException:
+            from ...keyvault._presence import revoke_current
+
+            revoke_current()
+            raise
 
     def _archive(self, value: TelegramSecrets) -> ArchiveStore:
         return ArchiveStore(value.store_key, self._archive_root)
@@ -512,12 +518,19 @@ class TelegramService:
                 messages=result.messages_imported,
             )
         except asyncio.CancelledError:
+            from ...keyvault._presence import revoke_current
+
+            revoke_current()
             self._last_error = "sync_cancelled"
             raise
         except Exception as exc:
             code = error_code(exc, "telegram_sync_failed")
             self._last_error = code
             revoked_session = code == "telegram_session_revoked"
+            if revoked_session:
+                from ...keyvault._presence import revoke
+
+                revoke(home=self._profile_home())
             if code == "telegram_sync_failed":
                 # Type name only: an exception message or traceback locals
                 # could carry message text.

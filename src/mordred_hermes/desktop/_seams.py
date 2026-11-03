@@ -254,4 +254,7 @@ async def lifespan(_app: Any) -> AsyncIterator[None]:
         with contextlib.suppress(asyncio.CancelledError):
             await task
         cancel_all_flows()
+        from ..keyvault._presence import revoke
+
+        revoke()
         _imap.set_diagnostic_sink(None)

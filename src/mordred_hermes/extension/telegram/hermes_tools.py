@@ -56,6 +56,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from ...keyvault._presence_hosts import hermes_presence
+
 _log = logging.getLogger(__name__)
 
 TOOLSET = "mordred_telegram"
@@ -292,7 +294,8 @@ async def telegram_chats(
         return _reader_refusal()
     try:
         await _require_reader_allowed(parent_agent)
-        dialogs = await _service().dialogs()
+        with hermes_presence(session_id):
+            dialogs = await _service().dialogs()
     except Exception as exc:
         return _error(exc)
     return json.dumps(
@@ -348,7 +351,8 @@ async def telegram_ask(args: dict[str, Any], parent_agent: Any = None, session_i
     meta: list[Any] = []
     try:
         await _require_reader_allowed(parent_agent)
-        parts = [chunk async for chunk in _service().ask(request, meta.append)]
+        with hermes_presence(session_id):
+            parts = [chunk async for chunk in _service().ask(request, meta.append)]
     except Exception as exc:
         return _error(exc)
     info = meta[0] if meta else None
@@ -387,7 +391,8 @@ async def mordred_history_search(
         return json.dumps({"error": exc.code})
     try:
         await _require_reader_allowed(parent_agent)
-        result = await search_service(_service(), request)
+        with hermes_presence(session_id):
+            result = await search_service(_service(), request)
     except Exception as exc:
         return _error(exc)
     return json.dumps(

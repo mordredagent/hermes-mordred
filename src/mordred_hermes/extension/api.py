@@ -407,6 +407,7 @@ class _Connection:
         self.telegram_service = telegram_service
         self.page_token = page_token  # set only for local-origin (page) sockets
         self.client_origin = client_origin
+        self._presence_connection = secrets.token_hex(16)
         self.authed = False
         # Extension sessions are bound to the exact pairing token generation
         # that completed authentication. Re-pairing or clearing state must
@@ -423,6 +424,9 @@ class _Connection:
 
     def cancel_background_tasks(self) -> None:
         """Stop work that would otherwise outlive this socket (and keep billing)."""
+        from ..keyvault._presence import revoke
+
+        revoke(principal=("extension", self._presence_connection))
         for task in list(self._telegram_asks.values()):
             task.cancel()
         self._telegram_asks.clear()
@@ -522,7 +526,26 @@ class _Connection:
                 # Error refusals reply keyed by ``id`` so the caller never hangs.
                 await self._send({"id": msg.get("id"), **refusal} if refusal["type"] == "error" else refusal)
             elif mtype in authed:
-                await authed[mtype](msg)
+                if mtype in {"telegram_sync", "telegram_dialogs", "telegram_ask"}:
+                    from .._core._home import hermes_home
+                    from ..keyvault._presence import presence_scope
+
+                    home = hermes_home().resolve()
+                    generation = self._authentication_generation
+
+                    def current() -> bool:
+                        return (
+                            not self.ws.closed
+                            and self.authed
+                            and self._authentication_generation == generation
+                            and self._authentication_is_current()
+                            and hermes_home().resolve() == home
+                        )
+
+                    with presence_scope(home, ("extension", self._presence_connection), "telegram", valid=current):
+                        await authed[mtype](msg)
+                else:
+                    await authed[mtype](msg)
         except ExtensionStorageError as exc:
             await self._send_storage_refusal(msg, exc)
         except Exception:
@@ -554,6 +577,9 @@ class _Connection:
     # -- pairing / auth -----------------------------------------------------
 
     def _invalidate_authentication(self) -> None:
+        from ..keyvault._presence import revoke
+
+        revoke(principal=("extension", self._presence_connection))
         self.authed = False
         self._authentication_generation = None
         self._page_authenticated = False
@@ -1151,6 +1177,9 @@ class _Connection:
         mid = msg.get("id")
         task = self._telegram_asks.get(mid) if isinstance(mid, str) else None
         if task is not None:
+            from ..keyvault._presence import revoke
+
+            revoke(principal=("extension", self._presence_connection))
             task.cancel()
 
     def _telegram_evidence_frame(self, mid: str, ek: bytes, report: Any) -> dict[str, Any]:
@@ -1196,8 +1225,14 @@ class _Connection:
                 return
             await self._send({"id": mid, "type": "telegram_ask_end"})
         except asyncio.CancelledError:
+            from ..keyvault._presence import revoke
+
+            revoke(principal=("extension", self._presence_connection))
             raise
         except Exception as exc:
+            from ..keyvault._presence import revoke
+
+            revoke(principal=("extension", self._presence_connection))
             await self._send(
                 {"id": mid, "type": "telegram_ask_error", "reason": error_code(exc, "telegram_ask_failed")}
             )

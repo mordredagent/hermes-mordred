@@ -224,7 +224,10 @@ async def mail_fetch(request: Request) -> Any:
         job.progress = {"message": "Fetching new mail… up to 10 minutes"}
         api._emit("progress", {"job_id": job.job_id, **job.progress})
         try:
-            data = await job.run_sync(fetch_mail, options, home)
+            from ..keyvault._presence_hosts import desktop_presence
+
+            with desktop_presence(request, "mail"):
+                data = await job.run_sync(fetch_mail, options, home)
         except Exception as exc:
             _log.warning("mordred desktop mail fetch failed (%s)", type(exc).__name__)
             raise api._Fail(_projections.MAIL_FETCH_FALLBACK) from None
