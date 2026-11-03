@@ -814,7 +814,7 @@ def _default_harden() -> None:
 
 
 def default_env(home: Path | None = None) -> FetchEnv:
-    from ..._home import hermes_home
+    from ..._core._home import hermes_home
     from .secrets import MailSecretStore
 
     return FetchEnv(

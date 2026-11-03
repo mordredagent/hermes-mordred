@@ -33,7 +33,7 @@ from __future__ import annotations
 import argparse
 
 from ..__about__ import __version__
-from .._policy_types import ACTIVE_PATHS, POLICY_MODES
+from .._core._policy_types import ACTIVE_PATHS, POLICY_MODES
 
 
 def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) -> None:

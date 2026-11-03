@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.imports.mail.secrets import KEY_ID, MailSecretsError, MailSecretStore
 from mordred_hermes.keyvault import wrap
 from tests._activity_protection import native_root as native_root

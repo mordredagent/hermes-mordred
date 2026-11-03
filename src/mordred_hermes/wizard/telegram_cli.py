@@ -492,7 +492,7 @@ def telegram_logout(
         return _windows_logout(
             forget=forget, store=store, client_factory=client_factory, input_fn=input_fn if input_fn else input
         )
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ..extension.telegram.secrets import TelegramSecretsError
     from ..extension.telegram.store import StoreError
     from ..keyvault._exceptions import WrapError
@@ -510,7 +510,7 @@ def telegram_logout(
 def _telegram_logout_result(
     *, forget: bool = False, force: bool = False, store: Any = None, client_factory: Callable[..., Any] | None = None
 ) -> _TelegramLogoutOutcome:
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ..extension.telegram.secrets import TelegramSecretsError
     from ..extension.telegram.tee import TeeSecretStore
     from ..keyvault._telegram_custody import pending_telegram_forget

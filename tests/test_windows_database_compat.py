@@ -142,7 +142,7 @@ def test_windows_database_status_refuses_unknown_checked_home(fs, monkeypatch, c
     # refusal/no-private-error-disclosure intent as well as unsafe lexical paths.
     selected = home
     if failure == "checked_inventory":
-        from mordred_hermes import _database_inventory
+        from mordred_hermes._core import _database_inventory
 
         def unsafe(_home):
             raise PrivateFSError("unsafe", "test-DO-NOT-ECHO")

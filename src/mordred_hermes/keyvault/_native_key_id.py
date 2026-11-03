@@ -526,7 +526,7 @@ def _checked_main_creation_pending(
 
 
 def _assert_creation_backend_bound(backend: NativeBackend, root: Path) -> None:
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ._seckey_backend import _SecKeyBackend
     from ._seckey_helper import _HelperSecKeyOps
 

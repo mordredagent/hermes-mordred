@@ -125,7 +125,7 @@ with windows_memory_session(Path(sys.argv[1]), create=True) as session:
     session.write_entries('MEMORY.md', ['child'], delimiter='\\n§\\n')
 print('done', flush=True)
 """
-    from mordred_hermes._windows_runtime import scrubbed_environment
+    from mordred_hermes._core._windows_runtime import scrubbed_environment
 
     env = with_package_under_test(scrubbed_environment(os.environ))
     env.update(HERMES_HOME=str(home), HERMES_SAFE_MODE="1", PYTHONUTF8="1")

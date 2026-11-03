@@ -14,8 +14,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from .._database_contracts import DatabaseRefused, NativeSnapshot
-from .._database_lifecycle import ExclusiveLease
+from .._core._database_contracts import DatabaseRefused, NativeSnapshot
+from .._core._database_lifecycle import ExclusiveLease
 from .._private_fs import PrivateFSError, open_private_directory
 from . import _migrate
 from ._authority import Authority
@@ -418,7 +418,7 @@ def _find(root: Path, source: Path, snapshot: NativeSnapshot) -> dict[str, Any]:
 
 def restore_database(source: Path, destination: Path, *, lease: ExclusiveLease) -> None:
     # Resolve root from the actual lease registry, never trust a backup's root.
-    from .._database_lifecycle import current_thread_exclusive_leases
+    from .._core._database_lifecycle import current_thread_exclusive_leases
     from ..keyvault._database_authority import resolve_database_domain
 
     if type(lease) is not ExclusiveLease or lease not in current_thread_exclusive_leases():

@@ -7,8 +7,8 @@ from dataclasses import asdict, replace
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused, NativeSnapshot
-from mordred_hermes._database_lifecycle import acquire_exclusive
+from mordred_hermes._core._database_contracts import DatabaseRefused, NativeSnapshot
+from mordred_hermes._core._database_lifecycle import acquire_exclusive
 from mordred_hermes.keyvault._database_authority import resolve_database_domain
 
 
@@ -182,7 +182,7 @@ def test_write_rejects_foreign_root_and_changed_generation(marker_root, tmp_path
 
 
 def test_forged_exclusive_lease_refused(marker_root):
-    from mordred_hermes._database_lifecycle import ExclusiveLease
+    from mordred_hermes._core._database_lifecycle import ExclusiveLease
     from mordred_hermes.dbcrypt._marker import write_marker
 
     class ForgedLease(ExclusiveLease):
@@ -199,7 +199,7 @@ def test_forged_exclusive_lease_refused(marker_root):
 
 
 def test_windows_marker_encoding_uses_full_generation_and_file_id(marker_root, monkeypatch):
-    from mordred_hermes._database_contracts import RootIdentity
+    from mordred_hermes._core._database_contracts import RootIdentity
     from mordred_hermes.dbcrypt import _marker
     from mordred_hermes.keyvault import _database_authority as custody
 

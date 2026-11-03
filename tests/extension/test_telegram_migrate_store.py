@@ -138,7 +138,7 @@ class _CheckedSecrets(_Secrets):
     """Accounting wrapper around real POSIX native ownership and sealed storage."""
 
     def __init__(self, store_key: bytes, *, session: str | None = None) -> None:
-        from mordred_hermes._home import hermes_home
+        from mordred_hermes._core._home import hermes_home
 
         from .test_telegram_tee import _tee_store
 

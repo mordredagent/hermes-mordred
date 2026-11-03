@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from mordred_hermes import _home
+from mordred_hermes._core import _home
 from mordred_hermes.keyvault import _seckey_helper as helper
 from mordred_hermes.keyvault._exceptions import WrapError
 from mordred_hermes.keyvault._seckey_backend import _SecKeyBackend

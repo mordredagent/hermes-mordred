@@ -94,8 +94,8 @@ def _mail_native_refusals() -> Iterator[None]:
     MailSetupError/sever_chain boundary. Keep cancellation and corrupt wraps
     distinct from unavailable native ownership, just as the portable path does.
     """
-    from ..._config_io import PolicyPendingError
-    from ..._database_contracts import DatabaseRefused
+    from ..._core._config_io import PolicyPendingError
+    from ..._core._database_contracts import DatabaseRefused
     from ..._private_fs import PrivateFSError
     from ...keyvault._exceptions import WrapAuthCancelled, WrapError, WrapIntegrityError, WrapParseError
     from ...keyvault._mail_custody import MailOrphanKey
@@ -215,7 +215,7 @@ def _platform() -> str:
 
 
 def _home() -> Path:
-    from ..._home import hermes_home
+    from ..._core._home import hermes_home
 
     return hermes_home()
 
@@ -342,7 +342,7 @@ class MailSecretStore:
         try:
             with open_private_directory(home / "mordred/mail") as directory:
                 if read(directory, JOURNAL) is not None:
-                    from ..._database_contracts import DatabaseRefused
+                    from ..._core._database_contracts import DatabaseRefused
 
                     raise DatabaseRefused("mail retirement pending; evidence retained")
                 if read(directory, SEALED) is None:
@@ -371,7 +371,7 @@ class MailSecretStore:
     def _forget_from_snapshot(self, snapshot: tuple[MailCredentials | None, Any]) -> bool:
         if self._platform() == "win32":
             return bool(self._windows().forget_from_snapshot(snapshot))
-        from ..._database_contracts import DatabaseRefused
+        from ..._core._database_contracts import DatabaseRefused
         from ...keyvault._mail_custody import JOURNAL, META, SEALED, MailOrphanKey, mail_credential_transaction, read
 
         with mail_credential_transaction(
@@ -538,7 +538,7 @@ class MailSecretStore:
 
     def _ensure_posix_key(self, *, require_presence: bool, replace: bool) -> bool | None:
         """Create and record a missing key; an existing orphan key, with or without its record, is never replaced."""
-        from ..._database_contracts import DatabaseRefused
+        from ..._core._database_contracts import DatabaseRefused
         from ...keyvault import wrap
         from ...keyvault._exceptions import WrapKeyNotFound
         from ...keyvault._mail_custody import SEALED, MailOrphanKey, mail_credential_transaction, publish, read

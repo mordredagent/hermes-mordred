@@ -204,7 +204,7 @@ def native_init(*, home: Path, roles: Sequence[NativeRole] = ("memory",)) -> int
 
 def cli_native_init(args: argparse.Namespace) -> int:
     """argparse handler for ``keyvault native init [--role memory|audit|telegram ...]``."""
-    from .._home import hermes_home
+    from .._core._home import hermes_home
 
     roles: list[NativeRole] = list(getattr(args, "roles", None) or ["memory"])
     return native_init(home=hermes_home(), roles=roles)

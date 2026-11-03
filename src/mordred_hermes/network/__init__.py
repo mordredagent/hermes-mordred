@@ -27,11 +27,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
-from .._audit_support import build_audit_writer, safe_audit_append
-from .._home import HERMES_BASE
-from .._policy_io import load_policy_mapping
-from .._policy_types import VALID_ACTIVE_PATHS, ActivePath, PolicyMode
-from .._yaml_io import load_plugin_section
+from .._core._audit_support import build_audit_writer, safe_audit_append
+from .._core._home import HERMES_BASE
+from .._core._policy_io import load_policy_mapping
+from .._core._policy_types import VALID_ACTIVE_PATHS, ActivePath, PolicyMode
+from .._core._yaml_io import load_plugin_section
 from . import api, hooks
 from . import proxy_env as proxy_env_mod
 from . import settings as settings_mod
@@ -705,7 +705,7 @@ def _build_audit_writer(path: Path) -> Writer:
     The module-local ``lru_cache`` preserves the cheap repeated-call and
     ``cache_clear()`` behavior tests rely on. The authoritative ownership is
     delegated to the shared
-    :func:`mordred_hermes._audit_support.build_audit_writer`, which returns the
+    :func:`mordred_hermes._core._audit_support.build_audit_writer`, which returns the
     same normalized-path singleton used by privacy_check, llm_guard and
     extension-sign. Clearing this local cache cannot close or replace a writer
     still used by another plugin.

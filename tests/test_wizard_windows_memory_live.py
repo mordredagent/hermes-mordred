@@ -40,7 +40,7 @@ CONTENT = "synthetic wizard smoke\n§\nsecond entry"
 
 
 def _fresh_read(python: str, home: Path) -> dict[str, str]:
-    from mordred_hermes._windows_runtime import scrubbed_environment
+    from mordred_hermes._core._windows_runtime import scrubbed_environment
 
     env = {k: v for k, v in scrubbed_environment(os.environ).items() if k.upper() != "HERMES_MEMORY_KEY"}
     env.update(HERMES_HOME=str(home), PYTHONUTF8="1", MORDRED_CONFIG_DECRYPT="0")

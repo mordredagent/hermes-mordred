@@ -178,14 +178,14 @@ def test_explicit_encrypt_requires_enabled_root_even_when_bound(native_root, mon
 def test_fresh_source_requires_enabled_root_before_auth(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from mordred_hermes._database_contracts import DatabaseRefused
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes.keyvault import _database_authority as custody
     from mordred_hermes.keyvault import _memory_key as memory
     from tests._keyvault_fakes import FakeBackend
 
     monkeypatch.setattr(custody, "sys", SimpleNamespace(platform="linux"))
-    from mordred_hermes import _database_locking_posix as locking
+    from mordred_hermes._core import _database_locking_posix as locking
 
     monkeypatch.setattr(locking, "sys", SimpleNamespace(platform="linux"))
     backend = FakeBackend()
@@ -200,7 +200,7 @@ def test_fresh_source_requires_enabled_root_before_auth(tmp_path, monkeypatch):
 
 
 def test_bound_disabled_source_observation_does_not_repair(native_root):
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes.keyvault import _database_authority as custody
 
     root, backend, _, expected = native_root
@@ -248,7 +248,7 @@ import json, os, sys, types
 from pathlib import Path
 sys.dont_write_bytecode = True
 sys.argv = ['hermes-mordred', *json.loads(sys.argv[1])]
-audit = types.ModuleType('mordred_hermes._audit_support')
+audit = types.ModuleType('mordred_hermes._core._audit_support')
 audit.safe_audit_append = lambda *args, **kwargs: None
 sys.modules[audit.__name__] = audit
 from mordred_hermes.dbcrypt import _key
@@ -302,7 +302,7 @@ def test_dependency_appearing_after_windows_proof_refuses_final_guard(native_roo
     monkeypatch.setattr(_windows_memory, "_gate", lambda *a, **k: 0)
 
     def prove(*a, **k):
-        from mordred_hermes._database_lifecycle import acquire_runtime
+        from mordred_hermes._core._database_lifecycle import acquire_runtime
 
         # A real SH lease proves the parent has released its early EX guard.
         with acquire_runtime(root, timeout=0):
@@ -463,7 +463,7 @@ def test_real_source_ceremony_startup_has_no_implicit_custody(tmp_path, command)
 import json, os, sys, types
 sys.dont_write_bytecode = True
 sys.argv = ['hermes-mordred', *json.loads(sys.argv[1])]
-audit = types.ModuleType('mordred_hermes._audit_support')
+audit = types.ModuleType('mordred_hermes._core._audit_support')
 audit.safe_audit_append = lambda *a, **k: None
 sys.modules[audit.__name__] = audit
 from mordred_hermes.dbcrypt import _key

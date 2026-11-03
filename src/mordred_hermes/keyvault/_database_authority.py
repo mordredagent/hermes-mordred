@@ -19,8 +19,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from .._database_contracts import DatabaseRefused, NativeSnapshot, RootIdentity, decode_database_source_binding
-from .._database_lifecycle import ExclusiveLease
+from .._core._database_contracts import DatabaseRefused, NativeSnapshot, RootIdentity, decode_database_source_binding
+from .._core._database_lifecycle import ExclusiveLease
 from .._private_fs import PrivateFSError, open_private_directory
 from .._private_fs._types import validate_leaf
 from ._uninstall_authority import UninstallAuthorization
@@ -62,9 +62,9 @@ class CheckedDatabaseDomain:
 
 def _identify_database_home(path: Path) -> RootIdentity:
     if sys.platform == "win32":
-        from .._database_locking_windows import identify_root
+        from .._core._database_locking_windows import identify_root
     elif sys.platform in {"linux", "darwin"}:
-        from .._database_locking_posix import identify_root
+        from .._core._database_locking_posix import identify_root
     else:
         raise DatabaseRefused("database domain platform is unsupported")
     return identify_root(path)
@@ -360,7 +360,7 @@ def retire_database_source(
     metadata transaction; it never acquires database or native custody locks.
     Successful retirement is not silently undone if that later operation fails.
     """
-    from .._database_inventory import assert_mutation_safe
+    from .._core._database_inventory import assert_mutation_safe
     from ._uninstall_authority import check_authorization
 
     with _refusal():

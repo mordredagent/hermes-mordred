@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .._home import hermes_home as _hermes_home
+from .._core._home import hermes_home as _hermes_home
 from . import _term
 from .vault_cli import _open_hot_path_or_report, _resolve_root
 
@@ -251,7 +251,7 @@ def _ensure_memory_key(
     ``enable env`` in one setup run) the flow's already open vault is reused,
     so this costs no second unlock / Touch ID.
     """
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ..keyvault import anchor, vault
     from ..keyvault._exceptions import WrapError
     from ._vault_entries import _source_change_lease

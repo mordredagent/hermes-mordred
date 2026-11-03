@@ -20,7 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
-from .._home import HERMES_BASE
+from .._core._home import HERMES_BASE
 
 DEFAULT_HERMES_CONFIG_PATH: Final = HERMES_BASE / "config.yaml"
 DEFAULT_MORDRED_DIR: Final = HERMES_BASE / "mordred"

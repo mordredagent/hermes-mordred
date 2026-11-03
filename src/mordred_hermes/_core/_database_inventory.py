@@ -7,9 +7,9 @@ import stat
 from pathlib import Path
 from typing import Final, Literal
 
+from .._private_fs import open_private_directory
 from ._database_contracts import DatabaseRefused, Dependency, Inventory, NativeSnapshot, decode_database_source_binding
 from ._database_lifecycle import ExclusiveLease
-from ._private_fs import open_private_directory
 
 # Keep these scope/name rules aligned with dbcrypt._policy. Importing that
 # package here would execute dbcrypt.__init__ below the custody boundary.

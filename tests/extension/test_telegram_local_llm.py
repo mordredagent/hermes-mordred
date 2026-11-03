@@ -79,7 +79,7 @@ def ask_local(tmp_path, monkeypatch):
 
 
 def test_failed_audit_does_not_log_transport_exception_secrets(ask_local, monkeypatch, caplog):
-    from mordred_hermes import _audit_support
+    from mordred_hermes._core import _audit_support
 
     def broken_writer(_path):
         raise OSError("AUDIT-SECRET")

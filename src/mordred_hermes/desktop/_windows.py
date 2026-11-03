@@ -212,7 +212,7 @@ def memory_refusal(home: Path) -> dict[str, Any] | None:
     remedy instead of looking like unencrypted memory. Other custody failures
     keep their classified code; anything else is ``memory_encryption_required``.
     """
-    from .._config_io import CanonicalPaths, canonical_session
+    from .._core._config_io import CanonicalPaths, canonical_session
     from .._private_fs import PrivateFSError
 
     try:
@@ -535,7 +535,7 @@ def _enable(home: Path, executable: str | None, captured: io.StringIO) -> dict[s
 
 def _write_approval_on(home: Path) -> bool:
     """``memory.write_approval`` parks pending writes as plaintext JSON outside the hooked memory files."""
-    from .._yaml_io import load_yaml_mapping
+    from .._core._yaml_io import load_yaml_mapping
 
     memory = load_yaml_mapping(home / "config.yaml").get("memory")
     return isinstance(memory, dict) and memory.get("write_approval") is True

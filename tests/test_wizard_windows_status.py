@@ -14,7 +14,7 @@ import threading
 
 import pytest
 
-from mordred_hermes import _config_io as cio
+from mordred_hermes._core import _config_io as cio
 from mordred_hermes.keyvault import _seckey_helper, wrap
 from mordred_hermes.wizard import encryption_cli, keyvault_windows_cli, memory_cli, setup_cli, status_cli
 from mordred_hermes.wizard._encryption_status import status_mark

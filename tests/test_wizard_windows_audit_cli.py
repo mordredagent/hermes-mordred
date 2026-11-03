@@ -22,8 +22,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from mordred_hermes import _config_io as cio
-from mordred_hermes._audit_session import AuditSession
+from mordred_hermes._core import _config_io as cio
+from mordred_hermes._core._audit_session import AuditSession
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
 from mordred_hermes.keyvault import _seckey_helper, _storage, _windows_capability
 from mordred_hermes.keyvault import log_encryption as mral
@@ -190,7 +190,7 @@ def refused(captured, reason: str) -> None:
 
 
 def test_tail_and_grep_read_the_checked_plaintext_log_through_one_bounded_snapshot(win, monkeypatch, capsys):
-    from mordred_hermes import _audit_session
+    from mordred_hermes._core import _audit_session
 
     plaintext(win, ["alpha", "beta", "gamma"])
     reads: list[tuple[str, int]] = []

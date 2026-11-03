@@ -30,7 +30,7 @@ from ._vault_open import _build_device_auth, _vault_identity
 from ._windows_gates import excluded_refusal
 
 if TYPE_CHECKING:
-    from .._database_lifecycle import ExclusiveLease
+    from .._core._database_lifecycle import ExclusiveLease
     from ..keyvault.anchor import AnchorStore
     from ..keyvault.wrap import NativeBackend
     from ._flow_session import FlowSession
@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
 @contextlib.contextmanager
 def _initialization_lease(root: Path) -> Iterator[ExclusiveLease | None]:
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ..keyvault import vault
     from ..keyvault._database_mutation import database_key_mutation
     from ..keyvault._identity import _vault_database_home
@@ -97,7 +97,7 @@ def init(
         if not eligible:
             _term.emit_error(f"Cannot initialise the vault at {root}: {reason}")
             return 1
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ..keyvault import anchor, vault
     from ..keyvault._exceptions import WrapError, WrapKeyNotFound
 
@@ -397,7 +397,7 @@ def recover(
         return refusal
     from cryptography.exceptions import InvalidTag
 
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ..keyvault import anchor, backup, manifest, recovery, vault
     from ..keyvault._database_mutation import database_key_mutation
     from ..keyvault._exceptions import WrapError

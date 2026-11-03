@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseBusy, DatabaseRefused
-from mordred_hermes._database_lifecycle import acquire_exclusive
+from mordred_hermes._core._database_contracts import DatabaseBusy, DatabaseRefused
+from mordred_hermes._core._database_lifecycle import acquire_exclusive
 from mordred_hermes.dbcrypt._key import KeyProvider, derive
 from mordred_hermes.keyvault import _database_authority as custody
 from mordred_hermes.keyvault import _memory_key as memory
@@ -25,7 +25,7 @@ def native_root(tmp_path, monkeypatch):
     # No Secure Enclave, TPM, production home, or ambient audit sink is used.
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setattr(custody, "sys", SimpleNamespace(platform="linux"))
-    from mordred_hermes import _database_locking_posix as locking
+    from mordred_hermes._core import _database_locking_posix as locking
 
     monkeypatch.setattr(locking, "sys", SimpleNamespace(platform="linux"))
     backend = FakeBackend()

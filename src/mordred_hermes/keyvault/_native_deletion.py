@@ -16,11 +16,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Never, cast
 from weakref import WeakKeyDictionary
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.keyvault._uninstall_authority import UninstallAuthorization
 
 if TYPE_CHECKING:
-    from mordred_hermes._database_lifecycle import ExclusiveLease
+    from mordred_hermes._core._database_lifecycle import ExclusiveLease
 
     from ._seckey_ops import _SecKeyOps
     from ._storage import KeyvaultCustody, _NativeCreationOwner

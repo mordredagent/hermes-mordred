@@ -43,7 +43,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ..._database_contracts import DatabaseRefused
+from ..._core._database_contracts import DatabaseRefused
 from ...keyvault._telegram_custody import (
     KEY_ID as KEY_ID,
 )
@@ -98,7 +98,7 @@ def _scope_document(scope: dict[str, Any]) -> dict[str, Any]:
 
 
 def _home() -> Path:
-    from ..._home import hermes_home
+    from ..._core._home import hermes_home
 
     return hermes_home()
 
@@ -125,7 +125,7 @@ def _audit_sink(entry: dict[str, Any]) -> None:
     try:
         import logging
 
-        from ..._audit_support import build_audit_writer, safe_audit_append
+        from ..._core._audit_support import build_audit_writer, safe_audit_append
 
         writer = build_audit_writer(_home() / "mordred" / "audit.log")
         safe_audit_append(writer, entry, logger=logging.getLogger(__name__))

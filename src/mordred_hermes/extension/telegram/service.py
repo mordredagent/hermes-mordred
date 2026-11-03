@@ -180,7 +180,7 @@ def _attach_evidence(
 
 def _label_language(home: Path) -> str:
     """``plugins.mordred_imports.label_language`` (``en`` / ``ja``); anything else is ``en``."""
-    from ..._yaml_io import load_plugin_section
+    from ..._core._yaml_io import load_plugin_section
 
     section = load_plugin_section(home / "config.yaml", "mordred_imports", catch=(Exception,)) or {}
     lang = section.get("label_language")
@@ -190,8 +190,8 @@ def _label_language(home: Path) -> str:
 def _audit(event: str, decision: str, **fields: Any) -> None:
     """Best-effort audit entry. Never includes content, names, or keys."""
     try:
-        from ..._audit_support import build_audit_writer, safe_audit_append
-        from ..._home import hermes_home
+        from ..._core._audit_support import build_audit_writer, safe_audit_append
+        from ..._core._home import hermes_home
 
         writer = build_audit_writer(hermes_home() / "mordred" / "audit.log")
         safe_audit_append(writer, {"event": event, "decision": decision, "reason": None, **fields}, logger=_log)
@@ -210,15 +210,15 @@ def check_llm_policy(backend: str, base_url: str) -> None:
     contains ``"venice"`` and ``allow_cloud_llm`` is true). There is no
     interactive prompt here: ``prompt-once`` fails closed.
     """
-    from ..._home import hermes_home
-    from ..._policy_io import read_policy_mode_fail_closed
+    from ..._core._home import hermes_home
+    from ..._core._policy_io import read_policy_mode_fail_closed
     from ...llm_guard import enforce
     from ...llm_guard._exceptions import MordredSessionRefused
 
     path = hermes_home() / "mordred" / "policy.json"
     mode = read_policy_mode_fail_closed(path, default="lenient", log=_log)
     try:
-        from ..._audit_support import build_audit_writer
+        from ..._core._audit_support import build_audit_writer
 
         writer = build_audit_writer(hermes_home() / "mordred" / "audit.log")
         enforce.check_runtime_provider(
@@ -342,7 +342,7 @@ class TelegramService:
     def _profile_home(self) -> Path:
         if self._home is not None:
             return self._home
-        from ..._home import hermes_home
+        from ..._core._home import hermes_home
 
         return hermes_home()
 

@@ -36,7 +36,7 @@ Python (unsigned)
 2. `$HERMES_HOME/mordred/keyvault/sekey`
 3. `~/.hermes/mordred/keyvault/sekey`
 
-This mirrors `mordred_hermes._home.hermes_home`. The directory is created
+This mirrors `mordred_hermes._core._home.hermes_home`. The directory is created
 `0700` and each `<tag_hex>.bin` blob is written `0600`. A blob is completed,
 chmodded, and synced under a private staging name before an atomic no-replace
 hard link publishes it, so neither a short write nor a concurrent generator can

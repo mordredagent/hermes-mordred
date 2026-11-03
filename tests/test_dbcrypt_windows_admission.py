@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.dbcrypt._authority import Authority
 from tests.test_dbcrypt_authority import native_root as _native_root
 
@@ -56,7 +56,7 @@ def test_register_checked_vfs_refuses_workstation_editions(monkeypatch):
 
 @pytest.mark.parametrize("qualified", [False, True])
 def test_database_lease_requires_qualified_windows_leases(tmp_path: Path, monkeypatch, qualified):
-    from mordred_hermes import _database_lifecycle, _database_locking_windows
+    from mordred_hermes._core import _database_lifecycle, _database_locking_windows
 
     sentinel = object()
     seen: list[Path] = []

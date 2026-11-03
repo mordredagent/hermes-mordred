@@ -726,7 +726,7 @@ class _Client:
 
 @pytest.fixture
 def telegram(windows_api, fs, monkeypatch, tmp_path):
-    from mordred_hermes import _config_io
+    from mordred_hermes._core import _config_io
     from mordred_hermes.extension.telegram import _windows_archive
     from mordred_hermes.extension.telegram.login_flow import LoginFlows
 

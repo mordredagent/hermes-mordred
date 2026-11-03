@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from mordred_hermes import _config_text_io
+from mordred_hermes._core import _config_text_io
 from mordred_hermes.wizard.policy_writer import (
     MORDRED_CONFIG_SECTIONS,
     MORDRED_PLUGIN_NAMES,
@@ -899,7 +899,7 @@ class TestWriteCompose:
         old_mode: str,
         new_mode: str,
     ) -> None:
-        from mordred_hermes import _policy_io
+        from mordred_hermes._core import _policy_io
         from mordred_hermes.privacy_check import _runtime as privacy_runtime
 
         w = _writer(tmp_path)

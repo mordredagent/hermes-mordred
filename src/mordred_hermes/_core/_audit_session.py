@@ -13,9 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from . import _private_fs as fs
-from ._private_fs import FileIdentity, FileMetadata, PrivateDirectory, PrivateFSError, PrivateTransaction
-from ._private_fs._types import validate_limit
+from .. import _private_fs as fs
+from .._private_fs import FileIdentity, FileMetadata, PrivateDirectory, PrivateFSError, PrivateTransaction
+from .._private_fs._types import validate_limit
 
 
 @dataclass(frozen=True)
@@ -45,7 +45,7 @@ _local = threading.local()
 def _validate_name(name: str) -> None:
     # This new API uses the Windows sibling-name contract even for an absent
     # view. Reuse the foundation's pure validator; no backend IO occurs here.
-    from ._private_fs._windows_paths import windows_leaf
+    from .._private_fs._windows_paths import windows_leaf
 
     windows_leaf(name)
 

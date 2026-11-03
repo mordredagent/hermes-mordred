@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 import sqlcipher3.dbapi2 as driver
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 
 
 @pytest.fixture
@@ -19,7 +19,7 @@ def collector():
 
 @pytest.fixture
 def software_key(monkeypatch, tmp_path):
-    from mordred_hermes import _database_lifecycle
+    from mordred_hermes._core import _database_lifecycle
     from mordred_hermes.keyvault import _memory_key
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))

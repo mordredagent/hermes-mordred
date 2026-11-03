@@ -15,9 +15,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final, Literal, cast
 
-from .._policy_io import read_policy_mode_fail_closed
-from .._policy_types import VALID_ACTIVE_PATHS, ActivePath, PolicyMode
-from .._yaml_io import load_plugin_section
+from .._core._policy_io import read_policy_mode_fail_closed
+from .._core._policy_types import VALID_ACTIVE_PATHS, ActivePath, PolicyMode
+from .._core._yaml_io import load_plugin_section
 from .provider_transport_flagger import ProviderEntry, TransportClass
 
 DEFAULT_NETWORK_PATH: Final[ActivePath] = "clearnet"

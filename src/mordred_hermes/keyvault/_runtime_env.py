@@ -17,7 +17,7 @@ from collections.abc import MutableMapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .._home import hermes_home as _hermes_home
+from .._core._home import hermes_home as _hermes_home
 from ._identity import default_vault_root, resolve_backend_store, vault_identity
 
 if TYPE_CHECKING:

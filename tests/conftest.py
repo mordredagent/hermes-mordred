@@ -1,7 +1,7 @@
 """Root pytest conftest: make the suite self-isolating against the developer's
 real Hermes home.
 
-``src/mordred_hermes/_home.py`` resolves ``HERMES_BASE`` **at import time**
+``src/mordred_hermes/_core/_home.py`` resolves ``HERMES_BASE`` **at import time**
 (``HERMES_BASE: Final = hermes_home()``), and several plugins derive their
 ``DEFAULT_*`` path constants from that frozen value. That means the very first
 import of ``mordred_hermes`` (or any of its plugins) anywhere in the process —

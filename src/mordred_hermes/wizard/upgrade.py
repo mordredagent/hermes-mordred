@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from .._yaml_io import load_plugin_section
+from .._core._yaml_io import load_plugin_section
 from . import openclaw_migration
 from ._runtime import DEFAULT_OPENCLAW_BASE
 from .policy_writer import (

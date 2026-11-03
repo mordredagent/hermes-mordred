@@ -276,7 +276,7 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
 - [ ] Staging WAL sidecars: `mode=ro` verification leaves `*.mordred-enc-wal`/`-shm` behind,
   and later operations refuse them as unknown sidecars (`src/mordred_hermes/dbcrypt/_migrate.py`).
 - [ ] Monitor: `monitor_runtime` invalidates authority over non-database files such as `state.db.malformed-backup-*`;
-  the inventory and policy name classifiers disagree (`src/mordred_hermes/dbcrypt/_monitor.py`, `src/mordred_hermes/_database_inventory.py`, `src/mordred_hermes/dbcrypt/_policy.py`).
+  the inventory and policy name classifiers disagree (`src/mordred_hermes/dbcrypt/_monitor.py`, `src/mordred_hermes/_core/_database_inventory.py`, `src/mordred_hermes/dbcrypt/_policy.py`).
 - [ ] Backup journal: a failed backup journal is never cleared in production, because
   `recover_backups`/`delete_backup` have no non-test caller (`src/mordred_hermes/dbcrypt/_backup.py`).
 - [x] Uninstall: move known refusals before restoration and separate verified
@@ -345,15 +345,15 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
 - [ ] `mail forget --force-orphan` keyless-source repair only fires on an exact `WrapKeyNotFound`; a home moved to another Mac/TPM carries a blob the helper cannot use and reports a different error, so that case still dead-ends in `tee_unavailable`; decide what counts as "unusable on this device" (`src/mordred_hermes/keyvault/_mail_custody.py`).
 - [ ] `--force-orphan` trusts the ambient `MORDRED_SEKEY_STORE` override when deciding a key is absent; pin the helper store for the repair (`src/mordred_hermes/keyvault/_mail_custody.py`).
 - [ ] `_reap()` runs only at `_open`; an abandoned mid-transaction facade keeps RESERVED until the next admission; consider reaping at `_operation` entry when `_ABANDONED` is non-empty (`src/mordred_hermes/dbcrypt/_connection.py`).
-- [ ] The Windows lease entry point checks only the constant `WINDOWS_LEASE_QUALIFIED`, not the edition gate, so unqualified editions still take the LockFileEx lease (availability only) (`src/mordred_hermes/_database_lifecycle.py`).
+- [ ] The Windows lease entry point checks only the constant `WINDOWS_LEASE_QUALIFIED`, not the edition gate, so unqualified editions still take the LockFileEx lease (availability only) (`src/mordred_hermes/_core/_database_lifecycle.py`).
 - [ ] Desktop Remove shows `tee_unavailable` for a sealed source whose key is gone and gives no route to the terminal repair (`src/mordred_hermes/desktop/_projections.py`).
 - [ ] `test_desktop_status_v4.py` forces `_driver_present -> False` and `test_history_search_tool.py` stubs `_gate.runtime_authority`; add companion tests that keep the original intent (`tests/extension/`).
 - [ ] The restore preview in `wizard/activity_store_cli.py` duplicates the preflight of `restore_activity_store`; share one helper (`src/mordred_hermes/wizard/activity_store_cli.py`).
 - [ ] `ActivityStore.restore` has no production caller since restore went offline; remove it and its tests or document why it stays (`src/mordred_hermes/activity/store.py`).
 - [ ] `activity restore` cannot recreate a deleted store; it now refuses with `store_missing` and guidance; decide whether an offline creation path is wanted (`src/mordred_hermes/activity/store.py`).
-- [ ] Windows Server admits only elevated-capable editions, yet an elevated token (including the built-in Administrator) creates Administrators-owned directories by default, so a Hermes home made with a plain `mkdir` is refused by `_root_identity` ("Windows database root cannot be identified safely"); since `uninstall` now always takes the database lease, even a package-only uninstall with nothing encrypted stops there, where `dev` succeeded. The native acceptance runs used a non-elevated user. Decide between keeping the strict owner policy with an actionable message (take ownership of `HERMES_HOME`) and an explicit admitted-owner policy for elevated tokens (`src/mordred_hermes/_database_locking_windows.py`, `src/mordred_hermes/wizard/uninstall_cli.py`).
+- [ ] Windows Server admits only elevated-capable editions, yet an elevated token (including the built-in Administrator) creates Administrators-owned directories by default, so a Hermes home made with a plain `mkdir` is refused by `_root_identity` ("Windows database root cannot be identified safely"); since `uninstall` now always takes the database lease, even a package-only uninstall with nothing encrypted stops there, where `dev` succeeded. The native acceptance runs used a non-elevated user. Decide between keeping the strict owner policy with an actionable message (take ownership of `HERMES_HOME`) and an explicit admitted-owner policy for elevated tokens (`src/mordred_hermes/_core/_database_locking_windows.py`, `src/mordred_hermes/wizard/uninstall_cli.py`).
 - [ ] On the macOS CI runner (Python 3.11) one in-wrap IMAP handshake worker stayed admitted for longer than 12 s after its waiter had given up (`tests/test_mail_imap_client.py`, run 40671007071), so the two tests asserting an empty `_abandoned_handshakes` cap failed; they now drain the cap first. Identify the test whose worker lingers (likely the interrupt test: a `shutdown` of the duplicated descriptor may not wake `recv` on that macOS) and decide whether the "ends at once" claim of `Link.interrupt` needs a platform note (`src/mordred_hermes/imports/mail/imap.py`).
-- [ ] `linux_holders_of` returns "unknown" as soon as one same-UID process refuses `/proc/<pid>/fd` (non-dumpable processes such as sandboxed browsers or agents); on the GitHub Ubuntu runner every unstubbed maintenance path refused with "could not check database holders". Decide whether such processes stay "uncertain" (current, refuses maintenance on many desktops) or are reported by PID so the operator can stop them (`src/mordred_hermes/_database_locking_posix.py`).
+- [ ] `linux_holders_of` returns "unknown" as soon as one same-UID process refuses `/proc/<pid>/fd` (non-dumpable processes such as sandboxed browsers or agents); on the GitHub Ubuntu runner every unstubbed maintenance path refused with "could not check database holders". Decide whether such processes stay "uncertain" (current, refuses maintenance on many desktops) or are reported by PID so the operator can stop them (`src/mordred_hermes/_core/_database_locking_posix.py`).
 
 ### Linux private Telegram (proposed)
 
@@ -831,7 +831,7 @@ Follow-ups left by the landed code:
   rebinding or explicit refusal; do not assume the old reproduction still holds.
 
 The old `arm` directory-creation defect is superseded: the POSIX lease creates
-`mordred` with mode `0700` (`_database_locking_posix.py`). Existing legacy `0755`
+`mordred` with mode `0700` (`_core/_database_locking_posix.py`). Existing legacy `0755`
 directories remain admitted by the legacy marker seam; that does not establish
 compatibility with every downstream private-store reader.
 

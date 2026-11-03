@@ -17,9 +17,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary
 
-from .._config_io import CanonicalPaths, CanonicalSession, _MordredTransaction, canonical_session
-from .._custody_order import custody_scope
-from .._database_contracts import DatabaseRefused
+from .._core._config_io import CanonicalPaths, CanonicalSession, _MordredTransaction, canonical_session
+from .._core._custody_order import custody_scope
+from .._core._database_contracts import DatabaseRefused
 from .._private_fs import (
     FileIdentity,
     PrivateFSError,
@@ -65,7 +65,7 @@ from .memory_crypto import MemoryCryptoError, looks_like_magic_line, unseal
 from .wrap import NativeBackend
 
 if TYPE_CHECKING:
-    from .._database_lifecycle import ExclusiveLease
+    from .._core._database_lifecycle import ExclusiveLease
 
 
 @dataclass
@@ -381,7 +381,7 @@ class WindowsCustodySession:
     def _fresh_manifest_v2(self) -> None:
         # A missing manifest alone is not absence. Refuse all non-coordinator
         # entries, including unknown/staged ownership, source stores and backups.
-        from .._database_inventory import scan_dependencies
+        from .._core._database_inventory import scan_dependencies
 
         if self._transaction().list_names(max_entries=4096):
             raise CustodyError("retained custody without a manifest requires reconciliation")

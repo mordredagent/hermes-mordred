@@ -17,8 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeVar
 
-from ._custody_order import custody_scope
-from ._private_fs import (
+from .._private_fs import (
     ConfidentialDirectory,
     ConfidentialTransaction,
     FileIdentity,
@@ -31,7 +30,8 @@ from ._private_fs import (
     open_optional_private_directory,
     open_private_directory,
 )
-from ._private_fs._types import reserved, validate_leaf, validate_limit
+from .._private_fs._types import reserved, validate_leaf, validate_limit
+from ._custody_order import custody_scope
 
 CONFIG_LIMIT = POLICY_LIMIT = DOTENV_LIMIT = 8 * 1024 * 1024
 MARKER_LIMIT = 4096
@@ -515,7 +515,7 @@ class _MordredTransaction:
         native key operations execute while directory traversal is deferred.
         The public stat/read APIs and all their guard/leaf checks are retained.
         """
-        from ._private_fs._windows_io import _CustodyReadScope, _Directory, _Transaction
+        from .._private_fs._windows_io import _CustodyReadScope, _Directory, _Transaction
 
         state = self._session._state
         scope: _CustodyReadScope | nullcontext[None] = nullcontext()

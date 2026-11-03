@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from mordred_hermes import _dotenv_io
+from mordred_hermes._core import _dotenv_io
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX lockfile contracts; native canonical tests are separate")
 

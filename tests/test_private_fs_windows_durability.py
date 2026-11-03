@@ -7,8 +7,8 @@ from pathlib import PureWindowsPath
 
 import pytest
 
-from mordred_hermes import _config_io as cio
 from mordred_hermes import _private_fs as fs
+from mordred_hermes._core import _config_io as cio
 from mordred_hermes._private_fs import _windows_paths as paths
 from mordred_hermes._private_fs._windows_api import NativeAPI
 from tests.test_private_fs_confidential import PRIVATE, Native, Node

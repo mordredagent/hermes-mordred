@@ -108,8 +108,8 @@ else:
 DATABASE_LEASE_CHILD = """
 import sys
 from pathlib import Path
-from mordred_hermes._database_contracts import DatabaseRefused
-from mordred_hermes._database_lifecycle import acquire_exclusive, acquire_runtime
+from mordred_hermes._core._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_lifecycle import acquire_exclusive, acquire_runtime
 operation = sys.argv[2]
 try:
     if operation == 'exclusive':

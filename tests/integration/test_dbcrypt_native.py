@@ -34,7 +34,7 @@ assert os.environ['HERMES_HOME'] == str(root)
 from mordred_hermes.keyvault import kek
 kek._noop_audit = lambda entry: None
 import sqlcipher3.dbapi2 as sc
-from mordred_hermes._database_lifecycle import acquire_exclusive
+from mordred_hermes._core._database_lifecycle import acquire_exclusive
 from mordred_hermes._private_fs import open_private_directory
 from mordred_hermes.dbcrypt import _backup, _migrate
 from mordred_hermes.dbcrypt._authority import Authority
@@ -99,8 +99,8 @@ def run():
         raise AssertionError('requested durable transition not reached')
     else:
         if direction == 'backup':
-            from mordred_hermes._database_contracts import DatabaseRefused
-            from mordred_hermes._database_inventory import assert_mutation_safe
+            from mordred_hermes._core._database_contracts import DatabaseRefused
+            from mordred_hermes._core._database_inventory import assert_mutation_safe
             with acquire_exclusive(root) as lease:
                 snapshot = observe_database_source(root=root)
                 try:

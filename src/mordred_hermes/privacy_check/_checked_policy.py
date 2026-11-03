@@ -6,10 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from .._config_io import CanonicalPaths, read_canonical_snapshot
-from .._policy_io import policy_mapping_from_snapshot
-from .._policy_types import POLICY_MODES
-from .._yaml_io import yaml_mapping_from_snapshot
+from .._core._config_io import CanonicalPaths, read_canonical_snapshot
+from .._core._policy_io import policy_mapping_from_snapshot
+from .._core._policy_types import POLICY_MODES
+from .._core._yaml_io import yaml_mapping_from_snapshot
 from .egress import LEVELS, EgressPolicy, parse_policy
 from .policy import PolicyMode
 

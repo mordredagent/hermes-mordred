@@ -82,7 +82,7 @@ _SET_LOCK = threading.Lock()
 
 
 def _windows() -> bool:
-    from .. import _config_text_io
+    from .._core import _config_text_io
 
     return _config_text_io._windows()
 
@@ -100,7 +100,7 @@ def _read_text(home: Path) -> str | None:
     """config.yaml's text, ``None`` when there is none; a sealed-away vault copy is refused."""
     try:
         if _windows():
-            from .._config_io import CanonicalPaths, read_canonical_snapshot
+            from .._core._config_io import CanonicalPaths, read_canonical_snapshot
 
             snapshot = read_canonical_snapshot(CanonicalPaths(home))
             return None if snapshot.config is None else snapshot.config.data.decode("utf-8")

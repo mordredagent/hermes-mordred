@@ -76,7 +76,7 @@ from ._uninstall_hermes_env import (
 )
 
 if TYPE_CHECKING:
-    from .._database_lifecycle import ExclusiveLease
+    from .._core._database_lifecycle import ExclusiveLease
     from ..keyvault.anchor import AnchorStore
     from ..keyvault.wrap import NativeBackend
     from ._flow_session import FlowSession
@@ -664,7 +664,7 @@ def _remove_helpers(
     if opts.remove_helper or opts.purge_data:
         for helper in plan.helpers:
             if helper.mordred_built:
-                from .._database_contracts import DatabaseRefused
+                from .._core._database_contracts import DatabaseRefused
                 from ..keyvault._database_mutation import assert_database_helper_removal_safe
 
                 if lease is None:
@@ -707,7 +707,7 @@ def _delete_vault_keys(
     uninstall: UninstallAuthorization | None = None,
 ) -> None:
     """Retain exclusion/custody until guarded native and anchor deletion finish."""
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ..keyvault import vault
     from ..keyvault._identity import resolve_backend
     from ..keyvault._native_deletion import _owned_delete_scope
@@ -762,7 +762,7 @@ def _purge_tpm_memory(ctx: UninstallContext) -> int:
 
 def _has_database_refusal(error: BaseException) -> bool:
     """A source refusal remains fatal through explicit and implicit wrappers."""
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
 
     pending = [error]
     seen: set[int] = set()
@@ -780,7 +780,7 @@ def _has_database_refusal(error: BaseException) -> bool:
 
 
 def _forget_telegram_for_uninstall(ctx: UninstallContext) -> None:
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from .telegram_cli import _TelegramLogoutOutcome
 
     forget = ctx.telegram_forget or _default_telegram_forget
@@ -921,7 +921,7 @@ def run_uninstall(ctx: UninstallContext, opts: UninstallOptions) -> int:
 
 
 def _context_from_environment() -> UninstallContext:
-    from .._home import hermes_home
+    from .._core._home import hermes_home
     from ..keyvault._identity import resolve_root
 
     return UninstallContext(home=hermes_home(), vault_root=resolve_root(None), user_home=Path.home())

@@ -1,11 +1,11 @@
-"""mordred_hermes._term — minimal, dependency-free terminal styling.
+"""mordred_hermes._core._term — minimal, dependency-free terminal styling.
 
 The Mordred CLI is plain ``print()`` with no colour. This module centralises the
 small amount of ANSI styling the CLI needs so every command styles output the
 same way and the same TTY / ``NO_COLOR`` gate is applied in one place.
 
-Lives at the package root (sibling to :mod:`mordred_hermes._home` /
-:mod:`mordred_hermes._yaml_io`) rather than under ``wizard`` so non-wizard
+Lives in :mod:`mordred_hermes._core` (sibling to :mod:`mordred_hermes._core._home` /
+:mod:`mordred_hermes._core._yaml_io`) rather than under ``wizard`` so non-wizard
 packages — notably ``keyvault._env_write_guard`` — can style output without
 importing the wizard layer. A ``wizard._term`` re-export facade preserves the
 historical import path so existing call sites and monkeypatch pins are unchanged.

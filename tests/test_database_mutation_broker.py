@@ -9,8 +9,8 @@ import sys
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused, Dependency, Inventory
-from mordred_hermes._database_lifecycle import ExclusiveLease, acquire_exclusive
+from mordred_hermes._core._database_contracts import DatabaseRefused, Dependency, Inventory
+from mordred_hermes._core._database_lifecycle import ExclusiveLease, acquire_exclusive
 
 
 def broker():
@@ -30,7 +30,7 @@ def test_empty_home_yields_genuine_live_lease(tmp_path):
 
 @pytest.mark.parametrize("kind", ["database", "pending", "journal", "backup", "unknown"])
 def test_all_generations_are_guarded(tmp_path, monkeypatch, kind):
-    from mordred_hermes import _database_inventory as inventory
+    from mordred_hermes._core import _database_inventory as inventory
 
     monkeypatch.setattr(
         inventory,
@@ -164,7 +164,7 @@ from mordred_hermes.keyvault._database_mutation import database_key_mutation
 
 
 def test_final_guard_rechecks_all_generations_after_preflight(tmp_path, monkeypatch):
-    from mordred_hermes import _database_inventory as inventory
+    from mordred_hermes._core import _database_inventory as inventory
 
     with broker().database_key_mutation(root=tmp_path, generation="first") as lease:
         monkeypatch.setattr(
@@ -202,7 +202,7 @@ def test_custody_intent_precedes_mutex_wait(tmp_path, monkeypatch):
 def test_tracking_is_thread_local_and_cleans_up_on_error(tmp_path):
     from concurrent.futures import ThreadPoolExecutor
 
-    from mordred_hermes._custody_order import active_custody_scopes, custody_scope
+    from mordred_hermes._core._custody_order import active_custody_scopes, custody_scope
 
     with pytest.raises(ValueError), custody_scope():
         assert active_custody_scopes()
@@ -215,8 +215,8 @@ def test_tracking_is_thread_local_and_cleans_up_on_error(tmp_path):
 
 
 def test_registry_snapshot_does_not_check_native_or_filesystem(tmp_path, monkeypatch):
-    from mordred_hermes._custody_order import assert_preceding_database_lease, custody_scope
-    from mordred_hermes._database_lifecycle import current_thread_exclusive_leases
+    from mordred_hermes._core._custody_order import assert_preceding_database_lease, custody_scope
+    from mordred_hermes._core._database_lifecycle import current_thread_exclusive_leases
 
     with acquire_exclusive(tmp_path) as lease:
 
@@ -268,8 +268,8 @@ def test_cross_thread_proof_refuses_without_native_check(tmp_path):
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork registry cleanup")
 def test_fork_discards_inherited_custody_and_database_proof(tmp_path):
-    from mordred_hermes._custody_order import active_custody_scopes, custody_scope
-    from mordred_hermes._database_lifecycle import current_thread_exclusive_leases
+    from mordred_hermes._core._custody_order import active_custody_scopes, custody_scope
+    from mordred_hermes._core._database_lifecycle import current_thread_exclusive_leases
 
     read_fd, write_fd = os.pipe()
     try:

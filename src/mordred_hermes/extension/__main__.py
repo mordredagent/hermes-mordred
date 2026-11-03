@@ -27,7 +27,7 @@ from collections.abc import Callable
 from types import FrameType
 from typing import TYPE_CHECKING, Any
 
-from .. import _term
+from .._core import _term
 
 if TYPE_CHECKING:
     from .api import ExtensionAPIServer
@@ -100,7 +100,7 @@ def _resolve_activity_receiver() -> Any:
     batch, so nothing here decides whether recording is allowed.
     """
     try:
-        from .._home import hermes_home
+        from .._core._home import hermes_home
         from ..activity.ingest import build_receiver
     except ImportError as exc:
         logging.getLogger(__name__).debug("activity receiver unavailable (%s)", type(exc).__name__)
@@ -113,7 +113,7 @@ def _resolve_activity_receiver() -> Any:
 
 
 def _resolve_activity_max_batch_bytes() -> int:
-    from .._home import hermes_home
+    from .._core._home import hermes_home
     from .activity_api import resolve_max_batch_bytes
 
     return resolve_max_batch_bytes(hermes_home())

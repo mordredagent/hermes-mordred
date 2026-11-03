@@ -173,7 +173,7 @@ class ActivityConfig:
         With ``strict`` a file that exists but cannot be read or parsed raises instead, so a caller that shows
         the switches (the Desktop page) can say so rather than show the defaults as the owner's choice.
         """
-        from .._yaml_io import load_plugin_section
+        from .._core._yaml_io import load_plugin_section
 
         section = load_plugin_section(home / "config.yaml", SECTION, catch=() if strict else None)
         return cls.from_mapping(section or {})

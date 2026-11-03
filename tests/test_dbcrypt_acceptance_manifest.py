@@ -2181,8 +2181,9 @@ def test_package_collector_preserves_binary_owner_and_emits_canonical_sid(tmp_pa
 
     import sqlcipher3.dbapi2 as driver
 
-    from mordred_hermes import _database_locking_windows, _private_fs
-    from mordred_hermes._database_contracts import RootIdentity
+    from mordred_hermes import _private_fs
+    from mordred_hermes._core import _database_locking_windows
+    from mordred_hermes._core._database_contracts import RootIdentity
     from mordred_hermes.keyvault import kek
     from tests import _dbcrypt_acceptance_native as collector
 

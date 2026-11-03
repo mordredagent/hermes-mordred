@@ -6,8 +6,8 @@ from dataclasses import replace
 
 import pytest
 
-from mordred_hermes import _config_io as cio
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core import _config_io as cio
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
 from mordred_hermes.keyvault._database_mutation import database_key_mutation
 from mordred_hermes.keyvault._exceptions import WrapKeyNotFound

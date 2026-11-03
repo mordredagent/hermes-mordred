@@ -23,7 +23,7 @@ vault_root = home / "mordred/vault"
 backup = home.parent / "retained.backup"
 paths = [home / "state.db", home / "profiles/work/state.db"]
 if phase == "prepare":
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes.dbcrypt import _backup, _migrate, arm
     from mordred_hermes.dbcrypt._authority import Authority
     from mordred_hermes.keyvault._config_bootstrap import reseal_config

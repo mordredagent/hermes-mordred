@@ -34,16 +34,16 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .._audit_support import build_audit_writer
-from .._home import HERMES_BASE
-from .._policy_io import read_policy_mode_fail_closed
-from .._provider_identity import canonicalize_provider
-from .._provider_resolution import (
+from .._core._audit_support import build_audit_writer
+from .._core._home import HERMES_BASE
+from .._core._policy_io import read_policy_mode_fail_closed
+from .._core._provider_identity import canonicalize_provider
+from .._core._provider_resolution import (
     read_auth_active_provider,
     read_config_model_provider,
     resolve_disk_provider,
 )
-from .._proxy_bypass import ensure_loopback_proxy_bypass
+from .._core._proxy_bypass import ensure_loopback_proxy_bypass
 from . import auxiliary_guard, enforce, harness_detect, local_adapter
 from ._exceptions import MordredLocalUnreachable, MordredSessionRefused
 from ._typing import PluginContext
@@ -299,7 +299,7 @@ def _build_audit_writer(path: Path) -> Writer:
     ``cache_clear()`` test API. It does not own writer lifecycle.
 
     Construction is delegated to the shared
-    :func:`mordred_hermes._audit_support.build_audit_writer`, which returns the
+    :func:`mordred_hermes._core._audit_support.build_audit_writer`, which returns the
     same normalized-path singleton used by privacy_check, network and
     extension-sign. Clearing this local cache therefore cannot wipe an active
     MRAL DEK or create a competing writer. The lazy privacy_check import keeps

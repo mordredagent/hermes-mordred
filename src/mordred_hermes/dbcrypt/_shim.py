@@ -255,13 +255,13 @@ def build_module(
 
 
 def _refuse_registration(*args: Any, **kwargs: Any) -> None:
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
 
     raise DatabaseRefused("custom SQL adaptation callbacks are unsupported in the guarded runtime")
 
 
 def _native_path(database: Any, *, uri: bool) -> tuple[Path | None, bool]:
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
 
     text = os.fsdecode(os.fspath(database))
     readonly = False
@@ -287,7 +287,7 @@ def _native_path(database: Any, *, uri: bool) -> tuple[Path | None, bool]:
 
 
 def _native_connect(authority: Authority) -> Callable[..., Any]:
-    from .._database_contracts import DatabaseRefused
+    from .._core._database_contracts import DatabaseRefused
     from ._connection import ProtectedConnection, _open_unprotected, open_protected
 
     def connect(database: Any, *args: Any, **kwargs: Any) -> Any:

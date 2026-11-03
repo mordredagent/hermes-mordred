@@ -222,7 +222,7 @@ def test_windows_identity_still_refuses_unsafe_native_metadata(monkeypatch, chan
     from pathlib import PureWindowsPath
     from types import SimpleNamespace
 
-    from mordred_hermes._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_contracts import DatabaseRefused
     from mordred_hermes._private_fs._windows_security import Ace
     from mordred_hermes.dbcrypt import _connection
     from tests._dbcrypt_windows_fakes import registration_environment

@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
-from .. import _term
+from .._core import _term
 
 if TYPE_CHECKING:
     from ..imports.mail import ImportPlan, MailSource
@@ -80,7 +80,7 @@ class _Failed(Exception):
 
 
 def _home() -> Path:
-    from .._home import hermes_home
+    from .._core._home import hermes_home
 
     return hermes_home()
 
@@ -102,7 +102,7 @@ def _writer_lock(home: Path) -> contextlib.AbstractContextManager[None]:
 def _audit(entry: Mapping[str, Any]) -> None:
     """Best-effort audit entry through the shared encryption-aware writer (counts and codes only)."""
     try:
-        from .._audit_support import build_audit_writer, safe_audit_append
+        from .._core._audit_support import build_audit_writer, safe_audit_append
 
         writer = build_audit_writer(_home() / "mordred" / "audit.log")
         safe_audit_append(writer, entry, logger=_LOG)

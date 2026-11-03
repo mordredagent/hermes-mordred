@@ -68,7 +68,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary
 
-from .._database_contracts import DatabaseRefused
+from .._core._database_contracts import DatabaseRefused
 from . import anchor, file_container, manifest, vault_master
 from ._native_deletion import _native_creation_handoff, _revoke_native_creation_rollbacks
 from ._storage import atomic_write, ensure_lock_file, keyvault_lock, safe_read
@@ -78,7 +78,7 @@ from .kek import MasterKey, open_master_key
 from .wrap import NativeBackend
 
 if TYPE_CHECKING:
-    from .._database_lifecycle import ExclusiveLease
+    from .._core._database_lifecycle import ExclusiveLease
     from ._native_deletion import ValidatedNativeOwner, _NativeOwnerFacts
     from ._windows_capability import ExcludedCapability
 

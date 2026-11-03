@@ -365,8 +365,8 @@ def load_policy(config_path: Path | None = None) -> EgressPolicy:
 
     POSIX retains the historical mtime cache and lockdown fallback.
     """
-    from .._home import hermes_home
-    from .._yaml_io import load_plugin_section
+    from .._core._home import hermes_home
+    from .._core._yaml_io import load_plugin_section
 
     path = config_path or (hermes_home() / "config.yaml")
     if _platform == "nt":

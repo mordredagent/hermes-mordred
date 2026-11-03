@@ -7,7 +7,7 @@ import copy
 
 import pytest
 
-from mordred_hermes._database_contracts import DatabaseRefused
+from mordred_hermes._core._database_contracts import DatabaseRefused
 from mordred_hermes.keyvault import vault
 from mordred_hermes.keyvault._database_mutation import database_key_mutation
 from mordred_hermes.keyvault._identity import vault_identity
@@ -26,7 +26,7 @@ def source(tmp_path, monkeypatch):
     require_legacy_file_vault()
     from types import SimpleNamespace
 
-    from mordred_hermes import _database_locking_posix
+    from mordred_hermes._core import _database_locking_posix
     from mordred_hermes.keyvault import _database_authority
 
     monkeypatch.setattr(_database_authority, "sys", SimpleNamespace(platform="darwin"))
@@ -165,7 +165,7 @@ def test_factory_backend_substitution_refuses_before_native_io(source):
 )
 def test_final_guard_with_every_dependency_preserves_all_artifacts(source, operation, dependency):
     home, opened, backend, store, ops = source
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
 
     with database_key_mutation(root=home, generation=None) as lease:
         if operation != "add":
@@ -256,7 +256,7 @@ def test_authorized_source_change_retires_old_binding(enrolled_source, operation
 
 @pytest.mark.parametrize("damage", ["malformed", "symlink", "temporary"])
 def test_broken_binding_cannot_be_repaired_by_source_change(source, damage):
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
 
     home, opened, _, _, _ = source
     with database_key_mutation(root=home, generation=None) as lease:
@@ -358,7 +358,7 @@ def test_factory_open_rejects_root_replacement_during_unwrap(source, monkeypatch
 
 
 def test_database_lease_acquired_after_real_vault_custody_cannot_authorize_mutation(source):
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
 
     home, opened, backend, _, ops = source
     with opened._custody_scope(), acquire_exclusive(home) as lease:
@@ -495,7 +495,7 @@ def test_orphaned_source_cannot_be_reinitialized_even_with_dependency_free_exclu
 )
 def test_lost_source_initialization_with_real_exclusion_preserves_every_dependency(tmp_path, dependency):
     require_legacy_file_vault()
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
 
     root = tmp_path / "mordred/vault"
     backend = _SecKeyBackend(ops=_FakeOps(), sw_ops=None)

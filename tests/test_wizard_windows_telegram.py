@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mordred_hermes import _config_io as cio
+from mordred_hermes._core import _config_io as cio
 from mordred_hermes._private_fs import open_private_directory
 from mordred_hermes.extension.telegram import _windows_archive, hardening, secrets, service, store, tee
 from mordred_hermes.extension.telegram.memory_guard import MemoryEncryptionRequired

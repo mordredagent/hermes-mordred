@@ -22,7 +22,7 @@ from mordred_hermes.wizard import vault_memory_key
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend
 
 if TYPE_CHECKING:
-    from mordred_hermes._database_lifecycle import ExclusiveLease
+    from mordred_hermes._core._database_lifecycle import ExclusiveLease
 
 _PASSPHRASE = "correct horse battery staple"
 # Matches Mordred memory_crypto filename-bound AAD: "hermes-memory-v1:<name>".
@@ -152,7 +152,7 @@ class TestVaultEnvToMemoryKey:
 
 def test_custom_vault_memory_source_refuses_even_with_real_home_lease(tmp_path: Path) -> None:
     """A genuine lease cannot establish an arbitrary custom source's independence."""
-    from mordred_hermes._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_contracts import DatabaseRefused
     from mordred_hermes.keyvault._database_mutation import database_key_mutation
 
     root = tmp_path / "custom-vault"

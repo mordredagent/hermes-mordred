@@ -575,7 +575,7 @@ def test_activity_roundtrip_dedup_search_restart(protected_runtime, monkeypatch)
 @pytest.mark.parametrize("profile", ["", "profiles/work"])
 def test_activity_roundtrip_dedup_search_restart_backup(protected_runtime, monkeypatch, profile):
     from mordred_hermes import dbcrypt
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes.activity import history
     from mordred_hermes.activity._gate import open_store
     from mordred_hermes.activity.store import restore_activity_store
@@ -625,7 +625,7 @@ def test_activity_roundtrip_dedup_search_restart_backup(protected_runtime, monke
 
 
 def test_offline_restore_preflight_rejects_newer_schema_without_replacement(protected_runtime, monkeypatch):
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes.activity._gate import open_store
     from mordred_hermes.activity.store import restore_activity_store
     from mordred_hermes.dbcrypt import _migrate
@@ -650,7 +650,7 @@ def test_offline_restore_preflight_rejects_newer_schema_without_replacement(prot
 
 
 def test_offline_postfinalization_failure_reports_incomplete_and_retains_backup(protected_runtime, monkeypatch):
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes.activity._gate import open_store
     from mordred_hermes.activity.store import restore_activity_store
     from mordred_hermes.dbcrypt import _migrate
@@ -675,7 +675,7 @@ def test_offline_postfinalization_failure_reports_incomplete_and_retains_backup(
 
 
 def test_restore_authentication_denial_precedes_database_mutation(protected_runtime):
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes.activity._gate import open_store
     from mordred_hermes.activity.store import restore_activity_store
 
@@ -695,7 +695,7 @@ def test_restore_authentication_denial_precedes_database_mutation(protected_runt
 
 def test_offline_restore_upgrades_older_activity_schema_under_ex(protected_runtime, monkeypatch):
     from mordred_hermes import dbcrypt
-    from mordred_hermes._database_lifecycle import acquire_exclusive
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
     from mordred_hermes.activity._gate import open_store
     from mordred_hermes.activity.store import restore_activity_store
     from mordred_hermes.dbcrypt import _migrate

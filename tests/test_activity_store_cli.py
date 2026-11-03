@@ -281,7 +281,7 @@ def test_real_restore_of_a_deleted_store_reports_store_missing(protected_runtime
 
 
 def test_real_restore_refuses_busy_while_a_runtime_lease_is_live(protected_runtime, monkeypatch, capsys) -> None:
-    from mordred_hermes._database_lifecycle import acquire_runtime
+    from mordred_hermes._core._database_lifecycle import acquire_runtime
     from mordred_hermes.keyvault._database_authority import resolve_database_domain
 
     _, home, backup = _protected_restore_setup(protected_runtime, monkeypatch)

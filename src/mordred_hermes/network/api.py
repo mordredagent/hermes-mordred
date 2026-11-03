@@ -25,8 +25,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from .._policy_types import VALID_ACTIVE_PATHS
-from .._policy_types import ActivePath as ActivePath
+from .._core._policy_types import VALID_ACTIVE_PATHS
+from .._core._policy_types import ActivePath as ActivePath
 from ._exceptions import BlackoutNotAsserted, MordredNetworkError, UnknownPath
 
 
@@ -67,7 +67,7 @@ class Runtime(Protocol):
     def is_dropped(self) -> bool: ...
 
     # ``PolicyMode`` now lives in the leaf module
-    # :mod:`mordred_hermes._policy_types`, so no import cycle forces the
+    # :mod:`mordred_hermes._core._policy_types`, so no import cycle forces the
     # wide type — it stays wide because the module-level
     # :func:`update_policy_mode` passes through the plain ``str`` the
     # hooks layer reads from disk; the concrete runtime narrows at the

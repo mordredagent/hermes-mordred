@@ -69,7 +69,7 @@ class HistoryProjection:
 
 
 def _history_path() -> Path:
-    from .._home import hermes_home
+    from .._core._home import hermes_home
 
     d = hermes_home() / "extension"
     if _storage.enabled():
