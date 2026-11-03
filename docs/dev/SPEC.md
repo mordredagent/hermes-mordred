@@ -319,6 +319,14 @@ Hermes hooks provide useful cooperative boundaries:
   and
 - `pre_gateway_dispatch` receives `event` and `gateway` for the E2E gateway.
 
+Wallet JSON-RPC uses `extension.egress.resolve_route`, including persisted Tor
+or VPN selection when no runtime is registered. Missing Tor proxies, unready or
+dropped protected routes, and unverifiable VPN routes refuse with
+`rpc_routing_unavailable` before destination DNS or HTTP. SOCKS routes retain
+isolation credentials and use Requests `socks5h://` for remote DNS. Permitted
+direct routes retain public-DNS validation, IP pinning, TLS verification and
+redirect refusal.
+
 [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) and
 `tools/hook_payload_contract.json` own the exact consumed fields.
 

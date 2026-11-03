@@ -249,6 +249,15 @@ def test_send_raw_requires_canonical_transaction_hash(monkeypatch, result):
 # --------------------------------------------------------------------------- #
 
 
+# Windows reads default_path from a checked canonical config/policy generation,
+# so a plain tmp_path/config.yaml refuses there and these expectations would fail
+# or pass for the wrong reason. tests/test_network_windows_policy.py owns that reader.
+posix_config_reader = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="exercises the POSIX config.yaml reader; Windows requires a checked canonical generation",
+)
+
+
 def _install_gateway_resolver(monkeypatch, resolver):
     gateway = types.ModuleType("gateway")
     platforms = types.ModuleType("gateway.platforms")
@@ -267,6 +276,7 @@ def test_proxies_resolves_for_explicit_rpc_host(monkeypatch):
         seen.append(target_hosts)
         return "socks5h://127.0.0.1:9050"
 
+    _rpc_network_state(monkeypatch, "clearnet")
     _install_gateway_resolver(monkeypatch, resolve)
     proxies = extension_rpc._proxies("https://rpc.example.com/v1")
     assert proxies == {"http": "socks5h://127.0.0.1:9050", "https": "socks5h://127.0.0.1:9050"}
@@ -277,6 +287,7 @@ def test_call_never_posts_when_route_resolution_fails(monkeypatch):
     def fail(*, target_hosts=None):
         raise RuntimeError(f"resolver unavailable for {target_hosts}")
 
+    _rpc_network_state(monkeypatch, "clearnet")
     _install_gateway_resolver(monkeypatch, fail)
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8118")
     monkeypatch.setattr(extension_rpc, "_direct_https_post", lambda *a, **k: pytest.fail("route failure must not post"))
@@ -293,7 +304,7 @@ def test_call_never_posts_when_route_resolution_fails(monkeypatch):
 
 def test_call_never_posts_when_tor_proxy_is_missing(monkeypatch):
     _install_gateway_resolver(monkeypatch, lambda *, target_hosts=None: None)
-    monkeypatch.setattr(extension_rpc, "_tor_route_active", lambda: True)
+    _rpc_network_state(monkeypatch, "tor")
     monkeypatch.setattr(
         extension_rpc, "_direct_https_post", lambda *a, **k: pytest.fail("missing Tor proxy must not post")
     )
@@ -303,7 +314,7 @@ def test_call_never_posts_when_tor_proxy_is_missing(monkeypatch):
     posted = []
     monkeypatch.setattr("requests.post", lambda *args, **kwargs: posted.append((args, kwargs)))
 
-    with pytest.raises(extension_rpc.JsonRpcError, match="Tor is active"):
+    with pytest.raises(extension_rpc.JsonRpcError, match="rpc_routing_unavailable"):
         extension_rpc.call("https://rpc.example.com", "eth_chainId", [])
     assert posted == []
 
@@ -373,7 +384,7 @@ def test_remote_error_rejects_invalid_code_or_message(error):
 
 def test_direct_route_rejects_private_dns_answer_before_post(monkeypatch):
     _install_gateway_resolver(monkeypatch, lambda *, target_hosts=None: None)
-    monkeypatch.setattr(extension_rpc, "_tor_route_active", lambda: False)
+    _rpc_network_state(monkeypatch, "clearnet")
     monkeypatch.setattr(
         extension_rpc.socket,
         "getaddrinfo",
@@ -390,6 +401,7 @@ def test_direct_route_rejects_private_dns_answer_before_post(monkeypatch):
 
 
 def test_call_refuses_redirect_and_disables_automatic_redirects(monkeypatch):
+    _rpc_network_state(monkeypatch, "clearnet")
     _install_gateway_resolver(
         monkeypatch,
         lambda *, target_hosts=None: "socks5h://127.0.0.1:9050",
@@ -418,7 +430,7 @@ def test_call_refuses_redirect_and_disables_automatic_redirects(monkeypatch):
 
 def test_direct_route_ignores_ambient_proxy_and_pins_validated_address(monkeypatch):
     _install_gateway_resolver(monkeypatch, lambda *, target_hosts=None: None)
-    monkeypatch.setattr(extension_rpc, "_tor_route_active", lambda: False)
+    _rpc_network_state(monkeypatch, "clearnet")
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8118")
     monkeypatch.setattr(
         extension_rpc,
@@ -443,7 +455,7 @@ def test_direct_route_ignores_ambient_proxy_and_pins_validated_address(monkeypat
 
 def test_direct_route_rebinding_cannot_trigger_second_dns_lookup(monkeypatch):
     _install_gateway_resolver(monkeypatch, lambda *, target_hosts=None: None)
-    monkeypatch.setattr(extension_rpc, "_tor_route_active", lambda: False)
+    _rpc_network_state(monkeypatch, "clearnet")
     lookups = []
 
     def resolve(*args, **kwargs):
@@ -1111,3 +1123,171 @@ def test_prepare_sign_rejects_chain_not_selected_by_operator(monkeypatch):
             [{"to": "0x" + "11" * 20}],
             "0xaa36a7",
         )
+
+
+def _rpc_network_state(monkeypatch, path, *, ready=True, dropped=False):
+    from mordred_hermes.network import api as network_api
+
+    monkeypatch.setattr(network_api, "status", lambda: types.SimpleNamespace(active_path=path, ready=ready))
+    monkeypatch.setattr(network_api, "is_dropped", lambda: dropped)
+
+
+@posix_config_reader
+@pytest.mark.parametrize("path", ["tor", "vpn"])
+def test_rpc_standalone_protected_selection_refuses_before_dns_or_http(monkeypatch, tmp_path, path):
+    from mordred_hermes.network import api as network_api
+
+    monkeypatch.setattr(network_api, "_RUNTIME", None)
+    (tmp_path / "config.yaml").write_text(f"plugins:\n  mordred_network:\n    default_path: {path}\n")
+    _install_gateway_resolver(monkeypatch, lambda **kwargs: None)
+    monkeypatch.setattr(extension_rpc.socket, "getaddrinfo", lambda *a, **k: pytest.fail("route failure reached DNS"))
+    monkeypatch.setattr(extension_rpc, "_direct_https_post", lambda *a, **k: pytest.fail("route failure reached HTTP"))
+    monkeypatch.setattr(extension_rpc, "_proxied_https_post", lambda *a, **k: pytest.fail("route failure reached HTTP"))
+    with pytest.raises(extension_rpc.JsonRpcError, match=r"^rpc_routing_unavailable"):
+        extension_rpc.call("https://rpc.example.com", "eth_chainId", [])
+
+
+@pytest.mark.parametrize("path", ["tor", "vpn"])
+@pytest.mark.parametrize("ready,dropped", [(False, False), (True, True)])
+def test_rpc_unavailable_protected_runtime_refuses_before_dns_or_http(monkeypatch, path, ready, dropped):
+    _rpc_network_state(monkeypatch, path, ready=ready, dropped=dropped)
+    _install_gateway_resolver(monkeypatch, lambda **kwargs: "socks5://127.0.0.1:9050")
+    monkeypatch.setattr(extension_rpc.socket, "getaddrinfo", lambda *a, **k: pytest.fail("route failure reached DNS"))
+    monkeypatch.setattr(extension_rpc, "_proxied_https_post", lambda *a, **k: pytest.fail("route failure reached HTTP"))
+    with pytest.raises(extension_rpc.JsonRpcError, match=r"^rpc_routing_unavailable"):
+        extension_rpc.call("https://rpc.example.com", "eth_chainId", [])
+
+
+@pytest.mark.parametrize(
+    "proxy",
+    [
+        None,
+        "http://127.0.0.1:8118",
+        "socks5://203.0.113.5:9050",
+        "ftp://127.0.0.1:9050",
+        "socks5://127.0.0.1",
+        "socks5://127.0.0.1:invalid",
+    ],
+)
+def test_rpc_tor_rejects_inappropriate_proxy_before_dns_or_http(monkeypatch, proxy):
+    _rpc_network_state(monkeypatch, "tor")
+    _install_gateway_resolver(monkeypatch, lambda **kwargs: proxy)
+    monkeypatch.setattr(extension_rpc.socket, "getaddrinfo", lambda *a, **k: pytest.fail("route failure reached DNS"))
+    monkeypatch.setattr(extension_rpc, "_proxied_https_post", lambda *a, **k: pytest.fail("route failure reached HTTP"))
+    with pytest.raises(extension_rpc.JsonRpcError, match=r"^rpc_routing_unavailable"):
+        extension_rpc.call("https://rpc.example.com", "eth_chainId", [])
+
+
+@pytest.mark.parametrize("path", ["vpn", "clearnet"])
+def test_rpc_verified_direct_route_still_validates_dns_and_pins_ip(monkeypatch, path):
+    _rpc_network_state(monkeypatch, path)
+    _install_gateway_resolver(monkeypatch, lambda **kwargs: None)
+    monkeypatch.setattr(
+        extension_rpc.socket,
+        "getaddrinfo",
+        lambda *a, **k: [
+            (extension_rpc.socket.AF_INET, extension_rpc.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+        ],
+    )
+    seen = []
+
+    def post(url, payload, *, address, timeout):
+        seen.append(address)
+        return 200, {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
+
+    monkeypatch.setattr(extension_rpc, "_direct_https_post", post)
+    assert extension_rpc.call("https://rpc.example.com", "eth_chainId", []) == "0x1"
+    assert seen == ["93.184.216.34"]
+
+
+@pytest.mark.parametrize("standalone", [False, pytest.param(True, marks=posix_config_reader)])
+def test_rpc_socks_route_preserves_auth_and_forces_remote_dns(monkeypatch, standalone, tmp_path):
+    from mordred_hermes.network import api as network_api
+
+    if standalone:
+        monkeypatch.setattr(network_api, "_RUNTIME", None)
+        (tmp_path / "config.yaml").write_text("plugins:\n  mordred_network:\n    default_path: tor\n")
+    else:
+        _rpc_network_state(monkeypatch, "tor")
+    _install_gateway_resolver(monkeypatch, lambda **kwargs: "socks5://isolate%40user:p%3Ass@127.0.0.1:9050")
+    monkeypatch.setattr(extension_rpc.socket, "getaddrinfo", lambda *a, **k: pytest.fail("SOCKS route reached DNS"))
+    assert extension_rpc._resolve_route("https://rpc.example.com") == (
+        {
+            "http": "socks5h://isolate%40user:p%3Ass@127.0.0.1:9050",
+            "https": "socks5h://isolate%40user:p%3Ass@127.0.0.1:9050",
+        },
+        None,
+    )
+
+
+@posix_config_reader
+@pytest.mark.parametrize(
+    "config",
+    [None, "plugins:\n  mordred_network:\n    default_path: clearnet\n"],
+    ids=["no_config", "clearnet"],
+)
+def test_rpc_standalone_unconfigured_uses_pinned_direct_route(monkeypatch, tmp_path, config):
+    from mordred_hermes.network import api as network_api
+
+    monkeypatch.setattr(network_api, "_RUNTIME", None)
+    if config is not None:
+        (tmp_path / "config.yaml").write_text(config)
+    _install_gateway_resolver(monkeypatch, lambda **kwargs: None)
+    monkeypatch.setattr(
+        extension_rpc.socket,
+        "getaddrinfo",
+        lambda *a, **k: [
+            (extension_rpc.socket.AF_INET, extension_rpc.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+        ],
+    )
+    monkeypatch.setattr(extension_rpc, "_proxied_https_post", lambda *a, **k: pytest.fail("direct route used a proxy"))
+    seen = []
+
+    def post(url, payload, *, address, timeout):
+        seen.append(address)
+        return 200, {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
+
+    monkeypatch.setattr(extension_rpc, "_direct_https_post", post)
+    assert extension_rpc.call("https://rpc.example.com", "eth_chainId", []) == "0x1"
+    assert seen == ["93.184.216.34"]
+
+
+@posix_config_reader
+def test_rpc_standalone_malformed_config_refuses_before_dns(monkeypatch, tmp_path):
+    from mordred_hermes.network import api as network_api
+
+    monkeypatch.setattr(network_api, "_RUNTIME", None)
+    (tmp_path / "config.yaml").write_text("plugins: [1]\n")
+    _install_gateway_resolver(monkeypatch, lambda **kwargs: None)
+    monkeypatch.setattr(extension_rpc.socket, "getaddrinfo", lambda *a, **k: pytest.fail("route failure reached DNS"))
+    monkeypatch.setattr(extension_rpc, "_direct_https_post", lambda *a, **k: pytest.fail("route failure reached HTTP"))
+    monkeypatch.setattr(extension_rpc, "_proxied_https_post", lambda *a, **k: pytest.fail("route failure reached HTTP"))
+    with pytest.raises(extension_rpc.JsonRpcError, match=r"^rpc_routing_unavailable"):
+        extension_rpc.call("https://rpc.example.com", "eth_chainId", [])
+
+
+def test_rpc_clearnet_http_proxy_is_passed_explicitly(monkeypatch):
+    proxy = "http://127.0.0.1:8118"
+    _rpc_network_state(monkeypatch, "clearnet")
+    _install_gateway_resolver(monkeypatch, lambda **kwargs: proxy)
+    monkeypatch.setattr(extension_rpc.socket, "getaddrinfo", lambda *a, **k: pytest.fail("proxied route reached DNS"))
+    monkeypatch.setattr(extension_rpc, "_direct_https_post", lambda *a, **k: pytest.fail("proxied route posted direct"))
+    seen = []
+
+    def post(url, payload, *, proxies, timeout):
+        seen.append((url, proxies))
+        return 200, {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
+
+    monkeypatch.setattr(extension_rpc, "_proxied_https_post", post)
+    assert extension_rpc.call("https://rpc.example.com", "eth_chainId", []) == "0x1"
+    assert seen == [("https://rpc.example.com", {"http": proxy, "https": proxy})]
+
+
+def test_rpc_unknown_runtime_path_refuses(monkeypatch):
+    _rpc_network_state(monkeypatch, "bogus")
+    _install_gateway_resolver(monkeypatch, lambda **kwargs: None)
+    monkeypatch.setattr(extension_rpc.socket, "getaddrinfo", lambda *a, **k: pytest.fail("route failure reached DNS"))
+    monkeypatch.setattr(extension_rpc, "_direct_https_post", lambda *a, **k: pytest.fail("route failure reached HTTP"))
+    monkeypatch.setattr(extension_rpc, "_proxied_https_post", lambda *a, **k: pytest.fail("route failure reached HTTP"))
+    with pytest.raises(extension_rpc.JsonRpcError, match=r"^rpc_routing_unavailable"):
+        extension_rpc.call("https://rpc.example.com", "eth_chainId", [])

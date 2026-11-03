@@ -1,9 +1,10 @@
 """Minimal EVM JSON-RPC client for the Mordred extension wallet (SPEC §5.3).
 
 Used to fill missing transaction fields (nonce / gas / fees / chainId) and to
-broadcast the signed raw transaction. Honors the gateway's configured proxy
-(Tor via ``mordred_network``) so RPC egress follows the same path as the rest
-of Hermes — the extension itself never talks to an RPC node.
+broadcast the signed raw transaction. The route comes from
+``extension.egress``, the extension server's shared fail-closed policy (Tor or
+VPN via ``mordred_network``, otherwise the gateway's configured proxy) — the
+extension itself never talks to an RPC node.
 
 Synchronous (``requests``); callers invoke it from a thread executor.
 """
@@ -18,6 +19,8 @@ import ssl
 from ipaddress import IPv4Address, IPv6Address, ip_address
 from typing import Any
 from urllib.parse import SplitResult, urlsplit
+
+from . import egress
 
 # Public fallback endpoints; users should set their own via wallet.json `rpc`.
 DEFAULT_RPC: dict[int, str] = {
@@ -175,40 +178,25 @@ def _validate_direct_dns(host: str, port: int = 443) -> tuple[str, ...]:
     return tuple(sorted(str(address) for address in answers))
 
 
-def _tor_route_active() -> bool:
-    """Whether the process-wide network runtime currently promises Tor."""
-    try:
-        from ..network import api as network_api
-
-        return network_api.status().active_path == "tor"
-    except Exception:
-        # The extension remains usable without mordred_network. A resolver
-        # failure is handled separately and always fails closed.
-        return False
-
-
 def _resolve_route(rpc_url: str) -> tuple[dict[str, str] | None, str | None]:
-    """Resolve the explicit RPC route without silently changing egress.
-
-    A successful gateway result of ``None`` is an intentional direct route
-    for clearnet or an OS-level VPN. A resolver exception is not a routing
-    decision and must stop the request. Likewise, an active Tor path must
-    always yield an application proxy (NO_PROXY cannot override it).
-    """
+    """Use the shared fail-closed route, with remote DNS for Requests SOCKS."""
     target_host = _validate_rpc_url(rpc_url)
+    url: str | None
     try:
-        from gateway.platforms.base import resolve_proxy_url
-
-        url = resolve_proxy_url(target_hosts=target_host)
-    except Exception as exc:
-        raise JsonRpcError("rpc_routing_unavailable: gateway proxy resolution failed") from exc
-    if not url and _tor_route_active():
-        raise JsonRpcError("rpc_routing_unavailable: Tor is active but no RPC proxy was resolved")
-    if not url:
-        parsed = _split_rpc_url(rpc_url)
-        addresses = _validate_direct_dns(target_host, parsed.port or 443)
-        return None, addresses[0]
-    return {"http": url, "https": url}, None
+        route = egress.resolve_route(target_host)
+        if route.socks_proxy_url is not None:
+            # Validate the endpoint and retain the encoded isolation credentials.
+            egress.socks_proxy(route.socks_proxy_url)
+            url = "socks5h://" + route.socks_proxy_url.removeprefix("socks5://")
+        else:
+            url = route.http_proxy_url
+    except egress.EgressError as exc:
+        raise JsonRpcError("rpc_routing_unavailable: RPC route could not be verified") from exc
+    if url is not None:
+        return {"http": url, "https": url}, None
+    parsed = _split_rpc_url(rpc_url)
+    addresses = _validate_direct_dns(target_host, parsed.port or 443)
+    return None, addresses[0]
 
 
 def _proxies(rpc_url: str) -> dict[str, str] | None:

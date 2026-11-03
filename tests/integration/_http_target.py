@@ -66,6 +66,7 @@ class HttpTarget:
 
 class _Handler(BaseHTTPRequestHandler):
     server: _CountingServer  # narrow the BaseHTTPRequestHandler attribute
+    timeout = 5.0  # bounds an idle client, and so the join in ``server_close``
 
     def _respond(self) -> None:
         length = int(self.headers.get("Content-Length") or 0)
@@ -92,7 +93,10 @@ class _CountingServer(ThreadingHTTPServer):
 
     Bound to ``127.0.0.1`` (IPv4 loopback) only — never all-interfaces —
     so the origin is unreachable to anything but the local test runner.
+    Handler threads are non-daemon so ``server_close`` joins them.
     """
+
+    daemon_threads = False
 
     def __init__(self, server_address: tuple[str, int], handler: type[BaseHTTPRequestHandler]) -> None:
         self._hit_lock = threading.Lock()
