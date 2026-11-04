@@ -2121,6 +2121,6 @@ completion acceptance matrix track later work and current open gates.
   A scratch module, not in the repository, passed 9 cases: seven more UNC, device
   and `file:` spellings refused, a `:memory:` and local-file round trip with the
   marker absent from the raw file and unreadable through plain `sqlite3`, and
-  `backup_database` refused UNC and extended-length source and destination paths.
+  `backup_database` refused a UNC source, a UNC destination and an extended-length source.
   Refusal order is observed in-process; no SMB traffic capture was taken.
   User key inventories were unchanged and the instance ended `stopped`.
