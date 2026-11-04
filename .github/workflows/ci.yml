@@ -509,7 +509,7 @@ jobs:
     needs:
       - ci-policy
     if: needs.ci-policy.outputs.macos == 'true'
-    runs-on: macos-latest
+    runs-on: macos-26-intel
     timeout-minutes: 60
     env:
       HERMES_HOME: /private/tmp/mordred-ci-macos-home

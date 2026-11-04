@@ -94,6 +94,12 @@ Key policy:
   >=80% and strict mypy. Drafts run critical feedback plus CI-tool tests.
 - The optional macOS worker runs the complete default suite, coverage, typing
   and status guard; drafts retain critical feedback and the status guard.
+  It uses `macos-26-intel`: hosted arm64 capacity repeatedly prevented runner
+  acquisition on 2026-11-04. The macOS generation, job/check identity, Python
+  floor and complete Swift/TPM validation packs remain unchanged. Native builds
+  and dependencies are now exercised on Intel; hosted ARM compilation is not
+  established by this fallback. Local ARM results and live-device acceptance
+  remain separate evidence; see the [delivery record](../superpowers/reports/2026-11-04-maintenance-performance.md).
 - Ordinary/draft Windows requests use one worker; final uses four isolated
   Windows runners. Ordinary workers retain complete mapped modules and remaining
   critical cases. Final workers cover all 84 frozen native modules once; routine

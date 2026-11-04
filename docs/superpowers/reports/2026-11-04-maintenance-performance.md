@@ -212,3 +212,38 @@ First-run observed successful Unix pytest steps: Linux 3.11 **730s**, Linux 3.13
 Windows with a testcase-duration sum of **4.263s**, versus **30.193s** in prior
 run `41820354815`. These are different hosted runs/revisions, not a controlled
 Windows speed guarantee or acceptance for the failed whole-run context.
+
+## Hosted macOS runner fallback
+
+At head `a306a87f6`, run `41852281876` attempts 1 and 2 could not acquire the
+hosted macOS arm64 runner. Both produced the explicit GitHub annotation
+"The job was not acquired by Runner of type hosted even after multiple attempts"
+and arm64 capacity notices. All other selected platforms passed in attempt 1;
+CI acceptance correctly rejected the incomplete matrix. No successful earlier
+worker manifest is reused for a later attempt or head.
+
+The `macos` job now uses `macos-26-intel`. The first actual runner image was
+`macos-26-arm64`, so the macOS generation remains 26. [GitHub's runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+lists the supported Intel label. Job/check identity, Python 3.11 floor, selected
+cases, two-process command, coverage floor, strict typing, status guard, Swift
+and TPM builds, timeouts, acceptance schema and all live gates are unchanged.
+A scoped independent review found no ARM-only default-test skip or relevant
+architecture-specific runtime branch introduced by this PR; T2 Intel Macs are
+explicitly supported by the native test boundary. No native runtime/helper source
+was changed.
+
+This is an infrastructure fallback, not identical hardware coverage: dependencies
+and native helpers now compile/run for Intel, and hosted ARM compilation is not
+established. Earlier local ARM results remain labeled by their actual source
+freeze; they do not become hosted ARM or live-device acceptance. A fresh complete
+accepted run for the resulting head/base is still required before merge.
+
+The post-fixture local full run at `a306a87f6` completed **14,687 passed,
+300 skipped, one failed**, 24 warnings, 1,619.91s. The unchanged
+`test_each_adversarial_shape_stays_near_linear[ja-target-joints]` measured 0.508s
+for the small shape and 2.791s for the large shape: its approximately 5.5x ratio
+was within the growth bound, but its separate unchanged 2.0-second absolute
+budget failed. Host load was observed above 24 on ten CPUs during this run.
+The failure is retained in the record; no budget or selector is weakened.
+The complete containing property module is rerun separately, with its result
+and the final exact-head hosted acceptance recorded in the PR.
