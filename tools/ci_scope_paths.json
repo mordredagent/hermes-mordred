@@ -120,6 +120,7 @@
     "native/dbcrypt-vfs/checked_io.h": [],
     "native/dbcrypt-vfs/probe.c": [],
     "native/dbcrypt-vfs/vfs.c": [],
+    "src/mordred_hermes/_core/_yaml_warnings.py": [],
     "src/mordred_hermes/activity/_redaction.py": [],
     "src/mordred_hermes/dbcrypt/_capability.py": [],
     "src/mordred_hermes/dbcrypt/_uninstall.py": [],
