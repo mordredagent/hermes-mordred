@@ -101,6 +101,24 @@ if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_after_fork)
 
 
+@contextmanager
+def passive_canonical_reads() -> Iterator[None]:
+    """Make this thread's nonblocking presentation reads refuse contention immediately.
+
+    Ordinary admission and explicit blocking sessions retain their existing
+    policy. Keep this scope outside ceremonies and mutation gates.
+    """
+    # Capture the local object: after a fork, exiting an inherited scope must
+    # restore only the discarded parent local, never the child's fresh policy.
+    local = _local
+    previous = getattr(local, "passive_reads", False)
+    local.passive_reads = True
+    try:
+        yield
+    finally:
+        local.passive_reads = previous
+
+
 def _read(tx: ConfidentialTransaction | None, name: str, limit: int) -> CheckedContents | None:
     validate_leaf(name)
     validate_limit(limit)
@@ -217,6 +235,14 @@ def canonical_session(
         yield session
 
 
+def _acquire_canonical_lock(*, blocking: bool) -> bool:
+    if blocking:
+        return _lock.acquire()
+    if getattr(_local, "passive_reads", False):
+        return _lock.acquire(blocking=False)
+    return _lock.acquire(timeout=IN_PROCESS_WAIT_SECONDS)
+
+
 @contextmanager
 def _canonical_session(
     paths: CanonicalPaths, *, scope: Literal["home", "policy"], create: bool, blocking: bool
@@ -228,8 +254,9 @@ def _canonical_session(
         with _nested_session(active, paths, scope, create, blocking) as session:
             yield session
         return
-    # Nonblocking sessions wait a bounded time here only; file locks below keep ``blocking``.
-    if not (_lock.acquire() if blocking else _lock.acquire(timeout=IN_PROCESS_WAIT_SECONDS)):
+    # Only passive presentation opts out of the ordinary bounded in-process
+    # wait. File locks below continue to use the caller's ``blocking`` policy.
+    if not _acquire_canonical_lock(blocking=blocking):
         raise PrivateFSError("busy", "canonical_lock")
     state: _State | None = None
     try:

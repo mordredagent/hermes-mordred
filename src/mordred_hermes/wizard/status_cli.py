@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..__about__ import __version__
+from .._core._config_io import passive_canonical_reads
 from .._core._home import hermes_home as _hermes_home
 from .._core._policy_io import (
     policy_transaction_marker_for_config,
@@ -294,6 +295,7 @@ def _default_helper_finder(platform: str) -> str | None:
 # -----------------------------------------------------------------------------
 # Aggregation + rendering
 # -----------------------------------------------------------------------------
+@passive_canonical_reads()
 def collect(
     *,
     home: Path,
@@ -383,6 +385,7 @@ def render_json(report: StatusReport) -> str:
     return json.dumps(report.to_dict(), indent=2)
 
 
+@passive_canonical_reads()
 def status(
     *,
     home: Path,

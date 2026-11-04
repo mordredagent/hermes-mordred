@@ -78,6 +78,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
+from .._core._config_io import passive_canonical_reads
 from .._core._home import hermes_home as _hermes_home
 from ..keyvault._identity import resolve_root
 from ..keyvault._memory_hook import memory_marker_path, memory_optout_marker_path
@@ -306,6 +307,7 @@ def memory_status(*, home: Path, platform: str) -> TargetStatus:
 # -----------------------------------------------------------------------------
 # Aggregation + rendering
 # -----------------------------------------------------------------------------
+@passive_canonical_reads()
 def collect_status(
     *,
     home: Path,
@@ -334,6 +336,7 @@ def collect_status(
     ]
 
 
+@passive_canonical_reads()
 def status(
     *,
     home: Path,
