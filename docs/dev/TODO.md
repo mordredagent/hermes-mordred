@@ -324,7 +324,8 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
   UNC/device namespaces lexically before target I/O, including decoded URIs,
   registered backup values and relative paths under a UNC working directory.
   Host regressions cover refusal order; `tests/test_dbcrypt_windows_native_paths.py`
-  covers native local-database and `:memory:` admission but has not yet run on Windows.
+  covers native local-database and `:memory:` admission and passed on AWS Windows Server
+  on 2026-11-04 (`VALIDATION_LOG.md`).
 - [ ] Backup cleanup: `_copy_registered_backup`'s `finally` leaks the destination connection and
   VFS registration when rollback fails (`src/mordred_hermes/dbcrypt/_connection.py`).
 - [ ] Backup restore is not bound to its source database or profile (latent)

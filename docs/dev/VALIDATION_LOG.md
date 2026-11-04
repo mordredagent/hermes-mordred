@@ -2094,3 +2094,33 @@ completion acceptance matrix track later work and current open gates.
   `tests/integration/test_dbcrypt_windows_vfs_probe.py` skipped all 90 cases on
   macOS; these skips establish no acceptance.
   Native Windows local-database and `:memory:` regressions remain required.
+
+- **2026-11-04 — Windows database namespace refusal (native Windows Server).**
+  Source: `fix/dbcrypt-windows-remote-paths` at `37551b489`, compared with `dev`
+  at `78ff87c44`. Host: AWS EC2, `ServerDatacenter`, build 26100, as an ordinary
+  medium-integrity user; Python 3.11.17, `hermes-agent` 0.19.0,
+  `sqlcipher3-wheels` 0.5.7, with a software CNG double in the module fixtures.
+  The first attempt was discarded because the run script had not created the
+  `--basetemp` parent directory; results below are from the corrected run.
+
+  | Suite | Branch | `dev` |
+  |---|---|---|
+  | `tests/test_dbcrypt_windows_native_paths.py` | 5 passed, 0 skipped | not present |
+  | Windows path, locking, capability, connection, routing and admission modules | 265 passed, 16 skipped, 1 failed, 110 errors | 162 passed, 8 skipped, 1 failed, 110 errors |
+  | `tests/integration/test_dbcrypt_windows_vfs.py`, `-Target CheckedTest` | 83 passed, 3 failed | 83 passed, 3 failed |
+  | Same module, packaged DLL, documented non-injection `-k` filter | 38 passed, 3 failed | 38 passed, 3 failed |
+  | `tests/integration/test_dbcrypt_windows_vfs_probe.py` | 4 passed | not run |
+
+  Every failing test ID on the branch also fails on `dev`. The 110 errors come
+  from a POSIX-custody fixture and the 1 failure needs the symlink privilege,
+  which the ordinary user lacks. The 3 VFS failures on each row are
+  `test_native_non_ntfs_root_refuses` and
+  `test_native_file_reparse_refuses_before_data_open`, which need the owned
+  exFAT/reparse fixture manifest. That fixture was not provisioned, so **those 3
+  cases establish nothing and the full native VFS gate remains unmet.**
+  A scratch module, not in the repository, passed 9 cases: seven more UNC, device
+  and `file:` spellings refused, a `:memory:` and local-file round trip with the
+  marker absent from the raw file and unreadable through plain `sqlite3`, and
+  `backup_database` refused UNC and extended-length source and destination paths.
+  Refusal order is observed in-process; no SMB traffic capture was taken.
+  User key inventories were unchanged and the instance ended `stopped`.
