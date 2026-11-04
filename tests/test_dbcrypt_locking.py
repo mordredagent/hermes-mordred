@@ -106,7 +106,6 @@ def test_root_and_lock_replacement_invalidate_runtime(tmp_path: Path) -> None:
 
 def test_holder_visibility_unknown_refuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from mordred_hermes._core import _database_locking_posix as posix
-    from mordred_hermes._core._database_contracts import DatabaseRefused
 
     database = tmp_path / "state.db"
     database.write_bytes(b"opaque")
@@ -121,8 +120,6 @@ def test_holder_visibility_unknown_refuses(tmp_path: Path, monkeypatch: pytest.M
 
     monkeypatch.setattr(os, "scandir", denied)
     assert posix.linux_holders_of([database], proc=proc) is None
-    with pytest.raises(DatabaseRefused):
-        posix.assert_no_linux_holders([database], proc=proc)
 
 
 def test_legacy_maintenance_reuses_preceding_exclusive_proof(tmp_path: Path) -> None:

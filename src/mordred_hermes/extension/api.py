@@ -1396,13 +1396,6 @@ def _hermes_version() -> str:
     return "0.0.0"
 
 
-def _dotenv_assignment(raw_line: str) -> tuple[str, bool, str] | None:
-    """Return ``(name, exported, value)`` for one simple dotenv assignment."""
-    from .._core._dotenv_text import parse_assignment
-
-    return parse_assignment(raw_line)
-
-
 def _dotenv_has_nonempty_key(existing: str, keys: set[str]) -> bool:
     """Whether dotenv text contains one of *keys* with a non-empty value."""
     from .._core._dotenv_text import has_nonempty_key

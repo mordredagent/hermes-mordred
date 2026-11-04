@@ -913,11 +913,6 @@ class WindowsCustodySession:
         return key
 
 
-def load_windows_memory_key(*, home: Path, backend: NativeBackend | None = None) -> bytes:
-    with windows_custody_session(home, backend=backend) as session:
-        return session.load_memory_key()
-
-
 def resolve_windows_memory_key(*, home: Path) -> bytes | None:
     with windows_custody_session(home) as session:
         return session.resolve_memory_key()

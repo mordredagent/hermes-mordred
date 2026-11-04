@@ -29,7 +29,7 @@ def test_projection_extracts_text():
             {"role": "tool", "content": "ignored"},
         ]
     )
-    turns = extension_history.projected_turns()
+    turns = extension_history.projected_history().turns
     assert turns == [{"role": "user", "content": "q"}, {"role": "assistant", "content": "answer"}]
 
 

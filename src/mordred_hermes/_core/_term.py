@@ -49,6 +49,7 @@ __all__ = [
     "should_color",
     "success",
     "supports_unicode",
+    "terminal_safe",
     "warn",
 ]
 
@@ -165,6 +166,12 @@ def glyph(name: str, *, ascii_only: bool = False) -> str:
     """The glyph for *name*, ASCII when *ascii_only* (non-UTF terminal)."""
     unicode_glyph, ascii_glyph = _GLYPHS[name]
     return ascii_glyph if ascii_only else unicode_glyph
+
+
+def terminal_safe(value: object) -> str:
+    """Render a persisted or operator-controlled value without terminal control characters."""
+    text = value if isinstance(value, str) else str(value)
+    return text if text.isprintable() else text.encode("unicode_escape").decode("ascii")
 
 
 def _emit(label: str, code: str, message: str, *, stream: IO[str] | None, env: Mapping[str, str] | None) -> None:

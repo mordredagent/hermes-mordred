@@ -199,11 +199,6 @@ def _resolve_route(rpc_url: str) -> tuple[dict[str, str] | None, str | None]:
     return None, addresses[0]
 
 
-def _proxies(rpc_url: str) -> dict[str, str] | None:
-    """Compatibility wrapper exposing only the resolved proxy mapping."""
-    return _resolve_route(rpc_url)[0]
-
-
 def _declared_response_length(headers: Any) -> int | None:
     """Parse and enforce an optional HTTP Content-Length header."""
     if headers is None:

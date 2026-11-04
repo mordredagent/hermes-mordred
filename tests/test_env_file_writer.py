@@ -203,7 +203,7 @@ class TestDotEnvFileWriter:
         with two lines for the same key, the upsert must collapse them to
         a single line with the new value -- not preserve the duplicate.
 
-        Before the fix, _replace_or_strip_key rewrote every matching line
+        Before the fix, the upsert rewrote every matching line
         in place, leaving the duplicate intact (``KEY=new\\nKEY=new``).
         After the fix, only the first match is kept; subsequent matches
         are stripped.

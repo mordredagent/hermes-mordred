@@ -83,13 +83,6 @@ def _resolve_root(home: Path | None) -> Path:
     return _storage.resolve_keyvault_dir(home if home is not None else _hermes_home())
 
 
-def _terminal_safe(value: object) -> str:
-    """Render persisted values without emitting terminal control characters."""
-
-    text = value if isinstance(value, str) else str(value)
-    return text if text.isprintable() else text.encode("unicode_escape").decode("ascii")
-
-
 def _load_meta_or_report(root: Path) -> dict[str, Any] | None:
     """``load_meta`` with the read commands' shared corrupt/unreadable reporting.
 
@@ -153,7 +146,7 @@ def _display_verification_digest(digests_dir: Path, key_id_hash: str, row: objec
         # a path so traversal-shaped hashes can never escape ``digests/``.
         _term.emit_error("  keyvault metadata contains an invalid key row or hash")
         return False
-    display_key_id = _terminal_safe(validated[0])
+    display_key_id = _term.terminal_safe(validated[0])
     commit = digests_dir / f"{key_id_hash}.commit"
     try:
         digest = _storage.safe_read(commit)
@@ -208,7 +201,7 @@ def list_keys(*, home: Path | None = None, as_json: bool = False) -> int:
     print(f"{len(keys)} key(s) in keyvault:")
     for key_id_hash, key_id, row in validated_rows:
         created = row.get("created_at", "<unknown>")
-        print(f"  {_terminal_safe(key_id)}  (hash {key_id_hash}, created {_terminal_safe(created)})")
+        print(f"  {_term.terminal_safe(key_id)}  (hash {key_id_hash}, created {_term.terminal_safe(created)})")
     return 0
 
 
@@ -466,7 +459,7 @@ def recover(
     # The legacy backup passphrase, if prompted for, was local to
     # _import_backup_or_report and is already gone with that frame.
     del seed_phrase, passphrase, normalized_seed
-    print(f"Keyvault recovered. Imported key: {_terminal_safe(key_id)}")
+    print(f"Keyvault recovered. Imported key: {_term.terminal_safe(key_id)}")
     return 0
 
 
@@ -528,9 +521,9 @@ def _confirm_reset(
     """
     retained_note = ""
     if retained_legacy:
-        displayed_retained = ", ".join(_terminal_safe(key_id) for key_id in retained_legacy)
+        displayed_retained = ", ".join(_term.terminal_safe(key_id) for key_id in retained_legacy)
         retained_note = f"  Legacy global keys retained (exclusive ownership is unproven): {displayed_retained}\n"
-    displayed_key_ids = ", ".join(_terminal_safe(key_id) for key_id in key_ids)
+    displayed_key_ids = ", ".join(_term.terminal_safe(key_id) for key_id in key_ids)
     print(
         "\n"
         "WARNING: keyvault reset DESTROYS the listed profile-owned key material — "
@@ -907,7 +900,7 @@ def _reset_keyvault(  # noqa: C901, PLR0912, PLR0915 - destructive state machine
     if journal.retained_legacy or journal.metadata_incomplete:
         print("Keyvault files reset — all provably profile-owned key material was destroyed.")
         if journal.retained_legacy:
-            displayed_retained = ", ".join(_terminal_safe(key_id) for key_id in journal.retained_legacy)
+            displayed_retained = ", ".join(_term.terminal_safe(key_id) for key_id in journal.retained_legacy)
             print(
                 "Legacy global native key(s) were retained because exclusive profile ownership "
                 f"cannot be proven: {displayed_retained}."

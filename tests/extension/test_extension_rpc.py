@@ -278,7 +278,7 @@ def test_proxies_resolves_for_explicit_rpc_host(monkeypatch):
 
     _rpc_network_state(monkeypatch, "clearnet")
     _install_gateway_resolver(monkeypatch, resolve)
-    proxies = extension_rpc._proxies("https://rpc.example.com/v1")
+    proxies, _direct = extension_rpc._resolve_route("https://rpc.example.com/v1")
     assert proxies == {"http": "socks5h://127.0.0.1:9050", "https": "socks5h://127.0.0.1:9050"}
     assert seen == ["rpc.example.com"]
 

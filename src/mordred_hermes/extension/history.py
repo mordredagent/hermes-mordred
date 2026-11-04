@@ -187,11 +187,6 @@ def projected_history() -> HistoryProjection:
     return HistoryProjection(_projected_turns(loaded.messages), loaded.status)
 
 
-def projected_turns() -> list[dict[str, str]]:
-    """A viewer-friendly [{role, content}] projection (user + assistant text)."""
-    return _projected_turns(load_messages())
-
-
 def _projected_turns(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     for msg in messages:

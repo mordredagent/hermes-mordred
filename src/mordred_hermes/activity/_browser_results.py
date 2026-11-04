@@ -50,7 +50,7 @@ __all__ = [
 PAGE_TEXT_CHARS: Final = 8000
 MAX_REF_LINE_CHARS: Final = 400
 MAX_URL_CHARS: Final = 4096
-#: Results larger than this are not parsed (:data:`.hooks_history.MAX_RESULT_CHARS`).
+#: Browser results larger than this are passed through untouched (never parsed).
 MAX_RESULT_CHARS: Final = 1_000_000
 #: A ref line naming a secret field: password (also German ``Passwort``), passcode, passphrase, passkey, PIN,
 #: one-time code, OTP, 2FA/MFA, secret, token, card, card security code, verification or authentication code,

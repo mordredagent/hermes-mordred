@@ -726,11 +726,6 @@ def _verify_database(connection: ProtectedConnection) -> None:
                 raise DatabaseRefused("unsupported Hermes session schema")
 
 
-def verify_database(connection: ProtectedConnection) -> None:
-    with connection._operation():
-        _verify_database(connection)
-
-
 class _MemoryBinding:
     path = Path(":memory:")
     leaf = None
