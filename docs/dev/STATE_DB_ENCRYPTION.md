@@ -192,11 +192,12 @@ journal on the next start. Classification reads each file with a plain
 `open()` and the stdlib `sqlite3`, so it is offline work: it runs only in the
 maintenance CLI or in the bootstrap before Hermes opens a database, and it
 refuses inside a Hermes process that has the SQLCipher module (see the POSIX
-lock gotcha below). `hermes-mordred databases encrypt` runs it now, or
-schedules it (`db-encryption.pending`) when a Hermes runtime or another
-converter holds the lock. Quit all Hermes processes before restarting to
-apply the pending conversion; a runtime that has not opened a database yet
-also prevents conversion. The runtime bootstrap converts before opening any
+lock gotcha below). `hermes-mordred databases encrypt` runs it now and refuses
+when a Hermes runtime or another converter holds the lock; it never schedules.
+Hermes Desktop's **Encrypt databases** schedules it (`db-encryption.pending`)
+instead. Quit all Hermes processes before restarting to apply the pending
+conversion; a runtime that has not opened a database yet also prevents
+conversion. The runtime bootstrap converts before opening any
 database, while other starting processes wait on `db-encryption.lock`.
 Verified end-to-end on a throwaway home with Hermes's own code.
 
@@ -218,8 +219,9 @@ Verified end-to-end on a throwaway home with Hermes's own code.
 - The `mordred.databases` system-prompt section states the checked status:
   encrypted, scheduled (not active yet), or the violation.
 - `databases decrypt` (`_migrate.decrypt_all`) mirrors the conversion: prepare
-  and verify every plaintext copy, journal, swap, then disarm; scheduled for
-  the next start (`db-decryption.pending`) when a Hermes runtime is running.
+  and verify every plaintext copy, journal, swap, then disarm. It refuses when
+  a Hermes runtime holds the lock. Nothing writes `db-decryption.pending` today;
+  startup still honors a record retained from an earlier release.
   An interrupted run is completed from the journal before anything else at
   startup (no key needed). An unreadable database, including one encrypted
   with a different key, refuses decryption before preparing copies or removing
