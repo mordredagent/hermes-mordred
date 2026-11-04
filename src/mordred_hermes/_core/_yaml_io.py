@@ -36,11 +36,11 @@ from __future__ import annotations
 
 import logging
 import os
-import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
 
 from ._config_io import CanonicalPaths, CanonicalSnapshot
+from ._yaml_warnings import quiet_yaml_warnings
 
 if TYPE_CHECKING:
     from ruamel.yaml import YAML
@@ -50,10 +50,7 @@ _platform = os.name
 
 def _parse_yaml(yaml: YAML, stream: TextIO | str) -> Any:
     """Keep parser diagnostics from exposing document content to warning sinks."""
-    from ruamel.yaml.error import YAMLWarning
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", YAMLWarning)
+    with quiet_yaml_warnings():
         return yaml.load(stream)
 
 
