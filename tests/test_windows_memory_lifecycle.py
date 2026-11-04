@@ -28,6 +28,7 @@ from mordred_hermes.keyvault.memory_crypto import is_sealed, seal, unseal
 from tests import _windows_proof_runtime as injected
 from tests.test_windows_custody import fs as fs
 from tests.test_windows_memory_proof import INJECTION, enroll, proof_module, prove
+from tests.test_windows_memory_proof import custody_env as custody_env
 from tests.test_windows_memory_proof import installed_runtime as installed_runtime
 from tests.test_windows_memory_proof import proof_env as proof_env
 
@@ -200,12 +201,26 @@ def test_host_lifecycle_does_not_require_the_pytest_parent_to_be_a_venv(proof_en
     assert markers(env.home) == {OPTOUT}
 
 
-def test_keep_key_false_refuses_before_any_lock_or_mutation(proven):
-    env = proven
+def test_keep_key_false_refuses_before_any_lock_or_mutation(custody_env, monkeypatch):
+    env = custody_env
+    for name, data in ORIGINALS.items():
+        put(env.home, "memories", name, data)
     before = files(env.home)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("keep_key=False must refuse before proof inspection, locks or native operations")
+
+    monkeypatch.setattr(proof_module(), "require_issued_proof", forbidden)
+    monkeypatch.setattr(proof_module(), "validate_windows_runtime_proof", forbidden)
+    monkeypatch.setattr(env.custody, "windows_custody_session", forbidden)
+    monkeypatch.setattr(cio, "canonical_session", forbidden)
+    monkeypatch.setattr(storage(), "windows_memory_session", forbidden)
+    for name in ("generate_enclave_key", "get_enclave_public_key", "enclave_ecdh", "delete_enclave_key"):
+        monkeypatch.setattr(env.backend, name, forbidden)
     with pytest.raises(storage().MemoryStorageError, match="purge"):
-        storage().disable_memory_encryption(env.home, env.proof, keep_key=False)
+        storage().disable_memory_encryption(env.home, object(), keep_key=False)
     assert files(env.home) == before and markers(env.home) == set()
+    assert env.launches.argv == [] and env.backend.calls == []
 
 
 def _bump_epoch(env):
@@ -525,8 +540,8 @@ def test_purge_report_tracks_lifecycle_without_native_calls(proven):
     assert blocked.broken == ("BROKEN.md",) and not blocked.may_purge
 
 
-def test_purge_report_for_unmanaged_profile(proof_env):
-    env = proof_env
+def test_purge_report_for_unmanaged_profile(custody_env):
+    env = custody_env
     put(env.home, "memories", "MEMORY.md", b"plain")
     report = storage().verify_memory_purge_candidates(env.home)
     assert not report.managed and not report.may_purge
@@ -598,8 +613,8 @@ def test_pending_lifecycle_siblings_reports_interrupted_disable(proven, monkeypa
     assert module.pending_lifecycle_siblings(env.home) == ()
 
 
-def test_pending_lifecycle_siblings_without_memories(proof_env):
-    assert storage().pending_lifecycle_siblings(proof_env.home) == ()
+def test_pending_lifecycle_siblings_without_memories(custody_env):
+    assert storage().pending_lifecycle_siblings(custody_env.home) == ()
 
 
 def test_injected_backend_is_test_only_file():

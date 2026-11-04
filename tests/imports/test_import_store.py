@@ -21,6 +21,7 @@ from mordred_hermes.imports.records import (
     PartKind,
     ProvenanceQuality,
     RecordError,
+    Source,
     content_digest,
 )
 from mordred_hermes.imports.store import (
@@ -88,6 +89,161 @@ def mail_message(message_id: str, text: str, *, sent_at: int | None = DAY2) -> I
         uid, PartKind.QUOTED, 1, ordinal=1, author=TANAKA, text="earlier words", quality=ProvenanceQuality.HEURISTIC
     )
     return message(uid, (authored_part, quoted), conv_uid=MAIL_CONV_UID, sent_at=sent_at, recipients=(TANAKA, SUZUKI))
+
+
+# --- public conversation history reads ------------------------------------------------------------
+
+
+def test_conversations_filter_source_and_account_and_round_trip_published_fields(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    custom = dataclasses.replace(SUZUKI, display_name="Custom observed participant", stable_id=None)
+    conv = dataclasses.replace(tg_conv(participants=(custom,)), sync_cursor="10", archived=True)
+    other = dataclasses.replace(tg_conv(), conv_uid="tg:123", conversation_id="123", source_account="100")
+    for record in (conv, other, mail_conv()):
+        store.upsert_conversation(record)
+
+    assert store.conversations(Source.TELEGRAM, OWNER_ID) == {conv.conv_uid: conv}
+    assert store.conversations("telegram", "100") == {other.conv_uid: other}
+    assert store.conversations("mail", "work") == {MAIL_CONV_UID: mail_conv()}
+    assert store.conversations("telegram", "absent") == {}
+    with pytest.raises(RecordError, match="unknown_enum"):
+        store.conversations("invalid", OWNER_ID)
+
+
+def test_conversation_reads_see_only_committed_messages_across_sources(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(1, sent_at=DAY1), authored(2, sent_at=None)])
+    commit(store, mail_conv(), [mail_message("m1@example.com", "mail", sent_at=DAY2)])
+    other = dataclasses.replace(tg_conv(), conv_uid="tg:123", conversation_id="123", source_account="100")
+    other_uid = "tg:123:1"
+    other_message = message(other_uid, (part(other_uid),), conv_uid=other.conv_uid, sent_at=DAY3)
+    commit(store, other, [other_message])
+    empty = dataclasses.replace(tg_conv(), conv_uid="tg:456", conversation_id="456")
+    store.upsert_conversation(empty)
+    for state, number in (("open", 3), ("failed", 4)):
+        for conv, msg in (
+            (tg_conv(), authored(number, sent_at=DAY3)),
+            (mail_conv(), mail_message(f"m{number}@example.com", "uncommitted")),
+        ):
+            run = store.run_begin(conv.source)
+            store.write_thread(run, [msg], conversation=conv)
+            if state == "failed":
+                store.run_fail(run, {})
+
+    wanted = [TG_CONV_UID, MAIL_CONV_UID, other.conv_uid, "absent", TG_CONV_UID]
+    assert store.conversation_stats(iter(wanted)) == {
+        TG_CONV_UID: (2, DAY1),
+        MAIL_CONV_UID: (1, DAY2),
+        other.conv_uid: (1, DAY3),
+    }
+    found = store.conversation_messages(wanted)
+    assert {key: [msg.source_uid for msg in msgs] for key, msgs in found.items()} == {
+        TG_CONV_UID: [tg_uid(1), tg_uid(2)],
+        MAIL_CONV_UID: [mail_uid("m1@example.com")],
+        other.conv_uid: [other_uid],
+    }
+    assert found[other.conv_uid] == [other_message]
+    assert store.conversation_stats([]) == store.conversation_messages([]) == {}
+    assert store.conversation_stats(["absent"]) == store.conversation_messages(["absent"]) == {}
+    assert store.conversation_stats([empty.conv_uid]) == store.conversation_messages([empty.conv_uid]) == {}
+
+
+@pytest.mark.parametrize(
+    ("since", "until", "expected"),
+    [
+        (None, None, ["1", "2", "10", "11"]),
+        (DAY2, DAY3, ["2", "10"]),
+        (None, DAY2, ["1"]),
+        (DAY3, None, []),
+        (DAY2, DAY2, []),
+    ],
+)
+def test_conversation_messages_preserve_half_open_dates_and_numeric_reading_order(
+    tmp_path: Path, since: int | None, until: int | None, expected: list[str]
+) -> None:
+    store = make_store(tmp_path)
+    commit(
+        store,
+        tg_conv(),
+        [
+            authored(10, sent_at=DAY2),
+            authored(2, sent_at=DAY2),
+            authored(11, sent_at=None),
+            authored(1, sent_at=DAY1),
+            authored(12, sent_at=DAY2),
+        ],
+    )
+    # Damaged/old stores can contain messages without parts; history has always omitted them.
+    with store.connection() as conn:
+        conn.execute("DELETE FROM import_parts WHERE source_uid = ?", (tg_uid(12),))
+    found = store.conversation_messages([TG_CONV_UID], since=since, until=until)
+    assert [msg.message_id for msg in found.get(TG_CONV_UID, [])] == expected
+    assert store.conversation_stats([TG_CONV_UID]) == {TG_CONV_UID: (5, DAY2)}
+
+
+def test_conversation_reads_chunk_and_deduplicate_uids(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(2), authored(10)])
+    mail = mail_message("m1@example.com", "mail")
+    commit(store, mail_conv(), [mail])
+    wanted = [MAIL_CONV_UID] + [f"tg:{number}" for number in range(501)] + [TG_CONV_UID, TG_CONV_UID]
+    assert store.conversation_stats(wanted) == {MAIL_CONV_UID: (1, DAY2), TG_CONV_UID: (2, authored(2).sent_at)}
+    assert store.conversation_messages(wanted) == {MAIL_CONV_UID: [mail], TG_CONV_UID: [authored(2), authored(10)]}
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("participants_json", '{"private":"SENSITIVE"}'),
+        ("participants_json", '[{"kind":"invalid"}]'),
+        ("participants_json", '"SENSITIVE"'),
+        ("message_count", "SENSITIVE"),
+        ("record_version", "SENSITIVE"),
+    ],
+)
+def test_conversations_map_malformed_rows_to_content_free_refusals(tmp_path: Path, column: str, value: str) -> None:
+    store = make_store(tmp_path)
+    store.upsert_conversation(tg_conv())
+    with store.connection() as conn:
+        conn.execute(f"UPDATE import_conversations SET {column} = ?", (value,))
+    with pytest.raises(ImportRefused) as caught:
+        store.conversations("telegram", OWNER_ID)
+    assert str(caught.value) == "store_unavailable" and "SENSITIVE" not in repr(caught.value)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    ["UPDATE import_messages SET recipients_json = 'SENSITIVE'", "UPDATE import_parts SET author_kind = 'SENSITIVE'"],
+)
+def test_conversation_messages_map_malformed_hydration_to_content_free_refusals(tmp_path: Path, sql: str) -> None:
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(2)])
+    with store.connection() as conn:
+        conn.execute(sql)
+    with pytest.raises(ImportRefused) as caught:
+        store.conversation_messages([TG_CONV_UID])
+    assert str(caught.value) == "store_unavailable" and "SENSITIVE" not in repr(caught.value)
+
+
+def test_conversation_messages_hydrate_one_committed_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(2, text="snapshot")])
+    with store.connection() as conn:
+        assert conn.execute("PRAGMA journal_mode = WAL").fetchone() == ("wal",)
+    hydrate = store._hydrate
+
+    def change_after_selection(conn, uids):
+        assert conn.in_transaction
+        with sqlite3.connect(store.path) as writer:
+            writer.execute("UPDATE import_runs SET state = 'failed'")
+            writer.execute("UPDATE import_parts SET text = 'changed'")
+        return hydrate(conn, uids)
+
+    monkeypatch.setattr(store, "_hydrate", change_after_selection)
+    found = store.conversation_messages([TG_CONV_UID])
+    assert found == {TG_CONV_UID: [authored(2, text="snapshot")]}
+    assert rows(store, "SELECT state FROM import_runs") == [("failed",)]
+    assert store.conversation_messages([TG_CONV_UID]) == {}
 
 
 # --- schema and binding ----------------------------------------------------------------------------
@@ -442,6 +598,127 @@ def test_search_without_text_lists_the_newest_parts_first(archive: ImportStore) 
     assert uids(hits) == [tg_uid(3), tg_uid(2), tg_uid(1), tg_uid(4)]
     assert archive.search("   ", conv_uids=[TG_CONV_UID]) == hits
     assert uids(archive.search(None, since=DAY3)) == [tg_uid(3)]
+
+
+@pytest.mark.parametrize(
+    ("query", "filters", "expected"),
+    [
+        ("LUNCH", {}, [tg_uid(2)]),
+        ("田中", {}, [tg_uid(1)]),
+        ("%", {}, [tg_uid(3)]),
+        ("_", {}, []),
+        ('"見積もり" OR lunch', {}, []),
+        (None, {"conv_uids": [TG_CONV_UID, TG_CONV_UID]}, [tg_uid(3), tg_uid(2), tg_uid(1), tg_uid(4)]),
+        ("見積もり", {"source": "mail"}, [mail_uid("m1@example.com")]),
+        ("見積もり", {"since": DAY3, "until": DAY3 + 1}, [tg_uid(3)]),
+        (None, {"conv_uids": ["tg:unknown"]}, []),
+    ],
+)
+def test_search_with_parts_preserves_selection_and_complete_records(archive, query, filters, expected):
+    hits, hydrated = archive.search_with_parts(query, **filters)
+    assert uids(hits) == expected
+    assert hits == archive.search(query, **filters)
+    assert list(hydrated) == [hit.part_uid for hit in hits]
+    assert hydrated == archive.parts_for(hit.part_uid for hit in hits)
+
+
+@pytest.mark.parametrize(
+    ("limit", "parts_limit", "candidates", "parts"), [(2, 1, 2, 1), (1, 9, 1, 1), (3, 0, 3, 0), (3, -1, 3, 0)]
+)
+def test_search_with_parts_keeps_candidate_and_hydration_limits_independent(
+    archive, limit, parts_limit, candidates, parts
+):
+    hits, hydrated = archive.search_with_parts(None, limit=limit, parts_limit=parts_limit)
+    assert len(hits) == candidates
+    assert list(hydrated) == [hit.part_uid for hit in hits[:parts]]
+
+
+@pytest.mark.parametrize("filters", [{"limit": 0}, {"limit": -1}, {"conv_uids": []}])
+def test_search_with_parts_early_returns_do_not_open(tmp_path, filters):
+    def forbidden(_path):
+        pytest.fail("early return must not open a store")
+
+    store = ImportStore(tmp_path / "absent.db", forbidden)
+    assert store.search_with_parts(None, **filters) == ([], {})
+    assert not store.path.exists()
+
+
+def test_search_with_parts_clamps_candidates_before_hydration(tmp_path, monkeypatch):
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(i) for i in range(1, 5)])
+    monkeypatch.setattr(store_module, "MAX_SEARCH_LIMIT", 2)
+    hits, hydrated = store.search_with_parts(None, limit=10, parts_limit=10)
+    assert len(hits) == len(hydrated) == 2
+
+
+def test_search_with_parts_excludes_uncommitted_and_orders_multipart(tmp_path):
+    store = make_store(tmp_path)
+    original = mail_message("m1@example.com", "earlier words")
+    commit(store, mail_conv(), [original])
+    run = store.run_begin("telegram")
+    store.write_thread(run, [authored(1, text="earlier words")], conversation=tg_conv())
+    hits, hydrated = store.search_with_parts(None)
+    assert [hit.part_uid for hit in hits] == [f"{original.source_uid}#a", f"{original.source_uid}#q1"]
+    assert all(found.message == original and found.conversation == mail_conv() for found in hydrated.values())
+    assert store.search_with_parts("missing") == ([], {})
+
+
+def test_search_with_parts_hydrates_one_snapshot_and_next_call_is_fresh(tmp_path, monkeypatch):
+    store = make_store(tmp_path)
+    first, second = authored(1, text="budget original"), authored(2, text="budget deleted")
+    commit(store, tg_conv(), [first, second])
+    with store.connection() as conn:
+        assert conn.execute("PRAGMA journal_mode = WAL").fetchone() == ("wal",)
+    hydrate = store._hydrate
+    changed = False
+
+    def change_after_selection(conn, source_uids):
+        nonlocal changed
+        assert conn.in_transaction
+        if not changed:
+            changed = True
+            with sqlite3.connect(store.path) as writer:
+                writer.execute(
+                    "UPDATE import_parts SET text = 'budget changed' WHERE source_uid = ?", (first.source_uid,)
+                )
+                writer.execute("DELETE FROM import_parts WHERE source_uid = ?", (second.source_uid,))
+                writer.execute("DELETE FROM import_messages WHERE source_uid = ?", (second.source_uid,))
+        return hydrate(conn, source_uids)
+
+    monkeypatch.setattr(store, "_hydrate", change_after_selection)
+    hits, hydrated = store.search_with_parts("budget")
+    assert set(uids(hits)) == {first.source_uid, second.source_uid}
+    assert {found.message for found in hydrated.values()} == {first, second}
+    next_hits, next_parts = store.search_with_parts("budget")
+    assert uids(next_hits) == [first.source_uid]
+    assert [found.part.text for found in next_parts.values()] == ["budget changed"]
+
+
+def test_search_with_parts_rolls_back_closes_and_sanitizes_hydration_failure(tmp_path, monkeypatch):
+    seed = make_store(tmp_path)
+    commit(seed, tg_conv(), [authored(1)])
+    events = []
+
+    class TrackedConnection(sqlite3.Connection):
+        def rollback(self):
+            events.append(("rollback", self.in_transaction))
+            return super().rollback()
+
+        def close(self):
+            events.append(("close", self.in_transaction))
+            return super().close()
+
+    store = ImportStore(seed.path, lambda path: sqlite3.connect(path, factory=TrackedConnection))
+
+    def fail_hydration(conn, _source_uids):
+        assert conn.in_transaction
+        raise sqlite3.DatabaseError("SENSITIVE hydration failure")
+
+    monkeypatch.setattr(store, "_hydrate", fail_hydration)
+    with pytest.raises(ImportRefused, match=r"^store_unavailable$"):
+        store.search_with_parts(None)
+    assert events == [("rollback", True), ("close", False)]
+    assert seed.search(None)  # released connection and transaction
 
 
 def test_parts_for_round_trips_the_stored_records(tmp_path: Path) -> None:
@@ -939,3 +1216,51 @@ def test_delete_source_retirement_guard_cannot_target_another_source_or_account(
     with pytest.raises(ImportRefused):
         store.delete_source(source, account, expected_retired_account=OWNER_ID)
     assert store.contains([tg_uid(1)]) == {tg_uid(1)}
+
+
+def test_search_with_parts_protected_opens_each_run_full_integrity(protected_runtime, monkeypatch):
+    from mordred_hermes.dbcrypt import _connection
+
+    home, provider, backend = protected_runtime
+    store = open_import_store(home)
+    commit(store, tg_conv(), [authored(1, text="budget original")])
+    verify = _connection._verify_database
+    verified = []
+    native_calls = list(backend.calls)
+
+    def verify_database(connection):
+        verify(connection)  # real SQLCipher full-page integrity path on every actual open
+        verified.append(connection)
+
+    monkeypatch.setattr(_connection, "_verify_database", verify_database)
+    for count in (1, 2):
+        hits, hydrated = store.search_with_parts("budget")
+        assert uids(hits) == [tg_uid(1)]
+        assert [found.part.text for found in hydrated.values()] == ["budget original"]
+        assert len(verified) == count
+    assert verified[0] is not verified[1]
+    assert not provider.current_authority.terminal
+    assert backend.calls == native_calls
+
+
+@pytest.mark.parametrize("damage", ["marker", "path", "authority"])
+def test_search_with_parts_protected_hydration_rechecks_authority(protected_runtime, monkeypatch, damage):
+    home, provider, _ = protected_runtime
+    store = open_import_store(home)
+    commit(store, tg_conv(), [authored(1, text="budget original")])
+    hydrate_parts = store._parts_for
+
+    def revoke_after_selection(conn, uids):
+        assert conn.in_transaction
+        if damage == "marker":
+            (home / "mordred/db-encryption.marker").unlink()
+        elif damage == "path":
+            store.path.rename(store.path.with_suffix(".replaced"))
+        else:
+            provider.close()
+        return hydrate_parts(conn, uids)
+
+    monkeypatch.setattr(store, "_parts_for", revoke_after_selection)
+    with pytest.raises(ImportRefused):
+        store.search_with_parts("budget")
+    assert provider.current_authority.terminal

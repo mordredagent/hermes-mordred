@@ -417,14 +417,23 @@ ORDINARY_VALUES = [
 ]
 
 
-@pytest.mark.parametrize("value", SECRET_VALUES)
-@pytest.mark.parametrize("field_kind", ["text", "search", "other"])
-def test_secret_shaped_typed_text_is_withheld_whatever_the_field(value: str, field_kind: str) -> None:
+def assert_secret_withheld(value: str, field_kind: str) -> None:
     assert contracts.looks_like_secret(value)
     event = normalize(action={"op": "type", "args": {"field_kind": field_kind}}, text=value)
     assert event.text is None
     assert "typed_text_dropped" in event.exclusions
     assert value.strip() not in repr(event)
+
+
+@pytest.mark.parametrize("value", SECRET_VALUES)
+def test_secret_shaped_typed_text_is_withheld_whatever_the_field(value: str) -> None:
+    # Credential classification is independent of the admitted field kind.
+    assert_secret_withheld(value, "text")
+
+
+@pytest.mark.parametrize("field_kind", ["search", "other"])
+def test_secret_refusal_covers_the_other_admitted_field_kinds(field_kind: str) -> None:
+    assert_secret_withheld(JWT, field_kind)
 
 
 @pytest.mark.parametrize("value", SECRET_VALUES[:3])
@@ -808,9 +817,23 @@ def test_redaction_happens_before_the_digest() -> None:
     assert first.content_digest == other.content_digest == canonical_digest(first)
 
 
+def assert_historical_spans(text: str) -> None:
+    """Keep every independent span oracle from revision efe9bb27d."""
+    clean = contracts.redact_secret_tokens(text)
+    now = _redaction._secret_spans(clean)
+    for start, end in BASE_SPANS[text]:
+        assert any(lo <= start and end <= hi for lo, hi in now), (clean[start:end], now)
+
+
+def assert_redacted(text: str, expected: str) -> None:
+    assert contracts.redact_text_secrets(text) == (expected, True)
+    if text in BASE_SPANS:
+        assert_historical_spans(text)
+
+
 @pytest.mark.parametrize(("text", "expected"), REDACTED_TEXTS)
 def test_secrets_in_free_text_are_replaced_and_the_rest_kept(text: str, expected: str) -> None:
-    assert contracts.redact_text_secrets(text) == (expected, True)
+    assert_redacted(text, expected)
     event = normalize(phase="correction", action={"op": "other"}, text=text)
     assert event.text == expected
     assert "text_secrets_redacted" in event.exclusions
@@ -826,6 +849,9 @@ def test_interface_talk_and_ordinary_sentences_are_untouched(text: str) -> None:
 
 def test_every_free_text_field_is_redacted_at_ingest() -> None:
     event = normalize(
+        # Keep a short PIN from randomly matching the UUID or its derived digest
+        # in the whole-record leak assertion below.
+        event_id="00000000-0000-4000-8000-000000000001",
         phase="boundary",
         action={"op": "task_end", "site": "example.com", "target": "submit with password: hunter2"},
         text="done; the new PIN is 4821",
@@ -1128,7 +1154,7 @@ QUALIFIED_KEPT = [
 
 @pytest.mark.parametrize(("text", "expected"), QUALIFIED_TEXTS)
 def test_a_value_after_to_or_a_short_qualifier_is_replaced(text: str, expected: str) -> None:
-    assert contracts.redact_text_secrets(text) == (expected, True)
+    assert_redacted(text, expected)
     assert _task_start(text).text == expected
 
 
@@ -1191,7 +1217,7 @@ NESTED_TEXTS = [
 
 @pytest.mark.parametrize(("text", "expected"), NESTED_TEXTS)
 def test_a_credential_inside_another_match_is_redacted_too(text: str, expected: str) -> None:
-    assert contracts.redact_text_secrets(text) == (expected, True)
+    assert_redacted(text, expected)
     assert _task_start(text).text == expected
 
 
@@ -1200,16 +1226,6 @@ def test_a_credential_inside_another_match_is_redacted_too(text: str, expected: 
 )
 def test_a_qualified_to_form_needs_a_secret_value(text: str) -> None:
     assert contracts.redact_text_secrets(text) == (text, False)
-
-
-@pytest.mark.parametrize(("text", "spans"), sorted(BASE_SPANS.items()))
-def test_every_value_the_base_revision_redacted_stays_redacted(text: str, spans: tuple[tuple[int, int], ...]) -> None:
-    """A newer rule only adds redactions: each value span the base revision (efe9bb27d) replaced lies inside a
-    span replaced now (spans of the text after JWTs, key-prefixed tokens and PEM lines are replaced)."""
-    clean = contracts.redact_secret_tokens(text)
-    now = _redaction._secret_spans(clean)
-    for start, end in spans:
-        assert any(lo <= start and end <= hi for lo, hi in now), (clean[start:end], now)
 
 
 def test_nested_keyword_redaction_is_linear_on_hostile_input() -> None:
@@ -1576,7 +1592,7 @@ def test_kana_value_redaction_is_linear_on_hostile_input() -> None:
 
 @pytest.mark.parametrize(("text", "expected"), SPOKEN_TEXTS)
 def test_a_value_of_several_words_is_replaced_to_the_end_of_its_clause(text: str, expected: str) -> None:
-    assert contracts.redact_text_secrets(text) == (expected, True)
+    assert_redacted(text, expected)
     event = _task_start(text)
     assert event.text == expected and "text_secrets_redacted" in event.exclusions
 
@@ -1596,7 +1612,7 @@ def test_passphrase_words_holding_a_keywords_letters_stay_inside_the_value(word:
 
 @pytest.mark.parametrize(("text", "expected"), TYPED_NEIGHBOURS)
 def test_typed_neighbours_end_a_value_of_several_words(text: str, expected: str) -> None:
-    assert contracts.redact_text_secrets(text) == (expected, True)
+    assert_redacted(text, expected)
 
 
 @pytest.mark.parametrize("text", SPOKEN_KEPT)
@@ -1948,3 +1964,14 @@ def test_host_collection_is_linear_on_hostile_input() -> None:
     for text in ("https://x.example/?next=" * 5000 + "done", "a." * 131072, "?u=https%3A%2F%2F" * 20000):
         contracts.event_hosts({"route": text, "target": text}, text)
     assert time.monotonic() - started < 5.0
+
+
+# These current literal-output cases also own the independent historical-span
+# check. Select the rest separately; the immutable BASE_SPANS oracle stays whole.
+SPAN_CORPORA = (REDACTED_TEXTS, QUALIFIED_TEXTS, NESTED_TEXTS, SPOKEN_TEXTS, TYPED_NEIGHBOURS)
+SPANS_CHECKED_BY_CORPORA = {str(getattr(row, "values", row)[0]) for corpus in SPAN_CORPORA for row in corpus}
+
+
+@pytest.mark.parametrize("text", sorted(set(BASE_SPANS) - SPANS_CHECKED_BY_CORPORA))
+def test_every_value_the_base_revision_redacted_stays_redacted(text: str) -> None:
+    assert_historical_spans(text)

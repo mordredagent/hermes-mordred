@@ -1,21 +1,19 @@
-"""The Hermes Desktop page's Windows contract (C11): syntax and explicit-metadata selection.
+"""The Hermes Desktop page's Windows contract (C11): explicit-metadata selection.
 
 ``plugin.js`` runs only inside Hermes Desktop, so this checks what can be
-checked without it: the module parses (``node --input-type=module --check``
-when Node is installed), the page asks for a Windows-capable status
+checked without it: the page asks for a Windows-capable status
 (``client_version>=3``: the page asks for 4, the start-up notice for 3), the
 Windows branch is chosen by ``hardware_kind`` and every capability name, reason
 code and step the Windows API can return has an explicit label. Readiness is
 never derived from matching English text. The Node harness lives in
-``tests/_desktop_page.py``, shared with ``test_desktop_page.py``.
+``tests/_desktop_page.py``, shared with ``test_desktop_page.py``, which owns
+the common ES-module syntax check.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import shutil
-import subprocess
 
 import pytest
 
@@ -51,20 +49,6 @@ CODES = (
     "forget_confirm_mismatch",
     "custody_busy",
 )
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
-def test_page_is_a_valid_es_module():
-    completed = subprocess.run(
-        ["node", "--input-type=module", "--check"],
-        input=source(),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=60,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
 
 
 def test_page_requests_the_windows_capable_status_and_selects_by_hardware_kind():

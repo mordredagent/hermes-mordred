@@ -282,11 +282,15 @@ def _store_found(store: ImportStore, request: SearchRequest) -> _Found:
             chosen = _centered(near, request.around_evidence_id, request.limit)
             return _Found(chosen, len(near), partial=False)
         conv_uids = [telegram_conv_uid(dialog) for dialog in request.chat_ids] or None
-        hits = store.search(
-            request.query, conv_uids=conv_uids, since=request.since, until=request.until, limit=_MAX_CANDIDATES
+        hits, hydrated = store.search_with_parts(
+            request.query,
+            conv_uids=conv_uids,
+            since=request.since,
+            until=request.until,
+            limit=_MAX_CANDIDATES,
+            parts_limit=request.limit,
         )
         wanted = [hit.part_uid for hit in hits[: request.limit]]
-        hydrated = store.parts_for(wanted)
     except ImportRefused as exc:
         _log.warning("history search: import store refused (%s)", exc.code)
         raise StoreError("import_store_unavailable") from None

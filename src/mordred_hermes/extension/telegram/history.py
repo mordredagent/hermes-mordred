@@ -53,7 +53,6 @@ in any case: the privacy LLM's key and endpoint are sealed with them.
 from __future__ import annotations
 
 import contextlib
-import json
 import logging
 import sys
 import time
@@ -117,11 +116,6 @@ _SOURCE: Final = Source.TELEGRAM.value
 _MAX_PARTICIPANTS: Final = 256
 #: Authors (and texts) of recently converted messages kept per dialog for same-run quote resolution.
 _MAX_REPLY_AUTHORS: Final = 4096
-_CHUNK: Final = 500  # bound on ``IN (...)`` parameters per statement
-_CONV_COLUMNS: Final = (
-    "conv_uid, source, source_account, conversation_id, kind, title, participants_json, "
-    "last_message_at, message_count, archived, sync_cursor, record_version"
-)
 #: Wire ``kind`` of a conversation for the dialog list (the archive's vocabulary).
 _LEGACY_KINDS: Final = {
     ConversationKind.GROUP: "group",
@@ -431,65 +425,17 @@ class ImportSink:
             self.store.run_fail(self._run_id, {"dialogs": len(self._dialogs), **self._counts})
 
 
-# -- reads the ImportStore does not offer (yet) -------------------------------------------------
-
-
-def _conversation(row: Sequence[Any]) -> ImportConversation:
-    participants = tuple(
-        Participant(
-            kind=SenderKind(item["kind"]),
-            stable_id=item["stable_id"],
-            display_name=item["display_name"],
-            owner_class=OwnerClass(item["owner_class"]),
-        )
-        for item in json.loads(row[6])
-    )
-    return ImportConversation(
-        conv_uid=str(row[0]),
-        source=Source(row[1]),
-        source_account=str(row[2]),
-        conversation_id=str(row[3]),
-        kind=ConversationKind(row[4]),
-        title=str(row[5]),
-        participants=participants,
-        last_message_at=row[7],
-        message_count=int(row[8]),
-        archived=bool(row[9]),
-        sync_cursor=row[10],
-        record_version=int(row[11]),
-    )
+# -- public import-store reads ----------------------------------------------------------------
 
 
 def stored_conversations(store: ImportStore, account: str) -> dict[str, ImportConversation]:
     """Every Telegram conversation row of ``account`` (cursors and counts as last committed)."""
-    with store.connection() as conn:
-        rows = conn.execute(
-            f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE source = ? AND source_account = ?",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
-            (_SOURCE, account),
-        ).fetchall()
-    try:
-        convs = [_conversation(row) for row in rows]
-    except (KeyError, TypeError, ValueError):
-        raise ImportRefused("store_unavailable") from None
-    return {conv.conv_uid: conv for conv in convs}
+    return store.conversations(_SOURCE, account)
 
 
 def committed_stats(store: ImportStore, conv_uids: Iterable[str]) -> dict[str, tuple[int, int | None]]:
     """``conv_uid -> (committed message count, newest sent_at)``."""
-    uids = list(dict.fromkeys(conv_uids))
-    stats: dict[str, tuple[int, int | None]] = {}
-    with store.connection() as conn:
-        for start in range(0, len(uids), _CHUNK):
-            chunk = uids[start : start + _CHUNK]
-            marks = ", ".join("?" * len(chunk))
-            for conv_uid, count, last in conn.execute(
-                "SELECT m.conv_uid, count(*), max(m.sent_at) FROM import_messages m "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
-                "JOIN import_runs r ON r.run_id = m.run_id AND r.state = 'committed' "
-                f"WHERE m.conv_uid IN ({marks}) GROUP BY m.conv_uid",
-                chunk,
-            ):
-                stats[str(conv_uid)] = (int(count), None if last is None else int(last))
-    return stats
+    return store.conversation_stats(conv_uids)
 
 
 # -- selection and the service's reads ------------------------------------------------------------
@@ -646,40 +592,11 @@ def summary(convs: Sequence[ImportConversation], index: ArchiveIndex) -> dict[st
 # -- what a question reads -----------------------------------------------------------------------
 
 
-def _reading_order(msg: ImportMessage) -> tuple[bool, int, int, str]:
-    """``sent_at`` (unknown dates last), then the numeric message id: the store's reading order."""
-    numeric = int(msg.message_id) if msg.message_id.isdigit() else 0
-    return msg.sent_at is None, msg.sent_at or 0, numeric, msg.message_id
-
-
 def _committed_messages(
     store: ImportStore, conv_uids: Sequence[str], since: int | None, until: int | None
 ) -> dict[str, list[ImportMessage]]:
-    """Committed messages of ``conv_uids`` with ``since <= sent_at < until`` (either bound optional).
-
-    The ``ImportStore`` has no per-conversation read, so this selects one part
-    uid per committed message through :meth:`ImportStore.connection` and
-    hydrates the messages with the public :meth:`ImportStore.parts_for`.
-    """
-    bounds = [("m.sent_at >= ?", since), ("m.sent_at < ?", until)]
-    clauses = "".join(f" AND {clause}" for clause, value in bounds if value is not None)
-    values = [value for _clause, value in bounds if value is not None]
-    anchors: list[str] = []
-    with store.connection() as conn:
-        for start in range(0, len(conv_uids), _CHUNK):
-            chunk = list(conv_uids[start : start + _CHUNK])
-            sql = (
-                "SELECT min(p.part_uid) FROM import_messages m "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
-                "JOIN import_runs r ON r.run_id = m.run_id AND r.state = 'committed' "
-                "JOIN import_parts p ON p.source_uid = m.source_uid "
-                f"WHERE m.conv_uid IN ({', '.join('?' * len(chunk))}){clauses} GROUP BY m.source_uid"
-            )
-            anchors.extend(str(row[0]) for row in conn.execute(sql, [*chunk, *values]))
-    messages = {found.message.source_uid: found.message for found in store.parts_for(anchors).values()}
-    by_conv: dict[str, list[ImportMessage]] = {}
-    for msg in sorted(messages.values(), key=_reading_order):
-        by_conv.setdefault(msg.conv_uid, []).append(msg)
-    return by_conv
+    """Committed messages of ``conv_uids`` with ``since <= sent_at < until`` (either bound optional)."""
+    return store.conversation_messages(conv_uids, since=since, until=until)
 
 
 def _stored_ask_records(store: ImportStore, account: str, request: AskRequest) -> AskRecords:
