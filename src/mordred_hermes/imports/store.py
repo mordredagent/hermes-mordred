@@ -440,6 +440,27 @@ def _decoded(fields: Sequence[str], row: Sequence[Any]) -> dict[str, Any]:
     }
 
 
+def _conversation(row: Sequence[Any]) -> ImportConversation:
+    values = _decoded(_CONV_FIELDS, row)
+    values["message_count"] = int(values["message_count"])
+    values["record_version"] = int(values["record_version"])
+    return ImportConversation(**values)
+
+
+@contextlib.contextmanager
+def _decoding() -> Iterator[None]:
+    """Malformed stored records refuse without exposing their contents."""
+    try:
+        yield
+    except (AttributeError, KeyError, TypeError, ValueError):
+        raise ImportRefused("store_unavailable") from None
+
+
+def _reading_order(msg: ImportMessage) -> tuple[bool, int, int, str]:
+    numeric = int(msg.message_id) if msg.message_id.isdigit() else 0
+    return msg.sent_at is None, msg.sent_at or 0, numeric, msg.message_id
+
+
 def _marks(count: int) -> str:
     return ", ".join("?" * count)
 
@@ -1213,6 +1234,66 @@ class ImportStore:
         stored = {str(row[0]): tuple(row)[1:] for row in rows}
         return {uid: _decision(stored.get(uid), copy) for uid, copy in incoming.items()}
 
+    def conversations(self, source: Source | str, source_account: str) -> dict[str, ImportConversation]:
+        """Every conversation of one source account, including its last published ``sync_cursor``.
+
+        Conversation metadata is published by ``upsert_conversation``; unlike
+        message reads, it is not filtered by an import run's state.
+        """
+        source_value = _source_value(source)
+        with self._transaction(write=False) as conn, _decoding():
+            rows = conn.execute(
+                f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE source = ? AND source_account = ?",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+                (source_value, source_account),
+            ).fetchall()
+            convs = [_conversation(row) for row in rows]
+        return {conv.conv_uid: conv for conv in convs}
+
+    def conversation_stats(self, conv_uids: Iterable[str]) -> dict[str, tuple[int, int | None]]:
+        """``conv_uid -> (committed message count, newest sent_at)``; empty conversations are omitted."""
+        uids = list(dict.fromkeys(conv_uids))
+        stats: dict[str, tuple[int, int | None]] = {}
+        with self._transaction(write=False) as conn, _decoding():
+            for start in range(0, len(uids), _CHUNK):
+                chunk = uids[start : start + _CHUNK]
+                for conv_uid, count, last in conn.execute(
+                    f"SELECT m.conv_uid, count(*), max(m.sent_at) FROM {_COMMITTED_MESSAGES} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+                    f"WHERE m.conv_uid IN ({_marks(len(chunk))}) GROUP BY m.conv_uid",
+                    chunk,
+                ):
+                    stats[str(conv_uid)] = (int(count), None if last is None else int(last))
+        return stats
+
+    def conversation_messages(
+        self, conv_uids: Sequence[str], *, since: int | None = None, until: int | None = None
+    ) -> dict[str, list[ImportMessage]]:
+        """Committed messages with parts, in reading order, for the requested conversations.
+
+        Bounds are half-open (``since <= sent_at < until``); unknown dates
+        match only when neither bound is set. Equal dates use numeric message
+        ids, then id text, with unknown dates last. Selection and hydration
+        share one read transaction so every message reflects the same snapshot.
+        """
+        uids = list(dict.fromkeys(conv_uids))
+        bounds = [("m.sent_at >= ?", since), ("m.sent_at < ?", until)]
+        clauses = "".join(f" AND {clause}" for clause, value in bounds if value is not None)
+        values = [value for _clause, value in bounds if value is not None]
+        by_conv: dict[str, list[ImportMessage]] = {}
+        with self._transaction(write=False) as conn, _decoding():
+            source_uids: list[str] = []
+            for start in range(0, len(uids), _CHUNK):
+                chunk = uids[start : start + _CHUNK]
+                sql = (
+                    f"SELECT DISTINCT m.source_uid FROM {_COMMITTED_MESSAGES} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+                    "JOIN import_parts p ON p.source_uid = m.source_uid "
+                    f"WHERE m.conv_uid IN ({_marks(len(chunk))}){clauses}"
+                )
+                source_uids.extend(str(row[0]) for row in conn.execute(sql, [*chunk, *values]))
+            hydrated = self._hydrate(conn, source_uids)
+            for msg in sorted((msg for _conv, msg in hydrated.values()), key=_reading_order):
+                by_conv.setdefault(msg.conv_uid, []).append(msg)
+        return by_conv
+
     def find_messages(
         self,
         source: Source | str,
@@ -1351,7 +1432,7 @@ class ImportStore:
             parts.setdefault(str(row[1]), []).append(ImportPart(**_decoded(_PART_FIELDS, row)))
         conv_uids = sorted({str(row[1]) for row in message_rows})
         convs = {
-            str(row[0]): ImportConversation(**_decoded(_CONV_FIELDS, row))
+            str(row[0]): _conversation(row)
             for row in _select_in(
                 conn,
                 f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE conv_uid IN",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound

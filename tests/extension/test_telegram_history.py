@@ -409,12 +409,48 @@ def test_failed_sync_publishes_nothing_and_does_not_advance_cursors(tmp_path, da
     assert imports.status()["runs"] == {"committed": 1, "failed": 1}
     assert imports.contains(["tg:11:6"]) == set()
     assert _conversations(imports)["tg:11"][:2] == ("5", 4)
+    assert imports.conversations("telegram", str(OWNER))["tg:11"].sync_cursor == "5"
     fake.fail_at = None
     fake.calls.clear()
     result = _sync(fake, archive, imports)
     assert ("bob", 5) in fake.calls and result.messages_imported == 2
     assert imports.contains(["tg:11:6", "tg:11:7"]) == {"tg:11:6", "tg:11:7"}
     assert _conversations(imports)["tg:11"][:2] == ("7", 6)
+    assert imports.conversations("telegram", str(OWNER))["tg:11"].sync_cursor == "7"
+
+
+def test_history_compatibility_reads_delegate_to_public_store_api():
+    calls = []
+    conversations, stats, messages = {}, {"tg:11": (0, None)}, {"tg:11": []}
+
+    class PublicStore:
+        def conversations(self, source, account):
+            calls.append(("conversations", source, account))
+            return conversations
+
+        def conversation_stats(self, uids):
+            calls.append(("stats", list(uids)))
+            return stats
+
+        def conversation_messages(self, uids, *, since=None, until=None):
+            calls.append(("messages", uids, since, until))
+            return messages
+
+    public = PublicStore()
+    assert history.stored_conversations(public, "7") is conversations
+    assert history.committed_stats(public, iter(["tg:11"])) is stats
+    assert history._committed_messages(public, ["tg:11"], 10, 20) is messages
+    assert calls == [("conversations", "telegram", "7"), ("stats", ["tg:11"]), ("messages", ["tg:11"], 10, 20)]
+
+
+def test_malformed_public_conversation_read_maps_to_content_free_store_error(tmp_path):
+    imports = _import_store(tmp_path)
+    imports.upsert_conversation(client.convert_dialog(_Dialog(11, "Bob", "bob", is_user=True), account="7"))
+    with imports.connection() as conn:
+        conn.execute("UPDATE import_conversations SET participants_json = ?", ('{"private":"SENSITIVE"}',))
+    with pytest.raises(store.StoreError) as caught:
+        history.list_conversations(imports, store.ArchiveIndex(account_id=OWNER))
+    assert str(caught.value) == "import_store_unavailable" and "SENSITIVE" not in repr(caught.value)
 
 
 def test_conversation_of_another_account_is_an_account_mismatch(tmp_path, darwin):
