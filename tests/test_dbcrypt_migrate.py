@@ -268,7 +268,7 @@ def test_a_scheduled_decryption_runs_at_startup_and_leaves_sqlite3_alone(
     monkeypatch.setattr(dbcrypt._runtime, "sys", policy_sys("darwin"))
     monkeypatch.setattr(_migrate, "holders", _no_holders)
     _migrate.migrate(home, KEY, arm=dbcrypt.arm, holders_of=_no_holders)
-    _migrate.schedule_decrypt(home)
+    _migrate._schedule_intent(home, _migrate.DECRYPT_PENDING_SUBPATH[-1])  # as an earlier release left it
     provider = _key.KeyProvider(environ={"HERMES_MEMORY_KEY": "hex:" + bytes(range(32)).hex()}, inject=lambda: 0)
 
     assert dbcrypt.install(home=home, provider=provider) is False

@@ -1689,15 +1689,13 @@ def windows_vfs_required_nodes(checkout: Path, *, release: bool) -> list[str]:
     return result
 
 
-def _qualification_argv(row: dict[str, Any], target: str, action: str, configuration: str) -> None:
+def _qualification_argv(row: dict[str, Any], action: str, configuration: str) -> None:
     args = row["argv"]
     _require(isinstance(args, list) and args[:3] == ["-q", "-c", configuration])
     _require(args[3:8] == ["-o", "addopts=", "-m", "integration", "--basetemp"])
     _require(_guest_path(args[8], "win32").is_absolute())
     _require(args[9].replace("\\", "/").endswith("tests/integration/test_dbcrypt_windows_vfs.py"))
-    tail = ["-k", WINDOWS_RELEASE_SELECTION] if target == "Checked" else []
-    tail += ["--collect-only"] if action == "collect" else []
-    _require(args[10:] == tail)
+    _require(args[10:] == (["--collect-only"] if action == "collect" else []))
 
 
 def _qualification_row(
@@ -1712,7 +1710,7 @@ def _qualification_row(
         _require(
             type(row["pytest_exit_code"]) is int and row["pytest_exit_code"] == 0 and row["collection_errors"] == []
         )
-        _qualification_argv(row, target, action, configuration)
+        _qualification_argv(row, action, configuration)
     _require(collected.get("reports", []) == [])
     for key in ("dll_sha256", "driver_native_sha256", "python_sha256"):
         _require(_hex(run[key], 64) and collected[key] == run[key])

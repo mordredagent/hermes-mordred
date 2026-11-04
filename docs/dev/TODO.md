@@ -336,8 +336,8 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
   no hash binding to `RECORD`, and source builds hard-fail without MSVC (`hatch_build.py`).
 - [ ] Acceptance `verify` self-attests `live_accepted`; `_verify_mode_sequences` and
   `_verify_native_stops` are untested (`tools/dbcrypt_acceptance.py`).
-- [ ] Oversized files: `tools/dbcrypt_acceptance.py` (4,407 lines), `tests/test_dbcrypt_acceptance_manifest.py` (3,258),
-  `tests/_dbcrypt_acceptance_native.py` (1,905; destructive collector shipped in the sdist); split them, consider stacked PRs.
+- [ ] Oversized files: `tools/dbcrypt_acceptance.py` (4,266 lines), `tests/test_dbcrypt_acceptance_manifest.py` (3,082),
+  `tests/_dbcrypt_acceptance_native.py` (1,907; destructive collector shipped in the sdist); split them, consider stacked PRs.
 - [x] Windows path handling: `_shim.py`, `_connection.py` and `_backup.py` reject
   UNC/device namespaces lexically before target I/O, including decoded URIs,
   registered backup values and relative paths under a UNC working directory.
