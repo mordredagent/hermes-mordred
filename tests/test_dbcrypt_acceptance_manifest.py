@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
+import ast
+import contextlib
+import ctypes
+import importlib.metadata
+import io
 import json
 import os
+import runpy
+import shutil
+import subprocess
 import sys
+import tarfile
+import zipfile
+from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path, PureWindowsPath
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -14,8 +27,6 @@ from tests._dbcrypt_support import acceptance_tool
 
 @pytest.fixture(autouse=True)
 def _native_unit_tripwires(monkeypatch: pytest.MonkeyPatch) -> None:
-    import subprocess
-
     from mordred_hermes.keyvault import _memory_key, _seckey_helper, _windows_custody, wrap
     from mordred_hermes.wizard import memory_cli
 
@@ -165,8 +176,6 @@ def write_manifest(root: Path, manifest: dict) -> None:
 
 
 def test_copied_bundle_preserves_real_pth_gate_test_inputs(tmp_path: Path) -> None:
-    import runpy
-
     tool = acceptance_tool("dbcrypt_acceptance")
     checkout = Path(__file__).resolve().parents[1]
     bundle = tmp_path / "bundle"
@@ -206,18 +215,6 @@ def test_bundle_pth_gate_inputs_are_required_hash_bound_and_exported(tmp_path: P
         tool.validate_bundle(bundle)
 
 
-def test_acceptance_rejects_source_import_in_wheel_run(tmp_path: Path) -> None:
-    tool = acceptance_tool("dbcrypt_acceptance")
-    checkout = tmp_path / "checkout"
-    source = checkout / "src/mordred_hermes/__init__.py"
-    source.parent.mkdir(parents=True)
-    source.touch()
-    environment = tmp_path / "bundle/wheel-env"
-    environment.mkdir(parents=True)
-    with pytest.raises(tool.AcceptanceRefused, match="wheel_import"):
-        tool.validate_import_provenance(source, checkout=checkout, environment=environment, mode="wheel")
-
-
 def test_import_requires_actual_wheel_environment_and_source_tree(tmp_path: Path) -> None:
     tool = acceptance_tool("dbcrypt_acceptance")
     checkout = tmp_path / "checkout"
@@ -231,6 +228,8 @@ def test_import_requires_actual_wheel_environment_and_source_tree(tmp_path: Path
     tool.validate_import_provenance(source, checkout=checkout, environment=wheel.parents[3], mode="source")
     with pytest.raises(tool.AcceptanceRefused, match="source_import"):
         tool.validate_import_provenance(wheel, checkout=checkout, environment=wheel.parents[3], mode="source")
+    with pytest.raises(tool.AcceptanceRefused, match="wheel_import"):
+        tool.validate_import_provenance(source, checkout=checkout, environment=wheel.parents[3], mode="wheel")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symlink setup requires host privilege on Windows")
@@ -284,8 +283,6 @@ def test_commands_preserve_installed_package_boundary_and_explicit_native_gates(
 @pytest.mark.parametrize("command_kind", ["linux-acceptance", "windows-acceptance", "windows-package"])
 def test_source_commands_preload_copied_plugin_outside_checkout(tmp_path: Path, command_kind: str) -> None:
     """A console-script launch loses the bundle before pytest preloads -p plugins."""
-    import shutil
-    import subprocess
 
     tool = acceptance_tool("dbcrypt_acceptance")
     checkout = Path(__file__).resolve().parents[1]
@@ -393,29 +390,6 @@ def test_runner_does_not_turn_unimplemented_native_phase_into_success(tmp_path: 
     assert evidence["tests"] == []
 
 
-def test_live_claim_requires_all_phases_and_stopped_receipt() -> None:
-    tool = acceptance_tool("dbcrypt_acceptance")
-    reasons = tool.acceptance_failures({"live_accepted": True, "native_provider": "EC2 NitroTPM"})
-    assert "missing_bundle_provenance" in reasons
-    assert "missing_phases" in reasons
-    assert "missing_independent_stop_receipt" in reasons
-    assert "missing_native_rows" in reasons
-
-
-@pytest.mark.parametrize(
-    "change,reason",
-    [
-        ({"unexpected_skips": ["native unavailable"]}, "unexpected_skips"),
-        ({"platform": "win32", "token": {"elevated": True}}, "ordinary_windows_token_required"),
-        ({"native_provider": "software TPM"}, "native_provider_unproven"),
-        ({"owned_instance_receipts": [{"state": "running"}]}, "incomplete_final_stop"),
-    ],
-)
-def test_incomplete_evidence_is_rejected(change: dict, reason: str) -> None:
-    tool = acceptance_tool("dbcrypt_acceptance")
-    assert reason in tool.acceptance_failures(change)
-
-
 def test_frozen_stop_receipt_requires_control_identity_and_actual_stop(tmp_path: Path) -> None:
     tool = acceptance_tool("dbcrypt_acceptance")
     path = tmp_path / "stop.json"
@@ -501,9 +475,6 @@ def test_bundle_refuses_checkout_output_and_existing_output_before_build(tmp_pat
 
 @pytest.mark.parametrize("name,kind", [("../escape", "file"), ("package/link", "link"), ("/absolute", "file")])
 def test_sdist_extraction_refuses_traversal_and_links(tmp_path: Path, name: str, kind: str) -> None:
-    import io
-    import tarfile
-
     tool = acceptance_tool("dbcrypt_acceptance")
     archive = tmp_path / "source.tar.gz"
     with tarfile.open(archive, "w:gz") as handle:
@@ -533,8 +504,6 @@ def test_bundle_integrity_rejects_changed_copied_test_and_product_on_import_path
 
 
 def test_cli_run_reports_refusal_without_cloud_or_product_import(tmp_path: Path) -> None:
-    import subprocess
-
     tool = acceptance_tool("dbcrypt_acceptance")
     root = tmp_path / "mordred-dbcrypt-cli"
     root.mkdir(mode=0o700)
@@ -623,15 +592,6 @@ def test_bundle_requires_complete_provenance(tmp_path: Path, field: str) -> None
         tool.validate_bundle(bundle)
 
 
-@pytest.mark.parametrize("artifact", ["sdist", "wheel"])
-def test_bundle_rejects_artifact_digest_diverging_from_inventory(tmp_path: Path, artifact: str) -> None:
-    tool, bundle, manifest = bundle_fixture(tmp_path)
-    manifest[artifact + "_sha256"] = "0" * 64
-    write_manifest(bundle, manifest)
-    with pytest.raises(tool.AcceptanceRefused):
-        tool.validate_bundle(bundle)
-
-
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -643,6 +603,8 @@ def test_bundle_rejects_artifact_digest_diverging_from_inventory(tmp_path: Path,
         ("files", []),
         ("source_probe", True),
         ("build_commands", [True]),
+        ("sdist_sha256", "0" * 64),
+        ("wheel_sha256", "0" * 64),
     ],
 )
 def test_bundle_rejects_malformed_or_noncanonical_provenance(tmp_path: Path, field: str, value: object) -> None:
@@ -872,23 +834,19 @@ def test_windows_candidate_requires_raw_qualification_rows_not_a_passed_boolean(
 
 
 def test_native_helper_digest_accepts_synthetic_rows_only_and_rejects_secret_fields() -> None:
-    import importlib.util
-
     path = Path(__file__).parent / "_dbcrypt_acceptance_native.py"
     assert path.is_file(), "fixed native operation helper is missing"
-    spec = importlib.util.spec_from_file_location("native_acceptance_helper", path)
-    helper = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(helper)
-    assert helper.logical_digest([{"id": "synthetic", "text": "日本語"}]) == helper.logical_digest(
+    logical_digest = runpy.run_path(str(path))["logical_digest"]
+    assert logical_digest([{"id": "synthetic", "text": "日本語"}]) == logical_digest(
         [{"text": "日本語", "id": "synthetic"}]
     )
     with pytest.raises(ValueError, match="synthetic_record_fields_only"):
-        helper.logical_digest([{"id": "synthetic", "app_password": "must-not-hash"}])
+        logical_digest([{"id": "synthetic", "app_password": "must-not-hash"}])
+    with pytest.raises(ValueError, match="synthetic_record_fields_only"):
+        logical_digest([{"id": "fixed", "text": {"app_password": "not-synthetic-content"}}])
 
 
 def test_native_collector_module_exists_and_has_explicit_integration_optin() -> None:
-    import ast
-
     path = Path(__file__).parent / "integration/test_dbcrypt_collectors.py"
     assert path.is_file(), "real native collector gate is missing"
     source = path.read_text()
@@ -899,8 +857,6 @@ def test_native_collector_module_exists_and_has_explicit_integration_optin() -> 
 
 
 def test_missing_native_interface_refuses_before_provider_or_memory_calls(tmp_path: Path, monkeypatch) -> None:
-    import runpy
-
     from mordred_hermes.keyvault import _database_authority
 
     helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
@@ -910,8 +866,6 @@ def test_missing_native_interface_refuses_before_provider_or_memory_calls(tmp_pa
 
 
 def test_native_child_diagnostics_never_export_exception_secrets(monkeypatch, capsys) -> None:
-    import runpy
-
     helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
 
     def secret_failure(_name):
@@ -925,8 +879,6 @@ def test_native_child_diagnostics_never_export_exception_secrets(monkeypatch, ca
 
 
 def test_damaging_native_operation_refuses_persistence_before_any_product_import(tmp_path, monkeypatch) -> None:
-    import runpy
-
     helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
     root = tmp_path / "mordred-dbcrypt-source-persistence"
     root.mkdir()
@@ -967,14 +919,6 @@ def test_phase_success_boolean_cannot_replace_executed_rows(tmp_path: Path) -> N
         tool.validate_native_phase_evidence(value, directory=tmp_path)
 
 
-def test_logical_digest_rejects_nested_data_even_under_a_public_field() -> None:
-    import runpy
-
-    helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
-    with pytest.raises(ValueError, match="synthetic_record_fields_only"):
-        helper["logical_digest"]([{"id": "fixed", "text": {"app_password": "not-synthetic-content"}}])
-
-
 def test_source_native_run_refuses_checkout_head_drift_before_probe(monkeypatch, tmp_path: Path) -> None:
     tool = acceptance_tool("dbcrypt_acceptance")
     monkeypatch.setattr(tool, "_git", lambda *_args: "different-source-head")
@@ -985,7 +929,6 @@ def test_source_native_run_refuses_checkout_head_drift_before_probe(monkeypatch,
 
 def test_native_suite_retains_module_coverage_outside_sdist_configuration(tmp_path: Path, monkeypatch) -> None:
     """Run the emitted collection tail, then bind its identities to strict evidence validation."""
-    import subprocess
 
     tool = acceptance_tool("dbcrypt_acceptance")
     bundle = tmp_path / "bundle"
@@ -1200,8 +1143,6 @@ def test_owned_helper_copy_refuses_unsafe_or_nonowned_target(tmp_path: Path, dam
 
 
 def test_owned_helper_withdrawal_restores_only_copy_on_body_failure(tmp_path: Path) -> None:
-    import runpy
-
     tool, parent, production, copied, manifest, _value = helper_copy_fixture(tmp_path)
     helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
     before = production.read_bytes()
@@ -1217,8 +1158,6 @@ def test_owned_helper_withdrawal_restores_only_copy_on_body_failure(tmp_path: Pa
 
 
 def test_owned_helper_withdrawal_never_overwrites_reappeared_copy(tmp_path: Path) -> None:
-    import runpy
-
     _tool, parent, production, copied, manifest, _value = helper_copy_fixture(tmp_path)
     helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
     with pytest.raises(OSError), helper["withdraw_owned_helper"](manifest, production=production, parent=parent):
@@ -1436,13 +1375,8 @@ def test_stop_start_requires_independent_previous_stop_before_new_arm(tmp_path: 
         )
 
 
-def test_controller_cycle_settlement_requires_matching_stop_and_complete_phase_window(tmp_path: Path) -> None:
-    tool, root, _path, action, _armed, started, saved, cloud = control_action_fixture(tmp_path)
-    reference = saved("frozen-action.json", action)
-    stop = saved("final-controller.json", {**started, "state": "stopped", "stopped_at": 1101.0}, 1101.5)
-    observed = cloud("final-stop", "stopped", 1102.0)
-    cycles = [{"action": reference, "stopped": stop, "independent_stopped": observed}]
-    phase = {
+def controller_phase(reference: dict) -> dict:
+    return {
         "platform": "linux",
         "instance": "i-095cbe655c196c749",
         "mode": "source",
@@ -1453,6 +1387,15 @@ def test_controller_cycle_settlement_requires_matching_stop_and_complete_phase_w
         "started_at": 1023.0,
         "finished_at": 1030.0,
     }
+
+
+def test_controller_cycle_settlement_requires_matching_stop_and_complete_phase_window(tmp_path: Path) -> None:
+    tool, root, _path, action, _armed, started, saved, cloud = control_action_fixture(tmp_path)
+    reference = saved("frozen-action.json", action)
+    stop = saved("final-controller.json", {**started, "state": "stopped", "stopped_at": 1101.0}, 1101.5)
+    observed = cloud("final-stop", "stopped", 1102.0)
+    cycles = [{"action": reference, "stopped": stop, "independent_stopped": observed}]
+    phase = controller_phase(reference)
     rows = tool.validate_control_cycles(root, cycles, [phase])
     assert rows[reference["sha256"]]["stopped_at"] == 1101.0
     with pytest.raises(tool.AcceptanceRefused, match="controller_cycle_correlation_incomplete"):
@@ -1465,17 +1408,7 @@ def test_controller_cycle_settlement_requires_matching_stop_and_complete_phase_w
 def test_controller_phase_binding_rejects_mode_sequence_or_run_relabel(tmp_path: Path) -> None:
     tool, root, _path, action, _armed, _started, saved, _cloud = control_action_fixture(tmp_path)
     reference = saved("frozen-action.json", action)
-    phase = {
-        "platform": "linux",
-        "instance": "i-095cbe655c196c749",
-        "mode": "source",
-        "observation": "provision",
-        "controller_run": "a" * 32,
-        "control_sequence": 1,
-        "control_action": reference,
-        "started_at": 1023.0,
-        "finished_at": 1030.0,
-    }
+    phase = controller_phase(reference)
     for change in ({"controller_run": "b" * 32}, {"control_sequence": 2}, {"started_at": 1021.0}):
         with pytest.raises(tool.AcceptanceRefused, match="controller_phase_binding_incomplete"):
             tool.validate_phase_control_binding({**phase, **change}, directory=root)
@@ -1558,9 +1491,6 @@ def test_reviewed_windows_platform_na_is_counted_separately(node: str, when: str
 
 
 def test_safe_native_report_exports_only_reviewed_skip_code_not_raw_reason() -> None:
-    import runpy
-    from types import SimpleNamespace
-
     helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
     report = helper["NativeReport"]()
     report.pytest_runtest_logreport(
@@ -1573,83 +1503,6 @@ def test_safe_native_report_exports_only_reviewed_skip_code_not_raw_reason() -> 
     )
     assert report.reports[0]["reason_code"] == "unrecognized_skip"
     assert "mustnotexportsecret" not in json.dumps(report.reports)
-
-
-def qualification_fixture(tmp_path: Path):
-    """Synthetic qualification files exercise closure only; never hardware proof."""
-    import runpy
-
-    tool = acceptance_tool("dbcrypt_acceptance")
-    checkout = Path(__file__).resolve().parents[1]
-    root = tmp_path / "qualification"
-    root.mkdir()
-
-    def saved(name, value):
-        path = root / name
-        path.write_text(json.dumps(value))
-        return {"path": name, "sha256": tool.sha256_file(path)}
-
-    node = "tests/integration/test_dbcrypt_windows_vfs.py::test_rollback_wal_temp_vacuum_and_bootstrap_lifetime"
-    rows = {}
-    for name, target in (
-        ("checkedtest_source", "CheckedTest"),
-        ("checked_source", "Checked"),
-        ("checked_wheel", "Checked"),
-    ):
-        run = {
-            "action": "run",
-            "target": target,
-            "nodeids": [node],
-            "collected": 1,
-            "pytest_exit_code": 0,
-            "reports": [
-                {"nodeid": node, "when": stage, "outcome": "passed"} for stage in ("setup", "call", "teardown")
-            ],
-            "collection_errors": [],
-            "dll_sha256": "a" * 64,
-            "driver_version": "0.5.7",
-            "versions": {"sqlite": "3.51.1", "sqlcipher": "4.12.0 community"},
-            "bundle_manifest_sha256": "b" * 64,
-            "sdist_sha256": "c" * 64,
-            "wheel_sha256": "d" * 64,
-            "record_owned_packaged_dll": True,
-            "test_exports_absent": True,
-            "env_dll_override": None,
-            "product_module": "/outside/wheel-env/lib/site-packages/mordred_hermes/__init__.py",
-            "argv": ["-q", "-k", "rollback"],
-        }
-        rows[name] = {
-            "collect": saved(name + "-collect.json", {**run, "action": "collect"}),
-            "run": saved(name + "-run.json", run),
-        }
-    critical = [
-        *(checkout / "native/dbcrypt-vfs").glob("*.c"),
-        *(checkout / "native/dbcrypt-vfs").glob("*.h"),
-        *(checkout / "src/mordred_hermes/_private_fs").glob("*.py"),
-        checkout / "src/mordred_hermes/dbcrypt/_windows_vfs.py",
-        checkout / "tests/integration/test_dbcrypt_windows_vfs.py",
-    ]
-    manifest = {
-        "schema": 1,
-        "kind": "windows_vfs_qualification",
-        "rows": rows,
-        "provenance": saved(
-            "provenance.json",
-            {
-                "source_hashes": {path.relative_to(checkout).as_posix(): tool.sha256_file(path) for path in critical},
-                "headers": runpy.run_path(str(checkout / "tools/dbcrypt_build_headers.py"))["HEADER_SHA256"],
-            },
-        ),
-        "fixture_verify": saved("fixture.json", {"elevated": False, "sid": "ordinary-test-fixture"}),
-    }
-    (root / "manifest.json").write_text(json.dumps(manifest))
-    return tool, root, checkout, manifest, saved
-
-
-def test_windows_qualification_rejects_self_consistent_focused_subset(tmp_path: Path) -> None:
-    tool, root, checkout, _manifest, _saved = qualification_fixture(tmp_path)
-    with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
-        tool.validate_windows_qualification(root, checkout=checkout)
 
 
 @pytest.mark.parametrize(
@@ -1669,9 +1522,6 @@ def test_windows_qualification_rejects_self_consistent_focused_subset(tmp_path: 
     ],
 )
 def test_original_private_credential_oracle_rejects_different_valid_fields(component, field, value) -> None:
-    import runpy
-    from dataclasses import replace
-
     from mordred_hermes.extension.telegram.secrets import TelegramSecrets
     from mordred_hermes.imports.mail.secrets import MailCredentials
 
@@ -1696,8 +1546,6 @@ def test_original_private_credential_oracle_rejects_different_valid_fields(compo
 
 
 def test_credential_reference_refuses_destructive_roots_before_sql_import(tmp_path: Path) -> None:
-    import runpy
-
     helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
     for suffix in ("negative", "crash"):
         root = tmp_path / ("mordred-dbcrypt-source-" + suffix)
@@ -1841,19 +1689,16 @@ def full_qualification_fixture(tmp_path: Path, monkeypatch):
     return complete_qualification(bundle_fixture(directory), tmp_path, monkeypatch)
 
 
-def test_full_synthetic_windows_qualification_closes_exact_source_and_release_nodes(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_full_synthetic_windows_diagnostic_closes_exact_full_nodes(tmp_path: Path, monkeypatch) -> None:
     tool, root, checkout, _manifest = full_qualification_fixture(tmp_path, monkeypatch)
-    actual = tool._validate_legacy_windows_qualification(root, checkout=checkout)
+    actual = tool.validate_windows_diagnostic(root, checkout=checkout)
     assert actual["diagnostic"]["nodeids"] == tool.windows_vfs_required_nodes(checkout, release=False)
-    assert actual["wheel"]["nodeids"] == tool.windows_vfs_required_nodes(checkout, release=True)
 
 
 @pytest.mark.parametrize(
-    "damage", ["focused_both", "selection", "deselected", "fixture", "artifact", "source_map", "wheel_hash", "header"]
+    "damage", ["focused_both", "selection", "deselected", "fixture", "artifact", "source_map", "header"]
 )
-def test_windows_qualification_refuses_subset_selection_or_provenance_gaps(
+def test_windows_diagnostic_refuses_subset_selection_or_provenance_gaps(
     tmp_path: Path, monkeypatch, damage: str
 ) -> None:
     tool, root, checkout, manifest = full_qualification_fixture(tmp_path, monkeypatch)
@@ -1877,25 +1722,25 @@ def test_windows_qualification_refuses_subset_selection_or_provenance_gaps(
                     ),
                 )
     elif damage == "selection":
-        rewrite(manifest["rows"]["checked_source"]["run"], lambda value: value["argv"].extend(["-k", "focused"]))
+        rewrite(manifest["rows"]["checkedtest_source"]["run"], lambda value: value["argv"].extend(["-k", "focused"]))
     elif damage == "deselected":
-        rewrite(manifest["rows"]["checked_source"]["run"], lambda value: value.update(deselected=[value["nodeids"][0]]))
+        rewrite(
+            manifest["rows"]["checkedtest_source"]["run"], lambda value: value.update(deselected=[value["nodeids"][0]])
+        )
     elif damage == "fixture":
         rewrite(manifest["fixture_verify"], lambda value: value.update(sid="different-ordinary-sid"))
     elif damage == "artifact":
-        (root / manifest["artifacts"]["checked_source"]["dll"]["path"]).write_bytes(b"changed actual tested artifact")
+        (root / manifest["artifacts"]["checkedtest_source"]["dll"]["path"]).write_bytes(b"changed tested artifact")
     elif damage == "source_map":
         rewrite(manifest["source_map"], lambda value: value["files"].update({"native/dbcrypt-vfs/vfs.c": "f" * 64}))
-    elif damage == "wheel_hash":
-        rewrite(manifest["rows"]["checked_wheel"]["run"], lambda value: value.update(wheel_sha256="f" * 64))
     else:
         (root / manifest["headers"]["sqlite3.h"]["path"]).write_bytes(b"changed header")
     (root / "manifest.json").write_text(json.dumps(manifest))
-    with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
-        tool._validate_legacy_windows_qualification(root, checkout=checkout)
+    with pytest.raises(ValueError, match="inconsistent bundle provenance"):
+        tool.validate_windows_diagnostic(root, checkout=checkout)
 
 
-def test_windows_qualification_rejects_artifact_shape_without_real_archive_closure(tmp_path: Path, monkeypatch) -> None:
+def test_windows_diagnostic_rejects_artifact_shape_without_real_archive_closure(tmp_path: Path, monkeypatch) -> None:
     tool, root, checkout, manifest = full_qualification_fixture(tmp_path, monkeypatch)
     # Even consistent hashes cannot turn non-archive bytes into a source chain.
     (root / manifest["source_archive"]["path"]).write_bytes(b"not an archive")
@@ -1907,25 +1752,11 @@ def test_windows_qualification_rejects_artifact_shape_without_real_archive_closu
     path.write_text(json.dumps(provenance))
     manifest["provenance"]["sha256"] = tool.sha256_file(path)
     (root / "manifest.json").write_text(json.dumps(manifest))
-    with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
-        tool._validate_legacy_windows_qualification(root, checkout=checkout)
-
-
-def test_windows_qualification_export_closes_referenced_public_inputs_only(tmp_path: Path, monkeypatch) -> None:
-    tool, root, checkout, _manifest = full_qualification_fixture(tmp_path, monkeypatch)
-    output = tmp_path / "phase-output"
-    output.mkdir()
-    reference = tool._export_windows_qualification({"qualification": str(root)}, output)
-    copied = tmp_path / reference["path"]
-    assert tool.sha256_file(copied) == tool.sha256_file(root / "manifest.json")
-    actual = tool._validate_legacy_windows_qualification(copied.parent, checkout=checkout)
-    assert actual["manifest_sha256"] == reference["sha256"]
+    with pytest.raises(zipfile.BadZipFile):
+        tool.validate_windows_diagnostic(root, checkout=checkout)
 
 
 def test_known_na_node_without_a_matching_raw_reason_still_refuses(monkeypatch) -> None:
-    import runpy
-    from types import SimpleNamespace
-
     helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
     reporter = helper["NativeReport"]()
     # Parser-only unit model; native factories and subprocess tripwires remain.
@@ -1940,9 +1771,6 @@ def test_known_na_node_without_a_matching_raw_reason_still_refuses(monkeypatch) 
 
 @pytest.mark.parametrize("root_kind", ["symlink", "missing", "file"])
 def test_windows_inventory_na_applies_only_to_the_actual_symlink_parameter(monkeypatch, root_kind: str) -> None:
-    import runpy
-    from types import SimpleNamespace
-
     tool = acceptance_tool("dbcrypt_acceptance")
     helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
     reporter = helper["NativeReport"]()
@@ -2061,7 +1889,6 @@ def test_packaged_qualification_has_fixed_commands_without_native_custody_gate(m
 @pytest.mark.parametrize("mode", ["source", "wheel"])
 def test_packaged_pytest_preserves_module_identity_outside_sdist_config(tmp_path: Path, mode: str) -> None:
     """The shared command tail must retain identity for sibling bundle tests."""
-    import subprocess
 
     tool = acceptance_tool("dbcrypt_acceptance")
     bundle = tmp_path / "bundle"
@@ -2154,6 +1981,10 @@ def test_legacy_complete_descriptor_cannot_admit_packaged_candidate(tmp_path: Pa
     tool, root, checkout, _manifest = full_qualification_fixture(tmp_path, monkeypatch)
     with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
         tool.validate_windows_qualification(root, checkout=checkout)
+    output = tmp_path / "phase-output"
+    output.mkdir()
+    with pytest.raises(ValueError, match="inconsistent bundle provenance"):
+        tool._export_windows_qualification({"qualification": str(root)}, output)
 
 
 def packaged_pipeline_fixture(tmp_path: Path, monkeypatch):
@@ -2174,11 +2005,6 @@ _WINDOWS_OWNER_SID = "S-1-5-21-128634620-2103407742-3662938906-1010"
 
 @pytest.mark.parametrize("damage", [None, "wrong_rid", "truncated", "text_owner", "private_root_refused"])
 def test_package_collector_preserves_binary_owner_and_emits_canonical_sid(tmp_path, monkeypatch, damage):
-    import contextlib
-    import ctypes
-    import importlib.metadata
-    from types import SimpleNamespace
-
     import sqlcipher3.dbapi2 as driver
 
     from mordred_hermes import _private_fs
@@ -2373,13 +2199,16 @@ def test_packaged_pipeline_assembles_real_inert_artifact_closure_with_distinct_d
     actual = tool.validate_windows_qualification(path.parent, checkout=checkout)
     assert actual["source"]["dll_sha256"] != actual["wheel"]["dll_sha256"]
     assert actual["diagnostic"]["nodeids"] == tool.windows_vfs_required_nodes(checkout, release=False)
+    assert actual["wheel"]["nodeids"] == tool.windows_vfs_required_nodes(checkout, release=True)
     assert actual["source"]["role"] == "packaged_editable" and actual["wheel"]["role"] == "packaged_wheel"
     historical_plan = json.loads((root / "fixture-plan.json").read_text())["plan"]
     assert actual["fixtures"]["test_root"] != historical_plan["test_root"]
     assert actual["source"]["fixture_root"] == actual["wheel"]["fixture_root"] == actual["fixtures"]["test_root"]
     export = tmp_path / "exported"
     export.mkdir()
-    tool._export_windows_qualification({"qualification": str(output)}, export)
+    reference = tool._export_windows_qualification({"qualification": str(output)}, export)
+    exported = tool.validate_windows_qualification(export / "windows-qualification", checkout=checkout)
+    assert exported["manifest_sha256"] == reference["sha256"] == tool.sha256_file(path)
     for retained in (output, export / "windows-qualification"):
         for mode in ("source", "wheel"):
             raw = retained / mode / "result.json"
@@ -2476,6 +2305,33 @@ def test_packaged_pipeline_refuses_broken_actual_artifact_or_execution_link(
     assert not (tmp_path / "refused/manifest.json").exists()
 
 
+@pytest.mark.parametrize("damage", ["wheel_dll", "wheel_bundle_binding", "missing_wheel_result"])
+def test_packaged_pipeline_refuses_wheel_result_not_bound_to_the_packaged_wheel(
+    tmp_path: Path, monkeypatch, damage: str
+) -> None:
+    tool, root, _checkout, _manifest, results, _fixtures, bundle = packaged_pipeline_fixture(tmp_path, monkeypatch)
+    wheel_dir, wheel = results["wheel"]
+    if damage == "wheel_dll":
+        wheel["dll_sha256"] = "f" * 64
+    elif damage == "wheel_bundle_binding":
+        report = json.loads((wheel_dir / "run.json").read_text())
+        report["qualification"]["bundle_manifest_sha256"] = "f" * 64
+        (wheel_dir / "run.json").write_text(json.dumps(report))
+        wheel["run"]["report"]["sha256"] = tool.sha256_file(wheel_dir / "run.json")
+    (wheel_dir / "result.json").write_text(json.dumps(wheel))
+    if damage == "missing_wheel_result":
+        (wheel_dir / "result.json").unlink()
+    with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
+        tool.assemble_windows_qualification(
+            bundle=bundle,
+            diagnostic=root / "manifest.json",
+            source_result=results["source"][0] / "result.json",
+            wheel_result=wheel_dir / "result.json",
+            output=tmp_path / "refused",
+        )
+    assert not (tmp_path / "refused/manifest.json").exists()
+
+
 def test_candidate_windows_consumes_prerequisite_instead_of_executing_vfs_again() -> None:
     tool = acceptance_tool("dbcrypt_acceptance")
     candidate = tool.native_acceptance_commands(
@@ -2492,9 +2348,6 @@ def test_candidate_windows_consumes_prerequisite_instead_of_executing_vfs_again(
 
 
 def test_qualification_plugin_never_enters_custody_or_candidate_branch(tmp_path, monkeypatch) -> None:
-    import runpy
-    from types import SimpleNamespace
-
     from mordred_hermes.dbcrypt import _windows_vfs
 
     helper = runpy.run_path(str(Path(__file__).parent / "_dbcrypt_acceptance_native.py"))
@@ -2530,8 +2383,6 @@ def test_qualification_plugin_never_enters_custody_or_candidate_branch(tmp_path,
 def test_packaged_producer_reaches_only_fixed_children_without_custody_and_retains_failure(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from types import SimpleNamespace
-
     tool, root, checkout, manifest, results, fixtures, bundle = packaged_pipeline_fixture(tmp_path, monkeypatch)
     original_diagnostic = tool.validate_windows_diagnostic
     monkeypatch.setattr(
@@ -2584,10 +2435,6 @@ def test_packaged_producer_reaches_only_fixed_children_without_custody_and_retai
 )
 def test_bundle_build_windows_receipt_constructor(tmp_path: Path, monkeypatch, existing, native_failure) -> None:
     """Python 3.11's observed OW ACL must never reach the strict build hook."""
-    import ast
-    import ctypes
-    from contextlib import contextmanager
-    from types import SimpleNamespace
 
     from mordred_hermes import _private_fs
 
@@ -2698,8 +2545,6 @@ def test_bundle_build_windows_receipt_constructor(tmp_path: Path, monkeypatch, e
 
 
 def test_outer_package_manager_output_is_not_compiler_receipt(tmp_path: Path, monkeypatch) -> None:
-    from types import SimpleNamespace
-
     tool = acceptance_tool("dbcrypt_acceptance")
     monkeypatch.setattr(
         tool.subprocess,
@@ -2734,7 +2579,7 @@ def test_packaged_receipt_must_belong_to_the_actual_bundle_wheel_build_interval(
 
 def test_full8_explicit_reviewed_source_configuration_is_bound(tmp_path: Path, monkeypatch) -> None:
     tool, root, checkout, manifest = full_qualification_fixture(tmp_path, monkeypatch)
-    actual = tool._validate_legacy_windows_qualification(root, checkout=checkout)
+    actual = tool.validate_windows_diagnostic(root, checkout=checkout)
     assert actual["diagnostic"]["argv"][1:3] == ["-c", r"C:\qualified\source\pyproject.toml"]
     assert manifest["configuration"]["sha256"] == tool.sha256_file(checkout / "pyproject.toml")
 
@@ -2797,8 +2642,8 @@ def test_offline_exported_input_hash_update_cannot_hide_inventory_drift(tmp_path
         tool.validate_native_phase_evidence(phase, directory=spool)
 
 
-@pytest.mark.parametrize("damage", ["path", "bytes", "wheel_dll", "missing_wheel_row"])
-def test_full8_configuration_and_actual_wheel_dll_remain_bound(tmp_path: Path, monkeypatch, damage: str) -> None:
+@pytest.mark.parametrize("damage", ["path", "bytes"])
+def test_full8_configuration_remains_bound(tmp_path: Path, monkeypatch, damage: str) -> None:
     tool, root, checkout, manifest = full_qualification_fixture(tmp_path, monkeypatch)
 
     def rewrite(reference, edit):
@@ -2813,22 +2658,13 @@ def test_full8_configuration_and_actual_wheel_dll_remain_bound(tmp_path: Path, m
             manifest["rows"]["checkedtest_source"]["run"],
             lambda row: row["argv"].__setitem__(2, r"C:\unrelated\pyproject.toml"),
         )
-    elif damage == "bytes":
+    else:
         path = root / manifest["configuration"]["path"]
         path.write_text(path.read_text() + "\n# different settings\n")
         manifest["configuration"]["sha256"] = tool.sha256_file(path)
-    elif damage == "missing_wheel_row":
-        del manifest["rows"]["checked_wheel"]
-    else:
-        reference = manifest["artifacts"]["checked_wheel"]["dll"]
-        path = root / reference["path"]
-        path.write_bytes(b"different DLL from the recorded packaged wheel")
-        reference["sha256"] = tool.sha256_file(path)
-        for row_ref in manifest["rows"]["checked_wheel"].values():
-            rewrite(row_ref, lambda row: row.update(dll_sha256=reference["sha256"]))
     (root / "manifest.json").write_text(json.dumps(manifest))
-    with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
-        tool._validate_legacy_windows_qualification(root, checkout=checkout)
+    with pytest.raises(ValueError, match="inconsistent bundle provenance"):
+        tool.validate_windows_diagnostic(root, checkout=checkout)
 
 
 def test_full8_reused_source_builds_bind_actual_artifacts_and_all_critical_inputs(tmp_path: Path, monkeypatch) -> None:
@@ -2841,12 +2677,11 @@ def test_full8_reused_source_builds_bind_actual_artifacts_and_all_critical_input
         if key.startswith(("native/dbcrypt-vfs/", "src/mordred_hermes/_private_fs/"))
         or key == "src/mordred_hermes/dbcrypt/_windows_vfs.py"
     }
-    reused = {}
-    for name in ("checkedtest_source", "checked_source"):
-        run = json.loads((root / manifest["rows"][name]["run"]["path"]).read_text())
-        reused[run["target"]] = {
+    run = json.loads((root / manifest["rows"]["checkedtest_source"]["run"]["path"]).read_text())
+    provenance["reused_builds"] = {
+        "CheckedTest": {
             "dll_sha256": run["dll_sha256"],
-            "actual_build_stdout_sha256": manifest["artifacts"][name]["build_stdout"]["sha256"],
+            "actual_build_stdout_sha256": manifest["artifacts"]["checkedtest_source"]["build_stdout"]["sha256"],
             "critical_inputs": critical,
             "headers": provenance["headers"],
             "cached_runtime": {
@@ -2854,22 +2689,19 @@ def test_full8_reused_source_builds_bind_actual_artifacts_and_all_critical_input
                 run["driver_native"]: run["driver_native_sha256"],
             },
         }
-    provenance["reused_builds"] = reused
+    }
     path.write_text(json.dumps(provenance))
     manifest["provenance"]["sha256"] = tool.sha256_file(path)
     (root / "manifest.json").write_text(json.dumps(manifest))
-    assert (
-        tool._validate_legacy_windows_qualification(root, checkout=checkout)["source"]["dll_sha256"]
-        != tool._validate_legacy_windows_qualification(root, checkout=checkout)["wheel"]["dll_sha256"]
-    )
+    assert tool.validate_windows_diagnostic(root, checkout=checkout)["diagnostic"]["dll_sha256"] == run["dll_sha256"]
     provenance["reused_builds"]["CheckedTest"]["critical_inputs"] = {
         "native/dbcrypt-vfs/vfs.c": critical["native/dbcrypt-vfs/vfs.c"]
     }
     path.write_text(json.dumps(provenance))
     manifest["provenance"]["sha256"] = tool.sha256_file(path)
     (root / "manifest.json").write_text(json.dumps(manifest))
-    with pytest.raises(tool.AcceptanceRefused, match="windows_native_qualification_incomplete"):
-        tool._validate_legacy_windows_qualification(root, checkout=checkout)
+    with pytest.raises(ValueError, match="inconsistent bundle provenance"):
+        tool.validate_windows_diagnostic(root, checkout=checkout)
 
 
 def test_production_vfs_plans_execute_both_owned_release_selections():
@@ -2885,9 +2717,6 @@ def test_production_vfs_plans_execute_both_owned_release_selections():
 
 
 def test_activated_qualification_never_assigns_runtime_eligibility(monkeypatch):
-    import runpy
-    from types import ModuleType, SimpleNamespace
-
     import mordred_hermes.dbcrypt as package
     from mordred_hermes.dbcrypt import _windows_vfs
 
@@ -2972,9 +2801,6 @@ def test_production_qualification_refuses_candidate_or_untyped_package_rows(mode
 
 @pytest.mark.parametrize("declared,observed", [(True, False), (False, True)])
 def test_qualification_rejects_handpatched_initial_eligibility(tmp_path, monkeypatch, declared, observed):
-    import runpy
-    from types import SimpleNamespace
-
     from mordred_hermes.dbcrypt import _windows_vfs
 
     loader = tmp_path / "_windows_vfs.py"
@@ -3044,8 +2870,6 @@ def test_startup_posix_fixture_na_is_exact_and_never_native(case, monkeypatch):
     ],
 )
 def test_startup_posix_fixture_skip_precedes_fixture_setup(name):
-    import ast
-
     source = ast.parse((Path(__file__).parent / "test_dbcrypt_capability.py").read_text())
     function = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == name)
     skips = [
@@ -3120,7 +2944,6 @@ def test_native_ceremony_evidence_rejects_role_or_entrypoint_substitution(tmp_pa
 @pytest.fixture
 def native_suite_environment_boundary(tmp_path, monkeypatch):
     """Keep the real scrub/build path; stop at the first subprocess boundary."""
-    from types import SimpleNamespace
 
     tool = acceptance_tool("dbcrypt_acceptance")
     monkeypatch.setattr(tool, "sys", SimpleNamespace(platform="linux"))

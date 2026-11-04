@@ -358,7 +358,7 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
 - [ ] Build hook leaves the DLL in `dist/` and re-reads the source after validating the image (`hatch_build.py`).
 - [ ] CI scope: `tools/ci_scope_paths.json` maps `tests/_dbcrypt_support.py` to `[]` (`tools/ci_scope_paths.json`).
 - [ ] Acceptance tooling: source mode misses `.pth`/`sitecustomize` and driver hashes; manifest has
-  stale `native_collectors` fields and dead `acceptance_failures` code (`tools/dbcrypt_acceptance.py`).
+  stale `native_collectors` fields (`tools/dbcrypt_acceptance.py`).
 - [ ] Temp store: runtime connections do not pin `temp_store=MEMORY` or deny `temp_store`/`mmap_size`
   changes (`src/mordred_hermes/dbcrypt/_connection.py`).
 - [ ] Reviewer-facing PR summary: the PR #270 body relies on internal jargon; state per platform what

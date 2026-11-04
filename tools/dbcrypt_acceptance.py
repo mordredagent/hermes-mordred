@@ -323,40 +323,6 @@ def load_stop_receipt(path: Path) -> dict[str, Any]:
     }
 
 
-def acceptance_failures(evidence: dict[str, Any]) -> list[str]:
-    """Fail closed: bookkeeping fixtures/booleans can never enable qualification."""
-    failures = []
-    if not evidence.get("executions"):
-        failures.append("missing_native_rows")
-    bundle = evidence.get("bundle")
-    if not isinstance(bundle, dict) or not all(
-        bundle.get(key) for key in ("commit", "sdist_sha256", "wheel_sha256", "source_probe", "wheel_probe")
-    ):
-        failures.append("missing_bundle_provenance")
-    if {row.get("phase") for row in evidence.get("phases", []) if isinstance(row, dict)} != {
-        "provision",
-        "reopen",
-        "verify",
-    }:
-        failures.append("missing_phases")
-    if evidence.get("unexpected_skips") != []:
-        failures.append("unexpected_skips")
-    token = evidence.get("token", {})
-    if evidence.get("platform") == "win32" and (not isinstance(token, dict) or token.get("elevated") is not False):
-        failures.append("ordinary_windows_token_required")
-    if evidence.get("native_provider") not in {"EC2 NitroTPM", "Microsoft Platform Crypto Provider"}:
-        failures.append("native_provider_unproven")
-    receipts = evidence.get("owned_instance_receipts")
-    if not isinstance(receipts, list) or not receipts:
-        failures.append("missing_independent_stop_receipt")
-    elif any(
-        not isinstance(row, dict) or row.get("state") != "stopped" or not row.get("sha256") or not row.get("stopped_at")
-        for row in receipts
-    ):
-        failures.append("incomplete_final_stop")
-    return failures
-
-
 def _write_new(path: Path, value: dict[str, Any]) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -1884,144 +1850,33 @@ def _qualified_package_artifacts(
     _require(bundle["files"][module] == provenance["source_hashes"][module])
 
 
-def _validate_legacy_windows_qualification(directory: Path, *, checkout: Path) -> dict[str, Any]:
-    try:
-        directory = directory.resolve(strict=True)
-        manifest = json.loads(_input_file(directory / "manifest.json").read_text())
-        _require(manifest["schema"] == 1 and manifest["kind"] == "windows_vfs_qualification")
-        full, release = (windows_vfs_required_nodes(checkout, release=value) for value in (False, True))
-        rows = manifest["rows"]
-        provenance = _qualification_source(directory, manifest, checkout)
-        configuration = provenance["configuration"]
-        diagnostic = _qualification_row(directory, rows["checkedtest_source"], "CheckedTest", full, configuration)
-        source = _qualification_row(directory, rows["checked_source"], "Checked", release, configuration)
-        wheel = _qualification_row(directory, rows["checked_wheel"], "Checked", release, configuration)
-        excluded = set(full) - set(release)
-        for name in ("checkedtest_source", "checked_source", "checked_wheel"):
-            for reference in rows[name].values():
-                _, raw = _evidence_ref(directory, reference)
-                if "deselected" in raw:
-                    _require(set(raw["deselected"]) == (set() if name == "checkedtest_source" else excluded))
-        plan = _qualification_fixture(directory, manifest)
-        for name, row in (("checkedtest_source", diagnostic), ("checked_source", source), ("checked_wheel", wheel)):
-            _qualification_binaries(directory, manifest["artifacts"][name], row, provenance)
-            if name != "checked_wheel" and "reused_builds" in provenance:
-                reused = provenance["reused_builds"][row["target"]]
-                _require(reused["dll_sha256"] == row["dll_sha256"])
-                _require(manifest["artifacts"][name]["build_stdout"]["sha256"] == reused["actual_build_stdout_sha256"])
-                _require(reused["headers"] == provenance["headers"] and bool(reused["critical_inputs"]))
-                expected_critical = {
-                    key
-                    for key in provenance["source_hashes"]
-                    if (
-                        key.startswith("native/dbcrypt-vfs/")
-                        and (key.endswith((".c", ".h")) or key.endswith("/build.ps1"))
-                    )
-                    or key.startswith("src/mordred_hermes/_private_fs/")
-                    or key == "src/mordred_hermes/dbcrypt/_windows_vfs.py"
-                }
-                _require(set(reused["critical_inputs"]) == expected_critical)
-
-                _require(
-                    all(provenance["source_hashes"][key] == digest for key, digest in reused["critical_inputs"].items())
-                )
-                _require(reused["cached_runtime"][row["executable"]] == row["python_sha256"])
-                _require(reused["cached_runtime"][row["driver_native"]] == row["driver_native_sha256"])
-
-        for row in (diagnostic, source):
-            _require(PureWindowsPath(row["dll"]).parent.parent == PureWindowsPath(plan["test_root"]))
-            _require(
-                PureWindowsPath(row["product_module"]).is_relative_to(
-                    PureWindowsPath(provenance["source"]) / "src/mordred_hermes"
-                )
-            )
-        _require(
-            wheel["record_owned_packaged_dll"] is True
-            and wheel["test_exports_absent"] is True
-            and wheel["env_dll_override"] is None
-        )
-        # Artifact/bundle closure is validated by the same fixed offline proof
-        # adapter used by phase evidence, never digest-shape or booleans alone.
-        proof_path, proof = _evidence_ref(directory, manifest["wheel_bundle"])
-        bundle = validate_bundle_evidence(proof, directory=proof_path.parent)
-        _require(all(wheel[key] == bundle[key] for key in ("sdist_sha256", "wheel_sha256")))
-        _require(wheel["bundle_manifest_sha256"] == proof["manifest"]["sha256"])
-        _qualified_package_artifacts(proof_path.parent, proof, bundle, wheel, provenance)
-        _validate_exported_import(
-            wheel["product_module"], mode="wheel", platform="win32", bundle=bundle, bundle_path=proof["bundle_path"]
-        )
-        return {
-            "manifest_sha256": sha256_file(directory / "manifest.json"),
-            "diagnostic": diagnostic,
-            "source": source,
-            "wheel": wheel,
-        }
-    except (
-        OSError,
-        ValueError,
-        TypeError,
-        KeyError,
-        IndexError,
-        tarfile.TarError,
-        zipfile.BadZipFile,
-        AcceptanceRefused,
-    ) as exc:
-        raise AcceptanceRefused("windows_native_qualification_incomplete") from exc
-
-
 def _qualification_inputs(directory: Path, manifest: dict[str, Any]) -> set[Path]:
-    if manifest.get("schema") == 2:
-        paths = {directory / "manifest.json"}
-        diagnostic_path = _artifact_ref(directory, manifest["diagnostic"])
-        paths.update(_diagnostic_files(diagnostic_path.parent, json.loads(diagnostic_path.read_text())))
-        fixture_path = _artifact_ref(directory, manifest["fixtures"])
-        _, fixture_files = _fixture_descriptor(fixture_path)
-        paths.update(fixture_files)
-        for reference in manifest["results"].values():
-            result_path = _artifact_ref(directory, reference)
-            value = json.loads(result_path.read_text())
-            paths.add(result_path)
-            paths.update(_artifact_ref(result_path.parent, value[action]["report"]) for action in ("collect", "run"))
-            paths.update(_artifact_ref(result_path.parent, ref) for ref in value["artifacts"].values())
-            nested = _artifact_ref(result_path.parent, value["fixtures_descriptor"])
-            _require(sha256_file(nested) == sha256_file(fixture_path))
-            _, nested_files = _fixture_descriptor(nested)
-            paths.update(nested_files)
-        proof_path, proof = _evidence_ref(directory, manifest["wheel_bundle"])
-        paths.add(proof_path)
-        paths.add(_artifact_ref(proof_path.parent, proof["manifest"]))
-        paths.add(_artifact_ref(proof_path.parent, proof["configuration"]))
-        paths.update(
-            _artifact_ref(proof_path.parent, ref)
-            for group in ("inputs", "artifacts", "native_build")
-            for ref in proof[group].values()
-        )
-        return paths
+    _require(manifest.get("schema") == 2)
     paths = {directory / "manifest.json"}
-    for key in (
-        "provenance",
-        "source_map",
-        "source_archive",
-        "fixture_plan",
-        "fixture_manifest",
-        "fixture_verify",
-        "configuration",
-    ):
-        paths.add(_artifact_ref(directory, manifest[key]))
-    paths.update(_artifact_ref(directory, value) for value in manifest["headers"].values())
-    for links in manifest["rows"].values():
-        paths.update(_artifact_ref(directory, value) for value in links.values())
-    for row in manifest["artifacts"].values():
-        paths.update(
-            _artifact_ref(directory, row[key])
-            for key in ("dll", "driver_native", "python", "build_stdout", "build_script")
-        )
+    diagnostic_path = _artifact_ref(directory, manifest["diagnostic"])
+    paths.update(_diagnostic_files(diagnostic_path.parent, json.loads(diagnostic_path.read_text())))
+    fixture_path = _artifact_ref(directory, manifest["fixtures"])
+    _, fixture_files = _fixture_descriptor(fixture_path)
+    paths.update(fixture_files)
+    for reference in manifest["results"].values():
+        result_path = _artifact_ref(directory, reference)
+        value = json.loads(result_path.read_text())
+        paths.add(result_path)
+        paths.update(_artifact_ref(result_path.parent, value[action]["report"]) for action in ("collect", "run"))
+        paths.update(_artifact_ref(result_path.parent, ref) for ref in value["artifacts"].values())
+        nested = _artifact_ref(result_path.parent, value["fixtures_descriptor"])
+        _require(sha256_file(nested) == sha256_file(fixture_path))
+        _, nested_files = _fixture_descriptor(nested)
+        paths.update(nested_files)
     proof_path, proof = _evidence_ref(directory, manifest["wheel_bundle"])
     paths.add(proof_path)
     paths.add(_artifact_ref(proof_path.parent, proof["manifest"]))
     paths.add(_artifact_ref(proof_path.parent, proof["configuration"]))
-    paths.update(_artifact_ref(proof_path.parent, value) for value in proof["artifacts"].values())
-    paths.update(_artifact_ref(proof_path.parent, value) for value in proof["inputs"].values())
+    paths.update(
+        _artifact_ref(proof_path.parent, ref)
+        for group in ("inputs", "artifacts", "native_build")
+        for ref in proof[group].values()
+    )
     return paths
 
 
