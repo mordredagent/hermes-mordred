@@ -1364,8 +1364,30 @@ class ImportStore:
         match by ``LIKE``. ``since <= sent_at < until`` (unix seconds) excludes
         unknown dates. Without indexed terms the newest parts come first.
         """
+        hits, _ = self.search_with_parts(
+            query, conv_uids=conv_uids, since=since, until=until, source=source, limit=limit, parts_limit=0
+        )
+        return hits
+
+    def search_with_parts(
+        self,
+        query: str | None,
+        *,
+        conv_uids: Sequence[str] | None = None,
+        since: int | None = None,
+        until: int | None = None,
+        source: Source | str | None = None,
+        limit: int = 20,
+        parts_limit: int = 20,
+    ) -> tuple[list[SearchHit], dict[str, StoredPart]]:
+        """Search and hydrate a nonnegative prefix of hits in one committed snapshot.
+
+        Filters, ranking and the bounded candidate ``limit`` match :meth:`search`.
+        ``parts_limit`` independently bounds hydration, preserving hit order.
+        Each call opens a fresh transaction; neither records nor authority are cached.
+        """
         if limit <= 0 or (conv_uids is not None and not conv_uids):
-            return []
+            return [], {}
         sql, params = _search_sql(
             _terms(query),
             conv_uids=None if conv_uids is None else list(dict.fromkeys(conv_uids)),
@@ -1375,7 +1397,14 @@ class ImportStore:
             limit=min(limit, MAX_SEARCH_LIMIT),
         )
         with self._transaction(write=False) as conn:
-            rows = conn.execute(sql, params).fetchall()
+            hits = self._search_hits(conn, sql, params)
+            wanted = [hit.part_uid for hit in hits[: max(0, parts_limit)]]
+            hydrated = self._parts_for(conn, wanted) if wanted else {}
+        return hits, hydrated
+
+    @staticmethod
+    def _search_hits(conn: sqlite3.Connection, sql: str, params: Sequence[Any]) -> list[SearchHit]:
+        rows = conn.execute(sql, params).fetchall()
         return [
             SearchHit(str(part), str(source_uid), str(conv), float(score)) for part, source_uid, conv, score in rows
         ]
@@ -1384,13 +1413,16 @@ class ImportStore:
         """Hydrate ``part_uids`` (unknown or uncommitted ones are left out) with their message and conversation."""
         uids = list(dict.fromkeys(part_uids))
         with self._transaction(write=False) as conn:
-            rows = _select_in(
-                conn,
-                f"SELECT p.part_uid, p.source_uid FROM {_COMMITTED_PARTS} WHERE p.part_uid IN",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
-                uids,
-            )
-            owners = {str(part): str(source_uid) for part, source_uid in rows}
-            hydrated = self._hydrate(conn, sorted(set(owners.values())))
+            return self._parts_for(conn, uids)
+
+    def _parts_for(self, conn: sqlite3.Connection, uids: Sequence[str]) -> dict[str, StoredPart]:
+        rows = _select_in(
+            conn,
+            f"SELECT p.part_uid, p.source_uid FROM {_COMMITTED_PARTS} WHERE p.part_uid IN",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+            uids,
+        )
+        owners = {str(part): str(source_uid) for part, source_uid in rows}
+        hydrated = self._hydrate(conn, sorted(set(owners.values())))
         result: dict[str, StoredPart] = {}
         for uid in uids:
             found = hydrated.get(owners.get(uid, ""))

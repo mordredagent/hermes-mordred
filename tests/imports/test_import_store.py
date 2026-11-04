@@ -600,6 +600,127 @@ def test_search_without_text_lists_the_newest_parts_first(archive: ImportStore) 
     assert uids(archive.search(None, since=DAY3)) == [tg_uid(3)]
 
 
+@pytest.mark.parametrize(
+    ("query", "filters", "expected"),
+    [
+        ("LUNCH", {}, [tg_uid(2)]),
+        ("田中", {}, [tg_uid(1)]),
+        ("%", {}, [tg_uid(3)]),
+        ("_", {}, []),
+        ('"見積もり" OR lunch', {}, []),
+        (None, {"conv_uids": [TG_CONV_UID, TG_CONV_UID]}, [tg_uid(3), tg_uid(2), tg_uid(1), tg_uid(4)]),
+        ("見積もり", {"source": "mail"}, [mail_uid("m1@example.com")]),
+        ("見積もり", {"since": DAY3, "until": DAY3 + 1}, [tg_uid(3)]),
+        (None, {"conv_uids": ["tg:unknown"]}, []),
+    ],
+)
+def test_search_with_parts_preserves_selection_and_complete_records(archive, query, filters, expected):
+    hits, hydrated = archive.search_with_parts(query, **filters)
+    assert uids(hits) == expected
+    assert hits == archive.search(query, **filters)
+    assert list(hydrated) == [hit.part_uid for hit in hits]
+    assert hydrated == archive.parts_for(hit.part_uid for hit in hits)
+
+
+@pytest.mark.parametrize(
+    ("limit", "parts_limit", "candidates", "parts"), [(2, 1, 2, 1), (1, 9, 1, 1), (3, 0, 3, 0), (3, -1, 3, 0)]
+)
+def test_search_with_parts_keeps_candidate_and_hydration_limits_independent(
+    archive, limit, parts_limit, candidates, parts
+):
+    hits, hydrated = archive.search_with_parts(None, limit=limit, parts_limit=parts_limit)
+    assert len(hits) == candidates
+    assert list(hydrated) == [hit.part_uid for hit in hits[:parts]]
+
+
+@pytest.mark.parametrize("filters", [{"limit": 0}, {"limit": -1}, {"conv_uids": []}])
+def test_search_with_parts_early_returns_do_not_open(tmp_path, filters):
+    def forbidden(_path):
+        pytest.fail("early return must not open a store")
+
+    store = ImportStore(tmp_path / "absent.db", forbidden)
+    assert store.search_with_parts(None, **filters) == ([], {})
+    assert not store.path.exists()
+
+
+def test_search_with_parts_clamps_candidates_before_hydration(tmp_path, monkeypatch):
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(i) for i in range(1, 5)])
+    monkeypatch.setattr(store_module, "MAX_SEARCH_LIMIT", 2)
+    hits, hydrated = store.search_with_parts(None, limit=10, parts_limit=10)
+    assert len(hits) == len(hydrated) == 2
+
+
+def test_search_with_parts_excludes_uncommitted_and_orders_multipart(tmp_path):
+    store = make_store(tmp_path)
+    original = mail_message("m1@example.com", "earlier words")
+    commit(store, mail_conv(), [original])
+    run = store.run_begin("telegram")
+    store.write_thread(run, [authored(1, text="earlier words")], conversation=tg_conv())
+    hits, hydrated = store.search_with_parts(None)
+    assert [hit.part_uid for hit in hits] == [f"{original.source_uid}#a", f"{original.source_uid}#q1"]
+    assert all(found.message == original and found.conversation == mail_conv() for found in hydrated.values())
+    assert store.search_with_parts("missing") == ([], {})
+
+
+def test_search_with_parts_hydrates_one_snapshot_and_next_call_is_fresh(tmp_path, monkeypatch):
+    store = make_store(tmp_path)
+    first, second = authored(1, text="budget original"), authored(2, text="budget deleted")
+    commit(store, tg_conv(), [first, second])
+    with store.connection() as conn:
+        assert conn.execute("PRAGMA journal_mode = WAL").fetchone() == ("wal",)
+    hydrate = store._hydrate
+    changed = False
+
+    def change_after_selection(conn, source_uids):
+        nonlocal changed
+        assert conn.in_transaction
+        if not changed:
+            changed = True
+            with sqlite3.connect(store.path) as writer:
+                writer.execute(
+                    "UPDATE import_parts SET text = 'budget changed' WHERE source_uid = ?", (first.source_uid,)
+                )
+                writer.execute("DELETE FROM import_parts WHERE source_uid = ?", (second.source_uid,))
+                writer.execute("DELETE FROM import_messages WHERE source_uid = ?", (second.source_uid,))
+        return hydrate(conn, source_uids)
+
+    monkeypatch.setattr(store, "_hydrate", change_after_selection)
+    hits, hydrated = store.search_with_parts("budget")
+    assert set(uids(hits)) == {first.source_uid, second.source_uid}
+    assert {found.message for found in hydrated.values()} == {first, second}
+    next_hits, next_parts = store.search_with_parts("budget")
+    assert uids(next_hits) == [first.source_uid]
+    assert [found.part.text for found in next_parts.values()] == ["budget changed"]
+
+
+def test_search_with_parts_rolls_back_closes_and_sanitizes_hydration_failure(tmp_path, monkeypatch):
+    seed = make_store(tmp_path)
+    commit(seed, tg_conv(), [authored(1)])
+    events = []
+
+    class TrackedConnection(sqlite3.Connection):
+        def rollback(self):
+            events.append(("rollback", self.in_transaction))
+            return super().rollback()
+
+        def close(self):
+            events.append(("close", self.in_transaction))
+            return super().close()
+
+    store = ImportStore(seed.path, lambda path: sqlite3.connect(path, factory=TrackedConnection))
+
+    def fail_hydration(conn, _source_uids):
+        assert conn.in_transaction
+        raise sqlite3.DatabaseError("SENSITIVE hydration failure")
+
+    monkeypatch.setattr(store, "_hydrate", fail_hydration)
+    with pytest.raises(ImportRefused, match=r"^store_unavailable$"):
+        store.search_with_parts(None)
+    assert events == [("rollback", True), ("close", False)]
+    assert seed.search(None)  # released connection and transaction
+
+
 def test_parts_for_round_trips_the_stored_records(tmp_path: Path) -> None:
     store = make_store(tmp_path)
     original = mail_message("m1@example.com", "見積もり from mail")
@@ -1095,3 +1216,51 @@ def test_delete_source_retirement_guard_cannot_target_another_source_or_account(
     with pytest.raises(ImportRefused):
         store.delete_source(source, account, expected_retired_account=OWNER_ID)
     assert store.contains([tg_uid(1)]) == {tg_uid(1)}
+
+
+def test_search_with_parts_protected_opens_each_run_full_integrity(protected_runtime, monkeypatch):
+    from mordred_hermes.dbcrypt import _connection
+
+    home, provider, backend = protected_runtime
+    store = open_import_store(home)
+    commit(store, tg_conv(), [authored(1, text="budget original")])
+    verify = _connection._verify_database
+    verified = []
+    native_calls = list(backend.calls)
+
+    def verify_database(connection):
+        verify(connection)  # real SQLCipher full-page integrity path on every actual open
+        verified.append(connection)
+
+    monkeypatch.setattr(_connection, "_verify_database", verify_database)
+    for count in (1, 2):
+        hits, hydrated = store.search_with_parts("budget")
+        assert uids(hits) == [tg_uid(1)]
+        assert [found.part.text for found in hydrated.values()] == ["budget original"]
+        assert len(verified) == count
+    assert verified[0] is not verified[1]
+    assert not provider.current_authority.terminal
+    assert backend.calls == native_calls
+
+
+@pytest.mark.parametrize("damage", ["marker", "path", "authority"])
+def test_search_with_parts_protected_hydration_rechecks_authority(protected_runtime, monkeypatch, damage):
+    home, provider, _ = protected_runtime
+    store = open_import_store(home)
+    commit(store, tg_conv(), [authored(1, text="budget original")])
+    hydrate_parts = store._parts_for
+
+    def revoke_after_selection(conn, uids):
+        assert conn.in_transaction
+        if damage == "marker":
+            (home / "mordred/db-encryption.marker").unlink()
+        elif damage == "path":
+            store.path.rename(store.path.with_suffix(".replaced"))
+        else:
+            provider.close()
+        return hydrate_parts(conn, uids)
+
+    monkeypatch.setattr(store, "_parts_for", revoke_after_selection)
+    with pytest.raises(ImportRefused):
+        store.search_with_parts("budget")
+    assert provider.current_authority.terminal
