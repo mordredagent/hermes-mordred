@@ -138,7 +138,7 @@ repeated full Node preparation runs. Two string-only walkers retain their
 original semantics. Fifty redundant positional callback protocol declarations
 were replaced by exact Callable field annotations; all default, keyword-only
 and variadic contracts remain, including `_python`. This removes **201 tooling
-lines**; test sources shrink by **57 lines**, for **258 net source lines removed**
+lines**; test sources shrink by **54 lines**, for **255 net source lines removed**
 relative to the pre-cleanup integration. No unproven runtime dead-code deletion
 was made. Independent AST/call-site review verified the callback contracts.
 
@@ -183,6 +183,32 @@ ten logical CPUs. This observed duration is not a repeat of the earlier
 controlled comparison and supplies no additional speedup claim.
 
 Final repository Ruff/format, strict mypy, import contracts, shellcheck and
-documentation links passed. The only subsequent changes record these results.
+documentation links passed. A subsequent fixture-only correction is recorded below; its fresh full regression and current-head hosted acceptance are recorded in the PR.
 Hosted acceptance for the current PR head/base remains a separate pre-merge
 requirement; its immutable run/artifact identity is recorded in the PR.
+
+
+## Hosted CI fixture correction
+
+The first hosted run `41847141538` at head `21bc15ce` passed Linux 3.11/3.13,
+the Hermes floor and all four Windows workers. macOS failed only
+`test_every_free_text_field_is_redacted_at_ingest`, so CI acceptance correctly
+refused the incomplete matrix. All four explicit redacted-field assertions
+passed; the final whole-record substring check failed. `raw_event` used a random
+UUID, and that identity or its derived SHA-256 digest can coincidentally contain
+the four-digit PIN `4821`. A process-local forced colliding UUID reproduced the
+same failure before the fix.
+
+The test now supplies one fixed valid UUID. All leak assertions, input secrets,
+redaction calls and product code remain unchanged. The forced-collision test
+then passed, and the complete containing module passed **719 cases in 80.64s**
+with unchanged covered-line sets. The fixture correction adds three test lines;
+current cleanup totals above include that adjustment. Fresh full local and
+hosted validation runs are required for the new head; no successful worker
+manifest from the failed first context is reused for acceptance.
+
+First-run observed successful Unix pytest steps: Linux 3.11 **730s**, Linux 3.13
+**713s**, Hermes floor **362s**. The three audit preflight cases passed on
+Windows with a testcase-duration sum of **4.263s**, versus **30.193s** in prior
+run `41820354815`. These are different hosted runs/revisions, not a controlled
+Windows speed guarantee or acceptance for the failed whole-run context.

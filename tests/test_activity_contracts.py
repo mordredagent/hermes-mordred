@@ -849,6 +849,9 @@ def test_interface_talk_and_ordinary_sentences_are_untouched(text: str) -> None:
 
 def test_every_free_text_field_is_redacted_at_ingest() -> None:
     event = normalize(
+        # Keep a short PIN from randomly matching the UUID or its derived digest
+        # in the whole-record leak assertion below.
+        event_id="00000000-0000-4000-8000-000000000001",
         phase="boundary",
         action={"op": "task_end", "site": "example.com", "target": "submit with password: hunter2"},
         text="done; the new PIN is 4821",
