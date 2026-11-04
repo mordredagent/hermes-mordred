@@ -11,370 +11,165 @@ Frozen operator-furnished receipts are evidence input, not authorization.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import os
 import subprocess
 import sys
 import tarfile
 import zipfile
+from importlib import import_module
+from importlib.machinery import ModuleSpec
+from importlib.util import module_from_spec
 from pathlib import Path
-from typing import Any
-
-# Scripts, arbitrary spec_from_file_location names and runpy do not establish a
-# package context. Anchor sibling imports to the tool's actual exported location.
-if str(Path(__file__).resolve().parent) not in sys.path:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from typing import TYPE_CHECKING, Any
 
 
-import sys
-from pathlib import Path
+# Separate physical tool copies must never share cached implementations. A
+# canonical-path package name gives each copy ordinary relative sibling imports
+# while keeping exception identity stable across repeated spec/runpy loads.
+def _load_tool_package(directory: Path) -> str:
+    name = "_mordred_dbcrypt_acceptance_" + hashlib.sha256(os.fsencode(directory)).hexdigest()
+    cached = sys.modules.get(name)
+    if cached is not None:
+        if cached.__spec__ is None or cached.__spec__.submodule_search_locations != [str(directory)]:
+            raise ImportError("acceptance_tool_package_conflict")
+        return name
+    specification = ModuleSpec(name, loader=None, is_package=True)
+    specification.submodule_search_locations = [str(directory)]
+    sys.modules.setdefault(name, module_from_spec(specification))
+    return name
 
-import _dbcrypt_acceptance_evidence as _evidence
-import _dbcrypt_acceptance_execution as _execution
-import _dbcrypt_acceptance_windows as _windows
-from _dbcrypt_acceptance_common import (
-    _PROBE as _PROBE,
-)
-from _dbcrypt_acceptance_common import (
-    _PTH_TEST_INPUTS as _PTH_TEST_INPUTS,
-)
-from _dbcrypt_acceptance_common import (
-    ADDITIONAL_MODULES as ADDITIONAL_MODULES,
-)
-from _dbcrypt_acceptance_common import (
-    AFFECTED_MODULES as AFFECTED_MODULES,
-)
-from _dbcrypt_acceptance_common import (
-    CONTROL_MARGIN as CONTROL_MARGIN,
-)
-from _dbcrypt_acceptance_common import (
-    INSTANCES as INSTANCES,
-)
-from _dbcrypt_acceptance_common import (
-    NATIVE_FAILURE_CATEGORIES as NATIVE_FAILURE_CATEGORIES,
-)
-from _dbcrypt_acceptance_common import (
-    NATIVE_FAILURE_STAGES as NATIVE_FAILURE_STAGES,
-)
-from _dbcrypt_acceptance_common import (
-    NATIVE_REFUSAL_REASONS as NATIVE_REFUSAL_REASONS,
-)
-from _dbcrypt_acceptance_common import (
-    NATIVE_TEST_FAILURE_HASH_SCHEME as NATIVE_TEST_FAILURE_HASH_SCHEME,
-)
-from _dbcrypt_acceptance_common import (
-    NATIVE_TEST_FAILURE_MODULES as NATIVE_TEST_FAILURE_MODULES,
-)
-from _dbcrypt_acceptance_common import (
-    PLATFORM_INSTANCE as PLATFORM_INSTANCE,
-)
-from _dbcrypt_acceptance_common import (
-    REQUIRED_COMPONENTS as REQUIRED_COMPONENTS,
-)
-from _dbcrypt_acceptance_common import (
-    REQUIRED_PROFILES as REQUIRED_PROFILES,
-)
-from _dbcrypt_acceptance_common import (
-    RUN_SCHEMA as RUN_SCHEMA,
-)
-from _dbcrypt_acceptance_common import (
-    WINDOWS_PLATFORM_NA as WINDOWS_PLATFORM_NA,
-)
-from _dbcrypt_acceptance_common import (
-    WINDOWS_RELEASE_SELECTION as WINDOWS_RELEASE_SELECTION,
-)
-from _dbcrypt_acceptance_common import (
-    WINDOWS_TELEGRAM_MIGRATION_REASON as WINDOWS_TELEGRAM_MIGRATION_REASON,
-)
-from _dbcrypt_acceptance_common import (
-    AcceptanceRefused as AcceptanceRefused,
-)
-from _dbcrypt_acceptance_common import (
-    EvidenceAPI as EvidenceAPI,
-)
-from _dbcrypt_acceptance_common import (
-    ExecutionAPI as ExecutionAPI,
-)
-from _dbcrypt_acceptance_common import (
-    Mode as Mode,
-)
-from _dbcrypt_acceptance_common import (
-    Phase as Phase,
-)
-from _dbcrypt_acceptance_common import (
-    QualificationAPI as QualificationAPI,
-)
-from _dbcrypt_acceptance_common import (
-    SystemAPI as SystemAPI,
-)
-from _dbcrypt_acceptance_common import (
-    WindowsAPI as WindowsAPI,
-)
-from _dbcrypt_acceptance_common import (
-    _absolute as _absolute,
-)
-from _dbcrypt_acceptance_common import (
-    _artifact_ref as _artifact_ref,
-)
-from _dbcrypt_acceptance_common import (
-    _bytecode as _bytecode,
-)
-from _dbcrypt_acceptance_common import (
-    _evidence_ref as _evidence_ref,
-)
-from _dbcrypt_acceptance_common import (
-    _guest_path as _guest_path,
-)
-from _dbcrypt_acceptance_common import (
-    _hex as _hex,
-)
-from _dbcrypt_acceptance_common import (
-    _input_file as _input_file,
-)
-from _dbcrypt_acceptance_common import (
-    _input_root_layout as _input_root_layout,
-)
-from _dbcrypt_acceptance_common import (
-    _module_functions as _module_functions,
-)
-from _dbcrypt_acceptance_common import (
-    _native_test_failure_details as _native_test_failure_details,
-)
-from _dbcrypt_acceptance_common import (
-    _normalized_node as _normalized_node,
-)
-from _dbcrypt_acceptance_common import (
-    _object as _object,
-)
-from _dbcrypt_acceptance_common import (
-    _private_evidence_file as _private_evidence_file,
-)
-from _dbcrypt_acceptance_common import (
-    _project_native_test_failure as _project_native_test_failure,
-)
-from _dbcrypt_acceptance_common import (
-    _python as _python,
-)
-from _dbcrypt_acceptance_common import (
-    _relative as _relative,
-)
-from _dbcrypt_acceptance_common import (
-    _require as _require,
-)
-from _dbcrypt_acceptance_common import (
-    _test_identity as _test_identity,
-)
-from _dbcrypt_acceptance_common import (
-    _text as _text,
-)
-from _dbcrypt_acceptance_common import (
-    _timestamp as _timestamp,
-)
-from _dbcrypt_acceptance_common import (
-    _tree_inputs as _tree_inputs,
-)
-from _dbcrypt_acceptance_common import (
-    native_failure_descriptor as native_failure_descriptor,
-)
-from _dbcrypt_acceptance_common import (
-    native_operation_bootstrap as native_operation_bootstrap,
-)
-from _dbcrypt_acceptance_common import (
-    native_refusal_payload as native_refusal_payload,
-)
-from _dbcrypt_acceptance_common import (
-    native_test_failure_descriptor as native_test_failure_descriptor,
-)
-from _dbcrypt_acceptance_common import (
-    native_test_failure_summary as native_test_failure_summary,
-)
-from _dbcrypt_acceptance_common import (
-    sha256_file as sha256_file,
-)
-from _dbcrypt_acceptance_evidence import (
-    _cloud_observation as _cloud_observation,
-)
-from _dbcrypt_acceptance_evidence import (
-    _collector_arguments as _collector_arguments,
-)
-from _dbcrypt_acceptance_evidence import (
-    _control_reboot as _control_reboot,
-)
-from _dbcrypt_acceptance_evidence import (
-    _control_start as _control_start,
-)
-from _dbcrypt_acceptance_evidence import (
-    _controller_snapshot as _controller_snapshot,
-)
-from _dbcrypt_acceptance_evidence import (
-    _crash_nodes as _crash_nodes,
-)
-from _dbcrypt_acceptance_evidence import (
-    _exported_probe as _exported_probe,
-)
-from _dbcrypt_acceptance_evidence import (
-    _native_node_outcome as _native_node_outcome,
-)
-from _dbcrypt_acceptance_evidence import (
-    _native_operation_evidence as _native_operation_evidence,
-)
-from _dbcrypt_acceptance_evidence import (
-    _native_payload as _native_payload,
-)
-from _dbcrypt_acceptance_evidence import (
-    _native_provision_coverage as _native_provision_coverage,
-)
-from _dbcrypt_acceptance_evidence import (
-    _offline_build_records as _offline_build_records,
-)
-from _dbcrypt_acceptance_evidence import (
-    _ordered_control_cycles as _ordered_control_cycles,
-)
-from _dbcrypt_acceptance_evidence import (
-    _owned_copy_directories as _owned_copy_directories,
-)
-from _dbcrypt_acceptance_evidence import (
-    _phase_bundle as _phase_bundle,
-)
-from _dbcrypt_acceptance_evidence import (
-    _provision_fixture_closure as _provision_fixture_closure,
-)
-from _dbcrypt_acceptance_evidence import (
-    _public_read as _public_read,
-)
-from _dbcrypt_acceptance_evidence import (
-    _same_controller_run as _same_controller_run,
-)
-from _dbcrypt_acceptance_evidence import (
-    _settled_control_cycle as _settled_control_cycle,
-)
-from _dbcrypt_acceptance_evidence import (
-    _validate_build_records as _validate_build_records,
-)
-from _dbcrypt_acceptance_evidence import (
-    _validate_exported_import as _validate_exported_import,
-)
-from _dbcrypt_acceptance_evidence import (
-    _validate_probe as _validate_probe,
-)
-from _dbcrypt_acceptance_evidence import (
-    _verify_mode_sequences as _verify_mode_sequences,
-)
-from _dbcrypt_acceptance_evidence import (
-    _verify_native_stops as _verify_native_stops,
-)
-from _dbcrypt_acceptance_evidence import (
-    load_stop_receipt as load_stop_receipt,
-)
-from _dbcrypt_acceptance_evidence import (
-    platform_na_reason as platform_na_reason,
-)
-from _dbcrypt_acceptance_evidence import (
-    validate_bundle_evidence as validate_bundle_evidence,
-)
-from _dbcrypt_acceptance_evidence import (
-    validate_control_action as validate_control_action,
-)
-from _dbcrypt_acceptance_evidence import (
-    validate_control_cycles as validate_control_cycles,
-)
-from _dbcrypt_acceptance_evidence import (
-    validate_helper_withdrawal as validate_helper_withdrawal,
-)
-from _dbcrypt_acceptance_evidence import (
-    validate_import_provenance as validate_import_provenance,
-)
-from _dbcrypt_acceptance_evidence import (
-    validate_native_test_report as validate_native_test_report,
-)
-from _dbcrypt_acceptance_evidence import (
-    validate_phase_control_binding as validate_phase_control_binding,
-)
-from _dbcrypt_acceptance_evidence import (
-    validate_reopen_continuity as validate_reopen_continuity,
-)
-from _dbcrypt_acceptance_evidence import (
-    validate_withdrawable_helper as validate_withdrawable_helper,
-)
-from _dbcrypt_acceptance_windows import (
-    _build_receipt_files as _build_receipt_files,
-)
-from _dbcrypt_acceptance_windows import (
-    _copy_build_receipts as _copy_build_receipts,
-)
-from _dbcrypt_acceptance_windows import (
-    _copy_referenced as _copy_referenced,
-)
-from _dbcrypt_acceptance_windows import (
-    _diagnostic_files as _diagnostic_files,
-)
-from _dbcrypt_acceptance_windows import (
-    _fixture_descriptor as _fixture_descriptor,
-)
-from _dbcrypt_acceptance_windows import (
-    _local_bundle_proof as _local_bundle_proof,
-)
-from _dbcrypt_acceptance_windows import (
-    _native_windows_vfs_rows as _native_windows_vfs_rows,
-)
-from _dbcrypt_acceptance_windows import (
-    _package_build_inputs as _package_build_inputs,
-)
-from _dbcrypt_acceptance_windows import (
-    _qualification_argv as _qualification_argv,
-)
-from _dbcrypt_acceptance_windows import (
-    _qualification_binaries as _qualification_binaries,
-)
-from _dbcrypt_acceptance_windows import (
-    _qualification_fixture as _qualification_fixture,
-)
-from _dbcrypt_acceptance_windows import (
-    _qualification_inputs as _qualification_inputs,
-)
-from _dbcrypt_acceptance_windows import (
-    _qualification_row as _qualification_row,
-)
-from _dbcrypt_acceptance_windows import (
-    _qualified_package_artifacts as _qualified_package_artifacts,
-)
-from _dbcrypt_acceptance_windows import (
-    _qualified_vfs_reference as _qualified_vfs_reference,
-)
-from _dbcrypt_acceptance_windows import (
-    _required_qualification_headers as _required_qualification_headers,
-)
-from _dbcrypt_acceptance_windows import (
-    _validate_build_receipt as _validate_build_receipt,
-)
-from _dbcrypt_acceptance_windows import (
-    _validate_package_eligibility as _validate_package_eligibility,
-)
-from _dbcrypt_acceptance_windows import (
-    _validate_packaged_result as _validate_packaged_result,
-)
-from _dbcrypt_acceptance_windows import (
-    _validate_windows_eligibility as _validate_windows_eligibility,
-)
-from _dbcrypt_acceptance_windows import (
-    canonical_windows_owner_sid as canonical_windows_owner_sid,
-)
-from _dbcrypt_acceptance_windows import (
-    matching_build_receipts as matching_build_receipts,
-)
-from _dbcrypt_acceptance_windows import (
-    require_production_qualification as require_production_qualification,
-)
-from _dbcrypt_acceptance_windows import (
-    validate_package_observation as validate_package_observation,
-)
-from _dbcrypt_acceptance_windows import (
-    windows_activation_declaration as windows_activation_declaration,
-)
-from _dbcrypt_acceptance_windows import (
-    windows_package_commands as windows_package_commands,
-)
-from _dbcrypt_acceptance_windows import (
-    windows_vfs_required_nodes as windows_vfs_required_nodes,
-)
+
+if TYPE_CHECKING:
+    import _dbcrypt_acceptance_common as _common
+    import _dbcrypt_acceptance_evidence as _evidence
+    import _dbcrypt_acceptance_execution as _execution
+    import _dbcrypt_acceptance_windows as _windows
+else:
+    _package = _load_tool_package(Path(__file__).resolve().parent)
+    _common = import_module("._dbcrypt_acceptance_common", package=_package)
+    _evidence = import_module("._dbcrypt_acceptance_evidence", package=_package)
+    _execution = import_module("._dbcrypt_acceptance_execution", package=_package)
+    _windows = import_module("._dbcrypt_acceptance_windows", package=_package)
+
+
+# Explicit compatibility exports keep their owning module visible and avoid
+# copying or forwarding a module namespace.
+_PROBE = _common._PROBE
+_PTH_TEST_INPUTS = _common._PTH_TEST_INPUTS
+ADDITIONAL_MODULES = _common.ADDITIONAL_MODULES
+AFFECTED_MODULES = _common.AFFECTED_MODULES
+CONTROL_MARGIN = _common.CONTROL_MARGIN
+INSTANCES = _common.INSTANCES
+NATIVE_FAILURE_CATEGORIES = _common.NATIVE_FAILURE_CATEGORIES
+NATIVE_FAILURE_STAGES = _common.NATIVE_FAILURE_STAGES
+NATIVE_REFUSAL_REASONS = _common.NATIVE_REFUSAL_REASONS
+NATIVE_TEST_FAILURE_HASH_SCHEME = _common.NATIVE_TEST_FAILURE_HASH_SCHEME
+NATIVE_TEST_FAILURE_MODULES = _common.NATIVE_TEST_FAILURE_MODULES
+PLATFORM_INSTANCE = _common.PLATFORM_INSTANCE
+REQUIRED_COMPONENTS = _common.REQUIRED_COMPONENTS
+REQUIRED_PROFILES = _common.REQUIRED_PROFILES
+RUN_SCHEMA = _common.RUN_SCHEMA
+WINDOWS_PLATFORM_NA = _common.WINDOWS_PLATFORM_NA
+WINDOWS_RELEASE_SELECTION = _common.WINDOWS_RELEASE_SELECTION
+WINDOWS_TELEGRAM_MIGRATION_REASON = _common.WINDOWS_TELEGRAM_MIGRATION_REASON
+AcceptanceRefused = _common.AcceptanceRefused
+EvidenceAPI = _common.EvidenceAPI
+ExecutionAPI = _common.ExecutionAPI
+Mode = _common.Mode
+Phase = _common.Phase
+QualificationAPI = _common.QualificationAPI
+SystemAPI = _common.SystemAPI
+WindowsAPI = _common.WindowsAPI
+_absolute = _common._absolute
+_artifact_ref = _common._artifact_ref
+_bytecode = _common._bytecode
+_evidence_ref = _common._evidence_ref
+_guest_path = _common._guest_path
+_hex = _common._hex
+_input_file = _common._input_file
+_input_root_layout = _common._input_root_layout
+_module_functions = _common._module_functions
+_native_test_failure_details = _common._native_test_failure_details
+_normalized_node = _common._normalized_node
+_object = _common._object
+_private_evidence_file = _common._private_evidence_file
+_project_native_test_failure = _common._project_native_test_failure
+_python = _common._python
+_relative = _common._relative
+_require = _common._require
+_test_identity = _common._test_identity
+_text = _common._text
+_timestamp = _common._timestamp
+_tree_inputs = _common._tree_inputs
+native_failure_descriptor = _common.native_failure_descriptor
+native_operation_bootstrap = _common.native_operation_bootstrap
+native_refusal_payload = _common.native_refusal_payload
+native_test_failure_descriptor = _common.native_test_failure_descriptor
+native_test_failure_summary = _common.native_test_failure_summary
+sha256_file = _common.sha256_file
+_cloud_observation = _evidence._cloud_observation
+_collector_arguments = _evidence._collector_arguments
+_control_reboot = _evidence._control_reboot
+_control_start = _evidence._control_start
+_controller_snapshot = _evidence._controller_snapshot
+_crash_nodes = _evidence._crash_nodes
+_exported_probe = _evidence._exported_probe
+_native_node_outcome = _evidence._native_node_outcome
+_native_operation_evidence = _evidence._native_operation_evidence
+_native_payload = _evidence._native_payload
+_native_provision_coverage = _evidence._native_provision_coverage
+_offline_build_records = _evidence._offline_build_records
+_ordered_control_cycles = _evidence._ordered_control_cycles
+_owned_copy_directories = _evidence._owned_copy_directories
+_phase_bundle = _evidence._phase_bundle
+_provision_fixture_closure = _evidence._provision_fixture_closure
+_public_read = _evidence._public_read
+_same_controller_run = _evidence._same_controller_run
+_settled_control_cycle = _evidence._settled_control_cycle
+_validate_build_records = _evidence._validate_build_records
+_validate_exported_import = _evidence._validate_exported_import
+_validate_probe = _evidence._validate_probe
+_verify_mode_sequences = _evidence._verify_mode_sequences
+_verify_native_stops = _evidence._verify_native_stops
+load_stop_receipt = _evidence.load_stop_receipt
+platform_na_reason = _evidence.platform_na_reason
+validate_bundle_evidence = _evidence.validate_bundle_evidence
+validate_control_action = _evidence.validate_control_action
+validate_control_cycles = _evidence.validate_control_cycles
+validate_helper_withdrawal = _evidence.validate_helper_withdrawal
+validate_import_provenance = _evidence.validate_import_provenance
+validate_native_test_report = _evidence.validate_native_test_report
+validate_phase_control_binding = _evidence.validate_phase_control_binding
+validate_reopen_continuity = _evidence.validate_reopen_continuity
+validate_withdrawable_helper = _evidence.validate_withdrawable_helper
+_build_receipt_files = _windows._build_receipt_files
+_copy_build_receipts = _windows._copy_build_receipts
+_copy_referenced = _windows._copy_referenced
+_diagnostic_files = _windows._diagnostic_files
+_fixture_descriptor = _windows._fixture_descriptor
+_local_bundle_proof = _windows._local_bundle_proof
+_native_windows_vfs_rows = _windows._native_windows_vfs_rows
+_package_build_inputs = _windows._package_build_inputs
+_qualification_argv = _windows._qualification_argv
+_qualification_binaries = _windows._qualification_binaries
+_qualification_fixture = _windows._qualification_fixture
+_qualification_inputs = _windows._qualification_inputs
+_qualification_row = _windows._qualification_row
+_qualified_package_artifacts = _windows._qualified_package_artifacts
+_qualified_vfs_reference = _windows._qualified_vfs_reference
+_required_qualification_headers = _windows._required_qualification_headers
+_validate_build_receipt = _windows._validate_build_receipt
+_validate_package_eligibility = _windows._validate_package_eligibility
+_validate_packaged_result = _windows._validate_packaged_result
+_validate_windows_eligibility = _windows._validate_windows_eligibility
+canonical_windows_owner_sid = _windows.canonical_windows_owner_sid
+matching_build_receipts = _windows.matching_build_receipts
+require_production_qualification = _windows.require_production_qualification
+validate_package_observation = _windows.validate_package_observation
+windows_activation_declaration = _windows.windows_activation_declaration
+windows_package_commands = _windows.windows_package_commands
+windows_vfs_required_nodes = _windows.windows_vfs_required_nodes
 
 
 def _evidence_dependencies() -> EvidenceAPI:

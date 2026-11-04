@@ -16,32 +16,58 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path, PureWindowsPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from _dbcrypt_acceptance_common import (
-    _PTH_TEST_INPUTS,
-    WINDOWS_RELEASE_SELECTION,
-    AcceptanceRefused,
-    QualificationAPI,
-    WindowsAPI,
-    _artifact_ref,
-    _evidence_ref,
-    _guest_path,
-    _hex,
-    _input_file,
-    _normalized_node,
-    _object,
-    _relative,
-    _require,
-    _text,
-    _timestamp,
-    sha256_file,
-)
-from _dbcrypt_acceptance_evidence import (
-    _validate_exported_import,
-    validate_bundle_evidence,
-    validate_native_test_report,
-)
+if TYPE_CHECKING:
+    from _dbcrypt_acceptance_common import (
+        _PTH_TEST_INPUTS,
+        WINDOWS_RELEASE_SELECTION,
+        AcceptanceRefused,
+        QualificationAPI,
+        WindowsAPI,
+        _artifact_ref,
+        _evidence_ref,
+        _guest_path,
+        _hex,
+        _input_file,
+        _normalized_node,
+        _object,
+        _relative,
+        _require,
+        _text,
+        _timestamp,
+        sha256_file,
+    )
+    from _dbcrypt_acceptance_evidence import (
+        _validate_exported_import,
+        validate_bundle_evidence,
+        validate_native_test_report,
+    )
+else:
+    from ._dbcrypt_acceptance_common import (
+        _PTH_TEST_INPUTS,
+        WINDOWS_RELEASE_SELECTION,
+        AcceptanceRefused,
+        QualificationAPI,
+        WindowsAPI,
+        _artifact_ref,
+        _evidence_ref,
+        _guest_path,
+        _hex,
+        _input_file,
+        _normalized_node,
+        _object,
+        _relative,
+        _require,
+        _text,
+        _timestamp,
+        sha256_file,
+    )
+    from ._dbcrypt_acceptance_evidence import (
+        _validate_exported_import,
+        validate_bundle_evidence,
+        validate_native_test_report,
+    )
 
 
 def windows_vfs_required_nodes(checkout: Path, *, release: bool) -> list[str]:

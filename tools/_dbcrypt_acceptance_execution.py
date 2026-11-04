@@ -12,20 +12,34 @@ import tarfile
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from _dbcrypt_acceptance_common import (
-    _PROBE,
-    _PTH_TEST_INPUTS,
-    ADDITIONAL_MODULES,
-    AFFECTED_MODULES,
-    CONTROL_MARGIN,
-    RUN_SCHEMA,
-    WINDOWS_RELEASE_SELECTION,
-    AcceptanceRefused,
-    ExecutionAPI,
-    Phase,
-)
+if TYPE_CHECKING:
+    from _dbcrypt_acceptance_common import (
+        _PROBE,
+        _PTH_TEST_INPUTS,
+        ADDITIONAL_MODULES,
+        AFFECTED_MODULES,
+        CONTROL_MARGIN,
+        RUN_SCHEMA,
+        WINDOWS_RELEASE_SELECTION,
+        AcceptanceRefused,
+        ExecutionAPI,
+        Phase,
+    )
+else:
+    from ._dbcrypt_acceptance_common import (
+        _PROBE,
+        _PTH_TEST_INPUTS,
+        ADDITIONAL_MODULES,
+        AFFECTED_MODULES,
+        CONTROL_MARGIN,
+        RUN_SCHEMA,
+        WINDOWS_RELEASE_SELECTION,
+        AcceptanceRefused,
+        ExecutionAPI,
+        Phase,
+    )
 
 
 def probe_environment(home: Path, *, _api: ExecutionAPI) -> dict[str, str]:

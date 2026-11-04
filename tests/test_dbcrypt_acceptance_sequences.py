@@ -180,8 +180,8 @@ assert runpy.run_path(str(path))['AcceptanceRefused'] is module.AcceptanceRefuse
 collector = runpy.run_path(str(Path(sys.argv[1]) / 'tests/_dbcrypt_acceptance_native.py'))
 assert callable(collector['main'])
 assert collector['_tool']()['AcceptanceRefused'] is module.AcceptanceRefused
-assert all(not getattr(value, '__file__', '').startswith(sys.argv[2])
-           for name, value in sys.modules.items() if name.startswith('_dbcrypt_acceptance'))
+for dependency in (module._common, module._evidence, module._execution, module._windows):
+    assert Path(dependency.__file__).resolve().parent == path.parent.resolve()
 """
     environment = tool.probe_environment(tmp_path / "home")
     child = subprocess.run(
@@ -221,3 +221,120 @@ def test_windows_inventory_uses_current_facade_platform(tmp_path: Path, monkeypa
     assert tool._site_packages(windows_bundle) == windows_site
     monkeypatch.setattr(tool, "sys", SimpleNamespace(platform="linux"))
     assert tool._site_packages(posix_bundle) == posix_site
+
+
+@pytest.mark.parametrize("copied_first", [False, True], ids=["checkout-first", "bundle-first"])
+def test_tool_copies_keep_their_own_implementations_in_one_process(tmp_path: Path, copied_first: bool) -> None:
+    """A cached verifier must not supply another physical copy's source authority."""
+    import shutil
+    import subprocess
+    import sys
+
+    checkout = Path(__file__).resolve().parents[1]
+    bundle = tmp_path / "bundle"
+    (bundle / "tools").mkdir(parents=True)
+    (bundle / "tests").mkdir()
+    for source in (checkout / "tools").glob("*dbcrypt_acceptance*.py"):
+        shutil.copyfile(source, bundle / "tools" / source.name)
+    shutil.copyfile(checkout / "tests/_dbcrypt_acceptance_native.py", bundle / "tests/_dbcrypt_acceptance_native.py")
+    script = """
+import importlib.util
+from pathlib import Path
+import runpy
+import sys
+
+checkout, bundle = (Path(value).resolve() for value in sys.argv[1:3])
+first, second = (bundle, checkout) if sys.argv[3] == 'True' else (checkout, bundle)
+# Both directories already occur on sys.path, with the second below the first.
+# Merely checking membership or deleting fixed-name module caches is insufficient.
+sys.path[:0] = [str(first / 'tools')]
+sys.path.append(str(second / 'tools'))
+before_path = sys.path.copy()
+spec = importlib.util.spec_from_file_location('arbitrary.first_copy', first / 'tools/dbcrypt_acceptance.py')
+loaded = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(loaded)
+facades = {first: vars(loaded), second: runpy.run_path(str(second / 'tools/dbcrypt_acceptance.py'))}
+for root, facade in facades.items():
+    common = sys.modules[facade['AcceptanceRefused'].__module__]
+    for module in (common, facade['_evidence'], facade['_execution'], facade['_windows']):
+        assert Path(module.__file__).resolve().parent == root / 'tools', (root, module.__file__)
+        assert module.AcceptanceRefused is facade['AcceptanceRefused']
+    collector = runpy.run_path(str(root / 'tests/_dbcrypt_acceptance_native.py'))
+    collected = collector['_tool']()
+    assert collected['AcceptanceRefused'] is facade['AcceptanceRefused']
+    assert collected['_windows'] is facade['_windows']
+assert facades[first]['AcceptanceRefused'] is not facades[second]['AcceptanceRefused']
+assert sys.path == before_path
+for root, facade in facades.items():
+    try:
+        facade['load_stop_receipt'](root / 'missing-receipt.json')
+    except facade['AcceptanceRefused']:
+        pass
+    else:
+        raise AssertionError('invalid receipt did not raise its own facade exception')
+
+# Exercise both Windows __file__-derived source-authority boundaries. Replace
+# only the downstream parser/selection boundary, after the real caller computes
+# the path; receipt/hash reads and the functions selecting the authority stay real.
+for number, (root, facade) in enumerate(facades.items()):
+    directory = bundle.parent / ('authority-' + str(number))
+    directory.mkdir()
+    path = directory / 'manifest.json'
+    path.write_text('{}')
+    reference = {'path': path.name, 'sha256': facade['sha256_file'](path)}
+    windows = facade['_windows']
+    seen = []
+    original = windows.validate_windows_qualification
+    def qualification(directory, *, checkout, _api):
+        seen.append(checkout)
+        return {'manifest_sha256': 'a' * 64, 'source': {'dll_sha256': 'b' * 64}}
+    try:
+        windows.validate_windows_qualification = qualification
+        facade['_phase_qualification']({
+            'platform': 'win32', 'qualification_evidence': reference, 'acceptance_kind': 'candidate',
+            'mode': 'source', 'native_facts': {
+                'qualification_manifest_sha256': 'a' * 64, 'dll': {'sha256': 'b' * 64},
+            },
+        }, directory)
+    finally:
+        windows.validate_windows_qualification = original
+    assert seen == [root], seen
+
+    class SelectedAuthority(Exception):
+        pass
+    calls = []
+    def nodes(checkout, *, release):
+        calls.append((checkout, release))
+        if not release:
+            raise SelectedAuthority
+        return ['inert']
+    original_nodes, original_fixture = windows.windows_vfs_required_nodes, windows._fixture_descriptor
+    try:
+        windows.windows_vfs_required_nodes = nodes
+        windows._fixture_descriptor = lambda path: ({}, set())
+        try:
+            facade['_validate_packaged_result'](directory, {
+                'schema_version': 1, 'kind': 'packaged_windows_vfs_result', 'status': 'passed',
+                'mode': 'source', 'diagnostic_manifest_sha256': 'd' * 64,
+                'fixtures_sha256': reference['sha256'], 'fixtures_descriptor': reference, 'artifacts': {},
+            }, mode='source', bundle={}, proof={}, proof_directory=directory,
+               diagnostic={'manifest_sha256': 'd' * 64}, fixtures={'manifest_sha256': reference['sha256']})
+        except SelectedAuthority:
+            pass
+        else:
+            raise AssertionError('qualification did not reach the source selection boundary')
+    finally:
+        windows.windows_vfs_required_nodes, windows._fixture_descriptor = original_nodes, original_fixture
+    assert calls == [(root, True), (root, False)], calls
+"""
+    environment = acceptance_tool("dbcrypt_acceptance").probe_environment(tmp_path / "home")
+    child = subprocess.run(
+        [sys.executable, "-c", script, str(checkout), str(bundle), str(copied_first)],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert child.returncode == 0, child.stdout + child.stderr
