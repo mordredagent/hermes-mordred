@@ -231,6 +231,150 @@ def test_plaintext_under_marker_no_replacement(native_root, authority):
     assert not list(path.parent.glob("*.corrupt*"))
 
 
+def test_same_inode_unread_page_corruption_refused_on_second_open(native_root, authority):
+    path = native_root[0] / "state.db"
+    conn = opener()(path, authority=authority)
+    conn.execute("CREATE TABLE records(value)")
+    conn.execute("INSERT INTO records VALUES (?)", (b"x" * 24000,))
+    conn.commit()
+    page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+    page_count = conn.execute("PRAGMA page_count").fetchone()[0]
+    assert page_count > 3
+    conn.close()
+    before = path.stat()
+    # Alter encrypted payload in the final overflow page, leaving schema intact.
+    with path.open("r+b") as stream:
+        offset = (page_count - 1) * page_size + 128
+        stream.seek(offset)
+        value = stream.read(1)
+        stream.seek(offset)
+        stream.write(bytes([value[0] ^ 1]))
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = path.stat()
+    assert (after.st_dev, after.st_ino, after.st_size, after.st_mode, after.st_mtime_ns) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mode,
+        before.st_mtime_ns,
+    )
+    raw = sc.connect(str(path))
+    try:
+        apply_key(raw, derive(native_root[2]))
+        # Schema-only admission would miss this authenticated-page corruption.
+        assert raw.execute("SELECT count(*) FROM sqlite_master").fetchone() == (1,)
+    finally:
+        raw.close()
+    with pytest.raises(DatabaseRefused):
+        opener()(path, authority=authority)
+
+
+@pytest.mark.parametrize("journal_mode", ["delete", "wal"])
+def test_external_committed_write_readable_on_reopen(native_root, authority, journal_mode):
+    path = native_root[0] / "state.db"
+    conn = opener()(path, authority=authority)
+    assert conn.execute(f"PRAGMA journal_mode={journal_mode}").fetchone() == (journal_mode,)
+    conn.execute("CREATE TABLE records(value)")
+    conn.execute("INSERT INTO records VALUES (1)")
+    conn.commit()
+    conn.close()
+    raw = sc.connect(str(path))
+    try:
+        apply_key(raw, derive(native_root[2]))
+        raw.execute("INSERT INTO records VALUES (2)")
+        raw.commit()
+        if journal_mode == "wal":
+            assert path.with_name(path.name + "-wal").stat().st_size > 32
+        reopened = opener()(path, authority=authority)
+        try:
+            assert reopened.execute("SELECT value FROM records ORDER BY value").fetchall() == [(1,), (2,)]
+        finally:
+            reopened.close()
+    finally:
+        raw.close()
+
+
+def test_each_sql_callback_keeps_one_full_metadata_observation(native_root, authority, monkeypatch):
+    from mordred_hermes.dbcrypt import _authority, _connection
+
+    conn = opener()(native_root[0] / "state.db", authority=authority)
+    full_checks = 0
+    callback_checks = {"authorizer": [], "progress": []}
+    observe = _authority.observe_database_source
+
+    def counted_observation(*, root):
+        nonlocal full_checks
+        full_checks += 1
+        return observe(root=root)
+
+    def counted_callback(name, callback):
+        def run(self, *args):
+            before = full_checks
+            result = callback(self, *args)
+            callback_checks[name].append(full_checks - before)
+            return result
+
+        return run
+
+    monkeypatch.setattr(_authority, "observe_database_source", counted_observation)
+    monkeypatch.setattr(
+        _connection.ProtectedConnection,
+        "_authorize",
+        counted_callback("authorizer", _connection.ProtectedConnection._authorize),
+    )
+    monkeypatch.setattr(
+        _connection.ProtectedConnection,
+        "_progress",
+        counted_callback("progress", _connection.ProtectedConnection._progress),
+    )
+    try:
+        assert conn.execute(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<3000) SELECT sum(x) FROM n"
+        ).fetchone() == (4501500,)
+        for checks in callback_checks.values():
+            assert checks
+            assert set(checks) == {1}
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("damage", ["marker", "native", "profile"])
+def test_metadata_change_during_long_query_refuses(native_root, authority, monkeypatch, damage):
+    from mordred_hermes.dbcrypt import _connection
+
+    root = native_root[0]
+    conn = opener()(root / "profiles/work/state.db", authority=authority)
+    progress = _connection.ProtectedConnection._progress
+    calls = 0
+
+    def change_during_query(self):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            if damage == "marker":
+                (root / "mordred/db-encryption.marker").unlink()
+            elif damage == "native":
+                wrapped = root / "mordred/memory-key.wrapped"
+                blob = bytearray(wrapped.read_bytes())
+                blob[-1] ^= 1
+                wrapped.write_bytes(blob)
+            else:
+                (root / "profiles/work/mordred/db-key-source.json").write_bytes(b"foreign binding")
+        return progress(self)
+
+    monkeypatch.setattr(_connection.ProtectedConnection, "_progress", change_during_query)
+    try:
+        with pytest.raises(DatabaseRefused):
+            conn.execute(
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000) SELECT sum(x) FROM n"
+            ).fetchone()
+        assert calls == 3
+        assert authority.terminal
+        assert conn._closed
+    finally:
+        conn.close()
+
+
 def native_module(authority):
     from mordred_hermes.dbcrypt._shim import build_module
 

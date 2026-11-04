@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -69,6 +70,125 @@ class HeldConnection:
         self.authority.check()
         assert not self.invalidated
         return (1,)
+
+
+@pytest.mark.parametrize("admission", ["operation", "registration"])
+def test_admission_observes_metadata_once_under_lock(native_root, monkeypatch, admission):
+    from mordred_hermes.dbcrypt import _authority
+
+    authority = _authority.Authority.acquire(native_root[0])
+    observations = []
+    lock = threading.RLock()
+
+    class ObservedLock:
+        depth = 0
+
+        def __enter__(self):
+            lock.acquire()
+            self.depth += 1
+
+        def __exit__(self, *args):
+            self.depth -= 1
+            lock.release()
+
+    observed_lock = ObservedLock()
+    authority._lock = observed_lock
+    observe = _authority.observe_database_source
+
+    def counted_observation(*, root):
+        observations.append(observed_lock.depth)
+        return observe(root=root)
+
+    monkeypatch.setattr(_authority, "observe_database_source", counted_observation)
+    try:
+        if admission == "registration":
+            held = HeldConnection(authority)
+            authority.register_connection(held)
+            assert authority._connections == [held]
+        else:
+            with authority.operation():
+                assert authority._operations == 1
+                assert observed_lock.depth == 0  # No authority lock during caller I/O.
+            assert authority._operations == 0
+        assert observations == [2]  # Admission lock plus check()'s reentrant lock.
+    finally:
+        authority.close()
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_unchecked_operation_is_cleanup_admission_without_metadata(native_root, monkeypatch, terminal):
+    from mordred_hermes.dbcrypt import _authority
+
+    root = native_root[0]
+    authority = _authority.Authority.acquire(root)
+    (root / "mordred/db-encryption.marker").unlink()
+    if terminal:
+        authority.close()
+
+    def forbidden_observation(*, root):
+        raise AssertionError("cleanup must not validate metadata")
+
+    monkeypatch.setattr(_authority, "observe_database_source", forbidden_observation)
+    try:
+        with authority.operation(check=False):
+            assert authority._operations == 1
+        assert authority._operations == 0
+        assert authority.terminal is terminal
+        with pytest.raises(DatabaseRefused), authority.operation():
+            pytest.fail("checked admission must still refuse")
+        assert authority.terminal
+    finally:
+        authority.close()
+
+
+@pytest.mark.filterwarnings("ignore:This process.*multi-threaded:DeprecationWarning")
+@pytest.mark.parametrize("admission", ["operation", "cleanup", "registration"])
+def test_admission_refuses_fork_before_held_inherited_lock(native_root, admission):
+    import signal
+
+    from mordred_hermes.dbcrypt._authority import Authority
+
+    if not hasattr(os, "fork"):
+        pytest.skip("POSIX fork lifetime")
+    root = native_root[0]
+    authority = Authority.acquire(root)
+    held = HeldConnection(authority)
+    authority.register_connection(held)
+    ready, release = threading.Event(), threading.Event()
+
+    def holder():
+        with authority._lock:
+            ready.set()
+            release.wait(10)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    assert ready.wait(3)
+    pid = os.fork()
+    if pid == 0:
+        signal.alarm(3)
+        try:
+            if admission == "registration":
+                authority.register_connection(held)
+            else:
+                with authority.operation(check=admission != "cleanup"):
+                    os._exit(2)
+        except DatabaseRefused:
+            os._exit(0 if authority.terminal and held.invalidated else 3)
+        except BaseException:
+            os._exit(4)
+        os._exit(2)
+    release.set()
+    thread.join(5)
+    try:
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
+        authority.check()
+        assert not held.invalidated
+        with pytest.raises(DatabaseBusy), acquire_exclusive(root):
+            pass
+    finally:
+        authority.close()
 
 
 def test_child_profile_uses_root_key_not_memory_key(native_root, monkeypatch):
