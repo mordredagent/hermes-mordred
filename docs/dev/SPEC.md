@@ -188,6 +188,12 @@ Accepted limitations include:
   audit history; the process-private memory-key holder does not change this;
 - vault-enrolled `.env` values other than `HERMES_MEMORY_KEY` stay in
   `os.environ` and reach terminal children according to Hermes's own blocklist;
+- Discord and Slack outbound encryption covers the live adapter's `send` only.
+  Hermes's standalone senders do not reach it: the `send_message` tool's Discord
+  route calls `standalone_sender_fn` directly, and cron falls back to it when the
+  adapter returns a failure, including Mordred's own encryption refusals. Text
+  can therefore reach a bound channel in cleartext on those routes. Other adapter
+  methods have the same gap (see `TODO.md`);
 - a plaintext `.env` holding `HERMES_MEMORY_KEY` can put it in `os.environ`, and
   eviction points narrow that without closing it: (a) in the brief window between
   a `.env` reload and the next eviction point, another spawn can copy the key;

@@ -628,7 +628,9 @@ def outbound_must_encrypt(platform: str, channel_id: str, thread_root: str | Non
        (:func:`is_encrypted_thread`) — reply-in-kind, §4.
     2. The channel has a bound ``K_chan`` on a platform where E2E is mandatory.
 
-    Rule 2 is what makes agent-initiated traffic safe. A cron result, a
+    Rule 2 is what makes agent-initiated traffic through the wrapped adapter
+    ``send`` safe; Hermes's standalone senders never reach this check (SPEC.md,
+    accepted limitations). A cron result, a
     proactive notification or any other send that carries no inbound thread
     context has no reply-in-kind mark to find, so before this rule it left in
     CLEARTEXT into a channel the operator had configured as a ciphertext-only
