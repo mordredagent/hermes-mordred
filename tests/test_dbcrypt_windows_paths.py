@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import sqlite3
+import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -498,6 +499,9 @@ def test_registered_backup_values_refuse_remote_names_before_filesystem(monkeypa
             calls[entry]()
 
 
+# ``native_root`` builds POSIX custody, whose locking needs ``os.O_DIRECTORY``. The
+# refusal order is simulated here; test_dbcrypt_windows_native_paths.py runs on Windows.
+@pytest.mark.skipif(sys.platform == "win32", reason="the native_root fixture uses POSIX custody")
 @pytest.mark.parametrize(
     "route",
     [
