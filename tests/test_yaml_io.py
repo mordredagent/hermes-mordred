@@ -10,11 +10,115 @@ top of it.
 from __future__ import annotations
 
 import logging
+import warnings
 from pathlib import Path
 
 import pytest
+from ruamel.yaml.error import YAMLError, YAMLWarning
 
 from mordred_hermes._core._yaml_io import load_plugin_section, load_yaml_mapping
+
+
+@pytest.fixture(params=["generic-file", "checked-snapshot"])
+def yaml_path(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from mordred_hermes._core import _config_io, _yaml_io
+    from mordred_hermes._private_fs import FileIdentity, FileMetadata
+
+    path = tmp_path / "config.yaml"
+    monkeypatch.setattr(_yaml_io, "_platform", "nt" if request.param == "checked-snapshot" else "posix")
+    if request.param == "checked-snapshot":
+        # Supply checked bytes at the filesystem boundary while exercising the real parser.
+        def read_snapshot(paths: _config_io.CanonicalPaths) -> _config_io.CanonicalSnapshot:
+            data = (paths.home / paths.config_name).read_bytes()
+            contents = _config_io.CheckedContents(data, FileMetadata(FileIdentity(1, b"yaml-test"), len(data), 1))
+            return _config_io.CanonicalSnapshot(contents, None)
+
+        monkeypatch.setattr(_config_io, "read_canonical_snapshot", read_snapshot)
+    return path
+
+
+@pytest.mark.parametrize("round_trip", [False, True], ids=["safe-pure", "round-trip"])
+@pytest.mark.parametrize("content_kind", ["duplicate-anchor", "malformed-scalar", "custom-tag"])
+def test_yaml_diagnostics_exclude_content_and_preserve_values(
+    yaml_path: Path,
+    round_trip: bool,
+    content_kind: str,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    token = "synthetic_secret_yaml_token"
+    contents = {
+        "duplicate-anchor": f"first: &{token} one\nsecond: &{token} two\nref: *{token}\n",
+        "malformed-scalar": f'value: "{token}\\q"\n',
+        "custom-tag": f"value: !{token} strict\n",
+    }
+    yaml_path.write_text(contents[content_kind], encoding="utf-8")
+    logger = logging.getLogger("test.yaml_io.diagnostics")
+    with warnings.catch_warnings(record=True) as captured, caplog.at_level(logging.WARNING):
+        warnings.simplefilter("always")
+        result = load_yaml_mapping(yaml_path, round_trip=round_trip, log=logger)
+        # The parse scope must restore filters even when parsing raises.
+        warnings.warn("outside parse scope", UserWarning, stacklevel=1)
+        warnings.warn("outside YAML parse scope", YAMLWarning, stacklevel=1)
+
+    if content_kind == "duplicate-anchor":
+        assert result == {"first": "one", "second": "two", "ref": "two"}
+    elif content_kind == "custom-tag" and round_trip:
+        assert str(result["value"]) == "strict"
+        assert result["value"] != "strict"
+        assert str(result["value"].tag) == f"!{token}"
+    else:
+        assert result == {}
+        assert ("ScannerError" if content_kind == "malformed-scalar" else "ConstructorError") in caplog.text
+
+    stdio = capsys.readouterr()
+    diagnostics = caplog.text + stdio.out + stdio.err + "".join(str(item.message) for item in captured)
+    assert token not in diagnostics
+    assert [str(item.message) for item in captured] == ["outside parse scope", "outside YAML parse scope"]
+    assert all(record.exc_info is None and record.stack_info is None for record in caplog.records)
+
+
+@pytest.mark.parametrize("round_trip", [False, True], ids=["safe-pure", "round-trip"])
+@pytest.mark.parametrize("exception_type", [OSError, YAMLError, ValueError, RuntimeError])
+@pytest.mark.parametrize("catch", [None, (ValueError,), (Exception,)])
+def test_yaml_catch_selection_is_preserved(
+    yaml_path: Path,
+    round_trip: bool,
+    exception_type: type[Exception],
+    catch: tuple[type[BaseException], ...] | None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from ruamel.yaml import YAML
+
+    from mordred_hermes._core import _yaml_io
+
+    yaml_path.write_text("ok: 1\n", encoding="utf-8")
+    error = exception_type("synthetic_secret_exception_token")
+
+    def fail_parse(self: YAML, stream: object) -> object:
+        warnings.warn("unrelated parser warning", UserWarning, stacklevel=1)
+        raise error
+
+    monkeypatch.setattr(YAML, "load", fail_parse)
+    selected = (
+        catch
+        if catch is not None
+        else ((OSError, ValueError, YAMLError) if _yaml_io._platform == "nt" else (OSError, YAMLError))
+    )
+    logger = logging.getLogger("test.yaml_io.catch")
+    with warnings.catch_warnings(record=True) as captured, caplog.at_level(logging.WARNING):
+        warnings.simplefilter("always")
+        if isinstance(error, selected):
+            assert load_yaml_mapping(yaml_path, catch=catch, round_trip=round_trip, log=logger) == {}
+            assert exception_type.__name__ in caplog.text
+        else:
+            with pytest.raises(exception_type) as raised:
+                load_yaml_mapping(yaml_path, catch=catch, round_trip=round_trip, log=logger)
+            assert raised.value is error
+        warnings.warn("after parser failure", YAMLWarning, stacklevel=1)
+    assert "synthetic_secret_exception_token" not in caplog.text
+    assert [str(item.message) for item in captured] == ["unrelated parser warning", "after parser failure"]
 
 
 def test_missing_file_returns_empty(tmp_path: Path) -> None:

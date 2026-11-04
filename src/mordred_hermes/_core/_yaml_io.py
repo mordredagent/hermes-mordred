@@ -36,12 +36,25 @@ from __future__ import annotations
 
 import logging
 import os
+import warnings
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, TextIO
 
 from ._config_io import CanonicalPaths, CanonicalSnapshot
 
+if TYPE_CHECKING:
+    from ruamel.yaml import YAML
+
 _platform = os.name
+
+
+def _parse_yaml(yaml: YAML, stream: TextIO | str) -> Any:
+    """Keep parser diagnostics from exposing document content to warning sinks."""
+    from ruamel.yaml.error import YAMLWarning
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", YAMLWarning)
+        return yaml.load(stream)
 
 
 def yaml_mapping_from_snapshot(snapshot: CanonicalSnapshot, *, round_trip: bool = False) -> dict[str, Any]:
@@ -51,7 +64,7 @@ def yaml_mapping_from_snapshot(snapshot: CanonicalSnapshot, *, round_trip: bool 
     if snapshot.config is None:
         return {}
     yaml = YAML(typ="rt") if round_trip else YAML(typ="safe", pure=True)
-    data = yaml.load(snapshot.config.data.decode("utf-8"))
+    data = _parse_yaml(yaml, snapshot.config.data.decode("utf-8"))
     if not isinstance(data, dict):
         raise ValueError("config YAML must contain a mapping")
     return data
@@ -96,7 +109,7 @@ def load_yaml_mapping(
             )
         except windows_catch as exc:
             if log is not None:
-                log.warning("could not read checked config %s: %s", path, exc)
+                log.warning("could not read checked config %s: %s", path, type(exc).__name__)
             return {}
     if not path.exists():
         return {}
@@ -108,10 +121,10 @@ def load_yaml_mapping(
     yaml = YAML(typ="rt") if round_trip else YAML(typ="safe", pure=True)
     try:
         with path.open(encoding="utf-8") as f:
-            data = yaml.load(f)
+            data = _parse_yaml(yaml, f)
     except catch as e:
         if log is not None:
-            log.warning("could not read %s: %s", path, e)
+            log.warning("could not read %s: %s", path, type(e).__name__)
         return {}
     return data if isinstance(data, dict) else {}
 
