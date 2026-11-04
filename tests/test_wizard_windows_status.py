@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+import time
 
 import pytest
 
@@ -19,6 +20,7 @@ from mordred_hermes.keyvault import _seckey_helper, wrap
 from mordred_hermes.wizard import encryption_cli, keyvault_windows_cli, memory_cli, setup_cli, status_cli
 from mordred_hermes.wizard._encryption_status import status_mark
 from mordred_hermes.wizard._workspace_paths import WorkspacePaths
+from tests.test_config_io import RecordingLock
 from tests.test_windows_custody import fs as fs
 from tests.test_windows_memory_lifecycle import ORIGINALS, put
 from tests.test_windows_memory_proof import installed_runtime as installed_runtime
@@ -42,13 +44,18 @@ ORDER = (
 def forbid_native(monkeypatch, env):
     """Status may read checked files only: no backend, unwrap or subprocess."""
 
+    attempts = []
+
     def tripwire(*args, **kwargs):
+        attempts.append((args, kwargs))
         raise AssertionError("status reached a native, unwrap or subprocess operation")
 
     monkeypatch.setattr(env.custody, "windows_backend", tripwire)
     monkeypatch.setattr(wrap, "unwrap_dek", tripwire)
+    monkeypatch.setattr(wrap, "wrap_dek", tripwire)
     monkeypatch.setattr(subprocess, "Popen", tripwire)
     monkeypatch.setattr(subprocess, "run", tripwire)
+    return attempts
 
 
 def workspace(tmp_path):
@@ -165,9 +172,22 @@ def test_copied_profile_prints_the_classified_reason(win, capsys):
     assert "memory custody: supported, unavailable (custody-broken)" in out
 
 
-def test_held_lock_is_reported_not_awaited(seeded, capsys):
+def test_held_lock_is_reported_not_awaited(seeded, monkeypatch, capsys):
     env = seeded
     enable(env)
+    capsys.readouterr()
+    native_attempts = forbid_native(monkeypatch, env)
+    from mordred_hermes.keyvault._windows_custody import WindowsCustodySession
+
+    mutations = []
+
+    def tripwire(*args, **kwargs):
+        mutations.append((args, kwargs))
+        raise AssertionError("passive status attempted creation or mutation")
+
+    for name in ("enroll_role", "enroll_memory", "_publish", "_remove"):
+        monkeypatch.setattr(WindowsCustodySession, name, tripwire)
+    before = {p.relative_to(env.home): p.read_bytes() for p in env.home.rglob("*") if p.is_file()}
     holding, release = threading.Event(), threading.Event()
 
     def holder():
@@ -179,13 +199,49 @@ def test_held_lock_is_reported_not_awaited(seeded, capsys):
     thread.start()
     try:
         assert holding.wait(30)
+        lock = RecordingLock(cio._lock)
+        monkeypatch.setattr(cio, "_lock", lock)
+        start = time.monotonic()
         status = memory_line(env)[0]
+        collected = status_cli.collect(
+            home=env.home, root=env.home / "vault", platform="win32", workspace=workspace(env.home.parent)
+        )
+        assert (
+            encryption_cli.status(
+                home=env.home,
+                root=env.home / "vault",
+                platform="win32",
+                workspace=workspace(env.home.parent),
+                as_json=True,
+            )
+            == 0
+        )
+        direct = json.loads(capsys.readouterr().out)
         out = report(env, capsys)
+        setup_result = setup_cli._resolve_step_memory_encryption(
+            home=env.home,
+            root=env.home / "vault",
+            platform="win32",
+            prompt_io=None,
+            options=setup_cli.SetupOptions(),
+        )
+        elapsed = time.monotonic() - start
     finally:
         release.set()
         thread.join(30)
-    assert "custody-uncertain" in status.detail
+    assert not thread.is_alive()
+    assert setup_result.action == "blocked" and "custody-uncertain" in setup_result.detail
+    assert elapsed < 1.0
+    assert lock.calls and all(kwargs == {"blocking": False} for _, _, kwargs in lock.calls)
+    assert "custody-uncertain" in status.detail and not status.active
+    assert all(not target.active for target in collected.encryption)
+    assert all(not row["active"] for row in direct)
+    assert "custody-uncertain" in direct[2]["detail"]
+    assert all(not row.available for row in collected.windows_capabilities)
     assert "memory custody: supported, unavailable (custody-uncertain)" in out
+    after = {p.relative_to(env.home): p.read_bytes() for p in env.home.rglob("*") if p.is_file()}
+    assert after == before
+    assert native_attempts == [] and mutations == []
 
 
 def test_retained_secret_store_and_excluded_artifacts_are_reported(win, monkeypatch, capsys):
@@ -258,6 +314,32 @@ def test_setup_skips_excluded_steps_and_runs_the_windows_memory_enable(seeded, m
     assert NO_PRESENCE_NO_RECOVERY in out and keyvault_windows_cli.CUSTODY_NOTICE in out
     assert not setup_cli._stops_run(keyvault)
     assert run_steps(env, monkeypatch)[2].action == "done"
+
+
+def test_setup_observation_is_passive_but_enable_uses_ordinary_admission(seeded, monkeypatch):
+    env = seeded
+    lock = RecordingLock(cio._lock)
+    monkeypatch.setattr(cio, "_lock", lock)
+    enable_calls = []
+
+    def run_enable(**kwargs):
+        before = len(lock.calls)
+        cio.read_canonical_snapshot(cio.CanonicalPaths(env.home))
+        enable_calls.extend(lock.calls[before:])
+        return 0
+
+    monkeypatch.setattr(setup_cli, "_run_memory_encryption", run_enable)
+    result = setup_cli._resolve_step_memory_encryption(
+        home=env.home,
+        root=env.home / "vault",
+        platform="win32",
+        prompt_io=None,
+        options=setup_cli.SetupOptions(),
+    )
+    assert result.action == "ran"
+    assert enable_calls and all(kwargs == {"timeout": 2.0} for _, _, kwargs in enable_calls)
+    observation_calls = lock.calls[: -len(enable_calls)]
+    assert observation_calls and all(kwargs == {"blocking": False} for _, _, kwargs in observation_calls)
 
 
 def test_setup_memory_step_respects_state(seeded, monkeypatch):
