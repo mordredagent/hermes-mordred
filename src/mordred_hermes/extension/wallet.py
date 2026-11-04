@@ -94,12 +94,6 @@ class _PreparedSign:
     expected_signer: str | None
 
 
-def _get_address() -> str:
-    from mordred_hermes.keyvault import extension_sign
-
-    return extension_sign.get_address()
-
-
 def _load_account_snapshot() -> tuple[str, str]:
     """Resolve ``(address, chain_id_hex)`` through the keyvault (uncached)."""
     from mordred_hermes.keyvault import extension_sign

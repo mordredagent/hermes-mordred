@@ -114,7 +114,6 @@ import os
 import re
 import secrets
 import sqlite3
-import sys
 import threading
 import time
 from collections import Counter
@@ -133,7 +132,7 @@ from ..activity._gate import (
     refusal,
     runtime_authority,
 )
-from ..activity.store import BUSY_TIMEOUT_S
+from ..activity.store import BUSY_TIMEOUT_S, _db_errors
 from . import _mail_reconcile, _schema
 from .records import (
     ConversationKind,
@@ -360,16 +359,6 @@ class StoredPart(NamedTuple):
 
 
 # --- errors -----------------------------------------------------------------------------------
-
-
-def _db_errors() -> tuple[type[BaseException], ...]:
-    """The stdlib's and, once installed, the SQLCipher replacement's error base classes."""
-    current = sys.modules.get("sqlite3", sqlite3)
-    try:
-        import sqlcipher3.dbapi2 as sc
-    except ImportError:
-        return (sqlite3.Error, getattr(current, "Error", sqlite3.Error))
-    return (sqlite3.Error, getattr(current, "Error", sqlite3.Error), sc.Error)
 
 
 def _classify(exc: BaseException) -> str:
@@ -1464,13 +1453,6 @@ def readonly_store_path(home: Path) -> Path:
     from ..activity._paths import PLUGIN_DATA_SUBPATH, STORE_NAME
 
     return home.joinpath(*PLUGIN_DATA_SUBPATH, STORE_NAME)
-
-
-def readonly_uri(path: Path) -> str:
-    """Compatibility utility; callers still need guarded authority for actual opens."""
-    from urllib.parse import quote
-
-    return f"file:{quote(path.as_posix(), safe='/')}?mode=ro"
 
 
 def _no_reopen(_path: Path) -> sqlite3.Connection:

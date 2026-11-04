@@ -59,13 +59,6 @@ _geteuid = getattr(os, "geteuid", None)
 _HARD_LINK_UNSUPPORTED_ERRNOS = frozenset({errno.EPERM, errno.EOPNOTSUPP, getattr(errno, "ENOTSUP", errno.EOPNOTSUPP)})
 
 
-def _terminal_safe(value: object) -> str:
-    """Render an operator-controlled path without terminal control bytes."""
-
-    text = value if isinstance(value, str) else str(value)
-    return text if text.isprintable() else text.encode("unicode_escape").decode("ascii")
-
-
 def _path_kind(mode: int) -> str:
     """Return a short user-facing description for an existing output object."""
 
@@ -85,7 +78,7 @@ def _preflight_output(path: Path) -> bool:
     atomic no-replace semantics, which closes the check-to-write race.
     """
 
-    display_path = _terminal_safe(path)
+    display_path = _term.terminal_safe(path)
     try:
         existing = path.lstat()
     except FileNotFoundError:
@@ -113,7 +106,7 @@ def _preflight_output(path: Path) -> bool:
     if stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode):
         _term.emit_error(
             f"backup output parent must be a real directory, not a symlink or special file: "
-            f"{_terminal_safe(path.parent)}. Pass the resolved directory path instead "
+            f"{_term.terminal_safe(path.parent)}. Pass the resolved directory path instead "
             "(on macOS `/tmp` is a symlink to `/private/tmp`)."
         )
         return False
@@ -345,9 +338,9 @@ def _report_publish_failure(path: Path, blob: bytes, exc: OSError) -> None:
         # written" here would send the operator to a retry that
         # `_preflight_output` then refuses.
         _term.emit_error(
-            f"Backup was published at {_terminal_safe(path)} (complete, mode 0600) but a durability or cleanup "
+            f"Backup was published at {_term.terminal_safe(path)} (complete, mode 0600) but a durability or cleanup "
             "step after publication failed, so its directory entry may not be durably synced; a private staging "
-            f"copy named `.{_terminal_safe(path.name)}.mordred-materialize-*` may remain in the same directory. "
+            f"copy named `.{_term.terminal_safe(path.name)}.mordred-materialize-*` may remain in the same directory. "
             "Verify the file and remove any staging copy before relying on it."
         )
         return
@@ -386,7 +379,8 @@ def _publish_backup(path: Path, blob: bytes) -> bool:
         return False
     if not published:
         _term.emit_error(
-            f"refusing to overwrite an output that appeared during export at {_terminal_safe(path)}; choose a new path."
+            f"refusing to overwrite an output that appeared during export at {_term.terminal_safe(path)}; "
+            "choose a new path."
         )
         return False
     return True
@@ -480,7 +474,7 @@ def export_keyvault_backup(
         pow_bytes = None
         blob = None
 
-    print(f"Portable Keyvault backup written to {_terminal_safe(output_path)} (mode 0600).")
+    print(f"Portable Keyvault backup written to {_term.terminal_safe(output_path)} (mode 0600).")
     print(
         "This backup is a snapshot. Re-run `hermes-mordred keyvault export` whenever Keyvault contents change, "
         "including after `keyvault eth new` or direct Keyvault API writes."

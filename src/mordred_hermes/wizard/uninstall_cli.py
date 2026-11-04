@@ -690,15 +690,6 @@ def _default_telegram_forget() -> object:
     return _telegram_logout_result(forget=True, force=True)
 
 
-def _default_keyvault_reset(ctx: UninstallContext) -> Callable[[Path], int]:
-    def reset(home: Path) -> int:
-        from .keyvault_cli import reset_keyvault
-
-        return reset_keyvault(home=home, backend=ctx.backend, assume_yes=True)
-
-    return reset
-
-
 def _delete_vault_keys(
     ctx: UninstallContext,
     flow: FlowSession,
@@ -743,21 +734,6 @@ def _delete_vault_keys(
             retire_database_source(root=ctx.home, expected=expected, lease=lease, uninstall=uninstall)
         store.delete(opened._label)
         shutil.rmtree(opened._root)
-
-
-def _purge_tpm_memory(ctx: UninstallContext) -> int:
-    from ..keyvault._memory_key import memory_key_path
-    from . import memory_cli
-
-    wrapped = memory_key_path(ctx.home)
-    if not (wrapped.exists() or wrapped.is_symlink()):
-        return 0
-    # Restore/erase already ran. Remove independent memory custody before
-    # keyvault reset can remove the containing native TPM store.
-    rc = memory_cli.purge(home=ctx.home, root=ctx.vault_root, backend=ctx.backend)
-    if rc != 0:
-        _term.emit_error("TPM memory could not be purged; Mordred data was retained")
-    return rc
 
 
 def _has_database_refusal(error: BaseException) -> bool:
@@ -807,25 +783,6 @@ def _purge_except_database_lock(path: Path) -> None:
             shutil.rmtree(child)
         else:
             child.unlink()
-
-
-def _purge_sources(ctx: UninstallContext, plan: UninstallPlan, flow: FlowSession, lease: ExclusiveLease) -> int:
-    """Guarded source phase before config/launcher cleanup; stop on any failure."""
-    if _purge_tpm_memory(ctx) != 0:
-        return 1
-    if ctx.vault_root.exists():
-        _delete_vault_keys(ctx, flow, lease)
-    if plan.telegram_configured:
-        _forget_telegram_for_uninstall(ctx)
-    if (ctx.home / "mordred" / "keyvault").exists():
-        reset = ctx.keyvault_reset or _default_keyvault_reset(ctx)
-        if reset(ctx.home) != 0:
-            _term.emit_error(
-                "the keyvault could not be reset (see above), so the Mordred data was NOT deleted -- deleting it "
-                "would orphan the keyvault's hardware keys. Re-run `hermes-mordred uninstall --purge-data`."
-            )
-            return 1
-    return 0
 
 
 def _purge_data(ctx: UninstallContext, plan: UninstallPlan) -> int:

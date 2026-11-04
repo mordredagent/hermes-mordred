@@ -206,7 +206,7 @@ def test_uninstall_data_purge_removes_memory_custody_before_keyvault(linux):
     from types import SimpleNamespace
 
     from mordred_hermes.keyvault import _storage
-    from mordred_hermes.wizard import uninstall_cli
+    from mordred_hermes.wizard import _uninstall_coordinator, uninstall_cli
     from mordred_hermes.wizard._flow_session import FlowSession
 
     home, backend = linux
@@ -231,7 +231,7 @@ def test_uninstall_data_purge_removes_memory_custody_before_keyvault(linux):
     )
     plan = SimpleNamespace(telegram_configured=False)
     with database_key_mutation(root=home, generation=None) as lease, FlowSession() as flow:
-        assert uninstall_cli._purge_sources(ctx, plan, flow, lease) == 0
+        assert _uninstall_coordinator._purge_profile(ctx, plan, flow, home, lease) == 0
         assert uninstall_cli._purge_data(ctx, plan) == 0
     assert reset_calls == ["reset"]
     assert not mk.memory_key_path(home).exists()

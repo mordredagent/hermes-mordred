@@ -336,8 +336,8 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
   no hash binding to `RECORD`, and source builds hard-fail without MSVC (`hatch_build.py`).
 - [ ] Acceptance `verify` self-attests `live_accepted`; `_verify_mode_sequences` and
   `_verify_native_stops` are untested (`tools/dbcrypt_acceptance.py`).
-- [ ] Oversized files: `tools/dbcrypt_acceptance.py` (4,407 lines), `tests/test_dbcrypt_acceptance_manifest.py` (3,258),
-  `tests/_dbcrypt_acceptance_native.py` (1,905; destructive collector shipped in the sdist); split them, consider stacked PRs.
+- [ ] Oversized files: `tools/dbcrypt_acceptance.py` (4,266 lines), `tests/test_dbcrypt_acceptance_manifest.py` (3,082),
+  `tests/_dbcrypt_acceptance_native.py` (1,907; destructive collector shipped in the sdist); split them, consider stacked PRs.
 - [x] Windows path handling: `_shim.py`, `_connection.py` and `_backup.py` reject
   UNC/device namespaces lexically before target I/O, including decoded URIs,
   registered backup values and relative paths under a UNC working directory.
@@ -358,7 +358,7 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
 - [ ] Build hook leaves the DLL in `dist/` and re-reads the source after validating the image (`hatch_build.py`).
 - [ ] CI scope: `tools/ci_scope_paths.json` maps `tests/_dbcrypt_support.py` to `[]` (`tools/ci_scope_paths.json`).
 - [ ] Acceptance tooling: source mode misses `.pth`/`sitecustomize` and driver hashes; manifest has
-  stale `native_collectors` fields and dead `acceptance_failures` code (`tools/dbcrypt_acceptance.py`).
+  stale `native_collectors` fields (`tools/dbcrypt_acceptance.py`).
 - [ ] Temp store: runtime connections do not pin `temp_store=MEMORY` or deny `temp_store`/`mmap_size`
   changes (`src/mordred_hermes/dbcrypt/_connection.py`).
 - [ ] Reviewer-facing PR summary: the PR #270 body relies on internal jargon; state per platform what

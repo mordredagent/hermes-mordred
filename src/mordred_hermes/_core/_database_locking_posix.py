@@ -182,9 +182,3 @@ def linux_holders_of(paths: list[Path], *, proc: Path = Path("/proc")) -> list[i
         except OSError:
             return None
     return sorted(holders)
-
-
-def assert_no_linux_holders(paths: list[Path], *, proc: Path = Path("/proc")) -> None:
-    result = linux_holders_of(paths, proc=proc)
-    if result is None or result:
-        raise DatabaseRefused("database holder visibility is unknown or files are in use")

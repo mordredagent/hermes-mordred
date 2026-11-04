@@ -28,7 +28,7 @@ from .._core._config_text_io import _atomic_write_text as _atomic_write_text
 from .._core._config_text_io import _bounded_utf8, _windows
 from .._core._dotenv_io import _dotenv_lock as _dotenv_lock
 from .._core._dotenv_io import update_dotenv_file as update_dotenv_file
-from .._core._dotenv_text import contains_newline, is_wizard_key, merge_assignments, replace_or_strip_key
+from .._core._dotenv_text import contains_newline, is_wizard_key, merge_assignments
 
 
 @runtime_checkable
@@ -62,20 +62,3 @@ class DotEnvFileWriter:
             return merge_assignments(existing, {key: value}, mode="wizard")
 
         update_dotenv_file(path, transform)
-
-
-def _replace_or_strip_key(lines: list[str], key: str, value: str) -> tuple[list[str], bool]:
-    """Return (lines, found) where lines either has the new value or has the
-    key removed (when ``value`` is empty).
-
-    Used by :meth:`DotEnvFileWriter.upsert`. Match is exact: ``key=...`` only
-    matches lines starting with ``<key>=``. Comments and lines that happen to
-    contain ``key=`` as a substring elsewhere are preserved.
-
-    Deduplication (review M2): if the on-disk file already had multiple
-    matching lines (from a hand-edit or a half-finished write), only the
-    first match keeps the new value -- subsequent matches are stripped --
-    so the result is a single line. Empty-value removal strips all
-    matches.
-    """
-    return replace_or_strip_key(lines, key, value)

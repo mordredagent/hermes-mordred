@@ -279,11 +279,6 @@ def set_history_switch(config_path: Path, key: str, value: bool) -> None:
     _edit_posix(config_path, edit)
 
 
-def set_history_enabled(config_path: Path, value: bool) -> None:
-    """Set ``plugins.mordred_activity.history_enabled`` only (:func:`set_history_switch`)."""
-    set_history_switch(config_path, "history_enabled", value)
-
-
 def _mapping(root: Any, parent: MutableMapping[str, Any], key: str) -> MutableMapping[str, Any]:
     """``parent[key]`` as a mapping, created when absent or empty; any other value is refused, and so is a
     mapping that another part of the document shares (:func:`_holders`)."""

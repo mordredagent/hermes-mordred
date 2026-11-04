@@ -565,11 +565,17 @@ def test_a_probe_that_already_reads_as_asked_writes_nothing(
 
 
 @posix_only
-@pytest.mark.parametrize("plan", [{"exit_get": 1}, {"sleep": 5}], ids=["exit-1", "timeout"])
+@pytest.mark.parametrize(
+    ("plan", "timeout_s"),
+    # A fresh script can take over 0.5s to start on macOS; only the timeout row may
+    # cut the fake off, and only after it has logged its call.
+    [({"exit_get": 1}, direct_tools.HERMES_TIMEOUT_S), ({"sleep": 30}, 3.0)],
+    ids=["exit-1", "timeout"],
+)
 def test_a_probe_that_fails_otherwise_is_config_write_failed(
-    home: Path, hermes: FakeHermes, monkeypatch: pytest.MonkeyPatch, plan: dict[str, Any]
+    home: Path, hermes: FakeHermes, monkeypatch: pytest.MonkeyPatch, plan: dict[str, Any], timeout_s: float
 ) -> None:
-    monkeypatch.setattr(direct_tools, "HERMES_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(direct_tools, "HERMES_TIMEOUT_S", timeout_s)
     config = write(home, CONFIG)
     hermes.plan(**plan)
     with pytest.raises(DirectToolsError) as error:

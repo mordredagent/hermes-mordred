@@ -754,7 +754,7 @@ hermes-mordred uninstall --purge-data   # also delete Mordred's data and device 
 ```sh
 hermes-mordred databases status            # each Hermes database: plaintext / encrypted
 hermes-mordred databases encrypt --dry-run # list what would be encrypted
-hermes-mordred databases encrypt           # encrypt them all (or at the next Hermes start)
+hermes-mordred databases encrypt           # encrypt them all; quit Hermes first
 hermes-mordred databases decrypt           # back to plain SQLite; encryption off
 ```
 > Hermes keeps its conversation history and other state in SQLite files
@@ -766,8 +766,8 @@ hermes-mordred databases decrypt           # back to plain SQLite; encryption of
 > first) and is unlocked once per Hermes process. Files of other programs
 > (Hermes's install, toolchains, MCP servers, skills) and anything outside the
 > Hermes home are left alone. If any Hermes process is running, even before
-> opening a database, conversion is scheduled. Quit all Hermes processes, then
-> restart; the conversion runs before the new process opens any database. The
+> opening a database, the command stops without changing anything. Quit all
+> Hermes processes and run it again. The
 > conversion is all-or-nothing and verified (same tables and row counts); an
 > interrupted one is completed on the next start. Old plaintext blocks are
 > replaced, not overwritten: on an SSD they can survive in free space or APFS
@@ -778,8 +778,8 @@ hermes-mordred databases decrypt           # back to plain SQLite; encryption of
 > key, and that no plaintext database has appeared; strict policy stops the turn,
 > lenient policy warns you (through the agent and Hermes Desktop). The agent is
 > told the checked status, so it does not claim encryption that is not in
-> effect. `decrypt` (also scheduled for the next start if Hermes is running)
-> converts everything back. A missing or wrong key leaves encryption enabled
+> effect. `decrypt` (also refused while Hermes is running) converts everything
+> back. A missing or wrong key leaves encryption enabled
 > and reports failure. Normal uninstall also restores the databases before
 > removing the package or keys. `status` and `--dry-run` do not execute pending
 > conversions.

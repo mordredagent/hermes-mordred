@@ -25,7 +25,7 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -274,42 +274,45 @@ def _memory_path(module: ModuleType) -> Path:
     return Path(module.MemoryStore._path_for("memory"))
 
 
+def _hooked(shape: str, mem_dir: Path, home: Path, **install_options: Any) -> tuple[ModuleType, Path]:
+    """A fresh ``shape`` module with the hook installed (see :func:`_install`), and its memory path."""
+    module = _fake_module(shape, mem_dir)
+    _install(module, home, **install_options)
+    return module, _memory_path(module)
+
+
 # --------------------------------------------------------------------------
 # Seam classification
 # --------------------------------------------------------------------------
 
 
-def test_classify_seam_rejects_missing_write_file(mem_dir: Path) -> None:
+@pytest.mark.parametrize(
+    ("owner", "attribute", "value", "named_in_reason"),
+    [
+        # Present but not callable.
+        pytest.param("MemoryStore", "_write_file", None, "_write_file", id="missing-write-file"),
+        pytest.param(
+            "MemoryStore", "_write_file", staticmethod(lambda p, lines: None), "_write_file", id="wrong-parameter-names"
+        ),
+        pytest.param("module", "ENTRY_DELIMITER", b"\n\xc2\xa7\n", "ENTRY_DELIMITER", id="non-str-delimiter"),
+        # `_read_raw_checked` says shape A, but the drift signature is shape B's.
+        pytest.param(
+            "MemoryStore",
+            "_read_raw_checked",
+            staticmethod(lambda path: ("", True)),
+            "_detect_external_drift",
+            id="mixed-shape",
+        ),
+    ],
+)
+def test_classify_seam_rejects_a_damaged_shape_b(
+    mem_dir: Path, owner: str, attribute: str, value: object, named_in_reason: str
+) -> None:
     module = _fake_module("B", mem_dir)
-    module.MemoryStore._write_file = None  # present but not callable
+    setattr(module if owner == "module" else module.MemoryStore, attribute, value)
     shape, reason = classify_seam(module)
     assert shape == ""
-    assert "_write_file" in reason
-
-
-def test_classify_seam_rejects_wrong_parameter_names(mem_dir: Path) -> None:
-    module = _fake_module("B", mem_dir)
-    module.MemoryStore._write_file = staticmethod(lambda p, lines: None)
-    shape, reason = classify_seam(module)
-    assert shape == ""
-    assert "_write_file" in reason
-
-
-def test_classify_seam_rejects_non_str_delimiter(mem_dir: Path) -> None:
-    module = _fake_module("B", mem_dir)
-    module.ENTRY_DELIMITER = b"\n\xc2\xa7\n"
-    shape, reason = classify_seam(module)
-    assert shape == ""
-    assert "ENTRY_DELIMITER" in reason
-
-
-def test_classify_seam_rejects_mixed_shape(mem_dir: Path) -> None:
-    # `_read_raw_checked` says shape A, but the drift signature is shape B's.
-    module = _fake_module("B", mem_dir)
-    module.MemoryStore._read_raw_checked = staticmethod(lambda path: ("", True))
-    shape, reason = classify_seam(module)
-    assert shape == ""
-    assert "_detect_external_drift" in reason
+    assert named_in_reason in reason
 
 
 def test_classify_seam_rejects_missing_memory_store() -> None:
@@ -382,13 +385,11 @@ def test_install_refuses_to_start_on_unsupported_seam_when_armed(
 
 
 def test_optout_marker_disarms_the_hook(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path)
+    module, path = _hooked(shape, mem_dir, tmp_path)
     optout = memory_optout_marker_path(tmp_path)
     optout.parent.mkdir(parents=True, exist_ok=True)
     optout.write_text("", encoding="utf-8")
 
-    path = _memory_path(module)
     module.MemoryStore._write_file(path, ["plain entry"])
     assert path.read_text(encoding="utf-8") == "plain entry"
 
@@ -399,12 +400,10 @@ def test_optout_marker_disarms_the_hook(shape: str, mem_dir: Path, tmp_path: Pat
 
 
 def test_not_armed_write_and_read_are_byte_identical(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    wrapped = _fake_module(shape, mem_dir)
+    wrapped, wrapped_path = _hooked(shape, mem_dir, tmp_path, armed=False)
     control = _fake_module(shape, mem_dir / "control")
-    _install(wrapped, tmp_path, armed=False)
 
     entries = ["first entry", "second entry"]
-    wrapped_path = _memory_path(wrapped)
     control_path = _memory_path(control)
     wrapped.MemoryStore._write_file(wrapped_path, entries)
     control.MemoryStore._write_file(control_path, entries)
@@ -431,9 +430,7 @@ def test_armed_write_seals_the_file(shape: str, mem_dir: Path, tmp_path: Path) -
 
 
 def test_armed_write_without_a_key_raises_and_leaves_the_file(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path, key=None)
-    path = _memory_path(module)
+    module, path = _hooked(shape, mem_dir, tmp_path, key=None)
     path.write_bytes(seal(b"prior entry", key=KEY, name="MEMORY.md"))
     before = path.read_bytes()
 
@@ -446,10 +443,9 @@ def test_armed_write_without_a_key_raises_and_leaves_the_file(shape: str, mem_di
 
 def test_armed_write_with_an_unusable_key_raises(shape: str, mem_dir: Path, tmp_path: Path) -> None:
     # A malformed key is "no key" — never a silent plaintext write.
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path, key="base64:not-a-32-byte-key")
+    module, path = _hooked(shape, mem_dir, tmp_path, key="base64:not-a-32-byte-key")
     with pytest.raises(MemoryEncryptionUnavailable):
-        module.MemoryStore._write_file(_memory_path(module), ["new entry"])
+        module.MemoryStore._write_file(path, ["new entry"])
 
 
 # --------------------------------------------------------------------------
@@ -458,18 +454,14 @@ def test_armed_write_with_an_unusable_key_raises(shape: str, mem_dir: Path, tmp_
 
 
 def test_armed_read_returns_the_plaintext_entries(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path)
-    path = _memory_path(module)
+    module, path = _hooked(shape, mem_dir, tmp_path)
     path.write_bytes(seal("first entry\n§\nsecond entry".encode(), key=KEY, name="MEMORY.md"))
 
     assert module.MemoryStore._read_file(path) == ["first entry", "second entry"]
 
 
 def test_armed_read_of_a_plaintext_file_passes_through_and_is_noted(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path)
-    path = _memory_path(module)
+    module, path = _hooked(shape, mem_dir, tmp_path)
     path.write_text("legacy entry", encoding="utf-8")
 
     assert module.MemoryStore._read_file(path) == ["legacy entry"]
@@ -477,16 +469,13 @@ def test_armed_read_of_a_plaintext_file_passes_through_and_is_noted(shape: str, 
 
 
 def test_read_of_an_absent_file_is_unchanged(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path)
+    module, _ = _hooked(shape, mem_dir, tmp_path)
     assert module.MemoryStore._read_file(mem_dir / "MEMORY.md") == []
     assert not _memory_hook._PLAINTEXT_SEEN
 
 
 def test_read_of_a_sealed_file_without_a_key_raises(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path, key=None)
-    path = _memory_path(module)
+    module, path = _hooked(shape, mem_dir, tmp_path, key=None)
     path.write_bytes(seal(b"prior entry", key=KEY, name="MEMORY.md"))
 
     with pytest.raises(MemoryEncryptionUnavailable, match="HERMES_MEMORY_KEY"):
@@ -494,17 +483,13 @@ def test_read_of_a_sealed_file_without_a_key_raises(shape: str, mem_dir: Path, t
 
 
 def test_read_of_a_plaintext_file_without_a_key_still_works(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path, key=None)
-    path = _memory_path(module)
+    module, path = _hooked(shape, mem_dir, tmp_path, key=None)
     path.write_text("legacy entry", encoding="utf-8")
     assert module.MemoryStore._read_file(path) == ["legacy entry"]
 
 
 def test_read_of_a_wrong_key_file_raises(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path, key=OTHER_KEY_ENV)
-    path = _memory_path(module)
+    module, path = _hooked(shape, mem_dir, tmp_path, key=OTHER_KEY_ENV)
     path.write_bytes(seal(b"prior entry", key=KEY, name="MEMORY.md"))
 
     with pytest.raises(MemoryEncryptionUnavailable, match="authenticate"):
@@ -512,9 +497,7 @@ def test_read_of_a_wrong_key_file_raises(shape: str, mem_dir: Path, tmp_path: Pa
 
 
 def test_read_of_a_tampered_file_raises(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path)
-    path = _memory_path(module)
+    module, path = _hooked(shape, mem_dir, tmp_path)
     sealed = bytearray(seal(b"prior entry", key=KEY, name="MEMORY.md"))
     sealed[-4] = ord("A") if sealed[-4] != ord("A") else ord("B")
     path.write_bytes(bytes(sealed))
@@ -525,17 +508,13 @@ def test_read_of_a_tampered_file_raises(shape: str, mem_dir: Path, tmp_path: Pat
 
 def test_read_of_a_sealed_file_while_disarmed_still_decrypts(shape: str, mem_dir: Path, tmp_path: Path) -> None:
     # Turning the marker off must not make already-sealed memories unreadable.
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path, armed=False)
-    path = _memory_path(module)
+    module, path = _hooked(shape, mem_dir, tmp_path, armed=False)
     path.write_bytes(seal(b"prior entry", key=KEY, name="MEMORY.md"))
     assert module.MemoryStore._read_file(path) == ["prior entry"]
 
 
 def test_shape_a_read_preserves_the_read_ok_contract(mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module("A", mem_dir)
-    _install(module, tmp_path)
-    path = _memory_path(module)
+    module, path = _hooked("A", mem_dir, tmp_path)
 
     assert module.MemoryStore._read_raw_checked(path) == ("", True)  # absent → clean empty
 
@@ -570,9 +549,7 @@ def _broken_seal(flavour: str, text: str = "prior entry") -> bytes:
 
 @pytest.mark.parametrize("flavour", ["appended", "truncated", "rewrapped"])
 def test_read_of_a_structurally_broken_seal_refuses(shape: str, mem_dir: Path, tmp_path: Path, flavour: str) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path)
-    path = _memory_path(module)
+    module, path = _hooked(shape, mem_dir, tmp_path)
     data = _broken_seal(flavour)
     assert not is_sealed(data)  # what used to make this read as one plaintext entry
     path.write_bytes(data)
@@ -584,9 +561,7 @@ def test_read_of_a_structurally_broken_seal_refuses(shape: str, mem_dir: Path, t
 def test_read_of_a_broken_seal_refuses_while_disarmed_and_keyless(shape: str, mem_dir: Path, tmp_path: Path) -> None:
     """The process that would do the damage is exactly the one with no key: it
     reads the ciphertext as an entry and writes it back mangled."""
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path, armed=False, key=None)
-    path = _memory_path(module)
+    module, path = _hooked(shape, mem_dir, tmp_path, armed=False, key=None)
     path.write_bytes(_broken_seal("appended"))
 
     with pytest.raises(MemoryEncryptionUnavailable, match="structure is broken"):
@@ -594,9 +569,7 @@ def test_read_of_a_broken_seal_refuses_while_disarmed_and_keyless(shape: str, me
 
 
 def test_shape_a_read_raw_checked_refuses_a_broken_seal(mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module("A", mem_dir)
-    _install(module, tmp_path)
-    path = _memory_path(module)
+    module, path = _hooked("A", mem_dir, tmp_path)
     path.write_bytes(_broken_seal("truncated"))
 
     with pytest.raises(MemoryEncryptionUnavailable, match="structure is broken"):
@@ -606,9 +579,7 @@ def test_shape_a_read_raw_checked_refuses_a_broken_seal(mem_dir: Path, tmp_path:
 def test_an_impersonating_entry_below_the_first_stays_readable(shape: str, mem_dir: Path, tmp_path: Path) -> None:
     """Only the file's *first* bytes are classified, so an entry carrying the magic
     anywhere else is ordinary plaintext and must still be readable."""
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path)
-    path = _memory_path(module)
+    module, path = _hooked(shape, mem_dir, tmp_path)
     entries = ["an ordinary entry", f"{MAGIC.decode()}\nnot base64 at all"]
     path.write_text(ENTRY_DELIMITER.join(entries), encoding="utf-8")
 
@@ -634,10 +605,8 @@ def test_broken_seal_fires_the_locked_memory_warning(tmp_path: Path, capsys: pyt
 
 
 def test_shape_a_drift_seals_the_plaintext_backup(mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module("A", mem_dir)
-    _install(module, tmp_path)
+    module, path = _hooked("A", mem_dir, tmp_path)
     store = module.MemoryStore()
-    path = _memory_path(module)
     raw = "x" * (store.memory_char_limit + 10)  # oversize entry = drift
     path.write_text(raw, encoding="utf-8")
 
@@ -650,8 +619,7 @@ def test_shape_a_drift_seals_the_plaintext_backup(mem_dir: Path, tmp_path: Path)
 
 
 def test_shape_a_drift_passes_a_clean_result_through(mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module("A", mem_dir)
-    _install(module, tmp_path)
+    module, _ = _hooked("A", mem_dir, tmp_path)
     store = module.MemoryStore()
 
     assert store._detect_external_drift("memory", "clean entry") is None
@@ -659,8 +627,7 @@ def test_shape_a_drift_passes_a_clean_result_through(mem_dir: Path, tmp_path: Pa
 
 
 def test_shape_a_drift_reports_a_failed_backup(mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    module = _fake_module("A", mem_dir)
-    _install(module, tmp_path)
+    module, _ = _hooked("A", mem_dir, tmp_path)
     store = module.MemoryStore()
 
     def _boom(path: Path, data: bytes) -> None:
@@ -680,9 +647,7 @@ def test_shape_a_drift_never_writes_a_plaintext_backup(
     """The H3 regression: upstream's own drift path writes the ``.bak`` with a bare
     ``Path.write_text`` of the *decrypted* snapshot. Watch the writes as they
     happen — a final-state check cannot see a plaintext file that is later sealed."""
-    module = _fake_module("A", mem_dir)
-    _install(module, tmp_path, armed=False)  # sealed on disk is enough; arming is not needed
-    path = _memory_path(module)
+    module, path = _hooked("A", mem_dir, tmp_path, armed=False)  # sealed on disk is enough; arming is not needed
     raw = "x" * 9000
     path.write_bytes(seal(raw.encode("utf-8"), key=KEY, name="MEMORY.md"))
 
@@ -728,10 +693,8 @@ def test_shape_a_drift_delegates_for_a_plaintext_file(mem_dir: Path, tmp_path: P
 
 
 def test_shape_b_drift_does_not_false_positive_on_a_sealed_file(mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module("B", mem_dir)
-    _install(module, tmp_path)
+    module, path = _hooked("B", mem_dir, tmp_path)
     store = module.MemoryStore(memory_char_limit=80)
-    path = _memory_path(module)
     plaintext = "first entry\n§\nsecond entry"
     path.write_bytes(seal(plaintext.encode(), key=KEY, name="MEMORY.md"))
     # The sealed text is far longer than the char limit; the check must run on
@@ -742,10 +705,8 @@ def test_shape_b_drift_does_not_false_positive_on_a_sealed_file(mem_dir: Path, t
 
 
 def test_shape_b_drift_backs_up_a_sealed_file_with_an_oversize_entry(mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module("B", mem_dir)
-    _install(module, tmp_path)
+    module, path = _hooked("B", mem_dir, tmp_path)
     store = module.MemoryStore(memory_char_limit=40)
-    path = _memory_path(module)
     plaintext = "x" * 100
     path.write_bytes(seal(plaintext.encode(), key=KEY, name="MEMORY.md"))
 
@@ -783,9 +744,7 @@ def test_shape_b_drift_delegates_for_a_plaintext_file(mem_dir: Path, tmp_path: P
 def test_shape_b_armed_plaintext_backup_is_sealed_before_publication(
     mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plaintext: str
 ) -> None:
-    module = _fake_module("B", mem_dir)
-    _install(module, tmp_path)
-    path = _memory_path(module)
+    module, path = _hooked("B", mem_dir, tmp_path)
     before = plaintext.encode()
     path.write_bytes(before)
     writes: list[bytes] = []
@@ -827,9 +786,7 @@ def test_shape_b_armed_plaintext_backup_is_sealed_before_publication(
 def test_shape_b_armed_plaintext_key_refusal_preserves_all_artifacts(
     mem_dir: Path, tmp_path: Path, key: str | None
 ) -> None:
-    module = _fake_module("B", mem_dir)
-    _install(module, tmp_path, key=key)
-    path = _memory_path(module)
+    module, path = _hooked("B", mem_dir, tmp_path, key=key)
     path.write_bytes(b"x" * 100)
     prior = mem_dir / "MEMORY.md.bak.prior"
     prior.write_bytes(b"prior backup")
@@ -843,9 +800,7 @@ def test_shape_b_armed_plaintext_key_refusal_preserves_all_artifacts(
 def test_shape_b_armed_read_uncertainty_refuses_without_publication(
     mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:
-    module = _fake_module("B", mem_dir)
-    _install(module, tmp_path)
-    path = _memory_path(module)
+    module, path = _hooked("B", mem_dir, tmp_path)
     path.write_bytes(b"original")
     reader = Path.read_text
 
@@ -863,9 +818,7 @@ def test_shape_b_armed_read_uncertainty_refuses_without_publication(
 def test_shape_b_plaintext_backup_uses_one_snapshot(
     mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    module = _fake_module("B", mem_dir)
-    _install(module, tmp_path)
-    path = _memory_path(module)
+    module, path = _hooked("B", mem_dir, tmp_path)
     observed = "x" * 100
     replacement = seal(b"different snapshot", key=KEY, name=path.name)
     path.write_text(observed)
@@ -891,10 +844,8 @@ def test_shape_b_plaintext_backup_uses_one_snapshot(
 def test_shape_b_drift_never_backs_up_an_unauthenticated_seal(
     mem_dir: Path, tmp_path: Path, armed: bool, damage: str
 ) -> None:
-    module = _fake_module("B", mem_dir)
     key = None if damage == "keyless" else OTHER_KEY_ENV if damage == "wrong-key" else KEY_ENV
-    _install(module, tmp_path, armed=armed, key=key)
-    path = _memory_path(module)
+    module, path = _hooked("B", mem_dir, tmp_path, armed=armed, key=key)
     before = seal(b"x" * 100, key=KEY, name=path.name)
     if damage == "broken":
         before += b"appended tampering"
@@ -905,9 +856,7 @@ def test_shape_b_drift_never_backs_up_an_unauthenticated_seal(
 
 
 def test_shape_b_disarmed_sealed_drift_remains_sealed(mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module("B", mem_dir)
-    _install(module, tmp_path, armed=False)
-    path = _memory_path(module)
+    module, path = _hooked("B", mem_dir, tmp_path, armed=False)
     before = seal(b"x" * 100, key=KEY, name=path.name)
     path.write_bytes(before)
     backup = Path(module.MemoryStore(memory_char_limit=40)._detect_external_drift("memory"))
@@ -916,9 +865,7 @@ def test_shape_b_disarmed_sealed_drift_remains_sealed(mem_dir: Path, tmp_path: P
 
 
 def test_shape_b_armed_clean_plaintext_creates_no_backup(mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module("B", mem_dir)
-    _install(module, tmp_path)
-    path = _memory_path(module)
+    module, path = _hooked("B", mem_dir, tmp_path)
     before = "first\n§\nsecond".encode()
     path.write_bytes(before)
     assert module.MemoryStore(memory_char_limit=40)._detect_external_drift("memory") is None
@@ -928,9 +875,7 @@ def test_shape_b_armed_clean_plaintext_creates_no_backup(mem_dir: Path, tmp_path
 def test_shape_b_sealed_backup_replace_failure_preserves_source_and_prior_backup(
     mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    module = _fake_module("B", mem_dir)
-    _install(module, tmp_path)
-    path = _memory_path(module)
+    module, path = _hooked("B", mem_dir, tmp_path)
     path.write_bytes(b"x" * 100)
     monkeypatch.setattr(_memory_hook.time, "time", lambda: 12345)
     prior = mem_dir / "MEMORY.md.bak.12345"
@@ -951,9 +896,7 @@ def test_shape_b_sealed_backup_replace_failure_preserves_source_and_prior_backup
 def test_shape_b_sealed_backup_replaces_symlink_without_touching_target(
     mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    module = _fake_module("B", mem_dir)
-    _install(module, tmp_path)
-    path = _memory_path(module)
+    module, path = _hooked("B", mem_dir, tmp_path)
     path.write_bytes(b"x" * 100)
     monkeypatch.setattr(_memory_hook.time, "time", lambda: 12345)
     outside = tmp_path / "outside"
@@ -973,10 +916,8 @@ def test_shape_b_linux_plaintext_backup_holds_lifecycle_lock_and_never_provision
     from mordred_hermes.keyvault import _memory_key
     from tests._helpers import PlatformSys
 
-    module = _fake_module("B", mem_dir)
-    _install(module, tmp_path, key=None)
+    module, path = _hooked("B", mem_dir, tmp_path, key=None)
     monkeypatch.setattr(_memory_hook, "sys", PlatformSys("linux"))
-    path = _memory_path(module)
     path.write_bytes(b"x" * 100)
     held = False
     lock = _memory_key.memory_key_lock
@@ -1031,9 +972,7 @@ def test_shape_b_linux_refuses_source_path_before_key_resolution(
     outside = tmp_path / "outside"
     outside.mkdir()
     selected = mem_dir if invalid_path == "symlink" else outside
-    module = _fake_module("B", selected)
-    _install(module, tmp_path)
-    path = _memory_path(module)
+    module, path = _hooked("B", selected, tmp_path)
     if invalid_path == "symlink":
         target = outside / "MEMORY.md"
         target.write_bytes(b"x" * 100)
@@ -1062,9 +1001,7 @@ def test_shape_b_linux_custody_failure_preserves_memory_and_does_not_regenerate(
 
     backend = FakeBackend()
     _memory_key.ensure_linux_memory_key(home=tmp_path, backend=backend)
-    module = _fake_module("B", mem_dir)
-    _install(module, tmp_path, key=KEY_ENV)  # ambient key must not bypass managed TPM failure
-    path = _memory_path(module)
+    module, path = _hooked("B", mem_dir, tmp_path, key=KEY_ENV)  # ambient key must not bypass managed TPM failure
     path.write_bytes(b"x" * 100)
     key_path = _memory_key.memory_key_path(tmp_path)
     if damage == "missing":
@@ -1085,17 +1022,14 @@ def test_shape_b_linux_custody_failure_preserves_memory_and_does_not_regenerate(
 
 
 def test_shape_b_drift_delegates_for_an_absent_file(mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module("B", mem_dir)
-    _install(module, tmp_path, key=None)
+    module, _ = _hooked("B", mem_dir, tmp_path, key=None)
     store = module.MemoryStore()
     assert store._detect_external_drift("memory") is None
     assert list(mem_dir.iterdir()) == []
 
 
 def test_shape_b_drift_raises_for_an_undecryptable_file(mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module("B", mem_dir)
-    _install(module, tmp_path, key=OTHER_KEY_ENV)
-    path = _memory_path(module)
+    module, path = _hooked("B", mem_dir, tmp_path, key=OTHER_KEY_ENV)
     path.write_bytes(seal(b"prior entry", key=KEY, name="MEMORY.md"))
     store = module.MemoryStore()
 
@@ -1104,8 +1038,7 @@ def test_shape_b_drift_raises_for_an_undecryptable_file(mem_dir: Path, tmp_path:
 
 
 def test_shape_c_has_no_drift_wrapper(mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module("C", mem_dir)
-    _install(module, tmp_path)
+    module, _ = _hooked("C", mem_dir, tmp_path)
     assert not hasattr(module.MemoryStore, "_detect_external_drift")
 
 
@@ -1115,9 +1048,7 @@ def test_shape_c_has_no_drift_wrapper(mem_dir: Path, tmp_path: Path) -> None:
 
 
 def test_mutate_cycle_keeps_prior_entries(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path)
-    path = _memory_path(module)
+    module, path = _hooked(shape, mem_dir, tmp_path)
 
     first = module.MemoryStore()
     first._set_entries("memory", ["first entry"])
@@ -1147,55 +1078,70 @@ def _seed_sealed(module: ModuleType, text: str = "prior entry") -> Path:
     return path
 
 
-def test_disarmed_write_over_a_sealed_file_stays_sealed(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path, armed=False)
-    path = _seed_sealed(module)
+def _seed_crlf_seal(module: ModuleType, text: str = "first entry\n§\nsecond entry") -> Path:
+    """A seal that has been through a CRLF-converting round trip (editor, git, rsync)."""
+    path = _memory_path(module)
+    path.write_bytes(seal(text.encode("utf-8"), key=KEY, name=path.name).replace(b"\n", b"\r\n"))
+    return path
 
-    module.MemoryStore._write_file(path, ["new entry"])
+
+@pytest.mark.parametrize(
+    ("seed", "entry"),
+    [
+        pytest.param(_seed_sealed, "new entry", id="sealed"),
+        pytest.param(_seed_crlf_seal, "the model's new entry", id="crlf-seal"),
+    ],
+)
+def test_disarmed_write_over_a_seal_stays_sealed(
+    shape: str, mem_dir: Path, tmp_path: Path, seed: Callable[[ModuleType], Path], entry: str
+) -> None:
+    module, _ = _hooked(shape, mem_dir, tmp_path, armed=False)
+    path = seed(module)
+
+    module.MemoryStore._write_file(path, [entry])
 
     assert is_sealed(path.read_bytes())
-    assert unseal(path.read_bytes(), key=KEY, name="MEMORY.md") == b"new entry"
-
-
-def test_disarmed_write_over_a_sealed_file_without_a_key_refuses(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path, armed=False, key=None)
-    path = _seed_sealed(module)
-    before = path.read_bytes()
-
-    with pytest.raises(MemoryEncryptionUnavailable, match="refusing to overwrite sealed"):
-        module.MemoryStore._write_file(path, ["new entry"])
-
-    assert path.read_bytes() == before
+    assert unseal(path.read_bytes(), key=KEY, name="MEMORY.md") == entry.encode()
 
 
 def test_safe_mode_write_over_a_sealed_file_stays_sealed(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path, environ={"HERMES_SAFE_MODE": "1"})
-    path = _seed_sealed(module)
+    module, path = _hooked(shape, mem_dir, tmp_path, environ={"HERMES_SAFE_MODE": "1"})
+    _seed_sealed(module)
 
     module.MemoryStore._write_file(path, ["new entry"])
 
     assert is_sealed(path.read_bytes())
 
 
-def test_safe_mode_write_over_a_sealed_file_without_a_key_refuses(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path, key=None, environ={"HERMES_SAFE_MODE": "1"})
-    path = _seed_sealed(module)
+@pytest.mark.parametrize(
+    ("armed", "environ", "seed", "entry"),
+    [
+        pytest.param(False, {}, _seed_sealed, "new entry", id="disarmed-sealed"),
+        pytest.param(True, {"HERMES_SAFE_MODE": "1"}, _seed_sealed, "new entry", id="safe-mode-sealed"),
+        pytest.param(False, {}, _seed_crlf_seal, "the model's new entry", id="disarmed-crlf-seal"),
+    ],
+)
+def test_write_over_a_seal_without_a_key_refuses(
+    shape: str,
+    mem_dir: Path,
+    tmp_path: Path,
+    armed: bool,
+    environ: dict[str, str],
+    seed: Callable[[ModuleType], Path],
+    entry: str,
+) -> None:
+    module, _ = _hooked(shape, mem_dir, tmp_path, armed=armed, key=None, environ=dict(environ))
+    path = seed(module)
     before = path.read_bytes()
 
     with pytest.raises(MemoryEncryptionUnavailable, match="refusing to overwrite sealed"):
-        module.MemoryStore._write_file(path, ["new entry"])
+        module.MemoryStore._write_file(path, [entry])
 
     assert path.read_bytes() == before
 
 
 def test_disarmed_write_over_a_plaintext_file_stays_plaintext(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path, armed=False)
-    path = _memory_path(module)
+    module, path = _hooked(shape, mem_dir, tmp_path, armed=False)
     path.write_text("legacy entry", encoding="utf-8")
 
     module.MemoryStore._write_file(path, ["new entry"])
@@ -1226,17 +1172,9 @@ def test_safe_mode_still_wraps_a_supported_seam(shape: str, mem_dir: Path, tmp_p
 # --------------------------------------------------------------------------
 
 
-def _seed_crlf_seal(module: ModuleType, text: str = "first entry\n§\nsecond entry") -> Path:
-    """A seal that has been through a CRLF-converting round trip (editor, git, rsync)."""
-    path = _memory_path(module)
-    path.write_bytes(seal(text.encode("utf-8"), key=KEY, name=path.name).replace(b"\n", b"\r\n"))
-    return path
-
-
 def test_crlf_seal_is_read_as_a_seal(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path)
-    path = _seed_crlf_seal(module)
+    module, path = _hooked(shape, mem_dir, tmp_path)
+    _seed_crlf_seal(module)
 
     assert module.MemoryStore._read_file(path) == ["first entry", "second entry"]
 
@@ -1245,34 +1183,10 @@ def test_crlf_seal_is_classified_as_sealed_by_the_write_side(shape: str, mem_dir
     """The read seam decodes in universal-newline mode, so a byte-level classifier
     called the same file plaintext — and a disarmed write then published plaintext
     over sealed bytes."""
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path)
-    path = _seed_crlf_seal(module)
+    module, path = _hooked(shape, mem_dir, tmp_path)
+    _seed_crlf_seal(module)
 
     assert _memory_hook._sealed_on_disk(path) is True
-
-
-def test_disarmed_write_over_a_crlf_seal_without_a_key_refuses(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path, armed=False, key=None)
-    path = _seed_crlf_seal(module)
-    before = path.read_bytes()
-
-    with pytest.raises(MemoryEncryptionUnavailable, match="refusing to overwrite sealed"):
-        module.MemoryStore._write_file(path, ["the model's new entry"])
-
-    assert path.read_bytes() == before
-
-
-def test_disarmed_write_over_a_crlf_seal_reseals_it(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path, armed=False)
-    path = _seed_crlf_seal(module)
-
-    module.MemoryStore._write_file(path, ["the model's new entry"])
-
-    assert is_sealed(path.read_bytes())
-    assert unseal(path.read_bytes(), key=KEY, name="MEMORY.md") == b"the model's new entry"
 
 
 # --------------------------------------------------------------------------
@@ -1285,9 +1199,7 @@ def test_plaintext_write_refuses_a_first_entry_that_impersonates_the_header(
 ) -> None:
     """Only entry 0 can put the magic at the head of the file, and only a plaintext
     write puts an entry there verbatim — the file would then read as a seal."""
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path, armed=False)
-    path = _memory_path(module)
+    module, path = _hooked(shape, mem_dir, tmp_path, armed=False)
 
     with pytest.raises(MemoryEncryptionUnavailable, match="sealed-memory header") as excinfo:
         module.MemoryStore._write_file(path, [f"  {MAGIC.decode()}\nZm9v", "harmless"])
@@ -1302,9 +1214,7 @@ def test_plaintext_write_allows_an_impersonating_entry_that_is_not_first(
 ) -> None:
     """The refusal used to be unconditional, so one stored entry bricked every
     write. Anywhere but position 0 the magic cannot reach the file's head."""
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path, armed=False)
-    path = _memory_path(module)
+    module, path = _hooked(shape, mem_dir, tmp_path, armed=False)
 
     module.MemoryStore._write_file(path, ["first", "second", f"{MAGIC.decode()}\nZm9v"])
 
@@ -1318,9 +1228,7 @@ def test_sealed_write_of_a_store_holding_an_impersonating_entry_succeeds(
 ) -> None:
     """Inside the ciphertext the blob is inert, so refusing here only bricked
     ``add`` on an encrypted store — and escaped the tool's error-dict contract."""
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path)
-    path = _memory_path(module)
+    module, path = _hooked(shape, mem_dir, tmp_path)
     entries = [f"{MAGIC.decode()}\nnotes about the sealed memory format", "an ordinary entry"]
 
     module.MemoryStore._write_file(path, entries)
@@ -1789,23 +1697,22 @@ def test_locked_memory_warning_fires_for_a_wrong_key(tmp_path: Path, capsys: pyt
     assert "agent memory is sealed" in capsys.readouterr().err
 
 
-def test_locked_memory_warning_is_quiet_when_the_key_opens_the_file(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    ("content", "environ"),
+    [
+        pytest.param(
+            lambda: seal(b"entry", key=KEY, name="MEMORY.md"), {"HERMES_MEMORY_KEY": KEY_ENV}, id="key-opens-the-file"
+        ),
+        pytest.param(lambda: b"legacy entry", {}, id="plaintext-memory"),
+    ],
+)
+def test_locked_memory_warning_is_quiet(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], content: Callable[[], bytes], environ: dict[str, str]
 ) -> None:
     home = _memories_home(tmp_path)
-    (home / "memories" / "MEMORY.md").write_bytes(seal(b"entry", key=KEY, name="MEMORY.md"))
+    (home / "memories" / "MEMORY.md").write_bytes(content())
 
-    assert warn_when_memory_is_locked(home=home, environ={"HERMES_MEMORY_KEY": KEY_ENV}) is False
-    assert capsys.readouterr().err == ""
-
-
-def test_locked_memory_warning_is_quiet_for_plaintext_memory(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    home = _memories_home(tmp_path)
-    (home / "memories" / "MEMORY.md").write_text("legacy entry", encoding="utf-8")
-
-    assert warn_when_memory_is_locked(home=home, environ={}) is False
+    assert warn_when_memory_is_locked(home=home, environ=environ) is False
     assert capsys.readouterr().err == ""
 
 
@@ -1853,8 +1760,7 @@ def test_home_is_resolved_per_call_when_not_injected(
 
 
 def test_memory_hook_installed_requires_every_seam_of_the_shape(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path)
+    module, _ = _hooked(shape, mem_dir, tmp_path)
     assert memory_hook_installed(module) is True
 
     other = _fake_module(shape, mem_dir)

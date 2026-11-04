@@ -1305,12 +1305,6 @@ def _schedule_intent(home: Path, name: str) -> None:
                 raise MigrationError("pending database intent is invalid")
 
 
-def schedule_decrypt(home: Path) -> None:
-    """Persist private decryption intent without upgrading an active SH lease."""
-    _schedule_intent(home, DECRYPT_PENDING_SUBPATH[-1])
-    _remove_record(home, PENDING_SUBPATH[-1])
-
-
 def schedule(home: Path) -> None:
     """Persist private conversion intent without upgrading an active SH lease."""
     _schedule_intent(home, PENDING_SUBPATH[-1])
