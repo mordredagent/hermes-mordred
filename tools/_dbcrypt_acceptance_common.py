@@ -10,6 +10,7 @@ import os
 import stat
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal, Protocol
@@ -760,118 +761,28 @@ def native_test_failure_summary(report: Path) -> dict[str, Any]:
     return {**result, "status": "available", "details": details}
 
 
-class _CallbackAbsolute(Protocol):
-    def __call__(self, /, value: Any) -> Path: ...
-
-
-class _CallbackArtifactRef(Protocol):
-    def __call__(self, /, directory: Path, reference: Any) -> Path: ...
-
-
 class _CallbackAssembleWindowsQualification(Protocol):
     def __call__(
         self, /, *, bundle: Path, diagnostic: Path, source_result: Path, wheel_result: Path, output: Path
     ) -> Path: ...
 
 
-class _CallbackBundleArtifact(Protocol):
-    def __call__(self, /, directory: Path, pattern: str) -> Path: ...
-
-
-class _CallbackBundleBuild(Protocol):
-    def __call__(
-        self, /, checkout: Path, output: Path, commands: list[dict[str, Any]], home: Path
-    ) -> dict[str, Any]: ...
-
-
-class _CallbackBundleHashes(Protocol):
-    def __call__(self, /, output: Path) -> dict[str, str]: ...
-
-
-class _CallbackCollectorChild(Protocol):
-    def __call__(self, /, context: dict[str, Any], root: Path, operation: str, directory: Path) -> dict[str, Any]: ...
-
-
-class _CallbackCopyBuildReceipts(Protocol):
-    def __call__(self, /, source: Path, target: Path) -> None: ...
-
-
-class _CallbackCopyInputs(Protocol):
-    def __call__(self, /, checkout: Path, output: Path) -> None: ...
-
-
-class _CallbackCopyReferenced(Protocol):
-    def __call__(self, /, source: Path, files: set[Path], target: Path) -> None: ...
-
-
-class _CallbackDiagnosticFiles(Protocol):
-    def __call__(self, /, directory: Path, manifest: dict[str, Any]) -> set[Path]: ...
-
-
 class _CallbackExecuteNativePhase(Protocol):
     def __call__(self, /, context: dict[str, Any], *, phase: Phase, directory: Path) -> dict[str, Any]: ...
-
-
-class _CallbackExportBundleEvidence(Protocol):
-    def __call__(self, /, context: dict[str, Any], directory: Path) -> dict[str, str]: ...
-
-
-class _CallbackExportWindowsQualification(Protocol):
-    def __call__(self, /, context: dict[str, Any], directory: Path) -> dict[str, str] | None: ...
-
-
-class _CallbackFixtureDescriptor(Protocol):
-    def __call__(self, /, path: Path) -> tuple[dict[str, Any], set[Path]]: ...
 
 
 class _CallbackGit(Protocol):
     def __call__(self, /, checkout: Path, *args: str) -> str: ...
 
 
-class _CallbackHex(Protocol):
-    def __call__(self, /, value: Any, length: int) -> bool: ...
-
-
-class _CallbackInputFile(Protocol):
-    def __call__(self, /, path: Path) -> Path: ...
-
-
-class _CallbackInputRootLayout(Protocol):
-    def __call__(self, /, output: Path) -> None: ...
-
-
-class _CallbackLocalBundleProof(Protocol):
-    def __call__(self, /, path: Path, manifest: dict[str, Any]) -> dict[str, Any]: ...
-
-
 class _CallbackNativeDriver(Protocol):
     def __call__(self, /, context: dict[str, Any], directory: Path, *, passive: bool = False) -> Path: ...
-
-
-class _CallbackNativeEnvironment(Protocol):
-    def __call__(self, /, context: dict[str, Any], root: Path) -> dict[str, str]: ...
-
-
-class _CallbackNativeObservationInputs(Protocol):
-    def __call__(self, /, phase: Phase) -> tuple[str | None, str]: ...
-
-
-class _CallbackNativePhaseCoverage(Protocol):
-    def __call__(self, /, phase: dict[str, Any], directory: Path) -> None: ...
 
 
 class _CallbackNativeProcess(Protocol):
     def __call__(
         self, /, context: dict[str, Any], argv: list[str], environment: dict[str, str], *, timeout: int, name: str
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]: ...
-
-
-class _CallbackNativePython(Protocol):
-    def __call__(self, /, context: dict[str, Any]) -> Path: ...
-
-
-class _CallbackNativeReopenPrior(Protocol):
-    def __call__(self, /, context: dict[str, Any], directory: Path) -> dict[str, Any]: ...
 
 
 class _CallbackNativeSuite(Protocol):
@@ -891,66 +802,14 @@ class _CallbackNativeWindowsQualification(Protocol):
     def __call__(self, /, directory: Path, *, checkout: Path, kind: str) -> dict[str, Any]: ...
 
 
-class _CallbackNativeWindowsVfsRows(Protocol):
-    def __call__(self, /, rows: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]: ...
-
-
-class _CallbackPhaseQualification(Protocol):
-    def __call__(self, /, phase: dict[str, Any], directory: Path) -> dict[str, Any] | None: ...
-
-
-class _CallbackPrivateEvidenceFile(Protocol):
-    def __call__(self, /, path: Path) -> Path: ...
-
-
 class _CallbackPython(Protocol):
     def __call__(self, /, environment: Path, platform: str = sys.platform) -> Path: ...
-
-
-class _CallbackQualificationFixture(Protocol):
-    def __call__(self, /, directory: Path, manifest: dict[str, Any]) -> dict[str, Any]: ...
-
-
-class _CallbackQualificationInputs(Protocol):
-    def __call__(self, /, directory: Path, manifest: dict[str, Any]) -> set[Path]: ...
-
-
-class _CallbackQualifiedVfsReference(Protocol):
-    def __call__(self, /, qualified: dict[str, Any], mode: str) -> dict[str, Any]: ...
-
-
-class _CallbackRecordNativeTestFailure(Protocol):
-    def __call__(self, /, record: dict[str, Any], report: Path, directory: Path) -> None: ...
-
-
-class _CallbackRequire(Protocol):
-    def __call__(self, /, condition: bool) -> None: ...
-
-
-class _CallbackRequiredQualificationHeaders(Protocol):
-    def __call__(self, /, checkout: Path) -> dict[str, str]: ...
-
-
-class _CallbackRootIdentity(Protocol):
-    def __call__(self, /, root: Path) -> dict[str, Any]: ...
 
 
 class _CallbackRunBuild(Protocol):
     def __call__(
         self, /, argv: list[str], *, cwd: Path, environment: dict[str, str], log: list[dict[str, Any]]
     ) -> str: ...
-
-
-class _CallbackSitePackages(Protocol):
-    def __call__(self, /, output: Path) -> Path: ...
-
-
-class _CallbackSuites(Protocol):
-    def __call__(self, /, platform: str) -> list[tuple[str, tuple[str, ...], dict[str, str], bool]]: ...
-
-
-class _CallbackTreeInputs(Protocol):
-    def __call__(self, /, directory: Path) -> list[Path]: ...
 
 
 class _CallbackValidatePackagedResult(Protocol):
@@ -973,68 +832,16 @@ class _CallbackValidateQualificationPayload(Protocol):
     def __call__(self, /, directory: Path, manifest: dict[str, Any], *, checkout: Path) -> dict[str, Any]: ...
 
 
-class _CallbackWriteNew(Protocol):
-    def __call__(self, /, path: Path, value: dict[str, Any]) -> None: ...
-
-
 class _CallbackAcceptanceCommands(Protocol):
     def __call__(self, /, *, checkout: Path, bundle: Path, platform: str) -> list[dict[str, Any]]: ...
-
-
-class _CallbackExtractSdist(Protocol):
-    def __call__(self, /, archive: Path, destination: Path) -> Path: ...
-
-
-class _CallbackLoadStopReceipt(Protocol):
-    def __call__(self, /, path: Path) -> dict[str, Any]: ...
 
 
 class _CallbackNativeAcceptanceCommands(Protocol):
     def __call__(self, /, *, checkout: Path, bundle: Path, platform: str, kind: str) -> list[dict[str, Any]]: ...
 
 
-class _CallbackNativeFixturePaths(Protocol):
-    def __call__(self, /, root: Path, mode: str) -> dict[str, Path]: ...
-
-
-class _CallbackNativePhaseInputs(Protocol):
-    def __call__(self, /, root: Path, phase: Phase) -> dict[str, Any]: ...
-
-
-class _CallbackNativeRefusalPayload(Protocol):
-    def __call__(self, /, stdout: str, operation: str, returncode: int) -> dict[str, Any] | None: ...
-
-
-class _CallbackNativeTestFailureDescriptor(Protocol):
-    def __call__(self, /, value: Any) -> bool: ...
-
-
-class _CallbackNativeTestFailureSummary(Protocol):
-    def __call__(self, /, report: Path) -> dict[str, Any]: ...
-
-
-class _CallbackProbeEnvironment(Protocol):
-    def __call__(self, /, home: Path) -> dict[str, str]: ...
-
-
 class _CallbackProbeInterpreter(Protocol):
     def __call__(self, /, interpreter: Path, *, cwd: Path) -> dict[str, Any]: ...
-
-
-class _CallbackRequireNativeSourceCheckout(Protocol):
-    def __call__(self, /, context: dict[str, Any]) -> None: ...
-
-
-class _CallbackRequireProductionQualification(Protocol):
-    def __call__(self, /, qualified: dict[str, Any]) -> None: ...
-
-
-class _CallbackSha256File(Protocol):
-    def __call__(self, /, path: Path) -> str: ...
-
-
-class _CallbackValidateBundle(Protocol):
-    def __call__(self, /, root: Path) -> dict[str, Any]: ...
 
 
 class _CallbackValidateControlAction(Protocol):
@@ -1049,10 +856,6 @@ class _CallbackValidateNativeTestReport(Protocol):
     def __call__(self, /, value: Any, *, platform: str = "", suite: str = "") -> dict[str, Any]: ...
 
 
-class _CallbackValidateReopenContinuity(Protocol):
-    def __call__(self, /, before: dict[str, Any], after: dict[str, Any], observation: str) -> None: ...
-
-
 class _CallbackValidateWindowsDiagnostic(Protocol):
     def __call__(self, /, directory: Path, *, checkout: Path) -> dict[str, Any]: ...
 
@@ -1063,10 +866,6 @@ class _CallbackValidateWindowsQualification(Protocol):
 
 class _CallbackValidateWithdrawableHelper(Protocol):
     def __call__(self, /, manifest: Path, *, production: Path, parent: Path) -> dict[str, Any]: ...
-
-
-class _CallbackVerifyNativeSpool(Protocol):
-    def __call__(self, /, root: Path) -> dict[str, Any]: ...
 
 
 class _CallbackWindowsPackageCommands(Protocol):
@@ -1096,9 +895,9 @@ class SystemAPI(Protocol):
 
 @dataclass(frozen=True)
 class EvidenceAPI:
-    _bundle_hashes: _CallbackBundleHashes
-    _phase_qualification: _CallbackPhaseQualification
-    _qualified_vfs_reference: _CallbackQualifiedVfsReference
+    _bundle_hashes: Callable[[Path], dict[str, str]]
+    _phase_qualification: Callable[[dict[str, Any], Path], dict[str, Any] | None]
+    _qualified_vfs_reference: Callable[[dict[str, Any], str], dict[str, Any]]
     acceptance_commands: _CallbackAcceptanceCommands
     native_acceptance_commands: _CallbackNativeAcceptanceCommands
     windows_vfs_required_nodes: _CallbackWindowsVfsRequiredNodes
@@ -1106,91 +905,91 @@ class EvidenceAPI:
 
 @dataclass(frozen=True)
 class QualificationAPI:
-    _required_qualification_headers: _CallbackRequiredQualificationHeaders
+    _required_qualification_headers: Callable[[Path], dict[str, str]]
 
 
 @dataclass(frozen=True)
 class ExecutionAPI:
-    _absolute: _CallbackAbsolute
-    _bundle_artifact: _CallbackBundleArtifact
-    _bundle_build: _CallbackBundleBuild
-    _bundle_hashes: _CallbackBundleHashes
-    _collector_child: _CallbackCollectorChild
-    _copy_build_receipts: _CallbackCopyBuildReceipts
-    _copy_inputs: _CallbackCopyInputs
+    _absolute: Callable[[Any], Path]
+    _bundle_artifact: Callable[[Path, str], Path]
+    _bundle_build: Callable[[Path, Path, list[dict[str, Any]], Path], dict[str, Any]]
+    _bundle_hashes: Callable[[Path], dict[str, str]]
+    _collector_child: Callable[[dict[str, Any], Path, str, Path], dict[str, Any]]
+    _copy_build_receipts: Callable[[Path, Path], None]
+    _copy_inputs: Callable[[Path, Path], None]
     _execute_native_phase: _CallbackExecuteNativePhase
-    _export_bundle_evidence: _CallbackExportBundleEvidence
-    _export_windows_qualification: _CallbackExportWindowsQualification
+    _export_bundle_evidence: Callable[[dict[str, Any], Path], dict[str, str]]
+    _export_windows_qualification: Callable[[dict[str, Any], Path], dict[str, str] | None]
     _git: _CallbackGit
-    _hex: _CallbackHex
-    _input_file: _CallbackInputFile
-    _input_root_layout: _CallbackInputRootLayout
+    _hex: Callable[[Any, int], bool]
+    _input_file: Callable[[Path], Path]
+    _input_root_layout: Callable[[Path], None]
     _native_driver: _CallbackNativeDriver
-    _native_environment: _CallbackNativeEnvironment
-    _native_observation_inputs: _CallbackNativeObservationInputs
-    _native_phase_coverage: _CallbackNativePhaseCoverage
+    _native_environment: Callable[[dict[str, Any], Path], dict[str, str]]
+    _native_observation_inputs: Callable[[Phase], tuple[str | None, str]]
+    _native_phase_coverage: Callable[[dict[str, Any], Path], None]
     _native_process: _CallbackNativeProcess
-    _native_python: _CallbackNativePython
-    _native_reopen_prior: _CallbackNativeReopenPrior
+    _native_python: Callable[[dict[str, Any]], Path]
+    _native_reopen_prior: Callable[[dict[str, Any], Path], dict[str, Any]]
     _native_suite: _CallbackNativeSuite
     _native_windows_qualification: _CallbackNativeWindowsQualification
-    _native_windows_vfs_rows: _CallbackNativeWindowsVfsRows
-    _private_evidence_file: _CallbackPrivateEvidenceFile
+    _native_windows_vfs_rows: Callable[[list[dict[str, Any]], str], list[dict[str, Any]]]
+    _private_evidence_file: Callable[[Path], Path]
     _python: _CallbackPython
-    _qualification_inputs: _CallbackQualificationInputs
-    _qualified_vfs_reference: _CallbackQualifiedVfsReference
-    _record_native_test_failure: _CallbackRecordNativeTestFailure
-    _require: _CallbackRequire
-    _root_identity: _CallbackRootIdentity
+    _qualification_inputs: Callable[[Path, dict[str, Any]], set[Path]]
+    _qualified_vfs_reference: Callable[[dict[str, Any], str], dict[str, Any]]
+    _record_native_test_failure: Callable[[dict[str, Any], Path, Path], None]
+    _require: Callable[[bool], None]
+    _root_identity: Callable[[Path], dict[str, Any]]
     _run_build: _CallbackRunBuild
-    _site_packages: _CallbackSitePackages
-    _suites: _CallbackSuites
-    _tree_inputs: _CallbackTreeInputs
-    _write_new: _CallbackWriteNew
+    _site_packages: Callable[[Path], Path]
+    _suites: Callable[[str], list[tuple[str, tuple[str, ...], dict[str, str], bool]]]
+    _tree_inputs: Callable[[Path], list[Path]]
+    _write_new: Callable[[Path, dict[str, Any]], None]
     acceptance_commands: _CallbackAcceptanceCommands
-    extract_sdist: _CallbackExtractSdist
-    load_stop_receipt: _CallbackLoadStopReceipt
+    extract_sdist: Callable[[Path, Path], Path]
+    load_stop_receipt: Callable[[Path], dict[str, Any]]
     native_acceptance_commands: _CallbackNativeAcceptanceCommands
-    native_fixture_paths: _CallbackNativeFixturePaths
-    native_phase_inputs: _CallbackNativePhaseInputs
-    native_refusal_payload: _CallbackNativeRefusalPayload
-    native_test_failure_descriptor: _CallbackNativeTestFailureDescriptor
-    native_test_failure_summary: _CallbackNativeTestFailureSummary
-    probe_environment: _CallbackProbeEnvironment
+    native_fixture_paths: Callable[[Path, str], dict[str, Path]]
+    native_phase_inputs: Callable[[Path, Phase], dict[str, Any]]
+    native_refusal_payload: Callable[[str, str, int], dict[str, Any] | None]
+    native_test_failure_descriptor: Callable[[Any], bool]
+    native_test_failure_summary: Callable[[Path], dict[str, Any]]
+    probe_environment: Callable[[Path], dict[str, str]]
     probe_interpreter: _CallbackProbeInterpreter
-    require_native_source_checkout: _CallbackRequireNativeSourceCheckout
-    require_production_qualification: _CallbackRequireProductionQualification
-    sha256_file: _CallbackSha256File
-    validate_bundle: _CallbackValidateBundle
+    require_native_source_checkout: Callable[[dict[str, Any]], None]
+    require_production_qualification: Callable[[dict[str, Any]], None]
+    sha256_file: Callable[[Path], str]
+    validate_bundle: Callable[[Path], dict[str, Any]]
     validate_control_action: _CallbackValidateControlAction
     validate_import_provenance: _CallbackValidateImportProvenance
     validate_native_test_report: _CallbackValidateNativeTestReport
-    validate_reopen_continuity: _CallbackValidateReopenContinuity
+    validate_reopen_continuity: Callable[[dict[str, Any], dict[str, Any], str], None]
     validate_windows_qualification: _CallbackValidateWindowsQualification
     validate_withdrawable_helper: _CallbackValidateWithdrawableHelper
-    verify_native_spool: _CallbackVerifyNativeSpool
+    verify_native_spool: Callable[[Path], dict[str, Any]]
     sys: SystemAPI
 
 
 @dataclass(frozen=True)
 class WindowsAPI:
-    _artifact_ref: _CallbackArtifactRef
+    _artifact_ref: Callable[[Path, Any], Path]
     _assemble_windows_qualification: _CallbackAssembleWindowsQualification
-    _copy_referenced: _CallbackCopyReferenced
-    _diagnostic_files: _CallbackDiagnosticFiles
-    _export_bundle_evidence: _CallbackExportBundleEvidence
-    _fixture_descriptor: _CallbackFixtureDescriptor
-    _input_file: _CallbackInputFile
-    _local_bundle_proof: _CallbackLocalBundleProof
-    _qualification_fixture: _CallbackQualificationFixture
-    _require: _CallbackRequire
+    _copy_referenced: Callable[[Path, set[Path], Path], None]
+    _diagnostic_files: Callable[[Path, dict[str, Any]], set[Path]]
+    _export_bundle_evidence: Callable[[dict[str, Any], Path], dict[str, str]]
+    _fixture_descriptor: Callable[[Path], tuple[dict[str, Any], set[Path]]]
+    _input_file: Callable[[Path], Path]
+    _local_bundle_proof: Callable[[Path, dict[str, Any]], dict[str, Any]]
+    _qualification_fixture: Callable[[Path, dict[str, Any]], dict[str, Any]]
+    _require: Callable[[bool], None]
     _validate_packaged_result: _CallbackValidatePackagedResult
     _validate_qualification_payload: _CallbackValidateQualificationPayload
-    _write_new: _CallbackWriteNew
-    probe_environment: _CallbackProbeEnvironment
-    require_native_source_checkout: _CallbackRequireNativeSourceCheckout
-    sha256_file: _CallbackSha256File
-    validate_bundle: _CallbackValidateBundle
+    _write_new: Callable[[Path, dict[str, Any]], None]
+    probe_environment: Callable[[Path], dict[str, str]]
+    require_native_source_checkout: Callable[[dict[str, Any]], None]
+    sha256_file: Callable[[Path], str]
+    validate_bundle: Callable[[Path], dict[str, Any]]
     validate_windows_diagnostic: _CallbackValidateWindowsDiagnostic
     windows_package_commands: _CallbackWindowsPackageCommands
     sys: SystemAPI
